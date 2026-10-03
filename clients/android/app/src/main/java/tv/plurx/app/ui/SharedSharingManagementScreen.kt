@@ -32,6 +32,7 @@ internal fun SharedSharingManagementScreen(onBack: () -> Unit) {
     val cursors = remember { mutableSetOf<String>() }
     var invitationId by remember { mutableStateOf<String?>(null) }
     var editingExport by remember { mutableStateOf<SharedSharingExport?>(null) }
+    var editingImport by remember { mutableStateOf<SharedSharingImport?>(null) }
     var confirmation by remember { mutableStateOf<Pair<String, suspend (SharedSharingManagementClient) -> Unit>?>(null) }
     var message by remember { mutableStateOf("") }
     var busy by remember { mutableStateOf(false) }
@@ -51,7 +52,7 @@ internal fun SharedSharingManagementScreen(onBack: () -> Unit) {
     }
     DisposableEffect(secrets) { onDispose { secrets.leave() } }
     LaunchedEffect(draftRevision) {
-        if (secrets.snapshot() == null) { imports = emptyList(); exports = emptyList(); invitationId = null; editingExport = null; confirmation = null }
+        if (secrets.snapshot() == null) { imports = emptyList(); exports = emptyList(); invitationId = null; editingExport = null; editingImport = null; confirmation = null }
     }
     LaunchedEffect(Unit) { load() }
     BackHandler { secrets.leave(); onBack() }
@@ -109,7 +110,7 @@ internal fun SharedSharingManagementScreen(onBack: () -> Unit) {
                         if (secrets.snapshot() != null) { imports = imports.filterNot { it.`import`.id == result.`import`.id } + result; secrets.clear(requested.revision); message = "Source re-paired. Compare current pairing code." }
                     }
                 } }) { Text("Re-pair using entered invitation") }
-                Text("Viewer assignments require a complete current assignment snapshot; an empty matrix is never inferred.")
+                TextButton(enabled = !busy && row.`import`.state == "active", onClick = { editingImport = row }) { Text("Manage B viewer assignments") }
                 TextButton(enabled = !busy, onClick = { confirmation = "Disconnect ${row.`import`.source_name}" to { client -> client.disconnect(row.`import`.id); client.requireCurrent() } }) { Text("Disconnect Source") }
             }
             if (imports.isEmpty()) Text("No imported Sources.")
@@ -132,6 +133,7 @@ internal fun SharedSharingManagementScreen(onBack: () -> Unit) {
     confirmation?.let { action -> AlertDialog(onDismissRequest = { confirmation = null }, title = { Text(action.first) }, text = { Text("This changes access for this recipient or Source. Sharing enablement is unchanged.") },
         confirmButton = { Button(enabled = !busy, onClick = { confirmation = null; scope.launch { run { client -> action.second(client); if (secrets.snapshot() != null) message = "Access change saved. Refresh management for current state." } } }) { Text("Confirm") } },
         dismissButton = { TextButton(onClick = { confirmation = null }) { Text("Cancel") } }) }
+    editingImport?.let { row -> SharedSharingAssignmentEditor(row.`import`, onDone = { editingImport = null }) }
     editingExport?.let { row -> SharedSharingExportEditor(row, libraries, onDone = { editingExport = null }) }
 }
 
@@ -171,4 +173,79 @@ internal fun SharedSharingManagementScreen(onBack: () -> Unit) {
             }
         }
     }, confirmButton = { TextButton(onClick = onDone) { Text("Done") } })
+}
+
+/** Complete authenticated admin reads are required before whole-replacement Save. */
+@Composable private fun SharedSharingAssignmentEditor(source: SharedSharingImportSummary, onDone: () -> Unit) {
+    val authority = remember(source.id) { SharedSharingSecretDraft() }
+    val authorizationRevision by authority.invalidations.collectAsState()
+    var current by remember { mutableStateOf<SharedSharingImportSummary?>(null) }
+    var matrix by remember { mutableStateOf<SharedSharingAssignmentMatrix?>(null) }
+    var editRevision by remember { mutableStateOf(0L) }
+    var selectedLibrary by remember { mutableStateOf("") }
+    var search by remember { mutableStateOf("") }
+    var busy by remember { mutableStateOf(false) }
+    var saved by remember { mutableStateOf(false) }
+    var readCurrent by remember { mutableStateOf(false) }
+    var message by remember { mutableStateOf("") }
+    val coroutine = rememberCoroutineScope()
+    DisposableEffect(authority) { onDispose { authority.leave() } }
+    LaunchedEffect(authorizationRevision) { if (authority.snapshot() == null) { matrix = null; current = null } }
+    suspend fun load() {
+        val requested = authority.snapshot() ?: return; if (busy) return; busy = true; readCurrent = false
+        try {
+            val client = SharedSharingManagementClient.create()
+            val row = client.imports().firstOrNull { it.`import`.id == source.id }?.`import`
+            require(row != null && row.source_server_id == source.source_server_id && row.catalogue_epoch == source.catalogue_epoch && row.state == "active")
+            val assignments = client.assignments(row); val sourceScope = client.sourceLibraries(row); val viewers = client.viewers()
+            val result = SharedSharingAssignmentMatrix(row, assignments, sourceScope, viewers)
+            client.requireCurrent(); if (authority.accepts(requested.revision)) {
+                current = row; matrix = result; selectedLibrary = result.libraries.firstOrNull()?.id.orEmpty(); editRevision = result.revision; saved = false; readCurrent = true; message = "Complete current matrix loaded."
+            }
+        } catch (failure: Exception) { if (failure is CancellationException) throw failure; message = "${failure.message}. Existing edits are retained; no empty matrix was inferred." }
+        finally { busy = false }
+    }
+    fun edit(change: (SharedSharingAssignmentMatrix) -> Unit) {
+        val draft = matrix ?: return; if (authority.snapshot() == null || busy || saved) return
+        try { change(draft); editRevision = draft.revision; authority.edit() }
+        catch (failure: Exception) { message = failure.message ?: "Invalid assignment edit" }
+    }
+    suspend fun save() {
+        val requested = authority.snapshot() ?: return; val row = current ?: return; val draft = matrix ?: return
+        if (busy || saved || !readCurrent) return; val requestedEdit = draft.revision; val groups = draft.groups.toList(); busy = true
+        try {
+            val client = SharedSharingManagementClient.create(); client.saveAssignments(draft.snapshot, row, groups)
+            client.requireCurrent(); if (authority.accepts(requested.revision) && matrix?.accepts(requestedEdit) == true) { saved = true; message = "Assignments saved. Reload current generations before another change." }
+        } catch (failure: Exception) { if (failure is CancellationException) throw failure; message = "${failure.message}. No automatic retry; refresh and review before saving again." }
+        finally { busy = false }
+    }
+    LaunchedEffect(Unit) { load() }
+    AlertDialog(onDismissRequest = { authority.leave(); matrix = null; onDone() }, title = { Text("${source.source_name} · Source viewers") }, text = {
+        Column(Modifier.verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            Text("${source.source_server_id} · ${source.catalogue_epoch}")
+            val draft = matrix
+            if (authority.snapshot() == null) Text("Account changed. Close and reopen this Source.")
+            else if (draft == null) Text("No replacement matrix is available until all current reads succeed.")
+            else {
+                Text("Assignment generation ${draft.snapshot.expected_assignment_generation}")
+                Text("Libraries outside current Source scope and unavailable viewers remain assigned until explicitly removed.")
+                draft.libraries.forEach { library -> TextButton(onClick = { selectedLibrary = library.id }) { Text(if (selectedLibrary == library.id) "Selected: ${library.name}" else library.name) } }
+                draft.libraries.firstOrNull { it.id == selectedLibrary }?.let { library ->
+                    Text("Source library ID: ${library.id}")
+                    if (library.outsideScope) TextButton(enabled = !busy && !saved, onClick = { edit { it.removeOutsideScope(library.id) } }) { Text("Remove this outside-scope assignment group") }
+                    OutlinedTextField(value = search, onValueChange = { search = it }, label = { Text("Find B viewer by name or ID") })
+                    val visible = remember(draft, editRevision, search) { draft.viewers.filter { search.isEmpty() || it.username.contains(search, ignoreCase = true) || it.id.toString().contains(search) } }
+                    visible.take(100).forEach { viewer -> Row {
+                        Checkbox(checked = draft.contains(library.id, viewer.id), enabled = !busy && !saved, onCheckedChange = { enabled -> edit { it.set(library.id, viewer.id, enabled) } }, modifier = Modifier.tvFocusRing())
+                        Text("${viewer.username} · ${viewer.id}", Modifier.padding(top = 12.dp))
+                    } }
+                    if (visible.size > 100) Text("Showing 100 of ${visible.size} matching viewers. Refine the search; hidden assignments remain in the complete matrix.")
+                }
+                if (draft.libraries.isEmpty()) Text("Source scope is explicitly empty and no saved assignment groups exist.")
+                Button(enabled = !busy && !saved && readCurrent, onClick = { coroutine.launch { save() } }) { Text("Save complete viewer assignments") }
+            }
+            Text(message)
+            TextButton(enabled = !busy, onClick = { coroutine.launch { load() } }) { Text("Reload current matrix") }
+        }
+    }, confirmButton = { TextButton(onClick = { authority.leave(); matrix = null; onDone() }) { Text("Done") } })
 }

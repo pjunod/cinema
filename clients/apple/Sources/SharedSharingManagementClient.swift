@@ -121,6 +121,11 @@ struct SharedSharingManagementClient {
         let result = try decode(SharedSharingAssignmentSnapshot.self, await request("sharing/imports/\(id(row.id))/assignments"))
         try result.validate(for: row); return result
     }
+    func sourceLibraries(_ row: SharedSharingImportSummary) async throws -> SharedSharingSourceLibrariesSnapshot {
+        guard row.state == "active" else { throw APIError.badURL }
+        let result = try decode(SharedSharingSourceLibrariesSnapshot.self, await request("sharing/imports/\(id(row.id))/libraries"))
+        try result.validate(for: row); return result
+    }
     func saveAssignments(_ snapshot: SharedSharingAssignmentSnapshot, for row: SharedSharingImportSummary, groups: [SharedSharingAssignmentGroup]) async throws {
         try snapshot.validate(for: row); try SharedSharingValidation.assignments(groups)
         let values = groups.map { group in SharedPlaybackJSON.object(["library_id": .string(group.libraryId), "user_ids": .array(group.userIds.map(SharedPlaybackJSON.integer))]) }

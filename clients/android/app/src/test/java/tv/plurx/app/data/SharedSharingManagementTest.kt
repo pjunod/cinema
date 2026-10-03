@@ -65,6 +65,50 @@ class SharedSharingManagementTest {
         assertNotNull(runCatching { client.endpoints() }.exceptionOrNull())
     }
 
+    @Test fun adminSourceLibraryReadBindsFullImportAndAcceptsOnlyExplicitEmptyScope(): Unit = runBlocking {
+        val client = client()
+        val row = SharedSharingImportSummary(uuid, server, epoch, "A", uuid, uuid, "active", precise, 3, 1, null, emptyList())
+        fun wire(libraries: String, generation: Long = precise) = """{"state":"active","import_id":"$uuid","server_id":"$server","catalogue_epoch":"$epoch","lifecycle_generation":3,"expected_assignment_generation":$generation,"libraries":$libraries}"""
+        val libraries = """[{"library_id":"$precise","name":"Source library","kind":"movies","anime":false}]"""
+        body = wire(libraries)
+        val scope = client.sourceLibraries(row)
+        assertEquals(precise.toString(), scope.libraries[0].library_id)
+        assertEquals("/api/v1/sharing/imports/$uuid/libraries", requests.last().url.encodedPath)
+        val escapedName = "\\u0000".repeat(256)
+        val maximumScope = (0 until 64).joinToString(prefix = "[", postfix = "]") { """{"library_id":"$it","name":"$escapedName","kind":"movies","anime":false}""" }
+        body = wire(maximumScope)
+        val complete = client.sourceLibraries(row); assertEquals(64, complete.libraries.size); assertEquals("63", complete.libraries.last().library_id)
+        body = wire("[]"); assertTrue(client.sourceLibraries(row).libraries.isEmpty())
+        val duplicate = "[" + libraries.removePrefix("[").removeSuffix("]") + "," + libraries.removePrefix("[").removeSuffix("]") + "]"
+        for (corrupt in listOf(wire(libraries, precise + 1), wire(libraries).replace(server, uuid), wire(libraries).replace("\"library_id\":\"$precise\"", "\"library_id\":$precise"), wire(duplicate))) {
+            body = corrupt; assertNotNull(runCatching { client.sourceLibraries(row) }.exceptionOrNull())
+        }
+        body = wire(libraries.replace("Source library", "😀".repeat(65)))
+        assertNotNull(runCatching { client.sourceLibraries(row) }.exceptionOrNull())
+        status = 503; body = "{}"
+        assertNotNull(runCatching { client.sourceLibraries(row) }.exceptionOrNull())
+        status = 200; body = wire("[]"); beforeResponse = { Session.token = "replacement" }
+        assertNotNull(runCatching { client.sourceLibraries(row) }.exceptionOrNull())
+    }
+
+    @Test fun assignmentMatrixRetainsOutsideScopeAndMissingViewersUntilExplicitEdit() {
+        val row = SharedSharingImportSummary(uuid, server, epoch, "A", uuid, uuid, "active", precise, 3, 1, null, emptyList())
+        val existing = listOf(SharedSharingAssignmentGroup(precise.toString(), listOf(precise)), SharedSharingAssignmentGroup("7", emptyList()))
+        val snapshot = SharedSharingAssignmentSnapshot("active", uuid, server, epoch, 3, precise, existing)
+        val scope = SharedSharingSourceLibrariesSnapshot("active", uuid, server, epoch, 3, precise, listOf(SharedSharingSourceLibrary("8", "Current", "movies", false)))
+        val matrix = SharedSharingAssignmentMatrix(row, snapshot, scope, listOf(SharedSharingViewer(1, "Current viewer", false)))
+        assertEquals(existing, matrix.groups)
+        assertTrue(matrix.libraries.first { it.id == precise.toString() }.outsideScope)
+        assertTrue(matrix.viewers.any { it.id == precise })
+        val requestRevision = matrix.revision; matrix.set("8", 1, true)
+        assertFalse(matrix.accepts(requestRevision)); assertEquals(existing, matrix.groups.take(2))
+        assertNotNull(runCatching { matrix.set("999", 1, true) }.exceptionOrNull())
+        assertNotNull(runCatching { matrix.removeOutsideScope("8") }.exceptionOrNull())
+        matrix.removeOutsideScope(precise.toString())
+        assertFalse(matrix.groups.any { it.library_id == precise.toString() })
+        assertTrue(matrix.groups.any { it.library_id == "7" && it.user_ids.isEmpty() })
+    }
+
     @After fun cleanup() { Session.origin = ""; Session.token = null }
     @Test fun actualInvitationImportRePairRotationAndExplicitDisconnectRoutes(): Unit = runBlocking {
         val client = client(); val token = "cinema-share-v1:Zml4dHVyZQ"

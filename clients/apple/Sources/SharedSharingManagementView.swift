@@ -14,6 +14,7 @@ struct SharedSharingManagementView: View {
     @State private var message = ""
     @State private var confirmation: Confirmation?
     @State private var editingExport: SharedSharingExport?
+    @State private var editingImport: SharedSharingImport?
     private enum Confirmation: Identifiable {
         case cancel(String), revoke(String), disconnect(String)
         var id: String { switch self { case .cancel(let id), .revoke(let id), .disconnect(let id): return id } }
@@ -47,7 +48,7 @@ struct SharedSharingManagementView: View {
                             Text("Lifecycle \(row.import.lifecycleGeneration) · Assignments \(row.import.assignmentGeneration) · Endpoints \(row.import.endpointGeneration)").font(.caption)
                             Button("Rotate credential") { Task { await rotate(row) } }.disabled(busy || row.import.state != "active")
                             Button("Re-pair using entered invitation") { Task { await rePair(row) } }.disabled(busy || (secrets.snapshot()?.invitation.isEmpty ?? true))
-                            Text("Viewer assignments require a current complete assignment snapshot; they are not inferred from an empty list.").font(.caption)
+                            Button("Manage B viewer assignments") { editingImport = row }.disabled(busy || row.import.state != "active")
                             Button("Disconnect Source", role: .destructive) { confirmation = .disconnect(row.id) }.disabled(busy)
                         }
                     }
@@ -69,10 +70,11 @@ struct SharedSharingManagementView: View {
             }
         }
         .navigationTitle("Sharing management")
+        .sheet(item: $editingImport) { row in NavigationStack { SharedSharingAssignmentEditor(source: row.import) } }
         .sheet(item: $editingExport) { row in NavigationStack { SharedSharingExportEditor(row: row, libraries: libraries) } }
         .task { await load() }
         .onReceive(secrets.objectWillChange) { _ in
-            if secrets.snapshot() == nil { imports = []; exports = []; invitationId = nil; editingExport = nil; confirmation = nil }
+            if secrets.snapshot() == nil { imports = []; exports = []; invitationId = nil; editingExport = nil; editingImport = nil; confirmation = nil }
         }
         .onDisappear { secrets.leave(); imports = []; exports = []; invitationId = nil }
         .alert(confirmation?.label ?? "Confirm", isPresented: Binding(get: { confirmation != nil }, set: { if !$0 { confirmation = nil } })) {
@@ -181,5 +183,83 @@ private struct SharedSharingExportEditor: View {
         guard let draft = secrets.snapshot() else { return }; busy = true; defer { busy = false }; let selection = Array(selected).sorted()
         do { let client = try SharedSharingManagementClient(); try await client.scope(row, libraries: selection); try client.requireCurrent(); guard secrets.accepts(draft.revision) else { return }; message = "Scope saved. Return and refresh current generations before another change." }
         catch { message = error.localizedDescription }
+    }
+}
+
+/// Whole-replacement editing requires complete authenticated admin Source and assignment reads.
+private struct SharedSharingAssignmentEditor: View {
+    @Environment(\.dismiss) private var dismiss
+    let source: SharedSharingImportSummary
+    @StateObject private var authority = SharedSharingSecretDraft()
+    @State private var current: SharedSharingImportSummary?
+    @State private var matrix: SharedSharingAssignmentMatrix?
+    @State private var selectedLibrary = ""
+    @State private var search = ""
+    @State private var busy = false
+    @State private var saved = false
+    @State private var readCurrent = false
+    @State private var message = ""
+    private var visibleViewers: [SharedSharingViewer] {
+        (matrix?.viewers ?? []).filter { search.isEmpty || $0.username.localizedCaseInsensitiveContains(search) || String($0.id).contains(search) }
+    }
+    var body: some View {
+        Form {
+            Text(source.sourceName).font(.headline)
+            Text("\(source.sourceServerId) · \(source.catalogueEpoch)").font(.caption)
+            if authority.snapshot() == nil { Text("Account changed. Close and reopen this Source.") }
+            else if let matrix {
+                Text("Assignment generation \(matrix.snapshot.expectedAssignmentGeneration)").font(.caption)
+                Text("The complete matrix is retained. Libraries outside the current Source scope and unavailable viewers stay assigned until explicitly removed.").font(.caption)
+                Picker("Source library", selection: $selectedLibrary) {
+                    ForEach(matrix.libraries) { library in Text(library.name).tag(library.id) }
+                }
+                if let library = matrix.libraries.first(where: { $0.id == selectedLibrary }) {
+                    Text("Source library ID: \(library.id)").font(.caption)
+                    if library.outsideScope {
+                        Button("Remove this outside-scope assignment group", role: .destructive) { edit { try $0.removeOutsideScope(library.id) } }.disabled(busy || saved)
+                    }
+                    TextField("Find B viewer by name or ID", text: $search).autocorrectionDisabled()
+                    ForEach(Array(visibleViewers.prefix(100))) { viewer in
+                        Toggle("\(viewer.username) · \(viewer.id)", isOn: Binding(get: { self.matrix?.contains(library: library.id, viewer: viewer.id) ?? false }, set: { enabled in edit { try $0.set(library: library.id, viewer: viewer.id, enabled: enabled) } })).disabled(busy || saved)
+                    }
+                    if visibleViewers.count > 100 { Text("Showing 100 of \(visibleViewers.count) matching viewers. Refine the search; hidden assignments remain in the complete matrix.").font(.caption) }
+                }
+                if matrix.libraries.isEmpty { Text("The Source has an explicitly empty current scope and no saved assignment groups.") }
+                Button("Save complete viewer assignments") { Task { await save() } }.disabled(busy || saved || !readCurrent)
+            } else { Text("No replacement matrix is available until all current reads succeed.") }
+            Text(message).font(.caption)
+            Button("Reload current matrix") { Task { await load() } }.disabled(busy)
+        }
+        .navigationTitle("Source viewers").toolbar { Button("Done") { authority.leave(); matrix = nil; dismiss() } }
+        .task { await load() }.onDisappear { authority.leave(); matrix = nil }
+        .onReceive(authority.objectWillChange) { _ in if authority.snapshot() == nil { matrix = nil; current = nil } }
+    }
+    private func edit(_ change: (inout SharedSharingAssignmentMatrix) throws -> Void) {
+        guard authority.snapshot() != nil, !busy, !saved, var draft = matrix else { return }
+        do { try change(&draft); matrix = draft; authority.edit() } catch { message = error.localizedDescription }
+    }
+    private func load() async {
+        guard let requested = authority.snapshot(), !busy else { return }; busy = true; readCurrent = false; defer { busy = false }
+        do {
+            let client = try SharedSharingManagementClient()
+            guard let row = try await client.imports().first(where: { $0.id == source.id })?.import,
+                  row.sourceServerId == source.sourceServerId, row.catalogueEpoch == source.catalogueEpoch, row.state == "active" else { throw APIError.badURL }
+            let assignments = try await client.assignments(row)
+            let scope = try await client.sourceLibraries(row)
+            let viewers = try await client.viewers()
+            let result = try SharedSharingAssignmentMatrix(row: row, assignments: assignments, scope: scope, viewers: viewers)
+            try client.requireCurrent(); guard authority.accepts(requested.revision) else { return }
+            current = row; matrix = result; selectedLibrary = result.libraries.first?.id ?? ""; saved = false; readCurrent = true; message = "Complete current matrix loaded."
+        } catch { message = "\(error.localizedDescription). Existing edits are retained; no empty matrix was inferred." }
+    }
+    private func save() async {
+        guard let requested = authority.snapshot(), let current, let matrix, !busy, !saved, readCurrent else { return }
+        busy = true; defer { busy = false }
+        do {
+            let client = try SharedSharingManagementClient()
+            try await client.saveAssignments(matrix.snapshot, for: current, groups: matrix.groups)
+            try client.requireCurrent(); guard authority.accepts(requested.revision), self.matrix?.accepts(matrix.revision) == true else { return }
+            saved = true; message = "Assignments saved. Reload current generations before another change."
+        } catch { message = "\(error.localizedDescription). No automatic retry; refresh and review before saving again." }
     }
 }

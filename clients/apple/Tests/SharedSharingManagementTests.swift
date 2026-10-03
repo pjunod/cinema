@@ -78,6 +78,57 @@ final class SharedSharingManagementTests: XCTestCase {
         do { _ = try await client.endpoints(); XCTFail("old account response accepted") } catch {}
     }
 
+    func testAdminSourceLibraryReadBindsFullImportAndAcceptsOnlyExplicitEmptyScope() async throws {
+        let client = try client()
+        let row = SharedSharingImportSummary(id: uuid, sourceServerId: server, catalogueEpoch: epoch, sourceName: "A", claimId: uuid, remoteGrantId: uuid, state: "active", assignmentGeneration: precise, lifecycleGeneration: 3, endpointGeneration: 1, observedEndpointRevision: nil, endpoints: [])
+        func wire(_ libraries: String, generation: Int64? = nil) -> String {
+            "{\"state\":\"active\",\"import_id\":\"\(uuid)\",\"server_id\":\"\(server)\",\"catalogue_epoch\":\"\(epoch)\",\"lifecycle_generation\":3,\"expected_assignment_generation\":\(generation ?? precise),\"libraries\":\(libraries)}"
+        }
+        let libraries = "[{\"library_id\":\"\(precise)\",\"name\":\"Source library\",\"kind\":\"movies\",\"anime\":false}]"
+        SharedManagementHTTP.body = Data(wire(libraries).utf8)
+        let scope = try await client.sourceLibraries(row)
+        XCTAssertEqual(scope.libraries[0].libraryId, String(precise))
+        XCTAssertEqual(SharedManagementHTTP.requests.last?.url?.path, "/api/v1/sharing/imports/\(uuid)/libraries")
+        let escapedName = String(repeating: "\\u0000", count: 256)
+        let maximumScope = "[" + (0..<64).map { "{\"library_id\":\"\($0)\",\"name\":\"\(escapedName)\",\"kind\":\"movies\",\"anime\":false}" }.joined(separator: ",") + "]"
+        SharedManagementHTTP.body = Data(wire(maximumScope).utf8)
+        let complete = try await client.sourceLibraries(row)
+        XCTAssertEqual(complete.libraries.count, 64); XCTAssertEqual(complete.libraries.last?.libraryId, "63")
+        SharedManagementHTTP.body = Data(wire("[]").utf8)
+        let empty = try await client.sourceLibraries(row); XCTAssertTrue(empty.libraries.isEmpty)
+        for corrupt in [wire(libraries, generation: precise + 1), wire(libraries).replacingOccurrences(of: server, with: uuid), wire(libraries).replacingOccurrences(of: "\"library_id\":\"\(precise)\"", with: "\"library_id\":\(precise)"), wire("[" + libraries.dropFirst().dropLast() + "," + libraries.dropFirst().dropLast() + "]")] {
+            SharedManagementHTTP.body = Data(corrupt.utf8)
+            do { _ = try await client.sourceLibraries(row); XCTFail("unbound/corrupt Source scope accepted") } catch {}
+        }
+        SharedManagementHTTP.body = Data(wire(libraries.replacingOccurrences(of: "Source library", with: String(repeating: "😀", count: 65))).utf8)
+        do { _ = try await client.sourceLibraries(row); XCTFail("Source name byte bound ignored") } catch {}
+        SharedManagementHTTP.status = 503; SharedManagementHTTP.body = Data("{}".utf8)
+        do { _ = try await client.sourceLibraries(row); XCTFail("offline scope inferred as empty") } catch {}
+        SharedManagementHTTP.status = 200; SharedManagementHTTP.body = Data(wire("[]").utf8)
+        SharedManagementHTTP.beforeResponse = { Session.shared.setCredentials(origin: "https://b.test", token: "replacement") }
+        do { _ = try await client.sourceLibraries(row); XCTFail("old login scope accepted") } catch {}
+    }
+
+    func testAssignmentMatrixRetainsOutsideScopeAndMissingViewersUntilExplicitEdit() throws {
+        let row = SharedSharingImportSummary(id: uuid, sourceServerId: server, catalogueEpoch: epoch, sourceName: "A", claimId: uuid, remoteGrantId: uuid, state: "active", assignmentGeneration: precise, lifecycleGeneration: 3, endpointGeneration: 1, observedEndpointRevision: nil, endpoints: [])
+        let existing = [SharedSharingAssignmentGroup(libraryId: String(precise), userIds: [precise]), SharedSharingAssignmentGroup(libraryId: "7", userIds: [])]
+        let snapshot = SharedSharingAssignmentSnapshot(state: "active", importId: uuid, serverId: server, catalogueEpoch: epoch, lifecycleGeneration: 3, expectedAssignmentGeneration: precise, assignments: existing)
+        let scope = SharedSharingSourceLibrariesSnapshot(state: "active", importId: uuid, serverId: server, catalogueEpoch: epoch, lifecycleGeneration: 3, expectedAssignmentGeneration: precise, libraries: [SharedSharingSourceLibrary(libraryId: "8", name: "Current", kind: "movies", anime: false)])
+        var matrix = try SharedSharingAssignmentMatrix(row: row, assignments: snapshot, scope: scope, viewers: [SharedSharingViewer(id: 1, username: "Current viewer", isAdmin: false)])
+        XCTAssertEqual(matrix.groups, existing)
+        XCTAssertTrue(matrix.libraries.first { $0.id == String(precise) }!.outsideScope)
+        XCTAssertTrue(matrix.viewers.contains { $0.id == precise })
+        let requestRevision = matrix.revision
+        try matrix.set(library: "8", viewer: 1, enabled: true)
+        XCTAssertFalse(matrix.accepts(requestRevision))
+        XCTAssertEqual(matrix.groups.prefix(2), existing[...])
+        XCTAssertThrowsError(try matrix.set(library: "999", viewer: 1, enabled: true))
+        XCTAssertThrowsError(try matrix.removeOutsideScope("8"))
+        try matrix.removeOutsideScope(String(precise))
+        XCTAssertFalse(matrix.groups.contains { $0.libraryId == String(precise) })
+        XCTAssertTrue(matrix.groups.contains { $0.libraryId == "7" && $0.userIds.isEmpty })
+    }
+
     func testActualInvitationImportRePairRotationAndExplicitDisconnectRoutes() async throws {
         let client = try client(); let token = "cinema-share-v1:Zml4dHVyZQ"
         SharedManagementHTTP.body = Data("{\"id\":\"\(uuid)\",\"invitation\":\"\(token)\",\"expires_at_ms\":1000}".utf8)

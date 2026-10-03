@@ -57,6 +57,52 @@ import kotlinx.serialization.Serializable
         SharedSharingValidation.assignments(assignments)
     }
 }
+/** Complete admin Source scope, never inferred from the viewer's assigned subset. */
+@Serializable internal data class SharedSharingSourceLibrary(val library_id: String, val name: String, val kind: String, val anime: Boolean)
+@Serializable internal data class SharedSharingSourceLibrariesSnapshot(val state: String, val import_id: String,
+    val server_id: String, val catalogue_epoch: String, val lifecycle_generation: Long,
+    val expected_assignment_generation: Long, val libraries: List<SharedSharingSourceLibrary>) {
+    fun validate(row: SharedSharingImportSummary) {
+        require(state == "active" && state == row.state && import_id == row.id && server_id == row.source_server_id && catalogue_epoch == row.catalogue_epoch)
+        require(lifecycle_generation == row.lifecycle_generation && expected_assignment_generation == row.assignment_generation)
+        SharedSharingValidation.ids(libraries.map { it.library_id })
+        require(libraries.all { it.kind in listOf("movies", "shows") && it.name.toByteArray(Charsets.UTF_8).size <= 256 })
+    }
+}
+
+/** Keeps historical groups and missing viewers until the operator explicitly removes them. */
+internal class SharedSharingAssignmentMatrix(row: SharedSharingImportSummary,
+    val snapshot: SharedSharingAssignmentSnapshot, scope: SharedSharingSourceLibrariesSnapshot,
+    currentViewers: List<SharedSharingViewer>) {
+    data class Library(val id: String, val name: String, val outsideScope: Boolean)
+    val libraries: List<Library>
+    val viewers: List<SharedSharingViewer>
+    var groups: List<SharedSharingAssignmentGroup> = snapshot.assignments.toList(); private set
+    var revision = 0L; private set
+    init {
+        snapshot.validate(row); scope.validate(row)
+        require(currentViewers.size <= 4096 && currentViewers.map { it.id }.toSet().size == currentViewers.size && currentViewers.all { it.id >= 0 })
+        val currentIds = scope.libraries.map { it.library_id }.toSet()
+        libraries = scope.libraries.map { Library(it.library_id, it.name, false) } + snapshot.assignments.filter { it.library_id !in currentIds }.map { Library(it.library_id, "Outside current Source scope · ${it.library_id}", true) }
+        val viewerIds = currentViewers.map { it.id }.toSet()
+        viewers = currentViewers + (snapshot.assignments.flatMap { it.user_ids }.toSet() - viewerIds).sorted().map { SharedSharingViewer(it, "Unavailable viewer · $it", false) }
+    }
+    fun contains(library: String, viewer: Long): Boolean = groups.firstOrNull { it.library_id == library }?.user_ids?.contains(viewer) ?: false
+    fun set(library: String, viewer: Long, enabled: Boolean) {
+        require(libraries.any { it.id == library } && viewers.any { it.id == viewer })
+        val ids = groups.firstOrNull { it.library_id == library }?.user_ids.orEmpty().toMutableSet()
+        if (enabled) ids.add(viewer) else ids.remove(viewer)
+        val group = SharedSharingAssignmentGroup(library, ids.sorted())
+        val replacement = if (groups.any { it.library_id == library }) groups.map { if (it.library_id == library) group else it } else groups + group
+        SharedSharingValidation.assignments(replacement); groups = replacement; revision++
+    }
+    fun removeOutsideScope(library: String) {
+        require(libraries.any { it.id == library && it.outsideScope })
+        groups = groups.filterNot { it.library_id == library }; revision++
+    }
+    fun accepts(requestedRevision: Long): Boolean = revision == requestedRevision
+}
+
 internal object SharedSharingValidation {
     fun ids(values: List<String>) { require(values.size <= 64 && values.toSet().size == values.size && values.all(PlaybackFileContext::canonicalId)) }
     fun code(value: String): Boolean = value.matches(Regex("^[0-9a-f]{16}$"))
