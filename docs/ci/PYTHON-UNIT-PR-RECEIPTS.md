@@ -347,6 +347,31 @@ cache changes are made. Durable preservation before any future non-unit retry
 remains operational work; this exact recovery is not a generic lost-artifact
 fallback or permission to delete markers.
 
+## The bounded #742 pre-unit failure preserves inherited successes
+
+On 2026-10-03, API3994/job41507 at `b18c01904af3f33193be3ee15db88bac69c519c7`
+published start1653, failed the corrective-history check before units, then
+preserved final1654. Both journals are identical: 936 inherited passes attributed
+only to their original runs3898,3915,3950, no fixture errors, and
+`complete: false`. The recovery does not complete this attempt or attribute
+any success to3994. Every retained entry still needs its separately trusted
+original source and current applicability. The history check remains blocking
+on the current candidate.
+
+API4002/job41568 at `4a087b75be2ad886f664c72596c36f8cc0311914` subsequently
+refused prepare on that incomplete3994 journal. Skipped start/final uploads,
+no unit phase and empty live artifact lists prove that4002 imports zero passes.
+
+The hash-pinned [two-case witness](../../validation/python-unit-inherited-failure742.json)
+binds those exact PR742 scope/run/job/source/log/ZIP identities. It requires
+an authenticated writer's `Python-Journal-Recovery` attestation of its hash on
+PR742, using the existing writer check. It has no arbitrary enrollment or
+incomplete waiver. Changed maps, new attribution, fixture errors, unknown
+outcomes, missing or expired witnesses and contradictory phase evidence refuse.
+The existing 64-local-proof bound is unchanged. The new synthetic control
+`tests/validation/test_python_inherited_failure_recovery.py::test_exact_inherited_failure_and_empty_refusal_preserve_original_trust`
+exercises actual restore and refusal paths without replaying original units.
+
 ## Focused proof and limits
 
 The small fake-fixture tests in
