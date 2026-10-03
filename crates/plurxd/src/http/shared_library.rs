@@ -1565,6 +1565,28 @@ mod tests {
         );
         body_server_app(app, body_dropped, data_dropped).await
     }
+    fn fixture_tracks_shared_body(path: &str) -> bool {
+        path.ends_with("/items")
+            || path.starts_with("/sharing/v1/items/")
+            || (path.contains("/shared/imports/")
+                && (path.contains("/items/") || path.ends_with("/continue-watching")))
+    }
+
+    #[test]
+    fn sharing_body_fixture_tracks_continue_watching_and_item_responses() {
+        for path in [
+            "/api/v1/shared/imports/fixture/continue-watching",
+            "/api/v1/shared/imports/fixture/items/7",
+            "/api/v1/shared/imports/fixture/libraries/7/items",
+            "/sharing/v1/items/7",
+        ] {
+            assert!(fixture_tracks_shared_body(path), "{path}");
+        }
+        for path in ["/ordinary/pending", "/api/v1/shared/continue-watching"] {
+            assert!(!fixture_tracks_shared_body(path), "{path}");
+        }
+    }
+
     async fn body_server_app(
         app: Router,
         body_dropped: Arc<AtomicBool>,
@@ -1603,10 +1625,7 @@ mod tests {
                             )
                             .ok();
                     }
-                    let tracked = request.uri().path().ends_with("/items")
-                        || request.uri().path().starts_with("/sharing/v1/items/")
-                        || (request.uri().path().contains("/shared/imports/")
-                            && request.uri().path().contains("/items/"));
+                    let tracked = fixture_tracks_shared_body(request.uri().path());
                     let response = next.run(request).await;
                     if tracked {
                         let (parts, body) = response.into_parts();

@@ -124,6 +124,7 @@ pub const WEB_ASSETS: &[(&str, WebAsset, &str)] = &[
     ("layouts/theater.js",                     WebAsset::BodyScript,  include_str!("../web/layouts/theater.js")),
     ("pages/reader.js",                        WebAsset::BodyScript,  include_str!("../web/pages/reader.js")),
     ("pages/library-channels-page.js",         WebAsset::BodyScript,  include_str!("../web/pages/library-channels-page.js")),
+    ("pages/shared-libraries.js",              WebAsset::BodyScript,  include_str!("../web/pages/shared-libraries.js")),
     ("router.js",                              WebAsset::BodyScript,  include_str!("../web/router.js")),
 ];
 

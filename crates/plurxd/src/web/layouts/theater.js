@@ -69,6 +69,7 @@ function theaterNavItems(active){
   // library. Home means the home page.
   const homeOn = active==="home" && (hash==="#/"||hash==="#"||hash==="");
   const items=[{tab:"home", href:"#/", label:"Home", on:homeOn},
+               {tab:"shared", href:"#/shared", label:"Shared libraries", on:active==="shared"},
                {tab:"live-tv", href:"#/live-tv", label:"Live TV", on:active==="live-tv"},
                {tab:"recordings", href:"#/recordings", label:"Recordings", on:active==="recordings"},
                {tab:"library-channels", href:"#/library-channels", label:"Library channels", on:active==="library-channels"},

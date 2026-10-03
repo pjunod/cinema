@@ -3,6 +3,7 @@
 // One page-scoped poller at a time; routing away always clears it.
 let PAGE_TIMER=null, PAGE_RENDER_GENERATION=0;
 function pagePhaseName(route){
+  if(route.startsWith("#/shared")) return "shared";
   if(route==="#/live-tv") return "live-tv";
   if(route.startsWith("#/recordings")) return "recordings";
   if(route==="#/library-channels") return "library-channels";
@@ -88,6 +89,7 @@ async function render(){
   dvrRouteChanged(h);
   try{
     if(h.startsWith("#/read/")) await viewReader(h.split("/")[2],h.split("/")[3]);
+    else if(h==="#/shared"||h.startsWith("#/shared/")) await viewSharedCatalogue(generation);
     else if(h.startsWith("#/item/")) await viewItem(h.split("/")[2]);
     else if(h.startsWith("#/library/")) await viewLibrary(h.split("/")[2]);
     else if(h.startsWith("#/category/")) await viewCategory(decodeURIComponent(h.split("/")[2]||""));

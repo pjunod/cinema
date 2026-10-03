@@ -5067,6 +5067,17 @@ pub trait MediaSessionStore: Send + Sync + 'static {
         now_ms: i64,
     ) -> Result<Option<crate::domain::MediaSessionTerminalAck>, StoreError>;
 
+    /// Exact current Source owner only. Does not publish or authorize takeover.
+    async fn renew_source_media_session(
+        &self,
+        _authority: &crate::sharing_source_sessions::SourceOwnedRouteAuthority,
+        _renewal: &MediaSessionRenewal,
+        _now_ms: i64,
+        _lease_expires_at_ms: i64,
+    ) -> Result<Option<MediaSessionRoute>, StoreError> {
+        Ok(None)
+    }
+
     async fn renew_media_sessions(
         &self,
         owner_node_id: &str,
