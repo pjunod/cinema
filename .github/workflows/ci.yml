@@ -1519,7 +1519,7 @@ jobs:
   # workflow. A cancelled tag run can therefore be recovered without moving it.
   publish:
     name: publish image (local registry)
-    needs: [check, package_smoke]
+    needs: [scope, check, package_smoke]
     if: >-
       startsWith(github.ref, 'refs/tags/v') && inputs.promotion_pr == '' &&
       inputs.promotion_head_sha == '' && inputs.promotion_base_sha == '' &&
