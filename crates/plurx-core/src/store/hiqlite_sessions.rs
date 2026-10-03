@@ -466,6 +466,35 @@ impl From<&mut Row<'_>> for DesiredRow {
     }
 }
 
+struct PrincipalDesiredRow(Result<crate::domain::DesiredOwnership, StoreError>);
+impl From<&mut Row<'_>> for PrincipalDesiredRow {
+    fn from(row: &mut Row<'_>) -> Self {
+        Self((|| {
+            let kind: String = row.try_get("principal_kind").map_err(database_error)?;
+            let user: Option<i64> = row.try_get("user_id").map_err(database_error)?;
+            let grant: Option<String> = row.try_get("share_grant_id").map_err(database_error)?;
+            let viewer: Option<String> = row.try_get("share_viewer_key").map_err(database_error)?;
+            let key: String = row.try_get("owner_key").map_err(database_error)?;
+            let principal = crate::playback_principal::PlaybackPrincipal::from_projection(
+                &kind,
+                user,
+                grant.as_deref(),
+                viewer.as_deref(),
+                &key,
+            )
+            .map_err(|_| StoreError::Task("invalid desired-selection owner projection".into()))?;
+            Ok(crate::domain::DesiredOwnership {
+                principal,
+                playback_id: row.try_get("playback_id").map_err(database_error)?,
+                revision: row.try_get("revision").map_err(database_error)?,
+                digest: row.try_get("digest").map_err(database_error)?,
+                canonical_form: row.try_get("canonical_form").map_err(database_error)?,
+                updated_at_ms: row.try_get("updated_at_ms").map_err(database_error)?,
+            })
+        })())
+    }
+}
+
 /// The bounds the table's own CHECK constraints enforce.
 ///
 /// Deliberately identical to the SQLite backend's: the two have to refuse the
@@ -2125,8 +2154,31 @@ impl MediaSessionStore for HiqliteAuthStore {
         principal: &crate::playback_principal::PlaybackPrincipal,
         playback_id: &str,
     ) -> Result<Option<crate::domain::DesiredOwnership>, StoreError> {
-        let user_id = crate::store::local_media_principal_id(principal)?;
-        desired_row(self, user_id, playback_id).await
+        if !principal.valid_admission_shape() {
+            return Err(StoreError::Task(
+                "invalid desired-selection principal".into(),
+            ));
+        }
+        if route_projection(self).await? == LEGACY_ROUTE_COLS {
+            return desired_row(
+                self,
+                crate::store::local_media_principal_id(principal)?,
+                playback_id,
+            )
+            .await;
+        }
+        self.client()
+            .query_consistent_map::<PrincipalDesiredRow, _>(
+                "SELECT owner_key, principal_kind, user_id, share_grant_id, share_viewer_key,
+                    playback_id, revision, digest, canonical_form, updated_at_ms
+               FROM media_playback_desired WHERE owner_key = $1 AND playback_id = $2",
+                params!(principal.owner_key(), playback_id),
+            )
+            .await?
+            .into_iter()
+            .next()
+            .map(|row| row.0)
+            .transpose()
     }
 
     async fn rejoin_media_session_preparation(

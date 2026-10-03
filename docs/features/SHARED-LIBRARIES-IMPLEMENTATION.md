@@ -1914,3 +1914,15 @@ or the mixed-version floor; those remain open.
 The existing `media_session_contract_runs_through_dyn_store` regression also
 passed on SQLite and the three-voter backend (zero ignored, 13.25 seconds);
 denied-warning Clippy passed with `hiqlite-contract-tests`.
+
+**Desired-selection read checkpoint:** current desired selections are read
+by canonical owner key on rebuilt tables, with the complete persisted
+principal decoded and validated. Legacy tables retain real local-user
+selection and refuse a shared principal. Both grants can retain a distinct
+revision for the same playback ID, and another viewer receives no selection.
+The six route/principal tests passed on memory and pooled SQLite (zero
+ignored, 0.92 seconds), and both actual three-voter candidate contracts passed
+(zero ignored, 18.51 seconds). The existing local session lifecycle contract
+and denied-warning Clippy also passed. Writers, schema installation, grant
+admission and cluster floor remain open; this checkpoint adds no shared
+worker admission.

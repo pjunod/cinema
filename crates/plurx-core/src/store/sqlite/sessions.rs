@@ -1863,10 +1863,59 @@ impl MediaSessionStore for SqliteStore {
         principal: &crate::playback_principal::PlaybackPrincipal,
         playback_id: &str,
     ) -> Result<Option<crate::domain::DesiredOwnership>, StoreError> {
-        let user_id = crate::store::local_media_principal_id(principal)?;
+        if !principal.valid_admission_shape() {
+            return Err(StoreError::Task(
+                "invalid desired-selection principal".into(),
+            ));
+        }
+        let principal = principal.clone();
         let playback_id = playback_id.to_owned();
-        self.with_conn(move |conn| desired_within(conn, user_id, &playback_id))
-            .await
+        self.with_read(move |conn| {
+            if route_projection(conn)? == LEGACY_ROUTE_COLS {
+                return desired_within(
+                    conn,
+                    crate::store::local_media_principal_id(&principal)?,
+                    &playback_id,
+                );
+            }
+            conn.query_row(
+                "SELECT revision, digest, canonical_form, updated_at_ms, owner_key,
+                        principal_kind, user_id, share_grant_id, share_viewer_key
+                   FROM media_playback_desired WHERE owner_key = ?1 AND playback_id = ?2",
+                params![principal.owner_key(), playback_id],
+                |row| {
+                    let kind: String = row.get(5)?;
+                    let grant: Option<String> = row.get(7)?;
+                    let viewer: Option<String> = row.get(8)?;
+                    let key: String = row.get(4)?;
+                    let stored = crate::playback_principal::PlaybackPrincipal::from_projection(
+                        &kind,
+                        row.get(6)?,
+                        grant.as_deref(),
+                        viewer.as_deref(),
+                        &key,
+                    )
+                    .map_err(|error| {
+                        rusqlite::Error::FromSqlConversionFailure(
+                            4,
+                            rusqlite::types::Type::Text,
+                            Box::new(error),
+                        )
+                    })?;
+                    Ok(crate::domain::DesiredOwnership {
+                        principal: stored,
+                        playback_id: playback_id.clone(),
+                        revision: row.get(0)?,
+                        digest: row.get(1)?,
+                        canonical_form: row.get(2)?,
+                        updated_at_ms: row.get(3)?,
+                    })
+                },
+            )
+            .optional()
+            .map_err(StoreError::from)
+        })
+        .await
     }
 
     async fn rejoin_media_session_preparation(
@@ -4094,6 +4143,14 @@ mod sharing_route_decoder_tests {
                     .expect("principal pointer read")
                     .expect("current route");
                 assert_eq!(current.incarnation_id, id);
+                let desired = store
+                    .desired_selection(&route.principal, "playback")
+                    .await
+                    .expect("typed desired read")
+                    .expect("desired row");
+                assert_eq!(desired.principal, route.principal);
+                assert_eq!(desired.revision, if id.ends_with('1') { 1 } else { 2 });
+
                 let other_viewer = crate::playback_principal::PlaybackPrincipal::sharing(
                     uuid::Uuid::parse_str(id).expect("grant"),
                     &"b".repeat(64),
@@ -4103,6 +4160,11 @@ mod sharing_route_decoder_tests {
                     .media_session_route_for_playback(&other_viewer, "playback")
                     .await
                     .expect("other viewer read")
+                    .is_none());
+                assert!(store
+                    .desired_selection(&other_viewer, "playback")
+                    .await
+                    .expect("other viewer desired read")
                     .is_none());
             }
             let local = crate::playback_principal::PlaybackPrincipal::LocalUser { user_id: 1 };
@@ -4117,7 +4179,7 @@ mod sharing_route_decoder_tests {
             );
             store.with_conn(|conn| {
                 conn.execute("DELETE FROM media_playback_pointers WHERE share_grant_id='00000000-0000-4000-a000-000000000002'", [])?;
-                conn.execute("UPDATE media_playback_pointers SET current_incarnation_id='00000000-0000-4000-a000-000000000002' WHERE share_grant_id='00000000-0000-4000-a000-000000000001'", [])?;
+                conn.execute("UPDATE media_playback_pointers SET desired_revision=1, current_incarnation_id='00000000-0000-4000-a000-000000000002' WHERE share_grant_id='00000000-0000-4000-a000-000000000001'", [])?;
                 Ok(())
             }).await.expect("corrupt cross-grant pointer fixture");
             let first = crate::playback_principal::PlaybackPrincipal::sharing(
