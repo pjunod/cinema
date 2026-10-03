@@ -926,6 +926,8 @@
             request: crate::transcode::SessionRequest {
                 quality_catalog: None,
             candidate_context: None,
+            vod_only: false,
+            passive_vod: false,
                 control_sequence: None,
                 file_id: 1,
                 playback_id: "control-transition".to_owned(),
@@ -2094,6 +2096,8 @@
             request: crate::transcode::SessionRequest {
                 quality_catalog: None,
             candidate_context: None,
+            vod_only: false,
+            passive_vod: false,
                 control_sequence: None,
                 file_id: fixture.file_id(),
                 playback_id: "terminal-cancellation".to_owned(),
@@ -2361,6 +2365,8 @@
                 request: crate::transcode::SessionRequest {
                     quality_catalog: None,
             candidate_context: None,
+            vod_only: false,
+            passive_vod: false,
                     control_sequence: None,
                     file_id: fixture.file_id(),
                     playback_id: format!("terminal-{label}"),
@@ -2657,3 +2663,46 @@
             );
         }
     }
+
+#[test]
+fn native_http_cannot_select_service_vod_only_policy() {
+    let public: CreateSession = serde_json::from_value(serde_json::json!({"playback_id":"native", "vod_only":true, "passive_vod":true})).expect("native body");
+    let request = public.into_request(1, 360);
+    assert!(!request.vod_only);
+    assert!(!request.passive_vod);
+}
+
+#[tokio::test]
+async fn passive_vod_owner_loop_retains_dormant_route_and_http_terminal_fences_expiry() {
+    let dir = crate::test_tempdir().expect("owner integration base");
+    let fixture = HlsDeliveryFixture::publish(dir.path(), "unused-rolling-fixture").await;
+    let id = uuid::Uuid::new_v4().to_string();
+    let _owner = install_vod_http_session(&fixture, dir.path(), &id).await;
+    activate_fixture_route(&fixture, &id, "passive-owner-player").await;
+    let vod = fixture.state.transcode.vod_for_test();
+    vod.install_passive_grant_for_test(&id, "user", "passive-owner-player", "passive-owner-request").await;
+    vod.force_reader_idle_for_test(&id).await;
+    vod.maintain().await;
+    assert_eq!(vod.active_sessions().await, 0);
+    assert!(vod.delivery_infos().await.is_empty());
+    assert_eq!(vod.frontier_ms(&id).await, Some(0));
+    let loop_task = tokio::spawn(crate::media_sessions::lease_loop(fixture.state.clone()));
+    tokio::time::sleep(Duration::from_millis(3500)).await;
+    let route = fixture.store.media_session_route(&id).await.expect("route read").expect("route");
+    assert_eq!(route.state, "active", "missing reader must not trigger stale settlement");
+    assert_eq!(route.owner_epoch, 1);
+    assert!(vod.passive_presence(&id, "user", "passive-owner-player", "passive-owner-request").await);
+    assert_eq!(vod.active_sessions().await, 0);
+    vod.expire_passive_grant_for_test(&id).await;
+    tokio::time::timeout(Duration::from_secs(12), async {
+        loop {
+            let route = fixture.store.media_session_route(&id).await.expect("passive test fixture").expect("passive test fixture");
+            if route.state == "ended" { break; }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    }).await.expect("expired grant settles through real owner loop");
+    assert!(!vod.passive_presence(&id, "user", "passive-owner-player", "passive-owner-request").await);
+    assert!(matches!(vod_resurrected_before(&fixture.state, &id, Instant::now() + Duration::from_secs(2)).await, VodResurrection::Ended));
+    loop_task.abort();
+    let _ = loop_task.await;
+}

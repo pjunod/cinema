@@ -1957,6 +1957,8 @@
         let req = SessionRequest {
             quality_catalog: None,
             candidate_context: None,
+            vod_only: false,
+            passive_vod: false,
             control_sequence: None,
             file_id: 1,
             playback_id: "cap-probe".to_owned(),
@@ -2026,6 +2028,8 @@
         let mut req = SessionRequest {
             quality_catalog: None,
             candidate_context: None,
+            vod_only: false,
+            passive_vod: false,
             control_sequence: None,
             file_id: 1,
             playback_id: "snapshot-probe".to_owned(),
@@ -3100,6 +3104,8 @@
         let request = SessionRequest {
             quality_catalog: None,
             candidate_context: None,
+            vod_only: false,
+            passive_vod: false,
             control_sequence: None,
             file_id: 5,
             playback_id: "player".into(),
@@ -3120,6 +3126,8 @@
         let hdr10 = SessionRequest {
             quality_catalog: None,
             candidate_context: None,
+            vod_only: false,
+            passive_vod: false,
             hdr10: true,
             ..request.clone()
         };

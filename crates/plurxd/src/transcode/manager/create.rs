@@ -477,6 +477,25 @@ impl TranscodeManager {
         self.validate_candidate_planning_binding(req, replacement_deadline)
             .await?;
 
+        if req.passive_vod
+            && (!req.vod_only
+                || req.presentation != Presentation::Vod
+                || req
+                    .request_id
+                    .as_deref()
+                    .is_none_or(|id| id.trim().is_empty()))
+        {
+            return Err(vod_refusal_error(
+                "vod_passive_policy_invalid",
+                "passive retention requires VOD-only policy and request identity",
+            ));
+        }
+        if req.vod_only && req.presentation != Presentation::Vod {
+            return Err(vod_refusal_error(
+                "vod_source_unsupported",
+                "VOD-only service policy forbids rolling presentation",
+            ));
+        }
         let startup_create_at = Instant::now();
         // Immutable VOD remains first. During the index backfill, a typed
         // prerequisite refusal may use the retained live engine rather than
@@ -529,7 +548,7 @@ impl TranscodeManager {
                     let live_recovery_reason = vod_refusal(&error)
                         .and_then(|(code, _)| LiveRecoveryReason::from_refusal(code));
                     if let Some(reason) = live_recovery_reason {
-                        if self.live_hls_recovery_enabled().await? {
+                        if !req.vod_only && self.live_hls_recovery_enabled().await? {
                             tracing::warn!(
                                 target: "plurxd::transcode",
                                 file_id = req.file_id,

@@ -1,6 +1,6 @@
 # Jellyfin compatibility — build contract for Infuse and Android TV
 
-**Status:** open · Opus approved; R1–R8 and S1–S4 reconciled; J0 unproved ·
+**Status:** open · Opus approved; R1–R8 and S1–S4 reconciled; J0 physical Infuse repeat deferred to J6 ·
 **Written / revised:** 2026-10-02 · **Original source:** `4d7257019` ·
 **Review source independently checked:** `f1f1390f1` · **Publication base:**
 `9a719fcb7` · [First review](JELLYFIN-COMPATIBILITY-REVIEW.md) ·
@@ -174,6 +174,26 @@ Always register the `/jellyfin` nest, even when disabled, with its own JSON
 404 response for disabled and unknown routes. Otherwise the native SPA
 fallback returns 200 HTML and looks like a broken Jellyfin server. Test both
 the bare mount and subpaths through TLS termination and a reverse proxy.
+
+
+**J0 measured transport amendment (2026-10-02):** Infuse 8.5.6’s Jellyfin
+transcode path expects a master playlist and resolves its media child under
+`/jellyfin/Videos/{item}`; it prepends that item path even to an absolute child.
+Use the measured item-relative route structure, carrying the exact opaque
+binding on every child. It fetches native fMP4 fragments but omits the
+`EXT-X-MAP` initialization request. A controlled wrapper concatenating the
+exact native init bytes with each native fragment, with exact combined content
+length, renders and seeks. The [Infuse observation](jellyfin/infuse-connection-observation.json)
+retains both failures and the successful boundary.
+
+J4 may implement this bounded representation for the measured client/version
+capability only after proving exact native rendition/publication identity for
+both objects, full/range lengths, cancellation, terminal/owner fencing and
+post-idle resurrection. Fetch through shared native services, never loopback
+HTTP. Do not add another encoder, rewrite timestamps, retain unbounded media
+bodies, or infer this capability for arbitrary profiles advertising TS. Keep
+ordinary `EXT-X-MAP` delivery for clients that use it. This amendment makes the
+required transport explicit; it does not qualify the adapter or J0 recovery.
 
 ## 4. Protocol baseline — traces choose the subset
 
@@ -600,8 +620,16 @@ requests through [prodsched.rs](../../crates/plurxd/src/prodsched.rs), with a
 180-second ahead horizon. [vodserve.rs](../../crates/plurxd/src/vodserve.rs)
 uses a 300-second idle TTL; successful delivery updates the touch clock in
 [vod/serve/delivery.rs](../../crates/plurxd/src/vod/serve/delivery.rs). Native
-control is optional on that path. Reuse passive delivery; no synthetic
-ControlRequestV1 or new actor ingress is required for this first release.
+control is optional on that reader path. Reuse passive delivery and do not
+synthesize `ControlRequestV1`. **J0 measured an owner-integration gap:** after
+a 343.445-second physical pause the reader was idle-reaped, the owner cleanup
+ended its durable route, and the next real request returned
+`410 media_session_ended`. The reader-only resurrection regression is
+insufficient. [ADR-J0-1](JELLYFIN-PASSIVE-VOD-ROUTE-LIFETIME.md) proposes a
+bounded, server-owned passive route grant separate from producer lifetime.
+Its service/worker policy and integrated/physical recovery proof must settle
+before J4; the claim that no additional native lifetime seam is needed is
+withdrawn.
 
 **The rolling fallback is different.** The native
 [create manager](../../crates/plurxd/src/transcode/manager/create.rs) can turn
@@ -860,6 +888,15 @@ Do not build the entire route list before these experiments settle the hard seam
 J0 needs the same pinned compiler loop as later Rust work. Delete owned
 prototype scripts, upstream downloads and raw captures after retaining the
 minimal fixture/findings; do not leave them in the repository.
+
+**User-directed test deferral (2026-10-02):** Paul is using the Bedroom Apple
+TV and explicitly directed that its remaining Infuse recovery test be skipped
+until the end. Proceed with J1–J5 using the retained reference/native transport
+observations, corrected Android long-pause proof and native lifecycle/worker
+regressions. The corrected physical Infuse pause/resume/seek and terminal
+checks remain required in J6 on the final candidate; no Infuse qualification,
+release, graduation or fleet rollout is granted by this deferral. Keep the
+Apple TV untouched until Paul makes it available.
 
 ### 9.1 Repository mechanics are part of J1/J2
 
