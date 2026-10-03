@@ -1773,6 +1773,7 @@ impl MediaSessionStore for SqliteStore {
     ) -> Result<crate::domain::DesiredOwnership, StoreError> {
         let user_id = crate::store::local_media_principal_id(principal)?;
         validate_desired_selection(playback_id, digest, canonical_form, now_ms)?;
+        let owner_key = principal.owner_key();
         let playback_id = playback_id.to_owned();
         let digest = digest.to_owned();
         let canonical_form = canonical_form.to_owned();
@@ -1783,11 +1784,33 @@ impl MediaSessionStore for SqliteStore {
             // first and writing after: two exchanges for the same playback can
             // otherwise both read revision 3 and both write 4, which turns a
             // monotone revision into a number two different asks share.
+            let rebuilt = route_projection(&tx)? == PRINCIPAL_ROUTE_COLS;
+            if rebuilt && !tx.query_row("SELECT EXISTS(SELECT 1 FROM users WHERE id=?1)", [user_id], |row| row.get::<_, bool>(0))? {
+                return Err(StoreError::Task("media-session local owner no longer exists".into()));
+            }
+
+            let (columns, values, conflict) = if rebuilt {
+                ("owner_key, principal_kind, user_id, share_grant_id, share_viewer_key, playback_id, revision, digest, canonical_form, updated_at_ms",
+                 "?6, 'local', ?1, NULL, NULL, ?2, 1, ?3, ?4, ?5", "owner_key, playback_id")
+            } else {
+                ("user_id, playback_id, revision, digest, canonical_form, updated_at_ms",
+                 "?1, ?2, 1, ?3, ?4, ?5", "user_id, playback_id")
+            };
+            let mut bindings = vec![
+                rusqlite::types::Value::Integer(user_id),
+                rusqlite::types::Value::Text(playback_id.clone()),
+                rusqlite::types::Value::Text(digest.clone()),
+                rusqlite::types::Value::Text(canonical_form.clone()),
+                rusqlite::types::Value::Integer(now_ms),
+            ];
+            if rebuilt {
+                bindings.push(rusqlite::types::Value::Text(owner_key));
+            }
             tx.execute(
-                "INSERT INTO media_playback_desired
-                     (user_id, playback_id, revision, digest, canonical_form, updated_at_ms)
-                 VALUES (?1, ?2, 1, ?3, ?4, ?5)
-                 ON CONFLICT(user_id, playback_id) DO UPDATE SET
+                &format!("INSERT INTO media_playback_desired
+                     ({columns})
+                 VALUES ({values})
+                 ON CONFLICT({conflict}) DO UPDATE SET
                      revision = CASE
                          WHEN media_playback_desired.digest = excluded.digest
                              THEN media_playback_desired.revision
@@ -1799,8 +1822,8 @@ impl MediaSessionStore for SqliteStore {
                          WHEN media_playback_desired.digest = excluded.digest
                              THEN media_playback_desired.updated_at_ms
                          ELSE excluded.updated_at_ms
-                     END",
-                rusqlite::params![user_id, &playback_id, &digest, &canonical_form, now_ms],
+                     END"),
+                rusqlite::params_from_iter(bindings),
             )?;
             let owned = desired_within(&tx, user_id, &playback_id)?
                 .ok_or_else(|| StoreError::Database("desired selection vanished".into()))?;
@@ -4168,6 +4191,50 @@ mod sharing_route_decoder_tests {
                     .is_none());
             }
             let local = crate::playback_principal::PlaybackPrincipal::LocalUser { user_id: 1 };
+            let local_desired = store
+                .record_desired_selection(
+                    &local,
+                    "new-local-playback",
+                    &"c".repeat(64),
+                    "v1;quality=auto",
+                    11,
+                )
+                .await
+                .expect("local desired insert after rebuild");
+            assert_eq!(local_desired.revision, 1);
+            assert_eq!(local_desired.principal, local);
+            let replay = store
+                .record_desired_selection(
+                    &local,
+                    "new-local-playback",
+                    &"c".repeat(64),
+                    "v1;quality=auto",
+                    12,
+                )
+                .await
+                .expect("local desired replay after rebuild");
+            assert_eq!(replay.revision, 1);
+            assert_eq!(replay.updated_at_ms, 11);
+            let changed = store
+                .record_desired_selection(
+                    &local,
+                    "new-local-playback",
+                    &"d".repeat(64),
+                    "v1;quality=auto",
+                    13,
+                )
+                .await
+                .expect("local desired upsert after rebuild");
+            assert_eq!(changed.revision, 2);
+            assert_eq!(
+                store
+                    .desired_selection(&local, "new-local-playback")
+                    .await
+                    .expect("complete local read")
+                    .expect("desired")
+                    .principal,
+                local
+            );
             assert_eq!(
                 store
                     .media_session_route_for_playback(&local, "playback")
@@ -4192,6 +4259,36 @@ mod sharing_route_decoder_tests {
                 .await
                 .expect("cross-grant read")
                 .is_none());
+            store
+                .with_conn(|conn| {
+                    conn.execute("DELETE FROM users WHERE id=1", [])?;
+                    Ok(())
+                })
+                .await
+                .expect("delete local owner");
+            assert!(
+                store
+                    .record_desired_selection(
+                        &local,
+                        "new-local-playback",
+                        &"e".repeat(64),
+                        "v1;quality=auto",
+                        14
+                    )
+                    .await
+                    .is_err(),
+                "deleted owner cannot recreate desired state"
+            );
+            assert!(store
+                .desired_selection(&local, "new-local-playback")
+                .await
+                .expect("deleted desired read")
+                .is_none());
+            assert!(store
+                .desired_selection(&first, "playback")
+                .await
+                .expect("sharing selection survives local deletion")
+                .is_some());
         }
     }
 

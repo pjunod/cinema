@@ -1926,3 +1926,13 @@ ignored, 0.92 seconds), and both actual three-voter candidate contracts passed
 and denied-warning Clippy also passed. Writers, schema installation, grant
 admission and cluster floor remain open; this checkpoint adds no shared
 worker admission.
+
+**SQLite desired-writer checkpoint:** a rebuilt local desired-selection write
+inserts the complete canonical principal projection and uses `(owner_key,
+playback_id)` for conflict resolution. Insert and exact replay retain revision
+1; a changed digest advances it to 2. The transaction checks that the real
+local user still exists, so a deleted user cannot recreate desired state.
+Other grants' selections survive local deletion. The six focused tests passed
+on memory and pooled SQLite (zero ignored, 0.99 seconds), and affected
+denied-warning Clippy passed. Shared desired writers still refuse admission;
+other writer operations, installation and the cluster floor remain open.
