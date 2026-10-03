@@ -619,6 +619,7 @@ All paths below are under `/api/v1/sharing` and require `AdminUser`:
 | DELETE `/exports/{id}` | Revoke, not merely hide |
 | POST `/imports` | `{invitation, endpoint_overrides?}`; parse, verify pinned identity, persist, claim; return import state, never echo invitation |
 | GET `/imports` | Local import status and pairing code |
+| GET `/imports/{id}/libraries` | Administrator fresh pinned Source scope for assignment bootstrap, independent of viewer assignments; return exact import/Source/epoch/lifecycle/assignment generation and active state with at most 64 movie/show libraries |
 | GET `/imports/{id}/assignments` | Complete bounded current import/Source/epoch/lifecycle/state and `expected_assignment_generation` with grouped Source library strings and exact local user IDs; refuse corrupt/oversized matrices |
 | PUT `/imports/{id}/assignments` | `{expected_assignment_generation, assignments:[{library_id,user_ids}]}`; explicit whole-set replacement |
 | PUT `/imports/{id}/endpoints` | `{expected_endpoint_generation, endpoints, confirm_new_pins:false}`; address edits retain pins; new pins require explicit out-of-band admin confirmation or authenticated manifest proof |
@@ -3088,6 +3089,28 @@ sharing regressions passed (29.12s), with zero ignored cases. The web ID parser
 also accepts canonical zero consistently with SourceId and both native clients;
 its eight browse regressions and unchanged type baseline pass. Pinned feature-enabled core/daemon all-target Clippy passed with denied warnings (1m26s), and all four docs-index cases pass.
 
+**Administrator Source-library bootstrap candidate:** GET
+`/api/v1/sharing/imports/{id}/libraries` reads current Source scope before B has
+any viewer assignments. This is a separate administrator surface: a live token,
+current administrator role and exact import lifecycle/claim/grant are read in
+one consistent authority query. The existing viewer query still requires its
+own assignments. The fresh pinned Source response has at most 64 unique
+movie/show libraries and 256 UTF-8 bytes per name. Empty scope is a successful
+empty read, while unavailable Source authority refuses the read.
+
+The accepted connection uses the same bounded receiver monitor registry and
+current Source tuple checks, including after the response body drops. Role,
+login, import, Source grant or sharing-switch loss cancels current connection
+authority. The isolated Linux H1/H2 regression is added but still awaits an
+exact committed archive run. No cached scope or Local library set bootstraps the
+editor. Backend administrator bootstrap/current-role proof passed on memory,
+pooled SQLite and three actual voters (one case, 9.28s); unchanged viewer proof
+passed (one case, 9.26s). HTTP management authentication isolation passed
+(one case, 0.19s); the unchanged idle-expiry/bad-policy reader passed
+(one case, 0.32s). All 33 daemon sharing cases passed (29.07s), zero ignored.
+Pinned feature-enabled all-target check passed (1m30s), final denied-warning
+Clippy passed (1m21s). These native checks exclude the Linux-only new fixture.
+
 **Linux fixture observation correction:** The exact `c220f6270` source archive
 (SHA-256 `0072b4b224ab34d05be670b21a7bcc9bfb6a0cbed8b23d479a7cc0d3c4d36c3f`)
 compiled with pinned Linux Rust 1.97.1, but its CGNAT fixture failed twice while
@@ -3104,7 +3127,17 @@ seeded files reused a unique path (6.38s). Each file now has its own fixture pat
 no production file or serving logic changes. The independent pinned transport
 claim/rotation restart case passed on that archive (one test, zero ignored,
 0.43s). The combined blocked-response fixture still requires an exact corrected
-archive run; neither result proves actual Tailscale or two-NAT operation.
+archive run; neither result proves actual Tailscale or two-NAT operation. The exact
+`719fde0bd` archive (SHA-256
+`b8698779b2f356c81c9bebe11c78b75acb973f8ff7979b368300031a6cf5c314`)
+first lost its compiler to signal 9 without a Rust diagnostic. The same frozen
+source then compiled in 2m40s after coordinating heavy Docker workloads: the
+blocked scope fixture passed all 18 actual HTTP/1 and HTTP/2 scenarios in one
+case (23.06s), and the independent claim/rotation restart case passed (0.37s),
+both zero ignored. Log: `/private/tmp/plurx-sharing-719f-linux-retry.log`.
+This qualifies the isolated protocol fixture on that commit; it does not
+qualify the subsequently added administrator or artwork routes, actual
+Tailscale, two-NAT operation or physical playback devices.
 
 ### 16.8 S7 native file-context foundation
 

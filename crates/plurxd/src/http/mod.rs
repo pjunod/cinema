@@ -1323,7 +1323,7 @@ pub fn router(state: AppState) -> Router {
     // before the shared serving gate so media bodies and blocked GETs remain
     // unlimited while JSON work cannot occupy a request slot forever.
     let json_short = Router::new()
-        .merge(sharing::admin_router())
+        .merge(sharing::admin_router(state.clone()))
         .merge(shared_library::viewer_router(state.clone()))
         .route("/server", get(system::server_info))
         .route("/me", get(auth::me))
@@ -12465,6 +12465,11 @@ mod tests {
             .await
             .expect("import");
         let path = format!("/api/v1/sharing/imports/{id}/assignments");
+        let libraries_path = format!("/api/v1/sharing/imports/{id}/libraries");
+        assert_eq!(
+            call(&app, get(&libraries_path, None)).await.0,
+            StatusCode::UNAUTHORIZED
+        );
         assert_eq!(
             call(&app, get(&path, None)).await.0,
             StatusCode::UNAUTHORIZED
@@ -12483,6 +12488,14 @@ mod tests {
         assert_eq!(
             call(&app, get(&path, Some(reader))).await.0,
             StatusCode::FORBIDDEN
+        );
+        assert_eq!(
+            call(&app, get(&libraries_path, Some(reader))).await.0,
+            StatusCode::FORBIDDEN
+        );
+        assert_eq!(
+            call(&app, get(&libraries_path, Some(&admin))).await.0,
+            StatusCode::SERVICE_UNAVAILABLE
         );
         let (status, empty) = call(&app, get(&path, Some(&admin))).await;
         assert_eq!(status, StatusCode::OK);
