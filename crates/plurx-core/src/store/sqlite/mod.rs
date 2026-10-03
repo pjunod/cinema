@@ -21,6 +21,7 @@ mod fragment_index_cluster;
 mod housekeeping;
 mod jellyfin_identity;
 mod jellyfin_login;
+mod jellyfin_play;
 mod library;
 mod library_channels;
 mod live_tv_resource;
@@ -1197,6 +1198,8 @@ pub(crate) const MIGRATIONS: &[&str] = &[
     super::jellyfin_identity::JELLYFIN_IDENTITY_SCHEMA,
     // v93: compatibility-only login scope and transactional replacement.
     super::jellyfin_login::JELLYFIN_LOGIN_SCHEMA,
+    // v94: bounded compatibility negotiations and exact native references.
+    super::jellyfin_play::SCHEMA,
 ];
 
 /// Highest SQLite schema version this binary can read and migrate.

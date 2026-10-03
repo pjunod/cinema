@@ -57,6 +57,10 @@ pub(super) const STORE_SOURCES: &[(&str, &str)] = &[
     ),
     ("hiqlite_import.rs", include_str!("hiqlite_import.rs")),
     (
+        "hiqlite_jellyfin_play.rs",
+        include_str!("hiqlite_jellyfin_play.rs"),
+    ),
+    (
         "hiqlite_jellyfin_login.rs",
         include_str!("hiqlite_jellyfin_login.rs"),
     ),
@@ -123,6 +127,7 @@ const SQLITE_SOURCES: &[(&str, &str)] = &[
         "jellyfin_identity.rs",
         include_str!("sqlite/jellyfin_identity.rs"),
     ),
+    ("jellyfin_play.rs", include_str!("sqlite/jellyfin_play.rs")),
     (
         "jellyfin_login.rs",
         include_str!("sqlite/jellyfin_login.rs"),
@@ -162,6 +167,7 @@ const SQLITE_SOURCES: &[(&str, &str)] = &[
 /// these, such a statement resolves to a neutral token, stops looking like a
 /// statement, and is never judged.
 const SHARED_CONSTANT_SOURCES: &[(&str, &str)] = &[
+    ("jellyfin_play.rs", include_str!("jellyfin_play.rs")),
     (
         "../live_tv_resource.rs",
         include_str!("../live_tv_resource.rs"),

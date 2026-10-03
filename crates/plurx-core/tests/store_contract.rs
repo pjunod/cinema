@@ -24,6 +24,8 @@ mod background_jobs;
 mod jellyfin_identity;
 #[path = "store_contract/jellyfin_login.rs"]
 mod jellyfin_login;
+#[path = "store_contract/jellyfin_play.rs"]
+mod jellyfin_play;
 
 #[cfg(feature = "hiqlite-contract-tests")]
 use std::borrow::Cow;

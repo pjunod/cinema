@@ -33,6 +33,14 @@ mod fragment_prune_tests;
 mod hiqlite_classification;
 mod jellyfin_identity;
 mod jellyfin_login;
+mod jellyfin_play;
+pub use jellyfin_play::{
+    JellyfinPlay, JellyfinPlayActivation, JellyfinPlayScope, JellyfinPlayStore, NewJellyfinPlay,
+    JELLYFIN_PENDING_PLAYS_PER_LOGIN, JELLYFIN_PENDING_PLAYS_SERVER, JELLYFIN_PENDING_PLAY_TTL_MS,
+    JELLYFIN_TERMINAL_PLAY_TTL_MS,
+};
+#[cfg(feature = "hiqlite-store")]
+mod hiqlite_jellyfin_play;
 pub use jellyfin_login::{JellyfinClientFamily, JellyfinLoginStore, JellyfinLoginWrite};
 #[cfg(feature = "hiqlite-store")]
 mod hiqlite_jellyfin_login;
@@ -5301,6 +5309,7 @@ pub trait Store:
     + SettingsStore
     + JellyfinIdentityStore
     + JellyfinLoginStore
+    + JellyfinPlayStore
     + BackgroundJobStore
     + DvConversionStore
     + MetricsStore
@@ -5340,6 +5349,7 @@ impl<T> Store for T where
         + SettingsStore
         + JellyfinIdentityStore
         + JellyfinLoginStore
+        + JellyfinPlayStore
         + BackgroundJobStore
         + DvConversionStore
         + MetricsStore

@@ -38,6 +38,7 @@ impl JellyfinIdentityStore for HiqliteAuthStore {
             .collect::<hiqlite::Params>();
         let found = self
             .client()
+            // authority: allocation must see existing live mappings and retirements.
             .query_consistent_map::<IdentityRow, _>(sql.clone(), args.clone())
             .await?;
         let missing = ids
@@ -69,6 +70,7 @@ impl JellyfinIdentityStore for HiqliteAuthStore {
         }
         Ok(self
             .client()
+            // authority: read the committed winner after concurrent conditional allocation.
             .query_consistent_map::<IdentityRow, _>(sql, args)
             .await?
             .into_iter()
@@ -80,6 +82,7 @@ impl JellyfinIdentityStore for HiqliteAuthStore {
         kind: JellyfinEntityKind,
         wire_id: &str,
     ) -> Result<Option<i64>, StoreError> {
+        // authority: a retired wire ID must never resolve through a reused native integer.
         Ok(self.client().query_consistent_map::<NativeRow,_>("SELECT native_id FROM jellyfin_entity_ids WHERE entity_kind=$1 AND wire_id=$2 AND retired=0", params!(kind.name(), wire_id)).await?.into_iter().next().map(|r| r.0))
     }
 }

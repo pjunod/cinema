@@ -158,6 +158,14 @@ pub struct SqliteTransactionSite {
 /// Rust-driven backfills remain separate audit populations. Keeping explicit
 /// boundaries here makes their port shape reviewable beside the CAS primitive.
 pub const SQLITE_TRANSACTION_SITES: &[SqliteTransactionSite] = &[
+    // Expired non-active rows and bounded conditional admission are fixed SQL.
+    SqliteTransactionSite {
+        module: "jellyfin_play.rs",
+        method: "create_jellyfin_play",
+        is_async: true,
+        mechanism: TransactionMechanism::RusqliteTransaction,
+        shape: TransactionShape::BatchWrite,
+    },
     // The password-matched mint admits both replacement writes; a collision
     // or later statement failure rolls the whole scoped replacement back.
     SqliteTransactionSite {
@@ -1027,6 +1035,7 @@ mod tests {
             "jellyfin_identity.rs",
             include_str!("sqlite/jellyfin_identity.rs"),
         ),
+        ("jellyfin_play.rs", include_str!("sqlite/jellyfin_play.rs")),
         (
             "jellyfin_login.rs",
             include_str!("sqlite/jellyfin_login.rs"),
@@ -1228,7 +1237,7 @@ mod tests {
         // links together so a failed delete remains retryable.
         // Reconciliation adds one atomic successor-insert / predecessor-retire
         // batch. Its SQL predicates own all branching, as in the replicated twin.
-        assert_eq!(methods.len(), 98);
+        assert_eq!(methods.len(), 99);
     }
 
     #[test]

@@ -2,7 +2,8 @@
 use super::{CacheAdminMutationClaim, MAX_DEVICE_LABEL_BYTES};
 use crate::error::StoreError;
 use async_trait::async_trait;
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum JellyfinClientFamily {
     Infuse,
     AndroidTv,

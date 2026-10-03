@@ -570,6 +570,32 @@ const TABLES: &[TablePlan] = &[
         parent_first: false,
     },
     TablePlan {
+        name: "jellyfin_plays",
+        columns: &[
+            "play_id",
+            "user_id",
+            "token_digest",
+            "device_digest",
+            "client_family",
+            "playback_id",
+            "item_id",
+            "file_id",
+            "item_wire_id",
+            "file_wire_id",
+            "payload",
+            "state",
+            "expires_at_ms",
+            "manual_revision",
+            "native_incarnation_id",
+            "direct_grant_id",
+        ],
+        order_by: "play_id",
+        minimum_schema: 94,
+        import_filter: None,
+        sealed_columns: &[],
+        parent_first: false,
+    },
+    TablePlan {
         name: "api_keys",
         columns: &[
             "id",
@@ -3455,7 +3481,8 @@ mod tests {
         assert!(!names.contains(&"live_tv_resource_revision"));
         assert!(names.contains(&"jellyfin_login_tokens"));
         assert!(names.contains(&"jellyfin_entity_ids"));
-        assert_eq!(names.len(), 72, "review every imported durable table");
+        assert!(names.contains(&"jellyfin_plays"));
+        assert_eq!(names.len(), 73, "review every imported durable table");
     }
 
     /// A source from before the pointer fence has no revision to attribute its

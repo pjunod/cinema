@@ -160,7 +160,9 @@ const JELLYFIN_IDENTITY_SCHEMA_VERSION: i64 = 70;
 const JELLYFIN_IDENTITY_SCHEMA_MIGRATION_SOURCE: i64 = PLAYBACK_INPUT_SCHEMA_VERSION;
 const JELLYFIN_LOGIN_SCHEMA_VERSION: i64 = 71;
 const JELLYFIN_LOGIN_SCHEMA_MIGRATION_SOURCE: i64 = JELLYFIN_IDENTITY_SCHEMA_VERSION;
-pub const AUTH_SCHEMA_VERSION: i64 = JELLYFIN_LOGIN_SCHEMA_VERSION;
+const JELLYFIN_PLAY_SCHEMA_VERSION: i64 = 72;
+const JELLYFIN_PLAY_SCHEMA_MIGRATION_SOURCE: i64 = JELLYFIN_LOGIN_SCHEMA_VERSION;
+pub const AUTH_SCHEMA_VERSION: i64 = JELLYFIN_PLAY_SCHEMA_VERSION;
 /// Oldest schema this binary can advance through the complete migration chain.
 pub const AUTH_SCHEMA_MIGRATION_SOURCE: i64 = 5;
 const READING_SCHEMA_VERSION: i64 = 6;
@@ -1625,6 +1627,9 @@ impl HiqliteAuthStore {
         for result in
             timeout_store(client.batch(super::jellyfin_login::JELLYFIN_LOGIN_SCHEMA)).await?
         {
+            result.map_err(database_error)?;
+        }
+        for result in timeout_store(client.batch(super::jellyfin_play::SCHEMA)).await? {
             result.map_err(database_error)?;
         }
         super::hiqlite_durable::install_schema(&client).await?;
@@ -3183,6 +3188,15 @@ impl HiqliteAuthStore {
                     let now = self.now()?;
                     let attempt = self.client().txn(vec![("UPDATE cluster_meta SET schema_version=$1,migrated_at=$2 WHERE singleton=1 AND schema_version=$3".to_owned(),params!(JELLYFIN_LOGIN_SCHEMA_VERSION,now,JELLYFIN_LOGIN_SCHEMA_MIGRATION_SOURCE))]).await;
                     self.settle_migration_attempt(JELLYFIN_LOGIN_SCHEMA_MIGRATION_SOURCE, attempt)
+                        .await?;
+                }
+                SchemaMigrationAction::MigrateFrom(JELLYFIN_PLAY_SCHEMA_MIGRATION_SOURCE) => {
+                    for result in self.client().batch(super::jellyfin_play::SCHEMA).await? {
+                        result.map_err(database_error)?;
+                    }
+                    let now = self.now()?;
+                    let attempt = self.client().txn(vec![("UPDATE cluster_meta SET schema_version=$1,migrated_at=$2 WHERE singleton=1 AND schema_version=$3".to_owned(),params!(JELLYFIN_PLAY_SCHEMA_VERSION,now,JELLYFIN_PLAY_SCHEMA_MIGRATION_SOURCE))]).await;
+                    self.settle_migration_attempt(JELLYFIN_PLAY_SCHEMA_MIGRATION_SOURCE, attempt)
                         .await?;
                 }
                 SchemaMigrationAction::MigrateFrom(version) => {
@@ -5253,7 +5267,8 @@ fn schema_migration_action(
         | DV_REQUEST_PROVENANCE_SCHEMA_MIGRATION_SOURCE
         | PLAYBACK_INPUT_SCHEMA_MIGRATION_SOURCE
         | JELLYFIN_IDENTITY_SCHEMA_MIGRATION_SOURCE
-        | JELLYFIN_LOGIN_SCHEMA_MIGRATION_SOURCE => {
+        | JELLYFIN_LOGIN_SCHEMA_MIGRATION_SOURCE
+        | JELLYFIN_PLAY_SCHEMA_MIGRATION_SOURCE => {
             Ok(SchemaMigrationAction::MigrateFrom(meta.schema_version))
         }
         version => Err(StoreError::Migration(format!(

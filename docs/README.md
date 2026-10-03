@@ -446,6 +446,7 @@ player obeys, subtitles and overlays, layouts and themes.
 | [UI-LAYOUTS-G3-DECISION.md](clients/UI-LAYOUTS-G3-DECISION.md) | Did the layout abstraction pay for itself? | done |
 | [JELLYFIN-EMBY-COMPATIBILITY-OUTLINE.md](clients/JELLYFIN-EMBY-COMPATIBILITY-OUTLINE.md) | Whole Jellyfin/Emby effort: first clients, phased scope, estimates and exclusions. | open |
 | [JELLYFIN-SHARED-SERVICES.md](clients/JELLYFIN-SHARED-SERVICES.md) | J1 shared login/token authority, token-only revocation and complete native watch operations; remaining compatibility lifecycle work. | open |
+| [JELLYFIN-PLAY-BINDINGS.md](clients/JELLYFIN-PLAY-BINDINGS.md) | J1 bounded negotiation metadata, live source incarnations, native route references, terminal retention and remaining adapter fences. | open |
 | [JELLYFIN-COMPATIBILITY-BUILD.md](clients/JELLYFIN-COMPATIBILITY-BUILD.md) | Infuse/Android TV build contract after three reviews: protocol spike, player identity, VOD fallbacks, watch fencing and acceptance. | open |
 | [JELLYFIN-DURABLE-IDENTITIES.md](clients/JELLYFIN-DURABLE-IDENTITIES.md) | J1 permanent opaque mappings, deterministic deletion retirement, both-backend migrations and import proof. | open |
 | [JELLYFIN-PROTOCOL-FOUNDATION.md](clients/JELLYFIN-PROTOCOL-FOUNDATION.md) | J1 pure tick/ID/credential forms, source replacement guard and the remaining service/storage boundary. | open |
