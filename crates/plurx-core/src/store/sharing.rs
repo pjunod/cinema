@@ -352,8 +352,17 @@ impl<T: Backend> SharingStore for T {
                 WHERE l.id IS NULL OR l.kind NOT IN ('movies','shows'))
             ON CONFLICT(id) DO NOTHING", vec![i.id.into(), i.token_hash.into(), json(&i.library_ids)?.into(),
                 i.created_at_ms.into(), i.expires_at_ms.into()])]).await?;
-        Ok(if counts[0] == 1 {
-            MutationOutcome::Applied
+        if counts[0] == 1 {
+            return Ok(MutationOutcome::Applied);
+        }
+        // The write itself enforces the limit atomically. This read only names
+        // the refusal; it never grants admission from a pre-count.
+        let full = !self.sharing_read(
+            "SELECT '{}' AS payload WHERE (SELECT count(*) FROM sharing_invitations WHERE state='open' AND expires_at_ms>$1)>=32 AND NOT EXISTS(SELECT 1 FROM sharing_invitations WHERE id=$2)",
+            vec![i.created_at_ms.into(), i.id.into()],
+        ).await?.is_empty();
+        Ok(if full {
+            MutationOutcome::Capacity
         } else {
             MutationOutcome::Conflict
         })
@@ -583,7 +592,7 @@ impl<T: Backend> SharingStore for T {
             vec![i.source.server_id.into(),i.source.catalogue_epoch.into()]).await?;
         match rows.first() {
             Some(row) => Ok(ImportOutcome::AlreadyImported(decode(row)?)),
-            None => Err(invalid()),
+            None => Ok(ImportOutcome::Capacity),
         }
     }
     async fn re_pair_share_import(

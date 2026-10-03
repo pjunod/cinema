@@ -343,6 +343,7 @@ mod tests {
             );
             drop(peer);
             server.abort();
+            let _ = server.await;
         }
         let (mut peer, requests, server) = fixture(
             StatusCode::FOUND,
@@ -359,6 +360,7 @@ mod tests {
         );
         drop(peer);
         server.abort();
+        let _ = server.await;
     }
     #[tokio::test]
     async fn sharing_peer_bounded_error_body_allows_rotation_status_recovery() {
@@ -376,13 +378,16 @@ mod tests {
                 Err(PeerError::Rejected(StatusCode::NOT_FOUND))
             ));
         }
-        let requests = requests.lock().expect("requests");
-        assert_eq!(requests.len(), 2);
-        assert!(requests.iter().all(|(path, auth, body)| path
-            == &format!("/sharing/v1/grant/rotation/{request}?grant_id={grant}")
-            && *auth
-            && *body == 0));
+        {
+            let requests = requests.lock().expect("requests");
+            assert_eq!(requests.len(), 2);
+            assert!(requests.iter().all(|(path, auth, body)| path
+                == &format!("/sharing/v1/grant/rotation/{request}?grant_id={grant}")
+                && *auth
+                && *body == 0));
+        }
         drop(peer);
         server.abort();
+        let _ = server.await;
     }
 }

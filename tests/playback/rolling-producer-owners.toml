@@ -2380,7 +2380,12 @@ pattern = "(?:[A-Za-z_]\\w*::)+spawn(?:_blocking|_local|_for_test)?\\s*\\("
 # replacement waiter in the test task instead of spawning a joined task.
 # This removes a test-only owner; production cleanup ownership is unchanged.
 # Combined native fixture addition and main cleanup fixture removal.
-expected_occurrences = 685
+# Shared libraries S2: two daemon-shutdown-owned listener/claim loops; two
+# awaited blocking TLS key/renewal operations; one PeerConnection-owned Hyper
+# driver aborted on Drop; and two fixture listener spawns. The lost-response
+# fixture owns its accepted connections in a JoinSet (abort on owner Drop);
+# the client fixture server is aborted and awaited. No media producer exists.
+expected_occurrences = 692
 # E1 plus S-14 M8: both ownership sets retained and counted on the merged source.
 # 643 -> 647 with S-14 M8 (`plan/S-14-5`: `Encoding`, `RollingFlowSync`, `TerminalCleanup`,
 # `HeadChildOwner`, `VodServingAdmission` behind per-owner hooks), measured by
@@ -2552,7 +2557,9 @@ pattern = "\\.spawn(?:_blocking|_local)?\\s*\\("
 # Queued-publication regression: the test owns one finite sleep child,
 # uses exec to avoid descendants, enables kill-on-drop, and verifies run_part
 # terminated and reaped it for foreground, download, ownership and deadline yields.
-expected_occurrences = 52
+# Shared libraries S2: the lost-response fixture JoinSet owns and aborts
+# accepted TLS connections; this is the same in-process task inventoried above.
+expected_occurrences = 53
 
 [[module_structures]]
 id = "bare-task-spawn"
@@ -3532,7 +3539,12 @@ pattern = "(?:[A-Za-z_]\\w*::)+(?:sleep|sleep_until|interval|interval_at|timeout
 # wrapper and directly checks Pending before releasing cleanup. The real
 # gate future retains its production deadline; no production timer changed.
 # Combined native-init fixture and TCL source: measured total 1129.
-expected_occurrences = 1129
+# Shared libraries S2: two one-second authority reads, listener pacing (five
+# seconds), certificate/enablement and claim-loop pacing (one second each),
+# the peer router's three-second deadline, and client dial/request five-second
+# deadlines. All are awaited by their request or daemon-shutdown owner;
+# cancellation drops the transport futures. None starts a media producer.
+expected_occurrences = 1137
 # +1 native-startup delayed-init fixture: its joined writer owns one bounded
 # six-second sleep, under the test request's unchanged twelve-second deadline.
 # No production timer or recovery clock is added.
@@ -4331,7 +4343,11 @@ pattern = "\\.(?:spawn|output|status)\\s*\\("
 # Combined current-main 409 plus the queued-publication test child = 410.
 # +1 TCL legacy admission fixture: Response::status() asserts typed Auto/1440
 # overflow versus ordinary copy/manual admission. This does not launch a child.
-expected_occurrences = 413
+# Shared libraries S2: eight status-shaped reads/builders (manager/TLS state,
+# HTTP response and fixture assertions), none an OS process launch. One
+# JoinSet.spawn owns accepted TLS fixture connections and aborts them when its
+# listener fixture is dropped; completed connections are joined in its loop.
+expected_occurrences = 422
 # +2 native-startup delayed-init fixture: Axum Response::status() reads
 # assert the master and legacy bridge responses. Neither launches a process.
 

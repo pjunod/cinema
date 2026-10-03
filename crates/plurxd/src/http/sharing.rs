@@ -78,6 +78,9 @@ fn credential(headers: &HeaderMap) -> Result<Secret, ApiError> {
 }
 fn mutation(result: MutationOutcome) -> Result<Json<Value>, ApiError> {
     match result {
+        MutationOutcome::Capacity => {
+            Err(failure(StatusCode::TOO_MANY_REQUESTS, "sharing_capacity"))
+        }
         MutationOutcome::Applied => Ok(Json(json!({"updated":true}))),
         MutationOutcome::Conflict => {
             Err(failure(StatusCode::CONFLICT, "sharing_generation_conflict"))
@@ -401,11 +404,16 @@ async fn save_settings(
     }
     Ok(Json(json!({"enabled":update.enabled})))
 }
-async fn status(
-    _admin: AdminUser,
-    State(state): State<AppState>,
-) -> Json<crate::sharing::SharingStatus> {
-    Json(state.sharing.status())
+async fn status(_admin: AdminUser, State(state): State<AppState>) -> Json<Value> {
+    // Transport state belongs to this process; a healthy peer is not evidence
+    // that another cluster member has a key, listener or qualified route.
+    let mut status = serde_json::to_value(state.sharing.status())
+        .expect("sharing status contains only JSON-compatible fields");
+    let object = status.as_object_mut().expect("sharing status is an object");
+    object.insert("node_id".into(), json!(state.node_id));
+    object.insert("observed_at_ms".into(), json!(clock_ms()));
+    object.insert("observation_scope".into(), json!("local_node"));
+    Json(status)
 }
 async fn manifest(
     _admin: AdminUser,
@@ -940,6 +948,7 @@ async fn create_import(
         .await
         .map_err(authority)?
     {
+        ImportOutcome::Capacity => Err(failure(StatusCode::TOO_MANY_REQUESTS, "sharing_capacity")),
         ImportOutcome::AlreadyImported(existing) => Err(ApiError::typed_detail(
             StatusCode::CONFLICT,
             "already_imported",
