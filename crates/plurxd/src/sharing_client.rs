@@ -433,6 +433,87 @@ impl PeerConnection {
         .await
         .map_err(|_| PeerError::Unavailable)?
     }
+    /// One pinned H1 exchange, without redirect, retry or reply normalization.
+    /// Dropping this future cancels waiting; it does not assert Source rollback.
+    #[allow(dead_code)] // Candidate transport remains unwired until Source/B authority integration.
+    pub async fn file_start(
+        &mut self,
+        credential: &Secret,
+        expected: &crate::http::hls::SourcePlaybackTarget,
+        viewer_hash: &str,
+        request_json: &str,
+    ) -> Result<crate::http::DecodedSourceHlsStart, PeerError> {
+        crate::http::validate_source_start_request(request_json.as_bytes(), expected)
+            .map_err(|_| PeerError::InvalidResponse)?;
+        if viewer_hash.len() != 64
+            || !viewer_hash
+                .bytes()
+                .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+        {
+            return Err(PeerError::InvalidResponse);
+        }
+        tokio::time::timeout(Duration::from_secs(310), async {
+            let mut authorization =
+                HeaderValue::from_str(&format!("CinemaShare {}", credential.expose()))
+                    .map_err(|_| PeerError::InvalidResponse)?;
+            authorization.set_sensitive(true);
+            let mut viewer =
+                HeaderValue::from_str(viewer_hash).map_err(|_| PeerError::InvalidResponse)?;
+            viewer.set_sensitive(true);
+            let request = Request::builder()
+                .method(Method::POST)
+                .uri(format!(
+                    "/sharing/v1/items/{}/files/{}/sessions",
+                    expected.item_id.as_str(),
+                    expected.file_id.as_str()
+                ))
+                .header(header::HOST, &self.host)
+                .header(header::ACCEPT, "application/json")
+                .header(header::CONTENT_TYPE, "application/json")
+                .header(header::AUTHORIZATION, authorization)
+                .header("cinemashare-viewer", viewer)
+                .body(Body::from(request_json.to_owned()))
+                .map_err(|_| PeerError::InvalidResponse)?;
+            self.sender
+                .ready()
+                .await
+                .map_err(|_| PeerError::Unavailable)?;
+            let response = self
+                .sender
+                .send_request(request)
+                .await
+                .map_err(|_| PeerError::Unavailable)?;
+            let status = response.status();
+            let bytes = axum::body::to_bytes(
+                Body::new(
+                    response
+                        .into_body()
+                        .map_err(|_| std::io::Error::other("sharing peer body")),
+                ),
+                if status.is_success() {
+                    CATALOGUE_RESPONSE_BYTES
+                } else {
+                    MANAGEMENT_RESPONSE_BYTES
+                },
+            )
+            .await
+            .map_err(|_| PeerError::InvalidResponse)?;
+            if status == StatusCode::UNAUTHORIZED {
+                return Err(PeerError::Authentication);
+            }
+            if status == StatusCode::UPGRADE_REQUIRED {
+                return Err(PeerError::ProtocolUnsupported);
+            }
+            if !status.is_success() {
+                return Err(PeerError::Rejected(status));
+            }
+            crate::http::decode_source_start_response(&bytes, expected)
+                .map_err(|_| PeerError::InvalidResponse)
+        })
+        .await
+        .map_err(|_| PeerError::Unavailable)?
+    }
+
     pub async fn file_decision(
         &mut self,
         credential: &Secret,

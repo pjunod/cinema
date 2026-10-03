@@ -1413,3 +1413,21 @@ B identity/epoch refuses the projection; Source control generation is absent
 from the public response. All five wire regressions passed (zero ignored,
 0.01 seconds). These are wire and identity proofs, not live actor or relay
 qualification. Both suites used pinned Rust 1.97.1 on the integrated tree.
+
+### Pinned Source Start transport integration
+
+The qualified transport checkpoint `7d3aecb2e` is integrated on the guarded
+startup factory base `726ed039e`. The current host tree passed six focused
+Start decoder/request regressions (0.04 seconds); its one explicitly
+classified disposable-CGNAT fixture remains opt-in. All fifteen operations
+inventory and docs-index tests passed (32.455 seconds), preserving twenty
+known-red tests and six explicit opt-in fixtures.
+
+The exact committed `7d3aecb2e` source-only Linux archive passed the transport
+fixture once with zero ignored (0.29 seconds), pinned Rust 1.97.1 and zero
+OOM events. It proves actual pinned Source TLS/HTTP1 and B ingress HTTP1/HTTP2
+with a mock Source actor envelope, including body/request bounds, invalid
+inputs, refusal preservation and blocked-reply cancellation. It is not
+physical Source activation evidence, and that archive is not evidence for
+this later integrated tree. The current release candidate still needs its
+exact source-only qualification after live actor and relay integration.

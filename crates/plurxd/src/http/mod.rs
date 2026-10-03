@@ -58,6 +58,9 @@ mod sharing_decision_decode;
 mod sharing_playback_wire;
 #[allow(dead_code)]
 mod sharing_start_decode;
+pub(crate) use sharing_start_decode::{
+    decode_source_start_response, validate_source_start_request, DecodedSourceHlsStart,
+};
 pub(crate) mod stream;
 pub(crate) mod subtitle_downloads;
 pub(crate) mod system;
