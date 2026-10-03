@@ -97,8 +97,9 @@ class Daemon:
             if self.process.poll() is not None:
                 raise RuntimeError(f"daemon exited before readiness; inspect {self.log}")
             try:
-                request(self.node, "/readyz")
-                return
+                with urllib.request.urlopen(self.node["base"] + "/readyz", timeout=5) as response:
+                    if response.status == 200 and response.read(1024) == b"ready\n":
+                        return
             except (OSError, ValueError, urllib.error.HTTPError):
                 time.sleep(0.1)
         raise RuntimeError(f"daemon readiness timed out; inspect {self.log}")
@@ -262,7 +263,7 @@ def cluster_fixture(old_binary, new_binary, helper, root):
             children.append(Daemon(old_binary, node, "historical-bootstrap"))
             children[-1].ready()
         roster = request(nodes[0], "/api/v1/cluster/nodes", token=owner)
-        if len([node for node in roster["nodes"] if node["role"] == "voter"]) != 3:
+        if len([node for node in roster["nodes"] if node["role"] == "voter" and node["is_voter"]]) != 3:
             raise RuntimeError("historical daemon fixture never formed three voters")
         stop_all(children)
         coordinators = [Coordinator(helper, node, "retained-seed") for node in nodes]
@@ -304,7 +305,7 @@ def cluster_fixture(old_binary, new_binary, helper, root):
             child.ready()
         restored_owner = request(nodes[0], "/api/v1/auth/login", {"username": "owner", "password": "coordinated-fixture-only"})["token"]
         restored_roster = request(nodes[0], "/api/v1/cluster/nodes", token=restored_owner)
-        assert len([node for node in restored_roster["nodes"] if node["role"] == "voter"]) == 3
+        assert len([node for node in restored_roster["nodes"] if node["role"] == "voter" and node["is_voter"]]) == 3
         stop_all(children)
         coordinators = [Coordinator(helper, node, "restored-retention") for node in nodes]
         for process in coordinators:
@@ -325,6 +326,7 @@ def main():
     parser.add_argument("--source-dir", type=Path, required=True, help="new source and fixture directory")
     parser.add_argument("--target-dir", type=Path, required=True, help="dedicated warm compiler directory")
     args = parser.parse_args()
+    args.source_dir = args.source_dir.resolve()
     if args.source_dir.exists():
         parser.error("source-dir must not exist; never overlay user data or source")
     version = subprocess.check_output(["rustc", "--version"], text=True).strip()

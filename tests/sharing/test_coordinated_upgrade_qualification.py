@@ -7,7 +7,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 ROOT = Path(__file__).resolve().parents[2]
 SCRIPT = ROOT / "scripts/qualify-sharing-coordinated-upgrade.py"
@@ -52,6 +52,19 @@ class CoordinatedUpgradeQualificationTests(unittest.TestCase):
             self.assertEqual(refusal.exception.code, 2)
             command.assert_called_once_with(["rustc", "--version"], text=True)
             self.assertFalse(source.exists())
+
+    def test_daemon_readiness_accepts_plain_text_ready_response(self):
+        module = load_runner()
+        daemon = object.__new__(module.Daemon)
+        daemon.node = {"base": "http://127.0.0.1:1"}
+        daemon.log = Path("unused-test-log")
+        daemon.process = Mock()
+        daemon.process.poll.return_value = None
+        response = io.BytesIO(b"ready\n")
+        response.status = 200
+        with patch.object(module.urllib.request, "urlopen", return_value=response) as request:
+            daemon.ready()
+        request.assert_called_once_with("http://127.0.0.1:1/readyz", timeout=5)
 
     def test_retention_detects_changed_old_values_and_allows_new_owner_columns(self):
         module = load_runner()
