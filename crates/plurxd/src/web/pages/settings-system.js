@@ -66,8 +66,8 @@ function buildLabel(){
 // everything still plays, 4K just stays slow, and there is nothing on screen to
 // distinguish "this box has no GPU tone-map" from "the driver refused the
 // graph" — which are the difference between shrugging and installing a package.
-// Each rejected candidate says what it failed on, so the answer is here rather
-// than in a log line from startup.
+// Rejected candidates remain available in a collapsed disclosure, so a working
+// GPU selection is not buried under diagnostics from the other probes.
 function toneMapHtml(tm){
   if(!tm) return `<span class="muted">—</span>`;
   const gpu = tm.selected && tm.selected!=="cpu";
@@ -93,7 +93,10 @@ function toneMapHtml(tm){
   const rows=rejected.map(v=>
     `<div class="muted" style="font-size:12px">${esc(v.label)}: ${esc(v.rejected||"rejected")}</div>`
   ).join("");
-  return `${head}${note}${rows}`;
+  const details=rows
+    ? `<details class="muted" style="margin-top:4px;font-size:12px"><summary style="cursor:pointer">Probe details</summary><div style="margin-top:6px;overflow-wrap:anywhere">${rows}</div></details>`
+    : "";
+  return `${head}${note}${details}`;
 }
 // What each library's storage reads at, in the unit the rest of the page uses
 // for bitrates — so "this mount does 240 Mb/s" and "this file is 69 Mb/s" can

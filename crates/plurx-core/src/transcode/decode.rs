@@ -2911,6 +2911,7 @@ pub fn resolve_transcode(
             Pipeline::VppQsv
                 | Pipeline::TonemapVaapi
                 | Pipeline::Libplacebo
+                | Pipeline::LibplaceboVaapi
                 | Pipeline::TonemapOpencl
         )
     {
@@ -3264,7 +3265,7 @@ fn validate_media_options(options: &TranscodeMediaOptions) -> Result<(), PlanErr
 fn pipeline_accepts_decode(pipeline: Pipeline, backend: DecodeBackend) -> bool {
     match pipeline {
         Pipeline::VppQsv => backend == DecodeBackend::Qsv,
-        Pipeline::TonemapVaapi => backend == DecodeBackend::Vaapi,
+        Pipeline::TonemapVaapi | Pipeline::LibplaceboVaapi => backend == DecodeBackend::Vaapi,
         Pipeline::DoviTonemapx | Pipeline::DoviPassthrough => backend == DecodeBackend::Software,
         Pipeline::Libplacebo
         | Pipeline::TonemapOpencl
@@ -3315,7 +3316,7 @@ fn preferred_backend(
     }
     match pipeline {
         Pipeline::VppQsv => return (DecodeBackend::Qsv, DecodeReason::LegacyPreference),
-        Pipeline::TonemapVaapi => {
+        Pipeline::TonemapVaapi | Pipeline::LibplaceboVaapi => {
             return (DecodeBackend::Vaapi, DecodeReason::LegacyPreference);
         }
         _ => {}
@@ -3358,7 +3359,11 @@ fn surface_contract(
     };
     let vendor_native = matches!(
         (decode_domain, pipeline),
-        (FrameDomain::Qsv, Pipeline::VppQsv) | (FrameDomain::Vaapi, Pipeline::TonemapVaapi)
+        (FrameDomain::Qsv, Pipeline::VppQsv)
+            | (
+                FrameDomain::Vaapi,
+                Pipeline::TonemapVaapi | Pipeline::LibplaceboVaapi
+            )
     );
     let decoder_download_format =
         if matches!(decode_domain, FrameDomain::Qsv | FrameDomain::Vaapi) && !vendor_native {
@@ -3369,7 +3374,7 @@ fn surface_contract(
     let renderer_domain = match pipeline {
         Pipeline::VppQsv => FrameDomain::Qsv,
         Pipeline::TonemapVaapi => FrameDomain::Vaapi,
-        Pipeline::Libplacebo => FrameDomain::Vulkan,
+        Pipeline::Libplacebo | Pipeline::LibplaceboVaapi => FrameDomain::Vulkan,
         Pipeline::TonemapOpencl if facts.is_hdr() => FrameDomain::OpenCl,
         Pipeline::TonemapOpencl
         | Pipeline::DoviTonemapx
@@ -3378,6 +3383,7 @@ fn surface_contract(
         | Pipeline::Cpu => FrameDomain::SystemMemory,
     };
     let renderer_upload_format = match renderer_domain {
+        FrameDomain::Vulkan if pipeline == Pipeline::LibplaceboVaapi => None,
         FrameDomain::Vulkan => decoder_download_format
             .clone()
             .or_else(|| facts.pixel_format.clone()),
@@ -3387,13 +3393,14 @@ fn surface_contract(
     let renderer_download_format = match pipeline {
         Pipeline::Libplacebo => Some("nv12".to_owned()),
         Pipeline::TonemapOpencl if facts.is_hdr() => Some("nv12".to_owned()),
-        Pipeline::VppQsv | Pipeline::TonemapVaapi
+        Pipeline::VppQsv | Pipeline::TonemapVaapi | Pipeline::LibplaceboVaapi
             if subtitle_rendering != SubtitleRendering::None =>
         {
             Some("nv12".to_owned())
         }
         Pipeline::VppQsv
         | Pipeline::TonemapVaapi
+        | Pipeline::LibplaceboVaapi
         | Pipeline::TonemapOpencl
         | Pipeline::DoviTonemapx
         | Pipeline::DoviPassthrough
@@ -3402,6 +3409,9 @@ fn surface_contract(
     };
     let rendered_domain = if renderer_download_format.is_some() {
         FrameDomain::SystemMemory
+    } else if pipeline == Pipeline::LibplaceboVaapi {
+        // The renderer's Vulkan output is hardware-mapped back to VA-API.
+        FrameDomain::Vaapi
     } else {
         renderer_domain
     };

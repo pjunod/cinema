@@ -1163,10 +1163,8 @@ fn video_filters_for_contract(
             }
             gpu.push_str(",setsar=1");
         }
-        if (bitmap_burn || text_burn)
-            && matches!(opts.pipeline, Pipeline::VppQsv | Pipeline::TonemapVaapi)
-        {
-            // These two end in vendor surfaces (their encoders read them
+        if (bitmap_burn || text_burn) && opts.pipeline.keeps_frames_off_the_cpu() {
+            // These graphs end in vendor surfaces (their encoders read them
             // directly); the composite cannot. Libplacebo and OpenCL already
             // finish with their own download, so they need nothing here.
             chain.push(format!("{gpu},hwdownload,format=nv12"));
@@ -1592,8 +1590,7 @@ fn hls_args_inner(
     // Hardware device init (VAAPI/QSV) must precede the input, and so must a
     // filter device the pipeline brings of its own (Vulkan for libplacebo,
     // OpenCL for tonemap_opencl).
-    args.extend(encoder.init_args());
-    args.extend(opts.pipeline.init_args());
+    args.extend(opts.pipeline.device_args(encoder));
 
     // Fast input seek for resume/session start.
     if opts.start_seconds > 0.0 {
@@ -1711,10 +1708,10 @@ fn hls_args_inner(
     // vendor pipeline is the exception both ways: `video_filters` appended a
     // download for libass/overlay, so the encoder's upload IS owed again.
     let subtitle_burn = opts.subtitle_burn.is_some();
-    let vendor_gpu =
-        matches!(opts.pipeline, Pipeline::VppQsv | Pipeline::TonemapVaapi) && !subtitle_burn;
-    let suffix = encoder
-        .filter_suffix_for(opts.pipeline.output_grade())
+    let vendor_gpu = opts.pipeline.keeps_frames_off_the_cpu() && !subtitle_burn;
+    let suffix = opts
+        .pipeline
+        .encoder_upload(encoder)
         .filter(|_| !vendor_gpu);
     let mut vf = String::new();
     if let Some(prefix) = &hwdownload {
@@ -2641,6 +2638,112 @@ mod tests {
             audio_offset_ms: 0,
             probed: true,
             dolby_vision: crate::domain::DolbyVisionFacts::default(),
+        }
+    }
+
+    #[test]
+    fn vulkan_playback_returns_frames_to_the_vaapi_encoder() {
+        let source = file(Some("hdr10"));
+        let options = TranscodeOptions {
+            pipeline: Pipeline::Libplacebo,
+            target_height: 1080,
+            ..Default::default()
+        };
+        let args = hls_args(
+            &source,
+            Encoder::Vaapi,
+            &options,
+            Pacing::unpaced(),
+            "/tmp/s",
+        );
+        let joined = args.join(" ");
+        assert!(joined.contains("-init_hw_device vaapi=hw:"), "{joined}");
+        assert!(joined.contains("-init_hw_device vulkan=vk@hw"), "{joined}");
+        assert!(joined.contains("-filter_hw_device vk"), "{joined}");
+        let vf = &args[args
+            .iter()
+            .position(|arg| arg == "-vf")
+            .expect("video filter graph")
+            + 1];
+        assert!(vf.contains("hwupload,libplacebo="), "{vf}");
+        assert!(vf.ends_with("hwupload=derive_device=vaapi"), "{vf}");
+        assert!(joined.contains("h264_vaapi"), "{joined}");
+
+        // The encoder upload must stay after a software subtitle composite.
+        let options = TranscodeOptions {
+            subtitle_burn: Some(SubtitleBurn {
+                subtitle_index: 0,
+                bitmap: true,
+            }),
+            ..options
+        };
+        let args = hls_args(
+            &source,
+            Encoder::Vaapi,
+            &options,
+            Pacing::unpaced(),
+            "/tmp/s",
+        );
+        let graph = &args[args
+            .iter()
+            .position(|arg| arg == "-filter_complex")
+            .expect("subtitle composite graph")
+            + 1];
+        assert!(
+            graph.ends_with(
+                "overlay=eof_action=pass,format=nv12,hwupload=derive_device=vaapi[vout]"
+            ),
+            "{graph}"
+        );
+    }
+
+    #[test]
+    fn vulkan_vaapi_playback_transfers_only_for_subtitle_burns() {
+        let source = file(Some("hdr10"));
+        for burn in [None, Some(false), Some(true)] {
+            let options = TranscodeOptions {
+                pipeline: Pipeline::LibplaceboVaapi,
+                target_height: 1080,
+                subtitle_burn: burn.map(|bitmap| SubtitleBurn {
+                    subtitle_index: 0,
+                    bitmap,
+                }),
+                ..Default::default()
+            };
+            let args = hls_args(
+                &source,
+                Encoder::Vaapi,
+                &options,
+                Pacing::unpaced(),
+                "/tmp/s",
+            );
+            assert!(args
+                .windows(2)
+                .any(|p| p == ["-hwaccel_output_format", "vaapi"]));
+            let flag = if burn == Some(true) {
+                "-filter_complex"
+            } else {
+                "-vf"
+            };
+            let graph = &args[args.iter().position(|a| a == flag).expect("video graph") + 1];
+            assert!(
+                graph.contains("hwmap=derive_device=vaapi,format=vaapi"),
+                "{graph}"
+            );
+            assert_eq!(
+                graph.matches("hwdownload").count(),
+                usize::from(burn.is_some()),
+                "{graph}"
+            );
+            assert_eq!(
+                graph.matches("hwupload").count(),
+                usize::from(burn.is_some()),
+                "{graph}"
+            );
+            if burn.is_some() {
+                assert!(graph.contains("hwupload=derive_device=vaapi"), "{graph}");
+                assert!(graph.find("hwmap=") < graph.find("hwdownload"), "{graph}");
+            }
         }
     }
 

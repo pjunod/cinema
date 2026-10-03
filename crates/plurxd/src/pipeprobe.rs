@@ -602,8 +602,7 @@ fn probe_args(fixture: &Path, out: &Path, candidate: Pipeline, encoder: Encoder)
         "error".into(),
         "-y".into(),
     ];
-    args.extend(encoder.init_args());
-    args.extend(candidate.init_args());
+    args.extend(candidate.device_args(encoder));
     args.extend(candidate.decode_args());
     args.push("-i".into());
     args.push(fixture.to_string_lossy().into_owned());
@@ -622,8 +621,8 @@ fn probe_args(fixture: &Path, out: &Path, candidate: Pipeline, encoder: Encoder)
     };
     // The CPU path uploads for a hardware encoder; the vendor graphs already
     // hand over surfaces of the right family. Same rule the real builder uses.
-    let vendor_gpu = matches!(candidate, Pipeline::VppQsv | Pipeline::TonemapVaapi);
-    if let Some(suffix) = encoder.filter_suffix().filter(|_| !vendor_gpu) {
+    let vendor_gpu = candidate.keeps_frames_off_the_cpu();
+    if let Some(suffix) = candidate.encoder_upload(encoder).filter(|_| !vendor_gpu) {
         vf.push(',');
         vf.push_str(suffix);
     }
@@ -1820,6 +1819,91 @@ mod tests {
             !vendor_graph.contains("hwupload"),
             "the VA-API graph already hands over VA-API surfaces: {vendor_graph}"
         );
+    }
+
+    #[tokio::test]
+    async fn vulkan_vaapi_is_probed_before_copying_and_keeps_safety_checks() {
+        for resident in [
+            Ok(sample(86.0, 3.0)),
+            Err("mapping unsupported".to_owned()),
+            Ok(sample(128.0, 1.0)),
+            Ok(sample(84.0, 9.0)),
+        ] {
+            let passes = resident
+                .as_ref()
+                .is_ok_and(|s| decide(s, &sample(84.0, 10.0)).is_ok());
+            let rec = Recorder::new(vec![
+                (Pipeline::Cpu, Ok(sample(84.0, 10.0))),
+                (Pipeline::TonemapVaapi, Err("HDR unsupported".to_owned())),
+                (Pipeline::LibplaceboVaapi, resident),
+                (Pipeline::Libplacebo, Ok(sample(86.0, 3.0))),
+            ]);
+            let r = &rec;
+            let report = probe_candidates(Encoder::Vaapi, |p| async move { r.run(p) }).await;
+            assert_eq!(
+                report.selected(),
+                if passes {
+                    Pipeline::LibplaceboVaapi
+                } else {
+                    Pipeline::Libplacebo
+                }
+            );
+            let mut expected = vec![
+                Pipeline::Cpu,
+                Pipeline::TonemapVaapi,
+                Pipeline::LibplaceboVaapi,
+            ];
+            if !passes {
+                expected.push(Pipeline::Libplacebo);
+            }
+            assert_eq!(*rec.asked.borrow(), expected);
+        }
+    }
+
+    #[test]
+    fn vulkan_vaapi_probe_keeps_decoded_frames_on_gpu() {
+        let args = probe_args(
+            Path::new("/f.mkv"),
+            Path::new("/o.mp4"),
+            Pipeline::LibplaceboVaapi,
+            Encoder::Vaapi,
+        );
+        assert!(args
+            .windows(2)
+            .any(|p| p == ["-hwaccel_output_format", "vaapi"]));
+        assert!(args
+            .windows(2)
+            .any(|p| p == ["-init_hw_device", "vulkan=vk@hw"]));
+        let graph = &args[args.iter().position(|a| a == "-vf").expect("graph") + 1];
+        assert!(graph.starts_with("libplacebo="), "{graph}");
+        assert!(
+            graph.ends_with("hwmap=derive_device=vaapi,format=vaapi"),
+            "{graph}"
+        );
+        assert!(!graph.contains("hwupload"), "{graph}");
+        assert!(!graph.contains("hwdownload"), "{graph}");
+    }
+
+    #[test]
+    fn vulkan_probe_returns_frames_to_the_vaapi_encoder() {
+        let args = probe_args(
+            Path::new("/f.mkv"),
+            Path::new("/o.mp4"),
+            Pipeline::Libplacebo,
+            Encoder::Vaapi,
+        );
+        let joined = args.join(" ");
+        assert!(joined.contains("-init_hw_device vaapi=hw:"), "{joined}");
+        assert!(joined.contains("-init_hw_device vulkan=vk@hw"), "{joined}");
+        assert!(joined.contains("-filter_hw_device vk"), "{joined}");
+        let vf = &args[args
+            .iter()
+            .position(|arg| arg == "-vf")
+            .expect("video filter graph")
+            + 1];
+        assert!(vf.contains("hwupload,libplacebo="), "{vf}");
+        assert!(vf.ends_with("hwupload=derive_device=vaapi"), "{vf}");
+        assert!(joined.contains("h264_vaapi"), "{joined}");
     }
 
     /// The fixture is the foundation: without PQ/BT.2020 signalling in the

@@ -56,10 +56,11 @@
             "and the CPU the rest of the pipeline spends is reserved: {estimate:?}"
         );
 
-        // The two vendor graphs are the only ones that keep every frame off the
+        // The vendor and mapped Vulkan graphs keep every frame off the
         // CPU, and a subtitle burn takes even them back to system memory.
         assert!(Pipeline::VppQsv.keeps_frames_off_the_cpu());
         assert!(Pipeline::TonemapVaapi.keeps_frames_off_the_cpu());
+        assert!(Pipeline::LibplaceboVaapi.keeps_frames_off_the_cpu());
         for cpu_touching in [
             Pipeline::Cpu,
             Pipeline::Libplacebo,

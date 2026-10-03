@@ -4178,3 +4178,28 @@ adapter, physical display or audible output qualification. The owned window
 and server were closed; the user's two tabs and TV-library navigation remain.
 Receipt: `native-safari-autonomous-pressure-recovery.json` in the ignored
 owned report directory.
+
+
+### 10.140 Integrate current main and keep native policy ownership explicit
+
+Authoritative main advanced from `15e36f7f4` to `2abd65f47`. Its GPU-resident
+VA-API/Vulkan tone-map path, telemetry writer registrations bound to Store
+lifetimes, native web startup handover timing and associated regressions merged
+without conflicts. Current manual/Auto runtime still identifies `9b1dd149b`;
+it cannot qualify this newer integrated tree. Pinned compilation and the normal
+hook must pass before this integration is committed. No unit tests executed.
+
+Three bounded diagnostic starts used daemon `331dc37cb` with the corrected
+steady harness. All passed, with no waits, stalls or hitches; the first measured
+66.7 ms maximum gap and zero owned FFmpeg children through five seconds after
+End. These receipts identify both daemon and harness scope. The earlier exact
+activation refusal remains unresolved; the longer current-source run retains
+its bounded diagnostics.
+
+Native Auto has an explicit design conflict: the native quality design says
+to stop if AVPlayer chooses its own rung, while this plan permits a bounded
+autonomous adapter with one policy owner. The human was asked to choose between
+retaining Plurx policy/prepared handoffs and delegating only the admitted
+compatible two-rung attachment to the native engine. Pending that choice,
+the existing policy and prepared path remain; the Safari fixture results do
+not silently change production policy or claim native enrollment complete.
