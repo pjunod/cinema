@@ -3200,11 +3200,6 @@
 
     #[tokio::test]
     async fn vaapi_hdr10_cadence_contract_preserves_high_rate_sdr_and_refuses_stale_plans() {
-        let store: Arc<dyn Store> = Arc::new(plurx_core::store::SqliteStore::open_in_memory().expect("store"));
-        let dir = crate::test_tempdir().expect("work");
-        let manager = TranscodeManager::new(store.clone(), dir.path().to_owned(),
-            EncoderCaps { vaapi: true, ..EncoderCaps::default() }, Pipeline::Cpu)
-            .with_hdr10_passthrough_vaapi(true);
         let mut file = profile5_file();
         file.hdr = Some("hdr10".into());
         file.hdr_format = None;
@@ -3213,6 +3208,13 @@
             ("50/1", "50/1", false), ("60/1", "60/1", false),
             ("30/1", "60/1", false), ("0/0", "0/0", false),
         ] {
+            // The seeding helper owns a library named L, so each independent
+            // cadence case needs its own store rather than a duplicate library.
+            let store: Arc<dyn Store> = Arc::new(plurx_core::store::SqliteStore::open_in_memory().expect("store"));
+            let dir = crate::test_tempdir().expect("work");
+            let manager = TranscodeManager::new(store.clone(), dir.path().to_owned(),
+                EncoderCaps { vaapi: true, ..EncoderCaps::default() }, Pipeline::Cpu)
+                .with_hdr10_passthrough_vaapi(true);
             let probe = serde_json::json!({"streams":[{"index":0,"codec_type":"video",
                 "codec_name":"hevc","profile":"Main 10","width":3840,"height":2160,
                 "pix_fmt":"yuv420p10le","color_transfer":"smpte2084","field_order":"progressive",
@@ -3234,6 +3236,11 @@
                 assert!(plan.expect_err("stale HDR preview must not encode").contains("known cadence"));
             }
         }
+        let store: Arc<dyn Store> = Arc::new(plurx_core::store::SqliteStore::open_in_memory().expect("store"));
+        let dir = crate::test_tempdir().expect("work");
+        let manager = TranscodeManager::new(store.clone(), dir.path().to_owned(),
+            EncoderCaps { vaapi: true, ..EncoderCaps::default() }, Pipeline::Cpu)
+            .with_hdr10_passthrough_vaapi(true);
         file.id = i64::MAX;
         assert!(!manager.vaapi_hdr10_source_fits(&file, HDR10_HEIGHT).await, "missing cadence is not 24 fps");
     }
