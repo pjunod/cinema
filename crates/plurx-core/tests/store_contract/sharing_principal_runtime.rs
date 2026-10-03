@@ -637,3 +637,168 @@ async fn sharing_rebuilt_local_activation_preserves_owner_and_foreign_lease() {
     .expect("shared principal");
     assert!(store.activate_media_session(&missing).await.is_err());
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn sharing_rebuilt_local_commit_binds_receipt_to_actual_predecessor_session() {
+    let _case = HIQLITE_CASE.lock().await;
+    let cluster = ContractCluster::start().await;
+    let store = open_contract_hiqlite_store(&cluster).await;
+    let client = Client::remote(
+        cluster.addresses.clone(),
+        true,
+        true,
+        CONTRACT_API_SECRET.to_owned(),
+        false,
+        None,
+    )
+    .await
+    .expect("fixture client");
+    for result in client
+        .batch(include_str!("../fixtures/session-principal-local.sql"))
+        .await
+        .expect("local fixture")
+    {
+        result.expect("local seed");
+    }
+    let statements: Vec<(String, hiqlite::Params)> = MEDIA_SESSION_PRINCIPAL_REBUILD_SCHEMA
+        .split("-- next statement\n")
+        .map(|sql| {
+            (
+                sql.trim().trim_end_matches(';').to_owned(),
+                hiqlite::params!(),
+            )
+        })
+        .collect();
+    for result in client.txn(statements).await.expect("candidate transaction") {
+        result.expect("candidate rebuild");
+    }
+    for result in client
+        .batch(include_str!("../fixtures/session-principal-sharing.sql"))
+        .await
+        .expect("shared fixture")
+    {
+        result.expect("shared seed");
+    }
+    let current = "00000000-0000-4000-a000-000000000120";
+    let current_session = "00000000-0000-4000-a000-000000000121";
+    let foreign_session = "00000000-0000-4000-a000-000000000127";
+    client
+        .execute(
+            "UPDATE media_sessions SET session_id=$1 WHERE incarnation_id=$2",
+            hiqlite::params!(foreign_session, SHARED_ROUTE),
+        )
+        .await
+        .expect("actual foreign session UUID fixture");
+    current_media_session(
+        &store,
+        1,
+        "commit-runtime",
+        current,
+        current_session,
+        "rebuilt commit",
+    )
+    .await;
+    let local = PlaybackPrincipal::LocalUser { user_id: 1 };
+    let refused = staged_preparation(
+        1,
+        "commit-runtime",
+        "00000000-0000-4000-a000-000000000122",
+        "00000000-0000-4000-a000-000000000123",
+        current,
+    );
+    store
+        .prepare_media_session(&refused)
+        .await
+        .expect("first candidate prepare")
+        .expect("staged candidate");
+    let receipt = MediaSessionTerminalAck {
+        incarnation_id: current.to_owned(),
+        session_id: current_session.to_owned(),
+        owner_node_id: "staged-node".to_owned(),
+        owner_epoch: 1,
+        client_instance_id: "00000000-0000-4000-a000-000000000128".to_owned(),
+        sequence: 1,
+        request_fingerprint: "f".repeat(64),
+        response_json: "{}".to_owned(),
+        expires_at_ms: 900000,
+        updated_at_ms: 3000,
+    };
+    let mut wrong = receipt.clone();
+    wrong.session_id = foreign_session.to_owned();
+    let mut refused_commit = preparation_commit_request(&refused.incarnation_id, 3000, 900000);
+    refused_commit.control_receipt = Some(wrong);
+    assert!(store
+        .commit_media_session_preparation(&local, "commit-runtime", &refused_commit)
+        .await
+        .expect("wrong-session receipt refusal")
+        .is_none());
+    assert_eq!(
+        store
+            .media_session_route_for_playback(&local, "commit-runtime")
+            .await
+            .expect("unadvanced pointer")
+            .expect("current route")
+            .incarnation_id,
+        current
+    );
+    assert!(store
+        .media_session_terminal_ack(foreign_session, 3100)
+        .await
+        .expect("no foreign receipt")
+        .is_none());
+    let prepared = staged_preparation(
+        1,
+        "commit-runtime",
+        "00000000-0000-4000-a000-000000000124",
+        "00000000-0000-4000-a000-000000000125",
+        current,
+    );
+    store
+        .prepare_media_session(&prepared)
+        .await
+        .expect("second candidate prepare")
+        .expect("replacement candidate");
+    let mut commit = preparation_commit_request(&prepared.incarnation_id, 3000, 900000);
+    commit.control_receipt = Some(receipt.clone());
+    let committed = store
+        .commit_media_session_preparation(&local, "commit-runtime", &commit)
+        .await
+        .expect("correct receipt commit")
+        .expect("committed successor");
+    assert_eq!(committed.route.principal, local);
+    assert_eq!(committed.route.incarnation_id, prepared.incarnation_id);
+    let predecessor = committed.predecessor.expect("same-principal predecessor");
+    assert_eq!(predecessor.principal, local);
+    assert_eq!(predecessor.state, "active");
+    assert!(predecessor.drain_deadline_ms.is_some());
+    assert_eq!(committed.control_receipt, Some(receipt.clone()));
+    assert!(store
+        .staged_media_session_for_playback(&local, "commit-runtime")
+        .await
+        .expect("consumed ledger")
+        .is_none());
+    let replay = store
+        .commit_media_session_preparation(&local, "commit-runtime", &commit)
+        .await
+        .expect("exact commit replay")
+        .expect("replayed committed successor");
+    assert_eq!(replay.route.principal, local);
+    assert_eq!(replay.route.incarnation_id, prepared.incarnation_id);
+    assert_eq!(replay.control_receipt, Some(receipt));
+    client.execute("INSERT INTO media_session_preparations(owner_key,principal_kind,user_id,share_grant_id,share_viewer_key,playback_id,staged_incarnation_id,expected_predecessor_incarnation_id,deadline_ms,created_at_ms,updated_at_ms) SELECT owner_key,principal_kind,user_id,share_grant_id,share_viewer_key,'shared-staged',incarnation_id,$1,9000,100,100 FROM media_sessions WHERE principal_kind='sharing'", hiqlite::params!("00000000-0000-4000-a000-000000000129")).await.expect("independent stored shared preparation projections");
+    for grant_id in 1..=2 {
+        let grant = format!("00000000-0000-4000-a000-{grant_id:012}");
+        let principal = PlaybackPrincipal::sharing(
+            uuid::Uuid::parse_str(&grant).expect("grant"),
+            &"a".repeat(64),
+        )
+        .expect("principal");
+        let staged = store
+            .staged_media_session_for_playback(&principal, "shared-staged")
+            .await
+            .expect("shared staged principal reader")
+            .expect("shared staged row");
+        assert_eq!(staged.principal, principal);
+        assert_eq!(staged.staged_incarnation_id, grant);
+    }
+}

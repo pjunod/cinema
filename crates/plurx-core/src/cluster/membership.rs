@@ -1422,6 +1422,266 @@ pub fn local_membership_version_matches_role(version: u32, role: ClusterRole) ->
     version == local_membership_version(role)
 }
 
+/// Wire declarations stay closed and bounded. Production defaults remain
+/// unadvertised until both writer implementations have been qualified.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SharingJoinCapabilities {
+    #[serde(default)]
+    pub session_principal: bool,
+    #[serde(default)]
+    pub catalogue_item_identity: bool,
+}
+
+impl SharingJoinCapabilities {
+    fn proves(self, required: Self) -> bool {
+        (!required.session_principal || self.session_principal)
+            && (!required.catalogue_item_identity || self.catalogue_item_identity)
+    }
+
+    fn supports(self, capability: &str) -> bool {
+        match capability {
+            SHARING_SESSION_PRINCIPAL_CAPABILITY => self.session_principal,
+            SHARING_CATALOGUE_ITEM_IDENTITY_CAPABILITY => self.catalogue_item_identity,
+            _ => false,
+        }
+    }
+}
+
+fn sharing_installed_marker_predicate(capability: &str) -> String {
+    match capability {
+        SHARING_CATALOGUE_ITEM_IDENTITY_CAPABILITY =>
+            "EXISTS (SELECT 1 FROM sqlite_master WHERE name='item_identity_watermark')".to_owned(),
+        SHARING_SESSION_PRINCIPAL_CAPABILITY =>
+            "EXISTS (SELECT 1 FROM sqlite_master schema JOIN pragma_table_info(schema.name) info \
+             WHERE schema.type='table' AND schema.name IN \
+               ('media_session_requests','media_playback_pointers','media_sessions',\
+                'media_session_preparations','media_playback_desired','media_session_producer_recovery',\
+                'library_channel_session_recipes','media_session_requests_principal_new',\
+                'media_playback_pointers_principal_new','media_sessions_principal_new',\
+                'media_session_preparations_principal_new','media_playback_desired_principal_new',\
+                'media_session_producer_recovery_principal_new','library_channel_session_recipes_principal_new') \
+             AND info.name IN ('owner_key','principal_kind','share_grant_id','share_viewer_key'))".to_owned(),
+        _ => "1".to_owned(),
+    }
+}
+
+struct SharingAdmissionMarkers {
+    required: SharingJoinCapabilities,
+    intents_installed: bool,
+}
+
+impl From<&mut Row<'_>> for SharingAdmissionMarkers {
+    fn from(row: &mut Row<'_>) -> Self {
+        Self {
+            required: SharingJoinCapabilities {
+                session_principal: row.get::<i64>("principal") != 0,
+                catalogue_item_identity: row.get::<i64>("catalogue") != 0,
+            },
+            intents_installed: row.get::<i64>("intents") != 0,
+        }
+    }
+}
+
+async fn sharing_admission_markers(
+    client: &Client,
+) -> Result<SharingAdmissionMarkers, MembershipError> {
+    let rows = client.query_consistent_map::<SharingAdmissionMarkers,_>(format!(
+        "SELECT {} AS principal, {} AS catalogue, EXISTS (SELECT 1 FROM sqlite_master WHERE type='table' AND name='cluster_sharing_join_intents') AS intents",
+        sharing_installed_marker_predicate(SHARING_SESSION_PRINCIPAL_CAPABILITY),
+        sharing_installed_marker_predicate(SHARING_CATALOGUE_ITEM_IDENTITY_CAPABILITY)),params!()).await?;
+    let [row] = rows.as_slice() else {
+        return Err(MembershipError::Incompatible);
+    };
+    Ok(SharingAdmissionMarkers {
+        required: row.required,
+        intents_installed: row.intents_installed,
+    })
+}
+
+/// Closed transition guard for coordinated activation and Shared writes.
+/// The candidate factory must already be installed; absent/partial tables are
+/// errors, never admission. Compose this with the exact roster predicate in the
+/// same conditional write. Readiness checks alone cannot make a roster atomic.
+#[must_use]
+pub const fn sharing_member_transition_absence_predicate() -> &'static str {
+    "NOT EXISTS (SELECT 1 FROM cluster_sharing_membership_intents) AND NOT EXISTS (SELECT 1 FROM cluster_sharing_join_declarations proof JOIN cluster_join_tokens token ON token.token_hash=proof.token_hash WHERE token.state='redeeming')"
+}
+
+/// Candidate membership guards. Installation is deliberately unconfigured:
+/// install these in the coordinated schema-activation transaction before any
+/// principal owner columns or allocator marker become visible. Every guard
+/// introspects schema rather than naming an absent application table, so a
+/// joining node can replay cluster DDL before its application store exists.
+/// Activation first drains old daemons and membership operations. A request
+/// that began before factory installation cannot be fenced retroactively;
+/// this candidate does not qualify a rolling activation path.
+#[must_use]
+pub fn sharing_member_admission_guard_schema() -> Vec<String> {
+    let mut statements = vec![format!(
+        "CREATE TABLE IF NOT EXISTS cluster_sharing_join_intents (\
+         token_hash TEXT NOT NULL CHECK(length(token_hash)=64), \
+         capability TEXT NOT NULL CHECK(capability IN ('{SHARING_SESSION_PRINCIPAL_CAPABILITY}','{SHARING_CATALOGUE_ITEM_IDENTITY_CAPABILITY}')), \
+         last_seen_at INTEGER NOT NULL CHECK(last_seen_at>0), \
+         PRIMARY KEY(token_hash,capability)) STRICT")];
+    statements.extend([
+        format!("CREATE TABLE IF NOT EXISTS cluster_sharing_join_declarations (token_hash TEXT NOT NULL CHECK(length(token_hash)=64),node_id TEXT NOT NULL CHECK(length(node_id) BETWEEN 1 AND 256),raft_id INTEGER NOT NULL CHECK(raft_id>0),api_address TEXT NOT NULL CHECK(length(api_address) BETWEEN 1 AND 512),raft_address TEXT NOT NULL CHECK(length(raft_address) BETWEEN 1 AND 512),capability TEXT NOT NULL CHECK(capability IN ('{SHARING_SESSION_PRINCIPAL_CAPABILITY}','{SHARING_CATALOGUE_ITEM_IDENTITY_CAPABILITY}')),last_seen_at INTEGER NOT NULL CHECK(last_seen_at>0),PRIMARY KEY(token_hash,capability)) STRICT"),
+        "CREATE TABLE IF NOT EXISTS cluster_sharing_membership_intents (raft_id INTEGER PRIMARY KEY CHECK(raft_id>0),node_id TEXT NOT NULL UNIQUE CHECK(length(node_id) BETWEEN 1 AND 256),attempt_id TEXT NOT NULL CHECK(length(attempt_id) BETWEEN 1 AND 64),operation TEXT NOT NULL CHECK(operation IN ('learner','voter')),api_address TEXT NOT NULL CHECK(length(api_address) BETWEEN 1 AND 512),raft_address TEXT NOT NULL CHECK(length(raft_address) BETWEEN 1 AND 512),claimed_at INTEGER NOT NULL CHECK(claimed_at>0)) STRICT".to_owned(),
+    ]);
+    for (label, capability) in [
+        ("principal", SHARING_SESSION_PRINCIPAL_CAPABILITY),
+        ("catalogue", SHARING_CATALOGUE_ITEM_IDENTITY_CAPABILITY),
+    ] {
+        let installed = sharing_installed_marker_predicate(capability);
+        statements.push(format!(
+            "CREATE TRIGGER IF NOT EXISTS cluster_sharing_{label}_membership_claim_guard BEFORE INSERT ON cluster_sharing_membership_intents WHEN ({installed}) AND NOT EXISTS (SELECT 1 FROM cluster_nodes node WHERE node.node_id=NEW.node_id AND node.raft_id=NEW.raft_id AND node.removed_at IS NULL AND node.api_address=NEW.api_address AND node.raft_address=NEW.raft_address AND node.last_seen_at BETWEEN NEW.claimed_at-120000 AND NEW.claimed_at AND ((EXISTS (SELECT 1 FROM cluster_sharing_join_declarations proof JOIN cluster_join_tokens token ON token.token_hash=proof.token_hash WHERE token.state='redeeming' AND token.node_id=node.node_id AND token.raft_id=node.raft_id AND proof.node_id=node.node_id AND proof.raft_id=node.raft_id AND proof.api_address=NEW.api_address AND proof.raft_address=NEW.raft_address AND proof.capability='{capability}' AND proof.last_seen_at=node.last_seen_at) AND (NEW.operation='learner' OR node.role='voter')) OR (NEW.operation='voter' AND node.role='learner' AND EXISTS (SELECT 1 FROM cluster_node_promotions promotion WHERE promotion.node_id=node.node_id) AND EXISTS (SELECT 1 FROM cluster_node_capabilities cap WHERE cap.node_id=node.node_id AND cap.capability='{capability}' AND cap.last_seen_at=node.last_seen_at)))) BEGIN SELECT RAISE(ABORT,'installed sharing schema requires exact fresh membership admission'); END"));
+        let reservation_proof = format!(
+            "EXISTS (SELECT 1 FROM cluster_sharing_join_intents intent \
+             JOIN cluster_node_heartbeat_intents heartbeat ON heartbeat.node_id=NEW.node_id \
+               AND heartbeat.last_seen_at=intent.last_seen_at \
+             WHERE intent.token_hash=NEW.token_hash AND intent.capability='{capability}')"
+        );
+        statements.push(format!(
+            "CREATE TRIGGER IF NOT EXISTS cluster_sharing_{label}_join_reservation_guard \
+             BEFORE UPDATE OF state ON cluster_join_tokens \
+             WHEN NEW.state='redeeming' AND OLD.state='issued' AND ({installed}) AND NOT ({reservation_proof}) \
+             BEGIN SELECT RAISE(ABORT,'installed sharing schema requires compatible token-bound join proof'); END"));
+        let node_proof = format!(
+            "EXISTS (SELECT 1 FROM cluster_join_tokens token \
+             JOIN cluster_sharing_join_intents intent ON intent.token_hash=token.token_hash \
+             JOIN cluster_node_heartbeat_intents heartbeat ON heartbeat.node_id=token.node_id \
+               AND heartbeat.last_seen_at=intent.last_seen_at \
+             WHERE token.node_id=NEW.node_id AND token.state='redeeming' \
+               AND intent.capability='{capability}')"
+        );
+        statements.push(format!(
+            "CREATE TRIGGER IF NOT EXISTS cluster_sharing_{label}_join_staging_guard \
+             BEFORE INSERT ON cluster_node_join_staging WHEN ({installed}) AND NOT ({node_proof}) \
+             BEGIN SELECT RAISE(ABORT,'installed sharing schema requires compatible token-bound staged join'); END"));
+        let fresh_node_proof = format!(
+            "EXISTS (SELECT 1 FROM cluster_join_tokens token \
+             JOIN cluster_sharing_join_intents intent ON intent.token_hash=token.token_hash \
+             WHERE token.node_id=NEW.node_id AND token.state='redeeming' \
+               AND intent.capability='{capability}' AND intent.last_seen_at=NEW.last_seen_at)"
+        );
+        statements.push(format!(
+            "CREATE TRIGGER IF NOT EXISTS cluster_sharing_{label}_node_insert_guard \
+             BEFORE INSERT ON cluster_nodes WHEN ({installed}) \
+               AND NOT EXISTS(SELECT 1 FROM cluster_nodes WHERE node_id=NEW.node_id) \
+               AND NOT ({fresh_node_proof}) \
+             BEGIN SELECT RAISE(ABORT,'installed sharing schema requires a fresh compatible new member'); END"));
+        statements.push(format!(
+            "CREATE TRIGGER IF NOT EXISTS cluster_sharing_{label}_node_rejoin_guard \
+             BEFORE UPDATE OF removed_at ON cluster_nodes \
+             WHEN OLD.removed_at IS NOT NULL AND NEW.removed_at IS NULL AND ({installed}) AND NOT ({fresh_node_proof}) \
+             BEGIN SELECT RAISE(ABORT,'installed sharing schema requires a fresh compatible rejoining member'); END"));
+        let target = format!(
+            "EXISTS (SELECT 1 FROM cluster_nodes node JOIN cluster_node_capabilities cap \
+             ON cap.node_id=node.node_id AND cap.last_seen_at=node.last_seen_at \
+             WHERE node.node_id=NEW.node_id AND node.removed_at IS NULL \
+               AND cap.capability='{capability}')"
+        );
+        for (event,suffix,freshness) in [
+            ("INSERT","insert"," AND node.last_seen_at>=NEW.started_at-120000 AND node.last_seen_at<=NEW.started_at"),
+            ("UPDATE","update"," AND node.last_seen_at>=NEW.started_at-120000"),
+        ] {
+            let fresh_target = target.replace("AND cap.capability",&format!("{freshness} AND cap.capability"));
+            statements.push(format!(
+                "CREATE TRIGGER IF NOT EXISTS cluster_sharing_{label}_promotion_{suffix}_guard \
+                 BEFORE {event} ON cluster_node_promotions WHEN ({installed}) AND NOT ({fresh_target}) \
+                 BEGIN SELECT RAISE(ABORT,'installed sharing schema requires a compatible promotion target'); END"));
+        }
+        statements.push(format!(
+            "CREATE TRIGGER IF NOT EXISTS cluster_sharing_{label}_promotion_role_guard \
+             BEFORE UPDATE OF role ON cluster_nodes WHEN OLD.role='learner' AND NEW.role='voter' AND ({installed}) \
+               AND NOT EXISTS(SELECT 1 FROM cluster_node_capabilities cap WHERE cap.node_id=NEW.node_id \
+                 AND cap.last_seen_at=NEW.last_seen_at AND cap.capability='{capability}') \
+             BEGIN SELECT RAISE(ABORT,'installed sharing schema requires a compatible promoted voter'); END"));
+        statements.push(format!(
+            "CREATE TRIGGER IF NOT EXISTS cluster_sharing_{label}_join_finalize_guard \
+             BEFORE UPDATE OF state ON cluster_join_tokens WHEN OLD.state='redeeming' AND NEW.state='redeemed' \
+               AND ({installed}) AND NOT ({target}) \
+             BEGIN SELECT RAISE(ABORT,'installed sharing schema requires a compatible admitted member'); END"));
+    }
+    // The durable intent spans the SQL proof and the distinct Raft membership
+    // entry. No timeout can remove it: only a leader that proves the requested
+    // membership outcome may release it. Ordinary heartbeats and capability
+    // replacement cannot change the admitted binary while that entry is pending.
+    for (table, identity) in [
+        ("cluster_nodes", "node_id"),
+        ("cluster_node_capabilities", "node_id"),
+        ("cluster_sharing_join_declarations", "node_id"),
+        ("cluster_join_tokens", "node_id"),
+    ] {
+        for (event, row) in [("INSERT", "NEW"), ("UPDATE", "OLD"), ("DELETE", "OLD")] {
+            let extra = if event == "UPDATE" {
+                format!(" OR intent.node_id=NEW.{identity}")
+            } else {
+                String::new()
+            };
+            statements.push(format!("CREATE TRIGGER IF NOT EXISTS cluster_sharing_freeze_{table}_{} BEFORE {event} ON {table} WHEN EXISTS (SELECT 1 FROM cluster_sharing_membership_intents intent WHERE intent.node_id={row}.{identity}{extra}) BEGIN SELECT RAISE(ABORT,'sharing membership admission is in flight'); END",event.to_ascii_lowercase()));
+        }
+    }
+    statements.push("CREATE TRIGGER IF NOT EXISTS cluster_sharing_join_declaration_finalize AFTER UPDATE OF state ON cluster_join_tokens WHEN NEW.state<>'redeeming' BEGIN DELETE FROM cluster_sharing_join_declarations WHERE token_hash=NEW.token_hash; END".to_owned());
+    statements.push("CREATE TRIGGER IF NOT EXISTS cluster_sharing_join_declaration_delete AFTER DELETE ON cluster_join_tokens BEGIN DELETE FROM cluster_sharing_join_declarations WHERE token_hash=OLD.token_hash; END".to_owned());
+    statements.push("CREATE TRIGGER IF NOT EXISTS cluster_sharing_membership_intent_update_guard BEFORE UPDATE ON cluster_sharing_membership_intents BEGIN SELECT RAISE(ABORT,'sharing membership intent is immutable'); END".to_owned());
+    statements
+}
+
+/// These statements precede token reservation in the same admission
+/// transaction. Clearing token-bound proofs prevents an earlier capability
+/// declaration from being inherited by a request that omits it. Heartbeat
+/// intents and capability intents are removed in that transaction's tail.
+#[must_use]
+pub fn sharing_join_intent_statements(
+    request: &RedeemJoinRequest,
+    now: i64,
+) -> Vec<(String, hiqlite::Params)> {
+    let mut statements = vec![
+        ("DELETE FROM cluster_sharing_join_intents WHERE token_hash=$1".to_owned(),params!(request.token_digest.as_str())),
+        ("DELETE FROM cluster_sharing_join_declarations WHERE token_hash=$1".to_owned(),params!(request.token_digest.as_str())),
+        ("INSERT INTO cluster_node_heartbeat_intents(node_id,last_seen_at) SELECT $1,$2 FROM cluster_join_tokens WHERE token_hash=$3 AND raft_id=$4 AND ((state='issued' AND expires_at>$2) OR (state='redeeming' AND node_id=$1)) ON CONFLICT(node_id) DO UPDATE SET last_seen_at=excluded.last_seen_at".to_owned(),params!(request.node_id.as_str(),now,request.token_digest.as_str(),request.raft_id as i64)),
+    ];
+    for capability in SharingMemberFloor::PrincipalAndCatalogue.capabilities() {
+        if request.sharing.supports(capability) {
+            statements.push((
+                "INSERT INTO cluster_sharing_join_declarations(token_hash,node_id,raft_id,api_address,raft_address,capability,last_seen_at) SELECT $1,$2,$3,$4,$5,$6,$7 FROM cluster_join_tokens WHERE token_hash=$1 AND raft_id=$3 AND ((state='issued' AND expires_at>$7) OR (state='redeeming' AND node_id=$2))".to_owned(),
+                params!(request.token_digest.as_str(),request.node_id.as_str(),request.raft_id as i64,request.api_address.as_str(),request.raft_address.as_str(),*capability,now),
+            ));
+            statements.push((
+                "INSERT INTO cluster_sharing_join_intents(token_hash,capability,last_seen_at) SELECT $1,$2,$3 FROM cluster_join_tokens WHERE token_hash=$1 AND raft_id=$4 AND ((state='issued' AND expires_at>$3) OR (state='redeeming' AND node_id=$5)) ON CONFLICT(token_hash,capability) DO UPDATE SET last_seen_at=excluded.last_seen_at".to_owned(),
+                params!(request.token_digest.as_str(),*capability,now,request.raft_id as i64,request.node_id.as_str()),
+            ));
+        }
+    }
+    statements
+}
+
+async fn require_installed_sharing_promotion_floor(
+    client: &Client,
+    node_id: &str,
+) -> Result<(), MembershipError> {
+    let now = unix_ms()?;
+    let guard=SharingMemberFloor::PrincipalAndCatalogue.capabilities().iter().map(|capability|format!(
+        "(NOT ({}) OR EXISTS (SELECT 1 FROM cluster_nodes node JOIN cluster_node_capabilities cap ON cap.node_id=node.node_id AND cap.last_seen_at=node.last_seen_at WHERE node.node_id=$1 AND node.removed_at IS NULL AND cap.capability='{capability}' AND node.last_seen_at>=$2 AND node.last_seen_at<=$3))",
+        sharing_installed_marker_predicate(capability))).collect::<Vec<_>>().join(" AND ");
+    let rows = client
+        .query_consistent_map::<CountRow, _>(
+            format!("SELECT CASE WHEN {guard} THEN 1 ELSE 0 END AS count"),
+            params!(
+                node_id,
+                now.saturating_sub(PROTOCOL_CHANGE_ABSENCE_WINDOW_MS),
+                now
+            ),
+        )
+        .await?;
+    if rows.first().is_some_and(|row| row.count == 1) {
+        Ok(())
+    } else {
+        Err(MembershipError::Incompatible)
+    }
+}
+
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RedeemJoinRequest {
     /// SHA-256 of the bearer held by the joining node. The coordinator needs
@@ -1457,6 +1717,9 @@ pub struct RedeemJoinRequest {
     /// replicated triggers before they can become a serving member.
     #[serde(default)]
     pub live_tv_v1: bool,
+    /// Additive closed declarations. Missing fields prove neither capability.
+    #[serde(default)]
+    pub sharing: SharingJoinCapabilities,
 }
 
 impl RedeemJoinRequest {
@@ -1480,6 +1743,7 @@ fn validate_redeem_join_request(
 ) -> Result<Option<String>, MembershipError> {
     let invalid_identity = !is_join_token_digest(&request.token_digest)
         || request.raft_id == 0
+        || i64::try_from(request.raft_id).is_err()
         || request.node_id.is_empty()
         || request.node_id.len() > MAX_PEER_NODE_ID_BYTES
         || request.node_id.chars().any(char::is_control)
@@ -1540,6 +1804,7 @@ impl std::fmt::Debug for RedeemJoinRequest {
             .field("protocol_version", &self.protocol_version)
             .field("protocol_range", &self.declared_protocol_range())
             .field("live_tv_v1", &self.live_tv_v1)
+            .field("sharing", &self.sharing)
             .finish()
     }
 }
@@ -3914,6 +4179,10 @@ impl MembershipManager {
         if role != expected_role {
             return Err(MembershipError::InvalidToken);
         }
+        let sharing_markers = sharing_admission_markers(&inner.client).await?;
+        if !request.sharing.proves(sharing_markers.required) {
+            return Err(MembershipError::Incompatible);
+        }
         if !request.live_tv_v1 && self.live_tv_enabled().await? {
             tracing::warn!(
                 node_id = %request.node_id,
@@ -4012,7 +4281,14 @@ impl MembershipManager {
         // is a compare-and-swap on both values, so a widening is caught too: a
         // protocol-4-only binary must not be admitted into a cluster that
         // activated while its request was in flight.
-        let mut statements = Vec::new();
+        let sharing_intents = sharing_markers.intents_installed
+            && (sharing_markers.required.session_principal
+                || sharing_markers.required.catalogue_item_identity);
+        let mut statements = if sharing_intents {
+            sharing_join_intent_statements(request, now)
+        } else {
+            Vec::new()
+        };
         if request.live_tv_v1 {
             statements.push((
                 "INSERT INTO cluster_live_tv_join_intents (token_hash) \
@@ -4216,6 +4492,12 @@ impl MembershipManager {
         if request.live_tv_v1 {
             statements.push((
                 "DELETE FROM cluster_live_tv_join_intents WHERE token_hash = $1".to_owned(),
+                params!(request.token_digest.as_str()),
+            ));
+        }
+        if sharing_intents {
+            statements.push((
+                "DELETE FROM cluster_sharing_join_intents WHERE token_hash=$1".to_owned(),
                 params!(request.token_digest.as_str()),
             ));
         }
@@ -7570,6 +7852,7 @@ impl MembershipManager {
         node_id: &str,
     ) -> Result<MembershipStatus, MembershipError> {
         let inner = self.replicated_inner()?;
+        require_installed_sharing_promotion_floor(&inner.client, node_id).await?;
         self.require_learner_lifecycle_capability().await?;
         if self.maintenance_operation_pending().await? {
             return Err(MembershipError::MaintenanceConflict(node_id.to_owned()));
@@ -7721,6 +8004,7 @@ impl MembershipManager {
             .nodes()
             .map(|(raft_id, node)| (*raft_id, node.addr_api.clone()))
             .collect::<Vec<_>>();
+        require_installed_sharing_promotion_floor(&inner.client, node_id).await?;
         match request_learner_promotion(&leader.addr_api, &inner.secrets.api, &target_node).await {
             Ok(()) => {}
             Err(MembershipChangeFailure::Rejected(error)) => {
@@ -17418,6 +17702,7 @@ mod tests {
             protocol_version: AUTH_PROTOCOL_MIN,
             protocol_min: AUTH_PROTOCOL_MIN,
             protocol_max: AUTH_PROTOCOL_MAX,
+            sharing: Default::default(),
             live_tv_v1: true,
         };
         assert_eq!(
@@ -17524,6 +17809,7 @@ mod tests {
             protocol_version: payload.protocol_version,
             protocol_min: AUTH_PROTOCOL_MIN,
             protocol_max: AUTH_PROTOCOL_MAX,
+            sharing: Default::default(),
             live_tv_v1: true,
         };
         let finalize = FinalizeJoinRequest {

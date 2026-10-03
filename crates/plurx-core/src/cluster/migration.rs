@@ -611,6 +611,7 @@ async fn join_fresh_store(config: &Config, daemon_lock: File) -> Result<Selected
             protocol_version: crate::store::AUTH_PROTOCOL_VERSION,
             protocol_min: crate::store::AUTH_PROTOCOL_MIN,
             protocol_max: crate::store::AUTH_PROTOCOL_MAX,
+            sharing: Default::default(),
             live_tv_v1: true,
         },
     )
@@ -6101,6 +6102,124 @@ mod tests {
     }
 
     #[cfg(feature = "hiqlite-store")]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn actual_redeem_rejoin_and_promotion_refuse_missing_installed_sharing_capabilities() {
+        use crate::cluster::membership::{
+            sharing_member_admission_guard_schema, MembershipError, SharingJoinCapabilities,
+        };
+        install_default_crypto_provider();
+        let directory = tempfile::tempdir().expect("candidate member source");
+        let config = membership_test_config(directory.path());
+        drop(
+            SqliteStore::open(&directory.path().join(SQLITE_FILENAME))
+                .expect("legacy source store"),
+        );
+        let selected = select_daemon_store(&config)
+            .await
+            .expect("actual source voter");
+        let client = selected.local_client.as_ref().expect("local voter client");
+        for sql in sharing_member_admission_guard_schema() {
+            client
+                .execute(sql, hiqlite::params!())
+                .await
+                .expect("install test-only candidate membership guards");
+        }
+        selected
+            .membership
+            .activate_learner_protocol()
+            .await
+            .expect("activate existing learner protocol for real redeem path");
+        let make_request =
+            |issued: &crate::cluster::membership::IssuedJoinToken| RedeemJoinRequest {
+                token_digest: join_token_digest(&issued.token),
+                raft_id: issued.raft_id,
+                node_id: uuid::Uuid::new_v4().to_string(),
+                hostname: "candidate-joiner".to_owned(),
+                raft_address: "127.0.0.1:32401".to_owned(),
+                api_address: "127.0.0.1:32402".to_owned(),
+                http_base: String::new(),
+                schema_version: AUTH_SCHEMA_VERSION,
+                protocol_version: crate::store::AUTH_PROTOCOL_VERSION,
+                protocol_min: crate::store::AUTH_PROTOCOL_MIN,
+                protocol_max: crate::store::AUTH_PROTOCOL_MAX,
+                live_tv_v1: true,
+                sharing: SharingJoinCapabilities::default(),
+            };
+        let legacy_token = selected
+            .membership
+            .issue_learner_token(Duration::from_secs(120))
+            .await
+            .expect("legacy compatible learner token");
+        let legacy = make_request(&legacy_token);
+        selected
+            .membership
+            .redeem_learner(&legacy)
+            .await
+            .expect("uninstalled cluster preserves missing sharing declarations");
+        client
+            .execute(
+                "CREATE TABLE item_identity_watermark(malformed TEXT)",
+                hiqlite::params!(),
+            )
+            .await
+            .expect("partial allocator marker");
+        assert!(matches!(selected.membership.redeem_learner(&legacy).await,Err(MembershipError::Incompatible)),"even an existing staged rejoin must explicitly implement installed allocator semantics");
+        assert!(
+            matches!(
+                selected.membership.promote_learner(&legacy.node_id).await,
+                Err(MembershipError::Incompatible)
+            ),
+            "actual promotion entry refuses older target before membership mutation"
+        );
+        let compatible_token = selected
+            .membership
+            .issue_learner_token(Duration::from_secs(120))
+            .await
+            .expect("compatible token");
+        let mut compatible = make_request(&compatible_token);
+        compatible.raft_address = "127.0.0.1:32403".to_owned();
+        compatible.api_address = "127.0.0.1:32404".to_owned();
+        compatible.sharing.catalogue_item_identity = true;
+        client
+            .execute(
+                "ALTER TABLE media_session_requests ADD COLUMN owner_key TEXT",
+                hiqlite::params!(),
+            )
+            .await
+            .expect("partial principal owner column");
+        assert!(
+            matches!(
+                selected.membership.redeem_learner(&compatible).await,
+                Err(MembershipError::Incompatible)
+            ),
+            "allocator claim is independent of installed principal columns"
+        );
+        compatible.sharing.session_principal = true;
+        selected
+            .membership
+            .redeem_learner(&compatible)
+            .await
+            .expect("actual compatible redemption uses fresh token-bound intents");
+        selected
+            .membership
+            .redeem_learner(&compatible)
+            .await
+            .expect("compatible identity-bound retry remains resumable");
+        compatible.sharing = SharingJoinCapabilities::default();
+        assert!(
+            matches!(
+                selected.membership.redeem_learner(&compatible).await,
+                Err(MembershipError::Incompatible)
+            ),
+            "a retry cannot inherit an earlier request's declarations"
+        );
+        selected
+            .shutdown()
+            .await
+            .expect("stop actual candidate source voter");
+    }
+
+    #[cfg(feature = "hiqlite-store")]
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn daemon_join_refuses_occupied_and_expired_targets_then_resumes_finalization() {
         install_default_crypto_provider();
@@ -6295,6 +6414,7 @@ mod tests {
             protocol_version: crate::store::AUTH_PROTOCOL_VERSION,
             protocol_min: crate::store::AUTH_PROTOCOL_MIN,
             protocol_max: crate::store::AUTH_PROTOCOL_MAX,
+            sharing: Default::default(),
             live_tv_v1: true,
         };
         coordinator
@@ -6688,6 +6808,7 @@ mod tests {
             protocol_version: crate::store::AUTH_PROTOCOL_VERSION,
             protocol_min: 0,
             protocol_max: 0,
+            sharing: Default::default(),
             live_tv_v1: false,
         };
         assert_ne!(
@@ -6791,6 +6912,7 @@ mod tests {
             // A joiner that predates the range sends no range fields.
             protocol_min: 0,
             protocol_max: 0,
+            sharing: Default::default(),
             live_tv_v1: false,
         };
         assert_eq!(
@@ -6804,6 +6926,7 @@ mod tests {
         let new_joiner = RedeemJoinRequest {
             protocol_min: crate::store::AUTH_PROTOCOL_MIN,
             protocol_max: crate::store::AUTH_PROTOCOL_MAX,
+            sharing: Default::default(),
             live_tv_v1: true,
             ..old_joiner
         };

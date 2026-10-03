@@ -15828,6 +15828,8 @@ struct ContractNodeSpec {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 struct ContractNodeLaunch {
     node_id: u64,
+    #[serde(default)]
+    learner_only: bool,
     root: PathBuf,
     nodes: Vec<ContractNodeSpec>,
 }
@@ -15906,6 +15908,7 @@ impl ContractCluster {
         for node_id in 1..=3 {
             let launch = ContractNodeLaunch {
                 node_id,
+                learner_only: false,
                 root: root.path().to_path_buf(),
                 nodes: specs.clone(),
             };
@@ -16039,6 +16042,7 @@ async fn hiqlite_contract_node_process() {
     std::fs::create_dir_all(&data_dir).expect("contract node data directory");
     let client = match hiqlite::start_node(NodeConfig {
         node_id: launch.node_id,
+        learner_only: launch.learner_only,
         nodes: launch
             .nodes
             .iter()

@@ -132,6 +132,29 @@ cases passed with zero ignored in 36.36 seconds. The activation unit filter
 passed 16/16 with zero ignored in 31.34 seconds. Denied-warning Clippy with
 `hiqlite-contract-tests` passed in 42.89 seconds.
 
+## Commit CAS binds ownership and the actual predecessor receipt
+
+The pointer-first commit proposal uses canonical pointer, preparation and
+desired keys. Its CAS requires the current Local user and same-principal
+predecessor. Draining the predecessor, extending the successor and gating the
+receipt remain within that canonical owner; returned routes preserve the same
+principal. The existing statement-output chain still makes a lost CAS mutation
+free before exact replay or owner-fenced abort classification.
+
+A control receipt must identify the actual same-principal predecessor session
+inside that CAS: incarnation, session UUID, owner node and owner epoch all
+match the stored row. A trusted incarnation/owner tuple alone cannot authorize
+a receipt naming another session. The voter regression gives an otherwise
+exact Local receipt an actual Shared session UUID, requires no pointer advance
+and no foreign ack, then commits and replays a correct receipt. It passed 1/1
+with zero ignored in 9.19 seconds; the commit replay safety unit passed.
+
+Staged readers now accept typed principals on rebuilt tables, bind their
+canonical key and decode the complete stored projection with expected-owner
+comparison. Two Shared namespaces using one staged playback name remain
+independent. The original layout continues to refuse Shared reads rather than
+manufacturing a Local user; all Shared mutations remain refused.
+
 ## A rebuilt table is not shared admission authority
 
 The schema shape comes from the existing quorum-observed Store-lifetime
@@ -145,9 +168,10 @@ The runtime census at base
 `9e2e0e55c2f3946d6df7a14bd6e73f0e5662503f` contained 61 numeric-owner SQL
 literals, including three unit-test literals and validation-only legacy
 writers. Earlier counts of 65 preceded the pointer/desired-reader conversion.
-This checkpoint addresses the request family; it is not a complete census
-closure or qualification of all seven ownership tables. Commit and the remaining lease/takeover/settlement/maintenance write predicates
-still need conversion and qualification.
+These checkpoints cover request, desired, recovery, preparation, activation and
+commit paths; they are not a complete census closure or qualification of all
+seven ownership tables. Lease, takeover, settlement and maintenance write
+predicates still need conversion and qualification.
 
 ## Exercise production behavior on three voters
 
@@ -176,6 +200,7 @@ cargo clippy --locked -p plurx-core --features hiqlite-contract-tests \
 **How to read it:** the request/inventory/recovery voter regression passed 1/1 with zero ignored
 in 18.14 seconds using Rust 1.97.1. The two request decoder regressions and the incomplete
 inventory/staged/desired decoder regression passed with zero ignored. All 28 existing local/replicated lifecycle contracts passed
-with zero ignored in 257.35 seconds. Denied-warning Clippy with
+with zero ignored in 258.30 seconds on the commit checkpoint. Its four rebuilt runtime cases
+passed with zero ignored in 45.53 seconds. Denied-warning Clippy with
 `hiqlite-contract-tests` passed. These tests do not enable shared worker ingress, install
 a migration, advertise the member capability or qualify an upgrade/rollback.

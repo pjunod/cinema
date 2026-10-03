@@ -2321,11 +2321,22 @@ impl MediaSessionStore for SqliteStore {
             let now_ms = request.now_ms;
             let lease_expires_at_ms = request.lease_expires_at_ms;
             let tx = conn.unchecked_transaction()?;
+            let rebuilt=route_projection(&tx)?==PRINCIPAL_ROUTE_COLS;
+            if rebuilt && !tx.query_row("SELECT EXISTS(SELECT 1 FROM users WHERE id=?1)",
+                [user_id],|row|row.get::<_,bool>(0))? { return Ok(None); }
+            let owner_1=local_owner_predicate(rebuilt,1);
+            let owner_3=local_owner_predicate(rebuilt,3);
+            let owner_4=local_owner_predicate(rebuilt,4);
+            let owner_5=local_owner_predicate(rebuilt,5);
+            let pointer_owner_1=format!("pointer.{}",local_owner_predicate(rebuilt,1));
+            let predecessor_owner_3=format!("predecessor.{}",local_owner_predicate(rebuilt,3));
+            let preparation_owner_3=format!("preparation.{}",local_owner_predicate(rebuilt,3));
+
             let staged = tx
                 .query_row(
                     &format!(
                         "SELECT {} FROM media_session_preparations
-                          WHERE user_id = ?1 AND playback_id = ?2
+                          WHERE {owner_1} AND playback_id = ?2
                             AND staged_incarnation_id = ?3",
                         staged_projection(&tx)?
                     ),
@@ -2343,13 +2354,24 @@ impl MediaSessionStore for SqliteStore {
                         &format!("SELECT {route_cols} FROM media_sessions
                               WHERE incarnation_id = (SELECT current_incarnation_id
                                 FROM media_playback_pointers
-                                 WHERE user_id = ?1 AND playback_id = ?2)
+                                 WHERE {owner_1} AND playback_id = ?2)
                                 AND incarnation_id = ?3", route_cols = route_projection(conn)?),
                         params![user_id, playback_id, staged_incarnation_id],
                         route_from_row,
                     )
-                    .optional()?;
+                    .optional()?.filter(|route|
+                        route.principal == (crate::playback_principal::PlaybackPrincipal::LocalUser{user_id})
+                        && route.playback_id == playback_id);
                 let control_receipt = if let Some(expected) = &request.control_receipt {
+                    let receipt_route=tx.query_row(
+                        &format!("SELECT {route_cols} FROM media_sessions WHERE incarnation_id=?1",
+                            route_cols=route_projection(&tx)?),[expected.incarnation_id.as_str()],route_from_row,
+                    ).optional()?;
+                    if receipt_route.as_ref().is_none_or(|route|
+                        route.principal != (crate::playback_principal::PlaybackPrincipal::LocalUser{user_id})
+                        || route.playback_id != playback_id || route.session_id != expected.session_id) {
+                        tx.rollback()?;return Ok(None);
+                    }
                     let stored = tx
                         .query_row(
                             "SELECT incarnation_id, session_id, owner_node_id, owner_epoch,
@@ -2381,23 +2403,24 @@ impl MediaSessionStore for SqliteStore {
             // generation is current, and reaping it would be the exact bug
             // that made a flag on `activate_media_session` unacceptable.
             let pointer_advanced = tx.execute(
-                "UPDATE media_playback_pointers
+                &format!("UPDATE media_playback_pointers
                     SET current_incarnation_id = ?1, updated_at_ms = ?2,
                         desired_revision = (SELECT revision FROM media_playback_desired
-                          WHERE user_id = ?3 AND playback_id = ?4)
-                  WHERE user_id = ?3 AND playback_id = ?4
+                          WHERE {owner_3} AND playback_id = ?4)
+                  WHERE {owner_3} AND playback_id = ?4
                     AND current_incarnation_id = ?5
                     AND EXISTS (SELECT 1 FROM media_sessions predecessor
                       WHERE predecessor.incarnation_id = ?5
                         AND predecessor.owner_node_id = ?6
                         AND predecessor.owner_epoch = ?7
-                        AND predecessor.state = 'active')
+                        AND predecessor.state = 'active' AND {predecessor_owner_3}
+                        AND (?9 IS NULL OR predecessor.session_id = ?9))
                     AND EXISTS (SELECT 1 FROM media_session_preparations preparation
-                      WHERE preparation.user_id = ?3 AND preparation.playback_id = ?4
+                      WHERE {preparation_owner_3} AND preparation.playback_id = ?4
                         AND preparation.staged_incarnation_id = ?1
                         AND preparation.deadline_ms > ?2)
                     AND EXISTS (SELECT 1 FROM media_sessions
-                      WHERE incarnation_id = ?1 AND user_id = ?3
+                      WHERE incarnation_id = ?1 AND {owner_3}
                         AND playback_id = ?4 AND state = 'active')
                     -- The ask has to still be the one this successor is for.
                     -- Carried in the CAS rather than checked before it, and
@@ -2412,7 +2435,7 @@ impl MediaSessionStore for SqliteStore {
                     -- while the replicated twin tore it down, which the
                     -- three-voter lane caught.
                     AND (?8 = 0 OR NOT EXISTS (SELECT 1 FROM media_playback_desired
-                      WHERE user_id = ?3 AND playback_id = ?4 AND revision != ?8))",
+                      WHERE {owner_3} AND playback_id = ?4 AND revision != ?8))"),
                 params![
                     staged.staged_incarnation_id,
                     now_ms,
@@ -2422,6 +2445,7 @@ impl MediaSessionStore for SqliteStore {
                     request.expected_predecessor_owner_node_id,
                     request.expected_predecessor_owner_epoch,
                     request.expected_desired_revision.unwrap_or(0),
+                    request.control_receipt.as_ref().map(|receipt|receipt.session_id.as_str()),
                 ],
             )?;
             if pointer_advanced != 1 {
@@ -2436,13 +2460,13 @@ impl MediaSessionStore for SqliteStore {
                 // the replicated twin for the same input.
                 let predecessor_still_owned = tx
                     .query_row(
-                        "SELECT 1 FROM media_playback_pointers pointer
+                        &format!("SELECT 1 FROM media_playback_pointers pointer
                           JOIN media_sessions predecessor
                             ON predecessor.incarnation_id = pointer.current_incarnation_id
-                         WHERE pointer.user_id = ?1 AND pointer.playback_id = ?2
+                         WHERE {pointer_owner_1} AND pointer.playback_id = ?2
                            AND pointer.current_incarnation_id = ?3
                            AND predecessor.owner_node_id = ?4
-                           AND predecessor.owner_epoch = ?5",
+                           AND predecessor.owner_epoch = ?5"),
                         params![
                             user_id,
                             playback_id,
@@ -2456,8 +2480,8 @@ impl MediaSessionStore for SqliteStore {
                     .is_some();
                 let pointer_moved = tx
                     .query_row(
-                        "SELECT current_incarnation_id FROM media_playback_pointers
-                          WHERE user_id = ?1 AND playback_id = ?2",
+                        &format!("SELECT current_incarnation_id FROM media_playback_pointers
+                          WHERE {owner_1} AND playback_id = ?2"),
                         params![user_id, playback_id],
                         |row| row.get::<_, String>(0),
                     )
@@ -2488,6 +2512,9 @@ impl MediaSessionStore for SqliteStore {
                     route_from_row,
                 )
                 .optional()?;
+            let predecessor=predecessor.filter(|route|
+                route.principal == (crate::playback_principal::PlaybackPrincipal::LocalUser{user_id})
+                && route.playback_id == playback_id);
             // The predecessor is not retired here. It is given a deadline and
             // otherwise left exactly as it was: state, cause, publication
             // readiness, lease, pins and `job_leases` all untouched, so it
@@ -2507,40 +2534,44 @@ impl MediaSessionStore for SqliteStore {
             // finished row a drain deadline would ask the sweep to end it a
             // second time under a cause it did not earn.
             tx.execute(
-                "UPDATE media_sessions
+                &format!("UPDATE media_sessions
                     SET drain_deadline_ms = ?1, updated_at_ms = ?2
                   WHERE incarnation_id = ?3 AND state != 'ended'
-                    AND drain_deadline_ms IS NULL",
+                    AND drain_deadline_ms IS NULL AND {owner_4}"),
                 params![
                     now_ms.saturating_add(MEDIA_SESSION_DRAIN_MS),
                     now_ms,
                     staged.expected_predecessor_incarnation_id,
+                    user_id,
                 ],
             )?;
             // The successor stops being a candidate and starts being a
             // stream, so it stops carrying the candidate's clock. Both halves
             // move: the row, and the `job_leases` fence renewal reads.
             tx.execute(
-                "UPDATE media_sessions
+                &format!("UPDATE media_sessions
                     SET lease_expires_at_ms = ?1, updated_at_ms = ?2
-                  WHERE incarnation_id = ?3 AND state = 'active'",
-                params![lease_expires_at_ms, now_ms, staged.staged_incarnation_id],
+                  WHERE incarnation_id = ?3 AND state = 'active' AND {owner_4}"),
+                params![lease_expires_at_ms, now_ms, staged.staged_incarnation_id,user_id],
             )?;
             tx.execute(
-                "UPDATE job_leases
+                &format!("UPDATE job_leases
                     SET expires_at_ms = ?1, revision = revision + 1, updated_at_ms = ?2
                   WHERE resource = ?3 AND owner_node_id = ?4 AND fence = 1
-                    AND revision < 9223372036854775807",
+                    AND revision < 9223372036854775807
+                    AND EXISTS(SELECT 1 FROM media_sessions
+                      WHERE ('session:' || incarnation_id)=job_leases.resource AND {owner_5})"),
                 params![
                     lease_expires_at_ms,
                     now_ms,
                     format!("session:{}", staged.staged_incarnation_id),
                     staged_owner,
+                    user_id,
                 ],
             )?;
             tx.execute(
-                "DELETE FROM media_session_preparations
-                  WHERE user_id = ?1 AND playback_id = ?2 AND staged_incarnation_id = ?3",
+                &format!("DELETE FROM media_session_preparations
+                  WHERE {owner_1} AND playback_id = ?2 AND staged_incarnation_id = ?3"),
                 params![user_id, playback_id, staged.staged_incarnation_id],
             )?;
             if let Some(receipt) = &request.control_receipt {
@@ -2590,13 +2621,15 @@ impl MediaSessionStore for SqliteStore {
                     &format!("SELECT {route_cols} FROM media_sessions
                           WHERE incarnation_id = (SELECT current_incarnation_id
                             FROM media_playback_pointers
-                             WHERE user_id = ?1 AND playback_id = ?2)
+                             WHERE {owner_1} AND playback_id = ?2)
                             AND incarnation_id = ?3", route_cols = route_projection(conn)?),
                     params![user_id, playback_id, staged.staged_incarnation_id],
                     route_from_row,
                 )
                 .optional()?
-                .filter(|route| route.state == "active");
+                .filter(|route| route.state == "active"
+                    && route.principal == (crate::playback_principal::PlaybackPrincipal::LocalUser{user_id})
+                    && route.playback_id == playback_id);
             let Some(route) = route else {
                 // Unreachable in practice: the pointer CAS above already
                 // required the staged row to be `active`, and that branch
@@ -4597,6 +4630,187 @@ mod sharing_route_decoder_tests {
                 .await
                 .expect("sharing selection survives local deletion")
                 .is_some());
+        }
+    }
+
+    #[tokio::test]
+    async fn sharing_preparation_commit_preserves_principal_and_fences_receipt_session() {
+        use crate::playback_principal::PlaybackPrincipal;
+        let directory = tempfile::tempdir().expect("commit directory");
+        let predecessor = "00000000-0000-4000-a000-000000000003";
+        let foreign = "00000000-0000-4000-a000-000000000001";
+        for store in [
+            SqliteStore::open_in_memory().expect("memory commit"),
+            SqliteStore::open(&directory.path().join("commit.db")).expect("pooled commit"),
+        ] {
+            store
+                .with_conn(move |conn| {
+                    conn.execute(
+                        "INSERT INTO users(id,username,password_hash,is_admin,created_at)
+                    VALUES(1,'owner','hash',0,1)",
+                        [],
+                    )?;
+                    conn.execute(
+                        "INSERT INTO media_sessions
+                    (incarnation_id,session_id,user_id,playback_id,request_fingerprint,
+                     owner_node_id,owner_epoch,lease_expires_at_ms,state,recipe_json,response_json,
+                     updated_at_ms,recovery_epoch)
+                    VALUES(?1,?2,1,'playback',?3,'node',2,9000,'active','{}','{}',10,'epoch')",
+                        params![
+                            predecessor,
+                            uuid::Uuid::new_v4().to_string(),
+                            "a".repeat(64)
+                        ],
+                    )?;
+                    conn.execute(
+                        "INSERT INTO media_playback_pointers
+                    (user_id,playback_id,current_incarnation_id,updated_at_ms)
+                    VALUES(1,'playback',?1,10)",
+                        [predecessor],
+                    )?;
+                    conn.execute_batch("BEGIN IMMEDIATE")?;
+                    conn.execute_batch(crate::store::MEDIA_SESSION_PRINCIPAL_REBUILD_SCHEMA)?;
+                    conn.execute_batch("COMMIT")?;
+                    conn.execute_batch(include_str!(
+                        "../../../tests/fixtures/session-principal-sharing.sql"
+                    ))?;
+                    conn.execute(
+                        "UPDATE media_sessions SET session_id=?1 WHERE incarnation_id=?2",
+                        params![uuid::Uuid::new_v4().to_string(), foreign],
+                    )?;
+                    Ok(())
+                })
+                .await
+                .expect("commit fixture");
+            let local = PlaybackPrincipal::LocalUser { user_id: 1 };
+            let predecessor_route = store
+                .media_session_route_by_incarnation(predecessor)
+                .await
+                .expect("predecessor")
+                .expect("route");
+            let foreign_route = store
+                .media_session_route_by_incarnation(foreign)
+                .await
+                .expect("foreign")
+                .expect("route");
+            let mut preparation = MediaSessionPreparation {
+                incarnation_id: uuid::Uuid::new_v4().to_string(),
+                session_id: uuid::Uuid::new_v4().to_string(),
+                principal: local.clone(),
+                playback_id: "playback".into(),
+                expected_predecessor_incarnation_id: predecessor.into(),
+                expected_predecessor_owner_node_id: "node".into(),
+                expected_predecessor_owner_epoch: 2,
+                request_fingerprint: "b".repeat(64),
+                owner_node_id: "node".into(),
+                recipe_json: "{}".into(),
+                response_json: "{}".into(),
+                media_origin_ms: 0,
+                now_ms: 20,
+                expected_desired_revision: None,
+                deadline_ms: 8000,
+            };
+            assert!(store
+                .prepare_media_session(&preparation)
+                .await
+                .expect("prepare")
+                .is_some());
+            let mut receipt = MediaSessionTerminalAck {
+                incarnation_id: predecessor.into(),
+                session_id: foreign_route.session_id.clone(),
+                owner_node_id: "node".into(),
+                owner_epoch: 2,
+                client_instance_id: uuid::Uuid::new_v4().to_string(),
+                sequence: 1,
+                request_fingerprint: "c".repeat(64),
+                response_json: "{}".into(),
+                expires_at_ms: 9000,
+                updated_at_ms: 21,
+            };
+            let mut request = MediaSessionPreparationCommitRequest {
+                staged_incarnation_id: preparation.incarnation_id.clone(),
+                expected_predecessor_owner_node_id: "node".into(),
+                expected_predecessor_owner_epoch: 2,
+                now_ms: 21,
+                lease_expires_at_ms: 8000,
+                control_receipt: Some(receipt.clone()),
+                expected_desired_revision: None,
+            };
+            assert!(store
+                .commit_media_session_preparation(&local, "playback", &request)
+                .await
+                .expect("wrong-session refusal")
+                .is_none());
+            assert_eq!(
+                store
+                    .media_session_route_for_playback(&local, "playback")
+                    .await
+                    .expect("unchanged pointer")
+                    .expect("route")
+                    .incarnation_id,
+                predecessor
+            );
+            let foreign_session = foreign_route.session_id.clone();
+            store
+                .with_read(move |conn| {
+                    let count: i64 = conn.query_row(
+                        "SELECT count(*) FROM media_session_terminal_acks WHERE session_id=?1",
+                        [foreign_session],
+                        |r| r.get(0),
+                    )?;
+                    assert_eq!(count, 0);
+                    Ok(())
+                })
+                .await
+                .expect("no foreign ack");
+            preparation.incarnation_id = uuid::Uuid::new_v4().to_string();
+            preparation.session_id = uuid::Uuid::new_v4().to_string();
+            preparation.now_ms = 22;
+            assert!(store
+                .prepare_media_session(&preparation)
+                .await
+                .expect("fresh prepare")
+                .is_some());
+            receipt.session_id = predecessor_route.session_id;
+            receipt.updated_at_ms = 23;
+            request.staged_incarnation_id = preparation.incarnation_id.clone();
+            request.now_ms = 23;
+            request.control_receipt = Some(receipt.clone());
+            let committed = store
+                .commit_media_session_preparation(&local, "playback", &request)
+                .await
+                .expect("commit")
+                .expect("committed");
+            assert_eq!(committed.route.principal, local);
+            let prior = committed.predecessor.expect("same-owner predecessor");
+            assert_eq!(prior.principal, local);
+            assert_eq!(prior.state, "active");
+            assert_eq!(prior.drain_deadline_ms, Some(23 + MEDIA_SESSION_DRAIN_MS));
+            assert_eq!(committed.control_receipt, Some(receipt.clone()));
+            let replay = store
+                .commit_media_session_preparation(&local, "playback", &request)
+                .await
+                .expect("commit replay")
+                .expect("replayed");
+            assert_eq!(replay.route, committed.route);
+            assert_eq!(replay.control_receipt, Some(receipt));
+            assert_eq!(
+                store
+                    .media_session_route_for_playback(&local, "playback")
+                    .await
+                    .expect("advanced pointer")
+                    .expect("route")
+                    .incarnation_id,
+                preparation.incarnation_id
+            );
+            assert_eq!(
+                store
+                    .media_session_route_by_incarnation(foreign)
+                    .await
+                    .expect("foreign survived")
+                    .expect("route"),
+                foreign_route
+            );
         }
     }
 

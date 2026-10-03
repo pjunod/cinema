@@ -2065,3 +2065,34 @@ candidate runtime cases passed (36.41 seconds), and all 28 existing lifecycle
 contracts passed (257.61 seconds), with zero ignored tests. Denied-warning
 feature Clippy passed (39.02 seconds). The candidate schema remains
 uninstalled; this receipt does not qualify Shared admission or rollout.
+
+
+**Commit and membership-admission integration checkpoint:** both backends bind
+predecessor receipts to the actual predecessor session and canonical principal
+inside the pointer compare-and-swap. A receipt naming an actual foreign Shared
+session cannot advance a Local pointer or create an acknowledgement. Correct
+Local commit, predecessor drain and exact replay preserve complete principals.
+SQLite replay without a preparation ledger also requires its retained Local
+predecessor rather than treating an unrelated acknowledgement as authority.
+
+The candidate membership factory records token-bound declarations and durable
+transition intents. Both application redemption and raw replicated-management
+RPCs refuse incompatible admission after partial installation. A real fourth
+learner exercises promotion. Ambiguous transition outcomes retain their intent;
+a timer does not release the fence. Installation, startup capability advertising
+and coordinated upgrade qualification remain unfinished.
+
+Pinned combined-tree core and cluster-check all-target compilation passed
+(33.53 and 32.51 seconds), all 15 ownership unit cases passed (15.60 seconds),
+all four rebuilt-schema actual-voter cases passed (45.60 seconds), all four
+membership-floor contracts passed (13.83 seconds), and six existing preparation
+commit contracts passed (59.29 seconds). Denied-warning feature Clippy passed
+(33.59 seconds). All executed regression cases had zero ignored tests. An
+initial overly narrow membership unit filter selected no tests and is excluded
+from this evidence; the exact application membership cases are recorded below.
+
+The exact application redemption/rejoin/promotion regression passed (one test,
+9.31 seconds); the existing occupied/expired-target daemon-join regression
+passed (one test, 31.55 seconds). Both used the same integrated tree and real
+replicated fixtures, with zero ignored tests. These are executed application
+join paths rather than historical-process or production rollout evidence.

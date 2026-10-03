@@ -650,25 +650,42 @@ async fn classify_preparation_commit_cas_loss(
 
 async fn staged_row(
     store: &HiqliteAuthStore,
-    user_id: i64,
+    principal: &crate::playback_principal::PlaybackPrincipal,
     playback_id: &str,
 ) -> Result<Option<crate::domain::MediaSessionStagedGeneration>, StoreError> {
     let layout = LocalSessionSql::load(store).await?;
+    let owner_column = layout.column();
+    let bindings = if layout.rebuilt {
+        params!(principal.owner_key(), playback_id)
+    } else {
+        params!(
+            crate::store::local_media_principal_id(principal)?,
+            playback_id
+        )
+    };
     let sql = format!(
         "SELECT {}, {STAGED_COLS} FROM media_session_preparations
-          WHERE {} AND playback_id = $2",
-        layout.projection(),
-        layout.equals(1)
+          WHERE {owner_column} = $1 AND playback_id = $2",
+        layout.projection()
     );
     validate_sql(&sql)?;
-    store
+    let result = store
         .client()
-        .query_consistent_map::<StagedRow, _>(sql, params!(user_id, playback_id))
+        .query_consistent_map::<StagedRow, _>(sql, bindings)
         .await?
         .into_iter()
         .next()
         .map(|row| row.0)
-        .transpose()
+        .transpose()?;
+    if result
+        .as_ref()
+        .is_some_and(|row| &row.principal != principal)
+    {
+        return Err(StoreError::Task(
+            "staged owner does not match requested principal".into(),
+        ));
+    }
+    Ok(result)
 }
 
 /// Classify an expected rejected or empty rejoin attempt from durable state.
@@ -684,12 +701,7 @@ async fn classify_rejoin_after_attempt(
     staged_incarnation_id: &str,
     preparation: &crate::domain::MediaSessionPreparation,
 ) -> Result<Option<MediaSessionRoute>, StoreError> {
-    let staged = staged_row(
-        store,
-        crate::store::local_media_principal_id(&preparation.principal)?,
-        &preparation.playback_id,
-    )
-    .await?;
+    let staged = staged_row(store, &preparation.principal, &preparation.playback_id).await?;
     if staged.as_ref().is_some_and(|staged| {
         staged.staged_incarnation_id == preparation.incarnation_id
             && staged.expected_predecessor_incarnation_id
@@ -2151,12 +2163,8 @@ impl MediaSessionStore for HiqliteAuthStore {
         // Replay by exact identity, before anything is attempted. The ledger's
         // primary key would otherwise turn an owner's retry into "you already
         // have one".
-        if let Some(existing) = staged_row(
-            self,
-            crate::store::local_media_principal_id(&preparation.principal)?,
-            &preparation.playback_id,
-        )
-        .await?
+        if let Some(existing) =
+            staged_row(self, &preparation.principal, &preparation.playback_id).await?
         {
             if existing.staged_incarnation_id != preparation.incarnation_id
                 || existing.expected_predecessor_incarnation_id
@@ -2196,12 +2204,7 @@ impl MediaSessionStore for HiqliteAuthStore {
         let route = route_by(self, "incarnation_id", &preparation.incarnation_id)
             .await?
             .filter(|route| preparation_route_matches(route, preparation));
-        let staged = staged_row(
-            self,
-            crate::store::local_media_principal_id(&preparation.principal)?,
-            &preparation.playback_id,
-        )
-        .await?;
+        let staged = staged_row(self, &preparation.principal, &preparation.playback_id).await?;
         let staged_is_ours = staged.map(|staged| staged.staged_incarnation_id).as_deref()
             == Some(preparation.incarnation_id.as_str());
         let Some(route) = route.filter(|_| staged_is_ours) else {
@@ -2385,12 +2388,7 @@ impl MediaSessionStore for HiqliteAuthStore {
         // A read narrows proposals to either the named occupied slot or an
         // exact replay. Every mutation remains SQL-gated in the proposal, so
         // a commit racing this read makes the observable ledger CAS reject.
-        let existing = staged_row(
-            self,
-            crate::store::local_media_principal_id(&preparation.principal)?,
-            &preparation.playback_id,
-        )
-        .await?;
+        let existing = staged_row(self, &preparation.principal, &preparation.playback_id).await?;
         let exact_replay = existing.as_ref().is_some_and(|staged| {
             staged.staged_incarnation_id == preparation.incarnation_id
                 && staged.expected_predecessor_incarnation_id
@@ -2601,13 +2599,12 @@ impl MediaSessionStore for HiqliteAuthStore {
         principal: &crate::playback_principal::PlaybackPrincipal,
         playback_id: &str,
     ) -> Result<Option<crate::domain::MediaSessionStagedGeneration>, StoreError> {
-        let user_id = crate::store::local_media_principal_id(principal)?;
-        if user_id <= 0 || playback_id.is_empty() || playback_id.len() > 128 {
+        if !principal.valid_admission_shape() || playback_id.is_empty() || playback_id.len() > 128 {
             return Err(StoreError::Task(
                 "invalid staged media-session lookup".to_owned(),
             ));
         }
-        staged_row(self, user_id, playback_id).await
+        staged_row(self, principal, playback_id).await
     }
 
     async fn commit_media_session_preparation(
@@ -2637,9 +2634,15 @@ impl MediaSessionStore for HiqliteAuthStore {
             ));
         }
         let staged_incarnation_id = request.staged_incarnation_id.as_str();
+        let layout = LocalSessionSql::load(self).await?;
+        let owner_1 = layout.equals(1);
+        let owner_3 = layout.equals(3);
+        let owner_4 = layout.equals(4);
+        let owner_11 = layout.equals(11);
+        let user_exists_3 = layout.existing_user(3);
         let now_ms = request.now_ms;
         let lease_expires_at_ms = request.lease_expires_at_ms;
-        let Some(staged) = staged_row(self, user_id, playback_id).await? else {
+        let Some(staged) = staged_row(self, principal, playback_id).await? else {
             // No ledger row. Either it was never staged, or an earlier commit
             // already consumed it — and the pointer is the discriminator.
             return commit_replay(
@@ -2733,25 +2736,26 @@ impl MediaSessionStore for HiqliteAuthStore {
         // here reads the pointer to decide what to reap; a pointer that no
         // longer names the predecessor simply fails every guard, and the
         // abort branch below is what turns that into the right outcome.
-        let mut statements: Vec<(&str, hiqlite::Params)> = vec![
+        let mut statements: Vec<(String, hiqlite::Params)> = vec![
             (
-                "UPDATE media_playback_pointers
+                format!(
+                    "UPDATE media_playback_pointers
                     SET current_incarnation_id = $1, updated_at_ms = $2,
                         desired_revision = (SELECT revision FROM media_playback_desired
-                          WHERE user_id = $3 AND playback_id = $4)
-                  WHERE user_id = $3 AND playback_id = $4
+                          WHERE {owner_3} AND playback_id = $4)
+                  WHERE {owner_3} AND playback_id = $4
                     AND current_incarnation_id = $5
                     AND EXISTS (SELECT 1 FROM media_sessions predecessor
                       WHERE predecessor.incarnation_id = $5
                         AND predecessor.owner_node_id = $6
                         AND predecessor.owner_epoch = $7
-                        AND predecessor.state = 'active')
+                        AND predecessor.state = 'active' AND predecessor.{owner_3})
                     AND EXISTS (SELECT 1 FROM media_session_preparations preparation
-                      WHERE preparation.user_id = $3 AND preparation.playback_id = $4
+                      WHERE preparation.{owner_3} AND preparation.playback_id = $4
                         AND preparation.staged_incarnation_id = $1
                         AND preparation.deadline_ms > $2)
                     AND EXISTS (SELECT 1 FROM media_sessions
-                      WHERE incarnation_id = $1 AND user_id = $3 AND playback_id = $4
+                      WHERE incarnation_id = $1 AND {owner_3} AND playback_id = $4
                         AND state = 'active')
                     AND ($8 = ''
                       OR NOT EXISTS (SELECT 1 FROM media_session_terminal_acks
@@ -2763,8 +2767,16 @@ impl MediaSessionStore for HiqliteAuthStore {
                           AND request_fingerprint = $14 AND response_json = $15
                           AND expires_at_ms = $16 AND updated_at_ms = $17))
                     AND ($18 = 0 OR NOT EXISTS (SELECT 1 FROM media_playback_desired
-                      WHERE user_id = $3 AND playback_id = $4 AND revision != $18))
-                  RETURNING current_incarnation_id",
+                      WHERE {owner_3} AND playback_id = $4 AND revision != $18))
+                    AND ($8 = '' OR EXISTS (SELECT 1 FROM media_sessions receipt_predecessor
+                      WHERE receipt_predecessor.incarnation_id = $9
+                        AND receipt_predecessor.session_id = $8
+                        AND receipt_predecessor.owner_node_id = $10
+                        AND receipt_predecessor.owner_epoch = $11
+                        AND receipt_predecessor.{owner_3}))
+                    {user_exists_3}
+                  RETURNING current_incarnation_id"
+                ),
                 params!(
                     staged.staged_incarnation_id.as_str(),
                     now_ms,
@@ -2799,13 +2811,15 @@ impl MediaSessionStore for HiqliteAuthStore {
                 // every other statement in this transaction: the guard makes
                 // the whole set apply or not apply together, which is the
                 // property the two backends are checked against.
-                "UPDATE media_sessions
+                format!(
+                    "UPDATE media_sessions
                     SET drain_deadline_ms = $1, updated_at_ms = $2
-                  WHERE incarnation_id = $3 AND state != 'ended'
+                  WHERE incarnation_id = $3 AND state != 'ended' AND {owner_4}
                     AND drain_deadline_ms IS NULL
                     AND EXISTS (SELECT 1 FROM media_playback_pointers
-                      WHERE user_id = $4 AND playback_id = $5
-                        AND current_incarnation_id = $6)",
+                      WHERE {owner_4} AND playback_id = $5
+                        AND current_incarnation_id = $6)"
+                ),
                 params!(
                     now_ms.saturating_add(MEDIA_SESSION_DRAIN_MS),
                     now_ms,
@@ -2822,12 +2836,14 @@ impl MediaSessionStore for HiqliteAuthStore {
                 // reads. Without this it would be ended by maintenance at the
                 // moment the preparation would have expired, taking the
                 // playback's pointer with it.
-                "UPDATE media_sessions
+                format!(
+                    "UPDATE media_sessions
                     SET lease_expires_at_ms = $1, updated_at_ms = $2
-                  WHERE incarnation_id = $3 AND state = 'active'
+                  WHERE incarnation_id = $3 AND state = 'active' AND {owner_4}
                     AND EXISTS (SELECT 1 FROM media_playback_pointers
-                      WHERE user_id = $4 AND playback_id = $5
-                        AND current_incarnation_id = $3)",
+                      WHERE {owner_4} AND playback_id = $5
+                        AND current_incarnation_id = $3)"
+                ),
                 params!(
                     lease_expires_at_ms,
                     now_ms,
@@ -2837,13 +2853,15 @@ impl MediaSessionStore for HiqliteAuthStore {
                 ),
             ),
             (
-                "UPDATE job_leases
+                format!(
+                    "UPDATE job_leases
                     SET expires_at_ms = $1, revision = revision + 1, updated_at_ms = $2
                   WHERE resource = $3 AND fence = 1
                     AND revision < 9223372036854775807
                     AND EXISTS (SELECT 1 FROM media_playback_pointers
-                      WHERE user_id = $4 AND playback_id = $5
-                        AND current_incarnation_id = $6)",
+                      WHERE {owner_4} AND playback_id = $5
+                        AND current_incarnation_id = $6)"
+                ),
                 params!(
                     lease_expires_at_ms,
                     now_ms,
@@ -2854,11 +2872,13 @@ impl MediaSessionStore for HiqliteAuthStore {
                 ),
             ),
             (
-                "DELETE FROM media_session_preparations
-                  WHERE user_id = $1 AND playback_id = $2 AND staged_incarnation_id = $3
+                format!(
+                    "DELETE FROM media_session_preparations
+                  WHERE {owner_1} AND playback_id = $2 AND staged_incarnation_id = $3
                     AND EXISTS (SELECT 1 FROM media_playback_pointers
-                      WHERE user_id = $1 AND playback_id = $2
-                        AND current_incarnation_id = $3)",
+                      WHERE {owner_1} AND playback_id = $2
+                        AND current_incarnation_id = $3)"
+                ),
                 params!(user_id, playback_id, staged.staged_incarnation_id.as_str()),
             ),
         ];
@@ -2874,15 +2894,17 @@ impl MediaSessionStore for HiqliteAuthStore {
                 return Ok(None);
             }
             statements.push((
-                "INSERT INTO media_session_terminal_acks
+                format!(
+                    "INSERT INTO media_session_terminal_acks
                     (incarnation_id, session_id, owner_node_id, owner_epoch,
                      client_instance_id, sequence, request_fingerprint, response_json,
                      expires_at_ms, updated_at_ms)
                  SELECT $1, $2, $3, $4, $5, $6, $7, $8, $9, $10
                   WHERE EXISTS (SELECT 1 FROM media_playback_pointers
-                    WHERE user_id = $11 AND playback_id = $12
+                    WHERE {owner_11} AND playback_id = $12
                       AND current_incarnation_id = $13)
-                 ON CONFLICT(session_id) DO NOTHING",
+                 ON CONFLICT(session_id) DO NOTHING"
+                ),
                 params!(
                     receipt.incarnation_id.as_str(),
                     receipt.session_id.as_str(),
@@ -2958,8 +2980,10 @@ impl MediaSessionStore for HiqliteAuthStore {
         let pointer = self
             .client()
             .query_consistent_map::<PointerRow, _>(
-                "SELECT current_incarnation_id FROM media_playback_pointers
-                  WHERE user_id = $1 AND playback_id = $2",
+                format!(
+                    "SELECT current_incarnation_id FROM media_playback_pointers
+                  WHERE {owner_1} AND playback_id = $2"
+                ),
                 params!(user_id, playback_id),
             )
             .await?
@@ -2987,11 +3011,13 @@ impl MediaSessionStore for HiqliteAuthStore {
         }
         let route = route_by(self, "incarnation_id", &staged.staged_incarnation_id)
             .await?
-            .filter(|route| route.state == "active");
+            .filter(|route| route.state == "active" && &route.principal == principal);
         let Some(route) = route else {
             return Ok(None);
         };
-        let predecessor = route_by(self, "incarnation_id", &predecessor_incarnation).await?;
+        let predecessor = route_by(self, "incarnation_id", &predecessor_incarnation)
+            .await?
+            .filter(|route| &route.principal == principal);
         let control_receipt = if let Some(receipt) = &request.control_receipt {
             let retained = self
                 .media_session_terminal_ack(&receipt.session_id, request.now_ms)
@@ -3055,7 +3081,7 @@ impl MediaSessionStore for HiqliteAuthStore {
         // The projection, not the row counts: an abort that finds the staged
         // row already ended and its ledger row already gone is an idempotent
         // replay and must read the same as the first one.
-        if staged_row(self, user_id, playback_id)
+        if staged_row(self, principal, playback_id)
             .await?
             .is_some_and(|staged| staged.staged_incarnation_id == request.staged_incarnation_id)
         {
