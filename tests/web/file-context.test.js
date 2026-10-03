@@ -178,3 +178,25 @@ test("translated decision media URLs cannot acquire upstream origins or unbound 
   for(const url of ["https://source/files/7/direct","/api/v1/files/7/direct",detail().file_base+"/direct?token=secret",detail().file_base+"/direct?session=aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",detail().file_base+"/stream.mp4?audio=1&audio=2"])
     assert.throws(()=>h.playbackFileDecisionMediaUrl(c,url));
 });
+
+test("actual Local play and picker handlers preserve id_text above the JS integer ceiling",()=>{
+  const ctx=vm.createContext({AUTH_GENERATION:0,observed:[],PREPLAY:{},PREPLAY_SCOPE_NOTE:"This playback only"});
+  const names=["exactWireId","prePlayPickers","playbackMetaFor","playCall","setPrePlay","prePlaySelection"];
+  vm.runInContext(source+"\n"+names.map(name=>shippedFunction("detail/preplay-selection.js",name)).join("\n")+`
+    function esc(value){return String(value).replaceAll("&","&amp;").replaceAll('"',"&quot;");}
+    function audioFactLabel(a){return "Track "+a.index;}function subFactLabel(){return "Subtitle";}
+    function prePlayPreview(){}function play(...args){observed.push(args);}
+  `,ctx);
+  const exact="9007199254740993",file={id:9007199254740993,id_text:exact,available:true,
+    duration_ms:123,audio_streams:[{index:0},{index:1}],subtitle_streams:[{index:0}]};
+  ctx.file=file;ctx.model={item:{kind:"movie",title:"Film"},meta:{},files:[file]};
+  const decode=text=>text.replaceAll("&quot;",'"').replaceAll("&amp;","&");
+  const onclick=decode(vm.runInContext("playCall(model,file,0)",ctx));
+  vm.runInContext(onclick,ctx);
+  assert.equal(ctx.observed[0][0],exact);assert.equal(typeof ctx.observed[0][0],"string");
+  const html=vm.runInContext("prePlayPickers(file)",ctx);
+  const change=decode(html.match(/onchange="([^"]+)"/)[1]);
+  vm.runInContext(`(function(){${change}}).call({value:"1"})`,ctx);
+  assert.equal(vm.runInContext(`prePlaySelection("${exact}").audio`,ctx),1);
+  assert.throws(()=>{ctx.file={...file,id_text:undefined};vm.runInContext("playCall(model,file,0)",ctx);});
+});

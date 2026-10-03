@@ -88,32 +88,35 @@ function setPrePlay(fileId, kind, raw){
   prePlayPreview(fileId);
 }
 function prePlayPickers(f){
-  const auds=f.audio_streams||[], subs=f.subtitle_streams||[];
-  const find=f.subtitle_search_enabled?`<button class="ghost sm" onclick="findSubtitles(${f.id})">Find subtitles</button><div id="subtitle-search-${f.id}"></div>`:"";
-  // Nothing to choose between: one audio track and no subtitles at all.
   if(!f.available) return "";
+  const context=playbackFileContextForFile(f);
+  if(context.source_ref.kind!=="local") playbackFileReject();
+  const id=context.source_ref.file_id, idArg=esc(JSON.stringify(id));
+  const auds=f.audio_streams||[], subs=f.subtitle_streams||[];
+  const find=f.subtitle_search_enabled?`<button class="ghost sm" onclick="findSubtitles(${idArg})">Find subtitles</button><div id="subtitle-search-${id}"></div>`:"";
+  // Nothing to choose between: one audio track and no subtitles at all.
   if(auds.length<2 && !subs.length) return find;
   const pd=f.playback_defaults||{}, ad=pd.audio||{}, sd=pd.subtitle||{};
-  const sel=prePlaySelection(f.id)||{audio:null,subtitle:null};
+  const sel=prePlaySelection(context)||{audio:null,subtitle:null};
   const defAudio=auds.find(a=>a.index===ad.selected_index);
   const defSub=subs.find(s=>s.index===sd.selected_index);
   const opt=(value,label,on)=>`<option value="${esc(String(value))}"${on?" selected":""}>${esc(label)}</option>`;
   const audioField=auds.length>1?`<div class="ppfield">
-      <label for="pp-a-${f.id}">Audio</label>
-      <select id="pp-a-${f.id}" onchange="setPrePlay(${f.id},'audio',this.value)">
+      <label for="pp-a-${id}">Audio</label>
+      <select id="pp-a-${id}" onchange="setPrePlay(${idArg},'audio',this.value)">
         ${opt("",defAudio?`Default · ${audioFactLabel(defAudio)}`:"Default",sel.audio==null)}
         ${auds.map(a=>opt(a.index,audioFactLabel(a),sel.audio===a.index)).join("")}
       </select></div>`:"";
   const subField=subs.length?`<div class="ppfield">
-      <label for="pp-s-${f.id}">Subtitles</label>
-      <select id="pp-s-${f.id}" onchange="setPrePlay(${f.id},'subtitle',this.value)">
+      <label for="pp-s-${id}">Subtitles</label>
+      <select id="pp-s-${id}" onchange="setPrePlay(${idArg},'subtitle',this.value)">
         ${opt("",defSub?`Default · ${subFactLabel(defSub)}`:"Default · Off",sel.subtitle==null)}
         ${opt(-1,"Off",sel.subtitle===-1)}
         ${subs.map(s=>opt(s.index,subFactLabel(s),sel.subtitle===s.index)).join("")}
       </select></div>`:"";
   return `<div class="preplay">
     <div class="pprow">${audioField}${subField}</div>${find}
-    <div class="ppnote" id="pp-n-${f.id}" role="status">${esc(PREPLAY_SCOPE_NOTE)}</div></div>`;
+    <div class="ppnote" id="pp-n-${id}" role="status">${esc(PREPLAY_SCOPE_NOTE)}</div></div>`;
 }
 // Criterion 7, said out loud rather than merely implemented: this is one
 // playback's choice, and Settings → Playback defaults is untouched by it.
@@ -332,7 +335,8 @@ async function loadItem(id,isCurrent=()=>true){
   clearPrePlay();
   const lib=libs.find(l=>l.id===it.library_id);
   d.files.forEach(f=>{
-    f.fileContext=localPlaybackFileContext(exactWireId(f));
+    f.fileContext=playbackFileContextForFile(f);
+    f.id=f.fileContext.source_ref.file_id;
     ITEM_FOR_FILE[playbackFileKey(f.fileContext)]=String(id);
     // File DTOs are item-scoped and do not repeat their library id. The
     // conversion status endpoint publishes modes per library, so bind the
@@ -421,7 +425,9 @@ function playbackMetaFor(p,file){
   return m;
 }
 function playCall(p,file,startMs){
-  return `play(${file.id},${esc(JSON.stringify(p.item.title))},${Math.max(0,startMs||0)},${file.duration_ms||0},${esc(JSON.stringify(playbackMetaFor(p,file)))})`;
+  const context=playbackFileContextForFile(file);
+  if(context.source_ref.kind!=="local") playbackFileReject();
+  return `play(${esc(JSON.stringify(context.source_ref.file_id))},${esc(JSON.stringify(p.item.title))},${Math.max(0,startMs||0)},${file.duration_ms||0},${esc(JSON.stringify(playbackMetaFor(p,file)))})`;
 }
 function exactWireId(value){
   return String(value&&value.id_text!=null?value.id_text:value&&value.id);
