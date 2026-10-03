@@ -18,6 +18,10 @@ RULES = ROOT / "validation/known-red.toml"
 IDENT_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 OPTIONAL_CARGO_IDENTITIES = frozenset(
     {
+        "crates/plurxd/src/http/mod.rs::http::tests::"
+        "sharing_pinned_transport_recovers_committed_claim_and_rotation_after_restart",
+        "crates/plurxd/tests/sharing_daemon_restart.rs::"
+        "sharing_separate_daemons_preserve_pending_pairing_and_rotation_across_restart",
         "crates/plurx-core/tests/store_contract.rs::hiqlite_activation_node_process",
         "crates/plurx-core/tests/store_contract.rs::hiqlite_contract_node_process",
         "crates/plurxd/src/live_tv/videotoolbox_tests.rs::"
@@ -598,6 +602,45 @@ def load_entries(path: pathlib.Path = RULES) -> tuple[dict[str, object], ...]:
     return tuple(data["entries"])
 
 
+def load_opt_in_fixtures(path: pathlib.Path = RULES) -> tuple[dict[str, object], ...]:
+    """Explicit configured fixtures are not expiring known-red debt."""
+    try:
+        data = tomllib.loads(path.read_text(encoding="utf-8"))
+    except (OSError, tomllib.TOMLDecodeError) as exc:
+        raise KnownRedError(f"cannot read {path}: {exc}") from exc
+    fixtures = data.get("fixtures", [])
+    if data.get("version") != 1 or not isinstance(fixtures, list):
+        raise KnownRedError("known-red.toml fixtures must be an array")
+    return tuple(fixtures)
+
+
+def validate_opt_in_fixtures(
+    fixtures: tuple[dict[str, object], ...],
+    ignored: tuple[IgnoredTest, ...],
+    entries: tuple[dict[str, object], ...] = (),
+) -> None:
+    identities = Counter(item.identity for item in ignored)
+    cargo_names = {item.identity: item.cargo_name for item in ignored}
+    seen: set[str] = set()
+    required = {"test", "owner", "reason", "requires", "command"}
+    debt = {entry.get("test") for entry in entries}
+    for index, fixture in enumerate(fixtures):
+        where = f"fixtures[{index}]"
+        if not isinstance(fixture, dict) or set(fixture) != required:
+            raise KnownRedError(f"{where} must have exactly {sorted(required)}")
+        if any(not isinstance(fixture[key], str) or not fixture[key].strip() for key in required):
+            raise KnownRedError(f"{where} fields must be non-empty text")
+        identity = str(fixture["test"])
+        if identity in seen or identities[identity] != 1:
+            raise KnownRedError(f"{where}.test must resolve to one distinct ignored identity")
+        if identity in debt:
+            raise KnownRedError(f"{where}.test is also classified as known-red debt")
+        command = str(fixture["command"])
+        if not all(token in command.split() for token in ("cargo", "test", "--ignored", "--exact", cargo_names[identity])):
+            raise KnownRedError(f"{where}.command must explicitly run the exact ignored test")
+        seen.add(identity)
+
+
 def validate_entries(
     entries: tuple[dict[str, object], ...],
     ignored: tuple[IgnoredTest, ...],
@@ -653,10 +696,14 @@ def main(argv: list[str] | None = None) -> int:
         validate_listed_tests(ignored, listed_rust_tests())
     entries = load_entries()
     validate_entries(entries, ignored)
-    print("identity\treason\tsource")
+    fixtures = load_opt_in_fixtures()
+    validate_opt_in_fixtures(fixtures, ignored, entries)
+    fixture_ids = {fixture["test"] for fixture in fixtures}
+    print("identity\tclassification\treason\tsource")
     for item in ignored:
-        print(f"{item.identity}\t{item.reason}\t{item.path}:{item.line}")
-    print(f"known-red: {len(entries)} entries")
+        classification = "opt-in-fixture" if item.identity in fixture_ids else "ignored-inventory"
+        print(f"{item.identity}\t{classification}\t{item.reason}\t{item.path}:{item.line}")
+    print(f"known-red: {len(entries)} entries · opt-in fixtures: {len(fixtures)}")
     return 0
 
 

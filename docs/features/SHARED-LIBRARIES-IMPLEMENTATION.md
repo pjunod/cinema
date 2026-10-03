@@ -1268,8 +1268,8 @@ milestones serially against the effort's current head.
 
 | Step | Scope and boundary | Required acceptance |
 |---|---|---|
-| S0 | Opus design review and dispositions; finalize fixture vocabulary and numbers | Opus re-review corrections SL-18–24 incorporated; build contract ready; S2 topology experiments remain pending |
-| S1 | Domain/schema, secret wrapping, pairing/rotation/assignment state machines | SQLite + Hiqlite parity; exact retry/claim race/expiry/rotation loss/user-recreation tests; no plaintext in durable rows |
+| S0 | contract ready to build | Original `4e81bc38c`, revision `eb9038755`, PR #740 | Opus re-review corrections incorporated in §16; runtime evidence is recorded per milestone |
+| S1 | merged into effort | [PR #746](http://192.168.4.7:3000/noirr/plurx/pulls/746), `aaafc1a0f5` | SQLite v92 / Hiqlite v70; purpose-bound secrets; pairing/rotation/assignment transactions. Five store contracts, 11 sharing unit tests, schema migration parity and 31 import-inventory tests passed; workspace Clippy and catalog lint passed. Run 3890 and the final Effort development gate passed on the exact candidate; landed in the effort as `971265536a` with all seven regression fields. |
 | S2 | Serve/loopback deployment, TLS provisioning/renewal, pinned egress, peer/admin routes, Developer switch | Two NATed servers over Tailscale; no public/LAN listener; TLS mismatch, VPN loss, wrong port/route, redirect/proxy and broad-grant cases |
 | S3 | Playback principal migration in existing family and cluster schema floor | Owner-key PK/upsert/count parity; local/shared replay races; user/grant deletion; old-writer migration receipt; prepared successor, cluster ownership and ordinary-router refusal |
 | S4 | Shared catalogue, live keyset paging, batch metadata, scoped art, assignments and local history | Huge IDs, same IDs on two sources, paging completes during continuous metadata writes, moved sort keys, expiry/deletion, denied cache reads, progress ordering |
@@ -1463,7 +1463,7 @@ implied by the build handoff.
 | S0 | contract ready to build | Original `4e81bc38c`, revision `eb9038755`, PR #740 | Opus re-review corrections incorporated in §16; runtime evidence is recorded per milestone |
 | S1 | merged into effort | [PR #746](http://192.168.4.7:3000/noirr/plurx/pulls/746), `aaafc1a0f5` | SQLite v92 / Hiqlite v70; purpose-bound secrets; pairing/rotation/assignment transactions. Five store contracts, 11 sharing unit tests, schema migration parity and 31 import-inventory tests passed; workspace Clippy and catalog lint passed. Run 3890 and the final Effort development gate passed on the exact candidate; landed in the effort as `971265536a` with all seven regression fields. |
 | S2 | implementation in progress; topology qualification open | [draft PR #759](http://192.168.4.7:3000/noirr/plurx/pulls/759) | Dedicated loopback TLS transport, pinned direct dialing and fixed Tailscale DNS, isolated peer/admin routes, durable claim/rotation recovery, authenticated endpoint refresh and advisory Developer switch implemented. Two-NAT, shared-machine Serve and Docker isolation/egress receipts remain open; S2 is not complete. |
-| S3 | implementation started; ownership migration open | `codex/sharing-s3-principals` (unpublished) | Typed session interfaces, caller handoffs and seven-table candidate rebuild implemented; 28 local/replicated lifecycle regressions passed. Runtime owner-key SQL, owner checks, migration installation, cluster floor and old-binary qualification remain open; §16.4 records the boundaries. |
+| S3 | implementation started; ownership migration open | `codex/sharing-s3-principals` (unpublished) | Canonical Local writers, complete principal reads and seven-table candidate rebuild implemented; ownership and actual-voter lifecycle regressions passed. Shared grant/scope admission, caller census, migration installation and coordinated upgrade qualification remain open; §16.4 records the boundaries. |
 | S4 | not started | — | — |
 | S5 | not started | — | — |
 | S6 | not started | — | — |
@@ -1663,7 +1663,7 @@ qualification.
 PLURX_SHARING_FIXTURE_IP=100.127.88.2 cargo test --locked --offline -p plurxd --bin plurxd http::tests::sharing_pinned_transport_recovers_committed_claim_and_rotation_after_restart -- --ignored --exact --nocapture
 ```
 
-**Still owed:** actual daemon process restart; complete per-node availability
+**Still owed:** complete per-node availability
 and deployment diagnostics;
 shared-machine raw TCP Serve, two NATs, Docker bridge egress/isolation and
 startup ordering; the final task gate. The current listener refuses unqualified
@@ -1702,6 +1702,30 @@ status-shaped calls launch no process. The response-loss fixture now owns its
 accepted connections in a JoinSet, and client fixture servers are aborted and
 awaited. The seven ownership-inventory tests passed after this review. The
 changed candidate must pass its focused transport tests and a fresh effort gate.
+
+**Separate-process restart regression:**
+`crates/plurxd/tests/sharing_daemon_restart.rs` starts the shipped daemon twice
+with separate disposable stores, pairs through a raw TCP forwarding fixture
+while retaining the production TLS pin, and restarts the recipient with a
+pending grant. It compares the persisted pairing identity, approves the grant,
+rotates its credential, restarts both processes and authenticates a new
+endpoint manifest revision with the recovered credential. It checks that source identity,
+catalogue epoch, grant/import IDs and SPKI remain stable and that no duplicate
+export appears. Rust 1.97.1 native compilation and denied-warning Clippy passed.
+The explicit Linux CGNAT execution passed on committed `440f5370a` with
+Rust 1.97.1 (one test, zero ignored, 34.17 seconds). The response-loss fixture
+also passed on that same candidate (one test, zero ignored, 0.42 seconds). The revision is published
+after both restarts, so retained state cannot satisfy the authentication
+assertion. An earlier fixture attempted a second rotation during the source's
+ten-minute receipt window and correctly encountered conflict; the Store
+contract expressly refuses that request. Client dispatch readiness is now
+awaited within its existing deadline, and rotation diagnostics expose only
+fixed phases and typed errors. No Tailscale or topology receipt is implied by
+this forwarding fixture.
+
+```sh
+PLURX_SHARING_FIXTURE_IP=100.127.88.2 cargo test --locked -p plurxd --test sharing_daemon_restart sharing_separate_daemons_preserve_pending_pairing_and_rotation_across_restart -- --ignored --exact --nocapture
+```
 
 ### 16.4 Implementation progress — S3, 2026-10-02
 

@@ -14,8 +14,9 @@ This file is the specification in the meantime, written by reading the routers
 and the handlers on 2026-09-07. Where a plan document and the code disagreed,
 the code won and the disagreement is recorded in §23.
 
-One binary serves everything on one port (`:32400` by default). plurx has 243
-routes across the four surfaces below. Every path here is absolute; the native
+The ordinary listener (`:32400` by default) serves the four surfaces below.
+plurx has 260 routes on that listener. Sharing uses a separate loopback TLS
+listener with its own peer credentials (§24). Every path here is absolute; the native
 API is the only one under a version prefix, and §7-§18 state that prefix once
 per section rather than repeating it in every row.
 
@@ -3182,3 +3183,48 @@ commit. Nothing yet asserts that every route in the router appears in a table
 here — that is the obvious next test, and until it exists, treat
 `crates/plurxd/src/http/mod.rs` as the authority and this file as its
 description.
+
+
+---
+
+## 24. Sharing administration — local owners manage private peer authority
+
+The following ordinary-listener routes require `AdminUser`: a local owner's
+bearer session, never a scoped integration key or a sharing credential. The
+request bodies are closed JSON, at most 16 KiB. UUID path values must use
+canonical lower-case, hyphenated spelling. Every sharing management response,
+including errors, carries `Cache-Control: no-store`.
+
+| Method | Absolute path | Operation |
+|---|---|---|
+| GET / PUT | `/api/v1/sharing/settings` | Read or save the sharing enabled choice. Saving either choice succeeds independently of readiness. |
+| GET | `/api/v1/sharing/status` | Read this serving node's timestamped listener, certificate, egress and import observations. Unobserved host Serve and node-key state are `unknown`. |
+| GET / PUT | `/api/v1/sharing/endpoints` | Read or replace approved source endpoints with `expected_revision` CAS. |
+| POST | `/api/v1/sharing/invitations` | Issue an expiring invitation for selected local movie/show libraries. |
+| DELETE | `/api/v1/sharing/invitations/{id}` | Cancel the invitation. |
+| GET | `/api/v1/sharing/exports` | List source grants and their pending or active authority. |
+| POST | `/api/v1/sharing/exports/{id}/approve` | Approve the compared pairing code using the expected grant generation. |
+| PUT | `/api/v1/sharing/exports/{id}/libraries` | Replace the selected library scope using the expected generation. |
+| DELETE | `/api/v1/sharing/exports/{id}` | Revoke the source grant. |
+| GET / POST | `/api/v1/sharing/imports` | List imports or begin a pinned, identity-checked invitation claim. |
+| POST | `/api/v1/sharing/imports/{id}/re-pair` | Explicitly pair a replacement invitation into the selected import. |
+| POST | `/api/v1/sharing/imports/{id}/rotate` | Persist a replacement credential before the recoverable upstream rotation. |
+| PUT | `/api/v1/sharing/imports/{id}/assignments` | Replace individually assigned local viewers using assignment-generation CAS. |
+| PUT | `/api/v1/sharing/imports/{id}/endpoints` | Update recipient-side numeric hints, retaining approved pins unless an owner explicitly confirms replacements. |
+| DELETE | `/api/v1/sharing/imports/{id}` | Disconnect the import and advance its lifecycle. |
+| ANY | `/sharing` | Refuse peer traffic on the ordinary listener with `404 sharing_not_found`. |
+| ANY | `/sharing/{*path}` | Refuse every peer path on the ordinary listener with the same typed 404. |
+
+The separate listener mounts only the peer router in
+[sharing.rs](../crates/plurxd/src/http/sharing.rs). It accepts the dedicated
+`CinemaShare` credential after pinned TLS, never household account tokens or
+cluster credentials. It serves no local login, web, metrics or cluster routes.
+Read the [sharing build contract](features/SHARED-LIBRARIES-IMPLEMENTATION.md)
+for the identity-before-secret claim flow, approval, endpoint manifests and
+rotation receipts. Catalogue and playback integration remain unfinished;
+these authority routes do not imply that shared playback is available.
+
+Capacity refusals are `429 sharing_capacity`; conflicting generations are
+`409 sharing_generation_conflict`; expired authority is `410 sharing_expired`.
+A missing or unusable Store returns `503 sharing_authority_unavailable`.
+Readiness remains advisory and does not erase or override the saved switch.
