@@ -22,12 +22,15 @@ internal data class SharedLibraryRow(val identity: SharedLibraryIdentity, val na
 @Serializable
 internal data class SharedLibraryItem(val source: String, val reference: SharedPlaybackReference, val parent: SharedPlaybackReference? = null,
     val title: String, val kind: String, val year: Int? = null, val overview: String? = null, val genres: List<String> = emptyList(),
-    val season_number: Int? = null, val episode_number: Int? = null) {
+    val season_number: Int? = null, val episode_number: Int? = null,
+    val art: List<SharedArtworkDescriptor>? = null, val poster_url: String? = null, val backdrop_url: String? = null,
+    @kotlinx.serialization.Transient val artworkSubject: SharedArtworkSubject? = null) {
     val id get() = listOf(reference.import_id, reference.server_id, reference.catalogue_epoch, reference.library_id, reference.item_id).joinToString("|")
     val hasChildren get() = kind in setOf("series", "season", "album", "artist", "collection")
     fun validate(library: SharedLibraryIdentity) {
         reference.validate(); require(source == "shared" && library.contains(reference) && title.toByteArray().size <= 512 && genres.size <= 64)
         parent?.let { it.validate(); require(library.contains(it)) }
+        SharedArtworkDescriptor.validate(art, poster_url, backdrop_url, reference)
     }
 }
 @Serializable

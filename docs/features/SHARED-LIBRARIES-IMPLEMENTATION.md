@@ -3397,3 +3397,30 @@ cases (one test, zero ignored). The new
 pinned Source/B H1/H2 decision fixture is opt-in and remains unqualified until
 its committed source archive runs in the disposable CGNAT container. Source
 starts, receiver sessions, media relay and progress remain separate open work.
+
+### S7 native artwork integration — physical device evidence remains open
+
+Apple and Android Shared browse/details now display only advertised poster and
+backdrop descriptors. Immutable authenticated subjects retain the full shared
+reference and accept only the matching B-relative artwork namespace. Requests
+use the current B account, refuse redirects and unsupported content, and bound
+the actual stream even without a trustworthy Content-Length. Account change,
+view retirement and task cancellation cannot publish an old completion.
+
+Each process admits four artwork operations without queuing and accounts for
+64 MiB of compressed ownership, with a 15 MiB limit per object. A separate
+64 MiB allowance covers owned decoded pixels. Swift's actual image provider
+release callback retires backing ownership. Android's private bitmap owner
+requires confirmed recycle before returning pixel credits; a collected or
+retired view alone does not return them. These allowances do not claim to
+measure opaque decoder internals or physical GPU/render caches.
+
+Checkpoint `1c7cff4065370c74843d3cafabdb566ee9307723` was qualified from source
+archive SHA-256
+`a1cfd55ac48427caab3fe4188627b493ae219ca5125f10b3f67af2653bfb4e0f`.
+All 395 native files in the integrated tree byte-match that input. The affected
+iOS, tvOS and Android suites each passed 35 tests, including seven artwork
+regressions. Exact-archive Android lint and instrumentation APK compilation
+passed, as did the normal pinned Rust 1.97.1 tracked hook. Android's actual
+native bitmap decode/recycle instrumentation is compiled only: no emulator
+or physical-device execution is claimed. Shared playback remains open.
