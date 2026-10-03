@@ -324,6 +324,89 @@ impl TranscodeManager {
         )
     }
 
+    /// A single sealed, descriptor-bound collection supplies both current
+    /// source verification and decoder planning. No full document is cached.
+    pub(super) async fn probe_vod_source_once(
+        &self,
+        file: &plurx_core::domain::MediaFile,
+        handle: Arc<std::fs::File>,
+    ) -> Result<Option<crate::decode_facts::FreshSourceProbe>, String> {
+        let Some(probe) = self.decode_probe_identity.as_ref() else {
+            return Ok(None);
+        };
+        let catalog = DecodeCatalogMetadata::from_media_file(file)
+            .map_err(|error| vod_refusal_error("vod_source_rescan_required", error.to_string()))?;
+        let source = self.hooks.get().decode_fact_source(
+            BoundPlanCaller::Vod
+                .decode_fact_source(handle, Arc::new(tokio::sync::Semaphore::new(1))),
+        );
+        self.decode_facts
+            .probe_source_document(
+                probe,
+                source,
+                Some(&catalog),
+                crate::decode_facts::ProbeStreamSelection::LegacyVideoOrdinal(0),
+                Duration::from_secs(5),
+                None,
+            )
+            .await
+            .map(Some)
+            .map_err(|error| {
+                vod_refusal_error(
+                    "vod_source_rescan_required",
+                    format!("the held source could not be verified against its scan: {error}"),
+                )
+            })
+    }
+
+    pub(super) async fn resolve_vod_prepared_source(
+        &self,
+        file: &plurx_core::domain::MediaFile,
+        options: &TranscodeOptions,
+        encoder: Encoder,
+        handle: Arc<std::fs::File>,
+        prepared: crate::decode_facts::FreshSourceProbe,
+    ) -> Result<ResolvedTranscode, String> {
+        let probe = self.decode_probe_identity.as_ref().ok_or_else(|| {
+            vod_refusal_error(
+                "vod_decoder_plan_refused",
+                "bound probe identity disappeared",
+            )
+        })?;
+        let catalog = DecodeCatalogMetadata::from_media_file(file)
+            .map_err(|error| vod_refusal_error("vod_decoder_plan_refused", error.to_string()))?;
+        let source = self.hooks.get().decode_fact_source(
+            BoundPlanCaller::Vod
+                .decode_fact_source(handle, Arc::new(tokio::sync::Semaphore::new(1))),
+        );
+        let facts = self
+            .decode_facts
+            .refine_source_document(
+                probe,
+                source,
+                Some(&catalog),
+                prepared,
+                DECODE_PLAN_PROBE_BUDGET,
+                None,
+            )
+            .await;
+        if let Err(
+            error @ (crate::decode_facts::DecodeFactError::SourceChanged
+            | crate::decode_facts::DecodeFactError::ProbeChanged
+            | crate::decode_facts::DecodeFactError::CacheInvariant),
+        ) = &facts
+        {
+            return Err(vod_refusal_error(
+                "vod_decoder_plan_refused",
+                error.to_string(),
+            ));
+        }
+        BoundPlanCaller::Vod.finish(
+            self.resolve_held_movie_plan_facts(file, options, encoder, facts)
+                .await,
+        )
+    }
+
     /// The VOD start's decoder plan, through the descriptor it holds, within
     /// `DECODE_PLAN_PROBE_BUDGET` and with the viewer's class on its probes.
     pub(super) async fn resolve_vod_movie_plan(

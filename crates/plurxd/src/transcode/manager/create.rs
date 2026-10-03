@@ -811,15 +811,31 @@ impl TranscodeManager {
             .map_err(|error| {
                 start_infrastructure_error(format!("reading the stored source probe: {error}"))
             })?;
-        let held_probe =
-            crate::ffmpeg::held_source_probe_json(&source.handle, VOD_START_HELD_PROBE)
-                .await
-                .map_err(|error| {
-                    vod_refusal_error(
-                        "vod_source_rescan_required",
-                        format!("the held source could not be verified against its scan: {error}"),
-                    )
-                })?;
+        let held_plan_handle = source.handle.try_clone().map(Arc::new).map_err(|error| {
+            vod_refusal_error(
+                "vod_source_rescan_required",
+                format!("the held source could not be retained for verification: {error}"),
+            )
+        })?;
+        let collected = self.probe_vod_source_once(file, held_plan_handle).await?;
+        let (held_probe, held_decode_facts) = match collected {
+            Some(mut collected) => (std::mem::take(&mut collected.document), Some(collected)),
+            // Platforms without a sealed probe keep their existing source
+            // verification and stored-facts planning behavior.
+            None => (
+                crate::ffmpeg::held_source_probe_json(&source.handle, VOD_START_HELD_PROBE)
+                    .await
+                    .map_err(|error| {
+                        vod_refusal_error(
+                            "vod_source_rescan_required",
+                            format!(
+                                "the held source could not be verified against its scan: {error}"
+                            ),
+                        )
+                    })?,
+                None,
+            ),
+        };
         let comparison = probe
             .as_deref()
             .map(|stored| crate::ffmpeg::compare_probe_documents(stored, &held_probe))
@@ -984,9 +1000,13 @@ impl TranscodeManager {
                 format!("the held source could not be retained for decoder planning: {error}"),
             )
         })?;
-        let plan = self
-            .resolve_vod_movie_plan(file, &options, encoder, held_plan_handle)
-            .await?;
+        let plan = if let Some(prepared) = held_decode_facts {
+            self.resolve_vod_prepared_source(file, &options, encoder, held_plan_handle, prepared)
+                .await?
+        } else {
+            self.resolve_vod_movie_plan(file, &options, encoder, held_plan_handle)
+                .await?
+        };
         if let Some(frame_rate) = plan
             .output_contract()
             .normalized_geometry()
