@@ -4378,3 +4378,33 @@ through an owned SSH forward and the lab's separate LAN proxy. Its process has
 a twelve-minute deadline and verified identity at cleanup. Browser and native
 cases run serially on that node. The native unlock window remains bounded;
 physical playback has not been observed.
+
+
+### 10.147 Confirm the backward step and isolate quality requests from steady playback
+
+The `2c4240c5e` observer comparison completed three manual changes at 67.30,
+83.62 and 83.92 ms maximum gap, with no independent backward-frame pairs in
+those intervals. Its first actual Auto upgrade presented 1080p, but the Auto
+window failed on one backward step while the incumbent was still 720p. Both
+independent subscriptions recorded the same pair: 1097.041666 to 1096.708333
+seconds, presented-frame count 2572 to 2573, same element, session and 720p
+dimensions. The live element position was 1096.687129, without pause or seek.
+This rules out a disagreement between the two observers; it does not establish
+the media/decoder root cause or physically calibrated display continuity.
+Maximum Auto callback gap was 84.02 ms; later Auto stages were not run. End
+retired both children by one second, and its runtime was removed. The receipt
+remains failed.
+
+The mixed command now offers a bounded `--steady-seconds 1..300` control at
+manual 720p, with no quality requests or Auto stage. It refuses simultaneous
+manual-count selection, records its diagnostic scope and applies a zero-hitch
+threshold. Combined with `--start-seconds 990`, this checks the same film
+window independently of quality-change work. It cannot replace switch
+qualification. Default mixed campaigns and their thresholds are unchanged.
+Syntax checks pass; no units executed.
+
+The Linux-backed physical phone launch remained locked through its bounded
+window. A blocked launch receipt and bounded logs were preserved; its own
+daemon, forward, LAN proxy and runtime were removed. No native playback is
+claimed. The installed separate lab app remains for the requested device
+qualification; production app settings and credentials were untouched.
