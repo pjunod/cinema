@@ -5,13 +5,14 @@
 <p class="state"><strong>Incomplete — final adversarial review has not started.</strong>
 The human requests a stop immediately after that review for external Fable
 reviews, before fast-lane tests or merge.</p>
-<p><strong>Working now:</strong> the committed twenty-switch continuous
-suite on owned Linux Firefox and exact daemon <code>c8484d19b</code>, following
-Chrome cleanup. The first Firefox connection ended without a receipt after a
-disk-quota failure; its diagnostics were preserved and owned orphan processes
-and obsolete runtime data removed. The new run has persisted supervision,
-a bounded deadline and automatic cleanup. A committed mixed manual/Auto command
-is being prepared for reproducible review. No unit tests have run.</p>
+<p><strong>Working now:</strong> diagnosing the completed Firefox failure with
+bounded per-switch frame metadata. All twenty changes completed in one session,
+but p95 was 133.66 ms against the unchanged 100 ms limit; two late gaps were
+183.36 ms and 133.66 ms. There were zero waits, reopens, stalls or hitches.
+The receipt remains failed and the owned runtime is cleaned up. The committed
+mixed manual/Auto command awaits execution. Separate signed Plurx CQ Lab build
+206 is installed on 17promax; the latest launch still reported Locked, so native
+playback evidence remains unmeasured. No unit tests have run.</p>
 <p><strong>Latest runtime result:</strong> the focused <code>c8484d19b</code>
 Chrome campaign passed three manual and five actual Auto changes, with at most
 66.8 ms callback gap on all eight transitions, zero stalls or hitches, and

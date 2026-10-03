@@ -4304,3 +4304,31 @@ Use `--manual-count 3` for the focused eight-change diagnostic; the default
 fifteen manual plus five Auto changes is the full twenty-change campaign.
 Run one browser case at a time. Final main-ready adversarial review and the
 subsequent human-requested Fable stop remain ahead.
+
+
+### 10.144 Retain the completed Firefox failure and prepare physical iOS evidence
+
+The supervised `c8484d19b` Firefox run completed all twenty manual switches
+in one VOD session, with zero waits, reopens, stalls or hitches. It failed
+the unchanged p95 video-gap limit: 133.66 ms against 100 ms. Changes eighteen
+and nineteen measured 183.36 ms and 133.66 ms; the other changes were at most
+84.02 ms. The run recorded 23 dropped frames out of 28,617 and a 1.001x media
+clock. No disk-quota error occurred. Its persisted JSON, JUnit, console log and
+supervisor status are retained, and its owned runtime was removed. This failed
+receipt is not a pass.
+
+The lab now retains bounded maximum-gap endpoints for each manual switch:
+film timestamps, callback and expected-display timestamps, presented-frame
+counts, attachment identities and the dropped-frame delta. These observations
+will distinguish delayed callbacks from missed presentations without changing
+measurement origins, scoring or thresholds. JavaScript syntax checks pass;
+no units executed.
+
+A separate signed `tv.plurx.cq.qual` / Plurx CQ Lab build 206 is installed on
+17promax. Its app identity has no shared keychain access group. The production
+app and its settings were not modified. The exact `b30f09ec9` Mac daemon built
+with Rust 1.97.1 for isolated generated MPEG4/AAC playback. Two launch attempts
+reported the phone locked, including a fresh retry after the human said it was
+unlocked. No native first frame or physical output is claimed. Keep the phone
+unlocked through isolated server preparation before retrying. Final review,
+the requested Fable stop and fast-lane tests remain ahead.

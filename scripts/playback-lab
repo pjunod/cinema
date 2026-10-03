@@ -2403,13 +2403,19 @@ async function setCasePreferences(driver, quality, frameDiagnostics = false) {
                   Math.max(probe.last_frame_at_ms,probe.measurement_start_at_ms),
                 end_at_ms:now,from_element:priorFrame?.element_id||null,
                 to_element:v.__plurxLabElementId||null,
-                from_session_id:priorFrame?.session_id||null};
+                from_session_id:priorFrame?.session_id||null,
+                from_media_time:priorFrame?.media_time??null,
+                from_expected_display_time_ms:priorFrame?.expected_display_time_ms??null,
+                from_presented_frames:priorFrame?.presented_frames??null};
             }
             probe.last_frame_at_ms=now;
             probe.frames+=1;
             probe.sequence+=1;
             const p=(typeof PLAYER!=='undefined'&&PLAYER)||{};
             const presented={sequence:probe.sequence,at_ms:now,
+              presentation_time_ms:Number.isFinite(metadata?.presentationTime)?metadata.presentationTime:null,
+              expected_display_time_ms:Number.isFinite(metadata?.expectedDisplayTime)?metadata.expectedDisplayTime:null,
+              presented_frames:Number.isFinite(metadata?.presentedFrames)?metadata.presentedFrames:null,
               element_id:v.__plurxLabElementId||null,
               media_time:metadata&&Number.isFinite(metadata.mediaTime)?metadata.mediaTime:null,
               absolute_time:metadata&&Number.isFinite(metadata.mediaTime)
@@ -2418,8 +2424,13 @@ async function setCasePreferences(driver, quality, frameDiagnostics = false) {
               height:metadata&&Number.isFinite(metadata.height)?metadata.height:v.videoHeight,
               method:p.method||null,session_id:p.sessionId||null,attempt_id:p.attemptId||null};
             probe.last_frame=presented;
-            if(probe.maximum_gap_detail&&probe.maximum_gap_detail.end_at_ms===now)
-              probe.maximum_gap_detail.to_session_id=presented.session_id;
+            if(probe.maximum_gap_detail&&probe.maximum_gap_detail.end_at_ms===now){
+              Object.assign(probe.maximum_gap_detail,{to_session_id:presented.session_id,
+                to_media_time:presented.media_time,
+                to_presentation_time_ms:presented.presentation_time_ms,
+                to_expected_display_time_ms:presented.expected_display_time_ms,
+                to_presented_frames:presented.presented_frames});
+            }
             if(!Array.isArray(probe.auto_presentations)) probe.auto_presentations=[];
             const switches=p.abr&&Array.isArray(p.abr.switches)?p.abr.switches:[];
             for(let index=switches.length-1;index>=0;index--){
@@ -2684,6 +2695,9 @@ async function performOperation(driver, testCase, start) {
       }
       if (testCase.require_continuous) change.continuous_after = evidenceEnd.continuous;
       change.video_gap_ms = measuredTransition.maximum_video_gap_ms;
+      change.frame_probe_gap_detail = measuredTransition.frame_probe_gap_detail;
+      change.dropped_frames = Math.max(0, Number(evidenceEnd.video.dropped || 0)
+        - Number(before.video.dropped || 0));
       change.frame_probe_operative = frameProbeOperative;
       changes.push(change);
       before = evidenceEnd;
