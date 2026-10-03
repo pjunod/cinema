@@ -1281,3 +1281,26 @@ each with zero ignored tests. Daemon feature all-target check passed in 1 minute
 lint and all four documentation-index tests passed. This receipt covers the
 physical prerequisites above; Source actor attachment, publication and durable
 post-reap settlement remain unqualified by these fixtures.
+
+### Retained canonical zero media IDs
+
+The Source binding adjunct accepts canonical nonnegative library, item and file
+IDs, matching the catalogue and locator vocabulary. The seven principal tables
+still require positive Local user IDs. The focused fixture inserts genuine
+retained library/item/file `0` before the monotonic allocator factory, obtains
+the actual authorized file witness, then claims, assigns and releases the
+never-activated Source reservation on memory and pooled SQLite. This is Store
+qualification, not a physical producer settlement receipt.
+
+On the `4b3117703` base, pinned Rust 1.97.1 passed the focused regression (1 test,
+zero ignored, 0.94 seconds), all Source Store tests (14 tests, zero ignored,
+40.74 seconds), feature all-target check (35.43 seconds) and denied-warning
+feature Clippy (38.53 seconds). The candidate adjunct changes only its three
+media-ID checks; schema installation and ordinary Shared ingress remain closed.
+
+```sh
+cargo test --locked -p plurx-core --features hiqlite-contract-tests --lib sharing_source_retained_zero_media_ids_claim_assign_and_release -- --nocapture
+cargo test --locked -p plurx-core --features hiqlite-contract-tests --lib store::sharing_source_sessions -- --nocapture
+cargo check --locked -p plurx-core --features hiqlite-contract-tests --all-targets
+cargo clippy --locked -p plurx-core --features hiqlite-contract-tests --all-targets -- -D warnings
+```

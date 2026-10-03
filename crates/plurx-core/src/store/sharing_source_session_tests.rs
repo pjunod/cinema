@@ -19,6 +19,10 @@ use crate::{
 use std::{collections::BTreeSet, path::PathBuf};
 
 async fn setup(store: &SqliteStore) -> (Uuid, CredentialKey) {
+    setup_with_media_id(store, 1).await
+}
+
+async fn setup_with_media_id(store: &SqliteStore, media_id: i64) -> (Uuid, CredentialKey) {
     let identity = store.sharing_identity(1000).await.expect("identity");
     let library = store
         .create_library(&NewLibrary {
@@ -30,6 +34,13 @@ async fn setup(store: &SqliteStore) -> (Uuid, CredentialKey) {
         .await
         .expect("library")
         .id;
+    let library = if media_id == 0 {
+        // Genuine retained zero IDs precede the monotonic allocator factory.
+        store.sharing_txn(vec![("INSERT INTO libraries(id,name,kind,paths,anime) VALUES(0,'Legacy Source','movies','[]',0)".into(),vec![]),("INSERT INTO items(id,library_id,kind,title,sort_title) VALUES(0,0,'movie','Legacy Movie','legacy movie')".into(),vec![]),("INSERT INTO files(id,item_id,path,size,mtime) VALUES(0,0,'/private/legacy-zero.mkv',20,1000)".into(),vec![])]).await.expect("retained legacy media before factory");
+        0
+    } else {
+        library
+    };
     let grant = Uuid::new_v4();
     let invitation = Uuid::new_v4();
     store
@@ -100,12 +111,23 @@ async fn intent(
     credential: &CredentialKey,
     name: &str,
 ) -> SourceSessionIntent {
+    intent_for_media(store, grant, credential, name, 1).await
+}
+
+async fn intent_for_media(
+    store: &SqliteStore,
+    grant: Uuid,
+    credential: &CredentialKey,
+    name: &str,
+    media_id: i64,
+) -> SourceSessionIntent {
+    let media_id = media_id.to_string();
     let witness = match store
         .source_item_file_witness(
             &"b".repeat(64),
             grant,
-            SourceId::parse("1").expect("Source candidate fixture operation"),
-            SourceId::parse("1").expect("Source candidate fixture operation"),
+            SourceId::parse(&media_id).expect("Source candidate fixture operation"),
+            SourceId::parse(&media_id).expect("Source candidate fixture operation"),
         )
         .await
         .expect("Source candidate fixture operation")
@@ -135,8 +157,8 @@ async fn intent(
                 now_ms: now,
                 claim_expires_at_ms: now + 60000,
                 credential_hash: "b".repeat(64),
-                item_id: SourceId::parse("1").expect("Source candidate fixture operation"),
-                file_id: SourceId::parse("1").expect("Source candidate fixture operation"),
+                item_id: SourceId::parse(&media_id).expect("Source candidate fixture operation"),
+                file_id: SourceId::parse(&media_id).expect("Source candidate fixture operation"),
                 file_revision: key
                     .file_revision(&witness)
                     .expect("Source candidate fixture operation"),
@@ -158,6 +180,40 @@ fn proof() -> SourceAdmissionMembers {
         &CredentialKey::from_bytes([17; 32]),
     )
     .expect("Source candidate fixture operation")
+}
+
+#[tokio::test]
+async fn sharing_source_retained_zero_media_ids_claim_assign_and_release() {
+    let directory = tempfile::tempdir().expect("zero ID fixture");
+    for store in [
+        SqliteStore::open_in_memory().expect("memory"),
+        SqliteStore::open(&directory.path().join("zero.db")).expect("pool"),
+    ] {
+        let (grant, key) = setup_with_media_id(&store, 0).await;
+        let request = intent_for_media(&store, grant, &key, "zero-media", 0).await;
+        let SourceClaimOutcome::Acquired(binding) = store
+            .claim_source_media_session(&request, &proof())
+            .await
+            .expect("legacy zero admission")
+        else {
+            panic!("zero media must claim")
+        };
+        assert_eq!(binding.library_id().as_str(), "0");
+        assert_eq!(binding.item_id().as_str(), "0");
+        assert_eq!(binding.file_id().as_str(), "0");
+        let assignment = store
+            .assign_source_dispatch(&binding, &key, &proof())
+            .await
+            .expect("zero dispatch")
+            .expect("assigned zero media");
+        assert_eq!(
+            store
+                .settle_source_assigned_without_activation(&assignment)
+                .await
+                .expect("never activated zero release"),
+            SourceReleaseOutcome::Released
+        );
+    }
 }
 async fn count(store: &SqliteStore, table: &str) -> i64 {
     store
