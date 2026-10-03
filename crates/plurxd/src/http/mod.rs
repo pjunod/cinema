@@ -12338,6 +12338,15 @@ mod tests {
         assert_eq!(status, StatusCode::OK);
         assert_eq!(saved["enabled"], true);
         assert_eq!(state.sharing.status().topology_qualification, "pending");
+        let transport = call(&app, get("/api/v1/sharing/status", Some(&admin))).await;
+        assert_eq!(transport.0, StatusCode::OK);
+        assert_eq!(transport.1["node_id"], state.node_id);
+        assert_eq!(transport.1["observation_scope"], "local_node");
+        assert!(transport.1["observed_at_ms"]
+            .as_i64()
+            .is_some_and(|at| at > 0));
+        assert_eq!(transport.1["serve"], "unknown");
+        assert_eq!(transport.1["tailscale_node_key_expiry"], "unknown");
         let readiness = call(&app, get("/api/v1/developer/readiness", Some(&admin)))
             .await
             .1;

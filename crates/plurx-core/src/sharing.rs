@@ -201,6 +201,7 @@ pub enum ClaimOutcome {
 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MutationOutcome {
+    Capacity,
     Applied,
     Conflict,
     NotFound,
@@ -323,6 +324,7 @@ pub struct NewImport {
 }
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ImportOutcome {
+    Capacity,
     Created,
     AlreadyImported(Uuid),
 }

@@ -1588,9 +1588,11 @@ the S1 task is integrated; no deployment is authorized.
 
 ### 16.3 Implementation progress — S2, 2026-10-02
 
-The unpublished S2 worktree preserves the primary checkout and builds on the
-prospective S1 tree. It must be ported to the gated effort and verified again
-against that exact base before its task PR is published.
+The unpublished S2 worktree preserves the primary checkout. S1 passed the
+Effort development gate on `aaafc1a0f5` and landed through PR #746 as
+`971265536a`, carrying all seven regression fields. S2 integrated that exact
+effort base in `9db1949b4`; its normal tracked hook passed. The final S2
+candidate still needs its own exact-tree checks and task gate before landing.
 
 **Implemented:** node-local TLS key provisioning and same-key renewal;
 strict SPKI, validity, server-auth and signature checks before capabilities;
@@ -1666,3 +1668,27 @@ and deployment diagnostics;
 shared-machine raw TCP Serve, two NATs, Docker bridge egress/isolation and
 startup ordering; the final task gate. The current listener refuses unqualified
 non-loopback profiles. S3–S8, native playback and promotion remain unfinished.
+
+
+**Capacity and node attribution:** invitation/import limit refusals now expose
+`sharing_capacity` with HTTP 429. Admission remains inside the atomic store
+write; a subsequent diagnostic read never grants an extra slot. The focused
+`sharing_capacity_refusals_preserve_existing_authority_and_reopen_expired_slots`
+regression passed on both SQLite modes and three real Hiqlite voters (one
+scenario, zero ignored, 9.44 seconds). It covers duplicate authority at the
+limit and canceled/expired invitation slot reuse. Admin status identifies
+`node_id`, `observed_at_ms` and `observation_scope: local_node`; it does not
+present a process-local observation as another member's readiness. Host
+Serve and node-key expiry stay unknown without operator evidence.
+
+
+On the integrated effort base, the native daemon `sharing_` filter passed
+8/8 (zero ignored, 1.27 seconds), including the node-attribution assertions.
+The core `sharing_` filter passed 20/20 (zero ignored, 1.19 seconds) after
+allowing the disposable TLS loopback listeners; the sandboxed first run
+refused those listeners and is not the passing receipt. Rust 1.97.1 was
+verified explicitly. Docs index passed 4/4 and Developer section tests 36/36.
+
+The complete sharing store filter passed 7/7 scenarios (zero ignored, 63.80
+seconds), covering both SQLite modes, three-voter authority, populated import,
+endpoint CAS/re-pair and the new capacity refusal contract.

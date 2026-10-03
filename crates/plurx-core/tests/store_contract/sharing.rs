@@ -1069,3 +1069,164 @@ async fn sharing_endpoint_cas_and_re_pair_preserve_private_viewer_identity() {
     })
     .await;
 }
+
+#[tokio::test]
+async fn sharing_capacity_refusals_preserve_existing_authority_and_reopen_expired_slots() {
+    for_each_backend(|store, backend| async move {
+        let lib = library(store.as_ref(), "Capacity fixture").await;
+        let mut invitations = Vec::new();
+        for n in 0..32 {
+            let record = InvitationRecord {
+                id: Uuid::new_v4(),
+                token_hash: hash(n),
+                library_ids: vec![lib],
+                created_at_ms: 1000,
+                expires_at_ms: 2000,
+            };
+            assert_eq!(
+                store
+                    .create_share_invitation(record.clone())
+                    .await
+                    .expect("fill invitation slots"),
+                MutationOutcome::Applied,
+                "{backend}"
+            );
+            invitations.push(record);
+        }
+        let overflow = InvitationRecord {
+            id: Uuid::new_v4(),
+            token_hash: hash(40),
+            library_ids: vec![lib],
+            created_at_ms: 1001,
+            expires_at_ms: 3000,
+        };
+        assert_eq!(
+            store
+                .create_share_invitation(overflow.clone())
+                .await
+                .expect("bounded invitations"),
+            MutationOutcome::Capacity,
+            "{backend}"
+        );
+        assert_eq!(
+            store
+                .create_share_invitation(invitations[0].clone())
+                .await
+                .expect("duplicate remains conflict"),
+            MutationOutcome::Conflict
+        );
+        store
+            .cancel_share_invitation(invitations[0].id)
+            .await
+            .expect("cancel releases slot");
+        assert_eq!(
+            store
+                .create_share_invitation(overflow)
+                .await
+                .expect("reuse canceled slot"),
+            MutationOutcome::Applied
+        );
+        let after_expiry = InvitationRecord {
+            id: Uuid::new_v4(),
+            token_hash: hash(41),
+            library_ids: vec![lib],
+            created_at_ms: 2000,
+            expires_at_ms: 3000,
+        };
+        assert_eq!(
+            store
+                .create_share_invitation(after_expiry)
+                .await
+                .expect("expired invitations release slots"),
+            MutationOutcome::Applied
+        );
+        let local = store.sharing_identity(1000).await.expect("local identity");
+        let directory = tempfile::tempdir().expect("disposable key directory");
+        let key = plurx_core::secrets::open_credential_key(
+            &directory.path().join("key"),
+            &Default::default(),
+        )
+        .expect("fixture key");
+        let make_import = || {
+            let id = Uuid::new_v4();
+            NewImport {
+                id,
+                source: SharingIdentity {
+                    server_id: Uuid::new_v4(),
+                    catalogue_epoch: Uuid::new_v4(),
+                    created_at_ms: 1000,
+                },
+                source_name: "Capacity source".into(),
+                claim_id: Uuid::new_v4(),
+                credential: key
+                    .seal_sharing(
+                        SharingSecretPurpose::Credential,
+                        local.server_id,
+                        id,
+                        "fixture credential",
+                    )
+                    .expect("seal credential"),
+                claim_secret: key
+                    .seal_sharing(
+                        SharingSecretPurpose::Claim,
+                        local.server_id,
+                        id,
+                        "fixture invitation",
+                    )
+                    .expect("seal invitation"),
+                endpoints: vec![Endpoint {
+                    ipv4: "100.101.102.103".parse().expect("fixture address"),
+                    ipv6: None,
+                    ts_fqdn: "source.example.ts.net".into(),
+                    port: 32443,
+                    spki_sha256: hash(7),
+                }],
+                now_ms: 1000,
+            }
+        };
+        let first = make_import();
+        assert_eq!(
+            store
+                .create_share_import(first.clone())
+                .await
+                .expect("first import"),
+            ImportOutcome::Created
+        );
+        for _ in 1..32 {
+            assert_eq!(
+                store
+                    .create_share_import(make_import())
+                    .await
+                    .expect("fill import slots"),
+                ImportOutcome::Created
+            );
+        }
+        assert_eq!(
+            store
+                .create_share_import(make_import())
+                .await
+                .expect("bounded imports"),
+            ImportOutcome::Capacity,
+            "{backend}"
+        );
+        let mut duplicate = first.clone();
+        duplicate.id = Uuid::new_v4();
+        duplicate.claim_id = Uuid::new_v4();
+        assert_eq!(
+            store
+                .create_share_import(duplicate)
+                .await
+                .expect("duplicate at capacity"),
+            ImportOutcome::AlreadyImported(first.id)
+        );
+        assert_eq!(
+            store
+                .sharing_imports()
+                .await
+                .expect("retained authority")
+                .len(),
+            32
+        );
+    })
+    .await;
+}
