@@ -5506,3 +5506,35 @@ A new unrun regression deliberately retires the launching caller thread,
 proves its stopped child stays alive while the owner is healthy, then kills
 the owner and requires the exact child's exit. Build/hook and repeat runtime
 qualification are pending. No unit tests or final adversarial review ran.
+
+
+### 10.189 · Parent-death cleanup passes; recovery remains failed
+
+Fix `def84f8c5` PASSED the normal hook (1m31s), exact committed Linux
+production build (2m23s), and Linux core all-target Clippy with
+`--features hiqlite-store -- -D warnings` (1m12s). Test sources compiled;
+no units executed. All 215 regression fields resolve statically.
+
+The second owner-loss probe PASSED the focused crash-retirement condition:
+voter B PID 2280386 was SIGKILLed and neither of its two pre-recorded
+children survived the ten-second bound. Its preceding mixed-owner quality
+switch also passed. TTFF was 9.159 s, observed initial clock 1.002x.
+
+The overall receipt remains FAILED. Playback exhausted its old buffer at
+21.957 seconds and did not advance beyond it within the 150-second recovery
+window. A stall-restart attempt produced a second durable parent start,
+but the browser still held its old public session/family with 503 schedule
+refusals. Three replacement-family producers on A remained stopped after
+End at 0/1/3/5 seconds. The probe never reached a healthy companion switch.
+The parent-count error additionally records two starts against the original
+one-parent allowance; the helper only permits a second parent after recovery
+has actually been proven, which did not happen here.
+
+Receipt: `continuous-chrome-def84f8c5-targeted-owner-loss2`; diagnostics
+and bounded node logs use the same source/stem. All owned daemons/browser/
+proxy/runtime trees were removed. Exact replacement producer identities
+2287228/116432026, 2287229/116432028 and 2287230/116432030 were checked
+again after daemon cleanup and were gone. Runtime directories were absent.
+The failure does not leave live orphaned work. Recovery/create/attachment
+ownership is the next investigation; no success or complete qualification
+is claimed.

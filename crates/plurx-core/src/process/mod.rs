@@ -36,7 +36,8 @@ pub struct ChildJob {
 ///
 /// `work` names the child's [`ChildClass`] and purpose: the child lowers its
 /// own CPU, I/O and OOM priority to the class's policy before `exec`
-/// ([`priority::apply`]; a failure there never fails the spawn), and it is
+/// ([`priority::apply`]; priority refusals never fail the spawn, but Linux
+/// ownership setup must succeed), and it is
 /// listed in [`priority::running`] until the returned job is dropped.
 /// `process::census::every_production_spawn_goes_through_the_launcher` fails
 /// on any production spawn that does not come through here.
