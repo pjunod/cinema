@@ -637,8 +637,149 @@ async fn assign_dispatch_prepared<T: Backend>(
     }
 }
 
+fn owned_route_condition(
+    authority: &SourceOwnedRouteAuthority,
+    now: i64,
+) -> Result<Option<Statement>, StoreError> {
+    let assignment = &authority.assignment;
+    let members = &assignment.members;
+    let Ok((floor, roster, cutoff, observed)) = members.write_guard(now, 1, 2, 3) else {
+        return Ok(None);
+    };
+    let Ok(raft) = i64::try_from(members.actual_local_raft_id()) else {
+        return Ok(None);
+    };
+    let mut values = claim_values(&authority.intent, roster, cutoff, observed);
+    values.extend([
+        raft.into(),
+        assignment.owner_node_id.clone().into(),
+        assignment.dispatch_generation.into(),
+        crate::cluster::coordination::removed_job_owner_key(&assignment.owner_node_id).into(),
+        authority.session_id.clone().into(),
+        authority.lease_expires_at_ms.into(),
+        authority.lease_revision.into(),
+    ]);
+    let guard = authority_guard(&floor);
+    let exact="b.incarnation_id=$10 AND b.owner_key=$4 AND b.share_grant_id=$5 AND b.share_viewer_key=$6 AND b.request_id=$7 AND b.request_fingerprint=$8 AND b.playback_id=$9 AND b.source_server_id=$11 AND b.catalogue_epoch=$12 AND b.library_id=$13 AND b.item_id=$14 AND b.file_id=$15 AND b.file_revision=$16 AND b.reservation_state='held' AND b.dispatch_generation=$23 AND $23=1 AND b.start_resolved_at_ms IS NOT NULL";
+    let request="r.incarnation_id=b.incarnation_id AND r.owner_key=b.owner_key AND r.request_id=b.request_id AND r.request_fingerprint=b.request_fingerprint AND r.playback_id=b.playback_id AND r.principal_kind='sharing' AND r.user_id IS NULL AND r.share_grant_id=b.share_grant_id AND r.share_viewer_key=b.share_viewer_key AND r.state='resolved' AND r.claim_expires_at_ms=$19 AND r.owner_node_id=$22";
+    let route="s.incarnation_id=b.incarnation_id AND s.owner_key=b.owner_key AND s.principal_kind='sharing' AND s.user_id IS NULL AND s.share_grant_id=b.share_grant_id AND s.share_viewer_key=b.share_viewer_key AND s.playback_id=b.playback_id AND s.request_fingerprint=b.request_fingerprint AND s.session_id=$25 AND s.owner_node_id=$22 AND s.owner_epoch=1 AND s.state='active' AND s.lease_expires_at_ms=$26 AND s.lease_expires_at_ms>$3 AND s.publication_ready_at_ms=0 AND s.response_json=r.response_json AND length(CAST(s.recipe_json AS BLOB))<=32768 AND length(CAST(s.response_json AS BLOB))<=65536";
+    let lease="j.resource='session:'||b.incarnation_id AND j.owner_node_id=s.owner_node_id AND j.fence=s.owner_epoch AND j.expires_at_ms=s.lease_expires_at_ms AND j.revision=$27 AND j.revision>0 AND j.revision<9223372036854775807";
+    Ok(Some((format!("EXISTS(SELECT 1 FROM sharing_source_session_bindings b JOIN media_session_requests r ON {request} JOIN media_sessions s ON {route} JOIN job_leases j ON {lease} WHERE {exact} AND {guard} AND EXISTS(SELECT 1 FROM cluster_nodes WHERE raft_id=$21 AND node_id=$22 AND removed_at IS NULL) AND NOT EXISTS(SELECT 1 FROM settings WHERE key=$24) AND NOT EXISTS(SELECT 1 FROM media_session_preparations WHERE staged_incarnation_id=b.incarnation_id))"),values)))
+}
+
+pub(crate) fn source_owned_renewal_guard(
+    authority: &SourceOwnedRouteAuthority,
+    renewal: &crate::domain::MediaSessionRenewal,
+    at: i64,
+    expires: i64,
+) -> Result<Option<Statement>, StoreError> {
+    let now = now_ms()?;
+    if renewal.incarnation_id != authority.assignment.binding.incarnation_id.to_string()
+        || renewal.owner_epoch != 1
+        || at <= 0
+        || at > now
+        || now.saturating_sub(at) > 5000
+        || expires <= now
+        || expires <= authority.lease_expires_at_ms
+    {
+        return Ok(None);
+    }
+    let Some((condition, values)) = owned_route_condition(authority, now)? else {
+        return Ok(None);
+    };
+    Ok(Some((format!("INSERT INTO sharing_source_session_bindings(incarnation_id,owner_key,share_grant_id,share_viewer_key,request_id,request_fingerprint,playback_id,source_server_id,catalogue_epoch,library_id,item_id,file_id,file_revision,reservation_state,start_resolved_at_ms,dispatch_generation,created_at_ms) SELECT NULL,$4,$5,$6,$7,$8,$9,$11,$12,$13,$14,$15,$16,'held',NULL,0,$3 WHERE NOT ({condition})"),values)))
+}
+
+async fn prepare_owned_route<T: Backend>(
+    backend: &T,
+    assignment: &SourceDispatchAssignment,
+    credential: &CredentialKey,
+    members: &SourceAdmissionMembers,
+) -> Result<SourceOwnedRouteAuthorityRead, StoreError> {
+    let now = now_ms()?;
+    if assignment.binding.released
+        || assignment.dispatch_generation != 1
+        || !present(backend).await?
+        || members.write_guard(now, 1, 2, 3).is_err()
+    {
+        return Ok(SourceOwnedRouteAuthorityRead::Unavailable);
+    }
+    let Ok(raft) = i64::try_from(members.actual_local_raft_id()) else {
+        return Ok(SourceOwnedRouteAuthorityRead::Unavailable);
+    };
+    let binding = &assignment.binding;
+    #[derive(Deserialize)]
+    struct Current {
+        hash: String,
+        expires: i64,
+        session: String,
+        lease: i64,
+        revision: i64,
+    }
+    let rows=backend.sharing_read("SELECT json_object('hash',e.token_hash,'expires',r.claim_expires_at_ms,'session',s.session_id,'lease',s.lease_expires_at_ms,'revision',j.revision) AS payload FROM sharing_source_session_bindings b JOIN media_session_requests r ON r.owner_key=b.owner_key AND r.request_id=b.request_id AND r.incarnation_id=b.incarnation_id JOIN media_sessions s ON s.incarnation_id=b.incarnation_id JOIN job_leases j ON j.resource='session:'||s.incarnation_id AND j.owner_node_id=s.owner_node_id AND j.fence=s.owner_epoch AND j.expires_at_ms=s.lease_expires_at_ms JOIN sharing_exports e ON e.id=b.share_grant_id JOIN cluster_nodes n ON n.raft_id=$1 AND n.node_id=s.owner_node_id AND n.removed_at IS NULL WHERE b.incarnation_id=$2 AND b.owner_key=$3 AND s.owner_node_id=$4 AND b.reservation_state='held' AND b.start_resolved_at_ms IS NOT NULL AND b.dispatch_generation=1 AND r.state='resolved' AND s.state='active' AND s.owner_epoch=1 AND s.lease_expires_at_ms>$5 AND s.publication_ready_at_ms=0 AND length(s.session_id) BETWEEN 1 AND 256 AND length(e.token_hash)=64 AND j.revision>0 AND j.revision<9223372036854775807",vec![raft.into(),binding.incarnation_id.into(),binding.principal.owner_key().into(),assignment.owner_node_id.clone().into(),now.into()]).await?;
+    let [row] = rows.as_slice() else {
+        return Ok(SourceOwnedRouteAuthorityRead::Unavailable);
+    };
+    let current: Current = serde_json::from_str(row).map_err(|_| invalid())?;
+    if !is_hash(&current.hash) {
+        return Ok(SourceOwnedRouteAuthorityRead::Unavailable);
+    }
+    let request = SourceSessionRequest {
+        principal: binding.principal.clone(),
+        request_id: binding.request_id.clone(),
+        request_fingerprint: binding.request_fingerprint.clone(),
+        playback_id: binding.playback_id.clone(),
+        incarnation_id: binding.incarnation_id,
+        now_ms: now,
+        claim_expires_at_ms: current.expires,
+        credential_hash: current.hash,
+        item_id: binding.item_id.clone(),
+        file_id: binding.file_id.clone(),
+        file_revision: binding.file_revision.clone(),
+    };
+    let intent = match prepare_intent(backend, request, credential, true).await? {
+        SourceIntentRead::Ready(i) => i,
+        SourceIntentRead::Unavailable => return Ok(SourceOwnedRouteAuthorityRead::Unavailable),
+        SourceIntentRead::Capacity => return Ok(SourceOwnedRouteAuthorityRead::Capacity),
+    };
+    if !agrees(binding, &intent) {
+        return Ok(SourceOwnedRouteAuthorityRead::Unavailable);
+    }
+    let authority = SourceOwnedRouteAuthority {
+        assignment: SourceDispatchAssignment {
+            binding: binding.clone(),
+            owner_node_id: assignment.owner_node_id.clone(),
+            dispatch_generation: assignment.dispatch_generation,
+            members: members.clone(),
+        },
+        intent,
+        session_id: current.session,
+        lease_expires_at_ms: current.lease,
+        lease_revision: current.revision,
+    };
+    let Some((condition, values)) = owned_route_condition(&authority, now_ms()?)? else {
+        return Ok(SourceOwnedRouteAuthorityRead::Unavailable);
+    };
+    let rows = backend
+        .sharing_read(
+            &format!("SELECT json_quote(CASE WHEN {condition} THEN 1 ELSE 0 END) AS payload"),
+            values,
+        )
+        .await?;
+    if rows.first().map(String::as_str) != Some("1") {
+        return Ok(SourceOwnedRouteAuthorityRead::Unavailable);
+    }
+    Ok(SourceOwnedRouteAuthorityRead::Ready(Box::new(authority)))
+}
+
 #[async_trait]
 pub trait SharingSourceSessionStore: Send + Sync {
+    async fn prepare_source_owned_route_authority(
+        &self,
+        assignment: &SourceDispatchAssignment,
+        credential: &CredentialKey,
+        members: &SourceAdmissionMembers,
+    ) -> Result<SourceOwnedRouteAuthorityRead, StoreError>;
     async fn prepare_source_activation_authority(
         &self,
         assignment: &SourceDispatchAssignment,
@@ -674,6 +815,14 @@ pub trait SharingSourceSessionStore: Send + Sync {
 
 #[async_trait]
 impl<T: Backend> SharingSourceSessionStore for T {
+    async fn prepare_source_owned_route_authority(
+        &self,
+        assignment: &SourceDispatchAssignment,
+        credential: &CredentialKey,
+        members: &SourceAdmissionMembers,
+    ) -> Result<SourceOwnedRouteAuthorityRead, StoreError> {
+        prepare_owned_route(self, assignment, credential, members).await
+    }
     async fn assign_source_dispatch(
         &self,
         binding: &SourceBindingHandle,
@@ -719,46 +868,7 @@ impl<T: Backend> SharingSourceSessionStore for T {
         request: SourceSessionRequest,
         credential: &CredentialKey,
     ) -> Result<SourceIntentRead, StoreError> {
-        let PlaybackPrincipal::Sharing { grant_id, .. } = &request.principal else {
-            return Err(invalid());
-        };
-        if !present(self).await? {
-            return Ok(SourceIntentRead::Unavailable);
-        }
-        let witness = match self
-            .source_item_file_witness(
-                &request.credential_hash,
-                *grant_id,
-                request.item_id.clone(),
-                request.file_id.clone(),
-            )
-            .await?
-        {
-            SourceDetailsRead::Authorized(witness) => witness,
-            SourceDetailsRead::Unavailable => return Ok(SourceIntentRead::Unavailable),
-            SourceDetailsRead::Capacity => return Ok(SourceIntentRead::Capacity),
-        };
-        let Some(envelope) = self
-            .source_catalogue_revision_key(witness.server, witness.epoch)
-            .await?
-        else {
-            return Ok(SourceIntentRead::Unavailable);
-        };
-        let rows = self.sharing_read("SELECT json_object('server_id',server_id,'catalogue_epoch',catalogue_epoch,'created_at_ms',created_at_ms) AS payload FROM sharing_identity WHERE singleton=1",vec![]).await?;
-        let [row] = rows.as_slice() else {
-            return Ok(SourceIntentRead::Unavailable);
-        };
-        let identity: SharingIdentity = serde_json::from_str(row).map_err(|_| invalid())?;
-        if identity.server_id != witness.server || identity.catalogue_epoch != witness.epoch {
-            return Ok(SourceIntentRead::Unavailable);
-        }
-        let key = CatalogueRevisionKey::open(credential, identity, &envelope)?;
-        if key.file_revision(&witness)? != request.file_revision {
-            return Ok(SourceIntentRead::Unavailable);
-        }
-        Ok(SourceIntentRead::Ready(Box::new(
-            SourceSessionIntent::from_current_witness(request, witness, &key, envelope)?,
-        )))
+        prepare_intent(self, request, credential, false).await
     }
 
     async fn claim_source_media_session(
@@ -883,6 +993,56 @@ impl<T: Backend> SharingSourceSessionStore for T {
             SourceReleaseOutcome::Refused
         })
     }
+}
+
+async fn prepare_intent<T: Backend>(
+    backend: &T,
+    request: SourceSessionRequest,
+    credential: &CredentialKey,
+    resolved: bool,
+) -> Result<SourceIntentRead, StoreError> {
+    let PlaybackPrincipal::Sharing { grant_id, .. } = &request.principal else {
+        return Err(invalid());
+    };
+    if !present(backend).await? {
+        return Ok(SourceIntentRead::Unavailable);
+    }
+    let witness = match backend
+        .source_item_file_witness(
+            &request.credential_hash,
+            *grant_id,
+            request.item_id.clone(),
+            request.file_id.clone(),
+        )
+        .await?
+    {
+        SourceDetailsRead::Authorized(witness) => witness,
+        SourceDetailsRead::Unavailable => return Ok(SourceIntentRead::Unavailable),
+        SourceDetailsRead::Capacity => return Ok(SourceIntentRead::Capacity),
+    };
+    let Some(envelope) = backend
+        .source_catalogue_revision_key(witness.server, witness.epoch)
+        .await?
+    else {
+        return Ok(SourceIntentRead::Unavailable);
+    };
+    let rows = backend.sharing_read("SELECT json_object('server_id',server_id,'catalogue_epoch',catalogue_epoch,'created_at_ms',created_at_ms) AS payload FROM sharing_identity WHERE singleton=1",vec![]).await?;
+    let [row] = rows.as_slice() else {
+        return Ok(SourceIntentRead::Unavailable);
+    };
+    let identity: SharingIdentity = serde_json::from_str(row).map_err(|_| invalid())?;
+    if identity.server_id != witness.server || identity.catalogue_epoch != witness.epoch {
+        return Ok(SourceIntentRead::Unavailable);
+    }
+    let key = CatalogueRevisionKey::open(credential, identity, &envelope)?;
+    if key.file_revision(&witness)? != request.file_revision {
+        return Ok(SourceIntentRead::Unavailable);
+    }
+    Ok(SourceIntentRead::Ready(Box::new(if resolved {
+        SourceSessionIntent::from_current_owned_witness(request, witness, &key, envelope)?
+    } else {
+        SourceSessionIntent::from_current_witness(request, witness, &key, envelope)?
+    })))
 }
 
 #[cfg(test)]

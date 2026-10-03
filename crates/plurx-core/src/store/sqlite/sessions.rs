@@ -3365,155 +3365,46 @@ impl MediaSessionStore for SqliteStore {
         now_ms: i64,
         lease_expires_at_ms: i64,
     ) -> Result<Vec<String>, StoreError> {
-        if owner_node_id.is_empty()
-            || owner_node_id.len() > 256
-            || renewals.len() > MAX_RENEWALS
-            || renewals.iter().any(|renewal| !valid_renewal(renewal))
-            || lease_expires_at_ms <= now_ms
-        {
-            return Err(StoreError::Task(
-                "invalid media-session renewal batch".to_owned(),
-            ));
-        }
-        let owner_node_id = owner_node_id.to_owned();
-        let renewals = renewals.to_vec();
-        self.with_conn(move |conn| {
-            let tx = conn.unchecked_transaction()?;
-            let rebuilt = route_projection(&tx)? == PRINCIPAL_ROUTE_COLS;
-            let owner_column = if rebuilt { "owner_key" } else { "user_id" };
-            let live_session = live_local_session_predicate(rebuilt, "media_sessions");
-            let live_alias = live_local_session_predicate(rebuilt, "session");
-            let mut renewed = Vec::new();
-            for renewal in renewals {
-                let lease_resource = format!("session:{}", renewal.incarnation_id);
-                let lease_renewed = tx.execute(
-                    &format!("UPDATE job_leases SET expires_at_ms = ?1, revision = revision + 1,
-                            updated_at_ms = ?2
-                      WHERE resource = ?3 AND owner_node_id = ?4 AND fence = ?5
-                        AND expires_at_ms > ?2 AND revision < 9223372036854775807
-                        AND expires_at_ms = (SELECT lease_expires_at_ms FROM media_sessions
-                          WHERE incarnation_id = ?6 AND owner_node_id = ?4 AND owner_epoch = ?5
-                            AND state = 'active' AND {live_session} AND lease_expires_at_ms > ?2
-                            AND (publication_ready_at_ms != ?7 OR EXISTS (
-                              SELECT 1 FROM media_playback_pointers pointer
-                               WHERE pointer.{owner_column} = media_sessions.{owner_column}
-                                 AND pointer.playback_id = media_sessions.playback_id
-                                 AND pointer.current_incarnation_id = media_sessions.incarnation_id))
-                            -- A staged successor's deadline is its whole life,
-                            -- and renewing it would be the one thing that can
-                            -- make that deadline never arrive. The ledger's
-                            -- reaper below says the retirement sweep ends a
-                            -- staged row whose deadline passed like any other
-                            -- active row — true only while nothing renews it.
-                            -- The owner node holds a real VOD session for the
-                            -- successor, so it is in `renewable_session_ids`
-                            -- and would otherwise be pushed forward every tick
-                            -- for as long as the node lives, holding an encoder
-                            -- and an admission slot nobody will ever commit.
-                            -- Keyed on the ledger row, which commit deletes, so
-                            -- a committed successor renews normally from its
-                            -- first tick after the commit.
-                            AND NOT EXISTS (SELECT 1 FROM media_session_preparations staged
-                              WHERE staged.staged_incarnation_id = media_sessions.incarnation_id
-                                AND staged.{owner_column} = media_sessions.{owner_column}
-                                AND staged.playback_id = media_sessions.playback_id)
-                            AND NOT EXISTS (SELECT 1 FROM media_session_requests request
-                              WHERE request.{owner_column} = media_sessions.{owner_column}
-                                AND request.incarnation_id = media_sessions.incarnation_id
-                                AND request.state = 'starting'
-                                AND request.claim_expires_at_ms <= media_sessions.lease_expires_at_ms))"),
-                    params![
-                        lease_expires_at_ms,
-                        now_ms,
-                        lease_resource,
-                        owner_node_id,
-                        renewal.owner_epoch,
-                        renewal.incarnation_id,
-                        MEDIA_SESSION_PUBLICATION_BLOCKED,
-                    ],
-                )? == 1;
-                if lease_renewed
-                    && tx.execute(
-                        &format!("UPDATE media_sessions SET lease_expires_at_ms = ?1, updated_at_ms = ?2,
-                              produced_playable_through_ms = MAX(
-                                produced_playable_through_ms, ?7),
-                              fetched_through_ms = MAX(fetched_through_ms, ?8),
-                              media_sequence = MAX(media_sequence, ?9)
-                      WHERE incarnation_id = ?3 AND owner_node_id = ?4 AND owner_epoch = ?5
-                        AND state = 'active' AND {live_session} AND lease_expires_at_ms > ?2
-                        AND (publication_ready_at_ms != ?10 OR EXISTS (
-                          SELECT 1 FROM media_playback_pointers pointer
-                           WHERE pointer.{owner_column} = media_sessions.{owner_column}
-                             AND pointer.playback_id = media_sessions.playback_id
-                             AND pointer.current_incarnation_id = media_sessions.incarnation_id))
-                        AND NOT EXISTS (SELECT 1 FROM media_session_requests request
-                          WHERE request.{owner_column} = media_sessions.{owner_column}
-                            AND request.incarnation_id = media_sessions.incarnation_id
-                            AND request.state = 'starting'
-                            AND request.claim_expires_at_ms <= media_sessions.lease_expires_at_ms)
-                        AND EXISTS (SELECT 1 FROM job_leases
-                          WHERE resource = ?6 AND owner_node_id = ?4 AND fence = ?5
-                            AND expires_at_ms = ?1)"),
-                        params![
-                            lease_expires_at_ms,
-                            now_ms,
-                            renewal.incarnation_id,
-                            owner_node_id,
-                            renewal.owner_epoch,
-                            lease_resource,
-                            renewal.produced_playable_through_ms,
-                            renewal.fetched_through_ms,
-                            renewal.media_sequence,
-                            MEDIA_SESSION_PUBLICATION_BLOCKED,
-                        ],
-                    )? == 1
-                {
-                    tx.execute(
-                        &format!("UPDATE cache_consumer_pins
-                            SET expires_at_ms = CASE
-                                  WHEN expires_at_ms < ?1 THEN ?1 ELSE expires_at_ms END
-                          WHERE consumer_kind = 'media_session' AND consumer_id = ?2
-                            AND consumer_epoch = ?3 AND expires_at_ms > ?4
-                            AND EXISTS (
-                                SELECT 1 FROM transcode_cache_locations location
-                                 WHERE location.storage_id = cache_consumer_pins.storage_id
-                                   AND location.recipe_hash = cache_consumer_pins.recipe_hash
-                                   AND location.generation_id = cache_consumer_pins.generation_id
-                                   AND location.storage_class = 'shared'
-                                   AND location.complete = 1)
-                            AND EXISTS (
-                                SELECT 1 FROM media_sessions session
-                                 WHERE session.incarnation_id = ?2
-                                   AND session.owner_node_id = ?5
-                                   AND session.owner_epoch = ?3
-                                   AND session.state = 'active' AND {live_alias}
-                                   AND session.lease_expires_at_ms = ?1
-                                   AND (session.publication_ready_at_ms != ?6 OR EXISTS (
-                                     SELECT 1 FROM media_playback_pointers pointer
-                                      WHERE pointer.{owner_column} = session.{owner_column}
-                                        AND pointer.playback_id = session.playback_id
-                                        AND pointer.current_incarnation_id = session.incarnation_id))
-                                   AND NOT EXISTS (SELECT 1 FROM media_session_requests request
-                                     WHERE request.{owner_column} = session.{owner_column}
-                                       AND request.incarnation_id = session.incarnation_id
-                                       AND request.state = 'starting'
-                                       AND request.claim_expires_at_ms <= session.lease_expires_at_ms))"),
-                        params![
-                            lease_expires_at_ms,
-                            renewal.incarnation_id,
-                            renewal.owner_epoch,
-                            now_ms,
-                            owner_node_id,
-                            MEDIA_SESSION_PUBLICATION_BLOCKED,
-                        ],
-                    )?;
-                    renewed.push(renewal.incarnation_id);
-                }
-            }
-            tx.commit()?;
-            Ok(renewed)
-        })
+        renew_with_authority(
+            self,
+            owner_node_id,
+            renewals,
+            now_ms,
+            lease_expires_at_ms,
+            None,
+        )
         .await
+    }
+    async fn renew_source_media_session(
+        &self,
+        authority: &crate::sharing_source_sessions::SourceOwnedRouteAuthority,
+        renewal: &MediaSessionRenewal,
+        now_ms: i64,
+        lease_expires_at_ms: i64,
+    ) -> Result<Option<MediaSessionRoute>, StoreError> {
+        let renewed = renew_with_authority(
+            self,
+            &authority.assignment.owner_node_id,
+            std::slice::from_ref(renewal),
+            now_ms,
+            lease_expires_at_ms,
+            Some(authority),
+        )
+        .await?;
+        if renewed.is_empty() {
+            return Ok(None);
+        }
+        Ok(self
+            .media_session_route_by_incarnation(&renewal.incarnation_id)
+            .await?
+            .filter(|route| {
+                route.principal == authority.assignment.binding.principal
+                    && route.session_id == authority.session_id
+                    && route.owner_node_id == authority.assignment.owner_node_id
+                    && route.owner_epoch == renewal.owner_epoch
+                    && route.state == "active"
+                    && route.lease_expires_at_ms == lease_expires_at_ms
+            }))
     }
 
     async fn expired_media_sessions(
@@ -4587,6 +4478,173 @@ fn read_recovery_row(
         updated_at_ms,
     )
     .map(Some)
+}
+
+async fn renew_with_authority(
+    store: &SqliteStore,
+    owner_node_id: &str,
+    renewals: &[MediaSessionRenewal],
+    now_ms: i64,
+    lease_expires_at_ms: i64,
+    authority: Option<&crate::sharing_source_sessions::SourceOwnedRouteAuthority>,
+) -> Result<Vec<String>, StoreError> {
+    if owner_node_id.is_empty()
+        || owner_node_id.len() > 256
+        || renewals.len() > MAX_RENEWALS
+        || renewals.iter().any(|renewal| !valid_renewal(renewal))
+        || lease_expires_at_ms <= now_ms
+    {
+        return Err(StoreError::Task(
+            "invalid media-session renewal batch".to_owned(),
+        ));
+    }
+    let owner_node_id = owner_node_id.to_owned();
+    let renewals = renewals.to_vec();
+    let authority = authority.cloned();
+    store.with_conn(move |conn| {
+            let tx = conn.unchecked_transaction()?;
+            let rebuilt = route_projection(&tx)? == PRINCIPAL_ROUTE_COLS;
+            if let Some(authority)=authority.as_ref(){
+                if renewals.len()!=1{return Ok(Vec::new())}
+                let Some((sql,values))=crate::store::sharing_source_sessions::source_owned_renewal_guard(authority,&renewals[0],now_ms,lease_expires_at_ms)? else{return Ok(Vec::new())};
+                let (sql,values)=crate::store::sharing::ordered(&sql,values)?;
+                let values=values.into_iter().map(|v|match v{crate::store::sharing::Value::Integer(v)=>rusqlite::types::Value::Integer(v),crate::store::sharing::Value::Text(v)=>rusqlite::types::Value::Text(v)}).collect::<Vec<_>>();
+                if let Err(error)=tx.execute(&sql,rusqlite::params_from_iter(values)){let error=StoreError::from(error);if crate::store::sharing_source_sessions::source_write_refused(&error){return Ok(Vec::new())}return Err(error)}
+            }
+            let owner_column = if rebuilt { "owner_key" } else { "user_id" };
+            let live_session = if authority.is_some(){"1=1".to_owned()}else{live_local_session_predicate(rebuilt, "media_sessions")};
+            let live_alias = if authority.is_some(){"1=1".to_owned()}else{live_local_session_predicate(rebuilt, "session")};
+            let mut renewed = Vec::new();
+            for renewal in renewals {
+                let lease_resource = format!("session:{}", renewal.incarnation_id);
+                let lease_renewed = tx.execute(
+                    &format!("UPDATE job_leases SET expires_at_ms = ?1, revision = revision + 1,
+                            updated_at_ms = ?2
+                      WHERE resource = ?3 AND owner_node_id = ?4 AND fence = ?5
+                        AND expires_at_ms > ?2 AND revision < 9223372036854775807
+                        AND expires_at_ms = (SELECT lease_expires_at_ms FROM media_sessions
+                          WHERE incarnation_id = ?6 AND owner_node_id = ?4 AND owner_epoch = ?5
+                            AND state = 'active' AND {live_session} AND lease_expires_at_ms > ?2
+                            AND (publication_ready_at_ms != ?7 OR EXISTS (
+                              SELECT 1 FROM media_playback_pointers pointer
+                               WHERE pointer.{owner_column} = media_sessions.{owner_column}
+                                 AND pointer.playback_id = media_sessions.playback_id
+                                 AND pointer.current_incarnation_id = media_sessions.incarnation_id))
+                            -- A staged successor's deadline is its whole life,
+                            -- and renewing it would be the one thing that can
+                            -- make that deadline never arrive. The ledger's
+                            -- reaper below says the retirement sweep ends a
+                            -- staged row whose deadline passed like any other
+                            -- active row — true only while nothing renews it.
+                            -- The owner node holds a real VOD session for the
+                            -- successor, so it is in `renewable_session_ids`
+                            -- and would otherwise be pushed forward every tick
+                            -- for as long as the node lives, holding an encoder
+                            -- and an admission slot nobody will ever commit.
+                            -- Keyed on the ledger row, which commit deletes, so
+                            -- a committed successor renews normally from its
+                            -- first tick after the commit.
+                            AND NOT EXISTS (SELECT 1 FROM media_session_preparations staged
+                              WHERE staged.staged_incarnation_id = media_sessions.incarnation_id
+                                AND staged.{owner_column} = media_sessions.{owner_column}
+                                AND staged.playback_id = media_sessions.playback_id)
+                            AND NOT EXISTS (SELECT 1 FROM media_session_requests request
+                              WHERE request.{owner_column} = media_sessions.{owner_column}
+                                AND request.incarnation_id = media_sessions.incarnation_id
+                                AND request.state = 'starting'
+                                AND request.claim_expires_at_ms <= media_sessions.lease_expires_at_ms))"),
+                    params![
+                        lease_expires_at_ms,
+                        now_ms,
+                        lease_resource,
+                        owner_node_id,
+                        renewal.owner_epoch,
+                        renewal.incarnation_id,
+                        MEDIA_SESSION_PUBLICATION_BLOCKED,
+                    ],
+                )? == 1;
+                if lease_renewed
+                    && tx.execute(
+                        &format!("UPDATE media_sessions SET lease_expires_at_ms = ?1, updated_at_ms = ?2,
+                              produced_playable_through_ms = MAX(
+                                produced_playable_through_ms, ?7),
+                              fetched_through_ms = MAX(fetched_through_ms, ?8),
+                              media_sequence = MAX(media_sequence, ?9)
+                      WHERE incarnation_id = ?3 AND owner_node_id = ?4 AND owner_epoch = ?5
+                        AND state = 'active' AND {live_session} AND lease_expires_at_ms > ?2
+                        AND (publication_ready_at_ms != ?10 OR EXISTS (
+                          SELECT 1 FROM media_playback_pointers pointer
+                           WHERE pointer.{owner_column} = media_sessions.{owner_column}
+                             AND pointer.playback_id = media_sessions.playback_id
+                             AND pointer.current_incarnation_id = media_sessions.incarnation_id))
+                        AND NOT EXISTS (SELECT 1 FROM media_session_requests request
+                          WHERE request.{owner_column} = media_sessions.{owner_column}
+                            AND request.incarnation_id = media_sessions.incarnation_id
+                            AND request.state = 'starting'
+                            AND request.claim_expires_at_ms <= media_sessions.lease_expires_at_ms)
+                        AND EXISTS (SELECT 1 FROM job_leases
+                          WHERE resource = ?6 AND owner_node_id = ?4 AND fence = ?5
+                            AND expires_at_ms = ?1)"),
+                        params![
+                            lease_expires_at_ms,
+                            now_ms,
+                            renewal.incarnation_id,
+                            owner_node_id,
+                            renewal.owner_epoch,
+                            lease_resource,
+                            renewal.produced_playable_through_ms,
+                            renewal.fetched_through_ms,
+                            renewal.media_sequence,
+                            MEDIA_SESSION_PUBLICATION_BLOCKED,
+                        ],
+                    )? == 1
+                {
+                    tx.execute(
+                        &format!("UPDATE cache_consumer_pins
+                            SET expires_at_ms = CASE
+                                  WHEN expires_at_ms < ?1 THEN ?1 ELSE expires_at_ms END
+                          WHERE consumer_kind = 'media_session' AND consumer_id = ?2
+                            AND consumer_epoch = ?3 AND expires_at_ms > ?4
+                            AND EXISTS (
+                                SELECT 1 FROM transcode_cache_locations location
+                                 WHERE location.storage_id = cache_consumer_pins.storage_id
+                                   AND location.recipe_hash = cache_consumer_pins.recipe_hash
+                                   AND location.generation_id = cache_consumer_pins.generation_id
+                                   AND location.storage_class = 'shared'
+                                   AND location.complete = 1)
+                            AND EXISTS (
+                                SELECT 1 FROM media_sessions session
+                                 WHERE session.incarnation_id = ?2
+                                   AND session.owner_node_id = ?5
+                                   AND session.owner_epoch = ?3
+                                   AND session.state = 'active' AND {live_alias}
+                                   AND session.lease_expires_at_ms = ?1
+                                   AND (session.publication_ready_at_ms != ?6 OR EXISTS (
+                                     SELECT 1 FROM media_playback_pointers pointer
+                                      WHERE pointer.{owner_column} = session.{owner_column}
+                                        AND pointer.playback_id = session.playback_id
+                                        AND pointer.current_incarnation_id = session.incarnation_id))
+                                   AND NOT EXISTS (SELECT 1 FROM media_session_requests request
+                                     WHERE request.{owner_column} = session.{owner_column}
+                                       AND request.incarnation_id = session.incarnation_id
+                                       AND request.state = 'starting'
+                                       AND request.claim_expires_at_ms <= session.lease_expires_at_ms))"),
+                        params![
+                            lease_expires_at_ms,
+                            renewal.incarnation_id,
+                            renewal.owner_epoch,
+                            now_ms,
+                            owner_node_id,
+                            MEDIA_SESSION_PUBLICATION_BLOCKED,
+                        ],
+                    )?;
+                    renewed.push(renewal.incarnation_id);
+                }
+            }
+            tx.commit()?;
+            Ok(renewed)
+        })
+        .await
 }
 
 #[cfg(test)]

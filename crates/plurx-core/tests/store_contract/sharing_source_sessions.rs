@@ -682,4 +682,99 @@ async fn sharing_source_reservations_three_voters_atomic_claim_caps_replay_and_r
     assert_eq!(replay.route.session_id, route.session_id);
     let rows=client.query_consistent_map::<SchemaText,_>("SELECT CAST(count(*) AS TEXT) AS value FROM sharing_source_session_bindings WHERE reservation_state='held'",hiqlite::params!()).await.expect("physical obligations retained");
     assert_eq!(rows[0].value, "8");
+    assert!(matches!(
+        store
+            .prepare_source_owned_route_authority(
+                &assignment,
+                &credential,
+                &observation(&client).await
+            )
+            .await
+            .expect("unresolved owned refusal"),
+        SourceOwnedRouteAuthorityRead::Unavailable
+    ));
+    // Explicit fixture-only publication; no producer is allocated and this
+    // receipt does not qualify a production readiness transition.
+    client
+        .execute(
+            "UPDATE media_sessions SET publication_ready_at_ms=0 WHERE incarnation_id=$1",
+            hiqlite::params!(activation.incarnation_id.clone()),
+        )
+        .await
+        .expect("fixture readiness");
+    client.execute("UPDATE media_session_requests SET state='resolved',response_json='{}' WHERE incarnation_id=$1",hiqlite::params!(activation.incarnation_id.clone())).await.expect("fixture resolved start");
+    client.execute("UPDATE sharing_source_session_bindings SET start_resolved_at_ms=$1 WHERE incarnation_id=$2",hiqlite::params!(activation.now_ms,activation.incarnation_id.clone())).await.expect("fixture resolved binding");
+    let SourceOwnedRouteAuthorityRead::Ready(owned) = store
+        .prepare_source_owned_route_authority(&assignment, &credential, &observation(&client).await)
+        .await
+        .expect("actual voter owned witness")
+    else {
+        panic!("resolved owned witness")
+    };
+    let renewal = MediaSessionRenewal {
+        incarnation_id: activation.incarnation_id.clone(),
+        owner_epoch: 1,
+        produced_playable_through_ms: 1000,
+        fetched_through_ms: 500,
+        media_sequence: 1,
+    };
+    let at = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("clock")
+        .as_millis() as i64;
+    let expiry = route.lease_expires_at_ms + 60000;
+    assert!(store
+        .renew_media_sessions("node-1", std::slice::from_ref(&renewal), at, expiry)
+        .await
+        .expect("ordinary Shared refuses")
+        .is_empty());
+    exec(
+        &client,
+        "UPDATE settings SET value='false' WHERE key='sharing_enabled'",
+    )
+    .await;
+    assert!(store
+        .renew_source_media_session(&owned, &renewal, at, expiry)
+        .await
+        .expect("same-write off race")
+        .is_none());
+    assert_eq!(
+        store
+            .media_session_route_by_incarnation(&activation.incarnation_id)
+            .await
+            .expect("route")
+            .expect("retained")
+            .lease_expires_at_ms,
+        route.lease_expires_at_ms
+    );
+    exec(
+        &client,
+        "UPDATE settings SET value='true' WHERE key='sharing_enabled'",
+    )
+    .await;
+    let renewed = store
+        .renew_source_media_session(&owned, &renewal, at, expiry)
+        .await
+        .expect("actual voter guarded renewal")
+        .expect("same route");
+    assert_eq!(renewed.lease_expires_at_ms, expiry);
+    assert_eq!(renewed.produced_playable_through_ms, 1000);
+    assert!(store
+        .renew_source_media_session(&owned, &renewal, at, expiry + 60000)
+        .await
+        .expect("stale revision refused")
+        .is_none());
+    assert!(matches!(
+        store
+            .prepare_source_owned_route_authority(
+                &assignment,
+                &credential,
+                &observation(&client).await
+            )
+            .await
+            .expect("refreshed owned witness"),
+        SourceOwnedRouteAuthorityRead::Ready(_)
+    ));
+    let rows=client.query_consistent_map::<SchemaText,_>("SELECT CAST(count(*) AS TEXT) AS value FROM sharing_source_session_bindings WHERE reservation_state='held'",hiqlite::params!()).await.expect("renewal retains physical obligations");
+    assert_eq!(rows[0].value, "8");
 }

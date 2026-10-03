@@ -41,6 +41,23 @@ impl SourceSessionIntent {
         revision_key: &CatalogueRevisionKey,
         revision_key_envelope: SealedSecret,
     ) -> Result<Self, StoreError> {
+        Self::from_witness(request, witness, revision_key, revision_key_envelope, false)
+    }
+    pub(crate) fn from_current_owned_witness(
+        request: SourceSessionRequest,
+        witness: SourceFileWitness,
+        revision_key: &CatalogueRevisionKey,
+        revision_key_envelope: SealedSecret,
+    ) -> Result<Self, StoreError> {
+        Self::from_witness(request, witness, revision_key, revision_key_envelope, true)
+    }
+    fn from_witness(
+        request: SourceSessionRequest,
+        witness: SourceFileWitness,
+        revision_key: &CatalogueRevisionKey,
+        revision_key_envelope: SealedSecret,
+        resolved: bool,
+    ) -> Result<Self, StoreError> {
         if !matches!(request.principal, PlaybackPrincipal::Sharing { .. })
             || !request.principal.valid_admission_shape()
             || !is_hash(&request.credential_hash)
@@ -50,7 +67,8 @@ impl SourceSessionIntent {
             || !(1..=128).contains(&request.playback_id.len())
             || request.playback_id.chars().any(char::is_control)
             || request.now_ms <= 0
-            || request.claim_expires_at_ms <= request.now_ms
+            || request.claim_expires_at_ms <= 0
+            || (!resolved && request.claim_expires_at_ms <= request.now_ms)
             || witness.item != request.item_id
             || witness.file != request.file_id
             || revision_key.file_revision(&witness)? != request.file_revision
@@ -183,6 +201,30 @@ impl SourceSessionWriteAuthority {
 
 pub enum SourceWriteAuthorityRead {
     Ready(Box<SourceSessionWriteAuthority>),
+    Unavailable,
+    Capacity,
+}
+
+/// Current resolved Source route and exact live lease, freshly authorized by
+/// the actual local worker. This cannot publish, take over, or release work.
+#[derive(Clone)]
+pub struct SourceOwnedRouteAuthority {
+    pub(crate) assignment: SourceDispatchAssignment,
+    pub(crate) intent: Box<SourceSessionIntent>,
+    pub(crate) session_id: String,
+    pub(crate) lease_expires_at_ms: i64,
+    pub(crate) lease_revision: i64,
+}
+impl SourceOwnedRouteAuthority {
+    pub fn validate_observation_freshness(
+        &self,
+        now_ms: i64,
+    ) -> Result<(), crate::cluster::membership::MembershipError> {
+        self.assignment.validate_observation_freshness(now_ms)
+    }
+}
+pub enum SourceOwnedRouteAuthorityRead {
+    Ready(Box<SourceOwnedRouteAuthority>),
     Unavailable,
     Capacity,
 }

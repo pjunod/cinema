@@ -1026,3 +1026,245 @@ async fn sharing_source_replay_conflict_does_not_bypass_revoked_current_authorit
     ));
     assert_eq!(count(&store, "sharing_source_session_bindings").await, 1);
 }
+
+#[tokio::test]
+async fn sharing_source_owned_renewal_current_authority_and_exact_lease() {
+    let dir = tempfile::tempdir().expect("fixture directory");
+    for store in [
+        SqliteStore::open_in_memory().expect("memory"),
+        SqliteStore::open(&dir.path().join("source-activation.db")).expect("pool"),
+    ] {
+        let (grant, key) = setup(&store).await;
+        let request = intent(&store, grant, &key, "first-activation").await;
+        let SourceClaimOutcome::Acquired(binding) = store
+            .claim_source_media_session(&request, &proof())
+            .await
+            .expect("claim")
+        else {
+            panic!("Source reservation")
+        };
+        let assignment = store
+            .assign_source_dispatch(&binding, &key, &proof())
+            .await
+            .expect("assignment")
+            .expect("actual local worker");
+        let SourceWriteAuthorityRead::Ready(authority) = store
+            .prepare_source_activation_authority(&assignment, &key, &proof())
+            .await
+            .expect("authority")
+        else {
+            panic!("current private witness")
+        };
+        let now = now_ms().expect("clock");
+        let activation = crate::domain::MediaSessionActivation {
+            incarnation_id: binding.incarnation_id.to_string(),
+            session_id: Uuid::new_v4().to_string(),
+            principal: binding.principal.clone(),
+            playback_id: binding.playback_id.clone(),
+            recovery_epoch: String::new(),
+            expected_predecessor_incarnation_id: None,
+            fence_predecessor: true,
+            request_id: Some(binding.request_id.clone()),
+            request_fingerprint: binding.request_fingerprint.clone(),
+            owner_node_id: "voter".into(),
+            recipe_json: "{}".into(),
+            response_json: "{}".into(),
+            publication_ready_at_ms: crate::domain::MEDIA_SESSION_PUBLICATION_BLOCKED,
+            media_origin_ms: 0,
+            now_ms: now,
+            lease_expires_at_ms: now + 60000,
+            expected_desired_revision: None,
+        };
+        let created = store
+            .activate_source_media_session(&authority, &activation)
+            .await
+            .expect("guarded activation")
+            .expect("Source route");
+        assert!(matches!(
+            store
+                .prepare_source_owned_route_authority(&assignment, &key, &proof())
+                .await
+                .expect("unresolved mint"),
+            SourceOwnedRouteAuthorityRead::Unavailable
+        ));
+        // Fixture-only published state: this test qualifies current-owner
+        // renewal, not a producer or a production readiness transition.
+        store.sharing_txn(vec![("UPDATE media_sessions SET publication_ready_at_ms=0 WHERE incarnation_id=$1".into(),vec![binding.incarnation_id.into()]),("UPDATE media_session_requests SET state='resolved',response_json='{}' WHERE incarnation_id=$1".into(),vec![binding.incarnation_id.into()]),("UPDATE sharing_source_session_bindings SET start_resolved_at_ms=$2 WHERE incarnation_id=$1".into(),vec![binding.incarnation_id.into(),now.into()])]).await.expect("fixture-only resolved route");
+        let SourceOwnedRouteAuthorityRead::Ready(owned) = store
+            .prepare_source_owned_route_authority(&assignment, &key, &proof())
+            .await
+            .expect("owned witness")
+        else {
+            panic!("current owned route")
+        };
+        let renewal = crate::domain::MediaSessionRenewal {
+            incarnation_id: binding.incarnation_id.to_string(),
+            owner_epoch: 1,
+            produced_playable_through_ms: 1000,
+            fetched_through_ms: 500,
+            media_sequence: 1,
+        };
+        let at = now_ms().expect("clock");
+        let expiry = created.route.lease_expires_at_ms + 60000;
+        assert!(store
+            .renew_media_sessions("voter", std::slice::from_ref(&renewal), at, expiry)
+            .await
+            .expect("ordinary refusal")
+            .is_empty());
+        store
+            .sharing_txn(vec![(
+                "UPDATE settings SET value='false' WHERE key='sharing_enabled'".into(),
+                vec![],
+            )])
+            .await
+            .expect("off race");
+        assert!(store
+            .renew_source_media_session(&owned, &renewal, at, expiry)
+            .await
+            .expect("typed refusal")
+            .is_none());
+        assert_eq!(
+            store
+                .media_session_route_by_incarnation(&renewal.incarnation_id)
+                .await
+                .expect("route")
+                .expect("retained")
+                .lease_expires_at_ms,
+            created.route.lease_expires_at_ms
+        );
+        store
+            .sharing_txn(vec![
+                (
+                    "UPDATE settings SET value='true' WHERE key='sharing_enabled'".into(),
+                    vec![],
+                ),
+                (
+                    "UPDATE files SET path='/private/changed.mkv' WHERE id=1".into(),
+                    vec![],
+                ),
+            ])
+            .await
+            .expect("file race");
+        assert!(store
+            .renew_source_media_session(&owned, &renewal, at, expiry)
+            .await
+            .expect("file refusal")
+            .is_none());
+        store
+            .sharing_txn(vec![(
+                "UPDATE files SET path='/private/synthetic.mkv' WHERE id=1".into(),
+                vec![],
+            )])
+            .await
+            .expect("restore fixture");
+        let SourceOwnedRouteAuthorityRead::Ready(owned) = store
+            .prepare_source_owned_route_authority(&assignment, &key, &proof())
+            .await
+            .expect("fresh witness")
+        else {
+            panic!("restored owned witness")
+        };
+        store.sharing_txn(vec![("UPDATE job_leases SET owner_node_id='foreign' WHERE resource=$1".into(),vec![format!("session:{}",binding.incarnation_id).into()]),("INSERT INTO cache_consumer_pins(storage_id,recipe_hash,generation_id,consumer_kind,consumer_id,consumer_epoch,expires_at_ms) VALUES('foreign','foreign','foreign','media_session','unrelated-retained',2,1)".into(),vec![])]).await.expect("foreign lease and pin fixture");
+        assert!(store
+            .renew_source_media_session(&owned, &renewal, now_ms().expect("clock"), expiry)
+            .await
+            .expect("foreign lease refusal")
+            .is_none());
+        assert!(matches!(
+            store
+                .prepare_source_owned_route_authority(&assignment, &key, &proof())
+                .await
+                .expect("foreign lease mint refusal"),
+            SourceOwnedRouteAuthorityRead::Unavailable
+        ));
+        let rows=store.sharing_read("SELECT json_object('node',owner_node_id,'expiry',expires_at_ms) AS payload FROM job_leases WHERE resource=$1",vec![format!("session:{}",binding.incarnation_id).into()]).await.expect("foreign unchanged");
+        let row: serde_json::Value = serde_json::from_str(&rows[0]).expect("row");
+        assert_eq!(row["node"], "foreign");
+        assert_eq!(row["expiry"], created.route.lease_expires_at_ms);
+        store
+            .sharing_txn(vec![(
+                "UPDATE job_leases SET owner_node_id='voter' WHERE resource=$1".into(),
+                vec![format!("session:{}", binding.incarnation_id).into()],
+            )])
+            .await
+            .expect("restore only injected lease owner");
+        store.sharing_txn(vec![("CREATE TRIGGER source_renewal_fault BEFORE UPDATE OF lease_expires_at_ms ON media_sessions BEGIN SELECT RAISE(ABORT,'source_renewal_fixture_fault'); END".into(),vec![])]).await.expect("writer fault");
+        let error = store
+            .renew_source_media_session(&owned, &renewal, now_ms().expect("clock"), expiry)
+            .await
+            .expect_err("real fault");
+        assert!(!source_write_refused(&error));
+        let rows = store
+            .sharing_read(
+                "SELECT json_quote(expires_at_ms) AS payload FROM job_leases WHERE resource=$1",
+                vec![format!("session:{}", binding.incarnation_id).into()],
+            )
+            .await
+            .expect("lease rollback");
+        assert_eq!(rows[0], created.route.lease_expires_at_ms.to_string());
+        store
+            .sharing_txn(vec![("DROP TRIGGER source_renewal_fault".into(), vec![])])
+            .await
+            .expect("remove fixture fault");
+        let renewed = store
+            .renew_source_media_session(&owned, &renewal, now_ms().expect("clock"), expiry)
+            .await
+            .expect("guarded renewal")
+            .expect("same owner");
+        assert_eq!(renewed.lease_expires_at_ms, expiry);
+        assert_eq!(renewed.produced_playable_through_ms, 1000);
+        assert!(store
+            .renew_source_media_session(&owned, &renewal, now_ms().expect("clock"), expiry + 60000)
+            .await
+            .expect("stale lease proof")
+            .is_none());
+        let SourceOwnedRouteAuthorityRead::Ready(fresh) = store
+            .prepare_source_owned_route_authority(&assignment, &key, &proof())
+            .await
+            .expect("fresh lease proof")
+        else {
+            panic!("renewed owned route")
+        };
+        assert_eq!(fresh.lease_revision, owned.lease_revision + 1);
+        let rows=store.sharing_read("SELECT json_quote(expires_at_ms) AS payload FROM cache_consumer_pins WHERE consumer_id='unrelated-retained'",vec![]).await.expect("foreign pin retained");
+        assert_eq!(rows[0], "1");
+        tokio::time::sleep(std::time::Duration::from_millis(5100)).await;
+        assert!(store
+            .renew_source_media_session(&fresh, &renewal, now_ms().expect("clock"), expiry + 60000)
+            .await
+            .expect("delayed current observation refused")
+            .is_none());
+        let SourceOwnedRouteAuthorityRead::Ready(current) = store
+            .prepare_source_owned_route_authority(&assignment, &key, &proof())
+            .await
+            .expect("old assignment fresh observation")
+        else {
+            panic!("old assignment is lineage, not a perpetual freshness veto")
+        };
+        assert!(store
+            .renew_source_media_session(
+                &current,
+                &renewal,
+                now_ms().expect("clock"),
+                expiry + 60000
+            )
+            .await
+            .expect("fresh observation renews old assignment")
+            .is_some());
+        assert_eq!(
+            binding_row(&store, &binding.principal.owner_key(), &binding.request_id)
+                .await
+                .expect("binding")
+                .expect("retained")
+                .reservation,
+            "held"
+        );
+        assert_eq!(
+            store
+                .release_source_never_dispatched(&binding)
+                .await
+                .expect("release stays closed"),
+            SourceReleaseOutcome::Refused
+        );
+    }
+}
