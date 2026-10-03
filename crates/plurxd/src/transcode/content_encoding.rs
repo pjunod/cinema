@@ -741,12 +741,10 @@ async fn run_media(
     }
 }
 
-async fn verify_sample(
+async fn sample_probe_document(
     path: &std::path::Path,
-    frames: usize,
-    context: &Context,
     cancelled: &tokio_util::sync::CancellationToken,
-) -> Result<(), String> {
+) -> Result<serde_json::Value, String> {
     let mut args = [
         "-v",
         "error",
@@ -776,19 +774,30 @@ async fn verify_sample(
     if !output.status.success() {
         return Err("sample_probe_failed".into());
     }
-    let value: serde_json::Value =
-        serde_json::from_slice(&output.stdout).map_err(|e| e.to_string())?;
+    serde_json::from_slice(&output.stdout).map_err(|e| e.to_string())
+}
+
+async fn verify_sample(
+    path: &std::path::Path,
+    frames: usize,
+    context: &Context,
+    cancelled: &tokio_util::sync::CancellationToken,
+) -> Result<(), String> {
+    let value = sample_probe_document(path, cancelled).await?;
     let stream = &value["streams"][0];
-    if stream["width"].as_i64() != Some(context.width)
-        || stream["height"].as_i64() != Some(context.height)
-        || stream["nb_read_frames"].as_str() != Some(&frames.to_string())
-        || stream["pix_fmt"] != "yuv420p"
-        || stream["color_range"] != "tv"
-        || ["color_transfer", "color_primaries", "color_space"]
-            .iter()
-            .any(|k| stream[*k] != "bt709")
-    {
-        return Err("sample_shape_or_frame_count_mismatch".into());
+    for (field, expected) in [
+        ("width", serde_json::json!(context.width)),
+        ("height", serde_json::json!(context.height)),
+        ("nb_read_frames", serde_json::json!(frames.to_string())),
+        ("pix_fmt", serde_json::json!("yuv420p")),
+        ("color_range", serde_json::json!("tv")),
+        ("color_transfer", serde_json::json!("bt709")),
+        ("color_primaries", serde_json::json!("bt709")),
+        ("color_space", serde_json::json!("bt709")),
+    ] {
+        if stream[field] != expected {
+            return Err(format!("sample_contract_mismatch:{field}"));
+        }
     }
     Ok(())
 }
@@ -883,6 +892,11 @@ mod tests {
             "lavfi",
             "-i",
             "testsrc2=size=320x180:rate=24:duration=6",
+            // FFV1 receives frame properties from lavfi. Set them on the
+            // frames, not just encoder options: unknown input color would
+            // otherwise survive into the fixture and fail the SDR contract.
+            "-vf",
+            "setparams=range=limited:color_primaries=bt709:color_trc=bt709:colorspace=bt709",
             "-c:v",
             "ffv1",
             "-threads",
@@ -928,9 +942,12 @@ mod tests {
             })
             .await
             .expect("item");
-        let probe = serde_json::json!({"streams":[{"codec_type":"video", "width":320,"height":180,
-            "color_transfer":"bt709","color_primaries":"bt709","color_space":"bt709","color_range":"tv",
-            "sample_aspect_ratio":"1:1","pix_fmt":"yuv420p","field_order":"progressive","avg_frame_rate":"24/1"}]});
+        // The qualification must describe the bytes actually emitted by the
+        // installed encoder, never an invented compliant probe document.
+        let probe = sample_probe_document(&path, &cancel)
+            .await
+            .expect("probe actual fixture");
+        assert_eq!(probe["streams"][0]["nb_read_frames"], "144");
         let file_id = store
             .upsert_file(
                 item,
