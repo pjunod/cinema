@@ -444,6 +444,9 @@ mod tests {
     }
     #[async_trait]
     impl Backend for ImportTransition<'_> {
+        async fn sharing_file_locator_key_rows(&self) -> Result<Vec<String>, StoreError> {
+            self.store.sharing_file_locator_key_rows().await
+        }
         async fn sharing_revision_key_rows(&self) -> Result<Vec<String>, StoreError> {
             self.store.sharing_revision_key_rows().await
         }

@@ -36,6 +36,9 @@ mod sharing_member_floor;
 #[cfg(feature = "hiqlite-contract-tests")]
 #[path = "store_contract/sharing_principal_runtime.rs"]
 mod sharing_principal_runtime;
+#[cfg(feature = "hiqlite-contract-tests")]
+#[path = "store_contract/sharing_source_sessions.rs"]
+mod sharing_source_sessions;
 
 #[cfg(feature = "hiqlite-contract-tests")]
 use std::borrow::Cow;

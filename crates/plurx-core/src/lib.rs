@@ -45,6 +45,9 @@ pub mod sharing;
 pub mod sharing_catalogue;
 pub mod sharing_catalogue_details;
 pub mod sharing_dns;
+pub mod sharing_file_locators;
+pub mod sharing_resources;
+pub mod sharing_source_sessions;
 pub mod sharing_tls;
 pub mod store;
 /// Media fixtures for the test suites, shared so `plurx-core` and `plurxd`

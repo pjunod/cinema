@@ -932,7 +932,8 @@ final class AppModel: ObservableObject {
         fileId: Int,
         selection: PrePlaySelection = .none,
         quality: PlaybackQuality = .auto,
-        audioOffsetMs: Int = 0
+        audioOffsetMs: Int = 0,
+        fileContext: PlaybackFileContext? = nil
     ) async throws -> (decision: Decision, caps: DeviceCaps) {
         let snapshot = Caps.snapshot()
         var document = snapshot.document
@@ -945,7 +946,8 @@ final class AppModel: ObservableObject {
                 fileId: fileId,
                 caps: document,
                 query: query,
-                legacyQuery: { snapshot.legacyQuery + query }
+                legacyQuery: { snapshot.legacyQuery + query },
+                fileContext: fileContext
             )
             return (decision, document)
         } catch {
@@ -956,12 +958,14 @@ final class AppModel: ObservableObject {
 
     func pgsOverlayManifest(
         fileId: Int,
-        trackIndex: Int
+        trackIndex: Int,
+        fileContext: PlaybackFileContext? = nil
     ) async throws -> PGSOverlayManifestFetch {
         do {
             return try await requireAPI().pgsOverlayManifest(
                 fileId: fileId,
-                trackIndex: trackIndex
+                trackIndex: trackIndex,
+                fileContext: fileContext
             )
         } catch {
             noteAuthFailure(error)
@@ -973,14 +977,16 @@ final class AppModel: ObservableObject {
         fileId: Int,
         trackIndex: Int,
         generation: String,
-        path: String
+        path: String,
+        fileContext: PlaybackFileContext? = nil
     ) async throws -> Data {
         do {
             return try await requireAPI().pgsOverlayObject(
                 fileId: fileId,
                 trackIndex: trackIndex,
                 generation: generation,
-                path: path
+                path: path,
+                fileContext: fileContext
             )
         } catch {
             noteAuthFailure(error)
@@ -988,12 +994,12 @@ final class AppModel: ObservableObject {
         }
     }
 
-    func createHlsSession(fileId: Int, body: CreateSessionRequest) async throws -> HlsStart {
+    func createHlsSession(fileId: Int, body: CreateSessionRequest, fileContext: PlaybackFileContext? = nil) async throws -> HlsStart {
         guard body.caps != nil else {
             throw APIError.transport("Playback session is missing its decision capabilities.")
         }
         do {
-            return try await requireAPI().createHlsSession(fileId: fileId, body: body)
+            return try await requireAPI().createHlsSession(fileId: fileId, body: body, fileContext: fileContext)
         } catch {
             noteAuthFailure(error)
             throw error

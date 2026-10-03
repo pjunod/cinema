@@ -516,11 +516,18 @@ retention, are required in the same storage work package:
 | `sharing_catalogue_revisions` | Library ID and positive membership/order revision; bump only on membership or sort-key changes, not metadata-only writes; no per-browse writes |
 | `sharing_relay_upstream` | Existing B media-session incarnation FK; import, lifecycle/assignment observations, remote item/file/revision, A request/session/incarnation, approved endpoint revision, sealed upstream capability, source position; one row per incarnation |
 | `sharing_delivery_grants` | File-grant-style hash verifier bound to B relay/session incarnation and source login-token hash, active/revoked state, deadline; no second player token |
+| `sharing_source_session_bindings` | Existing Source incarnation; immutable canonical principal/request/fingerprint/playback and Source/epoch/library/item/file/revision binding, held reservation, dispatch/resolution fence and exact release receipt; FK-free retained capacity ledger, not another session lifecycle |
 | `sharing_endpoint_manifest` | Singleton approved node endpoint set and monotonic revision, modified only by local admin; node private keys excluded |
 
 There is no `sharing_media_*` family, separate relay lifecycle table,
 per-segment resource map, or replicated browse snapshot. The existing media
-session family owns both A's share principal and B's local-user relay (§7).
+session family owns both A's share principal and B's local-user relay (§7). The
+Source binding adjunct cannot carry a second route or producer state machine.
+It preserves uncertain remote obligations across ordinary request/route cleanup
+until an exact never-dispatched CAS or confirmed producer-reap and writer
+settlement releases them. Expiry, pointer displacement and a terminal control
+receipt alone do not prove physical capacity was returned.
+
 Library deletion uses a single store transaction: advance each affected
 export's scope/catalogue/mutation counters, remove export links, then delete
 the library. Restrict the FK to catch callers that forget this step; both
@@ -1463,11 +1470,11 @@ implied by the build handoff.
 | S0 | contract ready to build | Original `4e81bc38c`, revision `eb9038755`, PR #740 | Opus re-review corrections incorporated in §16; runtime evidence is recorded per milestone |
 | S1 | merged into effort | [PR #746](http://192.168.4.7:3000/noirr/plurx/pulls/746), `aaafc1a0f5` | SQLite v92 / Hiqlite v70; purpose-bound secrets; pairing/rotation/assignment transactions. Five store contracts, 11 sharing unit tests, schema migration parity and 31 import-inventory tests passed; workspace Clippy and catalog lint passed. Run 3890 and the final Effort development gate passed on the exact candidate; landed in the effort as `971265536a` with all seven regression fields. |
 | S2 | implementation in progress; topology qualification open | [draft PR #759](http://192.168.4.7:3000/noirr/plurx/pulls/759) | Dedicated loopback TLS transport, pinned direct dialing and fixed Tailscale DNS, isolated peer/admin routes, durable claim/rotation recovery, authenticated endpoint refresh and advisory Developer switch implemented. Two-NAT, shared-machine Serve and Docker isolation/egress receipts remain open; S2 is not complete. |
-| S3 | implementation started; ownership migration open | `codex/sharing-s3-principals` (unpublished) | Typed session interfaces, caller handoffs and seven-table candidate rebuild implemented; 28 local/replicated lifecycle regressions passed. Runtime owner-key SQL, owner checks, migration installation, cluster floor and old-binary qualification remain open; §16.4 records the boundaries. |
+| S3 | implementation started; ownership migration open | `codex/sharing-s3-principals` (unpublished) | Canonical Local writers, complete principal reads and seven-table candidate rebuild implemented; ownership and actual-voter lifecycle regressions passed. Caller refusal and retained-read census are qualified; Shared grant/scope admission, migration installation and coordinated upgrade qualification remain open; §16.4 records the boundaries. |
 | S4 | source catalogue and private history candidates implemented; qualification pending | `codex/sharing-s4-catalogue` | Consistent live keysets and batch metadata, candidate order maintenance and durable item identities, peer metadata routes and receiver-only ordered history. Viewer/cache/artwork/details, activation floor and qualification remain open. |
-| S5 | not started | — | — |
-| S6 | not started | — | — |
-| S7 | not started | — | — |
+| S5 | bounded resource grammar candidate built; relay and admission open | `codex/sharing-s3-principals` (unpublished) | Current-engine relative HLS grammar and generator/escape regressions passed; no Shared producer, relay or signed file locator is enabled. |
+| S6 | file-context foundation integrated; shared UI open | `codex/sharing-s6-file-context` through `4865de285` | Exact Local IDs and immutable full-reference, account-scoped B file contexts cover current file URL callers; full web checks pass. Shared browse/settings/detail/player integration and actual relay playback remain open. |
+| S7 | native ownership census and baseline compiler loops started | `codex/sharing-s7-native-file-context` | Apple/Android file-context and authorization-generation implementation is in progress; no native Shared playback receipt exists. |
 | S8 | not started | — | — |
 
 ## 16. Opus S0 dispositions — corrections are not runtime evidence
@@ -1702,6 +1709,30 @@ status-shaped calls launch no process. The response-loss fixture now owns its
 accepted connections in a JoinSet, and client fixture servers are aborted and
 awaited. The seven ownership-inventory tests passed after this review. The
 changed candidate must pass its focused transport tests and a fresh effort gate.
+
+**Separate-process restart regression:**
+`crates/plurxd/tests/sharing_daemon_restart.rs` starts the shipped daemon twice
+with separate disposable stores, pairs through a raw TCP forwarding fixture
+while retaining the production TLS pin, and restarts the recipient with a
+pending grant. It compares the persisted pairing identity, approves the grant,
+rotates its credential, restarts both processes and authenticates a new
+endpoint manifest revision with the recovered credential. It checks that source identity,
+catalogue epoch, grant/import IDs and SPKI remain stable and that no duplicate
+export appears. Rust 1.97.1 native compilation and denied-warning Clippy passed.
+The explicit Linux CGNAT execution passed on committed `440f5370a` with
+Rust 1.97.1 (one test, zero ignored, 34.17 seconds). The response-loss fixture
+also passed on that same candidate (one test, zero ignored, 0.42 seconds). The revision is published
+after both restarts, so retained state cannot satisfy the authentication
+assertion. An earlier fixture attempted a second rotation during the source's
+ten-minute receipt window and correctly encountered conflict; the Store
+contract expressly refuses that request. Client dispatch readiness is now
+awaited within its existing deadline, and rotation diagnostics expose only
+fixed phases and typed errors. No Tailscale or topology receipt is implied by
+this forwarding fixture.
+
+```sh
+PLURX_SHARING_FIXTURE_IP=100.127.88.2 cargo test --locked -p plurxd --test sharing_daemon_restart sharing_separate_daemons_preserve_pending_pairing_and_rotation_across_restart -- --ignored --exact --nocapture
+```
 
 ### 16.4 Implementation progress — S3, 2026-10-02
 
@@ -2119,30 +2150,57 @@ replicated confirmation/publication and foreign abandoned-activation cleanup
 fences; coordinated installation and Shared admission remain open.
 
 
-**Separate-process restart regression:**
-`crates/plurxd/tests/sharing_daemon_restart.rs` starts the shipped daemon twice
-with separate disposable stores, pairs through a raw TCP forwarding fixture
-while retaining the production TLS pin, and restarts the recipient with a
-pending grant. It compares the persisted pairing identity, approves the grant,
-rotates its credential, restarts both processes and authenticates a new
-endpoint manifest revision with the recovered credential. It checks that source identity,
-catalogue epoch, grant/import IDs and SPKI remain stable and that no duplicate
-export appears. Rust 1.97.1 native compilation and denied-warning Clippy passed.
-The explicit Linux CGNAT execution passed on committed `440f5370a` with
-Rust 1.97.1 (one test, zero ignored, 34.17 seconds). The response-loss fixture
-also passed on that same candidate (one test, zero ignored, 0.42 seconds). The revision is published
-after both restarts, so retained state cannot satisfy the authentication
-assertion. An earlier fixture attempted a second rotation during the source's
-ten-minute receipt window and correctly encountered conflict; the Store
-contract expressly refuses that request. Client dispatch readiness is now
-awaited within its existing deadline, and rotation diagnostics expose only
-fixed phases and typed errors. No Tailscale or topology receipt is implied by
-this forwarding fixture.
+**Terminal and maintenance integration checkpoint:** exact-owner and public
+capability terminal cleanup use the actual route's canonical owner key on
+both layouts, including the original Local projection. Shared retirement no
+longer calls the Local numeric adapter. An expired preparation can retire only
+its same-principal, same-playback staged session; canonical pointer, ledger and
+request retention joins cannot borrow another principal's row.
 
-```sh
-PLURX_SHARING_FIXTURE_IP=100.127.88.2 cargo test --locked -p plurxd --test sharing_daemon_restart sharing_separate_daemons_preserve_pending_pairing_and_rotation_across_restart -- --ignored --exact --nocapture
-```
+The SQLite corruption/cleanup regression passed in memory and pooled stores
+(0.95 seconds): an expired Local ledger pointing at a Shared route leaves that
+route and its complete lease tuple unchanged, removes the corrupt ledger,
+then legitimate exact-owner and capability cleanup retires only the correct
+grant. The second grant with the same viewer/playback remains active. The
+replicated candidate also verifies preservation of the foreign physical pin.
 
+On the combined tree, pinned all-target compilation passed (26.27 seconds),
+all 17 ownership units passed (18.13 seconds), all six rebuilt-schema actual
+voter regressions passed (64.02 seconds), abandoned-preparation maintenance
+passed (9.61 seconds), and terminal-ack/takeover retention passed (9.70 seconds).
+Denied-warning feature Clippy passed (32.93 seconds); every executed regression
+had zero ignored tests. These are compatibility and ownership-boundary proofs,
+not Shared writer admission or released migration qualification.
+
+
+**Caller and retained-read census checkpoint:** VOD session creation, copy
+queueing and cluster index demand reject Shared execution before allocating a
+session, queue entry or pool demand. Canonical SQLite desired-selection reads
+now decode the complete retained principal and reject corrupt metadata. Both
+backends correlate terminal pointer removal with the exact ended session's
+principal and playback ID, preserving foreign-owner pointers even when a
+corrupt pointer names that incarnation. The indexed
+[principal census](SHARED-LIBRARIES-PRINCIPAL-CENSUS.md) records the remaining
+Source admission and proof-bearing worker boundaries.
+
+On the combined caller/SQLite tree, pinned daemon and feature-enabled core
+all-target compilation passed. All 19 SQLite ownership regressions passed
+(19.65 seconds); the Shared VOD no-allocation regression passed (0.16 seconds)
+and durable preparation queue regression passed (1.51 seconds). Core and daemon
+denied-warning Clippy passed. These checks do not authorize Shared admission.
+
+The exact committed transport/ownership integration `33c0fb2f0` also passed
+`sharing_pinned_transport_recovers_committed_claim_and_rotation_after_restart`
+on pinned Rust 1.97.1 in an isolated Linux CGNAT container (one test, zero
+ignored, 0.46 seconds). Its source-only archive carried neither Git metadata
+nor repository credentials. This is restart/rotation protocol evidence for
+that snapshot; it does not qualify real Tailscale, two NATs or a physical TV.
+
+The combined tree also passed the actual three-voter Shared terminal
+acknowledgement/projection regression (one test, zero ignored, 9.22 seconds),
+feature-enabled all-target check (25.37 seconds) and denied-warning Clippy
+(30.40 seconds). Wrong owner tuples fail, retained exact acknowledgements
+replay, and retirement preserves a foreign pointer and physical pin.
 
 ### 16.5 Parallel S4 implementation — catalogue boundaries and private progress
 
@@ -2471,6 +2529,89 @@ These are pinned Rust 1.97.1 results, with key provisioning confined to temporar
 fixtures. Production schemas, activation and Source advertisements remain unchanged.
 
 
+**Combined ownership/catalogue integration:** the retained-read and caller
+checkpoint `f65eaace4` integrates S4 through stable revision/current witness
+checkpoint `ae626d8e6`. Pinned daemon and feature-enabled core all-target checks
+passed (1m06s and 27.72 seconds). All 13 core catalogue units passed (4.47
+seconds), all five catalogue/private-history contracts passed through their
+SQLite and actual three-voter fixtures (45.50 seconds), all ten daemon
+catalogue/connection cancellation regressions passed (6.20 seconds), and all
+19 SQLite principal regressions passed (18.99 seconds). Denied-warning
+feature Clippy passed (31.49 seconds); every executed test had zero ignored
+cases. The integration preserves canonical ownership fixes while adding the
+bounded catalogue, allocator/import identity, private history, transport body
+cancellation and stable existing-key-only file-witness candidates. It does
+not install their schemas or enable Shared producer admission.
+
+
+**Opaque Source membership observation candidate:**
+`MembershipManager::observe_source_admission_members` derives the serving
+Raft identity from its actual replicated state and returns no wire-decodable
+proof. It quorum-checks both closed writer capabilities plus unresolved
+membership/join declarations, and compares committed membership before and
+after that read. Its write guard must be embedded with installed-schema and
+current-file authority in the mutation; the observation expires after five
+seconds and refuses a backwards clock. The existing advisory readiness APIs
+retain their original floor semantics. No capability is advertised and no
+Shared ingress is enabled by this API.
+
+Pinned feature-enabled all-target check passed (25.07 seconds), the guarded
+SQLite mutation race regression passed (one test, zero ignored), and all four
+existing actual-voter/fourth-learner floor contracts passed (13.77 seconds).
+The narrow test-only proof seams additionally passed check (28.66 seconds),
+the mutation regression (0.01 seconds) and denied-warning feature Clippy
+(33.73 seconds). SQLite unit fixtures construct only a test-build observation;
+the contract-only wrapper must execute the actual quorum observation path.
+Neither constructor is present in production builds. These checks qualify the
+closed guard and readiness refactor; a Source binding write using the opaque
+observation still needs its own actual-voter admission regression.
+
+
+**Completed-transition membership fence candidate:** the coordinated membership
+factory now includes `cluster_sharing_membership_generation`, a monotonic,
+non-replaceable singleton. Membership-intent insertion, mutation and exact
+resolution advance it, as do cluster-directory insertion, deletion and identity
+or removal-state changes. Ordinary heartbeats preserve it. A Source observation
+captures the generation in its quorum floor snapshot; its conditional write
+checks both that exact number and the complete generation table/trigger shape.
+A restored visible roster or an empty intent table cannot revive an observation
+from before a completed transition. Missing/partial factory state refuses; no
+read initializes or repairs it.
+
+Pinned feature-enabled all-target check passed (28.12 seconds). Both focused
+SQLite guarded-mutation regressions passed (zero ignored), including completed
+intent/identity transitions, missing trigger and reset/replacement/deletion
+refusals. All four actual-voter/fourth-learner membership-floor contracts passed
+(13.76 seconds, zero ignored), and denied-warning feature all-target Clippy
+passed (34.08 seconds). The actual Source binding transaction needs integration
+qualification with this newer factory. Clock freshness is enforced when the
+trusted server submits the mutation; delayed Raft execution has no independent
+wall-clock expression in deterministic SQL. Shared worker/frontdoor admission
+remains closed pending its full execution and producer-release proof. Earlier
+upgrade receipts do not qualify this newer factory or install it in production.
+
+
+**Coordinated qualification integration:** the indexed
+[daemon/rollback receipt](SHARED-LIBRARIES-COORDINATED-UPGRADE.md) records the
+actual source-only `9b99fcd0f` qualification on catalogue integration `a8bf5ce1d`:
+four historical/current future-schema refusals, three historical voters,
+bounded full stop, whole-topology backup, membership factory before the frozen
+principal rebuild, three current daemon restarts and historical restore. The
+separate SQLiteStore drill checks closed-file backup, injected rollback,
+current candidate reopen and byte-identical legacy restore. Strict inventory
+compares all eleven tables immediately across rebuild; post-restart predicates
+separately classify expected terminal maintenance and runtime worker leases.
+It remains an empty-media workload, with no active producer drain or production
+schema activation. This receipt does not qualify later Source admission code.
+
+The helper/runner checkpoint `95314e279` is integrated after opaque membership
+checkpoint `f6ee7a1bd`. On this combined source, pinned feature all-target check
+passed (0.62 seconds), both helper/SQLite regressions passed (0.69 seconds),
+denied-warning helper Clippy passed (25.67 seconds), and the six runner plus
+four docs-index tests passed. The exact combined runtime archive must be
+qualified again before its upgrade receipt can cover a later candidate.
+
+
 #### S4 bounded Source details and current file tuples (candidate, open)
 
 The Source item route reads its presentation record and file snapshots in one
@@ -2670,3 +2811,206 @@ or `--features plurx-core/hiqlite-contract-tests` for daemon. Filters are
 under core `--test store_contract`, `sharing_continue_reader` under core
 `--lib`, and `sharing_` under daemon `--bin plurxd`. These native checks
 exclude the Linux-only pinned transport fixture.
+
+**Bounded-detail combined integration:** Source details checkpoint `7b85efec8`
+is integrated with the ownership, opaque observation and resource grammar
+checkpoints through `325617428`. On that exact combined source, pinned Rust
+1.97.1 core feature/daemon all-target checks passed (26.85 seconds and 1m08s).
+All twelve core catalogue units passed (5.05 seconds), all five catalogue and
+private-history store contracts passed (45.65 seconds), all eleven daemon
+catalogue/blocked-connection regressions passed (12.44 seconds), and all four
+HLS resource regressions passed. Every executed test had zero ignored cases.
+Feature-enabled all-target Clippy with denied warnings passed (1m23s), and
+all four docs-index tests passed. These results qualify the combined candidate;
+Source playback admission, receiver cache authority and signed file delivery
+remain open.
+
+
+**Source reservation / receiver body combined integration:** Source binding
+checkpoints `1bb19f392` and `4a82e9cbc`, receiver scope/body checkpoint
+`5939dc2b2` and native caller checkpoint `8d7845b76` are integrated with the
+receiver locator crypto/census candidates. The combined core all-target check
+passed (26.16 seconds), and daemon all-target check passed (1m03s), both with
+pinned Rust 1.97.1 and the replicated contract feature.
+
+The fully qualified Source reservation, receiver login/import and Source file
+witness voter contracts passed individually (10.07, 9.26 and 9.03 seconds), each
+with a nonzero-test guard. All 87 sharing core units passed (52.90 seconds), and
+all 27 native-platform daemon sharing regressions passed (19.28 seconds), with
+zero ignored cases. Final feature-enabled all-target core/daemon Clippy passed
+with denied warnings (1m33s). The Linux-only real CGNAT fixture is outside those native
+results and must run against the committed combined source archive. No Shared
+producer start, locator exposure or session delivery route is enabled.
+
+### 16.6 S5 resource grammar foundation
+
+The candidate [relative HLS grammar](../../crates/plurx-core/src/sharing_resources.rs)
+is derived from the actual
+[router](../../crates/plurxd/src/http/mod.rs),
+[master/subtitle generator](../../crates/plurxd/src/http/hls/playlist_text.rs),
+[rolling start/discontinuity projection](../../crates/plurxd/src/transcode/rolling/segment_index.rs),
+[init-object naming](../../crates/plurxd/src/transcode/session_request.rs), and
+[TS muxer arguments](../../crates/plurx-core/src/transcode/mod.rs).
+It preserves validated playlist bytes without rewriting URLs or fetching them.
+
+| Resource | Closed relative grammar |
+|---|---|
+| Main playlists | `master.m3u8`, `index.m3u8`, `video.m3u8`; only bounded, nonduplicate `native`, `subtitle` and the existing diagnostic query vocabulary |
+| Video objects | `init.mp4`, positive `init-e{epoch}.mp4`, `seg{number}.ts` and `seg{number}.m4s`; numeric values fit the engine's signed range |
+| Native subtitles | `subs/{index}/index.m3u8`, `subs/{index}/seg{number}.vtt`; subtitle playlist children resolve within that exact track |
+| URI-bearing tags | Existing subtitle `EXT-X-MEDIA` and init `EXT-X-MAP`; closed attribute names and exact resource kinds |
+| Unsupported forms | Absolute/root-relative URLs, authorities, traversal, encoded separators, fragments, unknown query/URI attributes, keys/encryption, LL-HLS and unexpected tag/resource kinds |
+
+Validation bounds one playlist to 1 MiB, a line to 8 KiB and the line/attribute
+counts independently. It checks master/media/subtitle URI placement and
+pending segment declarations. Four focused tests passed with zero ignored
+cases, including the actual fMP4 generator output through segment index
+100000 and explicit proxy/encryption/duplicate-attribute/body-bound refusals.
+Pinned feature all-target check passed (28.27 seconds), and final denied-warning
+feature Clippy passed (31.23 seconds). The hand-authored master/subtitle fixtures
+record current emitted shapes; they do not replace an end-to-end producer
+receipt. This helper does not authorize a grant, session, response publication
+or a network fetch, and is not yet wired into a Shared relay.
+
+Remaining S5 work includes complete start/decision envelope translation,
+Source admission and producer-stop release, the B remote-source lifecycle,
+signed file locators, Range/416/file/subtitle resources, current-login and
+Source revocation cancellation, transport/resource budgets and real playback.
+
+
+**Actual-generator and file-resource grammar follow-up:** the closed file suffix
+parser now recognizes current decision/start, direct/progressive, VTT, PGS
+manifest/object and chapter thumbnail paths. Track/chapter indices are canonical
+and bounded; PGS generation/object digests keep their exact immutable grammar.
+It refuses authorities, traversal, encoded separators, queries embedded in a
+suffix and unknown resource forms. Authentication, immutable file/revision
+membership, query validation and B session delivery binding remain independent
+handler requirements; parsing a suffix grants none of them.
+
+The HLS validator now accepts literal backslashes in bounded subtitle metadata,
+which the actual master generator can emit, while every URI still rejects them.
+A daemon regression runs the actual master generator across SDR/HDR10/HLG/Dolby
+Vision, selected/forced/hearing-impaired subtitles, Unicode and quoted/comma
+names, all current diagnostic masters and actual subtitle timeline generation
+through segment sequence 100000. It preserves playlist bytes and refuses a URI
+containing the same backslash.
+
+On the combined `8cf6bfb24` base, pinned feature all-target core/daemon check
+passed (1m15s). The file suffix regression, all four existing HLS regressions
+and actual daemon generator regression passed with zero ignored cases. Final
+feature-enabled all-target Clippy with denied warnings passed (1m26s).
+This expands tested resource compatibility; no Shared relay/resource route,
+Source worker, file locator or response-publication authority is enabled.
+
+
+**Receiver-signed locator crypto candidate:**
+[file locators](../../crates/plurx-core/src/sharing_file_locators.rs) bind the
+receiver identity and epoch, import lifecycle generation, complete Source item
+reference, exact file ID and file revision in a fixed, versioned HMAC-SHA256
+frame. Canonical base64url encoding yields a bounded B-relative file base.
+IDs remain exact through the signed integer maximum. Purpose-separated sealed
+signing material survives master-key rewrap without changing issued locators.
+
+Three focused regressions passed with zero ignored cases: complete reference
+round trips and Source collision separation; every-byte tampering, malformed
+encoding and signed invalid fields; master rewrap and deliberate signing-key
+reuse across receiver identity/epoch boundaries. Final pinned feature-enabled
+all-target Clippy passed with denied warnings (34.42 seconds), and the existing
+file-revision regression also passed. Catalog lint covers the new module.
+
+This is crypto evidence only. Durable receiver key installation, sealed-row
+census, restart/clone qualification and authenticated file routes remain open.
+A verified locator identifies a reference; every use still needs current B
+viewer/import/assignment and Source grant/file authority, plus current B session
+delivery authority for media. No locator is exposed by current item details.
+
+**Durable key-read and census follow-up:** the optional candidate receiver key
+table now participates in the startup sealed-row census. Both backends bound
+its shape, identity and envelope reads; SQLite performs shape and data reads
+in one snapshot. Replicated activation/rewrap still requires coordinated
+quiescence, as with the existing catalogue-purpose key. These reads never
+initialize, repair or replace material. Missing material returns unavailable;
+partial tables, views, foreign identity, unsealed and oversized rows fail.
+
+Five locator regressions passed with zero ignored cases (0.60 seconds), including
+actual file-backed SQLite close/reopen, explicit master rewrap with an unchanged
+issued locator, and independent malformed-state refusals on memory and pooled
+stores. Pinned feature-enabled all-target check passed (28.16 seconds) and final
+denied-warning Clippy passed (32.37 seconds). This qualifies those SQLite reads
+and crypto only; the candidate table is uninstalled, and replicated key/restart,
+clone and complete activation qualification remain open.
+
+### 16.7 S6 file-context integration foundation
+
+The verified parallel checkpoint `4865de285` is integrated after catalogue
+checkpoint `db220b18a` and membership fence `a6a60d53f`. The new plain-script
+[file-context helper](../../crates/plurxd/src/web/core/file-context.js) has its
+asset registration, shell tag and layout index in the same checkpoint.
+Existing file-resource callers retain exact Local decimal identities; generated
+onclick/onchange calls preserve IDs above JavaScript's safe integer range.
+Shared contexts require the full Source reference and a B-relative opaque
+file base from the detail adapter. Their keys include account generation, and
+logout retires them. No numeric Source ID becomes a Local route or cache key.
+
+Typed resource/query builders preserve the current engine vocabulary, including
+named profiles, codec/container lists, Dolby Vision HLS and per-codec height
+limits. Shared native media URLs carry only an exact bound B UUIDv4 session;
+ordinary HLS/control/prepared paths retain their existing namespace. Progress
+and continuation refuse unsupported Shared authority before a Local item
+lookup. Current Source details have no file base, so Shared factories refuse
+that unavailable delivery contract. This foundation does not expose Shared UI
+starts or qualify a producer/relay.
+
+All twelve focused context/caller regressions and the full `make web-check`
+lane passed on the parallel final checkpoint. The combined tree independently
+passed the same full web lane, all four docs-index tests and pinned Rust 1.97.1
+`cargo check --locked --offline -p plurxd --all-targets` (1m04s). The lane
+includes actual shipped caller/control fixtures, asset order/layout, settings,
+JavaScript/TypeScript contracts and the existing documented contrast allowance.
+Shared navigation/settings/details/Continue Watching and end-to-end player
+behavior still require their S4/S5 authority and delivery integrations.
+
+
+### 16.8 S7 native file-context foundation
+
+The parallel native checkpoint `52b27c2b4` adds immutable full-reference contexts
+and account-generation seams to Apple and Android. Shared factories fetch the
+actual B detail through the authenticated B origin, capture authorization before
+the await, and refuse changes afterward. They validate canonical string file
+identities/revisions, the complete import/Source/epoch/library/item reference
+and the exact B-relative opaque locator. Private constructors provide no raw
+Source-to-Local conversion. Optional delivery binding uses B's existing UUIDv4
+session grammar, and logout/account replacement retires captured contexts.
+Local Apple Int/Android Long identities retain the existing exact i64 wire.
+
+Four iPhone context XCTest cases passed, including actual mock HTTP origin and
+bearer assertions, large IDs, reference/revision mismatch, malformed locators,
+account ABA and authorization change during fetch. Four Android context and
+five existing Session JVM cases passed. Unsigned iOS and tvOS builds passed;
+Android used the pinned source-only JDK25/SDK compiler image, not the host JDK21.
+The checkpoint's normal catalog/format/workspace Clippy/JavaScript hook passed.
+Its source-only archive hash is
+`787a598af7a07cf6058c07582d66b3be2e5824a27de34e85e2ed0b5778d2c6c1`.
+
+Integration preserves that tested native source but is not a combined native
+qualification receipt. Caller propagation, full resource/query vocabulary,
+PGS/reopen/prepared adapters, Shared UI/decision models and physical TV playback
+remain open. Current B details omit the locator, so the native Shared factories
+refuse that unavailable contract rather than selecting a Local file.
+
+**Native caller integration follow-up:** checkpoint `8d7845b76` propagates
+immutable file contexts through actual Apple/Android decision, HLS retry,
+progressive/remux, reopen and PGS callers. Captured context survives asynchronous
+work; current account generation and exact Local IDs are checked before requests
+and continuation. Shared contexts are refused before numeric Local decision,
+PGS, progress and next-item adapters. Full query vocabulary is translated through
+closed builders, and no Shared start is exposed.
+
+The checkpoint's exact source-only archive SHA-256 is
+`aa7fb6a40bb78d89611cb2a7d81a0cbe24ee6649f1a0c6933d52f56197070a45`.
+Its affected iOS 106 and tvOS 101 tests and builds passed with zero ignored cases.
+Android's identical native source tree passed 26 focused tests; the exact archive
+also passed fresh `lintDebug` (4m21s) with pinned Temurin 25.0.4.1 and Gradle 9.7.1.
+The normal hook passed. Integration has no native diff against that qualified
+checkpoint. These are caller/context regressions, not Shared producer, device
+playback, new Shared wire-model or UI qualification.

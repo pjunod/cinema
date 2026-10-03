@@ -5,10 +5,11 @@ const path=require("node:path");
 const vm=require("node:vm");
 const {test}=require("node:test");
 const source=fs.readFileSync(path.join(__dirname,"../../crates/plurxd/src/web/detail/preplay-selection.js"),"utf8");
+const fileContextSource=fs.readFileSync(path.join(__dirname,"../../crates/plurxd/src/web/core/file-context.js"),"utf8");
 const escape=value=>String(value).replaceAll("&","&amp;").replaceAll("<","&lt;").replaceAll(">","&gt;").replaceAll('"',"&quot;").replaceAll("'","&#39;");
 function app(overrides={}){
   const context=vm.createContext({esc:escape,document:{getElementById:()=>null},...overrides});
-  vm.runInContext(source,context);return context;
+  vm.runInContext(fileContextSource+"\n"+source,context);return context;
 }
 
 test("media with no subtitle tracks still offers search",()=>{

@@ -3127,3 +3127,39 @@
             assert!(!catalog.complete, "missing source is incomplete, not proof of an empty ladder");
         }
     }
+
+
+    #[test]
+    fn sharing_resource_validator_accepts_actual_master_and_subtitle_generators() {
+        use plurx_core::sharing_resources::{SharingHlsResource,validate_sharing_playlist};
+        let mut file=hls_file(vec![SubtitleStream {
+            index:0,codec:"subrip".into(),language:Some("eng".into()),
+            title:Some("English \\ commentary, \"quoted\"".into()),default:true,
+            forced:false,hearing_impaired:true,
+        },SubtitleStream {
+            index:1,codec:"webvtt".into(),language:Some("jpn".into()),
+            title:Some("日本語".into()),default:false,forced:true,hearing_impaired:false,
+        }]);
+        let master_resource=SharingHlsResource::parse("master.m3u8").expect("master resource");
+        for range in [None,Some("hdr10"),Some("hlg"),Some("dolby_vision")] {
+            file.hdr=range.map(str::to_owned);
+            for context in [sdr_context(),hls_context("hvc1.2.4.L153.B0,mp4a.40.2",Some("dvh1.08.06/db1p"))] {
+                for selected in [None,Some(0),Some(1)] {
+                    let master=master_playlist_with(&file,selected,&context,MasterRungs::default());
+                    validate_sharing_playlist(&master_resource,master.as_bytes()).expect("actual master keeps supported metadata and relative resource URIs");
+                    for diagnostic in ["video-only","video-only-codecs","video-only-range","video-only-hdr"] {
+                        let master=master_playlist_diagnostic(&file,selected,&context,Some(diagnostic));
+                        validate_sharing_playlist(&master_resource,master.as_bytes()).expect("actual diagnostic master");
+                    }
+                }
+            }
+        }
+        let subtitle_resource=SharingHlsResource::parse("subs/1/index.m3u8").expect("captured subtitle track");
+        for video in ["#EXTM3U\n#EXT-X-TARGETDURATION:6\n#EXT-X-MEDIA-SEQUENCE:100000\n#EXT-X-PLAYLIST-TYPE:EVENT\n#EXTINF:5.125,\nseg100000.ts\n",
+            "#EXTM3U\n#EXT-X-TARGETDURATION:6\n#EXT-X-MEDIA-SEQUENCE:5\n#EXT-X-PLAYLIST-TYPE:VOD\n#EXTINF:5.125,\nseg00005.m4s\n#EXT-X-ENDLIST\n"] {
+            let subtitles=subtitle_media_playlist(video.as_bytes());
+            validate_sharing_playlist(&subtitle_resource,subtitles.as_bytes()).expect("actual subtitle timeline generator");
+        }
+        let unsafe_uri="#EXTM3U\n#EXT-X-VERSION:7\n#EXT-X-MEDIA:TYPE=SUBTITLES,GROUP-ID=\"subs\",NAME=\"safe literal \\ metadata\",URI=\"subs\\0\\index.m3u8\"\n#EXT-X-STREAM-INF:BANDWIDTH=1000\nindex.m3u8\n";
+        assert!(validate_sharing_playlist(&master_resource,unsafe_uri.as_bytes()).is_err(),"metadata backslashes never admit a URI separator");
+    }

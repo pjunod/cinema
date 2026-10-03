@@ -22,6 +22,7 @@
     "core/errors.js",
     "core/app.js",
     "core/api.js",
+    "core/file-context.js",
     "player/measurements.js",
     "core/auth.js",
     "core/keyboard-reach.js",

@@ -549,6 +549,8 @@ pub enum SharingSecretPurpose {
     Upstream,
     /// A stable random catalogue revision key, sealed to its Source and epoch.
     CatalogueRevision,
+    /// Stable receiver-purpose material for non-capability file locators.
+    FileLocator,
 }
 
 fn sharing_aad(purpose: SharingSecretPurpose, server: uuid::Uuid, import: uuid::Uuid) -> Vec<u8> {
@@ -558,6 +560,7 @@ fn sharing_aad(purpose: SharingSecretPurpose, server: uuid::Uuid, import: uuid::
         SharingSecretPurpose::Rotation => b"rotation".as_slice(),
         SharingSecretPurpose::Upstream => b"upstream".as_slice(),
         SharingSecretPurpose::CatalogueRevision => b"catalogue-revision".as_slice(),
+        SharingSecretPurpose::FileLocator => b"file-locator".as_slice(),
     };
     let mut aad = b"plurx.sharing.v1\0".to_vec();
     aad.extend_from_slice(&(tag.len() as u32).to_be_bytes());

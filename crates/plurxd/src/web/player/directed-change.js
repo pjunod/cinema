@@ -655,7 +655,7 @@ async function openSession(fileId, opts, signal=null, requestId=null){
     PLAYER.libraryChannel=Object.assign({},following,result.library_channel);
     return result.playback;
   }
-  return api(`/files/${fileId}/hls/sessions`,{method:"POST",body,signal});
+  return api(playbackFileApiPath(fileId,"hls/sessions"),{method:"POST",body,signal});
 }
 // A cancellable wait. The newer intent's abort is the same signal the create
 // itself is carrying, so a retry sleeping between attempts is cancelled by the
@@ -827,6 +827,11 @@ function attachSession(v, t, info, wantSec){
   t.offset=info.start_seconds||0;
   t.encoder=info.encoder||null;
   t.sessionId=info.session_id||null;
+  if(t.fileContext&&playbackFileContext(t.fileContext).source_ref.kind!=="local"){
+    const fileContext=playbackFileContext(t.fileContext);
+    t.fileContext=withPlaybackFileSession(fileContext,t.sessionId);
+    t.meta={...(t.meta||{}),fileContext:t.fileContext};
+  }
   t.streamId=null;
   t.vod=!!info.vod;
   if(Array.isArray(info.ladder)&&info.ladder.length) t.ladder=info.ladder;

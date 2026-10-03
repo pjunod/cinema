@@ -30,6 +30,21 @@ impl Backend for SqliteStore {
             Ok(rows)
         }).await
     }
+    async fn sharing_file_locator_key_rows(&self) -> Result<Vec<String>, StoreError> {
+        self.with_read(|connection| {
+            let snapshot=connection.unchecked_transaction()?;
+            let present:i64=snapshot.query_row("SELECT CASE WHEN count(*)=0 THEN 0 WHEN count(*)=1 AND max(type)='table' THEN 1 ELSE 2 END FROM sqlite_master WHERE name='sharing_file_locator_keys'",[],|row| row.get(0))?;
+            if present==0 {return Ok(Vec::new());}
+            if present!=1 {return Err(crate::sharing::invalid());}
+            let read=|sql:&str| -> Result<Vec<String>,StoreError> {
+                Ok(snapshot.prepare(sql)?.query_map([],|row| row.get(0))?.collect::<Result<_,_>>()?)
+            };
+            crate::store::sharing_file_locators::columns(read(crate::store::sharing_file_locators::COLUMNS_SQL)?)?;
+            let rows=read(crate::store::sharing_file_locators::ROWS_SQL)?;
+            snapshot.commit()?;
+            Ok(rows)
+        }).await
+    }
     async fn sharing_read(&self, sql: &str, params: Vec<Value>) -> Result<Vec<String>, StoreError> {
         let (sql, params) = crate::store::sharing::ordered(sql, params)?;
         let params = values(params);
