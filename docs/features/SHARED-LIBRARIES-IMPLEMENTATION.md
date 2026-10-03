@@ -1472,7 +1472,7 @@ implied by the build handoff.
 | S2 | implementation in progress; topology qualification open | [draft PR #759](http://192.168.4.7:3000/noirr/plurx/pulls/759) | Dedicated loopback TLS transport, pinned direct dialing and fixed Tailscale DNS, isolated peer/admin routes, durable claim/rotation recovery, authenticated endpoint refresh and advisory Developer switch implemented. Two-NAT, shared-machine Serve and Docker isolation/egress receipts remain open; S2 is not complete. |
 | S3 | implementation started; ownership migration open | `codex/sharing-s3-principals` (unpublished) | Canonical Local writers, complete principal reads and seven-table candidate rebuild implemented; ownership and actual-voter lifecycle regressions passed. Caller refusal and retained-read census are qualified; Shared grant/scope admission, migration installation and coordinated upgrade qualification remain open; §16.4 records the boundaries. |
 | S4 | source catalogue and private history candidates implemented; qualification pending | `codex/sharing-s4-catalogue` | Consistent live keysets and batch metadata, candidate order maintenance and durable item identities, peer metadata routes and receiver-only ordered history. Viewer/cache/artwork/details, activation floor and qualification remain open. |
-| S5 | not started | — | — |
+| S5 | bounded resource grammar candidate built; relay and admission open | `codex/sharing-s3-principals` (unpublished) | Current-engine relative HLS grammar and generator/escape regressions passed; no Shared producer, relay or signed file locator is enabled. |
 | S6 | not started | — | — |
 | S7 | not started | — | — |
 | S8 | not started | — | — |
@@ -2586,3 +2586,39 @@ passed (0.62 seconds), both helper/SQLite regressions passed (0.69 seconds),
 denied-warning helper Clippy passed (25.67 seconds), and the six runner plus
 four docs-index tests passed. The exact combined runtime archive must be
 qualified again before its upgrade receipt can cover a later candidate.
+
+
+### 16.6 S5 resource grammar foundation
+
+The candidate [relative HLS grammar](../../crates/plurx-core/src/sharing_resources.rs)
+is derived from the actual
+[router](../../crates/plurxd/src/http/mod.rs),
+[master/subtitle generator](../../crates/plurxd/src/http/hls/playlist_text.rs),
+[rolling start/discontinuity projection](../../crates/plurxd/src/transcode/rolling/segment_index.rs),
+[init-object naming](../../crates/plurxd/src/transcode/session_request.rs), and
+[TS muxer arguments](../../crates/plurx-core/src/transcode/mod.rs).
+It preserves validated playlist bytes without rewriting URLs or fetching them.
+
+| Resource | Closed relative grammar |
+|---|---|
+| Main playlists | `master.m3u8`, `index.m3u8`, `video.m3u8`; only bounded, nonduplicate `native`, `subtitle` and the existing diagnostic query vocabulary |
+| Video objects | `init.mp4`, positive `init-e{epoch}.mp4`, `seg{number}.ts` and `seg{number}.m4s`; numeric values fit the engine's signed range |
+| Native subtitles | `subs/{index}/index.m3u8`, `subs/{index}/seg{number}.vtt`; subtitle playlist children resolve within that exact track |
+| URI-bearing tags | Existing subtitle `EXT-X-MEDIA` and init `EXT-X-MAP`; closed attribute names and exact resource kinds |
+| Unsupported forms | Absolute/root-relative URLs, authorities, traversal, encoded separators, fragments, unknown query/URI attributes, keys/encryption, LL-HLS and unexpected tag/resource kinds |
+
+Validation bounds one playlist to 1 MiB, a line to 8 KiB and the line/attribute
+counts independently. It checks master/media/subtitle URI placement and
+pending segment declarations. Four focused tests passed with zero ignored
+cases, including the actual fMP4 generator output through segment index
+100000 and explicit proxy/encryption/duplicate-attribute/body-bound refusals.
+Pinned feature all-target check passed (28.27 seconds), and final denied-warning
+feature Clippy passed (31.23 seconds). The hand-authored master/subtitle fixtures
+record current emitted shapes; they do not replace an end-to-end producer
+receipt. This helper does not authorize a grant, session, response publication
+or a network fetch, and is not yet wired into a Shared relay.
+
+Remaining S5 work includes complete start/decision envelope translation,
+Source admission and producer-stop release, the B remote-source lifecycle,
+signed file locators, Range/416/file/subtitle resources, current-login and
+Source revocation cancellation, transport/resource budgets and real playback.
