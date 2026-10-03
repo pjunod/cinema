@@ -19,6 +19,7 @@ mod file_grants;
 mod fragindex;
 mod fragment_index_cluster;
 mod housekeeping;
+mod jellyfin_identity;
 mod library;
 mod library_channels;
 mod live_tv_resource;
@@ -1191,6 +1192,8 @@ pub(crate) const MIGRATIONS: &[&str] = &[
     super::dv_conversion::DV_REQUEST_PROVENANCE_COLUMN,
     // v91: transactional playback planning settings generation.
     super::PLAYBACK_INPUT_SCHEMA,
+    // v92: permanent Jellyfin wire identities and deterministic retirement.
+    super::jellyfin_identity::JELLYFIN_IDENTITY_SCHEMA,
 ];
 
 /// Highest SQLite schema version this binary can read and migrate.
