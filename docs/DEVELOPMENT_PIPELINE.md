@@ -265,8 +265,15 @@ When the project is complete:
 2. **Merge current `main` into the effort.** Do not rebase the shared effort
    branch: rewriting every task commit creates avoidable review and recovery
    work.
-3. **Open `effort/<project>` into `main`.** The main workflow recognizes that
-   head/base pair and replaces normal path selection with the complete fan-out.
+3. **Open `effort/<project>` into `main`, then dispatch qualification manually.**
+   Full CI is manual or release-tag-only; opening the PR does not allocate its
+   runtime sweep. Dispatch [ci.yml](../.github/workflows/ci.yml) on the frozen
+   promotion head branch with `promotion_pr`, `promotion_head_sha` and
+   `promotion_base_sha` naming that open same-repository PR and both exact tips.
+   Authenticated API metadata must agree with the dispatched checkout, and
+   current `main` must already be an ancestor of the head. The bound run enables
+   every surface, including Windows. It never publishes a package or fleet image;
+   leaving the three inputs empty preserves the ordinary manual workflow.
    If resolving the final merge requires a separate branch, name it
    `integration/<project>-into-main`; the workflow treats that narrowly named
    branch as the same qualification candidate.
@@ -286,7 +293,9 @@ When the project is complete:
    available for one day.
 6. **Merge only while the candidate is current.** Immediately before writing
    the receipt, the gate fetches the live head and base refs and requires both
-   tips to equal the pull-request event. A moved effort head or `main` base
+   tips to equal the pull-request event or authenticated manual binding. The
+   manual receipt also revalidates the PR's open state and same-repository route.
+   A moved effort head or `main` base
    leaves the completed run available for diagnosis but prevents a success
    receipt. Merge current `main` into the effort and qualify the new tree.
 
