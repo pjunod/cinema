@@ -3471,8 +3471,13 @@ assert.equal(context.ACT_TIMER, null);
         self.assertEqual(
             " ".join(condition.split()),
             "always() && github.event_name == 'workflow_dispatch' && "
-            "github.ref == 'refs/heads/main'",
+            "github.ref == 'refs/heads/main' && inputs.promotion_pr == '' && "
+            "inputs.promotion_head_sha == '' && inputs.promotion_base_sha == '' && "
+            "needs.scope.outputs.qualification != 'true'",
         )
+        for field in ("promotion_pr", "promotion_head_sha", "promotion_base_sha"):
+            self.assertIn(f"inputs.{field} == ''", condition)
+        self.assertIn("needs.scope.outputs.qualification != 'true'", condition)
         triggers = workflow.split("on:\n", 1)[1].split("\njobs:", 1)[0]
         self.assertIn("workflow_dispatch:", triggers)
         self.assertNotIn("branches: [main]", triggers)
