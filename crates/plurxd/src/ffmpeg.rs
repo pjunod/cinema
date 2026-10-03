@@ -766,11 +766,11 @@ fn normalized_probe_document(raw: &str) -> Result<serde_json::Value, String> {
     let mut value: serde_json::Value =
         serde_json::from_str(raw).map_err(|error| format!("invalid ffprobe JSON: {error}"))?;
     if let Some(document) = value.as_object_mut() {
-        // plurx's own record of a measurement it made from the stored probe's
-        // source revision (`transcode::hevc_census`), grafted after the scan.
-        // A fresh probe never carries it, and its presence says nothing about
-        // whether the bytes changed.
+        // Application-owned measurements are grafted after the scan. A fresh
+        // probe never carries them; their presence says nothing about whether
+        // the source bytes changed. Keep all FFprobe-owned fields comparable.
         document.remove(plurx_core::transcode::hevc_census::PROBE_KEY);
+        document.remove(plurx_core::store::CONTENT_ENCODING_PROBE_KEY);
     }
     if let Some(format) = value
         .get_mut("format")
@@ -3816,6 +3816,32 @@ mod tests {
                 .expect("compare")
                 .same
         );
+    }
+
+    /// Background content analysis adds application metadata without changing
+    /// media. Same-reporter comparison must ignore that record alone, including
+    /// unavailable/negative reports, while still rejecting actual stream drift.
+    #[test]
+    fn a_content_encoding_report_is_not_a_source_change_for_the_same_reporter() {
+        let held = current_reporter_probe();
+        for outcome in ["measured", "scorer_unavailable", "bounded_failure"] {
+            let mut stored = held.clone();
+            stored[plurx_core::store::CONTENT_ENCODING_PROBE_KEY] = serde_json::json!({
+                "context": {"version": 1, "engine": "fixture", "threads": 2},
+                "outcome": outcome, "source_sha256": "a".repeat(64), "windows": [],
+            });
+            let comparison = super::compare_probe_documents(&stored.to_string(), &held.to_string())
+                .expect("compare unchanged source with content metadata");
+            assert!(comparison.same, "{outcome}: {:?}", comparison.differences);
+            assert!(!comparison.admitted_on_reporter_drift);
+
+            stored["streams"][0]["refs"] = serde_json::json!(99);
+            let changed = super::compare_probe_documents(&stored.to_string(), &held.to_string())
+                .expect("compare changed stream with content metadata");
+            assert!(!changed.same, "{outcome}: real stream changes must refuse");
+            assert!(!changed.admitted_on_reporter_drift);
+            assert!(changed.rendered_differences().contains("/streams/0/refs"));
+        }
     }
 
     /// The production failure this exists to stop: three refusals on `media1`

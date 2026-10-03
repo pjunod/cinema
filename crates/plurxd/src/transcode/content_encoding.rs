@@ -10,7 +10,7 @@ use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncReadExt, AsyncSeekExt};
 
 const VERSION: u32 = 1;
-const PROBE_KEY: &str = "plurx_content_encoding";
+use plurx_core::store::CONTENT_ENCODING_PROBE_KEY as PROBE_KEY;
 const MAX_SOURCE: u64 = 32 * 1024 * 1024 * 1024;
 const MAX_MEDIA: u64 = 64 * 1024 * 1024;
 struct Scorer {

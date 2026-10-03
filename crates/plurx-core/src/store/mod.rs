@@ -15,6 +15,10 @@
 //!   value is pending, and the response exposes only the durable state.
 //! - Implementations are shared via `Arc`, never cloned per-request.
 
+/// Application-owned measurement metadata grafted onto a stored FFprobe report.
+/// Source comparisons must omit this member; it is not emitted by FFprobe.
+pub const CONTENT_ENCODING_PROBE_KEY: &str = "plurx_content_encoding";
+
 pub mod classification;
 pub use classification::ClassificationStore;
 mod downloaded_subtitles;
