@@ -774,3 +774,50 @@ No implementation, browser upgrade or deployment occurred while addressing
 this review. Required physical results remain open. The existing constraints
 remain: no new watchdog, no timeout increase as the fix, and no incident
 closure until both VOD and native rolling pass their acceptance rows.
+
+## 10. Implementation record — candidate qualification stays open
+
+**Started:** 2026-10-03 · **Base:** `561a278f6` · **Integration:**
+`effort/web-seek`. The incident and review above remain historical evidence.
+No production deployment is part of this build.
+
+**Loader and presentation candidate:** the official full hls.js **1.6.19**
+npm distribution, tag `v1.6.19`, npm `gitHead`
+`1546898e0990e3c57aa0de63147e036bdc75c270`, Apache-2.0 license retained in
+the upstream bundle. Distribution archive SHA-256 is
+`a35046767c8dff431fb02b565451d1214378ffc48928355f3622d4702ec2aca0`;
+checked-in bundle SHA-256 is
+`72b87a6e58db623feca73ab370970c1126ec06eb3dcd0a67fd14b47b6340b820`.
+Main, prepared and Live TV construction explicitly choose MSE first;
+capability probing uses that same selector including MMS-only fallback.
+
+Target presentation now comes only from the authoritative settlement owner.
+Callback-backed video requires current attachment, intent and epoch plus a
+post-dispatch frame at the target. Execution resets progress and renews the
+same callback owner before media assignment, including a paused superseding
+seek. A sole target frame before `seeked` is retained and reconciled at that
+event. Paused successors do not need a `playing` event. Paused audio/video
+without callbacks reports `seek_positioned`, preserves paused intent and
+never credits a rendered frame or replacement TTFF.
+
+Focused proof: `node --test tests/web/hls-seek.test.js
+ tests/playback/seek-control.test.js tests/web/seek-telemetry.test.js`, plus
+`node --test tests/playback/web-control.test.js`. The bundled-controller
+regression exercises real seek/endstreaming/detach handling and independent
+incumbent/spare listeners. The sequence tests reject the former forward and
+backward clock/count proof; event-order tests cover one-frame paused seeks.
+
+Generated-media browser proof: `node tests/web/hls-seek.browser.cjs` with
+Playwright installed. Chromium passed MPEG-TS with reordered H.264 video,
+zero and 17-second transport timestamp origins, worker and inline remuxing,
+nonzero start, forward/backward/paused seeks and three growing-playlist
+reloads. Appended audio/video endpoint differences remained below 150 ms.
+This is timestamp/transport coverage, not physical A/V sync qualification.
+Fixtures are unencrypted and do not exercise LL-HLS. Physical Safari MSE,
+iPhone MMS, high-bitrate memory/eviction, AirPlay/power and reference-file
+latency rows remain open.
+
+Local compiler loop uses explicit `rustup run 1.97.1`: Rust 1.97.1
+`8bab26f4f`, cargo 1.97.1. `cargo check -p plurxd --all-targets` and
+`cargo clippy -p plurxd --all-targets -- -D warnings` passed on the base plus
+this phase. Bare Homebrew `rustc` is 1.98 and is not evidence for this work.

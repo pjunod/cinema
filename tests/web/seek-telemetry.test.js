@@ -18,7 +18,7 @@ function harness(options={}){
   const video={readyState:4,seeking:false,paused:false,ended:false,currentTime:0,playbackRate:1,
     addEventListener(name,fn){if(!listeners.has(name))listeners.set(name,new Set());listeners.get(name).add(fn);},
     removeEventListener(name,fn){listeners.get(name)?.delete(fn);},
-    getVideoPlaybackQuality(){return {totalVideoFrames:0};}};
+    getVideoPlaybackQuality(){return {totalVideoFrames:this.frames||0};}};
   const c=vm.createContext({PLAYER:p,performance:{now:()=>clock.ms},Math,Number,Object,
     document:{hidden:false,getElementById:()=>video},
     playbackContext:()=>({attempt:'a1',method:p.method,file_id:p.fileId}),
@@ -32,6 +32,7 @@ function harness(options={}){
     PlaybackPolicy:{seekRoute:({targetMs})=>({route:'local',basis:'direct',atMs:targetMs}),HLS_STARTUP:{seek_deadline_ms:8000}},
     setTimeout:(fn,ms)=>{timers.push({fn,ms});return timers.length;},clearTimeout:()=>{},
     armStall:()=>{},playerActivity:()=>{},qualityForce:()=>'original',
+    playbackSeekBufferCovers:()=>true,
   });
   for(const name of ['dispatchPlaybackSeekTelemetry','playbackSeekTraceRanges',
     'recordPlaybackSeekRoute','finishPlaybackSeekTelemetry','watchPlaybackSeekTelemetry',
@@ -39,7 +40,7 @@ function harness(options={}){
     'settlePlaybackControlSeek','seekTo'])vm.runInContext(source(name),c);
   function emit(name){for(const fn of [...(listeners.get(name)||[])])fn();}
   function present(at=clock.ms+50){clock.ms=at;video.seeking=false;emit('seeked');
-    return c.settlePlaybackControlSeek(video,c.PLAYER,video.currentTime,++c.PLAYER.controlPresentedFrames);}
+    return c.settlePlaybackControlSeek(video,c.PLAYER,video.currentTime,++c.PLAYER.controlPresentedFrames,{epoch:c.PLAYER.controlPresentationEpoch,attachment:c.PLAYER.mediaAttachment,intent:c.PLAYER.controlSeek?.sequence});}
   async function dispatch(target){const promise=c.seekTo(target);const timer=timers.shift();assert.equal(timer.ms,100);
     clock.ms+=100;timer.fn();await promise;return c.PLAYER.controlSeek;}
   return {c,p,video,posts,timers,clock,emit,present,dispatch};
@@ -83,7 +84,9 @@ test('no-rVFC fallback requires seeked and a ready current target before reporti
   h.emit('timeupdate');assert.equal(h.posts.filter(x=>x.event==='seek_resumed').length,0);
   h.emit('seeked');h.video.readyState=2;h.emit('timeupdate');
   assert.equal(h.posts.filter(x=>x.event==='seek_resumed').length,0);
-  h.video.readyState=3;h.emit('timeupdate');h.emit('timeupdate');
+  h.video.readyState=3;h.emit('timeupdate');
+  assert.equal(h.posts.filter(x=>x.event==='seek_resumed').length,0);
+  h.video.frames=1;h.video.currentTime=30.1;h.emit('timeupdate');
   assert.equal(h.posts.filter(x=>x.event==='seek_resumed').length,1);
 });
 test('retired attachment callbacks cannot finish a replacement seek',async()=>{
@@ -191,4 +194,41 @@ test('decoder retirement preserves the exact shared seek through reopen and mult
     h.clock.ms+=50;h.c.finishPlaybackSeekTelemetry(incoming,incoming.controlSeek,'seek_resumed');
     assert.deepEqual(h.posts.filter(x=>/^seek_(resumed|abandoned)$/.test(x.event)).map(x=>x.event),['seek_resumed']);
   }
+});
+
+for(const beforeSeeked of [true,false]) test(`paused sole target frame ${beforeSeeked?'before':'after'} seeked settles without Play`,async()=>{
+  const h=harness();h.video.paused=true;h.p.wantsPlayback=false;
+  await h.dispatch(30);h.video.seeking=beforeSeeked;
+  const observation={epoch:h.p.controlPresentationEpoch,attachment:h.p.mediaAttachment,intent:h.p.controlSeek.sequence};
+  const settled=h.c.settlePlaybackControlSeek(h.video,h.p,30,1,observation);
+  assert.equal(settled,!beforeSeeked);
+  if(beforeSeeked){assert.ok(h.p.controlSeek.targetFrame);h.video.seeking=false;h.emit('seeked');}
+  assert.equal(h.p.controlSeek,null);assert.equal(h.video.paused,true);assert.equal(h.p.wantsPlayback,false);
+  assert.equal(h.posts.filter(x=>x.event==='seek_resumed').length,1);
+});
+test('late old frame, epoch, intent and attachment cannot cancel current delivery',async()=>{
+  const h=harness();await h.dispatch(30);
+  const pending=h.p.controlSeek;
+  const current={epoch:h.p.controlPresentationEpoch,attachment:h.p.mediaAttachment,intent:pending.sequence};
+  for(const observation of [{...current,epoch:current.epoch-1},{...current,intent:current.intent-1},{...current,attachment:{id:0}}])
+    assert.equal(h.c.settlePlaybackControlSeek(h.video,h.p,30,1,observation),false);
+  assert.equal(h.c.settlePlaybackControlSeek(h.video,h.p,10,1,current),false);
+  assert.equal(h.p.controlSeek,pending);assert.equal(pending.targetFrame,null);
+  assert.equal(h.c.settlePlaybackControlSeek(h.video,h.p,30,1,current),true);
+});
+test('paused no-callback positioning labels weaker proof and rejects a clamp',async()=>{
+  const h=harness({callbacks:false});h.video.paused=true;h.p.wantsPlayback=false;
+  await h.dispatch(30);h.p.playStartedAt=100;h.video.currentTime=10;h.emit('seeked');assert.ok(h.p.controlSeek);
+  h.video.currentTime=30;h.emit('seeked');assert.equal(h.p.controlSeek,null);
+  assert.equal(h.posts.filter(x=>x.event==='seek_resumed').length,0);
+  assert.equal(h.posts.filter(x=>x.event==='seek_positioned').length,1);
+  assert.equal(h.p.playStartedAt,null,'positioning cannot mint a later cold-start TTFF');
+  assert.equal(h.video.paused,true);
+});
+
+test('ready paused successor settles its only frame before any playing event',async()=>{
+  const h=harness();await h.dispatch(30);h.p.started=false;h.p.wantsPlayback=false;h.video.paused=true;
+  const identity={epoch:h.p.controlPresentationEpoch,attachment:h.p.mediaAttachment,intent:h.p.controlSeek.sequence};
+  assert.equal(h.c.settlePlaybackControlSeek(h.video,h.p,30,1,identity),true);
+  assert.equal(h.p.controlSeek,null);assert.equal(h.video.paused,true);assert.equal(h.p.started,false);
 });

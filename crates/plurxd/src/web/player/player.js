@@ -948,7 +948,7 @@ function constructHls(startup,tgt,video,startAt,observesCurrent){
   const attachedPlayer=startup.player;
   const playlistUrl=startup.playlistUrl;
   const StockLoader=Hls.DefaultConfig&&Hls.DefaultConfig.loader;
-  const hls=new Hls({
+  const hls=new Hls({preferManagedMediaSource:false,
     maxBufferLength:tgt.fwd,
     backBufferLength:tgt.back,
     ...(tgt.budgeted?{maxBufferSize:tgt.fwdBytes}:{}),
