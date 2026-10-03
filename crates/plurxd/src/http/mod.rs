@@ -50,6 +50,7 @@ pub(crate) mod scan_identity;
 pub(crate) mod shared_artwork;
 pub(crate) mod shared_library;
 pub(crate) mod shared_playback;
+pub(crate) mod shared_source_playback;
 // Candidate projection helpers remain unregistered until Source/B lifecycle
 // authority and actual delivery binding are qualified.
 pub(crate) mod sharing;
