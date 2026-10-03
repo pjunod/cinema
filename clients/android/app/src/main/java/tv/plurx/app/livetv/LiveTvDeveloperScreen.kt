@@ -43,6 +43,7 @@ fun LiveTvDeveloperScreen(origin: String, onBack: () -> Unit) {
         verticalArrangement = Arrangement.spacedBy(14.dp)) {
         TextButton(onClick = onBack, modifier = Modifier.focusRequester(backFocus)) { Text("Back") }
         Text("Developer", style = MaterialTheme.typography.headlineMedium)
+        tv.plurx.app.ui.SharedSharingDeveloperCard()
         Text("Tuner, guide, recording and Library channel settings are in Settings → Live TV.")
         LiveTvSettingsPlacement.developer.forEach { card ->
             when (card) {

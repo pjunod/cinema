@@ -1,4 +1,4 @@
-# Web shell layout — where the app's sixty-seven files are, and what each one holds
+# Web shell layout — where the app's sixty-eight files are, and what each one holds
 
 **Status:** live · **Describes:** `crates/plurxd/src/web/` as served ·
 **Split:** 2026-09-19, executing
@@ -196,7 +196,8 @@ had to be edited.
 | 64 | [`layouts/theater.js`](../../crates/plurxd/src/web/layouts/theater.js) | The theater layout, `LAYOUTS.theater`, and the load-time `applyLayout()` that paints the first frame. | 22458–22996 |
 | 65 | [`pages/reader.js`](../../crates/plurxd/src/web/pages/reader.js) | The EPUB reader page — glue over the `reader.js` sidecar, which did not move. | 22997–23326 |
 | 66 | [`pages/library-channels-page.js`](../../crates/plurxd/src/web/pages/library-channels-page.js) | The Library channels page — glue over the `library-channels.js` sidecar, which did not move. | 23327–23783 |
-| 67 | [`router.js`](../../crates/plurxd/src/web/router.js) | `PAGE_TIMER`, `setPageTimer`, `render`, and the `hashchange` and boot statements that start the app. | 23784–23898 |
+| 67 | [`pages/shared-libraries.js`](../../crates/plurxd/src/web/pages/shared-libraries.js) | Separate full-reference Shared browsing, bounded B catalogue reads, independent Continue Watching groups, and Sharing management summary. | **New.** Shared catalogue integration. |
+| 68 | [`router.js`](../../crates/plurxd/src/web/router.js) | `PAGE_TIMER`, `setPageTimer`, `render`, and the `hashchange` and boot statements that start the app. | 23784–23898 |
 
 ## 3. Adding a file
 

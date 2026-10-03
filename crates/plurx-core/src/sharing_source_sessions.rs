@@ -10,6 +10,7 @@ use uuid::Uuid;
 
 /// Untrusted identity inputs. The intent factory validates these and binds a
 /// current server-produced witness; these fields are not themselves authority.
+#[derive(Clone)]
 pub struct SourceSessionRequest {
     pub principal: PlaybackPrincipal,
     pub request_id: String,
@@ -25,6 +26,7 @@ pub struct SourceSessionRequest {
 }
 
 /// No Serialize/Deserialize/Debug: a wire revision cannot mint this witness.
+#[derive(Clone)]
 pub struct SourceSessionIntent {
     pub(crate) request: SourceSessionRequest,
     pub(crate) witness: SourceFileWitness,
@@ -39,6 +41,23 @@ impl SourceSessionIntent {
         revision_key: &CatalogueRevisionKey,
         revision_key_envelope: SealedSecret,
     ) -> Result<Self, StoreError> {
+        Self::from_witness(request, witness, revision_key, revision_key_envelope, false)
+    }
+    pub(crate) fn from_current_owned_witness(
+        request: SourceSessionRequest,
+        witness: SourceFileWitness,
+        revision_key: &CatalogueRevisionKey,
+        revision_key_envelope: SealedSecret,
+    ) -> Result<Self, StoreError> {
+        Self::from_witness(request, witness, revision_key, revision_key_envelope, true)
+    }
+    fn from_witness(
+        request: SourceSessionRequest,
+        witness: SourceFileWitness,
+        revision_key: &CatalogueRevisionKey,
+        revision_key_envelope: SealedSecret,
+        resolved: bool,
+    ) -> Result<Self, StoreError> {
         if !matches!(request.principal, PlaybackPrincipal::Sharing { .. })
             || !request.principal.valid_admission_shape()
             || !is_hash(&request.credential_hash)
@@ -48,7 +67,8 @@ impl SourceSessionIntent {
             || !(1..=128).contains(&request.playback_id.len())
             || request.playback_id.chars().any(char::is_control)
             || request.now_ms <= 0
-            || request.claim_expires_at_ms <= request.now_ms
+            || request.claim_expires_at_ms <= 0
+            || (!resolved && request.claim_expires_at_ms <= request.now_ms)
             || witness.item != request.item_id
             || witness.file != request.file_id
             || revision_key.file_revision(&witness)? != request.file_revision
@@ -134,6 +154,7 @@ pub enum SourceReleaseOutcome {
 /// An actual local worker's committed assignment. A retained binding or a
 /// caller-supplied node string cannot construct this handle. This is not an
 /// encoder permit, an active route lease, or takeover authority.
+#[derive(Clone)]
 pub struct SourceDispatchAssignment {
     pub(crate) binding: SourceBindingHandle,
     pub(crate) owner_node_id: String,
@@ -162,13 +183,48 @@ impl SourceDispatchAssignment {
 
 /// Fresh assignment-stage authority for a first blocked Source activation.
 /// It is not renewable route, replacement, or takeover authority.
+#[derive(Clone)]
 pub struct SourceSessionWriteAuthority {
     pub(crate) assignment: SourceDispatchAssignment,
     pub(crate) intent: Box<SourceSessionIntent>,
 }
+impl SourceSessionWriteAuthority {
+    /// Required again after commit and before actual queue admission. This
+    /// checks the original snapshot clock, not current grant or physical work.
+    pub fn validate_observation_freshness(
+        &self,
+        now_ms: i64,
+    ) -> Result<(), crate::cluster::membership::MembershipError> {
+        self.assignment.validate_observation_freshness(now_ms)
+    }
+}
 
 pub enum SourceWriteAuthorityRead {
     Ready(Box<SourceSessionWriteAuthority>),
+    Unavailable,
+    Capacity,
+}
+
+/// Current resolved Source route and exact live lease, freshly authorized by
+/// the actual local worker. This cannot publish, take over, or release work.
+#[derive(Clone)]
+pub struct SourceOwnedRouteAuthority {
+    pub(crate) assignment: SourceDispatchAssignment,
+    pub(crate) intent: Box<SourceSessionIntent>,
+    pub(crate) session_id: String,
+    pub(crate) lease_expires_at_ms: i64,
+    pub(crate) lease_revision: i64,
+}
+impl SourceOwnedRouteAuthority {
+    pub fn validate_observation_freshness(
+        &self,
+        now_ms: i64,
+    ) -> Result<(), crate::cluster::membership::MembershipError> {
+        self.assignment.validate_observation_freshness(now_ms)
+    }
+}
+pub enum SourceOwnedRouteAuthorityRead {
+    Ready(Box<SourceOwnedRouteAuthority>),
     Unavailable,
     Capacity,
 }

@@ -14,6 +14,7 @@ struct LiveTvDeveloperView: View {
 
     var body: some View {
         Form {
+            SharedSharingDeveloperCard()
             Section("Bounded pause/resume · advisory enablement") {
                 Toggle("Enable bounded pause/resume", isOn: $boundedResumeEnabled)
                 Text("On by default. Resume consumes a healthy retained buffer immediately and gives an established on-demand item one recipe-preserving repair inside one 15-second budget.")

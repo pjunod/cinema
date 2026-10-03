@@ -76,7 +76,7 @@ test("every section is a route, grouped in the rail's order", () => {
   assert.deepEqual(r.SET_GROUPS.map(([group]) => group), ["Content", "Playback", "Server", "Outside", "Developer"]);
   assert.deepEqual(r.SET_TABS.map(([id]) => id), [
     "libraries", "metadata", "livetv", "playback", "analysis",
-    "maintenance", "users", "system", "cluster", "integrations", "developer",
+    "maintenance", "users", "system", "cluster", "integrations", "sharing", "developer",
   ]);
   const dispatch = {
     metadata: "metadataPanel(d.settings,d.developerReadiness)",
@@ -87,6 +87,7 @@ test("every section is a route, grouped in the rail's order", () => {
     users: "usersPanel(d.users,d.settings)",
     system: "systemPanel(d.sys,d.playbackEvents)",
     cluster: "clusterPanel(d)",
+    sharing: "sharingManagementPanel(d)",
     integrations: "integrationsPanel(d.settings,d.trakt)",
     developer: "developerPanel(d.settings,d.developerReadiness)",
   };

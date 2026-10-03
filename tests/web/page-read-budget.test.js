@@ -856,6 +856,7 @@ test("Settings loads only the active tab manifest", () => {
     users: { required: ["settings", "users"], secondary: [] },
     system: { required: ["sys"], secondary: ["playbackEvents"] },
     cluster: { required: ["cluster"], secondary: ["clusterOps", "developerReadiness"] },
+    sharing: { required: ["sharingStatus", "sharingImports", "sharingExports"], secondary: [] },
     integrations: { required: ["settings", "trakt"], secondary: [] },
     developer: { required: ["settings"], secondary: ["developerReadiness"] },
   });

@@ -703,9 +703,10 @@ observation. It returns a closed `SourceSessionWriteAuthority` with no wire
 constructor. A retained binding alone cannot mint it. Source activation on the
 ordinary `activate_media_session` entry remains refused.
 
-The narrowly named `activate_source_media_session` currently has a Hiqlite
-implementation; the default backend method returns unavailable. Both its Local
-and proof-bearing Source entries delegate to the existing activation algorithm.
+The narrowly named `activate_source_media_session` has candidate SQLite and
+Hiqlite implementations; the default method remains unavailable for other
+backends. Each backend's Local and proof-bearing Source entries delegate to its
+existing activation algorithm.
 The Source selector binds the canonical owner key, inserts literal NULL
 `user_id`, and persists the full Sharing principal. It accepts only a first
 start fenced against an absent predecessor. Replacement, preparation, renewal,
@@ -738,3 +739,86 @@ SQLite prove assertion rollback, file replacement refusal and preservation of a
 genuine storage fault. The existing Local activation/preparation/settlement
 contract through `dyn Store` passed with zero ignored tests in 11.64 seconds.
 The exact feature all-target compiler check passed in 28.16 seconds.
+
+
+The SQLite counterpart is based on
+`5982f541bd9ffa22c22909de7f004f0b512cee17`. Its owned writer closure carries a
+clone of the original closed authority, without resetting observation times,
+and calls the guard after acquiring the writer connection and starting the
+transaction. Both backends insert the same complete Sharing metadata with NULL
+local user ID. The authority exposes its original-observation freshness check
+for the required postcommit check before actual producer queue admission; it
+remains separate from current authorization and the actual physical permit.
+
+All nine Source library regressions passed with zero ignored tests in 17.80
+seconds. The new memory and pooled SQLite activation case covers the ordinary
+Shared entry refusal, saved-switch and private-file races, foreign lease/pin
+preservation and mint refusal, foreign viewer tuple refusal, genuine writer
+fault rollback, one blocked Sharing route, and exact replay without lease
+renewal. The held binding and unresolved start remain; the never-dispatched
+callback cannot release an assigned incarnation. The existing Local lifecycle
+contract through `dyn Store` passed with zero ignored tests in 11.72 seconds.
+Exact feature all-target check passed in 29.79 seconds and Clippy in 33.68
+seconds. The prior actual-voter receipt remains scoped to the Hiqlite checkpoint;
+this counterpart changes its SQLite algorithm and closed snapshot cloning only.
+
+## Candidate current-owner renewal
+
+`prepare_source_owned_route_authority` is a separate read-only factory for a
+resolved, ready Source route. It refreshes the current effective grant, stored
+credential hash, private file witness and existing Source key; the immutable
+binding and assignment supply lineage, not current permission. The canonical
+resolved request, binding resolution marker, session capability, actual local
+node, epoch one and unexpired job lease must agree. The closed authority captures
+both lease expiry and revision and the original start of the newly obtained
+membership observation. The dispatch assignment's earlier admission timestamp
+does not permanently prevent later renewal.
+
+The proof-bearing `renew_source_media_session` uses the existing backend renewal
+algorithm with an assertion first in the same transaction. It rechecks saved
+Sharing choice, current grant/scope/file/key, exact candidate schemas, membership
+floor/generation, local node/removal fence and the captured route/lease tuple.
+Only an already resolved, published, active route can extend its live lease and
+frontiers. A reused lease snapshot or delayed member observation refuses. The
+ordinary Shared renewal entry remains closed, and the held Source capacity
+obligation is retained. No expiration, terminal state or renewal releases it.
+
+This stage does not implement publication or projection completion. Possessing
+an owned SQL lease is not proof that a physical producer and its admission permit
+exist. The future daemon actor must retain the actual permit, child job and
+registered session before invoking a separately qualified readiness transition.
+Renewal fixtures explicitly seed a resolved ready route; they do not claim that
+production publication or physical dispatch is available.
+
+One existing publication seam remains open: the Source claim's resolved replay
+query requires `publication_ready_at_ms > 0`, while activation publication
+resolves a request only at readiness zero. The renewal fixture does not qualify
+that replay path. Physical completion/publication must align the ready-state
+predicate and add an actual exact resolved replay regression before enabling
+that seam.
+
+The renewal checkpoint is based on
+`2925a231b6fde645ccb5194c25233236bfb174bb` and was checked with pinned Rust
+1.97.1. All ten Source library regressions passed with zero ignored tests in
+22.03 seconds. The memory and pooled case proves switch/file refusal, exact
+foreign lease and unrelated pin preservation, rollback of lease extension when
+the route writer faults, successful frontier/lease renewal, refusal of a reused
+lease revision, expiry of the newly obtained five-second observation, and fresh
+renewal from an older dispatch assignment. Held capacity remains retained.
+
+The actual three-voter Source regression passed with zero ignored tests in
+10.89 seconds, including current-owner renewal at eight held obligations,
+ordinary Shared refusal, same-write switch-off refusal without lease extension,
+stale lease proof refusal and fresh proof minting. It uses fixture-only resolved
+readiness and does not dispatch a producer. The unchanged Local committed
+successor renewal contract passed with zero ignored tests in 9.64 seconds.
+Feature all-target check passed in 25.24 seconds and Clippy with denied warnings
+in 30.01 seconds. The exact focused commands were:
+
+```sh
+cargo test --locked -p plurx-core --features hiqlite-contract-tests --lib store::sharing_source_sessions -- --nocapture
+cargo test --locked -p plurx-core --features hiqlite-contract-tests --test store_contract sharing_source_reservations_three_voters_atomic_claim_caps_replay_and_release -- --nocapture
+cargo test --locked -p plurx-core --features hiqlite-contract-tests --test store_contract media_session_a_committed_successor_can_renew_and_outlives_its_preparation -- --nocapture
+cargo check --locked -p plurx-core --all-targets --features hiqlite-contract-tests
+cargo clippy --locked -p plurx-core --all-targets --features hiqlite-contract-tests -- -D warnings
+```
