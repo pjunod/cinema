@@ -199,6 +199,9 @@ impl VodServe {
         session_id: String,
         fences: VodCreateFences<'_>,
     ) -> Result<VodStart, String> {
+        if let Some(viewer) = &fences.viewer {
+            viewer.require_local_authority().map_err(str::to_owned)?;
+        }
         // The one funnel every create passes through: the plain entry point,
         // the cluster one that every shipped caller actually uses, and the
         // resurrection of a session from its durable route. Applying the
@@ -674,5 +677,138 @@ impl VodServe {
             session_id,
             duration_ms,
         })
+    }
+}
+
+#[cfg(test)]
+mod principal_demand_tests {
+    use super::*;
+    use plurx_core::domain::ProbeResult;
+    use plurx_core::domain::{ItemKind, LibraryKind, NewItem, NewLibrary};
+    use plurx_core::playback_principal::PlaybackPrincipal;
+    use plurx_core::store::SqliteStore;
+
+    #[tokio::test]
+    async fn shared_vod_demand_refuses_before_pool_queue_or_session_allocation() {
+        let store: Arc<dyn Store> = Arc::new(SqliteStore::open_in_memory().expect("store"));
+        let library = store
+            .create_library(&NewLibrary {
+                name: "Demand refusal".to_owned(),
+                kind: LibraryKind::Movies,
+                paths: Vec::new(),
+                anime: false,
+            })
+            .await
+            .expect("library");
+        let item = store
+            .insert_item(&NewItem {
+                library_id: library.id,
+                kind: ItemKind::Movie,
+                parent_id: None,
+                title: "Absent source".to_owned(),
+                year: None,
+                season_number: None,
+                episode_number: None,
+            })
+            .await
+            .expect("item");
+        let file_id = store
+            .upsert_file(
+                item,
+                "/absent/shared-demand.mkv",
+                100,
+                1,
+                &ProbeResult::default(),
+            )
+            .await
+            .expect("file");
+        let file = store
+            .get_file(file_id)
+            .await
+            .expect("read file")
+            .expect("file row");
+        let root = crate::test_tempdir().expect("VOD root");
+        let serve = VodServe::new_cluster(
+            root.path().to_path_buf(),
+            store.clone(),
+            "node-a".to_owned(),
+            root.path().join("index"),
+            None,
+        );
+        let request = SessionRequest {
+            quality_catalog: None,
+            candidate_context: None,
+            control_sequence: None,
+            file_id,
+            playback_id: "shared-demand".to_owned(),
+            request_id: None,
+            automatic: false,
+            previous_session_id: None,
+            reopen_reason: None,
+            kind: SessionKind::Copy {
+                aac: true,
+                preserve_dolby_vision: false,
+                convert_dolby_vision: false,
+            },
+            start_seconds: 0.0,
+            audio_index: None,
+            subtitle_burn: None,
+            audio_offset_ms: 0,
+            hdr10: false,
+            presentation: Default::default(),
+            block_budget_secs: None,
+            transport: None,
+        };
+        let initial_cap = serve.shared.pool.global_cap();
+        let settings = VodSettings {
+            working_set_bytes: 8 << 30,
+            completed_cache_bytes: 50 << 30,
+            block_budget: Duration::from_secs(30),
+            materialize_budget: Duration::from_secs(30),
+            blocked_get_cap: initial_cap + 7,
+        };
+        let viewer = crate::state::PlaybackViewerDemand {
+            principal: PlaybackPrincipal::sharing(uuid::Uuid::new_v4(), &"a".repeat(64))
+                .expect("sharing principal"),
+            playback_id: request.playback_id.clone(),
+        };
+        let refusal = serve
+            .try_create_for_viewer(
+                &request,
+                &file,
+                &settings,
+                VodAttribution {
+                    user_name: "recipient viewer",
+                    item_title: "Absent source",
+                    supersession_user: "shared-demand",
+                },
+                "00000000-0000-4000-a000-000000000190".to_owned(),
+                Some(viewer.clone()),
+            )
+            .await
+            .expect_err("Shared create needs source admission");
+        assert_eq!(
+            refusal,
+            "sharing playback demand requires typed source authority"
+        );
+        let index_refusal = serve
+            .try_cluster_fragment_index(&file, CopyVideoOptions::new(true, false), Some(&viewer))
+            .await
+            .expect_err("Shared index needs source admission");
+        assert_eq!(index_refusal, refusal);
+        assert_eq!(serve.shared.pool.global_cap(), initial_cap);
+        assert!(serve
+            .shared
+            .preparing_sessions
+            .lock()
+            .expect("preparing sessions")
+            .is_empty());
+        assert!(serve.shared.sessions.lock().await.is_empty());
+        assert!(serve.shared.renditions.lock().await.is_empty());
+        assert!(store
+            .analysis_requests(10)
+            .await
+            .expect("no preparation queue")
+            .is_empty());
     }
 }

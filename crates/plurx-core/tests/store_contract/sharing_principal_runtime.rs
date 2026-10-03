@@ -1306,3 +1306,247 @@ async fn sharing_rebuilt_cleanup_preserves_foreign_preparations_and_retires_shar
         .expect("deleted local handoff replay refusal")
         .is_none());
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn sharing_rebuilt_terminal_ack_and_projection_retire_only_exact_shared_owner() {
+    let _case = HIQLITE_CASE.lock().await;
+    let cluster = ContractCluster::start().await;
+    let store = open_contract_hiqlite_store(&cluster).await;
+    let client = Client::remote(
+        cluster.addresses.clone(),
+        true,
+        true,
+        CONTRACT_API_SECRET.to_owned(),
+        false,
+        None,
+    )
+    .await
+    .expect("fixture client");
+    for result in client
+        .batch(include_str!("../fixtures/session-principal-local.sql"))
+        .await
+        .expect("local fixture")
+    {
+        result.expect("local seed");
+    }
+    let statements: Vec<(String, hiqlite::Params)> = MEDIA_SESSION_PRINCIPAL_REBUILD_SCHEMA
+        .split("-- next statement\n")
+        .map(|sql| {
+            (
+                sql.trim().trim_end_matches(';').to_owned(),
+                hiqlite::params!(),
+            )
+        })
+        .collect();
+    for result in client.txn(statements).await.expect("candidate transaction") {
+        result.expect("candidate rebuild");
+    }
+    for result in client
+        .batch(include_str!("../fixtures/session-principal-sharing.sql"))
+        .await
+        .expect("shared fixture")
+    {
+        result.expect("shared seed");
+    }
+    let second = "00000000-0000-4000-a000-000000000002";
+    let first_session = "00000000-0000-4000-a000-000000000181";
+    let second_session = "00000000-0000-4000-a000-000000000182";
+    for (incarnation, session) in [(SHARED_ROUTE, first_session), (second, second_session)] {
+        client
+            .execute(
+                "UPDATE media_sessions SET session_id=$1 WHERE incarnation_id=$2",
+                hiqlite::params!(session, incarnation),
+            )
+            .await
+            .expect("actual shared session identity");
+        client.execute("INSERT INTO job_leases(resource,owner_node_id,fence,revision,expires_at_ms,updated_at_ms) VALUES('session:' || $1,'node',1,3,9000,10)", hiqlite::params!(incarnation)).await.expect("terminal lease fixture");
+        client.execute("INSERT INTO cache_consumer_pins(storage_id,recipe_hash,generation_id,consumer_kind,consumer_id,consumer_epoch,expires_at_ms) VALUES('foreign-storage','foreign-recipe','foreign-generation','media_session',$1,1,9000)", hiqlite::params!(incarnation)).await.expect("terminal pin fixture");
+    }
+    let acknowledgement = MediaSessionTerminalAck {
+        incarnation_id: SHARED_ROUTE.to_owned(),
+        session_id: first_session.to_owned(),
+        owner_node_id: "node".to_owned(),
+        owner_epoch: 1,
+        client_instance_id: "00000000-0000-4000-a000-000000000183".to_owned(),
+        sequence: 1,
+        request_fingerprint: "e".repeat(64),
+        response_json: r#"{"terminal":true}"#.to_owned(),
+        expires_at_ms: 1000000,
+        updated_at_ms: 3000,
+    };
+    for invalid in [
+        MediaSessionTerminalAck {
+            session_id: second_session.to_owned(),
+            ..acknowledgement.clone()
+        },
+        MediaSessionTerminalAck {
+            owner_epoch: 2,
+            ..acknowledgement.clone()
+        },
+        MediaSessionTerminalAck {
+            owner_node_id: "foreign-node".to_owned(),
+            ..acknowledgement.clone()
+        },
+    ] {
+        assert!(!store
+            .record_media_session_terminal_ack(&invalid)
+            .await
+            .expect("exact terminal identity refusal"));
+    }
+    assert!(store
+        .media_session_terminal_ack(first_session, 3000)
+        .await
+        .expect("no refused ack")
+        .is_none());
+    assert!(store
+        .media_session_terminal_ack(second_session, 3000)
+        .await
+        .expect("no foreign session ack")
+        .is_none());
+    assert_eq!(
+        store
+            .media_session_route_by_incarnation(SHARED_ROUTE)
+            .await
+            .expect("unmodified route")
+            .expect("first shared route")
+            .state,
+        "active"
+    );
+    // Corrupt the second grant's pointer, not its canonical metadata. Ending
+    // the first incarnation cannot authorize deleting that foreign row.
+    client
+        .execute(
+            "DELETE FROM media_playback_pointers WHERE share_grant_id=$1",
+            hiqlite::params!(SHARED_ROUTE),
+        )
+        .await
+        .expect("remove first pointer before unique-incarnation corruption");
+    client
+        .execute(
+            "UPDATE media_playback_pointers SET current_incarnation_id=$1, desired_revision=2 WHERE share_grant_id=$2",
+            hiqlite::params!(SHARED_ROUTE, second),
+        )
+        .await
+        .expect("foreign pointer corruption");
+    assert!(store
+        .record_media_session_terminal_ack(&acknowledgement)
+        .await
+        .expect("shared terminal ack"));
+    let ended = store
+        .media_session_route_by_incarnation(SHARED_ROUTE)
+        .await
+        .expect("terminal route")
+        .expect("retained ended route");
+    assert_eq!(ended.state, "ended");
+    assert_eq!(ended.lease_expires_at_ms, 3000);
+    assert_eq!(
+        ended.principal.owner_key(),
+        format!("share:{SHARED_ROUTE}:{}", "a".repeat(64))
+    );
+    assert_eq!(request_rows(&client, "SELECT CAST(count(*) AS TEXT) AS value FROM media_playback_pointers WHERE share_grant_id='00000000-0000-4000-a000-000000000001'").await, ["0"]);
+    assert_eq!(request_rows(&client, "SELECT current_incarnation_id AS value FROM media_playback_pointers WHERE share_grant_id='00000000-0000-4000-a000-000000000002'").await, [SHARED_ROUTE]);
+    assert_eq!(request_rows(&client, "SELECT CAST(revision AS TEXT) || ':' || expires_at_ms AS value FROM job_leases WHERE resource='session:00000000-0000-4000-a000-000000000001'").await, ["4:3000"]);
+    assert_eq!(request_rows(&client, "SELECT CAST(revision AS TEXT) || ':' || expires_at_ms AS value FROM job_leases WHERE resource='session:00000000-0000-4000-a000-000000000002'").await, ["3:9000"]);
+    assert_eq!(request_rows(&client, "SELECT consumer_id AS value FROM cache_consumer_pins WHERE consumer_kind='media_session' ORDER BY consumer_id").await, [second]);
+    assert_eq!(
+        store
+            .media_session_route_by_incarnation(second)
+            .await
+            .expect("foreign route isolation")
+            .expect("second route")
+            .state,
+        "active"
+    );
+    client
+        .execute(
+            "UPDATE media_playback_pointers SET current_incarnation_id=$1 WHERE share_grant_id=$1",
+            hiqlite::params!(second),
+        )
+        .await
+        .expect("restore foreign pointer for independent cleanup");
+    store
+        .maintain_media_sessions(4000)
+        .await
+        .expect("terminal cleanup");
+    assert_eq!(
+        store
+            .media_session_terminal_ack(first_session, 4000)
+            .await
+            .expect("retained terminal response"),
+        Some(acknowledgement.clone())
+    );
+    assert!(store
+        .record_media_session_terminal_ack(&acknowledgement)
+        .await
+        .expect("terminal ack replay after cleanup"));
+    let conflicting = MediaSessionTerminalAck {
+        sequence: 2,
+        response_json: "{}".to_owned(),
+        ..acknowledgement.clone()
+    };
+    assert!(!store
+        .record_media_session_terminal_ack(&conflicting)
+        .await
+        .expect("terminal receipt conflict"));
+    let second_ended = store
+        .end_media_session(second_session, "replaced", 5000)
+        .await
+        .expect("second owner terminal retirement")
+        .expect("second ended route");
+    assert_eq!(second_ended.state, "ended");
+    let safe_at = 5000 + plurx_core::domain::MEDIA_SESSION_HANDOFF_SAFETY_WINDOW_MS;
+    assert!(store
+        .arm_media_session_terminal_projection(second, "foreign-node", 1, safe_at, 5000)
+        .await
+        .expect("wrong terminal projection node")
+        .is_none());
+    assert!(store
+        .arm_media_session_terminal_projection(second, "node", 2, safe_at, 5000)
+        .await
+        .expect("wrong terminal projection epoch")
+        .is_none());
+    assert!(store
+        .arm_media_session_terminal_projection(second, "node", 1, safe_at, 5000)
+        .await
+        .expect("shared terminal projection arm")
+        .is_some());
+    let wrong_epoch = store
+        .complete_media_session_terminal_projection(
+            second,
+            "node",
+            2,
+            MediaSessionProjectionCompletion::PredecessorAcknowledged,
+            5000,
+        )
+        .await
+        .expect("wrong completion epoch");
+    assert!(wrong_epoch.is_none());
+    let completed = store
+        .complete_media_session_terminal_projection(
+            second,
+            "node",
+            1,
+            MediaSessionProjectionCompletion::SafetyBoundaryElapsed {
+                expected_not_before_ms: safe_at,
+            },
+            safe_at,
+        )
+        .await
+        .expect("shared terminal projection completion")
+        .expect("terminal projection completed");
+    assert_eq!(completed.state, "ended");
+    assert_eq!(completed.publication_ready_at_ms, 0);
+    assert_eq!(completed.lease_expires_at_ms, 5000);
+    assert_eq!(
+        completed.principal.owner_key(),
+        format!("share:{second}:{}", "a".repeat(64))
+    );
+    assert_eq!(request_rows(&client, "SELECT CAST(expires_at_ms AS TEXT) AS value FROM job_leases WHERE resource='session:00000000-0000-4000-a000-000000000002'").await, ["5000"]);
+    assert_eq!(
+        store
+            .media_session_terminal_ack(first_session, safe_at)
+            .await
+            .expect("other grant retained ack"),
+        Some(acknowledgement)
+    );
+}

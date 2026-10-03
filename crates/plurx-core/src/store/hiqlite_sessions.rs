@@ -3843,6 +3843,7 @@ impl MediaSessionStore for HiqliteAuthStore {
                 "invalid media-session terminal acknowledgement".to_owned(),
             ));
         }
+        let owner_column = LocalSessionSql::load(self).await?.column();
         let lease_resource = format!("session:{}", acknowledgement.incarnation_id);
         self.client()
             .txn([
@@ -3856,7 +3857,7 @@ impl MediaSessionStore for HiqliteAuthStore {
                      WHERE incarnation_id = $1 AND session_id = $2
                        AND owner_node_id = $3 AND owner_epoch = $4
                        AND state IN ('active', 'ended'))
-                 ON CONFLICT(session_id) DO NOTHING",
+                 ON CONFLICT(session_id) DO NOTHING".to_owned(),
                     params!(
                         acknowledgement.incarnation_id.as_str(),
                         acknowledgement.session_id.as_str(),
@@ -3882,7 +3883,7 @@ impl MediaSessionStore for HiqliteAuthStore {
                             AND owner_node_id = $4 AND owner_epoch = $5
                             AND client_instance_id = $6 AND sequence = $7
                             AND request_fingerprint = $8 AND response_json = $9
-                            AND expires_at_ms = $10 AND updated_at_ms = $1)",
+                            AND expires_at_ms = $10 AND updated_at_ms = $1)".to_owned(),
                     params!(
                         acknowledgement.updated_at_ms,
                         acknowledgement.incarnation_id.as_str(),
@@ -3907,7 +3908,7 @@ impl MediaSessionStore for HiqliteAuthStore {
                         AND EXISTS (SELECT 1 FROM media_sessions
                           WHERE incarnation_id = $5 AND session_id = $6
                             AND owner_node_id = $3 AND owner_epoch = $4
-                            AND state = 'ended' AND updated_at_ms = $1)",
+                            AND state = 'ended' AND updated_at_ms = $1)".to_owned(),
                     params!(
                         acknowledgement.updated_at_ms,
                         lease_resource.as_str(),
@@ -3918,12 +3919,14 @@ impl MediaSessionStore for HiqliteAuthStore {
                     ),
                 ),
                 (
-                    "DELETE FROM media_playback_pointers
+                    format!("DELETE FROM media_playback_pointers
                       WHERE current_incarnation_id = $1
                         AND EXISTS (SELECT 1 FROM media_sessions
                           WHERE incarnation_id = $1 AND session_id = $2
                             AND owner_node_id = $3 AND owner_epoch = $4
-                            AND state = 'ended' AND updated_at_ms = $5)",
+                            AND state = 'ended' AND updated_at_ms = $5
+                            AND media_sessions.{owner_column} = media_playback_pointers.{owner_column}
+                            AND media_sessions.playback_id = media_playback_pointers.playback_id)"),
                     params!(
                         acknowledgement.incarnation_id.as_str(),
                         acknowledgement.session_id.as_str(),
@@ -3938,7 +3941,7 @@ impl MediaSessionStore for HiqliteAuthStore {
                         AND EXISTS (SELECT 1 FROM media_sessions
                           WHERE incarnation_id = $1 AND session_id = $2
                             AND owner_node_id = $3 AND owner_epoch = $4
-                            AND state = 'ended' AND updated_at_ms = $5)",
+                            AND state = 'ended' AND updated_at_ms = $5)".to_owned(),
                     params!(
                         acknowledgement.incarnation_id.as_str(),
                         acknowledgement.session_id.as_str(),

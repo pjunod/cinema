@@ -396,6 +396,9 @@ impl VodServe {
         video: CopyVideoOptions,
         viewer: Option<&crate::state::PlaybackViewerDemand>,
     ) -> Result<Option<(FragmentIndex, String, String)>, String> {
+        if let Some(viewer) = viewer {
+            viewer.require_local_authority().map_err(str::to_owned)?;
+        }
         if !crate::ffmpeg::fragment_index_engine_is_current().await {
             return Err("the fragment-index engine changed; restart is required".to_owned());
         }
@@ -462,9 +465,7 @@ impl VodServe {
                 .await
                 .map_err(|error| format!("queueing the exact v2 artifact: {error}"))?;
             if queued {
-                if let Some(viewer) = viewer
-                    .filter(|viewer| viewer.principal.local_user_id().is_some_and(|id| id > 0))
-                {
+                if let Some(viewer) = viewer {
                     self.shared
                         .store
                         .join_artifact_viewer(plurx_core::store::ArtifactViewerInterest {

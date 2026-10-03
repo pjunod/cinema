@@ -223,6 +223,26 @@ seconds. All-target check passed in 26.73 seconds and denied-warning feature
 Clippy passed in 30.25 seconds. All eleven Hiqlite session safety/decoder unit
 regressions passed with zero ignored.
 
+## Shared terminal acknowledgements cannot clean another grant's pointer
+
+Terminal acknowledgement cleanup now correlates each pointer's canonical
+owner and playback with the exact ended session. Merely naming its incarnation
+cannot authorize removing another grant's pointer, including a deliberately
+corrupt foreign pointer. Session/node/epoch and exact ack replay fences remain
+in place; lease and pin effects remain tied to the unique incarnation and
+exact owner generation.
+
+The dedicated voter case executes Shared terminal acknowledgements, rejects an
+actual different session UUID, wrong node and wrong epoch, and checks another
+grant's route, pointer, lease and pin remain unchanged. It then replays the exact
+ack after maintenance, refuses a conflicting receipt, and arms/completes the
+other Shared terminal projection while requiring ended state and unchanged
+clamped leases. These operations retire authority; Shared producer admission
+remains closed. The actual candidate three-voter case passed 1/1 with zero
+ignored tests in 9.22 seconds. The existing terminal-ack/takeover contract
+passed 1/1 in 9.66 seconds and all 11 Hiqlite safety/decoder units passed in
+0.01 seconds. The pinned all-target check passed in 27.43 seconds. Denied-warning feature Clippy passed in 33.46 seconds.
+
 ## A rebuilt table is not shared admission authority
 
 The schema shape comes from the existing quorum-observed Store-lifetime

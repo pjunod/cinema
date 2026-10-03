@@ -2749,6 +2749,26 @@ pub(crate) struct PlaybackViewerDemand {
     pub playback_id: String,
 }
 
+impl PlaybackViewerDemand {
+    /// Shared source admission is not installed. Refuse explicitly rather
+    /// than dropping typed viewer ownership from background or VOD work.
+    pub(crate) fn require_local_authority(&self) -> Result<(), &'static str> {
+        match &self.principal {
+            plurx_core::playback_principal::PlaybackPrincipal::LocalUser { user_id }
+                if *user_id > 0 =>
+            {
+                Ok(())
+            }
+            plurx_core::playback_principal::PlaybackPrincipal::LocalUser { .. } => {
+                Err("invalid local playback demand")
+            }
+            plurx_core::playback_principal::PlaybackPrincipal::Sharing { .. } => {
+                Err("sharing playback demand requires typed source authority")
+            }
+        }
+    }
+}
+
 pub(crate) async fn enqueue_copy_preparation_for_object_with_viewer(
     store: &dyn Store,
     node_id: &str,
@@ -2757,6 +2777,11 @@ pub(crate) async fn enqueue_copy_preparation_for_object_with_viewer(
     object_version: Option<&str>,
     viewer: Option<&PlaybackViewerDemand>,
 ) -> Result<AnalysisRequest, StoreError> {
+    if let Some(viewer) = viewer {
+        viewer
+            .require_local_authority()
+            .map_err(|error| StoreError::Task(error.to_owned()))?;
+    }
     let pipeline_version = crate::ffmpeg::fragment_index_engine_digest().await;
     let video_identity = crate::fragindex::identity_for(file, video).argv_fingerprint;
     let base = analysis_request_generation(
@@ -2789,9 +2814,7 @@ pub(crate) async fn enqueue_copy_preparation_for_object_with_viewer(
             created_at_ms: now,
         })
         .await?;
-    if let Some(viewer) =
-        viewer.filter(|viewer| viewer.principal.local_user_id().is_some_and(|id| id > 0))
-    {
+    if let Some(viewer) = viewer {
         store
             .join_analysis_viewer(plurx_core::store::AnalysisViewerInterest {
                 analysis_request_id: request.request_id.clone(),
@@ -10596,6 +10619,35 @@ mod tests {
         let file = store.get_file(id).await.expect("read").expect("file");
         let strip = CopyVideoOptions::new(true, false);
         let convert = strip.with_dolby_vision_conversion(true);
+        for principal in [
+            plurx_core::playback_principal::PlaybackPrincipal::sharing(
+                uuid::Uuid::new_v4(),
+                &"a".repeat(64),
+            )
+            .expect("shared demand"),
+            plurx_core::playback_principal::PlaybackPrincipal::LocalUser { user_id: 0 },
+            plurx_core::playback_principal::PlaybackPrincipal::LocalUser { user_id: -1 },
+        ] {
+            let viewer = PlaybackViewerDemand {
+                principal,
+                playback_id: "refused-demand".to_owned(),
+            };
+            assert!(enqueue_copy_preparation_for_object_with_viewer(
+                &store,
+                "node-a",
+                &file,
+                convert,
+                None,
+                Some(&viewer)
+            )
+            .await
+            .is_err());
+            assert!(store
+                .analysis_requests(10)
+                .await
+                .expect("no anonymous queue write")
+                .is_empty());
+        }
         let first = enqueue_copy_preparation(&store, "node-a", &file, convert)
             .await
             .expect("first request");

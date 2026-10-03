@@ -255,17 +255,36 @@ fn desired_within(
     user_id: i64,
     playback_id: &str,
 ) -> Result<Option<crate::domain::DesiredOwnership>, StoreError> {
-    let mut statement = conn.prepare(
-        "SELECT revision, digest, canonical_form, updated_at_ms
+    let rebuilt = route_projection(conn)? == PRINCIPAL_ROUTE_COLS;
+    let owner = local_owner_predicate(rebuilt, 1);
+    let projection = if rebuilt {
+        "owner_key, principal_kind, user_id, share_grant_id, share_viewer_key"
+    } else {
+        "('local:' || user_id), 'local', user_id, NULL, NULL"
+    };
+    let mut statement = conn.prepare(&format!(
+        "SELECT revision, digest, canonical_form, updated_at_ms, {projection}
            FROM media_playback_desired
-          WHERE user_id = ?1 AND playback_id = ?2",
-    )?;
+          WHERE {owner} AND playback_id = ?2"
+    ))?;
     let mut rows = statement.query(rusqlite::params![user_id, playback_id])?;
     let Some(row) = rows.next()? else {
         return Ok(None);
     };
+    let owner_key: String = row.get(4)?;
+    let kind: String = row.get(5)?;
+    let grant: Option<String> = row.get(7)?;
+    let viewer: Option<String> = row.get(8)?;
+    let principal = crate::playback_principal::PlaybackPrincipal::from_projection(
+        &kind,
+        row.get(6)?,
+        grant.as_deref(),
+        viewer.as_deref(),
+        &owner_key,
+    )
+    .map_err(|_| StoreError::Task("invalid desired principal projection".into()))?;
     Ok(Some(crate::domain::DesiredOwnership {
-        principal: crate::playback_principal::PlaybackPrincipal::LocalUser { user_id },
+        principal,
         playback_id: playback_id.to_owned(),
         revision: row.get(0)?,
         digest: row.get(1)?,
@@ -2043,10 +2062,13 @@ impl MediaSessionStore for SqliteStore {
         let user_id = crate::store::local_media_principal_id(principal)?;
         let playback_id = playback_id.to_owned();
         self.with_conn(move |conn| {
+            let owner = local_owner_predicate(route_projection(conn)? == PRINCIPAL_ROUTE_COLS, 1);
             let value: Option<Option<i64>> = conn
                 .query_row(
-                    "SELECT desired_revision FROM media_playback_pointers
-                      WHERE user_id = ?1 AND playback_id = ?2",
+                    &format!(
+                        "SELECT desired_revision FROM media_playback_pointers
+                      WHERE {owner} AND playback_id = ?2"
+                    ),
                     params![user_id, playback_id],
                     |row| row.get(0),
                 )
@@ -3127,6 +3149,7 @@ impl MediaSessionStore for SqliteStore {
         let acknowledgement = acknowledgement.clone();
         self.with_conn(move |conn| {
             let tx = conn.unchecked_transaction()?;
+            let owner_column = if route_projection(&tx)? == PRINCIPAL_ROUTE_COLS { "owner_key" } else { "user_id" };
             tx.execute(
                 "INSERT OR IGNORE INTO media_session_terminal_acks
                     (incarnation_id, session_id, owner_node_id, owner_epoch,
@@ -3211,12 +3234,14 @@ impl MediaSessionStore for SqliteStore {
                     ],
                 )?;
                 tx.execute(
-                    "DELETE FROM media_playback_pointers
+                    &format!("DELETE FROM media_playback_pointers
                       WHERE current_incarnation_id = ?1
-                        AND EXISTS (SELECT 1 FROM media_sessions
-                          WHERE incarnation_id = ?1 AND session_id = ?2
-                            AND owner_node_id = ?3 AND owner_epoch = ?4
-                            AND state = 'ended' AND updated_at_ms = ?5)",
+                        AND EXISTS (SELECT 1 FROM media_sessions ended_session
+                          WHERE ended_session.incarnation_id = ?1 AND ended_session.session_id = ?2
+                            AND ended_session.owner_node_id = ?3 AND ended_session.owner_epoch = ?4
+                            AND ended_session.state = 'ended' AND ended_session.updated_at_ms = ?5
+                            AND ended_session.{owner_column} = media_playback_pointers.{owner_column}
+                            AND ended_session.playback_id = media_playback_pointers.playback_id)"),
                     params![
                         acknowledgement.incarnation_id,
                         acknowledgement.session_id,
@@ -4691,6 +4716,102 @@ mod sharing_route_decoder_tests {
                 .expect("sharing selection survives local deletion")
                 .is_some());
         }
+    }
+
+    #[tokio::test]
+    async fn sharing_terminal_ack_cannot_delete_a_foreign_owner_pointer() {
+        let directory = tempfile::tempdir().expect("ack directory");
+        let incarnation = "00000000-0000-4000-a000-000000000001";
+        for store in [
+            SqliteStore::open_in_memory().expect("memory ack"),
+            SqliteStore::open(&directory.path().join("ack.db")).expect("pooled ack"),
+        ] {
+            let session = uuid::Uuid::new_v4().to_string();
+            let fixture_session = session.clone();
+            store.with_conn(move |conn| {
+                conn.execute_batch(include_str!("../../../tests/fixtures/session-principal-local.sql"))?;
+                conn.execute_batch("BEGIN IMMEDIATE")?;
+                conn.execute_batch(crate::store::MEDIA_SESSION_PRINCIPAL_REBUILD_SCHEMA)?;
+                conn.execute_batch("COMMIT")?;
+                conn.execute_batch(include_str!("../../../tests/fixtures/session-principal-sharing.sql"))?;
+                conn.execute("UPDATE media_sessions SET session_id=?1 WHERE incarnation_id=?2",params![fixture_session,incarnation])?;
+                conn.execute("DELETE FROM media_playback_pointers WHERE share_grant_id=?1",[incarnation])?;
+                conn.execute("UPDATE media_playback_pointers SET current_incarnation_id=?1,desired_revision=2 WHERE share_grant_id='00000000-0000-4000-a000-000000000002'",[incarnation])?;
+                Ok(())
+            }).await.expect("corrupt foreign pointer fixture");
+            let ack = MediaSessionTerminalAck {
+                incarnation_id: incarnation.into(),
+                session_id: session.clone(),
+                owner_node_id: "node".into(),
+                owner_epoch: 1,
+                client_instance_id: uuid::Uuid::new_v4().to_string(),
+                sequence: 1,
+                request_fingerprint: "a".repeat(64),
+                response_json: "{}".into(),
+                expires_at_ms: 9000,
+                updated_at_ms: 20,
+            };
+            let mut wrong = ack.clone();
+            wrong.owner_epoch = 2;
+            assert!(!store
+                .record_media_session_terminal_ack(&wrong)
+                .await
+                .expect("wrong epoch refused"));
+            assert!(store
+                .record_media_session_terminal_ack(&ack)
+                .await
+                .expect("Shared ack accepted"));
+            assert_eq!(
+                store
+                    .media_session_route_by_incarnation(incarnation)
+                    .await
+                    .expect("ended Shared")
+                    .expect("route")
+                    .state,
+                "ended"
+            );
+            store.with_read(move |conn| {
+                let pointer:String=conn.query_row("SELECT current_incarnation_id FROM media_playback_pointers WHERE share_grant_id='00000000-0000-4000-a000-000000000002'",[],|r|r.get(0))?;assert_eq!(pointer,incarnation);Ok(())
+            }).await.expect("foreign pointer preserved");
+            assert!(store
+                .record_media_session_terminal_ack(&ack)
+                .await
+                .expect("exact Shared ack replay"));
+            store
+                .end_media_session(&session, "revoked", 21)
+                .await
+                .expect("Shared terminal cleanup")
+                .expect("ended");
+            assert_eq!(
+                store
+                    .media_session_terminal_ack(&session, 22)
+                    .await
+                    .expect("retained Shared ack"),
+                Some(ack)
+            );
+        }
+    }
+
+    #[test]
+    fn sharing_desired_decoder_refuses_corrupt_retained_principal_metadata() {
+        let conn = rusqlite::Connection::open_in_memory().expect("desired decoder");
+        conn.execute_batch("CREATE TABLE media_sessions(owner_key TEXT,principal_kind TEXT,share_grant_id TEXT,share_viewer_key TEXT);
+            CREATE TABLE media_playback_desired(owner_key TEXT,principal_kind TEXT,user_id INTEGER,share_grant_id TEXT,share_viewer_key TEXT,playback_id TEXT,revision INTEGER,digest TEXT,canonical_form TEXT,updated_at_ms INTEGER);
+            INSERT INTO media_playback_desired VALUES('local:1','sharing',1,NULL,NULL,'playback',1,'digest','form',10);").expect("corrupt restored projection");
+        assert!(desired_within(&conn, 1, "playback").is_err());
+        conn.execute(
+            "UPDATE media_playback_desired SET principal_kind='local'",
+            [],
+        )
+        .expect("repair metadata");
+        assert_eq!(
+            desired_within(&conn, 1, "playback")
+                .expect("local read")
+                .expect("desired")
+                .principal
+                .local_user_id(),
+            Some(1)
+        );
     }
 
     #[tokio::test]

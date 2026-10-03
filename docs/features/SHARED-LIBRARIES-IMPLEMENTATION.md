@@ -2164,3 +2164,33 @@ passed (9.61 seconds), and terminal-ack/takeover retention passed (9.70 seconds)
 Denied-warning feature Clippy passed (32.93 seconds); every executed regression
 had zero ignored tests. These are compatibility and ownership-boundary proofs,
 not Shared writer admission or released migration qualification.
+
+
+**Caller and retained-read census checkpoint:** VOD session creation, copy
+queueing and cluster index demand reject Shared execution before allocating a
+session, queue entry or pool demand. Canonical SQLite desired-selection reads
+now decode the complete retained principal and reject corrupt metadata. Both
+backends correlate terminal pointer removal with the exact ended session's
+principal and playback ID, preserving foreign-owner pointers even when a
+corrupt pointer names that incarnation. The indexed
+[principal census](SHARED-LIBRARIES-PRINCIPAL-CENSUS.md) records the remaining
+Source admission and proof-bearing worker boundaries.
+
+On the combined caller/SQLite tree, pinned daemon and feature-enabled core
+all-target compilation passed. All 19 SQLite ownership regressions passed
+(19.65 seconds); the Shared VOD no-allocation regression passed (0.16 seconds)
+and durable preparation queue regression passed (1.51 seconds). Core and daemon
+denied-warning Clippy passed. These checks do not authorize Shared admission.
+
+The exact committed transport/ownership integration `33c0fb2f0` also passed
+`sharing_pinned_transport_recovers_committed_claim_and_rotation_after_restart`
+on pinned Rust 1.97.1 in an isolated Linux CGNAT container (one test, zero
+ignored, 0.46 seconds). Its source-only archive carried neither Git metadata
+nor repository credentials. This is restart/rotation protocol evidence for
+that snapshot; it does not qualify real Tailscale, two NATs or a physical TV.
+
+The combined tree also passed the actual three-voter Shared terminal
+acknowledgement/projection regression (one test, zero ignored, 9.22 seconds),
+feature-enabled all-target check (25.37 seconds) and denied-warning Clippy
+(30.40 seconds). Wrong owner tuples fail, retained exact acknowledgements
+replay, and retirement preserves a foreign pointer and physical pin.
