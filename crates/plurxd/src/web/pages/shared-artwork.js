@@ -3,7 +3,8 @@
 // workspace or GPU caches. Actual close/reset precedes returning pixel credits.
 const SHARED_ARTWORK=(()=>{
   const ASSET=15*1024*1024,PIXELS=16*1024*1024;
-  const proofs=new WeakMap(),canvasOwners=new WeakMap(),contexts=new Map(),latest=new Map(),jobs=new Set(),unresolved=new Set(),observed=new Set(),metadataJobs=new Set();
+  let proofs=new WeakMap();const importRetirements=new Map();
+  const canvasOwners=new WeakMap(),contexts=new Map(),latest=new Map(),jobs=new Set(),unresolved=new Set(),observed=new Set(),metadataJobs=new Set();
   let observer=null,rescan=false;
   let serial=0;
   function budget(limit,operations){
@@ -42,7 +43,7 @@ const SHARED_ARTWORK=(()=>{
     if(operation.controller.signal.aborted||!current(capture))throw new Error("stale shared catalogue");
     const bytes=new Uint8Array(length);let offset=0;for(const chunk of chunks){bytes.set(chunk,offset);offset+=chunk.byteLength;}
     const reply=JSON.parse(new TextDecoder("utf-8",{fatal:true}).decode(bytes)),proof=Object.freeze({...capture});
-    const record=item=>{if(item&&typeof item==="object"&&item.source==="shared")proofs.set(item,proof);};
+    const record=item=>{if(item&&typeof item==="object"&&item.source==="shared")proofs.set(item,Object.freeze({...proof,sourceRetirement:importRetirements.get(item.reference?.import_id)||0}));};
     record(reply.item);if(Array.isArray(reply.items)){for(const row of reply.items){record(row);record(row?.item);}}
     return reply;
     }finally{metadataJobs.delete(operation);}
@@ -64,14 +65,15 @@ const SHARED_ARTWORK=(()=>{
     if(job.canvasLease){try{if(!owns)throw new Error("Canvas ownership changed");job.canvas.width=0;job.canvas.height=0;if(job.canvas.width!==0||job.canvas.height!==0)throw new Error("Canvas retirement unconfirmed");job.canvasLease.release();}catch(error){unresolved.add({resource:job.canvas,lease:job.canvasLease});}job.canvasLease=null;}
     if(owns){delete job.canvas.dataset.sharedArtReady;canvasOwners.delete(job.canvas);}jobs.delete(job);
   }
-  function retire(importId=null){for(const operation of metadataJobs)if(importId===null||operation.importId===importId){operation.controller.abort();void operation.reader?.cancel().catch(()=>{});}if(importId===null){observer?.disconnect();observed.clear();}
+  function retire(importId=null){if(importId===null){proofs=new WeakMap();importRetirements.clear();}else{if(importRetirements.size>=8192&&!importRetirements.has(importId)){retire();return;}importRetirements.set(importId,(importRetirements.get(importId)||0)+1);}
+    for(const operation of metadataJobs)if(importId===null||operation.importId===importId){operation.controller.abort();void operation.reader?.cancel().catch(()=>{});}if(importId===null){observer?.disconnect();observed.clear();}
     for(const job of [...jobs])if(importId===null||job.ctx.reference.import_id===importId)retireJob(job);
     for(const [id,ctx]of contexts)if(importId===null||ctx.reference.import_id===importId){contexts.delete(id);if(latest.get(ctx.key)===ctx)latest.delete(ctx.key);}}
   function markup(item,expected,capture,backdrop=false){
     if(!item||item.source!=="shared")throw new Error("Invalid Shared item");const ref=sharedCatalogueReference(item.reference),bound=sharedCatalogueGroupKey(expected);
     if(sharedCatalogueGroupKey(ref)!==bound||expected.library_id&&ref.library_id!==expected.library_id||expected.item_id&&ref.item_id!==expected.item_id)throw new Error("Shared artwork source changed");
     const values=rows(item,ref),alias=backdrop?item.backdrop_url:item.poster_url,row=values.find(v=>v.url===alias&&v.kind===(backdrop?"backdrop":"poster")&&v.variant===(backdrop?"w780":"w300"));
-    if(!row)return "";const proof=proofs.get(item);if(!proof||!capture||!equal(proof,capture)||!current(capture))throw new Error("Artwork requires authenticated B metadata");
+    if(!row)return "";const proof=proofs.get(item);if(!proof||proof.sourceRetirement!==(importRetirements.get(ref.import_id)||0)||!capture||!equal(proof,capture)||!current(capture))throw new Error("Artwork requires authenticated B metadata");
     origin(capture);const key=JSON.stringify([ref.import_id,ref.server_id,ref.catalogue_epoch,ref.library_id,ref.item_id,backdrop]);
     let ctx=latest.get(key);
     if(!ctx||ctx.row.url!==row.url||!equal(ctx.capture,capture)){

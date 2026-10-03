@@ -89,10 +89,12 @@ test("unconfirmed bitmap retirement remains charged and current403 retires only 
  assert.equal(canvas.width,0);assert.equal(f.h.snapshot().unresolved,1);assert.ok(f.h.snapshot().pixels.bytes>0);f.h.retire();assert.ok(f.h.snapshot().pixels.bytes>0);
  const g=harness(),one=await g.trusted(),otherRef={...ref,import_id:"44444444-4444-4444-8444-444444444444"},other=await g.trusted(item(otherRef,asset.replace(ref.import_id,otherRef.import_id)));
  g.canvas(g.h.markup(one,ref,g.capture));g.h.markup(other,otherRef,g.capture);g.setArt(()=>response("forbidden","https://b.test"+asset,{"content-type":"text/plain"},403));g.h.hydrate(g.root);await g.idle();
- assert.equal(g.h.snapshot().contexts,1);assert.equal(g.context.TOKEN,"bearer-a");
+ assert.equal(g.h.snapshot().contexts,1);assert.equal(g.context.TOKEN,"bearer-a");assert.throws(()=>g.h.markup(one,ref,g.capture),/authenticated/);assert.match(g.h.markup(other,otherRef,g.capture),/data-shared-art/);
 });
 
 test("retirement cancels actual metadata reader even before auth generation changes",async()=>{
  const f=harness();let cancelled=false;f.setMetadataResponse(path=>response(new ReadableStream({pull(){return new Promise(()=>{});},cancel(){cancelled=true;}}),"https://b.test/api/v1"+path,{"content-type":"application/json"}));
  const pending=f.h.metadata("/shared/libraries",f.capture);for(let n=0;n<5;n++)await Promise.resolve();f.h.retire();await assert.rejects(pending);assert.equal(cancelled,true);assert.equal(f.h.snapshot().metadata,0);assert.equal(f.context.AUTH_GENERATION,1);
 });
+
+test("leaving retires metadata proofs even before page generation changes",async()=>{const f=harness(),value=await f.trusted();f.h.markup(value,ref,f.capture);f.h.retire();assert.throws(()=>f.h.markup(value,ref,f.capture),/authenticated/);const fresh=await f.trusted();assert.match(f.h.markup(fresh,ref,f.capture),/data-shared-art/);});
