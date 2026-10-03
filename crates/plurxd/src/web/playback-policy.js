@@ -840,6 +840,12 @@
       // without it the viewer is sent back to the start of a film they were
       // ninety minutes into. Absent, null or unparseable stays `null` — a
       // guessed position is worse than no position.
+      // Only this typed refusal carries an unpublished start's release
+      // capability. Other failures and malformed ids cannot name a resource.
+      ...(parsed.code === "media_session_handoff_pending"
+        && typeof parsed.pending_session_id === "string"
+        && /^[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i.test(parsed.pending_session_id)
+        ? { pending_session_id: parsed.pending_session_id } : {}),
       position_ms:
         parsed.film_position_ms != null &&
         Number.isFinite(Number(parsed.film_position_ms))

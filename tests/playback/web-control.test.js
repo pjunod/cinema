@@ -7399,3 +7399,46 @@ test("forced continuous restart enrolls only its exact failed predecessor",async
  assert.equal((await context.openSession(7,{height:720},null,null,"failed-session")).session_id,"legacy");
  assert.deepEqual(calls.map(row=>row.kind),["legacy","legacy","continuous","legacy"]);
 });
+
+
+test("abandoned continuous handoff retries release only their unpublished family",async()=>{
+  const policy=require("../../crates/plurxd/src/web/playback-policy.js");
+  const pending="9e42a96e-742d-4e66-9bb1-716477d4b845";
+  const refusal=(id=pending,code="media_session_handoff_pending")=>Object.assign(new Error("handoff pending"),{
+    streamFailure:policy.parseStreamFailure({status:503,body:JSON.stringify({code,message:"handoff pending",pending_session_id:id})})});
+  function harness(answers,action="fail",holdRetry=false){
+    const released=[],posted=[];let waiting=false;
+    const controller=new AbortController(),preparation={expiry:null};
+    const openSession=async(...args)=>{posted.push(args[3]);const answer=answers.shift();if(answer instanceof Error)throw answer;return answer;};
+    const playbackRetryDelay=async(ms,signal)=>{
+      waiting=true;if(!holdRetry)return;
+      await new Promise((resolve,reject)=>signal.addEventListener("abort",()=>reject(Object.assign(new Error("superseded"),{name:"AbortError"})),{once:true}));
+    };
+    const PlaybackPolicy={classifyStreamFailure:()=>({}),createRetryStep:()=>({action,delayMs:1}),streamFailureOverlay:()=>null};
+    const run=new Function("openSession","releaseSession","newRequestId","PlaybackPolicy","playbackRetryDelay",
+      "playbackCreateRetryContext","raisePlaybackSurface","clientLog","playbackContext","stopPlayerForExhaustion",
+      shippedSource("openSessionRetryingNotYet")+";return openSessionRetryingNotYet;")(
+        openSession,id=>released.push(id),()=>"one-request",PlaybackPolicy,playbackRetryDelay,
+        ()=>"change",()=>{},()=>{},()=>({}),()=>{});
+    return {released,posted,waiting:()=>waiting,cancel:()=>controller.abort(),open:()=>run(1,{},controller.signal,{preparation})};
+  }
+  {
+    const h=harness([refusal()]);await assert.rejects(h.open(),/handoff pending/);
+    assert.deepEqual(h.released,[pending],"the abandoned replacement is released; the incumbent was never named");
+  }
+  {
+    const h=harness([refusal(),{session_id:pending}],"retry");
+    assert.equal((await h.open()).session_id,pending);
+    assert.deepEqual(h.released,[],"a successful replay transfers the family to the attachment");
+    assert.deepEqual(h.posted,["one-request","one-request"]);
+  }
+  {
+    const h=harness([refusal()],"retry",true),opening=h.open();
+    const rejected=assert.rejects(opening,{name:"AbortError"});
+    await flushDeep();assert.equal(h.waiting(),true);assert.deepEqual(h.released,[]);
+    h.cancel();await rejected;assert.deepEqual(h.released,[pending],"supersession retires a refused family during backoff");
+  }
+  for(const error of [refusal("../../incumbent"),refusal(pending,"startup_timeout")]){
+    const h=harness([error]);await assert.rejects(h.open());assert.deepEqual(h.released,[],"unbound refusal fields cannot release an attachment");
+  }
+});

@@ -1797,6 +1797,18 @@ pub async fn create(
     created
 }
 
+/// A refused continuous start still owns an unpublished family. Give its
+/// authenticated caller the exact release capability so abandoning the bounded
+/// retry sequence can retire that family without touching the predecessor.
+fn continuous_handoff_pending(session_id: &str) -> ApiError {
+    ApiError::typed_detail(
+        StatusCode::SERVICE_UNAVAILABLE,
+        "media_session_handoff_pending",
+        "the predecessor handoff remains durably owned; retry this request",
+        serde_json::json!({"pending_session_id": session_id}),
+    )
+}
+
 pub async fn create_continuous(
     AuthUser(user): AuthUser,
     State(state): State<AppState>,
@@ -2261,6 +2273,9 @@ async fn create_with_purpose_inner(
         MediaSessionRequestClaim::Resolved(route)
             if route.state == "active" && route.publication_ready_at_ms != 0 =>
         {
+            if continuous.is_some() {
+                return Err(continuous_handoff_pending(&route.session_id));
+            }
             return Err(ApiError::typed(
                 StatusCode::SERVICE_UNAVAILABLE,
                 "media_session_handoff_pending",
@@ -3144,6 +3159,11 @@ async fn create_with_purpose_inner(
                 }
             ) {
                 publication_guard.disarm();
+                if continuous.is_some() {
+                    return Err(continuous_handoff_pending(
+                        &publication_activation.session_id,
+                    ));
+                }
             }
             return Err(error);
         }

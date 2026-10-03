@@ -835,6 +835,7 @@ async function openSessionRetryingNotYet(fileId, opts, signal, options){
   const requestId=newRequestId();
   const began=Date.now();
   const sequence={raised:false,refusal:null};
+  const pendingSessions=new Set();
   const superseded=()=>Object.assign(new Error("Playback preparation superseded."),
     {name:"AbortError"});
   // Two things about the raise below, both of them decisions rather than
@@ -877,8 +878,10 @@ async function openSessionRetryingNotYet(fileId, opts, signal, options){
       try{
         info=await openSession(fileId,opts,signal,requestId,settings.continuousRestartSessionId||null);
       }catch(error){
-        if(signal&&signal.aborted) throw superseded();
         const failure=error&&error.streamFailure;
+        if(failure?.code==='media_session_handoff_pending'&&failure.pending_session_id)
+          pendingSessions.add(failure.pending_session_id);
+        if(signal&&signal.aborted) throw superseded();
         if(answeredLocally&&failure&&answeredLocally(failure)) throw error;
         const source=failure?PlaybackPolicy.classifyStreamFailure({
           status:failure.status,code:failure.code,context:where}):null;
@@ -908,12 +911,17 @@ async function openSessionRetryingNotYet(fileId, opts, signal, options){
       // that the preparation deadline is the one that ends this: it aborts the
       // signal, and the create already in flight still lands.
       if(signal&&signal.aborted){
+        pendingSessions.delete(info&&info.session_id);
         releaseSession(info&&info.session_id);
         throw superseded();
       }
+      // The successful response transfers this same family's ownership to
+      // its attachment. Earlier refused families still belong to this owner.
+      pendingSessions.delete(info&&info.session_id);
       return info;
     }
   }finally{
+    for(const session of pendingSessions) releaseSession(session);
     // A hook left behind would answer the NEXT operation's deadline with this
     // sequence's exhaustion.
     preparation.expiry=null;

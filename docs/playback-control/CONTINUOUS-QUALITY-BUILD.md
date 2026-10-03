@@ -5538,3 +5538,35 @@ again after daemon cleanup and were gone. Runtime directories were absent.
 The failure does not leave live orphaned work. Recovery/create/attachment
 ownership is the next investigation; no success or complete qualification
 is claimed.
+
+
+### 10.190 · Refused continuous starts need an explicit disposal owner
+
+The third owner-loss trace reproduced the recovery and End failures on
+`def84f8c5`. Targeted HTTP receipts show the replacement continuous start
+received 503 `media_session_handoff_pending` after roughly eight seconds.
+The same failed lifetime retained manual 720p. The create-retry context was
+`change`, so it abandoned the retry, while the server's cancellation-independent
+handoff owner retained three paused producers behind its existing response-
+lifetime safety boundary. No replacement playback or family bootstrap reached
+the browser. This explains the frozen old attachment and hidden family; it
+is not evidence that the ownership fence may be shortened.
+
+Receipt: `continuous-chrome-def84f8c5-targeted-owner-loss3`; selected HTTP
+request/response facts: `continuous-def84f8c5-owner-loss3-network`; quieter
+bounded node logs retain the create/activation path without TLS debug flood.
+Crash retirement again passed. Overall recovery remains failed.
+
+Continuous-only handoff-pending refusals now expose the exact unpublished
+session's release capability, both on initial activation and same-request
+replay. They do not publish the family's media or relax any safety boundary.
+The web parser accepts this capability only for that code and a UUID shape.
+The bounded retry owner holds it during backoff, releases it on refusal,
+abort/supersession or exhaustion, and transfers it on a successful response.
+The predecessor is never substituted as the cleanup target. Legacy refusals
+retain their shape. A new unrun regression covers refusal, successful replay,
+cancelled backoff and malformed/unbound capability fields.
+
+Pinned Rust 1.97.1 daemon test-source check PASSED in 29.51s; served-source
+and test-file JavaScript syntax checks pass. Normal hook, exact Linux build
+and focused disposal qualification are pending. No units or final review ran.
