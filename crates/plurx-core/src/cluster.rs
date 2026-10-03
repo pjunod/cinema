@@ -19,7 +19,7 @@ use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use crate::config::Config;
 use crate::error::StoreError;
 use crate::secrets::{self, CredentialKey};
-use crate::store::{SettingsStore, SqliteStore, Store};
+use crate::store::{SettingsStore, SharingStore, SqliteStore, Store};
 
 pub mod coordination;
 #[cfg(feature = "hiqlite-store")]
@@ -111,7 +111,8 @@ async fn open_credential_key_for(
     sqlite: &SqliteStore,
 ) -> Result<CredentialKey, StoreError> {
     let path = config.cluster.credential_key_path(&config.storage.data_dir);
-    let census = sqlite.sealed_trakt_row_census().await?;
+    let mut census = sqlite.sealed_trakt_row_census().await?;
+    census.merge(sqlite.sharing_sealed_census().await?);
     let key = secrets::open_credential_key(&path, &census)
         .map_err(|error| StoreError::Identity(error.to_string()))?;
     tracing::debug!(
@@ -647,6 +648,93 @@ mod tests {
         assert_eq!(
             untouched.access_token.as_stored(),
             sealed.access_token.as_stored()
+        );
+    }
+
+    #[tokio::test]
+    async fn sharing_credentials_alone_refuse_missing_and_wrong_startup_keys() {
+        use crate::{secrets::SharingSecretPurpose, sharing::*};
+        let dir = tempfile::tempdir().expect("synthetic sharing data dir");
+        let handle = open_store(&config_for(dir.path()))
+            .await
+            .expect("initial startup");
+        let identity = handle
+            .store
+            .sharing_identity(1000)
+            .await
+            .expect("sharing identity");
+        let import = uuid::Uuid::new_v4();
+        let credential = handle
+            .credential_key
+            .seal_sharing(
+                SharingSecretPurpose::Credential,
+                identity.server_id,
+                import,
+                "synthetic-sharing-credential",
+            )
+            .expect("seal sharing credential");
+        let claim_secret = handle
+            .credential_key
+            .seal_sharing(
+                SharingSecretPurpose::Claim,
+                identity.server_id,
+                import,
+                "synthetic-sharing-bootstrap",
+            )
+            .expect("seal sharing bootstrap");
+        handle
+            .store
+            .create_share_import(NewImport {
+                id: import,
+                source: SharingIdentity {
+                    server_id: uuid::Uuid::new_v4(),
+                    catalogue_epoch: uuid::Uuid::new_v4(),
+                    created_at_ms: 1000,
+                },
+                source_name: "Synthetic source".into(),
+                claim_id: uuid::Uuid::new_v4(),
+                credential,
+                claim_secret,
+                endpoints: vec![Endpoint {
+                    ipv4: "100.101.102.103"
+                        .parse()
+                        .expect("synthetic tailnet address"),
+                    ipv6: None,
+                    ts_fqdn: "source.example.ts.net".into(),
+                    port: 32443,
+                    spki_sha256: "a".repeat(64),
+                }],
+                now_ms: 1000,
+            })
+            .await
+            .expect("persist synthetic import");
+        let key_id = handle.credential_key.id().to_owned();
+        drop(handle);
+        let key_path = dir.path().join(crate::secrets::CREDENTIAL_KEY_FILENAME);
+        std::fs::remove_file(&key_path).expect("lose synthetic key");
+        let error = open_store(&config_for(dir.path()))
+            .await
+            .err()
+            .expect("missing sharing key refuses startup");
+        assert!(error.to_string().contains("refusing to start"));
+        assert!(!key_path.exists(), "startup must not replace a missing key");
+        let replacement = crate::secrets::open_credential_key(&key_path, &Default::default())
+            .expect("synthetic replacement key");
+        let error = open_store(&config_for(dir.path()))
+            .await
+            .err()
+            .expect("wrong sharing key refuses startup");
+        let message = error.to_string();
+        assert!(message.contains(&key_id) && message.contains(replacement.id()));
+        assert!(!message.contains("synthetic-sharing"));
+        let store = SqliteStore::open(&dir.path().join("plurx.db")).expect("preserved database");
+        assert_eq!(
+            store
+                .sharing_sealed_census()
+                .await
+                .expect("preserved census")
+                .sealed_rows(),
+            1
         );
     }
 

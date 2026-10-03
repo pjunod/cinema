@@ -1744,6 +1744,220 @@ const TABLES: &[TablePlan] = &[
         sealed_columns: &[],
         parent_first: false,
     },
+    TablePlan {
+        name: "sharing_identity",
+        columns: &["singleton", "server_id", "catalogue_epoch", "created_at_ms"],
+        order_by: "singleton",
+        minimum_schema: 92,
+        import_filter: None,
+        sealed_columns: &[],
+        parent_first: false,
+    },
+    TablePlan {
+        name: "sharing_invitations",
+        columns: &[
+            "id",
+            "token_hash",
+            "library_ids_json",
+            "created_at_ms",
+            "expires_at_ms",
+            "state",
+            "claim_id",
+            "claim_digest",
+        ],
+        order_by: "id",
+        minimum_schema: 92,
+        import_filter: None,
+        sealed_columns: &[],
+        parent_first: false,
+    },
+    TablePlan {
+        name: "sharing_exports",
+        columns: &[
+            "id",
+            "invitation_id",
+            "recipient_server_id",
+            "recipient_name",
+            "token_hash",
+            "scope_generation",
+            "credential_generation",
+            "catalogue_generation",
+            "mutation_generation",
+            "state",
+            "pending_expires_at_ms",
+            "created_at_ms",
+            "updated_at_ms",
+        ],
+        order_by: "id",
+        minimum_schema: 92,
+        import_filter: None,
+        sealed_columns: &[],
+        parent_first: false,
+    },
+    TablePlan {
+        name: "sharing_export_libraries",
+        columns: &["grant_id", "library_id"],
+        order_by: "grant_id, library_id",
+        minimum_schema: 92,
+        import_filter: None,
+        sealed_columns: &[],
+        parent_first: false,
+    },
+    TablePlan {
+        name: "sharing_imports",
+        columns: &[
+            "id",
+            "source_server_id",
+            "catalogue_epoch",
+            "source_name",
+            "claim_id",
+            "remote_grant_id",
+            "credential_envelope",
+            "claim_envelope",
+            "endpoints_json",
+            "assignment_generation",
+            "lifecycle_generation",
+            "endpoint_generation",
+            "observed_scope_generation",
+            "observed_credential_generation",
+            "observed_catalogue_generation",
+            "observed_endpoint_revision",
+            "state",
+            "created_at_ms",
+            "updated_at_ms",
+        ],
+        order_by: "id",
+        minimum_schema: 92,
+        import_filter: None,
+        sealed_columns: &["credential_envelope", "claim_envelope"],
+        parent_first: false,
+    },
+    TablePlan {
+        name: "sharing_viewers",
+        columns: &["user_id", "viewer_id"],
+        order_by: "user_id",
+        minimum_schema: 92,
+        import_filter: None,
+        sealed_columns: &[],
+        parent_first: false,
+    },
+    TablePlan {
+        name: "sharing_assignments",
+        columns: &["import_id", "remote_library_id", "user_id", "enabled"],
+        order_by: "import_id, remote_library_id, user_id",
+        minimum_schema: 92,
+        import_filter: None,
+        sealed_columns: &[],
+        parent_first: false,
+    },
+    TablePlan {
+        name: "sharing_watch",
+        columns: &[
+            "source_server_id",
+            "catalogue_epoch",
+            "remote_library_id",
+            "remote_item_id",
+            "user_id",
+            "position_ms",
+            "duration_ms",
+            "watched",
+            "sequence",
+            "updated_at_ms",
+        ],
+        order_by: "source_server_id, catalogue_epoch, remote_item_id, user_id",
+        minimum_schema: 92,
+        import_filter: None,
+        sealed_columns: &[],
+        parent_first: false,
+    },
+    TablePlan {
+        name: "sharing_rotations",
+        columns: &[
+            "grant_id",
+            "request_id",
+            "old_hash",
+            "new_hash",
+            "created_at_ms",
+            "expires_at_ms",
+        ],
+        order_by: "grant_id",
+        minimum_schema: 92,
+        import_filter: None,
+        sealed_columns: &[],
+        parent_first: false,
+    },
+    TablePlan {
+        name: "sharing_import_rotations",
+        columns: &[
+            "import_id",
+            "request_id",
+            "credential_envelope",
+            "created_at_ms",
+            "expires_at_ms",
+        ],
+        order_by: "import_id",
+        minimum_schema: 92,
+        import_filter: None,
+        sealed_columns: &["credential_envelope"],
+        parent_first: false,
+    },
+    TablePlan {
+        name: "sharing_catalogue_revisions",
+        columns: &["library_id", "order_revision"],
+        order_by: "library_id",
+        minimum_schema: 92,
+        import_filter: None,
+        sealed_columns: &[],
+        parent_first: false,
+    },
+    TablePlan {
+        name: "sharing_endpoint_manifest",
+        columns: &["singleton", "endpoints_json", "revision"],
+        order_by: "singleton",
+        minimum_schema: 92,
+        import_filter: None,
+        sealed_columns: &[],
+        parent_first: false,
+    },
+    TablePlan {
+        name: "sharing_relay_upstream",
+        columns: &[
+            "incarnation_id",
+            "import_id",
+            "lifecycle_generation",
+            "assignment_generation",
+            "remote_library_id",
+            "remote_item_id",
+            "remote_file_id",
+            "remote_revision",
+            "source_request_id",
+            "source_session_id",
+            "source_incarnation_id",
+            "endpoint_revision",
+            "capability_envelope",
+            "source_position_ms",
+        ],
+        order_by: "incarnation_id",
+        minimum_schema: 92,
+        import_filter: None,
+        sealed_columns: &["capability_envelope"],
+        parent_first: false,
+    },
+    TablePlan {
+        name: "sharing_delivery_grants",
+        columns: &[
+            "token_hash",
+            "incarnation_id",
+            "source_token_hash",
+            "state",
+            "deadline_ms",
+        ],
+        order_by: "token_hash",
+        minimum_schema: 92,
+        import_filter: None,
+        sealed_columns: &[],
+        parent_first: false,
+    },
 ];
 
 /// Groups import rows into transactions bounded by serialized bytes.
@@ -2582,8 +2796,15 @@ fn unsealed_credential_rows(source: &Connection, table: TablePlan) -> Result<u64
         // either, so it fails closed with everything else rather than reading
         // as "nothing to check here".
         let sealed = (0..table.sealed_columns.len()).all(|index| {
-            row.get::<_, String>(index)
-                .is_ok_and(|value| SealedSecret::from_stored(value).is_wrapped())
+            row.get::<_, Option<String>>(index).is_ok_and(|value| {
+                value.map_or(
+                    matches!(
+                        table.sealed_columns[index],
+                        "claim_envelope" | "capability_envelope"
+                    ),
+                    |value| SealedSecret::from_stored(value).is_wrapped(),
+                )
+            })
         });
         if !sealed {
             unsealed = unsealed
@@ -3429,7 +3650,25 @@ mod tests {
         assert!(names.contains(&"live_tv_resource_records"));
         // The revision/nonce is reconstructed above the greatest restored epoch.
         assert!(!names.contains(&"live_tv_resource_revision"));
-        assert_eq!(names.len(), 70, "review every imported durable table");
+        for name in [
+            "sharing_identity",
+            "sharing_invitations",
+            "sharing_exports",
+            "sharing_export_libraries",
+            "sharing_imports",
+            "sharing_viewers",
+            "sharing_assignments",
+            "sharing_watch",
+            "sharing_rotations",
+            "sharing_import_rotations",
+            "sharing_catalogue_revisions",
+            "sharing_endpoint_manifest",
+            "sharing_relay_upstream",
+            "sharing_delivery_grants",
+        ] {
+            assert!(names.contains(&name), "durable sharing table: {name}");
+        }
+        assert_eq!(names.len(), 84, "review every imported durable table");
     }
 
     /// A source from before the pointer fence has no revision to attribute its

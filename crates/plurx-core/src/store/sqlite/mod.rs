@@ -30,6 +30,7 @@ mod publication;
 mod reading;
 mod sessions;
 mod shared_cache;
+mod sharing;
 mod telemetry;
 mod timeline_annotations;
 mod trakt;
@@ -1191,6 +1192,8 @@ pub(crate) const MIGRATIONS: &[&str] = &[
     super::dv_conversion::DV_REQUEST_PROVENANCE_COLUMN,
     // v91: transactional playback planning settings generation.
     super::PLAYBACK_INPUT_SCHEMA,
+    // v92: directional sharing authority and sealed outbound material.
+    super::sharing::SCHEMA,
 ];
 
 /// Highest SQLite schema version this binary can read and migrate.

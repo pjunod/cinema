@@ -208,7 +208,7 @@ storage, and redirects disabled. Capability downloads refuse redirects and
 same-origin escapes, and the offline bridge receives no bearer or credential
 getter.
 
-## Cluster voter disks — the Trakt credential is encrypted at rest
+## Cluster voter disks — outbound credentials are encrypted at rest
 
 Passwords, login tokens, API keys, and offline lease capabilities are stored
 as hashes, because plurx only ever needs to *verify* them. Trakt is the
@@ -226,6 +226,15 @@ alone is not the guarantee, because a pre-encryption row must still be readable
 to be upgraded; there, the **durable write itself refuses** an unsealed value.
 Raft carries ciphertext, key id, expiry, username, and sync metadata. A copied
 voter disk is not enough to use a household's Trakt account.
+
+The [shared-library foundation](features/SHARED-LIBRARIES-IMPLEMENTATION.md)
+uses the same wrapping key for outbound peer credentials, pending claims,
+rotations and upstream capabilities. Sharing AEAD binds secret purpose,
+local server UUID and import UUID; ciphertext substitution across any of
+those contexts fails. The startup census includes both Trakt and sharing,
+including disabled imports. Missing or mismatched keys preserve whole-server
+startup refusal. Sharing listeners and playback are still pending later
+milestones; these storage records do not expose a peer API.
 
 | Property | How |
 |---|---|
