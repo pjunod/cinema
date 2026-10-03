@@ -714,7 +714,17 @@ async fn classify_rejoin_after_attempt(
 
 fn prepare_statements(
     preparation: &crate::domain::MediaSessionPreparation,
-) -> Result<Vec<(&'static str, hiqlite::Params)>, StoreError> {
+    layout: LocalSessionSql,
+) -> Result<Vec<(String, hiqlite::Params)>, StoreError> {
+    let owner_1 = layout.equals(1);
+    let owner_3 = layout.equals(3);
+    let owner_5 = layout.equals(5);
+    let extra_columns = layout.insert_columns();
+    let extra_values_1 = layout.insert_values(1);
+    let extra_values_3 = layout.insert_values(3);
+    let user_exists_1 = layout.existing_user(1);
+    let user_exists_3 = layout.existing_user(3);
+    let user_exists_5 = layout.existing_user(5);
     let prepare_lease_resource = format!("session:{}", preparation.incarnation_id);
     let removed_owner_key = removed_job_owner_key(&preparation.owner_node_id);
     // Zero is "no expectation", and it can never collide with a real one:
@@ -735,31 +745,33 @@ fn prepare_statements(
             // Every statement carries the same fixed preconditions. A
             // replicated transaction cannot branch between statements, so a
             // partial lease/session/ledger preparation must be impossible.
-            "INSERT INTO job_leases
+            format!(
+                "INSERT INTO job_leases
                 (resource, owner_node_id, fence, revision, expires_at_ms, updated_at_ms)
              SELECT $1, $2, 1, 1, $3, $4
               WHERE EXISTS (SELECT 1 FROM media_playback_pointers
-                  WHERE user_id = $5 AND playback_id = $6
+                  WHERE {owner_5} AND playback_id = $6
                     AND current_incarnation_id = $7)
                 AND NOT EXISTS (SELECT 1 FROM media_session_preparations
-                  WHERE user_id = $5 AND playback_id = $6)
+                  WHERE {owner_5} AND playback_id = $6)
                 AND NOT EXISTS (SELECT 1 FROM media_session_preparations
                   WHERE staged_incarnation_id = $8)
                 AND NOT EXISTS (SELECT 1 FROM media_sessions WHERE incarnation_id = $8)
                 AND (SELECT COUNT(*) FROM media_sessions
-                      WHERE user_id = $5 AND state IN ('starting', 'active')
+                      WHERE {owner_5} AND state IN ('starting', 'active')
                         AND lease_expires_at_ms > $4 AND incarnation_id != $8) < $9
                 AND (SELECT COUNT(*) FROM media_sessions
-                      WHERE user_id = $5 AND incarnation_id != $8) < $10
+                      WHERE {owner_5} AND incarnation_id != $8) < $10
                 AND (SELECT COUNT(*) FROM media_sessions
                       WHERE owner_node_id = $2 AND state = 'active'
                         AND lease_expires_at_ms > $4 AND incarnation_id != $8) < $11
                 AND NOT EXISTS (SELECT 1 FROM settings WHERE key = $12)
                 AND EXISTS (SELECT 1 FROM media_sessions
                   WHERE incarnation_id = $7 AND owner_node_id = $13
-                    AND owner_epoch = $14 AND state = 'active')
+                    AND owner_epoch = $14 AND state = 'active' AND {owner_5})
                 AND ($15 = 0 OR NOT EXISTS (SELECT 1 FROM media_playback_desired
-                  WHERE user_id = $5 AND playback_id = $6 AND revision != $15))
+                  WHERE {owner_5} AND playback_id = $6 AND revision != $15))
+                {user_exists_5}
              ON CONFLICT(resource) DO UPDATE SET
                 expires_at_ms = excluded.expires_at_ms,
                 revision = job_leases.revision + 1,
@@ -767,7 +779,8 @@ fn prepare_statements(
               WHERE job_leases.owner_node_id = excluded.owner_node_id
                 AND job_leases.fence = 1 AND job_leases.expires_at_ms > $4
                 AND job_leases.revision < 9223372036854775807
-             RETURNING resource, owner_node_id, fence, revision, expires_at_ms",
+             RETURNING resource, owner_node_id, fence, revision, expires_at_ms"
+            ),
             params!(
                 prepare_lease_resource.as_str(),
                 preparation.owner_node_id.as_str(),
@@ -787,12 +800,13 @@ fn prepare_statements(
             ),
         ),
         (
-            "INSERT INTO media_sessions
+            format!(
+                "INSERT INTO media_sessions
                 (incarnation_id, session_id, user_id, playback_id, request_fingerprint,
                  owner_node_id, owner_epoch, lease_expires_at_ms, state, recipe_json,
                  response_json, produced_playable_through_ms, fetched_through_ms,
                  media_origin_ms, media_sequence, discontinuity_sequence,
-                 publication_ready_at_ms, updated_at_ms, recovery_epoch)
+                 publication_ready_at_ms, updated_at_ms, recovery_epoch{extra_columns})
              -- The staged successor inherits its predecessor's epoch, read
              -- from the predecessor's own row rather than passed in: a
              -- successor continues one playback, so minting here would grant a
@@ -803,32 +817,34 @@ fn prepare_statements(
              -- other, so one must not name a placeholder either.
              SELECT $1, $2, $3, $4, $5, $6, 1, $7, 'active', $8, $9, 0, 0, $10, 0, 0, $11, $12,
                     COALESCE((SELECT recovery_epoch FROM media_sessions
-                               WHERE incarnation_id = $13), '')
+                               WHERE incarnation_id = $13), ''){extra_values_3}
               WHERE EXISTS (SELECT 1 FROM job_leases
                   WHERE resource = 'session:' || $1 AND owner_node_id = $6
                     AND fence = 1 AND expires_at_ms = $7 AND expires_at_ms > $12)
                 AND EXISTS (SELECT 1 FROM media_playback_pointers
-                  WHERE user_id = $3 AND playback_id = $4
+                  WHERE {owner_3} AND playback_id = $4
                     AND current_incarnation_id = $13)
                 AND NOT EXISTS (SELECT 1 FROM media_session_preparations
-                  WHERE user_id = $3 AND playback_id = $4)
+                  WHERE {owner_3} AND playback_id = $4)
                 AND NOT EXISTS (SELECT 1 FROM media_session_preparations
                   WHERE staged_incarnation_id = $1)
                 AND (SELECT COUNT(*) FROM media_sessions
-                      WHERE user_id = $3 AND state IN ('starting', 'active')
+                      WHERE {owner_3} AND state IN ('starting', 'active')
                         AND lease_expires_at_ms > $12 AND incarnation_id != $1) < $14
                 AND (SELECT COUNT(*) FROM media_sessions
-                      WHERE user_id = $3 AND incarnation_id != $1) < $15
+                      WHERE {owner_3} AND incarnation_id != $1) < $15
                 AND (SELECT COUNT(*) FROM media_sessions
                       WHERE owner_node_id = $6 AND state = 'active'
                         AND lease_expires_at_ms > $12 AND incarnation_id != $1) < $16
                 AND NOT EXISTS (SELECT 1 FROM settings WHERE key = $17)
                 AND EXISTS (SELECT 1 FROM media_sessions
                   WHERE incarnation_id = $13 AND owner_node_id = $18
-                    AND owner_epoch = $19 AND state = 'active')
+                    AND owner_epoch = $19 AND state = 'active' AND {owner_3})
                 AND ($20 = 0 OR NOT EXISTS (SELECT 1 FROM media_playback_desired
-                  WHERE user_id = $3 AND playback_id = $4 AND revision != $20))
-             RETURNING incarnation_id, session_id, user_id, playback_id, owner_node_id",
+                  WHERE {owner_3} AND playback_id = $4 AND revision != $20))
+                {user_exists_3}
+             RETURNING incarnation_id, session_id, user_id, playback_id, owner_node_id"
+            ),
             params!(
                 preparation.incarnation_id.as_str(),
                 preparation.session_id.as_str(),
@@ -853,26 +869,29 @@ fn prepare_statements(
             ),
         ),
         (
-            "INSERT INTO media_session_preparations
+            format!(
+                "INSERT INTO media_session_preparations
                 (user_id, playback_id, staged_incarnation_id,
                  expected_predecessor_incarnation_id, deadline_ms,
-                 created_at_ms, updated_at_ms)
-             SELECT $1, $2, $3, $4, $5, $6, $6 WHERE EXISTS (
+                 created_at_ms, updated_at_ms{extra_columns})
+             SELECT $1, $2, $3, $4, $5, $6, $6{extra_values_1} WHERE EXISTS (
                SELECT 1 FROM media_sessions
                 WHERE incarnation_id = $3 AND session_id = $7
-                  AND user_id = $1 AND playback_id = $2
+                  AND {owner_1} AND playback_id = $2
                   AND owner_node_id = $8 AND state = 'active'
                   AND publication_ready_at_ms = $9)
                AND EXISTS (SELECT 1 FROM media_playback_pointers pointer
                  JOIN media_sessions predecessor
                    ON predecessor.incarnation_id = pointer.current_incarnation_id
-                WHERE pointer.user_id = $1 AND pointer.playback_id = $2
+                WHERE pointer.{owner_1} AND pointer.playback_id = $2
                   AND pointer.current_incarnation_id = $4
                   AND predecessor.owner_node_id = $10
                   AND predecessor.owner_epoch = $11
-                  AND predecessor.state = 'active')
+                  AND predecessor.state = 'active' AND predecessor.{owner_1})
                AND ($12 = 0 OR NOT EXISTS (SELECT 1 FROM media_playback_desired
-                 WHERE user_id = $1 AND playback_id = $2 AND revision != $12))",
+                 WHERE {owner_1} AND playback_id = $2 AND revision != $12))
+               {user_exists_1}"
+            ),
             params!(
                 crate::store::local_media_principal_id(&preparation.principal)?,
                 preparation.playback_id.as_str(),
@@ -898,27 +917,32 @@ fn abort_statements(
     expected_owner_node_id: &str,
     expected_owner_epoch: i64,
     now_ms: i64,
-) -> Vec<(&'static str, hiqlite::Params)> {
+    layout: LocalSessionSql,
+) -> Vec<(String, hiqlite::Params)> {
+    let owner_column = layout.column();
+    let owner_1 = layout.equals(1);
+    let owner_3 = layout.equals(3);
+    let owner_4 = layout.equals(4);
     let lease_resource = format!("session:{staged_incarnation_id}");
     vec![
         (
-            "UPDATE media_sessions SET state = 'ended', terminal_reason = 'replaced',
+            format!("UPDATE media_sessions SET state = 'ended', terminal_reason = 'replaced',
                     lease_expires_at_ms = $1, updated_at_ms = $1
-              WHERE incarnation_id = $2 AND state != 'ended'
+              WHERE incarnation_id = $2 AND state != 'ended' AND {owner_3}
                 AND EXISTS (SELECT 1 FROM media_session_preparations
-                  WHERE user_id = $3 AND playback_id = $4
+                  WHERE {owner_3} AND playback_id = $4
                     AND staged_incarnation_id = $2)
                 AND NOT EXISTS (SELECT 1 FROM media_playback_pointers pointer
                   JOIN media_session_preparations preparation
-                    ON preparation.user_id = pointer.user_id
+                    ON preparation.{owner_column} = pointer.{owner_column}
                    AND preparation.playback_id = pointer.playback_id
                   JOIN media_sessions predecessor
                     ON predecessor.incarnation_id = pointer.current_incarnation_id
-                 WHERE preparation.user_id = $3 AND preparation.playback_id = $4
+                 WHERE preparation.{owner_3} AND preparation.playback_id = $4
                    AND preparation.staged_incarnation_id = $2
                    AND pointer.current_incarnation_id = preparation.expected_predecessor_incarnation_id
                    AND (predecessor.owner_node_id != $5 OR predecessor.owner_epoch != $6))
-              RETURNING incarnation_id",
+              RETURNING incarnation_id"),
             params!(
                 now_ms,
                 staged_incarnation_id,
@@ -929,23 +953,23 @@ fn abort_statements(
             ),
         ),
         (
-            "DELETE FROM cache_consumer_pins
+            format!("DELETE FROM cache_consumer_pins
               WHERE consumer_kind = 'media_session' AND consumer_id = $1
                 AND EXISTS (SELECT 1 FROM media_sessions
-                  WHERE incarnation_id = $1 AND state = 'ended' AND updated_at_ms = $2)
+                  WHERE incarnation_id = $1 AND state = 'ended' AND updated_at_ms = $2 AND {owner_3})
                 AND EXISTS (SELECT 1 FROM media_session_preparations
-                  WHERE user_id = $3 AND playback_id = $4
+                  WHERE {owner_3} AND playback_id = $4
                     AND staged_incarnation_id = $1)
                 AND NOT EXISTS (SELECT 1 FROM media_playback_pointers pointer
                   JOIN media_session_preparations preparation
-                    ON preparation.user_id = pointer.user_id
+                    ON preparation.{owner_column} = pointer.{owner_column}
                    AND preparation.playback_id = pointer.playback_id
                   JOIN media_sessions predecessor
                     ON predecessor.incarnation_id = pointer.current_incarnation_id
-                 WHERE preparation.user_id = $3 AND preparation.playback_id = $4
+                 WHERE preparation.{owner_3} AND preparation.playback_id = $4
                    AND preparation.staged_incarnation_id = $1
                    AND pointer.current_incarnation_id = preparation.expected_predecessor_incarnation_id
-                   AND (predecessor.owner_node_id != $5 OR predecessor.owner_epoch != $6))",
+                   AND (predecessor.owner_node_id != $5 OR predecessor.owner_epoch != $6))"),
             params!(
                 staged_incarnation_id,
                 now_ms,
@@ -956,26 +980,26 @@ fn abort_statements(
             ),
         ),
         (
-            "UPDATE job_leases
+            format!("UPDATE job_leases
                 SET expires_at_ms = CASE
                       WHEN expires_at_ms < $1 THEN expires_at_ms ELSE $1 END,
                     revision = revision + 1, updated_at_ms = $1
               WHERE resource = $2 AND revision < 9223372036854775807
                 AND EXISTS (SELECT 1 FROM media_sessions
-                  WHERE incarnation_id = $3 AND state = 'ended' AND updated_at_ms = $1)
+                  WHERE incarnation_id = $3 AND state = 'ended' AND updated_at_ms = $1 AND {owner_4})
                 AND EXISTS (SELECT 1 FROM media_session_preparations
-                  WHERE user_id = $4 AND playback_id = $5
+                  WHERE {owner_4} AND playback_id = $5
                     AND staged_incarnation_id = $3)
                 AND NOT EXISTS (SELECT 1 FROM media_playback_pointers pointer
                   JOIN media_session_preparations preparation
-                    ON preparation.user_id = pointer.user_id
+                    ON preparation.{owner_column} = pointer.{owner_column}
                    AND preparation.playback_id = pointer.playback_id
                   JOIN media_sessions predecessor
                     ON predecessor.incarnation_id = pointer.current_incarnation_id
-                 WHERE preparation.user_id = $4 AND preparation.playback_id = $5
+                 WHERE preparation.{owner_4} AND preparation.playback_id = $5
                    AND preparation.staged_incarnation_id = $3
                    AND pointer.current_incarnation_id = preparation.expected_predecessor_incarnation_id
-                   AND (predecessor.owner_node_id != $6 OR predecessor.owner_epoch != $7))",
+                   AND (predecessor.owner_node_id != $6 OR predecessor.owner_epoch != $7))"),
             params!(
                 now_ms,
                 lease_resource.as_str(),
@@ -987,18 +1011,18 @@ fn abort_statements(
             ),
         ),
         (
-            "DELETE FROM media_session_preparations
-              WHERE user_id = $1 AND playback_id = $2 AND staged_incarnation_id = $3
+            format!("DELETE FROM media_session_preparations
+              WHERE {owner_1} AND playback_id = $2 AND staged_incarnation_id = $3
                 AND NOT EXISTS (SELECT 1 FROM media_playback_pointers pointer
                   JOIN media_session_preparations preparation
-                    ON preparation.user_id = pointer.user_id
+                    ON preparation.{owner_column} = pointer.{owner_column}
                    AND preparation.playback_id = pointer.playback_id
                   JOIN media_sessions predecessor
                     ON predecessor.incarnation_id = pointer.current_incarnation_id
-                 WHERE preparation.user_id = $1 AND preparation.playback_id = $2
+                 WHERE preparation.{owner_1} AND preparation.playback_id = $2
                    AND preparation.staged_incarnation_id = $3
                    AND pointer.current_incarnation_id = preparation.expected_predecessor_incarnation_id
-                   AND (predecessor.owner_node_id != $4 OR predecessor.owner_epoch != $5))",
+                   AND (predecessor.owner_node_id != $4 OR predecessor.owner_epoch != $5))"),
             params!(
                 user_id,
                 playback_id,
@@ -2078,6 +2102,7 @@ impl MediaSessionStore for HiqliteAuthStore {
         preparation: &crate::domain::MediaSessionPreparation,
     ) -> Result<Option<MediaSessionRoute>, StoreError> {
         validate_preparation(preparation)?;
+        let layout = LocalSessionSql::load(self).await?;
         let predecessor = route_by(
             self,
             "incarnation_id",
@@ -2085,7 +2110,8 @@ impl MediaSessionStore for HiqliteAuthStore {
         )
         .await?;
         if !predecessor.as_ref().is_some_and(|predecessor| {
-            predecessor.owner_node_id == preparation.expected_predecessor_owner_node_id
+            predecessor.principal == preparation.principal
+                && predecessor.owner_node_id == preparation.expected_predecessor_owner_node_id
                 && predecessor.owner_epoch == preparation.expected_predecessor_owner_epoch
                 && predecessor.state == "active"
         }) {
@@ -2116,7 +2142,7 @@ impl MediaSessionStore for HiqliteAuthStore {
         // The same fixed statement builder is concatenated after abort for an
         // occupied-slot rejoin, so admission and replay cannot drift between
         // the two entry points.
-        let statements = prepare_statements(preparation)?;
+        let statements = prepare_statements(preparation, layout)?;
         for (sql, _) in &statements {
             validate_sql(sql)?;
         }
@@ -2314,6 +2340,10 @@ impl MediaSessionStore for HiqliteAuthStore {
         preparation: &crate::domain::MediaSessionPreparation,
     ) -> Result<Option<MediaSessionRoute>, StoreError> {
         validate_preparation(preparation)?;
+        let layout = LocalSessionSql::load(self).await?;
+        let owner_1 = layout.equals(1);
+        let owner_7 = layout.equals(7);
+        let assertion_column = layout.column();
         if !valid_uuid(staged_incarnation_id) || staged_incarnation_id == preparation.incarnation_id
         {
             return Err(StoreError::Task(
@@ -2372,6 +2402,7 @@ impl MediaSessionStore for HiqliteAuthStore {
             &preparation.expected_predecessor_owner_node_id,
             preparation.expected_predecessor_owner_epoch,
             preparation.now_ms,
+            layout,
         );
         // Rejoin may release the ledger only after the named active row was
         // retired by this proposal. Explicit abort deliberately releases an
@@ -2379,15 +2410,17 @@ impl MediaSessionStore for HiqliteAuthStore {
         // occupied slot when it cannot prove its own replacement path.
         statements.pop();
         statements.push((
-            "DELETE FROM media_session_preparations
-              WHERE user_id = $1 AND playback_id = $2 AND staged_incarnation_id = $3
+            format!(
+                "DELETE FROM media_session_preparations
+              WHERE {owner_1} AND playback_id = $2 AND staged_incarnation_id = $3
                 AND expected_predecessor_incarnation_id = $4
                 AND EXISTS (SELECT 1 FROM media_sessions
-                  WHERE incarnation_id = $3 AND user_id = $1 AND playback_id = $2
+                  WHERE incarnation_id = $3 AND {owner_1} AND playback_id = $2
                     AND state = 'ended' AND terminal_reason = 'replaced'
                     AND updated_at_ms = $5)
               RETURNING user_id, playback_id, staged_incarnation_id,
-                        expected_predecessor_incarnation_id",
+                        expected_predecessor_incarnation_id"
+            ),
             params!(
                 crate::store::local_media_principal_id(&preparation.principal)?,
                 preparation.playback_id.as_str(),
@@ -2398,7 +2431,7 @@ impl MediaSessionStore for HiqliteAuthStore {
         ));
         let guarded_delete_index = statements.len() - 1;
         statements[guarded_delete_index].1[2] = Param::StmtOutputNamed(0, "incarnation_id".into());
-        let mut prepare = prepare_statements(preparation)?;
+        let mut prepare = prepare_statements(preparation, layout)?;
         // Each stage is observable and the next stage consumes its output.
         // Missing old ledger, refused lease mutation, or refused session
         // insert therefore aborts the proposal before a later statement can
@@ -2418,19 +2451,21 @@ impl MediaSessionStore for HiqliteAuthStore {
         // transaction. The SELECT emits no row on a complete rejoin or on a
         // lost abort, so the assertion is inert on both success paths.
         statements.push((
-            "INSERT INTO media_session_preparations
-                (user_id, playback_id, staged_incarnation_id,
+            format!(
+                "INSERT INTO media_session_preparations
+                ({assertion_column}, playback_id, staged_incarnation_id,
                  expected_predecessor_incarnation_id, deadline_ms,
                  created_at_ms, updated_at_ms)
              SELECT NULL, $1, $2, $3, $4, $5, $5
               WHERE EXISTS (SELECT 1 FROM media_sessions
-                WHERE incarnation_id = $6 AND user_id = $7 AND playback_id = $1
+                WHERE incarnation_id = $6 AND {owner_7} AND playback_id = $1
                   AND state = 'ended' AND terminal_reason = 'replaced'
                   AND updated_at_ms = $5)
                 AND NOT EXISTS (SELECT 1 FROM media_session_preparations
-                  WHERE user_id = $7 AND playback_id = $1
+                  WHERE {owner_7} AND playback_id = $1
                     AND staged_incarnation_id = $2
-                    AND expected_predecessor_incarnation_id = $3)",
+                    AND expected_predecessor_incarnation_id = $3)"
+            ),
             params!(
                 preparation.playback_id.as_str(),
                 preparation.incarnation_id.as_str(),
@@ -2461,7 +2496,11 @@ impl MediaSessionStore for HiqliteAuthStore {
                         "StmtIndex({index}) does not have observable row output"
                     ))
                 });
-                let assertion_failed = message.contains("media_session_preparations.user_id");
+                let assertion_failed = message.contains(if layout.rebuilt {
+                    "media_session_preparations.owner_key"
+                } else {
+                    "media_session_preparations.user_id"
+                });
                 if guarded_step_lost || assertion_failed {
                     return classify_rejoin_after_attempt(self, staged_incarnation_id, preparation)
                         .await;
@@ -2476,10 +2515,11 @@ impl MediaSessionStore for HiqliteAuthStore {
                 // expected statement error. Hiqlite has rolled the proposal
                 // back. Classify only that exact constraint target; unrelated
                 // statement errors remain database faults.
-                if error
-                    .to_string()
-                    .contains("media_session_preparations.user_id")
-                {
+                if error.to_string().contains(if layout.rebuilt {
+                    "media_session_preparations.owner_key"
+                } else {
+                    "media_session_preparations.user_id"
+                }) {
                     return classify_rejoin_after_attempt(self, staged_incarnation_id, preparation)
                         .await;
                 }
@@ -2962,6 +3002,7 @@ impl MediaSessionStore for HiqliteAuthStore {
         // Ledger-scoped in every statement, which is the safety property:
         // without a ledger row naming it, this cannot end an incarnation. An
         // abort aimed at a successor that already committed ends nothing.
+        let layout = LocalSessionSql::load(self).await?;
         let statements = abort_statements(
             user_id,
             playback_id,
@@ -2969,6 +3010,7 @@ impl MediaSessionStore for HiqliteAuthStore {
             &request.expected_predecessor_owner_node_id,
             request.expected_predecessor_owner_epoch,
             request.now_ms,
+            layout,
         );
         for (sql, _) in &statements {
             validate_sql(sql)?;
@@ -5131,7 +5173,8 @@ mod tests {
         let method = method_source("prepare_media_session");
         let normalized_method = method.split_whitespace().collect::<Vec<_>>().join(" ");
         assert!(
-            normalized_method.contains("let statements = prepare_statements(preparation)?;")
+            normalized_method
+                .contains("let statements = prepare_statements(preparation, layout)?;")
                 && method.matches("let statements =").count() == 1
                 && method.matches(".txn(").count() == 1
                 && method.matches(".txn(statements)").count() == 1
@@ -5146,7 +5189,9 @@ mod tests {
             "the public preparation path must submit the shared statement vector unchanged"
         );
         let preparation = statement_test_preparation();
-        let statements = prepare_statements(&preparation).expect("local preparation statements");
+        let statements =
+            prepare_statements(&preparation, super::LocalSessionSql { rebuilt: false })
+                .expect("local preparation statements");
         assert_eq!(
             statements.len(),
             3,
@@ -5162,8 +5207,7 @@ mod tests {
         );
         let statement_sql = statements
             .iter()
-            .map(|(sql, _)| sql)
-            .copied()
+            .map(|(sql, _)| sql.as_str())
             .collect::<Vec<_>>()
             .join("\n");
         assert!(
@@ -5220,7 +5264,7 @@ mod tests {
         let normalized_method = method.split_whitespace().collect::<Vec<_>>().join(" ");
         assert!(
             normalized_method.contains(
-                "let statements = abort_statements( user_id, playback_id, &request.staged_incarnation_id, &request.expected_predecessor_owner_node_id, request.expected_predecessor_owner_epoch, request.now_ms, );"
+                "let statements = abort_statements( user_id, playback_id, &request.staged_incarnation_id, &request.expected_predecessor_owner_node_id, request.expected_predecessor_owner_epoch, request.now_ms, layout, );"
             ) && method.matches("let statements =").count() == 1
                 && method.matches(".txn(").count() == 1
                 && method.matches(".txn(statements)").count() == 1
@@ -5241,16 +5285,17 @@ mod tests {
             "owner",
             1,
             1,
+            super::LocalSessionSql { rebuilt: false },
         );
         assert_eq!(
             statements.len(),
             4,
             "abort is exactly retirement, pin delete, lease clamp, then ledger delete"
         );
-        let retirement = statements[0].0;
-        let pin_delete = statements[1].0;
-        let lease_clamp = statements[2].0;
-        let ledger_delete = statements[3].0;
+        let retirement = &statements[0].0;
+        let pin_delete = &statements[1].0;
+        let lease_clamp = &statements[2].0;
+        let ledger_delete = &statements[3].0;
         let normalized_retirement = retirement.split_whitespace().collect::<Vec<_>>().join(" ");
         let normalized_pin_delete = pin_delete.split_whitespace().collect::<Vec<_>>().join(" ");
         let normalized_lease_clamp = lease_clamp.split_whitespace().collect::<Vec<_>>().join(" ");
@@ -5273,7 +5318,7 @@ mod tests {
         );
         assert!(
             normalized_pin_delete.contains(
-                "EXISTS (SELECT 1 FROM media_sessions WHERE incarnation_id = $1 AND state = 'ended' AND updated_at_ms = $2)"
+                "EXISTS (SELECT 1 FROM media_sessions WHERE incarnation_id = $1 AND state = 'ended' AND updated_at_ms = $2 AND user_id = $3)"
             ) && normalized_pin_delete.contains(
                 "EXISTS (SELECT 1 FROM media_session_preparations WHERE user_id = $3 AND playback_id = $4 AND staged_incarnation_id = $1)"
             ),
@@ -5281,7 +5326,7 @@ mod tests {
         );
         assert!(
             normalized_lease_clamp.contains(
-                "EXISTS (SELECT 1 FROM media_sessions WHERE incarnation_id = $3 AND state = 'ended' AND updated_at_ms = $1)"
+                "EXISTS (SELECT 1 FROM media_sessions WHERE incarnation_id = $3 AND state = 'ended' AND updated_at_ms = $1 AND user_id = $4)"
             ) && normalized_lease_clamp.contains(
                 "EXISTS (SELECT 1 FROM media_session_preparations WHERE user_id = $4 AND playback_id = $5 AND staged_incarnation_id = $3)"
             ),

@@ -71,6 +71,42 @@ including the historical-v32 migration fixture corrected by `1af1a26e4`. The
 four runtime contracts cover single budget admission, racing identities,
 settlement fences and corrupt restriction refusal.
 
+## Preparation, rejoin and abort use canonical ledgers
+
+The common preparation builder still submits lease, session and ledger writes
+in one ordered Raft proposal. All rebuilt Local owner predicates, counts and
+joins use canonical keys; session and preparation insertions supply full Local
+metadata. Each admission statement includes the current-user predicate within
+the write, and predecessor reads and write predicates require the same owner.
+
+`LocalSessionSql` renders the fixed layout fragments while retaining each real
+numeric Local user binding. Preparation uses `equals(1/3/5)` for ownership,
+`insert_columns()` with `insert_values(1/3)` for full metadata, and
+`existing_user(1/3/5)` for atomic admission. Abort uses `equals(1/3/4)` and
+`column()` for preparation/pointer joins. Retirement checks the session owner
+at parameter 3 as well as the ledger; pin cleanup repeats that owner in its
+ended-session predicate, and lease cleanup repeats it at parameter 4. These
+predicates preserve placeholder first-appearance order.
+
+Rejoin consumes the guarded abort outputs before preparing the replacement.
+Its guarded ledger delete uses the canonical owner, and its conditional rollback
+assertion deliberately targets the layout's non-null ownership key. The error
+classifier recognizes only that exact constraint target or a missing guarded
+statement output. Abort additionally fences retirement and dependent pin/lease
+effects to the ledger principal, so a corrupt Local ledger cannot end a Shared
+route or shorten its lease.
+
+The dedicated rebuilt preparation contract creates a current session with the
+production legacy writer, rebuilds the fixture, then opens a fresh Store using
+the production open-existing path. This respects the Store-lifetime schema
+projection; it does not install an upgrade mechanism. Actual prepare, exact
+replay, rejoin and abort preserve the current pointer, retain complete staged
+ownership and refuse a corrupt cross-principal abort. It passed 1/1 with zero
+ignored in 9.20 seconds. The four preparation safety unit tests passed. The
+final combined candidate voter module passed 2/2 with zero ignored in 27.32
+seconds after the lint-only string repair; feature-enabled denied-warning
+Clippy passed in 46.23 seconds.
+
 ## A rebuilt table is not shared admission authority
 
 The schema shape comes from the existing quorum-observed Store-lifetime
@@ -85,9 +121,9 @@ The runtime census at base
 literals, including three unit-test literals and validation-only legacy
 writers. Earlier counts of 65 preceded the pointer/desired-reader conversion.
 This checkpoint addresses the request family; it is not a complete census
-closure or qualification of all seven ownership tables. Preparation,
-activation, commit/abort and their remaining
-write predicates still need conversion and qualification.
+closure or qualification of all seven ownership tables. Activation,
+commit and the remaining lease/takeover/settlement/maintenance write predicates
+still need conversion and qualification.
 
 ## Exercise production behavior on three voters
 
@@ -102,6 +138,8 @@ that global owned/expired inventories retain two distinct Shared principals.
 cargo test --locked -p plurx-core --features hiqlite-contract-tests \
   --test store_contract sharing_principal_runtime -- --nocapture
 cargo test --locked -p plurx-core --features hiqlite-store \
+  --lib preparation_ -- --nocapture
+cargo test --locked -p plurx-core --features hiqlite-store \
   --lib sharing_request_ -- --nocapture
 cargo test --locked -p plurx-core --features hiqlite-store \
   --lib sharing_inventory_and_staged_decoders -- --nocapture
@@ -111,9 +149,9 @@ cargo clippy --locked -p plurx-core --features hiqlite-contract-tests \
   --all-targets -- -D warnings
 ```
 
-**How to read it:** the focused voter regression passed 1/1 with zero ignored
+**How to read it:** the request/inventory/recovery voter regression passed 1/1 with zero ignored
 in 18.14 seconds using Rust 1.97.1. The two request decoder regressions and the incomplete
 inventory/staged/desired decoder regression passed with zero ignored. All 28 existing local/replicated lifecycle contracts passed
-with zero ignored in 257.54 seconds. Denied-warning Clippy with
+with zero ignored in 257.18 seconds. Denied-warning Clippy with
 `hiqlite-contract-tests` passed. These tests do not enable shared worker ingress, install
 a migration, advertise the member capability or qualify an upgrade/rollback.

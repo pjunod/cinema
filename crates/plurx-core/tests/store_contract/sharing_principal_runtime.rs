@@ -387,3 +387,158 @@ async fn sharing_rebuilt_local_request_writes_preserve_owner_and_refuse_cross_pr
         drop(store);
     }
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn sharing_rebuilt_local_preparation_rejoin_abort_preserve_principal_fences() {
+    let _case = HIQLITE_CASE.lock().await;
+    let cluster = ContractCluster::start().await;
+    let store = open_contract_hiqlite_store(&cluster).await;
+    let client = Client::remote(
+        cluster.addresses.clone(),
+        true,
+        true,
+        CONTRACT_API_SECRET.to_owned(),
+        false,
+        None,
+    )
+    .await
+    .expect("fixture client");
+    for result in client
+        .batch(include_str!("../fixtures/session-principal-local.sql"))
+        .await
+        .expect("local fixture")
+    {
+        result.expect("seed local fixture");
+    }
+    let current = "00000000-0000-4000-a000-000000000090";
+    current_media_session(
+        &store,
+        1,
+        "prepared-runtime",
+        current,
+        "00000000-0000-4000-a000-000000000091",
+        "candidate preparation",
+    )
+    .await;
+    let statements: Vec<(String, hiqlite::Params)> = MEDIA_SESSION_PRINCIPAL_REBUILD_SCHEMA
+        .split("-- next statement\n")
+        .map(|sql| {
+            (
+                sql.trim().trim_end_matches(';').to_owned(),
+                hiqlite::params!(),
+            )
+        })
+        .collect();
+    for result in client.txn(statements).await.expect("candidate transaction") {
+        result.expect("candidate rebuild");
+    }
+    for result in client
+        .batch(include_str!("../fixtures/session-principal-sharing.sql"))
+        .await
+        .expect("shared fixture")
+    {
+        result.expect("seed shared owners");
+    }
+    // The schema projection is fixed for one Store lifetime. Reopen after
+    // the fixture rebuild, as the coordinated upgrade path requires.
+    drop(store);
+    let store = HiqliteAuthStore::open(
+        client.clone(),
+        &cluster._root.path().join("candidate-reopened-telemetry.db"),
+    )
+    .await
+    .expect("reopen rebuilt fixture store");
+    let local = PlaybackPrincipal::LocalUser { user_id: 1 };
+    let first = staged_preparation(
+        1,
+        "prepared-runtime",
+        "00000000-0000-4000-a000-000000000092",
+        "00000000-0000-4000-a000-000000000093",
+        current,
+    );
+    let staged = store
+        .prepare_media_session(&first)
+        .await
+        .expect("rebuilt production prepare")
+        .expect("staged successor");
+    assert_eq!(staged.principal, local);
+    assert_eq!(
+        store
+            .media_session_route_for_playback(&local, "prepared-runtime")
+            .await
+            .expect("unchanged current pointer")
+            .expect("current route")
+            .incarnation_id,
+        current
+    );
+    assert_eq!(request_rows(&client, "SELECT owner_key || ':' || principal_kind || ':' || user_id AS value FROM media_session_preparations WHERE playback_id='prepared-runtime'").await, ["local:1:local:1"]);
+    assert_eq!(
+        store
+            .prepare_media_session(&first)
+            .await
+            .expect("exact staged replay")
+            .expect("replayed staged route")
+            .incarnation_id,
+        first.incarnation_id
+    );
+    let second = staged_preparation(
+        1,
+        "prepared-runtime",
+        "00000000-0000-4000-a000-000000000094",
+        "00000000-0000-4000-a000-000000000095",
+        current,
+    );
+    let rejoined = store
+        .rejoin_media_session_preparation(&first.incarnation_id, &second)
+        .await
+        .expect("rebuilt rejoin")
+        .expect("replacement staged successor");
+    assert_eq!(rejoined.principal, local);
+    assert_eq!(rejoined.incarnation_id, second.incarnation_id);
+    assert_eq!(
+        store
+            .staged_media_session_for_playback(&local, "prepared-runtime")
+            .await
+            .expect("canonical staged reader")
+            .expect("replacement ledger")
+            .staged_incarnation_id,
+        second.incarnation_id
+    );
+    let ended = store
+        .abort_media_session_preparation(
+            &local,
+            "prepared-runtime",
+            &preparation_abort_request(&second.incarnation_id, 3000),
+        )
+        .await
+        .expect("rebuilt abort")
+        .expect("ended staged successor");
+    assert_eq!(ended.principal, local);
+    assert_eq!(ended.terminal_reason.as_deref(), Some("replaced"));
+    assert!(store
+        .staged_media_session_for_playback(&local, "prepared-runtime")
+        .await
+        .expect("released ledger")
+        .is_none());
+    assert_eq!(
+        store
+            .media_session_route_for_playback(&local, "prepared-runtime")
+            .await
+            .expect("current pointer after abort")
+            .expect("current route")
+            .incarnation_id,
+        current
+    );
+    client.execute("INSERT INTO media_session_preparations(owner_key,principal_kind,user_id,playback_id,staged_incarnation_id,expected_predecessor_incarnation_id,deadline_ms,created_at_ms,updated_at_ms) VALUES('local:1','local',1,'prepared-runtime',$1,$2,800000,3000,3000)", hiqlite::params!(SHARED_ROUTE, current)).await.expect("corrupted cross-principal ledger fixture");
+    assert!(store
+        .abort_media_session_preparation(
+            &local,
+            "prepared-runtime",
+            &preparation_abort_request(SHARED_ROUTE, 3100)
+        )
+        .await
+        .expect("closed foreign abort")
+        .is_none());
+    assert_eq!(request_rows(&client, "SELECT state AS value FROM media_sessions WHERE incarnation_id='00000000-0000-4000-a000-000000000001'").await, ["active"]);
+    assert_eq!(request_rows(&client, "SELECT CAST(lease_expires_at_ms AS TEXT) AS value FROM media_sessions WHERE incarnation_id='00000000-0000-4000-a000-000000000001'").await, ["9000"]);
+}

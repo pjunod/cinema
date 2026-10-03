@@ -2029,3 +2029,23 @@ contracts, including the repaired historical v32 fixture, passed
 warnings passed (36.74 seconds); documentation indexing and catalog lint
 also passed. These checks do not qualify schema installation or Shared
 writer admission.
+
+**Preparation integration checkpoint:** SQLite staged lookups and worker
+inventories decode complete principals and correlate canonical owner keys.
+Two grants sharing the same viewer/playback retain independent staged slots;
+a starting request suppresses only its own owner's inventory entry. SQLite
+Local prepare/replay/rejoin/abort now writes complete metadata, checks current
+user existence within its transaction, and requires predecessor ownership
+agreement. Retirement and dependent pin/lease cleanup each require the
+ledger's principal. The matching replicated preparation checkpoint is also
+integrated. Shared mutation ingress remains refused.
+
+On the combined tree, all 13 SQLite ownership cases passed (11.79 seconds),
+both actual-voter candidate runtime cases passed (27.27 seconds), and all 28
+existing lifecycle contracts passed (257.78 seconds). Every test had zero
+ignored cases. The SQLite preparation case executes a corrupt Local ledger
+pointing at a foreign Shared route and verifies the route, cache pin and
+complete job-lease revision/expiry/update tuple survive the abort attempt in
+both memory and pooled disk stores. Pinned all-target compilation and
+denied-warning feature Clippy passed; schema installation, Shared admission
+and upgrade/rollback qualification remain open.
