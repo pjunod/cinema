@@ -3765,3 +3765,57 @@ binding regressions (22, zero ignored, 31.11 seconds), purpose regressions
 warnings passed in 1 minute 36 seconds, and all four docs-index tests passed.
 This qualifies the integrated startup/storage tree; live Source/B actor,
 transport/body relay, hardware and real Tailscale acceptance remain open.
+
+### S5 receiver Source attachment, publication and attached renewal
+
+The dedicated receiver Store now attaches an exact Source result to an existing
+blocked B owner, publishes its canonical projected response and resolves the
+original starting request in one transaction, and renews an attached blocked
+or published owner. These are B metadata writers. The caller must verify the
+actual Source published response and seal/open its upstream capability with the
+selected B key and identity/import AAD; none of these methods admits Source
+physical work or infers Source authority from a persisted tuple.
+
+Every write repeats current original-login, idle policy, saved switch, import
+lifecycle, Source server/epoch and effective library authorization together with
+the exact B session/incarnation, owner node/epoch, pointer, request fingerprint,
+recipe and matching live job lease. The Source binding retains the complete
+reference, file/revision, request/session/incarnation UUIDs and exact sealed
+envelope. Envelope size is checked before parsing (four KiB), including its
+nonce/tag structural minimum; projected responses are canonical JSON objects
+bounded to sixty-four KiB. Partial or different bindings refuse without repair,
+replacement or rebinding. Exact replay performs no writes. Expired owners are
+not resurrected and leases are never shortened. Attached renewal updates the
+starting claim only while blocked; an already resolved request stays unchanged.
+The original null-only pending renewal remains separate.
+
+The existing receiver activation, adjunct and pending-renewal assertions also
+refuse before an INSERT trigger can suppress their failure. Their refused
+branch evaluates a fixed SQL expression error before the trigger runs, while
+the allowed branch emits no assertion row; the older named NOT-NULL error
+remains recognized. Both ordinary backend publication methods now exclude a
+remote recipe before returning a ready/resolved reply, requiring the dedicated
+current-login publication path. Other Source and general lifecycle assertions
+are outside this change. Ownership is confined to the receiver DTO/Store and
+its existing tests, plus the two publication methods in
+`store/sqlite/sessions.rs` and `store/hiqlite_sessions.rs`.
+
+On the complete intended-base integration with `726ed039e`, pinned Rust 1.97.1
+affected feature-enabled all-target compilation passed in 1 minute 10 seconds
+and Clippy with denied warnings passed in 1 minute 37 seconds. The
+`--lib sharing_receiver` filter passed three tests with zero ignored
+(19.72 seconds), including both SQLite storage modes and both principal
+layouts, stale/current-scope races, original-login loss, malformed/oversized
+envelopes, partial binding refusal, exact replay and ignored assertion/update
+rollback. The extended actual three-voter receiver contract passed in
+9.53 seconds; the existing Local activation/publication contract through
+`dyn Store` passed in 11.53 seconds. These Store fixtures do not qualify the
+HTTP actor, a live Source/B relay, delivery, progress ordering or two-NAT work.
+
+```sh
+cargo test --locked -p plurx-core --features hiqlite-contract-tests --lib sharing_receiver -- --nocapture
+cargo test --locked -p plurx-core --features hiqlite-contract-tests --test store_contract sharing_receiver_three_voters_atomic_admission_replay_scope_and_unresolved_retention -- --nocapture
+cargo test --locked -p plurx-core --features hiqlite-contract-tests --test store_contract media_session_activation_prepare_settle_contract_runs_through_dyn_store -- --nocapture
+cargo check --locked -p plurx-core -p plurxd --all-targets --features plurx-core/hiqlite-contract-tests
+cargo clippy --locked -p plurx-core -p plurxd --all-targets --features plurx-core/hiqlite-contract-tests -- -D warnings
+```

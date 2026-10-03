@@ -1933,12 +1933,13 @@ impl MediaSessionStore for SqliteStore {
             let request_owner_1 = format!("request.{}", local_owner_predicate(rebuilt, 1));
             let route_owner_1 = format!("route.{}", local_owner_predicate(rebuilt, 1));
 
+            let live_route = live_local_session_predicate(rebuilt, "route");
             let route = tx
                 .query_row(
                     &format!(
                         "SELECT {route_cols} FROM media_sessions route
                           WHERE {route_owner_1} AND route.incarnation_id = ?2
-                            AND route.state = 'active'
+                            AND route.state = 'active' AND {live_route}
                             AND route.publication_ready_at_ms = 0
                             AND EXISTS (SELECT 1 FROM media_session_requests request
                               WHERE {request_owner_1} AND request.request_id = ?4

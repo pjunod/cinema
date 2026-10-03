@@ -222,10 +222,22 @@ async fn sharing_receiver_three_voters_atomic_admission_replay_scope_and_unresol
             }
             _ => {}
         }
+        if refusal != "none" {
+            client.execute("CREATE TRIGGER receiver_ignored_old_assertion BEFORE INSERT ON sharing_relay_upstream BEGIN SELECT RAISE(IGNORE); END",hiqlite::params!()).await.expect("ignored old assertion fixture");
+        }
         let outcome = store
             .activate_receiver_media_session(&authority, &activation)
             .await
             .expect("atomic B activation");
+        if refusal != "none" {
+            client
+                .execute(
+                    "DROP TRIGGER receiver_ignored_old_assertion",
+                    hiqlite::params!(),
+                )
+                .await
+                .expect("remove old assertion fixture");
+        }
         assert_eq!(outcome.is_some(), refusal == "none", "{refusal}");
         if refusal == "none" {
             assert!(store
@@ -295,10 +307,18 @@ async fn sharing_receiver_three_voters_atomic_admission_replay_scope_and_unresol
                 .expect("lease before refused renewal")
                 .pop()
                 .expect("lease");
+            client.execute("CREATE TRIGGER receiver_ignored_pending_assertion BEFORE INSERT ON sharing_relay_upstream BEGIN SELECT RAISE(IGNORE); END",hiqlite::params!()).await.expect("ignored pending assertion fixture");
             assert!(!store
                 .renew_pending_receiver_session(&fresh, &renewal)
                 .await
                 .expect("lost assignment refuses renewal"));
+            client
+                .execute(
+                    "DROP TRIGGER receiver_ignored_pending_assertion",
+                    hiqlite::params!(),
+                )
+                .await
+                .expect("remove pending assertion fixture");
             let after: SchemaText = client
                 .query_consistent_map(
                     "SELECT CAST(revision AS TEXT) AS value FROM job_leases WHERE resource=$1",
@@ -319,6 +339,300 @@ async fn sharing_receiver_three_voters_atomic_admission_replay_scope_and_unresol
                 )
                 .await
                 .expect("restore fixture");
+
+            use plurx_core::sharing_receiver_sessions::{
+                ReceiverSourceAttachment, ReceiverSourceBinding, ReceiverSourceOwner,
+                ReceiverSourcePublication, ReceiverSourceRenewal, ReceiverSourceWrite,
+            };
+            let key = plurx_core::secrets::CredentialKey::from_bytes([41; 32]);
+            let envelope = key
+                .seal_sharing(
+                    plurx_core::secrets::SharingSecretPurpose::Upstream,
+                    Uuid::new_v4(),
+                    scope.import_id,
+                    "actual contract upstream capability",
+                )
+                .expect("sealed actor result fixture");
+            let mut attachment = ReceiverSourceAttachment {
+                owner: ReceiverSourceOwner {
+                    incarnation_id: recipe.source_request_id,
+                    session_id: Uuid::parse_str(&activation.session_id).expect("B UUID"),
+                    owner_node_id: activation.owner_node_id.clone(),
+                    owner_epoch: route.owner_epoch,
+                    request_id: "B-request".into(),
+                    lease_expires_at_ms: renewal.lease_expires_at_ms,
+                    now_ms: SystemTime::now()
+                        .duration_since(UNIX_EPOCH)
+                        .expect("clock")
+                        .as_millis() as i64,
+                },
+                binding: ReceiverSourceBinding {
+                    reference: recipe.reference.clone(),
+                    file_id: recipe.file_id.clone(),
+                    file_revision: recipe.file_revision.clone(),
+                    source_request_id: recipe.source_request_id,
+                    source_session_id: Uuid::new_v4(),
+                    source_incarnation_id: Uuid::new_v4(),
+                    capability_envelope: envelope,
+                },
+            };
+            let fresh = store
+                .prepare_receiver_session_authority(intent.clone())
+                .await
+                .expect("current binding proof")
+                .expect("original login");
+            let census="SELECT json_array((SELECT json_group_array(json_array(owner_node_id,owner_epoch,publication_ready_at_ms,lease_expires_at_ms,response_json,updated_at_ms)) FROM media_sessions),(SELECT json_group_array(json_array(state,claim_expires_at_ms,response_json,updated_at_ms)) FROM media_session_requests),(SELECT json_group_array(json_array(owner_node_id,fence,revision,expires_at_ms,updated_at_ms)) FROM job_leases),(SELECT json_group_array(json_array(source_session_id,source_incarnation_id,capability_envelope)) FROM sharing_relay_upstream)) AS value";
+            let read = || client.query_consistent_map::<SchemaText, _>(census, hiqlite::params!());
+            for (change, restore) in [
+                (
+                    "UPDATE sharing_assignments SET enabled=0",
+                    "UPDATE sharing_assignments SET enabled=1",
+                ),
+                (
+                    "UPDATE media_sessions SET owner_epoch=owner_epoch+1",
+                    "UPDATE media_sessions SET owner_epoch=owner_epoch-1",
+                ),
+                (
+                    "UPDATE sharing_relay_upstream SET source_incarnation_id='partial'",
+                    "UPDATE sharing_relay_upstream SET source_incarnation_id=NULL",
+                ),
+            ] {
+                client
+                    .execute(change, hiqlite::params!())
+                    .await
+                    .expect("binding race");
+                let before = read()
+                    .await
+                    .expect("before refusal")
+                    .pop()
+                    .expect("census")
+                    .value;
+                assert_eq!(
+                    store
+                        .attach_receiver_source(&fresh, &attachment)
+                        .await
+                        .expect("same-write refusal"),
+                    ReceiverSourceWrite::Refused,
+                    "{change}"
+                );
+                assert_eq!(
+                    read()
+                        .await
+                        .expect("after refusal")
+                        .pop()
+                        .expect("census")
+                        .value,
+                    before
+                );
+                client
+                    .execute(restore, hiqlite::params!())
+                    .await
+                    .expect("restore fixture");
+            }
+            client.execute("CREATE TRIGGER receiver_ignored_assertion BEFORE INSERT ON sharing_relay_upstream BEGIN SELECT RAISE(IGNORE); END",hiqlite::params!()).await.expect("actual ignored assertion fixture");
+            client
+                .execute(
+                    "UPDATE sharing_assignments SET enabled=0",
+                    hiqlite::params!(),
+                )
+                .await
+                .expect("revoked original assignment");
+            let before = read()
+                .await
+                .expect("before ignored assertion")
+                .pop()
+                .expect("row")
+                .value;
+            assert_eq!(
+                store
+                    .attach_receiver_source(&fresh, &attachment)
+                    .await
+                    .expect("actual pre-trigger assertion"),
+                ReceiverSourceWrite::Refused
+            );
+            assert_eq!(
+                read()
+                    .await
+                    .expect("refusal atomic")
+                    .pop()
+                    .expect("row")
+                    .value,
+                before
+            );
+            client
+                .execute(
+                    "DROP TRIGGER receiver_ignored_assertion",
+                    hiqlite::params!(),
+                )
+                .await
+                .expect("remove fixture trigger");
+            client
+                .execute(
+                    "UPDATE sharing_assignments SET enabled=1",
+                    hiqlite::params!(),
+                )
+                .await
+                .expect("restore fixture");
+            assert_eq!(
+                store
+                    .attach_receiver_source(&fresh, &attachment)
+                    .await
+                    .expect("actual attached commit"),
+                ReceiverSourceWrite::Applied
+            );
+            let before = read()
+                .await
+                .expect("attached census")
+                .pop()
+                .expect("row")
+                .value;
+            assert_eq!(
+                store
+                    .attach_receiver_source(&fresh, &attachment)
+                    .await
+                    .expect("exact attachment replay"),
+                ReceiverSourceWrite::Replay
+            );
+            assert_eq!(
+                read()
+                    .await
+                    .expect("unchanged replay")
+                    .pop()
+                    .expect("row")
+                    .value,
+                before
+            );
+            let mut wrong = attachment.clone();
+            wrong.binding.source_session_id = Uuid::new_v4();
+            assert_eq!(
+                store
+                    .attach_receiver_source(&fresh, &wrong)
+                    .await
+                    .expect("no Source rebind"),
+                ReceiverSourceWrite::Refused
+            );
+            let target = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("clock")
+                .as_millis() as i64
+                + 30_000;
+            let bound_renewal = ReceiverSourceRenewal {
+                attachment: attachment.clone(),
+                lease_expires_at_ms: target,
+            };
+            assert_eq!(
+                store
+                    .renew_receiver_source_session(&fresh, &bound_renewal)
+                    .await
+                    .expect("attached blocked renewal"),
+                ReceiverSourceWrite::Applied
+            );
+            assert_eq!(
+                store
+                    .renew_receiver_source_session(&fresh, &bound_renewal)
+                    .await
+                    .expect("renewal replay"),
+                ReceiverSourceWrite::Replay
+            );
+            attachment.owner.lease_expires_at_ms = target;
+            let publication=ReceiverSourcePublication {attachment:attachment.clone(),response_json:serde_json::json!({"session_id":attachment.owner.session_id.to_string(),"file_id":"0"}).to_string()};
+            client
+                .execute(
+                    "UPDATE sharing_assignments SET enabled=0",
+                    hiqlite::params!(),
+                )
+                .await
+                .expect("publication revocation");
+            let before = read()
+                .await
+                .expect("before publication refusal")
+                .pop()
+                .expect("row")
+                .value;
+            assert_eq!(
+                store
+                    .publish_receiver_source(&fresh, &publication)
+                    .await
+                    .expect("publication revoked"),
+                ReceiverSourceWrite::Refused
+            );
+            assert_eq!(
+                read()
+                    .await
+                    .expect("atomic publication refusal")
+                    .pop()
+                    .expect("row")
+                    .value,
+                before
+            );
+            client
+                .execute(
+                    "UPDATE sharing_assignments SET enabled=1",
+                    hiqlite::params!(),
+                )
+                .await
+                .expect("restore fixture");
+            assert_eq!(
+                store
+                    .publish_receiver_source(&fresh, &publication)
+                    .await
+                    .expect("actual publication"),
+                ReceiverSourceWrite::Applied
+            );
+            let before = read()
+                .await
+                .expect("published census")
+                .pop()
+                .expect("row")
+                .value;
+            assert_eq!(
+                store
+                    .publish_receiver_source(&fresh, &publication)
+                    .await
+                    .expect("exact publication replay"),
+                ReceiverSourceWrite::Replay
+            );
+            assert_eq!(
+                read()
+                    .await
+                    .expect("read-only publication replay")
+                    .pop()
+                    .expect("row")
+                    .value,
+                before
+            );
+            assert!(store
+                .publish_media_session_activation(
+                    &activation.principal,
+                    "B-request",
+                    &activation.incarnation_id,
+                    attachment.owner.now_ms
+                )
+                .await
+                .expect("generic publication excludes remote")
+                .is_none());
+            let request_before:SchemaText=client.query_consistent_map("SELECT json_array(state,response_json,claim_expires_at_ms,updated_at_ms) AS value FROM media_session_requests WHERE incarnation_id=$1",hiqlite::params!(activation.incarnation_id.clone())).await.expect("request before renewal").pop().expect("row");
+            let target = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("clock")
+                .as_millis() as i64
+                + 30_000;
+            let bound_renewal = ReceiverSourceRenewal {
+                attachment: attachment.clone(),
+                lease_expires_at_ms: target,
+            };
+            assert_eq!(
+                store
+                    .renew_receiver_source_session(&fresh, &bound_renewal)
+                    .await
+                    .expect("published attached renewal"),
+                ReceiverSourceWrite::Applied
+            );
+            let request_after:SchemaText=client.query_consistent_map("SELECT json_array(state,response_json,claim_expires_at_ms,updated_at_ms) AS value FROM media_session_requests WHERE incarnation_id=$1",hiqlite::params!(activation.incarnation_id.clone())).await.expect("request after renewal").pop().expect("row");
+            assert_eq!(
+                request_before.value, request_after.value,
+                "published request never rewritten by renewal"
+            );
             let later = now + 7 * 24 * 60 * 60 * 1000;
             store
                 .maintain_media_sessions(later)
