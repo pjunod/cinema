@@ -1268,8 +1268,8 @@ milestones serially against the effort's current head.
 
 | Step | Scope and boundary | Required acceptance |
 |---|---|---|
-| S0 | Opus design review and dispositions; finalize fixture vocabulary and numbers | Opus re-review corrections SL-18–24 incorporated; build contract ready; S2 topology experiments remain pending |
-| S1 | Domain/schema, secret wrapping, pairing/rotation/assignment state machines | SQLite + Hiqlite parity; exact retry/claim race/expiry/rotation loss/user-recreation tests; no plaintext in durable rows |
+| S0 | contract ready to build | Original `4e81bc38c`, revision `eb9038755`, PR #740 | Opus re-review corrections incorporated in §16; runtime evidence is recorded per milestone |
+| S1 | merged into effort | [PR #746](http://192.168.4.7:3000/noirr/plurx/pulls/746), `aaafc1a0f5` | SQLite v92 / Hiqlite v70; purpose-bound secrets; pairing/rotation/assignment transactions. Five store contracts, 11 sharing unit tests, schema migration parity and 31 import-inventory tests passed; workspace Clippy and catalog lint passed. Run 3890 and the final Effort development gate passed on the exact candidate; landed in the effort as `971265536a` with all seven regression fields. |
 | S2 | Serve/loopback deployment, TLS provisioning/renewal, pinned egress, peer/admin routes, Developer switch | Two NATed servers over Tailscale; no public/LAN listener; TLS mismatch, VPN loss, wrong port/route, redirect/proxy and broad-grant cases |
 | S3 | Playback principal migration in existing family and cluster schema floor | Owner-key PK/upsert/count parity; local/shared replay races; user/grant deletion; old-writer migration receipt; prepared successor, cluster ownership and ordinary-router refusal |
 | S4 | Shared catalogue, live keyset paging, batch metadata, scoped art, assignments and local history | Huge IDs, same IDs on two sources, paging completes during continuous metadata writes, moved sort keys, expiry/deletion, denied cache reads, progress ordering |
@@ -1460,9 +1460,9 @@ implied by the build handoff.
 
 | Milestone | State | PR / commit | Evidence / outstanding work |
 |---|---|---|---|
-| S0 | contract ready to build | Original `4e81bc38c`, revision `eb9038755`, PR #740 | Opus re-review corrections incorporated in §16; S2/runtime experiments not yet executed |
-| S1 | implemented; task gate pending | `codex/sharing-s1-state` | SQLite v92 / Hiqlite v70; purpose-bound secrets; pairing/rotation/assignment transactions. Five store contracts, 11 sharing unit tests, schema migration parity and 31 import-inventory tests passed; workspace Clippy and catalog lint passed. Task PR/gate remain pending. |
-| S2 | not started | — | — |
+| S0 | contract ready to build | Original `4e81bc38c`, revision `eb9038755`, PR #740 | Opus re-review corrections incorporated in §16; runtime evidence is recorded per milestone |
+| S1 | merged into effort | [PR #746](http://192.168.4.7:3000/noirr/plurx/pulls/746), `aaafc1a0f5` | SQLite v92 / Hiqlite v70; purpose-bound secrets; pairing/rotation/assignment transactions. Five store contracts, 11 sharing unit tests, schema migration parity and 31 import-inventory tests passed; workspace Clippy and catalog lint passed. Run 3890 and the final Effort development gate passed on the exact candidate; landed in the effort as `971265536a` with all seven regression fields. |
+| S2 | implementation in progress; topology qualification open | [draft PR #759](http://192.168.4.7:3000/noirr/plurx/pulls/759) | Dedicated loopback TLS transport, pinned direct dialing and fixed Tailscale DNS, isolated peer/admin routes, durable claim/rotation recovery, authenticated endpoint refresh and advisory Developer switch implemented. Two-NAT, shared-machine Serve and Docker isolation/egress receipts remain open; S2 is not complete. |
 | S3 | not started | — | — |
 | S4 | catalogue primitives and private history implemented; qualification pending | `codex/sharing-s4-catalogue` | Signed live-list boundaries, closed source references and bounded batch inputs; receiver-only ordered watch transactions. Runtime catalogue/routes/revisions/cache/artwork and real scan liveness remain open. |
 | S5 | not started | — | — |
@@ -1569,11 +1569,163 @@ mapping: the two new store adapters must also select `cluster.auth` in the
 CI scope resolver. That mapping was corrected, and all 253 validation tests
 passed locally (one platform-specific skip). The runtime source is unchanged.
 
+Run 3887 passed policy, web, Apple and Android checks, but its Rust job
+rejected the isolated Hiqlite spike lockfile before compilation. Commit
+`aaafc1a0f5af031c3adbfe6760ad4edcff7cb082` synchronizes that lockfile;
+`make spike-lock-check` and the normal hook passed locally. Exact-candidate
+[run 3890](http://192.168.4.7:3000/noirr/plurx/actions/runs/3890) has passed
+scope, policy, Rust, web, Apple and Android. Windows compilation reached
+its 30-minute runner deadline without a compiler error. Only that job was
+rerun as attempt 2 on the same commit; the effort gate remains blocking
+until it passes.
+
 **Still owed:** the gate on the corrected S1 candidate. S2 requires disposable two-NAT/Tailscale
 and Docker profiles; S7/S8 require physical Apple TV/Google TV and the
 cluster/resource matrix. No network, shared playback, native client, promotion
 or Developer graduation evidence is claimed by S1. S2–S8 remain work after
 the S1 task is integrated; no deployment is authorized.
+
+
+### 16.3 Implementation progress — S2, 2026-10-02
+
+The unpublished S2 worktree preserves the primary checkout. S1 passed the
+Effort development gate on `aaafc1a0f5` and landed through PR #746 as
+`971265536a`, carrying all seven regression fields. S2 integrated that exact
+effort base in `9db1949b4`; its normal tracked hook passed. The final S2
+candidate still needs its own exact-tree checks and task gate before landing.
+
+**Implemented:** node-local TLS key provisioning and same-key renewal;
+strict SPKI, validity, server-auth and signature checks before capabilities;
+a bounded loopback listener isolated from ordinary Cinema routes; fixed
+Tailscale DNS with bounded binary parsing and same-resolver TCP fallback;
+validated numeric fallback and qualified egress binding; closed HTTP requests
+that never follow redirects or consult proxy environment variables. The
+admin endpoint manifest is read and updated through
+`GET` / `PUT /api/v1/sharing/endpoints`; updates require `expected_revision`.
+A source manifest is accepted only through an authenticated active peer and
+uses both the source revision and the local endpoint generation.
+
+Recipient claim metadata persists the original recipient name and confirmed
+pending expiry inside the purpose-bound credential envelope. Repeated claims
+retain the same digest, restart recovery retains expiry, and delayed replies
+cannot replace a newer lifecycle's credential or downgrade active authority.
+Rotation persists the replacement before the upstream swap and recovers
+through the old credential's status-only route. Private HTTP responses carry
+`Cache-Control: no-store`, including errors and unsupported protocol majors.
+The Developer switch saves either choice while readiness remains advisory.
+
+**Observed so far:** the core sharing filter passed 20 tests, including seven
+TLS cases and two DNS cases. The updated endpoint/re-pair/receipt contract passed
+against both SQLite modes and three real Hiqlite voters (one named scenario,
+9.76 seconds). The focused daemon filter passed eight tests (seven sharing
+cases and one pre-existing playback case), including secret-safe errors,
+private-route isolation, cache headers, invalid library selections, approval,
+rotation and sealed restart metadata. Developer section tests passed 36/36;
+`web-types` preserves the existing baseline. Workspace Clippy with denied
+warnings passed. The native test linker warns about its large unwind table;
+the tests completed successfully. Final exact-tree commands and nonzero
+counts will be recorded again after porting to the gated effort. These
+component tests do not constitute a topology or physical-device receipt.
+
+```sh
+cargo test --locked -p plurx-core --features hiqlite-contract-tests --test store_contract sharing_endpoint_cas_and_re_pair_preserve_private_viewer_identity -- --nocapture
+cargo test --locked -p plurxd --bin plurxd sharing_ -- --nocapture
+cargo test --locked -p plurx-core --features hiqlite-store --lib sharing_ -- --nocapture
+cargo clippy --locked --workspace --all-targets -- -D warnings
+scripts/web-types
+node --test tests/web/settings-sections.test.js
+make spike-lock-check
+python3 -m unittest discover -s tests/operations -p test_docs_index.py
+```
+
+**Pinned transport receipt:** local checkpoint `6c5f7b8d7` passed the explicitly
+invoked `sharing_pinned_transport_recovers_committed_claim_and_rotation_after_restart`
+case: one test, zero ignored, 0.55 seconds. An internal-only Docker CGNAT
+network supplied the numeric fixture address; no ports were published and
+no production Tailscale setting was changed. The production endpoint
+validator, DNS fallback, pin/identity checks and HTTP client handled source
+commits whose responses were deliberately lost. Recreated recipient managers
+recovered the exact claim despite a recipient rename, observed approval,
+and settled a committed rotation through the old status-only credential.
+The SQLite stores remain in the test process; this is not an actual daemon
+process restart or a two-NAT/Tailscale receipt.
+
+The source-only compiler verified Rust 1.97.1. Linux core Clippy, formatting
+and workspace compilation passed on `3dfdf1a15`; the Linux-only fixture
+subsequently type-checked. Its initial ARM test build required `+fp16` for the
+existing GEMM dependency, and a two-job build was killed by the disposable
+VM. The successful run used one job, `RUSTFLAGS='-C target-feature=+fp16'`,
+`CARGO_PROFILE_TEST_DEBUG=0`, `--locked --offline`, and the exact committed
+archive. These flags provide functional component evidence, not resource
+qualification.
+
+```sh
+PLURX_SHARING_FIXTURE_IP=100.127.88.2 cargo test --locked --offline -p plurxd --bin plurxd http::tests::sharing_pinned_transport_recovers_committed_claim_and_rotation_after_restart -- --ignored --exact --nocapture
+```
+
+**Still owed:** complete per-node availability
+and deployment diagnostics;
+shared-machine raw TCP Serve, two NATs, Docker bridge egress/isolation and
+startup ordering; the final task gate. The current listener refuses unqualified
+non-loopback profiles. S3–S8, native playback and promotion remain unfinished.
+
+
+**Capacity and node attribution:** invitation/import limit refusals now expose
+`sharing_capacity` with HTTP 429. Admission remains inside the atomic store
+write; a subsequent diagnostic read never grants an extra slot. The focused
+`sharing_capacity_refusals_preserve_existing_authority_and_reopen_expired_slots`
+regression passed on both SQLite modes and three real Hiqlite voters (one
+scenario, zero ignored, 9.44 seconds). It covers duplicate authority at the
+limit and canceled/expired invitation slot reuse. Admin status identifies
+`node_id`, `observed_at_ms` and `observation_scope: local_node`; it does not
+present a process-local observation as another member's readiness. Host
+Serve and node-key expiry stay unknown without operator evidence.
+
+
+On the integrated effort base, the native daemon `sharing_` filter passed
+8/8 (zero ignored, 1.27 seconds), including the node-attribution assertions.
+The core `sharing_` filter passed 20/20 (zero ignored, 1.19 seconds) after
+allowing the disposable TLS loopback listeners; the sandboxed first run
+refused those listeners and is not the passing receipt. Rust 1.97.1 was
+verified explicitly. Docs index passed 4/4 and Developer section tests 36/36.
+
+The complete sharing store filter passed 7/7 scenarios (zero ignored, 63.80
+seconds), covering both SQLite modes, three-voter authority, populated import,
+endpoint CAS/re-pair and the new capacity refusal contract.
+
+**S2 ownership review, 2026-10-02:** run 3924 on `aeb0d7b91` stopped at the
+module-wide task/timer/process-shape inventory before compilation. The new
+transport sites are now inventoried: daemon listener/claim loops belong to
+shutdown; blocking TLS work is awaited; the Hyper connection driver belongs
+to its abort-on-drop peer; eight timers bound those owners. Eight additional
+status-shaped calls launch no process. The response-loss fixture now owns its
+accepted connections in a JoinSet, and client fixture servers are aborted and
+awaited. The seven ownership-inventory tests passed after this review. The
+changed candidate must pass its focused transport tests and a fresh effort gate.
+
+**Separate-process restart regression:**
+`crates/plurxd/tests/sharing_daemon_restart.rs` starts the shipped daemon twice
+with separate disposable stores, pairs through a raw TCP forwarding fixture
+while retaining the production TLS pin, and restarts the recipient with a
+pending grant. It compares the persisted pairing identity, approves the grant,
+rotates its credential, restarts both processes and authenticates a new
+endpoint manifest revision with the recovered credential. It checks that source identity,
+catalogue epoch, grant/import IDs and SPKI remain stable and that no duplicate
+export appears. Rust 1.97.1 native compilation and denied-warning Clippy passed.
+The explicit Linux CGNAT execution passed on committed `440f5370a` with
+Rust 1.97.1 (one test, zero ignored, 34.17 seconds). The response-loss fixture
+also passed on that same candidate (one test, zero ignored, 0.42 seconds). The revision is published
+after both restarts, so retained state cannot satisfy the authentication
+assertion. An earlier fixture attempted a second rotation during the source's
+ten-minute receipt window and correctly encountered conflict; the Store
+contract expressly refuses that request. Client dispatch readiness is now
+awaited within its existing deadline, and rotation diagnostics expose only
+fixed phases and typed errors. No Tailscale or topology receipt is implied by
+this forwarding fixture.
+
+```sh
+PLURX_SHARING_FIXTURE_IP=100.127.88.2 cargo test --locked -p plurxd --test sharing_daemon_restart sharing_separate_daemons_preserve_pending_pairing_and_rotation_across_restart -- --ignored --exact --nocapture
+```
 
 
 ### 16.5 Parallel S4 implementation — catalogue boundaries and private progress

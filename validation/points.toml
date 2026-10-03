@@ -1153,13 +1153,19 @@ paths = [
   "crates/plurx-core/src/sharing_catalogue.rs",
   "crates/plurx-core/src/store/sharing_catalogue.rs",
   "crates/plurx-core/tests/store_contract/sharing_catalogue.rs",
+  "crates/plurx-core/src/sharing_tls.rs",
+  "crates/plurx-core/src/sharing_dns.rs",
+  "crates/plurxd/src/sharing.rs",
+  "crates/plurxd/src/sharing_client.rs",
+  "crates/plurxd/src/http/sharing.rs",
   "crates/plurx-core/src/store/sharing.rs",
   "crates/plurx-core/src/store/sharing_schema.sql",
   "crates/plurx-core/src/store/hiqlite_sharing.rs",
   "crates/plurx-core/src/store/sqlite/sharing.rs",
   "crates/plurx-core/tests/store_contract/sharing.rs",
   "tests/sharing/**",
+  "crates/plurxd/tests/sharing_daemon_restart.rs",
   "docs/features/SHARED-LIBRARIES-*.md",
 ]
-checks = ["rust-gate", "rust-gate-ci", "unit-core", "cluster-auth", "database-upgrades", "credential-encryption"]
+checks = ["rust-gate", "rust-gate-ci", "unit-core", "cluster-auth", "database-upgrades", "credential-encryption", "web-static"]
 depends_on = ["identity.access", "cluster.auth", "persistence.upgrades"]

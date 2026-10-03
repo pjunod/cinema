@@ -42,6 +42,8 @@ pub mod secrets;
 pub mod segplan;
 pub mod sharing;
 pub mod sharing_catalogue;
+pub mod sharing_dns;
+pub mod sharing_tls;
 pub mod store;
 /// Media fixtures for the test suites, shared so `plurx-core` and `plurxd`
 /// cannot drift onto different GOP structures and disagree about what the

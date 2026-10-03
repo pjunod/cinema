@@ -2,7 +2,7 @@
 use crate::{error::StoreError, secrets::Secret};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use std::net::{Ipv4Addr, Ipv6Addr};
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use uuid::Uuid;
 
 pub const MAX_PEERS: i64 = 32;
@@ -54,28 +54,39 @@ pub struct Endpoint {
     pub port: u16,
     pub spki_sha256: String,
 }
+pub fn is_tailnet_address(ip: IpAddr) -> bool {
+    match ip {
+        IpAddr::V4(ip) => {
+            let bytes = ip.octets();
+            bytes[0] == 100 && (64..=127).contains(&bytes[1])
+        }
+        IpAddr::V6(ip) => ip.segments()[..3] == [0xfd7a, 0x115c, 0xa1e0],
+    }
+}
+pub fn validate_tailnet_name(name: &str) -> Result<(), StoreError> {
+    let labels = name.strip_suffix(".ts.net").ok_or_else(invalid)?;
+    if labels.len() > 240
+        || labels.split('.').count() < 2
+        || labels.split('.').any(|label| {
+            label.is_empty()
+                || label.len() > 63
+                || label.starts_with('-')
+                || label.ends_with('-')
+                || !label
+                    .bytes()
+                    .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
+        })
+    {
+        return Err(invalid());
+    }
+    Ok(())
+}
 impl Endpoint {
     pub fn validate(&self) -> Result<(), StoreError> {
-        let a = self.ipv4.octets();
-        let ipv6_ok = self
-            .ipv6
-            .is_none_or(|ip| ip.segments()[..3] == [0xfd7a, 0x115c, 0xa1e0]);
-        let labels = self.ts_fqdn.strip_suffix(".ts.net").ok_or_else(invalid)?;
-        if a[0] != 100
-            || !(64..=127).contains(&a[1])
-            || !ipv6_ok
+        validate_tailnet_name(&self.ts_fqdn)?;
+        if !is_tailnet_address(self.ipv4.into())
+            || self.ipv6.is_some_and(|ip| !is_tailnet_address(ip.into()))
             || self.port == 0
-            || labels.len() > 240
-            || labels.split('.').count() < 2
-            || labels.split('.').any(|l| {
-                l.is_empty()
-                    || l.starts_with('-')
-                    || l.ends_with('-')
-                    || l.len() > 63
-                    || !l
-                        .bytes()
-                        .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
-            })
             || !is_hash(&self.spki_sha256)
         {
             return Err(invalid());
@@ -190,6 +201,7 @@ pub enum ClaimOutcome {
 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MutationOutcome {
+    Capacity,
     Applied,
     Conflict,
     NotFound,
@@ -312,6 +324,7 @@ pub struct NewImport {
 }
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ImportOutcome {
+    Capacity,
     Created,
     AlreadyImported(Uuid),
 }
@@ -320,6 +333,43 @@ pub enum ImportOutcome {
 pub struct Assignment {
     pub library_id: SourceId,
     pub user_id: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ExportSummary {
+    pub grant: ExportGrant,
+    pub recipient_name: String,
+    pub invitation_id: Uuid,
+    pub claim_id: Uuid,
+    pub library_ids: Vec<SourceId>,
+    pub pairing_code: String,
+}
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ImportSummary {
+    pub id: Uuid,
+    pub source_server_id: Uuid,
+    pub catalogue_epoch: Uuid,
+    pub source_name: String,
+    pub claim_id: Uuid,
+    pub remote_grant_id: Option<Uuid>,
+    pub state: String,
+    pub assignment_generation: i64,
+    pub lifecycle_generation: i64,
+    pub endpoint_generation: i64,
+    pub observed_endpoint_revision: Option<i64>,
+    pub endpoints: Vec<Endpoint>,
+}
+/// Durable ciphertext is deliberately separated from the serializable status DTO.
+#[derive(Debug, Clone)]
+pub struct StoredImport {
+    pub summary: ImportSummary,
+    pub credential: crate::secrets::SealedSecret,
+    pub claim: Option<crate::secrets::SealedSecret>,
+}
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EndpointManifest {
+    pub revision: i64,
+    pub endpoints: Vec<Endpoint>,
 }
 
 /// New capabilities are 256 bits; base64url has one canonical spelling.
@@ -344,7 +394,7 @@ pub fn validate_secret(secret: &Secret) -> Result<(), StoreError> {
     Ok(())
 }
 
-fn canonical_uuid<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Uuid, D::Error> {
+pub fn canonical_uuid<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Uuid, D::Error> {
     let value = String::deserialize(d)?;
     let id = Uuid::parse_str(&value).map_err(serde::de::Error::custom)?;
     if id.to_string() != value {
@@ -354,6 +404,11 @@ fn canonical_uuid<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Uuid, D::Err
 }
 fn bootstrap_secret<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Secret, D::Error> {
     String::deserialize(d).map(Secret::from_cleartext)
+}
+pub fn wire_secret<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Secret, D::Error> {
+    let secret = bootstrap_secret(d)?;
+    validate_secret(&secret).map_err(|_| serde::de::Error::custom("invalid sharing secret"))?;
+    Ok(secret)
 }
 
 /// The bootstrap blob is deliberately not Serializable or printable.
@@ -527,5 +582,21 @@ pub struct ImportRotation {
     pub request_id: Uuid,
     pub credential: crate::secrets::SealedSecret,
     pub lifecycle_generation: i64,
+    pub now_ms: i64,
+}
+#[derive(Debug, Clone)]
+pub struct StoredImportRotation {
+    pub request_id: Uuid,
+    pub credential: crate::secrets::SealedSecret,
+    pub expires_at_ms: i64,
+}
+#[derive(Debug, Clone)]
+pub struct ImportClaimReceipt {
+    pub import_id: Uuid,
+    pub claim_id: Uuid,
+    pub lifecycle_generation: i64,
+    pub grant_id: Uuid,
+    pub active: bool,
+    pub credential: crate::secrets::SealedSecret,
     pub now_ms: i64,
 }

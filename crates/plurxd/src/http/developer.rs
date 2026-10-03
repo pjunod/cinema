@@ -212,6 +212,15 @@ pub(crate) async fn readiness(
     Ok(Json(DeveloperReadiness {
         observed_at_ms: crate::state::clock_ms(),
         items: vec![
+            cinema_sharing(
+                &state,
+                plurx_core::store::stored_switch(
+                    settings
+                        .get(plurx_core::store::keys::SHARING_ENABLED)
+                        .map(String::as_str),
+                    false,
+                ),
+            ),
             durable_cluster_work(&state).await,
             bounded_catalogue_reads(
                 &state,
@@ -2027,6 +2036,16 @@ fn channel_subjects(enabled: bool) -> DeveloperEnableItem {
         DeveloperRequirement{id:"provider",title:"Local catalogue matcher",status,evidence:observed.error.clone().unwrap_or_else(||observed.profile.clone().unwrap_or_else(||"Local metadata rules are available without an inference provider. The worker has not reported a batch yet.".into()))},
         DeveloperRequirement{id:"metadata",title:"Metadata coverage",status:if observed.metadata_total>0{RequirementStatus::Met}else{RequirementStatus::Unobservable},evidence:format!("Last observed scope: {} titles, {} missing item overviews, {} truncated inputs. Sparse metadata can remain uncertain.",observed.metadata_total,observed.missing_overviews,observed.truncated)},
         DeveloperRequirement{id:"batch",title:"Recent batch outcome and queued work",status:if observed.error.is_some(){RequirementStatus::Unmet}else{RequirementStatus::Unobservable},evidence:format!("{}; queued work observed: {}. Only new rule evaluations pause when disabled; saves, cached decisions and published playback remain available.",observed.error.unwrap_or_else(||"No recent error recorded".into()),observed.pending>0)},
+    ]}
+}
+
+fn cinema_sharing(state: &AppState, enabled: bool) -> DeveloperEnableItem {
+    let status = state.sharing.status();
+    DeveloperEnableItem {id:"cinema_sharing",title:"Cinema shared libraries",enabled:Some(enabled),setting:Some("sharing_enabled"),requirements:vec![
+        DeveloperRequirement {id:"listener",title:"Private sharing listener",status:if status.listener=="listening" {RequirementStatus::Met}else{RequirementStatus::Unmet},evidence:format!("This node reports {} at {}. Ordinary local APIs never mount private peer routes.",status.listener,status.listener_address)},
+        DeveloperRequirement {id:"tls",title:"Node certificate and pin",status:if status.certificate.is_some() && status.certificate_renewal=="healthy" {RequirementStatus::Met}else{RequirementStatus::Unknown},evidence:status.certificate.map(|certificate|format!("Certificate expires at {} ms UTC. Renewal status: {}. The identity pin is shown under sharing status.",certificate.expires_at_ms,status.certificate_renewal)).unwrap_or_else(||"No active node certificate was observed. Enabling may create one; a missing key beside an existing certificate requires repair.".into())},
+        DeveloperRequirement {id:"network",title:"Tailscale reachability and access policy",status:RequirementStatus::Unknown,evidence:"This process has no two-home Serve, outbound interface, node-key expiry or access-policy qualification receipt.".into()},
+        DeveloperRequirement {id:"qualification",title:"Shared catalogue and client qualification",status:RequirementStatus::Unknown,evidence:"S3–S8 session, catalogue, playback, private history and native device qualification remain in progress. No supported media is advertised yet.".into()},
     ]}
 }
 
