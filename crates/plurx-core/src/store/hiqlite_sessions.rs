@@ -1167,11 +1167,12 @@ impl LocalSessionSql {
     /// Until shared admission is wired, incarnation-only writers may extend
     /// authority only for a retained Local principal with a current real user.
     fn live_local_user(self, table: &str) -> String {
-        if self.rebuilt {
+        let principal = if self.rebuilt {
             format!(" AND {table}.principal_kind = 'local' AND EXISTS (SELECT 1 FROM users WHERE id = {table}.user_id)")
         } else {
             String::new()
-        }
+        };
+        format!("{principal} AND COALESCE(json_extract(CASE WHEN json_valid({table}.recipe_json) THEN {table}.recipe_json ELSE '{{}}' END,'$.kind'),'') != 'remote_source'")
     }
 
     fn projection(self) -> &'static str {

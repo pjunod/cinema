@@ -102,16 +102,35 @@ async fn sharing_receiver_three_voters_atomic_admission_replay_scope_and_unresol
             file_id: SourceId::parse("0").expect("Source file zero"),
             file_revision: FileRevision::parse(&"a".repeat(64)).expect("revision"),
             source_request_id: Uuid::new_v4(),
+            parent_login_hash: hash.clone(),
             request_json: "{\"caps_v2\":{}}".into(),
         };
+        let intent = ReceiverSessionIntent {
+            scope: scope.clone(),
+            user_id: user.id,
+            login_hash: hash.clone(),
+            recipe: recipe.clone(),
+            source_position_ms: 1234,
+        };
+        let other_hash = format!(
+            "{:x}",
+            sha2::Sha256::digest(format!("other-{refusal}").as_bytes())
+        );
+        store
+            .create_token(&other_hash, user.id, None)
+            .await
+            .expect("other valid login");
+        let mut other = intent.clone();
+        other.login_hash = other_hash;
+        assert!(
+            store
+                .prepare_receiver_session_authority(other)
+                .await
+                .is_err(),
+            "same user cannot adopt parent login"
+        );
         let authority = store
-            .prepare_receiver_session_authority(ReceiverSessionIntent {
-                scope: scope.clone(),
-                user_id: user.id,
-                login_hash: hash,
-                recipe: recipe.clone(),
-                source_position_ms: 1234,
-            })
+            .prepare_receiver_session_authority(intent.clone())
             .await
             .expect("proof")
             .expect("current proof");
@@ -214,6 +233,92 @@ async fn sharing_receiver_three_voters_atomic_admission_replay_scope_and_unresol
                 .await
                 .expect("exact replay")
                 .is_some());
+            let route = store
+                .media_session_route_by_incarnation(&activation.incarnation_id)
+                .await
+                .expect("route")
+                .expect("blocked owner");
+            assert!(store
+                .complete_media_session_handoff(
+                    &activation.incarnation_id,
+                    &activation.owner_node_id,
+                    route.owner_epoch,
+                    plurx_core::domain::MediaSessionProjectionCompletion::PredecessorAcknowledged,
+                    now
+                )
+                .await
+                .expect("ordinary publication refusal")
+                .is_none());
+            let renewal_now = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("clock")
+                .as_millis() as i64;
+            let renewal = plurx_core::sharing_receiver_sessions::ReceiverPendingRenewal {
+                incarnation_id: activation.incarnation_id.clone(),
+                owner_node_id: activation.owner_node_id.clone(),
+                owner_epoch: route.owner_epoch,
+                request_id: "B-request".into(),
+                now_ms: renewal_now,
+                lease_expires_at_ms: renewal_now + 30_000,
+            };
+            let fresh = store
+                .prepare_receiver_session_authority(intent.clone())
+                .await
+                .expect("fresh proof")
+                .expect("original login");
+            assert!(store
+                .renew_pending_receiver_session(&fresh, &renewal)
+                .await
+                .expect("actual replicated atomic pending renewal"));
+            assert_eq!(
+                store
+                    .media_session_route_by_incarnation(&activation.incarnation_id)
+                    .await
+                    .expect("renewed route")
+                    .expect("route")
+                    .lease_expires_at_ms,
+                renewal.lease_expires_at_ms
+            );
+            client
+                .execute(
+                    "UPDATE sharing_assignments SET enabled=0 WHERE import_id=$1",
+                    hiqlite::params!(scope.import_id.to_string()),
+                )
+                .await
+                .expect("renewal race");
+            let before: SchemaText = client
+                .query_consistent_map(
+                    "SELECT CAST(revision AS TEXT) AS value FROM job_leases WHERE resource=$1",
+                    hiqlite::params!(format!("session:{}", activation.incarnation_id)),
+                )
+                .await
+                .expect("lease before refused renewal")
+                .pop()
+                .expect("lease");
+            assert!(!store
+                .renew_pending_receiver_session(&fresh, &renewal)
+                .await
+                .expect("lost assignment refuses renewal"));
+            let after: SchemaText = client
+                .query_consistent_map(
+                    "SELECT CAST(revision AS TEXT) AS value FROM job_leases WHERE resource=$1",
+                    hiqlite::params!(format!("session:{}", activation.incarnation_id)),
+                )
+                .await
+                .expect("lease after refused renewal")
+                .pop()
+                .expect("lease");
+            assert_eq!(
+                before.value, after.value,
+                "guard refusal rolls back all replicated writes"
+            );
+            client
+                .execute(
+                    "UPDATE sharing_assignments SET enabled=1 WHERE import_id=$1",
+                    hiqlite::params!(scope.import_id.to_string()),
+                )
+                .await
+                .expect("restore fixture");
             let later = now + 7 * 24 * 60 * 60 * 1000;
             store
                 .maintain_media_sessions(later)

@@ -68,11 +68,14 @@ fn local_owner_predicate(rebuilt: bool, parameter: usize) -> String {
 // their grant/scope/floor proof exists, a rebuilt-schema authority extension
 // requires the stored Local principal and its current user in the same write.
 fn live_local_session_predicate(rebuilt: bool, table: &str) -> String {
-    if rebuilt {
+    let principal = if rebuilt {
         format!("{table}.principal_kind = 'local' AND EXISTS (SELECT 1 FROM users local_owner WHERE local_owner.id = {table}.user_id)")
     } else {
         "1 = 1".into()
-    }
+    };
+    // Remote Source owners require their dedicated current-login/scope proof.
+    // Preserve legacy Local recipe tolerance without evaluating malformed JSON.
+    format!("({principal}) AND COALESCE(json_extract(CASE WHEN json_valid({table}.recipe_json) THEN {table}.recipe_json ELSE '{{}}' END,'$.kind'),'') != 'remote_source'")
 }
 
 fn route_from_row(row: &Row<'_>) -> rusqlite::Result<MediaSessionRoute> {

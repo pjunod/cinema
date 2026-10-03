@@ -23,6 +23,8 @@ pub struct RemoteSourceRecipe {
     pub file_id: SourceId,
     pub file_revision: FileRevision,
     pub source_request_id: Uuid,
+    /// Original B login; another login for the same user cannot adopt this film.
+    pub parent_login_hash: String,
     /// Canonical bounded actual playback request, including capability/selection.
     pub request_json: String,
 }
@@ -45,6 +47,17 @@ pub struct ReceiverSessionWriteAuthority {
     pub(crate) last_seen: i64,
     pub(crate) login_expires_at_s: Option<i64>,
     pub(crate) observed_at_ms: i64,
+}
+
+/// Exact existing blocked receiver owner. No Source or delivery authority.
+#[derive(Clone)]
+pub struct ReceiverPendingRenewal {
+    pub incarnation_id: String,
+    pub owner_node_id: String,
+    pub owner_epoch: i64,
+    pub request_id: String,
+    pub now_ms: i64,
+    pub lease_expires_at_ms: i64,
 }
 
 impl RemoteSourceRecipe {

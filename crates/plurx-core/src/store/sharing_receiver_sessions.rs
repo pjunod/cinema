@@ -40,9 +40,24 @@ pub trait SharingReceiverSessionStore: Send + Sync {
         &self,
         intent: ReceiverSessionIntent,
     ) -> Result<Option<ReceiverSessionWriteAuthority>, StoreError>;
+    /// Fresh original-login proof; atomically extends the pending request,
+    /// blocked owner and matching lease without resolving a Source outcome.
+    async fn renew_pending_receiver_session(
+        &self,
+        authority: &ReceiverSessionWriteAuthority,
+        renewal: &crate::sharing_receiver_sessions::ReceiverPendingRenewal,
+    ) -> Result<bool, StoreError>;
 }
 #[async_trait]
 impl<T: Backend> SharingReceiverSessionStore for T {
+    async fn renew_pending_receiver_session(
+        &self,
+        authority: &ReceiverSessionWriteAuthority,
+        renewal: &crate::sharing_receiver_sessions::ReceiverPendingRenewal,
+    ) -> Result<bool, StoreError> {
+        renew_pending(self, authority, renewal).await
+    }
+
     async fn prepare_receiver_session_authority(
         &self,
         intent: ReceiverSessionIntent,
@@ -51,6 +66,7 @@ impl<T: Backend> SharingReceiverSessionStore for T {
         let reference = &intent.recipe.reference;
         if intent.user_id <= 0
             || !is_hash(&intent.login_hash)
+            || intent.recipe.parent_login_hash != intent.login_hash
             || intent.recipe.version != 1
             || intent.recipe.source_request_id.is_nil()
             || intent.source_position_ms < 0
@@ -133,6 +149,71 @@ impl<T: Backend> SharingReceiverSessionStore for T {
             login_expires_at_s,
             observed_at_ms: now,
         }))
+    }
+}
+
+/// Pending Source response is an obligation, not permission to replace it.
+/// Renew only an existing blocked B owner and its original request together.
+async fn renew_pending<T: Backend>(
+    store: &T,
+    authority: &ReceiverSessionWriteAuthority,
+    renewal: &crate::sharing_receiver_sessions::ReceiverPendingRenewal,
+) -> Result<bool, StoreError> {
+    let actual_now = now_ms()?;
+    if renewal.incarnation_id != authority.intent.recipe.source_request_id.to_string()
+        || renewal.owner_node_id.is_empty()
+        || renewal.owner_node_id.len() > 128
+        || renewal.owner_epoch <= 0
+        || !(1..=128).contains(&renewal.request_id.len())
+        || renewal.request_id.chars().any(char::is_control)
+        || renewal.now_ms > actual_now
+        || actual_now.saturating_sub(renewal.now_ms) > 5000
+        || actual_now.saturating_sub(authority.observed_at_ms) > 5000
+        || renewal.lease_expires_at_ms <= actual_now
+        || renewal.lease_expires_at_ms > actual_now.saturating_add(30_000)
+        || authority
+            .login_expires_at_s
+            .is_some_and(|deadline| actual_now / 1000 >= deadline)
+    {
+        return Ok(false);
+    }
+    let mut values = values(authority)?;
+    values.extend([
+        renewal.incarnation_id.clone().into(),
+        renewal.owner_node_id.clone().into(),
+        renewal.owner_epoch.into(),
+        renewal.request_id.clone().into(),
+        serde_json::to_string(&authority.intent.recipe)
+            .map_err(|_| invalid())?
+            .into(),
+        authority.intent.recipe.request_fingerprint()?.into(),
+        renewal.now_ms.into(),
+        renewal.lease_expires_at_ms.into(),
+        crate::cluster::coordination::removed_job_owner_key(&renewal.owner_node_id).into(),
+        authority.intent.source_position_ms.into(),
+    ]);
+    // Both supported principal layouts retain Local user_id. Exact pending
+    // request, pointer, recipe, owner epoch and upstream identity are mandatory.
+    let current = "EXISTS(SELECT 1 FROM media_sessions s JOIN sharing_relay_upstream b ON b.incarnation_id=s.incarnation_id JOIN job_leases j ON j.resource='session:'||s.incarnation_id JOIN media_session_requests r ON r.incarnation_id=s.incarnation_id AND r.user_id=s.user_id WHERE s.incarnation_id=$6 AND s.user_id=$2 AND s.owner_node_id=$7 AND s.owner_epoch=$8 AND s.recipe_json=$10 AND s.state='active' AND s.publication_ready_at_ms=9223372036854775807 AND s.media_origin_ms=$15 AND s.lease_expires_at_ms>$12 AND j.owner_node_id=$7 AND j.fence=$8 AND j.expires_at_ms=s.lease_expires_at_ms AND r.request_id=$9 AND r.owner_node_id=$7 AND r.request_fingerprint=$11 AND r.playback_id=s.playback_id AND r.state='starting' AND r.claim_expires_at_ms>$12 AND b.import_id=json_extract($3,'$.import_id') AND b.lifecycle_generation=json_extract($3,'$.lifecycle_generation') AND b.assignment_generation<=json_extract($3,'$.assignment_generation') AND b.endpoint_revision<=json_extract($3,'$.endpoint_generation') AND b.remote_library_id=json_extract($10,'$.reference.library_id') AND b.remote_item_id=json_extract($10,'$.reference.item_id') AND b.remote_file_id=json_extract($10,'$.file_id') AND b.remote_revision=json_extract($10,'$.file_revision') AND b.source_request_id=json_extract($10,'$.source_request_id') AND b.source_position_ms=$15 AND b.source_session_id IS NULL AND b.source_incarnation_id IS NULL AND b.capability_envelope IS NULL AND EXISTS(SELECT 1 FROM media_playback_pointers p WHERE p.user_id=s.user_id AND p.playback_id=s.playback_id AND p.current_incarnation_id=s.incarnation_id))";
+    let valid = format!(
+        "{} AND {current} AND NOT EXISTS(SELECT 1 FROM settings WHERE key=$14) AND $13>$12",
+        authority_predicate()
+    );
+    let guard = |predicate: String| {
+        (format!("INSERT INTO sharing_relay_upstream(incarnation_id,import_id,lifecycle_generation,assignment_generation,remote_library_id,remote_item_id,remote_file_id,remote_revision,source_request_id,endpoint_revision,source_position_ms) SELECT NULL,'',1,1,'0','0','0','','',1,0 WHERE NOT ({predicate})"), values.clone())
+    };
+    let statements = vec![
+        guard(format!("{valid} AND EXISTS(SELECT 1 FROM job_leases WHERE resource='session:'||$6 AND revision<9223372036854775807 AND expires_at_ms<=$13) AND EXISTS(SELECT 1 FROM media_session_requests WHERE incarnation_id=$6 AND claim_expires_at_ms<=$13)")),
+        ("UPDATE media_session_requests SET claim_expires_at_ms=$1,updated_at_ms=$2 WHERE incarnation_id=$3 AND user_id=$4 AND request_id=$5 AND state='starting' AND owner_node_id=$6".into(),vec![renewal.lease_expires_at_ms.into(),renewal.now_ms.into(),renewal.incarnation_id.clone().into(),authority.intent.user_id.into(),renewal.request_id.clone().into(),renewal.owner_node_id.clone().into()]),
+        ("UPDATE job_leases SET expires_at_ms=$1,revision=revision+1,updated_at_ms=$2 WHERE resource='session:'||$3 AND owner_node_id=$4 AND fence=$5".into(),vec![renewal.lease_expires_at_ms.into(),renewal.now_ms.into(),renewal.incarnation_id.clone().into(),renewal.owner_node_id.clone().into(),renewal.owner_epoch.into()]),
+        ("UPDATE media_sessions SET lease_expires_at_ms=$1,updated_at_ms=$2 WHERE incarnation_id=$3 AND owner_node_id=$4 AND owner_epoch=$5 AND state='active'".into(),vec![renewal.lease_expires_at_ms.into(),renewal.now_ms.into(),renewal.incarnation_id.clone().into(),renewal.owner_node_id.clone().into(),renewal.owner_epoch.into()]),
+        guard(format!("{valid} AND EXISTS(SELECT 1 FROM media_sessions WHERE incarnation_id=$6 AND lease_expires_at_ms=$13) AND EXISTS(SELECT 1 FROM media_session_requests WHERE incarnation_id=$6 AND claim_expires_at_ms=$13)")),
+    ];
+    match store.sharing_txn(statements).await {
+        Ok(counts) if counts == [0, 1, 1, 1, 0] => Ok(true),
+        Ok(_) => Err(invalid()),
+        Err(error) if receiver_write_refused(&error) => Ok(false),
+        Err(error) => Err(error),
     }
 }
 
@@ -321,6 +402,7 @@ mod tests {
                         file_id: SourceId::parse("0").expect("zero file"),
                         file_revision: FileRevision::parse(&"a".repeat(64)).expect("revision"),
                         source_request_id: Uuid::new_v4(),
+                        parent_login_hash: hash.clone(),
                         request_json: "{\"caps_v2\":{}}".into(),
                     };
                     let intent = ReceiverSessionIntent {
@@ -330,8 +412,22 @@ mod tests {
                         recipe: recipe.clone(),
                         source_position_ms: 1234,
                     };
+                    let other_hash = "d".repeat(64);
+                    store
+                        .create_token(&other_hash, user.id, None)
+                        .await
+                        .expect("second valid login");
+                    let mut other_login = intent.clone();
+                    other_login.login_hash = other_hash;
+                    assert!(
+                        store
+                            .prepare_receiver_session_authority(other_login)
+                            .await
+                            .is_err(),
+                        "same user cannot adopt a different parent login"
+                    );
                     let authority = store
-                        .prepare_receiver_session_authority(intent)
+                        .prepare_receiver_session_authority(intent.clone())
                         .await
                         .expect("snapshot")
                         .expect("authorized");
@@ -446,6 +542,91 @@ mod tests {
                             .await
                             .expect("exact replay")
                             .is_some());
+                        let route = store
+                            .media_session_route_by_incarnation(&activation.incarnation_id)
+                            .await
+                            .expect("route")
+                            .expect("blocked owner");
+                        assert!(store.complete_media_session_handoff(
+                            &activation.incarnation_id, &activation.owner_node_id, route.owner_epoch,
+                            crate::domain::MediaSessionProjectionCompletion::PredecessorAcknowledged, now_ms().expect("clock")
+                        ).await.expect("ordinary handoff refused").is_none());
+                        assert!(store
+                            .arm_media_session_handoff(
+                                &activation.incarnation_id,
+                                &activation.owner_node_id,
+                                route.owner_epoch,
+                                now + crate::domain::MEDIA_SESSION_HANDOFF_SAFETY_WINDOW_MS + 5000,
+                                now_ms().expect("clock")
+                            )
+                            .await
+                            .expect("ordinary arm refused")
+                            .is_none());
+                        let renewal_now = now_ms().expect("current renewal clock");
+                        let renewal = crate::sharing_receiver_sessions::ReceiverPendingRenewal {
+                            incarnation_id: activation.incarnation_id.clone(),
+                            owner_node_id: activation.owner_node_id.clone(),
+                            owner_epoch: route.owner_epoch,
+                            request_id: "B-request".into(),
+                            now_ms: renewal_now,
+                            lease_expires_at_ms: renewal_now + 30_000,
+                        };
+                        let fresh = store
+                            .prepare_receiver_session_authority(intent.clone())
+                            .await
+                            .expect("fresh login")
+                            .expect("original login");
+                        assert!(store
+                            .renew_pending_receiver_session(&fresh, &renewal)
+                            .await
+                            .expect("pending renewal"));
+                        let renewed = store
+                            .media_session_route_by_incarnation(&activation.incarnation_id)
+                            .await
+                            .expect("renewed route")
+                            .expect("route retained");
+                        assert_eq!(renewed.lease_expires_at_ms, renewal.lease_expires_at_ms);
+                        assert_eq!(
+                            renewed.publication_ready_at_ms,
+                            MEDIA_SESSION_PUBLICATION_BLOCKED
+                        );
+                        for stale in 0..4 {
+                            let mut rejected = renewal.clone();
+                            match stale {
+                                0 => rejected.owner_epoch += 1,
+                                1 => rejected.incarnation_id = Uuid::new_v4().to_string(),
+                                2 => rejected.request_id = "other-request".into(),
+                                _ => rejected.owner_node_id = "other-node".into(),
+                            }
+                            assert!(!store
+                                .renew_pending_receiver_session(&fresh, &rejected)
+                                .await
+                                .expect("stale renewal refusal"));
+                            assert_eq!(
+                                store
+                                    .media_session_route_by_incarnation(&activation.incarnation_id)
+                                    .await
+                                    .expect("unchanged")
+                                    .expect("retained")
+                                    .lease_expires_at_ms,
+                                renewed.lease_expires_at_ms
+                            );
+                        }
+                        for (change, restore) in [
+                            ("UPDATE sharing_assignments SET enabled=0", "UPDATE sharing_assignments SET enabled=1"),
+                            ("UPDATE settings SET value='false' WHERE key='sharing_enabled'", "UPDATE settings SET value='true' WHERE key='sharing_enabled'"),
+                            ("INSERT INTO settings(key,value) VALUES('auth.token_idle_days','1')", "DELETE FROM settings WHERE key='auth.token_idle_days'"),
+                            ("UPDATE sharing_relay_upstream SET source_session_id='unverified-source-session'", "UPDATE sharing_relay_upstream SET source_session_id=NULL"),
+                            ("UPDATE job_leases SET fence=fence+1", "UPDATE job_leases SET fence=fence-1"),
+                            ("UPDATE media_session_requests SET state='failed'", "UPDATE media_session_requests SET state='starting'"),
+                        ] {
+                            store.sharing_txn(vec![(change.into(),vec![])]).await.expect("renewal race");
+                            let census = "SELECT json_array((SELECT group_concat(claim_expires_at_ms) FROM media_session_requests),(SELECT group_concat(expires_at_ms||':'||revision) FROM job_leases),(SELECT group_concat(lease_expires_at_ms||':'||publication_ready_at_ms) FROM media_sessions)) AS payload";
+                            let before = store.sharing_read(census,vec![]).await.expect("before refused write");
+                            assert!(!store.renew_pending_receiver_session(&fresh,&renewal).await.expect("current proof race refuses"),"{change}");
+                            assert_eq!(store.sharing_read(census,vec![]).await.expect("after refused write"),before,"atomic refusal {change}");
+                            store.sharing_txn(vec![(restore.into(),vec![])]).await.expect("restore fixture");
+                        }
                         let later = now + 7 * 24 * 60 * 60 * 1000;
                         store
                             .maintain_media_sessions(later)

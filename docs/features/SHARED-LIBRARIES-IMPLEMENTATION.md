@@ -3584,3 +3584,47 @@ projection tests passed with zero ignored on pinned Rust 1.97.1. The disposable
 CGNAT HTTP/1 and HTTP/2 fixture now reads the actual authenticated item alias
 before requesting a decision; its changed-tree Linux execution is still pending.
 This does not enable playback or grant delivery authority.
+
+### S5 original-login binding and pending receiver renewal
+
+The persisted remote recipe now records its original B login hash. A current
+login for the same user cannot adopt another login's film; the Store authority
+factory compares the actual login hash against that durable recipe binding.
+A dedicated pending-renewal writer extends the exact blocked session, its
+original starting request and matching job lease in one guarded transaction.
+It requires fresh original-login/policy/import/library authority, the existing
+owner epoch and pointer, the complete pending Source tuple, an unresolved
+Source binding, and live existing request/lease deadlines. It neither replaces
+the Source request nor publishes the session. Refused authority rolls every
+write back; expired or differently owned obligations are never resurrected.
+Ordinary incarnation-only Local handoff, renewal and takeover paths refuse a
+remote recipe and require the dedicated receiver proof instead.
+
+The expanded SQLite regression passed across both storage modes and principal
+layouts (14.51s, one test, zero ignored), including a second valid login for the
+same user, exact owner/request refusal and six current-authority/upstream/lease
+races with unchanged durable renewal metadata. The actual three-voter contract
+passed (10.02s, one test, zero ignored), including guarded pending renewal and
+atomic revoked-assignment refusal. The focused existing Local worker and
+rebuilt activation regressions passed (0.85s and 0.98s). Pinned Rust 1.97.1
+feature-enabled affected all-target Clippy passed with denied warnings (1m39s).
+This supplies a pending ownership writer; the B actor, Source attachment,
+publication, delivery and ordered progress remain open.
+
+### S3 Source decision marker evidence before physical admission
+
+Shared decisions now use the common engine with an explicit stored-evidence
+marker policy. Existing persisted annotations win; otherwise only bounded
+scan-time chapters supply chapter evidence. Missing stored chapters never
+launch a live FFprobe, backfill a probe document, or create annotations during
+Source decision/preparation. The ordinary Local derivation path is retained.
+This closes the unadmitted chapter-probe path that the actual Source preparation
+fixture exposed when a live fallback changed its captured file revision.
+
+The focused actual-engine regression passed (0.22s, one test, zero ignored).
+It proves that a Source decision does not enter the paused live-probe seam,
+that stored probe/annotation data stays unchanged, that existing chapters and
+persisted annotation evidence are preserved, and that Local fallback still
+enters its original seam. The existing complete Source preparation/principal
+engine regression passed on the same source. This marker policy grants no
+producer or playback authority.
