@@ -8431,7 +8431,7 @@ mod tests {
             .clone();
 
         let current = replicated_schema_version(&client).await;
-        assert_eq!(current, crate::store::AUTH_SCHEMA_VERSION);
+        assert_eq!(current, crate::store::AUTH_SCHEMA_BASELINE_VERSION);
         let behind = current - 1;
         client
             .execute(
@@ -8474,7 +8474,7 @@ mod tests {
         client
             .execute(
                 "UPDATE cluster_meta SET schema_version = $1 WHERE singleton = 1",
-                hiqlite::params!(crate::store::AUTH_SCHEMA_VERSION),
+                hiqlite::params!(crate::store::AUTH_SCHEMA_BASELINE_VERSION),
             )
             .await
             .expect("restore the replicated schema marker");
@@ -8490,6 +8490,36 @@ mod tests {
 
         // The voter arm is the one that may migrate, and it opens the same
         // cluster through `open_or_migrate`.
+        // Reconstruct the preceding schema, rather than rewinding only its
+        // marker: migration 70 creates these tables and must actually execute.
+        for table in [
+            "sharing_delivery_grants",
+            "sharing_relay_upstream",
+            "sharing_endpoint_manifest",
+            "sharing_catalogue_revisions",
+            "sharing_import_rotations",
+            "sharing_rotations",
+            "sharing_watch",
+            "sharing_assignments",
+            "sharing_viewers",
+            "sharing_imports",
+            "sharing_export_libraries",
+            "sharing_exports",
+            "sharing_invitations",
+            "sharing_identity",
+        ] {
+            client
+                .execute(format!("DROP TABLE {table}"), hiqlite::params!())
+                .await
+                .expect("remove the test fixture's migration-70 tables");
+        }
+        client
+            .execute(
+                "UPDATE cluster_meta SET schema_version = $1 WHERE singleton = 1",
+                hiqlite::params!(behind),
+            )
+            .await
+            .expect("restore the behind marker before the voter migration");
         drop(
             open_store_for_role(
                 ClusterRole::Voter,
@@ -8501,7 +8531,7 @@ mod tests {
         );
         assert_eq!(
             replicated_schema_version(&client).await,
-            crate::store::AUTH_SCHEMA_VERSION
+            crate::store::AUTH_SCHEMA_BASELINE_VERSION
         );
 
         selected.shutdown().await.expect("stop the voter");

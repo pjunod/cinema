@@ -28,6 +28,158 @@ pub(crate) struct AdmittedSourceCopyRendition {
     permit: crate::vodencode::EncodePermit,
 }
 
+/// Actual admitted rendition facts before the actor's blocked activation.
+/// This observation is neither producer readiness nor publication authority.
+pub(crate) struct SourcePendingStartInfo {
+    info: crate::transcode::StartInfo,
+}
+impl SourcePendingStartInfo {
+    pub(crate) fn start_info(&self) -> &crate::transcode::StartInfo {
+        &self.info
+    }
+}
+
+pub(crate) struct ReservedSourceCopyRendition {
+    pending: Option<PreparedSourceVodRendition>,
+    permit: Option<crate::vodencode::EncodePermit>,
+    owner: Arc<source_lifetime::SourceRenditionOwner>,
+    rendition: Arc<Rendition>,
+    assignment: plurx_core::sharing_source_sessions::SourceDispatchAssignment,
+    session_id: Option<String>,
+}
+
+pub(crate) struct SourceCopyReadiness {
+    assignment: plurx_core::sharing_source_sessions::SourceDispatchAssignment,
+    _registration: crate::prodrun::ProducerRegistration,
+    _init_identity: String,
+    _source: crate::fragment_index_cluster::SourceFence,
+}
+#[allow(dead_code)] // Consumed by the private owned Source actor, pending HTTP integration.
+impl SourceCopyReadiness {
+    pub(crate) fn matches(
+        &self,
+        assignment: &plurx_core::sharing_source_sessions::SourceDispatchAssignment,
+    ) -> bool {
+        self.assignment.same_identity(assignment) && self._source.unchanged()
+    }
+}
+
+#[allow(dead_code)] // Consumed by the private owned Source actor, pending HTTP integration.
+impl ReservedSourceCopyRendition {
+    pub(crate) fn start_info(&self, session_id: &str) -> Result<SourcePendingStartInfo, String> {
+        let uuid = uuid::Uuid::parse_str(session_id)
+            .map_err(|_| "invalid actual Source session UUID".to_owned())?;
+        if uuid.get_version() != Some(uuid::Version::Random) || uuid.to_string() != session_id {
+            return Err("invalid actual Source session UUID".into());
+        }
+        let pending = self
+            .pending
+            .as_ref()
+            .ok_or_else(|| "Source attachment has already committed".to_owned())?;
+        Ok(SourcePendingStartInfo {
+            info: crate::transcode::StartInfo {
+                session_id: session_id.into(),
+                playlist_url: format!("/api/v1/hls/{session_id}/index.m3u8"),
+                duration_ms: Some(plan_duration_ms(&self.rendition.plan)),
+                start_seconds: 0.0,
+                media_origin_seconds: 0.0,
+                target_height: self.rendition.recipe.file.height.unwrap_or(0),
+                kind: pending.request.kind,
+                encoder: "vod",
+                grade: plurx_core::transcode::OutputGrade::Sdr,
+                vod: true,
+                control_lease_timeout_ms: crate::playback_control::VOD_LEASE_TIMEOUT_MS,
+            },
+        })
+    }
+
+    pub(crate) async fn wait_ready(
+        &self,
+        deadline: Instant,
+    ) -> Result<SourceCopyReadiness, String> {
+        loop {
+            if Instant::now() >= deadline {
+                return Err("Source materialization timed out".into());
+            }
+            if let Some(cause) = self.rendition.failure_cause() {
+                return Err(cause);
+            }
+            if self
+                .rendition
+                .source
+                .as_ref()
+                .is_none_or(|source| !source.unchanged())
+            {
+                return Err("Source physical identity changed before readiness".into());
+            }
+            if let Some(registration) = self.owner.registered_readiness() {
+                let held = self
+                    .rendition
+                    .source
+                    .as_ref()
+                    .ok_or_else(|| "Source physical fence is absent".to_owned())?;
+                let source = crate::fragment_index_cluster::open_source_playback_fence(
+                    &self.rendition.recipe.file,
+                    Some(held.object_version()),
+                )
+                .await?;
+                let identity = self
+                    .rendition
+                    .identity
+                    .lock()
+                    .await
+                    .identity
+                    .as_ref()
+                    .map(|identity| identity.served_init.clone());
+                if let Some(identity) = identity {
+                    let path = self.rendition.dir.path().join(INIT_NAME);
+                    if let Ok(metadata) = tokio::fs::metadata(&path).await {
+                        if metadata.is_file()
+                            && metadata.len() > 0
+                            && metadata.len() <= HEAD_REGENERATION_MAX_BYTES as u64
+                        {
+                            if let Ok(bytes) = tokio::fs::read(&path).await {
+                                if hex::encode(Sha256::digest(&bytes)) == identity {
+                                    return Ok(SourceCopyReadiness {
+                                        assignment: self.assignment.clone(),
+                                        _registration: registration,
+                                        _init_identity: identity,
+                                        _source: source,
+                                    });
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            self.rendition.kick();
+            tokio::time::sleep_until(tokio::time::Instant::from_std(
+                deadline.min(Instant::now() + Duration::from_millis(100)),
+            ))
+            .await;
+        }
+    }
+
+    pub(crate) async fn retire(
+        &mut self,
+        serve: &VodServe,
+    ) -> Result<source_lifetime::SourceProducerAssociationsSettled, String> {
+        if let Some(session_id) = self.session_id.as_deref() {
+            serve.end(session_id, Terminal::Replaced).await;
+        }
+        self.owner.begin_detach();
+        self.owner.wait_dispatches().await;
+        if let Some(registration) = self.rendition.source_owners.terminal_registration() {
+            self.rendition
+                .slot
+                .request_registered_retirement(&registration)
+                .await
+                .map_err(|_| "Source producer retirement is unresolved".to_owned())?;
+        }
+        Ok(self.owner.detach_and_wait().await)
+    }
+}
+
 #[cfg(test)]
 impl AdmittedSourceCopyRendition {
     pub(crate) async fn assert_no_demand_or_child(&self) {
@@ -42,6 +194,77 @@ impl AdmittedSourceCopyRendition {
 }
 
 impl VodServe {
+    #[allow(dead_code)] // The private owned Source actor is the sole consumer.
+    pub(crate) fn reserve_source_copy(
+        &self,
+        admitted: AdmittedSourceCopyRendition,
+    ) -> Result<ReservedSourceCopyRendition, String> {
+        let rendition = Arc::clone(&admitted.pending.prepared.attachment.rendition);
+        let assignment = admitted.pending.assignment.clone();
+        let owner = rendition
+            .source_owners
+            .attach(&assignment)
+            .map_err(str::to_owned)?;
+        Ok(ReservedSourceCopyRendition {
+            pending: Some(admitted.pending),
+            permit: Some(admitted.permit),
+            owner,
+            rendition,
+            assignment,
+            session_id: None,
+        })
+    }
+
+    #[allow(dead_code)] // The private owned Source actor is the sole consumer.
+    pub(crate) async fn commit_source_copy(
+        &self,
+        reserved: &mut ReservedSourceCopyRendition,
+        session_id: &str,
+        producer_gate: &Arc<crate::transcode::source_actor::SourceProducerAuthority>,
+        admissions: &crate::admission::Admissions,
+    ) -> Result<VodStart, String> {
+        let permit = reserved
+            .permit
+            .take()
+            .ok_or_else(|| "Source physical reservation has already transferred".to_owned())?;
+        if let Err(permit) = reserved.rendition.source_owners.arm_initial_permit(
+            &reserved.owner,
+            permit,
+            admissions,
+            producer_gate,
+        ) {
+            reserved.permit = Some(permit);
+            return Err("Source first-start reservation is busy".into());
+        }
+        let pending = reserved
+            .pending
+            .take()
+            .ok_or_else(|| "Source attachment has already committed".to_owned())?;
+        reserved.session_id = Some(session_id.into());
+        let owner_key = pending.assignment.binding().principal().owner_key();
+        Box::pin(self.commit_vod_rendition(
+            &pending.request,
+            &pending.file,
+            &pending.settings,
+            VodAttribution {
+                user_name: "Shared viewer",
+                item_title: "Shared playback",
+                supersession_user: &owner_key,
+            },
+            session_id.into(),
+            VodCreateFences {
+                release_fence: None,
+                serving_admission: None,
+                viewer: Some(crate::state::PlaybackViewerDemand {
+                    principal: pending.assignment.binding().principal().clone(),
+                    playback_id: pending.request.playback_id.clone(),
+                }),
+            },
+            pending.prepared,
+        ))
+        .await
+    }
+
     /// No codec/FFprobe/burn work is hidden in this copy-only preparation.
     /// The real reservation is held before first durable blocked activation.
     #[allow(dead_code)] // Source actor integration is deliberately incremental.
@@ -866,6 +1089,34 @@ impl VodServe {
             start_entry,
             marker_destinations,
         })
+    }
+}
+
+#[cfg(test)]
+impl VodServe {
+    /// Move only the fixture's actual last-media clock past the existing idle
+    /// allowance, then run the unmodified production maintenance/reap path.
+    pub(crate) async fn expire_source_viewer_for_actor_test(
+        &self,
+        session_id: &str,
+        assignment: &plurx_core::sharing_source_sessions::SourceDispatchAssignment,
+    ) {
+        {
+            let sessions = self.shared.sessions.lock().await;
+            let session = sessions.get(session_id).expect("actual Source viewer");
+            assert_eq!(
+                session.supersession_user,
+                assignment.binding().principal().owner_key()
+            );
+            assert!(session
+                .live_rendition()
+                .expect("live Source rendition")
+                .key
+                .starts_with("source-"));
+            *session.last_touch.lock().expect("actual media clock") =
+                Instant::now() - SESSION_IDLE_TTL - Duration::from_secs(1);
+        }
+        self.maintain().await;
     }
 }
 

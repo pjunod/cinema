@@ -1431,3 +1431,88 @@ inputs, refusal preservation and blocked-reply cancellation. It is not
 physical Source activation evidence, and that archive is not evidence for
 this later integrated tree. The current release candidate still needs its
 exact source-only qualification after live actor and relay integration.
+
+### Owned Source copy actor and response-body retirement
+
+The private `SourceViewerActor` owns the first plain, unburned copy-VOD lane.
+Its bounded registry retains at most eight complete dispatch assignments; exact
+retries join the same owner. Registry insertion precedes every await. The
+separate detached task owns admission, first blocked activation, registered
+producer attachment, readiness, current-route renewal and terminal settlement.
+Dropping an HTTP waiter does not stop that task or release Source capacity.
+Native, subtitle, encoded, predecessor, Direct and progressive lanes are still
+unsupported. Unsupported prepared requests refuse before physical admission
+or activation inside the owned task, preserving its no-spawn cleanup owner.
+
+Physical admission uses the existing CPU governor's actual four-cost copy
+permit. The caller's activation observation is only an initial identity hint:
+after admission the task obtains a fresh actual member/master/file/grant proof
+and performs the guarded write. The complete response from the actual pending
+`StartInfo` is retained while publication is blocked. Attachment uses the real
+VOD driver and registered producer/writer barrier. Readiness requires that
+actual registration and immutable init identity before fresh coupled publication.
+The original observation clock is checked after the write, before queueing and
+before publishing the response. An absolute start deadline never certifies
+physical settlement.
+
+Plain index/init/fMP4 requests return an opaque `SourceOpenedResource`. Its
+non-cloneable guard counts the actual response Body independently of the
+producer. The transport must retain that guard through all reads and select
+its cancellation signal. Retirement blocks new bodies, detaches the real
+reader, requests exact registered retirement and waits for successful child
+reap and joined writers. SQL capacity settlement follows all response-body
+guards. Sharing-off or grant revocation still permits terminal cleanup.
+A Store failure retains the actual reservation or sealed physical receipt and
+retries SQL; it does not spawn a replacement or infer physical settlement.
+
+The current-route renewal loop first checks that its actual VOD session still
+exists. Only actual authorized media publication touches the VOD media clock;
+Raft renewal does not represent viewer demand. The existing five-minute VOD
+idle clock and production maintenance path can therefore remove a disconnected
+viewer. The owner notices disappearance within its ten-second supervision
+interval and performs the same terminal producer/body settlement.
+
+An existing durable route without this process's registry owner is explicitly
+unresolved. Startup does not reconstruct a producer or release a held binding
+from an absent registry, expired lease, cache files or terminal acknowledgement.
+Abrupt-process recovery, cold cache, full private control/status, other engine
+lanes and complete peer/B HTTP-body qualification remain open.
+
+The initial admission and final response checks are distinct. A parked segment
+may legitimately outlive the first five-second member observation; after the
+wait the actor obtains a new actual current-owned-route proof. Readiness,
+resource opening, metadata response and renewal also reopen the current Source
+path without following links, match its exact held producer object version,
+and always check actual stored size/mtime. No index repair or Local fallback
+is involved. The Body guard retains that physical file fence through writing.
+A changed or linked Source path refuses even while stored authorization still
+matches the old revision.
+
+`open_start_response` counts the actual complete Start response Body, verifies
+its stored full response and current published owner, and returns the same
+opaque cancellation guard as media. Metadata replay does not touch the VOD
+media clock. `settlement_status` is a copy-only observation for HTTP registry
+pruning: only actual successful producer/body/SQL settlement yields `Some(Ok)`.
+It grants no cleanup authority, and unknown or failed owners remain retained.
+
+```sh
+cargo test -p plurxd --bin plurxd source_copy_ -- --nocapture
+```
+
+On the qualified `990548d6e` base plus this actor candidate, the six focused
+copy/admission/actor regressions passed, zero ignored, in 27.64 seconds with
+pinned Rust 1.97.1 on normal test/runtime stacks. They exercise actual one-voter
+selection, complete response retention, real FFmpeg registration/readiness,
+waiter cancellation, exact lookup, actual Start/playlist/open-file Body
+barriers, Source-path replacement refusal while DB authority remains ready,
+sharing-off cleanup, insufficient real CPU admission with owned g1 no-spawn
+settlement, and actual idle-clock maintenance followed by automatic retirement.
+The complete attachment future is 7,872 bytes; common preparation remains
+21,528 bytes and preadmission 512 bytes. Capability and candidate-schema
+seeding remain explicit test setup; this receipt does not replace production
+schema-installation, private HTTP/B transport or abrupt-restart qualification.
+
+The affected daemon all-target denied-warning Clippy passed in 61 seconds.
+The existing Local cached-rendition proof regression passed, zero ignored,
+in 0.92 seconds (`hevc_vod_checks_proof_before_reusing_a_cached_rendition`).
+Documentation index checks and validation catalog lint also passed.

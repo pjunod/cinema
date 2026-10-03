@@ -3819,3 +3819,105 @@ cargo test --locked -p plurx-core --features hiqlite-contract-tests --test store
 cargo check --locked -p plurx-core -p plurxd --all-targets --features plurx-core/hiqlite-contract-tests
 cargo clippy --locked -p plurx-core -p plurxd --all-targets --features plurx-core/hiqlite-contract-tests -- -D warnings
 ```
+
+### B Source Start dispatch — retained owner before sending
+
+`SharingManager::start_file_source` accepts the complete retained receiver
+intent and its existing blocked owner. Before peer lookup it compares the
+canonical private wrapper against the original complete playback request,
+allowing only replacement of `request_id` with the retained Source request
+UUID. The original B login, import, Source identity, library assignment and
+lifecycle must match the retained intent. The ordinary client request remains
+unchanged in the durable remote recipe.
+
+After the pinned peer handshake, the caller repeats current import authority,
+prepares fresh original-login authority, and atomically renews the existing
+blocked owner, pending claim and matching lease before the first Source send.
+The pseudonymous viewer comes from B's current assignment Store. The exchange
+uses the qualified bounded pinned Source Start transport without a retry.
+Once a complete Source result arrives, this method returns it to the owning
+task even if B's scope changed during the exchange: guarded B publication must
+repeat authority, while the known Source result remains a cleanup obligation.
+An error or dropped waiter proves no Source rollback.
+
+The method is a candidate owner seam; no viewer Start route, relay, control,
+delivery grant or restart cleanup is registered by this change. The focused
+recipe test checks retained nested playback selections, Source ID zero and an
+item ID above JavaScript's exact integer range, exact private request identity,
+unchanged original client request and refusal of a different parent login.
+It does not prove a real Source/B playback exchange.
+
+```sh
+cargo test -p plurxd --bin plurxd sharing_source_dispatch_retains_complete_receiver_recipe_and_private_request
+```
+
+### Candidate B owned Start task — no HTTP registration yet
+
+`shared_receiver_playback.rs` adds a bounded registry on the actual
+`SharingManager`. It captures the original B login and complete request before
+spawning a detached owner. An exact client retry joins the retained owner and
+keeps its original Source request UUID; a changed recipe, login, player or
+client key refuses. A failed or timed-out attempt remains an obligation and
+continues occupying its registry entry.
+
+The owner uses the actual Local principal to claim and assign B's request,
+then commits the guarded blocked remote session before sending Source Start.
+While waiting, it renews the pending request, owner and lease through fresh
+original-login authority. Immediately after receiving Source's complete
+result, it retains the actual authenticated Source credential, pseudonymous
+viewer, Source incarnation and response before any B Store await. The upstream
+capsule is sealed under the selected B master with the Upstream purpose and
+B-server/import AAD; its exact ciphertext is retained through attachment,
+publication and renewal. The public response projects session, playlist and
+control identity to the actual B owner.
+
+This finite owner accepts only the implemented full-film VOD lane with
+Source origin zero. Resume remains in the original engine request. It does
+not reinterpret an encoded origin or force an unsupported Source lane into
+copy. After guarded attachment and publication it renews the attached B
+metadata independently of Local worker renewal. A received Source result or
+an uncertain send is never released because a waiter times out or B loses
+its original login.
+
+The candidate is deliberately unregistered pending real Source HTTP/B Start
+qualification, fresh delivery/body grants, Source status/end settlement,
+relay, control and progress. Its registry tests qualify exact retry identity,
+complete request conflict, captured login, retained Source request identity,
+capacity and waiter-timeout retention; they are not physical Source/B proof.
+
+```sh
+cargo test -p plurxd --bin plurxd sharing_receiver_registry
+cargo test -p plurxd --bin plurxd source_copy_
+```
+
+### Combined startup stack regression
+
+The combined real Source actor fixture initially overflowed the default test
+thread stack during one-voter schema startup, before Source admission. A batch
+debugger identified `HiqliteAuthStore::migrate_schema` reserving 1,635,152 bytes
+in its polling frame. Raising the test stack would have hidden this startup
+failure. Migration transactions now collect their statements into one fixed
+vector representation and box the transaction future through a synchronous
+helper. SQL, parameter order, validation, deadlines and commit-unknown handling
+remain in the existing transaction and migration settlement paths.
+
+The learner/voter regression now uses the ordinary baseline version 70, while
+the Source-only installer retains version 71. Before the voter arm, the fixture
+removes migration-70 tables and restores version 69, so it exercises a real
+migration rather than only reopening an already-current schema. This regression
+passed on pinned Rust 1.97.1 with the default stack: one test, zero ignored,
+9.05 seconds. The actual Source response Body guard also checks its retained
+physical file fence when observing cancellation; a path replacement cannot
+remain authorized merely because the database still reports the old revision.
+
+```sh
+cargo test -p plurx-core --features hiqlite-store,hiqlite-contract-tests --lib a_learner_refuses_a_behind_schema_that_a_voter_migrates
+```
+
+On this combined tree, the six Source copy/admission/actor tests passed with
+zero ignored in 26.33 seconds, including physical file drift cancellation
+while a returned Body still holds settlement capacity. The two retained B
+registry tests and complete Source-dispatch recipe test also passed with zero
+ignored. Documentation index checks passed all four tests. These are focused
+integration receipts; the unregistered B candidate still requires the live
+HTTP, relay, delivery and cleanup qualification listed above.
