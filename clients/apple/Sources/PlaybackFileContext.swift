@@ -107,6 +107,16 @@ struct PlaybackFileContext: Hashable {
                     generation: auth.generation, origin: auth.origin)
     }
 
+    func localID(expected: Int? = nil) throws -> Int {
+        guard reference == nil, let id = Int(sourceFileId), String(id) == sourceFileId,
+              expected == nil || expected == id else { throw APIError.badURL }
+        return id
+    }
+    static func localCall(_ id: Int, context: Self?) throws -> Self {
+        let value = try context ?? local(id)
+        _ = try value.localID(expected: id)
+        return value
+    }
     var sourceKey: String {
         guard let reference else { return sourceFileId }
         return [String(accountGeneration!), reference.importId, reference.serverId, reference.catalogueEpoch,
@@ -127,16 +137,73 @@ struct PlaybackFileContext: Hashable {
                     session: id, generation: accountGeneration, origin: accountOrigin)
     }
     /// Closed resource grammar. Ordinary HLS/control UUID paths never pass here.
-    func path(_ resource: String) throws -> String {
+    func path(_ resource: String, query: [URLQueryItem] = []) throws -> String {
         try requireCurrent()
         guard Self.matches(resource, "^(decision|hls/sessions|direct|stream\\.mp4|subs/[0-9]{1,6}(\\.vtt|/overlay\\.json|/overlay/[0-9a-f]{64}/objects/[0-9a-f]{64}\\.png)?|chapters/[0-9]{1,6}/thumb)$")
         else { throw APIError.badURL }
         if reference != nil && (resource == "direct" || resource == "stream.mp4") && sessionId == nil {
             throw APIError.badURL
         }
-        var value = fileBase + "/" + resource
-        if let sessionId, resource != "decision", resource != "hls/sessions" { value += "?session=\(sessionId)" }
-        return value
+        if reference != nil { try Self.validateQuery(resource, query) }
+        var components = URLComponents(string: fileBase + "/" + resource)!
+        var items = query
+        if let sessionId, resource != "decision", resource != "hls/sessions" { items.append(URLQueryItem(name: "session", value: sessionId)) }
+        if !items.isEmpty { components.queryItems = items }
+        guard let result = components.string else { throw APIError.badURL }
+        return result
     }
-    func apiPath(_ resource: String) throws -> String { String(try path(resource).dropFirst("/api/v1/".count)) }
+    func apiPath(_ resource: String, query: [URLQueryItem] = []) throws -> String {
+        String(try path(resource, query: query).dropFirst("/api/v1/".count))
+    }
+    func translatedDeliveryPath(_ value: String) throws -> String {
+        guard reference != nil else { return value }
+        try requireCurrent()
+        guard let components = URLComponents(string: value), components.scheme == nil,
+              components.host == nil, components.fragment == nil,
+              [fileBase + "/direct", fileBase + "/stream.mp4"].contains(components.percentEncodedPath)
+        else { throw APIError.badURL }
+        let session = components.queryItems?.filter { $0.name == "session" } ?? []
+        guard session.count <= 1, session.allSatisfy({ $0.value == sessionId && sessionId != nil }) else { throw APIError.badURL }
+        let query = components.queryItems?.filter { $0.name != "session" } ?? []
+        return try path(String(components.percentEncodedPath.dropFirst(fileBase.count + 1)), query: query)
+    }
+    private static func validateQuery(_ resource: String, _ query: [URLQueryItem]) throws {
+        let capabilities = ["client", "device", "profile", "vcodec", "vmaxheight", "acodec", "container", "maxheight", "hdr", "dv", "dvprofile", "dvhls", "hdr10t"]
+        let allowed = resource == "decision" ? capabilities + ["force", "audio", "subtitle", "audio_offset_ms", "achannels", "capver", "hdrtypes", "dvdecoders", "dvraw", "dvstatus"]
+            : resource == "stream.mp4" ? capabilities + ["force", "audio", "audio_offset_ms", "start", "stream"]
+            : resource.hasPrefix("chapters/") ? ["v"] : []
+        guard Set(query.map(\.name)).count == query.count else { throw APIError.badURL }
+        func integer(_ value: String, _ low: Int, _ high: Int) -> Bool {
+            guard let n = Int(value), String(n) == value else { return false }; return n >= low && n <= high
+        }
+        for item in query {
+            guard allowed.contains(item.name), let text = item.value else { throw APIError.badURL }
+            let valid: Bool
+            switch item.name {
+            case "hdr", "dv", "dvhls", "hdr10t": valid = text == "0" || text == "1"
+            case "vcodec", "acodec", "container":
+                valid = text.count <= 256 && (text.isEmpty || text.split(separator: ",", omittingEmptySubsequences: false).allSatisfy { matches(String($0), "^[A-Za-z0-9_-]{1,32}$") })
+            case "dvprofile":
+                valid = text.count <= 64 && (text.isEmpty || text.split(separator: ",", omittingEmptySubsequences: false).allSatisfy { integer(String($0), 0, 255) })
+            case "vmaxheight":
+                valid = text.count <= 256 && (text.isEmpty || text.split(separator: ",", omittingEmptySubsequences: false).allSatisfy { value in
+                    let parts = value.split(separator: ":", omittingEmptySubsequences: false)
+                    return parts.count == 2 && matches(String(parts[0]), "^[A-Za-z0-9_-]{1,32}$") && integer(String(parts[1]), 1, 65535)
+                })
+            case "client", "profile": valid = matches(text, "^[A-Za-z0-9_.-]{1,64}$")
+            case "device", "capver", "hdrtypes", "dvdecoders", "dvraw", "dvstatus":
+                valid = text.count <= 256 && !text.unicodeScalars.contains { $0.value < 32 || $0.value == 127 }
+            case "achannels": valid = integer(text, 1, 16)
+            case "force": valid = ["auto", "original", "transcode"].contains(text)
+            case "stream": valid = matches(text, "^[A-Za-z0-9_-]{1,200}$")
+            case "start": valid = matches(text, "^(0|[1-9][0-9]{0,12})(\\.[0-9]{1,3})?$")
+            case "v": valid = matches(text, "^-?(0|[1-9][0-9]{0,19})$")
+            case "subtitle": valid = integer(text, -1, 999999)
+            case "audio_offset_ms": valid = integer(text, -15000, 15000)
+            case "maxheight": valid = integer(text, 0, 65535)
+            default: valid = integer(text, 0, 999999)
+            }
+            guard valid else { throw APIError.badURL }
+        }
+    }
 }

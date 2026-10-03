@@ -99,48 +99,75 @@ impl PeerConnection {
         // Losing dials are dropped as soon as a pinned stream wins.
         tokio::time::timeout(Duration::from_secs(5), async {
             let egress = manager.egress();
-            let mut resolutions = FuturesUnordered::new();
+            use futures_util::FutureExt;
+            let mut attempts = FuturesUnordered::new();
             for endpoint in endpoints {
                 let egress = &egress;
-                resolutions.push(async move {
-                    (
-                        endpoint,
-                        plurx_core::sharing_dns::resolve_tailnet(&endpoint.ts_fqdn, egress).await,
-                    )
-                });
-            }
-            let mut resolved = Vec::with_capacity(endpoints.len());
-            while let Some((endpoint, result)) = resolutions.next().await {
-                resolved.push((endpoint, result.unwrap_or_default()));
-            }
-            let mut attempts = FuturesUnordered::new();
-            for (endpoint, answers) in resolved {
-                let mut addresses: Vec<_> = answers
-                    .into_iter()
-                    .map(|ip| SocketAddr::new(ip, endpoint.port))
-                    .collect();
-                // Invitation hints and explicit recipient-side overrides are
-                // already validated. They retain the approved TLS pin.
-                let v4 = SocketAddr::new(endpoint.ipv4.into(), endpoint.port);
-                if !addresses.contains(&v4) {
-                    addresses.push(v4);
-                }
+                // Validated numeric hints are immediately useful. A stalled
+                // Quad100 lookup must not consume a control RPC's full budget
+                // before the first already-approved pinned dial begins.
+                let mut hints = vec![SocketAddr::new(endpoint.ipv4.into(), endpoint.port)];
                 if let Some(ip) = endpoint.ipv6 {
-                    let v6 = SocketAddr::new(ip.into(), endpoint.port);
-                    if !addresses.contains(&v6) {
-                        addresses.push(v6);
-                    }
+                    hints.push(SocketAddr::new(ip.into(), endpoint.port));
                 }
-                for address in addresses {
-                    let egress = &egress;
-                    attempts.push(async move {
-                        dial_numeric_peer(address, &endpoint.ts_fqdn, &endpoint.spki_sha256, egress)
+                for address in hints.clone() {
+                    attempts.push(
+                        async move {
+                            dial_numeric_peer(
+                                address,
+                                &endpoint.ts_fqdn,
+                                &endpoint.spki_sha256,
+                                egress,
+                            )
                             .await
                             .map(|stream| {
                                 (stream, format!("{}:{}", endpoint.ts_fqdn, endpoint.port))
                             })
-                    });
+                        }
+                        .boxed(),
+                    );
                 }
+                attempts.push(
+                    async move {
+                        let addresses =
+                            plurx_core::sharing_dns::resolve_tailnet(&endpoint.ts_fqdn, egress)
+                                .await
+                                .unwrap_or_default();
+                        let mut resolved = FuturesUnordered::new();
+                        let mut considered = hints;
+                        for ip in addresses {
+                            let address = SocketAddr::new(ip, endpoint.port);
+                            if considered.contains(&address) {
+                                continue;
+                            }
+                            if considered.len() == 4 {
+                                break;
+                            }
+                            considered.push(address);
+                            resolved.push(async move {
+                                dial_numeric_peer(
+                                    address,
+                                    &endpoint.ts_fqdn,
+                                    &endpoint.spki_sha256,
+                                    egress,
+                                )
+                                .await
+                                .map(|stream| {
+                                    (stream, format!("{}:{}", endpoint.ts_fqdn, endpoint.port))
+                                })
+                            });
+                        }
+                        while let Some(result) = resolved.next().await {
+                            if result.is_ok() {
+                                return result;
+                            }
+                        }
+                        Err(plurx_core::error::StoreError::Identity(
+                            "sharing peer unavailable".into(),
+                        ))
+                    }
+                    .boxed(),
+                );
             }
             while let Some(result) = attempts.next().await {
                 if let Ok((stream, host)) = result {
@@ -279,6 +306,25 @@ impl PeerConnection {
         })
         .await
         .map_err(|_| PeerError::Unavailable)?
+    }
+    pub async fn current_scope(
+        &mut self,
+        credential: &Secret,
+        request: &plurx_core::sharing_catalogue_details::SourceScopeRequest,
+    ) -> Result<bool, PeerError> {
+        request.validate().map_err(|_| PeerError::InvalidResponse)?;
+        let payload = Secret::from_cleartext(
+            serde_json::to_string(request).map_err(|_| PeerError::InvalidResponse)?,
+        );
+        let response: plurx_core::sharing_catalogue_details::SourceScopeResponse = self
+            .request(
+                Method::POST,
+                "/sharing/v1/current-scope",
+                Some(credential),
+                Some(&payload),
+            )
+            .await?;
+        Ok(response.authorized)
     }
     pub async fn catalogue_libraries(
         &mut self,
@@ -503,6 +549,41 @@ mod tests {
             requests,
             server,
         )
+    }
+    #[tokio::test]
+    async fn sharing_current_scope_client_uses_closed_control_response() {
+        use plurx_core::sharing_catalogue_details::SourceScopeRequest;
+        let credential = plurx_core::sharing::new_secret().expect("synthetic credential");
+        let scope = SourceScopeRequest {
+            server_id: uuid::Uuid::new_v4(),
+            catalogue_epoch: uuid::Uuid::new_v4(),
+            grant_id: uuid::Uuid::new_v4(),
+            recipient_server_id: uuid::Uuid::new_v4(),
+            libraries: Vec::new(),
+            items: Vec::new(),
+            files: Vec::new(),
+        };
+        for (payload, valid) in [
+            (serde_json::json!({"authorized":true}), true),
+            (serde_json::json!({"authorized":false}), true),
+            (serde_json::json!({"authorized":1}), false),
+            (
+                serde_json::json!({"authorized":true,"path":"/private/injected"}),
+                false,
+            ),
+        ] {
+            let (mut peer, requests, server) = fixture(StatusCode::OK, payload).await;
+            assert_eq!(peer.current_scope(&credential, &scope).await.is_ok(), valid);
+            {
+                let requests = requests.lock().expect("request log");
+                assert_eq!(requests[0].0, "/sharing/v1/current-scope");
+                assert!(requests[0].1);
+                assert!(requests[0].2 < 32 * 1024);
+            }
+            drop(peer);
+            server.abort();
+            let _ = server.await;
+        }
     }
     fn catalogue_item(id: &str) -> serde_json::Value {
         serde_json::json!({"item_id":id,"library_id":"12","parent_id":null,"kind":"movie","title":"Fixture","sort_title":"Fixture","year":null,"overview":"x".repeat(8192),"genres":[],"season_number":null,"episode_number":null})

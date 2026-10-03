@@ -47,6 +47,8 @@ pub(crate) struct SharingManager {
     status: RwLock<SharingStatus>,
     lifetime: Mutex<Option<CancellationToken>>,
     catalogue_admission: Arc<CatalogueAdmission>,
+    catalogue_cache: Mutex<CatalogueCache>,
+    scope_control: Arc<tokio::sync::Semaphore>,
 }
 pub(crate) async fn enabled(store: &dyn Store) -> Result<bool, StoreError> {
     let result = tokio::time::timeout(
@@ -80,7 +82,17 @@ impl SharingManager {
             network,
             lifetime: Mutex::new(None),
             catalogue_admission: Arc::new(CatalogueAdmission::default()),
+            catalogue_cache: Mutex::new(CatalogueCache::default()),
+            scope_control: Arc::new(tokio::sync::Semaphore::new(32)),
         }
+    }
+    #[cfg(all(test, target_os = "linux"))]
+    pub(crate) fn scope_control_available(&self) -> usize {
+        self.scope_control.available_permits()
+    }
+    #[cfg(all(test, target_os = "linux"))]
+    pub(crate) fn catalogue_cache_entries(&self) -> usize {
+        self.catalogue_cache.lock().expect("cache").entries.len()
     }
     pub fn status(&self) -> SharingStatus {
         self.status.read().expect("sharing status lock").clone()
@@ -1008,6 +1020,7 @@ impl CatalogueAdmission {
     }
 }
 
+#[derive(Serialize)]
 pub(crate) enum CatalogueRead {
     Libraries,
     Page {
@@ -1020,13 +1033,205 @@ pub(crate) enum CatalogueRead {
     Batch(plurx_core::sharing_catalogue::MetadataBatch),
     Item(plurx_core::sharing::SourceId),
 }
+#[derive(serde::Serialize, serde::Deserialize)]
 pub(crate) enum CatalogueReply {
     Libraries(Vec<plurx_core::store::sharing_catalogue_source::SourceLibrary>),
     Page(plurx_core::sharing_catalogue::CataloguePeerPage),
     Batch(plurx_core::sharing_catalogue::CataloguePeerBatch),
     Item(plurx_core::sharing_catalogue_details::SourceItemDetails),
 }
+// Bytes are boxed in an Arc, so the charged payload has no spare Vec capacity.
+// Cache hits never substitute for a fresh Source read or receiver authority.
+const CATALOGUE_CACHE_BYTES: usize = 32 * 1024 * 1024;
+const CATALOGUE_CACHE_TTL: Duration = Duration::from_secs(30);
+const CATALOGUE_CACHE_ENTRIES: usize = 2048;
+struct CachedCatalogue {
+    bytes: Arc<[u8]>,
+    inserted: std::time::Instant,
+    touched: u64,
+}
+#[derive(Default)]
+struct CatalogueCache {
+    entries: std::collections::BTreeMap<[u8; 32], CachedCatalogue>,
+    bytes: usize,
+    tick: u64,
+}
+impl CatalogueCache {
+    fn remove(&mut self, key: &[u8; 32]) {
+        if let Some(entry) = self.entries.remove(key) {
+            self.bytes -= entry.bytes.len() + 256;
+        }
+    }
+    fn fresh(&mut self, key: &[u8; 32], now: std::time::Instant) -> Option<Arc<[u8]>> {
+        if self
+            .entries
+            .get(key)
+            .is_some_and(|v| now.saturating_duration_since(v.inserted) >= CATALOGUE_CACHE_TTL)
+        {
+            self.remove(key);
+        }
+        self.tick = self.tick.checked_add(1).unwrap_or_else(|| {
+            self.entries.clear();
+            self.bytes = 0;
+            0
+        });
+        let entry = self.entries.get_mut(key)?;
+        entry.touched = self.tick;
+        Some(entry.bytes.clone())
+    }
+    fn remember(&mut self, key: [u8; 32], bytes: Vec<u8>, now: std::time::Instant) {
+        self.remove(&key);
+        let charge = bytes.len() + 256;
+        if bytes.len() > 4 * 1024 * 1024 || charge > CATALOGUE_CACHE_BYTES {
+            return;
+        }
+        let expired = self
+            .entries
+            .iter()
+            .filter(|(_, e)| now.saturating_duration_since(e.inserted) >= CATALOGUE_CACHE_TTL)
+            .map(|(k, _)| *k)
+            .collect::<Vec<_>>();
+        for key in expired {
+            self.remove(&key);
+        }
+        while self.bytes + charge > CATALOGUE_CACHE_BYTES
+            || self.entries.len() >= CATALOGUE_CACHE_ENTRIES
+        {
+            let Some(key) = self
+                .entries
+                .iter()
+                .min_by_key(|(_, e)| e.touched)
+                .map(|(k, _)| *k)
+            else {
+                return;
+            };
+            self.remove(&key);
+        }
+        self.tick = self.tick.checked_add(1).unwrap_or_else(|| {
+            self.entries.clear();
+            self.bytes = 0;
+            0
+        });
+        self.bytes += charge;
+        self.entries.insert(
+            key,
+            CachedCatalogue {
+                bytes: Arc::from(bytes.into_boxed_slice()),
+                inserted: now,
+                touched: self.tick,
+            },
+        );
+    }
+}
+fn catalogue_cache_key(
+    summary: &plurx_core::sharing::ImportSummary,
+    user: i64,
+    request: &CatalogueRead,
+) -> Result<[u8; 32], crate::sharing_client::PeerError> {
+    use sha2::{Digest, Sha256};
+    struct Writer(Sha256);
+    impl std::io::Write for Writer {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            self.0.update(bytes);
+            Ok(bytes.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+    let mut writer = Writer(Sha256::new());
+    serde_json::to_writer(
+        &mut writer,
+        &(
+            "cinema-receiver-catalogue-cache-v1",
+            summary.id,
+            summary.source_server_id,
+            summary.catalogue_epoch,
+            summary.lifecycle_generation,
+            summary.assignment_generation,
+            summary.endpoint_generation,
+            summary.claim_id,
+            summary.remote_grant_id,
+            user,
+            request,
+        ),
+    )
+    .map_err(|_| crate::sharing_client::PeerError::InvalidResponse)?;
+    Ok(writer.0.finalize().into())
+}
 impl SharingManager {
+    /// A bounded live body-authority check, independent of catalogue permits.
+    /// It proves no revision, cached bytes, worker or write admission.
+    pub async fn current_catalogue_scope(
+        &self,
+        state: &AppState,
+        captured: &plurx_core::store::sharing_catalogue::ReceiverCatalogueScope,
+        items: Vec<plurx_core::sharing_catalogue_details::SourceScopeItem>,
+        files: Vec<plurx_core::sharing_catalogue_details::SourceScopeFile>,
+    ) -> bool {
+        use crate::sharing_client::{PeerConnection, PeerError};
+        use plurx_core::{sharing::SharingIdentity, sharing_catalogue_details::SourceScopeRequest};
+        let Ok(_permit) = self.scope_control.clone().try_acquire_owned() else {
+            return false;
+        };
+        tokio::time::timeout(Duration::from_secs(1), async {
+            let import = state
+                .store
+                .sharing_import(captured.import_id)
+                .await
+                .map_err(|_| PeerError::Unavailable)?
+                .ok_or(PeerError::Unavailable)?;
+            let s = &import.summary;
+            if s.state != "active"
+                || s.source_server_id != captured.source_server_id
+                || s.catalogue_epoch != captured.catalogue_epoch
+                || s.lifecycle_generation != captured.lifecycle_generation
+                || s.assignment_generation < captured.assignment_generation
+                || s.endpoint_generation < captured.endpoint_generation
+                || s.claim_id != captured.claim_id
+                || s.remote_grant_id != Some(captured.remote_grant_id)
+            {
+                return Err(PeerError::Authentication);
+            }
+            if !enabled(state.store.as_ref())
+                .await
+                .map_err(|_| PeerError::Unavailable)?
+            {
+                return Err(PeerError::Unavailable);
+            }
+            let local = state
+                .store
+                .sharing_identity(clock_ms())
+                .await
+                .map_err(|_| PeerError::Unavailable)?;
+            let credentials = ImportCredential::open(self, local.server_id, &import)
+                .map_err(|_| PeerError::Unavailable)?;
+            let expected = SharingIdentity {
+                server_id: s.source_server_id,
+                catalogue_epoch: s.catalogue_epoch,
+                created_at_ms: 0,
+            };
+            let (mut peer, _) = PeerConnection::verified(self, &s.endpoints, &expected).await?;
+            if !enabled(state.store.as_ref())
+                .await
+                .map_err(|_| PeerError::Unavailable)?
+            {
+                return Err(PeerError::Unavailable);
+            }
+            let request = SourceScopeRequest {
+                server_id: s.source_server_id,
+                catalogue_epoch: s.catalogue_epoch,
+                grant_id: captured.remote_grant_id,
+                recipient_server_id: local.server_id,
+                libraries: captured.libraries.clone(),
+                items,
+                files,
+            };
+            peer.current_scope(&credentials.credential, &request).await
+        })
+        .await
+        .is_ok_and(|result| matches!(result, Ok(true)))
+    }
     pub async fn read_catalogue(
         &self,
         state: &AppState,
@@ -1090,6 +1295,22 @@ impl SharingManager {
                 return Err(PeerError::Authentication);
             }
         }
+        match &request {
+            CatalogueRead::Page {
+                q, cursor, limit, ..
+            } if q.len() > 512
+                || q.chars().any(char::is_control)
+                || cursor.as_ref().is_some_and(|c| c.len() > 4096)
+                || !(1..=200).contains(limit) =>
+            {
+                return Err(PeerError::InvalidResponse)
+            }
+            CatalogueRead::Batch(batch) => {
+                batch.validate().map_err(|_| PeerError::InvalidResponse)?
+            }
+            _ => {}
+        }
+        let cache_key = catalogue_cache_key(&import.summary, user, &request)?;
         let local = state
             .store
             .sharing_identity(clock_ms())
@@ -1197,6 +1418,34 @@ impl SharingManager {
                     }
                 }
             }
+        }
+        // Until the Source exposes a smaller current-digest proof, every hit
+        // still takes the full fresh pinned read above. Changed or unauthorized
+        // data can therefore never be served from this cache.
+        let bytes = serde_json::to_vec(&reply).map_err(|_| PeerError::InvalidResponse)?;
+        if bytes.len() > 4 * 1024 * 1024 {
+            return Err(PeerError::InvalidResponse);
+        }
+        // Closed response bytes include the received revisions and observed
+        // scope/catalogue counters. A different current witness gets a distinct
+        // entry, even when the request and receiver generations are unchanged.
+        use sha2::{Digest, Sha256};
+        let cache_key: [u8; 32] = Sha256::new()
+            .chain_update(cache_key)
+            .chain_update(Sha256::digest(&bytes))
+            .finalize()
+            .into();
+        let now = std::time::Instant::now();
+        let mut cache = self.catalogue_cache.lock().expect("catalogue cache");
+        if let Some(previous) = cache.fresh(&cache_key, now) {
+            if previous.as_ref() == bytes.as_slice() {
+                reply =
+                    serde_json::from_slice(&previous).map_err(|_| PeerError::InvalidResponse)?;
+            } else {
+                cache.remember(cache_key, bytes, now);
+            }
+        } else {
+            cache.remember(cache_key, bytes, now);
         }
         Ok((import.summary, reply))
     }
@@ -1330,5 +1579,147 @@ mod tests {
         assert!(ImportCredential::open(&manager, uuid::Uuid::new_v4(), &stored).is_err());
         stored.summary.id = uuid::Uuid::new_v4();
         assert!(ImportCredential::open(&manager, local, &stored).is_err());
+    }
+}
+
+#[cfg(test)]
+mod catalogue_cache_tests {
+    use super::*;
+    fn key(n: u64) -> [u8; 32] {
+        let mut key = [0; 32];
+        key[..8].copy_from_slice(&n.to_be_bytes());
+        key
+    }
+    #[test]
+    fn sharing_catalogue_cache_enforces_ram_lru_entry_and_absolute_ttl_bounds() {
+        let now = std::time::Instant::now();
+        let mut cache = CatalogueCache::default();
+        for n in 0..8 {
+            cache.remember(key(n), vec![n as u8; 4 * 1024 * 1024], now);
+        }
+        assert!(cache.bytes <= CATALOGUE_CACHE_BYTES);
+        assert!(cache.fresh(&key(0), now).is_none());
+        assert!(cache.fresh(&key(1), now).is_some());
+        cache.remember(key(8), vec![8; 4 * 1024 * 1024], now);
+        assert!(cache.fresh(&key(2), now).is_none());
+        assert!(cache.fresh(&key(1), now).is_some());
+        // Touching never extends the insertion TTL.
+        assert!(cache
+            .fresh(&key(1), now + Duration::from_secs(29))
+            .is_some());
+        assert!(cache
+            .fresh(&key(1), now + Duration::from_secs(30))
+            .is_none());
+        cache.remember(key(9), vec![0; 4 * 1024 * 1024 + 1], now);
+        assert!(!cache.entries.contains_key(&key(9)));
+        cache = CatalogueCache::default();
+        for n in 0..2049 {
+            cache.remember(key(n), vec![1], now);
+        }
+        assert_eq!(cache.entries.len(), 2048);
+        assert!(!cache.entries.contains_key(&key(0)));
+        assert_eq!(cache.bytes, 2048 * 257);
+        cache.remember(key(2048), vec![2, 3], now);
+        assert_eq!(
+            cache.fresh(&key(2048), now).expect("replacement").as_ref(),
+            &[2, 3]
+        );
+        cache.tick = u64::MAX;
+        assert!(cache.fresh(&key(2048), now).is_none());
+        assert!(cache.entries.is_empty());
+        assert_eq!(cache.bytes, 0);
+    }
+    #[test]
+    fn sharing_catalogue_cache_key_separates_full_authority_and_request() {
+        let summary = plurx_core::sharing::ImportSummary {
+            id: uuid::Uuid::new_v4(),
+            source_server_id: uuid::Uuid::new_v4(),
+            catalogue_epoch: uuid::Uuid::new_v4(),
+            source_name: "Fixture".into(),
+            claim_id: uuid::Uuid::new_v4(),
+            remote_grant_id: Some(uuid::Uuid::new_v4()),
+            state: "active".into(),
+            assignment_generation: 1,
+            lifecycle_generation: 1,
+            endpoint_generation: 1,
+            observed_endpoint_revision: None,
+            endpoints: Vec::new(),
+        };
+        let request = CatalogueRead::Item(
+            plurx_core::sharing::SourceId::parse("9007199254740993").expect("large ID"),
+        );
+        let key = catalogue_cache_key(&summary, 1, &request).expect("key");
+        assert_ne!(
+            key,
+            catalogue_cache_key(&summary, 2, &request).expect("other user")
+        );
+        assert_ne!(
+            key,
+            catalogue_cache_key(&summary, 1, &CatalogueRead::Libraries).expect("other operation")
+        );
+        for field in 0..8 {
+            let mut other = summary.clone();
+            match field {
+                0 => other.id = uuid::Uuid::new_v4(),
+                1 => other.source_server_id = uuid::Uuid::new_v4(),
+                2 => other.catalogue_epoch = uuid::Uuid::new_v4(),
+                3 => other.claim_id = uuid::Uuid::new_v4(),
+                4 => other.remote_grant_id = Some(uuid::Uuid::new_v4()),
+                5 => other.lifecycle_generation += 1,
+                6 => other.assignment_generation += 1,
+                _ => other.endpoint_generation += 1,
+            };
+            assert_ne!(
+                key,
+                catalogue_cache_key(&other, 1, &request).expect("changed authority")
+            );
+        }
+        let page = |q: &str, cursor: Option<String>| CatalogueRead::Page {
+            library: plurx_core::sharing::SourceId::parse("1").expect("ID"),
+            parent: None,
+            q: q.into(),
+            cursor,
+            limit: 200,
+        };
+        assert_ne!(
+            catalogue_cache_key(&summary, 1, &page("a", None)).expect("filter"),
+            catalogue_cache_key(&summary, 1, &page("b", None)).expect("other filter")
+        );
+        assert_ne!(
+            catalogue_cache_key(&summary, 1, &page("a", None)).expect("filter"),
+            catalogue_cache_key(&summary, 1, &page("a", Some("opaque".into()))).expect("cursor")
+        );
+    }
+    #[tokio::test]
+    async fn sharing_scope_control_capacity_is_independent_and_cancellation_releases() {
+        let directory = tempfile::tempdir().expect("control fixture");
+        let manager = SharingManager::new(
+            Arc::new(CredentialKey::from_bytes([41; 32])),
+            directory.path().to_path_buf(),
+            Default::default(),
+        );
+        let catalogue = manager.catalogue_admission.clone();
+        let busy = catalogue.acquire(uuid::Uuid::new_v4()).expect("catalogue");
+        let controls = manager.scope_control.clone();
+        let full = controls
+            .clone()
+            .try_acquire_many_owned(32)
+            .expect("control cap");
+        assert!(controls.clone().try_acquire_owned().is_err());
+        assert_eq!(catalogue.global.available_permits(), 3);
+        drop(full);
+        drop(busy);
+        let cloned = controls.clone();
+        let (started, ready) = tokio::sync::oneshot::channel();
+        let task = tokio::spawn(async move {
+            let _permit = cloned.try_acquire_owned().expect("control");
+            started.send(()).expect("ready");
+            std::future::pending::<()>().await;
+        });
+        ready.await.expect("admitted");
+        assert_eq!(controls.available_permits(), 31);
+        task.abort();
+        let _ = task.await;
+        assert_eq!(controls.available_permits(), 32);
     }
 }

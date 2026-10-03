@@ -242,3 +242,124 @@ async fn sharing_private_watch_orders_updates_and_isolates_sources_and_assignmen
     })
     .await;
 }
+
+#[tokio::test]
+async fn sharing_receiver_content_authority_is_read_only_and_fences_current_login_and_import() {
+    let now_s = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("clock")
+        .as_secs() as i64;
+    for_each_backend(move |s, b| async move {
+        let user = s
+            .create_user("sharing-current-viewer", "synthetic-hash", false)
+            .await
+            .expect("viewer");
+        let other = s
+            .create_user("sharing-other-viewer", "synthetic-hash", false)
+            .await
+            .expect("other");
+        let import = assigned_import(s.as_ref(), user.id).await;
+        let summary = s
+            .sharing_import(import)
+            .await
+            .expect("import")
+            .expect("active")
+            .summary;
+        let scope = ReceiverCatalogueScope {
+            import_id: import,
+            source_server_id: summary.source_server_id,
+            catalogue_epoch: summary.catalogue_epoch,
+            lifecycle_generation: summary.lifecycle_generation,
+            assignment_generation: summary.assignment_generation,
+            endpoint_generation: summary.endpoint_generation,
+            claim_id: summary.claim_id,
+            remote_grant_id: summary.remote_grant_id.expect("settled grant"),
+            libraries: vec![source_id("12")],
+        };
+        let hash = "c".repeat(64);
+        s.create_token(&hash, user.id, None)
+            .await
+            .expect("local login");
+        assert!(
+            s.receiver_catalogue_authorized(&hash, user.id, std::slice::from_ref(&scope), now_s)
+                .await
+                .expect("current proof"),
+            "{b}"
+        );
+        assert!(!s
+            .receiver_catalogue_authorized(&hash, other.id, std::slice::from_ref(&scope), now_s)
+            .await
+            .expect("wrong user"));
+        let before = s.list_tokens_for_user(user.id).await.expect("before");
+        for _ in 0..3 {
+            assert!(s
+                .receiver_catalogue_authorized(&hash, user.id, std::slice::from_ref(&scope), now_s)
+                .await
+                .expect("read-only proof"));
+        }
+        let after = s.list_tokens_for_user(user.id).await.expect("after");
+        assert_eq!(
+            before[0].last_seen_at, after[0].last_seen_at,
+            "monitor reads never renew idle expiry"
+        );
+        for changed in 0..6 {
+            let mut stale = scope.clone();
+            match changed {
+                0 => stale.lifecycle_generation += 1,
+                1 => stale.assignment_generation += 1,
+                2 => stale.endpoint_generation += 1,
+                3 => stale.source_server_id = Uuid::new_v4(),
+                4 => stale.remote_grant_id = Uuid::new_v4(),
+                _ => stale.libraries = vec![source_id("13")],
+            };
+            assert!(
+                !s.receiver_catalogue_authorized(&hash, user.id, &[stale], now_s)
+                    .await
+                    .expect("captured fence"),
+                "{b}/{changed}"
+            );
+        }
+        assert!(s
+            .receiver_catalogue_authorized(&hash, user.id, &vec![scope.clone(); 65], now_s)
+            .await
+            .is_err());
+        s.assign_share_viewers(
+            import,
+            summary.assignment_generation,
+            vec![
+                Assignment {
+                    library_id: source_id("12"),
+                    user_id: user.id,
+                },
+                Assignment {
+                    library_id: source_id("13"),
+                    user_id: user.id,
+                },
+            ],
+            1009,
+        )
+        .await
+        .expect("benign scope expansion");
+        assert!(s
+            .receiver_catalogue_authorized(&hash, user.id, std::slice::from_ref(&scope), now_s)
+            .await
+            .expect("captured effective scope survives expansion"));
+        s.assign_share_viewers(import, summary.assignment_generation + 1, vec![], 1010)
+            .await
+            .expect("revoke assignment");
+        assert!(!s
+            .receiver_catalogue_authorized(&hash, user.id, &[scope], now_s)
+            .await
+            .expect("current assignment revoked"));
+        assert!(s
+            .receiver_catalogue_authorized(&hash, user.id, &[], now_s)
+            .await
+            .expect("login only"));
+        s.delete_token(&hash).await.expect("revoke login");
+        assert!(!s
+            .receiver_catalogue_authorized(&hash, user.id, &[], now_s)
+            .await
+            .expect("current token revoked"));
+    })
+    .await;
+}

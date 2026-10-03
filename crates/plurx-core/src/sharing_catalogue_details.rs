@@ -630,3 +630,119 @@ impl SourceFileWitness {
         Ok(file)
     }
 }
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SourceScopeItem {
+    pub library_id: SourceId,
+    pub item_id: SourceId,
+}
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SourceScopeFile {
+    pub library_id: SourceId,
+    pub item_id: SourceId,
+    pub file_id: SourceId,
+}
+fn scope_items<'de, D: Deserializer<'de>>(d: D) -> Result<Vec<SourceScopeItem>, D::Error> {
+    bounded::<_, _, 200>(d)
+}
+fn scope_files<'de, D: Deserializer<'de>>(d: D) -> Result<Vec<SourceScopeFile>, D::Error> {
+    bounded::<_, _, 64>(d)
+}
+fn scope_libraries<'de, D: Deserializer<'de>>(d: D) -> Result<Vec<SourceId>, D::Error> {
+    bounded::<_, _, 64>(d)
+}
+/// Current body scope only: no cached-byte, revision or worker-write proof.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SourceScopeRequest {
+    #[serde(deserialize_with = "crate::sharing::canonical_uuid")]
+    pub server_id: Uuid,
+    #[serde(deserialize_with = "crate::sharing::canonical_uuid")]
+    pub catalogue_epoch: Uuid,
+    #[serde(deserialize_with = "crate::sharing::canonical_uuid")]
+    pub grant_id: Uuid,
+    #[serde(deserialize_with = "crate::sharing::canonical_uuid")]
+    pub recipient_server_id: Uuid,
+    #[serde(deserialize_with = "scope_libraries")]
+    pub libraries: Vec<SourceId>,
+    #[serde(deserialize_with = "scope_items")]
+    pub items: Vec<SourceScopeItem>,
+    #[serde(deserialize_with = "scope_files")]
+    pub files: Vec<SourceScopeFile>,
+}
+impl SourceScopeRequest {
+    pub fn validate(&self) -> Result<(), StoreError> {
+        if self.libraries.len() > 64 || self.items.len() > 200 || self.files.len() > 64 {
+            return Err(invalid());
+        }
+        Ok(())
+    }
+}
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SourceScopeResponse {
+    pub authorized: bool,
+}
+
+#[cfg(test)]
+mod scope_tests {
+    use super::*;
+    #[test]
+    fn sharing_current_scope_rejects_oversized_and_malformed_inputs() {
+        let request = SourceScopeRequest {
+            server_id: Uuid::new_v4(),
+            catalogue_epoch: Uuid::new_v4(),
+            grant_id: Uuid::new_v4(),
+            recipient_server_id: Uuid::new_v4(),
+            libraries: Vec::new(),
+            items: Vec::new(),
+            files: Vec::new(),
+        };
+        let value = serde_json::to_value(request).expect("scope fixture");
+        for (field, entry, limit) in [
+            ("libraries", serde_json::json!("9223372036854775807"), 64),
+            (
+                "items",
+                serde_json::json!({"library_id":"9007199254740993","item_id":"9223372036854775807"}),
+                200,
+            ),
+            (
+                "files",
+                serde_json::json!({"library_id":"1","item_id":"2","file_id":"9223372036854775807"}),
+                64,
+            ),
+        ] {
+            for count in [limit, limit + 1] {
+                let mut input = value.clone();
+                input[field] = serde_json::Value::Array(vec![entry.clone(); count]);
+                assert_eq!(
+                    serde_json::from_value::<SourceScopeRequest>(input).is_ok(),
+                    count == limit
+                );
+            }
+        }
+        for bad in [
+            serde_json::json!(1),
+            serde_json::json!("01"),
+            serde_json::json!("9223372036854775808"),
+            serde_json::json!("-1"),
+        ] {
+            let mut input = value.clone();
+            input["libraries"] = serde_json::json!([bad]);
+            assert!(serde_json::from_value::<SourceScopeRequest>(input).is_err());
+        }
+        let mut input = value.clone();
+        input["recipient_server_id"] = serde_json::json!("AAAAAAAA-AAAA-AAAA-AAAA-AAAAAAAAAAAA");
+        assert!(serde_json::from_value::<SourceScopeRequest>(input).is_err());
+        let mut input = value;
+        input["path"] = serde_json::json!("/private/injected");
+        assert!(serde_json::from_value::<SourceScopeRequest>(input).is_err());
+        assert!(serde_json::from_str::<SourceScopeResponse>(
+            r#"{"authorized":true,"path":"injected"}"#
+        )
+        .is_err());
+        assert!(serde_json::from_str::<SourceScopeResponse>(r#"{"authorized":1}"#).is_err());
+    }
+}

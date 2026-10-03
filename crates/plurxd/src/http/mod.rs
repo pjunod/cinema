@@ -1320,7 +1320,7 @@ pub fn router(state: AppState) -> Router {
     // unlimited while JSON work cannot occupy a request slot forever.
     let json_short = Router::new()
         .merge(sharing::admin_router())
-        .merge(shared_library::viewer_router())
+        .merge(shared_library::viewer_router(state.clone()))
         .route("/server", get(system::server_info))
         .route("/me", get(auth::me))
         .route("/settings", get(system::get_settings))

@@ -66,6 +66,7 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
+import tv.plurx.app.data.PlaybackFileContext
 import tv.plurx.app.data.Caps
 import tv.plurx.app.data.HlsStart
 import tv.plurx.app.data.CreateSessionReq
@@ -138,6 +139,8 @@ class Controller internal constructor(
     retainedSubtitle: SubtitleChoice? = null,
     private val replan: (Long, String, PlaybackQuality) -> Unit,
 ) {
+    private val fileContext = plan.fileContext.also { it.localId(plan.fileId) }
+
     /**
      * The authoritative player — the one on the surface, with the volume up.
      *
@@ -309,7 +312,7 @@ class Controller internal constructor(
      * the user request the server's final replacement as well as the UI's.
      */
     private val sessionCreateCoordinator = SessionCreateCoordinator(
-        createSession = { body -> vm.createHlsSession(plan.fileId, body) },
+        createSession = { body -> vm.createHlsSession(plan.fileId, body, fileContext) },
         // A refusal the server explained now arrives as RefusalException,
         // so "is this a 400" has to ask for the status rather than for one of
         // the two exception types that can carry it.
@@ -749,6 +752,7 @@ class Controller internal constructor(
         api = { vm.api() },
         scope = scope,
         fileId = plan.fileId,
+        fileContext = fileContext,
         sourcePositionMs = ::realPosition,
         isPlaying = { player.isPlaying },
         playbackSpeed = { player.playbackParameters.speed },
@@ -1906,8 +1910,8 @@ class Controller internal constructor(
         when (recipe.recipe.desiredTransport) {
             PlaybackMediaTransport.Direct -> {
                 leaveSessionPlayback()
-                activeMediaPath = relativeMediaPath(plan.playUrl)
-                player.setMediaItem(MediaItem.fromUri(plan.playUrl), positionMs)
+                activeMediaPath = relativeMediaPath(fileContext.translatedDeliveryPath(plan.playUrl))
+                player.setMediaItem(MediaItem.fromUri(fileContext.translatedDeliveryPath(plan.playUrl)), positionMs)
                 attachRecipe(recipe)
                 executionSequence?.let { sequence ->
                     markIntentExecuted(sequence, recipe)
@@ -2599,9 +2603,9 @@ class Controller internal constructor(
 
     private fun remuxUri(ms: Long): String = progressiveRemuxUri(
         plannedUrl = if (plan.mode == "direct") {
-            Session.url("/api/v1/files/${plan.fileId}/stream.mp4")
+            Session.url(fileContext.path("stream.mp4"))
         } else {
-            plan.playUrl
+            fileContext.translatedDeliveryPath(plan.playUrl)
         },
         startSeconds = ms / 1000.0,
         audioIndex = selectedAudio,
@@ -2994,7 +2998,7 @@ class Controller internal constructor(
         scope.launch {
             val fresh = try {
                 vm.playbackDecision(plan.fileId, PreplayTracks(selectedAudio, SubtitleChoice(selectedSubtitle)),
-                    PlaybackQuality.Auto, target, selectionKey.third).decision
+                    PlaybackQuality.Auto, target, selectionKey.third, fileContext = fileContext).decision
             } catch (_: Exception) { return@launch }
             if (controlObservationIsClosed || selectionKey != Triple(selectedAudio, selectedSubtitle, audioOffsetMs)) return@launch
             if (fresh.display_aware_auto_protocol == "route-v1") autoCatalog = fresh.quality_candidates
@@ -4589,6 +4593,7 @@ interface PlanLike {
     val title: String
     val isAudioOnly: Boolean get() = false
     val fileId: Long
+    val fileContext: PlaybackFileContext get() = PlaybackFileContext.local(fileId)
     val playUrl: String
     val mode: String // "direct" | "remux" | "transcode"
     /** `delivery.requires_hls`: this remux needs the copy-HLS producer. */

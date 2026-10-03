@@ -175,9 +175,11 @@ are implemented and qualified.
 
 ## Proposed server-only claim API and transaction
 
-This is a design proposal. The types, binding table and SQL below are not
-implemented or qualified. They preserve the existing incarnation namespace
-and the seven principal families; they do not enable a Shared adapter.
+The complete worker admission and producer retirement API below remains a
+design proposal. The narrower candidate reservation API described at the end
+of this document now implements initial binding/claim and proven
+never-dispatched release. It preserves the existing incarnation namespace and
+the seven principal families; it does not enable a Shared adapter.
 
 The proposed Core API is deliberately separate from Local request admission:
 
@@ -529,3 +531,124 @@ Shared admission remains open until all of these are wired and qualified:
 A Local-compatible rebuilt runtime and a typed retained Shared row are only
 parts of S3. This census does not qualify a migration installation, mixed
 cluster bridge, historical daemon process, rollback or Shared admission.
+
+
+## Candidate Source reservation checkpoint
+
+`SharingSourceSessionStore` is a separate native-backend trait. Its three
+implemented methods are `prepare_source_session_intent`,
+`claim_source_media_session` and `release_source_never_dispatched`. The common
+`MediaSessionStore`, HTTP ingress, forwarded worker requests and allocation
+queues remain unchanged by this checkpoint. No schema version, installer or
+advertised capability is changed.
+
+The intent factory loads a current grant/credential/scope-authorized
+`SourceFileWitness` and the existing sealed CatalogueRevision purpose key.
+It opens that key with the local `CredentialKey` and compares the received
+`FileRevision` with the HMAC of the actual current private witness. The intent
+and binding handle have no wire encoding or Debug representation. Source item,
+file and library IDs remain exact bounded positive decimal strings. The
+conditional write independently correlates credential hash, grant, effective
+library, current Source/epoch, importing state, the guarded private file
+projection and the same persisted key envelope. A captured witness alone
+cannot authorize another grant.
+
+Every proposal checks the exact seven frozen principal table definitions after
+SQLite's quoted rename and the exact Source adjunct table, indexes and
+triggers. The opaque server-created `SourceAdmissionMembers` supplies the
+combined principal/catalogue capability floor and unresolved membership
+transition predicates. Admission also checks the saved `sharing_enabled`
+setting in the same write. Its bounded SQL comparison accepts text of at most 64 bytes and the
+canonical enabled spellings `1`, `true`, `yes`, and `on` with surrounding ASCII
+spaces; other persisted representations refuse admission without changing the
+saved setting.
+
+A transaction inserts the immutable held binding, inserts the matching
+canonical Sharing request, and executes a conditional NOT NULL assertion. If
+either guarded insertion cannot establish the exact pair, that assertion rolls
+back the transaction. Only that named assertion failure is classified as a
+lost proposal; other database failures propagate. An existing immutable
+request binding is examined before all caps. Exact retries return its original
+incarnation; changed immutable identity conflicts. Missing or cross-principal
+request records refuse usable replay and are not repaired. A retained resolved
+response additionally requires a matching principal/owner live published route;
+that branch is not qualified as a complete Shared worker lifecycle here.
+
+The occupancy union deduplicates held binding IDs, Sharing starting requests,
+Sharing starting/active routes and Sharing preparations. It excludes no entry
+because its deadline, lease, owner epoch or pointer has changed. Thus active
+routes with drain deadlines or displaced pointers and held older-epoch rows
+remain obligations. Limits are eight Source slots, four per grant and two
+unresolved starts per grant. Independent retained bounds are 4096 Source binding
+rows and 4096 Sharing request rows; full bounds preserve exact replay. Ordinary
+request expiry or failed request state does not release a held slot.
+
+The adjunct stores identity and capacity bookkeeping, not a parallel media
+lifecycle. Immutable identity cannot change, dispatch/resolution proof cannot
+move backwards, and a held row cannot be deleted. The only implemented release
+is an exact never-dispatched CAS: dispatch generation zero, unresolved start,
+no route of any state, no preparation/recipe/pointer, no cache pin or session
+lease even if expired, and no assigned, resolved or foreign-principal request.
+It records an internal deterministic release receipt and fails the matching
+unassigned request atomically. Exact release retry succeeds after sharing is
+disabled or revoked. A resolved start, ended route, timeout or expired lease
+cannot mint this proof. No reaped-producer callback is implemented.
+
+The selected worker's actual RAII admission permit, producer dispatch fence,
+proof-bearing activation/renewal paths and reaped-producer/writer-settlement
+release remain prerequisites before this reservation can authorize work. The
+candidate calls the opaque floor factory's clock check with fresh execution-entry
+wall time, but cannot prove an arbitrary Raft queue delay stays within its five
+second observation window. Hiqlite forbids nondeterministic SQLite time
+functions. The integrated membership factory now supplies a monotonic generation
+singleton and exact table/trigger-shape checks in the conditional write. It
+invalidates an observation across completed intent or directory identity
+mutations even after their visible floor is restored. Current capability
+predicates also recheck every active SQL member. The deterministic queued-clock
+limitation and remaining worker proof remain explicit; Shared front doors stay
+closed.
+
+Focused candidate commands (Rust 1.97.1, `hiqlite-contract-tests` enabled):
+
+```bash
+cargo test --locked -p plurx-core --features hiqlite-contract-tests \
+  --lib store::sharing_source_sessions -- --nocapture
+cargo test --locked -p plurx-core --features hiqlite-contract-tests \
+  --test store_contract sharing_source_reservations_three -- --nocapture
+cargo check --locked -p plurx-core --features hiqlite-contract-tests --all-targets
+cargo clippy --locked -p plurx-core --features hiqlite-contract-tests \
+  --all-targets -- -D warnings
+```
+
+The SQLite matrix exercises memory and pooled stores, pending-start/Source/grant
+limits, expired/failed request holds, exact and retired retry, switch/file races,
+missing request and altered schema refusal, injected second-insertion rollback,
+foreign expired pin preservation, and the retained bound. Resolved-start rows
+in the grant-cap test are explicit fixture bookkeeping, not evidence of a live
+producer being reaped. The replicated fixture uses three actual voters and the
+full quorum observation factory; its reservations allocate no producer.
+
+The initial checkpoint is based on `b84f87e142974d34c4e01d84e4d978b34947d54d`
+(the pinned S4 witness plus opaque floor checkpoint). The six focused library
+regressions passed with zero ignored tests in 8.51 seconds. The actual
+three-voter Source race/capacity regression passed with zero ignored tests in
+9.83 seconds. Catalogue lint and all four documentation index tests passed.
+The library matrix also verifies that a changed retained request cannot return
+conflict after its grant is disabled; current authority refusal takes priority.
+These are reservation receipts; they do not qualify live producer dispatch,
+physical retirement or schema activation.
+
+
+The generation follow-up integrates `a6a60d53f` as `71e9958ca`. Its actual
+three-voter Source regression passed in 10.20 seconds with zero ignored tests.
+A valid, production-guarded voter-promotion intent is inserted and resolved
+after the observation; the actual committed configuration already proves the
+voter outcome. With no open intent and a restored visible floor, the old
+observation creates zero Source rows. A fresh actual quorum observation admits
+work. This is a completed guarded SQL-intent race, not a new live Raft membership
+configuration change. The same test additionally races identical request keys
+with distinct proposed UUIDs: exactly one acquires and the other returns its
+original in-flight incarnation. All six Source library tests passed with zero
+ignored tests in 8.43 seconds, including oversized saved-switch refusal without
+changing the saved value. The exact combined feature all-target check passed
+in 29.39 seconds. Earlier receipts remain scoped to their earlier factory.

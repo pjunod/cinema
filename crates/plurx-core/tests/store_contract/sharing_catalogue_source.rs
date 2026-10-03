@@ -180,6 +180,7 @@ async fn sharing_catalogue_source_three_voters_refuse_removed_scope_and_preserve
     }
     let invitation = Uuid::new_v4();
     let grant = Uuid::new_v4();
+    let recipient = Uuid::new_v4();
     store
         .create_share_invitation(InvitationRecord {
             id: invitation,
@@ -196,7 +197,7 @@ async fn sharing_catalogue_source_three_voters_refuse_removed_scope_and_preserve
             invitation_hash: "a".repeat(64),
             claim_id: Uuid::new_v4(),
             grant_id: grant,
-            recipient_server_id: Uuid::new_v4(),
+            recipient_server_id: recipient,
             recipient_name: "Synthetic recipient".into(),
             credential_hash: "b".repeat(64),
             now_ms: 1001,
@@ -248,6 +249,45 @@ async fn sharing_catalogue_source_three_voters_refuse_removed_scope_and_preserve
         )
         .await
         .expect("source identity mismatch"));
+    let request = plurx_core::sharing_catalogue_details::SourceScopeRequest {
+        server_id: identity.server_id,
+        catalogue_epoch: identity.catalogue_epoch,
+        grant_id: grant,
+        recipient_server_id: recipient,
+        libraries: vec![library_id.clone()],
+        items: vec![plurx_core::sharing_catalogue_details::SourceScopeItem {
+            library_id: library_id.clone(),
+            item_id: item_id.clone(),
+        }],
+        files: Vec::new(),
+    };
+    assert!(store
+        .source_scope_authorized(&"b".repeat(64), grant, &request)
+        .await
+        .expect("current authenticated scope"));
+    assert!(!store
+        .source_scope_authorized(&"c".repeat(64), grant, &request)
+        .await
+        .expect("wrong credential"));
+    assert!(!store
+        .source_scope_authorized(&"b".repeat(64), Uuid::new_v4(), &request)
+        .await
+        .expect("wrong header grant"));
+    for field in 0..6 {
+        let mut stale = request.clone();
+        match field {
+            0 => stale.server_id = Uuid::new_v4(),
+            1 => stale.catalogue_epoch = Uuid::new_v4(),
+            2 => stale.grant_id = Uuid::new_v4(),
+            3 => stale.recipient_server_id = Uuid::new_v4(),
+            4 => stale.libraries[0] = SourceId::parse(&libraries[1].to_string()).expect("ID"),
+            _ => stale.items[0].item_id = SourceId::parse(&(first + 1000).to_string()).expect("ID"),
+        }
+        assert!(!store
+            .source_scope_authorized(&"b".repeat(64), grant, &stale)
+            .await
+            .expect("foreign tuple refuses"));
+    }
     let items = [(library_id.clone(), item_id)];
     assert!(store
         .source_content_authorized(
@@ -276,6 +316,10 @@ async fn sharing_catalogue_source_three_voters_refuse_removed_scope_and_preserve
         )
         .await
         .expect("current item move refuses"));
+    assert!(!store
+        .source_scope_authorized(&"b".repeat(64), grant, &request)
+        .await
+        .expect("scope move refusal"));
     client
         .execute(
             "UPDATE items SET library_id=$1 WHERE id=$2",
@@ -541,6 +585,7 @@ async fn sharing_catalogue_file_witness_three_voters_binds_current_file_and_refu
         .expect("library")
         .id;
     let grant = Uuid::new_v4();
+    let recipient = Uuid::new_v4();
     let invitation = Uuid::new_v4();
     store
         .create_share_invitation(InvitationRecord {
@@ -558,7 +603,7 @@ async fn sharing_catalogue_file_witness_three_voters_binds_current_file_and_refu
             invitation_hash: "a".repeat(64),
             claim_id: Uuid::new_v4(),
             grant_id: grant,
-            recipient_server_id: Uuid::new_v4(),
+            recipient_server_id: recipient,
             recipient_name: "synthetic".into(),
             credential_hash: "b".repeat(64),
             now_ms: 1001,
@@ -616,6 +661,61 @@ async fn sharing_catalogue_file_witness_three_voters_binds_current_file_and_refu
         )
         .await
         .expect("quorum file tuples"));
+    let mut scope = plurx_core::sharing_catalogue_details::SourceScopeRequest {
+        server_id: identity.server_id,
+        catalogue_epoch: identity.catalogue_epoch,
+        grant_id: grant,
+        recipient_server_id: recipient,
+        libraries: Vec::new(),
+        items: Vec::new(),
+        files: vec![plurx_core::sharing_catalogue_details::SourceScopeFile {
+            library_id: tuples[0].0.clone(),
+            item_id: tuples[0].1.clone(),
+            file_id: tuples[0].2.clone(),
+        }],
+    };
+    assert!(store
+        .source_scope_authorized(&"b".repeat(64), grant, &scope)
+        .await
+        .expect("live file"));
+    scope.files[0].file_id = SourceId::parse("1").expect("ID");
+    assert!(!store
+        .source_scope_authorized(&"b".repeat(64), grant, &scope)
+        .await
+        .expect("wrong file"));
+    scope.files[0].file_id = tuples[0].2.clone();
+    client
+        .execute(
+            "UPDATE files SET probe_json='{\"benign\":true}'",
+            hiqlite::params!(),
+        )
+        .await
+        .expect("benign revision");
+    assert!(store
+        .source_scope_authorized(&"b".repeat(64), grant, &scope)
+        .await
+        .expect("body scope tolerates revision"));
+    client
+        .execute(
+            "UPDATE item_identity_watermark SET importing=1",
+            hiqlite::params!(),
+        )
+        .await
+        .expect("import fence");
+    assert!(
+        store
+            .source_scope_authorized(&"b".repeat(64), grant, &scope)
+            .await
+            .is_err(),
+        "active import refuses proof before reading tuples"
+    );
+    client
+        .execute(
+            "UPDATE item_identity_watermark SET importing=0",
+            hiqlite::params!(),
+        )
+        .await
+        .expect("restore fence");
     client.execute("WITH RECURSIVE n(x) AS (VALUES(1) UNION ALL SELECT x+1 FROM n WHERE x<64) INSERT INTO files(id,item_id,path,size,mtime,scanned_at) SELECT x,9007199254740993,'/synthetic/'||x,20,1000,1000 FROM n",hiqlite::params!()).await.expect("65 files");
     assert!(matches!(
         store

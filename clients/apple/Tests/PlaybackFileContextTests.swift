@@ -76,9 +76,45 @@ final class PlaybackFileContextTests: XCTestCase {
             do { _ = try await fetch(base, mutate: change); XCTFail("accepted mismatched file reference") } catch {}
         }
     }
+    func testSharedFullQueryVocabularyAndTranslatedMediaCannotAcquireAuthority() async throws {
+        Session.shared.setCredentials(origin: "https://b.test", token: "fixture-bearer")
+        let context = try await fetch(base)
+        XCTAssertThrowsError(try PlaybackFileContext.localCall(7, context: context))
+        let bound = try context.withSession("44444444-4444-4444-8444-444444444444")
+        let fields = ["client": "android", "device": "Native client", "profile": "android-directplay-any",
+                      "vcodec": "hevc,h264", "vmaxheight": "hevc:2160,h264:1080", "acodec": "aac,eac3",
+                      "container": "mkv,mp4", "maxheight": "2160", "hdr": "1", "dv": "1", "dvhls": "1",
+                      "hdr10t": "1", "dvprofile": "5,8", "start": "12.5", "audio": "2", "audio_offset_ms": "-100"]
+        let path = try bound.path("stream.mp4", query: fields.map { URLQueryItem(name: $0.key, value: $0.value) })
+        let parameters = URLComponents(string: path)!.queryItems!
+        for (key, value) in fields { XCTAssertEqual(parameters.first { $0.name == key }?.value, value) }
+        XCTAssertEqual(try bound.translatedDeliveryPath(path), path)
+        for value in ["https://a.test" + path, "/api/v1/files/7/direct", base + "/direct?token=x", base + "/direct?session=55555555-5555-4555-8555-555555555555", base + "/stream.mp4?achannels=6", base + "/stream.mp4?audio=1&audio=2"] {
+            XCTAssertThrowsError(try bound.translatedDeliveryPath(value))
+        }
+        XCTAssertThrowsError(try bound.path("decision", query: [URLQueryItem(name: "upstreamURL", value: "https://a.test")]))
+    }
+    func testActualLocalAPICallersPreserveExactIDsAndRejectSharedFallback() async throws {
+        Session.shared.setCredentials(origin: "https://b.test", token: "fixture-bearer")
+        let shared = try await fetch(base)
+        let config = URLSessionConfiguration.ephemeral; config.protocolClasses = [FileContextHTTP.self]
+        let api = PlurxAPI(origin: "https://b.test", testTransport: URLSession(configuration: config))
+        let id = 9_007_199_254_740_993
+        let context = try PlaybackFileContext.local(id)
+        do { _ = try await api.pgsOverlayManifest(fileId: id, trackIndex: 2, fileContext: context) } catch {}
+        XCTAssertEqual(FileContextHTTP.lastRequest?.url?.path, "/api/v1/files/9007199254740993/subs/2/overlay.json")
+        do { _ = try await api.createHlsSession(fileId: id, body: CreateSessionRequest(playbackId: "44444444-4444-4444-8444-444444444444"), fileContext: context) } catch {}
+        XCTAssertEqual(FileContextHTTP.lastRequest?.url?.path, "/api/v1/files/9007199254740993/hls/sessions")
+        FileContextHTTP.lastRequest = nil
+        do { _ = try await api.pgsOverlayManifest(fileId: id, trackIndex: 2, fileContext: shared); XCTFail("Shared became Local") } catch {}
+        XCTAssertNil(FileContextHTTP.lastRequest)
+    }
     func testLocalExactIDsAndClosedResources() throws {
         XCTAssertEqual(try PlaybackFileContext.local(Int64.max.description).path("direct"), "/api/v1/files/9223372036854775807/direct")
         for id in ["01", "-1", "9223372036854775808", "1.0", "1/2"] { XCTAssertThrowsError(try PlaybackFileContext.local(id)) }
+        let decoded = try JSONDecoder().decode(MediaFile.self, from: Data("{\"id\":9007199254740993}".utf8))
+        XCTAssertEqual(try PlaybackFileContext.local(decoded.id).path("direct"), "/api/v1/files/9007199254740993/direct")
+        XCTAssertThrowsError(try PlaybackFileContext.localCall(7, context: PlaybackFileContext.local(decoded.id)))
         let context = try PlaybackFileContext.local(7)
         for resource in ["../direct", "direct?token=x", "//a.test", "subs/1/../2", "hls/foreign/status"] {
             XCTAssertThrowsError(try context.path(resource))

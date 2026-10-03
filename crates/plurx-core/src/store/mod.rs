@@ -25,6 +25,8 @@ pub mod sharing_catalogue_details;
 pub use sharing_catalogue_details::SharingSourceDetailsStore;
 pub mod sharing_file_locators;
 pub use sharing_file_locators::SharingFileLocatorStore;
+pub mod sharing_source_sessions;
+pub use sharing_source_sessions::SharingSourceSessionStore;
 pub mod classification;
 #[cfg(feature = "hiqlite-store")]
 mod hiqlite_sharing;

@@ -2667,6 +2667,89 @@ Source schema installation, revision-key initialization, capability advertisemen
 receiver body authority/cache/artwork/Continue Watching and S5 delivery remain
 open. This checkpoint does not complete S4 or qualify an admission write.
 
+#### S4 receiver body scope and bounded metadata cache (candidate, open)
+
+The candidate adds POST /sharing/v1/current-scope as an authenticated control
+operation. Its closed 32 KiB request binds the actual grant credential and
+recipient to the expected Source UUID/epoch, at most 64 library IDs, 200
+library/item tuples and 64 library/item/file tuples. One consistent query
+checks every current effective tuple and importing=0; the real closed catalogue
+member floor is checked before and after. The response contains only a current
+authority boolean. It proves neither cached bytes/revisions nor worker or write
+admission. Source control admission is a separate nonqueued pool of 32 permits,
+with a one-second deadline including body reads. No receipt, MAC key, schema
+initializer or capability advertisement is added.
+
+Receiver metadata bodies capture only a hashed local login and bounded authority
+references. A read-only Store query checks the current token/user, idle-expiry
+policy, import lifecycle, Source/epoch, claim/grant and effective assignments;
+monitor reads never renew last_seen_at. Assignment additions and endpoint refresh
+may advance counters while preserving captured effective tuples; generation
+rewind, identity/lifecycle replacement or a lost assignment refuses the proof.
+The control client reloads the current sealed credential and approved endpoints,
+verifies TLS SPKI and Source identity before sending credentials, and checks
+current Source scope. Its whole operation has a one-second deadline and a
+separate 32-permit nonqueued admission pool. Approved numeric hints now race
+bounded Quad100 resolution rather than waiting behind its one-second lookup.
+Each endpoint permits at most four distinct numeric targets, sixteen overall;
+DNS cannot duplicate an in-flight hint or add a generic fallback. Losing dials
+and connection drivers remain owned and are cancelled.
+
+Receiver authority is checked before bounded 4 MiB serialization and again at
+accepted-body admission. A global pool bounds receiver monitors to 32, and the
+accepted connection retains the established 32-monitor registry bound. Current
+login/import/assignment and Source grant/item/file checks run once per second,
+with a one-second deadline for the whole proof. Failures cancel the accepted
+connection, including a writer blocked by HTTP/1 backpressure or HTTP/2 windows.
+Monitors remain owned until actual connection completion; body drop, another
+stream's flush or a timer is not an EOS witness. HTTP/2 cancellation also closes
+unrelated streams on that connection.
+
+The receiver metadata cache charges serialized payload plus conservative entry
+overhead against 32 MiB, permits at most 2048 entries and uses LRU eviction and
+an absolute 30-second insertion TTL. Its key separates the current B user,
+import/Source/epoch/claim/grant and all lifecycle/assignment/endpoint generations
+plus the complete request and a digest of the closed received bytes (including
+revisions and observed scope/catalogue counters). Every lookup still performs the full fresh pinned
+catalogue/details read and current assignment checks. Matching bytes can reuse
+a cached decode; changed bytes replace the entry. Failed or unavailable fresh
+reads cannot serve cached content. The new scope boolean deliberately cannot
+replace that byte-freshness evidence.
+
+Native Source HTTP and typed control-response fixtures pass, including recipient,
+foreign Source/grant/tuple refusal, capacity cleanup, oversized bodies and closed
+response parsing. The current Source scope query passed against actual three
+Hiqlite voters (9.03 seconds, zero ignored). The native receiver fixture passed
+with actual blocked HTTP/1 and HTTP/2 DATA, login revocation, connection/data/
+permit cleanup and unchanged last_seen_at (5.05 seconds, zero ignored).
+An explicit Linux-only fixture retains the real CGNAT Source TLS/SPKI/identity
+path, both production routers and accepted-connection servers. It covers Source
+grant/scope/item/file changes, B login/import/assignment loss, unavailable fresh
+reads with a populated cache, benign real credential rotation and assignment/
+endpoint expansion, a refused numeric target with a reachable approved hint,
+and collateral HTTP/2 stream closure. That fixture remains unqualified until
+executed from the committed candidate in the disposable CGNAT source-only loop;
+its ignored declaration is not acceptance evidence.
+
+Continue Watching grouping, scoped artwork/cache delivery, import move history
+reconciliation, current skip analysis and S5-bound progress writes remain open.
+The current cache does not provide offline fallback, and the scope check does
+not qualify playback, file locators, schema installation or promotion.
+
+The final native source passed 66 core sharing units (35.96 seconds), 26 daemon
+sharing units (18.93 seconds), the receiver authority contract across SQLite
+and actual three-voter Hiqlite (9.30 seconds), and the expanded replicated
+file/scope/import-fence contract (9.07 seconds), each with zero ignored.
+Commands use pinned Rust 1.97.1 and `--locked --offline`: `cargo test -p
+plurx-core --features hiqlite-contract-tests --lib sharing_`; `cargo test -p
+plurxd --bin plurxd --features plurx-core/hiqlite-contract-tests sharing_`;
+and `cargo test -p plurx-core --features hiqlite-contract-tests --test
+store_contract` with `sharing_receiver_content_authority` and
+`sharing_catalogue_file_witness_three_voters`. Native all-target core/daemon
+Clippy with the same features and `-D warnings` passed; the tracked hook checks
+the final committed tree again. Docs-index tests passed. These native results
+exclude the explicit Linux CGNAT fixture and do not replace its execution.
+
 
 **Bounded-detail combined integration:** Source details checkpoint `7b85efec8`
 is integrated with the ownership, opaque observation and resource grammar
@@ -2681,6 +2764,22 @@ all four docs-index tests passed. These results qualify the combined candidate;
 Source playback admission, receiver cache authority and signed file delivery
 remain open.
 
+
+**Source reservation / receiver body combined integration:** Source binding
+checkpoints `1bb19f392` and `4a82e9cbc`, receiver scope/body checkpoint
+`5939dc2b2` and native caller checkpoint `8d7845b76` are integrated with the
+receiver locator crypto/census candidates. The combined core all-target check
+passed (26.16 seconds), and daemon all-target check passed (1m03s), both with
+pinned Rust 1.97.1 and the replicated contract feature.
+
+The fully qualified Source reservation, receiver login/import and Source file
+witness voter contracts passed individually (10.07, 9.26 and 9.03 seconds), each
+with a nonzero-test guard. All 87 sharing core units passed (52.90 seconds), and
+all 27 native-platform daemon sharing regressions passed (19.28 seconds), with
+zero ignored cases. Final feature-enabled all-target core/daemon Clippy passed
+with denied warnings (1m33s). The Linux-only real CGNAT fixture is outside those native
+results and must run against the committed combined source archive. No Shared
+producer start, locator exposure or session delivery route is enabled.
 
 ### 16.6 S5 resource grammar foundation
 
@@ -2837,3 +2936,20 @@ qualification receipt. Caller propagation, full resource/query vocabulary,
 PGS/reopen/prepared adapters, Shared UI/decision models and physical TV playback
 remain open. Current B details omit the locator, so the native Shared factories
 refuse that unavailable contract rather than selecting a Local file.
+
+**Native caller integration follow-up:** checkpoint `8d7845b76` propagates
+immutable file contexts through actual Apple/Android decision, HLS retry,
+progressive/remux, reopen and PGS callers. Captured context survives asynchronous
+work; current account generation and exact Local IDs are checked before requests
+and continuation. Shared contexts are refused before numeric Local decision,
+PGS, progress and next-item adapters. Full query vocabulary is translated through
+closed builders, and no Shared start is exposed.
+
+The checkpoint's exact source-only archive SHA-256 is
+`aa7fb6a40bb78d89611cb2a7d81a0cbe24ee6649f1a0c6933d52f56197070a45`.
+Its affected iOS 106 and tvOS 101 tests and builds passed with zero ignored cases.
+Android's identical native source tree passed 26 focused tests; the exact archive
+also passed fresh `lintDebug` (4m21s) with pinned Temurin 25.0.4.1 and Gradle 9.7.1.
+The normal hook passed. Integration has no native diff against that qualified
+checkpoint. These are caller/context regressions, not Shared producer, device
+playback, new Shared wire-model or UI qualification.
