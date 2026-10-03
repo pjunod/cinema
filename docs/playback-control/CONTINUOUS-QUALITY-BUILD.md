@@ -5278,3 +5278,33 @@ canonical initialization/early segment artifacts in a 16 MiB budget to
 improve first-switch publication binding. No runtime/result is assumed
 from older source. All 213 PR regression names statically resolved against
 the current tree; none executed. Final adversarial review remains deferred.
+
+
+### 10.182 · Type-only declaration and live fast-lane policy
+
+The post-fix JavaScript type check found one new diagnostic: the existing
+`continuousQualityBootstrap` field was absent from the Player typedef.
+Documentation-only `75ffc6c2f` declares its attachment-owned shape.
+`scripts/web-types --base 34252101807d5785651fe81ecead9997cf3360f7`
+then passed with the unchanged 515-diagnostic/83-key baseline. Normal hook
+passed. TypeScript transpilation with comments removed produced identical
+JavaScript to `1a84ce40a`, SHA256
+`95abd5e7551dfa47034a75432429834eea2af50675caff38e62da1f4f70092ea`
+for the annotated player script. The running executable remains explicitly
+labelled `1a84ce40a`; no newer binary identity is claimed.
+
+The live pipeline correction at the top of `docs/DEVELOPMENT_PIPELINE.md`
+explicitly supersedes older automatic full-qualification instructions:
+main-bound PRs use `.github/workflows/main-fast-lane.yml`, full CI is
+manual/release-triggered, and ready state starts the lane after review.
+The actual Main promotion gate requires affected fast-lane jobs and current
+head/base refs. This agrees with the human's fast-lane-only direction.
+No ready transition, unit execution, full-CI dispatch or final review ran.
+The required Fable pause after the final adversarial review still applies.
+
+The new-source full campaign has durably presented all fifteen manual
+changes and its initial actual Auto stage. Copied canonical first-window
+AVC/AAC independently decoded without errors; candidate 1080p→720p join
+at six seconds advances from 5.958333 to 6.0 seconds, exactly one frame
+at 24 fps. Actual appended-artifact binding awaits the final campaign
+receipt; physical output remains unmeasured. The full result is pending.
