@@ -40,6 +40,9 @@ mod sharing_principal_runtime;
 #[path = "store_contract/sharing_purpose_keys.rs"]
 mod sharing_purpose_keys;
 #[cfg(feature = "hiqlite-contract-tests")]
+#[path = "store_contract/sharing_receiver_sessions.rs"]
+mod sharing_receiver_sessions;
+#[cfg(feature = "hiqlite-contract-tests")]
 #[path = "store_contract/sharing_source_sessions.rs"]
 mod sharing_source_sessions;
 

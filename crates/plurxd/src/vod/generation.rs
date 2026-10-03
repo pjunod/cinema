@@ -46,9 +46,54 @@ pub(super) async fn spawn_generation(
     };
     let start_seconds = entry.start_ticks as f64 / f64::from(rendition.timescale);
     let recipe = &rendition.recipe;
-    debug_assert_eq!(recipe.encoding.is_some(), permit.is_some());
+    debug_assert_eq!(
+        recipe.encoding.is_some() || rendition.key.starts_with("source-"),
+        permit.is_some(),
+    );
     let attested = attested_source_setup(rendition);
-    let audio_source = match reopen_encoded_audio(rendition.source.as_ref(), recipe).await {
+    let source_current = if rendition.key.starts_with("source-") {
+        let Some(held) = rendition
+            .source
+            .as_ref()
+            .filter(|source| source.unchanged())
+        else {
+            record_failure(
+                shared,
+                rendition,
+                crate::playback_control::ProducerDecisionReason::SourceChanged,
+                "Source held descriptor changed before spawn".to_owned(),
+            );
+            return;
+        };
+        match crate::fragment_index_cluster::open_source_playback_fence(
+            &recipe.file,
+            Some(held.object_version()),
+        )
+        .await
+        {
+            Ok(current) => Some(current),
+            Err(cause) => {
+                record_failure(
+                    shared,
+                    rendition,
+                    crate::playback_control::ProducerDecisionReason::SourceChanged,
+                    cause,
+                );
+                return;
+            }
+        }
+    } else {
+        None
+    };
+    let audio_open = if source_current.is_some()
+        && recipe.encoding.is_some()
+        && !recipe.file.audio_streams.is_empty()
+    {
+        Ok(source_current)
+    } else {
+        reopen_encoded_audio(rendition.source.as_ref(), recipe).await
+    };
+    let audio_source = match audio_open {
         Ok(source) => source,
         Err(cause) => {
             record_failure(
@@ -64,7 +109,10 @@ pub(super) async fn spawn_generation(
     // the muxer now — `dvpipe` rewrites the RPUs inside the fragments this
     // process writes — so the producer is the producer it always was.
     let (child, child_job, stdout, stderr) = {
-        let args = recipe_pipe_args(recipe, start_seconds, attested);
+        let mut args = recipe_pipe_args(recipe, start_seconds, attested);
+        if rendition.key.starts_with("source-") && recipe.encoding.is_none() {
+            bound_source_copy_threads(&mut args);
+        }
         #[cfg(unix)]
         let descriptors = crate::producer_spawn::Descriptors::from_files(
             rendition.source.as_ref().map(|source| &source.handle),
@@ -317,6 +365,31 @@ pub(super) fn recipe_pipe_args(recipe: &Recipe, start_seconds: f64, attested: bo
         }
         args
     }
+}
+
+/// Input options apply to each opened demuxer; output audio and filter bounds
+/// prevent automatic parallelism. Ordinary Local copy argv is unchanged.
+pub(super) fn bound_source_copy_threads(args: &mut Vec<String>) {
+    let mut index = 0;
+    while index < args.len() {
+        if args[index] == "-i" {
+            args.splice(index..index, ["-threads".to_owned(), "1".to_owned()]);
+            index += 2;
+        }
+        index += 1;
+    }
+    args.splice(
+        0..0,
+        [
+            "-filter_threads".to_owned(),
+            "1".to_owned(),
+            "-filter_complex_threads".to_owned(),
+            "1".to_owned(),
+        ],
+    );
+    // These are output options and must precede the existing output target.
+    let output = args.len().saturating_sub(1);
+    args.splice(output..output, ["-threads:a".to_owned(), "1".to_owned()]);
 }
 
 pub(super) async fn reopen_encoded_audio(

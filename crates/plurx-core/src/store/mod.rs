@@ -29,6 +29,8 @@ pub mod sharing_file_locators;
 pub mod sharing_purpose_keys;
 pub use sharing_file_locators::SharingFileLocatorStore;
 pub use sharing_purpose_keys::SharingPurposeKeyStore;
+pub mod sharing_receiver_sessions;
+pub use sharing_receiver_sessions::SharingReceiverSessionStore;
 pub mod sharing_source_sessions;
 pub use sharing_source_sessions::SharingSourceSessionStore;
 pub mod classification;
@@ -4677,6 +4679,16 @@ pub trait MediaSessionStore: Send + Sync + 'static {
         Ok(None)
     }
 
+    /// B-only remote activation: current Local login/import proof and remote
+    /// side binding commit atomically with the ordinary blocked route.
+    async fn activate_receiver_media_session(
+        &self,
+        _authority: &crate::sharing_receiver_sessions::ReceiverSessionWriteAuthority,
+        _activation: &MediaSessionActivation,
+    ) -> Result<Option<MediaSessionActivationOutcome>, StoreError> {
+        Ok(None)
+    }
+
     /// Stage a successor that exists without being current.
     ///
     /// `Ok(None)` means the CAS lost, and there are exactly three ways to lose
@@ -5360,6 +5372,7 @@ pub trait Store:
     + SharingSourceArtworkStore
     + SharingSourceCatalogueStore
     + SharingSourceDetailsStore
+    + SharingReceiverSessionStore
     + SharingSourceSessionStore
     + SettingsStore
     + BackgroundJobStore
@@ -5405,6 +5418,7 @@ impl<T> Store for T where
         + SharingSourceArtworkStore
         + SharingSourceCatalogueStore
         + SharingSourceDetailsStore
+        + SharingReceiverSessionStore
         + SharingSourceSessionStore
         + SettingsStore
         + BackgroundJobStore

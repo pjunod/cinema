@@ -1,15 +1,17 @@
 "use strict";
 const fs=require("node:fs"),vm=require("node:vm"),assert=require("node:assert/strict"),{test}=require("node:test");
+const artworkSource=fs.readFileSync("crates/plurxd/src/web/pages/shared-artwork.js","utf8");
 const source=fs.readFileSync("crates/plurxd/src/web/pages/shared-libraries.js","utf8");
 const ref={import_id:"11111111-1111-4111-8111-111111111111",server_id:"22222222-2222-4222-8222-222222222222",catalogue_epoch:"33333333-3333-4333-8333-333333333333",library_id:"9007199254740993",item_id:"9223372036854775807"};
 function harness(read){
  const elements=new Map(),requests=[];
- const context=vm.createContext({TextDecoder,Uint8Array,URLSearchParams,AUTH_GENERATION:1,PAGE_RENDER_GENERATION:1,TOKEN:"login-a",API:"/api/v1",location:{hash:"#/shared"},
+ const context=vm.createContext({TextDecoder,Uint8Array,URLSearchParams,URL,AbortController,AUTH_GENERATION:1,PAGE_RENDER_GENERATION:1,TOKEN:"login-a",API:"/api/v1",location:{hash:"#/shared",href:"https://b.test/#/shared"},
   PLAYBACK_FILE_UUID:/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/,
   esc:v=>String(v).replaceAll("&","&amp;").replaceAll("<","&lt;").replaceAll('"',"&quot;"),fmtDur:String,
-  api:async(path)=>{requests.push(path);return read(path);},layoutChrome(){},setPagePhase(){},
+  api:async(path)=>{requests.push(path);const response=await read(path);Object.defineProperty(response,"url",{value:new URL("/api/v1"+path,"https://b.test").href});return response;},layoutChrome(){},setPagePhase(){},
   document:{getElementById(id){if(!elements.has(id))elements.set(id,{innerHTML:"",more:null,querySelector(){return this.more;},insertAdjacentHTML(where,html){this.innerHTML+=html;},appendChild(button){this.more=button;button.remove=()=>{this.more=null;};}});return elements.get(id);},createElement(){return {dataset:{}};}}
  });
+ vm.runInContext(artworkSource,context);
  vm.runInContext(source+"\nthis.shared={id:sharedCatalogueId,key:sharedCatalogueGroupKey,href:sharedCatalogueHref,route:sharedCatalogueRoute,item:sharedCatalogueItemHtml,read:sharedCatalogueRead,view:viewSharedCatalogue,page:sharedCatalogueLoadPage};",context);
  return {context,h:context.shared,elements,requests,capture(){return {generation:1,auth:1,token:"login-a",origin:"/api/v1",route:"#/shared"};}};
 }
@@ -87,4 +89,15 @@ test("Continue Watching unavailable groups never publish stale items or erase an
  });
  await fixture.h.view(1);assert.match(fixture.elements.get("shared-continue-0").innerHTML,/unavailable/);
  assert.match(fixture.elements.get("shared-continue-1").innerHTML,/Current title/);
+});
+test("Continue Watching preserves two assigned libraries from the same Source",async()=>{
+ const second={...ref,library_id:"7",item_id:"9"};
+ const fixture=harness(async path=>{
+  if(path==="/shared/libraries")return reply({libraries:[ref,second]});
+  if(path==="/shared/continue-watching?limit=200")return reply({groups:[ref]});
+  if(path.includes("continue-watching"))return reply({...ref,availability:"online",items:[ref,second].map((reference,n)=>({item:{source:"shared",reference,title:"Library title "+n,kind:"movie"}}))});
+  return reply({...ref,libraries:[{library_id:ref.library_id,name:"First"},{library_id:"7",name:"Second"}]});
+ });
+ await fixture.h.view(1);const html=fixture.elements.get("shared-continue-0").innerHTML;
+ assert.match(html,/Library title 0/);assert.match(html,/Library title 1/);assert.ok(!html.includes("Local"));
 });

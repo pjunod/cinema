@@ -185,6 +185,14 @@ fn validate_claim(
 }
 
 fn validate_activation(activation: &MediaSessionActivation) -> Result<(), StoreError> {
+    if serde_json::from_str::<serde_json::Value>(&activation.recipe_json)
+        .ok()
+        .is_some_and(|recipe| {
+            recipe.get("kind").and_then(serde_json::Value::as_str) == Some("remote_source")
+        })
+    {
+        return Err(crate::sharing::invalid());
+    }
     if !activation
         .principal
         .local_user_id()
@@ -853,15 +861,42 @@ fn validate_takeover(takeover: &MediaSessionTakeover) -> Result<(), StoreError> 
     }
 }
 
+fn apply_receiver_statements(
+    conn: &rusqlite::Connection,
+    statements: Vec<crate::store::sharing::Statement>,
+) -> Result<bool, StoreError> {
+    for (sql, values) in statements {
+        let (sql, values) = crate::store::sharing::ordered(&sql, values)?;
+        let values = values.into_iter().map(|value| match value {
+            crate::store::sharing::Value::Integer(value) => rusqlite::types::Value::Integer(value),
+            crate::store::sharing::Value::Text(value) => rusqlite::types::Value::Text(value),
+        });
+        if let Err(error) = conn.execute(&sql, rusqlite::params_from_iter(values)) {
+            let error = StoreError::from(error);
+            if crate::store::sharing_receiver_sessions::receiver_write_refused(&error) {
+                return Ok(false);
+            }
+            return Err(error);
+        }
+    }
+    Ok(true)
+}
+
 async fn activate_with_authority(
     store: &SqliteStore,
     activation: &MediaSessionActivation,
     authority: Option<&crate::sharing_source_sessions::SourceSessionWriteAuthority>,
+    receiver: Option<&crate::sharing_receiver_sessions::ReceiverSessionWriteAuthority>,
 ) -> Result<Option<MediaSessionActivationOutcome>, StoreError> {
     let activation = activation.clone();
     let authority = authority.cloned();
+    let receiver = receiver.cloned();
     store.with_conn(move |conn| {
             let tx = conn.unchecked_transaction()?;
+            if let Some(receiver) = receiver.as_ref() {
+                let Some(guard) = crate::store::sharing_receiver_sessions::receiver_activation_guard(receiver, &activation)? else { return Ok(None); };
+                if !apply_receiver_statements(&tx, vec![guard])? { return Ok(None); }
+            }
             let rebuilt=route_projection(&tx)?==PRINCIPAL_ROUTE_COLS;
             let source=authority.is_some();
             if source && !rebuilt { return Ok(None); }
@@ -943,6 +978,9 @@ async fn activate_with_authority(
                             route.principal == activation.principal && route.playback_id == activation.playback_id),
                     None => None,
                 };
+                if let Some(receiver) = receiver.as_ref() {
+                    if !apply_receiver_statements(&tx, crate::store::sharing_receiver_sessions::receiver_activation_binding(receiver, &activation)?)? { return Ok(None); }
+                }
                 tx.commit()?;
                 return Ok(Some(MediaSessionActivationOutcome { route, predecessor }));
             }
@@ -1257,6 +1295,9 @@ async fn activate_with_authority(
                     .optional()?,
                 None => None,
             };
+            if let Some(receiver) = receiver.as_ref() {
+                if !apply_receiver_statements(&tx, crate::store::sharing_receiver_sessions::receiver_activation_binding(receiver, &activation)?)? { return Ok(None); }
+            }
             tx.commit()?;
             Ok(Some(MediaSessionActivationOutcome { route, predecessor }))
         })
@@ -1335,6 +1376,7 @@ impl MediaSessionStore for SqliteStore {
                                 incarnation_id = ?2, owner_node_id = NULL,
                                 response_json = NULL, updated_at_ms = ?3
                           WHERE {owner_4} AND request_id = ?5
+                            AND NOT EXISTS(SELECT 1 FROM sharing_relay_upstream b WHERE b.incarnation_id=media_session_requests.incarnation_id)
                             AND (state = 'failed'
                               OR (state = 'starting' AND claim_expires_at_ms <= ?3))
                             AND request_fingerprint = ?6 AND playback_id = ?7
@@ -1561,7 +1603,23 @@ impl MediaSessionStore for SqliteStore {
         activation: &MediaSessionActivation,
     ) -> Result<Option<MediaSessionActivationOutcome>, StoreError> {
         validate_activation(activation)?;
-        activate_with_authority(self, activation, None).await
+        activate_with_authority(self, activation, None, None).await
+    }
+
+    async fn activate_receiver_media_session(
+        &self,
+        authority: &crate::sharing_receiver_sessions::ReceiverSessionWriteAuthority,
+        activation: &MediaSessionActivation,
+    ) -> Result<Option<MediaSessionActivationOutcome>, StoreError> {
+        validate_activation_shape(activation)?;
+        if !activation
+            .principal
+            .local_user_id()
+            .is_some_and(|id| id > 0)
+        {
+            return Err(crate::sharing::invalid());
+        }
+        activate_with_authority(self, activation, None, Some(authority)).await
     }
 
     async fn activate_source_media_session(
@@ -1576,7 +1634,7 @@ impl MediaSessionStore for SqliteStore {
         ) {
             return Err(crate::sharing::invalid());
         }
-        activate_with_authority(self, activation, Some(authority)).await
+        activate_with_authority(self, activation, Some(authority), None).await
     }
 
     async fn settle_media_session_activation(
@@ -4024,21 +4082,21 @@ impl MediaSessionStore for SqliteStore {
             tx.execute(
                 "DELETE FROM media_session_requests WHERE rowid IN (
                    SELECT rowid FROM media_session_requests
-                    WHERE state = 'starting' AND claim_expires_at_ms <= ?1
+                    WHERE NOT EXISTS(SELECT 1 FROM sharing_relay_upstream b WHERE b.incarnation_id=media_session_requests.incarnation_id) AND state = 'starting' AND claim_expires_at_ms <= ?1
                     ORDER BY claim_expires_at_ms, rowid LIMIT ?2)",
                 params![now_ms, MAINTENANCE_BATCH],
             )?;
             tx.execute(
                 "DELETE FROM media_session_requests WHERE rowid IN (
                    SELECT rowid FROM media_session_requests
-                    WHERE state = 'failed' AND updated_at_ms < ?1
+                    WHERE NOT EXISTS(SELECT 1 FROM sharing_relay_upstream b WHERE b.incarnation_id=media_session_requests.incarnation_id) AND state = 'failed' AND updated_at_ms < ?1
                     ORDER BY updated_at_ms, rowid LIMIT ?2)",
                 params![failed_cutoff, MAINTENANCE_BATCH],
             )?;
             tx.execute(
                 &format!("DELETE FROM media_session_requests WHERE rowid IN (
                    SELECT request.rowid FROM media_session_requests request
-                    WHERE request.state = 'resolved' AND request.updated_at_ms < ?1
+                    WHERE NOT EXISTS(SELECT 1 FROM sharing_relay_upstream b WHERE b.incarnation_id=request.incarnation_id) AND request.state = 'resolved' AND request.updated_at_ms < ?1
                       AND NOT EXISTS (SELECT 1 FROM media_sessions session
                         WHERE session.incarnation_id = request.incarnation_id
                           AND session.{owner_column} = request.{owner_column}
@@ -4052,7 +4110,7 @@ impl MediaSessionStore for SqliteStore {
                    SELECT lease.rowid FROM job_leases lease
                    JOIN media_sessions session
                      ON lease.resource = 'session:' || session.incarnation_id
-                    WHERE session.state = 'ended' AND session.updated_at_ms < ?1
+                    WHERE NOT EXISTS(SELECT 1 FROM sharing_relay_upstream b WHERE b.incarnation_id=session.incarnation_id) AND session.state = 'ended' AND session.updated_at_ms < ?1
                     ORDER BY session.updated_at_ms, lease.rowid LIMIT ?2)",
                 params![retained_cutoff, MAINTENANCE_BATCH],
             )?;
@@ -4069,7 +4127,7 @@ impl MediaSessionStore for SqliteStore {
             tx.execute(
                 "DELETE FROM media_sessions WHERE rowid IN (
                    SELECT rowid FROM media_sessions
-                    WHERE state = 'ended' AND updated_at_ms < ?1
+                    WHERE NOT EXISTS(SELECT 1 FROM sharing_relay_upstream b WHERE b.incarnation_id=media_sessions.incarnation_id) AND state = 'ended' AND updated_at_ms < ?1
                     ORDER BY updated_at_ms, rowid LIMIT ?2)",
                 params![retained_cutoff, MAINTENANCE_BATCH],
             )?;
