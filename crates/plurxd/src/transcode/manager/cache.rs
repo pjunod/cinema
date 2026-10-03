@@ -862,7 +862,11 @@ impl TranscodeManager {
         let cached_kind = SessionKind::Transcode {
             height: opts.target_height,
         };
-        let cached_codecs = transcoded_hls_codecs(opts.pipeline.output_grade(), opts.target_height);
+        let cached_codecs = transcoded_hls_codecs(
+            opts.pipeline.output_grade(),
+            opts.target_height,
+            plan.encoder(),
+        );
         let cached_probe_json = self.store.get_file_probe_json(file.id).await.ok().flatten();
         let frozen_presentation = FrozenHlsPresentation::from_contract(
             file.clone(),

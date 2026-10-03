@@ -916,11 +916,14 @@ impl TranscodeManager {
                     grade,
                     Some(encoding.plan.output_contract()),
                 );
-                let mut codecs = encoding
-                    .plan
-                    .output_contract()
-                    .hls_codecs()
-                    .unwrap_or_else(|| transcoded_hls_codecs(grade, height));
+                let mut codecs =
+                    encoding
+                        .plan
+                        .output_contract()
+                        .hls_codecs()
+                        .unwrap_or_else(|| {
+                            transcoded_hls_codecs(grade, height, encoding.plan.encoder())
+                        });
                 if file.audio_streams.is_empty() {
                     codecs.truncate(codecs.find(',').unwrap_or(codecs.len()));
                 }

@@ -82,8 +82,10 @@ plan; high, variable or unknown rates retain SDR with their original cadence. Do
 HDR subtitle burn are not advertised: burning subtitles still selects SDR
 composition, avoiding nominal subtitle white at the PQ peak. The HDR ceiling
 now asks for the selected route's own proof; plain QSV HDR no longer
-accidentally requires the unrelated Dolby QSV proof. The output remains the
-existing HEVC Main10/PQ client contract rather than a new client codec.
+accidentally requires the unrelated Dolby QSV proof. The output remains HEVC Main10/PQ. The isolated capture found VAAPI's
+actual non-packed constraint byte is `B0`, so its declaration is
+`hvc1.2.4.H120.B0`; software/QSV retain their existing measured declarations.
+The selected encoder now informs rolling, cached and VOD presentation facts.
 
 `encoder-calibration-args --grade hdr10 --family vaapi` exports the production
 encoder/upload arguments and 1080p plain-HDR filter for an isolated capture.
