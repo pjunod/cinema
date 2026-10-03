@@ -48,7 +48,11 @@ mod reading;
 mod scan;
 pub(crate) mod scan_identity;
 pub(crate) mod shared_library;
+// Candidate projection helpers remain unregistered until Source/B lifecycle
+// authority and actual delivery binding are qualified.
 pub(crate) mod sharing;
+#[allow(dead_code)]
+mod sharing_playback_wire;
 pub(crate) mod stream;
 pub(crate) mod subtitle_downloads;
 pub(crate) mod system;

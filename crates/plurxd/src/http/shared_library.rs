@@ -2554,11 +2554,13 @@ mod tests {
                             .execute("UPDATE files SET item_id=?1 WHERE id=1", [source.item + 1])
                             .expect("Source file move");
                     }
-                    5 => receiver
-                        .store
-                        .delete_token(&hash)
-                        .await
-                        .expect("B login revoke"),
+                    5 => {
+                        assert!(receiver
+                            .store
+                            .delete_token(&hash)
+                            .await
+                            .expect("B login revoke"));
+                    }
                     6 => receiver
                         .store
                         .disable_share_import(import, 2000)

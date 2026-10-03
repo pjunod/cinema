@@ -2879,6 +2879,36 @@ denied-warning Clippy passed (32.37 seconds). This qualifies those SQLite reads
 and crypto only; the candidate table is uninstalled, and replicated key/restart,
 clone and complete activation qualification remain open.
 
+**S5 complete engine-envelope projection candidate:**
+[response projection](../../crates/plurxd/src/http/sharing_playback_wire.rs)
+preserves the actual serialized decision fields across direct, remux and
+transcode. It replaces numeric file identity with its exact Source string and
+the complete detail-style compound reference, and translates only closed engine
+file URLs to the signed B file base. HLS starts retain quality/catalogue, ladder,
+VOD, timing/origin, HDR/Dolby Vision, plan notes and actual control generation,
+epoch and lease fields while replacing session/playlist/control URLs with the
+ordinary B UUIDv4 namespace. PGS retains cue timing and geometry with string
+identity/full reference and closed relative generation/object names.
+
+Three focused regressions compare complete actual typed engine serialization
+before and after projection, including IDs above the JavaScript safe range,
+all decision methods, retained control epoch, URL/query/foreign-file refusals,
+PGS generation and geometry escape refusals, and invalid start timing. They
+passed with zero ignored cases (0.01 seconds). The projection module has no
+registered routes. Pinned feature-enabled daemon all-target check passed
+(50.62 seconds), and final all-target Clippy passed with denied warnings (1m33s).
+The projection module has no
+registered routes and grants no current viewer, Source, worker or delivery
+authority. Peer decision decoding, current timeline/analysis proof, session
+binding and actual relay/resource publication remain open.
+
+The first exact combined Linux archive (`352b5644a`, SHA-256
+`3e9008b55953063eb64f0cbdee2e5b7d1745aa208f5b6bb109ec1d5642f5b7b1`)
+failed compilation in its Linux-only fixture because token deletion's boolean
+was used as a unit match arm. The fixture now asserts successful token deletion
+and yields unit. That archive has no Linux runtime qualification; the corrected
+committed tree must be archived and executed again before any such claim.
+
 ### 16.7 S6 file-context integration foundation
 
 The verified parallel checkpoint `4865de285` is integrated after catalogue
@@ -2953,3 +2983,20 @@ also passed fresh `lintDebug` (4m21s) with pinned Temurin 25.0.4.1 and Gradle 9.
 The normal hook passed. Integration has no native diff against that qualified
 checkpoint. These are caller/context regressions, not Shared producer, device
 playback, new Shared wire-model or UI qualification.
+
+**Native Shared wire-model candidate:** integrated checkpoint `5d42f292c`
+adds separate, lossless Shared decision/start envelopes and string-ID PGS
+models, plus a typed Local/Shared subject. Validation binds all import/Source/
+epoch/library/item/file/revision fields to the captured current-account context.
+Descriptive file URLs do not confer media authority; actual delivery still
+requires the bound B UUIDv4 session and its exact playlist/control namespace.
+The models preserve the full received B payload without interpreting private
+recipe-looking metadata as authority, and retain the PGS containment checks.
+
+The exact native checkpoint passed 10 iOS, 10 tvOS and 10 Android tests with
+zero ignored cases, Android lint (4m16s) and its normal hook. The source-only
+archive SHA-256 is
+`53a9c0b966fd9f1eed0f6fd232348a445d025efc13e973e0671d20c7ddcece8d`.
+Integration has no native source diff against that qualified tree. Shared
+navigation, settings, playback starts and progress/history remain separate
+unfinished integrations.
