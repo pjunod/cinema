@@ -1,6 +1,6 @@
 # Video quality programme — measured improvements and their build order
 
-**Status:** plan merged as PR #758; first three implementation lanes active
+**Status:** active consolidated implementation; batch workflow authorized 2026-10-02
 · **Written:** 2026-10-02 · **Source census:** `4fa50b79e`
 
 Companion to [the execution ledger](VIDEO-QUALITY-STATUS.md), which records
@@ -58,11 +58,12 @@ or deployment claims match today's fleet. Capture the actual binary and route.
 
 ## 3. Parallel ownership — one integration branch
 
-Merge this documentation-only PR into `main` first. Create
-`effort/video-quality` from that merged main. Task branches use
-`codex/video-quality-<task>` and target the current effort. The coordinator owns
-integration, rebases, the index and shared documentation; workers use isolated
-checkouts and never modify the user's working tree.
+The planning and first evidence documents are merged into `main`. Following
+Paul's workflow override, implementation now collects logical commits on
+`codex/video-quality-batch` for one main-bound PR. Workers use independent
+clones and hand commits to the coordinator, who owns integration, the index,
+shared documentation, the final review and fast-lane receipt. Earlier task
+PRs are superseded once their source is retained on the batch branch.
 
 | Lane | Initial exclusive files | Shared integration boundary |
 |---|---|---|
@@ -219,18 +220,39 @@ from Paul and are not silently converted to pass results.
 
 ## 8. Integration, evidence and limits
 
-Use normal commits and the tracked hook. Run the smallest meaningful regression
-before push; record its command and `Regression-Test:` lines in behavioral task
-PRs and landing commit messages. Use `fix(` or `perf(` for user-visible behavior.
-Task PRs target the effort; dispatch and pass the required effort development
-gate. Freeze task merges for promotion, merge current main, and qualify the
-exact resulting candidate under the repository's current promotion rules.
-Main-bound PRs receive exactly one adversarial review, its fixes, then the
-ready fast lane; no merge happens on a stale or missing required result.
+**Workflow amendment, 2026-10-03:** Paul explicitly replaced this effort's
+per-task tests, task PRs/effort gates and full promotion qualification with a
+single larger batch PR. This is an effort-specific override of the earlier
+AGENTS/development-pipeline rules, not a change to unrelated work. Retain pinned
+Rust compile checks and normal logical commits; combine work on
+`codex/video-quality-batch` in an independent agent-owned Forgejo clone.
 
-The initial documentation PR is ordinary docs-only work into main. It does not
-change settings, recipes, production service state or the rules for later code.
-Merge authority is granted by Paul's request; deployment is a separate action.
+Build the whole batch before obtaining its one adversarial agent review.
+Address the findings, then run the fast lane. Maintain a per-check receipt:
+every required check must pass on the code being merged. Retry failed checks
+individually; do not replay successful suites just because another check failed.
+Compilation is still established before Rust changes and never delegated to CI
+as the first compiler. Broader pre-existing unit failures belong to the separate
+repair process; record them accurately instead of expanding this programme.
+
+Use `fix(` or `perf(` for user-visible changes. Preserve the applicable
+`Regression-Test:` lines in the batch description and landing message. Do not
+merge before its required fast-lane results are green. Prior measurement/tool
+reviews and tests remain historical evidence, not substitutes for the final
+batch review. Superseded small PRs close only after their source is retained in
+the batch. No additional per-task CI campaign is dispatched.
+
+The existing ledger remains the status page. Each implemented change names its
+concrete cause, the existing architectural owner it extends, the measured or
+structural cost removed, outstanding evidence, and decisions made without Paul.
+Do not add independent playback watchdogs, retry loops, feature gates, or hidden
+readiness switches. An unavoidable optional control belongs in Developer;
+readiness is advisory and cannot reject or override the saved enable choice.
+
+Never use Paul's checkout. Agent clones have no alternates or dependencies on
+it. Retain source/evidence in the remote batch before removing owned temporary
+clones, containers, fixtures, logs and compiler scratch; do not remove another
+process's files. Merge is authorized; production deployment remains separate.
 
 **Non-goals:** AI enhancement, sharpening by default, motion interpolation,
 full pre-encoding of the library, a new playback owner, a second independent

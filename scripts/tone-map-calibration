@@ -1,0 +1,277 @@
+#!/usr/bin/env python3
+"""Offline authored-signal tone-map comparisons, never perceptual qualification."""
+
+import argparse
+from array import array
+import hashlib
+import itertools
+import json
+import math
+from pathlib import Path
+import re
+import struct
+import subprocess
+import sys
+import time
+import zlib
+
+WIDTH, HEIGHT, FRAMES, FPS = 512, 128, 8, 4
+CASES = ("pq-absent", "pq-1000", "pq-4000", "hlg")
+VARIANTS = ("historical", "current", "current-no-dither")
+SDR = {"width": WIDTH, "height": HEIGHT, "pix_fmt": "yuv420p",
+       "color_range": "tv", "color_space": "bt709",
+       "color_transfer": "bt709", "color_primaries": "bt709"}
+
+
+def sha256(path):
+    with Path(path).open("rb") as source:
+        return hashlib.file_digest(source, "sha256").hexdigest()
+
+
+def validate_source_metadata(payload, case):
+    records = [*payload.get("streams", []), *payload.get("frames", [])]
+    values = [entry.get("max_content") for record in records for entry in record.get("side_data_list", [])
+              if entry.get("side_data_type") == "Content light level metadata"]
+    expected = {"pq-1000": 1000, "pq-4000": 4000}.get(case)
+    if (expected is None and values) or (expected is not None and (not values or any(v != expected for v in values))):
+        raise ValueError("decoded MaxCLL does not match the authored metadata case")
+
+
+def production_binding(source):
+    text = source.read_text()
+    match = re.search(r'"(zscale=tin=\{tin\}:min=bt2020nc:pin=bt2020:t=linear:npl=100,format=gbrpf32le,.*?)"', text, re.S)
+    if not match:
+        raise ValueError("production CPU tone-map graph could not be located")
+    template = re.sub(r"\\\n\s*", "", match.group(1))
+    for case in CASES:
+        expected = template.format(tin="arib-std-b67" if case == "hlg" else "smpte2084", peak=40 if case == "pq-4000" else 10)
+        if graph(case, "current").rsplit(",scale=", 1)[0] != expected:
+            raise ValueError("calibration current graph drifted from production source")
+    return {"file": "crates/plurx-core/src/transcode/mod.rs", "sha256": sha256(source), "template": template}
+
+
+def pq_code(nits):
+    """ST2084 inverse EOTF; neutral RGB maps directly to limited Y'."""
+    p = (nits / 10000) ** (2610 / 16384)
+    return round(64 + 876 * ((3424 / 4096 + 2413 / 128 * p) /
+                            (1 + 2392 / 128 * p)) ** (2523 / 32))
+
+
+def hlg_code(scene):
+    """ARIB STD-B67 OETF, scene-relative; no display-nit claim."""
+    a, b, c = 0.17883277, 0.28466892, 0.55991073
+    signal = math.sqrt(3 * scene) if scene <= 1 / 12 else a * math.log(12 * scene - b) + c
+    return round(64 + 876 * signal)
+
+
+def authored_frame(case):
+    # Three horizontal neutral panels: wide, near-black, narrow mid-tone.
+    # These cannot prove chromatic gamut mapping or skin-tone fidelity.
+    peak = 4000 if case == "pq-4000" else 1000
+    rows = []
+    for y in range(HEIGHT):
+        for x in range(WIDTH):
+            t = x / (WIDTH - 1)
+            if case == "hlg":
+                value = t if y < 43 else (0.01 * t if y < 86 else 0.2 + 0.002 * t)
+                rows.append(hlg_code(value))
+            else:
+                value = peak * t if y < 43 else (10 * t if y < 86 else 20 + t)
+                rows.append(pq_code(value))
+    values = array("H", rows + [512] * (WIDTH * HEIGHT // 2))
+    if sys.byteorder != "little":
+        values.byteswap()
+    return values.tobytes()
+
+
+def graph(case, variant):
+    trc = "arib-std-b67" if case == "hlg" else "smpte2084"
+    linear = f"zscale=tin={trc}:min=bt2020nc:pin=bt2020:t=linear:npl=100,format=gbrpf32le"
+    scale = "scale=-2:'min(1080,ih)'"
+    if variant == "historical":
+        return f"{scale},{linear},tonemap=tonemap=hable:desat=0,zscale=p=bt709:t=bt709:m=bt709:r=tv,format=yuv420p"
+    peak = 40 if case == "pq-4000" else 10
+    dither = ":dither=error_diffusion" if variant == "current" else ""
+    return (f"{linear},zscale=p=bt709,tonemap=tonemap=hable:desat=0:peak={peak},"
+            f"zscale=t=bt709:m=bt709:r=tv{dither},format=yuv420p,{scale}")
+
+
+def validate_decoded(payload, expected):
+    streams, frames = payload.get("streams", []), payload.get("frames", [])
+    if len(streams) != 1 or len(frames) != FRAMES:
+        raise ValueError("one stream and exactly eight decoded frames required")
+    for record in [streams[0], *frames]:
+        # Matroska may omit container transfer/primaries although every decoded
+        # frame proves them. Missing container color tags are not invented;
+        # present contradictions and missing decoded tags still refuse.
+        if any(record.get(k) != v for k, v in expected.items()
+               if record is not streams[0] or k in record or k in ("width", "height", "pix_fmt")):
+            raise ValueError("decoded geometry or color tags do not match the declared grade")
+    grid = [float(f["best_effort_timestamp_time"]) for f in frames]
+    if grid != [n / FPS for n in range(FRAMES)]:
+        raise ValueError("decoded frame grid changed")
+    return grid
+
+
+def luma_readings(raw):
+    frame_bytes = WIDTH * HEIGHT * 3 // 2
+    if len(raw) != frame_bytes * FRAMES:
+        raise ValueError("decoded raw byte count differs from the complete frame grid")
+    readings = []
+    for n in range(FRAMES):
+        y = raw[n * frame_bytes:n * frame_bytes + WIDTH * HEIGHT]
+        histogram = [0] * 256
+        for value in y:
+            histogram[value] += 1
+        panels = {}
+        for name, row in (("wide", 21), ("near-black", 64), ("narrow-mid", 107)):
+            line = y[row * WIDTH:(row + 1) * WIDTH]
+            panels[name] = {"distinct_codes": len(set(line)), "longest_equal_run": max(
+                sum(1 for _ in group) for _, group in itertools.groupby(line))}
+        readings.append({"frame": n, "timestamp": n / FPS, "minimum": min(y),
+                         "maximum": max(y), "mean": sum(y) / len(y),
+                         "at_or_below_16_fraction": sum(histogram[:17]) / len(y),
+                         "at_or_above_235_fraction": sum(histogram[235:]) / len(y),
+                         "histogram": histogram, "panels": panels})
+    return readings
+
+
+def difference(a, b):
+    if len(a) != len(b) or not a:
+        raise ValueError("unmatched decoded comparison")
+    mse = sum((x - y) ** 2 for x, y in zip(a, b)) / len(a)
+    return {"domain": "8-bit YUV code difference, historical is not ground truth",
+            "mse": mse, "psnr_db": "identical" if mse == 0 else 10 * math.log10(255 ** 2 / mse)}
+
+
+def png(path, width, height, rgb):
+    def chunk(kind, data):
+        return struct.pack(">I", len(data)) + kind + data + struct.pack(">I", zlib.crc32(kind + data))
+    scan = b"".join(b"\0" + rgb[y * width * 3:(y + 1) * width * 3] for y in range(height))
+    path.write_bytes(b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", struct.pack(">IIBBBBB", width, height, 8, 2, 0, 0, 0)) +
+                     chunk(b"IDAT", zlib.compress(scan)) + chunk(b"IEND", b""))
+
+
+class Runner:
+    def __init__(self, ffmpeg, ffprobe, out, prefix=()):
+        self.ffmpeg, self.ffprobe, self.out = ffmpeg, ffprobe, out
+        self.prefix = list(prefix)
+        self.commands = []
+
+    def run(self, argv):
+        index = len(self.commands)
+        started = time.monotonic()
+        command = {"argv": self.prefix + argv, "exit": None}
+        self.commands.append(command)
+        try:
+            with (self.out / f"command-{index:03d}.stdout").open("wb") as stdout, (self.out / f"command-{index:03d}.stderr").open("wb") as stderr:
+                result = subprocess.run(self.prefix + argv, stdout=stdout, stderr=stderr, timeout=45)
+                command["exit"] = result.returncode
+        except Exception as error:
+            command["failure"] = str(error)
+            raise
+        finally:
+            command["elapsed_seconds"] = time.monotonic() - started
+        if result.returncode:
+            raise ValueError(f"tool failed; see command-{index:03d}.stderr")
+        if (self.out / f"command-{index:03d}.stdout").stat().st_size > 4 * 1024 * 1024:
+            raise ValueError("tool output exceeded allowance")
+        return (self.out / f"command-{index:03d}.stdout").read_bytes()
+
+    def ff(self, args):
+        return self.run([str(self.ffmpeg), "-hide_banner", "-loglevel", "error", "-nostdin", "-n", "-threads", "1", "-filter_threads", "1", *args])
+
+    def probe(self, path):
+        return json.loads(self.run([str(self.ffprobe), "-v", "error", "-select_streams", "v:0", "-show_streams", "-show_frames", "-of", "json", str(path)]))
+
+
+def calibrate(ffmpeg, ffprobe, out, prefix=(), production_source=None):
+    out.mkdir()  # Existing evidence is never overwritten.
+    runner = Runner(ffmpeg, ffprobe, out, prefix)
+    report = {"schema": 1, "completed": False, "kind": "authored-neutral-tone-map-comparison", "cases": [],
+              "limitations": ["Historical output is not a correctness reference", "Neutral signals do not qualify gamut, skin tones, real titles, GPUs or physical displays", "Tiny-run timings are diagnostics, not performance evidence"],
+              "tools": {},
+              "authored_signal": {"pq": "ST2084 inverse EOTF in absolute nits", "hlg": "ARIB STD-B67 OETF, scene relative", "panels_top_to_bottom": ["wide", "near black", "narrow mid-tone"]}}
+    try:
+        report["production_binding"] = production_binding(production_source or Path(__file__).resolve().parents[1] / "crates/plurx-core/src/transcode/mod.rs")
+        for name, executable in (("ffmpeg", ffmpeg), ("ffprobe", ffprobe)):
+            # A container prefix hashes the real executable in that namespace,
+            # never a host wrapper pretending to be the FFmpeg binary.
+            digest = runner.run(["sha256sum", str(executable)]).decode().split()[0] if prefix else sha256(executable)
+            if len(digest) != 64 or any(c not in "0123456789abcdef" for c in digest):
+                raise ValueError("invalid executable identity")
+            report["tools"][name + "_sha256"] = digest
+        report["tools"]["ffmpeg_version"] = runner.run([str(ffmpeg), "-version"]).decode()
+        for case in CASES:
+            raw_source, source = out / f"{case}.yuv", out / f"{case}.mkv"
+            raw_source.write_bytes(authored_frame(case) * FRAMES)
+            trc = "arib-std-b67" if case == "hlg" else "smpte2084"
+            params = f"lossless=1:pools=none:frame-threads=1:log-level=error:colorprim=bt2020:transfer={trc}:colormatrix=bt2020nc:range=limited"
+            if case in ("pq-1000", "pq-4000"):
+                params += f":max-cll={1000 if case == 'pq-1000' else 4000},100"
+            runner.ff(["-f", "rawvideo", "-pixel_format", "yuv420p10le", "-video_size", f"{WIDTH}x{HEIGHT}", "-framerate", str(FPS), "-i", str(raw_source), "-c:v", "libx265", "-x265-params", params, "-color_range", "tv", "-colorspace", "bt2020nc", "-color_primaries", "bt2020", "-color_trc", trc, str(source)])
+            raw_source.unlink()
+            source_probe = runner.probe(source)
+            validate_decoded(source_probe, dict(SDR, pix_fmt="yuv420p10le", color_space="bt2020nc", color_transfer=trc, color_primaries="bt2020"))
+            validate_source_metadata(source_probe, case)
+            record = {"name": case, "source_sha256": sha256(source), "source_probe": source_probe, "variants": {}}
+            report["cases"].append(record)
+            decoded, rgb = {}, {}
+            for variant in VARIANTS:
+                target, raw, pixels = (out / f"{case}-{variant}{suffix}" for suffix in (".mkv", ".yuv", ".rgb"))
+                runner.ff(["-i", str(source), "-vf", graph(case, variant), "-c:v", "libx264", "-threads", "1", "-qp", "0", "-pix_fmt", "yuv420p", "-color_range", "tv", "-colorspace", "bt709", "-color_primaries", "bt709", "-color_trc", "bt709", str(target)])
+                probe = runner.probe(target)
+                validate_decoded(probe, SDR)
+                runner.ff(["-i", str(target), "-f", "rawvideo", "-pix_fmt", "yuv420p", str(raw)])
+                decoded[variant] = raw.read_bytes()
+                runner.ff(["-i", str(target), "-f", "rawvideo", "-pix_fmt", "rgb24", str(pixels)])
+                rgb[variant] = pixels.read_bytes()
+                if len(rgb[variant]) != WIDTH * HEIGHT * 3 * FRAMES:
+                    raise ValueError("RGB capture frame count differs")
+                record["variants"][variant] = {"sha256": sha256(target), "graph": graph(case, variant), "decoded_probe": probe, "luma": luma_readings(decoded[variant])}
+                raw.unlink()
+                pixels.unlink()
+            record["historical_to_current"] = difference(decoded["historical"], decoded["current"])
+            record["no_dither_to_current"] = difference(decoded["current-no-dither"], decoded["current"])
+            # Rows: historical/current/no-dither; columns: frames 1/4/7.
+            # Keep original resolution, no interpolation that can hide banding.
+            sheet = bytearray()
+            for variant in VARIANTS:
+                for y in range(HEIGHT):
+                    for n in (1, 4, 7):
+                        offset = (n * WIDTH * HEIGHT + y * WIDTH) * 3
+                        sheet.extend(rgb[variant][offset:offset + WIDTH * 3])
+            png(out / f"{case}-contact.png", WIDTH * 3, HEIGHT * 3, sheet)
+            record["contact_sheet"] = {"file": f"{case}-contact.png", "rows": VARIANTS, "columns_seconds": [0.25, 1, 1.75]}
+        report["completed"] = True
+    except Exception as error:
+        report["failure"] = str(error)
+        raise
+    finally:
+        for path in out.iterdir():
+            if path.suffix in (".rgb", ".yuv"):
+                path.unlink()
+        report["commands"] = runner.commands
+        (out / "report.json").write_text(json.dumps(report, indent=2, allow_nan=False) + "\n")
+    return report
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--ffmpeg", type=Path, required=True)
+    parser.add_argument("--ffprobe", type=Path, required=True)
+    parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument("--tool-prefix-json", default="[]", help='Optional argv prefix, e.g. ["docker", "exec", "owned-container"]. Mount the output path unchanged.')
+    parser.add_argument("--production-source", type=Path, help="Exact production transcode/mod.rs snapshot for graph drift validation")
+    args = parser.parse_args()
+    prefix = json.loads(args.tool_prefix_json)
+    if not isinstance(prefix, list) or any(not isinstance(arg, str) or not arg for arg in prefix):
+        parser.error("tool prefix must be an argv string array")
+    ffmpeg = args.ffmpeg if prefix else args.ffmpeg.resolve(strict=True)
+    ffprobe = args.ffprobe if prefix else args.ffprobe.resolve(strict=True)
+    report = calibrate(ffmpeg, ffprobe, args.output.resolve(), prefix, args.production_source)
+    print(json.dumps({"completed": report["completed"], "report": str(args.output / "report.json")}))
+
+
+if __name__ == "__main__":
+    main()
