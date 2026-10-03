@@ -5,3 +5,21 @@ version = 1
 # Bare names and suffixes are intentionally invalid because two targets can
 # expose the same function name.
 entries = []
+
+
+# Passing opt-in fixtures are a separate inventory from temporarily broken
+# tests. Their exact commands supply a disposable namespace; they are never
+# counted as known-red, and never qualify a production Tailscale topology.
+[[fixtures]]
+test = "crates/plurxd/src/http/mod.rs::http::tests::sharing_pinned_transport_recovers_committed_claim_and_rotation_after_restart"
+owner = "sharing"
+reason = "Pinned transport response-loss recovery requires an isolated numeric CGNAT fixture, not the host network."
+requires = "Linux disposable CGNAT namespace; PLURX_SHARING_FIXTURE_IP"
+command = "PLURX_SHARING_FIXTURE_IP=100.127.88.2 cargo test --locked -p plurxd --bin plurxd http::tests::sharing_pinned_transport_recovers_committed_claim_and_rotation_after_restart -- --ignored --exact --nocapture"
+
+[[fixtures]]
+test = "crates/plurxd/tests/sharing_daemon_restart.rs::sharing_separate_daemons_preserve_pending_pairing_and_rotation_across_restart"
+owner = "sharing"
+reason = "Separate shipped daemon processes require a disposable CGNAT namespace and persistent fixture stores."
+requires = "Unix disposable CGNAT namespace; PLURX_SHARING_FIXTURE_IP"
+command = "PLURX_SHARING_FIXTURE_IP=100.127.88.2 cargo test --locked -p plurxd --test sharing_daemon_restart sharing_separate_daemons_preserve_pending_pairing_and_rotation_across_restart -- --ignored --exact --nocapture"

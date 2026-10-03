@@ -8,6 +8,8 @@ from validation.known_red import (
     KnownRedError,
     ignored_tests,
     load_entries,
+    load_opt_in_fixtures,
+    validate_opt_in_fixtures,
     validate_entries,
     validate_listed_tests,
 )
@@ -55,11 +57,34 @@ class KnownRedContractTest(unittest.TestCase):
         # needs the pinned model files its ignore reason names.
         # K-08 M5 adds embed_thread_scaling, the inference thread-count
         # measurement behind EMBED_THREADS, which needs the same model files.
-        self.assertEqual(len(ignored), 20)
+        fixtures = load_opt_in_fixtures()
+        validate_opt_in_fixtures(fixtures, ignored, load_entries())
+        fixture_ids = {fixture["test"] for fixture in fixtures}
+        self.assertEqual(fixture_ids, {
+            "crates/plurxd/src/http/mod.rs::http::tests::sharing_pinned_transport_recovers_committed_claim_and_rotation_after_restart",
+            "crates/plurxd/tests/sharing_daemon_restart.rs::sharing_separate_daemons_preserve_pending_pairing_and_rotation_across_restart",
+        })
+        self.assertEqual(len([item for item in ignored if item.identity not in fixture_ids]), 20)
         self.assertTrue(all(item.reason for item in ignored))
         self.assertTrue(all(item.path in item.identity for item in ignored))
         self.assertTrue(all(item.cargo_name in item.identity for item in ignored))
         validate_entries(load_entries(), ignored, dt.date(2026, 9, 20))
+
+    def test_opt_in_fixture_is_explicit_and_separate_from_known_red(self):
+        ignored = (IgnoredTest("crates/example/src/lib.rs::held_case", "held_case", "namespace", "crates/example/src/lib.rs", 1),)
+        fixture = {"test": ignored[0].identity, "owner": "sharing", "reason": "namespace", "requires": "disposable network", "command": "cargo test -p example held_case -- --ignored --exact"}
+        validate_opt_in_fixtures((fixture,), ignored)
+        for invalid in (
+            {**fixture, "test": "held_case"},
+            {**fixture, "requires": ""},
+            {**fixture, "command": "cargo test -p example held_case"},
+        ):
+            with self.assertRaises(KnownRedError):
+                validate_opt_in_fixtures((invalid,), ignored)
+        with self.assertRaises(KnownRedError):
+            validate_opt_in_fixtures((fixture, fixture), ignored)
+        with self.assertRaisesRegex(KnownRedError, "known-red debt"):
+            validate_opt_in_fixtures((fixture,), ignored, (self._entry(ignored[0].identity),))
 
     def test_comments_and_raw_text_cannot_create_ignore_attributes(self):
         with tempfile.TemporaryDirectory() as directory:
