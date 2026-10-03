@@ -2718,6 +2718,31 @@ signed file locators, Range/416/file/subtitle resources, current-login and
 Source revocation cancellation, transport/resource budgets and real playback.
 
 
+**Actual-generator and file-resource grammar follow-up:** the closed file suffix
+parser now recognizes current decision/start, direct/progressive, VTT, PGS
+manifest/object and chapter thumbnail paths. Track/chapter indices are canonical
+and bounded; PGS generation/object digests keep their exact immutable grammar.
+It refuses authorities, traversal, encoded separators, queries embedded in a
+suffix and unknown resource forms. Authentication, immutable file/revision
+membership, query validation and B session delivery binding remain independent
+handler requirements; parsing a suffix grants none of them.
+
+The HLS validator now accepts literal backslashes in bounded subtitle metadata,
+which the actual master generator can emit, while every URI still rejects them.
+A daemon regression runs the actual master generator across SDR/HDR10/HLG/Dolby
+Vision, selected/forced/hearing-impaired subtitles, Unicode and quoted/comma
+names, all current diagnostic masters and actual subtitle timeline generation
+through segment sequence 100000. It preserves playlist bytes and refuses a URI
+containing the same backslash.
+
+On the combined `8cf6bfb24` base, pinned feature all-target core/daemon check
+passed (1m15s). The file suffix regression, all four existing HLS regressions
+and actual daemon generator regression passed with zero ignored cases. Final
+feature-enabled all-target Clippy with denied warnings passed (1m26s).
+This expands tested resource compatibility; no Shared relay/resource route,
+Source worker, file locator or response-publication authority is enabled.
+
+
 ### 16.7 S6 file-context integration foundation
 
 The verified parallel checkpoint `4865de285` is integrated after catalogue

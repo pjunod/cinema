@@ -31,6 +31,80 @@ pub struct SharingHlsResource {
     native: Option<u8>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SharingFileResourceKind {
+    Decision,
+    Start,
+    Direct,
+    Progressive,
+    Subtitle { index: u16 },
+    SubtitleManifest { index: u16 },
+    SubtitleObject { index: u16 },
+    ChapterThumbnail { index: u16 },
+}
+
+/// A file-relative suffix only. Authentication, exact file/revision membership
+/// and the optional B session binding are separate mandatory handler inputs.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SharingFileResource {
+    suffix: String,
+    kind: SharingFileResourceKind,
+}
+impl SharingFileResource {
+    pub fn parse(suffix: &str) -> Result<Self> {
+        if suffix.len() > 256 || !suffix.is_ascii() {
+            return Err(SharingResourceUnsupported);
+        }
+        let fields = suffix.split('/').collect::<Vec<_>>();
+        let index = |value: &str| -> Result<u16> {
+            let parsed = digits(value, 4095)?;
+            if parsed.to_string() != value {
+                return Err(SharingResourceUnsupported);
+            }
+            Ok(parsed as u16)
+        };
+        let digest = |value: &str| {
+            value.len() == 64
+                && value
+                    .bytes()
+                    .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+        };
+        let kind = match fields.as_slice() {
+            ["decision"] => SharingFileResourceKind::Decision,
+            ["hls", "sessions"] => SharingFileResourceKind::Start,
+            ["direct"] => SharingFileResourceKind::Direct,
+            ["stream.mp4"] => SharingFileResourceKind::Progressive,
+            ["subs", track] => SharingFileResourceKind::Subtitle {
+                index: index(track.strip_suffix(".vtt").unwrap_or(track))?,
+            },
+            ["subs", track, "overlay.json"] => SharingFileResourceKind::SubtitleManifest {
+                index: index(track)?,
+            },
+            ["subs", track, "overlay", generation, "objects", object]
+                if digest(generation) && object.strip_suffix(".png").is_some_and(digest) =>
+            {
+                SharingFileResourceKind::SubtitleObject {
+                    index: index(track)?,
+                }
+            }
+            ["chapters", chapter, "thumb"] => SharingFileResourceKind::ChapterThumbnail {
+                index: index(chapter)?,
+            },
+            _ => return Err(SharingResourceUnsupported),
+        };
+        Ok(Self {
+            suffix: suffix.to_owned(),
+            kind,
+        })
+    }
+    pub fn as_str(&self) -> &str {
+        &self.suffix
+    }
+    pub fn kind(&self) -> SharingFileResourceKind {
+        self.kind
+    }
+}
+
 fn digits(value: &str, maximum: u64) -> Result<u64> {
     if value.is_empty() || value.len() > 19 || !value.bytes().all(|b| b.is_ascii_digit()) {
         return Err(SharingResourceUnsupported);
@@ -186,7 +260,7 @@ fn attributes(raw: &str) -> Result<BTreeMap<&str, &str>> {
         };
         if value.is_empty()
             || value.len() > 2048
-            || value.contains(['"', '\\'])
+            || value.contains('"')
             || result.insert(key, value).is_some()
         {
             return Err(SharingResourceUnsupported);
@@ -390,6 +464,61 @@ pub fn validate_sharing_playlist(resource: &SharingHlsResource, bytes: &[u8]) ->
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn sharing_file_resources_bind_closed_current_router_suffixes() {
+        for suffix in [
+            "decision",
+            "hls/sessions",
+            "direct",
+            "stream.mp4",
+            "subs/0",
+            "subs/4095.vtt",
+            "subs/1/overlay.json",
+            "chapters/4095/thumb",
+        ] {
+            assert_eq!(
+                SharingFileResource::parse(suffix)
+                    .expect("current router suffix")
+                    .as_str(),
+                suffix
+            );
+        }
+        let object = format!(
+            "subs/2/overlay/{}/objects/{}.png",
+            "a".repeat(64),
+            "b".repeat(64)
+        );
+        assert_eq!(
+            SharingFileResource::parse(&object)
+                .expect("published PGS naming")
+                .kind(),
+            SharingFileResourceKind::SubtitleObject { index: 2 }
+        );
+        for suffix in [
+            "",
+            "https://source/direct",
+            "/direct",
+            "//source/direct",
+            "../direct",
+            "direct?session=anything",
+            "direct#other",
+            "subs/01",
+            "subs/4096",
+            "subs/-1",
+            "subs/0%2fvtt",
+            "subs/0\\vtt",
+            "subs/0/../direct",
+            "chapters/1/thumb/extra",
+            "hls/sessions/../control",
+        ] {
+            assert!(SharingFileResource::parse(suffix).is_err(), "{suffix}");
+        }
+        assert!(SharingFileResource::parse(&object.replace(".png", ".jpg")).is_err());
+        assert!(
+            SharingFileResource::parse(&object.replace(&"a".repeat(64), &"A".repeat(64))).is_err()
+        );
+    }
     #[test]
     fn sharing_hls_resources_refuse_proxy_and_query_escapes() {
         for uri in [
