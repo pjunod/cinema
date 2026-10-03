@@ -5342,3 +5342,37 @@ The later Player change is JSDoc only and emits identical JavaScript; the
 measured executable identity remains explicit rather than relabelled.
 Compiler verification of the latest committed tree and a scoped lost-
 acknowledgement reservation probe are next. No units or final review ran.
+
+
+### 10.184 · Exact-tree compilation and durable append acknowledgement replay
+
+Committed source `75c9c7ba3` built with verified Rust 1.97.1 in 1m34s
+on the isolated Linux compiler. The source-only archive contained neither
+`.git` nor repository credentials. No units executed.
+
+The scoped Chrome lost-append-acknowledgement probe PASSED against that
+executable. After actual SourceBuffer completion, the helper verified the
+exact requested intervals in the durable ledger and dropped one HTTP 200
+response. The client retried the identical payload at sequence 21 and
+received the identical canonical receipt, SHA256
+`d7625811e3e821a22c552420f9917a68834c36370078bc054a4edf39655307c3`.
+720p subsequently presented on the same session/player, maximum callback
+gap 50.1 ms, zero new stalls/hitches/drops; End counts 0/0/0/0.
+The owned daemon/browser/runtime were cleaned up. This is browser and
+protocol evidence, not physical display/audio or takeover qualification.
+
+Probe attempts 1 and 2 remain FAILED: their helper incorrectly required
+media arrays inside the canonical replay receipt, which deliberately clears
+those arrays. Actual append facts reside in the accompanying ledger. The
+corrected third helper proves those exact facts before injection and checks
+canonical receipt equality on replay. No production patch was needed.
+Reports use stem `continuous-chrome-75c9c7ba3-targeted-append-ack-loss3`.
+
+After the human reported unlock, 17promax was paired and reachable, but
+the bounded separate lab-app retry received Locked refusals and then
+CoreDevice error 4000: remoteService XPC unavailable. No lab process or
+playback was confirmed; backend/proxy/runtime were cleaned up. Mac lock
+inspection also still reported locked. The human is away from home, so
+physical-device retries are suspended while independent work continues.
+Foreground reservation pressure and broader owner/source/platform evidence
+remain open. Final review has not started; the Fable pause remains.
