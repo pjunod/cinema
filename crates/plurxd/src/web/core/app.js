@@ -34,6 +34,7 @@ async function startNativeReader(token,itemId,fileId){
     nativeReaderPost("error","Cinema could not validate this reader handoff."); return false;
   }
   if(typeof sharedArtworkRetire==="function")sharedArtworkRetire();
+  if(typeof sharedDecisionRetire==="function")sharedDecisionRetire();
   TOKEN=token; AUTH_GENERATION++; ME=null;
   refreshClientErrorReporterAuth();
   history.replaceState(null,"",`${location.pathname}?native-reader=1#/read/${item}/${file}`);

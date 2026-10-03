@@ -23,17 +23,17 @@ final class PlaybackFileContextTests: XCTestCase {
         libraryId: "9007199254740993", itemId: "9223372036854775807")
     private let revision = String(repeating: "a", count: 64)
     private let file = "9007199254740993"
-    private var base: String { "/api/v1/shared/imports/\(ref.importId)/files/signed_locator-ABC123" }
+    private var base: String { "/api/v1/shared/imports/\(ref.importId)/files/\(String(repeating: "L", count: 236))" }
     override func tearDown() { FileContextHTTP.beforeResponse = nil; Session.shared.setCredentials(origin: "", token: nil) }
     private func fetch(_ base: String?, mutate: (inout [String: Any]) -> Void = { _ in },
                        detailBody: (Data) throws -> Data = { $0 }) async throws -> PlaybackFileContext {
         let encoder = JSONEncoder(); encoder.keyEncodingStrategy = .convertToSnakeCase
         let reference = try JSONSerialization.jsonObject(with: encoder.encode(ref))
         var row: [String: Any] = ["file_id": file, "revision": revision,
-                                  "reference": ["item": reference, "file_id": file, "revision": revision]]
+                                  "reference": ["item": reference, "file_id": file, "revision": revision, "lifecycle_generation": 1]]
         row["file_base"] = base
         mutate(&row)
-        FileContextHTTP.body = try detailBody(JSONSerialization.data(withJSONObject: ["files": [row]]))
+        FileContextHTTP.body = try detailBody(JSONSerialization.data(withJSONObject: ["files": [row], "lifecycle_generation": 1]))
         let config = URLSessionConfiguration.ephemeral; config.protocolClasses = [FileContextHTTP.self]
         return try await PlaybackFileContext.authenticatedDetail(reference: ref, fileId: file,
                                                                  testTransport: URLSession(configuration: config))
@@ -128,7 +128,7 @@ final class PlaybackFileContextTests: XCTestCase {
                 var binding = row["reference"] as! [String: Any]; binding["file_id"] = id; row["reference"] = binding
                 return row
             }
-            var result = try JSONSerialization.data(withJSONObject: ["files": rows])
+            var result = try JSONSerialization.data(withJSONObject: ["files": rows, "lifecycle_generation": 1])
             XCTAssertGreaterThan(result.count, 1_048_576); XCTAssertLessThan(result.count, 4_194_304)
             // JSON whitespace makes the transport byte boundary exact without inventing wire fields.
             result.append(Data(repeating: 32, count: 4_194_304 - result.count))

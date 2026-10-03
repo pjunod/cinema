@@ -5089,6 +5089,48 @@ mod tests {
         let prepared = prepare_source_playback(&fixture.state, &headers, target.clone(), body())
             .await
             .expect("actual Source preparation");
+        // Response projection is pure presentation evidence; this StartInfo
+        // fixture does not assert physical admission or publication.
+        let session = uuid::Uuid::new_v4().to_string();
+        let incarnation = uuid::Uuid::new_v4().to_string();
+        let info = crate::transcode::StartInfo {
+            session_id: session.clone(),
+            playlist_url: format!("/api/v1/hls/{session}/index.m3u8"),
+            duration_ms: Some(60_000),
+            start_seconds: 0.0,
+            media_origin_seconds: 0.0,
+            target_height: 1080,
+            kind: prepared.request().kind,
+            encoder: "vod",
+            grade: plurx_core::transcode::OutputGrade::Sdr,
+            vod: true,
+            control_lease_timeout_ms: crate::playback_control::VOD_LEASE_TIMEOUT_MS,
+        };
+        let response = prepared
+            .start_response(&fixture.state, &info, &incarnation, 7)
+            .await
+            .expect("complete Source response");
+        assert_eq!(response.session_id, session);
+        assert_eq!(response.playlist_url, info.playlist_url);
+        assert_eq!(response.duration_ms, info.duration_ms);
+        assert_eq!(response.height, info.target_height);
+        assert_eq!(response.encoder, info.encoder);
+        assert_eq!(response.media_origin_ms, Some(0));
+        assert!(response.vod);
+        assert_eq!(response.prior_kbps, None);
+        assert_eq!(response.plan_notes, prepared.plan_notes());
+        let control = response.control.as_ref().expect("private control");
+        assert_eq!(control.generation, incarnation);
+        assert_eq!(control.control_epoch, 7);
+        assert_eq!(control.url, format!("/api/v1/hls/{session}/control"));
+        assert!(prepared
+            .start_response(&fixture.state, &info, &incarnation, 0)
+            .await
+            .is_err());
+        assert!(prepared
+            .start_response(&fixture.state, &info, "not-an-incarnation", 7)
+            .await
+            .is_err());
         let decision_input = || super::super::shared_playback::SourceDecisionRequest {
             reference: target.clone(),
             caps: caps.clone(),

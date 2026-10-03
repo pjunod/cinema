@@ -22,26 +22,31 @@ function localPlaybackFileContext(id){
 function registerPlaybackFileContext(value){
   const context=Object.freeze(value); PLAYBACK_FILE_CONTEXTS.add(context); return context;
 }
-function sharedPlaybackFileContextFromDetail(reference,file){
+function sharedPlaybackFileContextFromDetail(reference,file,lifecycle=file?.reference?.lifecycle_generation){
   if(!reference||!file||typeof reference!=="object") playbackFileReject();
   const keys=["import_id","server_id","catalogue_epoch","library_id","item_id"];
   if(Object.keys(reference).length!==keys.length||keys.some(k=>!Object.hasOwn(reference,k))) playbackFileReject();
-  for(const k of keys.slice(0,3)) if(typeof reference[k]!=="string"||!PLAYBACK_FILE_UUID.test(reference[k])) playbackFileReject();
+  for(const k of keys.slice(0,3)) if(typeof reference[k]!=="string"||!PLAYBACK_FILE_UUID.test(reference[k])||reference[k]==="00000000-0000-0000-0000-000000000000") playbackFileReject();
   for(const k of keys.slice(3)) playbackFileDecimal(reference[k]);
   // No decoding or URL normalization: encoded separators, queries, fragments,
   // dot segments and authorities must never acquire another interpretation.
   const prefix=`/api/v1/shared/imports/${reference.import_id}/files/`;
   const base=file.file_base;
   if(typeof base!=="string"||!base.startsWith(prefix)
-    ||! /^[A-Za-z0-9_-]{1,2048}$/.test(base.slice(prefix.length))) playbackFileReject();
-  const source_file_id=playbackFileDecimal(file.id);
+    ||! /^[A-Za-z0-9_-]{236}$/.test(base.slice(prefix.length))) playbackFileReject();
+  const source_file_id=playbackFileDecimal(file.file_id),r=file.reference;
+  if(!r||keys.some(k=>r.item?.[k]!==reference[k])||r.file_id!==source_file_id) playbackFileReject();
+  const revision=r.revision;
+  if(typeof revision!=="string"||! /^[a-f0-9]{64}$/.test(revision)||file.revision!==revision) playbackFileReject();
+  if(typeof lifecycle!=="bigint"||lifecycle<=0n||lifecycle>9223372036854775807n||r.lifecycle_generation!==lifecycle) playbackFileReject();
   return registerPlaybackFileContext({source_ref:Object.freeze({...reference}),
-    source_file_id,auth_generation:AUTH_GENERATION,file_base:base,session_id:null});
+    source_file_id,file_revision:revision,lifecycle_generation:lifecycle,
+    auth_generation:AUTH_GENERATION,auth_origin:typeof API==="string"?API:null,file_base:base,session_id:null});
 }
 function playbackFileContext(value){
   if(value&&typeof value==="object"){
     if(PLAYBACK_FILE_CONTEXTS.has(value)){
-      if(value.source_ref.kind!=="local"&&value.auth_generation!==AUTH_GENERATION) playbackFileReject();
+      if(value.source_ref.kind!=="local"&&(value.auth_generation!==AUTH_GENERATION||value.auth_origin!==(typeof API==="string"?API:null))) playbackFileReject();
       return value;
     }
     if(value.source_ref||value.file_base) playbackFileReject();
@@ -55,8 +60,8 @@ function withPlaybackFileSession(value,id){
 }
 function playbackFileKey(value){
   const c=playbackFileContext(value), r=c.source_ref;
-  return r.kind==="local"?r.file_id:JSON.stringify([c.auth_generation,r.import_id,r.server_id,
-    r.catalogue_epoch,r.library_id,r.item_id,c.file_base]);
+  return r.kind==="local"?r.file_id:JSON.stringify([c.auth_origin,c.auth_generation,r.import_id,r.server_id,
+    r.catalogue_epoch,r.library_id,r.item_id,c.source_file_id,c.file_revision,String(c.lifecycle_generation),c.file_base]);
 }
 function playbackFileSuffix(suffix){
   if(typeof suffix!=="string") playbackFileReject();

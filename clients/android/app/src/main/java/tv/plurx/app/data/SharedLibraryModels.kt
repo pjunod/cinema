@@ -44,13 +44,13 @@ internal data class SharedLibraryPage(val items: List<SharedLibraryItem>, val ne
 @Serializable
 internal data class SharedLibraryFile(val file_id: String, val revision: String, val reference: SharedPlaybackFileReference,
     val size: String, val duration_ms: Long? = null, val container: String? = null, val video_codec: String? = null,
-    val width: Int? = null, val height: Int? = null)
+    val width: Int? = null, val height: Int? = null, val file_base: String? = null)
 @Serializable
 internal data class SharedLibraryWatch(val position_ms: Long, val duration_ms: Long? = null, val watched: Boolean,
     val sequence: Long, val updated_at_ms: Long)
 @Serializable
 internal data class SharedLibraryDetail(val item: SharedLibraryItem, val files: List<SharedLibraryFile>,
-    val watch: SharedLibraryWatch? = null, val delivery_status: String) {
+    val watch: SharedLibraryWatch? = null, val delivery_status: String, val lifecycle_generation: Long? = null) {
     fun validate(expected: SharedPlaybackReference) {
         val library = SharedLibraryIdentity(expected.import_id, expected.server_id, expected.catalogue_epoch, expected.library_id)
         item.validate(library)

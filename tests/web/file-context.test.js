@@ -10,7 +10,7 @@ function harness(){
   return context.helper;
 }
 const reference={import_id:"11111111-1111-4111-8111-111111111111",server_id:"22222222-2222-4222-8222-222222222222",catalogue_epoch:"33333333-3333-4333-8333-333333333333",library_id:"7",item_id:"9"};
-function detail(ref=reference,locator="opaque_7-A"){return {file_base:`/api/v1/shared/imports/${ref.import_id}/files/${locator}`,id:"7"};}
+function detail(ref=reference,locator="L".repeat(236)){return {file_base:`/api/v1/shared/imports/${ref.import_id}/files/${locator}`,file_id:"7",revision:"a".repeat(64),reference:{item:{...ref},file_id:"7",revision:"a".repeat(64),lifecycle_generation:1n}};}
 test("same numeric source file cannot collide with local playback resources or source keys",()=>{
   const h=harness(),local=h.localPlaybackFileContext(7),shared=h.sharedPlaybackFileContextFromDetail(reference,detail());
   assert.equal(h.playbackFileUrl(local,"decision"),"/api/v1/files/7/decision");
@@ -21,12 +21,12 @@ test("same numeric source file cannot collide with local playback resources or s
     assert.equal(h.playbackFileApiPath(shared,suffix),url.slice(7));
   }
   assert.notEqual(h.playbackFileKey(local),h.playbackFileKey(shared));
-  const other=h.sharedPlaybackFileContextFromDetail({...reference,server_id:"44444444-4444-4444-8444-444444444444"},detail());
+  const other=h.sharedPlaybackFileContextFromDetail({...reference,server_id:"44444444-4444-4444-8444-444444444444"},detail({...reference,server_id:"44444444-4444-4444-8444-444444444444"}));
   assert.notEqual(h.playbackFileKey(shared),h.playbackFileKey(other));
 });
 test("shared detail rejects absolute, encoded, traversing, mismatched and local bases",()=>{
   const h=harness(),base=detail().file_base;
-  for(const file_base of ["https://source/files/7","//source/files/7","/api/v1/files/7",base+"?session=x",base+"#x",base+"/../direct",base+"%2fthing",base+"%2e",base+"\\thing",base.replace(reference.import_id,reference.server_id),base.replace("opaque_7-A",""),base.replace("opaque_7-A","a".repeat(2049))]){
+  for(const file_base of ["https://source/files/7","//source/files/7","/api/v1/files/7",base+"?session=x",base+"#x",base+"/../direct",base+"%2fthing",base+"%2e",base+"\\thing",base.replace(reference.import_id,reference.server_id),base.replace("L".repeat(236),""),base.replace("L".repeat(236),"a".repeat(237))]){
     assert.throws(()=>h.sharedPlaybackFileContextFromDetail(reference,{file_base}));
   }
   assert.throws(()=>h.sharedPlaybackFileContextFromDetail({...reference,item_id:7},detail()));

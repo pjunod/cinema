@@ -1352,3 +1352,33 @@ setup, not evidence for production installation or heartbeat advertisement.
 The existing complete Source-engine preparation regression passed in 0.85
 seconds and the actual saved VOD/admission start-budget regression in 0.15
 seconds, each one test with zero ignored.
+
+### Integrated Source preadmission qualification
+
+The receiver/client integration at `eed99b6bc` plus the canonical-zero and
+Source preadmission checkpoints passed both actual Source actor regressions
+(2 passed, zero ignored, 10.20 seconds) and the retained-zero storage
+regression (1 passed, zero ignored, 0.89 seconds) with pinned Rust 1.97.1.
+All four documentation-index tests passed. This tree includes the Source
+stored-marker policy, so preparation has no Local live-probe fallback.
+The actor publication, HTTP relay and complete end-to-end proof remain open.
+
+### Complete Source HLS response presentation
+
+`PreparedSourcePlayback::start_response` projects the actual admitted engine
+`StartInfo` and resolved plan into the complete ordinary HLS `StartResponse`.
+It retains timing, normalized route height, encoder, VOD presentation, quality
+catalogue/status, candidate, plan notes and delivered dynamic range/profile.
+The ladder uses the actual node capability ceiling; the response carries no
+receiver network prior. Mandatory private control uses the actual Source
+incarnation and owner epoch. Invalid identities, timing, route kind, playlist
+path or control parameters refuse the projection. This builder grants no
+physical readiness or publication authority. The actor must persist the
+response while blocked, attach its actual admitted worker and publish only
+after its independently guarded readiness transition.
+
+The existing complete Source preparation regression now also checks the
+response fields and refuses malformed incarnation/owner epochs (1 passed,
+zero ignored, 0.62 seconds on the integrated preadmission base, pinned Rust
+1.97.1). Its presentation fixture does not claim physical producer evidence;
+the actual actor must qualify this builder with its opaque pending observation.
