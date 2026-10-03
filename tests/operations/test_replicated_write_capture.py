@@ -57,6 +57,83 @@ def samples(minutes: int, *, build_at=None, transcode_at=None, rollback_at=None)
 
 
 class GateCase(unittest.TestCase):
+    def test_external_observer_sanitizes_actual_settings_and_refuses_unbound_deployment(self):
+        """Synthetic HTTP adapter only; never a real deployment or twelve-hour run."""
+        source, build, now = "a" * 40, "v0.3.0-1-gaaaaaaaaa", 1790000000
+        deployment = json.dumps({"schema": "k03-deployment-binding-v1", "observations": [
+            dict(node=node, build=build, source_commit=source,
+                 origin=url.removesuffix("/metrics")) for node, url in capture.AFTER_URLS.items()
+        ]}).encode()
+        digest = hashlib.sha256(deployment).hexdigest()
+        metrics = (f'plurx_build_info{{version="0.3.0",build="{build}"}} 1\n'
+            'plurx_uptime_seconds 1000\nplurx_cluster_local_is_voter 1\n'
+            'plurx_raft_commit_index 100\n'
+            'plurx_store_operations_total{class="authority_read",method="read"} 2\n'
+            'plurx_store_operations_total{class="write",method="write"} 3\n'
+            'plurx_raft_snapshot_seconds_count{operation="build"} 0\n'
+            'plurx_watched_outbox{status="pending"} 0\n'
+            'plurx_transcode_sessions_active 0\n'
+            'plurx_live_tv_sessions{state="starting"} 0\n'
+            'plurx_live_tv_sessions{state="active"} 0\n'
+            'plurx_cache_protected_entries{reason="active_playback"} 0\n'
+            'plurx_takeover_settings_authority_reads_started_total 0\n' + ''.join(
+                f'plurx_watched_outbox_ticks_total{{outcome="{name}"}} 0\n'
+                for name in capture.OUTCOMES)).encode()
+        settings = {"cluster_media_pool_enabled": False, "cluster_session_takeover_enabled": True,
+                    "curator_api_key": "SECRET-DTO", "other_private": "SECRET-OTHER"}
+        calls = []
+        def fetch(url, token):
+            calls.append((url, token))
+            if url.endswith("/metrics"):
+                self.assertIsNone(token)
+                return metrics
+            self.assertTrue(url.endswith("/api/v1/settings"))
+            self.assertEqual(token, "SECRET-TOKEN")
+            return json.dumps(settings).encode()
+        credentials = dict.fromkeys(capture.NODES, "SECRET-TOKEN")
+        raw = capture.observe_after_tick(deployment, digest, credentials, fetch, lambda: now)
+        self.assertNotIn(b"SECRET", raw)
+        for node in capture.NODES:
+            self.assertEqual(capture.after_acquisition(raw, now, node, build, source)["node"], node)
+        self.assertEqual(len(calls), 6)
+        with self.assertRaises(ValueError):
+            capture.observe_after_tick(deployment, "0" * 64, credentials, fetch, lambda: now)
+        self.assertEqual(len(calls), 6)  # refuses before any HTTP adapter call
+        for replacement in (None, "false", True):
+            settings["cluster_media_pool_enabled"] = replacement
+            with self.assertRaises(ValueError):
+                capture.observe_after_tick(deployment, digest, credentials, fetch, lambda: now)
+        settings["cluster_media_pool_enabled"] = False
+        changed = json.loads(deployment)
+        changed["observations"][0]["source_commit"] = "b" * 40
+        unbound = json.dumps(changed).encode()
+        with self.assertRaises(ValueError):
+            capture.observe_after_tick(unbound, hashlib.sha256(unbound).hexdigest(), credentials, fetch, lambda: now)
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "deployment").write_bytes(deployment)
+            (root / "credentials").write_text(json.dumps(credentials))
+            class Response(io.BytesIO):
+                status = 200
+            def opened(request, timeout):
+                self.assertEqual(timeout, 5)
+                return Response(metrics if request.full_url.endswith("/metrics") else json.dumps(settings).encode())
+            transport = mock.Mock()
+            transport.open.side_effect = opened
+            owner = root / "observer"
+            with mock.patch.object(capture.urllib.request, "build_opener", return_value=transport), \
+                 mock.patch.object(capture.signal, "getitimer", return_value=(0.0, 0.0)), \
+                 mock.patch.object(capture.signal, "signal"), \
+                 mock.patch.object(capture.signal, "setitimer") as timer, \
+                 mock.patch.object(capture.time, "time", return_value=now):
+                self.assertEqual(capture.observe_after(owner, root / "deployment", digest,
+                                                      root / "credentials", 1), 0)
+                self.assertEqual(timer.call_args.args, (capture.signal.ITIMER_REAL, 0))
+            self.assertEqual((owner / "manifest.json").read_bytes(), raw)
+            self.assertTrue(all(b"SECRET" not in path.read_bytes() for path in owner.iterdir()))
+            with self.assertRaises(FileExistsError):
+                capture.observe_after(owner, root / "deployment", digest, root / "credentials", 1)
+
     def test_the_gate_is_twelve_hours_in_the_evaluator_and_the_sampler(self):
         self.assertEqual(capture.GATE_HOURS, 12)
         self.assertIn("required_idle_seconds=43200\n", SAMPLER.read_text())
