@@ -3519,6 +3519,103 @@ physical producer or public network qualification.
 Feature-enabled all-target Clippy with denied warnings also passed (1 minute
 27 seconds), and the documentation index suite passed all four tests.
 
+### S4 Source schema startup — bounded nonrolling factory
+
+The normal daemon calls the single-use `SelectedStore` Source coordinator
+before constructing `State`, opening application listeners or probing media
+workers. SQLite recovery cannot obtain its authority. Normal standalone uses
+an actual one-voter replicated store, with the same master and member-proof
+factory as a larger topology. The current binary advertises Principal,
+Catalogue and Purpose protocol support after its selected master passes the
+actual sealed-material census; this advertisement does not claim installed
+schema or permission to create a producer.
+
+Replicated v70 remains the ordinary readable baseline. The binary also
+supports v71, whose installation is one guarded Raft transaction: the frozen
+seven-family principal rebuild, catalogue membership/order maintenance,
+monotone item allocator, Source binding adjunct and final installation marker.
+The factory requires the exact current Raft/SQL roster and generation,
+heartbeat-coupled selected-master proof, all three sharing capabilities,
+no membership or census transition, current saved Sharing=true, and fresh
+startup attempts from every active member. Each member advertises only its
+current boot UUID; its heartbeat deletes older boot labels. A retained row
+from a stopped process does not prove that process is still in startup.
+The same-write assertions validate the complete admission schema, captured
+boot attempts, exact installed definitions and successful final guard row.
+A competing coordinator adopts only the complete validated winner.
+
+The predecessor census freezes the thirty affected table/index/trigger
+objects, including the refresh trigger on the background command table.
+Only explicit known SQLite ALTER-built and replicated declarations are
+accepted; the historical v10 session ALTER chain has its own frozen variant.
+Unknown persisted columns, changed constraints, extra indexes, substituted
+triggers, partial principal/allocator state and nonpositive Local user
+ownership refuse the rebuild. Existing Local rows retain their original
+columns through the frozen copy projections. Active sessions, starting
+requests, preparations and live worker leases prevent installation; the
+coordinator never drains or deletes them.
+
+A twenty-second incomplete-floor wait leaves Shared readiness pending only
+after the exact own boot attempt has been confirmed released and the unchanged
+legacy layout has been checked again. Startup also retires its own previous
+crashed process's intent after the actual selected-master heartbeat has
+withdrawn the old boot label. Unknown release outcome or an ignored deletion
+prevents serving. A complete recognized two-capability guard is a Local-only
+pending state: its saved Sharing choice and schema remain untouched, with no
+key mint, ALTER or rebuild. Unknown or partial guards and unreadable material
+refuse startup even when Sharing is disabled. The advisory switch remains
+saved; readiness never substitutes a different choice.
+
+After commit, the node's durable activation file records the actual committed
+schema version, rather than the binary's maximum. A restart verifies every
+installed definition before serving and does not repair missing objects.
+The media-session projection cache is initially uncaptured: the normal boot
+performs this transition before its first session reader. There is no cache
+reset or schema rebuild during serving, and the heartbeat coordinator never
+installs Source DDL.
+
+These startup fixtures qualify schema authority and bounded Local-only
+readiness, not active playback drain, interruption during the rebuild,
+production backup tooling, a global runtime master replacement, physical
+Source dispatch, Tailscale/two-NAT operation or final effort promotion. The
+historical daemon/whole-topology receipt above remains scoped to its recorded
+candidate; it does not become evidence for this v71 factory merely because
+both use the same seven-family copy statements.
+
+The focused startup and schema regressions are:
+
+```sh
+cargo test --locked -p plurx-core --features hiqlite-contract-tests --lib actual_source_schema_coordinator -- --nocapture
+cargo test --locked -p plurx-core --features hiqlite-contract-tests --lib sharing_source_schema -- --nocapture
+cargo check --locked -p plurx-core -p plurxd --all-targets --features plurx-core/hiqlite-contract-tests
+cargo clippy --locked -p plurx-core -p plurxd --all-targets --features plurx-core/hiqlite-contract-tests -- -D warnings
+```
+
+On the initial `75882facb8d` development ancestor, the final `source_schema`
+filter passed nine tests with zero ignored (109.43 seconds): five schema units
+and four actual replicated startup cases. These include one-voter install,
+restart and missing-index refusal; retained Local lease and crashed-intent
+retirement with Sharing disabled; complete legacy guard pending readiness and
+disabled partial-guard refusal; and three-voter single-boot refusal followed by
+full-stop competing installation. Feature-enabled core/daemon all-target
+Clippy with denied warnings passed in 1 minute 24 seconds. The schema migration
+chain regression and existing compatibility regressions also passed. This is
+a development checkpoint; qualification must run again after integrating the
+current effort and canonical-zero Source adjunct correction.
+
+The full intended-base integration with `b4e04e417` retains the canonical-zero
+Source binding checks and incoming receiver/client changes. On that exact tree,
+`--lib source_schema` passed nine tests (104.41 seconds),
+`--lib sharing_source` passed twenty-two tests (39.03 seconds), and
+`--lib purpose` passed fourteen tests (15.48 seconds), all with zero ignored.
+The actual three-voter Source reservation contract passed in 11.78 seconds;
+the three-voter purpose factory/master-proof contract passed in 9.81 seconds.
+Affected feature-enabled core/daemon all-target compilation passed in
+1 minute 8 seconds and Clippy with denied warnings passed in 1 minute 38 seconds.
+The actual fourth-learner raw admission/promotion capability-race regression
+passed in 11.44 seconds. These remain startup and Store receipts with the limits
+above; they do not qualify a live relay or promote the complete effort.
+
 ### S5 B remote activation checkpoint — delivery remains closed
 
 The receiver now has a distinct `remote_source` recipe with complete import,
@@ -3655,3 +3752,16 @@ memory-limit failures; the successful fresh compilation recorded zero OOM
 kills. This proves the pinned Source/B HTTP path and advertised alias, not an
 actual Tailscale, DERP, hardware-decoder or live playback scenario. Later
 combined candidates still require their own affected qualification before push.
+
+### Current playback-base startup integration qualification
+
+The actual Source startup factory checkpoint `ec2f82a1d` was integrated on
+`1ba0814b9`, which includes complete Source response construction, canonical
+zero preparation, strict Start decoding and B control projection. Pinned Rust
+1.97.1 passed Source schema tests (9, zero ignored, 109.76 seconds), Source
+binding regressions (22, zero ignored, 31.11 seconds), purpose regressions
+(14, zero ignored, 15.24 seconds) and the actual Source three-voter contract
+(1, zero ignored, 11.70 seconds). Feature all-target Clippy with denied
+warnings passed in 1 minute 36 seconds, and all four docs-index tests passed.
+This qualifies the integrated startup/storage tree; live Source/B actor,
+transport/body relay, hardware and real Tailscale acceptance remain open.

@@ -61,7 +61,7 @@ fn quote(value: &str) -> String {
 
 /// Every Source write checks the candidate shape again. Missing tables are
 /// observed before preparing application SQL, not repaired on a read path.
-fn schema_guard() -> String {
+pub(crate) fn schema_guard() -> String {
     let mut guards = candidate_statements()
         .iter()
         .map(|statement| {

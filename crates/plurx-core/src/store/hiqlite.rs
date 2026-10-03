@@ -158,7 +158,9 @@ const PLAYBACK_INPUT_SCHEMA_VERSION: i64 = 69;
 const PLAYBACK_INPUT_SCHEMA_MIGRATION_SOURCE: i64 = DV_REQUEST_PROVENANCE_SCHEMA_VERSION;
 const SHARING_SCHEMA_VERSION: i64 = 70;
 const SHARING_SCHEMA_MIGRATION_SOURCE: i64 = PLAYBACK_INPUT_SCHEMA_VERSION;
-pub const AUTH_SCHEMA_VERSION: i64 = SHARING_SCHEMA_VERSION;
+/// Ordinary bootstrap remains v70; the startup-only Source factory activates v71.
+pub const AUTH_SCHEMA_BASELINE_VERSION: i64 = SHARING_SCHEMA_VERSION;
+pub const AUTH_SCHEMA_VERSION: i64 = 71;
 /// Oldest schema this binary can advance through the complete migration chain.
 pub const AUTH_SCHEMA_MIGRATION_SOURCE: i64 = 5;
 const READING_SCHEMA_VERSION: i64 = 6;
@@ -311,8 +313,9 @@ CREATE TABLE IF NOT EXISTS job_leases (
 ) STRICT;
 "#;
 
-/// What one binary can participate in: exactly one schema version, and every
-/// protocol in an inclusive range.
+/// What one binary can participate in: its supported schema maximum and every
+/// protocol in an inclusive range. Current v71 also reads the unchanged v70
+/// baseline; the nonrolling Source factory owns that optional transition.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ClusterCompatibility {
     pub schema_version: i64,
@@ -1605,7 +1608,7 @@ impl HiqliteAuthStore {
         for result in results {
             result.map_err(database_error)?;
         }
-        // Bootstrap stamps `AUTH_SCHEMA_VERSION` below without running the
+        // Bootstrap stamps `AUTH_SCHEMA_BASELINE_VERSION` below without running the
         // migration chain, so these installs are a second copy of every
         // `MigrateFrom` step in `migrate_schema`. A step added there must be
         // installed here too: the store contract
@@ -1659,7 +1662,7 @@ impl HiqliteAuthStore {
                  (singleton, schema_version, protocol_min, protocol_max, migrated_at) \
                  VALUES (1, $1, $2, $2, $3) \
                  ON CONFLICT(singleton) DO NOTHING",
-                params!(AUTH_SCHEMA_VERSION, AUTH_PROTOCOL_MIN, now),
+                params!(AUTH_SCHEMA_BASELINE_VERSION, AUTH_PROTOCOL_MIN, now),
             )
             .await?;
         store
@@ -3305,6 +3308,7 @@ impl HiqliteAuthStore {
             .filter(|_| meta.len() == 1)
             .map(|row| (row.protocol_min, row.protocol_max));
         verify_compatibility_rows(meta, supported)?;
+        Self::verify_source_schema_version(remote).await?;
         if learner {
             let (active_min, active_max) = active.ok_or_else(|| {
                 StoreError::Migration("cluster compatibility marker is missing".to_owned())
@@ -3335,7 +3339,44 @@ impl HiqliteAuthStore {
             .client()
             .query_consistent_map::<CompatibilityRow, _>(sql, params!())
             .await?;
-        verify_compatibility_rows(meta, supported)
+        verify_compatibility_rows(meta, supported)?;
+        Self::verify_source_schema_version(self.client().inner()).await
+    }
+
+    /// The supported maximum is not evidence that the nonrolling Source
+    /// factory ran. Activation files must record this actual committed value.
+    pub(crate) async fn committed_schema_version(&self) -> Result<i64, StoreError> {
+        Self::committed_schema_version_for_client(self.client().inner()).await
+    }
+    pub(crate) async fn committed_schema_version_for_client(
+        client: &Client,
+    ) -> Result<i64, StoreError> {
+        let rows=client.query_consistent_map::<CompatibilityRow,_>(
+            "SELECT schema_version,protocol_min,protocol_max FROM cluster_meta WHERE singleton=1",params!()).await.map_err(database_error)?;
+        verify_compatibility_rows(rows.clone(), ClusterCompatibility::CURRENT)?;
+        Ok(rows[0].schema_version)
+    }
+
+    async fn verify_source_schema_version(client: &Client) -> Result<(), StoreError> {
+        let rows=client.query_consistent_map::<CompatibilityRow,_>(
+            "SELECT schema_version,protocol_min,protocol_max FROM cluster_meta WHERE singleton=1",params!()).await.map_err(database_error)?;
+        if matches!(rows.as_slice(),[row] if row.schema_version==super::sharing_source_schema::SOURCE_SCHEMA_VERSION)
+        {
+            let guard = super::sharing_source_schema::installed_guard();
+            let shape = client
+                .query_consistent_map::<CountRow, _>(
+                    format!("SELECT CASE WHEN {guard} THEN 1 ELSE 0 END AS count"),
+                    params!(),
+                )
+                .await
+                .map_err(database_error)?;
+            if !matches!(shape.as_slice(),[row] if row.count==1) {
+                return Err(StoreError::Migration(
+                    "Source schema marker requires the complete exact installed layout".to_owned(),
+                ));
+            }
+        }
+        Ok(())
     }
 
     /// Hash ordered local state for the separate-process replica-equality gate.
@@ -5179,7 +5220,13 @@ fn schema_migration_action(
         ));
     }
     match meta.schema_version {
-        version if version == supported.schema_version => Ok(SchemaMigrationAction::Current),
+        version
+            if version == supported.schema_version
+                || (supported.schema_version == AUTH_SCHEMA_VERSION
+                    && version == AUTH_SCHEMA_BASELINE_VERSION) =>
+        {
+            Ok(SchemaMigrationAction::Current)
+        }
         AUTH_SCHEMA_MIGRATION_SOURCE
         | BOOK_SCHEMA_MIGRATION_SOURCE
         | LEASE_SCHEMA_MIGRATION_SOURCE
@@ -5264,7 +5311,10 @@ fn verify_compatibility_rows(
             rows.len()
         )));
     };
-    if meta.schema_version != supported.schema_version {
+    if meta.schema_version != supported.schema_version
+        && !(supported.schema_version == AUTH_SCHEMA_VERSION
+            && meta.schema_version == AUTH_SCHEMA_BASELINE_VERSION)
+    {
         return Err(StoreError::Migration(format!(
             "cluster schema {} is incompatible with voter schema {}",
             meta.schema_version, supported.schema_version
@@ -7340,9 +7390,9 @@ mod tests {
             "v67 advances exactly one step to request provenance"
         );
         assert_eq!(
-            AUTH_SCHEMA_MIGRATION_SOURCE + 64,
-            AUTH_SCHEMA_VERSION,
-            "this implementation contains every additive v5→v69 step"
+            AUTH_SCHEMA_MIGRATION_SOURCE + 65,
+            AUTH_SCHEMA_BASELINE_VERSION,
+            "the additive migration dispatcher ends at baseline v70"
         );
         let row = |schema_version| CompatibilityRow {
             schema_version,
@@ -7354,7 +7404,7 @@ mod tests {
                 .expect("current schema"),
             SchemaMigrationAction::Current
         );
-        for schema_version in AUTH_SCHEMA_MIGRATION_SOURCE..AUTH_SCHEMA_VERSION {
+        for schema_version in AUTH_SCHEMA_MIGRATION_SOURCE..AUTH_SCHEMA_BASELINE_VERSION {
             assert_eq!(
                 schema_migration_action(&[row(schema_version)], ClusterCompatibility::CURRENT,)
                     .unwrap_or_else(|error| {
