@@ -663,7 +663,7 @@ function startPlaybackControl(v,p,bootstrap){
 // recovers the session it already made instead of spawning a second encoder —
 // which is what makes retrying a "still building" 503 safe at all. Absent, a
 // fresh identity is minted, exactly as every caller had before.
-async function openSession(fileId, opts, signal=null, requestId=null){
+async function openSession(fileId, opts, signal=null, requestId=null, restartSessionId=null){
   const contract=vodClientContract();
   const body=Object.assign({},opts||{},
     {playback_id:PLAYBACK_ID,request_id:requestId||newRequestId()},contract.session);
@@ -759,8 +759,12 @@ async function openSession(fileId, opts, signal=null, requestId=null){
     PLAYER.libraryChannel=Object.assign({},following,result.library_channel);
     return result.playback;
   }
-  const continuous=body.transport==='hlsjs'&&!player?.sessionId
-    ?await openContinuousQualitySession(fileId,body,player,signal):null;
+  // A forced recovery creates a new attachment even while the failed one
+  // still owns its session id. Only that exact continuous predecessor may
+  // enroll a fresh family; healthy replacement paths keep their incumbent.
+  const continuous=body.transport==='hlsjs'&&(!player?.sessionId
+      ||player.sessionId===restartSessionId&&player.continuousQualityBootstrap)
+    ?await openContinuousQualitySession(fileId,body,player,signal,restartSessionId):null;
   return continuous||api(`/files/${fileId}/hls/sessions`,{method:"POST",body,signal});
 }
 // A cancellable wait. The newer intent's abort is the same signal the create
@@ -871,7 +875,7 @@ async function openSessionRetryingNotYet(fileId, opts, signal, options){
       if(signal&&signal.aborted) throw superseded();
       let info;
       try{
-        info=await openSession(fileId,opts,signal,requestId);
+        info=await openSession(fileId,opts,signal,requestId,settings.continuousRestartSessionId||null);
       }catch(error){
         if(signal&&signal.aborted) throw superseded();
         const failure=error&&error.streamFailure;

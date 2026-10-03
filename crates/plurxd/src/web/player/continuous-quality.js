@@ -209,8 +209,9 @@ function continuousQualityBoundCatalog(catalog,family){
   }));
   return catalog.map(row=>costs.has(row.id)?{...row,peak_bps:costs.get(row.id)}:row);
 }
-async function openContinuousQualitySession(fileId,body,player,signal){
-  if(!player||player.sessionId||player.libraryChannel||body.transport!=='hlsjs'
+async function openContinuousQualitySession(fileId,body,player,signal,restartSessionId=null){
+  if(!player||(player.sessionId&&!(player.sessionId===restartSessionId&&player.continuousQualityBootstrap))
+    ||player.libraryChannel||body.transport!=='hlsjs'
     ||body.copy===true||body.hdr10===true||body.subtitle_burn!=null||!body.caps
     ||!window.Hls||!Hls.isSupported())return null;
   if(playbackControlSelection(player).quality.mode==='original')return null;

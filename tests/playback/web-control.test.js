@@ -7380,3 +7380,22 @@ test("local seek preserves only its attached continuous manual request",()=>{
   begin(p,50);
   assert.notEqual(p.directedChange.intentGeneration,p.controlIntentGeneration,"ordinary replacement paths retain their fence");
 });
+
+
+test("forced continuous restart enrolls only its exact failed predecessor",async()=>{
+ const calls=[];
+ const player={sessionId:"failed-session",continuousQualityBootstrap:{family:{}},curSub:-1,subs:[]};
+ const context={PLAYER:player,SERVER:{},PLAYBACK_ID:"playback",api:async(url)=>{calls.push({kind:"legacy",url});return {session_id:"legacy"};},
+  openContinuousQualitySession:async(file,body,p,signal,restart)=>{calls.push({kind:"continuous",restart,session:p.sessionId});return {session_id:"fresh-family"};},
+  vodClientContract:()=>({session:{}}),newRequestId:()=>"request",currentCapsDocument:()=>null,capsDocumentIsUsable:()=>false,
+  qualityForce:()=>"720",plannedHlsTransport:()=>"hlsjs"};
+ require("node:vm").createContext(context);
+ require("node:vm").runInContext(shippedSource("openSession"),context);
+ assert.equal((await context.openSession(7,{height:720})).session_id,"legacy");
+ assert.equal((await context.openSession(7,{height:720},null,null,"foreign-session")).session_id,"legacy");
+ assert.equal((await context.openSession(7,{height:720},null,null,"failed-session")).session_id,"fresh-family");
+ assert.equal(player.sessionId,"failed-session","enrollment cannot retire the old attachment before success");
+ delete player.continuousQualityBootstrap;
+ assert.equal((await context.openSession(7,{height:720},null,null,"failed-session")).session_id,"legacy");
+ assert.deepEqual(calls.map(row=>row.kind),["legacy","legacy","continuous","legacy"]);
+});

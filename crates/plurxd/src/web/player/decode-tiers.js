@@ -1290,7 +1290,8 @@ async function executePlaybackMediaChange(p,change){
       // point: which context a create is in is decided in ONE place, not by
       // which branch of this function happened to call which function.
       const info=await preparation.run(
-        signal=>openSessionRetryingNotYet(p.fileId,opts,signal,{preparation}),
+        signal=>openSessionRetryingNotYet(p.fileId,opts,signal,{preparation,
+          continuousRestartSessionId:change.forceReopen&&p.continuousQualityBootstrap?p.sessionId:null}),
         late=>releaseSession(late&&late.session_id));
       if(!live()){ releaseSession(info&&info.session_id); return false; }
       retirePlaybackPredecessor(p);
