@@ -5638,3 +5638,87 @@ compilation, normal hook and exact Linux build passed; Linux all-target
 daemon Clippy PASSED in 1m23s. A read-only cleanup check found no
 owned live daemon or current-source runtime directory. No units or final
 adversarial review ran.
+
+
+### 10.193 · Build the real older peer before negotiation qualification
+
+Committed main `342521018` predates the continuous catalog/session routes.
+Its actual Linux executable was built with verified Rust 1.97.1 in 2m22s
+from `git archive origin/main` source only. Candidate executable `3c5e6d93b`
+was preserved under the same approved owned root. Committed candidate source
+was then restored and exact `2d79e2e22` Linux compilation PASSED in 2m22s.
+No repository metadata or credential was transferred.
+
+The prepared mixed-version runtime uses candidate binaries for A/C and
+actual main for B, with exact build/command/config assertions. The candidate
+browser and ordinary ingress are on A; continuous negotiation and legacy
+creation go through B. It requires an actual 404/405 from the old route,
+retained initial manual 1080p, no false continuous enrollment, and a shipped
+manual prepared 720p change. Its request trace contains no synthetic refusal
+or response rewriting. Runtime qualification is running. No units or final
+adversarial review ran.
+
+
+### 10.194 · Actual main refuses the incompatible schema join
+
+`continuous-chrome-3c5e6d93b-targeted-older-peer1` remains a FAILED harness
+receipt, before browser launch. Main-build B did not become healthy:
+its bounded log explicitly reports `join_incompatible`, because the
+candidate join token declares schema 71/protocol 4..=4 while actual main
+implements schema 69/protocol 4..=5. This is a real durable schema admission
+refusal, not a fabricated HTTP response. No compatibility or migration
+check was weakened. The helper removed its owned daemons/runtime tree.
+
+The follow-up `old-server2` runtime uses separate candidate/main lab
+clusters. Browser assets come from candidate `3c5e6d93b`; every API request
+runs against actual main `342521018`, with its own generated lab identity.
+The proxy forwards responses without body/status rewriting. This measures
+new-client/old-server endpoint negotiation and prepared manual playback,
+not a mixed-version cluster whose schemas cannot join. Actual schema
+refusal remains separately recorded. Runtime is running; no units or final
+adversarial review ran.
+
+
+### 10.195 · Old-server prepared seam refuses an unproven alignment
+
+`continuous-chrome-3c5e6d93b-targeted-old-server2` remains FAILED. The
+new client received actual main's 404 continuous catalog response and
+played manual 1080p without continuous enrollment. A 720p prepared offer
+arrived after 4.820s and buffered, but decoded overlap proof refused
+`lost-alignment` at the incumbent-frame phase: four warm callbacks,
+zero bad frames, 18ms last-frame age and 88ms drift. The incumbent remained
+advancing at 1080p through film 102.603s, readyState=4, with no video error
+or dropped frame. Exactly two parents started, initial plus refused staged
+successor. End raw/playback counts were 0/0/0/0 and owned resources retired.
+The helper's original one-parent allowance also rejected the staged parent;
+that does not establish recovery or seamless presentation.
+
+The next compatibility probe preserves this optional-refusal outcome and
+requires saved 720p plus the shipped explicit Apply with restart action if
+the prepared seam cannot earn proof. No presentation tolerance is widened,
+no native policy changes, and no production patch was made for this probe.
+No units or final adversarial review ran.
+
+
+### 10.196 · Old-server negotiation and explicit manual restart pass
+
+`continuous-chrome-3c5e6d93b-targeted-old-server4` PASSED. Actual main
+`342521018` returned catalog 404; the candidate web client played retained
+manual 1080p without false continuous enrollment. Its optional prepared
+720p offer could not earn decoded alignment and retained the incumbent
+plus saved 720p. The shipped Apply with restart action then presented
+720p in a new session on actual main. Exactly three parents started:
+initial, refused preparation, explicit restart. The measured manual action
+through restored target took 12.839s. Initial TTFF was 11.414s and clock
+1.001x. End raw/playback child counts were 0/0/0/0; helper exited zero and
+removed both separate lab runtimes, browser and proxy. This is explicit
+restart compatibility, not a seamless prepared handoff or mixed-schema
+cluster admission.
+
+The `old-server3` receipt remains FAILED: the helper incorrectly expected
+a boolean from the async UI action, which returns no boolean after starting
+playback. It recorded three parents and closed too early. The corrected
+helper verifies eligibility before calling the unchanged shipped action,
+then judges actual presentation. No production patch or tolerance change
+was made. Actual main's schema-69 vs candidate schema-71 join refusal
+continues to apply. No units or final adversarial review ran.
