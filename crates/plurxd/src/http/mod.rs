@@ -328,6 +328,8 @@ fn http_route_group(path: &str) -> usize {
         | "/jellyfin/UserViews/GroupingOptions"
         | "/jellyfin/Library/VirtualFolders"
         | "/jellyfin/DisplayPreferences/{id}"
+        | "/jellyfin/Items/{item_id}/Intros"
+        | "/jellyfin/MediaSegments/{item_id}"
         | "/jellyfin/Items/{item_id}/LocalTrailers"
         | "/jellyfin/Items/{item_id}/SpecialFeatures"
         | "/jellyfin/UserViews"
@@ -358,6 +360,7 @@ fn http_route_group(path: &str) -> usize {
 
         // Playback decisions, control, media bodies and watch state.
         "/jellyfin/Items/{item_id}/PlaybackInfo"
+        | "/jellyfin/Videos/{item_id}/{source_id}/Subtitles/{index}/{filename}"
         | "/jellyfin/Videos/{item_id}/stream"
         | "/jellyfin/Videos/{item_id}/{filename}"
         | "/jellyfin/Sessions/Logout"

@@ -549,3 +549,30 @@ a leading minus excludes named codecs/containers, and an empty selector is a
 wildcard. A negative codec selector must still apply its required conditions
 to every non-excluded source; the regression covers that bypass. Accepting a
 protocol wildcard never fills in HDR/DV claims in the native planner.
+
+
+The profile slice merged through [PR #780](http://192.168.4.7:3000/noirr/plurx/pulls/780)
+as `7a4e56b86071b856703ea357218f75ce229f026a` after all eight jobs passed
+on head `687c83602`. Its landing contains the ten checked regression fields.
+
+An independent ancillary/track slice now implements authenticated Intros,
+MediaSegments and source-bound subtitle aliases. Intros reports the native
+empty pre-roll collection. MediaSegments reuses native persisted/manual marker
+authority and chapter fallback; content-derived segment IDs stay stable while
+the mapped item/source, kind and source times are unchanged. They are not
+mutable catalog entities. The segment-type filter is bounded and closed.
+Subtitle requests preserve original global indices and source timestamps,
+delegate native VTT extraction/cache, and convert plain compatible cues to SRT
+for the observed Infuse format. Unsupported WebVTT styling or timestamp tags
+refuse instead of silently changing their meaning. Native extraction failure
+and bitmap refusal retain their error responses.
+
+This slice requires authentication on every request and creates no media
+capability or playback owner. Full J5 qualification still depends on J4's
+native activation and transport work and the deferred client matrix.
+
+On the current integrated base, all 19 focused Jellyfin HTTP regressions pass
+(10.27 seconds), both subtitle representation regressions pass, and all 17
+documentation/identity/ownership contracts pass. Route deadline and attribution
+inventories pass. Workspace/all-target Clippy passes on pinned Rust 1.97.1.
+These automated results do not count as physical client qualification.
