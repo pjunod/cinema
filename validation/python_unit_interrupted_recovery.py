@@ -17,6 +17,73 @@ SCOPE = {"repository": 1, "pr": 767,
          "base": "effort/architecture-review-2026-09-20"}
 COMMIT = "2d08b4bc71315c14e48755229f84a6d91c23dc22"
 DESCRIPTOR_SHA256 = "3e7134e0b02bf8082c93c1f6990f64e27099a5fba024d272bf25f0fb4c21da10"
+PREPARE_SHA256 = "f17328b9800a00a750ece1e6dbb2c8ce7a52c3db01509ae7af30a2d12324c909"
+
+
+def prepare_case():
+    path = Path(__file__).with_name("python-unit-preunit-failure3985.json")
+    receipts.require(path.is_file() and not path.is_symlink(), "Prepare3985 witness unavailable")
+    with path.open("rb") as stream:
+        raw = stream.read(receipts.MAX_BYTES + 1)
+    receipts.require(len(raw) <= receipts.MAX_BYTES
+                     and hashlib.sha256(raw).hexdigest() == PREPARE_SHA256,
+                     "Unknown or corrupt prepare3985 witness")
+    return receipts.bounded_json(raw), PREPARE_SHA256
+
+
+def recover_prepare_pr767(api, scope, prior, jobs):
+    """One authenticated zero-unit CLI refusal; never import a success map."""
+    proof, digest = prepare_case()
+    receipts.require(proof["version"] == 1 and proof["scope"] == SCOPE
+                     and proof["run"] == 3985 and proof["job"] == 41443
+                     and proof["task"] == 15438
+                     and proof["commit"] == "0782c1ac4d04e7ee3592f2a97e4b40cbfed31f09",
+                     "Prepare3985 exact-case identity mismatch")
+    receipts.authenticate_lost_journal(api, scope, digest)
+    receipts.require(prior["commit_sha"] == proof["commit"], "Prepare3985 prior source mismatch")
+    actual = api.get("/actions/runs/3985")
+    receipts.require(actual["id"] == 3985 and actual["repository"]["id"] == 1
+                     and actual["commit_sha"] == proof["commit"]
+                     and actual["prettyref"] == scope["branch"]
+                     and actual["workflow_id"] == "effort-ci.yml" and actual["status"] == "failure",
+                     "Prepare3985 terminal run metadata mismatch")
+    receipts.require(len(jobs) == len(proof["jobs"])
+                     and sorted(({field: job[field] for field in ("id", "task_id", "name", "status")}
+                                 for job in jobs), key=lambda row: row["id"]) == proof["jobs"]
+                     and all(job["run_id"] == 3985 and job["repo_id"] == 1
+                             and job["attempt"] == 1 for job in jobs),
+                     "Prepare3985 complete terminal job inventory mismatch")
+    receipts.require(set(proof["source_hashes"]) == {
+        ".github/workflows/effort-ci.yml", "validation/python_unit_receipts.py",
+        "validation/python_unit_interrupted_recovery.py"}, "Prepare3985 source inventory mismatch")
+    for path, expected in proof["source_hashes"].items():
+        source = api.bytes("/raw/" + path, {"ref": proof["commit"]})
+        receipts.require(len(source) <= receipts.MAX_BYTES
+                         and hashlib.sha256(source).hexdigest() == expected,
+                         "Prepare3985 original parser/source mismatch")
+    raw = api.bytes("/actions/jobs/41443/logs")
+    receipts.require(len(raw) <= receipts.MAX_BYTES
+                     and hashlib.sha256(raw).hexdigest() == proof["log_sha256"],
+                     "Prepare3985 original terminal log mismatch")
+    lines = [re.sub(r"^\d{4}-\d\d-\d\dT[0-9:.]+Z ", "", line)
+             for line in raw.decode("utf-8").splitlines()]
+    refusal = ("Python receipt refusal: ReceiptHTTPError: HTTP 403 at "
+               "/repos/noirr/plurx/collaborators/pjunod/permission; evidence unavailable")
+    start = "skipping post step for 'Publish Python attempt-start marker'; main step was skipped"
+    final = "skipping post step for 'Preserve Python success journal even on unit failure'; main step was skipped"
+    log = "\n".join(lines)
+    receipts.require(raw.endswith(b"\n") and proof["commit"] in lines
+                     and lines.count(refusal) == lines.count(start) == lines.count(final) == 1
+                     and lines.index(refusal) < min(lines.index(start), lines.index(final))
+                     and lines[-1] == "Job 'Python unit receipts' failed"
+                     and not any(marker in log for marker in (
+                         "discovered=", "historical-passes=", "pending=", "Ran ",
+                         "Unit discovery failed", "fixture_errors", "... ok", "... FAIL", "... ERROR",
+                         "has been successfully uploaded!")),
+                     "Prepare3985 contradicts zero-unit terminal phase evidence")
+    receipts.recovery_absence(api, scope, 3985)
+    print("Recovered failed prepare run3985/job41443: zero units, no successes imported")
+    return True, None
 
 
 def interrupted_case():
@@ -103,6 +170,8 @@ def positive_events(proof, raw):
 
 def recover_interrupted_pr767(api, scope, prior, jobs, legacy, current_run):
     """Recover only the bound missing-final case, with original attributions."""
+    if scope == SCOPE and prior["id"] == 3985:
+        return recover_prepare_pr767(api, scope, prior, jobs)
     if scope != SCOPE or prior["id"] != 3972:
         return False, None
     proof, digest = interrupted_case()

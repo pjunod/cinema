@@ -1,0 +1,25 @@
+{
+  "version": 1,
+  "scope": {"repository": 1, "pr": 767, "branch": "codex/ci-windows-baremetal-routing", "base": "effort/architecture-review-2026-09-20"},
+  "run": 3985,
+  "job": 41443,
+  "task": 15438,
+  "commit": "0782c1ac4d04e7ee3592f2a97e4b40cbfed31f09",
+  "log_sha256": "cac43950a7c8cf3141e70deceee32411f805ff991d21134dd6197afbdc2d3169",
+  "source_hashes": {
+    ".github/workflows/effort-ci.yml": "b7c05851a042afa2da9a39bcd3e4057ea4ee0d02f37bb304b6044237cf303e5d",
+    "validation/python_unit_receipts.py": "47f6ce32e018be39399a6bbfd0b27df4b94092dc66fa0e5225b36ad2badf5b39",
+    "validation/python_unit_interrupted_recovery.py": "3f447cd229a403d906671c9b874032178fca707d6595a4a5ddd41482aec144e5"
+  },
+  "jobs": [
+    {"id":41442,"task_id":15437,"name":"effort validation scope","status":"success"},
+    {"id":41443,"task_id":15438,"name":"Python unit receipts","status":"failure"},
+    {"id":41444,"task_id":15441,"name":"effort Rust compile","status":"skipped"},
+    {"id":41445,"task_id":15443,"name":"effort Windows compile","status":"skipped"},
+    {"id":41446,"task_id":15442,"name":"effort web static contracts","status":"skipped"},
+    {"id":41447,"task_id":15439,"name":"effort Apple compile","status":"skipped"},
+    {"id":41448,"task_id":15440,"name":"effort Android compile","status":"skipped"},
+    {"id":41449,"task_id":15444,"name":"Effort development gate","status":"failure"}
+  ],
+  "provenance": "Actual terminal run3985/job41443/task15438 failed during prepare: three owner HTTP403 enrollment fallbacks, then the recovery consumer's duplicate-module exception escaped. Start and final preservation steps skipped; no unit outcomes or attempt marker. This exact authenticated exception imports zero successes and creates no journal."
+}
