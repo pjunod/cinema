@@ -3540,7 +3540,11 @@ pattern = "(?:[A-Za-z_]\\w*::)+(?:sleep|sleep_until|interval|interval_at|timeout
 # a 100 ms maintenance deferral observation, a 20 ms claim poll bounded by
 # a two-second timeout, and a one-second viewer-departure timeout. All are
 # test-only; each timeout asserts rather than extending a production budget.
-expected_occurrences = 1133
+# +2 for a_store_outliving_its_writer_runtime_cannot_reuse_a_stale_sink:
+# its test runtime owns a two-second persistence timeout and a 10 ms poll
+# awaited inside that deadline, then drains the writer before runtime drop.
+# No production timer or detached timer owner is added.
+expected_occurrences = 1135
 # +1 native-startup delayed-init fixture: its joined writer owns one bounded
 # six-second sleep, under the test request's unchanged twelve-second deadline.
 # No production timer or recovery clock is added.
