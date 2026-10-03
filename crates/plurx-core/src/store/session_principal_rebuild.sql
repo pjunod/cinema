@@ -40,7 +40,7 @@ CREATE TABLE media_session_requests_principal_new (
     updated_at_ms       INTEGER NOT NULL,
     PRIMARY KEY (owner_key, request_id),
     CHECK (
-      (principal_kind = 'local' AND user_id IS NOT NULL
+      (principal_kind = 'local' AND user_id IS NOT NULL AND user_id > 0
        AND share_grant_id IS NULL AND share_viewer_key IS NULL
        AND owner_key = 'local:' || CAST(user_id AS TEXT))
       OR (principal_kind = 'sharing' AND user_id IS NULL
@@ -83,7 +83,7 @@ CREATE TABLE media_playback_pointers_principal_new (
     desired_revision       INTEGER,
     PRIMARY KEY (owner_key, playback_id),
     CHECK (
-      (principal_kind = 'local' AND user_id IS NOT NULL
+      (principal_kind = 'local' AND user_id IS NOT NULL AND user_id > 0
        AND share_grant_id IS NULL AND share_viewer_key IS NULL
        AND owner_key = 'local:' || CAST(user_id AS TEXT))
       OR (principal_kind = 'sharing' AND user_id IS NULL
@@ -142,7 +142,7 @@ CREATE TABLE media_sessions_principal_new (
     drain_deadline_ms             INTEGER
 ,
     CHECK (
-      (principal_kind = 'local' AND user_id IS NOT NULL
+      (principal_kind = 'local' AND user_id IS NOT NULL AND user_id > 0
        AND share_grant_id IS NULL AND share_viewer_key IS NULL
        AND owner_key = 'local:' || CAST(user_id AS TEXT))
       OR (principal_kind = 'sharing' AND user_id IS NULL
@@ -213,7 +213,7 @@ CREATE TABLE media_session_preparations_principal_new (
         PRIMARY KEY (owner_key, playback_id)
     ,
     CHECK (
-      (principal_kind = 'local' AND user_id IS NOT NULL
+      (principal_kind = 'local' AND user_id IS NOT NULL AND user_id > 0
        AND share_grant_id IS NULL AND share_viewer_key IS NULL
        AND owner_key = 'local:' || CAST(user_id AS TEXT))
       OR (principal_kind = 'sharing' AND user_id IS NULL
@@ -255,7 +255,7 @@ CREATE TABLE media_playback_desired_principal_new (
         PRIMARY KEY (owner_key, playback_id)
     ,
     CHECK (
-      (principal_kind = 'local' AND user_id IS NOT NULL
+      (principal_kind = 'local' AND user_id IS NOT NULL AND user_id > 0
        AND share_grant_id IS NULL AND share_viewer_key IS NULL
        AND owner_key = 'local:' || CAST(user_id AS TEXT))
       OR (principal_kind = 'sharing' AND user_id IS NULL
@@ -306,7 +306,7 @@ CREATE TABLE media_session_producer_recovery_principal_new (
         PRIMARY KEY (owner_key, playback_id, recovery_epoch)
     ,
     CHECK (
-      (principal_kind = 'local' AND user_id IS NOT NULL
+      (principal_kind = 'local' AND user_id IS NOT NULL AND user_id > 0
        AND share_grant_id IS NULL AND share_viewer_key IS NULL
        AND owner_key = 'local:' || CAST(user_id AS TEXT))
       OR (principal_kind = 'sharing' AND user_id IS NULL
@@ -344,7 +344,7 @@ CREATE TABLE library_channel_session_recipes_principal_new (
     created_at_ms   INTEGER NOT NULL,
     PRIMARY KEY (owner_key, request_id),
     CHECK (
-      (principal_kind = 'local' AND user_id IS NOT NULL
+      (principal_kind = 'local' AND user_id IS NOT NULL AND user_id > 0
        AND share_grant_id IS NULL AND share_viewer_key IS NULL
        AND owner_key = 'local:' || CAST(user_id AS TEXT))
       OR (principal_kind = 'sharing' AND user_id IS NULL

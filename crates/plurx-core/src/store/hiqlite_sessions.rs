@@ -369,7 +369,9 @@ impl From<&mut Row<'_>> for RouteRow {
     }
 }
 
-fn decode_route(row: &mut Row<'_>) -> Result<MediaSessionRoute, StoreError> {
+fn decode_session_principal(
+    row: &mut Row<'_>,
+) -> Result<crate::playback_principal::PlaybackPrincipal, StoreError> {
     let kind: String = row.try_get("principal_kind").map_err(database_error)?;
     let user_id: Option<i64> = row.try_get("user_id").map_err(database_error)?;
     let grant: Option<String> = row.try_get("share_grant_id").map_err(database_error)?;
@@ -383,6 +385,11 @@ fn decode_route(row: &mut Row<'_>) -> Result<MediaSessionRoute, StoreError> {
         &owner_key,
     )
     .map_err(|_| StoreError::Task("invalid media-session owner projection".to_owned()))?;
+    Ok(principal)
+}
+
+fn decode_route(row: &mut Row<'_>) -> Result<MediaSessionRoute, StoreError> {
+    let principal = decode_session_principal(row)?;
     Ok(MediaSessionRoute {
         incarnation_id: row.try_get("incarnation_id").map_err(database_error)?,
         session_id: row.try_get("session_id").map_err(database_error)?,
@@ -449,20 +456,20 @@ impl From<&mut Row<'_>> for PointerRevisionRow {
     }
 }
 
-struct DesiredRow(crate::domain::DesiredOwnership);
-
-impl From<&mut Row<'_>> for DesiredRow {
+struct PrincipalDesiredRow(Result<crate::domain::DesiredOwnership, StoreError>);
+impl From<&mut Row<'_>> for PrincipalDesiredRow {
     fn from(row: &mut Row<'_>) -> Self {
-        Self(crate::domain::DesiredOwnership {
-            principal: crate::playback_principal::PlaybackPrincipal::LocalUser {
-                user_id: row.get("user_id"),
-            },
-            playback_id: row.get("playback_id"),
-            revision: row.get("revision"),
-            digest: row.get("digest"),
-            canonical_form: row.get("canonical_form"),
-            updated_at_ms: row.get("updated_at_ms"),
-        })
+        Self((|| {
+            let principal = decode_session_principal(row)?;
+            Ok(crate::domain::DesiredOwnership {
+                principal,
+                playback_id: row.try_get("playback_id").map_err(database_error)?,
+                revision: row.try_get("revision").map_err(database_error)?,
+                digest: row.try_get("digest").map_err(database_error)?,
+                canonical_form: row.try_get("canonical_form").map_err(database_error)?,
+                updated_at_ms: row.try_get("updated_at_ms").map_err(database_error)?,
+            })
+        })())
     }
 }
 
@@ -495,38 +502,47 @@ async fn desired_row(
     user_id: i64,
     playback_id: &str,
 ) -> Result<Option<crate::domain::DesiredOwnership>, StoreError> {
-    let sql = "SELECT user_id, playback_id, revision, digest, canonical_form, updated_at_ms
-          FROM media_playback_desired
-         WHERE user_id = $1 AND playback_id = $2";
-    validate_sql(sql)?;
-    Ok(store
+    let layout = LocalSessionSql::load(store).await?;
+    let sql = format!(
+        "SELECT {}, playback_id, revision, digest, canonical_form, updated_at_ms
+          FROM media_playback_desired WHERE {} AND playback_id = $2",
+        layout.projection(),
+        layout.equals(1)
+    );
+    validate_sql(&sql)?;
+    store
         .client()
-        .query_consistent_map::<DesiredRow, _>(sql, params!(user_id, playback_id))
+        .query_consistent_map::<PrincipalDesiredRow, _>(sql, params!(user_id, playback_id))
         .await?
         .into_iter()
         .next()
-        .map(|row| row.0))
+        .map(|row| row.0)
+        .transpose()
 }
 
-struct StagedRow(crate::domain::MediaSessionStagedGeneration);
+struct StagedRow(Result<crate::domain::MediaSessionStagedGeneration, StoreError>);
 
 impl From<&mut Row<'_>> for StagedRow {
     fn from(row: &mut Row<'_>) -> Self {
-        Self(crate::domain::MediaSessionStagedGeneration {
-            principal: crate::playback_principal::PlaybackPrincipal::LocalUser {
-                user_id: row.get("user_id"),
-            },
-            playback_id: row.get("playback_id"),
-            staged_incarnation_id: row.get("staged_incarnation_id"),
-            expected_predecessor_incarnation_id: row.get("expected_predecessor_incarnation_id"),
-            deadline_ms: row.get("deadline_ms"),
-            created_at_ms: row.get("created_at_ms"),
-            updated_at_ms: row.get("updated_at_ms"),
-        })
+        Self((|| {
+            Ok(crate::domain::MediaSessionStagedGeneration {
+                principal: decode_session_principal(row)?,
+                playback_id: row.try_get("playback_id").map_err(database_error)?,
+                staged_incarnation_id: row
+                    .try_get("staged_incarnation_id")
+                    .map_err(database_error)?,
+                expected_predecessor_incarnation_id: row
+                    .try_get("expected_predecessor_incarnation_id")
+                    .map_err(database_error)?,
+                deadline_ms: row.try_get("deadline_ms").map_err(database_error)?,
+                created_at_ms: row.try_get("created_at_ms").map_err(database_error)?,
+                updated_at_ms: row.try_get("updated_at_ms").map_err(database_error)?,
+            })
+        })())
     }
 }
 
-const STAGED_COLS: &str = "user_id, playback_id, staged_incarnation_id,
+const STAGED_COLS: &str = "playback_id, staged_incarnation_id,
     expected_predecessor_incarnation_id, deadline_ms, created_at_ms, updated_at_ms";
 
 /// Is this commit an exact replay?
@@ -542,11 +558,15 @@ async fn commit_replay(
     staged_incarnation_id: &str,
     expected_receipt: Option<&MediaSessionTerminalAck>,
 ) -> Result<Option<crate::domain::MediaSessionPreparationCommit>, StoreError> {
+    let layout = LocalSessionSql::load(store).await?;
     let pointer = store
         .client()
         .query_consistent_map::<PointerRow, _>(
-            "SELECT current_incarnation_id FROM media_playback_pointers
-              WHERE user_id = $1 AND playback_id = $2",
+            format!(
+                "SELECT current_incarnation_id FROM media_playback_pointers
+              WHERE {} AND playback_id = $2",
+                layout.equals(1)
+            ),
             params!(user_id, playback_id),
         )
         .await?
@@ -579,6 +599,9 @@ async fn commit_replay(
     };
     Ok(route_by(store, "incarnation_id", staged_incarnation_id)
         .await?
+        .filter(|route| {
+            route.principal == crate::playback_principal::PlaybackPrincipal::LocalUser { user_id }
+        })
         .map(|route| crate::domain::MediaSessionPreparationCommit {
             route,
             predecessor: None,
@@ -627,21 +650,42 @@ async fn classify_preparation_commit_cas_loss(
 
 async fn staged_row(
     store: &HiqliteAuthStore,
-    user_id: i64,
+    principal: &crate::playback_principal::PlaybackPrincipal,
     playback_id: &str,
 ) -> Result<Option<crate::domain::MediaSessionStagedGeneration>, StoreError> {
+    let layout = LocalSessionSql::load(store).await?;
+    let owner_column = layout.column();
+    let bindings = if layout.rebuilt {
+        params!(principal.owner_key(), playback_id)
+    } else {
+        params!(
+            crate::store::local_media_principal_id(principal)?,
+            playback_id
+        )
+    };
     let sql = format!(
-        "SELECT {STAGED_COLS} FROM media_session_preparations
-          WHERE user_id = $1 AND playback_id = $2"
+        "SELECT {}, {STAGED_COLS} FROM media_session_preparations
+          WHERE {owner_column} = $1 AND playback_id = $2",
+        layout.projection()
     );
     validate_sql(&sql)?;
-    Ok(store
+    let result = store
         .client()
-        .query_consistent_map::<StagedRow, _>(sql, params!(user_id, playback_id))
+        .query_consistent_map::<StagedRow, _>(sql, bindings)
         .await?
         .into_iter()
         .next()
-        .map(|row| row.0))
+        .map(|row| row.0)
+        .transpose()?;
+    if result
+        .as_ref()
+        .is_some_and(|row| &row.principal != principal)
+    {
+        return Err(StoreError::Task(
+            "staged owner does not match requested principal".into(),
+        ));
+    }
+    Ok(result)
 }
 
 /// Classify an expected rejected or empty rejoin attempt from durable state.
@@ -657,12 +701,7 @@ async fn classify_rejoin_after_attempt(
     staged_incarnation_id: &str,
     preparation: &crate::domain::MediaSessionPreparation,
 ) -> Result<Option<MediaSessionRoute>, StoreError> {
-    let staged = staged_row(
-        store,
-        crate::store::local_media_principal_id(&preparation.principal)?,
-        &preparation.playback_id,
-    )
-    .await?;
+    let staged = staged_row(store, &preparation.principal, &preparation.playback_id).await?;
     if staged.as_ref().is_some_and(|staged| {
         staged.staged_incarnation_id == preparation.incarnation_id
             && staged.expected_predecessor_incarnation_id
@@ -687,7 +726,17 @@ async fn classify_rejoin_after_attempt(
 
 fn prepare_statements(
     preparation: &crate::domain::MediaSessionPreparation,
-) -> Result<Vec<(&'static str, hiqlite::Params)>, StoreError> {
+    layout: LocalSessionSql,
+) -> Result<Vec<(String, hiqlite::Params)>, StoreError> {
+    let owner_1 = layout.equals(1);
+    let owner_3 = layout.equals(3);
+    let owner_5 = layout.equals(5);
+    let extra_columns = layout.insert_columns();
+    let extra_values_1 = layout.insert_values(1);
+    let extra_values_3 = layout.insert_values(3);
+    let user_exists_1 = layout.existing_user(1);
+    let user_exists_3 = layout.existing_user(3);
+    let user_exists_5 = layout.existing_user(5);
     let prepare_lease_resource = format!("session:{}", preparation.incarnation_id);
     let removed_owner_key = removed_job_owner_key(&preparation.owner_node_id);
     // Zero is "no expectation", and it can never collide with a real one:
@@ -708,31 +757,33 @@ fn prepare_statements(
             // Every statement carries the same fixed preconditions. A
             // replicated transaction cannot branch between statements, so a
             // partial lease/session/ledger preparation must be impossible.
-            "INSERT INTO job_leases
+            format!(
+                "INSERT INTO job_leases
                 (resource, owner_node_id, fence, revision, expires_at_ms, updated_at_ms)
              SELECT $1, $2, 1, 1, $3, $4
               WHERE EXISTS (SELECT 1 FROM media_playback_pointers
-                  WHERE user_id = $5 AND playback_id = $6
+                  WHERE {owner_5} AND playback_id = $6
                     AND current_incarnation_id = $7)
                 AND NOT EXISTS (SELECT 1 FROM media_session_preparations
-                  WHERE user_id = $5 AND playback_id = $6)
+                  WHERE {owner_5} AND playback_id = $6)
                 AND NOT EXISTS (SELECT 1 FROM media_session_preparations
                   WHERE staged_incarnation_id = $8)
                 AND NOT EXISTS (SELECT 1 FROM media_sessions WHERE incarnation_id = $8)
                 AND (SELECT COUNT(*) FROM media_sessions
-                      WHERE user_id = $5 AND state IN ('starting', 'active')
+                      WHERE {owner_5} AND state IN ('starting', 'active')
                         AND lease_expires_at_ms > $4 AND incarnation_id != $8) < $9
                 AND (SELECT COUNT(*) FROM media_sessions
-                      WHERE user_id = $5 AND incarnation_id != $8) < $10
+                      WHERE {owner_5} AND incarnation_id != $8) < $10
                 AND (SELECT COUNT(*) FROM media_sessions
                       WHERE owner_node_id = $2 AND state = 'active'
                         AND lease_expires_at_ms > $4 AND incarnation_id != $8) < $11
                 AND NOT EXISTS (SELECT 1 FROM settings WHERE key = $12)
                 AND EXISTS (SELECT 1 FROM media_sessions
                   WHERE incarnation_id = $7 AND owner_node_id = $13
-                    AND owner_epoch = $14 AND state = 'active')
+                    AND owner_epoch = $14 AND state = 'active' AND {owner_5})
                 AND ($15 = 0 OR NOT EXISTS (SELECT 1 FROM media_playback_desired
-                  WHERE user_id = $5 AND playback_id = $6 AND revision != $15))
+                  WHERE {owner_5} AND playback_id = $6 AND revision != $15))
+                {user_exists_5}
              ON CONFLICT(resource) DO UPDATE SET
                 expires_at_ms = excluded.expires_at_ms,
                 revision = job_leases.revision + 1,
@@ -740,7 +791,8 @@ fn prepare_statements(
               WHERE job_leases.owner_node_id = excluded.owner_node_id
                 AND job_leases.fence = 1 AND job_leases.expires_at_ms > $4
                 AND job_leases.revision < 9223372036854775807
-             RETURNING resource, owner_node_id, fence, revision, expires_at_ms",
+             RETURNING resource, owner_node_id, fence, revision, expires_at_ms"
+            ),
             params!(
                 prepare_lease_resource.as_str(),
                 preparation.owner_node_id.as_str(),
@@ -760,12 +812,13 @@ fn prepare_statements(
             ),
         ),
         (
-            "INSERT INTO media_sessions
+            format!(
+                "INSERT INTO media_sessions
                 (incarnation_id, session_id, user_id, playback_id, request_fingerprint,
                  owner_node_id, owner_epoch, lease_expires_at_ms, state, recipe_json,
                  response_json, produced_playable_through_ms, fetched_through_ms,
                  media_origin_ms, media_sequence, discontinuity_sequence,
-                 publication_ready_at_ms, updated_at_ms, recovery_epoch)
+                 publication_ready_at_ms, updated_at_ms, recovery_epoch{extra_columns})
              -- The staged successor inherits its predecessor's epoch, read
              -- from the predecessor's own row rather than passed in: a
              -- successor continues one playback, so minting here would grant a
@@ -776,32 +829,34 @@ fn prepare_statements(
              -- other, so one must not name a placeholder either.
              SELECT $1, $2, $3, $4, $5, $6, 1, $7, 'active', $8, $9, 0, 0, $10, 0, 0, $11, $12,
                     COALESCE((SELECT recovery_epoch FROM media_sessions
-                               WHERE incarnation_id = $13), '')
+                               WHERE incarnation_id = $13), ''){extra_values_3}
               WHERE EXISTS (SELECT 1 FROM job_leases
                   WHERE resource = 'session:' || $1 AND owner_node_id = $6
                     AND fence = 1 AND expires_at_ms = $7 AND expires_at_ms > $12)
                 AND EXISTS (SELECT 1 FROM media_playback_pointers
-                  WHERE user_id = $3 AND playback_id = $4
+                  WHERE {owner_3} AND playback_id = $4
                     AND current_incarnation_id = $13)
                 AND NOT EXISTS (SELECT 1 FROM media_session_preparations
-                  WHERE user_id = $3 AND playback_id = $4)
+                  WHERE {owner_3} AND playback_id = $4)
                 AND NOT EXISTS (SELECT 1 FROM media_session_preparations
                   WHERE staged_incarnation_id = $1)
                 AND (SELECT COUNT(*) FROM media_sessions
-                      WHERE user_id = $3 AND state IN ('starting', 'active')
+                      WHERE {owner_3} AND state IN ('starting', 'active')
                         AND lease_expires_at_ms > $12 AND incarnation_id != $1) < $14
                 AND (SELECT COUNT(*) FROM media_sessions
-                      WHERE user_id = $3 AND incarnation_id != $1) < $15
+                      WHERE {owner_3} AND incarnation_id != $1) < $15
                 AND (SELECT COUNT(*) FROM media_sessions
                       WHERE owner_node_id = $6 AND state = 'active'
                         AND lease_expires_at_ms > $12 AND incarnation_id != $1) < $16
                 AND NOT EXISTS (SELECT 1 FROM settings WHERE key = $17)
                 AND EXISTS (SELECT 1 FROM media_sessions
                   WHERE incarnation_id = $13 AND owner_node_id = $18
-                    AND owner_epoch = $19 AND state = 'active')
+                    AND owner_epoch = $19 AND state = 'active' AND {owner_3})
                 AND ($20 = 0 OR NOT EXISTS (SELECT 1 FROM media_playback_desired
-                  WHERE user_id = $3 AND playback_id = $4 AND revision != $20))
-             RETURNING incarnation_id, session_id, user_id, playback_id, owner_node_id",
+                  WHERE {owner_3} AND playback_id = $4 AND revision != $20))
+                {user_exists_3}
+             RETURNING incarnation_id, session_id, user_id, playback_id, owner_node_id"
+            ),
             params!(
                 preparation.incarnation_id.as_str(),
                 preparation.session_id.as_str(),
@@ -826,26 +881,29 @@ fn prepare_statements(
             ),
         ),
         (
-            "INSERT INTO media_session_preparations
+            format!(
+                "INSERT INTO media_session_preparations
                 (user_id, playback_id, staged_incarnation_id,
                  expected_predecessor_incarnation_id, deadline_ms,
-                 created_at_ms, updated_at_ms)
-             SELECT $1, $2, $3, $4, $5, $6, $6 WHERE EXISTS (
+                 created_at_ms, updated_at_ms{extra_columns})
+             SELECT $1, $2, $3, $4, $5, $6, $6{extra_values_1} WHERE EXISTS (
                SELECT 1 FROM media_sessions
                 WHERE incarnation_id = $3 AND session_id = $7
-                  AND user_id = $1 AND playback_id = $2
+                  AND {owner_1} AND playback_id = $2
                   AND owner_node_id = $8 AND state = 'active'
                   AND publication_ready_at_ms = $9)
                AND EXISTS (SELECT 1 FROM media_playback_pointers pointer
                  JOIN media_sessions predecessor
                    ON predecessor.incarnation_id = pointer.current_incarnation_id
-                WHERE pointer.user_id = $1 AND pointer.playback_id = $2
+                WHERE pointer.{owner_1} AND pointer.playback_id = $2
                   AND pointer.current_incarnation_id = $4
                   AND predecessor.owner_node_id = $10
                   AND predecessor.owner_epoch = $11
-                  AND predecessor.state = 'active')
+                  AND predecessor.state = 'active' AND predecessor.{owner_1})
                AND ($12 = 0 OR NOT EXISTS (SELECT 1 FROM media_playback_desired
-                 WHERE user_id = $1 AND playback_id = $2 AND revision != $12))",
+                 WHERE {owner_1} AND playback_id = $2 AND revision != $12))
+               {user_exists_1}"
+            ),
             params!(
                 crate::store::local_media_principal_id(&preparation.principal)?,
                 preparation.playback_id.as_str(),
@@ -871,27 +929,32 @@ fn abort_statements(
     expected_owner_node_id: &str,
     expected_owner_epoch: i64,
     now_ms: i64,
-) -> Vec<(&'static str, hiqlite::Params)> {
+    layout: LocalSessionSql,
+) -> Vec<(String, hiqlite::Params)> {
+    let owner_column = layout.column();
+    let owner_1 = layout.equals(1);
+    let owner_3 = layout.equals(3);
+    let owner_4 = layout.equals(4);
     let lease_resource = format!("session:{staged_incarnation_id}");
     vec![
         (
-            "UPDATE media_sessions SET state = 'ended', terminal_reason = 'replaced',
+            format!("UPDATE media_sessions SET state = 'ended', terminal_reason = 'replaced',
                     lease_expires_at_ms = $1, updated_at_ms = $1
-              WHERE incarnation_id = $2 AND state != 'ended'
+              WHERE incarnation_id = $2 AND state != 'ended' AND {owner_3}
                 AND EXISTS (SELECT 1 FROM media_session_preparations
-                  WHERE user_id = $3 AND playback_id = $4
+                  WHERE {owner_3} AND playback_id = $4
                     AND staged_incarnation_id = $2)
                 AND NOT EXISTS (SELECT 1 FROM media_playback_pointers pointer
                   JOIN media_session_preparations preparation
-                    ON preparation.user_id = pointer.user_id
+                    ON preparation.{owner_column} = pointer.{owner_column}
                    AND preparation.playback_id = pointer.playback_id
                   JOIN media_sessions predecessor
                     ON predecessor.incarnation_id = pointer.current_incarnation_id
-                 WHERE preparation.user_id = $3 AND preparation.playback_id = $4
+                 WHERE preparation.{owner_3} AND preparation.playback_id = $4
                    AND preparation.staged_incarnation_id = $2
                    AND pointer.current_incarnation_id = preparation.expected_predecessor_incarnation_id
                    AND (predecessor.owner_node_id != $5 OR predecessor.owner_epoch != $6))
-              RETURNING incarnation_id",
+              RETURNING incarnation_id"),
             params!(
                 now_ms,
                 staged_incarnation_id,
@@ -902,23 +965,23 @@ fn abort_statements(
             ),
         ),
         (
-            "DELETE FROM cache_consumer_pins
+            format!("DELETE FROM cache_consumer_pins
               WHERE consumer_kind = 'media_session' AND consumer_id = $1
                 AND EXISTS (SELECT 1 FROM media_sessions
-                  WHERE incarnation_id = $1 AND state = 'ended' AND updated_at_ms = $2)
+                  WHERE incarnation_id = $1 AND state = 'ended' AND updated_at_ms = $2 AND {owner_3})
                 AND EXISTS (SELECT 1 FROM media_session_preparations
-                  WHERE user_id = $3 AND playback_id = $4
+                  WHERE {owner_3} AND playback_id = $4
                     AND staged_incarnation_id = $1)
                 AND NOT EXISTS (SELECT 1 FROM media_playback_pointers pointer
                   JOIN media_session_preparations preparation
-                    ON preparation.user_id = pointer.user_id
+                    ON preparation.{owner_column} = pointer.{owner_column}
                    AND preparation.playback_id = pointer.playback_id
                   JOIN media_sessions predecessor
                     ON predecessor.incarnation_id = pointer.current_incarnation_id
-                 WHERE preparation.user_id = $3 AND preparation.playback_id = $4
+                 WHERE preparation.{owner_3} AND preparation.playback_id = $4
                    AND preparation.staged_incarnation_id = $1
                    AND pointer.current_incarnation_id = preparation.expected_predecessor_incarnation_id
-                   AND (predecessor.owner_node_id != $5 OR predecessor.owner_epoch != $6))",
+                   AND (predecessor.owner_node_id != $5 OR predecessor.owner_epoch != $6))"),
             params!(
                 staged_incarnation_id,
                 now_ms,
@@ -929,26 +992,26 @@ fn abort_statements(
             ),
         ),
         (
-            "UPDATE job_leases
+            format!("UPDATE job_leases
                 SET expires_at_ms = CASE
                       WHEN expires_at_ms < $1 THEN expires_at_ms ELSE $1 END,
                     revision = revision + 1, updated_at_ms = $1
               WHERE resource = $2 AND revision < 9223372036854775807
                 AND EXISTS (SELECT 1 FROM media_sessions
-                  WHERE incarnation_id = $3 AND state = 'ended' AND updated_at_ms = $1)
+                  WHERE incarnation_id = $3 AND state = 'ended' AND updated_at_ms = $1 AND {owner_4})
                 AND EXISTS (SELECT 1 FROM media_session_preparations
-                  WHERE user_id = $4 AND playback_id = $5
+                  WHERE {owner_4} AND playback_id = $5
                     AND staged_incarnation_id = $3)
                 AND NOT EXISTS (SELECT 1 FROM media_playback_pointers pointer
                   JOIN media_session_preparations preparation
-                    ON preparation.user_id = pointer.user_id
+                    ON preparation.{owner_column} = pointer.{owner_column}
                    AND preparation.playback_id = pointer.playback_id
                   JOIN media_sessions predecessor
                     ON predecessor.incarnation_id = pointer.current_incarnation_id
-                 WHERE preparation.user_id = $4 AND preparation.playback_id = $5
+                 WHERE preparation.{owner_4} AND preparation.playback_id = $5
                    AND preparation.staged_incarnation_id = $3
                    AND pointer.current_incarnation_id = preparation.expected_predecessor_incarnation_id
-                   AND (predecessor.owner_node_id != $6 OR predecessor.owner_epoch != $7))",
+                   AND (predecessor.owner_node_id != $6 OR predecessor.owner_epoch != $7))"),
             params!(
                 now_ms,
                 lease_resource.as_str(),
@@ -960,18 +1023,18 @@ fn abort_statements(
             ),
         ),
         (
-            "DELETE FROM media_session_preparations
-              WHERE user_id = $1 AND playback_id = $2 AND staged_incarnation_id = $3
+            format!("DELETE FROM media_session_preparations
+              WHERE {owner_1} AND playback_id = $2 AND staged_incarnation_id = $3
                 AND NOT EXISTS (SELECT 1 FROM media_playback_pointers pointer
                   JOIN media_session_preparations preparation
-                    ON preparation.user_id = pointer.user_id
+                    ON preparation.{owner_column} = pointer.{owner_column}
                    AND preparation.playback_id = pointer.playback_id
                   JOIN media_sessions predecessor
                     ON predecessor.incarnation_id = pointer.current_incarnation_id
-                 WHERE preparation.user_id = $1 AND preparation.playback_id = $2
+                 WHERE preparation.{owner_1} AND preparation.playback_id = $2
                    AND preparation.staged_incarnation_id = $3
                    AND pointer.current_incarnation_id = preparation.expected_predecessor_incarnation_id
-                   AND (predecessor.owner_node_id != $4 OR predecessor.owner_epoch != $5))",
+                   AND (predecessor.owner_node_id != $4 OR predecessor.owner_epoch != $5))"),
             params!(
                 user_id,
                 playback_id,
@@ -991,24 +1054,25 @@ impl From<&mut Row<'_>> for PendingMaintenanceRow {
     }
 }
 
-struct OwnedLeaseRow(OwnedMediaSessionLease);
+struct OwnedLeaseRow(Result<OwnedMediaSessionLease, StoreError>);
 
 impl From<&mut Row<'_>> for OwnedLeaseRow {
     fn from(row: &mut Row<'_>) -> Self {
-        Self(OwnedMediaSessionLease {
-            principal: crate::playback_principal::PlaybackPrincipal::LocalUser {
-                user_id: row.get("user_id"),
-            },
-            incarnation_id: row.get("incarnation_id"),
-            session_id: row.get("session_id"),
-            owner_epoch: row.get("owner_epoch"),
-            lease_expires_at_ms: row.get("lease_expires_at_ms"),
-            drain_deadline_ms: row.get("drain_deadline_ms"),
-        })
+        Self((|| {
+            Ok(OwnedMediaSessionLease {
+                principal: decode_session_principal(row)?,
+                incarnation_id: row.try_get("incarnation_id").map_err(database_error)?,
+                session_id: row.try_get("session_id").map_err(database_error)?,
+                owner_epoch: row.try_get("owner_epoch").map_err(database_error)?,
+                lease_expires_at_ms: row.try_get("lease_expires_at_ms").map_err(database_error)?,
+                drain_deadline_ms: row.try_get("drain_deadline_ms").map_err(database_error)?,
+            })
+        })())
     }
 }
 
-struct RequestRow {
+struct RequestState {
+    principal: crate::playback_principal::PlaybackPrincipal,
     request_fingerprint: String,
     playback_id: String,
     state: String,
@@ -1017,15 +1081,96 @@ struct RequestRow {
     claim_expires_at_ms: i64,
 }
 
+struct RequestRow(Result<RequestState, StoreError>);
+
 impl From<&mut Row<'_>> for RequestRow {
     fn from(row: &mut Row<'_>) -> Self {
-        Self {
-            request_fingerprint: row.get("request_fingerprint"),
-            playback_id: row.get("playback_id"),
-            state: row.get("state"),
-            incarnation_id: row.get("incarnation_id"),
-            owner_node_id: row.get("owner_node_id"),
-            claim_expires_at_ms: row.get("claim_expires_at_ms"),
+        Self(decode_request(row))
+    }
+}
+
+fn decode_request(row: &mut Row<'_>) -> Result<RequestState, StoreError> {
+    Ok(RequestState {
+        principal: decode_session_principal(row)?,
+        request_fingerprint: row.try_get("request_fingerprint").map_err(database_error)?,
+        playback_id: row.try_get("playback_id").map_err(database_error)?,
+        state: row.try_get("state").map_err(database_error)?,
+        incarnation_id: row.try_get("incarnation_id").map_err(database_error)?,
+        owner_node_id: row.try_get("owner_node_id").map_err(database_error)?,
+        claim_expires_at_ms: row.try_get("claim_expires_at_ms").map_err(database_error)?,
+    })
+}
+
+/// These SQL fragments are only for validated, real local users. Sharing
+/// remains refused at mutation ingress until its transaction admission proof
+/// is implemented. A schema shape is not grant or member-floor authority.
+#[derive(Clone, Copy)]
+struct LocalSessionSql {
+    rebuilt: bool,
+}
+
+impl LocalSessionSql {
+    async fn load(store: &HiqliteAuthStore) -> Result<Self, StoreError> {
+        Ok(Self {
+            rebuilt: route_projection(store).await? == PRINCIPAL_ROUTE_COLS,
+        })
+    }
+
+    fn column(self) -> &'static str {
+        if self.rebuilt {
+            "owner_key"
+        } else {
+            "user_id"
+        }
+    }
+
+    fn equals(self, parameter: usize) -> String {
+        if self.rebuilt {
+            format!("owner_key = ('local:' || ${parameter})")
+        } else {
+            format!("user_id = ${parameter}")
+        }
+    }
+
+    fn insert_columns(self) -> &'static str {
+        if self.rebuilt {
+            ", owner_key, principal_kind, share_grant_id, share_viewer_key"
+        } else {
+            ""
+        }
+    }
+
+    fn insert_values(self, parameter: usize) -> String {
+        if self.rebuilt {
+            format!(", ('local:' || ${parameter}), 'local', NULL, NULL")
+        } else {
+            String::new()
+        }
+    }
+
+    fn existing_user(self, parameter: usize) -> String {
+        if self.rebuilt {
+            format!(" AND EXISTS (SELECT 1 FROM users WHERE id = ${parameter})")
+        } else {
+            String::new()
+        }
+    }
+
+    /// Until shared admission is wired, incarnation-only writers may extend
+    /// authority only for a retained Local principal with a current real user.
+    fn live_local_user(self, table: &str) -> String {
+        if self.rebuilt {
+            format!(" AND {table}.principal_kind = 'local' AND EXISTS (SELECT 1 FROM users WHERE id = {table}.user_id)")
+        } else {
+            String::new()
+        }
+    }
+
+    fn projection(self) -> &'static str {
+        if self.rebuilt {
+            "user_id, owner_key, principal_kind, share_grant_id, share_viewer_key"
+        } else {
+            "user_id, ('local:' || user_id) AS owner_key, 'local' AS principal_kind, NULL AS share_grant_id, NULL AS share_viewer_key"
         }
     }
 }
@@ -1246,23 +1391,37 @@ async fn request_row(
     store: &HiqliteAuthStore,
     user_id: i64,
     request_id: &str,
-) -> Result<Option<RequestRow>, StoreError> {
-    Ok(store
+) -> Result<Option<RequestState>, StoreError> {
+    let ownership = LocalSessionSql::load(store).await?;
+    let owner = ownership.equals(1);
+    let projection = ownership.projection();
+    let result = store
         .client()
         .query_consistent_map::<RequestRow, _>(
-            "SELECT request_fingerprint, playback_id, state, incarnation_id, owner_node_id,
-                    claim_expires_at_ms
-               FROM media_session_requests WHERE user_id = $1 AND request_id = $2",
+            format!(
+                "SELECT request_fingerprint, playback_id, state, incarnation_id, owner_node_id,
+                    claim_expires_at_ms, {projection}
+               FROM media_session_requests WHERE {owner} AND request_id = $2"
+            ),
             params!(user_id, request_id),
         )
         .await?
         .into_iter()
-        .next())
+        .next()
+        .map(|row| row.0)
+        .transpose()?;
+    let expected = crate::playback_principal::PlaybackPrincipal::LocalUser { user_id };
+    if result.as_ref().is_some_and(|row| row.principal != expected) {
+        return Err(StoreError::Task(
+            "mismatched media-session request principal".into(),
+        ));
+    }
+    Ok(result)
 }
 
 async fn claim_from_row(
     store: &HiqliteAuthStore,
-    row: RequestRow,
+    row: RequestState,
     fingerprint: &str,
     playback_id: &str,
 ) -> Result<MediaSessionRequestClaim, StoreError> {
@@ -1271,6 +1430,9 @@ async fn claim_from_row(
     }
     if row.state == "resolved" {
         if let Some(route) = route_by(store, "incarnation_id", &row.incarnation_id).await? {
+            if route.principal != row.principal {
+                return Ok(MediaSessionRequestClaim::Conflict);
+            }
             return Ok(MediaSessionRequestClaim::Resolved(Box::new(route)));
         }
     }
@@ -1287,7 +1449,7 @@ async fn claim_from_row(
 #[allow(clippy::too_many_arguments)]
 async fn claim_existing_or_reacquire(
     store: &HiqliteAuthStore,
-    row: RequestRow,
+    row: RequestState,
     user_id: i64,
     request_id: &str,
     fingerprint: &str,
@@ -1300,28 +1462,33 @@ async fn claim_existing_or_reacquire(
         return Ok(MediaSessionRequestClaim::Conflict);
     }
     if row.state == "failed" || (row.state == "starting" && row.claim_expires_at_ms <= now_ms) {
+        let ownership = LocalSessionSql::load(store).await?;
+        let owner = ownership.equals(4);
+        let existing_user = ownership.existing_user(4);
         let reacquired = store
             .client()
             .execute(
-                "UPDATE media_session_requests
+                format!(
+                    "UPDATE media_session_requests
                     SET state = 'starting', claim_expires_at_ms = $1,
                         incarnation_id = $2, owner_node_id = NULL,
                         response_json = NULL, updated_at_ms = $3
-                  WHERE user_id = $4 AND request_id = $5
+                  WHERE {owner} AND request_id = $5
                     AND (state = 'failed'
                       OR (state = 'starting' AND claim_expires_at_ms <= $3))
-                    AND request_fingerprint = $6 AND playback_id = $7
+                    AND request_fingerprint = $6 AND playback_id = $7{existing_user}
                     AND (SELECT COUNT(*) FROM media_session_requests
-                          WHERE user_id = $4 AND state = 'starting'
+                          WHERE {owner} AND state = 'starting'
                             AND claim_expires_at_ms > $3) < $8
                     AND (SELECT COUNT(*) FROM media_sessions
-                          WHERE user_id = $4 AND state IN ('starting', 'active')
+                          WHERE {owner} AND state IN ('starting', 'active')
                             AND lease_expires_at_ms > $3
                             AND incarnation_id != COALESCE((
                               SELECT current_incarnation_id FROM media_playback_pointers
-                               WHERE user_id = $4 AND playback_id = $7), '')) < $9
+                               WHERE {owner} AND playback_id = $7), '')) < $9
                     AND (SELECT COUNT(*) FROM media_sessions
-                          WHERE user_id = $4) < $10",
+                          WHERE {owner}) < $10"
+                ),
                 params!(
                     claim_expires_at_ms,
                     incarnation_id,
@@ -1396,28 +1563,37 @@ impl MediaSessionStore for HiqliteAuthStore {
             )
             .await;
         }
+        let ownership = LocalSessionSql::load(self).await?;
+        let owner = ownership.equals(1);
+        let owner_column = ownership.column();
+        let principal_columns = ownership.insert_columns();
+        let principal_values = ownership.insert_values(1);
+        let existing_user = ownership.existing_user(1);
         let inserted = self
             .client()
             .execute(
-                "INSERT INTO media_session_requests
+                format!(
+                    "INSERT INTO media_session_requests
                     (user_id, request_id, request_fingerprint, playback_id, state,
                      claim_expires_at_ms, incarnation_id, owner_node_id, response_json,
-                     updated_at_ms)
-                 SELECT $1, $2, $3, $4, 'starting', $5, $6, NULL, NULL, $7
+                     updated_at_ms{principal_columns})
+                 SELECT $1, $2, $3, $4, 'starting', $5, $6, NULL, NULL, $7{principal_values}
                   WHERE (SELECT COUNT(*) FROM media_session_requests
-                          WHERE user_id = $1 AND state = 'starting'
+                          WHERE {owner} AND state = 'starting'
                             AND claim_expires_at_ms > $7) < $8
                     AND (SELECT COUNT(*) FROM media_sessions
-                          WHERE user_id = $1 AND state IN ('starting', 'active')
+                          WHERE {owner} AND state IN ('starting', 'active')
                             AND lease_expires_at_ms > $7
                             AND incarnation_id != COALESCE((
                               SELECT current_incarnation_id FROM media_playback_pointers
-                               WHERE user_id = $1 AND playback_id = $4), '')) < $9
+                               WHERE {owner} AND playback_id = $4), '')) < $9
                     AND (SELECT COUNT(*) FROM media_session_requests
-                          WHERE user_id = $1) < $10
+                          WHERE {owner}) < $10
                     AND (SELECT COUNT(*) FROM media_sessions
-                          WHERE user_id = $1) < $11
-                 ON CONFLICT(user_id, request_id) DO NOTHING",
+                          WHERE {owner}) < $11
+                 {existing_user}
+                 ON CONFLICT({owner_column}, request_id) DO NOTHING"
+                ),
                 params!(
                     user_id,
                     request_id,
@@ -1475,20 +1651,27 @@ impl MediaSessionStore for HiqliteAuthStore {
                 "invalid Library-channel session recipe".to_owned(),
             ));
         }
+        let ownership = LocalSessionSql::load(self).await?;
+        let owner = ownership.equals(1);
+        let owner_column = ownership.column();
+        let principal_columns = ownership.insert_columns();
+        let principal_values = ownership.insert_values(1);
+        let existing_user = ownership.existing_user(1);
         Ok(self
             .client()
             .execute(
-                "INSERT INTO library_channel_session_recipes
-                    (user_id, request_id, incarnation_id, recipe_json, created_at_ms)
-                 SELECT $1, $2, $3, $4, $5
+                format!("INSERT INTO library_channel_session_recipes
+                    (user_id, request_id, incarnation_id, recipe_json, created_at_ms{principal_columns})
+                 SELECT $1, $2, $3, $4, $5{principal_values}
                   WHERE EXISTS (SELECT 1 FROM media_session_requests
-                    WHERE user_id = $1 AND request_id = $2 AND incarnation_id = $3
+                    WHERE {owner} AND request_id = $2 AND incarnation_id = $3
                       AND state = 'starting' AND claim_expires_at_ms > $5)
-                 ON CONFLICT(user_id, request_id) DO UPDATE SET
+                 {existing_user}
+                 ON CONFLICT({owner_column}, request_id) DO UPDATE SET
                     incarnation_id = excluded.incarnation_id,
                     recipe_json = excluded.recipe_json,
                     created_at_ms = excluded.created_at_ms
-                 WHERE library_channel_session_recipes.incarnation_id = excluded.incarnation_id",
+                 WHERE library_channel_session_recipes.incarnation_id = excluded.incarnation_id"),
                 params!(user_id, request_id, incarnation_id, recipe_json, now_ms),
             )
             .await?
@@ -1515,13 +1698,18 @@ impl MediaSessionStore for HiqliteAuthStore {
                 "invalid media-session owner assignment".to_owned(),
             ));
         }
+        let ownership = LocalSessionSql::load(self).await?;
+        let owner = ownership.equals(3);
+        let existing_user = ownership.existing_user(3);
         Ok(self
             .client()
             .execute(
-                "UPDATE media_session_requests SET owner_node_id = $1, updated_at_ms = $2
-                  WHERE user_id = $3 AND request_id = $4 AND incarnation_id = $5
+                format!(
+                    "UPDATE media_session_requests SET owner_node_id = $1, updated_at_ms = $2
+                  WHERE {owner} AND request_id = $4 AND incarnation_id = $5
                     AND state = 'starting' AND claim_expires_at_ms > $2
-                    AND (owner_node_id IS NULL OR owner_node_id = $1)",
+                    AND (owner_node_id IS NULL OR owner_node_id = $1){existing_user}"
+                ),
                 params!(owner_node_id, now_ms, user_id, request_id, incarnation_id),
             )
             .await?
@@ -1533,11 +1721,26 @@ impl MediaSessionStore for HiqliteAuthStore {
         activation: &MediaSessionActivation,
     ) -> Result<Option<MediaSessionActivationOutcome>, StoreError> {
         validate_activation(activation)?;
+        let layout = LocalSessionSql::load(self).await?;
+        let owner_1 = layout.equals(1);
+        let owner_2 = layout.equals(2);
+        let owner_3 = layout.equals(3);
+        let owner_5 = layout.equals(5);
+        let owner_6 = layout.equals(6);
+        let owner_column = layout.column();
+        let extra_columns = layout.insert_columns();
+        let extra_values_1 = layout.insert_values(1);
+        let extra_values_3 = layout.insert_values(3);
+        let user_exists_1 = layout.existing_user(1);
+        let user_exists_3 = layout.existing_user(3);
+        let user_exists_6 = layout.existing_user(6);
         let current_pointer = self
             .client()
             .query_consistent_map::<PointerRow, _>(
-                "SELECT current_incarnation_id FROM media_playback_pointers
-                  WHERE user_id = $1 AND playback_id = $2",
+                format!(
+                    "SELECT current_incarnation_id FROM media_playback_pointers
+                  WHERE {owner_1} AND playback_id = $2"
+                ),
                 params!(
                     crate::store::local_media_principal_id(&activation.principal)?,
                     activation.playback_id.as_str()
@@ -1568,7 +1771,9 @@ impl MediaSessionStore for HiqliteAuthStore {
                 return Ok(None);
             };
             let predecessor = match activation.expected_predecessor_incarnation_id.as_deref() {
-                Some(incarnation_id) => route_by(self, "incarnation_id", incarnation_id).await?,
+                Some(incarnation_id) => route_by(self, "incarnation_id", incarnation_id)
+                    .await?
+                    .filter(|route| route.principal == activation.principal),
                 None => None,
             };
             return Ok(Some(MediaSessionActivationOutcome { route, predecessor }));
@@ -1589,14 +1794,17 @@ impl MediaSessionStore for HiqliteAuthStore {
         let removed_owner_key = removed_job_owner_key(&activation.owner_node_id);
         let statements = vec![
             (
-                "INSERT INTO job_leases
+                format!("INSERT INTO job_leases
                     (resource, owner_node_id, fence, revision, expires_at_ms, updated_at_ms)
                  SELECT $1, $2, 1, 1, $3, $4
                   WHERE NOT EXISTS (SELECT 1 FROM settings WHERE key = $5)
                     AND NOT EXISTS (
                       SELECT 1 FROM media_playback_pointers
-                       WHERE user_id = $6 AND playback_id = $7
+                       WHERE {owner_6} AND playback_id = $7
                          AND current_incarnation_id = $8)
+                    AND NOT EXISTS (SELECT 1 FROM media_sessions
+                      WHERE incarnation_id = $8 AND NOT ({owner_6}))
+                    {user_exists_6}
                  ON CONFLICT(resource) DO UPDATE SET
                     expires_at_ms = excluded.expires_at_ms,
                     revision = job_leases.revision + 1,
@@ -1607,8 +1815,10 @@ impl MediaSessionStore for HiqliteAuthStore {
                    AND NOT EXISTS (SELECT 1 FROM settings WHERE key = $5)
                    AND NOT EXISTS (
                      SELECT 1 FROM media_playback_pointers
-                      WHERE user_id = $6 AND playback_id = $7
-                        AND current_incarnation_id = $8)",
+                      WHERE {owner_6} AND playback_id = $7
+                        AND current_incarnation_id = $8)
+                   AND NOT EXISTS (SELECT 1 FROM media_sessions
+                     WHERE incarnation_id = $8 AND NOT ({owner_6})){user_exists_6}"),
                 params!(
                     lease_resource.as_str(),
                     activation.owner_node_id.as_str(),
@@ -1621,31 +1831,31 @@ impl MediaSessionStore for HiqliteAuthStore {
                 ),
             ),
             (
-                "INSERT INTO media_sessions
+                format!("INSERT INTO media_sessions
                     (incarnation_id, session_id, user_id, playback_id, request_fingerprint,
                      owner_node_id, owner_epoch, lease_expires_at_ms, state, recipe_json,
                      response_json, produced_playable_through_ms, fetched_through_ms,
                      media_origin_ms, media_sequence, discontinuity_sequence,
-                     updated_at_ms, publication_ready_at_ms, recovery_epoch)
+                     updated_at_ms, publication_ready_at_ms, recovery_epoch{extra_columns})
                  SELECT $1, $2, $3, $4, $5, $6, 1, $7, 'active', $8, $9,
-                        0, 0, $10, 0, 0, $11, $12, $13
+                        0, 0, $10, 0, 0, $11, $12, $13{extra_values_3}
                   WHERE (SELECT COUNT(*) FROM media_sessions
-                          WHERE user_id = $3 AND state IN ('starting', 'active')
+                          WHERE {owner_3} AND state IN ('starting', 'active')
                             AND lease_expires_at_ms > $11
                             AND incarnation_id != $1
                             AND incarnation_id != COALESCE((
                               SELECT current_incarnation_id FROM media_playback_pointers
-                               WHERE user_id = $3 AND playback_id = $4), '')) < $14
+                               WHERE {owner_3} AND playback_id = $4), '')) < $14
                     AND ($15 = '' OR EXISTS (
                       SELECT 1 FROM media_session_requests
-                       WHERE user_id = $3 AND request_id = $15 AND incarnation_id = $1
+                       WHERE {owner_3} AND request_id = $15 AND incarnation_id = $1
                          AND request_fingerprint = $5 AND playback_id = $4
                          AND owner_node_id = $6
                          AND ((state = 'starting' AND claim_expires_at_ms > $11)
                            OR (state = 'resolved' AND response_json = $9))
                          AND (COALESCE(json_type($8, '$.library_channel'), 'null') = 'null' OR EXISTS (
                            SELECT 1 FROM library_channel_session_recipes
-                            WHERE user_id = $3 AND request_id = $15 AND incarnation_id = $1
+                            WHERE {owner_3} AND request_id = $15 AND incarnation_id = $1
                               AND recipe_json = $8))))
                     AND EXISTS (SELECT 1 FROM job_leases
                       WHERE resource = $16 AND owner_node_id = $6 AND fence = 1
@@ -1653,22 +1863,25 @@ impl MediaSessionStore for HiqliteAuthStore {
                         AND updated_at_ms = $11
                         AND revision < 9223372036854775807)
                     AND (SELECT COUNT(*) FROM media_sessions
-                          WHERE user_id = $3 AND incarnation_id != $1) < $17
+                          WHERE {owner_3} AND incarnation_id != $1) < $17
                     AND (SELECT COUNT(*) FROM media_sessions
                           WHERE owner_node_id = $6 AND state = 'active'
                             AND lease_expires_at_ms > $11
                             AND incarnation_id != $1
                             AND incarnation_id != COALESCE((
                               SELECT current_incarnation_id FROM media_playback_pointers
-                               WHERE user_id = $3 AND playback_id = $4), '')) < $18
+                               WHERE {owner_3} AND playback_id = $4), '')) < $18
                     AND NOT EXISTS (SELECT 1 FROM settings WHERE key = $19)
                     AND ($20 = '' OR NOT EXISTS (SELECT 1 FROM media_sessions
                       WHERE incarnation_id = $20 AND state = 'active'
                         AND publication_ready_at_ms != 0))
                     AND NOT EXISTS (
                       SELECT 1 FROM media_playback_pointers
-                       WHERE user_id = $3 AND playback_id = $4
+                       WHERE {owner_3} AND playback_id = $4
                          AND current_incarnation_id = $1)
+                    AND ($20 = '' OR EXISTS (SELECT 1 FROM media_sessions
+                      WHERE incarnation_id = $20 AND {owner_3} AND playback_id = $4))
+                    {user_exists_3}
                  -- The epoch is written once, with the row. An idempotent
                  -- replay refreshes the lease and the response and
                  -- deliberately not this: a replay that re-minted the budget
@@ -1679,11 +1892,11 @@ impl MediaSessionStore for HiqliteAuthStore {
                     response_json = excluded.response_json,
                     updated_at_ms = excluded.updated_at_ms
                  WHERE media_sessions.session_id = excluded.session_id
-                   AND media_sessions.user_id = excluded.user_id
+                   AND media_sessions.{owner_column} = excluded.{owner_column}
                    AND media_sessions.playback_id = excluded.playback_id
                    AND media_sessions.request_fingerprint = excluded.request_fingerprint
                    AND media_sessions.owner_node_id = excluded.owner_node_id
-                   AND media_sessions.owner_epoch = 1 AND media_sessions.state = 'active'",
+                   AND media_sessions.owner_epoch = 1 AND media_sessions.state = 'active'"),
                 params!(
                     activation.incarnation_id.as_str(),
                     activation.session_id.as_str(),
@@ -1708,14 +1921,14 @@ impl MediaSessionStore for HiqliteAuthStore {
                 ),
             ),
             (
-                "UPDATE media_sessions SET state = 'ended', terminal_reason = 'superseded', lease_expires_at_ms = $1,
+                format!("UPDATE media_sessions SET state = 'ended', terminal_reason = 'superseded', lease_expires_at_ms = $1,
                         publication_ready_at_ms = $2, updated_at_ms = $1
                   WHERE incarnation_id = (SELECT current_incarnation_id
-                      FROM media_playback_pointers WHERE user_id = $3 AND playback_id = $4)
-                    AND incarnation_id != $5 AND state != 'ended'
+                      FROM media_playback_pointers WHERE {owner_3} AND playback_id = $4)
+                    AND incarnation_id != $5 AND state != 'ended' AND {owner_3}
                     AND EXISTS (SELECT 1 FROM media_sessions
                       WHERE incarnation_id = $5 AND session_id = $6
-                        AND owner_node_id = $7 AND state = 'active')
+                        AND owner_node_id = $7 AND state = 'active' AND {owner_3})
                     AND $8 != '' AND incarnation_id = $8
                     -- The same ask the pointer write is gated on, and it has
                     -- to be here too. A replicated transaction cannot branch:
@@ -1728,7 +1941,7 @@ impl MediaSessionStore for HiqliteAuthStore {
                     -- single-writer backend cannot, because there the refusal
                     -- is a rollback.
                     AND ($9 = 0 OR NOT EXISTS (SELECT 1 FROM media_playback_desired
-                      WHERE user_id = $3 AND playback_id = $4 AND revision != $9))",
+                      WHERE {owner_3} AND playback_id = $4 AND revision != $9))"),
                 params!(
                     activation.now_ms,
                     MEDIA_SESSION_PUBLICATION_BLOCKED,
@@ -1742,13 +1955,13 @@ impl MediaSessionStore for HiqliteAuthStore {
                 ),
             ),
             (
-                "DELETE FROM cache_consumer_pins
+                format!("DELETE FROM cache_consumer_pins
                   WHERE consumer_kind = 'media_session'
                     AND consumer_id IN (
                       SELECT incarnation_id FROM media_sessions
-                       WHERE user_id = $1 AND playback_id = $2
+                       WHERE {owner_1} AND playback_id = $2
                          AND incarnation_id != $3 AND state = 'ended'
-                         AND updated_at_ms = $4)",
+                         AND updated_at_ms = $4)"),
                 params!(
                     crate::store::local_media_principal_id(&activation.principal)?,
                     activation.playback_id.as_str(),
@@ -1757,19 +1970,19 @@ impl MediaSessionStore for HiqliteAuthStore {
                 ),
             ),
             (
-                "UPDATE job_leases
+                format!("UPDATE job_leases
                     SET expires_at_ms = CASE
                           WHEN expires_at_ms < $1 THEN expires_at_ms ELSE $1 END,
                         revision = revision + 1, updated_at_ms = $1
                   WHERE revision < 9223372036854775807
                     AND EXISTS (SELECT 1 FROM media_sessions AS session
                       WHERE 'session:' || session.incarnation_id = job_leases.resource
-                        AND session.user_id = $2 AND session.playback_id = $3
+                        AND session.{owner_2} AND session.playback_id = $3
                         AND session.incarnation_id != $4 AND session.state = 'ended'
                         AND session.incarnation_id = $5
                         AND session.updated_at_ms = $1
                         AND session.owner_node_id = job_leases.owner_node_id
-                        AND session.owner_epoch = job_leases.fence)",
+                        AND session.owner_epoch = job_leases.fence)"),
                 params!(
                     activation.now_ms,
                     crate::store::local_media_principal_id(&activation.principal)?,
@@ -1779,37 +1992,38 @@ impl MediaSessionStore for HiqliteAuthStore {
                 ),
             ),
             (
-                "INSERT INTO media_playback_pointers
+                format!("INSERT INTO media_playback_pointers
                     (user_id, playback_id, current_incarnation_id, updated_at_ms,
-                     desired_revision)
+                     desired_revision{extra_columns})
                  SELECT $1, $2, $3, $4,
                         -- See the SQLite twin: the row records the ask current
                         -- when it was written, and only a writer without the
                         -- column can leave a null here.
                         (SELECT revision FROM media_playback_desired
-                          WHERE user_id = $1 AND playback_id = $2)
+                          WHERE {owner_1} AND playback_id = $2){extra_values_1}
                   WHERE EXISTS (
                    SELECT 1 FROM media_sessions WHERE incarnation_id = $3 AND session_id = $5
-                     AND owner_node_id = $6 AND state = 'active')
+                     AND owner_node_id = $6 AND state = 'active' AND {owner_1})
                    AND (($7 = '' AND NOT EXISTS (
                      SELECT 1 FROM media_playback_pointers
-                      WHERE user_id = $1 AND playback_id = $2)) OR EXISTS (
+                      WHERE {owner_1} AND playback_id = $2)) OR EXISTS (
                      SELECT 1 FROM media_playback_pointers
-                      WHERE user_id = $1 AND playback_id = $2
+                      WHERE {owner_1} AND playback_id = $2
                         AND current_incarnation_id IN ($7, $3)))
                    -- On the `SELECT` only. A row the `SELECT` does not produce
                    -- cannot conflict, so the same predicate on the `ON CONFLICT`
                    -- arm is unreachable, and a guard no test can tell from its
                    -- absence is not a guard. Matches the SQLite twin exactly.
                    AND ($8 = 0 OR NOT EXISTS (SELECT 1 FROM media_playback_desired
-                     WHERE user_id = $1 AND playback_id = $2 AND revision != $8))
-                 ON CONFLICT(user_id, playback_id) DO UPDATE SET
+                     WHERE {owner_1} AND playback_id = $2 AND revision != $8))
+                   {user_exists_1}
+                 ON CONFLICT({owner_column}, playback_id) DO UPDATE SET
                     current_incarnation_id = excluded.current_incarnation_id,
                     updated_at_ms = excluded.updated_at_ms,
                     desired_revision = excluded.desired_revision
                   WHERE media_playback_pointers.current_incarnation_id IN ($7, $3)
                     AND media_playback_pointers.current_incarnation_id
-                        != excluded.current_incarnation_id",
+                        != excluded.current_incarnation_id"),
                 params!(
                     crate::store::local_media_principal_id(&activation.principal)?,
                     activation.playback_id.as_str(),
@@ -1822,12 +2036,12 @@ impl MediaSessionStore for HiqliteAuthStore {
                 ),
             ),
             (
-                "UPDATE media_sessions SET state = 'ended', terminal_reason = 'replaced', lease_expires_at_ms = $1,
+                format!("UPDATE media_sessions SET state = 'ended', terminal_reason = 'replaced', lease_expires_at_ms = $1,
                         publication_ready_at_ms = $2, updated_at_ms = $1
-                  WHERE incarnation_id = $3 AND session_id = $4 AND state = 'active'
+                  WHERE incarnation_id = $3 AND session_id = $4 AND state = 'active' AND {owner_5}
                     AND NOT EXISTS (SELECT 1 FROM media_playback_pointers
-                      WHERE user_id = $5 AND playback_id = $6
-                        AND current_incarnation_id = $3)",
+                      WHERE {owner_5} AND playback_id = $6
+                        AND current_incarnation_id = $3)"),
                 params!(
                     activation.now_ms,
                     MEDIA_SESSION_PUBLICATION_BLOCKED,
@@ -1838,7 +2052,7 @@ impl MediaSessionStore for HiqliteAuthStore {
                 ),
             ),
             (
-                "UPDATE job_leases
+                format!("UPDATE job_leases
                     SET expires_at_ms = CASE
                           WHEN expires_at_ms < $1 THEN expires_at_ms ELSE $1 END,
                         revision = revision + 1, updated_at_ms = $1
@@ -1846,20 +2060,21 @@ impl MediaSessionStore for HiqliteAuthStore {
                     AND revision < 9223372036854775807
                     AND EXISTS (SELECT 1 FROM media_sessions
                       WHERE incarnation_id = $4 AND session_id = $5 AND state = 'ended'
-                        AND updated_at_ms = $1)",
+                        AND updated_at_ms = $1 AND {owner_6})"),
                 params!(
                     activation.now_ms,
                     lease_resource.as_str(),
                     activation.owner_node_id.as_str(),
                     activation.incarnation_id.as_str(),
-                    activation.session_id.as_str()
+                    activation.session_id.as_str(),
+                    crate::store::local_media_principal_id(&activation.principal)?
                 ),
             ),
             (
                 "DELETE FROM job_leases WHERE resource = $1 AND owner_node_id = $2
                     AND fence = 1 AND revision = 1
                     AND NOT EXISTS (SELECT 1 FROM media_sessions
-                      WHERE incarnation_id = $3)",
+                      WHERE incarnation_id = $3)".to_owned(),
                 params!(
                     lease_resource.as_str(),
                     activation.owner_node_id.as_str(),
@@ -1905,8 +2120,10 @@ impl MediaSessionStore for HiqliteAuthStore {
         let committed_pointer = self
             .client()
             .query_consistent_map::<PointerRow, _>(
-                "SELECT current_incarnation_id FROM media_playback_pointers
-                  WHERE user_id = $1 AND playback_id = $2",
+                format!(
+                    "SELECT current_incarnation_id FROM media_playback_pointers
+                  WHERE {owner_1} AND playback_id = $2"
+                ),
                 params!(
                     crate::store::local_media_principal_id(&activation.principal)?,
                     activation.playback_id.as_str()
@@ -1925,7 +2142,9 @@ impl MediaSessionStore for HiqliteAuthStore {
         // owner/epoch the terminal projection must acknowledge.
         let predecessor =
             match (!predecessor_incarnation.is_empty()).then_some(predecessor_incarnation) {
-                Some(incarnation) => route_by(self, "incarnation_id", incarnation).await?,
+                Some(incarnation) => route_by(self, "incarnation_id", incarnation)
+                    .await?
+                    .filter(|route| route.principal == activation.principal),
                 None => None,
             };
         Ok(Some(MediaSessionActivationOutcome { route, predecessor }))
@@ -1936,6 +2155,7 @@ impl MediaSessionStore for HiqliteAuthStore {
         preparation: &crate::domain::MediaSessionPreparation,
     ) -> Result<Option<MediaSessionRoute>, StoreError> {
         validate_preparation(preparation)?;
+        let layout = LocalSessionSql::load(self).await?;
         let predecessor = route_by(
             self,
             "incarnation_id",
@@ -1943,7 +2163,8 @@ impl MediaSessionStore for HiqliteAuthStore {
         )
         .await?;
         if !predecessor.as_ref().is_some_and(|predecessor| {
-            predecessor.owner_node_id == preparation.expected_predecessor_owner_node_id
+            predecessor.principal == preparation.principal
+                && predecessor.owner_node_id == preparation.expected_predecessor_owner_node_id
                 && predecessor.owner_epoch == preparation.expected_predecessor_owner_epoch
                 && predecessor.state == "active"
         }) {
@@ -1952,12 +2173,8 @@ impl MediaSessionStore for HiqliteAuthStore {
         // Replay by exact identity, before anything is attempted. The ledger's
         // primary key would otherwise turn an owner's retry into "you already
         // have one".
-        if let Some(existing) = staged_row(
-            self,
-            crate::store::local_media_principal_id(&preparation.principal)?,
-            &preparation.playback_id,
-        )
-        .await?
+        if let Some(existing) =
+            staged_row(self, &preparation.principal, &preparation.playback_id).await?
         {
             if existing.staged_incarnation_id != preparation.incarnation_id
                 || existing.expected_predecessor_incarnation_id
@@ -1974,7 +2191,7 @@ impl MediaSessionStore for HiqliteAuthStore {
         // The same fixed statement builder is concatenated after abort for an
         // occupied-slot rejoin, so admission and replay cannot drift between
         // the two entry points.
-        let statements = prepare_statements(preparation)?;
+        let statements = prepare_statements(preparation, layout)?;
         for (sql, _) in &statements {
             validate_sql(sql)?;
         }
@@ -1997,12 +2214,7 @@ impl MediaSessionStore for HiqliteAuthStore {
         let route = route_by(self, "incarnation_id", &preparation.incarnation_id)
             .await?
             .filter(|route| preparation_route_matches(route, preparation));
-        let staged = staged_row(
-            self,
-            crate::store::local_media_principal_id(&preparation.principal)?,
-            &preparation.playback_id,
-        )
-        .await?;
+        let staged = staged_row(self, &preparation.principal, &preparation.playback_id).await?;
         let staged_is_ours = staged.map(|staged| staged.staged_incarnation_id).as_deref()
             == Some(preparation.incarnation_id.as_str());
         let Some(route) = route.filter(|_| staged_is_ours) else {
@@ -2054,10 +2266,15 @@ impl MediaSessionStore for HiqliteAuthStore {
         // monotone revision into a number two different asks share — and this
         // is a replicated store, so the two exchanges need not even be on the
         // same node.
-        let sql = "INSERT INTO media_playback_desired
-                 (user_id, playback_id, revision, digest, canonical_form, updated_at_ms)
-             VALUES ($1, $2, 1, $3, $4, $5)
-             ON CONFLICT(user_id, playback_id) DO UPDATE SET
+        let layout = LocalSessionSql::load(self).await?;
+        let extra_columns = layout.insert_columns();
+        let extra_values = layout.insert_values(1);
+        let owner_column = layout.column();
+        let owner_exists = layout.existing_user(1);
+        let sql = format!("INSERT INTO media_playback_desired
+                 (user_id, playback_id, revision, digest, canonical_form, updated_at_ms{extra_columns})
+             SELECT $1, $2, 1, $3, $4, $5{extra_values} WHERE 1 = 1{owner_exists}
+             ON CONFLICT({owner_column}, playback_id) DO UPDATE SET
                  revision = CASE
                      WHEN media_playback_desired.digest = excluded.digest
                          THEN media_playback_desired.revision
@@ -2069,13 +2286,18 @@ impl MediaSessionStore for HiqliteAuthStore {
                      WHEN media_playback_desired.digest = excluded.digest
                          THEN media_playback_desired.updated_at_ms
                      ELSE excluded.updated_at_ms
-                 END";
-        validate_sql(sql)?;
-        timeout_store(self.client().execute(
+                 END");
+        validate_sql(&sql)?;
+        let changed = timeout_store(self.client().execute(
             sql,
             params!(user_id, playback_id, digest, canonical_form, now_ms),
         ))
         .await?;
+        if changed == 0 {
+            return Err(StoreError::Task(
+                "desired-selection principal is unavailable".into(),
+            ));
+        }
         desired_row(self, user_id, playback_id)
             .await?
             .ok_or_else(|| StoreError::Database("desired selection vanished".to_owned()))
@@ -2087,9 +2309,13 @@ impl MediaSessionStore for HiqliteAuthStore {
         playback_id: &str,
     ) -> Result<Option<i64>, StoreError> {
         let user_id = crate::store::local_media_principal_id(principal)?;
+        let layout = LocalSessionSql::load(self).await?;
         let rows: Vec<PointerRevisionRow> = timeout_store(self.client().query_consistent_map(
-            "SELECT desired_revision FROM media_playback_pointers
-              WHERE user_id = $1 AND playback_id = $2",
+            format!(
+                "SELECT desired_revision FROM media_playback_pointers
+              WHERE {} AND playback_id = $2",
+                layout.equals(1)
+            ),
             params!(user_id, playback_id),
         ))
         .await?;
@@ -2125,8 +2351,31 @@ impl MediaSessionStore for HiqliteAuthStore {
         principal: &crate::playback_principal::PlaybackPrincipal,
         playback_id: &str,
     ) -> Result<Option<crate::domain::DesiredOwnership>, StoreError> {
-        let user_id = crate::store::local_media_principal_id(principal)?;
-        desired_row(self, user_id, playback_id).await
+        if !principal.valid_admission_shape() {
+            return Err(StoreError::Task(
+                "invalid desired-selection principal".into(),
+            ));
+        }
+        if route_projection(self).await? == LEGACY_ROUTE_COLS {
+            return desired_row(
+                self,
+                crate::store::local_media_principal_id(principal)?,
+                playback_id,
+            )
+            .await;
+        }
+        self.client()
+            .query_consistent_map::<PrincipalDesiredRow, _>(
+                "SELECT owner_key, principal_kind, user_id, share_grant_id, share_viewer_key,
+                    playback_id, revision, digest, canonical_form, updated_at_ms
+               FROM media_playback_desired WHERE owner_key = $1 AND playback_id = $2",
+                params!(principal.owner_key(), playback_id),
+            )
+            .await?
+            .into_iter()
+            .next()
+            .map(|row| row.0)
+            .transpose()
     }
 
     async fn rejoin_media_session_preparation(
@@ -2135,6 +2384,10 @@ impl MediaSessionStore for HiqliteAuthStore {
         preparation: &crate::domain::MediaSessionPreparation,
     ) -> Result<Option<MediaSessionRoute>, StoreError> {
         validate_preparation(preparation)?;
+        let layout = LocalSessionSql::load(self).await?;
+        let owner_1 = layout.equals(1);
+        let owner_7 = layout.equals(7);
+        let assertion_column = layout.column();
         if !valid_uuid(staged_incarnation_id) || staged_incarnation_id == preparation.incarnation_id
         {
             return Err(StoreError::Task(
@@ -2145,12 +2398,7 @@ impl MediaSessionStore for HiqliteAuthStore {
         // A read narrows proposals to either the named occupied slot or an
         // exact replay. Every mutation remains SQL-gated in the proposal, so
         // a commit racing this read makes the observable ledger CAS reject.
-        let existing = staged_row(
-            self,
-            crate::store::local_media_principal_id(&preparation.principal)?,
-            &preparation.playback_id,
-        )
-        .await?;
+        let existing = staged_row(self, &preparation.principal, &preparation.playback_id).await?;
         let exact_replay = existing.as_ref().is_some_and(|staged| {
             staged.staged_incarnation_id == preparation.incarnation_id
                 && staged.expected_predecessor_incarnation_id
@@ -2193,6 +2441,7 @@ impl MediaSessionStore for HiqliteAuthStore {
             &preparation.expected_predecessor_owner_node_id,
             preparation.expected_predecessor_owner_epoch,
             preparation.now_ms,
+            layout,
         );
         // Rejoin may release the ledger only after the named active row was
         // retired by this proposal. Explicit abort deliberately releases an
@@ -2200,15 +2449,17 @@ impl MediaSessionStore for HiqliteAuthStore {
         // occupied slot when it cannot prove its own replacement path.
         statements.pop();
         statements.push((
-            "DELETE FROM media_session_preparations
-              WHERE user_id = $1 AND playback_id = $2 AND staged_incarnation_id = $3
+            format!(
+                "DELETE FROM media_session_preparations
+              WHERE {owner_1} AND playback_id = $2 AND staged_incarnation_id = $3
                 AND expected_predecessor_incarnation_id = $4
                 AND EXISTS (SELECT 1 FROM media_sessions
-                  WHERE incarnation_id = $3 AND user_id = $1 AND playback_id = $2
+                  WHERE incarnation_id = $3 AND {owner_1} AND playback_id = $2
                     AND state = 'ended' AND terminal_reason = 'replaced'
                     AND updated_at_ms = $5)
               RETURNING user_id, playback_id, staged_incarnation_id,
-                        expected_predecessor_incarnation_id",
+                        expected_predecessor_incarnation_id"
+            ),
             params!(
                 crate::store::local_media_principal_id(&preparation.principal)?,
                 preparation.playback_id.as_str(),
@@ -2219,7 +2470,7 @@ impl MediaSessionStore for HiqliteAuthStore {
         ));
         let guarded_delete_index = statements.len() - 1;
         statements[guarded_delete_index].1[2] = Param::StmtOutputNamed(0, "incarnation_id".into());
-        let mut prepare = prepare_statements(preparation)?;
+        let mut prepare = prepare_statements(preparation, layout)?;
         // Each stage is observable and the next stage consumes its output.
         // Missing old ledger, refused lease mutation, or refused session
         // insert therefore aborts the proposal before a later statement can
@@ -2239,19 +2490,21 @@ impl MediaSessionStore for HiqliteAuthStore {
         // transaction. The SELECT emits no row on a complete rejoin or on a
         // lost abort, so the assertion is inert on both success paths.
         statements.push((
-            "INSERT INTO media_session_preparations
-                (user_id, playback_id, staged_incarnation_id,
+            format!(
+                "INSERT INTO media_session_preparations
+                ({assertion_column}, playback_id, staged_incarnation_id,
                  expected_predecessor_incarnation_id, deadline_ms,
                  created_at_ms, updated_at_ms)
              SELECT NULL, $1, $2, $3, $4, $5, $5
               WHERE EXISTS (SELECT 1 FROM media_sessions
-                WHERE incarnation_id = $6 AND user_id = $7 AND playback_id = $1
+                WHERE incarnation_id = $6 AND {owner_7} AND playback_id = $1
                   AND state = 'ended' AND terminal_reason = 'replaced'
                   AND updated_at_ms = $5)
                 AND NOT EXISTS (SELECT 1 FROM media_session_preparations
-                  WHERE user_id = $7 AND playback_id = $1
+                  WHERE {owner_7} AND playback_id = $1
                     AND staged_incarnation_id = $2
-                    AND expected_predecessor_incarnation_id = $3)",
+                    AND expected_predecessor_incarnation_id = $3)"
+            ),
             params!(
                 preparation.playback_id.as_str(),
                 preparation.incarnation_id.as_str(),
@@ -2282,7 +2535,11 @@ impl MediaSessionStore for HiqliteAuthStore {
                         "StmtIndex({index}) does not have observable row output"
                     ))
                 });
-                let assertion_failed = message.contains("media_session_preparations.user_id");
+                let assertion_failed = message.contains(if layout.rebuilt {
+                    "media_session_preparations.owner_key"
+                } else {
+                    "media_session_preparations.user_id"
+                });
                 if guarded_step_lost || assertion_failed {
                     return classify_rejoin_after_attempt(self, staged_incarnation_id, preparation)
                         .await;
@@ -2297,10 +2554,11 @@ impl MediaSessionStore for HiqliteAuthStore {
                 // expected statement error. Hiqlite has rolled the proposal
                 // back. Classify only that exact constraint target; unrelated
                 // statement errors remain database faults.
-                if error
-                    .to_string()
-                    .contains("media_session_preparations.user_id")
-                {
+                if error.to_string().contains(if layout.rebuilt {
+                    "media_session_preparations.owner_key"
+                } else {
+                    "media_session_preparations.user_id"
+                }) {
                     return classify_rejoin_after_attempt(self, staged_incarnation_id, preparation)
                         .await;
                 }
@@ -2351,13 +2609,12 @@ impl MediaSessionStore for HiqliteAuthStore {
         principal: &crate::playback_principal::PlaybackPrincipal,
         playback_id: &str,
     ) -> Result<Option<crate::domain::MediaSessionStagedGeneration>, StoreError> {
-        let user_id = crate::store::local_media_principal_id(principal)?;
-        if user_id <= 0 || playback_id.is_empty() || playback_id.len() > 128 {
+        if !principal.valid_admission_shape() || playback_id.is_empty() || playback_id.len() > 128 {
             return Err(StoreError::Task(
                 "invalid staged media-session lookup".to_owned(),
             ));
         }
-        staged_row(self, user_id, playback_id).await
+        staged_row(self, principal, playback_id).await
     }
 
     async fn commit_media_session_preparation(
@@ -2387,9 +2644,15 @@ impl MediaSessionStore for HiqliteAuthStore {
             ));
         }
         let staged_incarnation_id = request.staged_incarnation_id.as_str();
+        let layout = LocalSessionSql::load(self).await?;
+        let owner_1 = layout.equals(1);
+        let owner_3 = layout.equals(3);
+        let owner_4 = layout.equals(4);
+        let owner_11 = layout.equals(11);
+        let user_exists_3 = layout.existing_user(3);
         let now_ms = request.now_ms;
         let lease_expires_at_ms = request.lease_expires_at_ms;
-        let Some(staged) = staged_row(self, user_id, playback_id).await? else {
+        let Some(staged) = staged_row(self, principal, playback_id).await? else {
             // No ledger row. Either it was never staged, or an earlier commit
             // already consumed it — and the pointer is the discriminator.
             return commit_replay(
@@ -2483,25 +2746,26 @@ impl MediaSessionStore for HiqliteAuthStore {
         // here reads the pointer to decide what to reap; a pointer that no
         // longer names the predecessor simply fails every guard, and the
         // abort branch below is what turns that into the right outcome.
-        let mut statements: Vec<(&str, hiqlite::Params)> = vec![
+        let mut statements: Vec<(String, hiqlite::Params)> = vec![
             (
-                "UPDATE media_playback_pointers
+                format!(
+                    "UPDATE media_playback_pointers
                     SET current_incarnation_id = $1, updated_at_ms = $2,
                         desired_revision = (SELECT revision FROM media_playback_desired
-                          WHERE user_id = $3 AND playback_id = $4)
-                  WHERE user_id = $3 AND playback_id = $4
+                          WHERE {owner_3} AND playback_id = $4)
+                  WHERE {owner_3} AND playback_id = $4
                     AND current_incarnation_id = $5
                     AND EXISTS (SELECT 1 FROM media_sessions predecessor
                       WHERE predecessor.incarnation_id = $5
                         AND predecessor.owner_node_id = $6
                         AND predecessor.owner_epoch = $7
-                        AND predecessor.state = 'active')
+                        AND predecessor.state = 'active' AND predecessor.{owner_3})
                     AND EXISTS (SELECT 1 FROM media_session_preparations preparation
-                      WHERE preparation.user_id = $3 AND preparation.playback_id = $4
+                      WHERE preparation.{owner_3} AND preparation.playback_id = $4
                         AND preparation.staged_incarnation_id = $1
                         AND preparation.deadline_ms > $2)
                     AND EXISTS (SELECT 1 FROM media_sessions
-                      WHERE incarnation_id = $1 AND user_id = $3 AND playback_id = $4
+                      WHERE incarnation_id = $1 AND {owner_3} AND playback_id = $4
                         AND state = 'active')
                     AND ($8 = ''
                       OR NOT EXISTS (SELECT 1 FROM media_session_terminal_acks
@@ -2513,8 +2777,16 @@ impl MediaSessionStore for HiqliteAuthStore {
                           AND request_fingerprint = $14 AND response_json = $15
                           AND expires_at_ms = $16 AND updated_at_ms = $17))
                     AND ($18 = 0 OR NOT EXISTS (SELECT 1 FROM media_playback_desired
-                      WHERE user_id = $3 AND playback_id = $4 AND revision != $18))
-                  RETURNING current_incarnation_id",
+                      WHERE {owner_3} AND playback_id = $4 AND revision != $18))
+                    AND ($8 = '' OR EXISTS (SELECT 1 FROM media_sessions receipt_predecessor
+                      WHERE receipt_predecessor.incarnation_id = $9
+                        AND receipt_predecessor.session_id = $8
+                        AND receipt_predecessor.owner_node_id = $10
+                        AND receipt_predecessor.owner_epoch = $11
+                        AND receipt_predecessor.{owner_3}))
+                    {user_exists_3}
+                  RETURNING current_incarnation_id"
+                ),
                 params!(
                     staged.staged_incarnation_id.as_str(),
                     now_ms,
@@ -2549,13 +2821,15 @@ impl MediaSessionStore for HiqliteAuthStore {
                 // every other statement in this transaction: the guard makes
                 // the whole set apply or not apply together, which is the
                 // property the two backends are checked against.
-                "UPDATE media_sessions
+                format!(
+                    "UPDATE media_sessions
                     SET drain_deadline_ms = $1, updated_at_ms = $2
-                  WHERE incarnation_id = $3 AND state != 'ended'
+                  WHERE incarnation_id = $3 AND state != 'ended' AND {owner_4}
                     AND drain_deadline_ms IS NULL
                     AND EXISTS (SELECT 1 FROM media_playback_pointers
-                      WHERE user_id = $4 AND playback_id = $5
-                        AND current_incarnation_id = $6)",
+                      WHERE {owner_4} AND playback_id = $5
+                        AND current_incarnation_id = $6)"
+                ),
                 params!(
                     now_ms.saturating_add(MEDIA_SESSION_DRAIN_MS),
                     now_ms,
@@ -2572,12 +2846,14 @@ impl MediaSessionStore for HiqliteAuthStore {
                 // reads. Without this it would be ended by maintenance at the
                 // moment the preparation would have expired, taking the
                 // playback's pointer with it.
-                "UPDATE media_sessions
+                format!(
+                    "UPDATE media_sessions
                     SET lease_expires_at_ms = $1, updated_at_ms = $2
-                  WHERE incarnation_id = $3 AND state = 'active'
+                  WHERE incarnation_id = $3 AND state = 'active' AND {owner_4}
                     AND EXISTS (SELECT 1 FROM media_playback_pointers
-                      WHERE user_id = $4 AND playback_id = $5
-                        AND current_incarnation_id = $3)",
+                      WHERE {owner_4} AND playback_id = $5
+                        AND current_incarnation_id = $3)"
+                ),
                 params!(
                     lease_expires_at_ms,
                     now_ms,
@@ -2587,13 +2863,15 @@ impl MediaSessionStore for HiqliteAuthStore {
                 ),
             ),
             (
-                "UPDATE job_leases
+                format!(
+                    "UPDATE job_leases
                     SET expires_at_ms = $1, revision = revision + 1, updated_at_ms = $2
                   WHERE resource = $3 AND fence = 1
                     AND revision < 9223372036854775807
                     AND EXISTS (SELECT 1 FROM media_playback_pointers
-                      WHERE user_id = $4 AND playback_id = $5
-                        AND current_incarnation_id = $6)",
+                      WHERE {owner_4} AND playback_id = $5
+                        AND current_incarnation_id = $6)"
+                ),
                 params!(
                     lease_expires_at_ms,
                     now_ms,
@@ -2604,11 +2882,13 @@ impl MediaSessionStore for HiqliteAuthStore {
                 ),
             ),
             (
-                "DELETE FROM media_session_preparations
-                  WHERE user_id = $1 AND playback_id = $2 AND staged_incarnation_id = $3
+                format!(
+                    "DELETE FROM media_session_preparations
+                  WHERE {owner_1} AND playback_id = $2 AND staged_incarnation_id = $3
                     AND EXISTS (SELECT 1 FROM media_playback_pointers
-                      WHERE user_id = $1 AND playback_id = $2
-                        AND current_incarnation_id = $3)",
+                      WHERE {owner_1} AND playback_id = $2
+                        AND current_incarnation_id = $3)"
+                ),
                 params!(user_id, playback_id, staged.staged_incarnation_id.as_str()),
             ),
         ];
@@ -2624,15 +2904,17 @@ impl MediaSessionStore for HiqliteAuthStore {
                 return Ok(None);
             }
             statements.push((
-                "INSERT INTO media_session_terminal_acks
+                format!(
+                    "INSERT INTO media_session_terminal_acks
                     (incarnation_id, session_id, owner_node_id, owner_epoch,
                      client_instance_id, sequence, request_fingerprint, response_json,
                      expires_at_ms, updated_at_ms)
                  SELECT $1, $2, $3, $4, $5, $6, $7, $8, $9, $10
                   WHERE EXISTS (SELECT 1 FROM media_playback_pointers
-                    WHERE user_id = $11 AND playback_id = $12
+                    WHERE {owner_11} AND playback_id = $12
                       AND current_incarnation_id = $13)
-                 ON CONFLICT(session_id) DO NOTHING",
+                 ON CONFLICT(session_id) DO NOTHING"
+                ),
                 params!(
                     receipt.incarnation_id.as_str(),
                     receipt.session_id.as_str(),
@@ -2708,8 +2990,10 @@ impl MediaSessionStore for HiqliteAuthStore {
         let pointer = self
             .client()
             .query_consistent_map::<PointerRow, _>(
-                "SELECT current_incarnation_id FROM media_playback_pointers
-                  WHERE user_id = $1 AND playback_id = $2",
+                format!(
+                    "SELECT current_incarnation_id FROM media_playback_pointers
+                  WHERE {owner_1} AND playback_id = $2"
+                ),
                 params!(user_id, playback_id),
             )
             .await?
@@ -2737,11 +3021,13 @@ impl MediaSessionStore for HiqliteAuthStore {
         }
         let route = route_by(self, "incarnation_id", &staged.staged_incarnation_id)
             .await?
-            .filter(|route| route.state == "active");
+            .filter(|route| route.state == "active" && &route.principal == principal);
         let Some(route) = route else {
             return Ok(None);
         };
-        let predecessor = route_by(self, "incarnation_id", &predecessor_incarnation).await?;
+        let predecessor = route_by(self, "incarnation_id", &predecessor_incarnation)
+            .await?
+            .filter(|route| &route.principal == principal);
         let control_receipt = if let Some(receipt) = &request.control_receipt {
             let retained = self
                 .media_session_terminal_ack(&receipt.session_id, request.now_ms)
@@ -2783,6 +3069,7 @@ impl MediaSessionStore for HiqliteAuthStore {
         // Ledger-scoped in every statement, which is the safety property:
         // without a ledger row naming it, this cannot end an incarnation. An
         // abort aimed at a successor that already committed ends nothing.
+        let layout = LocalSessionSql::load(self).await?;
         let statements = abort_statements(
             user_id,
             playback_id,
@@ -2790,6 +3077,7 @@ impl MediaSessionStore for HiqliteAuthStore {
             &request.expected_predecessor_owner_node_id,
             request.expected_predecessor_owner_epoch,
             request.now_ms,
+            layout,
         );
         for (sql, _) in &statements {
             validate_sql(sql)?;
@@ -2803,7 +3091,7 @@ impl MediaSessionStore for HiqliteAuthStore {
         // The projection, not the row counts: an abort that finds the staged
         // row already ended and its ledger row already gone is an idempotent
         // replay and must read the same as the first one.
-        if staged_row(self, user_id, playback_id)
+        if staged_row(self, principal, playback_id)
             .await?
             .is_some_and(|staged| staged.staged_incarnation_id == request.staged_incarnation_id)
         {
@@ -2837,6 +3125,11 @@ impl MediaSessionStore for HiqliteAuthStore {
                 "invalid media-session activation settlement time".to_owned(),
             ));
         }
+        let layout = LocalSessionSql::load(self).await?;
+        let owner_1 = layout.equals(1);
+        let owner_3 = layout.equals(3);
+        let owner_5 = layout.equals(5);
+        let user_exists_5 = layout.existing_user(5);
         let request_id = activation.request_id.as_deref().unwrap_or("");
         let lease_resource = format!("session:{}", activation.incarnation_id);
         match settlement {
@@ -2865,9 +3158,10 @@ impl MediaSessionStore for HiqliteAuthStore {
                 let changed = self
                     .client()
                     .execute_idempotent(
-                        "UPDATE media_sessions SET publication_ready_at_ms = $1,
+                        format!(
+                            "UPDATE media_sessions SET publication_ready_at_ms = $1,
                                     updated_at_ms = $2
-                              WHERE incarnation_id = $3 AND session_id = $4 AND user_id = $5
+                              WHERE incarnation_id = $3 AND session_id = $4 AND {owner_5}
                                 AND playback_id = $6 AND request_fingerprint = $7
                                 AND owner_node_id = $8 AND owner_epoch = 1 AND state = 'active'
                                 AND recipe_json = $9 AND response_json = $10
@@ -2875,14 +3169,16 @@ impl MediaSessionStore for HiqliteAuthStore {
                                 AND publication_ready_at_ms = $12
                                 AND lease_expires_at_ms = $13 AND lease_expires_at_ms > $2
                                 AND EXISTS (SELECT 1 FROM media_playback_pointers
-                                  WHERE user_id = $5 AND playback_id = $6
+                                  WHERE {owner_5} AND playback_id = $6
                                     AND current_incarnation_id = $3)
                                 AND ($14 = '' OR EXISTS (SELECT 1
                                   FROM media_session_requests
-                                  WHERE user_id = $5 AND request_id = $14
+                                  WHERE {owner_5} AND request_id = $14
                                     AND incarnation_id = $3 AND request_fingerprint = $7
                                     AND playback_id = $6 AND owner_node_id = $8
-                                    AND state = 'starting'))",
+                                    AND state = 'starting'))
+                                {user_exists_5}"
+                        ),
                         params!(
                             publication_ready_at_ms,
                             now_ms,
@@ -2914,8 +3210,10 @@ impl MediaSessionStore for HiqliteAuthStore {
                 let committed_pointer = self
                     .client()
                     .query_consistent_map::<PointerRow, _>(
-                        "SELECT current_incarnation_id FROM media_playback_pointers
-                          WHERE user_id = $1 AND playback_id = $2",
+                        format!(
+                            "SELECT current_incarnation_id FROM media_playback_pointers
+                          WHERE {owner_1} AND playback_id = $2"
+                        ),
                         params!(
                             crate::store::local_media_principal_id(&activation.principal)?,
                             activation.playback_id.as_str()
@@ -2937,13 +3235,15 @@ impl MediaSessionStore for HiqliteAuthStore {
                 self.client()
                     .txn([
                         (
-                            "UPDATE media_session_requests SET state = 'failed',
+                            format!(
+                                "UPDATE media_session_requests SET state = 'failed',
                                     response_json = NULL, claim_expires_at_ms = $1,
                                     updated_at_ms = $1
-                              WHERE $2 != '' AND user_id = $3 AND request_id = $2
+                              WHERE $2 != '' AND {owner_3} AND request_id = $2
                                 AND incarnation_id = $4 AND request_fingerprint = $5
                                 AND playback_id = $6 AND owner_node_id = $7
-                                AND state = 'starting'",
+                                AND state = 'starting'"
+                            ),
                             params!(
                                 now_ms,
                                 request_id,
@@ -2955,20 +3255,22 @@ impl MediaSessionStore for HiqliteAuthStore {
                             ),
                         ),
                         (
-                            "UPDATE media_sessions SET state = 'ended',
+                            format!(
+                                "UPDATE media_sessions SET state = 'ended',
                                     terminal_reason = 'replaced', lease_expires_at_ms = $1,
                                     publication_ready_at_ms = $2, updated_at_ms = $1
-                              WHERE incarnation_id = $3 AND session_id = $4 AND user_id = $5
+                              WHERE incarnation_id = $3 AND session_id = $4 AND {owner_5}
                                 AND playback_id = $6 AND request_fingerprint = $7
                                 AND owner_node_id = $8 AND owner_epoch = 1
                                 AND state = 'active' AND recipe_json = $9
                                 AND response_json = $10 AND media_origin_ms = $11
                                 AND ($12 = '' AND publication_ready_at_ms = $2
                                   OR $12 != '' AND EXISTS (SELECT 1
-                                  FROM media_session_requests WHERE user_id = $5
+                                  FROM media_session_requests WHERE {owner_5}
                                     AND request_id = $12 AND incarnation_id = $3
                                     AND request_fingerprint = $7 AND playback_id = $6
-                                    AND owner_node_id = $8 AND state IN ('failed', 'starting')))",
+                                    AND owner_node_id = $8 AND state IN ('failed', 'starting')))"
+                            ),
                             params!(
                                 now_ms,
                                 MEDIA_SESSION_PUBLICATION_BLOCKED,
@@ -2985,12 +3287,15 @@ impl MediaSessionStore for HiqliteAuthStore {
                             ),
                         ),
                         (
-                            "DELETE FROM media_playback_pointers
-                              WHERE user_id = $1 AND playback_id = $2
+                            format!(
+                                "DELETE FROM media_playback_pointers
+                              WHERE {owner_1} AND playback_id = $2
                                 AND current_incarnation_id = $3
                                 AND EXISTS (SELECT 1 FROM media_sessions
                                   WHERE incarnation_id = $3 AND state = 'ended'
-                                    AND terminal_reason = 'replaced' AND updated_at_ms = $4)",
+                                    AND terminal_reason = 'replaced' AND updated_at_ms = $4
+                                    AND {owner_1})"
+                            ),
                             params!(
                                 crate::store::local_media_principal_id(&activation.principal)?,
                                 activation.playback_id.as_str(),
@@ -2999,27 +3304,38 @@ impl MediaSessionStore for HiqliteAuthStore {
                             ),
                         ),
                         (
-                            "UPDATE job_leases SET expires_at_ms = $1,
+                            format!(
+                                "UPDATE job_leases SET expires_at_ms = $1,
                                     revision = revision + 1, updated_at_ms = $1
                               WHERE resource = $2 AND owner_node_id = $3 AND fence = 1
                                 AND revision < 9223372036854775807
                                 AND EXISTS (SELECT 1 FROM media_sessions
                                   WHERE incarnation_id = $4 AND state = 'ended'
-                                    AND terminal_reason = 'replaced' AND updated_at_ms = $1)",
+                                    AND terminal_reason = 'replaced' AND updated_at_ms = $1
+                                    AND {owner_5})"
+                            ),
                             params!(
                                 now_ms,
                                 lease_resource.as_str(),
                                 activation.owner_node_id.as_str(),
-                                activation.incarnation_id.as_str()
+                                activation.incarnation_id.as_str(),
+                                crate::store::local_media_principal_id(&activation.principal)?
                             ),
                         ),
                         (
-                            "DELETE FROM cache_consumer_pins
+                            format!(
+                                "DELETE FROM cache_consumer_pins
                               WHERE consumer_kind = 'media_session' AND consumer_id = $1
                                 AND EXISTS (SELECT 1 FROM media_sessions
                                   WHERE incarnation_id = $1 AND state = 'ended'
-                                    AND terminal_reason = 'replaced' AND updated_at_ms = $2)",
-                            params!(activation.incarnation_id.as_str(), now_ms),
+                                    AND terminal_reason = 'replaced' AND updated_at_ms = $2
+                                    AND {owner_3})"
+                            ),
+                            params!(
+                                activation.incarnation_id.as_str(),
+                                now_ms,
+                                crate::store::local_media_principal_id(&activation.principal)?
+                            ),
                         ),
                     ])
                     .await?
@@ -3078,33 +3394,37 @@ impl MediaSessionStore for HiqliteAuthStore {
                 "invalid media-session activation publication".to_owned(),
             ));
         }
+        let layout = LocalSessionSql::load(self).await?;
+        let owner_1 = layout.equals(1);
+        let user_exists_1 = layout.existing_user(1);
         self.client()
             .txn([(
-                "UPDATE media_session_requests SET state = 'resolved',
+                format!("UPDATE media_session_requests SET state = 'resolved',
                         response_json = (SELECT route.response_json FROM media_sessions route
-                          WHERE route.user_id = $1 AND $2 != '' AND route.incarnation_id = $3
+                          WHERE route.{owner_1} AND $2 != '' AND route.incarnation_id = $3
                             AND route.state = 'active' AND route.publication_ready_at_ms = 0
                             AND route.lease_expires_at_ms > $4
                             AND route.request_fingerprint = media_session_requests.request_fingerprint
                             AND route.playback_id = media_session_requests.playback_id
                             AND route.owner_node_id = media_session_requests.owner_node_id),
                         claim_expires_at_ms = (SELECT route.lease_expires_at_ms FROM media_sessions route
-                          WHERE route.user_id = $1 AND route.incarnation_id = $3
+                          WHERE route.{owner_1} AND route.incarnation_id = $3
                             AND route.state = 'active' AND route.publication_ready_at_ms = 0
                             AND route.lease_expires_at_ms > $4
                             AND route.request_fingerprint = media_session_requests.request_fingerprint
                             AND route.playback_id = media_session_requests.playback_id
                             AND route.owner_node_id = media_session_requests.owner_node_id),
                         updated_at_ms = $4
-                  WHERE user_id = $1 AND request_id = $2 AND incarnation_id = $3
+                  WHERE {owner_1} AND request_id = $2 AND incarnation_id = $3
                     AND state = 'starting'
                     AND EXISTS (SELECT 1 FROM media_sessions route
-                      WHERE route.user_id = $1 AND route.incarnation_id = $3
+                      WHERE route.{owner_1} AND route.incarnation_id = $3
                         AND route.state = 'active' AND route.publication_ready_at_ms = 0
                         AND route.lease_expires_at_ms > $4
                         AND route.request_fingerprint = media_session_requests.request_fingerprint
                         AND route.playback_id = media_session_requests.playback_id
-                        AND route.owner_node_id = media_session_requests.owner_node_id)",
+                        AND route.owner_node_id = media_session_requests.owner_node_id)
+                    {user_exists_1}"),
                 params!(user_id, request_id, incarnation_id, now_ms),
             )])
             .await?
@@ -3389,13 +3709,17 @@ impl MediaSessionStore for HiqliteAuthStore {
         {
             return Err(StoreError::Task("invalid media-session failure".to_owned()));
         }
+        let ownership = LocalSessionSql::load(self).await?;
+        let owner = ownership.equals(2);
         Ok(self
             .client()
             .execute(
-                "UPDATE media_session_requests SET state = 'failed', claim_expires_at_ms = $1,
+                format!(
+                    "UPDATE media_session_requests SET state = 'failed', claim_expires_at_ms = $1,
                         updated_at_ms = $1
-                  WHERE user_id = $2 AND request_id = $3 AND incarnation_id = $4
-                    AND state = 'starting'",
+                  WHERE {owner} AND request_id = $3 AND incarnation_id = $4
+                    AND state = 'starting'"
+                ),
                 params!(now_ms, user_id, request_id, incarnation_id),
             )
             .await?
@@ -3654,12 +3978,16 @@ impl MediaSessionStore for HiqliteAuthStore {
         if renewals.is_empty() {
             return Ok(Vec::new());
         }
+        let layout = LocalSessionSql::load(self).await?;
+        let owner_column = layout.column();
+        let live_local = layout.live_local_user("media_sessions");
+        let live_local_session = layout.live_local_user("session");
         let owner_fence_key = removed_job_owner_key(owner_node_id);
         let mut statements = Vec::with_capacity(renewals.len().saturating_mul(3));
         for renewal in renewals {
             let lease_resource = format!("session:{}", renewal.incarnation_id);
             statements.push((
-                "UPDATE job_leases SET expires_at_ms = $1, revision = revision + 1,
+                format!("UPDATE job_leases SET expires_at_ms = $1, revision = revision + 1,
                         updated_at_ms = $2
                   WHERE resource = $3 AND owner_node_id = $4 AND fence = $5
                     AND expires_at_ms > $2 AND revision < 9223372036854775807
@@ -3667,9 +3995,10 @@ impl MediaSessionStore for HiqliteAuthStore {
                     AND expires_at_ms = (SELECT lease_expires_at_ms FROM media_sessions
                       WHERE incarnation_id = $7 AND owner_node_id = $4 AND owner_epoch = $5
                         AND state = 'active' AND lease_expires_at_ms > $2
+                        {live_local}
                         AND (publication_ready_at_ms != $8 OR EXISTS (
                           SELECT 1 FROM media_playback_pointers pointer
-                           WHERE pointer.user_id = media_sessions.user_id
+                           WHERE pointer.{owner_column} = media_sessions.{owner_column}
                              AND pointer.playback_id = media_sessions.playback_id
                              AND pointer.current_incarnation_id = media_sessions.incarnation_id))
                         -- A staged successor's deadline is its whole life; see
@@ -3680,10 +4009,10 @@ impl MediaSessionStore for HiqliteAuthStore {
                         AND NOT EXISTS (SELECT 1 FROM media_session_preparations staged
                           WHERE staged.staged_incarnation_id = media_sessions.incarnation_id)
                         AND NOT EXISTS (SELECT 1 FROM media_session_requests request
-                          WHERE request.user_id = media_sessions.user_id
+                          WHERE request.{owner_column} = media_sessions.{owner_column}
                             AND request.incarnation_id = media_sessions.incarnation_id
                             AND request.state = 'starting'
-                            AND request.claim_expires_at_ms <= media_sessions.lease_expires_at_ms))",
+                            AND request.claim_expires_at_ms <= media_sessions.lease_expires_at_ms))"),
                 params!(
                     lease_expires_at_ms,
                     now_ms,
@@ -3699,26 +4028,29 @@ impl MediaSessionStore for HiqliteAuthStore {
                 // SQLite resolves `$N` by first appearance, not by the
                 // number, so the frontier columns must be numbered where they
                 // are written or every value in this statement shifts.
-                "UPDATE media_sessions SET lease_expires_at_ms = $1, updated_at_ms = $2,
+                format!(
+                    "UPDATE media_sessions SET lease_expires_at_ms = $1, updated_at_ms = $2,
                         produced_playable_through_ms = MAX(
                           produced_playable_through_ms, $3),
                         fetched_through_ms = MAX(fetched_through_ms, $4),
                         media_sequence = MAX(media_sequence, $5)
                       WHERE incarnation_id = $6 AND owner_node_id = $7 AND owner_epoch = $8
                         AND state = 'active' AND lease_expires_at_ms > $2
+                        {live_local}
                         AND (publication_ready_at_ms != $9 OR EXISTS (
                           SELECT 1 FROM media_playback_pointers pointer
-                           WHERE pointer.user_id = media_sessions.user_id
+                           WHERE pointer.{owner_column} = media_sessions.{owner_column}
                              AND pointer.playback_id = media_sessions.playback_id
                              AND pointer.current_incarnation_id = media_sessions.incarnation_id))
                         AND NOT EXISTS (SELECT 1 FROM media_session_requests request
-                          WHERE request.user_id = media_sessions.user_id
+                          WHERE request.{owner_column} = media_sessions.{owner_column}
                             AND request.incarnation_id = media_sessions.incarnation_id
                             AND request.state = 'starting'
                             AND request.claim_expires_at_ms <= media_sessions.lease_expires_at_ms)
                         AND EXISTS (SELECT 1 FROM job_leases
                           WHERE resource = $10 AND owner_node_id = $7 AND fence = $8
-                            AND expires_at_ms = $1)",
+                            AND expires_at_ms = $1)"
+                ),
                 params!(
                     lease_expires_at_ms,
                     now_ms,
@@ -3733,7 +4065,8 @@ impl MediaSessionStore for HiqliteAuthStore {
                 ),
             ));
             statements.push((
-                "UPDATE cache_consumer_pins
+                format!(
+                    "UPDATE cache_consumer_pins
                     SET expires_at_ms = CASE
                           WHEN expires_at_ms < $1 THEN $1 ELSE expires_at_ms END
                   WHERE consumer_kind = 'media_session' AND consumer_id = $2
@@ -3751,17 +4084,19 @@ impl MediaSessionStore for HiqliteAuthStore {
                            AND session.owner_node_id = $5
                            AND session.owner_epoch = $3
                            AND session.state = 'active'
+                           {live_local_session}
                            AND session.lease_expires_at_ms = $1
                            AND (session.publication_ready_at_ms != $6 OR EXISTS (
                              SELECT 1 FROM media_playback_pointers pointer
-                              WHERE pointer.user_id = session.user_id
+                              WHERE pointer.{owner_column} = session.{owner_column}
                                 AND pointer.playback_id = session.playback_id
                                 AND pointer.current_incarnation_id = session.incarnation_id))
                            AND NOT EXISTS (SELECT 1 FROM media_session_requests request
-                             WHERE request.user_id = session.user_id
+                             WHERE request.{owner_column} = session.{owner_column}
                                AND request.incarnation_id = session.incarnation_id
                                AND request.state = 'starting'
-                               AND request.claim_expires_at_ms <= session.lease_expires_at_ms))",
+                               AND request.claim_expires_at_ms <= session.lease_expires_at_ms))"
+                ),
                 params!(
                     lease_expires_at_ms,
                     renewal.incarnation_id.as_str(),
@@ -3814,6 +4149,7 @@ impl MediaSessionStore for HiqliteAuthStore {
             None => (0_i64, 0_i64, String::new()),
         };
         let route_cols = route_projection(self).await?;
+        let owner_column = LocalSessionSql::load(self).await?.column();
         let sql = format!(
             "SELECT {route_cols} FROM media_sessions
               WHERE state = 'active' AND lease_expires_at_ms <= $1
@@ -3822,7 +4158,7 @@ impl MediaSessionStore for HiqliteAuthStore {
                 -- ends it. See the SQLite twin.
                 AND drain_deadline_ms IS NULL
                 AND NOT EXISTS (SELECT 1 FROM media_session_requests request
-                  WHERE request.user_id = media_sessions.user_id
+                  WHERE request.{owner_column} = media_sessions.{owner_column}
                     AND request.incarnation_id = media_sessions.incarnation_id
                     AND request.state = 'starting'
                     AND media_sessions.publication_ready_at_ms = 0
@@ -3855,6 +4191,10 @@ impl MediaSessionStore for HiqliteAuthStore {
         takeover: &MediaSessionTakeover,
     ) -> Result<Option<MediaSessionRoute>, StoreError> {
         validate_takeover(takeover)?;
+        let layout = LocalSessionSql::load(self).await?;
+        let owner_column = layout.column();
+        let live_local = layout.live_local_user("media_sessions");
+        let live_local_route = layout.live_local_user("route");
         let lease_resource = format!("session:{}", takeover.incarnation_id);
         let next_epoch = takeover.expected_owner_epoch.saturating_add(1);
         let removed_owner_key = removed_job_owner_key(&takeover.next_owner_node_id);
@@ -3862,7 +4202,7 @@ impl MediaSessionStore for HiqliteAuthStore {
             .client()
             .txn([
                 (
-                    "UPDATE job_leases
+                    format!("UPDATE job_leases
                         SET owner_node_id = $1, fence = $2, revision = revision + 1,
                             expires_at_ms = $3, updated_at_ms = $4
                       WHERE resource = $5 AND owner_node_id = $6 AND fence = $7
@@ -3874,25 +4214,26 @@ impl MediaSessionStore for HiqliteAuthStore {
                           FROM media_sessions WHERE incarnation_id = $9
                             AND owner_node_id = $6 AND owner_epoch = $7
                             AND state = 'active' AND lease_expires_at_ms <= $4
+                            {live_local}
                             AND publication_ready_at_ms != $10
                             AND drain_deadline_ms IS NULL
                             AND NOT EXISTS (SELECT 1 FROM media_session_requests request
-                              WHERE request.user_id = media_sessions.user_id
+                              WHERE request.{owner_column} = media_sessions.{owner_column}
                                 AND request.incarnation_id = media_sessions.incarnation_id
                                 AND request.state = 'starting'
                                 AND media_sessions.publication_ready_at_ms = 0
                                 AND request.claim_expires_at_ms <= media_sessions.lease_expires_at_ms)
                             AND NOT EXISTS (SELECT 1 FROM media_session_requests request
-                              WHERE request.user_id = media_sessions.user_id
+                              WHERE request.{owner_column} = media_sessions.{owner_column}
                                 AND request.incarnation_id = media_sessions.incarnation_id
                                 AND request.state = 'starting'
                                 AND (request.owner_node_id IS NULL
                                   OR request.owner_node_id != $6))
                             AND (SELECT COUNT(*) FROM media_session_requests request
-                              WHERE request.user_id = media_sessions.user_id
+                              WHERE request.{owner_column} = media_sessions.{owner_column}
                                 AND request.incarnation_id = media_sessions.incarnation_id
                                 AND request.state = 'starting') <= 1
-                            AND discontinuity_sequence < 9223372036854775807)",
+                            AND discontinuity_sequence < 9223372036854775807)"),
                     params!(
                         takeover.next_owner_node_id.as_str(),
                         next_epoch,
@@ -3907,35 +4248,36 @@ impl MediaSessionStore for HiqliteAuthStore {
                     ),
                 ),
                 (
-                    "UPDATE media_sessions
+                    format!("UPDATE media_sessions
                         SET owner_node_id = $1, owner_epoch = $2,
                             lease_expires_at_ms = $3,
                             discontinuity_sequence = discontinuity_sequence + 1,
                             updated_at_ms = $4
                       WHERE incarnation_id = $5 AND owner_node_id = $6 AND owner_epoch = $7
                         AND state = 'active' AND lease_expires_at_ms <= $4
+                            {live_local}
                         AND publication_ready_at_ms != $8
                         AND drain_deadline_ms IS NULL
                         AND NOT EXISTS (SELECT 1 FROM media_session_requests request
-                          WHERE request.user_id = media_sessions.user_id
+                          WHERE request.{owner_column} = media_sessions.{owner_column}
                             AND request.incarnation_id = media_sessions.incarnation_id
                             AND request.state = 'starting'
                             AND media_sessions.publication_ready_at_ms = 0
                             AND request.claim_expires_at_ms <= media_sessions.lease_expires_at_ms)
                         AND NOT EXISTS (SELECT 1 FROM media_session_requests request
-                          WHERE request.user_id = media_sessions.user_id
+                          WHERE request.{owner_column} = media_sessions.{owner_column}
                             AND request.incarnation_id = media_sessions.incarnation_id
                             AND request.state = 'starting'
                             AND (request.owner_node_id IS NULL
                               OR request.owner_node_id != $6))
                         AND (SELECT COUNT(*) FROM media_session_requests request
-                          WHERE request.user_id = media_sessions.user_id
+                          WHERE request.{owner_column} = media_sessions.{owner_column}
                             AND request.incarnation_id = media_sessions.incarnation_id
                             AND request.state = 'starting') <= 1
                         AND discontinuity_sequence < 9223372036854775807
                         AND EXISTS (SELECT 1 FROM job_leases
                           WHERE resource = $9 AND owner_node_id = $1 AND fence = $2
-                            AND expires_at_ms = $3 AND updated_at_ms = $4)",
+                            AND expires_at_ms = $3 AND updated_at_ms = $4)"),
                     params!(
                         takeover.next_owner_node_id.as_str(),
                         next_epoch,
@@ -3949,17 +4291,18 @@ impl MediaSessionStore for HiqliteAuthStore {
                     ),
                 ),
                 (
-                    "UPDATE media_session_requests
+                    format!("UPDATE media_session_requests
                         SET owner_node_id = $1, updated_at_ms = $2
                       WHERE incarnation_id = $3 AND owner_node_id = $4
                         AND state = 'starting'
                         AND EXISTS (SELECT 1 FROM media_sessions route
                           WHERE route.incarnation_id = $3
-                            AND route.user_id = media_session_requests.user_id
+                            AND route.{owner_column} = media_session_requests.{owner_column}
                             AND route.request_fingerprint = media_session_requests.request_fingerprint
                             AND route.playback_id = media_session_requests.playback_id
                             AND route.owner_node_id = $1 AND route.owner_epoch = $5
-                            AND route.lease_expires_at_ms = $6 AND route.updated_at_ms = $2)",
+                            {live_local_route}
+                            AND route.lease_expires_at_ms = $6 AND route.updated_at_ms = $2)"),
                     params!(
                         takeover.next_owner_node_id.as_str(),
                         takeover.now_ms,
@@ -3970,12 +4313,13 @@ impl MediaSessionStore for HiqliteAuthStore {
                     ),
                 ),
                 (
-                    "DELETE FROM cache_consumer_pins
+                    format!("DELETE FROM cache_consumer_pins
                       WHERE consumer_kind = 'media_session' AND consumer_id = $1
                         AND consumer_epoch = $2
                         AND EXISTS (SELECT 1 FROM media_sessions
                           WHERE incarnation_id = $1 AND owner_node_id = $3
-                            AND owner_epoch = $4 AND state = 'active')",
+                            AND owner_epoch = $4 AND state = 'active'
+                            {live_local})"),
                     params!(
                         takeover.incarnation_id.as_str(),
                         takeover.expected_owner_epoch,
@@ -4464,27 +4808,31 @@ impl MediaSessionStore for HiqliteAuthStore {
         if owner_node_id.is_empty() || owner_node_id.len() > 256 {
             return Err(StoreError::Task("invalid media-session owner".to_owned()));
         }
-        Ok(self
-            .client()
+        let layout = LocalSessionSql::load(self).await?;
+        let principal_cols = layout.projection();
+        let owner_column = layout.column();
+        self.client()
             .query_consistent_map::<OwnedLeaseRow, _>(
-                "SELECT incarnation_id, session_id, owner_epoch, lease_expires_at_ms,
-                        drain_deadline_ms, user_id
+                format!(
+                    "SELECT incarnation_id, session_id, owner_epoch, lease_expires_at_ms,
+                        drain_deadline_ms, {principal_cols}
                    FROM media_sessions
                   WHERE owner_node_id = $1 AND state = 'active'
                     AND lease_expires_at_ms > $2
                     AND (publication_ready_at_ms != $3 OR EXISTS (
                       SELECT 1 FROM media_playback_pointers pointer
-                       WHERE pointer.user_id = media_sessions.user_id
+                       WHERE pointer.{owner_column} = media_sessions.{owner_column}
                          AND pointer.playback_id = media_sessions.playback_id
                          AND pointer.current_incarnation_id = media_sessions.incarnation_id))
                     AND NOT EXISTS (SELECT 1 FROM media_session_preparations staged
                       WHERE staged.staged_incarnation_id = media_sessions.incarnation_id)
                     AND NOT EXISTS (SELECT 1 FROM media_session_requests request
-                      WHERE request.user_id = media_sessions.user_id
+                      WHERE request.{owner_column} = media_sessions.{owner_column}
                         AND request.incarnation_id = media_sessions.incarnation_id
                         AND request.state = 'starting'
                         AND request.claim_expires_at_ms <= media_sessions.lease_expires_at_ms)
-                  ORDER BY updated_at_ms, incarnation_id LIMIT $4",
+                  ORDER BY updated_at_ms, incarnation_id LIMIT $4"
+                ),
                 params!(
                     owner_node_id,
                     now_ms,
@@ -4495,7 +4843,7 @@ impl MediaSessionStore for HiqliteAuthStore {
             .await?
             .into_iter()
             .map(|row| row.0)
-            .collect())
+            .collect()
     }
 
     async fn reserve_producer_recovery(
@@ -4513,14 +4861,19 @@ impl MediaSessionStore for HiqliteAuthStore {
         // violations, so a row the schema rejected would read back as absent
         // and this method would report a spent budget for a write that never
         // happened.
-        let sql = "INSERT INTO media_session_producer_recovery (
+        let layout = LocalSessionSql::load(self).await?;
+        let extra_columns = layout.insert_columns();
+        let extra_values = layout.insert_values(1);
+        let owner_column = layout.column();
+        let owner_exists = layout.existing_user(1);
+        let sql = format!("INSERT INTO media_session_producer_recovery (
                        user_id, playback_id, recovery_epoch, failed_incarnation_id,
                        failed_producer_attempt, decision_sequence, failed_plan_digest,
                        alternate_plan_digest, decode_restriction, state,
-                       created_at_ms, updated_at_ms)
-                   VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, 'reserved', $10, $10)
-                   ON CONFLICT (user_id, playback_id, recovery_epoch) DO NOTHING";
-        validate_sql(sql)?;
+                       created_at_ms, updated_at_ms{extra_columns})
+                   SELECT $1, $2, $3, $4, $5, $6, $7, $8, $9, 'reserved', $10, $10{extra_values} WHERE 1 = 1{owner_exists}
+                   ON CONFLICT ({owner_column}, playback_id, recovery_epoch) DO NOTHING");
+        validate_sql(&sql)?;
         // One conditional insert, then a linearizable read. The affected-row
         // count cannot be the answer here: a Hiqlite proposal that reports
         // zero rows may have lost to a competing identity *or* be this
@@ -4554,7 +4907,7 @@ impl MediaSessionStore for HiqliteAuthStore {
             .map_err(database_error)?;
         let Some(existing) = recovery_row(
             self,
-            crate::store::local_media_principal_id(&request.principal)?,
+            &request.principal,
             &request.playback_id,
             &request.recovery_epoch,
         )
@@ -4616,12 +4969,16 @@ impl MediaSessionStore for HiqliteAuthStore {
         // knows the three key fields can spend somebody else's live
         // reservation, and the owner's own settle would then read back a
         // terminal state it did not write.
-        let sql = "UPDATE media_session_producer_recovery
+        let layout = LocalSessionSql::load(self).await?;
+        let owner_predicate = layout.equals(3);
+        let sql = format!(
+            "UPDATE media_session_producer_recovery
                       SET state = $1, updated_at_ms = $2
-                    WHERE user_id = $3 AND playback_id = $4 AND recovery_epoch = $5
+                    WHERE {owner_predicate} AND playback_id = $4 AND recovery_epoch = $5
                       AND failed_incarnation_id = $6
-                      AND state = 'reserved'";
-        validate_sql(sql)?;
+                      AND state = 'reserved'"
+        );
+        validate_sql(&sql)?;
         self.client()
             .execute(
                 sql,
@@ -4636,7 +4993,7 @@ impl MediaSessionStore for HiqliteAuthStore {
             )
             .await
             .map_err(database_error)?;
-        Ok(recovery_row(self, user_id, playback_id, recovery_epoch)
+        Ok(recovery_row(self, principal, playback_id, recovery_epoch)
             .await?
             .filter(|row| row.state == state && row.failed_incarnation_id == failed_incarnation_id))
     }
@@ -4647,9 +5004,17 @@ impl MediaSessionStore for HiqliteAuthStore {
         playback_id: &str,
         recovery_epoch: &str,
     ) -> Result<Option<crate::domain::ProducerRecoveryReservation>, StoreError> {
-        let user_id = crate::store::local_media_principal_id(principal)?;
-        crate::store::validated_epoch_key(user_id, playback_id, recovery_epoch)?;
-        recovery_row(self, user_id, playback_id, recovery_epoch).await
+        if !principal.valid_admission_shape()
+            || playback_id.is_empty()
+            || playback_id.len() > 128
+            || recovery_epoch.is_empty()
+            || recovery_epoch.len() > 128
+        {
+            return Err(StoreError::Task(
+                "invalid recovery principal or epoch key".into(),
+            ));
+        }
+        recovery_row(self, principal, playback_id, recovery_epoch).await
     }
 
     async fn validation_corrupt_recovery_restriction(
@@ -4660,10 +5025,14 @@ impl MediaSessionStore for HiqliteAuthStore {
         stored: &str,
     ) -> Result<bool, StoreError> {
         let user_id = crate::store::local_media_principal_id(principal)?;
-        let sql = "UPDATE media_session_producer_recovery
+        let layout = LocalSessionSql::load(self).await?;
+        let owner_predicate = layout.equals(2);
+        let sql = format!(
+            "UPDATE media_session_producer_recovery
                       SET decode_restriction = $1
-                    WHERE user_id = $2 AND playback_id = $3 AND recovery_epoch = $4";
-        validate_sql(sql)?;
+                    WHERE {owner_predicate} AND playback_id = $3 AND recovery_epoch = $4"
+        );
+        validate_sql(&sql)?;
         let changed = self
             .client()
             .execute(
@@ -4682,9 +5051,10 @@ impl MediaSessionStore for HiqliteAuthStore {
 }
 
 /// The ledger row as it is stored. Read into this first and validated after,
-/// because a row mapper cannot fail — and a `decode_restriction` that will not
-/// parse has to be a refusal rather than a `None`.
-struct RecoveryRow {
+/// with a fallible mapped result. A malformed ownership projection or a
+/// `decode_restriction` that will not parse is a refusal rather than a `None`.
+struct RecoveryState {
+    principal: crate::playback_principal::PlaybackPrincipal,
     failed_incarnation_id: String,
     failed_producer_attempt: i64,
     decision_sequence: i64,
@@ -4696,19 +5066,30 @@ struct RecoveryRow {
     updated_at_ms: i64,
 }
 
+struct RecoveryRow(Result<RecoveryState, StoreError>);
+
 impl From<&mut Row<'_>> for RecoveryRow {
     fn from(row: &mut Row<'_>) -> Self {
-        Self {
-            failed_incarnation_id: row.get("failed_incarnation_id"),
-            failed_producer_attempt: row.get("failed_producer_attempt"),
-            decision_sequence: row.get("decision_sequence"),
-            failed_plan_digest: row.get("failed_plan_digest"),
-            alternate_plan_digest: row.get("alternate_plan_digest"),
-            decode_restriction: row.get("decode_restriction"),
-            state: row.get("state"),
-            created_at_ms: row.get("created_at_ms"),
-            updated_at_ms: row.get("updated_at_ms"),
-        }
+        Self((|| {
+            Ok(RecoveryState {
+                principal: decode_session_principal(row)?,
+                failed_incarnation_id: row
+                    .try_get("failed_incarnation_id")
+                    .map_err(database_error)?,
+                failed_producer_attempt: row
+                    .try_get("failed_producer_attempt")
+                    .map_err(database_error)?,
+                decision_sequence: row.try_get("decision_sequence").map_err(database_error)?,
+                failed_plan_digest: row.try_get("failed_plan_digest").map_err(database_error)?,
+                alternate_plan_digest: row
+                    .try_get("alternate_plan_digest")
+                    .map_err(database_error)?,
+                decode_restriction: row.try_get("decode_restriction").map_err(database_error)?,
+                state: row.try_get("state").map_err(database_error)?,
+                created_at_ms: row.try_get("created_at_ms").map_err(database_error)?,
+                updated_at_ms: row.try_get("updated_at_ms").map_err(database_error)?,
+            })
+        })())
     }
 }
 
@@ -4718,31 +5099,50 @@ const RECOVERY_COLS: &str = "failed_incarnation_id, failed_producer_attempt, dec
 
 async fn recovery_row(
     store: &HiqliteAuthStore,
-    user_id: i64,
+    principal: &crate::playback_principal::PlaybackPrincipal,
     playback_id: &str,
     recovery_epoch: &str,
 ) -> Result<Option<crate::domain::ProducerRecoveryReservation>, StoreError> {
+    let layout = LocalSessionSql::load(store).await?;
+    let owner_column = layout.column();
+    let principal_columns = layout.projection();
+    let bindings = if layout.rebuilt {
+        params!(
+            principal.owner_key(),
+            playback_id.to_owned(),
+            recovery_epoch.to_owned()
+        )
+    } else {
+        params!(
+            crate::store::local_media_principal_id(principal)?,
+            playback_id.to_owned(),
+            recovery_epoch.to_owned()
+        )
+    };
     let sql = format!(
-        "SELECT {RECOVERY_COLS} FROM media_session_producer_recovery
-          WHERE user_id = $1 AND playback_id = $2 AND recovery_epoch = $3"
+        "SELECT {principal_columns}, {RECOVERY_COLS} FROM media_session_producer_recovery
+          WHERE {owner_column} = $1 AND playback_id = $2 AND recovery_epoch = $3"
     );
     validate_sql(&sql)?;
     let Some(row) = store
         .client()
-        .query_consistent_map::<RecoveryRow, _>(
-            sql,
-            params!(user_id, playback_id.to_owned(), recovery_epoch.to_owned()),
-        )
+        .query_consistent_map::<RecoveryRow, _>(sql, bindings)
         .await?
         .into_iter()
         .next()
     else {
         return Ok(None);
     };
+    let row = row.0?;
+    if &row.principal != principal {
+        return Err(StoreError::Task(
+            "recovery owner does not match requested principal".into(),
+        ));
+    }
     // Converted through the shared reader, so that identical stored bytes
     // produce an identical typed answer on both backends.
     crate::store::recovery_reservation_from_row(
-        user_id,
+        row.principal,
         playback_id,
         recovery_epoch,
         row.failed_incarnation_id,
@@ -4891,7 +5291,8 @@ mod tests {
         let method = method_source("prepare_media_session");
         let normalized_method = method.split_whitespace().collect::<Vec<_>>().join(" ");
         assert!(
-            normalized_method.contains("let statements = prepare_statements(preparation)?;")
+            normalized_method
+                .contains("let statements = prepare_statements(preparation, layout)?;")
                 && method.matches("let statements =").count() == 1
                 && method.matches(".txn(").count() == 1
                 && method.matches(".txn(statements)").count() == 1
@@ -4906,7 +5307,9 @@ mod tests {
             "the public preparation path must submit the shared statement vector unchanged"
         );
         let preparation = statement_test_preparation();
-        let statements = prepare_statements(&preparation).expect("local preparation statements");
+        let statements =
+            prepare_statements(&preparation, super::LocalSessionSql { rebuilt: false })
+                .expect("local preparation statements");
         assert_eq!(
             statements.len(),
             3,
@@ -4922,8 +5325,7 @@ mod tests {
         );
         let statement_sql = statements
             .iter()
-            .map(|(sql, _)| sql)
-            .copied()
+            .map(|(sql, _)| sql.as_str())
             .collect::<Vec<_>>()
             .join("\n");
         assert!(
@@ -4980,7 +5382,7 @@ mod tests {
         let normalized_method = method.split_whitespace().collect::<Vec<_>>().join(" ");
         assert!(
             normalized_method.contains(
-                "let statements = abort_statements( user_id, playback_id, &request.staged_incarnation_id, &request.expected_predecessor_owner_node_id, request.expected_predecessor_owner_epoch, request.now_ms, );"
+                "let statements = abort_statements( user_id, playback_id, &request.staged_incarnation_id, &request.expected_predecessor_owner_node_id, request.expected_predecessor_owner_epoch, request.now_ms, layout, );"
             ) && method.matches("let statements =").count() == 1
                 && method.matches(".txn(").count() == 1
                 && method.matches(".txn(statements)").count() == 1
@@ -5001,16 +5403,17 @@ mod tests {
             "owner",
             1,
             1,
+            super::LocalSessionSql { rebuilt: false },
         );
         assert_eq!(
             statements.len(),
             4,
             "abort is exactly retirement, pin delete, lease clamp, then ledger delete"
         );
-        let retirement = statements[0].0;
-        let pin_delete = statements[1].0;
-        let lease_clamp = statements[2].0;
-        let ledger_delete = statements[3].0;
+        let retirement = &statements[0].0;
+        let pin_delete = &statements[1].0;
+        let lease_clamp = &statements[2].0;
+        let ledger_delete = &statements[3].0;
         let normalized_retirement = retirement.split_whitespace().collect::<Vec<_>>().join(" ");
         let normalized_pin_delete = pin_delete.split_whitespace().collect::<Vec<_>>().join(" ");
         let normalized_lease_clamp = lease_clamp.split_whitespace().collect::<Vec<_>>().join(" ");
@@ -5033,7 +5436,7 @@ mod tests {
         );
         assert!(
             normalized_pin_delete.contains(
-                "EXISTS (SELECT 1 FROM media_sessions WHERE incarnation_id = $1 AND state = 'ended' AND updated_at_ms = $2)"
+                "EXISTS (SELECT 1 FROM media_sessions WHERE incarnation_id = $1 AND state = 'ended' AND updated_at_ms = $2 AND user_id = $3)"
             ) && normalized_pin_delete.contains(
                 "EXISTS (SELECT 1 FROM media_session_preparations WHERE user_id = $3 AND playback_id = $4 AND staged_incarnation_id = $1)"
             ),
@@ -5041,7 +5444,7 @@ mod tests {
         );
         assert!(
             normalized_lease_clamp.contains(
-                "EXISTS (SELECT 1 FROM media_sessions WHERE incarnation_id = $3 AND state = 'ended' AND updated_at_ms = $1)"
+                "EXISTS (SELECT 1 FROM media_sessions WHERE incarnation_id = $3 AND state = 'ended' AND updated_at_ms = $1 AND user_id = $4)"
             ) && normalized_lease_clamp.contains(
                 "EXISTS (SELECT 1 FROM media_session_preparations WHERE user_id = $4 AND playback_id = $5 AND staged_incarnation_id = $3)"
             ),
@@ -5067,8 +5470,8 @@ mod tests {
             "both the job-lease insert and conflict update must be suppressed by the transaction-time pointer"
         );
         assert!(
-            source.contains(
-                "AND NOT EXISTS (\n                      SELECT 1 FROM media_playback_pointers\n                       WHERE user_id = $3 AND playback_id = $4\n                         AND current_incarnation_id = $1)"
+            source.contains("let owner_3 = layout.equals(3);") && source.contains(
+                "AND NOT EXISTS (\n                      SELECT 1 FROM media_playback_pointers\n                       WHERE {owner_3} AND playback_id = $4\n                         AND current_incarnation_id = $1)"
             ),
             "the session insert/upsert must be suppressed after the exact activation wins"
         );
@@ -5172,5 +5575,86 @@ mod sharing_route_decoder_tests {
             .expect("owned row"),
         );
         assert!(decode_route(&mut wrong).is_err());
+    }
+
+    #[test]
+    fn sharing_request_decoder_preserves_complete_principal_and_refuses_mixed_ownership() {
+        let conn = rusqlite::Connection::open_in_memory().expect("fixture connection");
+        let grant = "00000000-0000-4000-a000-000000000001";
+        let viewer = "a".repeat(64);
+        let key = format!("share:{grant}:{viewer}");
+        let decode = |kind: &str,
+                      user: Option<i64>,
+                      grant: Option<&str>,
+                      viewer: Option<&str>,
+                      key: &str| {
+            conn.query_row("SELECT 'fingerprint' AS request_fingerprint, 'playback' AS playback_id, 'starting' AS state, 'incarnation' AS incarnation_id, NULL AS owner_node_id, 1000 AS claim_expires_at_ms, ?1 AS principal_kind, ?2 AS user_id, ?3 AS share_grant_id, ?4 AS share_viewer_key, ?5 AS owner_key", rusqlite::params![kind, user, grant, viewer, key], |row| Ok(decode_request(&mut Row::Borrowed(row)))).expect("SQL request projection")
+        };
+        assert_eq!(
+            decode("local", Some(7), None, None, "local:7")
+                .expect("local")
+                .principal
+                .local_user_id(),
+            Some(7)
+        );
+        let shared = decode("sharing", None, Some(grant), Some(&viewer), &key).expect("sharing");
+        assert_eq!(
+            shared.principal,
+            crate::playback_principal::PlaybackPrincipal::sharing(
+                uuid::Uuid::parse_str(grant).expect("grant UUID"),
+                &viewer
+            )
+            .expect("principal")
+        );
+        assert!(decode("sharing", Some(7), Some(grant), Some(&viewer), &key).is_err());
+        assert!(decode("sharing", None, Some(grant), None, &key).is_err());
+        assert!(decode("sharing", None, Some(grant), Some(&viewer), "local:7").is_err());
+        assert!(decode("local", Some(0), None, None, "local:0").is_err());
+        assert!(decode("local", Some(7), None, None, "local:07").is_err());
+    }
+
+    #[test]
+    fn sharing_request_owned_decoder_returns_errors_for_incomplete_and_wrong_type_rows() {
+        for columns in [
+            serde_json::json!([]),
+            serde_json::json!([{"name":"principal_kind","value":{"Integer":1}}]),
+            serde_json::json!([
+                {"name":"principal_kind","value":{"Text":"local"}},
+                {"name":"user_id","value":{"Integer":7}},
+                {"name":"owner_key","value":{"Text":"local:7"}},
+                {"name":"share_grant_id","value":"Null"},
+                {"name":"share_viewer_key","value":"Null"}
+            ]),
+        ] {
+            let mut row = Row::Owned(
+                serde_json::from_value(serde_json::json!({"columns":columns})).expect("owned row"),
+            );
+            assert!(decode_request(&mut row).is_err());
+        }
+    }
+    #[test]
+    fn sharing_inventory_and_staged_decoders_refuse_incomplete_owned_rows() {
+        for columns in [
+            serde_json::json!([]),
+            serde_json::json!([{"name":"principal_kind","value":{"Integer":1}}]),
+            serde_json::json!([
+                {"name":"principal_kind","value":{"Text":"local"}},
+                {"name":"user_id","value":{"Integer":7}},
+                {"name":"owner_key","value":{"Text":"local:7"}},
+                {"name":"share_grant_id","value":"Null"},
+                {"name":"share_viewer_key","value":"Null"}
+            ]),
+        ] {
+            let make_row = || {
+                Row::Owned(
+                    serde_json::from_value(serde_json::json!({"columns":columns}))
+                        .expect("owned row"),
+                )
+            };
+            assert!(OwnedLeaseRow::from(&mut make_row()).0.is_err());
+            assert!(StagedRow::from(&mut make_row()).0.is_err());
+            assert!(PrincipalDesiredRow::from(&mut make_row()).0.is_err());
+            assert!(RecoveryRow::from(&mut make_row()).0.is_err());
+        }
     }
 }

@@ -1915,6 +1915,210 @@ The existing `media_session_contract_runs_through_dyn_store` regression also
 passed on SQLite and the three-voter backend (zero ignored, 13.25 seconds);
 denied-warning Clippy passed with `hiqlite-contract-tests`.
 
+**Desired-selection read checkpoint:** current desired selections are read
+by canonical owner key on rebuilt tables, with the complete persisted
+principal decoded and validated. Legacy tables retain real local-user
+selection and refuse a shared principal. Both grants can retain a distinct
+revision for the same playback ID, and another viewer receives no selection.
+The six route/principal tests passed on memory and pooled SQLite (zero
+ignored, 0.92 seconds), and both actual three-voter candidate contracts passed
+(zero ignored, 18.51 seconds). The existing local session lifecycle contract
+and denied-warning Clippy also passed. Writers, schema installation, grant
+admission and cluster floor remain open; this checkpoint adds no shared
+worker admission.
+
+**SQLite desired-writer checkpoint:** a rebuilt local desired-selection write
+inserts the complete canonical principal projection and uses `(owner_key,
+playback_id)` for conflict resolution. Insert and exact replay retain revision
+1; a changed digest advances it to 2. The transaction checks that the real
+local user still exists, so a deleted user cannot recreate desired state.
+Other grants' selections survive local deletion. The six focused tests passed
+on memory and pooled SQLite (zero ignored, 0.99 seconds), and affected
+denied-warning Clippy passed. Shared desired writers still refuse admission;
+other writer operations, installation and the cluster floor remain open.
+
+
+**SQLite request-writer checkpoint:** rebuilt local request claims, replay,
+recipe persistence, owner assignment and failure cleanup use canonical owner
+keys and persist the complete local principal. The real user must exist in
+the claiming transaction. A deleted owner receives the existing overloaded
+refusal; a resolved request pointing to another principal returns conflict.
+Shared claims remain refused while grant admission and the member floor are
+unfinished. The focused regression passed in both SQLite modes (one test,
+zero ignored, 1.85 seconds). The 28 existing local/replicated session contracts
+also passed after the request SQL change (zero ignored, 257.86 seconds),
+before the final deleted-owner refusal alignment and positive-owner DDL check.
+
+The candidate rebuild now rejects zero and negative local IDs in all seven
+owner tables. Five candidate rebuild tests passed (zero ignored, 5.62 seconds),
+and both actual three-voter candidate contracts passed (zero ignored,
+18.49 seconds). Denied-warning Clippy passed with `hiqlite-contract-tests`.
+The changed DDL requires a fresh historical-store qualification; the schema
+is still uninstalled and these results do not qualify shared admission.
+
+```sh
+cargo test --locked -p plurx-core --features hiqlite-store --lib sharing_request_rebuilt_local_keys_replay_and_deleted_owner_refusal -- --nocapture
+cargo test --locked -p plurx-core --features hiqlite-store --lib sharing_principal_rebuild -- --nocapture
+cargo test --locked -p plurx-core --features hiqlite-contract-tests --test store_contract session_principals -- --nocapture
+```
+
+
+**Recovery decoder checkpoint:** the shared recovery-row converter now
+receives and preserves a complete validated principal; each legacy caller
+explicitly supplies its real Local owner. It refuses invalid Local IDs rather
+than manufacturing a valid owner from zero. The focused converter regression
+passed (one test, zero ignored), and the four existing recovery behavior
+regressions passed through SQLite and actual three-voter stores. The broader
+`producer_recovery_` filter also selected an older-schema migration fixture,
+which failed during its synthetic downgrade because a newer background
+projection trigger referenced a column being dropped. That fixture needs
+repair; this is not a passing full filter or migration qualification. Shared
+recovery SQL, schema installation and admission remain open.
+
+
+**SQLite recovery ownership checkpoint:** rebuilt recovery reservations use
+canonical owner keys and persist the complete Local projection. Reservation
+checks real user existence in its transaction. Replay returns the same budget;
+another failed incarnation receives none, and settling the budget prevents
+reuse. Recovery reads decode complete persisted principals and isolate two
+grants sharing the same playback/epoch; another viewer receives no row. Shared
+reservation writes remain refused while authority admission is unfinished.
+The focused rebuilt regression passed in memory and pooled SQLite (one test,
+zero ignored, 0.73 seconds); the four existing recovery behavior regressions
+passed on SQLite and actual three voters (zero ignored, 37.88 seconds). The
+older-schema migration fixture remains separately under repair.
+
+```sh
+cargo test --locked -p plurx-core --features hiqlite-store --lib sharing_recovery_rebuilt_keys_preserve_grants_and_one_local_budget -- --nocapture
+cargo test --locked -p plurx-core --features hiqlite-contract-tests --test store_contract producer_recovery_ -- --skip replicated_v32_store_migrates_the_producer_recovery_ledger_on_daemon_open --nocapture
+```
+
+
+**Parallel integration checkpoint:** the integrated branch includes the
+replicated Local request/desired writers, complete staged/owned principal
+decoders, canonical inventory joins, member-floor checker and atomic SQL
+predicate. The capability remains unadvertised. The checker covers the
+committed bounded voter/learner roster, fresh coupled heartbeats, join/removal
+fences and quorum failure; its read result alone grants no write authority.
+The dedicated three-voter test covers actual quorum loss and a heartbeat
+change within the admission transaction. Learner cases use projected SQL
+state, so a live fourth learner and promotion still need qualification.
+
+Pinned all-target compilation passed on the integrated tree. Five floor unit
+regressions passed (zero ignored, 0.01 seconds), all 11 sharing contracts
+passed through their SQLite/actual-voter fixtures (zero ignored,
+100.76 seconds), and the repaired v32 migration passed (zero ignored,
+9.99 seconds). The fixture now removes later background/sharing schema
+objects before setting its historical marker and verifies full background
+trigger restoration after forward migration. Production migrations are
+unchanged. Earlier v5/v27 checks also passed on the agent's exact committed
+fixture. This resolves the stale migration-filter failure above; the new
+schema is still uninstalled and Shared writer admission remains unfinished.
+
+The next integrated checkpoint adds the closed catalogue/session floor
+variants and replicated recovery reads and Local reservation/settlement
+writes. Complete recovery principals survive decoding; rebuilt writes use
+canonical owner keys and check the current Local user within their admission
+transaction. Shared reservation and settlement remain refused.
+
+On that combined tree, pinned all-target compilation passed (31.25 seconds),
+both actual-voter floor contracts passed (13.70 seconds), the rebuilt Local
+runtime contract passed (18.14 seconds), and all five producer-recovery
+contracts, including the repaired historical v32 fixture, passed
+(45.76 seconds). All tests had zero ignored cases. Feature Clippy with denied
+warnings passed (36.74 seconds); documentation indexing and catalog lint
+also passed. These checks do not qualify schema installation or Shared
+writer admission.
+
+**Preparation integration checkpoint:** SQLite staged lookups and worker
+inventories decode complete principals and correlate canonical owner keys.
+Two grants sharing the same viewer/playback retain independent staged slots;
+a starting request suppresses only its own owner's inventory entry. SQLite
+Local prepare/replay/rejoin/abort now writes complete metadata, checks current
+user existence within its transaction, and requires predecessor ownership
+agreement. Retirement and dependent pin/lease cleanup each require the
+ledger's principal. The matching replicated preparation checkpoint is also
+integrated. Shared mutation ingress remains refused.
+
+On the combined tree, all 13 SQLite ownership cases passed (11.79 seconds),
+both actual-voter candidate runtime cases passed (27.27 seconds), and all 28
+existing lifecycle contracts passed (257.78 seconds). Every test had zero
+ignored cases. The SQLite preparation case executes a corrupt Local ledger
+pointing at a foreign Shared route and verifies the route, cache pin and
+complete job-lease revision/expiry/update tuple survive the abort attempt in
+both memory and pooled disk stores. Pinned all-target compilation and
+denied-warning feature Clippy passed; schema installation, Shared admission
+and upgrade/rollback qualification remain open.
+
+**Activation integration checkpoint:** both backends now persist complete
+Local principal metadata on activation and canonical pointer conflicts,
+requests and publication. SQLite checks current user existence within its
+transaction and refuses a current pointer that names another owner/playback.
+Both implementations preserve a foreign Shared route's job lease when a
+Local activation collides with its incarnation. Confirmation and exact replay
+retain the committed route; request-backed publication retains its canonical
+request identity. Shared activation remains explicitly refused.
+
+Pinned all-target compilation passed on the combined tree (33.49 seconds).
+All 14 SQLite ownership cases passed (14.43 seconds), all three actual-voter
+candidate runtime cases passed (36.41 seconds), and all 28 existing lifecycle
+contracts passed (257.61 seconds), with zero ignored tests. Denied-warning
+feature Clippy passed (39.02 seconds). The candidate schema remains
+uninstalled; this receipt does not qualify Shared admission or rollout.
+
+
+**Commit and membership-admission integration checkpoint:** both backends bind
+predecessor receipts to the actual predecessor session and canonical principal
+inside the pointer compare-and-swap. A receipt naming an actual foreign Shared
+session cannot advance a Local pointer or create an acknowledgement. Correct
+Local commit, predecessor drain and exact replay preserve complete principals.
+SQLite replay without a preparation ledger also requires its retained Local
+predecessor rather than treating an unrelated acknowledgement as authority.
+
+The candidate membership factory records token-bound declarations and durable
+transition intents. Both application redemption and raw replicated-management
+RPCs refuse incompatible admission after partial installation. A real fourth
+learner exercises promotion. Ambiguous transition outcomes retain their intent;
+a timer does not release the fence. Installation, startup capability advertising
+and coordinated upgrade qualification remain unfinished.
+
+Pinned combined-tree core and cluster-check all-target compilation passed
+(33.53 and 32.51 seconds), all 15 ownership unit cases passed (15.60 seconds),
+all four rebuilt-schema actual-voter cases passed (45.60 seconds), all four
+membership-floor contracts passed (13.83 seconds), and six existing preparation
+commit contracts passed (59.29 seconds). Denied-warning feature Clippy passed
+(33.59 seconds). All executed regression cases had zero ignored tests. An
+initial overly narrow membership unit filter selected no tests and is excluded
+from this evidence; the exact application membership cases are recorded below.
+
+The exact application redemption/rejoin/promotion regression passed (one test,
+9.31 seconds); the existing occupied/expired-target daemon-join regression
+passed (one test, 31.55 seconds). Both used the same integrated tree and real
+replicated fixtures, with zero ignored tests. These are executed application
+join paths rather than historical-process or production rollout evidence.
+
+
+**Worker authority integration checkpoint:** SQLite and replicated renewal and
+expired-owner takeover correlate canonical principal keys. Rebuilt-schema
+session, physical lease and pin authority extensions require the stored Local
+principal and its current user. Active handoff arming/completion and completion
+replay also refuse Shared or deleted Local rows. Shared authority extension
+still needs the server-side grant/scope/member-floor proof; terminal retirement
+and complete Shared reads remain separate supported operations.
+
+The new SQLite regression passed in memory and pooled stores (0.76 seconds),
+including legitimate Local renewal/takeover, Shared refusal with the complete
+foreign job-lease tuple unchanged, and a deliberately restored active Local
+row after its user was deleted. On the integrated tree, all 16 ownership units
+passed (16.33 seconds), all five actual-voter candidate cases passed (54.72
+seconds), the existing dyn-store lifecycle passed (12.82 seconds), committed
+successor renewal passed (9.66 seconds), and staged deadline refusal passed
+(9.63 seconds). All had zero ignored tests. Pinned all-target compilation and
+denied-warning feature Clippy passed. This checkpoint also integrates the
+replicated confirmation/publication and foreign abandoned-activation cleanup
+fences; coordinated installation and Shared admission remain open.
+
+
 **Separate-process restart regression:**
 `crates/plurxd/tests/sharing_daemon_restart.rs` starts the shipped daemon twice
 with separate disposable stores, pairs through a raw TCP forwarding fixture

@@ -614,7 +614,7 @@ pub(crate) fn encoded_recovery_restriction(
 /// a task error on the other.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn recovery_reservation_from_row(
-    user_id: i64,
+    principal: crate::playback_principal::PlaybackPrincipal,
     playback_id: &str,
     recovery_epoch: &str,
     failed_incarnation_id: String,
@@ -627,6 +627,11 @@ pub(crate) fn recovery_reservation_from_row(
     created_at_ms: i64,
     updated_at_ms: i64,
 ) -> Result<crate::domain::ProducerRecoveryReservation, StoreError> {
+    if !principal.valid_admission_shape() {
+        return Err(StoreError::Task(
+            "stored recovery principal is invalid".to_owned(),
+        ));
+    }
     let decode_restriction = match stored_restriction {
         Some(stored) => Some(
             crate::domain::ContinuationDecodeRestriction::decode(&stored).map_err(|error| {
@@ -638,7 +643,7 @@ pub(crate) fn recovery_reservation_from_row(
     let state = crate::domain::ProducerRecoveryState::parse(state)
         .ok_or_else(|| StoreError::Task(format!("unknown recovery state {state}")))?;
     Ok(crate::domain::ProducerRecoveryReservation {
-        principal: crate::playback_principal::PlaybackPrincipal::LocalUser { user_id },
+        principal,
         playback_id: playback_id.to_owned(),
         recovery_epoch: recovery_epoch.to_owned(),
         failed_incarnation_id,
@@ -6265,5 +6270,44 @@ mod item_sort_order_tests {
             );
             assert!(source.contains("item_sort_order_by(sort)"));
         }
+    }
+}
+
+#[cfg(test)]
+mod sharing_recovery_principal_tests {
+    use super::recovery_reservation_from_row;
+    use crate::playback_principal::PlaybackPrincipal;
+
+    #[test]
+    fn sharing_recovery_converter_preserves_complete_owner_and_refuses_invalid_local() {
+        let convert = |principal| {
+            recovery_reservation_from_row(
+                principal,
+                "playback",
+                "epoch",
+                "incarnation".to_owned(),
+                1,
+                1,
+                "a".repeat(64),
+                "b".repeat(64),
+                None,
+                "reserved",
+                1,
+                1,
+            )
+        };
+        let principal = PlaybackPrincipal::sharing(
+            uuid::Uuid::parse_str("00000000-0000-4000-a000-000000000001").expect("grant UUID"),
+            &"a".repeat(64),
+        )
+        .expect("viewer key");
+        assert_eq!(
+            convert(principal.clone())
+                .expect("valid shared row")
+                .principal,
+            principal
+        );
+        assert!(convert(PlaybackPrincipal::LocalUser { user_id: 0 }).is_err());
+        assert!(convert(PlaybackPrincipal::LocalUser { user_id: -1 }).is_err());
     }
 }
