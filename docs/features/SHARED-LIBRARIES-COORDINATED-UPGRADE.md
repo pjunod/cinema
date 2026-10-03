@@ -61,8 +61,8 @@ media workers. It seeds retained local-principal rows from the frozen fixture,
 with resolved requests, ended sessions, current fixture creation/update clocks
 and bounded future retention deadlines. The frozen fixture's diagnostic 1970
 clocks would otherwise exercise expiry cleanup rather than retained-data
-compatibility. Only the seeded session lease receives a future lease deadline;
-existing daemon worker leases keep their original clocks. The second ended
+compatibility. Only the seeded session leases receive future lease deadlines; existing
+daemon worker leases keep their original clocks. The second ended
 route deliberately keeps its stale clock to qualify retention cleanup. It reads
 all columns of eleven relevant tables through quorum reads. It then stops all
 three processes and copies each entire stopped data directory into one owned
@@ -73,8 +73,8 @@ After restarting the control processes, the leader installs the candidate
 membership declaration/intent factory before any principal marker. One Raft
 transaction asserts the closed transition-absence predicate and applies the
 unchanged frozen seven-table rebuild. There are no shared principals and no
-capability advertisements. Retained pre-existing columns and rows, including the full job-lease inventory,
-must match immediately across the rebuild.
+capability advertisements. Retained pre-existing columns and rows, including
+the full job-lease inventory, must match immediately across the rebuild.
 Store methods are not called through a stale cached shape after rebuilding.
 
 All control processes stop before three current actual daemons restart on the
@@ -120,23 +120,30 @@ checks belong to the separate replicated topology fixture.
 
 ## 5. Receipt and rollout limits
 
-On 2026-10-03 the full daemon/topology runner passed against committed
-candidate `7ce5f6a7095f0b073f932695a00f38a24a9eb167` and unchanged historical
-source `971265536a259dea38b0f7a9a8752a5a74e8c025`, using
-`rustc 1.97.1 (8bab26f4f 2026-07-14)`. Its candidate source archive SHA-256 was
-`5b4a4e1cb3907a441494d917bb221e342fe01f13f27ba24a31d49d57c92f414f`.
+On 2026-10-03 the combined archived runner passed against committed candidate
+`9b99fcd0f267b20c03a037a0ede4330ae54fbf80`, based on integrated S4 commit
+`a8bf5ce1d690b1d66b5d5b066abfe069df54e345`, and unchanged historical source
+`971265536a259dea38b0f7a9a8752a5a74e8c025`. It used
+`rustc 1.97.1 (8bab26f4f 2026-07-14)`. The candidate source archive SHA-256 was
+`7cd7d5a4a7e76114f7ca1424c3671b23c5ee76539349413d4be6ea3852740f74`;
+the candidate daemon binary SHA-256 was
+`82216faa807cbfc5826ab3fe29e5f7f0bf4c10b6aea98acd94e5453fefcf484d`.
+
 The receipt verified both future-schema refusal cases for both actual daemons,
 three historical voters, successful full-stop shutdown, factory-before-marker
 rebuild, strict immediate eleven-table retention, current daemon restart,
 whole-topology restore with historical owner login and voter membership, and
-the exact retained/cleanup outcomes described above. Shared writes were not
+the exact retained/cleanup outcomes described above. The same run verified
+closed-file SQLite Store backup, statement-error rollback, successful rebuild,
+candidate reopen, byte-identical backup restore and legacy reopen, retaining
+all original fields and rows across eleven tables. Shared writes were not
 admitted and no capability was advertised.
 
-The later SQLite extension has separately passed its exact production-schema
-regression, one executed test and zero ignored. The combined archived runner
-must be rerun after committing that extension; the first receipt does not
-cover its newer source tree. Source and binary hashes in each generated receipt
-identify the snapshot actually exercised.
+The two feature-enabled helper regressions passed with zero ignored, alongside
+eight runner contract tests, four documentation-index tests and normal tracked
+lint/format/syntax checks. Source and binary hashes in each generated receipt
+identify the snapshot actually exercised. This receipt does not qualify later
+source-admission changes or a subsequent integrated base.
 
 Production activation requires completed principal and allocator writers,
 qualified atomic source-grant and exact member-floor admission, a released
