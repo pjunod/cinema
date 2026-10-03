@@ -19,22 +19,59 @@ class PlaybackFileContextTest {
     private val file = "9007199254740993"
     private val base = "/api/v1/shared/imports/${ref.import_id}/files/signed_locator-ABC123"
     private val revision = "a".repeat(64)
-    private suspend fun fetch(locator: String?, mutate: (JsonObject) -> JsonObject = { it }, change: () -> Unit = {}): PlaybackFileContext {
+    private suspend fun fetch(locator: String?, mutate: (JsonObject) -> JsonObject = { it }, detailBody: (String) -> String = { it }, unknownLength: Boolean = false, change: () -> Unit = {}): PlaybackFileContext {
         val item = Json.parseToJsonElement(Json.encodeToString(ref))
         val row = mutate(buildJsonObject {
             put("file_id", file); put("revision", revision)
             put("reference", buildJsonObject { put("item", item); put("file_id", file); put("revision", revision) })
             if (locator != null) put("file_base", locator)
         })
-        val body = buildJsonObject { put("files", buildJsonArray { add(row) }) }.toString()
+        val body = detailBody(buildJsonObject { put("files", buildJsonArray { add(row) }) }.toString())
         val client = OkHttpClient.Builder().addInterceptor { chain ->
             assertEquals("b.test", chain.request().url.host)
             assertEquals("Bearer fixture-bearer", chain.request().header("Authorization"))
             change()
             Response.Builder().request(chain.request()).protocol(Protocol.HTTP_1_1).code(200).message("OK")
-                .body(body.toResponseBody()).build()
+                .body(if (unknownLength) object : okhttp3.ResponseBody() {
+                    override fun contentType(): okhttp3.MediaType? = null
+                    override fun contentLength(): Long = -1
+                    override fun source(): okio.BufferedSource = okio.Buffer().writeUtf8(body)
+                } else body.toResponseBody()).build()
         }.build()
         return PlaybackFileContext.authenticatedDetailForTest(ref, file, client)
+    }
+    @Test fun authenticatedDetailHonorsFourMiBBoundWithoutGrantingMissingLocator(): Unit = runBlocking {
+        Session.origin = "https://b.test"; Session.token = "fixture-bearer"
+        val largeDetail: (String) -> String = { text ->
+            val template = Json.parseToJsonElement(text).jsonObject.getValue("files").jsonArray[0].jsonObject
+            val chapters = buildJsonArray {
+                repeat(1024) { index -> add(buildJsonObject {
+                    put("index", index); put("title", "c".repeat(512)); put("start_ms", index * 1000); put("end_ms", (index + 1) * 1000)
+                }) }
+            }
+            val rows = buildJsonArray {
+                repeat(3) { index ->
+                    val id = if (index == 0) file else index.toString()
+                    add(JsonObject(template + mapOf(
+                        "file_id" to JsonPrimitive(id), "size" to JsonPrimitive("1048576"), "chapters" to chapters,
+                        "audio_streams" to JsonArray(emptyList()), "subtitle_streams" to JsonArray(emptyList()),
+                        "skip_regions" to JsonArray(emptyList()), "dolby_vision" to JsonObject(emptyMap()),
+                        "audio_offset_ms" to JsonPrimitive(0), "probed" to JsonPrimitive(true),
+                        "reference" to JsonObject(template.getValue("reference").jsonObject + ("file_id" to JsonPrimitive(id)))
+                    )))
+                }
+            }
+            val result = buildJsonObject { put("files", rows) }.toString()
+            assertTrue(result.toByteArray().size > 1_048_576); assertTrue(result.toByteArray().size < 4_194_304)
+            // Valid JSON whitespace tests the exact byte limit without adding synthetic wire fields.
+            result + " ".repeat(4_194_304 - result.toByteArray().size)
+        }
+        val context = fetch(base, detailBody = largeDetail, unknownLength = true)
+        assertEquals(ref, context.reference); assertEquals(file, context.sourceFileId); assertNull(context.sessionId)
+        assertThrows(IllegalArgumentException::class.java) { context.path("direct") }
+        assertNotNull(runCatching { fetch(base, detailBody = { largeDetail(it) + " " }) }.exceptionOrNull())
+        assertNotNull(runCatching { fetch(base, detailBody = { largeDetail(it) + " " }, unknownLength = true) }.exceptionOrNull())
+        assertNotNull(runCatching { fetch(null, detailBody = largeDetail) }.exceptionOrNull())
     }
     @Test fun authenticatedBContextPreservesExactReferenceAndSessionAuthority(): Unit = runBlocking {
         Session.origin = "https://b.test"; Session.token = "fixture-bearer"

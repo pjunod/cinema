@@ -81,7 +81,7 @@ struct PlaybackFileContext: Hashable {
         let current = Session.shared.playbackAuthorization
         guard current.generation == auth.generation, current.origin == auth.origin,
               current.token == auth.token, let http = response as? HTTPURLResponse,
-              http.statusCode == 200, response.url == url, data.count <= 1_048_576,
+              http.statusCode == 200, response.url == url, data.count <= 4_194_304,
               let detail = try JSONSerialization.jsonObject(with: data) as? [String: Any],
               let files = detail["files"] as? [[String: Any]]
         else { throw APIError.badURL }

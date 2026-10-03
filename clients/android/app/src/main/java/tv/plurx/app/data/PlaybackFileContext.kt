@@ -188,12 +188,12 @@ class PlaybackFileContext private constructor(
                 client.newCall(request).execute().use { response ->
                     require(response.code == 200 && response.request.url == request.url && response.priorResponse == null)
                     val body = requireNotNull(response.body)
-                    require(body.contentLength() <= 1_048_576)
+                    require(body.contentLength() <= 4_194_304)
                     // Bound actual bytes even when Content-Length is absent.
                     val source = body.source()
-                    source.request(1_048_577)
-                    val bytes = source.buffer.readByteArray(source.buffer.size.coerceAtMost(1_048_577))
-                    require(bytes.size <= 1_048_576)
+                    source.request(4_194_305)
+                    val bytes = source.buffer.readByteArray(source.buffer.size.coerceAtMost(4_194_305))
+                    require(bytes.size <= 4_194_304)
                     Json.parseToJsonElement(bytes.toString(Charsets.UTF_8)).jsonObject
                 }
             }
