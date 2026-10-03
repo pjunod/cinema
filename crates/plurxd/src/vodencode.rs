@@ -17,7 +17,43 @@ use crate::seam_hooks::{HookFuture, HookReady};
 
 use crate::admission::{
     Admissions, HwSlot, LiveWait, PoolSnapshot, Priority, SwPermit, TranscodeResourceEstimate,
+    Workload,
 };
+
+/// Freeze the encoder allowance without reducing whole-pipeline accounting.
+pub(crate) fn frozen_software_threads(work: &Workload<'_>, budget: usize) -> u32 {
+    work.software_threads().min(budget).max(1) as u32
+}
+
+/// Current policy must still allow the frozen encoder. The shared admission
+/// pool owns the conservative pipeline claim and its isolated oversize rule.
+pub(crate) fn try_admit_frozen_bundle(
+    admissions: &Admissions,
+    hardware_limit: usize,
+    software_budget: usize,
+    resources: &TranscodeResourceEstimate,
+    options: &TranscodeOptions,
+    priority: Priority,
+    claim: Option<u64>,
+) -> Result<crate::admission::TranscodePermit, bool> {
+    let frozen_floor = if resources.hardware_slot {
+        // Hardware output ignores the software encoder cap. Its CPU decode
+        // and filter estimate remains the operative policy floor.
+        resources.cpu_threads
+    } else {
+        resources.cpu_threads.min(
+            options
+                .software_threads
+                .map_or(resources.cpu_threads, |threads| threads as usize),
+        )
+    };
+    if frozen_floor > software_budget {
+        return Err(true);
+    }
+    admissions
+        .try_admit_bundle_claiming(hardware_limit, software_budget, resources, priority, claim)
+        .ok_or(false)
+}
 
 /// Resolved once before attachment. A restart cannot silently change encoder,
 /// grade, cadence, rate control, tracks, or burn pixels under an immutable URI.
@@ -438,24 +474,20 @@ impl Encoding {
             });
             None
         };
-        // The shared pool deliberately admits one oversize job when otherwise
-        // idle. A frozen VOD recipe cannot shrink its thread demand on retry,
-        // so an operator lowering the budget below that exact plan is an
-        // explicit refusal rather than an oversize exception.
-        if self.resources.cpu_threads > software_budget {
-            return refuse(true);
-        }
         let claim = (priority != Priority::Background)
             .then(|| *self.handoff_claim.lock().expect("VOD handoff claim"))
             .flatten();
-        let Some(bundle) = self.admissions.try_admit_bundle_claiming(
+        let bundle = match try_admit_frozen_bundle(
+            &self.admissions,
             hardware_limit,
             software_budget,
             &self.resources,
+            &self.options,
             priority,
             claim,
-        ) else {
-            return refuse(false);
+        ) {
+            Ok(bundle) => bundle,
+            Err(over_budget) => return refuse(over_budget),
         };
         let (hardware, software) = bundle.into_parts();
         let permit = EncodePermit {
