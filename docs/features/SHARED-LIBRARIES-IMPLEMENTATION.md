@@ -2992,6 +2992,24 @@ was used as a unit match arm. The fixture now asserts successful token deletion
 and yields unit. That archive has no Linux runtime qualification; the corrected
 committed tree must be archived and executed again before any such claim.
 
+**Source SQLite activation and current-owned renewal integration:**
+Checkpoints `2925a231b` and `07e193f11` extend the same blocked first-activation
+contract to SQLite and add opaque current-owned renewal to both stores. Renewal
+requires the exact resolved Source binding, route, lease, pin, file revision and
+fresh actual membership proof in the acquired write transaction. An expired
+assignment observation cannot authorize renewal, while a fresh observation may
+renew its unchanged assignment. Ordinary Shared renewal remains refused.
+
+The combined pinned feature-enabled core/daemon all-target check passed (1m10s).
+Twelve Source/membership units passed (22.25s); the actual three-voter Source
+assignment/activation/renewal case passed (10.69s), and the unchanged Local
+committed-successor renewal case passed (9.59s), all with nonzero-test guards and
+zero ignored cases. Final denied-warning all-target Clippy passed (1m24s), and
+four docs-index tests passed. Thirty-two daemon sharing regressions, including
+the body-tracker correction below, passed on the combined candidate before the
+renewal integration. Physical readiness/publication, resolved claim replay,
+worker admission, producer settlement and post-reap release remain open.
+
 ### 16.7 S6 file-context integration foundation
 
 The verified parallel checkpoint `4865de285` is integrated after catalogue
@@ -3022,6 +3040,40 @@ JavaScript/TypeScript contracts and the existing documented contrast allowance.
 Shared navigation/settings/details/Continue Watching and end-to-end player
 behavior still require their S4/S5 authority and delivery integrations.
 
+
+**S6 Shared browse candidate:** The web app now has separate Shared routes in
+all three layouts, keyed by import, Source server, catalogue epoch, library and
+item without converting Source IDs to JavaScript numbers. Assigned groups load
+independently with four concurrent Source reads. Continue Watching is a separate
+B-private group index and fresh per-Source request; unavailable groups publish
+no stale items. Library search stays within the chosen Source/library, cursors
+remain opaque, and full-reference deduplication bounds one rendered browse to
+5,000 items. Shared details display current Source file descriptions without
+calling Local numeric item/file/history routes. Playback is explicitly
+unavailable until its session and delivery integration is qualified.
+
+Settings → Sharing displays the current imports/exports page and node status.
+The existing saved switch remains in Developer with advisory readiness; this
+checkpoint adds no pairing, scope, assignment or credential-rotation mutations.
+Every Shared catalogue and management read bounds the received body to 4 MiB
+and checks the current login generation, bearer, B origin and page after each
+stream read and before publication. The file, served row, shell tag, layout map
+and generated JavaScript file list are updated together. Eight executed web
+regressions cover identities above the safe Number range, escaping, account and
+origin replacement during streaming, body bounds, independent Source failure,
+opaque cursor encoding/repetition, duplicate items, concurrency and unavailable
+Continue Watching. The complete web lane, its layout/shell checks, all 36
+Settings section cases, and the unchanged type baseline pass.
+
+**Linux fixture observation correction:** The exact `c220f6270` source archive
+(SHA-256 `0072b4b224ab34d05be670b21a7bcc9bfb6a0cbed8b23d479a7cc0d3c4d36c3f`)
+compiled with pinned Linux Rust 1.97.1, but its CGNAT fixture failed twice while
+awaiting the test body's drop flag (7.28 and 7.27 seconds). Its test decorator
+tracked item paths but omitted the newly tested Continue Watching path, so that
+flag was never attached. The decorator now includes the exact per-import
+Continue Watching route, with a focused path regression. No observation timeout
+or production cancellation code changes. The corrected committed archive still
+requires execution before any Linux runtime qualification claim.
 
 ### 16.8 S7 native file-context foundation
 
@@ -3083,3 +3135,28 @@ archive SHA-256 is
 Integration has no native source diff against that qualified tree. Shared
 navigation, settings, playback starts and progress/history remain separate
 unfinished integrations.
+
+**S7 Shared browse integration:** Native checkpoint `cee083a8e` adds separate
+Shared groups, library pages and details on Apple and Android, preserving the
+complete import/Source/epoch/library/item reference throughout navigation.
+Each Source loads and retries independently. Details display B-owned remote
+watch state and Source files without Local item/history/image fallbacks.
+Settings shows current sharing summaries, while Developer retains the saved
+choice with advisory readiness. An in-flight read or Save cannot overwrite a
+newer user edit. Shared playback, pairing/scope/assignment mutations, optional
+artwork rendering and physical-device qualification remain open.
+
+The exact source-only archive SHA-256 is
+`81a72a8d3f270ab65875e2467d6fc77855c3a5c4c2c06f161580a17caf36cd54`.
+Its 381 tracked native files byte-match the qualification input. Fifteen iOS,
+fifteen tvOS and fifteen Android focused tests passed with zero failures, all
+affected Apple UI sources compiled, and exact-head Android lint passed (4m33s).
+Integration has no native source differences against that qualified checkpoint;
+its normal tracked hook passed before integration. Native parity checkpoint `b41e3f8e8` also integrates unchanged: authenticated
+Shared details use the same 4 MiB bound as B, including a body with three actual
+maximum-sized chapter lists. Seven iOS, seven tvOS and seven Android tests pass;
+exact 4 MiB passes, one extra byte and a missing locator refuse, and absent
+Content-Length cannot bypass the streaming bound. Android lint passed (5m56s),
+its normal hook passed, and all 381 native files byte-match the tested source.
+Archive SHA-256 is
+`01aa335f5dee172a5d7f3eccb7651cffd3b445d81215afb9e5e758734362330f`.

@@ -73,6 +73,7 @@ const SETTINGS_ENDPOINTS={
   libs:()=>api("/libraries"),settings:()=>api("/settings"),status:()=>api("/scan/status"),
   dvConversions:()=>api("/dv-conversions"),
   sys:()=>api("/system"),users:()=>api("/users"),trakt:()=>api("/trakt/status"),
+  sharingStatus:()=>sharingManagementRead("/sharing/status"),sharingImports:()=>sharingManagementRead("/sharing/imports"),sharingExports:()=>sharingManagementRead("/sharing/exports"),
   developerReadiness:()=>api("/developer/readiness"),
   analysis:()=>api("/analysis/summary"),
   playbackEvents:()=>api(`/system/playback-events?since=${Date.now()-7*24*60*60*1000}&limit=2000`),
@@ -110,6 +111,7 @@ const SETTINGS_MANIFEST={
   users:{required:["settings","users"],secondary:[]},
   system:{required:["sys"],secondary:["playbackEvents"]},
   cluster:{required:["cluster"],secondary:["clusterOps","developerReadiness"]},
+  sharing:{required:["sharingStatus","sharingImports","sharingExports"],secondary:[]},
   integrations:{required:["settings","trakt"],secondary:[]},
   developer:{required:["settings"],secondary:["developerReadiness"]},
 };
