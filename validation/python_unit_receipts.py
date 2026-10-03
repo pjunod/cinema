@@ -878,6 +878,13 @@ def restore(api, scope, run, applicability=None):
         if matching[0]["status"] == "skipped":
             continue
         if rid not in indexed:
+            from validation.python_unit_interrupted_recovery import recover_interrupted_pr767
+            handled, recovered_journal = recover_interrupted_pr767(api, scope, prior, jobs, legacy, run)
+            if handled:
+                if recovered_journal is not None:
+                    trusted_sources.add((rid, prior["commit_sha"]))
+                    journals.append(recovered_journal)
+                continue
             handled, recovered_journal = recover_lost_pr742(api, scope, prior, jobs)
             if handled:
                 if recovered_journal is not None:
@@ -1222,6 +1229,8 @@ def main(argv=None):
 
 
 if __name__ == "__main__":
+    # Recovery consumers must share the CLI's exception and API identities.
+    sys.modules["validation.python_unit_receipts"] = sys.modules[__name__]
     try:
         sys.exit(main())
     except Exception as error:
