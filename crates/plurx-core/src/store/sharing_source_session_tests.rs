@@ -1268,3 +1268,158 @@ async fn sharing_source_owned_renewal_current_authority_and_exact_lease() {
         );
     }
 }
+
+#[tokio::test]
+async fn sharing_source_publication_atomic_ready_zero_and_exact_replay() {
+    let dir = tempfile::tempdir().expect("directory");
+    for store in [
+        SqliteStore::open_in_memory().expect("memory"),
+        SqliteStore::open(&dir.path().join("source-publication.db")).expect("pool"),
+    ] {
+        let (grant, key) = setup(&store).await;
+        let request = intent(&store, grant, &key, "publication").await;
+        let SourceClaimOutcome::Acquired(binding) = store
+            .claim_source_media_session(&request, &proof())
+            .await
+            .expect("claim")
+        else {
+            panic!("binding")
+        };
+        let assignment = store
+            .assign_source_dispatch(&binding, &key, &proof())
+            .await
+            .expect("assignment")
+            .expect("worker");
+        let SourceWriteAuthorityRead::Ready(authority) = store
+            .prepare_source_activation_authority(&assignment, &key, &proof())
+            .await
+            .expect("activation authority")
+        else {
+            panic!("authority")
+        };
+        let now = now_ms().expect("clock");
+        let activation = crate::domain::MediaSessionActivation {
+            incarnation_id: binding.incarnation_id.to_string(),
+            session_id: Uuid::new_v4().to_string(),
+            principal: binding.principal.clone(),
+            playback_id: binding.playback_id.clone(),
+            recovery_epoch: String::new(),
+            expected_predecessor_incarnation_id: None,
+            fence_predecessor: true,
+            request_id: Some(binding.request_id.clone()),
+            request_fingerprint: binding.request_fingerprint.clone(),
+            owner_node_id: "voter".into(),
+            recipe_json: "{}".into(),
+            response_json: "{}".into(),
+            publication_ready_at_ms: crate::domain::MEDIA_SESSION_PUBLICATION_BLOCKED,
+            media_origin_ms: 0,
+            now_ms: now,
+            lease_expires_at_ms: now + 60000,
+            expected_desired_revision: None,
+        };
+        store
+            .activate_source_media_session(&authority, &activation)
+            .await
+            .expect("activation")
+            .expect("blocked route");
+        assert!(
+            store
+                .publish_media_session_activation(
+                    &binding.principal,
+                    &binding.request_id,
+                    &binding.incarnation_id.to_string(),
+                    now
+                )
+                .await
+                .is_err(),
+            "ordinary Shared publication stays closed"
+        );
+        let SourcePublicationAuthorityRead::Ready(publication) = store
+            .prepare_source_publication_authority(&assignment, &key, &proof())
+            .await
+            .expect("publication permission")
+        else {
+            panic!("blocked permission")
+        };
+        store
+            .sharing_txn(vec![(
+                "UPDATE settings SET value='false' WHERE key='sharing_enabled'".into(),
+                vec![],
+            )])
+            .await
+            .expect("switch off");
+        assert!(store
+            .complete_source_media_session_publication(&publication)
+            .await
+            .expect("switch refusal")
+            .is_none());
+        assert_eq!(
+            store
+                .media_session_route_by_incarnation(&binding.incarnation_id.to_string())
+                .await
+                .expect("route")
+                .expect("held route")
+                .publication_ready_at_ms,
+            crate::domain::MEDIA_SESSION_PUBLICATION_BLOCKED
+        );
+        store.sharing_txn(vec![("UPDATE settings SET value='true' WHERE key='sharing_enabled'".into(),vec![]),("CREATE TRIGGER source_publication_ignore BEFORE UPDATE OF start_resolved_at_ms ON sharing_source_session_bindings BEGIN SELECT RAISE(IGNORE); END".into(),vec![])]).await.expect("ignored accounting writer");
+        assert!(store
+            .complete_source_media_session_publication(&publication)
+            .await
+            .expect("coupled rollback refusal")
+            .is_none());
+        assert_eq!(
+            store
+                .media_session_route_by_incarnation(&binding.incarnation_id.to_string())
+                .await
+                .expect("route")
+                .expect("rollback route")
+                .publication_ready_at_ms,
+            crate::domain::MEDIA_SESSION_PUBLICATION_BLOCKED
+        );
+        let rows=store.sharing_read("SELECT json_quote(state) AS payload FROM media_session_requests WHERE incarnation_id=$1",vec![binding.incarnation_id.into()]).await.expect("request rollback");
+        assert_eq!(rows, vec!["\"starting\"".to_owned()]);
+        store
+            .sharing_txn(vec![(
+                "DROP TRIGGER source_publication_ignore".into(),
+                vec![],
+            )])
+            .await
+            .expect("fault removed");
+        let route = store
+            .complete_source_media_session_publication(&publication)
+            .await
+            .expect("publication")
+            .expect("ready route");
+        assert_eq!(route.publication_ready_at_ms, 0);
+        assert_eq!(route.principal, binding.principal);
+        assert_eq!(route.session_id, activation.session_id);
+        assert!(
+            matches!(store.claim_source_media_session(&request,&proof()).await.expect("ready-zero exact replay"),SourceClaimOutcome::Resolved{binding:replayed,..} if replayed.same_identity(&binding))
+        );
+        assert!(store
+            .complete_source_media_session_publication(&publication)
+            .await
+            .expect("old pending phase refuses")
+            .is_none());
+        let SourcePublicationAuthorityRead::Ready(replay) = store
+            .prepare_source_publication_authority(&assignment, &key, &proof())
+            .await
+            .expect("published exact permission")
+        else {
+            panic!("published permission")
+        };
+        assert_eq!(
+            store
+                .complete_source_media_session_publication(&replay)
+                .await
+                .expect("exact publication replay")
+                .expect("same route")
+                .session_id,
+            route.session_id
+        );
+        assert_eq!(count(&store, "sharing_source_session_bindings").await, 1);
+        let held=store.sharing_read("SELECT json_quote(reservation_state) AS payload FROM sharing_source_session_bindings",vec![]).await.expect("held capacity");
+        assert_eq!(held, vec!["\"held\"".to_owned()]);
+    }
+}

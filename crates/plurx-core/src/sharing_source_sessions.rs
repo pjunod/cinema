@@ -356,3 +356,36 @@ mod association_tests {
         assert!(!assignment.same_identity(&other));
     }
 }
+
+/// Current blocked-or-exactly-published Source route permission. This has no
+/// wire encoding and does not certify producer readiness. Only the actual
+/// worker owner may invoke publication after its registered readiness barrier.
+#[derive(Clone)]
+pub struct SourcePublicationAuthority {
+    pub(crate) owned: SourceOwnedRouteAuthority,
+    pub(crate) phase: SourcePublicationPhase,
+}
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SourcePublicationPhase {
+    Pending,
+    Published,
+}
+impl SourcePublicationAuthority {
+    pub fn assignment(&self) -> &SourceDispatchAssignment {
+        &self.owned.assignment
+    }
+    pub fn session_id(&self) -> &str {
+        &self.owned.session_id
+    }
+    pub fn validate_observation_freshness(
+        &self,
+        now_ms: i64,
+    ) -> Result<(), crate::cluster::membership::MembershipError> {
+        self.owned.validate_observation_freshness(now_ms)
+    }
+}
+pub enum SourcePublicationAuthorityRead {
+    Ready(Box<SourcePublicationAuthority>),
+    Unavailable,
+    Capacity,
+}

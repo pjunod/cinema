@@ -790,12 +790,11 @@ registered session before invoking a separately qualified readiness transition.
 Renewal fixtures explicitly seed a resolved ready route; they do not claim that
 production publication or physical dispatch is available.
 
-One existing publication seam remains open: the Source claim's resolved replay
-query requires `publication_ready_at_ms > 0`, while activation publication
-resolves a request only at readiness zero. The renewal fixture does not qualify
-that replay path. Physical completion/publication must align the ready-state
-predicate and add an actual exact resolved replay regression before enabling
-that seam.
+At the renewal checkpoint, the Source claim's resolved replay query required
+`publication_ready_at_ms > 0`, although publication resolves a request at
+readiness zero. The SQL publication checkpoint below closes that predicate and
+qualifies exact replay. Actual physical readiness remains a separate daemon
+owner obligation before production dispatch can use this transition.
 
 The renewal checkpoint is based on
 `2925a231b6fde645ccb5194c25233236bfb174bb` and was checked with pinned Rust
@@ -922,4 +921,45 @@ cargo test --locked -p plurx-core --features hiqlite-contract-tests --lib source
 cargo check --locked -p plurxd --all-targets
 cargo clippy --locked -p plurxd --all-targets -- -D warnings
 cargo clippy --locked -p plurx-core --all-targets --features hiqlite-contract-tests -- -D warnings
+```
+
+
+## Source publication transaction and ready-zero replay
+
+Based on `c9bc7bf876ab61ec96dc13db746c2f28ac70b77e`, the candidate
+`SourcePublicationAuthority` factory captures the actual current binding,
+canonical request, private file/key/grant witness, node/lease/pointer lineage
+and a fresh opaque member observation. It distinguishes blocked starting and
+published resolved phases. This is SQL permission; it does not prove physical
+producer readiness and the ordinary Shared publication entry remains closed.
+
+The guarded transaction changes the exact blocked route to readiness zero,
+resolves its canonical request from that route, and records start settlement
+without releasing its held Source capacity. A final assertion checks the full
+published tuple and actual lease expiry in the same transaction. Suppressing
+an accounting update rolls back all preceding writes. Saved-switch changes
+refuse without mutation. A fresh published authority provides exact completion
+replay, and resolved Source claim replay accepts readiness zero before capacity
+checks. A rotated old peer credential remains unavailable; current credential
+replay succeeds at all eight held obligations.
+
+Pinned Rust 1.97.1 passed all eleven Source library tests with zero ignored tests
+in 23.95 seconds. The actual three-voter contract passed with one test and zero
+ignored tests in 11.17 seconds. Daemon all-target check passed in 1 minute
+13 seconds, Core feature all-target check in 28.31 seconds, Core feature Clippy
+in 34.62 seconds, and daemon Clippy in 1 minute 21 seconds. The focused tests
+exercise memory and pooled SQLite and actual replicated transactions, without
+allocating or dispatching a producer. Physical readiness, downstream writer
+settlement and generation-one failed-start retirement remain closed until the
+actual daemon actor owns those barriers. Trusted transaction-entry time keeps
+the original observation window; deterministic replicated SQL has no independent
+applied-command clock, so the actor must recheck freshness after commit.
+
+```sh
+cargo test --locked -p plurx-core --features hiqlite-contract-tests --lib store::sharing_source_sessions -- --nocapture
+cargo test --locked -p plurx-core --features hiqlite-contract-tests --test store_contract sharing_source_reservations_three_voters_atomic_claim_caps_replay_and_release -- --nocapture
+cargo check --locked -p plurxd --all-targets
+cargo check --locked -p plurx-core --all-targets --features hiqlite-contract-tests
+cargo clippy --locked -p plurx-core --all-targets --features hiqlite-contract-tests -- -D warnings
+cargo clippy --locked -p plurxd --all-targets -- -D warnings
 ```
