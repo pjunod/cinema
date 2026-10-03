@@ -58,7 +58,11 @@ this proves process shutdown, not active media drain.
 The [test-only control process](../../crates/plurx-core/examples/qualify_sharing_upgrade.rs)
 opens those saved daemon stores through `select_daemon_store`, without HTTP or
 media workers. It seeds retained local-principal rows from the frozen fixture,
-with resolved requests, ended sessions and future retention deadlines. It reads
+with resolved requests, ended sessions, current fixture creation/update clocks
+and bounded future retention deadlines. The frozen fixture's diagnostic 1970
+clocks would otherwise exercise expiry cleanup rather than retained-data
+compatibility. Only the seeded session lease receives a future lease deadline;
+existing daemon worker leases keep their original clocks. It reads
 all columns of eleven relevant tables through quorum reads. It then stops all
 three processes and copies each entire stopped data directory into one owned
 whole-topology backup. Individual live SQLite, WAL or Raft files are never
