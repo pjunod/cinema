@@ -212,6 +212,14 @@ pub(crate) async fn readiness(
     Ok(Json(DeveloperReadiness {
         observed_at_ms: crate::state::clock_ms(),
         items: vec![
+            DeveloperEnableItem {
+                id:"jellyfin_compatibility",title:"Jellyfin client compatibility",
+                enabled:Some(plurx_core::store::stored_switch(settings.get(plurx_core::store::keys::JELLYFIN_COMPATIBILITY_ENABLED).map(String::as_str),false)),
+                setting:Some("jellyfin_compatibility_enabled"),
+                requirements:vec![DeveloperRequirement { id:"client_qualification",title:"Pinned clients qualified",
+                    status:RequirementStatus::Unobservable,
+                    evidence:"The frozen-candidate browsing, playback, tracks and recovery qualification receipt is not visible to this daemon. The saved choice remains authoritative.".into() }],
+            },
             durable_cluster_work(&state).await,
             bounded_catalogue_reads(
                 &state,

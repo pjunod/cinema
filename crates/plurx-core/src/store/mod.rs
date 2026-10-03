@@ -31,6 +31,14 @@ mod fragment_index_cluster;
 mod fragment_prune_tests;
 #[cfg(feature = "hiqlite-store")]
 mod hiqlite_classification;
+mod jellyfin_catalog;
+pub use jellyfin_catalog::{
+    JellyfinCatalogArtwork, JellyfinCatalogIdentity, JellyfinCatalogLibrary,
+    JellyfinCatalogMissing, JellyfinCatalogMode, JellyfinCatalogPage, JellyfinCatalogQuery,
+    JellyfinCatalogSort, JellyfinCatalogStore,
+};
+#[cfg(feature = "hiqlite-store")]
+mod hiqlite_jellyfin_catalog;
 mod jellyfin_identity;
 mod jellyfin_login;
 mod jellyfin_play;
@@ -41,7 +49,9 @@ pub use jellyfin_play::{
 };
 #[cfg(feature = "hiqlite-store")]
 mod hiqlite_jellyfin_play;
-pub use jellyfin_login::{JellyfinClientFamily, JellyfinLoginStore, JellyfinLoginWrite};
+pub use jellyfin_login::{
+    JellyfinClientFamily, JellyfinCompatibilityState, JellyfinLoginStore, JellyfinLoginWrite,
+};
 #[cfg(feature = "hiqlite-store")]
 mod hiqlite_jellyfin_login;
 mod renditionplan;
@@ -1697,6 +1707,7 @@ pub mod keys {
     pub const CLUSTER_RESTORE_GENERATION: &str = "cluster.restore_generation";
     /// Runtime Library-channel playback switch. The feature is always compiled;
     /// absence is off so an upgrade never starts scheduled playback implicitly.
+    pub const JELLYFIN_COMPATIBILITY_ENABLED: &str = "compat.jellyfin.enabled";
     pub const LIBRARY_CHANNELS_ENABLED: &str = "library_channels.enabled";
     /// Runtime-only HDHomeRun live-TV configuration. The values are read
     /// as one snapshot and written with a generation CAS; the enable bit is
@@ -5307,6 +5318,7 @@ pub trait TimelineAnnotationStore: Send + Sync + 'static {
 pub trait Store:
     crate::live_tv_resource::LiveTvResourceStore
     + SettingsStore
+    + JellyfinCatalogStore
     + JellyfinIdentityStore
     + JellyfinLoginStore
     + JellyfinPlayStore
@@ -5347,6 +5359,7 @@ pub trait Store:
 impl<T> Store for T where
     T: crate::live_tv_resource::LiveTvResourceStore
         + SettingsStore
+        + JellyfinCatalogStore
         + JellyfinIdentityStore
         + JellyfinLoginStore
         + JellyfinPlayStore

@@ -14,8 +14,8 @@ This file is the specification in the meantime, written by reading the routers
 and the handlers on 2026-09-07. Where a plan document and the code disagreed,
 the code won and the disagreement is recorded in §23.
 
-One binary serves everything on one port (`:32400` by default). plurx has 243
-routes across the four surfaces below. Every path here is absolute; the native
+One binary serves everything on one port (`:32400` by default). plurx has 271
+routes across the five surfaces below. Every path here is absolute; the native
 API is the only one under a version prefix, and §7-§18 state that prefix once
 per section rather than repeating it in every row.
 
@@ -27,7 +27,7 @@ count above stops matching.
 
 ---
 
-## 1. Surfaces — four things on one port
+## 1. Surfaces — five things on one port
 
 ```
                          ┌────────────────────────────┐
@@ -45,11 +45,14 @@ count above stops matching.
                          └────────────────────────────┘
 ```
 
-Four surfaces, four different rules:
+Five surfaces, five different rules:
 
 - **Native `/api/v1`** — JSON, bearer or scoped-key credentials, WebSocket-free
   (clients poll). This is what the web app and the Apple and Android clients
-  speak, and the only surface with any compatibility intent.
+  speak.
+- **Jellyfin-compat `/jellyfin`** — default-off JSON connection/catalog facade
+  for the pinned Infuse and Android TV clients, using shared native authentication
+  and permanent item identities. Implementation and qualification remain open (§24).
 - **Plex-compat** — XML at Plex's own absolute paths, `X-Plex-Token` carrying
   a plurx token. Tier 1: the endpoint set the Kodi-family clients actually
   use. plex.tv is never contacted.
@@ -3182,3 +3185,82 @@ commit. Nothing yet asserts that every route in the router appears in a table
 here — that is the obvious next test, and until it exists, treat
 `crates/plurxd/src/http/mod.rs` as the authority and this file as its
 description.
+
+
+## 24. Jellyfin client connection and catalog
+
+The compatibility surface is compiled and registered at `/jellyfin` even
+when disabled. `jellyfin_compatibility_enabled` in the admin settings API is
+an explicit, default-off choice. Its Developer readiness is advisory. Saving
+creates a fresh generation atomically with the choice; login checks that exact
+generation alongside password CAS before minting a scoped native user token.
+Disabling during password work, including an off/on cycle, refuses the stale
+mint. Media resource cleanup belongs to the later playback adapter.
+
+| Method | Path | Authority and response |
+|---|---|---|
+| GET | `/jellyfin/` | JSON 404 |
+| GET | `/jellyfin/System/Info/Public` | Enabled switch; native server identity/name/version and setup status |
+| POST | `/jellyfin/Users/AuthenticateByName` | Shared native password verification/throttle; `Username` and `Pw`; supported client metadata and device ID; exact enabled generation |
+| GET | `/jellyfin/Users/Me` | Compatibility token; authenticated user projection |
+| GET | `/jellyfin/Users/{user_id}` | Compatibility token; exact own permanent user ID |
+| GET | `/jellyfin/Users/{user_id}/Views` | Own user ID; mapped movie and TV libraries |
+| GET | `/jellyfin/UserViews/GroupingOptions` | Supported logical library IDs and names |
+| GET | `/jellyfin/Library/VirtualFolders` | Logical library folders, without native scan roots |
+| GET | `/jellyfin/DisplayPreferences/{id}` | Initial client presentation; no native persisted per-client preferences |
+| GET | `/jellyfin/Items/{item_id}/LocalTrailers` | Live item; empty array because native Movies/TV has no classified trailer records |
+| GET | `/jellyfin/Items/{item_id}/SpecialFeatures` | Live item; empty array because native Movies/TV has no classified extra records |
+| GET | `/jellyfin/UserViews` | Compatibility token; same library views |
+| GET | `/jellyfin/Items/Latest` | Compatibility token; latest playable items in date order, array response |
+| GET | `/jellyfin/Items/Resume` | Compatibility token; native resumable progress, paged envelope |
+| GET | `/jellyfin/UserItems/Resume` | Same resume projection |
+| GET | `/jellyfin/Users/{user_id}/Items/Latest` | Own user ID; latest array |
+| GET | `/jellyfin/Users/{user_id}/Items/Resume` | Own user ID; resume envelope |
+| GET | `/jellyfin/Shows/Upcoming` | Native episode air dates at/after the bound current UTC date |
+| GET | `/jellyfin/Items/{item_id}/Similar` | Live source item; same supported item kind sharing native provider genres |
+| GET | `/jellyfin/Shows/NextUp` | Native next-episode predicate; series filtering before paging |
+| GET | `/jellyfin/Items` | Compatibility token; bounded catalog page |
+| GET | `/jellyfin/Users/{user_id}/Items` | Own user ID; bounded catalog page |
+| GET | `/jellyfin/Items/{item_id}/Images/{kind}` | Compatibility token; mapped movie/TV Primary or Backdrop; prepared derivative only |
+| GET | `/jellyfin/Items/{item_id}/Images/{kind}/{index}` | Same authenticated artwork surface; only index 0 |
+| GET | `/jellyfin/Items/{item_id}` | Compatibility token; live permanent item ID |
+| GET | `/jellyfin/Users/{user_id}/Items/{item_id}` | Own user ID and live permanent item ID |
+| GET | `/jellyfin/Shows/{item_id}/Seasons` | Compatibility token; direct season children |
+| GET | `/jellyfin/Shows/{item_id}/Episodes` | Compatibility token; descendant episodes; optional season parent |
+
+Disabled requests, including unsupported mutations, answer JSON 404. Enabled
+unsupported methods answer JSON 405; unknown paths answer JSON 404. The
+native root still serves its app shell. Connection/catalog handlers use the
+existing JSON deadline and serving-authority layers and fixed route groups.
+
+Bearer, `X-Emby-Token`, Emby authorization attributes, and the observed query
+token carriers share the bounded credential parser. Duplicates are preserved;
+conflicting carriers and scoped API keys are refused. Client/device metadata
+selects replacement scope only after password authentication.
+
+Catalog queries preserve real `StartIndex` (including an empty final page),
+`Limit` from 0 through 500, parent hierarchy, recursive traversal, literal
+search, supported item types, sort fields and direction. An ID tie-break
+makes equal sort values deterministic. A Store read projects item bodies,
+live wire mappings, token/user membership, watch facts and per-page source
+facts together. Missing identities are primed in bounded batches followed by
+a fresh projection; allocated IDs are never attached to an older item body.
+Sources omit native paths/raw probes and retain actual global stream indices.
+Pages with more than 5,000 sources and bootstrap inventories above 500 supported
+libraries refuse rather than truncate.
+
+Artwork currently requires the shared authenticated compatibility user guard.
+The anonymous access ruling remains pending explicit approval; target-client
+artwork parity is not qualified. Requests admit at most 20 per minute per resolved
+client address. The 4,096-address table refuses new addresses while full instead
+of evicting live budgets. Cold requests enqueue a bounded, deduplicated intent
+for the existing artwork owner and return an uncached JSON 404 with Retry-After.
+The request performs no original read, peer fetch or resize. The owner verifies
+source bytes and rechecks the exact item/source/switch generation before the
+existing durable derivative admission. Warm requests serve verified derivatives.
+
+This slice exposes connection/catalog and authenticated artwork behavior. Additional
+playback negotiation and resource lifecycle remain under implementation; the
+current source capabilities and playback policy do not advertise delivery.
+Qualification progress is in
+[the compatibility status](clients/JELLYFIN-COMPATIBILITY-STATUS.md).

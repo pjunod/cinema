@@ -19,6 +19,7 @@ mod file_grants;
 mod fragindex;
 mod fragment_index_cluster;
 mod housekeeping;
+mod jellyfin_catalog;
 mod jellyfin_identity;
 mod jellyfin_login;
 mod jellyfin_play;

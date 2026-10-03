@@ -158,6 +158,15 @@ pub struct SqliteTransactionSite {
 /// Rust-driven backfills remain separate audit populations. Keeping explicit
 /// boundaries here makes their port shape reviewable beside the CAS primitive.
 pub const SQLITE_TRANSACTION_SITES: &[SqliteTransactionSite] = &[
+    // Explicit switch and fresh generation publish together; no observation
+    // of readiness or caller data branches inside this fixed write batch.
+    SqliteTransactionSite {
+        module: "jellyfin_login.rs",
+        method: "set_jellyfin_compatibility",
+        is_async: true,
+        mechanism: TransactionMechanism::RusqliteTransaction,
+        shape: TransactionShape::BatchWrite,
+    },
     // Expired non-active rows and bounded conditional admission are fixed SQL.
     SqliteTransactionSite {
         module: "jellyfin_play.rs",
@@ -170,7 +179,7 @@ pub const SQLITE_TRANSACTION_SITES: &[SqliteTransactionSite] = &[
     // or later statement failure rolls the whole scoped replacement back.
     SqliteTransactionSite {
         module: "jellyfin_login.rs",
-        method: "replace_jellyfin_login",
+        method: "replace_jellyfin_login_inner",
         is_async: true,
         mechanism: TransactionMechanism::RusqliteTransaction,
         shape: TransactionShape::BranchOnRowsAffected,
@@ -1034,6 +1043,10 @@ mod tests {
         (
             "jellyfin_identity.rs",
             include_str!("sqlite/jellyfin_identity.rs"),
+        ),
+        (
+            "jellyfin_catalog.rs",
+            include_str!("sqlite/jellyfin_catalog.rs"),
         ),
         ("jellyfin_play.rs", include_str!("sqlite/jellyfin_play.rs")),
         (

@@ -453,6 +453,38 @@ pub(crate) async fn login_jellyfin_user(
     device_id: &str,
     client_family: plurx_core::store::JellyfinClientFamily,
 ) -> Result<AuthenticatedLogin, ApiError> {
+    login_jellyfin_user_inner(state, peer, headers, req, device_id, client_family, None).await
+}
+
+pub(crate) async fn login_jellyfin_user_if_enabled(
+    state: &AppState,
+    peer: Option<SocketAddr>,
+    headers: &HeaderMap,
+    req: LoginRequest,
+    device_id: &str,
+    client_family: plurx_core::store::JellyfinClientFamily,
+    generation: &str,
+) -> Result<AuthenticatedLogin, ApiError> {
+    login_jellyfin_user_inner(
+        state,
+        peer,
+        headers,
+        req,
+        device_id,
+        client_family,
+        Some(generation),
+    )
+    .await
+}
+async fn login_jellyfin_user_inner(
+    state: &AppState,
+    peer: Option<SocketAddr>,
+    headers: &HeaderMap,
+    req: LoginRequest,
+    device_id: &str,
+    client_family: plurx_core::store::JellyfinClientFamily,
+    generation: Option<&str>,
+) -> Result<AuthenticatedLogin, ApiError> {
     if device_id.is_empty() || device_id.len() > 256 || device_id.chars().any(char::is_control) {
         return Err(ApiError::BadRequest(
             "device ID must contain 1 to 256 bytes without control characters".into(),
@@ -462,24 +494,36 @@ pub(crate) async fn login_jellyfin_user(
     let token = auth::generate_token().map_err(|e| ApiError::Internal(e.to_string()))?;
     let hash = auth::hash_token(&token);
     let proof_revocation = ClusterCacheRevocation::begin_user(state, verified.user.id).await?;
-    let replaced = state
-        .store
-        .replace_jellyfin_login(
-            plurx_core::store::JellyfinLoginWrite {
-                token_hash: hash,
-                user_id: verified.user.id,
-                device_digest: auth::hash_token(device_id),
-                client_family,
-                device_label: verified.device.clone(),
-                expected_password_hash: verified.user.password_hash.clone(),
-                created_at: std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .unwrap_or_default()
-                    .as_secs() as i64,
-            },
-            proof_revocation.mutation_claim(),
-        )
-        .await?;
+    let write = plurx_core::store::JellyfinLoginWrite {
+        token_hash: hash,
+        user_id: verified.user.id,
+        device_digest: auth::hash_token(device_id),
+        client_family,
+        device_label: verified.device.clone(),
+        expected_password_hash: verified.user.password_hash.clone(),
+        created_at: std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs() as i64,
+    };
+    let replaced = match generation {
+        Some(generation) => {
+            state
+                .store
+                .replace_jellyfin_login_if_enabled(
+                    write,
+                    proof_revocation.mutation_claim(),
+                    generation,
+                )
+                .await?
+        }
+        None => {
+            state
+                .store
+                .replace_jellyfin_login(write, proof_revocation.mutation_claim())
+                .await?
+        }
+    };
     // Complete the fence on a definitive CAS refusal too. This clears the
     // exclusion without turning a stale password into fresh authority.
     proof_revocation.finish(state).await?;
@@ -493,7 +537,11 @@ pub(crate) async fn login_jellyfin_user(
     Ok(AuthenticatedLogin { token, user })
 }
 
-fn client_ip(headers: &HeaderMap, peer: Option<SocketAddr>, trusted: &[ipnet::IpNet]) -> IpAddr {
+pub(super) fn client_ip(
+    headers: &HeaderMap,
+    peer: Option<SocketAddr>,
+    trusted: &[ipnet::IpNet],
+) -> IpAddr {
     let peer = peer
         .map(|address| address.ip())
         .unwrap_or(IpAddr::from([127, 0, 0, 1]));

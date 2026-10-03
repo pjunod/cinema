@@ -33,6 +33,7 @@ pub(crate) mod internal_live_tv;
 pub(crate) mod internal_media;
 pub(crate) mod internal_media_sessions;
 mod items;
+mod jellyfin;
 mod keys;
 mod libraries;
 pub(crate) mod library_channels;
@@ -236,7 +237,13 @@ fn http_route_group(path: &str) -> usize {
     // inventory test fails if a registered pattern is left unclassified.
     match path {
         // Authentication and identity administration.
-        "/api/v1/me"
+        "/jellyfin"
+        | "/jellyfin/"
+        | "/jellyfin/System/Info/Public"
+        | "/jellyfin/Users/AuthenticateByName"
+        | "/jellyfin/Users/{user_id}"
+        | "/jellyfin/Users/Me"
+        | "/api/v1/me"
         | "/api/v1/setup"
         | "/api/v1/auth/login"
         | "/api/v1/auth/logout"
@@ -317,6 +324,29 @@ fn http_route_group(path: &str) -> usize {
         | "/api/v1/dvr/reminders"
         | "/api/v1/dvr/reminders/{id}"
         | "/api/v1/dvr/reminders/{id}/ack"
+        | "/jellyfin/Users/{user_id}/Views"
+        | "/jellyfin/UserViews/GroupingOptions"
+        | "/jellyfin/Library/VirtualFolders"
+        | "/jellyfin/DisplayPreferences/{id}"
+        | "/jellyfin/Items/{item_id}/LocalTrailers"
+        | "/jellyfin/Items/{item_id}/SpecialFeatures"
+        | "/jellyfin/UserViews"
+        | "/jellyfin/Items/Latest"
+        | "/jellyfin/Items/Resume"
+        | "/jellyfin/UserItems/Resume"
+        | "/jellyfin/Users/{user_id}/Items/Latest"
+        | "/jellyfin/Users/{user_id}/Items/Resume"
+        | "/jellyfin/Shows/Upcoming"
+        | "/jellyfin/Items/{item_id}/Similar"
+        | "/jellyfin/Shows/NextUp"
+        | "/jellyfin/Items"
+        | "/jellyfin/Users/{user_id}/Items"
+        | "/jellyfin/Items/{item_id}/Images/{kind}"
+        | "/jellyfin/Items/{item_id}/Images/{kind}/{index}"
+        | "/jellyfin/Items/{item_id}"
+        | "/jellyfin/Users/{user_id}/Items/{item_id}"
+        | "/jellyfin/Shows/{item_id}/Seasons"
+        | "/jellyfin/Shows/{item_id}/Episodes"
         | "/library/metadata/{key}"
         | "/library/metadata/{key}/children"
         | "/library/metadata/{key}/{kind}"
@@ -1734,6 +1764,22 @@ pub fn router(state: AppState) -> Router {
     // Plex uses literal `:` path segments (`/:/timeline`, `/photo/:/transcode`)
     // which axum 0.8 rejects by default — `without_v07_checks` matches them
     // literally (we still use `{capture}` syntax for real captures).
+    // Every merged root family shares the literal-colon routing policy used
+    // by Plex; merging an ordinary router would turn those checks back on.
+    let jellyfin_json = Router::new()
+        .without_v07_checks()
+        .route("/jellyfin/", axum::routing::any(jellyfin::not_found))
+        .nest("/jellyfin", jellyfin::router())
+        .layer(axum::middleware::from_fn(json_long_deadline))
+        .layer(axum::middleware::from_fn_with_state(
+            state.clone(),
+            jellyfin::enabled_gate,
+        ))
+        .layer(axum::middleware::from_fn_with_state(
+            state.clone(),
+            mutable_media_serving_gate,
+        ))
+        .layer(axum::middleware::from_fn(jellyfin::cache_policy));
     let plex_short = Router::new()
         .without_v07_checks()
         .route("/identity", get(plex::identity))
@@ -1956,6 +2002,7 @@ pub fn router(state: AppState) -> Router {
         // Also opted out of the v0.7 checks so the merged Plex `:` routes pass.
         .without_v07_checks()
         .nest("/api/v1", api)
+        .merge(jellyfin_json)
         .merge(plex_routes)
         .merge(public_short)
         .merge(public_media)
@@ -3721,6 +3768,7 @@ mod tests {
             "json_short",
             "json_long",
             "media",
+            "jellyfin_json",
             "plex_short",
             "plex_media",
             "public_short",
@@ -3819,6 +3867,7 @@ mod tests {
             ("let json_short", "let json_long", "/api/v1"),
             ("let json_long", "let media", "/api/v1"),
             ("let media", "let api", "/api/v1"),
+            ("let jellyfin_json", "let plex_short", ""),
             ("let plex_short", "let plex_media", ""),
             ("let plex_media", "let plex_routes", ""),
             ("let public_short", "let public_media", ""),
@@ -3842,6 +3891,7 @@ mod tests {
             }
         }
         for (source, prefix) in [
+            (include_str!("jellyfin.rs"), "/jellyfin"),
             (include_str!("dvr.rs"), "/api/v1/dvr"),
             (
                 include_str!("library_channels.rs"),

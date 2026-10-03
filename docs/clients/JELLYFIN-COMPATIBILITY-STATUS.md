@@ -1,6 +1,6 @@
 # Jellyfin compatibility — measured build progress and remaining gates
 
-**Status:** open · J0 integrated; J1 foundations in verification; physical Infuse repeat deferred · **Updated:** 2026-10-02 EDT.
+**Status:** open · J0/J1 integrated; J2 connection and browsing underway; physical Infuse repeat deferred · **Updated:** 2026-10-03 EDT.
 
 Companion to [the reviewed build contract](JELLYFIN-COMPATIBILITY-BUILD.md)
 (what must be built and proved) — this records execution and evidence. The
@@ -330,7 +330,7 @@ remaining facade/worker/race boundaries are still pending; see the
 |---|---|---|
 | J0 | Admitted for implementation by user direction | Corrected physical Infuse repeat retained as J6 qualification requirement |
 | J1 | Ready after J0 task integration | Identity, deterministic retirement/replacement guard, token-only service seams |
-| J2 | Waiting on J1 and traced artwork policy | Connect/browse, bounded misses and cold-node first sync |
+| J2 | Connection/catalog implementation under verification; anonymous artwork decision pending | Connect/browse, bounded misses and cold-node first sync |
 | J3 | Waiting on J2 | Direct/watch, Store revisions and per-play final durability |
 | J4 | Waiting on J3 and J0 hard-seam decisions | VOD-only negotiation/activation, refusal mapping, bounded retries and aliases |
 | J5 | Waiting on J4 | Track, subtitle and observed ancillary completion |
@@ -457,3 +457,41 @@ Public routes, native resource-release adapters and manual-watch revision
 fences remain subsequent milestone work. No public compatibility playback is
 exposed by J1. The Apple TV remains untouched under Paul's explicit deferral;
 its availability does not block implementation or the J1 integration gate.
+
+
+## 10. J1 integrated; J2 connection and browsing underway
+
+[Effort run 3963](http://192.168.4.7:3000/noirr/plurx/actions/runs/3963)
+passes all eight required jobs on J1 head `0e4318355`.
+[PR #763](http://192.168.4.7:3000/noirr/plurx/pulls/763) merged as `d3719303e`
+with exactly `0331f5686` and `0e4318355` as parents and all 36 checked
+regression references in the landing message. The earlier run's Windows
+failure occurred while fetching the pinned toolchain action, before source
+compilation; the unchanged candidate passed on retry. Protocol-only draft
+PR #757 closed after its complete implementation and regressions were folded
+into #763.
+
+J2 starts from this integrated effort. The connection facade now uses native
+password authentication, token expiry/revocation and an atomic switch generation
+that fences late login replacement across disable/re-enable. Its catalog reads
+use one coherent Store snapshot for paging, hierarchy, source facts and each
+user's watch state. Global probe indices retain zero; native paths never appear
+in the DTOs. Upcoming and similar rows use native dates and metadata.
+
+All sixteen Jellyfin Store contracts pass against SQLite and the real
+three-voter backend, including 2,500 tied-sort items, empty-page totals,
+user/source retirement, catalog rails, artwork mappings and switch generations.
+The 28 ownership/SQL censuses and transaction classification also pass. HTTP
+regressions cover connection, strict credential conflicts, zero paging, disabled
+JSON routes and preservation of the native shell. Artwork miss regressions
+prove bounded admission, demand deduplication and no inline original hashing or
+decoding. The native owner also publishes the cold derivative successfully;
+warm responses use private revalidation and conditional hits add no hashing
+or decoding. Old queued work is discarded across switch generations.
+
+Artwork routes currently require authentication. Automatic approval review
+rejected anonymous mapped artwork exposure; the direct human decision is
+pending. Neither anonymous behavior nor physical client browsing is qualified.
+The Android TV's previously authorized address is currently unreachable. The
+Apple TV remains deferred and untouched under Paul's instruction; these device
+checks do not block implementation or automated compilation.
