@@ -98,6 +98,24 @@ async fn sharing_private_watch_orders_updates_and_isolates_sources_and_assignmen
         let a = assigned_import(s.as_ref(), user.id).await;
         let c = assigned_import(s.as_ref(), user.id).await;
         assert_eq!(
+            s.assigned_catalogue_libraries(a, user.id, 1, 2)
+                .await
+                .expect("synthetic catalogue fixture"),
+            vec![source_id("12")]
+        );
+        assert!(s
+            .assigned_catalogue_libraries(a, outsider.id, 1, 2)
+            .await
+            .expect("synthetic catalogue fixture")
+            .is_empty());
+        assert!(s
+            .assigned_catalogue_libraries(a, user.id, 1, 1)
+            .await
+            .expect("synthetic catalogue fixture")
+            .is_empty());
+        assert!(s.assigned_catalogue_libraries(a, 0, 1, 2).await.is_err());
+
+        assert_eq!(
             s.save_remote_watch(update(a, outsider.id, 1, 1000))
                 .await
                 .expect("denied"),

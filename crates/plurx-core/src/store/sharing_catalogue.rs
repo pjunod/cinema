@@ -55,6 +55,14 @@ pub struct RemoteWatchUpdate {
 
 #[async_trait]
 pub trait SharingCatalogueStore: Send + Sync {
+    /// One consistent, generation-bound receiver authority query per operation.
+    async fn assigned_catalogue_libraries(
+        &self,
+        import: Uuid,
+        user: i64,
+        lifecycle: i64,
+        assignment: i64,
+    ) -> Result<Vec<SourceId>, StoreError>;
     async fn save_remote_watch(
         &self,
         update: RemoteWatchUpdate,
@@ -70,6 +78,25 @@ pub trait SharingCatalogueStore: Send + Sync {
 const AUTH: &str = "FROM sharing_imports i JOIN sharing_assignments a ON a.import_id=i.id JOIN sharing_viewers v ON v.user_id=a.user_id JOIN users u ON u.id=v.user_id WHERE i.id=$1 AND i.state='active' AND a.remote_library_id=$2 AND a.user_id=$4 AND a.enabled=1";
 #[async_trait]
 impl<T: Backend> SharingCatalogueStore for T {
+    async fn assigned_catalogue_libraries(
+        &self,
+        import: Uuid,
+        user: i64,
+        lifecycle: i64,
+        assignment: i64,
+    ) -> Result<Vec<SourceId>, StoreError> {
+        if user <= 0 || lifecycle <= 0 || assignment <= 0 {
+            return Err(invalid());
+        }
+        let rows=self.sharing_read("SELECT json_quote(a.remote_library_id) AS payload FROM sharing_assignments a JOIN sharing_imports i ON i.id=a.import_id JOIN sharing_viewers v ON v.user_id=a.user_id JOIN users u ON u.id=v.user_id WHERE i.id=$1 AND a.user_id=$2 AND i.lifecycle_generation=$3 AND i.assignment_generation=$4 AND i.state='active' AND a.enabled=1 ORDER BY a.remote_library_id LIMIT 65",vec![import.into(),user.into(),lifecycle.into(),assignment.into()]).await?;
+        if rows.len() > crate::sharing::MAX_LIBRARIES {
+            return Err(invalid());
+        }
+        rows.into_iter()
+            .map(|row| serde_json::from_str(&row).map_err(|_| invalid()))
+            .collect()
+    }
+
     async fn save_remote_watch(
         &self,
         update: RemoteWatchUpdate,

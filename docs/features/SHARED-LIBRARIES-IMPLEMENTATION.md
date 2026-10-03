@@ -2072,3 +2072,63 @@ current source revalidation of Continue Watching, scoped artwork and blocked
 body revocation remain open. The earlier private-watch Store still requires
 live login and current foreign item membership at its HTTP caller. This is
 not S4 completion, playback admission or Tailscale/promotion qualification.
+
+
+The isolated S4 branch also integrated the verified member-floor dependency
+chain through `18999f044`, retaining its principal fixtures and all catalogue
+registrations. The resulting tree passed core/daemon all-target check
+(1 minute 22 seconds), 46 focused sharing unit tests (13.81 seconds) and
+14 focused sharing contracts (110.23 seconds, zero ignored) on SQLite and
+actual three-voter fixtures. Those contracts include both independent floor
+capability cases and the source/allocator/private-history cases. Serving
+admission integration is the next change; these observations do not install
+schemas, advertise capabilities or authorize a new shared writer.
+
+
+#### S4 receiver runtime checkpoint (candidate, open)
+
+The candidate now mounts authenticated receiver library, browse/search,
+children, batch, item metadata and a closed private-progress refusal route. Every operation
+uses a verified pinned source connection, a closed bounded response and fresh
+local assignment authority. Admission retains no wait queue: four metadata
+operations process-wide and one per import. Permit ownership releases both
+limits on errors and cancellation. Assignment filtering uses one consistent,
+generation-bound query, bounded at the existing 64 libraries per grant, instead of one Store lookup
+per remote item. Captured source/epoch, import lifecycle, endpoint, grant and
+assignment generations are checked after the network operation. The private-progress Store enforces those generations atomically. Its HTTP
+writer remains unavailable until S5 supplies current active-session observation
+binding; a fresh source batch alone cannot authorize playback progress.
+
+Catalogue success bodies have an explicit 4 MiB client cap; management and
+error bodies retain a 128 KiB cap. Unknown response fields, mismatched batch
+IDs/order, noncanonical IDs, excessive fields and oversized streams refuse
+without retaining peer error text. Query components are percent-encoded and
+malformed percent encodings or UTF-8 refuse before cursor/filter processing.
+Source metadata serving now requires the actual CatalogueItemIdentity member
+floor on replicated nodes, with a one-second read deadline. That read check
+is not a write admission predicate and does not install a schema or advertise
+capabilities.
+
+This checkpoint remains open: playable-file details, metadata/art caches,
+scoped art with blocked-socket revocation and current-source Continue Watching
+are still owed. Private progress refuses a changed stored library identity;
+a later explicit reconciliation must prove the same durable source/epoch/item
+in its new library and recheck the new assignment. A progress body cannot
+perform that reconciliation. Neither this checkpoint nor the earlier Store
+primitives constitutes S4 completion or S5 playback qualification.
+
+
+The exact receiver checkpoint passed six focused daemon catalogue regressions
+(0.59 seconds, zero ignored), including authenticated-route refusal, malformed
+UTF-8/query fields, 64-versus-65 library response bounds, the management versus
+catalogue body budgets, mismatched per-ID results and cancelled admission.
+The generation-bound private-watch/assignment contract passed memory, pooled
+SQLite and actual three-voter storage (9.37 seconds, zero ignored).
+Core/daemon all-target denied-warning Clippy passed on the same source; its
+reported 5 minutes 4 seconds includes waiting for the focused test compiler.
+Commands: `cargo test --locked --offline -p plurxd --bin plurxd sharing_catalogue_`,
+`cargo test --locked --offline -p plurx-core --features hiqlite-contract-tests
+--test store_contract sharing_private_watch_orders_updates_and_isolates_sources_and_assignments`
+and `cargo clippy --locked --offline -p plurxd -p plurx-core --all-targets
+--features plurx-core/hiqlite-contract-tests -- -D warnings`, with the pinned
+1.97.1 compiler and the isolated S4 target directory.

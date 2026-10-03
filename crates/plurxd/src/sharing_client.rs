@@ -9,12 +9,52 @@ use hyper::client::conn::http1::SendRequest;
 use hyper_util::rt::TokioIo;
 use plurx_core::{
     secrets::Secret,
+    sharing::SourceId,
     sharing::{canonical_uuid, Endpoint, SharingIdentity},
+    sharing_catalogue::{
+        CataloguePeerBatch, CataloguePeerPage, MetadataBatch, MAX_CURSOR_BYTES, MAX_PAGE_SIZE,
+    },
     sharing_tls::dial_numeric_peer,
 };
 use serde::{de::DeserializeOwned, Deserialize};
 use std::{net::SocketAddr, time::Duration};
 use uuid::Uuid;
+
+const MANAGEMENT_RESPONSE_BYTES: usize = 128 * 1024;
+const CATALOGUE_RESPONSE_BYTES: usize = 4 * 1024 * 1024;
+#[derive(Clone, Copy)]
+enum ResponseBudget {
+    Management,
+    Catalogue,
+}
+impl ResponseBudget {
+    fn bytes(self) -> usize {
+        match self {
+            Self::Management => MANAGEMENT_RESPONSE_BYTES,
+            Self::Catalogue => CATALOGUE_RESPONSE_BYTES,
+        }
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct CatalogueLibraries {
+    pub libraries: Vec<plurx_core::store::sharing_catalogue_source::SourceLibrary>,
+}
+fn query_component(value: &str) -> String {
+    let mut result = String::new();
+    const HEX: &[u8] = b"0123456789ABCDEF";
+    for byte in value.bytes() {
+        if byte.is_ascii_alphanumeric() || b"-._~".contains(&byte) {
+            result.push(char::from(byte));
+        } else {
+            result.push('%');
+            result.push(char::from(HEX[(byte >> 4) as usize]));
+            result.push(char::from(HEX[(byte & 15) as usize]));
+        }
+    }
+    result
+}
 
 #[derive(Clone, Copy, Debug)]
 pub(crate) enum PeerError {
@@ -157,6 +197,23 @@ impl PeerConnection {
         credential: Option<&Secret>,
         payload: Option<&Secret>,
     ) -> Result<T, PeerError> {
+        self.request_with_budget(
+            method,
+            path,
+            credential,
+            payload,
+            ResponseBudget::Management,
+        )
+        .await
+    }
+    async fn request_with_budget<T: DeserializeOwned>(
+        &mut self,
+        method: Method,
+        path: &str,
+        credential: Option<&Secret>,
+        payload: Option<&Secret>,
+        budget: ResponseBudget,
+    ) -> Result<T, PeerError> {
         tokio::time::timeout(Duration::from_secs(5), async {
             let mut request = Request::builder()
                 .method(method)
@@ -199,7 +256,11 @@ impl PeerConnection {
                         .into_body()
                         .map_err(|_| std::io::Error::other("sharing peer body")),
                 ),
-                16 * 1024,
+                if status.is_success() {
+                    budget.bytes()
+                } else {
+                    MANAGEMENT_RESPONSE_BYTES
+                },
             )
             .await
             .map_err(|_| PeerError::InvalidResponse)?;
@@ -218,6 +279,99 @@ impl PeerConnection {
         })
         .await
         .map_err(|_| PeerError::Unavailable)?
+    }
+    pub async fn catalogue_libraries(
+        &mut self,
+        credential: &Secret,
+    ) -> Result<CatalogueLibraries, PeerError> {
+        let response: CatalogueLibraries = self
+            .request_with_budget(
+                Method::GET,
+                "/sharing/v1/libraries",
+                Some(credential),
+                None,
+                ResponseBudget::Catalogue,
+            )
+            .await?;
+        if response.libraries.len() > plurx_core::sharing::MAX_LIBRARIES
+            || response
+                .libraries
+                .iter()
+                .any(|l| l.name.len() > 256 || !matches!(l.kind.as_str(), "movies" | "shows"))
+        {
+            return Err(PeerError::InvalidResponse);
+        }
+        Ok(response)
+    }
+    pub async fn catalogue_page(
+        &mut self,
+        credential: &Secret,
+        library: &SourceId,
+        parent: Option<&SourceId>,
+        q: &str,
+        cursor: Option<&str>,
+        limit: usize,
+    ) -> Result<CataloguePeerPage, PeerError> {
+        if q.len() > 512
+            || q.chars().any(char::is_control)
+            || cursor.is_some_and(|s| s.len() > MAX_CURSOR_BYTES)
+            || !(1..=MAX_PAGE_SIZE).contains(&limit)
+        {
+            return Err(PeerError::InvalidResponse);
+        }
+        let mut path = match parent {
+            None => format!("/sharing/v1/libraries/{}/items", library.as_str()),
+            Some(parent) => format!("/sharing/v1/items/{}/children", parent.as_str()),
+        };
+        path.push_str(&format!("?limit={limit}&q={}", query_component(q)));
+        if let Some(cursor) = cursor {
+            path.push_str("&cursor=");
+            path.push_str(&query_component(cursor));
+        }
+        let response: CataloguePeerPage = self
+            .request_with_budget(
+                Method::GET,
+                &path,
+                Some(credential),
+                None,
+                ResponseBudget::Catalogue,
+            )
+            .await?;
+        response
+            .validate()
+            .map_err(|_| PeerError::InvalidResponse)?;
+        if response.items.len() > limit
+            || response
+                .items
+                .iter()
+                .any(|item| &item.library_id != library || item.parent_id.as_ref() != parent)
+        {
+            return Err(PeerError::InvalidResponse);
+        }
+        Ok(response)
+    }
+    pub async fn catalogue_batch(
+        &mut self,
+        credential: &Secret,
+        batch: &MetadataBatch,
+    ) -> Result<CataloguePeerBatch, PeerError> {
+        batch.validate().map_err(|_| PeerError::InvalidResponse)?;
+        let payload = Secret::from_cleartext(
+            serde_json::to_string(batch).map_err(|_| PeerError::InvalidResponse)?,
+        );
+        let response: CataloguePeerBatch = self
+            .request_with_budget(
+                Method::POST,
+                "/sharing/v1/items:batch",
+                Some(credential),
+                Some(&payload),
+                ResponseBudget::Catalogue,
+            )
+            .await?;
+        response
+            .validate(batch)
+            .map_err(|_| PeerError::InvalidResponse)?;
+        Ok(response)
     }
     async fn identity(&mut self) -> Result<Identity, PeerError> {
         self.request(Method::GET, "/sharing/v1/identity", None, None)
@@ -327,6 +481,75 @@ mod tests {
             requests,
             server,
         )
+    }
+    fn catalogue_item(id: &str) -> serde_json::Value {
+        serde_json::json!({"item_id":id,"library_id":"12","parent_id":null,"kind":"movie","title":"Fixture","sort_title":"Fixture","year":null,"overview":"x".repeat(8192),"genres":[],"season_number":null,"episode_number":null})
+    }
+    #[tokio::test]
+    async fn sharing_catalogue_client_bounds_closed_records_and_encodes_queries() {
+        let credential = plurx_core::sharing::new_secret().expect("synthetic catalogue fixture");
+        for count in [64, 65] {
+            let payload = serde_json::json!({"libraries":(1..=count).map(|id|serde_json::json!({"library_id":id.to_string(),"name":"Fixture","kind":"movies","anime":false})).collect::<Vec<_>>()});
+            let (mut peer, _, server) = fixture(StatusCode::OK, payload).await;
+            assert_eq!(
+                peer.catalogue_libraries(&credential).await.is_ok(),
+                count == 64
+            );
+            drop(peer);
+            server.abort();
+            let _ = server.await;
+        }
+
+        let payload = serde_json::json!({"items":(1..=25).map(|id|catalogue_item(&id.to_string())).collect::<Vec<_>>(),"next_cursor":null,"catalogue_revision":1,"scope_generation":1,"catalogue_generation":1});
+        let (mut peer, requests, server) = fixture(StatusCode::OK, payload.clone()).await;
+        let page = peer
+            .catalogue_page(
+                &credential,
+                &SourceId::parse("12").expect("synthetic catalogue fixture"),
+                None,
+                "A &雪/?",
+                Some("x+=/"),
+                60,
+            )
+            .await
+            .expect("synthetic catalogue fixture");
+        assert_eq!(page.items.len(), 25);
+        assert_eq!(
+            requests.lock().expect("synthetic catalogue fixture")[0].0,
+            "/sharing/v1/libraries/12/items?limit=60&q=A%20%26%E9%9B%AA%2F%3F&cursor=x%2B%3D%2F"
+        );
+        assert!(matches!(
+            peer.request::<serde_json::Value>(
+                Method::GET,
+                "/sharing/v1/grant",
+                Some(&credential),
+                None
+            )
+            .await,
+            Err(PeerError::InvalidResponse)
+        ));
+        drop(peer);
+        server.abort();
+        let _ = server.await;
+        for payload in [
+            serde_json::json!({"items":[{"item_id":"2","item":null}]}),
+            serde_json::json!({"items":[{"item_id":"1","item":catalogue_item("2")}]}),
+            serde_json::json!({"items":[{"item_id":"1","item":null}],"path":"private"}),
+            serde_json::json!({"items":[{"item_id":"01","item":null}]}),
+            serde_json::json!({"items":[{"item_id":"1","item":null}],"padding":"x".repeat(CATALOGUE_RESPONSE_BYTES)}),
+        ] {
+            let (mut peer, _, server) = fixture(StatusCode::OK, payload).await;
+            let batch = MetadataBatch {
+                item_ids: vec![SourceId::parse("1").expect("synthetic catalogue fixture")],
+            };
+            assert!(matches!(
+                peer.catalogue_batch(&credential, &batch).await,
+                Err(PeerError::InvalidResponse)
+            ));
+            drop(peer);
+            server.abort();
+            let _ = server.await;
+        }
     }
     #[tokio::test]
     async fn sharing_peer_identity_mismatch_and_redirect_never_send_capabilities() {

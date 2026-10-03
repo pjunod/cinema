@@ -57,11 +57,41 @@ async fn authority(
     if grant.grant.state != GrantState::Active {
         return Err(missing());
     }
+    // This is serving-read admission only. Future shared writes must carry
+    // their capability floor and effective grant predicate atomically.
+    if state.membership.is_replicated() {
+        let ready = tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            state.membership.sharing_member_floor_ready(
+                plurx_core::cluster::membership::SharingMemberFloor::CatalogueItemIdentity,
+            ),
+        )
+        .await
+        .map_err(|_| {
+            fail(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "sharing_member_floor_unavailable",
+            )
+        })?
+        .map_err(|_| {
+            fail(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "sharing_member_floor_unavailable",
+            )
+        })?;
+        if !ready {
+            return Err(fail(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "sharing_member_floor_unavailable",
+            ));
+        }
+    }
     Ok((hash, grant.grant.id))
 }
 #[derive(Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct BrowseQuery {
+    #[serde(alias = "query")]
     q: Option<String>,
     cursor: Option<String>,
     limit: Option<usize>,
@@ -70,6 +100,28 @@ fn query(raw: Option<&str>) -> Result<BrowseQuery, ApiError> {
     let raw = raw.unwrap_or("");
     if raw.len() > 6144 {
         return Err(invalid());
+    }
+    // Reject lossy form decoding: malformed UTF-8 must never become a changed
+    // filter whose digest happens to authenticate another cursor context.
+    for field in raw.split('&') {
+        let mut decoded = Vec::with_capacity(field.len());
+        let mut bytes = field.bytes();
+        while let Some(byte) = bytes.next() {
+            if byte == b'%' {
+                let a = bytes
+                    .next()
+                    .and_then(|b| char::from(b).to_digit(16))
+                    .ok_or_else(invalid)?;
+                let b = bytes
+                    .next()
+                    .and_then(|b| char::from(b).to_digit(16))
+                    .ok_or_else(invalid)?;
+                decoded.push((a * 16 + b) as u8);
+            } else {
+                decoded.push(byte);
+            }
+        }
+        std::str::from_utf8(&decoded).map_err(|_| invalid())?;
     }
     let uri: axum::http::Uri = format!("/?{raw}").parse().map_err(|_| invalid())?;
     let axum::extract::Query(q) =
@@ -261,6 +313,264 @@ async fn batch(
     ))
 }
 
+pub(crate) fn viewer_router() -> Router<AppState> {
+    Router::new()
+        .route("/shared/libraries", get(viewer_assigned_libraries))
+        .route("/shared/imports/{import}/libraries", get(viewer_libraries))
+        .route(
+            "/shared/imports/{import}/libraries/{library}/items",
+            get(viewer_items),
+        )
+        .route(
+            "/shared/imports/{import}/items/{item}/children",
+            get(viewer_children),
+        )
+        .route("/shared/imports/{import}/items/{item}", get(viewer_item))
+        .route(
+            "/shared/imports/{import}/items/{item}/progress",
+            post(viewer_progress),
+        )
+        .route("/shared/imports/{import}/items:batch", post(viewer_batch))
+}
+fn import_id(value: &str) -> Result<uuid::Uuid, ApiError> {
+    let id = uuid::Uuid::parse_str(value).map_err(|_| invalid())?;
+    if id.to_string() != value {
+        return Err(invalid());
+    }
+    Ok(id)
+}
+fn peer_failure(error: crate::sharing_client::PeerError) -> ApiError {
+    if matches!(error, crate::sharing_client::PeerError::Authentication) {
+        missing()
+    } else if matches!(
+        error,
+        crate::sharing_client::PeerError::Rejected(StatusCode::TOO_MANY_REQUESTS)
+    ) {
+        fail(StatusCode::TOO_MANY_REQUESTS, "sharing_metadata_capacity")
+    } else {
+        fail(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "sharing_source_unavailable",
+        )
+    }
+}
+fn shared_item(summary: &plurx_core::sharing::ImportSummary, item: SourceCatalogueItem) -> Value {
+    let reference = SharedReference {
+        import_id: summary.id,
+        server_id: summary.source_server_id,
+        catalogue_epoch: summary.catalogue_epoch,
+        library_id: item.library_id.clone(),
+        item_id: item.item_id.clone(),
+    };
+    let parent = item.parent_id.clone().map(|id| SharedReference {
+        item_id: id,
+        ..reference.clone()
+    });
+    json!({"source":"shared","reference":reference,"parent":parent,"title":item.title,"sort_title":item.sort_title,"kind":item.kind,"year":item.year,"overview":item.overview,"genres":item.genres,"season_number":item.season_number,"episode_number":item.episode_number})
+}
+async fn viewer_libraries(
+    State(state): State<AppState>,
+    super::extract::AuthUser(user): super::extract::AuthUser,
+    Path(import): Path<String>,
+) -> Result<Json<Value>, ApiError> {
+    let (summary, reply) = state
+        .sharing
+        .read_catalogue(
+            &state,
+            import_id(&import)?,
+            user.id,
+            crate::sharing::CatalogueRead::Libraries,
+        )
+        .await
+        .map_err(peer_failure)?;
+    let crate::sharing::CatalogueReply::Libraries(libraries) = reply else {
+        return Err(invalid());
+    };
+    Ok(Json(
+        json!({"import_id":summary.id,"server_id":summary.source_server_id,"catalogue_epoch":summary.catalogue_epoch,"libraries":libraries}),
+    ))
+}
+async fn viewer_items(
+    State(state): State<AppState>,
+    super::extract::AuthUser(user): super::extract::AuthUser,
+    Path((import, library)): Path<(String, String)>,
+    RawQuery(raw): RawQuery,
+) -> Result<Json<Value>, ApiError> {
+    viewer_page(
+        &state,
+        user.id,
+        import_id(&import)?,
+        source_id(&library)?,
+        None,
+        query(raw.as_deref())?,
+    )
+    .await
+}
+async fn viewer_children(
+    State(state): State<AppState>,
+    super::extract::AuthUser(user): super::extract::AuthUser,
+    Path((import, item)): Path<(String, String)>,
+    RawQuery(raw): RawQuery,
+) -> Result<Json<Value>, ApiError> {
+    let import = import_id(&import)?;
+    let item = source_id(&item)?;
+    let query = query(raw.as_deref())?;
+    let (_, metadata) = current_viewer_item(&state, user.id, import, item.clone()).await?;
+    viewer_page(
+        &state,
+        user.id,
+        import,
+        metadata.library_id,
+        Some(item),
+        query,
+    )
+    .await
+}
+async fn viewer_page(
+    state: &AppState,
+    user: i64,
+    import: uuid::Uuid,
+    library: SourceId,
+    parent: Option<SourceId>,
+    q: BrowseQuery,
+) -> Result<Json<Value>, ApiError> {
+    let (summary, reply) = state
+        .sharing
+        .read_catalogue(
+            state,
+            import,
+            user,
+            crate::sharing::CatalogueRead::Page {
+                library,
+                parent,
+                q: q.q.unwrap_or_default(),
+                cursor: q.cursor,
+                limit: q.limit.unwrap_or(DEFAULT_PAGE_SIZE),
+            },
+        )
+        .await
+        .map_err(peer_failure)?;
+    let crate::sharing::CatalogueReply::Page(page) = reply else {
+        return Err(invalid());
+    };
+    Ok(Json(
+        json!({"items":page.items.into_iter().map(|item|shared_item(&summary,item)).collect::<Vec<_>>(),"next_cursor":page.next_cursor,"catalogue_revision":page.catalogue_revision,"scope_generation":page.scope_generation,"catalogue_generation":page.catalogue_generation}),
+    ))
+}
+async fn viewer_batch(
+    State(state): State<AppState>,
+    super::extract::AuthUser(user): super::extract::AuthUser,
+    Path(import): Path<String>,
+    body: Body,
+) -> Result<Json<Value>, ApiError> {
+    let bytes = to_bytes(body, 16 * 1024).await.map_err(|_| invalid())?;
+    let batch: MetadataBatch = serde_json::from_slice(&bytes).map_err(|_| invalid())?;
+    batch.validate().map_err(|_| invalid())?;
+    let (summary, reply) = state
+        .sharing
+        .read_catalogue(
+            &state,
+            import_id(&import)?,
+            user.id,
+            crate::sharing::CatalogueRead::Batch(batch),
+        )
+        .await
+        .map_err(peer_failure)?;
+    let crate::sharing::CatalogueReply::Batch(batch) = reply else {
+        return Err(invalid());
+    };
+    Ok(Json(
+        json!({"items":batch.items.into_iter().map(|entry|json!({"item_id":entry.item_id,"item":entry.item.map(|item|shared_item(&summary,item))})).collect::<Vec<_>>()}),
+    ))
+}
+
+async fn current_viewer_item(
+    state: &AppState,
+    user: i64,
+    import: uuid::Uuid,
+    item: SourceId,
+) -> Result<(plurx_core::sharing::ImportSummary, SourceCatalogueItem), ApiError> {
+    let (summary, reply) = state
+        .sharing
+        .read_catalogue(
+            state,
+            import,
+            user,
+            crate::sharing::CatalogueRead::Batch(MetadataBatch {
+                item_ids: vec![item.clone()],
+            }),
+        )
+        .await
+        .map_err(peer_failure)?;
+    let crate::sharing::CatalogueReply::Batch(mut batch) = reply else {
+        return Err(invalid());
+    };
+    let metadata = batch
+        .items
+        .pop()
+        .and_then(|entry| entry.item)
+        .ok_or_else(missing)?;
+    if metadata.item_id != item {
+        return Err(missing());
+    }
+    Ok((summary, metadata))
+}
+async fn viewer_item(
+    State(state): State<AppState>,
+    super::extract::AuthUser(user): super::extract::AuthUser,
+    Path((import, item)): Path<(String, String)>,
+) -> Result<Json<Value>, ApiError> {
+    let import = import_id(&import)?;
+    let item = source_id(&item)?;
+    let (summary, metadata) = current_viewer_item(&state, user.id, import, item.clone()).await?;
+    let progress = state
+        .store
+        .remote_watch(import, metadata.library_id.clone(), item, user.id)
+        .await
+        .map_err(unavailable)?;
+    Ok(Json(
+        json!({"item":shared_item(&summary,metadata),"watch":progress}),
+    ))
+}
+async fn viewer_progress(
+    State(state): State<AppState>,
+    super::extract::AuthUser(user): super::extract::AuthUser,
+    Path((import, item)): Path<(String, String)>,
+    body: Body,
+) -> Result<Json<Value>, ApiError> {
+    let bytes = to_bytes(body, 1024).await.map_err(|_| invalid())?;
+    let _: plurx_core::store::sharing_catalogue::RemoteWatch =
+        serde_json::from_slice(&bytes).map_err(|_| invalid())?;
+    current_viewer_item(&state, user.id, import_id(&import)?, source_id(&item)?).await?;
+    Err(fail(
+        StatusCode::SERVICE_UNAVAILABLE,
+        "sharing_progress_session_binding_unavailable",
+    ))
+}
+async fn viewer_assigned_libraries(
+    State(state): State<AppState>,
+    super::extract::AuthUser(user): super::extract::AuthUser,
+) -> Result<Json<Value>, ApiError> {
+    let imports = state.store.sharing_imports().await.map_err(unavailable)?;
+    let mut libraries = Vec::new();
+    for import in imports.into_iter().filter(|i| i.state == "active") {
+        let assigned = state
+            .store
+            .assigned_catalogue_libraries(
+                import.id,
+                user.id,
+                import.lifecycle_generation,
+                import.assignment_generation,
+            )
+            .await
+            .map_err(unavailable)?;
+        for library in assigned {
+            libraries.push(json!({"import_id":import.id,"server_id":import.source_server_id,"catalogue_epoch":import.catalogue_epoch,"library_id":library,"source_name":import.source_name,"availability":"unverified"}));
+        }
+    }
+    Ok(Json(json!({"libraries":libraries})))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -270,6 +580,87 @@ mod tests {
         sharing::*,
     };
     use tower::ServiceExt;
+    #[tokio::test]
+    async fn sharing_catalogue_viewer_routes_require_login_and_fail_closed_without_import() {
+        let (app, state) = super::super::tests::test_app_with_state();
+        let import = uuid::Uuid::new_v4();
+        let path = format!("/api/v1/shared/imports/{import}/libraries/12/items");
+        let response = app
+            .clone()
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri(&path)
+                    .body(Body::empty())
+                    .expect("synthetic catalogue fixture"),
+            )
+            .await
+            .expect("synthetic catalogue fixture");
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        let response = app
+            .clone()
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/setup")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        json!({"username":"catalogue-viewer","password":"synthetic-password"})
+                            .to_string(),
+                    ))
+                    .expect("synthetic catalogue fixture"),
+            )
+            .await
+            .expect("synthetic catalogue fixture");
+        assert_eq!(response.status(), StatusCode::OK);
+        let bytes = response
+            .into_body()
+            .collect()
+            .await
+            .expect("synthetic catalogue fixture")
+            .to_bytes();
+        let setup: Value = serde_json::from_slice(&bytes).expect("synthetic catalogue fixture");
+        let token = setup["token"]
+            .as_str()
+            .expect("synthetic catalogue fixture");
+        for (path, status) in [
+            (path, StatusCode::SERVICE_UNAVAILABLE),
+            (
+                format!("/api/v1/shared/imports/{import}/libraries/01/items"),
+                StatusCode::BAD_REQUEST,
+            ),
+            (
+                format!("/api/v1/shared/imports/{import}/libraries/12/items?q=%FF"),
+                StatusCode::BAD_REQUEST,
+            ),
+        ] {
+            let response = app
+                .clone()
+                .oneshot(
+                    axum::http::Request::builder()
+                        .uri(path)
+                        .header("authorization", format!("Bearer {token}"))
+                        .body(Body::empty())
+                        .expect("synthetic catalogue fixture"),
+                )
+                .await
+                .expect("synthetic catalogue fixture");
+            assert_eq!(response.status(), status);
+            let bytes = response
+                .into_body()
+                .collect()
+                .await
+                .expect("synthetic catalogue fixture")
+                .to_bytes();
+            let body = String::from_utf8(bytes.to_vec()).expect("synthetic catalogue fixture");
+            assert!(!body.contains("synthetic-password"));
+        }
+        assert!(state
+            .store
+            .sharing_imports()
+            .await
+            .expect("synthetic catalogue fixture")
+            .is_empty());
+    }
     #[tokio::test]
     async fn sharing_catalogue_http_requires_live_grant_and_qualified_order_maintenance() {
         let (_, state) = super::super::tests::test_app_with_state();
@@ -393,6 +784,9 @@ mod tests {
             "offset=1",
             "limit=201",
             "limit=0",
+            "q=%",
+            "q=%FF",
+            "q=%C3%28",
             "limit=1&limit=2",
             "cursor=x&cursor=y",
             "q=x&q=y",

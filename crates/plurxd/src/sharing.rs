@@ -46,6 +46,7 @@ pub(crate) struct SharingManager {
     key_directory: PathBuf,
     status: RwLock<SharingStatus>,
     lifetime: Mutex<Option<CancellationToken>>,
+    catalogue_admission: Arc<CatalogueAdmission>,
 }
 pub(crate) async fn enabled(store: &dyn Store) -> Result<bool, StoreError> {
     let result = tokio::time::timeout(
@@ -78,6 +79,7 @@ impl SharingManager {
             }),
             network,
             lifetime: Mutex::new(None),
+            catalogue_admission: Arc::new(CatalogueAdmission::default()),
         }
     }
     pub fn status(&self) -> SharingStatus {
@@ -951,6 +953,298 @@ impl SharingManager {
             return Err(PeerError::Rejected(axum::http::StatusCode::CONFLICT));
         }
         Ok(())
+    }
+}
+
+/// No waiters are retained: unavailable imports cannot build a metadata queue.
+struct CatalogueAdmission {
+    imports: Mutex<std::collections::BTreeSet<uuid::Uuid>>,
+    global: Arc<tokio::sync::Semaphore>,
+}
+impl Default for CatalogueAdmission {
+    fn default() -> Self {
+        Self {
+            imports: Mutex::new(Default::default()),
+            global: Arc::new(tokio::sync::Semaphore::new(4)),
+        }
+    }
+}
+struct CataloguePermit {
+    admission: Arc<CatalogueAdmission>,
+    import: uuid::Uuid,
+    _global: tokio::sync::OwnedSemaphorePermit,
+}
+impl Drop for CataloguePermit {
+    fn drop(&mut self) {
+        self.admission
+            .imports
+            .lock()
+            .expect("catalogue admission")
+            .remove(&self.import);
+    }
+}
+impl CatalogueAdmission {
+    fn acquire(
+        self: &Arc<Self>,
+        import: uuid::Uuid,
+    ) -> Result<CataloguePermit, crate::sharing_client::PeerError> {
+        // Reserve the import first; cancellation and every early refusal drop it.
+        let mut imports = self.imports.lock().expect("catalogue admission");
+        if imports.contains(&import) {
+            return Err(crate::sharing_client::PeerError::Rejected(
+                axum::http::StatusCode::TOO_MANY_REQUESTS,
+            ));
+        }
+        let global = self.global.clone().try_acquire_owned().map_err(|_| {
+            crate::sharing_client::PeerError::Rejected(axum::http::StatusCode::TOO_MANY_REQUESTS)
+        })?;
+        imports.insert(import);
+        drop(imports);
+        Ok(CataloguePermit {
+            admission: self.clone(),
+            import,
+            _global: global,
+        })
+    }
+}
+
+pub(crate) enum CatalogueRead {
+    Libraries,
+    Page {
+        library: plurx_core::sharing::SourceId,
+        parent: Option<plurx_core::sharing::SourceId>,
+        q: String,
+        cursor: Option<String>,
+        limit: usize,
+    },
+    Batch(plurx_core::sharing_catalogue::MetadataBatch),
+}
+pub(crate) enum CatalogueReply {
+    Libraries(Vec<plurx_core::store::sharing_catalogue_source::SourceLibrary>),
+    Page(plurx_core::sharing_catalogue::CataloguePeerPage),
+    Batch(plurx_core::sharing_catalogue::CataloguePeerBatch),
+}
+impl SharingManager {
+    pub async fn read_catalogue(
+        &self,
+        state: &AppState,
+        import_id: uuid::Uuid,
+        user: i64,
+        request: CatalogueRead,
+    ) -> Result<
+        (plurx_core::sharing::ImportSummary, CatalogueReply),
+        crate::sharing_client::PeerError,
+    > {
+        tokio::time::timeout(
+            Duration::from_secs(8),
+            self.read_catalogue_inner(state, import_id, user, request),
+        )
+        .await
+        .map_err(|_| crate::sharing_client::PeerError::Unavailable)?
+    }
+    async fn read_catalogue_inner(
+        &self,
+        state: &AppState,
+        import_id: uuid::Uuid,
+        user: i64,
+        request: CatalogueRead,
+    ) -> Result<
+        (plurx_core::sharing::ImportSummary, CatalogueReply),
+        crate::sharing_client::PeerError,
+    > {
+        use crate::sharing_client::{PeerConnection, PeerError};
+        use plurx_core::sharing::SharingIdentity;
+        if user <= 0 {
+            return Err(PeerError::Authentication);
+        }
+        let _permit = self.catalogue_admission.acquire(import_id)?;
+        let import = tokio::time::timeout(
+            Duration::from_secs(1),
+            state.store.sharing_import(import_id),
+        )
+        .await
+        .map_err(|_| PeerError::Unavailable)?
+        .map_err(|_| PeerError::Unavailable)?
+        .ok_or(PeerError::Unavailable)?;
+        if import.summary.state != "active" {
+            return Err(PeerError::Unavailable);
+        }
+        self.ensure_current(state, &import.summary).await?;
+        let assigned = state
+            .store
+            .assigned_catalogue_libraries(
+                import_id,
+                user,
+                import.summary.lifecycle_generation,
+                import.summary.assignment_generation,
+            )
+            .await
+            .map_err(|_| PeerError::Unavailable)?;
+        if assigned.is_empty() {
+            return Err(PeerError::Authentication);
+        }
+        if let CatalogueRead::Page { library, .. } = &request {
+            if !assigned.contains(library) {
+                return Err(PeerError::Authentication);
+            }
+        }
+        let local = state
+            .store
+            .sharing_identity(clock_ms())
+            .await
+            .map_err(|_| PeerError::Unavailable)?;
+        let credentials = ImportCredential::open(self, local.server_id, &import)
+            .map_err(|_| PeerError::Unavailable)?;
+        let expected = SharingIdentity {
+            server_id: import.summary.source_server_id,
+            catalogue_epoch: import.summary.catalogue_epoch,
+            created_at_ms: 0,
+        };
+        let (mut peer, _) =
+            PeerConnection::verified(self, &import.summary.endpoints, &expected).await?;
+        self.ensure_current(state, &import.summary).await?;
+        let mut reply = match request {
+            CatalogueRead::Libraries => CatalogueReply::Libraries(
+                peer.catalogue_libraries(&credentials.credential)
+                    .await?
+                    .libraries,
+            ),
+            CatalogueRead::Page {
+                library,
+                parent,
+                q,
+                cursor,
+                limit,
+            } => CatalogueReply::Page(
+                peer.catalogue_page(
+                    &credentials.credential,
+                    &library,
+                    parent.as_ref(),
+                    &q,
+                    cursor.as_deref(),
+                    limit,
+                )
+                .await?,
+            ),
+            CatalogueRead::Batch(batch) => CatalogueReply::Batch(
+                peer.catalogue_batch(&credentials.credential, &batch)
+                    .await?,
+            ),
+        };
+        let current = state
+            .store
+            .sharing_import(import_id)
+            .await
+            .map_err(|_| PeerError::Unavailable)?
+            .ok_or(PeerError::Unavailable)?;
+        if current.summary.assignment_generation != import.summary.assignment_generation
+            || current.summary.lifecycle_generation != import.summary.lifecycle_generation
+            || current.summary.endpoint_generation != import.summary.endpoint_generation
+            || current.summary.source_server_id != import.summary.source_server_id
+            || current.summary.catalogue_epoch != import.summary.catalogue_epoch
+            || current.summary.remote_grant_id != import.summary.remote_grant_id
+            || current.summary.state != "active"
+        {
+            return Err(PeerError::Unavailable);
+        }
+        self.ensure_current(state, &import.summary).await?;
+        let assigned = tokio::time::timeout(
+            Duration::from_secs(1),
+            state.store.assigned_catalogue_libraries(
+                import_id,
+                user,
+                import.summary.lifecycle_generation,
+                import.summary.assignment_generation,
+            ),
+        )
+        .await
+        .map_err(|_| PeerError::Unavailable)?
+        .map_err(|_| PeerError::Unavailable)?;
+        if assigned.is_empty() {
+            return Err(PeerError::Authentication);
+        }
+        match &mut reply {
+            CatalogueReply::Libraries(libraries) => {
+                libraries.retain(|library| assigned.contains(&library.library_id))
+            }
+            CatalogueReply::Page(page) => {
+                if page
+                    .items
+                    .iter()
+                    .any(|item| !assigned.contains(&item.library_id))
+                {
+                    return Err(PeerError::Authentication);
+                }
+            }
+            CatalogueReply::Batch(batch) => {
+                for entry in &mut batch.items {
+                    if entry
+                        .item
+                        .as_ref()
+                        .is_some_and(|item| !assigned.contains(&item.library_id))
+                    {
+                        entry.item = None;
+                    }
+                }
+            }
+        }
+        Ok((import.summary, reply))
+    }
+}
+
+#[cfg(test)]
+mod catalogue_admission_tests {
+    use super::*;
+    #[test]
+    fn sharing_catalogue_admission_is_bounded_and_releases_on_cancellation() {
+        let admission = Arc::new(CatalogueAdmission::default());
+        let ids: Vec<_> = (0..5).map(|_| uuid::Uuid::new_v4()).collect();
+        let mut permits: Vec<_> = ids[..4]
+            .iter()
+            .map(|id| admission.acquire(*id).expect("synthetic catalogue fixture"))
+            .collect();
+        assert!(admission.acquire(ids[0]).is_err());
+        assert!(admission.acquire(ids[4]).is_err());
+        drop(permits.pop());
+        let replacement = admission
+            .acquire(ids[4])
+            .expect("synthetic catalogue fixture");
+        drop(replacement);
+        drop(permits);
+        assert_eq!(admission.global.available_permits(), 4);
+        assert!(admission
+            .imports
+            .lock()
+            .expect("synthetic catalogue fixture")
+            .is_empty());
+        drop(
+            admission
+                .acquire(ids[0])
+                .expect("synthetic catalogue fixture"),
+        );
+    }
+}
+
+#[cfg(test)]
+mod catalogue_cancellation_tests {
+    use super::*;
+    #[tokio::test]
+    async fn sharing_catalogue_aborted_operation_releases_import_and_global_admission() {
+        let admission = Arc::new(CatalogueAdmission::default());
+        let import = uuid::Uuid::new_v4();
+        let task_admission = admission.clone();
+        let (ready, waiting) = tokio::sync::oneshot::channel();
+        let task = tokio::spawn(async move {
+            let _permit = task_admission.acquire(import).expect("synthetic admission");
+            ready.send(()).expect("fixture receiver");
+            std::future::pending::<()>().await;
+        });
+        waiting.await.expect("fixture admission");
+        assert!(admission.acquire(import).is_err());
+        task.abort();
+        assert!(task.await.expect_err("cancelled fixture").is_cancelled());
+        assert_eq!(admission.global.available_permits(), 4);
+        drop(admission.acquire(import).expect("released import"));
     }
 }
 

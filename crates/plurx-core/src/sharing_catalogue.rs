@@ -284,6 +284,7 @@ impl BrowseSeen {
 
 /// Source-only presentation fields. Filesystem and account data have no wire slot.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct SourceCatalogueItem {
     pub item_id: SourceId,
     pub library_id: SourceId,
@@ -342,6 +343,66 @@ pub struct SourceCataloguePage {
     pub records: Vec<SourceCatalogueRecord>,
     pub counters: CatalogueCounters,
     pub has_more: bool,
+}
+
+/// Closed response vocabulary shared by source presentation and the receiver.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CataloguePeerPage {
+    pub items: Vec<SourceCatalogueItem>,
+    pub next_cursor: Option<String>,
+    pub catalogue_revision: i64,
+    pub scope_generation: i64,
+    pub catalogue_generation: i64,
+}
+impl CataloguePeerPage {
+    pub fn validate(&self) -> Result<(), CatalogueError> {
+        if self.items.len() > MAX_PAGE_SIZE
+            || self
+                .next_cursor
+                .as_ref()
+                .is_some_and(|s| s.len() > MAX_CURSOR_BYTES)
+        {
+            return Err(CatalogueError::Invalid);
+        }
+        CatalogueCounters {
+            library_revision: self.catalogue_revision,
+            scope_generation: self.scope_generation,
+            catalogue_generation: self.catalogue_generation,
+        }
+        .validate()?;
+        self.items
+            .iter()
+            .try_for_each(SourceCatalogueItem::validate)
+    }
+}
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CataloguePeerBatchEntry {
+    pub item_id: SourceId,
+    pub item: Option<SourceCatalogueItem>,
+}
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CataloguePeerBatch {
+    pub items: Vec<CataloguePeerBatchEntry>,
+}
+impl CataloguePeerBatch {
+    pub fn validate(&self, expected: &MetadataBatch) -> Result<(), CatalogueError> {
+        expected.validate()?;
+        if self.items.len() != expected.item_ids.len() {
+            return Err(CatalogueError::Invalid);
+        }
+        for (entry, id) in self.items.iter().zip(&expected.item_ids) {
+            if &entry.item_id != id || entry.item.as_ref().is_some_and(|item| &item.item_id != id) {
+                return Err(CatalogueError::Invalid);
+            }
+            if let Some(item) = &entry.item {
+                item.validate()?;
+            }
+        }
+        Ok(())
+    }
 }
 
 #[cfg(test)]
