@@ -5760,5 +5760,56 @@ remain different from physical output evidence.
 A new unrun regression uses the exact captured timings, rejects a real
 compositor stall, invalid/missing/backward metadata and an open blackout,
 and confirms raw callback diagnostics survive. Node syntax checks pass.
-Normal hook, exact committed build and a focused new-harness runtime are
-pending. No units or final adversarial review ran.
+Normal hook passed (pinned Clippy in 36.89 seconds and 72 served JavaScript
+syntax checks); the exact committed Linux build passed in 1m31s. The
+focused new-harness result is recorded below. No units or final adversarial
+review ran.
+
+
+### 10.198 Exact Firefox timing correction qualification and raster diagnosis
+
+`continuous-firefox-067788318-headed3-software-output2` **FAILED** on one
+backward-frame hitch and two dropped frames. All three manual targets
+presented; maximum/p95 presentation spacing was 85.58ms and raw callback
+spacing was 85.60ms. First frame took 2745ms, measured clock rate was
+1.002x, and the same session/player retained one parent. There were no
+stalls. End producer counts were 0/0/0/0, capture exited 0, and the
+supervisor removed its owned display/runtime. No Auto stages ran.
+
+At callback 20901.24ms, Firefox reported media time 18.916666s while the
+element clock was 18.542809s; the next callback at 20935.42ms reported
+18.583333s with element clock 18.583462s. Presented-frame counters advanced
+455→456 and both frames were 720p on the same session. The raster hashes
+differ. Comparing those 64×36 rasters against 30 decoded generated-source
+frames with four scaling algorithms best matches 18.541667s then
+18.583333s, which advance normally. Mean RGB errors remain substantial
+(approximately 16–18): the actual delivered AVC segment was not preserved,
+so this is diagnostic evidence only. It does not erase the hitch/drop
+failure, prove physical output, or justify replacing media time with the
+element clock; doing that could hide real A/V skew.
+
+The follow-up bounded probe
+`continuous-firefox-067788318-headed3-artifact-binding1` captures suspicious
+rasters with the exact family and canonical append ledger, then fetches
+only their corresponding immutable video segments and initialization maps.
+Each copied segment must match its append receipt SHA-256 before an
+independent decoder comparison. Copies are bounded to six segments, eight
+MiB per segment and a 256KiB initialization map; each request has a ten-second
+deadline. The early generic spool is disabled to avoid filling the budget
+with unrelated AAC. The three manual changes passed, and the first actual
+Auto target presented; the remaining Auto stages are still running. This
+focused diagnostic does not replace the full fifteen-manual/five-Auto
+campaign. Phone qualification remains paused while the human is away.
+
+
+### 10.199 Reset callback diagnostics with each actual Auto stage
+
+The new display/dispatch measurement already resets both clocks for each
+manual switch. Inspection found that `measureAuto` still reset only the
+primary presentation clock, so its raw callback maximum could carry over
+from an earlier Auto stage. It now clears the raw maximum and endpoint
+record at the same stage boundary. Presentation timing, hitch/stall checks
+and all qualification thresholds are unchanged. The source-067 diagnostic
+therefore retains trustworthy raw maxima, but its reported raw per-Auto
+stage values are cumulative rather than independently scoped. Node syntax
+checks pass; no unit tests were executed.

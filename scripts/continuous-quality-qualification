@@ -61,7 +61,7 @@ async function measureAuto(driver, shaper, result) {
   await driver.exec('setQuality("auto"); return true;');
   for (let i = 0; i < 5; i++) {
     const height = i % 2 ? 720 : 1080;
-    await driver.exec("{const p=globalThis.__plurxLabFrameProbe;if(p){p.maximum_gap_ms=0;p.maximum_gap_detail=null;p.frames=0;p.measurement_start_at_ms=null;}}return true;");
+    await driver.exec("{const p=globalThis.__plurxLabFrameProbe;if(p){p.maximum_gap_ms=0;p.maximum_callback_gap_ms=0;p.maximum_callback_gap_detail=null;p.maximum_gap_detail=null;p.frames=0;p.measurement_start_at_ms=null;}}return true;");
     const before = await driver.eval(lab.playerSnapshotExpression());
     const removals = lab.continuousRemovalEvidence(before.continuous);
     const deadline = Date.now() + 240000;
