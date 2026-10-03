@@ -107,6 +107,31 @@ final combined candidate voter module passed 2/2 with zero ignored in 27.32
 seconds after the lint-only string repair; feature-enabled denied-warning
 Clippy passed in 46.23 seconds.
 
+## Activation preserves the principal through every effect
+
+Rebuilt Local activation addresses request, recipe, desired, session and
+pointer rows by canonical owner. Session and pointer insertions provide the
+full Local projection; their conflict targets and immutable owner comparisons
+use the rebuilt keys. Lease admission, session admission and pointer writes
+require the current Local user within the same proposal. Predecessor retirement
+and returned predecessor metadata remain within the activation principal.
+
+The initial job-lease insert and conflict update also refuse an incarnation
+already belonging to another principal. A failed session conflict must not
+leave that foreign lease modified. Dependent successor lease cleanup repeats
+the real Local owner predicate. The actual voter regression attempts that
+cross-principal collision and checks unchanged lease revision, expiry and
+update coordinates; it also verifies Local activation/confirmation/replay,
+complete stored session/pointer metadata, missing owner refusal and explicit
+Shared admission refusal.
+
+The preparation corruption fixture now includes a real foreign cache pin and
+job lease. Its actual abort checks preserve the pin and the complete lease
+coordinates, alongside the foreign active route. All three candidate voter
+cases passed with zero ignored in 36.36 seconds. The activation unit filter
+passed 16/16 with zero ignored in 31.34 seconds. Denied-warning Clippy with
+`hiqlite-contract-tests` passed in 42.89 seconds.
+
 ## A rebuilt table is not shared admission authority
 
 The schema shape comes from the existing quorum-observed Store-lifetime
@@ -121,8 +146,7 @@ The runtime census at base
 literals, including three unit-test literals and validation-only legacy
 writers. Earlier counts of 65 preceded the pointer/desired-reader conversion.
 This checkpoint addresses the request family; it is not a complete census
-closure or qualification of all seven ownership tables. Activation,
-commit and the remaining lease/takeover/settlement/maintenance write predicates
+closure or qualification of all seven ownership tables. Commit and the remaining lease/takeover/settlement/maintenance write predicates
 still need conversion and qualification.
 
 ## Exercise production behavior on three voters
@@ -152,6 +176,6 @@ cargo clippy --locked -p plurx-core --features hiqlite-contract-tests \
 **How to read it:** the request/inventory/recovery voter regression passed 1/1 with zero ignored
 in 18.14 seconds using Rust 1.97.1. The two request decoder regressions and the incomplete
 inventory/staged/desired decoder regression passed with zero ignored. All 28 existing local/replicated lifecycle contracts passed
-with zero ignored in 257.18 seconds. Denied-warning Clippy with
+with zero ignored in 257.35 seconds. Denied-warning Clippy with
 `hiqlite-contract-tests` passed. These tests do not enable shared worker ingress, install
 a migration, advertise the member capability or qualify an upgrade/rollback.

@@ -529,6 +529,8 @@ async fn sharing_rebuilt_local_preparation_rejoin_abort_preserve_principal_fence
             .incarnation_id,
         current
     );
+    client.execute("INSERT INTO job_leases(resource,owner_node_id,fence,revision,expires_at_ms,updated_at_ms) VALUES('session:' || $1,'node',1,3,9000,10)", hiqlite::params!(SHARED_ROUTE)).await.expect("foreign job lease fixture");
+    client.execute("INSERT INTO cache_consumer_pins(storage_id,recipe_hash,generation_id,consumer_kind,consumer_id,consumer_epoch,expires_at_ms) VALUES('foreign-storage','foreign-recipe','foreign-generation','media_session',$1,1,9000)", hiqlite::params!(SHARED_ROUTE)).await.expect("foreign cache pin fixture");
     client.execute("INSERT INTO media_session_preparations(owner_key,principal_kind,user_id,playback_id,staged_incarnation_id,expected_predecessor_incarnation_id,deadline_ms,created_at_ms,updated_at_ms) VALUES('local:1','local',1,'prepared-runtime',$1,$2,800000,3000,3000)", hiqlite::params!(SHARED_ROUTE, current)).await.expect("corrupted cross-principal ledger fixture");
     assert!(store
         .abort_media_session_preparation(
@@ -541,4 +543,97 @@ async fn sharing_rebuilt_local_preparation_rejoin_abort_preserve_principal_fence
         .is_none());
     assert_eq!(request_rows(&client, "SELECT state AS value FROM media_sessions WHERE incarnation_id='00000000-0000-4000-a000-000000000001'").await, ["active"]);
     assert_eq!(request_rows(&client, "SELECT CAST(lease_expires_at_ms AS TEXT) AS value FROM media_sessions WHERE incarnation_id='00000000-0000-4000-a000-000000000001'").await, ["9000"]);
+    assert_eq!(request_rows(&client, "SELECT CAST(revision AS TEXT) || ':' || expires_at_ms || ':' || updated_at_ms AS value FROM job_leases WHERE resource='session:00000000-0000-4000-a000-000000000001'").await, ["3:9000:10"]);
+    assert_eq!(request_rows(&client, "SELECT CAST(count(*) AS TEXT) AS value FROM cache_consumer_pins WHERE consumer_kind='media_session' AND consumer_id='00000000-0000-4000-a000-000000000001' AND consumer_epoch=1 AND expires_at_ms=9000").await, ["1"]);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn sharing_rebuilt_local_activation_preserves_owner_and_foreign_lease() {
+    let _case = HIQLITE_CASE.lock().await;
+    let cluster = ContractCluster::start().await;
+    let store = open_contract_hiqlite_store(&cluster).await;
+    let client = Client::remote(
+        cluster.addresses.clone(),
+        true,
+        true,
+        CONTRACT_API_SECRET.to_owned(),
+        false,
+        None,
+    )
+    .await
+    .expect("fixture client");
+    for result in client
+        .batch(include_str!("../fixtures/session-principal-local.sql"))
+        .await
+        .expect("local fixture")
+    {
+        result.expect("local seed");
+    }
+    let statements: Vec<(String, hiqlite::Params)> = MEDIA_SESSION_PRINCIPAL_REBUILD_SCHEMA
+        .split("-- next statement\n")
+        .map(|sql| {
+            (
+                sql.trim().trim_end_matches(';').to_owned(),
+                hiqlite::params!(),
+            )
+        })
+        .collect();
+    for result in client.txn(statements).await.expect("candidate transaction") {
+        result.expect("candidate rebuild");
+    }
+    for result in client
+        .batch(include_str!("../fixtures/session-principal-sharing.sql"))
+        .await
+        .expect("shared fixture")
+    {
+        result.expect("shared seed");
+    }
+    let activation = current_media_session(
+        &store,
+        1,
+        "activation-runtime",
+        "00000000-0000-4000-a000-000000000100",
+        "00000000-0000-4000-a000-000000000101",
+        "rebuilt activation",
+    )
+    .await;
+    let local = PlaybackPrincipal::LocalUser { user_id: 1 };
+    let replay = store
+        .activate_media_session(&activation)
+        .await
+        .expect("exact activation replay")
+        .expect("owned activation outcome");
+    assert_eq!(replay.route.principal, local);
+    assert_eq!(replay.route.publication_ready_at_ms, 0);
+    assert_eq!(request_rows(&client, "SELECT owner_key || ':' || principal_kind || ':' || user_id AS value FROM media_sessions WHERE playback_id='activation-runtime'").await, ["local:1:local:1"]);
+    assert_eq!(request_rows(&client, "SELECT owner_key || ':' || principal_kind || ':' || user_id AS value FROM media_playback_pointers WHERE playback_id='activation-runtime'").await, ["local:1:local:1"]);
+    client.execute("INSERT INTO job_leases(resource,owner_node_id,fence,revision,expires_at_ms,updated_at_ms) VALUES('session:' || $1,'node',1,3,9000,10)", hiqlite::params!(SHARED_ROUTE)).await.expect("foreign job lease");
+    let mut collision = activation.clone();
+    collision.incarnation_id = SHARED_ROUTE.to_owned();
+    collision.session_id = "00000000-0000-4000-a000-000000000102".to_owned();
+    collision.owner_node_id = "node".to_owned();
+    collision.now_ms = 2000;
+    assert!(store
+        .activate_media_session(&collision)
+        .await
+        .expect("foreign incarnation refusal")
+        .is_none());
+    assert_eq!(request_rows(&client, "SELECT CAST(revision AS TEXT) || ':' || expires_at_ms || ':' || updated_at_ms AS value FROM job_leases WHERE resource='session:00000000-0000-4000-a000-000000000001'").await, ["3:9000:10"]);
+    assert_eq!(request_rows(&client, "SELECT state AS value FROM media_sessions WHERE incarnation_id='00000000-0000-4000-a000-000000000001'").await, ["active"]);
+    let mut missing = activation.clone();
+    missing.principal = PlaybackPrincipal::LocalUser { user_id: 2 };
+    missing.incarnation_id = "00000000-0000-4000-a000-000000000103".to_owned();
+    missing.session_id = "00000000-0000-4000-a000-000000000104".to_owned();
+    assert!(store
+        .activate_media_session(&missing)
+        .await
+        .expect("missing activation owner refusal")
+        .is_none());
+    assert_eq!(request_rows(&client, "SELECT CAST(count(*) AS TEXT) AS value FROM job_leases WHERE resource='session:00000000-0000-4000-a000-000000000103'").await, ["0"]);
+    missing.principal = PlaybackPrincipal::sharing(
+        uuid::Uuid::parse_str(SHARED_ROUTE).expect("grant"),
+        &"a".repeat(64),
+    )
+    .expect("shared principal");
+    assert!(store.activate_media_session(&missing).await.is_err());
 }

@@ -2049,3 +2049,19 @@ complete job-lease revision/expiry/update tuple survive the abort attempt in
 both memory and pooled disk stores. Pinned all-target compilation and
 denied-warning feature Clippy passed; schema installation, Shared admission
 and upgrade/rollback qualification remain open.
+
+**Activation integration checkpoint:** both backends now persist complete
+Local principal metadata on activation and canonical pointer conflicts,
+requests and publication. SQLite checks current user existence within its
+transaction and refuses a current pointer that names another owner/playback.
+Both implementations preserve a foreign Shared route's job lease when a
+Local activation collides with its incarnation. Confirmation and exact replay
+retain the committed route; request-backed publication retains its canonical
+request identity. Shared activation remains explicitly refused.
+
+Pinned all-target compilation passed on the combined tree (33.49 seconds).
+All 14 SQLite ownership cases passed (14.43 seconds), all three actual-voter
+candidate runtime cases passed (36.41 seconds), and all 28 existing lifecycle
+contracts passed (257.61 seconds), with zero ignored tests. Denied-warning
+feature Clippy passed (39.02 seconds). The candidate schema remains
+uninstalled; this receipt does not qualify Shared admission or rollout.
