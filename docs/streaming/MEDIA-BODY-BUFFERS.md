@@ -222,27 +222,32 @@ number.
 
 ### 3.2 M2 — batch the acknowledgement, keep what it proves
 
-Later milestone in this PR, with its own tests. The change is in the pump
-loop only: instead of one `DrivenLocalChunk` per read, accumulate reads into
-a batch of at most
-`MEDIA_BODY_ACK_BATCH_BYTES = 1 MiB` (or until `reader.next()` would block —
-use `poll_next` with `Poll::Pending` as the batch boundary, never a timer),
-send the batch as one chunk, and wait for one ack. Then:
+The video-quality batch reconciles M2 with Decision 5: each storage read
+(up to 128 KiB) crosses the existing capacity-one channel once. The body
+retains that batch and emits at most 4 KiB per poll, updating one watch channel
+with the cumulative number of bytes actually taken. The producer accounts
+only the delta between observed counts; multiple consumer polls can coalesce
+into one producer wakeup without crediting any unpolled bytes.
 
-- item 1 holds: `note`/`note_read` are called once per *batch* with the
-  batch's byte count, still after the ack;
-- item 2 holds: the last batch ends at `len`; completion runs when
-  `delivered == len` after that ack, and a short read is still
-  `UnexpectedEof`;
-- items 3–6 are untouched: the selects, deadlines, terminal and ownership
-  do not move;
-- item 7: `note_read` receives the batch's elapsed time and byte count; the
-  normalised guard from §3.1 makes that meaningful.
+This removes up to 32 per-piece channel allocations and mandatory task round
+trips per full storage read. It does not claim fewer socket writes or packets:
+the public body still yields 4 KiB frames. No new buffering threshold, timer,
+watchdog, queue capacity or speculative read is introduced.
 
-What M2 must **not** do: send a batch before the reader has produced it
-(no speculative sizing), change `LOCAL_MEDIA_BODY_CHANNEL_CAPACITY`, or
-move accounting ahead of the ack. `driven_local_body` is unchanged: it
-already handles a chunk of any size.
+Both lifetime and producer-failure fences run before every body piece,
+including pieces retained across polls. The producer continues to own the
+file, authorization, completion permit and no-progress deadline. A dropped
+body leaves its final cumulative count observable before the acknowledgement
+channel closes, so the exact accepted prefix is counted. Only the advertised
+full length settles completion. Storage latency is reported once per read,
+after the first acknowledged piece, using the original read length and time.
+
+Earlier text proposing a 1 MiB delivery acknowledgement is superseded by this
+protocol. Increasing the delivery-proof unit remains inadmissible. Existing
+partial-read, expiry, cancellation and completion regressions remain; added
+cases exercise draining without producer round trips, coalesced final counts,
+partial drop and failure while a batch is pending. Runtime/performance checks
+follow the final review under the programme's user-approved batch workflow.
 
 ## 4. Guardrails (non-goals)
 

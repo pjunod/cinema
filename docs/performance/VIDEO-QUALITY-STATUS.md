@@ -17,11 +17,11 @@ effort only. Whole-suite unit repair remains with the separate process.
 | Work | Current state | Cause and architectural direction |
 |---|---|---|
 | Independent workspace | Ready | `/private/tmp/plurx-video-quality-build-20261003`, cloned directly from Forgejo; no borrowed Git objects or access to Paul's checkout. |
-| Consolidated branch | Building | `codex/video-quality-batch`, based on `d17efeedf`; retaining all three tool branches and their meaningful regression cases. |
+| Consolidated branch | Building | [PR #766](http://192.168.4.7:3000/noirr/plurx/pulls/766), `codex/video-quality-batch`, based on `d17efeedf`; commit `6ef61fb1f` retains all three tool branches. PRs #760/#761/#762 are closed as superseded. |
 | Old per-task CI | Stopped | Encoder run 3936 passed; still-running C1/HDR runs 3938/3942 were cancelled after the workflow override. No additional per-task test campaigns. |
 | Content-aware runtime C2 | Implementing | Existing durable jobs/resource admission and offline/pretranscode snapshots; no analysis on Play and no generic complexity bias. |
 | Next episode | Implementing | Current web path discovers successor and builds its model only after ended; move bounded read-only resolution earlier within the existing playback lifecycle. Same-file prepared-replacement sessions are not a cross-episode owner. |
-| HLS acknowledgement batching | Diagnosing/implementing | Current pump allocates and schedules a separate channel acknowledgement for every 4 KiB despite 128 KiB storage reads; preserve the 4 KiB proof while reducing coordination, rather than weakening accounting. |
+| HLS acknowledgement batching | Implemented, validation deferred | Current pump allocates and schedules a separate channel acknowledgement for every 4 KiB despite 128 KiB storage reads; preserve the 4 KiB proof while reducing coordination, rather than weakening accounting. |
 | Remaining 2, 6, 3, 4 | Queued | Retain measured encoder baseline; presentation-grid B-frame work; one executable broader codec tuple; measured remaining startup critical path. |
 
 The agent's first pinned Rust 1.97.1 compile check in the independent clone
