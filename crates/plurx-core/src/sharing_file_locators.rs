@@ -89,6 +89,16 @@ fn positive_id(value: &SourceId) -> Result<i64, StoreError> {
         .ok_or_else(invalid)
 }
 impl FileLocatorKey {
+    pub(crate) fn art_context(&self) -> (Uuid, Uuid) {
+        (self.receiver, self.epoch)
+    }
+    pub(crate) fn art_signature(&self, bytes: &[u8]) -> ring::hmac::Tag {
+        let key = ring::hmac::Key::new(ring::hmac::HMAC_SHA256, &self.key);
+        let mut context = ring::hmac::Context::with_key(&key);
+        context.update(b"plurx.sharing.receiver-art-resource.v1\0");
+        context.update(bytes);
+        context.sign()
+    }
     pub fn generate_sealed(
         credential: &CredentialKey,
         identity: &SharingIdentity,

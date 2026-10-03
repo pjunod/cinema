@@ -802,3 +802,176 @@ async fn sharing_catalogue_file_witness_three_voters_binds_current_file_and_refu
         SourceDetailsRead::Unavailable
     ));
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn sharing_art_snapshot_three_voters_uses_current_grant_selection_and_refuses_capacity() {
+    use plurx_core::{
+        sharing_artwork::{artwork_expiry, ArtKind, ArtVariant, SourceArtReference},
+        store::{sharing_catalogue_artwork::SourceArtRead, SharingSourceArtworkStore},
+    };
+    let _case = HIQLITE_CASE.lock().await;
+    let cluster = ContractCluster::start().await;
+    let store = open_contract_hiqlite_store(&cluster).await;
+    let client = hiqlite::Client::remote(
+        cluster.addresses.clone(),
+        true,
+        true,
+        CONTRACT_API_SECRET.to_owned(),
+        false,
+        None,
+    )
+    .await
+    .expect("snapshot client");
+    let identity = store.sharing_identity(1000).await.expect("source identity");
+    let library = store
+        .create_library(&NewLibrary {
+            name: "Source files".into(),
+            kind: LibraryKind::Movies,
+            paths: vec![PathBuf::from("/synthetic")],
+            anime: false,
+        })
+        .await
+        .expect("library")
+        .id;
+    let grant = Uuid::new_v4();
+    let recipient = Uuid::new_v4();
+    let invitation = Uuid::new_v4();
+    store
+        .create_share_invitation(InvitationRecord {
+            id: invitation,
+            token_hash: "a".repeat(64),
+            library_ids: vec![library],
+            created_at_ms: 1000,
+            expires_at_ms: 2000,
+        })
+        .await
+        .expect("invite");
+    store
+        .claim_share(ShareClaim {
+            invitation_id: invitation,
+            invitation_hash: "a".repeat(64),
+            claim_id: Uuid::new_v4(),
+            grant_id: grant,
+            recipient_server_id: recipient,
+            recipient_name: "synthetic".into(),
+            credential_hash: "b".repeat(64),
+            now_ms: 1001,
+        })
+        .await
+        .expect("claim");
+    store.approve_share(grant, 1, 1002).await.expect("approve");
+    for result in client
+        .txn(
+            candidate_statements()
+                .into_iter()
+                .chain(candidate_item_identity_statements())
+                .map(|sql| (sql, hiqlite::params!()))
+                .collect::<Vec<_>>(),
+        )
+        .await
+        .expect("candidate layout")
+    {
+        result.expect("layout statement");
+    }
+    client.execute("INSERT INTO items(id,library_id,kind,title,sort_title,added_at,updated_at) VALUES(9007199254740993,$1,'movie','Source movie','movie',1000,1000)",hiqlite::params!(library)).await.expect("durable movie");
+
+    client.execute("UPDATE items SET poster_path='private-safe.png',backdrop_path='private-backdrop.jpg' WHERE id=9007199254740993",hiqlite::params!()).await.expect("private internal names");
+    let reference = SourceArtReference {
+        server_id: identity.server_id,
+        catalogue_epoch: identity.catalogue_epoch,
+        grant_id: grant,
+        library_id: SourceId::parse(&library.to_string()).expect("library"),
+        item_id: SourceId::parse("9007199254740993").expect("large ID"),
+        kind: ArtKind::Poster,
+        variant: ArtVariant::Original,
+        expires_at_ms: artwork_expiry(1700000000000).expect("trusted fixture clock"),
+    };
+    let SourceArtRead::Authorized(snapshot) = store
+        .source_art_snapshot(&"b".repeat(64), grant, &reference)
+        .await
+        .expect("consistent read")
+    else {
+        panic!("current asset absent");
+    };
+    assert_eq!(snapshot.filename(), "private-safe.png");
+    assert_eq!(snapshot.identity().created_at_ms, identity.created_at_ms);
+    assert!(matches!(
+        store
+            .source_art_snapshot(&"c".repeat(64), grant, &reference)
+            .await
+            .expect("wrong credential"),
+        SourceArtRead::Unavailable
+    ));
+    let mut foreign = reference.clone();
+    foreign.catalogue_epoch = Uuid::new_v4();
+    assert!(matches!(
+        store
+            .source_art_snapshot(&"b".repeat(64), grant, &foreign)
+            .await
+            .expect("wrong epoch"),
+        SourceArtRead::Unavailable
+    ));
+    client
+        .execute(
+            "UPDATE items SET poster_path=hex(zeroblob(129)) WHERE id=9007199254740993",
+            hiqlite::params!(),
+        )
+        .await
+        .expect("oversized private projection");
+    assert!(matches!(
+        store
+            .source_art_snapshot(&"b".repeat(64), grant, &reference)
+            .await
+            .expect("bound before JSON"),
+        SourceArtRead::Capacity
+    ));
+    client
+        .execute(
+            "UPDATE items SET poster_path='../private.png' WHERE id=9007199254740993",
+            hiqlite::params!(),
+        )
+        .await
+        .expect("malformed private name");
+    assert!(store
+        .source_art_snapshot(&"b".repeat(64), grant, &reference)
+        .await
+        .is_err());
+    client
+        .execute(
+            "UPDATE items SET poster_path='private-safe.png' WHERE id=9007199254740993",
+            hiqlite::params!(),
+        )
+        .await
+        .expect("restore");
+    client
+        .execute(
+            "UPDATE item_identity_watermark SET importing=1 WHERE singleton=1",
+            hiqlite::params!(),
+        )
+        .await
+        .expect("internal import fence");
+    assert!(
+        store
+            .source_art_snapshot(&"b".repeat(64), grant, &reference)
+            .await
+            .is_err(),
+        "actual replicated readiness refuses import mode"
+    );
+    client
+        .execute(
+            "UPDATE item_identity_watermark SET importing=0 WHERE singleton=1",
+            hiqlite::params!(),
+        )
+        .await
+        .expect("restore import fence");
+    store.revoke_share(grant, 3000).await.expect("revoke");
+    assert!(matches!(
+        store
+            .source_art_snapshot(&"b".repeat(64), grant, &reference)
+            .await
+            .expect("revoked"),
+        SourceArtRead::Unavailable
+    ));
+    drop(client);
+    drop(store);
+}
