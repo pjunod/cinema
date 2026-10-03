@@ -650,9 +650,11 @@ function qualityLabel(){
 }
 
 async function play(fileId, title, resumeMs, knownDurMs, meta, reservedOpenAttempt, retryIntent){
+  const fileContext=playbackFileContextForPlay(fileId,meta);
+  meta={...(meta||{}),fileContext};
   const beginning=beginPlayAttempt(fileId,title,resumeMs,knownDurMs,meta,reservedOpenAttempt,retryIntent);
   const inputs=capturePlayInputs(fileId,meta,retryIntent);
-  const attempt=Object.freeze({...beginning,...inputs,fileId,title,resumeMs,knownDurMs,meta});
+  const attempt=Object.freeze({...beginning,...inputs,fileContext,fileId,title,resumeMs,knownDurMs,meta});
   const {modal,playerWasOpen}=attempt;
   document.getElementById("playTitle").textContent=title;
   modal.classList.add("open");
@@ -697,17 +699,17 @@ function beginPlayAttempt(fileId,title,resumeMs,knownDurMs,meta,reservedOpenAtte
     if(!openIsCurrent()) return;
     preparation.finish();
     const wanted=PLAYER;
-    const latest=wanted?.fileId===fileId;
+    const latest=samePlaybackFile(wanted,fileId,meta);
     const retry={fileId,title,knownDurMs,meta,predecessor,
       resumeMs:latest&&wanted.controlSeek?Math.round(wanted.controlSeek.targetMs):resumeMs,
       wantsPlayback:fullIntent.wantsPlayback,
-      selection:latest?playbackSelection(wanted,fileId):attempt.selection,
+      selection:latest?playbackSelection(wanted,meta.fileContext||fileId):attempt.selection,
       audioOffsetMs:latest?(wanted.aoffset||0):attempt.sessionAudioOffset};
     play.failedPreparation=retry;
     if(play.pendingIntent===fullIntent)play.pendingIntent=null;
     if(predecessor){
       PLAYER=predecessor;
-      if(latest&&predecessor.fileId===fileId){
+      if(latest&&samePlaybackFile(predecessor,fileId,meta)){
         const audio=selectedAudioIndex(wanted);
         Object.assign(predecessor,{wantsPlayback:wanted.wantsPlayback,
           controlSeek:wanted.controlSeek,controlSeekSequence:wanted.controlSeekSequence,
@@ -751,7 +753,7 @@ function beginPlayAttempt(fileId,title,resumeMs,knownDurMs,meta,reservedOpenAtte
     PLAYER.retiringOpenAttempt=openAttempt;
   }
   if(predecessor)predecessor.retiringOpenAttempt=openAttempt;
-  const inputPlayer=PLAYER&&PLAYER.fileId===fileId
+  const inputPlayer=samePlaybackFile(PLAYER,fileId,meta)
     &&document.getElementById("modal")?.classList.contains("open")?PLAYER:null;
   if(inputPlayer){
     rememberPlaybackTransportIntent(document.getElementById("video"),inputPlayer);
@@ -775,13 +777,13 @@ function capturePlayInputs(fileId,meta,retryIntent){
   // keeps its correction. A different title, or a player that was closed,
   // starts clean at zero.
   const sessionAudioOffset=retryIntent?.audioOffsetMs??
-    (PLAYER&&PLAYER.fileId===fileId ? (PLAYER.aoffset||0) : 0);
-  const replacementBandwidthSeed=PLAYER&&PLAYER.fileId===fileId
+    (samePlaybackFile(PLAYER,fileId,meta) ? (PLAYER.aoffset||0) : 0);
+  const replacementBandwidthSeed=samePlaybackFile(PLAYER,fileId,meta)
     ? PlaybackPolicy.bandwidthSeedBps({
         outgoingEstimateBps:PLAYER.hls&&PLAYER.hls.bandwidthEstimate,
         priorKbps:PLAYER.priorKbps})
     : null;
-  const continuingPlayback=!!(PLAYER&&PLAYER.fileId===fileId);
+  const continuingPlayback=!!(samePlaybackFile(PLAYER,fileId,meta));
   const carriedSeek=retryIntent?.controlSeek||(continuingPlayback&&PLAYER.controlSeek);
   const replacementControlSeek=carriedSeek
     ? Object.assign({},carriedSeek,{executed:false,frameFloor:0,audioPositionMs:null})
@@ -794,7 +796,7 @@ function capturePlayInputs(fileId,meta,retryIntent){
     ? (PLAYER.controlIntentGeneration||0) : 0;
   // The track choice this playback runs with: the detail screen's pickers on a
   // cold start, what is already playing on an internal reopen.
-  const selection=retryIntent?.selection??playbackSelection(PLAYER, fileId);
+  const selection=retryIntent?.selection??playbackSelection(PLAYER, meta&&meta.fileContext||fileId);
   const modal=document.getElementById("modal"), video=document.getElementById("video");
   const playerWasOpen=modal.classList.contains("open");
   const playerOpener=playerWasOpen?(PLAYER&&PLAYER._opener):document.activeElement;
@@ -821,7 +823,7 @@ async function decideForPlay(attempt){
   // play. Asking for the policy default and correcting afterwards is what used
   // to force a remux over a perfectly decodable audio choice.
   let decision;
-  try{ decision=await preparation.run(signal=>askDecision(fileId, qualityForce(), requestSelection,signal));}
+  try{ decision=await preparation.run(signal=>askDecision(attempt.fileContext||fileId, qualityForce(), requestSelection,signal));}
   catch(e){failPreparation(e,attempt);return null;}
   if(!openIsCurrent()) return null;
   let retestDecodeLimit=false;
@@ -856,7 +858,7 @@ async function decideForPlay(attempt){
         // would hand the learned-limit transcode the policy default audio and
         // silently discard the viewer's choice on exactly the devices that need
         // the transcode most.
-        const d2=await preparation.run(signal=>askDecision(fileId,"transcode",requestSelection,signal));
+        const d2=await preparation.run(signal=>askDecision(attempt.fileContext||fileId,"transcode",requestSelection,signal));
         if(!openIsCurrent()) return null;
         learnedLimitView=PlaybackPolicy.learnedDecodeLimitView({
           source:decision.source||{},limit:lim,ordinaryRange,
@@ -928,7 +930,7 @@ function buildPlayer(attempt,decided,prepared){
     replacementControlIntentGeneration,replacementControlSequenceFloor,clickedAt,
     openAttempt,fullIntent,selection}=attempt;
   const {src,book,preBurn,ladder,priorKbps,autoStartHeight,outgoing}=prepared;
-  return {fileId, timer:null, offset:0, hls:null, knownDur:knownDurMs||0,
+  return {fileId, fileContext:attempt.fileContext||localPlaybackFileContext(fileId), timer:null, offset:0, hls:null, knownDur:knownDurMs||0,
     decodeRetest:retestDecodeLimit,
     durMs:(src.duration_ms||knownDurMs||0), method:decision.method, encoder:null,
     capsSnapshot:decision._capsSnapshot||currentCapsDocument(),
@@ -993,7 +995,7 @@ function buildPlayer(attempt,decided,prepared){
       // persisted: a transient server failure must not cap quality forever.
       failedHeights:new Set()},
     waitAt:null, waitStartedRunway:null, waitTimer:null, waitReported:false,
-    stallsByKind:null, stallRecoveries:outgoing&&outgoing.fileId===fileId?(outgoing.stallRecoveries||0):0, recoveringStall:null,
+    stallsByKind:null, stallRecoveries:samePlaybackFile(outgoing,fileId,meta)?(outgoing.stallRecoveries||0):0, recoveringStall:null,
     // The presenter's state, shared by every player object this page has: the
     // overlay is one element with one history and identity is the generation
     // each fault carries (PLAYBACK-SURFACE-CONTRACT.md §3.1).
@@ -1100,7 +1102,7 @@ function attachPlayRoute(attempt,decided,prepared,openedPlayer,openIsAttached,in
     const options=transcodeOpts(startSec,initialAudio);
     const retryContext=playbackCreateRetryContext();
     let info; try{info=await preparation.run(
-      signal=>openSessionRetryingNotYet(fileId,options,signal,{context:retryContext,preparation}),
+      signal=>openSessionRetryingNotYet(attempt.fileContext||fileId,options,signal,{context:retryContext,preparation}),
       late=>releaseSession(late&&late.session_id));}catch(e){
       if(openIsAttached())failPreparation(e,attempt);
       return false;
@@ -1160,15 +1162,12 @@ function attachPlayRoute(attempt,decided,prepared,openedPlayer,openIsAttached,in
     if(isRemux){
       if(decision.method==='direct_play') PLAYER.method='remux';
       PLAYER.offset=startSec;
-      const base=decision.method==='direct_play'
-        ? `/api/v1/files/${fileId}/stream.mp4`
-        : decision.play_url;
-      url=remuxUrl(base, initialAudio, startSec);
-      PLAYER.probeUrl=decision.play_url; armStall(startSec);
+      url=remuxUrl(playbackFileContextForPlayer(PLAYER), initialAudio, startSec);
+      PLAYER.probeUrl=playbackFileDecisionMediaUrl(playbackFileContextForPlayer(PLAYER),decision.play_url); armStall(startSec);
     } else {
-      url=tok(decision.play_url);
+      url=tok(playbackFileDecisionMediaUrl(playbackFileContextForPlayer(PLAYER),decision.play_url));
       PLAYER.directUrl=url;
-      PLAYER.probeUrl=decision.play_url;
+      PLAYER.probeUrl=playbackFileDecisionMediaUrl(playbackFileContextForPlayer(PLAYER),decision.play_url);
       armStall(startSec);
     }
     retireOutgoing();
@@ -1289,7 +1288,7 @@ async function executePlaybackMediaChange(p,change){
       // point: which context a create is in is decided in ONE place, not by
       // which branch of this function happened to call which function.
       const info=await preparation.run(
-        signal=>openSessionRetryingNotYet(p.fileId,opts,signal,{preparation}),
+        signal=>openSessionRetryingNotYet(playbackFileContextForPlayer(p),opts,signal,{preparation}),
         late=>releaseSession(late&&late.session_id));
       if(!live()){ releaseSession(info&&info.session_id); return false; }
       retirePlaybackPredecessor(p);
@@ -1305,8 +1304,8 @@ async function executePlaybackMediaChange(p,change){
       retirePlaybackPredecessor(p);
       teardownHls(); resetMediaSource(v); clearSubs(v);
       p.started=false; p.method='remux'; p.copyHls=false; p.offset=pos;
-      p.probeUrl=`/api/v1/files/${p.fileId}/stream.mp4`;
-      setPlaybackMediaSource(v,remuxUrl(`/api/v1/files/${p.fileId}/stream.mp4`,audio,pos));
+      p.probeUrl=playbackFileUrl(playbackFileContextForPlayer(p),"stream.mp4");
+      setPlaybackMediaSource(v,remuxUrl(playbackFileContextForPlayer(p),audio,pos));
       markPlaybackControlSeekExecuted(p,pos);
       armStall(pos,20000); applyPlaybackTransportIntent(v,p);
     }
@@ -1407,7 +1406,7 @@ async function startCopyHls(v, startSec, live, openAttempt, preparation, beforeA
       new Error("A copy-HLS open needs a preparation owner to bound and cancel it."),
       {name:"TypeError"});
     info=await preparation.run(
-      signal=>openSessionRetryingNotYet(fileId,options,signal,retry),
+      signal=>openSessionRetryingNotYet(playbackFileContextForPlayer(PLAYER),options,signal,retry),
       late=>releaseSession(late&&late.session_id));
   }catch(error){
     if(live && !live()) return false;
@@ -1422,9 +1421,9 @@ async function startCopyHls(v, startSec, live, openAttempt, preparation, beforeA
     // unplayable title. Safari/native HLS is excluded by the policy above.
     const from=startSec||0;
     if(beforeAttach)beforeAttach();
-    const base=`/api/v1/files/${PLAYER.fileId}/stream.mp4`;
+    const context=playbackFileContextForPlayer(PLAYER);
     PLAYER.method='remux'; PLAYER.copyHls=false; PLAYER.offset=from;
-    PLAYER.probeUrl=base;
+    PLAYER.probeUrl=playbackFileUrl(context,"stream.mp4");
     clearStreamFailure();
     clientLog(Object.assign({level:"warn",event:"stream_route_fallback",
       detail:"vod_index_pending",
@@ -1434,7 +1433,7 @@ async function startCopyHls(v, startSec, live, openAttempt, preparation, beforeA
       detail:"the HLS index is still building — remuxing without segmentation"});
     resetMediaSource(v);
     if(live && !live()) return false;
-    setPlaybackMediaSource(v,remuxUrl(base,aidx,from));
+    setPlaybackMediaSource(v,remuxUrl(context,aidx,from));
     markPlaybackControlSeekExecuted(PLAYER,from);
     armStall(from,20000); applyPlaybackTransportIntent(v,PLAYER);
     return true;

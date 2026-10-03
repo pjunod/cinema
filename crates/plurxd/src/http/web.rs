@@ -64,6 +64,7 @@ pub const WEB_ASSETS: &[(&str, WebAsset, &str)] = &[
     ("hls.min.js",                             WebAsset::BodyScript,  include_str!("../web/hls.min.js")),
     ("core/app.js",                            WebAsset::BodyScript,  include_str!("../web/core/app.js")),
     ("core/api.js",                            WebAsset::BodyScript,  include_str!("../web/core/api.js")),
+    ("core/file-context.js",                   WebAsset::BodyScript,  include_str!("../web/core/file-context.js")),
     ("player/measurements.js",                 WebAsset::BodyScript,  include_str!("../web/player/measurements.js")),
     ("core/auth.js",                           WebAsset::BodyScript,  include_str!("../web/core/auth.js")),
     ("core/keyboard-reach.js",                 WebAsset::BodyScript,  include_str!("../web/core/keyboard-reach.js")),

@@ -18,7 +18,8 @@
  * @typedef {Object} Player
  *
  * Identity and the decision
- * @property {number|null} fileId          the media file being played
+ * @property {number|string|null} fileId          the media file being played
+ * @property {Object} [fileContext]             explicit B-relative file identity
  * @property {string} [title]
  * @property {any} [meta]                  the item card's metadata (book parts, poster, episode facts)
  * @property {string} [method]             direct_play | remux | transcode — mutates as the session moves

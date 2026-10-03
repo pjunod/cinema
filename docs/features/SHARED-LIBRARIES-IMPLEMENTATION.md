@@ -1473,8 +1473,8 @@ implied by the build handoff.
 | S3 | implementation started; ownership migration open | `codex/sharing-s3-principals` (unpublished) | Canonical Local writers, complete principal reads and seven-table candidate rebuild implemented; ownership and actual-voter lifecycle regressions passed. Caller refusal and retained-read census are qualified; Shared grant/scope admission, migration installation and coordinated upgrade qualification remain open; §16.4 records the boundaries. |
 | S4 | source catalogue and private history candidates implemented; qualification pending | `codex/sharing-s4-catalogue` | Consistent live keysets and batch metadata, candidate order maintenance and durable item identities, peer metadata routes and receiver-only ordered history. Viewer/cache/artwork/details, activation floor and qualification remain open. |
 | S5 | bounded resource grammar candidate built; relay and admission open | `codex/sharing-s3-principals` (unpublished) | Current-engine relative HLS grammar and generator/escape regressions passed; no Shared producer, relay or signed file locator is enabled. |
-| S6 | not started | — | — |
-| S7 | not started | — | — |
+| S6 | file-context foundation integrated; shared UI open | `codex/sharing-s6-file-context` through `4865de285` | Exact Local IDs and immutable full-reference, account-scoped B file contexts cover current file URL callers; full web checks pass. Shared browse/settings/detail/player integration and actual relay playback remain open. |
+| S7 | native ownership census and baseline compiler loops started | `codex/sharing-s7-native-file-context` | Apple/Android file-context and authorization-generation implementation is in progress; no native Shared playback receipt exists. |
 | S8 | not started | — | — |
 
 ## 16. Opus S0 dispositions — corrections are not runtime evidence
@@ -2716,3 +2716,34 @@ Remaining S5 work includes complete start/decision envelope translation,
 Source admission and producer-stop release, the B remote-source lifecycle,
 signed file locators, Range/416/file/subtitle resources, current-login and
 Source revocation cancellation, transport/resource budgets and real playback.
+
+
+### 16.7 S6 file-context integration foundation
+
+The verified parallel checkpoint `4865de285` is integrated after catalogue
+checkpoint `db220b18a` and membership fence `a6a60d53f`. The new plain-script
+[file-context helper](../../crates/plurxd/src/web/core/file-context.js) has its
+asset registration, shell tag and layout index in the same checkpoint.
+Existing file-resource callers retain exact Local decimal identities; generated
+onclick/onchange calls preserve IDs above JavaScript's safe integer range.
+Shared contexts require the full Source reference and a B-relative opaque
+file base from the detail adapter. Their keys include account generation, and
+logout retires them. No numeric Source ID becomes a Local route or cache key.
+
+Typed resource/query builders preserve the current engine vocabulary, including
+named profiles, codec/container lists, Dolby Vision HLS and per-codec height
+limits. Shared native media URLs carry only an exact bound B UUIDv4 session;
+ordinary HLS/control/prepared paths retain their existing namespace. Progress
+and continuation refuse unsupported Shared authority before a Local item
+lookup. Current Source details have no file base, so Shared factories refuse
+that unavailable delivery contract. This foundation does not expose Shared UI
+starts or qualify a producer/relay.
+
+All twelve focused context/caller regressions and the full `make web-check`
+lane passed on the parallel final checkpoint. The combined tree independently
+passed the same full web lane, all four docs-index tests and pinned Rust 1.97.1
+`cargo check --locked --offline -p plurxd --all-targets` (1m04s). The lane
+includes actual shipped caller/control fixtures, asset order/layout, settings,
+JavaScript/TypeScript contracts and the existing documented contrast allowance.
+Shared navigation/settings/details/Continue Watching and end-to-end player
+behavior still require their S4/S5 authority and delivery integrations.
