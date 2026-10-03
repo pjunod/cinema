@@ -113,9 +113,9 @@ pub(super) async fn spawn_generation(
     rendition
         .last_child_pid
         .store(child.id().unwrap_or(0), Relaxed);
-    rendition
+    let (registration, writers) = rendition
         .slot
-        .attach_job_owned(
+        .attach_registered_job_owned(
             child,
             child_job,
             at,
@@ -134,12 +134,58 @@ pub(super) async fn spawn_generation(
     let rendition = Arc::clone(rendition);
     tokio::spawn(async move {
         let key = rendition.key.clone();
-        let (_, diagnostic) = tokio::join!(
-            run_generation(shared, rendition, stdout, at, epoch),
-            crate::ffmpeg::drain_diagnostics(stderr),
+        let (retiring, retired) = tokio::sync::oneshot::channel();
+        let (outcome, diagnostic) = tokio::join!(
+            async {
+                let outcome = run_generation(
+                    Arc::clone(&shared),
+                    Arc::clone(&rendition),
+                    stdout,
+                    at,
+                    epoch,
+                )
+                .await;
+                // Killing starts before diagnostic drain is joined, while the
+                // owned reaper waits for this task's actual writer settlement.
+                let _ = super::driver::request_registered_driver_retirement(
+                    &shared,
+                    &rendition,
+                    &registration,
+                )
+                .await;
+                let _ = retiring.send(());
+                outcome
+            },
+            async {
+                let diagnostic = crate::ffmpeg::drain_diagnostics(stderr);
+                tokio::pin!(diagnostic);
+                tokio::select! {
+                    text=&mut diagnostic=>text,
+                    _=retired=>match tokio::time::timeout(Duration::from_secs(5),&mut diagnostic).await{
+                        Ok(text)=>text,
+                        Err(_)=>"producer diagnostic drain exceeded its retirement deadline".to_owned(),
+                    },
+                }
+            }
         );
+        writers.settled();
+        match rendition
+            .slot
+            .wait_registered_retirement(&registration)
+            .await
+        {
+            Ok(receipt) => {
+                debug_assert!(receipt.matches(&registration));
+            }
+            Err(error) => {
+                tracing::warn!(target:"plurxd::vodserve",%error,"generation retirement was superseded")
+            }
+        }
         if !diagnostic.trim().is_empty() {
-            tracing::warn!(target: "plurxd::vodserve", rendition = %key, generation = epoch, %diagnostic, "VOD producer diagnostic");
+            tracing::warn!(target:"plurxd::vodserve",rendition=%key,generation=epoch,%diagnostic,"VOD producer diagnostic");
+        }
+        if let Some(outcome) = outcome {
+            on_generation_end(&shared, &rendition, outcome, epoch).await;
         }
     });
     tracing::info!(
@@ -296,7 +342,7 @@ async fn run_generation(
     stdout: tokio::process::ChildStdout,
     at: u32,
     epoch: u64,
-) {
+) -> Option<Outcome> {
     let mut stdout = stdout;
     let need_pre_read = {
         let identity = rendition.identity.lock().await;
@@ -309,20 +355,13 @@ async fn run_generation(
         // stream (it verifies the init itself before a single write).
         match read_muxer_init(&mut stdout).await {
             Err(error) => {
-                on_generation_end(
-                    &shared,
-                    &rendition,
-                    Outcome::Failed(Failure::Stream(format!(
-                        "reading the generation's init: {error}"
-                    ))),
-                    epoch,
-                )
-                .await;
-                return;
+                return Some(Outcome::Failed(Failure::Stream(format!(
+                    "reading the generation's init: {error}"
+                ))));
             }
             Ok((consumed, muxer)) => {
-                if !establish_or_verify(&shared, &rendition, &muxer, epoch).await {
-                    return;
+                if let Err(outcome) = establish_or_verify(&rendition, &muxer).await {
+                    return Some(outcome);
                 }
                 Box::new(std::io::Cursor::new(consumed).chain(stdout))
             }
@@ -337,7 +376,7 @@ async fn run_generation(
             // The pre-read established it, or the rendition already had it;
             // reaching here without one is the pre-read having purged and
             // bailed, which returns above.
-            None => return,
+            None => return None,
         }
     };
     let generation = Generation {
@@ -363,28 +402,16 @@ async fn run_generation(
         epoch,
     };
     let outcome = vodgen::run(src, generation, &sink, &rendition.key).await;
-    on_generation_end(&shared, &rendition, outcome, epoch).await;
+    Some(outcome)
 }
 
 /// The identity half of a pre-read generation. `false` means the generation
 /// is over (drift handled or failure recorded) and the caller must return.
-async fn establish_or_verify(
-    shared: &Arc<Shared>,
-    rendition: &Arc<Rendition>,
-    muxer: &Init,
-    epoch: u64,
-) -> bool {
+async fn establish_or_verify(rendition: &Arc<Rendition>, muxer: &Init) -> Result<(), Outcome> {
     if !recipe_engine_is_current(&rendition.recipe).await {
-        on_generation_end(
-            shared,
-            rendition,
-            Outcome::Failed(Failure::EngineChanged(
-                "the immutable media engine changed before init publication".to_owned(),
-            )),
-            epoch,
-        )
-        .await;
-        return false;
+        return Err(Outcome::Failed(Failure::EngineChanged(
+            "the immutable media engine changed before init publication".to_owned(),
+        )));
     }
     let served = {
         let mut state = rendition.identity.lock().await;
@@ -400,14 +427,7 @@ async fn establish_or_verify(
                         );
                     }
                     drop(state);
-                    on_generation_end(
-                        shared,
-                        rendition,
-                        Outcome::Failed(Failure::InitDrift(refused.to_string())),
-                        epoch,
-                    )
-                    .await;
-                    return false;
+                    return Err(Outcome::Failed(Failure::InitDrift(refused.to_string())));
                 }
             },
             None => {
@@ -422,16 +442,9 @@ async fn establish_or_verify(
                     Ok(identity) => identity,
                     Err(error) => {
                         drop(state);
-                        on_generation_end(
-                            shared,
-                            rendition,
-                            Outcome::Failed(Failure::Stream(format!(
-                                "establishing the init identity: {error}"
-                            ))),
-                            epoch,
-                        )
-                        .await;
-                        return false;
+                        return Err(Outcome::Failed(Failure::Stream(format!(
+                            "establishing the init identity: {error}"
+                        ))));
                     }
                 };
                 let served = identity
@@ -453,18 +466,11 @@ async fn establish_or_verify(
         }
     };
     if let Err(error) = rendition.dir.write_init(&served.bytes).await {
-        on_generation_end(
-            shared,
-            rendition,
-            Outcome::Failed(Failure::Sink(error)),
-            epoch,
-        )
-        .await;
-        return false;
+        return Err(Outcome::Failed(Failure::Sink(error)));
     }
     rendition.clear_demand(INIT_DEMAND_INDEX);
     rendition.init_notify.notify_waiters();
-    true
+    Ok(())
 }
 
 /// What a generation's ending means for the rendition.
@@ -488,15 +494,6 @@ async fn on_generation_end(
         AcqRel,
         Acquire,
     );
-    // Reap the child so the belief goes honestly absent, keeping its progress.
-    let _ = perform_driver_step(
-        shared,
-        rendition,
-        Step::Terminate {
-            why: Termination::Idle,
-        },
-    )
-    .await;
     match outcome {
         Outcome::Failed(Failure::InitDrift(cause)) => {
             on_init_drift(shared, rendition, cause).await;

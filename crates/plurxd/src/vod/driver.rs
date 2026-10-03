@@ -156,6 +156,27 @@ pub(super) fn notify_new_vod_live_wait(
     }
 }
 
+pub(super) async fn request_registered_driver_retirement(
+    shared: &Shared,
+    rendition: &Rendition,
+    generation: &crate::prodrun::ProducerRegistration,
+) -> std::io::Result<()> {
+    if rendition
+        .slot
+        .request_registered_retirement(generation)
+        .await?
+    {
+        record_performed_step(
+            shared,
+            rendition,
+            Step::Terminate {
+                why: Termination::Idle,
+            },
+        );
+    }
+    Ok(())
+}
+
 pub(super) async fn perform_driver_step(
     shared: &Shared,
     rendition: &Rendition,
