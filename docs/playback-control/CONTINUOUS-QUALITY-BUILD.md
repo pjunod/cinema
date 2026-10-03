@@ -5215,3 +5215,37 @@ during both censuses; the owned browser/backend/runtime were then removed.
 This receipt does not prove daemon restart/takeover, physical display/audio
 queue retirement, or the full cancellation/source-shape matrix. The failed
 receipts are retained. No units or final adversarial review ran.
+
+
+### 10.180 · Restart grace, legacy recovery and fresh-family enrollment fix
+
+The short `97967c6ce` daemon restart probe PASSED only its stated short
+observation: the verified owned PID changed, buffered playback advanced
+from 3.533 to 9.501 seconds in the old session, and final playback-or-
+unclassified producers retired. Quality scheduling returned 410. This
+is buffered grace, not successful target or durable-parent recovery.
+
+The extended probe FAILED the stronger same-parent criterion after original
+runway: legacy recovery reopened a new parent, recovered after a 2.5-second
+stall and presented 720p at 44.307 seconds. Its new HLS attachment had no
+continuous family. Two durable session creates were observed. This is a
+forced backend-loss recovery observation, not a healthy quality change.
+The owned restarted daemon and browser/runtime were removed.
+
+Source inspection found the enrollment guard accepted only players with
+no session id, while forced recovery still owns the failed predecessor id
+until its create succeeds. Fix `1a84ce40a` carries that exact predecessor
+identity through the bounded retry sequence and permits a fresh continuous
+family only for a forced recovery of an already continuous attachment.
+Healthy replacements and foreign or legacy predecessor identities retain
+their existing path. The old attachment is not retired before success.
+The focused ownership regression is authored and unrun; there are now 213
+PR regression fields. The normal pinned hook passed. Exact source-only
+Linux compilation and the fresh-family runtime check are in progress.
+
+The latest physical phone retry received Locked, then CoreDevice 4000 /
+remoteService XPC unavailable. No lab process or playback was confirmed;
+its own backend/proxy/runtime and generated launch file were cleaned.
+Physical iOS evidence remains unmeasured. No units or final adversarial
+review ran. Native policy ownership and the promotion-policy conflict
+remain pending human decisions.
