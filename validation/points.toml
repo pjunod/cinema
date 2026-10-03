@@ -1161,6 +1161,7 @@ paths = [
   "crates/plurx-core/src/store/sqlite/sharing.rs",
   "crates/plurx-core/tests/store_contract/sharing.rs",
   "tests/sharing/**",
+  "crates/plurxd/tests/sharing_daemon_restart.rs",
   "docs/features/SHARED-LIBRARIES-*.md",
 ]
 checks = ["rust-gate", "rust-gate-ci", "unit-core", "cluster-auth", "database-upgrades", "credential-encryption", "web-static"]

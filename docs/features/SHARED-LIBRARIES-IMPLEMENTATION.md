@@ -1462,7 +1462,7 @@ implied by the build handoff.
 |---|---|---|---|
 | S0 | contract ready to build | Original `4e81bc38c`, revision `eb9038755`, PR #740 | Opus re-review corrections incorporated in §16; S2/runtime experiments not yet executed |
 | S1 | implemented; task gate pending | `codex/sharing-s1-state` | SQLite v92 / Hiqlite v70; purpose-bound secrets; pairing/rotation/assignment transactions. Five store contracts, 11 sharing unit tests, schema migration parity and 31 import-inventory tests passed; workspace Clippy and catalog lint passed. Task PR/gate remain pending. |
-| S2 | implementation in progress; topology qualification open | `codex/sharing-s2-network` (unpublished) | Dedicated loopback TLS transport, pinned direct dialing and fixed Tailscale DNS, isolated peer/admin routes, durable claim/rotation recovery, authenticated endpoint refresh and advisory Developer switch implemented. Two-NAT, shared-machine Serve and Docker isolation/egress receipts remain open; S2 is not complete. |
+| S2 | implementation in progress; topology qualification open | [draft PR #759](http://192.168.4.7:3000/noirr/plurx/pulls/759) | Dedicated loopback TLS transport, pinned direct dialing and fixed Tailscale DNS, isolated peer/admin routes, durable claim/rotation recovery, authenticated endpoint refresh and advisory Developer switch implemented. Two-NAT, shared-machine Serve and Docker isolation/egress receipts remain open; S2 is not complete. |
 | S3 | not started | — | — |
 | S4 | not started | — | — |
 | S5 | not started | — | — |
@@ -1702,3 +1702,20 @@ status-shaped calls launch no process. The response-loss fixture now owns its
 accepted connections in a JoinSet, and client fixture servers are aborted and
 awaited. The seven ownership-inventory tests passed after this review. The
 changed candidate must pass its focused transport tests and a fresh effort gate.
+
+**Separate-process restart regression:**
+`crates/plurxd/tests/sharing_daemon_restart.rs` starts the shipped daemon twice
+with separate disposable stores, pairs through a raw TCP forwarding fixture
+while retaining the production TLS pin, and restarts the recipient with a
+pending grant. It compares the persisted pairing identity, approves the grant,
+rotates its credential, restarts both processes and authenticates a second
+rotation with the recovered credential. It checks that source identity,
+catalogue epoch, grant/import IDs and SPKI remain stable and that no duplicate
+export appears. Rust 1.97.1 native compilation and denied-warning Clippy passed.
+The explicit CGNAT execution is pending: Docker Desktop stopped answering
+both compiler-run and bounded status requests. No Tailscale or topology receipt
+is implied by this forwarding fixture, even after its process test passes.
+
+```sh
+PLURX_SHARING_FIXTURE_IP=100.127.88.2 cargo test --locked -p plurxd --test sharing_daemon_restart sharing_separate_daemons_preserve_pending_pairing_and_rotation_across_restart -- --ignored --exact --nocapture
+```
