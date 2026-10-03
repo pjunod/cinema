@@ -2525,3 +2525,86 @@ The tracked commit hook remains required before integration.
 Source schema installation, revision-key initialization, capability advertisement,
 receiver body authority/cache/artwork/Continue Watching and S5 delivery remain
 open. This checkpoint does not complete S4 or qualify an admission write.
+
+#### S4 receiver body scope and bounded metadata cache (candidate, open)
+
+The candidate adds POST /sharing/v1/current-scope as an authenticated control
+operation. Its closed 32 KiB request binds the actual grant credential and
+recipient to the expected Source UUID/epoch, at most 64 library IDs, 200
+library/item tuples and 64 library/item/file tuples. One consistent query
+checks every current effective tuple and importing=0; the real closed catalogue
+member floor is checked before and after. The response contains only a current
+authority boolean. It proves neither cached bytes/revisions nor worker or write
+admission. Source control admission is a separate nonqueued pool of 32 permits,
+with a one-second deadline including body reads. No receipt, MAC key, schema
+initializer or capability advertisement is added.
+
+Receiver metadata bodies capture only a hashed local login and bounded authority
+references. A read-only Store query checks the current token/user, idle-expiry
+policy, import lifecycle, Source/epoch, claim/grant and effective assignments;
+monitor reads never renew last_seen_at. Assignment additions and endpoint refresh
+may advance counters while preserving captured effective tuples; generation
+rewind, identity/lifecycle replacement or a lost assignment refuses the proof.
+The control client reloads the current sealed credential and approved endpoints,
+verifies TLS SPKI and Source identity before sending credentials, and checks
+current Source scope. Its whole operation has a one-second deadline and a
+separate 32-permit nonqueued admission pool. Approved numeric hints now race
+bounded Quad100 resolution rather than waiting behind its one-second lookup.
+Each endpoint permits at most four distinct numeric targets, sixteen overall;
+DNS cannot duplicate an in-flight hint or add a generic fallback. Losing dials
+and connection drivers remain owned and are cancelled.
+
+Receiver authority is checked before bounded 4 MiB serialization and again at
+accepted-body admission. A global pool bounds receiver monitors to 32, and the
+accepted connection retains the established 32-monitor registry bound. Current
+login/import/assignment and Source grant/item/file checks run once per second,
+with a one-second deadline for the whole proof. Failures cancel the accepted
+connection, including a writer blocked by HTTP/1 backpressure or HTTP/2 windows.
+Monitors remain owned until actual connection completion; body drop, another
+stream's flush or a timer is not an EOS witness. HTTP/2 cancellation also closes
+unrelated streams on that connection.
+
+The receiver metadata cache charges serialized payload plus conservative entry
+overhead against 32 MiB, permits at most 2048 entries and uses LRU eviction and
+an absolute 30-second insertion TTL. Its key separates the current B user,
+import/Source/epoch/claim/grant and all lifecycle/assignment/endpoint generations
+plus the complete request and a digest of the closed received bytes (including
+revisions and observed scope/catalogue counters). Every lookup still performs the full fresh pinned
+catalogue/details read and current assignment checks. Matching bytes can reuse
+a cached decode; changed bytes replace the entry. Failed or unavailable fresh
+reads cannot serve cached content. The new scope boolean deliberately cannot
+replace that byte-freshness evidence.
+
+Native Source HTTP and typed control-response fixtures pass, including recipient,
+foreign Source/grant/tuple refusal, capacity cleanup, oversized bodies and closed
+response parsing. The current Source scope query passed against actual three
+Hiqlite voters (9.03 seconds, zero ignored). The native receiver fixture passed
+with actual blocked HTTP/1 and HTTP/2 DATA, login revocation, connection/data/
+permit cleanup and unchanged last_seen_at (5.05 seconds, zero ignored).
+An explicit Linux-only fixture retains the real CGNAT Source TLS/SPKI/identity
+path, both production routers and accepted-connection servers. It covers Source
+grant/scope/item/file changes, B login/import/assignment loss, unavailable fresh
+reads with a populated cache, benign real credential rotation and assignment/
+endpoint expansion, a refused numeric target with a reachable approved hint,
+and collateral HTTP/2 stream closure. That fixture remains unqualified until
+executed from the committed candidate in the disposable CGNAT source-only loop;
+its ignored declaration is not acceptance evidence.
+
+Continue Watching grouping, scoped artwork/cache delivery, import move history
+reconciliation, current skip analysis and S5-bound progress writes remain open.
+The current cache does not provide offline fallback, and the scope check does
+not qualify playback, file locators, schema installation or promotion.
+
+The final native source passed 66 core sharing units (35.96 seconds), 26 daemon
+sharing units (18.93 seconds), the receiver authority contract across SQLite
+and actual three-voter Hiqlite (9.30 seconds), and the expanded replicated
+file/scope/import-fence contract (9.07 seconds), each with zero ignored.
+Commands use pinned Rust 1.97.1 and `--locked --offline`: `cargo test -p
+plurx-core --features hiqlite-contract-tests --lib sharing_`; `cargo test -p
+plurxd --bin plurxd --features plurx-core/hiqlite-contract-tests sharing_`;
+and `cargo test -p plurx-core --features hiqlite-contract-tests --test
+store_contract` with `sharing_receiver_content_authority` and
+`sharing_catalogue_file_witness_three_voters`. Native all-target core/daemon
+Clippy with the same features and `-D warnings` passed; the tracked hook checks
+the final committed tree again. Docs-index tests passed. These native results
+exclude the explicit Linux CGNAT fixture and do not replace its execution.

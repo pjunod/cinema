@@ -31,6 +31,12 @@ pub struct SourceBatchEntry {
 }
 #[async_trait]
 pub trait SharingSourceCatalogueStore: Send + Sync {
+    async fn source_scope_authorized(
+        &self,
+        hash: &str,
+        grant: Uuid,
+        request: &crate::sharing_catalogue_details::SourceScopeRequest,
+    ) -> Result<bool, StoreError>;
     /// Current authority for an already authenticated content body. Credential
     /// rotation does not revoke a grant; effective item/library revocation does.
     async fn source_content_authorized(
@@ -101,6 +107,28 @@ fn json<T: serde::Serialize>(value: &T) -> Result<String, StoreError> {
 }
 #[async_trait]
 impl<T: Backend> SharingSourceCatalogueStore for T {
+    async fn source_scope_authorized(
+        &self,
+        hash: &str,
+        grant: Uuid,
+        request: &crate::sharing_catalogue_details::SourceScopeRequest,
+    ) -> Result<bool, StoreError> {
+        if !is_hash(hash) {
+            return Err(invalid());
+        }
+        request.validate()?;
+        ready(self).await?;
+        let request = serde_json::to_string(request).map_err(|_| invalid())?;
+        let sql="SELECT json_quote(EXISTS(SELECT 1 FROM sharing_exports e JOIN sharing_identity s ON s.singleton=1 WHERE e.id=$1 AND e.token_hash=$2 AND e.state='active' AND e.id=json_extract($3,'$.grant_id') AND e.recipient_server_id=json_extract($3,'$.recipient_server_id') AND s.server_id=json_extract($3,'$.server_id') AND s.catalogue_epoch=json_extract($3,'$.catalogue_epoch') AND EXISTS(SELECT 1 FROM item_identity_watermark WHERE singleton=1 AND importing=0) AND NOT EXISTS(SELECT 1 FROM json_each($3,'$.libraries') r WHERE NOT EXISTS(SELECT 1 FROM sharing_export_libraries x JOIN libraries l ON l.id=x.library_id WHERE x.grant_id=e.id AND CAST(l.id AS TEXT)=r.value AND l.kind IN ('movies','shows'))) AND NOT EXISTS(SELECT 1 FROM json_each($3,'$.items') r WHERE NOT EXISTS(SELECT 1 FROM sharing_export_libraries x JOIN libraries l ON l.id=x.library_id JOIN items i ON i.library_id=l.id WHERE x.grant_id=e.id AND CAST(l.id AS TEXT)=json_extract(r.value,'$.library_id') AND CAST(i.id AS TEXT)=json_extract(r.value,'$.item_id') AND l.kind IN ('movies','shows') AND i.kind IN ('movie','show','season','episode'))) AND NOT EXISTS(SELECT 1 FROM json_each($3,'$.files') r WHERE NOT EXISTS(SELECT 1 FROM sharing_export_libraries x JOIN libraries l ON l.id=x.library_id JOIN items i ON i.library_id=l.id JOIN files f ON f.item_id=i.id WHERE x.grant_id=e.id AND CAST(l.id AS TEXT)=json_extract(r.value,'$.library_id') AND CAST(i.id AS TEXT)=json_extract(r.value,'$.item_id') AND CAST(f.id AS TEXT)=json_extract(r.value,'$.file_id') AND l.kind IN ('movies','shows') AND i.kind IN ('movie','episode'))))) AS payload";
+        let rows = self
+            .sharing_read(
+                sql,
+                vec![grant.into(), hash.to_owned().into(), request.into()],
+            )
+            .await?;
+        Ok(rows.len() == 1 && rows[0] == "1")
+    }
+
     async fn source_content_authorized(
         &self,
         grant: Uuid,
