@@ -446,7 +446,7 @@ pub struct DeliveryCandidate {
 /// The durable identity a session reserves its recovery budget against.
 ///
 /// Three values that travel together because they are one thing: the ledger
-/// `media_session_producer_recovery` is keyed by `(user_id, playback_id,
+/// `media_session_producer_recovery` is keyed by `(owner_key, playback_id,
 /// recovery_epoch)`, and a reservation additionally names the incarnation that
 /// failed. `playback_id` is already on [`SessionRequest`] because a client
 /// supplies it; these three are not, and deliberately.
@@ -465,12 +465,33 @@ pub struct DeliveryCandidate {
 /// must treat it as "no reservation is possible" and not as a fresh grant.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SessionRecoveryIdentity {
-    pub user_id: i64,
+    pub principal: plurx_core::playback_principal::PlaybackPrincipal,
     /// The coordination identity of the generation being started, which is
     /// what a reservation records as the attempt that failed.
     pub incarnation_id: String,
     /// The server-owned budget identity. Empty means no budget.
     pub recovery_epoch: String,
+}
+
+pub(crate) fn principal_supersession_scope(
+    principal: &plurx_core::playback_principal::PlaybackPrincipal,
+) -> String {
+    match principal {
+        plurx_core::playback_principal::PlaybackPrincipal::LocalUser { user_id } => {
+            serde_json::json!(["user_id", user_id]).to_string()
+        }
+        plurx_core::playback_principal::PlaybackPrincipal::Sharing { .. } => {
+            serde_json::json!(["principal", principal.owner_key()]).to_string()
+        }
+    }
+}
+
+impl SessionRecoveryIdentity {
+    /// Retain the existing local gate encoding; sharing gets a separate
+    /// typed namespace and never a synthetic numeric user.
+    pub(crate) fn supersession_scope(&self) -> String {
+        principal_supersession_scope(&self.principal)
+    }
 }
 
 /// What a client asked for, normalised. Two requests with the same
@@ -829,7 +850,7 @@ impl SessionRequest {
     /// For an Auto transcode the numeric height is excluded on purpose: a
     /// network-prior refresh between transport attempts may recompute it, but
     /// the same `request_id` must still recover the first persisted answer.
-    fn intent_fingerprint_with_user_scope(&self, user_name: Option<&str>) -> String {
+    pub(super) fn intent_fingerprint_with_user_scope(&self, user_name: Option<&str>) -> String {
         let kind = match self.kind {
             SessionKind::Transcode { height: _ } if self.automatic => "ta".to_owned(),
             SessionKind::Transcode { height } => format!("t{height}"),
@@ -903,12 +924,24 @@ impl SessionRequest {
 
     /// Fixed-width durable identity used by the replicated session claim.
     ///
-    /// Replicated request rows are already scoped by the immutable user id.
+    /// Replicated request rows are scoped by the canonical playback principal.
     /// Exclude the mutable username so an account rename cannot turn an
     /// otherwise identical idempotent replay into a conflict. The established
     /// process-local identity above keeps the username scope it has always had.
-    pub(crate) fn durable_intent_fingerprint(&self, user_id: i64) -> String {
-        let durable = serde_json::json!([user_id, self.intent_fingerprint_with_user_scope(None),]);
+    pub(crate) fn durable_intent_fingerprint(
+        &self,
+        principal: &plurx_core::playback_principal::PlaybackPrincipal,
+    ) -> String {
+        let intent = self.intent_fingerprint_with_user_scope(None);
+        // Keep local hashes byte-for-byte stable across the ownership upgrade.
+        let durable = match principal {
+            plurx_core::playback_principal::PlaybackPrincipal::LocalUser { user_id } => {
+                serde_json::json!([user_id, intent])
+            }
+            plurx_core::playback_principal::PlaybackPrincipal::Sharing { .. } => {
+                serde_json::json!([principal.owner_key(), intent])
+            }
+        };
         hex::encode(Sha256::digest(durable.to_string().as_bytes()))
     }
 }

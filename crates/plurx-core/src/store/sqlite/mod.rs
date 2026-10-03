@@ -2599,7 +2599,13 @@ mod tests {
 
         let store = SqliteStore::open_in_memory().expect("open");
         assert_eq!(
-            store.desired_selection(7, "play-a").await.expect("read"),
+            store
+                .desired_selection(
+                    &crate::playback_principal::PlaybackPrincipal::LocalUser { user_id: 7 },
+                    "play-a"
+                )
+                .await
+                .expect("read"),
             None,
             "a playback nobody has asked anything about says so, rather than \
              inventing a default that an admission point would compare against"
@@ -2613,7 +2619,13 @@ mod tests {
             let form = form.to_owned();
             async move {
                 store
-                    .record_desired_selection(7, "play-a", &digest, &form, now)
+                    .record_desired_selection(
+                        &crate::playback_principal::PlaybackPrincipal::LocalUser { user_id: 7 },
+                        "play-a",
+                        &digest,
+                        &form,
+                        now,
+                    )
                     .await
                     .expect("record")
             }
@@ -2651,17 +2663,35 @@ mod tests {
         );
 
         assert_eq!(
-            store.desired_selection(7, "play-a").await.expect("read"),
+            store
+                .desired_selection(
+                    &crate::playback_principal::PlaybackPrincipal::LocalUser { user_id: 7 },
+                    "play-a"
+                )
+                .await
+                .expect("read"),
             Some(third),
             "and the row that is read back is the one that was written"
         );
         assert_eq!(
-            store.desired_selection(8, "play-a").await.expect("read"),
+            store
+                .desired_selection(
+                    &crate::playback_principal::PlaybackPrincipal::LocalUser { user_id: 8 },
+                    "play-a"
+                )
+                .await
+                .expect("read"),
             None,
             "asks are per viewer as well as per playback"
         );
         assert_eq!(
-            store.desired_selection(7, "play-b").await.expect("read"),
+            store
+                .desired_selection(
+                    &crate::playback_principal::PlaybackPrincipal::LocalUser { user_id: 7 },
+                    "play-b"
+                )
+                .await
+                .expect("read"),
             None
         );
     }
@@ -2700,14 +2730,26 @@ mod tests {
         ] {
             assert!(
                 store
-                    .record_desired_selection(7, playback_id, digest, form, now)
+                    .record_desired_selection(
+                        &crate::playback_principal::PlaybackPrincipal::LocalUser { user_id: 7 },
+                        playback_id,
+                        digest,
+                        form,
+                        now
+                    )
                     .await
                     .is_err(),
                 "{why} must be refused"
             );
         }
         assert_eq!(
-            store.desired_selection(7, "play-a").await.expect("read"),
+            store
+                .desired_selection(
+                    &crate::playback_principal::PlaybackPrincipal::LocalUser { user_id: 7 },
+                    "play-a"
+                )
+                .await
+                .expect("read"),
             None,
             "and a refused write leaves nothing behind"
         );

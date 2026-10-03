@@ -475,7 +475,7 @@ impl TakeoverSettlementIo<SessionAdoptionToken, TakeoverWorkerGuard> for AppStat
         Box::pin(async move {
             let Some(staged) = self
                 .store
-                .staged_media_session_for_playback(route.user_id, &route.playback_id)
+                .staged_media_session_for_playback(&route.principal, &route.playback_id)
                 .await?
             else {
                 return Ok(());
@@ -488,7 +488,7 @@ impl TakeoverSettlementIo<SessionAdoptionToken, TakeoverWorkerGuard> for AppStat
             let aborted = self
                 .store
                 .abort_media_session_preparation(
-                    route.user_id,
+                    &route.principal,
                     &route.playback_id,
                     &plurx_core::domain::MediaSessionPreparationAbortRequest {
                         staged_incarnation_id: staged.staged_incarnation_id.clone(),
@@ -503,7 +503,7 @@ impl TakeoverSettlementIo<SessionAdoptionToken, TakeoverWorkerGuard> for AppStat
             }
             let retained = self
                 .store
-                .staged_media_session_for_playback(route.user_id, &route.playback_id)
+                .staged_media_session_for_playback(&route.principal, &route.playback_id)
                 .await?;
             if retained.as_ref().is_some_and(|retained| {
                 retained.staged_incarnation_id == staged.staged_incarnation_id
@@ -2060,7 +2060,7 @@ impl MediaSessionCoordinator {
             tokio::time::timeout_at(
                 tokio::time::Instant::from_std(request_deadline),
                 self.store
-                    .staged_media_session_for_playback(route.user_id, &route.playback_id),
+                    .staged_media_session_for_playback(&route.principal, &route.playback_id),
             )
             .await
             .map_err(|_| {
@@ -2076,7 +2076,7 @@ impl MediaSessionCoordinator {
             let current = tokio::time::timeout_at(
                 tokio::time::Instant::from_std(request_deadline),
                 self.store
-                    .media_session_route_for_playback(route.user_id, &route.playback_id),
+                    .media_session_route_for_playback(&route.principal, &route.playback_id),
             )
             .await
             .map_err(|_| {
@@ -2903,7 +2903,7 @@ fn prepared_successor_route(route: &MediaSessionRoute) -> bool {
 fn same_media_route(left: &MediaSessionRoute, right: &MediaSessionRoute) -> bool {
     left.incarnation_id == right.incarnation_id
         && left.session_id == right.session_id
-        && left.user_id == right.user_id
+        && left.principal == right.principal
         && left.playback_id == right.playback_id
         && left.owner_node_id == right.owner_node_id
         && left.owner_epoch == right.owner_epoch
@@ -5365,7 +5365,7 @@ async fn supervise_takeover_settlement(
     let provisional_id = start.provisional_session_id.clone();
     let replacement = state
         .transcode
-        .acquire_cluster_takeover_replacement(&request, original.user_id, creation_deadline)
+        .acquire_cluster_takeover_replacement(&request, &original.principal, creation_deadline)
         .await?;
     // The takeover id is predetermined, so it can be fenced from the moment the
     // gate is held — including by a later open that has to reclaim the key
@@ -5388,7 +5388,7 @@ async fn supervise_takeover_settlement(
     let creation_user = user_name.clone();
     let creation_start = start.clone();
     let creation_recovery = crate::transcode::SessionRecoveryIdentity {
-        user_id: original.user_id,
+        principal: original.principal.clone(),
         incarnation_id: original.incarnation_id.clone(),
         recovery_epoch: original.recovery_epoch.clone(),
     };
@@ -5450,7 +5450,10 @@ pub(crate) fn takeover_eligible_route(session_id: &str, incarnation_id: &str) ->
     let base = tests::valid_start_request();
     let recipe = RemoteStartRequest {
         incarnation_id: incarnation_id.to_owned(),
-        user_id: route.user_id,
+        user_id: route
+            .principal
+            .local_user_id()
+            .expect("local test principal"),
         typeless_playlist: true,
         request: SessionRequest {
             quality_catalog: None,
@@ -5623,11 +5626,19 @@ async fn attempt_takeover(state: &AppState, route: MediaSessionRoute) -> Result<
     )
     .await
     .map_err(|_| "candidate takeover validation timed out".to_owned())??;
-    let user = tokio::time::timeout_at(deadline, state.store.get_user(route.user_id))
-        .await
-        .map_err(|_| "media-session takeover timed out".to_owned())?
-        .map_err(|error| error.to_string())?
-        .ok_or_else(|| "takeover user is missing".to_owned())?;
+    let user = tokio::time::timeout_at(
+        deadline,
+        state.store.get_user(
+            route
+                .principal
+                .local_user_id()
+                .ok_or_else(|| "sharing takeover requires typed source authority".to_owned())?,
+        ),
+    )
+    .await
+    .map_err(|_| "media-session takeover timed out".to_owned())?
+    .map_err(|error| error.to_string())?
+    .ok_or_else(|| "takeover user is missing".to_owned())?;
     let provisional_id = uuid::Uuid::new_v4().to_string();
     let start = SessionTakeoverStart {
         provisional_session_id: provisional_id,
@@ -5716,7 +5727,7 @@ fn takeover_source_matches(envelope: &RemoteStartRequest, size: i64, mtime: i64)
 fn takeover_recipe_matches_route(envelope: &RemoteStartRequest, route: &MediaSessionRoute) -> bool {
     takeover_recipe_is_valid(envelope)
         && envelope.incarnation_id == route.incarnation_id
-        && envelope.user_id == route.user_id
+        && route.principal.local_user_id() == Some(envelope.user_id)
 }
 
 /// What one lease tick may touch.
@@ -6016,7 +6027,9 @@ mod tests {
                 expected_desired_revision: None,
                 incarnation_id: "00000000-0000-4000-8000-0000000000a1".to_owned(),
                 session_id: "00000000-0000-4000-8000-0000000000b1".to_owned(),
-                user_id: 7,
+                principal: plurx_core::playback_principal::PlaybackPrincipal::LocalUser {
+                    user_id: 7,
+                },
                 playback_id: "player-a".to_owned(),
                 expected_predecessor_incarnation_id: None,
                 fence_predecessor: false,
@@ -6132,7 +6145,7 @@ mod tests {
             recovery_epoch: String::new(),
             incarnation_id: format!("incarnation-{session_id}"),
             session_id: session_id.to_owned(),
-            user_id: 7,
+            principal: plurx_core::playback_principal::PlaybackPrincipal::LocalUser { user_id: 7 },
             playback_id: "player-c".to_owned(),
             request_fingerprint: "c".repeat(64),
             owner_node_id: "node-c".to_owned(),
@@ -6155,6 +6168,7 @@ mod tests {
 
     fn owned_lease(session_id: &str) -> OwnedMediaSessionLease {
         OwnedMediaSessionLease {
+            principal: plurx_core::playback_principal::PlaybackPrincipal::LocalUser { user_id: 7 },
             incarnation_id: format!("incarnation-{session_id}"),
             session_id: session_id.to_owned(),
             owner_epoch: 1,
@@ -7149,7 +7163,12 @@ mod tests {
         .to_string();
         assert!(prepared_successor_route(&route));
         let staged = plurx_core::domain::MediaSessionStagedGeneration {
-            user_id: route.user_id,
+            principal: plurx_core::playback_principal::PlaybackPrincipal::LocalUser {
+                user_id: route
+                    .principal
+                    .local_user_id()
+                    .expect("local test principal"),
+            },
             playback_id: route.playback_id.clone(),
             staged_incarnation_id: route.incarnation_id.clone(),
             expected_predecessor_incarnation_id: "predecessor".to_owned(),

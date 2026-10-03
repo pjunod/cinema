@@ -36,3 +36,15 @@ INSERT INTO users (id, username, password_hash, is_admin, created_at) VALUES (1,
            (incarnation_id, session_id, owner_node_id, owner_epoch, client_instance_id,
             sequence, request_fingerprint, response_json, expires_at_ms, updated_at_ms)
          VALUES ('ended', 'ended-session', 'node', 1, 'client', 1, 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa', '{}', 9000, 10);
+
+INSERT INTO sharing_relay_upstream
+ (incarnation_id, import_id, lifecycle_generation, assignment_generation,
+  remote_library_id, remote_item_id, remote_file_id, remote_revision,
+  source_request_id, source_session_id, source_incarnation_id, endpoint_revision,
+  capability_envelope, source_position_ms)
+ VALUES ('live', 'import', 2, 3, '9223372036854775807', 'item', 'file', 'revision',
+         'source-request', 'source-session', 'source-incarnation', 4,
+         'sealed-private-capability', 6000);
+INSERT INTO sharing_delivery_grants
+ (token_hash, incarnation_id, source_token_hash, state, deadline_ms)
+ VALUES ('delivery-hash', 'live', 'source-token-hash', 'active', 7000);

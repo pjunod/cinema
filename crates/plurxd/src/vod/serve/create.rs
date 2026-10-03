@@ -70,7 +70,7 @@ impl VodServe {
         attribution: VodAttribution<'_>,
         session_id: String,
         serving_admission: VodServingAdmission,
-        viewer: crate::state::PlaybackViewerDemand,
+        viewer: Option<crate::state::PlaybackViewerDemand>,
     ) -> Result<VodStart, String> {
         self.try_create_with_release_fence(
             req.into(),
@@ -81,7 +81,7 @@ impl VodServe {
             VodCreateFences {
                 release_fence: None,
                 serving_admission: Some(serving_admission),
-                viewer: Some(viewer),
+                viewer,
             },
         )
         .await
@@ -94,7 +94,7 @@ impl VodServe {
         settings: &VodSettings,
         attribution: VodAttribution<'_>,
         session_id: String,
-        viewer: crate::state::PlaybackViewerDemand,
+        viewer: Option<crate::state::PlaybackViewerDemand>,
     ) -> Result<VodStart, String> {
         self.try_create_with_release_fence(
             req.into(),
@@ -105,7 +105,7 @@ impl VodServe {
             VodCreateFences {
                 release_fence: None,
                 serving_admission: None,
-                viewer: Some(viewer),
+                viewer,
             },
         )
         .await

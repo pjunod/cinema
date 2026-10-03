@@ -147,9 +147,12 @@ async fn settle_media_session_request_claim(
     loop {
         match tokio::time::timeout_at(
             deadline,
-            state
-                .store
-                .fail_media_session_request(user_id, request_id, incarnation_id, unix_ms()),
+            state.store.fail_media_session_request(
+                &plurx_core::playback_principal::PlaybackPrincipal::LocalUser { user_id },
+                request_id,
+                incarnation_id,
+                unix_ms(),
+            ),
         )
         .await
         {

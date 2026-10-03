@@ -1460,10 +1460,10 @@ implied by the build handoff.
 
 | Milestone | State | PR / commit | Evidence / outstanding work |
 |---|---|---|---|
-| S0 | contract ready to build | Original `4e81bc38c`, revision `eb9038755`, PR #740 | Opus re-review corrections incorporated in §16; S2/runtime experiments not yet executed |
-| S1 | implemented; task gate pending | `codex/sharing-s1-state` | SQLite v92 / Hiqlite v70; purpose-bound secrets; pairing/rotation/assignment transactions. Five store contracts, 11 sharing unit tests, schema migration parity and 31 import-inventory tests passed; workspace Clippy and catalog lint passed. Task PR/gate remain pending. |
+| S0 | contract ready to build | Original `4e81bc38c`, revision `eb9038755`, PR #740 | Opus re-review corrections incorporated in §16; runtime evidence is recorded per milestone |
+| S1 | gated; integration pending | [PR #746](http://192.168.4.7:3000/noirr/plurx/pulls/746), `aaafc1a0f5` | SQLite v92 / Hiqlite v70; purpose-bound secrets; pairing/rotation/assignment transactions. Five store contracts, 11 sharing unit tests, schema migration parity and 31 import-inventory tests passed; workspace Clippy and catalog lint passed. Run 3890 and the final Effort development gate passed on the exact candidate; effort integration remains pending. |
 | S2 | implementation in progress; topology qualification open | `codex/sharing-s2-network` (unpublished) | Dedicated loopback TLS transport, pinned direct dialing and fixed Tailscale DNS, isolated peer/admin routes, durable claim/rotation recovery, authenticated endpoint refresh and advisory Developer switch implemented. Two-NAT, shared-machine Serve and Docker isolation/egress receipts remain open; S2 is not complete. |
-| S3 | implementation started; ownership migration open | `codex/sharing-s3-principals` (unpublished) | Typed principal and canonical owner-key construction implemented; two decoder/collision tests passed and core Clippy passed. All 36 Store operations, table rebuilds, real owner checks, cluster floor and old-writer receipts remain open. |
+| S3 | implementation started; ownership migration open | `codex/sharing-s3-principals` (unpublished) | Typed session interfaces, caller handoffs and seven-table candidate rebuild implemented; 28 local/replicated lifecycle regressions passed. Runtime owner-key SQL, owner checks, migration installation, cluster floor and old-binary qualification remain open; §16.4 records the boundaries. |
 | S4 | not started | — | — |
 | S5 | not started | — | — |
 | S6 | not started | — | — |
@@ -1574,17 +1574,16 @@ rejected the isolated Hiqlite spike lockfile before compilation. Commit
 `aaafc1a0f5af031c3adbfe6760ad4edcff7cb082` synchronizes that lockfile;
 `make spike-lock-check` and the normal hook passed locally. Exact-candidate
 [run 3890](http://192.168.4.7:3000/noirr/plurx/actions/runs/3890) has passed
-scope, policy, Rust, web, Apple and Android. Windows compilation reached
-its 30-minute runner deadline without a compiler error. Only that job was
-rerun as attempt 2 on the same commit; the effort gate remains blocking
-until it passes.
+scope, policy, Rust, web, Apple and Android. Windows attempt 1 reached its
+30-minute runner deadline without a compiler error. The individual retry on
+the same commit passed in 20 minutes 17 seconds; the final Effort development
+gate passed. The exact candidate is gated but has not been integrated.
 
-**Still owed:** the gate on the corrected S1 candidate. S2 requires disposable two-NAT/Tailscale
+**Still owed:** S1 integration into the effort. S2 requires disposable two-NAT/Tailscale
 and Docker profiles; S7/S8 require physical Apple TV/Google TV and the
 cluster/resource matrix. No network, shared playback, native client, promotion
 or Developer graduation evidence is claimed by S1. S2–S8 remain work after
 the S1 task is integrated; no deployment is authorized.
-
 
 ### 16.3 Implementation progress — S2, 2026-10-02
 
@@ -1683,15 +1682,49 @@ never adopts a foreign local user. Debug output redacts the pseudonym.
 Two focused tests passed; core Clippy with denied warnings passed using
 Rust 1.97.1 and `hiqlite-store`.
 
-The Store recount at this checkpoint confirms 36 `MediaSessionStore`
-operations, 16 with an explicit numeric-user key and 20 with other keys or
-structured input. This recount is not the required complete predicate,
-conflict-target and decoder census. Existing session tables and runtime
-callers still use the old ownership shape; no shared playback admission or
-migration acceptance is claimed.
+The Store recount confirms 36 `MediaSessionStore` operations: 16 explicit
+ownership arguments now take a borrowed `PlaybackPrincipal`, and 20 retain
+session/incarnation/owner keys or structured input. Activation, preparation,
+route, desired-selection, staged-generation, recovery-request/reservation and
+owned-lease results carry the principal. Preparation/control and producer
+recovery handoffs pass it through; route comparisons compare the principal.
+Local authenticated ingress constructs an explicit local principal.
+
+This interface conversion still uses a temporary local-only adapter in the
+common SQL implementation. That adapter refuses a sharing principal before
+any statement runs; it cannot create a numeric user for a share. Existing
+runtime tables retain their old numeric ownership keys. Legacy source-worker
+and VOD dispatch, cluster forwarding, ordinary-router authorization, telemetry
+and account/grant deletion still need the complete principal-aware conversion.
+The legacy process-local test entry points now pass an absent recovery
+identity explicitly. No zero user ID stands for an unbound producer or VOD
+viewer; cluster starts still require a complete typed recovery identity. The
+focused no-budget regression passed (0.05 seconds).
+
+Durable request hashing now takes the principal. Local hashes retain their
+existing JSON/numeric encoding; sharing hashes use the canonical owner key.
+Producer supersession and takeover gates share the typed namespace helper,
+with the established local encoding preserved. The daemon intent-identity
+regression passed after this conversion and proves local hash/gate stability
+and separation by grant and viewer.
+ These changes do not qualify
+sharing admission. The complete predicate/conflict-target/decoder census,
+runtime table rebuild, writer floor and migration acceptance remain open.
+The typed local session adapter passed all 28 `media_session_` contract
+regressions against SQLite and the actual three-voter fixture in 258.12 seconds.
+The first activation run caught a Rust helper mistakenly substituted into SQL;
+all such substitutions were removed from both backends before this successful
+lifecycle run. The ownership conversion still needs the runtime key switch.
+
+The current numeric-ownership SQL inventory contains 140 statement literals
+in the session implementations (75 SQLite, 65 Hiqlite). Each must be switched
+or explicitly justified as local-only; this statement inventory does not yet
+include the remaining decoders, schema definitions, other stores or callers.
 
 ```sh
 cargo test --locked -p plurx-core --features hiqlite-store --lib playback_principal::tests -- --nocapture
+cargo test --locked -p plurx-core --features hiqlite-contract-tests --test store_contract media_session_ -- --nocapture
+cargo test --locked -p plurxd --bin plurxd the_grade_is_part_of_a_request_identity -- --nocapture
 cargo clippy --locked -p plurx-core --features hiqlite-store --lib -- -D warnings
 ```
 
@@ -1715,6 +1748,20 @@ omits `owner_key` and an upsert using the old `(user_id, request_id)` conflict
 target. These are SQL-shape probes, not execution of an old daemon binary.
 They provide evidence for the coordinated-drain fallback; they do not qualify
 a live upgrade, the membership floor or backup restoration.
+
+The populated fixture now includes `sharing_relay_upstream` and
+`sharing_delivery_grants`. A retention regression exposed DROP TABLE cascading
+into both children. The candidate rebuild evacuates and restores them inside
+the same transaction, with coverage for SQLite's migration FK setting and the
+replicated writer's enabled FK setting. The source capability envelope, remote
+IDs, position, delivery deadline and generation coordinates must remain exact;
+backup tables must disappear and foreign-key integrity must hold. The three
+SQLite migration regressions passed in 2.64 seconds, including preservation
+with foreign keys both enabled and disabled. The source still uses SQLite v92
+and replicated v70; this is a candidate rebuild, not an installed migration. The
+updated three-voter transaction test passed in 9.38 seconds and proves both
+children retain every original column after success and after a failed final
+write rolls the complete rebuild back.
 
 The rebuild is not installed in the runtime migration chain. The remaining
 S3 work is the principal-aware Store/runtime conversion, owner-existence and

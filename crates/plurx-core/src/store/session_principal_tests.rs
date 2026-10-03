@@ -17,6 +17,8 @@ fn current_database() -> Connection {
     let conn = Connection::open_in_memory().expect("open");
     SqliteStore::apply_migrations_for_test(&conn, SQLITE_SCHEMA_VERSION)
         .expect("current migrations");
+    conn.pragma_update(None, "foreign_keys", "ON")
+        .expect("enforce deployed child foreign keys during the candidate transaction");
     conn.execute_batch(include_str!(
         "../../tests/fixtures/session-principal-local.sql"
     ))
@@ -73,60 +75,78 @@ fn insert_shared_request(
 
 #[test]
 fn sharing_principal_rebuild_preserves_every_old_column_and_retention_row() {
-    let conn = current_database();
-    let tables = OWNER_TABLES
-        .into_iter()
-        .chain(["job_leases", "media_session_terminal_acks"]);
-    let before = tables
-        .map(|table| {
-            let cols = columns(&conn, table);
-            let rows = snapshot(&conn, table, &cols);
-            (table, cols, rows)
-        })
-        .collect::<Vec<_>>();
-    rebuild(&conn);
-    for (table, cols, rows) in before {
+    for enforce_foreign_keys in [false, true] {
+        let conn = current_database();
+        conn.pragma_update(None, "foreign_keys", enforce_foreign_keys)
+            .expect("exercise the SQLite runner and replicated FK settings");
+        let tables = OWNER_TABLES.into_iter().chain([
+            "job_leases",
+            "media_session_terminal_acks",
+            "sharing_relay_upstream",
+            "sharing_delivery_grants",
+        ]);
+        let before = tables
+            .map(|table| {
+                let cols = columns(&conn, table);
+                let rows = snapshot(&conn, table, &cols);
+                (table, cols, rows)
+            })
+            .collect::<Vec<_>>();
+        rebuild(&conn);
+        let dangling: i64 = conn
+            .query_row("SELECT count(*) FROM pragma_foreign_key_check", [], |r| {
+                r.get(0)
+            })
+            .expect("child foreign key integrity");
+        assert_eq!(dangling, 0);
+        let leftovers: i64 = conn.query_row("SELECT count(*) FROM sqlite_master WHERE name IN ('media_session_principal_relay_backup', 'media_session_principal_delivery_backup')", [], |r| r.get(0)).expect("temporary rebuild tables");
         assert_eq!(
-            snapshot(&conn, table, &cols),
-            rows,
-            "{table}: old data is retained"
+            leftovers, 0,
+            "the atomic migration leaves no authority backup tables"
         );
-    }
-    for table in OWNER_TABLES {
-        let foreign_keys: i64 = conn
-            .query_row(
-                &format!("SELECT count(*) FROM pragma_foreign_key_list('{table}')"),
-                [],
-                |r| r.get(0),
-            )
-            .expect("foreign keys");
-        assert_eq!(
-            foreign_keys, 0,
-            "{table}: retained rows must remain FK-free"
-        );
-        let invalid: i64 = conn.query_row(&format!(
+        for (table, cols, rows) in before {
+            assert_eq!(
+                snapshot(&conn, table, &cols),
+                rows,
+                "{table}: old data is retained"
+            );
+        }
+        for table in OWNER_TABLES {
+            let foreign_keys: i64 = conn
+                .query_row(
+                    &format!("SELECT count(*) FROM pragma_foreign_key_list('{table}')"),
+                    [],
+                    |r| r.get(0),
+                )
+                .expect("foreign keys");
+            assert_eq!(
+                foreign_keys, 0,
+                "{table}: retained rows must remain FK-free"
+            );
+            let invalid: i64 = conn.query_row(&format!(
             "SELECT count(*) FROM {table} WHERE owner_key != 'local:' || CAST(user_id AS TEXT)
               OR principal_kind != 'local' OR share_grant_id IS NOT NULL OR share_viewer_key IS NOT NULL"
         ), [], |r| r.get(0)).expect("local backfill");
-        assert_eq!(invalid, 0, "{table}: all projections backfilled");
+            assert_eq!(invalid, 0, "{table}: all projections backfilled");
+        }
+        conn.execute("DELETE FROM users WHERE id = 1", [])
+            .expect("owner deletion");
+        assert_eq!(
+            conn.query_row("SELECT count(*) FROM media_sessions", [], |r| r
+                .get::<_, i64>(0))
+                .expect("sessions"),
+            2
+        );
+        assert_eq!(
+            conn.query_row(
+                "SELECT count(*) FROM media_session_terminal_acks",
+                [],
+                |r| r.get::<_, i64>(0)
+            )
+            .expect("acks"),
+            1
+        );
     }
-    conn.execute("DELETE FROM users WHERE id = 1", [])
-        .expect("owner deletion");
-    assert_eq!(
-        conn.query_row("SELECT count(*) FROM media_sessions", [], |r| r
-            .get::<_, i64>(0))
-            .expect("sessions"),
-        2
-    );
-    assert_eq!(
-        conn.query_row(
-            "SELECT count(*) FROM media_session_terminal_acks",
-            [],
-            |r| r.get::<_, i64>(0)
-        )
-        .expect("acks"),
-        1
-    );
 }
 
 #[test]

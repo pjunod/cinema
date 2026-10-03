@@ -3222,7 +3222,9 @@ async fn background_next_episode_uses_the_active_session_before_watch_completion
             expected_desired_revision: None,
             incarnation_id: uuid::Uuid::new_v4().to_string(),
             session_id: uuid::Uuid::new_v4().to_string(),
-            user_id: fixture.user,
+            principal: plurx_core::playback_principal::PlaybackPrincipal::LocalUser {
+                user_id: fixture.user,
+            },
             playback_id: "prediction-next-playback".into(),
             expected_predecessor_incarnation_id: None,
             fence_predecessor: false,

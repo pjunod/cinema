@@ -1158,7 +1158,7 @@
                     let now_ms = crate::media_sessions::unix_ms();
                     store
                         .claim_media_session_request(
-                            7,
+                            &plurx_core::playback_principal::PlaybackPrincipal::LocalUser { user_id: 7 },
                             &incarnation,
                             &fingerprint,
                             "player-control",
@@ -1170,7 +1170,7 @@
                         .expect("claim the restart's request");
                     assert!(store
                         .assign_media_session_request_owner(
-                            7,
+                            &plurx_core::playback_principal::PlaybackPrincipal::LocalUser { user_id: 7 },
                             &incarnation,
                             &incarnation,
                             "test-node",
@@ -1190,7 +1190,7 @@
                     // the session id moves and the playback id is what the
                     // pointer is keyed by.
                     session_id: uuid::Uuid::new_v4().to_string(),
-                    user_id: 7,
+                    principal: plurx_core::playback_principal::PlaybackPrincipal::LocalUser { user_id: 7 },
                     playback_id: "player-control".to_owned(),
                     expected_predecessor_incarnation_id: admitted
                         .expected_predecessor_incarnation_id
@@ -2265,7 +2265,7 @@
                 expected_desired_revision: None,
                 incarnation_id: incarnation_id.clone(),
                 session_id: session_id.clone(),
-                user_id: user.id,
+                principal: plurx_core::playback_principal::PlaybackPrincipal::LocalUser { user_id: user.id },
                 playback_id: "owner-loss".to_owned(),
                 expected_predecessor_incarnation_id: None,
                 fence_predecessor: false,
@@ -2546,12 +2546,12 @@
                 expected_desired_revision: None,
                 incarnation_id,
                 session_id: session_id.clone(),
-                user_id: user.id,
+                principal: plurx_core::playback_principal::PlaybackPrincipal::LocalUser { user_id: user.id },
                 playback_id: playback_id.to_owned(),
                 expected_predecessor_incarnation_id: None,
                 fence_predecessor: false,
                 request_id: None,
-                request_fingerprint: predecessor_request.durable_intent_fingerprint(user.id),
+                request_fingerprint: predecessor_request.durable_intent_fingerprint(&plurx_core::playback_principal::PlaybackPrincipal::LocalUser { user_id: user.id }),
                 owner_node_id: fixture.state.node_id.clone(),
                 lease_expires_at_ms: unix_ms().saturating_add(900_000),
                 recipe_json: serde_json::to_string(&predecessor_recipe).expect("recipe"),

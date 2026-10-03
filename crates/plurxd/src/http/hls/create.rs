@@ -1393,7 +1393,9 @@ pub(crate) async fn resolve_plan(
     // retry of the same body recover the same session no matter which binary
     // answers it. Only after it is taken does the server's reconciliation
     // apply to the request that will actually be built.
-    let fingerprint = request.durable_intent_fingerprint(user_id);
+    let fingerprint = request.durable_intent_fingerprint(
+        &plurx_core::playback_principal::PlaybackPrincipal::LocalUser { user_id },
+    );
     let plan_notes = match review {
         Some(review) => apply_plan_review(&mut request, review),
         None => Vec::new(),
@@ -1618,7 +1620,9 @@ async fn create_with_purpose_inner(
             state
                 .store
                 .record_desired_selection(
-                    user.id,
+                    &plurx_core::playback_principal::PlaybackPrincipal::LocalUser {
+                        user_id: user.id,
+                    },
                     &req.playback_id,
                     &intent.digest(),
                     &selection.canonical_form(),
@@ -1826,7 +1830,7 @@ async fn create_with_purpose_inner(
     match state
         .store
         .claim_media_session_request(
-            user.id,
+            &plurx_core::playback_principal::PlaybackPrincipal::LocalUser { user_id: user.id },
             &request_claim_id,
             &fingerprint,
             &request.playback_id,
@@ -1914,7 +1918,7 @@ async fn create_with_purpose_inner(
             .and_then(Result::ok)
             .flatten()
             .filter(|route| {
-                route.user_id == user.id
+                route.principal.local_user_id() == Some(user.id)
                     && route.playback_id == request.playback_id
                     && route.request_fingerprint == fingerprint
                     && route.state == "active"
@@ -1938,7 +1942,9 @@ async fn create_with_purpose_inner(
                 let route = tokio::time::timeout_at(
                     publication_deadline,
                     state.store.publish_media_session_activation(
-                        user.id,
+                        &plurx_core::playback_principal::PlaybackPrincipal::LocalUser {
+                            user_id: user.id,
+                        },
                         &request_claim_id,
                         &in_flight_incarnation,
                         unix_ms(),
@@ -2121,7 +2127,7 @@ async fn create_with_purpose_inner(
         && !state
             .store
             .record_library_channel_session_recipe(
-                user.id,
+                &plurx_core::playback_principal::PlaybackPrincipal::LocalUser { user_id: user.id },
                 &request_claim_id,
                 &incarnation_id,
                 &recipe_json,
@@ -2143,7 +2149,10 @@ async fn create_with_purpose_inner(
     // pointer moves to the successor.
     let activation_predecessor = state
         .store
-        .media_session_route_for_playback(user.id, &request.playback_id)
+        .media_session_route_for_playback(
+            &plurx_core::playback_principal::PlaybackPrincipal::LocalUser { user_id: user.id },
+            &request.playback_id,
+        )
         .await
         .map_err(|error| session_store_error("reading the predecessor route", error))?;
     // One mint for this start, bound here rather than called twice.
@@ -2213,7 +2222,7 @@ async fn create_with_purpose_inner(
     {
         if let Some(route) = activation_predecessor.as_ref() {
             if route.session_id != previous_session_id
-                || route.user_id != user.id
+                || route.principal.local_user_id() != Some(user.id)
                 || route.state != "active"
                 || route.lease_expires_at_ms <= unix_ms()
             {
@@ -2315,7 +2324,9 @@ async fn create_with_purpose_inner(
             let guard_request = request_claim_id.clone();
             let guard_user = user.id;
             let worker_recovery = crate::transcode::SessionRecoveryIdentity {
-                user_id: user.id,
+                principal: plurx_core::playback_principal::PlaybackPrincipal::LocalUser {
+                    user_id: user.id,
+                },
                 incarnation_id: incarnation_id.clone(),
                 recovery_epoch: recovery_epoch.clone(),
             };
@@ -2502,7 +2513,7 @@ async fn create_with_purpose_inner(
     match tokio::time::timeout(
         OWNER_ASSIGNMENT_DEADLINE,
         state.store.assign_media_session_request_owner(
-            user.id,
+            &plurx_core::playback_principal::PlaybackPrincipal::LocalUser { user_id: user.id },
             &request_claim_id,
             &incarnation_id,
             &owner_node_id,
@@ -2665,7 +2676,9 @@ async fn create_with_purpose_inner(
         expected_desired_revision: recorded_ask_revision,
         incarnation_id: incarnation_id.clone(),
         session_id: info.session_id.clone(),
-        user_id: user.id,
+        principal: plurx_core::playback_principal::PlaybackPrincipal::LocalUser {
+            user_id: user.id,
+        },
         playback_id: request.playback_id.clone(),
         expected_predecessor_incarnation_id: expected_predecessor_incarnation_id.clone(),
         fence_predecessor,
@@ -2831,7 +2844,7 @@ async fn create_with_purpose_inner(
     let published_route = tokio::time::timeout_at(
         publication_deadline,
         state.store.publish_media_session_activation(
-            user.id,
+            &plurx_core::playback_principal::PlaybackPrincipal::LocalUser { user_id: user.id },
             &request_claim_id,
             &incarnation_id,
             unix_ms(),
@@ -2889,7 +2902,7 @@ pub(super) fn route_matches_activation(
 ) -> bool {
     route.incarnation_id == activation.incarnation_id
         && route.session_id == activation.session_id
-        && route.user_id == activation.user_id
+        && route.principal == activation.principal
         && route.playback_id == activation.playback_id
         && route.request_fingerprint == activation.request_fingerprint
         && route.owner_node_id == activation.owner_node_id
@@ -2916,7 +2929,7 @@ fn replay_route_identity_matches(
 ) -> bool {
     current.incarnation_id == observed.incarnation_id
         && current.session_id == observed.session_id
-        && current.user_id == observed.user_id
+        && current.principal == observed.principal
         && current.playback_id == observed.playback_id
         && current.request_fingerprint == observed.request_fingerprint
         && current.recipe_json == observed.recipe_json
@@ -3429,7 +3442,9 @@ pub(in crate::http) async fn prime_live_prepared_session(
         _ => return false,
     };
     let recovery = crate::transcode::SessionRecoveryIdentity {
-        user_id: recipe.user_id,
+        principal: plurx_core::playback_principal::PlaybackPrincipal::LocalUser {
+            user_id: recipe.user_id,
+        },
         incarnation_id: recipe.incarnation_id.clone(),
         recovery_epoch: recovery_epoch.to_owned(),
     };

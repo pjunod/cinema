@@ -592,7 +592,7 @@ use crate::queue_fixture::QueueFixture;
         let playback_id = format!("vod-control-{session_id}");
         store
             .claim_media_session_request(
-                7,
+                &plurx_core::playback_principal::PlaybackPrincipal::LocalUser { user_id: 7 },
                 generation,
                 &fingerprint,
                 &playback_id,
@@ -603,7 +603,7 @@ use crate::queue_fixture::QueueFixture;
             .await
             .expect("claim route");
         assert!(store
-            .assign_media_session_request_owner(7, generation, generation, "node-a", now_ms,)
+            .assign_media_session_request_owner(&plurx_core::playback_principal::PlaybackPrincipal::LocalUser { user_id: 7 }, generation, generation, "node-a", now_ms,)
             .await
             .expect("assign route owner"));
         let activation = plurx_core::domain::MediaSessionActivation {
@@ -611,7 +611,7 @@ use crate::queue_fixture::QueueFixture;
             expected_desired_revision: None,
             incarnation_id: generation.to_owned(),
             session_id: session_id.to_owned(),
-            user_id: 7,
+            principal: plurx_core::playback_principal::PlaybackPrincipal::LocalUser { user_id: 7 },
             playback_id,
             expected_predecessor_incarnation_id: None,
             fence_predecessor: false,
@@ -642,7 +642,7 @@ use crate::queue_fixture::QueueFixture;
             .expect("confirm route")
             .expect("route confirmed");
         store
-            .publish_media_session_activation(7, generation, generation, now_ms)
+            .publish_media_session_activation(&plurx_core::playback_principal::PlaybackPrincipal::LocalUser { user_id: 7 }, generation, generation, now_ms)
             .await
             .expect("publish route")
             .expect("route published");

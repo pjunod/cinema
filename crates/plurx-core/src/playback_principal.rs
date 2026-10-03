@@ -70,6 +70,14 @@ impl PlaybackPrincipal {
             } => format!("share:{grant_id}:{}", viewer_key.as_str()),
         }
     }
+    /// Structural admission bounds only; this does not prove owner existence,
+    /// export scope, sharing enablement or compatible cluster writers.
+    pub fn valid_admission_shape(&self) -> bool {
+        match self {
+            Self::LocalUser { user_id } => *user_id > 0,
+            Self::Sharing { .. } => true,
+        }
+    }
     pub fn local_user_id(&self) -> Option<i64> {
         match self {
             Self::LocalUser { user_id } => Some(*user_id),

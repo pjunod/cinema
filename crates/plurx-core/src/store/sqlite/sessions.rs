@@ -39,7 +39,9 @@ fn route_from_row(row: &Row<'_>) -> rusqlite::Result<MediaSessionRoute> {
     Ok(MediaSessionRoute {
         incarnation_id: row.get(0)?,
         session_id: row.get(1)?,
-        user_id: row.get(2)?,
+        principal: crate::playback_principal::PlaybackPrincipal::LocalUser {
+            user_id: row.get(2)?,
+        },
         playback_id: row.get(3)?,
         request_fingerprint: row.get(4)?,
         owner_node_id: row.get(5)?,
@@ -133,7 +135,7 @@ fn validate_claim(
 fn validate_activation(activation: &MediaSessionActivation) -> Result<(), StoreError> {
     let valid = valid_uuid(&activation.incarnation_id)
         && valid_uuid(&activation.session_id)
-        && activation.user_id > 0
+        && activation.principal.local_user_id().is_some_and(|id| id > 0)
         && !activation.playback_id.is_empty()
         && activation.playback_id.len() <= 128
         && activation
@@ -211,7 +213,7 @@ fn desired_within(
         return Ok(None);
     };
     Ok(Some(crate::domain::DesiredOwnership {
-        user_id,
+        principal: crate::playback_principal::PlaybackPrincipal::LocalUser { user_id },
         playback_id: playback_id.to_owned(),
         revision: row.get(0)?,
         digest: row.get(1)?,
@@ -230,7 +232,7 @@ fn validate_preparation(preparation: &MediaSessionPreparation) -> Result<(), Sto
         && !preparation.expected_predecessor_owner_node_id.is_empty()
         && preparation.expected_predecessor_owner_node_id.len() <= 256
         && preparation.expected_predecessor_owner_epoch > 0
-        && preparation.user_id > 0
+        && preparation.principal.local_user_id().is_some_and(|id| id > 0)
         && !preparation.playback_id.is_empty()
         && preparation.playback_id.len() <= 128
         && valid_fingerprint(&preparation.request_fingerprint)
@@ -333,7 +335,7 @@ fn abort_staged_generation(
 fn prepare_within(
     tx: &rusqlite::Transaction<'_>,
     preparation: &MediaSessionPreparation,
-) -> rusqlite::Result<Option<MediaSessionRoute>> {
+) -> Result<Option<MediaSessionRoute>, StoreError> {
     let predecessor_is_authoritative = tx
         .query_row(
             "SELECT 1 FROM media_playback_pointers pointer
@@ -345,7 +347,7 @@ fn prepare_within(
                AND predecessor.owner_epoch = ?5
                AND predecessor.state = 'active'",
             params![
-                preparation.user_id,
+                crate::store::local_media_principal_id(&preparation.principal)?,
                 preparation.playback_id,
                 preparation.expected_predecessor_incarnation_id,
                 preparation.expected_predecessor_owner_node_id,
@@ -376,7 +378,11 @@ fn prepare_within(
             .query_row(
                 "SELECT 1 FROM media_playback_desired
                   WHERE user_id = ?1 AND playback_id = ?2 AND revision != ?3",
-                params![preparation.user_id, preparation.playback_id, expected],
+                params![
+                    crate::store::local_media_principal_id(&preparation.principal)?,
+                    preparation.playback_id,
+                    expected
+                ],
                 |_| Ok(()),
             )
             .optional()?
@@ -391,7 +397,10 @@ fn prepare_within(
                 "SELECT {STAGED_COLS} FROM media_session_preparations
                   WHERE user_id = ?1 AND playback_id = ?2"
             ),
-            params![preparation.user_id, preparation.playback_id],
+            params![
+                crate::store::local_media_principal_id(&preparation.principal)?,
+                preparation.playback_id
+            ],
             staged_from_row,
         )
         .optional()?;
@@ -417,7 +426,10 @@ fn prepare_within(
         .query_row(
             "SELECT current_incarnation_id FROM media_playback_pointers
               WHERE user_id = ?1 AND playback_id = ?2",
-            params![preparation.user_id, preparation.playback_id],
+            params![
+                crate::store::local_media_principal_id(&preparation.principal)?,
+                preparation.playback_id
+            ],
             |row| row.get::<_, String>(0),
         )
         .optional()?;
@@ -435,7 +447,7 @@ fn prepare_within(
           WHERE user_id = ?1 AND state IN ('starting', 'active')
             AND lease_expires_at_ms > ?2 AND incarnation_id != ?3",
         params![
-            preparation.user_id,
+            crate::store::local_media_principal_id(&preparation.principal)?,
             preparation.now_ms,
             preparation.incarnation_id,
         ],
@@ -444,7 +456,10 @@ fn prepare_within(
     let session_rows: i64 = tx.query_row(
         "SELECT COUNT(*) FROM media_sessions
           WHERE user_id = ?1 AND incarnation_id != ?2",
-        params![preparation.user_id, preparation.incarnation_id],
+        params![
+            crate::store::local_media_principal_id(&preparation.principal)?,
+            preparation.incarnation_id
+        ],
         |row| row.get(0),
     )?;
     let owner_current: i64 = tx.query_row(
@@ -523,7 +538,7 @@ fn prepare_within(
         params![
             preparation.incarnation_id,
             preparation.session_id,
-            preparation.user_id,
+            crate::store::local_media_principal_id(&preparation.principal)?,
             preparation.playback_id,
             preparation.request_fingerprint,
             preparation.owner_node_id,
@@ -543,7 +558,7 @@ fn prepare_within(
              created_at_ms, updated_at_ms)
          VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?6)",
         params![
-            preparation.user_id,
+            crate::store::local_media_principal_id(&preparation.principal)?,
             preparation.playback_id,
             preparation.incarnation_id,
             preparation.expected_predecessor_incarnation_id,
@@ -573,7 +588,7 @@ fn preparation_route_matches(
 ) -> bool {
     route.incarnation_id == preparation.incarnation_id
         && route.session_id == preparation.session_id
-        && route.user_id == preparation.user_id
+        && route.principal == preparation.principal
         && route.playback_id == preparation.playback_id
         && route.request_fingerprint == preparation.request_fingerprint
         && route.owner_node_id == preparation.owner_node_id
@@ -587,7 +602,9 @@ fn preparation_route_matches(
 
 fn staged_from_row(row: &Row<'_>) -> rusqlite::Result<MediaSessionStagedGeneration> {
     Ok(MediaSessionStagedGeneration {
-        user_id: row.get(0)?,
+        principal: crate::playback_principal::PlaybackPrincipal::LocalUser {
+            user_id: row.get(0)?,
+        },
         playback_id: row.get(1)?,
         staged_incarnation_id: row.get(2)?,
         expected_predecessor_incarnation_id: row.get(3)?,
@@ -610,7 +627,7 @@ fn activation_route_matches(
 ) -> bool {
     route.incarnation_id == activation.incarnation_id
         && route.session_id == activation.session_id
-        && route.user_id == activation.user_id
+        && route.principal == activation.principal
         && route.playback_id == activation.playback_id
         && route.request_fingerprint == activation.request_fingerprint
         && route.owner_node_id == activation.owner_node_id
@@ -652,7 +669,7 @@ fn validate_takeover(takeover: &MediaSessionTakeover) -> Result<(), StoreError> 
 impl MediaSessionStore for SqliteStore {
     async fn claim_media_session_request(
         &self,
-        user_id: i64,
+        principal: &crate::playback_principal::PlaybackPrincipal,
         request_id: &str,
         request_fingerprint: &str,
         playback_id: &str,
@@ -660,6 +677,7 @@ impl MediaSessionStore for SqliteStore {
         now_ms: i64,
         claim_expires_at_ms: i64,
     ) -> Result<MediaSessionRequestClaim, StoreError> {
+        let user_id = crate::store::local_media_principal_id(principal)?;
         validate_claim(
             user_id,
             request_id,
@@ -830,12 +848,13 @@ impl MediaSessionStore for SqliteStore {
 
     async fn record_library_channel_session_recipe(
         &self,
-        user_id: i64,
+        principal: &crate::playback_principal::PlaybackPrincipal,
         request_id: &str,
         incarnation_id: &str,
         recipe_json: &str,
         now_ms: i64,
     ) -> Result<bool, StoreError> {
+        let user_id = crate::store::local_media_principal_id(principal)?;
         if user_id <= 0
             || request_id.is_empty()
             || request_id.len() > 128
@@ -871,12 +890,13 @@ impl MediaSessionStore for SqliteStore {
 
     async fn assign_media_session_request_owner(
         &self,
-        user_id: i64,
+        principal: &crate::playback_principal::PlaybackPrincipal,
         request_id: &str,
         incarnation_id: &str,
         owner_node_id: &str,
         now_ms: i64,
     ) -> Result<bool, StoreError> {
+        let user_id = crate::store::local_media_principal_id(principal)?;
         if user_id <= 0
             || request_id.is_empty()
             || request_id.len() > 128
@@ -916,7 +936,7 @@ impl MediaSessionStore for SqliteStore {
                 .query_row(
                     "SELECT current_incarnation_id FROM media_playback_pointers
                       WHERE user_id = ?1 AND playback_id = ?2",
-                    params![activation.user_id, activation.playback_id],
+                    params![crate::store::local_media_principal_id(&activation.principal)?, activation.playback_id],
                     |row| row.get::<_, String>(0),
                 )
                 .optional()?;
@@ -966,7 +986,7 @@ impl MediaSessionStore for SqliteStore {
                            WHERE user_id = ?1 AND request_id = ?2 AND incarnation_id = ?3
                              AND recipe_json = ?9))",
                     params![
-                        activation.user_id,
+                        crate::store::local_media_principal_id(&activation.principal)?,
                         request_id,
                         activation.incarnation_id,
                         activation.request_fingerprint,
@@ -1014,7 +1034,7 @@ impl MediaSessionStore for SqliteStore {
                       SELECT current_incarnation_id FROM media_playback_pointers
                        WHERE user_id = ?1 AND playback_id = ?3), '')",
                 params![
-                    activation.user_id,
+                    crate::store::local_media_principal_id(&activation.principal)?,
                     activation.incarnation_id,
                     activation.playback_id,
                     activation.now_ms,
@@ -1036,7 +1056,7 @@ impl MediaSessionStore for SqliteStore {
                     activation.owner_node_id,
                     activation.now_ms,
                     activation.incarnation_id,
-                    activation.user_id,
+                    crate::store::local_media_principal_id(&activation.principal)?,
                     activation.playback_id,
                 ],
                 |row| row.get(0),
@@ -1044,7 +1064,7 @@ impl MediaSessionStore for SqliteStore {
             let session_rows: i64 = tx.query_row(
                 "SELECT COUNT(*) FROM media_sessions
                   WHERE user_id = ?1 AND incarnation_id != ?2",
-                params![activation.user_id, activation.incarnation_id],
+                params![crate::store::local_media_principal_id(&activation.principal)?, activation.incarnation_id],
                 |row| row.get(0),
             )?;
             if owner_current >= MAX_OWNED || session_rows >= MAX_SESSION_ROWS_PER_USER {
@@ -1061,7 +1081,7 @@ impl MediaSessionStore for SqliteStore {
                             AND incarnation_id != ?3"
                     ),
                     params![
-                        activation.user_id,
+                        crate::store::local_media_principal_id(&activation.principal)?,
                         activation.playback_id,
                         activation.incarnation_id,
                     ],
@@ -1098,7 +1118,7 @@ impl MediaSessionStore for SqliteStore {
                     AND incarnation_id != ?4 AND state != 'ended'",
                 params![
                     activation.now_ms,
-                    activation.user_id,
+                    crate::store::local_media_principal_id(&activation.principal)?,
                     activation.playback_id,
                     activation.incarnation_id,
                     MEDIA_SESSION_PUBLICATION_BLOCKED,
@@ -1113,7 +1133,7 @@ impl MediaSessionStore for SqliteStore {
                          AND incarnation_id != ?3 AND state = 'ended'
                          AND updated_at_ms = ?4)",
                 params![
-                    activation.user_id,
+                    crate::store::local_media_principal_id(&activation.principal)?,
                     activation.playback_id,
                     activation.incarnation_id,
                     activation.now_ms,
@@ -1134,7 +1154,7 @@ impl MediaSessionStore for SqliteStore {
                         AND session.owner_epoch = job_leases.fence)",
                 params![
                     activation.now_ms,
-                    activation.user_id,
+                    crate::store::local_media_principal_id(&activation.principal)?,
                     activation.playback_id,
                     activation.incarnation_id,
                 ],
@@ -1169,7 +1189,7 @@ impl MediaSessionStore for SqliteStore {
                 params![
                     activation.incarnation_id,
                     activation.session_id,
-                    activation.user_id,
+                    crate::store::local_media_principal_id(&activation.principal)?,
                     activation.playback_id,
                     activation.request_fingerprint,
                     activation.owner_node_id,
@@ -1241,7 +1261,7 @@ impl MediaSessionStore for SqliteStore {
                     updated_at_ms = excluded.updated_at_ms,
                     desired_revision = excluded.desired_revision",
                 params![
-                    activation.user_id,
+                    crate::store::local_media_principal_id(&activation.principal)?,
                     activation.playback_id,
                     activation.incarnation_id,
                     activation.now_ms,
@@ -1319,7 +1339,7 @@ impl MediaSessionStore for SqliteStore {
                         .query_row(
                             "SELECT current_incarnation_id FROM media_playback_pointers
                               WHERE user_id = ?1 AND playback_id = ?2",
-                            params![activation.user_id, activation.playback_id],
+                            params![crate::store::local_media_principal_id(&activation.principal)?, activation.playback_id],
                             |row| row.get(0),
                         )
                         .optional()?;
@@ -1356,7 +1376,7 @@ impl MediaSessionStore for SqliteStore {
                                 AND request_fingerprint = ?4 AND playback_id = ?5
                                 AND owner_node_id = ?6 AND state = 'starting'",
                             params![
-                                activation.user_id,
+                                crate::store::local_media_principal_id(&activation.principal)?,
                                 request_id,
                                 activation.incarnation_id,
                                 activation.request_fingerprint,
@@ -1385,7 +1405,7 @@ impl MediaSessionStore for SqliteStore {
                             activation.owner_node_id,
                             MEDIA_SESSION_PUBLICATION_BLOCKED,
                             activation.lease_expires_at_ms,
-                            activation.user_id,
+                            crate::store::local_media_principal_id(&activation.principal)?,
                             activation.playback_id,
                         ],
                     )? != 1
@@ -1414,7 +1434,7 @@ impl MediaSessionStore for SqliteStore {
                                         AND incarnation_id = ?3 AND request_fingerprint = ?4
                                         AND playback_id = ?5 AND owner_node_id = ?6",
                                     params![
-                                        activation.user_id,
+                                        crate::store::local_media_principal_id(&activation.principal)?,
                                         activation.request_id.as_deref().unwrap_or_default(),
                                         activation.incarnation_id,
                                         activation.request_fingerprint,
@@ -1438,7 +1458,7 @@ impl MediaSessionStore for SqliteStore {
                                         AND incarnation_id = ?3 AND request_fingerprint = ?4
                                         AND playback_id = ?5 AND owner_node_id = ?6",
                                     params![
-                                        activation.user_id,
+                                        crate::store::local_media_principal_id(&activation.principal)?,
                                         activation.request_id.as_deref().unwrap_or_default(),
                                         activation.incarnation_id,
                                         activation.request_fingerprint,
@@ -1464,7 +1484,7 @@ impl MediaSessionStore for SqliteStore {
                                 AND owner_node_id = ?7 AND state = 'starting'",
                             params![
                                 now_ms,
-                                activation.user_id,
+                                crate::store::local_media_principal_id(&activation.principal)?,
                                 request_id,
                                 activation.incarnation_id,
                                 activation.request_fingerprint,
@@ -1492,7 +1512,7 @@ impl MediaSessionStore for SqliteStore {
                               WHERE user_id = ?1 AND playback_id = ?2
                                 AND current_incarnation_id = ?3",
                             params![
-                                activation.user_id,
+                                crate::store::local_media_principal_id(&activation.principal)?,
                                 activation.playback_id,
                                 activation.incarnation_id,
                             ],
@@ -1524,11 +1544,12 @@ impl MediaSessionStore for SqliteStore {
 
     async fn publish_media_session_activation(
         &self,
-        user_id: i64,
+        principal: &crate::playback_principal::PlaybackPrincipal,
         request_id: &str,
         incarnation_id: &str,
         now_ms: i64,
     ) -> Result<Option<MediaSessionRoute>, StoreError> {
+        let user_id = crate::store::local_media_principal_id(principal)?;
         if user_id <= 0
             || request_id.is_empty()
             || request_id.len() > 128
@@ -1708,12 +1729,13 @@ impl MediaSessionStore for SqliteStore {
 
     async fn record_desired_selection(
         &self,
-        user_id: i64,
+        principal: &crate::playback_principal::PlaybackPrincipal,
         playback_id: &str,
         digest: &str,
         canonical_form: &str,
         now_ms: i64,
     ) -> Result<crate::domain::DesiredOwnership, StoreError> {
+        let user_id = crate::store::local_media_principal_id(principal)?;
         validate_desired_selection(playback_id, digest, canonical_form, now_ms)?;
         let playback_id = playback_id.to_owned();
         let digest = digest.to_owned();
@@ -1754,9 +1776,10 @@ impl MediaSessionStore for SqliteStore {
 
     async fn validation_playback_pointer_desired_revision(
         &self,
-        user_id: i64,
+        principal: &crate::playback_principal::PlaybackPrincipal,
         playback_id: &str,
     ) -> Result<Option<i64>, StoreError> {
+        let user_id = crate::store::local_media_principal_id(principal)?;
         let playback_id = playback_id.to_owned();
         self.with_conn(move |conn| {
             let value: Option<Option<i64>> = conn
@@ -1774,11 +1797,12 @@ impl MediaSessionStore for SqliteStore {
 
     async fn validation_write_legacy_playback_pointer(
         &self,
-        user_id: i64,
+        principal: &crate::playback_principal::PlaybackPrincipal,
         playback_id: &str,
         incarnation_id: &str,
         now_ms: i64,
     ) -> Result<(), StoreError> {
+        let user_id = crate::store::local_media_principal_id(principal)?;
         // Exactly the statement a binary from before v49 emits: four columns,
         // no `desired_revision`, so the row arrives with a null there.
         let playback_id = playback_id.to_owned();
@@ -1800,9 +1824,10 @@ impl MediaSessionStore for SqliteStore {
 
     async fn desired_selection(
         &self,
-        user_id: i64,
+        principal: &crate::playback_principal::PlaybackPrincipal,
         playback_id: &str,
     ) -> Result<Option<crate::domain::DesiredOwnership>, StoreError> {
+        let user_id = crate::store::local_media_principal_id(principal)?;
         let playback_id = playback_id.to_owned();
         self.with_conn(move |conn| desired_within(conn, user_id, &playback_id))
             .await
@@ -1830,7 +1855,10 @@ impl MediaSessionStore for SqliteStore {
                         "SELECT {STAGED_COLS} FROM media_session_preparations
                           WHERE user_id = ?1 AND playback_id = ?2"
                     ),
-                    params![preparation.user_id, preparation.playback_id],
+                    params![
+                        crate::store::local_media_principal_id(&preparation.principal)?,
+                        preparation.playback_id
+                    ],
                     staged_from_row,
                 )
                 .optional()?;
@@ -1872,7 +1900,7 @@ impl MediaSessionStore for SqliteStore {
             }
             let retired = abort_staged_generation(
                 &tx,
-                preparation.user_id,
+                crate::store::local_media_principal_id(&preparation.principal)?,
                 &preparation.playback_id,
                 &staged_incarnation_id,
                 preparation.now_ms,
@@ -1897,7 +1925,7 @@ impl MediaSessionStore for SqliteStore {
                 .is_some_and(|route| {
                     route.state == "ended"
                         && route.terminal_reason.as_deref() == Some("replaced")
-                        && route.user_id == preparation.user_id
+                        && route.principal == preparation.principal
                         && route.playback_id == preparation.playback_id
                 });
             let Some(route) = route.filter(|_| named_was_replaced) else {
@@ -1917,9 +1945,10 @@ impl MediaSessionStore for SqliteStore {
 
     async fn staged_media_session_for_playback(
         &self,
-        user_id: i64,
+        principal: &crate::playback_principal::PlaybackPrincipal,
         playback_id: &str,
     ) -> Result<Option<MediaSessionStagedGeneration>, StoreError> {
+        let user_id = crate::store::local_media_principal_id(principal)?;
         if user_id <= 0 || playback_id.is_empty() || playback_id.len() > 128 {
             return Err(StoreError::Task(
                 "invalid staged media-session lookup".to_owned(),
@@ -1943,10 +1972,11 @@ impl MediaSessionStore for SqliteStore {
 
     async fn commit_media_session_preparation(
         &self,
-        user_id: i64,
+        principal: &crate::playback_principal::PlaybackPrincipal,
         playback_id: &str,
         request: &MediaSessionPreparationCommitRequest,
     ) -> Result<Option<MediaSessionPreparationCommit>, StoreError> {
+        let user_id = crate::store::local_media_principal_id(principal)?;
         if user_id <= 0
             || playback_id.is_empty()
             || playback_id.len() > 128
@@ -2287,10 +2317,11 @@ impl MediaSessionStore for SqliteStore {
 
     async fn abort_media_session_preparation(
         &self,
-        user_id: i64,
+        principal: &crate::playback_principal::PlaybackPrincipal,
         playback_id: &str,
         request: &MediaSessionPreparationAbortRequest,
     ) -> Result<Option<MediaSessionRoute>, StoreError> {
+        let user_id = crate::store::local_media_principal_id(principal)?;
         if user_id <= 0
             || playback_id.is_empty()
             || playback_id.len() > 128
@@ -2378,7 +2409,8 @@ impl MediaSessionStore for SqliteStore {
                 .filter(|route| {
                     route.state == "ended"
                         && route.terminal_reason.as_deref() == Some("replaced")
-                        && route.user_id == user_id
+                        && route.principal
+                            == (crate::playback_principal::PlaybackPrincipal::LocalUser { user_id })
                         && route.playback_id == playback_id
                 });
             tx.commit()?;
@@ -2575,11 +2607,12 @@ impl MediaSessionStore for SqliteStore {
 
     async fn fail_media_session_request(
         &self,
-        user_id: i64,
+        principal: &crate::playback_principal::PlaybackPrincipal,
         request_id: &str,
         incarnation_id: &str,
         now_ms: i64,
     ) -> Result<bool, StoreError> {
+        let user_id = crate::store::local_media_principal_id(principal)?;
         if user_id <= 0
             || request_id.is_empty()
             || request_id.len() > 128
@@ -2643,9 +2676,10 @@ impl MediaSessionStore for SqliteStore {
 
     async fn media_session_route_for_playback(
         &self,
-        user_id: i64,
+        principal: &crate::playback_principal::PlaybackPrincipal,
         playback_id: &str,
     ) -> Result<Option<MediaSessionRoute>, StoreError> {
+        let user_id = crate::store::local_media_principal_id(principal)?;
         if user_id <= 0
             || playback_id.is_empty()
             || playback_id.len() > 128
@@ -3173,7 +3207,7 @@ impl MediaSessionStore for SqliteStore {
                     AND request_fingerprint = ?3 AND playback_id = ?4
                     AND state = 'starting'",
                 params![
-                    route.user_id,
+                    crate::store::local_media_principal_id(&route.principal)?,
                     takeover.incarnation_id,
                     route.request_fingerprint,
                     route.playback_id,
@@ -3191,7 +3225,7 @@ impl MediaSessionStore for SqliteStore {
                         params![
                             takeover.next_owner_node_id,
                             takeover.now_ms,
-                            route.user_id,
+                            crate::store::local_media_principal_id(&route.principal)?,
                             takeover.incarnation_id,
                             route.request_fingerprint,
                             route.playback_id,
@@ -3314,7 +3348,7 @@ impl MediaSessionStore for SqliteStore {
                 "DELETE FROM media_playback_pointers
                   WHERE user_id = ?1 AND playback_id = ?2 AND current_incarnation_id = ?3",
                 params![
-                    current_route.user_id,
+                    crate::store::local_media_principal_id(&current_route.principal)?,
                     current_route.playback_id,
                     end.incarnation_id
                 ],
@@ -3397,7 +3431,11 @@ impl MediaSessionStore for SqliteStore {
                 tx.execute(
                     "DELETE FROM media_playback_pointers
                       WHERE user_id = ?1 AND playback_id = ?2 AND current_incarnation_id = ?3",
-                    params![route.user_id, route.playback_id, route.incarnation_id],
+                    params![
+                        crate::store::local_media_principal_id(&route.principal)?,
+                        route.playback_id,
+                        route.incarnation_id
+                    ],
                 )?;
                 tx.execute(
                     // Every epoch's pin, matching the replicated backend: the
@@ -3625,7 +3663,7 @@ impl MediaSessionStore for SqliteStore {
         self.with_read(move |conn| {
             let mut statement = conn.prepare(
                 "SELECT incarnation_id, session_id, owner_epoch, lease_expires_at_ms,
-                        drain_deadline_ms
+                        drain_deadline_ms, user_id
                    FROM media_sessions
                   WHERE owner_node_id = ?1 AND state = 'active'
                     AND lease_expires_at_ms > ?2
@@ -3653,6 +3691,9 @@ impl MediaSessionStore for SqliteStore {
                     ],
                     |row| {
                         Ok(OwnedMediaSessionLease {
+                            principal: crate::playback_principal::PlaybackPrincipal::LocalUser {
+                                user_id: row.get(5)?,
+                            },
                             incarnation_id: row.get(0)?,
                             session_id: row.get(1)?,
                             owner_epoch: row.get(2)?,
@@ -3699,7 +3740,7 @@ impl MediaSessionStore for SqliteStore {
                  VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, 'reserved', ?10, ?10)
                  ON CONFLICT (user_id, playback_id, recovery_epoch) DO NOTHING",
                 params![
-                    request.user_id,
+                    crate::store::local_media_principal_id(&request.principal)?,
                     request.playback_id,
                     request.recovery_epoch,
                     request.failed_incarnation_id,
@@ -3717,7 +3758,7 @@ impl MediaSessionStore for SqliteStore {
             // somebody else's decision.
             let existing = read_recovery_row(
                 &tx,
-                request.user_id,
+                crate::store::local_media_principal_id(&request.principal)?,
                 &request.playback_id,
                 &request.recovery_epoch,
             )?;
@@ -3753,13 +3794,14 @@ impl MediaSessionStore for SqliteStore {
 
     async fn settle_producer_recovery(
         &self,
-        user_id: i64,
+        principal: &crate::playback_principal::PlaybackPrincipal,
         playback_id: &str,
         recovery_epoch: &str,
         failed_incarnation_id: &str,
         state: crate::domain::ProducerRecoveryState,
         now_ms: i64,
     ) -> Result<Option<crate::domain::ProducerRecoveryReservation>, StoreError> {
+        let user_id = crate::store::local_media_principal_id(principal)?;
         if matches!(state, crate::domain::ProducerRecoveryState::Reserved) {
             return Err(StoreError::Task(
                 "a recovery cannot be settled back into reserved".to_owned(),
@@ -3807,10 +3849,11 @@ impl MediaSessionStore for SqliteStore {
 
     async fn producer_recovery_for_epoch(
         &self,
-        user_id: i64,
+        principal: &crate::playback_principal::PlaybackPrincipal,
         playback_id: &str,
         recovery_epoch: &str,
     ) -> Result<Option<crate::domain::ProducerRecoveryReservation>, StoreError> {
+        let user_id = crate::store::local_media_principal_id(principal)?;
         let (user_id, playback_id, recovery_epoch) =
             crate::store::validated_epoch_key(user_id, playback_id, recovery_epoch)?;
         self.with_conn(move |conn| {
@@ -3823,11 +3866,12 @@ impl MediaSessionStore for SqliteStore {
 
     async fn validation_corrupt_recovery_restriction(
         &self,
-        user_id: i64,
+        principal: &crate::playback_principal::PlaybackPrincipal,
         playback_id: &str,
         recovery_epoch: &str,
         stored: &str,
     ) -> Result<bool, StoreError> {
+        let user_id = crate::store::local_media_principal_id(principal)?;
         let (playback_id, recovery_epoch, stored) = (
             playback_id.to_owned(),
             recovery_epoch.to_owned(),

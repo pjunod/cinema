@@ -2,7 +2,7 @@
 use super::*;
 use plurx_core::store::MEDIA_SESSION_PRINCIPAL_REBUILD_SCHEMA;
 
-const TABLES: [&str; 9] = [
+const TABLES: [&str; 11] = [
     "media_session_requests",
     "media_playback_pointers",
     "media_sessions",
@@ -12,6 +12,8 @@ const TABLES: [&str; 9] = [
     "library_channel_session_recipes",
     "job_leases",
     "media_session_terminal_acks",
+    "sharing_relay_upstream",
+    "sharing_delivery_grants",
 ];
 
 async fn text_rows(client: &Client, sql: String) -> Vec<String> {

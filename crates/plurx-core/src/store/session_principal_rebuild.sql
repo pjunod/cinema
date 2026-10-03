@@ -162,10 +162,38 @@ INSERT INTO media_sessions_principal_new (owner_key, principal_kind, share_grant
 SELECT 'local:' || CAST(user_id AS TEXT), 'local', NULL, NULL, incarnation_id, session_id, user_id, playback_id, request_fingerprint, owner_node_id, owner_epoch, lease_expires_at_ms, state, terminal_reason, publication_ready_at_ms, recipe_json, response_json, produced_playable_through_ms, fetched_through_ms, media_origin_ms, media_sequence, discontinuity_sequence, updated_at_ms, recovery_epoch, drain_deadline_ms FROM media_sessions;
 
 -- next statement
+-- Preserve the child rows while replacing their parent. The replicated writer
+-- enforces foreign keys; SQLite's migration runner temporarily turns them off.
+-- Explicitly evacuating both children handles either setting in one atomic
+-- transaction and avoids DROP TABLE's ON DELETE CASCADE losing relay authority.
+CREATE TABLE media_session_principal_relay_backup AS SELECT * FROM sharing_relay_upstream;
+
+-- next statement
+CREATE TABLE media_session_principal_delivery_backup AS SELECT * FROM sharing_delivery_grants;
+
+-- next statement
+DELETE FROM sharing_delivery_grants;
+
+-- next statement
+DELETE FROM sharing_relay_upstream;
+
+-- next statement
 DROP TABLE media_sessions;
 
 -- next statement
 ALTER TABLE media_sessions_principal_new RENAME TO media_sessions;
+
+-- next statement
+INSERT INTO sharing_relay_upstream SELECT * FROM media_session_principal_relay_backup;
+
+-- next statement
+INSERT INTO sharing_delivery_grants SELECT * FROM media_session_principal_delivery_backup;
+
+-- next statement
+DROP TABLE media_session_principal_delivery_backup;
+
+-- next statement
+DROP TABLE media_session_principal_relay_backup;
 
 -- next statement
 CREATE TABLE media_session_preparations_principal_new (
