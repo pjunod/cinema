@@ -183,6 +183,8 @@ pub struct Track {
     /// `EXTINF` is computed in — audio's differs by up to one AAC frame per
     /// fragment and using it drifts the playlist against the media.
     pub timescale: u32,
+    /// Structural edit metadata; encoded VOD must never compensate its grid through it.
+    pub has_edit_list: bool,
     pub codec: Option<VideoCodec>,
     /// The sample entry carries a Dolby Vision decoder configuration (`dvcC`
     /// or `dvvC`). This is distinct from an `hvc1` base layer: ffmpeg may strip
@@ -263,6 +265,9 @@ impl Sample {
 /// One `trun`, resolved: where its sample data starts and what its samples are.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Run {
+    /// Original trun wire shape, retained for encoded presentation-grid validation.
+    pub version: u8,
+    pub composition_offsets_present: bool,
     /// Byte offset of this run's first sample, relative to the start of the
     /// enclosing [`Fragment`]'s bytes (which begin at the `moof` — the same
     /// origin `default-base-is-moof` gives the `trun`).
@@ -686,6 +691,7 @@ fn parse_trak(payload: &[u8]) -> Result<Track, Fmp4Error> {
         id: 0,
         kind: TrackKind::Other,
         timescale: 0,
+        has_edit_list: false,
         codec: None,
         dolby_vision_config: false,
         nal_length_size: 0,
@@ -710,6 +716,7 @@ fn parse_trak(payload: &[u8]) -> Result<Track, Fmp4Error> {
                 track.id = be_u32(b, off);
             }
             b"mdia" => parse_mdia(b, &mut track)?,
+            b"edts" | b"elst" => track.has_edit_list = true,
             _ => {}
         }
     }
@@ -3378,6 +3385,9 @@ fn parse_trun(
         return malformed("trun too short");
     }
     let version = b[0];
+    if version > 1 {
+        return malformed("unsupported trun version");
+    }
     let flags = be_u32(b, 0) & 0x00ff_ffff;
     let count = be_u32(b, 4) as usize;
     let mut p = 8;
@@ -3472,10 +3482,120 @@ fn parse_trun(
         });
     }
     Ok(Run {
+        version,
+        composition_offsets_present: flags & 0x00_0800 != 0,
         data_offset,
         data_offset_at,
         samples,
     })
+}
+
+/// A refused encoded timeline is never eligible for publication. These fixed
+/// reasons distinguish a bad producer clock from a malformed presentation grid.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+pub enum EncodedGridError {
+    #[error("missing selected video track")]
+    MissingVideo,
+    #[error("video timescale differs from immutable plan")]
+    Timescale,
+    #[error("selected video track contains edit metadata")]
+    EditList,
+    #[error("fragment does not begin with clean random access")]
+    RandomAccess,
+    #[error("decode anchor differs from planned entry")]
+    DecodeAnchor,
+    #[error("random-access picture does not present at the entry boundary")]
+    PresentationAnchor,
+    #[error("invalid planned frame duration or entry size")]
+    PlanDuration,
+    #[error("sample count differs from planned frame count")]
+    SampleCount,
+    #[error("sample duration differs from declared output cadence")]
+    SampleDuration,
+    #[error("nonzero composition offset lacks signed version-1 wire shape")]
+    CompositionShape,
+    #[error("timestamp arithmetic exceeds the representable timeline")]
+    Overflow,
+    #[error("presentation timestamp is outside the planned interval")]
+    PresentationInterval,
+    #[error("presentation slots are missing, duplicated or off-grid")]
+    PresentationGrid,
+}
+
+/// Prove the exact presentation multiset, independently of decode order. The
+/// frame duration comes from the frozen encoder recipe, never the output.
+pub fn validate_encoded_grid(
+    fragment: &Fragment,
+    init: &Init,
+    timescale: u32,
+    start: u64,
+    duration: u64,
+    frame_ticks: u32,
+) -> Result<(), EncodedGridError> {
+    use EncodedGridError as E;
+    let track = init.video().ok_or(E::MissingVideo)?;
+    let video = fragment.track(track.id).ok_or(E::MissingVideo)?;
+    if track.timescale != timescale || timescale == 0 {
+        return Err(E::Timescale);
+    }
+    if track.has_edit_list {
+        return Err(E::EditList);
+    }
+    if !classify(fragment, init).is_clean() {
+        return Err(E::RandomAccess);
+    }
+    if video.base_decode_time != start {
+        return Err(E::DecodeAnchor);
+    }
+    if video.samples().next().is_some_and(|sample| sample.cto != 0) {
+        return Err(E::PresentationAnchor);
+    }
+    let step = u64::from(frame_ticks);
+    if step == 0 || duration == 0 || !duration.is_multiple_of(step) {
+        return Err(E::PlanDuration);
+    }
+    if u64::try_from(video.sample_count()).map_err(|_| E::Overflow)? != duration / step {
+        return Err(E::SampleCount);
+    }
+    let end = start.checked_add(duration).ok_or(E::Overflow)?;
+    let mut dts = i128::from(start);
+    let mut presentation = Vec::with_capacity(video.sample_count());
+    for run in &video.runs {
+        for sample in &run.samples {
+            if sample.duration != frame_ticks {
+                return Err(E::SampleDuration);
+            }
+            if sample.cto != 0
+                && (run.version != 1
+                    || !run.composition_offsets_present
+                    || i32::try_from(sample.cto).is_err())
+            {
+                return Err(E::CompositionShape);
+            }
+            let pts = dts.checked_add(i128::from(sample.cto)).ok_or(E::Overflow)?;
+            if pts < i128::from(start) || pts >= i128::from(end) {
+                return Err(E::PresentationInterval);
+            }
+            presentation.push(pts);
+            dts = dts
+                .checked_add(i128::from(sample.duration))
+                .ok_or(E::Overflow)?;
+        }
+    }
+    if dts != i128::from(end) {
+        return Err(E::SampleDuration);
+    }
+    presentation.sort_unstable();
+    let mut expected = i128::from(start);
+    for pts in presentation {
+        if pts != expected {
+            return Err(E::PresentationGrid);
+        }
+        expected = expected
+            .checked_add(i128::from(frame_ticks))
+            .ok_or(E::Overflow)?;
+    }
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -4221,8 +4341,8 @@ fn trun_flags(samples: &[Sample]) -> u32 {
 /// offsets are UNSIGNED.
 ///
 /// ffmpeg shifts dts to keep every offset non-negative unless it is asked for
-/// `+negative_cts_offsets`, which plurx does not pass — so in production this
-/// is always 0. It matters anyway, because the alternative was writing
+/// `+negative_cts_offsets`, used by the software-H.264 reordered VOD recipe.
+/// Preserve its signed offsets, because the alternative was writing
 /// `cto.max(0)` into a version-0 field: a negative offset would then be
 /// silently clamped, shifting that frame's presentation time by the offset it
 /// lost, with no error — which is exactly the class of change the framemd5
@@ -4908,6 +5028,8 @@ impl Segmenter {
                                 track_id: track.id,
                                 base_decode_time: selected_decode_time,
                                 runs: vec![Run {
+                                    version: run.version,
+                                    composition_offsets_present: run.composition_offsets_present,
                                     data_offset_at: None,
                                     data_offset: selected_data_offset,
                                     samples: run.samples[group_start..group_end].to_vec(),
@@ -5247,6 +5369,8 @@ mod tests {
                 track_id,
                 base_decode_time: 0,
                 runs: vec![Run {
+                    version: 0,
+                    composition_offsets_present: false,
                     data_offset_at: None,
                     data_offset: 0,
                     samples: vec![Sample {
@@ -7143,6 +7267,8 @@ mod tests {
                 track_id,
                 base_decode_time: base,
                 runs: vec![Run {
+                    version: 0,
+                    composition_offsets_present: false,
                     data_offset_at: None,
                     data_offset: 8,
                     samples,
@@ -7166,6 +7292,7 @@ mod tests {
             id,
             kind,
             timescale,
+            has_edit_list: false,
             codec: None,
             dolby_vision_config: false,
             nal_length_size: 4,
@@ -8301,6 +8428,180 @@ mod tests {
         moof.extend_from_slice(&8u32.to_be_bytes());
         moof.extend_from_slice(b"mdat");
         moof
+    }
+
+    fn encoded_grid_fixture(case: &serde_json::Value) -> (Init, Fragment) {
+        // Parse structural edit metadata rather than infer absence from argv.
+        let mut trak = vec![0; 24];
+        trak[..4].copy_from_slice(&24u32.to_be_bytes());
+        trak[4..8].copy_from_slice(b"tkhd");
+        trak[20..24].copy_from_slice(&1u32.to_be_bytes());
+        if case["has_edit_list"]
+            .as_bool()
+            .expect("valid presentation-grid fixture")
+        {
+            trak.extend_from_slice(&8u32.to_be_bytes());
+            trak.extend_from_slice(b"edts");
+        }
+        let mut track = parse_trak(&trak).expect("parser-produced track metadata");
+        track.kind = TrackKind::Video;
+        track.codec = Some(VideoCodec::H264);
+        track.nal_length_size = 4;
+        track.timescale = case["track_timescale"]
+            .as_u64()
+            .expect("valid presentation-grid fixture") as u32;
+        let init = Init {
+            bytes: Vec::new(),
+            tracks: vec![track],
+        };
+        let samples = case["samples"]
+            .as_array()
+            .expect("valid presentation-grid fixture");
+        let version = case["trun_version"]
+            .as_u64()
+            .expect("valid presentation-grid fixture") as u32;
+        let mut fields = vec![0; 4]; // data_offset filled once box size is known
+        for sample in samples {
+            fields.extend_from_slice(
+                &(sample["duration"]
+                    .as_u64()
+                    .expect("valid presentation-grid fixture") as u32)
+                    .to_be_bytes(),
+            );
+            fields.extend_from_slice(&5u32.to_be_bytes());
+            fields.extend_from_slice(
+                &(sample["cto"]
+                    .as_i64()
+                    .expect("valid presentation-grid fixture") as u32)
+                    .to_be_bytes(),
+            );
+        }
+        let flags = (version << 24) | 0x0000_0b01;
+        let empty = hand_built_fragment(flags, samples.len() as u32, &fields);
+        fields[..4].copy_from_slice(&(empty.len() as u32).to_be_bytes());
+        let mut bytes = hand_built_fragment(flags, samples.len() as u32, &fields);
+        let mdat = bytes.len() - 8;
+        bytes[mdat..mdat + 4].copy_from_slice(&(8 + samples.len() as u32 * 5).to_be_bytes());
+        let tfdt = bytes
+            .windows(4)
+            .position(|part| part == b"tfdt")
+            .expect("valid presentation-grid fixture");
+        bytes[tfdt + 8..tfdt + 16].copy_from_slice(
+            &case["base_decode_time"]
+                .as_u64()
+                .expect("valid presentation-grid fixture")
+                .to_be_bytes(),
+        );
+        for index in 0..samples.len() {
+            let nal = if index == 0
+                && case["clean_random_access"]
+                    .as_bool()
+                    .expect("valid presentation-grid fixture")
+            {
+                0x65
+            } else {
+                0x41
+            };
+            bytes.extend_from_slice(&[0, 0, 0, 1, nal]);
+        }
+        let tracks =
+            parse_moof(&bytes[..mdat], 8, &init.tracks).expect("parser-produced sample times");
+        let payload = mdat + 8..bytes.len();
+        (
+            init,
+            Fragment {
+                bytes,
+                mdat_payload: payload,
+                tracks,
+            },
+        )
+    }
+
+    #[test]
+    fn encoded_presentation_grid_enforces_the_design_oracle_from_parsed_boxes() {
+        let cases: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../tests/playback/vod-bframes-timeline-cases.json"
+        ))
+        .expect("valid presentation-grid fixture");
+        for case in cases["cases"]
+            .as_array()
+            .expect("valid presentation-grid fixture")
+        {
+            let (init, fragment) = encoded_grid_fixture(case);
+            assert_eq!(
+                init.video()
+                    .expect("valid presentation-grid fixture")
+                    .has_edit_list,
+                case["has_edit_list"]
+                    .as_bool()
+                    .expect("valid presentation-grid fixture")
+            );
+            let result = validate_encoded_grid(
+                &fragment,
+                &init,
+                case["plan_timescale"]
+                    .as_u64()
+                    .expect("valid presentation-grid fixture") as u32,
+                case["entry_start"]
+                    .as_u64()
+                    .expect("valid presentation-grid fixture"),
+                case["entry_duration"]
+                    .as_u64()
+                    .expect("valid presentation-grid fixture"),
+                case["frame_ticks"]
+                    .as_u64()
+                    .expect("valid presentation-grid fixture") as u32,
+            );
+            assert_eq!(
+                result.is_ok(),
+                case["expect"]["accepted"]
+                    .as_bool()
+                    .expect("valid presentation-grid fixture"),
+                "{}: {result:?}",
+                case["name"]
+            );
+        }
+    }
+
+    #[test]
+    fn encoded_presentation_grid_refuses_unrepresentable_end_and_false_wire_claims() {
+        let cases: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../tests/playback/vod-bframes-timeline-cases.json"
+        ))
+        .expect("valid presentation-grid fixture");
+        let case = &cases["cases"][1];
+        let (init, mut fragment) = encoded_grid_fixture(case);
+        fragment.tracks[0].base_decode_time = u64::MAX - 1;
+        assert_eq!(
+            validate_encoded_grid(&fragment, &init, 24, u64::MAX - 1, 4, 1),
+            Err(EncodedGridError::Overflow)
+        );
+        fragment.tracks[0].base_decode_time = 0;
+        // This is a complete unique grid, but it presents B pictures before
+        // the IDR. NAL classification alone cannot prove the presentation cut.
+        for (sample, cto) in fragment.tracks[0].runs[0]
+            .samples
+            .iter_mut()
+            .zip([2, 2, -2, -2])
+        {
+            sample.cto = cto;
+        }
+        assert_eq!(
+            validate_encoded_grid(&fragment, &init, 24, 0, 4, 1),
+            Err(EncodedGridError::PresentationAnchor)
+        );
+        for (sample, cto) in fragment.tracks[0].runs[0]
+            .samples
+            .iter_mut()
+            .zip([0, 2, -1, -1])
+        {
+            sample.cto = cto;
+        }
+        fragment.tracks[0].runs[0].composition_offsets_present = false;
+        assert_eq!(
+            validate_encoded_grid(&fragment, &init, 24, 0, 4, 1),
+            Err(EncodedGridError::CompositionShape)
+        );
     }
 
     /// A `trun` that sets no per-sample flags has a per-sample cost of ZERO

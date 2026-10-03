@@ -45,7 +45,8 @@ pub use encoder::{
 pub use pipeline::{Pipeline, CANDIDATES as PIPELINE_CANDIDATES};
 pub use recipe::{PipelineDigest, Recipe, CACHE_RECIPE_VERSION};
 pub use vod::{
-    vod_audio_anchor, vod_pipe_args, VodFrameGrid, VOD_AAC_FRAME_SAMPLES, VOD_AUDIO_RATE,
+    vod_audio_anchor, vod_pipe_args, vod_pipe_args_with_reorder, VodFrameGrid,
+    VOD_AAC_FRAME_SAMPLES, VOD_AUDIO_RATE,
 };
 
 use crate::domain::MediaFile;

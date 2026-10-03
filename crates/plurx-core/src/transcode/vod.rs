@@ -117,6 +117,19 @@ pub fn vod_pipe_args(
     grid: VodFrameGrid,
     duration_seconds: f64,
 ) -> Vec<String> {
+    vod_pipe_args_with_reorder(source, plan, execution, grid, duration_seconds, false)
+}
+
+/// Optional software-H.264 reordered recipe. Hardware and other codecs keep
+/// their existing recipe; readiness is advisory at the operator control.
+pub fn vod_pipe_args_with_reorder(
+    source: &MediaFile,
+    plan: &ResolvedTranscode,
+    execution: &TranscodeExecution,
+    grid: VodFrameGrid,
+    duration_seconds: f64,
+    reorder: bool,
+) -> Vec<String> {
     let media = plan.options();
     let target = execution.start_seconds.max(0.0);
     let audio_anchor = vod_audio_anchor(target) as f64 / f64::from(VOD_AUDIO_RATE);
@@ -260,6 +273,10 @@ pub fn vod_pipe_args(
     if let Some(index) = args.iter().position(|arg| arg == "-force_key_frames") {
         args[index + 1] = format!("expr:eq(mod(n,{}),0)", grid.frames_per_segment);
     }
+    let reorder = reorder
+        && args
+            .windows(2)
+            .any(|pair| pair[0] == "-c:v" && pair[1] == "libx264");
     args.extend([
         // Chapters are library metadata, not part of an immutable media
         // rendition. ffmpeg maps them independently of the explicit video
@@ -275,10 +292,9 @@ pub fn vod_pipe_args(
         VOD_AUDIO_RATE.to_string(),
         "-profile:a".to_owned(),
         "aac_low".to_owned(),
-        // No reorder delay: the plan addresses presented frame boundaries,
-        // not a decoder preroll hidden before the URI's declared start.
+        // Signed CTOs preserve the presentation grid with two B frames.
         "-bf".to_owned(),
-        "0".to_owned(),
+        if reorder { "2" } else { "0" }.to_owned(),
         "-flags".to_owned(),
         "+cgop".to_owned(),
         "-g".to_owned(),
@@ -303,7 +319,12 @@ pub fn vod_pipe_args(
         // The runner removes encoder priming and restores the film-global
         // audio lattice. Per-generation edit lists must not change the init
         // or apply a second priming shift after fragment publication.
-        "+empty_moov+delay_moov+default_base_moof+frag_keyframe".to_owned(),
+        if reorder {
+            "+empty_moov+delay_moov+default_base_moof+frag_keyframe+negative_cts_offsets"
+        } else {
+            "+empty_moov+delay_moov+default_base_moof+frag_keyframe"
+        }
+        .to_owned(),
         "-video_track_timescale".to_owned(),
         grid.numerator.to_string(),
         "-f".to_owned(),
@@ -403,6 +424,22 @@ mod tests {
             VodFrameGrid::new(24, 1).expect("grid"),
             12.0,
         );
+        let reordered = vod_pipe_args_with_reorder(
+            &source,
+            &plan,
+            &execution,
+            VodFrameGrid::new(24, 1).expect("grid"),
+            12.0,
+            true,
+        );
+        assert!(args.windows(2).any(|pair| pair == ["-bf", "0"]));
+        assert!(reordered.windows(2).any(|pair| pair == ["-bf", "2"]));
+        assert!(reordered
+            .iter()
+            .any(|arg| arg.contains("+negative_cts_offsets")));
+        assert!(reordered
+            .windows(2)
+            .any(|pair| pair == ["-use_editlist", "0"]));
         let chapter_options = args
             .windows(2)
             .filter(|pair| pair[0] == "-map_chapters")

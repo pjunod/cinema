@@ -1048,12 +1048,22 @@ impl TranscodeManager {
                 "the source changed while attesting the encoded engine; rescan it before playback",
             ));
         }
+        let reorder_frames = self
+            .store
+            .get_setting("playback.vod_reorder_frames")
+            .await
+            .map_err(|error| {
+                start_infrastructure_error(format!("reading VOD reorder setting: {error}"))
+            })?
+            .as_deref()
+            == Some("2");
         Ok(Some(Arc::new(crate::vodencode::Encoding {
             source_object_version,
             plan,
             resources,
             options,
             grid,
+            reorder_frames,
             subtitle,
             subtitle_digest,
             ffmpeg_build: crate::ffmpeg::ffmpeg_build().await,
