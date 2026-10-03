@@ -2030,12 +2030,13 @@ impl ClusterFragmentIndexStore for HiqliteAuthStore {
             })
     }
 
-    async fn claim_analysis_request_compatible(
+    async fn claim_analysis_request_for_capacity(
         &self,
         node_id: &str,
         pipeline_version: Option<&str>,
         now_ms: i64,
         lease_expires_ms: i64,
+        viewer_only: bool,
     ) -> Result<Option<AnalysisRequest>, StoreError> {
         if node_id.is_empty()
             || node_id.len() > 128
@@ -2100,6 +2101,11 @@ impl ClusterFragmentIndexStore for HiqliteAuthStore {
             .map_err(database_error)?;
         for _ in 0..8 {
             let capacity = super::fragment_index_cluster::analysis_source_capacity_clause("$3");
+            let viewer = if viewer_only {
+                super::fragment_index_cluster::analysis_live_viewer_clause("$3")
+            } else {
+                "1".to_owned()
+            };
             let candidate = self
                 .client()
                 .query_consistent_map::<RequestRow, _>(
@@ -2110,7 +2116,7 @@ impl ClusterFragmentIndexStore for HiqliteAuthStore {
                             AND component <> 'subtitle_source' AND attempts < $2
                             AND state = 'queued' AND not_before_ms <= $3
                             AND ($4 IS NULL OR component <> 'fragment_index' OR pipeline_version = $4)
-                            AND {capacity}
+                            AND {capacity} AND {viewer}
                           ORDER BY CASE WHEN (component != 'fragment_index' AND priority = 'foreground')
                             OR (component = 'fragment_index' AND EXISTS (
                                 SELECT 1 FROM background_job_waiters waiter
@@ -2149,7 +2155,7 @@ impl ClusterFragmentIndexStore for HiqliteAuthStore {
                       WHERE request_id = $4 AND fence = $5
                         AND state = 'queued' AND not_before_ms <= $3
                         AND ($6 IS NULL OR component <> 'fragment_index' OR pipeline_version = $6)
-                        AND {capacity}"
+                        AND {capacity} AND {viewer}"
                         ),
                         params!(
                             node_id,

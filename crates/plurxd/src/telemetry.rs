@@ -3396,16 +3396,18 @@ mod tests {
     /// whole binary, which is how this reached a review as a passing branch.
     #[test]
     fn an_unregistered_store_registers_its_sink_without_relocking() {
+        // The watchdog covers registry registration, not schema migration or
+        // runtime construction. Those fixtures can be slow under suite load
+        // without emit relocking its registry or failing to make progress.
+        let store: Arc<dyn Store> =
+            Arc::new(plurx_core::store::SqliteStore::open_in_memory().expect("telemetry store"));
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("runtime");
         let (sender, receiver) = std::sync::mpsc::channel();
         std::thread::spawn(move || {
-            let runtime = tokio::runtime::Builder::new_current_thread()
-                .enable_all()
-                .build()
-                .expect("runtime");
             runtime.block_on(async move {
-                let store: Arc<dyn Store> = Arc::new(
-                    plurx_core::store::SqliteStore::open_in_memory().expect("telemetry store"),
-                );
                 emit(
                     Arc::clone(&store),
                     PlaybackEvent {

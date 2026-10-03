@@ -21144,6 +21144,143 @@ async fn analysis_source_invalidation_terminalizes_exact_attempt_through_dyn_sto
 }
 
 #[tokio::test]
+async fn busy_analysis_worker_claims_only_live_viewers_without_spending_maintenance_attempts() {
+    for_each_backend(|store, backend| async move {
+        let (_, file_id) = seed_file(&store, "busy-analysis-viewer").await;
+        let user = store
+            .create_user("busy-analysis-viewer", "hash", false)
+            .await
+            .expect("user");
+        let request = store
+            .enqueue_analysis_request(&NewAnalysisRequest {
+                request_id: "busy-analysis-request".into(),
+                file_id,
+                source_size: 10_000,
+                source_mtime: 1,
+                component: "fragment_index".into(),
+                pipeline_version: "busy-engine".into(),
+                video_identity: String::new(),
+                requested_generation: "busy-generation".into(),
+                priority: "normal".into(),
+                trigger: "background".into(),
+                force_rebuild: false,
+                target_node_id: "busy-node".into(),
+                not_before_ms: 10,
+                created_at_ms: 10,
+            })
+            .await
+            .expect("request");
+        assert!(
+            store
+                .claim_analysis_request_for_capacity(
+                    "busy-node",
+                    Some("busy-engine"),
+                    11,
+                    1011,
+                    true
+                )
+                .await
+                .expect("busy claim")
+                .is_none(),
+            "{backend}: no maintenance while busy"
+        );
+        assert_eq!(
+            store
+                .analysis_request(&request.request_id)
+                .await
+                .expect("read")
+                .expect("row")
+                .attempts,
+            0
+        );
+        store
+            .join_analysis_viewer(plurx_core::store::AnalysisViewerInterest {
+                analysis_request_id: request.request_id.clone(),
+                requested_generation: request.requested_generation.clone(),
+                pipeline_version: request.pipeline_version.clone(),
+                video_identity: request.video_identity.clone(),
+                target_node_id: request.target_node_id.clone(),
+                user_id: user.id,
+                playback_id: "busy-viewer".into(),
+                now_ms: 12,
+            })
+            .await
+            .expect("viewer");
+        assert!(
+            store
+                .analysis_preparation_observation(&request.request_id, 13)
+                .await
+                .expect("observation")
+                .expect("row")
+                .has_live_viewer,
+            "{backend}"
+        );
+        assert!(
+            store
+                .claim_analysis_request_for_capacity(
+                    "busy-node",
+                    Some("other-engine"),
+                    13,
+                    1013,
+                    true
+                )
+                .await
+                .expect("wrong engine")
+                .is_none(),
+            "{backend}"
+        );
+        let claimed = store
+            .claim_analysis_request_for_capacity("busy-node", Some("busy-engine"), 14, 1014, true)
+            .await
+            .expect("viewer claim")
+            .expect("viewer source read admitted");
+        assert_eq!(claimed.request_id, request.request_id, "{backend}");
+        assert!(store
+            .retry_analysis_request(&claimed, "foreground_preempted", 15, 1015, false)
+            .await
+            .expect("return claim"));
+        assert!(
+            !store
+                .analysis_preparation_observation(&request.request_id, 120013)
+                .await
+                .expect("observation")
+                .expect("row")
+                .has_live_viewer,
+            "{backend}: expired viewers do not admit work"
+        );
+        assert!(
+            store
+                .claim_analysis_request_for_capacity(
+                    "busy-node",
+                    Some("busy-engine"),
+                    120013,
+                    121013,
+                    true
+                )
+                .await
+                .expect("expired viewer claim")
+                .is_none(),
+            "{backend}"
+        );
+        assert!(
+            store
+                .claim_analysis_request_for_capacity(
+                    "busy-node",
+                    Some("busy-engine"),
+                    120014,
+                    121014,
+                    false
+                )
+                .await
+                .expect("idle maintenance claim")
+                .is_some(),
+            "{backend}: idle maintenance still runs"
+        );
+    })
+    .await;
+}
+
+#[tokio::test]
 async fn analysis_worker_skips_incompatible_engine_before_spending_a_claim() {
     for_each_backend(|store, backend| async move {
         let (_, old_file) = seed_file(&store, "analysis-old-engine").await;
