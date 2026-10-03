@@ -2,8 +2,9 @@
 //!
 //! There is no analysis task on Play. A durable producer performs this phase
 //! while it owns its ordinary source, cancellation and CPU admission. Its
-//! measured result is reusable by later offline requests with the same source
-//! and output policy. Absence, refusal and failed measurements retain VBR.
+//! measured result is reusable by completed-cache lookups and later offline
+//! requests with the same source and output policy. Absence, refusal and failed
+//! measurements retain VBR.
 use super::*;
 use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncReadExt, AsyncSeekExt};
@@ -68,6 +69,28 @@ impl Report {
         }
         winner(&self.windows).map(|quality| EffectiveRateControl::Qvbr { quality })
     }
+}
+
+/// A cache reader may name the producer's thread recipe because it never
+/// starts an encoder. A new offline encode must retain its own thread recipe.
+/// The returned options remain provisional until the complete report context
+/// has been validated and a completed artifact has passed ordinary admission.
+fn content_lookup_options(
+    options: &TranscodeOptions,
+    producer_threads: Option<u32>,
+) -> Option<TranscodeOptions> {
+    if options.effective_rate_control != EffectiveRateControl::Vbr
+        || options.normalized_geometry
+        || options.auto_quality_rate_profile.is_some()
+        || producer_threads.is_some_and(|threads| !(1..=6).contains(&threads))
+    {
+        return None;
+    }
+    let mut candidate = options.clone();
+    if let Some(threads) = producer_threads {
+        candidate.software_threads = Some(threads);
+    }
+    Some(candidate)
 }
 
 fn winner(windows: &[Vec<Measurement>]) -> Option<u8> {
@@ -224,6 +247,31 @@ impl TranscodeManager {
         opts: &TranscodeOptions,
         encoder: Encoder,
     ) -> Option<EffectiveRateControl> {
+        self.measured_content_options(file, opts, encoder, false)
+            .await
+            .map(|candidate| candidate.effective_rate_control)
+    }
+
+    /// Cache-only alternative: callers must retain the original live options on
+    /// a miss. Report thread counts describe already-produced bytes, not a new
+    /// admission request or permission to spend encoder capacity on Play.
+    pub(super) async fn measured_content_cache_options(
+        &self,
+        file: &plurx_core::domain::MediaFile,
+        opts: &TranscodeOptions,
+        encoder: Encoder,
+    ) -> Option<TranscodeOptions> {
+        self.measured_content_options(file, opts, encoder, true)
+            .await
+    }
+
+    async fn measured_content_options(
+        &self,
+        file: &plurx_core::domain::MediaFile,
+        opts: &TranscodeOptions,
+        encoder: Encoder,
+        cache_only: bool,
+    ) -> Option<TranscodeOptions> {
         let policy = self.rate_control_snapshot();
         if encoder != Encoder::Software
             || policy.requested_mode.is_some()
@@ -252,9 +300,14 @@ impl TranscodeManager {
             .ok()
             .flatten()?;
         let value: serde_json::Value = serde_json::from_str(&raw).ok()?;
-        let context = self.content_context(file, opts, snapshot, &value).await?;
         let report: Report = serde_json::from_value(value.get(PROBE_KEY)?.clone()).ok()?;
-        report.rate_for(&context)
+        let mut candidate =
+            content_lookup_options(opts, cache_only.then_some(report.context.threads))?;
+        let context = self
+            .content_context(file, &candidate, snapshot, &value)
+            .await?;
+        candidate.effective_rate_control = report.rate_for(&context)?;
+        Some(candidate)
     }
 
     /// Returns a measured mode when it improves every sampled window. Ordinary
@@ -949,6 +1002,34 @@ mod tests {
     }
 
     #[test]
+    fn completed_cache_lookup_preserves_live_policy_and_uses_producer_thread_recipe() {
+        let baseline = TranscodeOptions {
+            effective_rate_control: EffectiveRateControl::Vbr,
+            software_threads: Some(6),
+            ..TranscodeOptions::default()
+        };
+        let lookup = content_lookup_options(&baseline, Some(2)).expect("cache candidate");
+        assert_eq!(lookup.software_threads, Some(2));
+        assert_eq!(baseline.software_threads, Some(6));
+        assert_eq!(baseline.effective_rate_control, EffectiveRateControl::Vbr);
+        assert_eq!(
+            content_lookup_options(&baseline, None),
+            Some(baseline.clone())
+        );
+        assert!(content_lookup_options(&baseline, Some(7)).is_none());
+        let explicit = TranscodeOptions {
+            effective_rate_control: EffectiveRateControl::Qvbr { quality: 18 },
+            ..baseline.clone()
+        };
+        assert!(content_lookup_options(&explicit, Some(2)).is_none());
+        let bound_candidate = TranscodeOptions {
+            normalized_geometry: true,
+            ..baseline
+        };
+        assert!(content_lookup_options(&bound_candidate, Some(2)).is_none());
+    }
+
+    #[test]
     fn measured_policy_requires_every_window_and_finite_metrics() {
         let mut evidence = windows();
         assert_eq!(winner(&evidence), Some(23));
@@ -994,6 +1075,9 @@ mod tests {
         );
         let mut changed = context.clone();
         changed.engine = "engine-b".into();
+        assert_eq!(report.rate_for(&changed), None);
+        changed = context.clone();
+        changed.threads = 2;
         assert_eq!(report.rate_for(&changed), None);
         changed = context.clone();
         changed.height = 1080;

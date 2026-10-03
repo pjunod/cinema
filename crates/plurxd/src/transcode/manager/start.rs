@@ -527,6 +527,43 @@ impl TranscodeManager {
                 return Ok(info);
             }
         }
+        // A measured speculative producer has a distinct recipe. Try only
+        // its completed artifact: neither analysis nor a measured live encode
+        // belongs on Play. A miss leaves the original plan/options untouched.
+        // Explicit candidate bindings and takeovers already name their exact
+        // recipe and must never be redirected to a different one.
+        if takeover.is_none() && candidate_context.is_none() {
+            if let Some(cached_options) = self
+                .measured_content_cache_options(&file, &opts, encoder)
+                .await
+            {
+                // Resolution reads stored decoder facts; it does not probe or
+                // score media. serve_cached retains all manifest/source checks,
+                // shared generation pins and normal session ownership.
+                if let Ok(cached_plan) = self
+                    .resolve_movie_plan(&file, &cached_options, encoder)
+                    .await
+                {
+                    if let Some(info) = self
+                        .serve_cached(
+                            &file,
+                            &cached_options,
+                            &cached_plan,
+                            &item_title,
+                            SessionOwner {
+                                user_name,
+                                supersession_user,
+                                playback_id,
+                                automatic,
+                            },
+                        )
+                        .await
+                    {
+                        return Ok(info);
+                    }
+                }
+            }
+        }
         // Can this ffmpeg build actually burn? Asked here — after the cache
         // lookup, which needs no ffmpeg at all, and before any slot, process
         // or session exists — because the alternative is spawning a graph that
