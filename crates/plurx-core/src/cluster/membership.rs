@@ -144,6 +144,31 @@ pub const LIVE_TV_CAPABILITY: &str = "live_tv_v1";
 /// heartbeat must publish it only after every reader/writer and migration is
 /// implemented. Sharing admission also needs the installed schema marker.
 pub const SHARING_SESSION_PRINCIPAL_CAPABILITY: &str = "sharing_session_principal_v1";
+
+/// Allocator writers and import semantics must be complete before advertising.
+pub const SHARING_CATALOGUE_ITEM_IDENTITY_CAPABILITY: &str = "sharing_catalogue_item_identity_v1";
+
+/// Closed, bounded capability requirements. No caller-supplied identifier can
+/// become SQL, and an empty capability set cannot authorize a new writer.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SharingMemberFloor {
+    SessionPrincipal,
+    CatalogueItemIdentity,
+    PrincipalAndCatalogue,
+}
+
+impl SharingMemberFloor {
+    fn capabilities(self) -> &'static [&'static str] {
+        match self {
+            Self::SessionPrincipal => &[SHARING_SESSION_PRINCIPAL_CAPABILITY],
+            Self::CatalogueItemIdentity => &[SHARING_CATALOGUE_ITEM_IDENTITY_CAPABILITY],
+            Self::PrincipalAndCatalogue => &[
+                SHARING_SESSION_PRINCIPAL_CAPABILITY,
+                SHARING_CATALOGUE_ITEM_IDENTITY_CAPABILITY,
+            ],
+        }
+    }
+}
 /// Minimum unreserved capacity required before a learner may be promoted.
 /// This is deliberately independent of media-cache headroom: a voter must
 /// always retain room for Raft WAL growth, a received snapshot, and SQLite's
@@ -2156,6 +2181,37 @@ pub fn sharing_session_principal_guard_predicate(
     cutoff_parameter: usize,
     observed_at_parameter: usize,
 ) -> String {
+    sharing_member_guard_predicate(
+        SharingMemberFloor::SessionPrincipal,
+        members_parameter,
+        cutoff_parameter,
+        observed_at_parameter,
+    )
+}
+
+/// Allocator-specific admission guard; the principal capability is independent.
+#[must_use]
+pub fn sharing_catalogue_item_identity_guard_predicate(
+    members_parameter: usize,
+    cutoff_parameter: usize,
+    observed_at_parameter: usize,
+) -> String {
+    sharing_member_guard_predicate(
+        SharingMemberFloor::CatalogueItemIdentity,
+        members_parameter,
+        cutoff_parameter,
+        observed_at_parameter,
+    )
+}
+
+/// Embed this closed capability floor in the same replicated admission write.
+#[must_use]
+pub fn sharing_member_guard_predicate(
+    required: SharingMemberFloor,
+    members_parameter: usize,
+    cutoff_parameter: usize,
+    observed_at_parameter: usize,
+) -> String {
     let committed = format!("${members_parameter}");
     let cutoff = format!("${cutoff_parameter}");
     let observed_at = format!("${observed_at_parameter}");
@@ -2171,7 +2227,12 @@ pub fn sharing_session_principal_guard_predicate(
              AND (present.last_seen_at < {cutoff} \
                OR present.last_seen_at > {observed_at})) \
          AND {}",
-        capability_ready_predicate(SHARING_SESSION_PRINCIPAL_CAPABILITY),
+        required
+            .capabilities()
+            .iter()
+            .map(|capability| capability_ready_predicate(capability))
+            .collect::<Vec<_>>()
+            .join(" AND "),
         no_join_in_flight_predicate(),
         no_removal_in_flight_predicates(),
     )
@@ -2183,6 +2244,29 @@ pub fn sharing_session_principal_guard_predicate(
 pub async fn sharing_session_principal_floor_ready(
     client: &Client,
     local_raft_id: u64,
+) -> Result<bool, MembershipError> {
+    sharing_member_floor_ready(client, local_raft_id, SharingMemberFloor::SessionPrincipal).await
+}
+
+/// Quorum observation of the allocator-specific writer floor.
+pub async fn sharing_catalogue_item_identity_floor_ready(
+    client: &Client,
+    local_raft_id: u64,
+) -> Result<bool, MembershipError> {
+    sharing_member_floor_ready(
+        client,
+        local_raft_id,
+        SharingMemberFloor::CatalogueItemIdentity,
+    )
+    .await
+}
+
+/// Quorum observation for a bounded required capability set. This does not
+/// advertise capabilities, install schemas, or override a saved Developer switch.
+pub async fn sharing_member_floor_ready(
+    client: &Client,
+    local_raft_id: u64,
+    required: SharingMemberFloor,
 ) -> Result<bool, MembershipError> {
     let before = client.metrics_db().await?;
     let members = before
@@ -2202,7 +2286,7 @@ pub async fn sharing_session_principal_floor_ready(
                 "SELECT CASE WHEN {} THEN 1 ELSE 0 END AS ready, \
                  MIN(node.last_seen_at) AS oldest_heartbeat \
                  FROM cluster_nodes AS node WHERE node.removed_at IS NULL",
-                sharing_session_principal_guard_predicate(1, 2, 3),
+                sharing_member_guard_predicate(required, 1, 2, 3),
             ),
             params!(members_json, cutoff, now),
         )
@@ -8544,6 +8628,23 @@ impl MembershipManager {
     pub async fn sharing_session_principal_floor_ready(&self) -> Result<bool, MembershipError> {
         let inner = self.replicated_inner()?;
         sharing_session_principal_floor_ready(&inner.client, inner.identity.raft_id).await
+    }
+
+    /// Quorum-confirm the allocator-specific floor without advertising it.
+    pub async fn sharing_catalogue_item_identity_floor_ready(
+        &self,
+    ) -> Result<bool, MembershipError> {
+        self.sharing_member_floor_ready(SharingMemberFloor::CatalogueItemIdentity)
+            .await
+    }
+
+    /// Quorum-confirm a closed set of requirements for a shared admission.
+    pub async fn sharing_member_floor_ready(
+        &self,
+        required: SharingMemberFloor,
+    ) -> Result<bool, MembershipError> {
+        let inner = self.replicated_inner()?;
+        sharing_member_floor_ready(&inner.client, inner.identity.raft_id, required).await
     }
 
     /// Active nodes that cannot currently prove the always-compiled live-TV

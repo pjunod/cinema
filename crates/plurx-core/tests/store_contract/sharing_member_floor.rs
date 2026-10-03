@@ -245,3 +245,173 @@ async fn three_voter_floor_and_atomic_admission_refuse_incomplete_member_proofs(
         "lost quorum cannot authorize sharing"
     );
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn three_voter_allocator_floor_requires_independent_fresh_capabilities_in_the_write() {
+    use plurx_core::cluster::membership::{
+        sharing_catalogue_item_identity_floor_ready, sharing_member_floor_ready,
+        sharing_member_guard_predicate, SharingMemberFloor,
+        SHARING_CATALOGUE_ITEM_IDENTITY_CAPABILITY,
+    };
+    let cluster = ContractCluster::start().await;
+    let client = Client::remote(
+        cluster.addresses.clone(),
+        true,
+        true,
+        CONTRACT_API_SECRET.to_owned(),
+        false,
+        None,
+    )
+    .await
+    .expect("allocator floor three-voter observer");
+    assert_eq!(
+        client
+            .metrics_db()
+            .await
+            .expect("actual roster")
+            .membership_config
+            .voter_ids()
+            .count(),
+        3
+    );
+    for sql in [
+        "CREATE TABLE cluster_nodes (node_id TEXT PRIMARY KEY, raft_id INTEGER NOT NULL, last_seen_at INTEGER NOT NULL, removed_at INTEGER, role TEXT)",
+        "CREATE TABLE cluster_node_capabilities (node_id TEXT NOT NULL, capability TEXT NOT NULL, last_seen_at INTEGER NOT NULL, PRIMARY KEY(node_id, capability))",
+        "CREATE TABLE cluster_node_join_staging (node_id TEXT PRIMARY KEY)",
+        "CREATE TABLE cluster_node_removals (node_id TEXT PRIMARY KEY)",
+        "CREATE TABLE cluster_node_removal_attempts (node_id TEXT NOT NULL, attempt_id TEXT)",
+        "CREATE TABLE allocator_admission_receipts (id INTEGER PRIMARY KEY)",
+    ] { write(&client,sql).await; }
+    let now = i64::try_from(
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock")
+            .as_millis(),
+    )
+    .expect("bounded clock");
+    for id in 1_i64..=3 {
+        client
+            .execute(
+                "INSERT INTO cluster_nodes VALUES ($1,$2,$3,NULL,'voter')",
+                hiqlite::params!(format!("voter-{id}"), id, now),
+            )
+            .await
+            .expect("seed voter");
+    }
+    client.execute("INSERT INTO cluster_node_capabilities SELECT node_id,$1,last_seen_at FROM cluster_nodes",hiqlite::params!(SHARING_SESSION_PRINCIPAL_CAPABILITY)).await.expect("principal-only capabilities");
+    assert!(ready(&client).await);
+    assert!(!sharing_catalogue_item_identity_floor_ready(&client, 1)
+        .await
+        .expect("independent allocator floor"));
+    let guard = format!(
+        "INSERT INTO allocator_admission_receipts SELECT 1 WHERE {}",
+        sharing_member_guard_predicate(SharingMemberFloor::PrincipalAndCatalogue, 1, 2, 3)
+    );
+    assert_eq!(
+        client
+            .execute(
+                guard.clone(),
+                hiqlite::params!("[1,2,3]", now - 120000, now)
+            )
+            .await
+            .expect("principal-only admission"),
+        0
+    );
+    client.execute("INSERT INTO cluster_node_capabilities SELECT node_id,$1,last_seen_at FROM cluster_nodes",hiqlite::params!(SHARING_CATALOGUE_ITEM_IDENTITY_CAPABILITY)).await.expect("allocator capabilities");
+    assert!(
+        sharing_member_floor_ready(&client, 1, SharingMemberFloor::PrincipalAndCatalogue)
+            .await
+            .expect("both independent floors")
+    );
+    assert_eq!(
+        client
+            .execute(
+                guard.clone(),
+                hiqlite::params!("[1,2,3]", now - 120000, now)
+            )
+            .await
+            .expect("both-capability admission"),
+        1
+    );
+    write(&client, "DELETE FROM allocator_admission_receipts").await;
+    let outcomes=client.txn([
+        ("UPDATE cluster_node_capabilities SET last_seen_at=last_seen_at-1 WHERE node_id='voter-3' AND capability='sharing_catalogue_item_identity_v1'".to_owned(),hiqlite::params!()),
+        (guard.clone(),hiqlite::params!("[1,2,3]",now-120000,now)),
+    ]).await.expect("capability change and admission commit together");
+    assert_eq!(
+        outcomes
+            .into_iter()
+            .map(|result| result.expect("atomic statement"))
+            .collect::<Vec<_>>(),
+        vec![1, 0]
+    );
+    assert!(
+        ready(&client).await,
+        "allocator proof cannot weaken principal wrapper"
+    );
+    assert!(
+        !sharing_member_floor_ready(&client, 1, SharingMemberFloor::PrincipalAndCatalogue)
+            .await
+            .expect("changed catalogue proof")
+    );
+    client
+        .execute(
+            "UPDATE cluster_node_capabilities SET last_seen_at=$1",
+            hiqlite::params!(now),
+        )
+        .await
+        .expect("restore all fresh proofs");
+    write(
+        &client,
+        "UPDATE cluster_nodes SET raft_id=99 WHERE node_id='voter-3'",
+    )
+    .await;
+    assert!(
+        !sharing_member_floor_ready(&client, 1, SharingMemberFloor::PrincipalAndCatalogue)
+            .await
+            .expect("exact committed roster")
+    );
+    assert_eq!(
+        client
+            .execute(
+                guard.clone(),
+                hiqlite::params!("[1,2,3]", now - 120000, now)
+            )
+            .await
+            .expect("missing-roster guarded write"),
+        0
+    );
+    write(
+        &client,
+        "UPDATE cluster_nodes SET raft_id=3 WHERE node_id='voter-3'",
+    )
+    .await;
+    client
+        .txn([
+            (
+                "UPDATE cluster_nodes SET last_seen_at=$1 WHERE node_id='voter-3'",
+                hiqlite::params!(now - 120001),
+            ),
+            (
+                "UPDATE cluster_node_capabilities SET last_seen_at=$1 WHERE node_id='voter-3'",
+                hiqlite::params!(now - 120001),
+            ),
+        ])
+        .await
+        .expect("coupled stale proofs")
+        .into_iter()
+        .collect::<Result<Vec<_>, _>>()
+        .expect("commit stale proofs");
+    assert!(
+        !sharing_member_floor_ready(&client, 1, SharingMemberFloor::PrincipalAndCatalogue)
+            .await
+            .expect("coupled proofs must still be fresh")
+    );
+    assert_eq!(
+        client
+            .execute(guard, hiqlite::params!("[1,2,3]", now - 120000, now))
+            .await
+            .expect("stale-roster guarded write"),
+        0
+    );
+}
