@@ -351,7 +351,7 @@ pub const SQLITE_TRANSACTION_SITES: &[SqliteTransactionSite] = &[
         method: "invalidate_cache_entry",
         is_async: true,
         mechanism: TransactionMechanism::RusqliteTransaction,
-        shape: TransactionShape::VerbatimBatch,
+        shape: TransactionShape::ReadBranchWrite,
     },
     SqliteTransactionSite {
         module: "cache.rs",
