@@ -35,6 +35,7 @@ from __future__ import annotations
 
 from collections import Counter
 from dataclasses import dataclass
+from functools import lru_cache
 from pathlib import Path
 import re
 import tomllib
@@ -178,6 +179,24 @@ def still_current_calls(text: str) -> tuple[str, ...]:
     return tuple(function for function, _ in _by_function(text, STILL_CURRENT_RE, None))
 
 
+@lru_cache(maxsize=1)
+def _cached_controller_analysis(text: str) -> tuple[
+    tuple[Comparison, ...], tuple[tuple[str, str], ...], tuple[str, ...]
+]:
+    return census(text), fence_calls(text), still_current_calls(text)
+
+
+def _controller_analysis(text: str) -> tuple[
+    tuple[Comparison, ...], tuple[tuple[str, str], ...], tuple[str, ...]
+]:
+    # Scope mutations change PlayerAttempt.swift, not the controller. Reuse
+    # only immutable analysis of exactly equal controller text; a source edit
+    # selects a different key. Keep one source of at most 1 MiB in memory.
+    if len(text) > 1024 * 1024 or len(text.encode("utf-8")) > 1024 * 1024:
+        return census(text), fence_calls(text), still_current_calls(text)
+    return _cached_controller_analysis(text)
+
+
 def _enum_body(source: str, header: str) -> str:
     start = source.find(header)
     if start < 0:
@@ -241,7 +260,8 @@ def audit(read) -> tuple[str, ...]:
             "scopes are the same nine; changing one without the other hides a fence."
         )
 
-    counted = Counter(comparison.key for comparison in census(source))
+    comparisons, calls, direct_calls = _controller_analysis(source)
+    counted = Counter(comparison.key for comparison in comparisons)
     for key in sorted(set(counted) | set(allowed)):
         seen = counted.get(key, 0)
         budget = allowed.get(key, 0)
@@ -261,11 +281,13 @@ def audit(read) -> tuple[str, ...]:
                 "hand-written fence to take the retired one's place unnoticed."
             )
 
-    errors.extend(_audit_fences(source, attempt_source, read(ALLOWLIST), scopes))
+    errors.extend(_audit_fences(source, attempt_source, read(ALLOWLIST), scopes,
+                                calls, direct_calls))
     return tuple(errors)
 
 
-def _audit_fences(source: str, attempt_source: str, allowlist: str, scopes: tuple[str, ...]) -> list[str]:
+def _audit_fences(source: str, attempt_source: str, allowlist: str, scopes: tuple[str, ...],
+                  calls: tuple[tuple[str, str], ...], direct_calls: tuple[str, ...]) -> list[str]:
     """The migrated fences: declared cases, their scope sets and their call
     sites, each held against the `[fences]` table in both directions."""
     errors: list[str] = []
@@ -315,7 +337,7 @@ def _audit_fences(source: str, attempt_source: str, allowlist: str, scopes: tupl
             )
 
     expected = Counter((str(row.get("function", "")), name) for name, row in recorded.items())
-    seen = Counter(fence_calls(source))
+    seen = Counter(calls)
     for function, name in sorted(set(expected) | set(seen)):
         have, want = seen.get((function, name), 0), expected.get((function, name), 0)
         if have == want:
@@ -337,7 +359,7 @@ def _audit_fences(source: str, attempt_source: str, allowlist: str, scopes: tupl
                 f"{SOURCE} has {have} such call(s) there."
             )
 
-    for function in still_current_calls(source):
+    for function in direct_calls:
         if function != FENCE_HELPER:
             errors.append(
                 f"{SOURCE}: `{function}()` calls stillCurrent directly. Name its scope set as "
