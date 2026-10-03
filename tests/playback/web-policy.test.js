@@ -5070,6 +5070,9 @@ function carryHarness(player) {
       shippedSource("setPrePlay"),
       shippedSource("rememberPlaybackSelection"),
       "function clearPlaybackControlWaiters(){}",
+      "let AUTOPLAY_NEXT_PREPARED={page:{id:'next-episode'}};",
+      shippedSource("cancelNextEpisodePreparation"),
+      shippedSource("clearAutoplayNextPreparation"),
       shippedSource("supersedePlaybackControlIntent"),
       transportTelemetrySources(),shippedSource("pausePlaybackInternally"),
       shippedSource("playbackTransportEvents"),
@@ -5081,7 +5084,7 @@ function carryHarness(player) {
       shippedSource("beginPlaybackPreparation"),"function play(){}",
       shippedSource("retirePlaybackPredecessor"),
       "return {prePlaySelection, clearPrePlay, playbackSelection, setPrePlay," +
-        " rememberPlaybackSelection, closePlayer};",
+        " rememberPlaybackSelection, closePlayer,nextPrepared:()=>AUTOPLAY_NEXT_PREPARED};",
     ].join("\n"),
   );
   const harness = build(
@@ -5111,12 +5114,17 @@ function carryHarness(player) {
 }
 
 test("closing the player ends its track choice instead of arming the next play", () => {
-  const player = { fileId: 42, preplay: { audio: 1, subtitle: null } };
+  let nextEpisodeCancelled = 0;
+  const player = { fileId: 42, preplay: { audio: 1, subtitle: null },
+    nextEpisodePreparation: { owner: { cancel() { nextEpisodeCancelled++; } } } };
   const h = carryHarness(player);
   // While it is open, this playback's own tracks are the answer — that is the
   // carry a quality change depends on.
   assert.deepEqual(h.playbackSelection(player, 42), { audio: 1, subtitle: null });
   h.closePlayer();
+  assert.equal(nextEpisodeCancelled, 1, "closing cancels its pending episode preparation");
+  assert.equal(player.nextEpisodePreparation, null);
+  assert.equal(h.nextPrepared(), null, "closing drops transferable successor metadata");
   assert.equal(h.mediaSessionCleared(), 1,
     "closing left the OS media keys installed for a player that is gone");
   // loadItem() empties the pickers on the way back to the detail screen, so
