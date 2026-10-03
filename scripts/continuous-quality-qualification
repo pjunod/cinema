@@ -114,7 +114,11 @@ async function mixedCase(driver, server, manifest, fixture, testCase, info, obse
   const began = Date.now();
   try {
     if (testCase.operation === "steady") {
-      result.diagnostic_scope = "steady_manual_720_without_quality_requests";
+      result.diagnostic_scope = testCase.quality === "original"
+        ? "steady_original_without_quality_requests" : "steady_manual_720_without_quality_requests";
+      if (testCase.quality === "original" && result.end?.continuous) {
+        throw new Error("Original baseline unexpectedly enrolled continuous quality");
+      }
     } else if (result.status === "passed") await measureAuto(driver, shaper, result);
   } catch (error) {
     result.status = "failed"; result.errors.push(error.message);
@@ -141,11 +145,11 @@ async function mixedCase(driver, server, manifest, fixture, testCase, info, obse
 
 async function main(args) {
   if (args.includes("--help")) {
-    process.stdout.write("Usage: scripts/continuous-quality-qualification --server PATH --source-ref BUILD_REF --browser chrome|firefox [--fixtures DIR] [--manual-count 3|15] [--start-seconds POSITION] [--steady-seconds 1..300] [--chrome PATH] [--firefox PATH] [--geckodriver PATH] [--json PATH] [--junit PATH]\n");
+    process.stdout.write("Usage: scripts/continuous-quality-qualification --server PATH --source-ref BUILD_REF --browser chrome|firefox [--fixtures DIR] [--manual-count 3|15] [--start-seconds POSITION] [--steady-seconds 1..300] [--steady-source continuous|original] [--chrome PATH] [--firefox PATH] [--geckodriver PATH] [--json PATH] [--junit PATH]\n");
     return 0;
   }
   const options = {};
-  const allowed = new Set(["server", "source-ref", "browser", "fixtures", "manual-count", "start-seconds", "steady-seconds", "chrome", "firefox", "geckodriver", "json", "junit"]);
+  const allowed = new Set(["server", "source-ref", "browser", "fixtures", "manual-count", "start-seconds", "steady-seconds", "steady-source", "chrome", "firefox", "geckodriver", "json", "junit"]);
   for (let i = 0; i < args.length; i += 2) {
     const key = args[i].replace(/^--/, "");
     if (!args[i].startsWith("--") || !allowed.has(key) || !args[i + 1] || args[i + 1].startsWith("--")) throw new Error(`invalid option ${args[i]}`);
@@ -157,6 +161,9 @@ async function main(args) {
   const steadySeconds = Number(options.steady_seconds ?? 0);
   if (options.steady_seconds !== undefined && (!Number.isFinite(steadySeconds)
       || steadySeconds <= 0 || steadySeconds > 300)) throw new Error("--steady-seconds must be positive and at most 300");
+  const steadySource = options.steady_source || "continuous";
+  if (!["continuous", "original"].includes(steadySource)
+      || options.steady_source !== undefined && !steadySeconds) throw new Error("--steady-source requires a steady control and continuous or original");
   if (steadySeconds && options.manual_count !== undefined) throw new Error("steady controls do not accept --manual-count");
   const count = Number(options.manual_count || 15);
   if (![3, 15].includes(count)) throw new Error("--manual-count must be 3 (focused) or 15 (twenty total changes)");
@@ -169,8 +176,9 @@ async function main(args) {
     switches: Array.from({length: count}, (_, i) => ({quality: i % 2 ? "1080" : "720",
       expected_method: "transcode", expected_height: i % 2 ? 1080 : 720}))});
   if (steadySeconds) {
-    Object.assign(testCase, {name: "continuous steady 720p control without quality requests",
-      quality: "720", operation: "steady", switches: []});
+    Object.assign(testCase, {name: steadySource === "original" ? "original H264 steady control without quality requests" : "continuous steady 720p control without quality requests",
+      fixture: steadySource === "original" ? "continuous-h264-aac-1080" : "continuous-mpeg4-aac-1080",
+      quality: steadySource === "original" ? "original" : "720", operation: "steady", switches: []});
     manifest.thresholds.maximum_hitches = 0;
     options.observe = steadySeconds;
   }

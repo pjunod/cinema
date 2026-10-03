@@ -4564,3 +4564,42 @@ Authored, unrun regression:
 `crates/plurxd/src/vod/tests/chunk_03.rs::restarted_sink_keeps_published_bytes_before_quality_reservation`.
 It restarts a sink before any quality pin, checks original bytes survive, and
 checks no extra working-set or publication credit. No units have run.
+
+
+### 10.155 Exact-source steady control passes after publication retention
+
+The pinned Linux build of `65440c329` succeeded. Its exact-source steady
+Firefox control started in 3095 ms and played for 120 seconds at 720p without
+quality requests. The receipt passes: zero hitches, stalls, waits, reopens or
+dropped frames, 2886 total frames, no backward observations or reservation
+refusals, and 83.94 ms maximum callback gap. The media clock advanced
+120.043 seconds (1.000x), retaining one durable VOD session and attachment.
+This is the first passing focused control after the publication change; it
+does not erase earlier failures or qualify the full switching matrix.
+
+The supervisor removed the runtime and the machine receipts/media diagnostics
+are preserved in the independent clone. A same-binary late-window focused
+Firefox campaign is now running: three manual changes followed by five actual
+Auto changes, with the original continuity thresholds and End census. No
+rebuild or units were repeated between these runs. Physical iOS and final
+adversarial review/Fable stop remain ahead.
+
+
+### 10.156 Keep the mixed Firefox failure and add an Original control
+
+The same `65440c329` source completed three manual changes with p95/max
+83.98 ms gap, no waits, reopens or stalls and one VOD session. The campaign
+failed on a backward observation at film 994.625 to 994.333333: 720p on the
+same element, presentedFrames 112 to 113, actual currentTime 994.31573,
+not paused or seeking. Auto was not run after that manual-phase failure.
+The passing steady control does not clear this intermittent hitch. Receipts
+remain failed and are preserved. A separately started process observer did
+not collect valid samples before the campaign ended; no runtime ownership
+coverage is claimed from it.
+
+The committed qualification helper now accepts `--steady-source original`
+only together with a bounded steady control. It uses the existing generated
+long H264/AAC fixture and ordinary Original selection, records the actual
+transport, and refuses unexpected continuous enrollment. This is a diagnostic
+comparison without quality requests, not continuous-family qualification.
+The original continuity thresholds remain intact. No units ran.
