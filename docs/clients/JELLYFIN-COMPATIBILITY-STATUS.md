@@ -1,6 +1,6 @@
 # Jellyfin compatibility — measured build progress and remaining gates
 
-**Status:** open · J0–J2 integrated; J3 direct/watch implementation underway; physical Infuse repeat deferred · **Updated:** 2026-10-03 EDT.
+**Status:** open · J0–J3 integrated; J4 profile and VOD implementation underway; physical Infuse repeat deferred · **Updated:** 2026-10-03 EDT.
 
 Companion to [the reviewed build contract](JELLYFIN-COMPATIBILITY-BUILD.md)
 (what must be built and proved) — this records execution and evidence. The
@@ -331,8 +331,8 @@ remaining facade/worker/race boundaries are still pending; see the
 | J0 | Admitted for implementation by user direction | Corrected physical Infuse repeat retained as J6 qualification requirement |
 | J1 | Ready after J0 task integration | Identity, deterministic retirement/replacement guard, token-only service seams |
 | J2 | Integrated into effort; anonymous artwork decision pending | Connect/browse, bounded misses and cold-node first sync |
-| J3 | Local direct/watch validation complete; effort integration pending | Direct/watch, Store revisions and per-play final durability |
-| J4 | Waiting on J3 and J0 hard-seam decisions | VOD-only negotiation/activation, refusal mapping, bounded retries and aliases |
+| J3 | Integrated as `13568fbf3`; all eight effort gates passed | Direct/watch, Store revisions and per-play final durability |
+| J4 | Profile predicates and probe fencing implemented; native VOD integration underway | VOD-only negotiation/activation, refusal mapping, bounded retries and aliases |
 | J5 | Waiting on J4 | Track, subtitle and observed ancillary completion |
 | J6 | Waiting on J5 | Frozen physical/cluster matrix, qualification and graduation |
 
@@ -459,7 +459,7 @@ exposed by J1. The Apple TV remains untouched under Paul's explicit deferral;
 its availability does not block implementation or the J1 integration gate.
 
 
-## 10. J0–J2 integrated; J3 direct/watch underway
+## 10. J0–J3 integrated; J4 negotiation underway
 
 [Effort run 3963](http://192.168.4.7:3000/noirr/plurx/actions/runs/3963)
 passes all eight required jobs on J1 head `0e4318355`.
@@ -518,3 +518,27 @@ Store contracts pass on SQLite and three voters (214.11 seconds), and all ten
 shared coalescer regressions pass. Route deadline and metric-group inventories
 also pass. These results do not qualify either physical client,
 J4/J5 transport completion, or release promotion.
+
+
+[PR #779](http://192.168.4.7:3000/noirr/plurx/pulls/779) merged J3 as
+`13568fbf36b415f111d922c33faf90fdcbd54c83`, with parents `e5d17b1c8` and
+`a7d45e149` and all 22 checked regression references in the landing message.
+[Effort run 4018](http://192.168.4.7:3000/noirr/plurx/actions/runs/4018)
+passed all eight jobs. The exact J1 history erratum records its earlier landing
+whose subject omitted the PR number; it does not weaken the history audit.
+
+The first J4 slice evaluates bounded codec/container predicates against a
+coherent native file/probe snapshot and the selected audio track. Unknown
+predicate names/operators and malformed values refuse. Known missing facts
+retain the pinned reference's `IsRequired` semantics; they do not invent HDR
+or Dolby Vision capability. Negotiation stores the exact nullable probe, and
+both current-play admission and durable progress reject a changed probe even
+when size and modification time match. A legacy J3 binding without that new
+field keeps its existing source fence. Each ordered transcoding profile keeps
+its own output tuple and constraints; this slice does not advertise HLS.
+
+The native VOD prerequisite extraction is still a source-only prototype. Its
+regression proves that an indexed copy can be checked without attaching a
+reader, rendition, preparation session or producer; unresolved encoded
+recipes refuse before allocation. Activation, aliases, bounded startup retries
+and real-client transport qualification remain subsequent J4 work.

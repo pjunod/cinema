@@ -1520,6 +1520,39 @@ mod tests {
         assert_eq!(status, StatusCode::BAD_REQUEST);
     }
     #[tokio::test]
+    async fn jellyfin_codec_conditions_use_exact_probed_source_and_selected_audio_before_allocation(
+    ) {
+        let f = playback_fixture().await;
+        for (kind, codec, property, value, expected) in [
+            ("Video", "h264", "Height", "1080", true),
+            ("Video", "h264", "Height", "720", false),
+            ("VideoAudio", "aac", "AudioChannels", "2", true),
+            ("VideoAudio", "aac", "AudioChannels", "1", false),
+            ("Video", "h264", "VideoLevel", "52", false),
+        ] {
+            let body = json!({"UserId":f.user,"AudioStreamIndex":0,"SubtitleStreamIndex":-1,
+                "DeviceProfile":{"DirectPlayProfiles":[{"Type":"Video","Container":"mp4","VideoCodec":"h264","AudioCodec":"aac"}],
+                    "CodecProfiles":[{"Type":kind,"Codec":codec,"Container":"mp4",
+                        "Conditions":[{"Property":property,"Condition":"LessThanEqual","Value":value,"IsRequired":true}]}]}});
+            let (status, answer) = json_call(
+                &f.app,
+                request(
+                    "POST",
+                    &format!("/jellyfin/Items/{}/PlaybackInfo", f.item),
+                    Some(&f.token),
+                    body,
+                ),
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK);
+            assert_eq!(
+                answer["PlaySessionId"].is_string(),
+                expected,
+                "{property} {value}"
+            );
+        }
+    }
+    #[tokio::test]
     async fn jellyfin_logout_releases_only_presented_login_and_preserves_other_device() {
         let f = playback_fixture().await;
         let info = negotiate(&f).await;

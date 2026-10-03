@@ -3258,6 +3258,14 @@ Sources omit native paths/raw probes and retain actual global stream indices.
 Pages with more than 5,000 sources and bootstrap inventories above 500 supported
 libraries refuse rather than truncate.
 
+PlaybackInfo evaluates each direct profile independently, including bounded codec
+and container predicates, against the selected audio and coherent native probe.
+Unknown constraints refuse; missing known facts follow the pinned reference's
+required/optional rule. The stored exact probe is rechecked during admission
+and durable progress, so a rescan cannot change the negotiation's constraint
+basis while preserving size and modification time. Transcoded URLs are not
+advertised by this profile slice.
+
 Artwork currently requires the shared authenticated compatibility user guard.
 The anonymous access ruling remains pending explicit approval; target-client
 artwork parity is not qualified. Requests admit at most 20 per minute per resolved
