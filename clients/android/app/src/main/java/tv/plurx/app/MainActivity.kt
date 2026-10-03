@@ -47,6 +47,8 @@ import tv.plurx.app.ui.PhotoScreen
 import tv.plurx.app.ui.ReaderScreen
 import tv.plurx.app.ui.PdfReaderScreen
 import tv.plurx.app.ui.SearchScreen
+import tv.plurx.app.ui.SharedLibrariesScreen
+import tv.plurx.app.ui.SharedSharingSettingsScreen
 import tv.plurx.app.ui.SettingsScreen
 import tv.plurx.app.ui.components.LoadingBox
 import tv.plurx.app.ui.theme.PlurxTheme
@@ -189,6 +191,7 @@ private fun MainNav(
                 onOpenLiveTv = { nav.navigate("live-tv") },
                 onOpenRecordings = { nav.navigate("recordings") },
                 onOpenLibraryChannels = { nav.navigate("library-channels") },
+                onOpenSharedLibraries = { nav.navigate("shared-libraries") },
             )
         }
         composable(
@@ -268,12 +271,20 @@ private fun MainNav(
                 onBack = { nav.popBackStackFrom(entry) },
             )
         }
+        composable("shared-libraries") { entry ->
+            SharedLibrariesScreen(onBack = { nav.popBackStackFrom(entry) })
+        }
+        composable("sharing-settings") { entry ->
+            SharedSharingSettingsScreen(onBack = { nav.popBackStackFrom(entry) },
+                onLibraries = { nav.navigate("shared-libraries") }, onDeveloper = { nav.navigate("developer") })
+        }
         composable("settings") { entry ->
             SettingsScreen(
                 vm = vm,
                 onBack = { nav.popBackStackFrom(entry) },
                 onOpenDeveloper = { nav.navigate("developer") },
                 onOpenLiveTvSettings = { nav.navigate("live-tv-settings") },
+                onOpenSharing = { nav.navigate("sharing-settings") },
             )
         }
         composable(
