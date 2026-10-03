@@ -53,6 +53,7 @@ pub(crate) mod shared_playback;
 // Candidate projection helpers remain unregistered until Source/B lifecycle
 // authority and actual delivery binding are qualified.
 pub(crate) mod sharing;
+mod sharing_decision_decode;
 #[allow(dead_code)]
 mod sharing_playback_wire;
 pub(crate) mod stream;
@@ -1327,6 +1328,7 @@ pub fn router(state: AppState) -> Router {
     let json_short = Router::new()
         .merge(sharing::admin_router(state.clone()))
         .merge(shared_library::viewer_router(state.clone()))
+        .merge(shared_playback::viewer_router(state.clone()))
         .route("/server", get(system::server_info))
         .route("/me", get(auth::me))
         .route("/settings", get(system::get_settings))

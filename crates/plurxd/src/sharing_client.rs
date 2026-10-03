@@ -26,12 +26,13 @@ const CATALOGUE_RESPONSE_BYTES: usize = 4 * 1024 * 1024;
 enum ResponseBudget {
     Management,
     Catalogue,
+    Decision,
 }
 impl ResponseBudget {
     fn bytes(self) -> usize {
         match self {
             Self::Management => MANAGEMENT_RESPONSE_BYTES,
-            Self::Catalogue => CATALOGUE_RESPONSE_BYTES,
+            Self::Catalogue | Self::Decision => CATALOGUE_RESPONSE_BYTES,
         }
     }
 }
@@ -246,7 +247,12 @@ impl PeerConnection {
         payload: Option<&Secret>,
         budget: ResponseBudget,
     ) -> Result<T, PeerError> {
-        tokio::time::timeout(Duration::from_secs(5), async {
+        let deadline = if matches!(budget, ResponseBudget::Decision) {
+            Duration::from_secs(12)
+        } else {
+            Duration::from_secs(5)
+        };
+        tokio::time::timeout(deadline, async {
             let mut request = Request::builder()
                 .method(method)
                 .uri(path)
@@ -427,6 +433,35 @@ impl PeerConnection {
         .await
         .map_err(|_| PeerError::Unavailable)?
     }
+    pub async fn file_decision(
+        &mut self,
+        credential: &Secret,
+        input: &crate::http::shared_playback::SourceDecisionRequest,
+    ) -> Result<crate::http::shared_playback::SourceDecisionReply, PeerError> {
+        let bytes = serde_json::to_string(input).map_err(|_| PeerError::InvalidResponse)?;
+        if bytes.len() > 128 * 1024 {
+            return Err(PeerError::InvalidResponse);
+        }
+        let payload = Secret::from_cleartext(bytes);
+        let reply: crate::http::shared_playback::SourceDecisionReply = self
+            .request_with_budget(
+                Method::POST,
+                &format!(
+                    "/sharing/v1/items/{}/files/{}/decision",
+                    input.reference.item_id.as_str(),
+                    input.reference.file_id.as_str()
+                ),
+                Some(credential),
+                Some(&payload),
+                ResponseBudget::Decision,
+            )
+            .await?;
+        if reply.protocol != 1 || reply.reference != input.reference {
+            return Err(PeerError::InvalidResponse);
+        }
+        Ok(reply)
+    }
+
     pub async fn current_scope(
         &mut self,
         credential: &Secret,
@@ -669,6 +704,69 @@ mod tests {
             requests,
             server,
         )
+    }
+    #[tokio::test]
+    async fn sharing_decision_client_binds_complete_reference_and_refuses_redirect_or_body_amplification(
+    ) {
+        use crate::http::{hls::SourcePlaybackTarget, shared_playback::SourceDecisionRequest};
+        use plurx_core::sharing_catalogue_details::FileRevision;
+        let input = SourceDecisionRequest {
+            reference: SourcePlaybackTarget {
+                server_id: Uuid::new_v4(), catalogue_epoch: Uuid::new_v4(),
+                library_id: SourceId::parse("9007199254740993").expect("library"),
+                item_id: SourceId::parse("9223372036854775807").expect("item"),
+                file_id: SourceId::parse("0").expect("file"),
+                revision: FileRevision::parse(&"d".repeat(64)).expect("revision"),
+            },
+            caps: serde_json::from_value(serde_json::json!({"v":2,"video":[{"codec":"h264","max_height":2160,"present":["sdr"]}],"audio":["aac"],"containers":["mp4"],"transports":["hls","progressive"]})).expect("actual caps"),
+            audio: Some(2), subtitle: Some(3), audio_offset_ms: Some(-100), force: None,
+        };
+        let credential = plurx_core::sharing::new_secret().expect("credential");
+        for case in 0..10 {
+            let mut payload =
+                serde_json::json!({"protocol":1,"reference":input.reference,"decision":{}});
+            match case {
+                1 => payload["protocol"] = serde_json::json!(2),
+                2 => payload["reference"]["server_id"] = serde_json::json!(Uuid::new_v4()),
+                3 => payload["reference"]["catalogue_epoch"] = serde_json::json!(Uuid::new_v4()),
+                4 => payload["reference"]["library_id"] = serde_json::json!("1"),
+                5 => payload["reference"]["item_id"] = serde_json::json!("1"),
+                6 => payload["reference"]["file_id"] = serde_json::json!("1"),
+                7 => payload["reference"]["revision"] = serde_json::json!("e".repeat(64)),
+                8 => (),
+                9 => {
+                    payload["decision"] = serde_json::json!(["x".repeat(CATALOGUE_RESPONSE_BYTES)])
+                }
+                _ => (),
+            }
+            let status = if case == 8 {
+                StatusCode::TEMPORARY_REDIRECT
+            } else {
+                StatusCode::OK
+            };
+            let (mut peer, requests, server) = fixture(status, payload).await;
+            assert_eq!(
+                peer.file_decision(&credential, &input).await.is_ok(),
+                case == 0,
+                "closed envelope {case}"
+            );
+            {
+                let requests = requests.lock().expect("requests");
+                assert_eq!(requests.len(), 1, "no redirect or replacement request");
+                assert_eq!(
+                    requests[0].0,
+                    "/sharing/v1/items/9223372036854775807/files/0/decision"
+                );
+                assert!(requests[0].1);
+                assert_eq!(
+                    requests[0].2,
+                    serde_json::to_vec(&input).expect("body").len()
+                );
+            }
+            drop(peer);
+            server.abort();
+            let _ = server.await;
+        }
     }
     #[tokio::test]
     async fn sharing_art_client_rejects_redirects_bad_digests_encodings_and_size_claims() {

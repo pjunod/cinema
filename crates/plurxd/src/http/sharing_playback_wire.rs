@@ -142,7 +142,7 @@ pub(crate) fn project_shared_decision(
         .as_str()
         .parse::<i64>()
         .map_err(|_| SharingResourceUnsupported)?;
-    if file <= 0 || decision.file_id != file {
+    if file < 0 || decision.file_id != file {
         return Err(SharingResourceUnsupported);
     }
     let locator = key
@@ -169,6 +169,93 @@ pub(crate) fn project_shared_decision(
         }
     }
     let mut payload = serde_json::to_value(decision).map_err(|_| SharingResourceUnsupported)?;
+    payload["file_id"] = json!(reference.file_id);
+    payload["reference"] =
+        json!({"item":reference.item,"file_id":reference.file_id,"revision":reference.revision});
+    if serde_json::to_vec(&payload)
+        .map_err(|_| SharingResourceUnsupported)?
+        .len()
+        > MAX_ENVELOPE_BYTES
+    {
+        return Err(SharingResourceUnsupported);
+    }
+    Ok(SharedDecisionResponse(payload))
+}
+
+/// Only the closed whole-engine decoder can enter this peer-payload projection.
+/// No Source path or URL is forwarded into the receiver's file namespace.
+pub(super) fn project_decoded_decision(
+    decoded: super::sharing_decision_decode::DecodedDecision,
+    reference: &FileLocatorReference,
+    key: &FileLocatorKey,
+) -> Result<SharedDecisionResponse> {
+    let file = reference
+        .file_id
+        .as_str()
+        .parse::<i64>()
+        .map_err(|_| SharingResourceUnsupported)?;
+    let base = key
+        .issue(reference)
+        .map_err(|_| SharingResourceUnsupported)?
+        .file_base();
+    let mut payload = decoded.into_payload();
+    if payload["file_id"].as_i64() != Some(file) {
+        return Err(SharingResourceUnsupported);
+    }
+    let mode = payload["delivery"]["mode"]
+        .as_str()
+        .ok_or(SharingResourceUnsupported)?
+        .to_owned();
+    let kind = if mode == "direct" {
+        SharingFileResourceKind::Direct
+    } else {
+        SharingFileResourceKind::Progressive
+    };
+    let url = payload["play_url"]
+        .as_str()
+        .ok_or(SharingResourceUnsupported)?;
+    payload["play_url"] = json!(file_url(url, file, &base, kind)?);
+    match mode.as_str() {
+        "direct" => {
+            let url = payload["delivery"]["url"]
+                .as_str()
+                .ok_or(SharingResourceUnsupported)?;
+            payload["delivery"]["url"] =
+                json!(file_url(url, file, &base, SharingFileResourceKind::Direct)?);
+        }
+        "remux" => {
+            let url = payload["delivery"]["url"]
+                .as_str()
+                .ok_or(SharingResourceUnsupported)?;
+            payload["delivery"]["url"] = json!(file_url(
+                url,
+                file,
+                &base,
+                SharingFileResourceKind::Progressive
+            )?);
+            let start = payload["delivery"]["sessions_url"]
+                .as_str()
+                .ok_or(SharingResourceUnsupported)?;
+            payload["delivery"]["sessions_url"] = json!(file_url(
+                start,
+                file,
+                &base,
+                SharingFileResourceKind::Start
+            )?);
+        }
+        "transcode" => {
+            let start = payload["delivery"]["sessions_url"]
+                .as_str()
+                .ok_or(SharingResourceUnsupported)?;
+            payload["delivery"]["sessions_url"] = json!(file_url(
+                start,
+                file,
+                &base,
+                SharingFileResourceKind::Start
+            )?);
+        }
+        _ => return Err(SharingResourceUnsupported),
+    }
     payload["file_id"] = json!(reference.file_id);
     payload["reference"] =
         json!({"item":reference.item,"file_id":reference.file_id,"revision":reference.revision});
@@ -292,7 +379,9 @@ mod tests {
         FileLocatorKey::open(&master, &identity, &envelope).expect("fixture signer")
     }
     fn decision(method: PlaybackMethod) -> DecisionResponse {
-        let file_id = i64::MAX;
+        decision_for_file(method, i64::MAX)
+    }
+    fn decision_for_file(method: PlaybackMethod, file_id: i64) -> DecisionResponse {
         let direct = format!("/api/v1/files/{file_id}/direct");
         let progressive = format!("/api/v1/files/{file_id}/stream.mp4?audio=2");
         let sessions_url = format!("/api/v1/files/{file_id}/hls/sessions");
@@ -359,9 +448,32 @@ mod tests {
                 duration_ms: Some(100_000),
                 frame_rate: Some("24000/1001".into()),
             },
-            audio: vec![],
-            subtitles: vec![],
-            selection: None,
+            audio: vec![super::super::stream::AudioTrackDto {
+                index: 2,
+                codec: "aac".into(),
+                channels: Some(2),
+                language: Some("eng".into()),
+                title: Some("actual typed audio".into()),
+                default: true,
+            }],
+            subtitles: vec![super::super::stream::SubTrackDto {
+                index: 3,
+                codec: "hdmv_pgs_subtitle".into(),
+                language: Some("eng".into()),
+                title: Some("actual typed bitmap metadata".into()),
+                default: false,
+                forced: true,
+                text: false,
+                native: false,
+                overlay: Some(crate::pgs_overlay::PROTOCOL),
+            }],
+            selection: Some(super::super::stream::DecisionSelection {
+                audio_index: Some(2),
+                subtitle_index: Some(3),
+                subtitle_requires_burn_in: false,
+                subtitle_burn_in_blocked_by_hdr: false,
+                subtitle_route: Some("overlay"),
+            }),
             markers: vec![],
             audio_offset_ms: 0,
             declared_offset_ms: Some(-50),
@@ -423,6 +535,127 @@ mod tests {
         wrong.file_id = 7;
         assert!(project_shared_decision(wrong, &reference, &key).is_err());
     }
+    #[test]
+    fn sharing_peer_decision_decoder_retains_complete_engine_and_refuses_shape_drift() {
+        use super::super::sharing_decision_decode::DecodedDecision;
+        for method in [
+            PlaybackMethod::DirectPlay,
+            PlaybackMethod::Remux,
+            PlaybackMethod::Transcode,
+        ] {
+            let mut engine = decision(method);
+            engine.prior_kbps = None;
+            let payload = serde_json::to_value(engine).expect("actual full engine payload");
+            assert_eq!(
+                DecodedDecision::parse(payload.clone(), i64::MAX)
+                    .expect("complete Source decision")
+                    .into_payload(),
+                payload
+            );
+            for pointer in [
+                "",
+                "/source",
+                "/delivered_audio",
+                "/delivered_audio/action",
+                "/delivery",
+                "/ladder/0",
+            ] {
+                let mut wrong = payload.clone();
+                wrong
+                    .pointer_mut(pointer)
+                    .expect("actual object")
+                    .as_object_mut()
+                    .expect("object")
+                    .insert("unnegotiated_engine_field".into(), json!(true));
+                assert!(DecodedDecision::parse(wrong, i64::MAX).is_err());
+            }
+            for field in [
+                "file_id",
+                "vod_indexed",
+                "method",
+                "reasons",
+                "transcode_audio",
+                "delivered_audio",
+                "container",
+                "delivered_dynamic_range",
+                "play_url",
+                "delivery",
+                "source",
+                "audio",
+                "subtitles",
+                "markers",
+                "audio_offset_ms",
+                "declared_offset_ms",
+                "ladder",
+            ] {
+                let mut missing = payload.clone();
+                missing
+                    .as_object_mut()
+                    .expect("engine object")
+                    .remove(field);
+                assert!(
+                    DecodedDecision::parse(missing, i64::MAX).is_err(),
+                    "required field {field}"
+                );
+            }
+            for (pointer, value) in [
+                ("/file_id", json!("9223372036854775807")),
+                ("/method", json!("unsupported")),
+                ("/prior_kbps", json!(100)),
+                ("/vod_indexed", json!(1)),
+                ("/audio_offset_ms", json!(1.5)),
+                ("/delivery/mode", json!("remote_decode")),
+            ] {
+                let mut wrong = payload.clone();
+                // prior_kbps is intentionally omitted by the Source engine.
+                if pointer == "/prior_kbps" {
+                    wrong["prior_kbps"] = value;
+                } else {
+                    *wrong.pointer_mut(pointer).expect("current field") = value;
+                }
+                assert!(DecodedDecision::parse(wrong, i64::MAX).is_err());
+            }
+            assert!(DecodedDecision::parse(payload, i64::MAX - 1).is_err());
+        }
+    }
+
+    #[test]
+    fn sharing_decoded_decision_zero_identity_projects_only_receiver_urls() {
+        let mut reference = reference();
+        reference.item.library_id =
+            plurx_core::sharing::SourceId::parse("0").expect("zero library");
+        reference.item.item_id = plurx_core::sharing::SourceId::parse("0").expect("zero item");
+        reference.file_id = plurx_core::sharing::SourceId::parse("0").expect("zero file");
+        let key = key();
+        let base = key
+            .issue(&reference)
+            .expect("signed zero tuple")
+            .file_base();
+        for method in [
+            PlaybackMethod::DirectPlay,
+            PlaybackMethod::Remux,
+            PlaybackMethod::Transcode,
+        ] {
+            let mut engine = decision_for_file(method, 0);
+            engine.prior_kbps = None;
+            let decoded = super::super::sharing_decision_decode::DecodedDecision::parse(
+                serde_json::to_value(engine).expect("whole engine"),
+                0,
+            )
+            .expect("decoded");
+            let actual = serde_json::to_value(
+                project_decoded_decision(decoded, &reference, &key).expect("B projection"),
+            )
+            .expect("payload");
+            assert_eq!(actual["file_id"], json!("0"));
+            assert_eq!(actual["reference"]["item"]["library_id"], json!("0"));
+            assert!(actual["play_url"].as_str().expect("URL").starts_with(&base));
+            assert!(!serde_json::to_string(&actual)
+                .expect("wire")
+                .contains("/api/v1/files/0/"));
+        }
+    }
+
     fn start(source: Uuid) -> StartResponse {
         let mut response:StartResponse=serde_json::from_value(json!({"quality_catalog_status":{"complete":true,"causes":[]},"display_aware_auto_protocol":"route-v1","quality_candidate_id":"04040404040404040404040404040404","quality_candidates":[],"session_id":source,"playlist_url":format!("/api/v1/hls/{source}/index.m3u8?native=1&subtitle=2"),"duration_ms":100000,"start_seconds":30.0,"media_origin_ms":29800,"height":2160,"encoder":"fixture-encoder","vod":true,"ladder":[{"height":2160,"total_kbps":22000,"peak_kbps":32000}],"prior_kbps":50000,"delivered_dynamic_range":"dolby_vision","delivered_dolby_vision_profile":8,"plan_notes":["fixture override"]})).expect("engine HTTP shape");
         response.control = crate::playback_control::ControlBootstrap::new(

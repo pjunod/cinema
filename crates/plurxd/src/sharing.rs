@@ -1160,6 +1160,78 @@ fn catalogue_cache_key(
     Ok(writer.0.finalize().into())
 }
 impl SharingManager {
+    /// Fresh assigned-file preflight through the approved pinned Source only.
+    /// No offline reply, Local Source ID, B account identity or session is sent.
+    pub async fn read_file_decision(
+        &self,
+        state: &AppState,
+        user: i64,
+        reference: &plurx_core::sharing_file_locators::FileLocatorReference,
+        request: &crate::http::shared_playback::SourceDecisionRequest,
+    ) -> Result<
+        (
+            plurx_core::sharing::ImportSummary,
+            crate::http::shared_playback::SourceDecisionReply,
+        ),
+        crate::sharing_client::PeerError,
+    > {
+        use crate::sharing_client::{PeerConnection, PeerError};
+        tokio::time::timeout(Duration::from_secs(15), async {
+            if user <= 0 {
+                return Err(PeerError::Authentication);
+            }
+            let _permit = self.catalogue_admission.acquire(reference.item.import_id)?;
+            let import = state
+                .store
+                .sharing_import(reference.item.import_id)
+                .await
+                .map_err(|_| PeerError::Unavailable)?
+                .ok_or(PeerError::Unavailable)?;
+            let summary = &import.summary;
+            if summary.state != "active"
+                || summary.lifecycle_generation != reference.lifecycle_generation
+                || summary.source_server_id != reference.item.server_id
+                || summary.catalogue_epoch != reference.item.catalogue_epoch
+            {
+                return Err(PeerError::Authentication);
+            }
+            self.ensure_current(state, summary).await?;
+            let assigned = state
+                .store
+                .assigned_catalogue_libraries(
+                    summary.id,
+                    user,
+                    summary.lifecycle_generation,
+                    summary.assignment_generation,
+                )
+                .await
+                .map_err(|_| PeerError::Unavailable)?;
+            if !assigned.contains(&reference.item.library_id) {
+                return Err(PeerError::Authentication);
+            }
+            let local = state
+                .store
+                .sharing_identity(clock_ms())
+                .await
+                .map_err(|_| PeerError::Unavailable)?;
+            let credentials = ImportCredential::open(self, local.server_id, &import)
+                .map_err(|_| PeerError::Unavailable)?;
+            let expected = plurx_core::sharing::SharingIdentity {
+                server_id: summary.source_server_id,
+                catalogue_epoch: summary.catalogue_epoch,
+                created_at_ms: 0,
+            };
+            let (mut peer, _) =
+                PeerConnection::verified(self, &summary.endpoints, &expected).await?;
+            self.ensure_current(state, summary).await?;
+            let reply = peer.file_decision(&credentials.credential, request).await?;
+            self.ensure_current(state, summary).await?;
+            Ok((summary.clone(), reply))
+        })
+        .await
+        .map_err(|_| PeerError::Unavailable)?
+    }
+
     /// A fresh pinned read of the exact opaque artwork resource. No offline
     /// cache hit can substitute for this opened-byte digest proof.
     pub async fn read_artwork(

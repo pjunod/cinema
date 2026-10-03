@@ -22,9 +22,9 @@ use std::{
 static DECISIONS: LazyLock<Arc<tokio::sync::Semaphore>> =
     LazyLock::new(|| Arc::new(tokio::sync::Semaphore::new(16)));
 
-#[derive(Deserialize)]
+#[derive(serde::Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub(super) struct SourceDecisionRequest {
+pub(crate) struct SourceDecisionRequest {
     pub reference: SourcePlaybackTarget,
     pub caps: plurx_core::playback::DeviceCaps,
     pub audio: Option<i64>,
@@ -180,4 +180,99 @@ pub(super) async fn source_decision(
         &target,
         json!({"protocol":1,"reference":target,"decision":decision}),
     )
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct SourceDecisionReply {
+    pub protocol: u8,
+    pub reference: SourcePlaybackTarget,
+    #[serde(deserialize_with = "super::sharing_decision_decode::bounded_decision_value")]
+    pub decision: serde_json::Value,
+}
+
+pub(crate) fn viewer_router(state: AppState) -> Router<AppState> {
+    Router::new()
+        .route(
+            "/shared/imports/{import}/files/{locator}/decision",
+            post(viewer_decision),
+        )
+        .route_layer(axum::middleware::from_fn_with_state(
+            state,
+            shared_library::receiver_content_guard,
+        ))
+}
+async fn viewer_decision(
+    State(state): State<AppState>,
+    super::extract::AuthUser(user): super::extract::AuthUser,
+    super::extract::RawToken(token): super::extract::RawToken,
+    Path((import, locator)): Path<(String, String)>,
+    axum::extract::Query(q): axum::extract::Query<stream::Caps>,
+    body: Body,
+) -> Result<Response, ApiError> {
+    let import_id = uuid::Uuid::parse_str(&import).map_err(|_| invalid())?;
+    if import_id.is_nil() || import_id.to_string() != import {
+        return Err(invalid());
+    }
+    // Header/cookie account authentication is mandatory for pre-session
+    // decisions. A locator and a session query confer no such authority.
+    let import = state
+        .store
+        .sharing_import(import_id)
+        .await?
+        .ok_or_else(refused)?;
+    if import.summary.state != "active" || !crate::sharing::enabled(state.store.as_ref()).await? {
+        return Err(refused());
+    }
+    let key = super::shared_artwork::receiver_key(&state)
+        .await?
+        .ok_or_else(refused)?;
+    let reference = key
+        .verify(&locator, import_id, import.summary.lifecycle_generation)
+        .map_err(|_| invalid())?;
+    let bytes = to_bytes(body, 128 * 1024).await.map_err(|_| invalid())?;
+    let body: stream::DecisionBody = serde_json::from_slice(&bytes).map_err(|_| invalid())?;
+    let input = SourceDecisionRequest {
+        reference: SourcePlaybackTarget {
+            server_id: reference.item.server_id,
+            catalogue_epoch: reference.item.catalogue_epoch,
+            library_id: reference.item.library_id.clone(),
+            item_id: reference.item.item_id.clone(),
+            file_id: reference.file_id.clone(),
+            revision: reference.revision.clone(),
+        },
+        caps: body.caps,
+        audio: q.audio,
+        subtitle: q.subtitle,
+        audio_offset_ms: q.audio_offset_ms,
+        force: q.force,
+    };
+    stream::validate_device_caps(&input.caps)?;
+    if input.caps.v != plurx_core::playback::DeviceCaps::VERSION || input.caps.is_empty() {
+        return Err(invalid());
+    }
+    let (summary, reply) = state
+        .sharing
+        .read_file_decision(&state, user.id, &reference, &input)
+        .await
+        .map_err(|_| refused())?;
+    let file = reference
+        .file_id
+        .as_str()
+        .parse::<i64>()
+        .map_err(|_| invalid())?;
+    let decoded = super::sharing_decision_decode::DecodedDecision::parse(reply.decision, file)
+        .map_err(|_| refused())?;
+    let projected =
+        super::sharing_playback_wire::project_decoded_decision(decoded, &reference, &key)
+            .map_err(|_| refused())?;
+    shared_library::receiver_file_json(
+        &state,
+        &token,
+        user.id,
+        &summary,
+        &reference,
+        serde_json::to_value(projected).map_err(|_| refused())?,
+    )
+    .await
 }

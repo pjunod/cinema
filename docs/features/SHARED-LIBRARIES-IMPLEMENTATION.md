@@ -3368,3 +3368,32 @@ Focused evidence uses pinned Rust 1.97.1: the actual three-voter factory/rewrap
 contract passed with zero ignored tests, and the single/pooled SQLite offline
 restore regression passed with foreign keys enabled. These are foundation
 receipts, not startup installation or full shared-library qualification.
+
+### S5 authenticated receiver decision adapter — live delivery remains open
+
+B's POST file decision route accepts an authenticated current account, a
+current signed file locator, and the actual version-2 device capabilities.
+It checks the saved switch, active import, full Source identity and current
+library assignment before opening the existing sealed credential and dialing
+an approved pinned endpoint. Source uses its ordinary decision engine after a
+fresh grant-authorized complete file witness and revision check, then checks
+that authority again. Neither side creates a media session for this read.
+
+The peer reply binds the exact requested Source/epoch/library/item/file/revision
+and protocol. Its decision decoder retains every current engine field,
+including audio/subtitle selection and ladder entries. Unknown fields, type or
+method/delivery disagreement, duplicate JSON keys, excessive nesting and an
+excessive tree refuse. The response has a 4 MiB wire limit, a 16,384-node limit
+and depth 32. B rewrites only the closed file URL suffixes into its signed
+namespace and publishes the string file identity with the full shared
+reference. Source file zero is valid. No Source URL, Local file route or LAN
+bandwidth observation supplies receiver authority.
+
+Pinned Rust 1.97.1 all-target checking and denied-warning Clippy passed on the
+adapter. Five complete decision/start/PGS projection tests and the dedicated
+JSON allocation-budget regression passed with zero ignored tests. The peer
+client regression also passed ten envelope/reference/redirect/body-bound
+cases (one test, zero ignored). The new
+pinned Source/B H1/H2 decision fixture is opt-in and remains unqualified until
+its committed source archive runs in the disposable CGNAT container. Source
+starts, receiver sessions, media relay and progress remain separate open work.

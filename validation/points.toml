@@ -1195,6 +1195,7 @@ paths = [
   "crates/plurxd/src/http/shared_playback.rs",
   "crates/plurxd/src/http/shared_artwork.rs",
   "crates/plurxd/src/http/sharing_playback_wire.rs",
+  "crates/plurxd/src/http/sharing_decision_decode.rs",
   "crates/plurx-core/src/store/sharing.rs",
   "crates/plurx-core/src/store/sharing_schema.sql",
   "crates/plurx-core/src/store/hiqlite_sharing.rs",

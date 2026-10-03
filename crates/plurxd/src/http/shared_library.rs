@@ -844,6 +844,37 @@ async fn receiver_json(
     let scopes = sources.iter().map(|s| s.scope.clone()).collect();
     receiver_json_scoped(state, token, user, scopes, sources, value).await
 }
+pub(super) async fn receiver_file_json(
+    state: &AppState,
+    token: &str,
+    user: i64,
+    summary: &plurx_core::sharing::ImportSummary,
+    reference: &plurx_core::sharing_file_locators::FileLocatorReference,
+    value: Value,
+) -> Result<Response, ApiError> {
+    let source = receiver_scope(
+        summary,
+        vec![reference.item.library_id.clone()],
+        vec![(
+            reference.item.library_id.clone(),
+            reference.item.item_id.clone(),
+        )],
+        vec![(
+            reference.item.library_id.clone(),
+            reference.item.item_id.clone(),
+            reference.file_id.clone(),
+        )],
+    )?;
+    receiver_json_scoped(
+        state,
+        token,
+        user,
+        vec![source.scope.clone()],
+        vec![source],
+        value,
+    )
+    .await
+}
 async fn receiver_json_scoped(
     state: &AppState,
     token: &str,
@@ -928,7 +959,7 @@ pub(super) async fn attach_receiver_art_authority(
 }
 static RECEIVER_MONITORS: std::sync::LazyLock<std::sync::Arc<tokio::sync::Semaphore>> =
     std::sync::LazyLock::new(|| std::sync::Arc::new(tokio::sync::Semaphore::new(32)));
-async fn receiver_content_guard(
+pub(super) async fn receiver_content_guard(
     State(state): State<AppState>,
     request: Request<Body>,
     next: Next,
@@ -3058,6 +3089,418 @@ mod tests {
         }
     }
 
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    #[ignore = "requires disposable CGNAT network and PLURX_SHARING_FIXTURE_IP"]
+    async fn sharing_receiver_pinned_decision_http1_http2_revalidates_file_assignment_and_login() {
+        use http_body_util::BodyExt;
+        use plurx_core::{
+            config::{SharingEgressConfig, SharingNetworkConfig},
+            secrets::SharingSecretPurpose,
+            sharing_catalogue_details::CatalogueRevisionKey,
+            sharing_file_locators::{FileLocatorKey, FileLocatorReference},
+            sharing_tls::{LiveNodeTls, SharingTlsListener},
+            store::SqliteStore,
+        };
+        let _serial = BODY_FIXTURES.lock().await;
+        let address: std::net::IpAddr = std::env::var("PLURX_SHARING_FIXTURE_IP")
+            .expect("explicit CGNAT fixture")
+            .parse()
+            .expect("address");
+        assert!(is_tailnet_address(address));
+        for h2 in [false, true] {
+            let source = body_fixture().await;
+            let tls_dir = tempfile::tempdir().expect("Source TLS fixture");
+            let tls =
+                Arc::new(LiveNodeTls::open(tls_dir.path(), clock_ms() / 1000).expect("Source TLS"));
+            let (pin, _) = tls.status().expect("Source SPKI");
+            let listener = tokio::net::TcpListener::bind((address, 0))
+                .await
+                .expect("Source CGNAT listener");
+            let endpoint = Endpoint {
+                ipv4: match address {
+                    std::net::IpAddr::V4(ip) => ip,
+                    _ => panic!("IPv4 fixture"),
+                },
+                ipv6: None,
+                ts_fqdn: "source.fixture.ts.net".into(),
+                port: listener.local_addr().expect("Source address").port(),
+                spki_sha256: pin,
+            };
+            let (source_stop, source_stopped) = tokio::sync::oneshot::channel();
+            let source_task = tokio::spawn(crate::serve_http(
+                SharingTlsListener::new(listener, tls),
+                sharing::peer_router(source.state.clone()),
+                async move {
+                    let _ = source_stopped.await;
+                },
+                crate::HTTP_TIMEOUTS,
+            ));
+            let receiver_dir = tempfile::tempdir().expect("B fixture");
+            let receiver_path = receiver_dir.path().join("receiver.sqlite");
+            let (_, mut receiver) = super::super::tests::test_app_with_state();
+            receiver.store = Arc::new(SqliteStore::open(&receiver_path).expect("B Store"));
+            receiver.runtime_cache_dir = receiver_dir
+                .path()
+                .canonicalize()
+                .expect("canonical B cache")
+                .join("runtime");
+            std::fs::create_dir(&receiver.runtime_cache_dir).expect("runtime cache fixture");
+            receiver.sharing = Arc::new(crate::sharing::SharingManager::new(
+                receiver.sharing.key.clone(),
+                receiver_dir.path().join("unused-tls"),
+                SharingNetworkConfig {
+                    bind: "127.0.0.1:32444".parse().expect("unused bind"),
+                    egress: SharingEgressConfig::LocalAddress { address },
+                },
+            ));
+            receiver
+                .store
+                .put_setting(plurx_core::store::keys::SHARING_ENABLED, "true")
+                .await
+                .expect("enable B");
+            let user = receiver
+                .store
+                .create_user("receiver-current-viewer", "synthetic-hash", false)
+                .await
+                .expect("viewer");
+            let token = "synthetic-receiver-current-login";
+            let hash = plurx_core::auth::hash_token(token);
+            receiver
+                .store
+                .create_token(&hash, user.id, None)
+                .await
+                .expect("login");
+            let local = receiver
+                .store
+                .sharing_identity(1000)
+                .await
+                .expect("B identity");
+            let remote = source
+                .state
+                .store
+                .sharing_identity(1000)
+                .await
+                .expect("Source identity");
+            rusqlite::Connection::open(&source.path)
+                .expect("Source fixture writer")
+                .execute(
+                    "UPDATE sharing_exports SET recipient_server_id=?1 WHERE id=?2",
+                    rusqlite::params![local.server_id.to_string(), source.grant.to_string()],
+                )
+                .expect("bind grant to actual B identity");
+            let import = uuid::Uuid::new_v4();
+            let credential = crate::sharing::ImportCredential::encode(
+                &source.secret,
+                uuid::Uuid::new_v4(),
+                1000,
+                "Fixture B",
+                2000,
+                None,
+            )
+            .expect("closed credential");
+            assert_eq!(
+                receiver
+                    .store
+                    .create_share_import(NewImport {
+                        id: import,
+                        source: remote.clone(),
+                        source_name: "Fixture Source".into(),
+                        claim_id: uuid::Uuid::new_v4(),
+                        credential: receiver
+                            .sharing
+                            .key
+                            .seal_sharing(
+                                SharingSecretPurpose::Credential,
+                                local.server_id,
+                                import,
+                                credential.expose()
+                            )
+                            .expect("seal credential"),
+                        claim_secret: receiver
+                            .sharing
+                            .key
+                            .seal_sharing(
+                                SharingSecretPurpose::Claim,
+                                local.server_id,
+                                import,
+                                "synthetic-claim"
+                            )
+                            .expect("seal claim"),
+                        endpoints: vec![endpoint.clone()],
+                        now_ms: 1000
+                    })
+                    .await
+                    .expect("B import"),
+                ImportOutcome::Created
+            );
+            receiver
+                .store
+                .settle_share_claim(import, source.grant, true, 1001)
+                .await
+                .expect("active B import");
+            let library = source_id(&source.library.to_string()).expect("ID");
+            receiver
+                .store
+                .assign_share_viewers(
+                    import,
+                    1,
+                    vec![Assignment {
+                        library_id: library.clone(),
+                        user_id: user.id,
+                    }],
+                    1002,
+                )
+                .await
+                .expect("assignment");
+
+            let source_file = source._directory.path().join("decision.mp4");
+            std::fs::write(&source_file, b"actual fixture presence").expect("Source file");
+            let envelope =
+                CatalogueRevisionKey::generate_sealed(&source.state.sharing.key, remote.clone())
+                    .expect("Source key");
+            let source_key =
+                CatalogueRevisionKey::open(&source.state.sharing.key, remote.clone(), &envelope)
+                    .expect("Source signer");
+            let writer = rusqlite::Connection::open(&source.path).expect("Source writer");
+            writer
+                .execute_batch(
+                    plurx_core::store::sharing_catalogue_source::CANDIDATE_REVISION_KEY_SCHEMA,
+                )
+                .expect("Source schema");
+            writer
+                .execute(
+                    "INSERT INTO sharing_catalogue_keys VALUES(1,?1,?2,?3)",
+                    rusqlite::params![
+                        remote.server_id.to_string(),
+                        remote.catalogue_epoch.to_string(),
+                        envelope.as_stored()
+                    ],
+                )
+                .expect("Source key");
+            writer.execute("INSERT INTO files(id,item_id,path,size,mtime,duration_ms,container,video_codec,width,height,bit_depth,bitrate) VALUES(0,?1,?2,23,1000,60000,'mp4','h264',1920,1080,8,1000000)",rusqlite::params![source.item,source_file.to_str().expect("path")]).expect("Source file identity zero");
+            drop(writer);
+            let hash = secret_hash(SecretDomain::Grant, &source.secret);
+            let plurx_core::store::sharing_catalogue_details::SourceDetailsRead::Authorized(
+                witness,
+            ) = source
+                .state
+                .store
+                .source_item_file_witness(
+                    &hash,
+                    source.grant,
+                    source_id(&source.item.to_string()).expect("item"),
+                    source_id("0").expect("file"),
+                )
+                .await
+                .expect("witness")
+            else {
+                panic!("authorized")
+            };
+            let reference = FileLocatorReference {
+                item: SharedReference {
+                    import_id: import,
+                    server_id: remote.server_id,
+                    catalogue_epoch: remote.catalogue_epoch,
+                    library_id: library.clone(),
+                    item_id: source_id(&source.item.to_string()).expect("item"),
+                },
+                file_id: source_id("0").expect("zero"),
+                revision: source_key.file_revision(&witness).expect("revision"),
+                lifecycle_generation: 1,
+            };
+            let envelope =
+                FileLocatorKey::generate_sealed(&receiver.sharing.key, &local).expect("B key");
+            let writer = rusqlite::Connection::open(&receiver_path).expect("B writer");
+            writer
+                .execute_batch(
+                    plurx_core::store::sharing_file_locators::CANDIDATE_FILE_LOCATOR_KEY_SCHEMA,
+                )
+                .expect("B schema");
+            writer
+                .execute(
+                    "INSERT INTO sharing_file_locator_keys VALUES(1,?1,?2,?3)",
+                    rusqlite::params![
+                        local.server_id.to_string(),
+                        local.catalogue_epoch.to_string(),
+                        envelope.as_stored()
+                    ],
+                )
+                .expect("B key");
+            drop(writer);
+            let key =
+                FileLocatorKey::open(&receiver.sharing.key, &local, &envelope).expect("B signer");
+            let locator = key.issue(&reference).expect("signed locator");
+            let path = format!("{}/decision", locator.file_base());
+            let caps:plurx_core::playback::DeviceCaps=serde_json::from_value(json!({"v":2,"video":[{"codec":"h264","max_height":2160,"present":["sdr"]}],"audio":["aac"],"containers":["mp4"],"transports":["hls","progressive"]})).expect("caps");
+            let input = super::super::shared_playback::SourceDecisionRequest {
+                reference: super::super::hls::SourcePlaybackTarget {
+                    server_id: remote.server_id,
+                    catalogue_epoch: remote.catalogue_epoch,
+                    library_id: library.clone(),
+                    item_id: reference.item.item_id.clone(),
+                    file_id: reference.file_id.clone(),
+                    revision: reference.revision.clone(),
+                },
+                caps: caps.clone(),
+                audio: None,
+                subtitle: None,
+                audio_offset_ms: None,
+                force: None,
+            };
+            let (_, expected) = receiver
+                .sharing
+                .read_file_decision(&receiver, user.id, &reference, &input)
+                .await
+                .expect("actual pinned Source decision");
+            let expected =
+                super::super::sharing_decision_decode::DecodedDecision::parse(expected.decision, 0)
+                    .expect("complete engine");
+            let expected = serde_json::to_value(
+                super::super::sharing_playback_wire::project_decoded_decision(
+                    expected, &reference, &key,
+                )
+                .expect("expected B projection"),
+            )
+            .expect("JSON");
+            let (b_address, _captured, stop, served) = body_server_app(
+                super::super::router(receiver.clone()),
+                Arc::new(AtomicBool::new(false)),
+                Arc::new(AtomicBool::new(false)),
+            )
+            .await;
+            for case in 0..5 {
+                if case == 2 {
+                    rusqlite::Connection::open(&source.path)
+                        .expect("Source writer")
+                        .execute("UPDATE files SET mtime=mtime+1 WHERE id=0", [])
+                        .expect("change actual revision");
+                }
+                if case == 3 {
+                    rusqlite::Connection::open(&source.path)
+                        .expect("Source writer")
+                        .execute("UPDATE files SET mtime=1000 WHERE id=0", [])
+                        .expect("restore revision");
+                    receiver
+                        .store
+                        .assign_share_viewers(import, 2, vec![], 1003)
+                        .await
+                        .expect("remove current viewer assignment");
+                }
+                if case == 4 {
+                    receiver
+                        .store
+                        .assign_share_viewers(
+                            import,
+                            3,
+                            vec![Assignment {
+                                library_id: library.clone(),
+                                user_id: user.id,
+                            }],
+                            1004,
+                        )
+                        .await
+                        .expect("restore current assignment");
+                    receiver
+                        .store
+                        .delete_token(&plurx_core::auth::hash_token(token))
+                        .await
+                        .expect("revoke actual B login");
+                }
+                let request_path = if case == 1 {
+                    let mut forged = locator.file_base();
+                    let last = forged.pop().expect("nonempty signed locator");
+                    forged.push(if last == 'a' { 'b' } else { 'a' });
+                    format!("{forged}/decision")
+                } else {
+                    path.clone()
+                };
+                let request = Request::builder()
+                    .method("POST")
+                    .uri(format!("http://fixture{request_path}"))
+                    .header("authorization", format!("Bearer {token}"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::to_vec(&json!({"caps":caps})).expect("body"),
+                    ))
+                    .expect("request");
+                let socket = tokio::net::TcpStream::connect(b_address)
+                    .await
+                    .expect("B socket");
+                let (status, payload) = if h2 {
+                    let (mut sender, driver) = hyper::client::conn::http2::Builder::new(
+                        hyper_util::rt::TokioExecutor::new(),
+                    )
+                    .handshake::<_, Body>(hyper_util::rt::TokioIo::new(socket))
+                    .await
+                    .expect("H2 handshake");
+                    let driver = tokio::spawn(driver);
+                    let response = sender.send_request(request).await.expect("B response");
+                    let status = response.status();
+                    let payload = response
+                        .into_body()
+                        .collect()
+                        .await
+                        .expect("B body")
+                        .to_bytes();
+                    drop(sender);
+                    driver.abort();
+                    let _ = driver.await;
+                    (status, payload)
+                } else {
+                    let (mut sender, driver) = hyper::client::conn::http1::handshake::<_, Body>(
+                        hyper_util::rt::TokioIo::new(socket),
+                    )
+                    .await
+                    .expect("H1 handshake");
+                    let driver = tokio::spawn(driver);
+                    let response = sender.send_request(request).await.expect("B response");
+                    let status = response.status();
+                    let payload = response
+                        .into_body()
+                        .collect()
+                        .await
+                        .expect("B body")
+                        .to_bytes();
+                    drop(sender);
+                    driver.abort();
+                    let _ = driver.await;
+                    (status, payload)
+                };
+                if case == 0 {
+                    assert_eq!(
+                        status,
+                        StatusCode::OK,
+                        "{}",
+                        String::from_utf8_lossy(&payload)
+                    );
+                    assert_eq!(
+                        serde_json::from_slice::<Value>(&payload).expect("complete B engine"),
+                        expected
+                    );
+                } else {
+                    assert!(
+                        !status.is_success(),
+                        "must refuse changed authority H2={h2} case={case}"
+                    );
+                }
+                for database in [&source.path, &receiver_path] {
+                    let sessions: i64 = rusqlite::Connection::open(database)
+                        .expect("session census")
+                        .query_row("SELECT count(*) FROM media_sessions", [], |r| r.get(0))
+                        .expect("census");
+                    assert_eq!(sessions, 0, "decisions never allocate Source/B sessions");
+                }
+            }
+            let _ = stop.send(());
+            served.await.expect("B server").expect("B shutdown");
+            let _ = source_stop.send(());
+            source_task
+                .await
+                .expect("Source server")
+                .expect("Source shutdown");
+        }
+    }
     /// Runs only inside the explicitly assigned disposable CGNAT container.
     /// The real Source router, SPKI dialer, identity check, receiver router,
     /// Store authorities and accepted-connection ownership remain in the path.

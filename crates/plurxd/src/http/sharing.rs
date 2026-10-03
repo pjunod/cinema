@@ -173,7 +173,15 @@ async fn peer_guard(
         }
         Err(error) => return authority(error).into_response(),
     }
-    match tokio::time::timeout(Duration::from_secs(3), next.run(request)).await {
+    let deadline = match request
+        .extensions()
+        .get::<axum::extract::MatchedPath>()
+        .map(|path| path.as_str())
+    {
+        Some("/sharing/v1/items/{item}/files/{file}/decision") => Duration::from_secs(10),
+        _ => Duration::from_secs(3),
+    };
+    match tokio::time::timeout(deadline, next.run(request)).await {
         Ok(response) => response,
         Err(_) => failure(
             StatusCode::SERVICE_UNAVAILABLE,
