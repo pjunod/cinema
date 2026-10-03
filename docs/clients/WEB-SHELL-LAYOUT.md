@@ -1,4 +1,4 @@
-# Web shell layout — where the app's sixty-nine files are, and what each one holds
+# Web shell layout — where the app's seventy files are, and what each one holds
 
 **Status:** live · **Describes:** `crates/plurxd/src/web/` as served ·
 **Split:** 2026-09-19, executing
@@ -99,7 +99,7 @@ the file's first statement, and `asset-order` refuses a row without one.
 
 ### 1.5 Two things that really are different
 
-The bytes are identical and the app behaves identically, but sixty-nine
+The bytes are identical and the app behaves identically, but seventy
 scripts are not one script, and two consequences are worth knowing before you
 debug something strange.
 
@@ -196,9 +196,10 @@ had to be edited.
 | 64 | [`layouts/theater.js`](../../crates/plurxd/src/web/layouts/theater.js) | The theater layout, `LAYOUTS.theater`, and the load-time `applyLayout()` that paints the first frame. | 22458–22996 |
 | 65 | [`pages/reader.js`](../../crates/plurxd/src/web/pages/reader.js) | The EPUB reader page — glue over the `reader.js` sidecar, which did not move. | 22997–23326 |
 | 66 | [`pages/library-channels-page.js`](../../crates/plurxd/src/web/pages/library-channels-page.js) | The Library channels page — glue over the `library-channels.js` sidecar, which did not move. | 23327–23783 |
-| 67 | [`pages/shared-libraries.js`](../../crates/plurxd/src/web/pages/shared-libraries.js) | Separate full-reference Shared browsing, bounded B catalogue reads, and independent Continue Watching groups. | **New.** Shared catalogue integration. |
-| 68 | [`pages/sharing-management.js`](../../crates/plurxd/src/web/pages/sharing-management.js) | Exact integer admin sharing transport, transient invitation/pairing drafts, complete viewer matrices and Tailnet endpoint editors. | **New.** Shared management integration. |
-| 69 | [`router.js`](../../crates/plurxd/src/web/router.js) | `PAGE_TIMER`, `setPageTimer`, `render`, and the `hashchange` and boot statements that start the app. | 23784–23898 |
+| 67 | [`pages/shared-artwork.js`](../../crates/plurxd/src/web/pages/shared-artwork.js) | Authenticated B-only Shared artwork, bounded streaming reads and owned bitmap/canvas retirement. Opaque browser decoder and GPU storage remain separate qualification limits. | **New.** Shared artwork integration. |
+| 68 | [`pages/shared-libraries.js`](../../crates/plurxd/src/web/pages/shared-libraries.js) | Separate full-reference Shared browsing, bounded B catalogue reads, and independent Continue Watching groups. | **New.** Shared catalogue integration. |
+| 69 | [`pages/sharing-management.js`](../../crates/plurxd/src/web/pages/sharing-management.js) | Exact integer admin sharing transport, transient invitation/pairing drafts, complete viewer matrices and Tailnet endpoint editors. | **New.** Shared management integration. |
+| 70 | [`router.js`](../../crates/plurxd/src/web/router.js) | `PAGE_TIMER`, `setPageTimer`, `render`, and the `hashchange` and boot statements that start the app. | 23784–23898 |
 
 ## 3. Adding a file
 

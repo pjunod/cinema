@@ -45,32 +45,14 @@ function sharedCatalogueRoute(hash){
 function sharedCatalogueCurrent(capture){
   return capture.generation===PAGE_RENDER_GENERATION&&capture.auth===AUTH_GENERATION&&capture.token===TOKEN&&capture.origin===API&&capture.route===location.hash;
 }
-async function sharedCatalogueRead(path,capture){
-  if(!sharedCatalogueCurrent(capture)) throw new Error("stale shared catalogue");
-  const response=await api(path,{raw:true});
-  if(!sharedCatalogueCurrent(capture)){await response.body?.cancel();throw new Error("stale shared catalogue");}
-  const reader=response.body?.getReader();
-  if(!reader) throw new Error("Shared catalogue body unavailable");
-  const chunks=[];let length=0;
-  try{
-    for(;;){const part=await reader.read();if(part.done) break;
-      length+=part.value.byteLength;
-      if(length>4*1024*1024||!sharedCatalogueCurrent(capture)) throw new Error("Shared catalogue response unavailable");
-      chunks.push(part.value);
-    }
-  }catch(error){await reader.cancel().catch(()=>{});throw error;}finally{reader.releaseLock();}
-  if(!sharedCatalogueCurrent(capture)) throw new Error("stale shared catalogue");
-  const bytes=new Uint8Array(length);let offset=0;
-  for(const chunk of chunks){bytes.set(chunk,offset);offset+=chunk.byteLength;}
-  return JSON.parse(new TextDecoder("utf-8",{fatal:true}).decode(bytes));
-}
-function sharedCatalogueItemHtml(item,expected){
+async function sharedCatalogueRead(path,capture){return SHARED_ARTWORK.metadata(path,capture);}
+function sharedCatalogueItemHtml(item,expected,capture=null){
   if(!item||item.source!=="shared") throw new TypeError("Invalid shared item");
   const ref=sharedCatalogueReference(item.reference);
   if(sharedCatalogueGroupKey(ref)!==sharedCatalogueGroupKey(expected)
     ||expected.library_id&&ref.library_id!==expected.library_id) throw new TypeError("Shared source changed");
   if(typeof item.title!=="string"||item.title.length>16384) throw new TypeError("Invalid shared item");
-  return `<a class="card" href="${esc(sharedCatalogueHref(ref))}"><strong>${esc(item.title)}</strong><div class="muted">${esc(item.kind||"")}${item.year?` · ${esc(String(item.year))}`:""}</div></a>`;
+  return `<a class="card" href="${esc(sharedCatalogueHref(ref))}">${SHARED_ARTWORK.markup(item,expected,capture)}<strong>${esc(item.title)}</strong><div class="muted">${esc(item.kind||"")}${item.year?` · ${esc(String(item.year))}`:""}</div></a>`;
 }
 function sharedCatalogueError(error){return `<div class="empty" role="status">Shared source unavailable. ${esc(error.message||"Try again.")} <button class="ghost sm" onclick="render()">Retry</button></div>`;}
 async function viewSharedCatalogue(generation=++PAGE_RENDER_GENERATION){
@@ -78,7 +60,7 @@ async function viewSharedCatalogue(generation=++PAGE_RENDER_GENERATION){
   const parsed=sharedCatalogueRoute(capture.route);
   layoutChrome("shared",`<h1>Shared libraries</h1><p><a href="#/shared">All shared sources</a></p><div id="shared-catalogue"><div class="empty">Loading…</div></div>`);
   setPagePhase(capture.route,generation,"shell");
-  const paint=html=>{if(!sharedCatalogueCurrent(capture)) return false;const el=document.getElementById("shared-catalogue");if(!el) return false;el.innerHTML=html;setPagePhase(capture.route,generation,"content");return true;};
+  const paint=html=>{if(!sharedCatalogueCurrent(capture)) return false;const el=document.getElementById("shared-catalogue");if(!el) return false;el.innerHTML=html;SHARED_ARTWORK.hydrate(el);setPagePhase(capture.route,generation,"content");return true;};
   try{
     if(parsed.kind==="index"){
       const results=await Promise.allSettled([sharedCatalogueRead("/shared/libraries",capture),sharedCatalogueRead("/shared/continue-watching?limit=200",capture)]);
@@ -109,9 +91,9 @@ async function viewSharedCatalogue(generation=++PAGE_RENDER_GENERATION){
           try{const reply=await sharedCatalogueRead(`/shared/imports/${group.import_id}/continue-watching?limit=200`,capture);
             if(sharedCatalogueGroupKey(reply)!==sharedCatalogueGroupKey(group)||!Array.isArray(reply.items)||reply.items.length>200) throw new Error("Shared history changed");
             if(!["online","unavailable","busy"].includes(reply.availability)||reply.availability!=="online"&&reply.items.length) throw new Error("Shared history unavailable");
-            recent=reply.availability==="online"?reply.items.map(entry=>sharedCatalogueItemHtml(entry.item,group)).join(""):'<p class="muted">Continue Watching unavailable for this Source.</p>';
+            recent=reply.availability==="online"?reply.items.map(entry=>{const r=sharedCatalogueReference(entry.item?.reference);if(!group.assigned.has(r.library_id))throw new Error("Shared history assignment changed");return sharedCatalogueItemHtml(entry.item,{import_id:group.import_id,server_id:group.server_id,catalogue_epoch:group.catalogue_epoch},capture);}).join(""):'<p class="muted">Continue Watching unavailable for this Source.</p>';
           }catch(error){recent=sharedCatalogueError(error);}
-          if(sharedCatalogueCurrent(capture)){const el=document.getElementById(`shared-continue-${index}`);if(el)el.innerHTML=`<h3>Continue Watching</h3>${recent}`;}
+          if(sharedCatalogueCurrent(capture)){const el=document.getElementById(`shared-continue-${index}`);if(el){el.innerHTML=`<h3>Continue Watching</h3>${recent}`;SHARED_ARTWORK.hydrate(el);}}
         }
       };
       await Promise.allSettled(Array.from({length:Math.min(4,entries.length)},async()=>{
@@ -125,7 +107,7 @@ async function viewSharedCatalogue(generation=++PAGE_RENDER_GENERATION){
         const item=detail.item,current=sharedCatalogueReference(item?.reference);
         if(sharedCatalogueGroupKey(current)!==sharedCatalogueGroupKey(ref)||current.library_id!==ref.library_id||current.item_id!==ref.item_id) throw new Error("Shared source changed");
         if(!Array.isArray(detail.files)||detail.files.length>64) throw new Error("Shared details unavailable");
-        paint(`<h2>${esc(item.title||"")}</h2><p>${esc(item.overview||"")}</p><p class="muted">Playback is not available for this shared item yet.</p><div>${detail.files.map(file=>{
+        paint(`${SHARED_ARTWORK.markup(item,ref,capture,true)}<h2>${esc(item.title||"")}</h2><p>${esc(item.overview||"")}</p><p class="muted">Playback is not available for this shared item yet.</p><div>${detail.files.map(file=>{
           sharedCatalogueId(file.file_id);
           const fileRef=sharedCatalogueReference(file.reference?.item);
           if(JSON.stringify(fileRef)!==JSON.stringify(current)||file.reference.file_id!==file.file_id) throw new Error("Shared file changed");
@@ -159,13 +141,13 @@ async function sharedCatalogueLoadPage(path,ref,capture,mount,q=""){
       const next=page.next_cursor;
       if(next!==null&&next!==undefined&&(typeof next!=="string"||next.length>4096||!next||seen.has(next))) throw new Error("Shared cursor unavailable");
       const accepted=[],pageKeys=new Set();
-      for(const item of page.items){const html=sharedCatalogueItemHtml(item,ref),r=sharedCatalogueReference(item.reference),key=JSON.stringify([r.import_id,r.server_id,r.catalogue_epoch,r.library_id,r.item_id]);
-        if(!seenItems.has(key)&&!pageKeys.has(key)){pageKeys.add(key);if(seenItems.size+accepted.length>=5000) throw new Error("Search this library to narrow the results.");accepted.push([key,html]);}
+      for(const item of page.items){const r=sharedCatalogueReference(item.reference),key=JSON.stringify([r.import_id,r.server_id,r.catalogue_epoch,r.library_id,r.item_id]);
+        if(!seenItems.has(key)&&!pageKeys.has(key)){pageKeys.add(key);if(seenItems.size+accepted.length>=5000) throw new Error("Search this library to narrow the results.");accepted.push([key,sharedCatalogueItemHtml(item,ref,capture)]);}
       }
       const html=accepted.map(row=>row[1]).join("");
       if(!sharedCatalogueCurrent(capture)) return;
       for(const row of accepted) seenItems.add(row[0]);
-      if(prior) prior.remove();el.insertAdjacentHTML("beforeend",html||(!cursor?'<div class="empty">No items.</div>':""));
+      if(prior) prior.remove();el.insertAdjacentHTML("beforeend",html||(!cursor?'<div class="empty">No items.</div>':""));SHARED_ARTWORK.hydrate(el);
       cursor=next||null;
       if(cursor&&seenItems.size>=5000){el.insertAdjacentHTML("beforeend",'<p class="muted">Search this library to narrow the results.</p>');}
       else if(cursor){seen.add(cursor);const button=document.createElement("button");button.className="ghost";button.dataset.sharedMore="true";button.textContent="Load more";button.onclick=load;el.appendChild(button);}
