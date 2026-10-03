@@ -5308,3 +5308,37 @@ AVC/AAC independently decoded without errors; candidate 1080p→720p join
 at six seconds advances from 5.958333 to 6.0 seconds, exactly one frame
 at 24 fps. Actual appended-artifact binding awaits the final campaign
 receipt; physical output remains unmeasured. The full result is pending.
+
+
+### 10.183 · New-source full Chrome passes and copied target binds
+
+Behavior source `1a84ce40a` PASSED the full unchanged twenty-change
+qualification: fifteen manual plus five actual Auto stages, heights
+1080/720/1080/720/1080. Maximum/mixed p95 callback gap was 66.8 ms;
+zero hitches, stalls, drops, waits or reopens; one durable session/player.
+TTFF was 2.669 seconds and observed clock 1.001x. End counts were
+2/0/0/0 with the daemon alive. The bounded supervisor finished zero and
+removed its owned runtime. Main remained `342521018`.
+
+The 754 producer samples contained 709 one-video/one-audio, sixteen
+two-video/one-audio, nineteen empty, nine unclassified-only and one
+one-video/one-audio/one-unclassified sample. The unclassified process
+is not retrospectively assigned a role; exact between-sample overlap
+and physical output queues remain unmeasured. Fifteen canonical media
+copies totaling 12,583,159 bytes were preserved.
+
+The 720p segment covering 6..8 seconds has SHA256/artifact id
+`2bb789391f7727e30f8894d016f93901caca3e71702b08e407196b1d52ffa180`,
+matching the actual appended receipt at 144..192 ticks / 24. First target
+callback was at 6.083333 seconds. Both copied AVC renditions decode
+without errors through the candidate six-second join, with a 1/24-second
+PTS step; copied shared AAC also decodes cleanly. Independent appended-
+receipt binding is missing for the incumbent 4..6-second copy and AAC,
+so a fully bound two-sided presentation join is not claimed. Physical
+display/audio remain unmeasured.
+
+All final reports/census/media copies are local in ignored evidence storage.
+The later Player change is JSDoc only and emits identical JavaScript; the
+measured executable identity remains explicit rather than relabelled.
+Compiler verification of the latest committed tree and a scoped lost-
+acknowledgement reservation probe are next. No units or final review ran.
