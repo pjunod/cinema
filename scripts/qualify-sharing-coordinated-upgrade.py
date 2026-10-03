@@ -22,6 +22,7 @@ import urllib.request
 BASELINE = "971265536a259dea38b0f7a9a8752a5a74e8c025"
 ROOT = Path(__file__).resolve().parent.parent
 PREFIX = "QUALIFICATION "
+TERMINAL_FIXTURE_LEASE = "session:00000000-0000-4000-a000-000000000072"
 
 
 def archive_source(reference, destination):
@@ -235,8 +236,20 @@ def future_replicated(binary, helper, root, label):
             "source_sentinel_preserved": True, "raft_startup_required": True}
 
 
-def compare_retained(before, after):
+def compare_retained(before, after, terminal_cleanup=False):
+    if terminal_cleanup:
+        original = [row for row in before["job_leases"]["rows"]
+                    if row["resource"] == TERMINAL_FIXTURE_LEASE]
+        surviving = [row for row in after["job_leases"]["rows"]
+                     if row["resource"] == TERMINAL_FIXTURE_LEASE]
+        if len(original) != 1 or surviving:
+            raise RuntimeError("ended fixture session lease cleanup was not proven")
     for table, original in before.items():
+        if terminal_cleanup and table == "job_leases":
+            # Other resources belong to daemon workers. Their lease clocks,
+            # revisions and expirations are mutable runtime state; both full
+            # inventories remain in the receipt artifacts for inspection.
+            continue
         columns = original["columns"]
         retained = [{column: row[column] for column in columns} for row in after[table]["rows"]]
         if sorted(map(lambda row: json.dumps(row, sort_keys=True), retained)) != sorted(
@@ -271,6 +284,7 @@ def cluster_fixture(old_binary, new_binary, helper, root):
             assert process.response()["ready"]
         assert coordinators[0].command("seed")["seeded"]
         before = coordinators[0].command("snapshot")["snapshot"]
+        (root / "retained-before.json").write_text(json.dumps(before, indent=2, sort_keys=True) + "\n")
         stop_all(coordinators)
         # All writers are stopped before copying a whole topology. No live DB,
         # WAL, or Raft log is copied independently of the other stopped voters.
@@ -284,6 +298,7 @@ def cluster_fixture(old_binary, new_binary, helper, root):
         assert coordinators[0].command("factory")["voters"] == 3
         assert coordinators[0].command("rebuild")["capabilities_advertised"] is False
         rebuilt = coordinators[0].command("snapshot")["snapshot"]
+        (root / "retained-rebuilt.json").write_text(json.dumps(rebuilt, indent=2, sort_keys=True) + "\n")
         compare_retained(before, rebuilt)
         stop_all(coordinators)
         children = [Daemon(new_binary, node, "candidate-restart") for node in nodes]
@@ -293,7 +308,9 @@ def cluster_fixture(old_binary, new_binary, helper, root):
         coordinators = [Coordinator(helper, node, "candidate-retention") for node in nodes]
         for process in coordinators:
             assert process.response()["ready"]
-        compare_retained(before, coordinators[0].command("snapshot")["snapshot"])
+        restarted = coordinators[0].command("snapshot")["snapshot"]
+        (root / "retained-restarted.json").write_text(json.dumps(restarted, indent=2, sort_keys=True) + "\n")
+        compare_retained(before, restarted, terminal_cleanup=True)
         stop_all(coordinators)
         parked = root / "parked-candidate"
         parked.mkdir()
@@ -310,11 +327,16 @@ def cluster_fixture(old_binary, new_binary, helper, root):
         coordinators = [Coordinator(helper, node, "restored-retention") for node in nodes]
         for process in coordinators:
             assert process.response()["ready"]
-        compare_retained(before, coordinators[0].command("snapshot")["snapshot"])
+        restored = coordinators[0].command("snapshot")["snapshot"]
+        (root / "retained-restored.json").write_text(json.dumps(restored, indent=2, sort_keys=True) + "\n")
+        compare_retained(before, restored, terminal_cleanup=True)
         stop_all(coordinators)
         return {"historical_daemon_voters": 3, "current_daemon_restart": True,
                 "factory_before_principal_marker": True, "retained_tables": len(before),
                 "closed_topology_backup_restore": True,
+                "full_lease_inventory_retained_across_rebuild": True,
+                "ended_session_lease_cleanup_after_restart_and_restore": True,
+                "background_leases": "mutable runtime state; full snapshots recorded",
                 "active_media_drain": "not qualified", "shared_writes": "not admitted"}
     finally:
         for child in children + coordinators:

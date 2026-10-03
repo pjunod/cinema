@@ -78,6 +78,25 @@ class CoordinatedUpgradeQualificationTests(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "retained row difference: media_sessions"):
             module.compare_retained(before, rebuilt)
 
+    def test_terminal_cleanup_requires_exact_fixture_lease_without_loosening_rebuild_inventory(self):
+        module = load_runner()
+        before = {"job_leases": {"columns": ["resource", "revision"],
+                                 "rows": [{"resource": module.TERMINAL_FIXTURE_LEASE,
+                                           "revision": 3},
+                                          {"resource": "daemon-worker", "revision": 1}]}}
+        after = {"job_leases": {"columns": ["resource", "revision"],
+                                "rows": [{"resource": "daemon-worker", "revision": 2}]}}
+        with self.assertRaisesRegex(RuntimeError, "retained row difference: job_leases"):
+            module.compare_retained(before, after)
+        module.compare_retained(before, after, terminal_cleanup=True)
+        after["job_leases"]["rows"].append(before["job_leases"]["rows"][0])
+        with self.assertRaisesRegex(RuntimeError, "lease cleanup was not proven"):
+            module.compare_retained(before, after, terminal_cleanup=True)
+        with self.assertRaisesRegex(RuntimeError, "lease cleanup was not proven"):
+            module.compare_retained({"job_leases": {"columns": ["resource"], "rows": []}},
+                                    {"job_leases": {"columns": ["resource"], "rows": []}},
+                                    terminal_cleanup=True)
+
 
 if __name__ == "__main__":
     unittest.main()
