@@ -917,5 +917,5 @@ The batch's [isolated VAAPI receipt](../evidence/video-quality-2026-10-03/vaapi-
 verifies the actual sample entry, profile/tier/constraints, all 96 timestamps,
 PQ/BT.2020 tags, complete decode and a continuous neutral ramp on m6. A separate
 discontinuous fixture exceeded its worst-pixel limit; see the
-[execution ledger](../performance/VIDEO-QUALITY-STATUS.md#final-qualification--receipts-retained-before-the-fast-lane)
+[execution ledger](../performance/VIDEO-QUALITY-STATUS.md#final-qualification--retained-per-check-receipts)
 for that failed result and the exact limits of the passing capture.

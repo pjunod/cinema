@@ -478,7 +478,7 @@ is streamed (`streaming/`) and what is replicated (`cluster/`).
 
 [Video quality programme](performance/VIDEO-QUALITY-PROGRAM.md) — approved calibration and performance build order; [execution ledger](performance/VIDEO-QUALITY-STATUS.md) — parallel ownership, actual measurements, merges and remaining evidence. **Open.**
 
-[Video quality batch qualification](evidence/video-quality-2026-10-03/) — final review corrections, native content analysis, packaged scorer, Developer settings and isolated VAAPI output receipts. **Built; fast lane pending.**
+[Video quality batch qualification](evidence/video-quality-2026-10-03/) — final review corrections, native content analysis, packaged scorer, Developer settings and isolated VAAPI output receipts. **Built; selective fast-lane receipts in PR #766.**
 
 Two rounds of performance work, each with its plan, review, and response.
 

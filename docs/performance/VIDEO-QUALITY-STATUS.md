@@ -1,6 +1,6 @@
 # Video quality status — what is built, measured and merged
 
-**Status:** final review addressed; runtime receipts retained; fast lane next · **Updated:** 2026-10-03
+**Status:** implementation and runtime receipts retained; selective fast-lane qualification · **Updated:** 2026-10-03
 
 Companion to [the programme](VIDEO-QUALITY-PROGRAM.md), which owns scope,
 acceptance and order. This ledger records actual execution. Empty evidence is
@@ -46,7 +46,7 @@ revision token. It must not consume a viewer session or mark the next item
 watched; use the existing autoplay preference rather than an extra feature
 switch. Preserve delivery-proof granularity in the batching design.
 
-## Final qualification — receipts retained before the fast lane
+## Final qualification — retained per-check receipts
 
 The one final adversarial review completed on `6cdddaeef`. Its two findings
 were addressed in `827023fd2` (application-owned probe metadata) and
@@ -59,7 +59,7 @@ were addressed in `827023fd2` (application-owned probe metadata) and
 | Shipping scorer | Actual Docker runtime-assets stage passed on idle nuc3 in 398 s with 2 CPUs / 3 GiB, including static ELF closure and built-in VMAF model smoke. The first build exposed the missing C++ runtime link; `555c7defb` fixes it. [Receipt](../evidence/video-quality-2026-10-03/scorer/qualification.json). |
 | VAAPI HDR graph | Continuous neutral PQ ramp passed on idle m6: 96 frames at 1920×1080/24, exact timestamps, Main10/PQ/BT.2020/limited range and complete decode. Actual `hvc1.2.4.H120.B0` equals the declaration. Mean luma error 0.531 and maximum 2 ten-bit codes; 1.960 s encode for 4 s content (2.04× in this synthetic capture). [Receipt](../evidence/video-quality-2026-10-03/vaapi-qualification.json). |
 | Developer settings | 36/36 passed, once after review; this changed suite is outside fast lane. Both saved choices remain independent of readiness. [Receipt](../evidence/video-quality-2026-10-03/settings-sections.json). |
-| Fast lane | Next, on the final committed candidate. Passing checks are retained and only failures retried. PR #766 is the live CI/merge record; no full promotion campaign is required for this effort. |
+| Fast lane | [Run 3969](http://192.168.4.7:3000/noirr/plurx/actions/runs/3969) passed scope, history and regression fields; 249/253 validation methods passed. Four stale inventory methods are repaired and passed individually, with runtime source unchanged. Continue the previously unrun steps; [PR #766](http://192.168.4.7:3000/noirr/plurx/pulls/766) is the live per-check and merge record. |
 
 **What the failed HDR captures taught us:** the first output used constraints
 `B0`, not the shared `90`, and MP4 defaulted to `hev1`. Commits `117570654`
@@ -292,3 +292,21 @@ test_encoder_calibration_screen.py` for the 13 focused regressions. The
 `summarize` commands so the shipped encoder can be measured without requiring
 libvmaf in its image. The exporter calls the production Rust implementation;
 it is not an independently maintained copy of encoding constants.
+
+## Selective fast-lane continuation
+
+The initial preflight found stale ownership/source-count assertions. The owner
+ledger now identifies the admitted content phase's cancellation/yield interval,
+bounded source snapshot, existing child constructors and awaited reap branches,
+one-shot VAAPI boot probe, and test-only VOD/body fixtures. It adds no recovery
+owner. The provenance inventory names the three shared ordinal-zero consumers
+instead of an anonymous call count; provenance still cannot enter artifact names.
+
+Only the four failed methods were rerun, all passing. The 249 passing methods,
+history audit and regression-field checks are retained. Forgejo's aggregate
+preflight result remains a truthful record of its failed attempt; its dependency
+skips are not test failures. The user's explicit workflow override permits
+per-check continuation without a full promotion rerun. Previously skipped
+operations, player-contract and affected compile/test jobs run once. The
+[selective-repair receipt](../evidence/video-quality-2026-10-03/preflight-selective-repair.json)
+and linked PR hold the resulting evidence without relabelling failed CI as green.
