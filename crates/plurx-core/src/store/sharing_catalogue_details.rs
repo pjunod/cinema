@@ -4,6 +4,7 @@ use crate::{
     error::StoreError,
     secrets::SealedSecret,
     sharing::{invalid, is_hash, SourceId},
+    sharing_catalogue::SourceCatalogueRecord,
     sharing_catalogue_details::SourceFileWitness,
 };
 use async_trait::async_trait;
@@ -14,11 +15,10 @@ use uuid::Uuid;
 /// expression in its atomic transaction using these fixed f/i/s aliases.
 /// Caption bodies intentionally have their own future resource revisions.
 pub const FILE_REVISION_PROJECTION_SQL:&str="json_array(1,s.server_id,s.catalogue_epoch,CAST(i.library_id AS TEXT),CAST(i.id AS TEXT),CAST(f.id AS TEXT),f.path,f.size,f.mtime,f.duration_ms,f.container,f.video_codec,f.video_profile,f.video_codec_tag,f.field_order,f.width,f.height,f.bit_depth,f.hdr,f.hdr_format,f.bitrate,f.audio_streams,f.subtitle_streams,f.probe_json,f.scanned_at,f.audio_offset_ms,f.dv_profile,f.dv_level,f.dv_bl_compat_id,f.dv_el_present,f.dv_rpu_present,f.max_cll,f.max_fall,f.mastering_max_luminance,f.luminance_source,json((SELECT json_group_array(json_array(json_extract(c.value,'$.source_size'),json_extract(c.value,'$.source_mtime'),json_extract(c.value,'$.provider_file_id'),json_extract(c.value,'$.language'),json_extract(c.value,'$.title'),json_extract(c.value,'$.hearing_impaired'),json_extract(c.value,'$.forced'))) FROM json_each(coalesce(f.downloaded_subtitles,'[]')) c)))";
-pub const FILE_REVISION_CAPACITY_SQL:&str="length(f.path)<=32768 AND coalesce(length(f.probe_json),0)<=1048576 AND coalesce(length(f.audio_streams),0)<=65536 AND coalesce(length(f.subtitle_streams),0)<=262144 AND coalesce(length(f.downloaded_subtitles),0)<=4194304";
 
 /// CASE, rather than optimizer-dependent AND evaluation, fences construction
 /// of the private projection behind raw-field and serialized-byte limits.
-pub fn file_revision_guarded_projection_sql() -> String {
+fn revision_bounds() -> (String, String) {
     let text = [
         "path",
         "container",
@@ -77,9 +77,23 @@ pub fn file_revision_guarded_projection_sql() -> String {
     // Caption metadata is bounded by its raw source field before this nested
     // expression runs. Caption bodies never enter the canonical witness.
     let caption="json((SELECT json_group_array(json_array(json_extract(c.value,'$.source_size'),json_extract(c.value,'$.source_mtime'),json_extract(c.value,'$.provider_file_id'),json_extract(c.value,'$.language'),json_extract(c.value,'$.title'),json_extract(c.value,'$.hearing_impaired'),json_extract(c.value,'$.forced'))) FROM json_each(coalesce(f.downloaded_subtitles,'[]')) c))";
-    format!("CASE WHEN {} THEN CASE WHEN 1024+{estimate}+length(CAST({caption} AS BLOB))<=2097152 THEN {FILE_REVISION_PROJECTION_SQL} ELSE NULL END ELSE NULL END",raw.join(" AND "))
+    (
+        raw.join(" AND "),
+        format!("1024+{estimate}+length(CAST({caption} AS BLOB))"),
+    )
+}
+pub fn file_revision_guarded_projection_sql() -> String {
+    let (raw, estimate) = revision_bounds();
+    format!("CASE WHEN {raw} THEN CASE WHEN {estimate}<=2097152 THEN {FILE_REVISION_PROJECTION_SQL} ELSE NULL END ELSE NULL END")
 }
 
+/// Private snapshots never implement Serialize or Debug.
+pub struct SourceItemSnapshot {
+    pub record: SourceCatalogueRecord,
+    pub server: Uuid,
+    pub epoch: Uuid,
+    pub files: Vec<SourceFileWitness>,
+}
 pub enum SourceDetailsRead<T> {
     Authorized(T),
     Unavailable,
@@ -88,6 +102,21 @@ pub enum SourceDetailsRead<T> {
 
 #[async_trait]
 pub trait SharingSourceDetailsStore: Send + Sync {
+    async fn source_item_details_snapshot(
+        &self,
+        credential_hash: &str,
+        grant: Uuid,
+        item: SourceId,
+    ) -> Result<SourceDetailsRead<SourceItemSnapshot>, StoreError>;
+    /// Current tuple authority for a captured details response. Revision changes
+    /// do not revoke metadata; deletion, movement and effective scope do.
+    async fn source_content_files_authorized(
+        &self,
+        grant: Uuid,
+        server: Uuid,
+        epoch: Uuid,
+        files: &[(SourceId, SourceId, SourceId)],
+    ) -> Result<bool, StoreError>;
     /// Read existing purpose material only. Absence is unavailable; this never
     /// creates a key and never changes a Source identity or epoch.
     async fn source_catalogue_revision_key(
@@ -106,6 +135,93 @@ pub trait SharingSourceDetailsStore: Send + Sync {
 }
 #[async_trait]
 impl<T: Backend> SharingSourceDetailsStore for T {
+    async fn source_content_files_authorized(
+        &self,
+        grant: Uuid,
+        server: Uuid,
+        epoch: Uuid,
+        files: &[(SourceId, SourceId, SourceId)],
+    ) -> Result<bool, StoreError> {
+        if files.len() > 64 {
+            return Err(invalid());
+        }
+        super::sharing_catalogue_source::ready(self).await?;
+        let tuples = serde_json::to_string(files).map_err(|_| invalid())?;
+        let rows=self.sharing_read("SELECT json_quote(EXISTS(SELECT 1 FROM sharing_exports e JOIN sharing_identity s ON s.singleton=1 WHERE e.id=$1 AND e.state='active' AND s.server_id=$2 AND s.catalogue_epoch=$3 AND EXISTS(SELECT 1 FROM item_identity_watermark WHERE singleton=1 AND importing=0) AND NOT EXISTS(SELECT 1 FROM json_each($4) r WHERE NOT EXISTS(SELECT 1 FROM files f JOIN items i ON i.id=f.item_id JOIN libraries l ON l.id=i.library_id JOIN sharing_export_libraries x ON x.library_id=l.id AND x.grant_id=e.id WHERE CAST(l.id AS TEXT)=json_extract(r.value,'$[0]') AND CAST(i.id AS TEXT)=json_extract(r.value,'$[1]') AND CAST(f.id AS TEXT)=json_extract(r.value,'$[2]') AND l.kind IN ('movies','shows') AND i.kind IN ('movie','episode'))))) AS payload",vec![grant.into(),server.into(),epoch.into(),tuples.into()]).await?;
+        Ok(rows.len() == 1 && rows[0] == "1")
+    }
+    async fn source_item_details_snapshot(
+        &self,
+        hash: &str,
+        grant: Uuid,
+        item: SourceId,
+    ) -> Result<SourceDetailsRead<SourceItemSnapshot>, StoreError> {
+        if !is_hash(hash) {
+            return Err(invalid());
+        }
+        super::sharing_catalogue_source::ready(self).await?;
+        let (raw, estimate) = revision_bounds();
+        let projection = file_revision_guarded_projection_sql();
+        // The aggregate estimate runs before canonical projections are built.
+        // LIMIT 65 is a refusal sentinel, never a truncated file listing.
+        let record = super::sharing_catalogue_source::RECORD;
+        let sql=format!("WITH allowed AS (SELECT i.id FROM sharing_exports e JOIN sharing_identity s ON s.singleton=1 AND length(CAST(s.server_id AS BLOB))=36 AND length(CAST(s.catalogue_epoch AS BLOB))=36 JOIN sharing_export_libraries x ON x.grant_id=e.id JOIN libraries l ON l.id=x.library_id JOIN items i ON i.library_id=l.id WHERE e.id=$1 AND e.token_hash=$2 AND e.state='active' AND i.id=$3 AND i.kind IN ('movie','show','season','episode') AND l.kind IN ('movies','shows') AND EXISTS(SELECT 1 FROM item_identity_watermark WHERE singleton=1 AND importing=0)), bounded_files AS (SELECT f.id FROM files f WHERE f.item_id=$3 ORDER BY f.id LIMIT 65), capacity AS (SELECT count(*) AS n,coalesce(sum(CASE WHEN {raw} THEN {estimate} ELSE 8388609 END),0) AS bytes FROM bounded_files b JOIN files f ON f.id=b.id) SELECT json_object('server',s.server_id,'epoch',s.catalogue_epoch,'record',json({record}),'projections',CASE WHEN c.n<=64 AND c.bytes<=8388608 THEN json((SELECT json_group_array(({projection})||'') FROM bounded_files b JOIN files f ON f.id=b.id)) ELSE NULL END) AS payload FROM allowed a JOIN items i ON i.id=a.id JOIN sharing_identity s ON s.singleton=1 CROSS JOIN capacity c");
+        let rows = self
+            .sharing_read(
+                &sql,
+                vec![
+                    grant.into(),
+                    hash.to_owned().into(),
+                    item.as_str().parse::<i64>().map_err(|_| invalid())?.into(),
+                ],
+            )
+            .await?;
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct Row {
+            server: Uuid,
+            epoch: Uuid,
+            record: Option<SourceCatalogueRecord>,
+            projections: Option<Vec<Option<String>>>,
+        }
+        if rows.len() > 1 {
+            return Err(invalid());
+        }
+        let Some(row) = rows.first() else {
+            return Ok(SourceDetailsRead::Unavailable);
+        };
+        let row: Row = serde_json::from_str(row).map_err(|_| invalid())?;
+        let (Some(record), Some(projections)) = (row.record, row.projections) else {
+            return Ok(SourceDetailsRead::Capacity);
+        };
+        record.item.validate().map_err(|_| invalid())?;
+        if record.item.item_id != item || projections.len() > 64 {
+            return Err(invalid());
+        }
+        let mut files = Vec::with_capacity(projections.len());
+        for projection in projections {
+            let Some(projection) = projection else {
+                return Ok(SourceDetailsRead::Capacity);
+            };
+            let value: serde_json::Value =
+                serde_json::from_str(&projection).map_err(|_| invalid())?;
+            let file = SourceId::parse(value[5].as_str().ok_or_else(invalid)?)?;
+            files.push(SourceFileWitness::from_current_projection(
+                row.server,
+                row.epoch,
+                record.item.library_id.clone(),
+                item.clone(),
+                file,
+                projection,
+            )?);
+        }
+        Ok(SourceDetailsRead::Authorized(SourceItemSnapshot {
+            record,
+            server: row.server,
+            epoch: row.epoch,
+            files,
+        }))
+    }
     async fn source_catalogue_revision_key(
         &self,
         server: Uuid,
@@ -136,7 +252,7 @@ impl<T: Backend> SharingSourceDetailsStore for T {
         }
         super::sharing_catalogue_source::ready(self).await?;
         let projection = file_revision_guarded_projection_sql();
-        let sql=format!("SELECT json_object('server',s.server_id,'epoch',s.catalogue_epoch,'library',CAST(i.library_id AS TEXT),'item',CAST(i.id AS TEXT),'file',CAST(f.id AS TEXT),'projection',({projection})||'') AS payload FROM sharing_exports e JOIN sharing_identity s ON s.singleton=1 JOIN sharing_export_libraries x ON x.grant_id=e.id JOIN libraries l ON l.id=x.library_id JOIN items i ON i.library_id=l.id JOIN files f ON f.item_id=i.id WHERE e.id=$1 AND e.token_hash=$2 AND e.state='active' AND i.id=$3 AND f.id=$4 AND i.kind IN ('movie','episode') AND l.kind IN ('movies','shows') AND EXISTS(SELECT 1 FROM item_identity_watermark WHERE singleton=1 AND importing=0)");
+        let sql=format!("SELECT json_object('server',s.server_id,'epoch',s.catalogue_epoch,'library',CAST(i.library_id AS TEXT),'item',CAST(i.id AS TEXT),'file',CAST(f.id AS TEXT),'projection',({projection})||'') AS payload FROM sharing_exports e JOIN sharing_identity s ON s.singleton=1 JOIN sharing_export_libraries x ON x.grant_id=e.id JOIN libraries l ON l.id=x.library_id JOIN items i ON i.library_id=l.id JOIN files f ON f.item_id=i.id WHERE length(CAST(s.server_id AS BLOB))=36 AND length(CAST(s.catalogue_epoch AS BLOB))=36 AND e.id=$1 AND e.token_hash=$2 AND e.state='active' AND i.id=$3 AND f.id=$4 AND i.kind IN ('movie','episode') AND l.kind IN ('movies','shows') AND EXISTS(SELECT 1 FROM item_identity_watermark WHERE singleton=1 AND importing=0)");
         let rows = self
             .sharing_read(
                 &sql,
@@ -313,7 +429,180 @@ mod tests {
                 .await
                 .expect("wrong epoch")
                 .is_none());
-            let initial = key.file_revision(&witness).expect("initial revision");
+            store.sharing_txn(vec![("UPDATE files SET probe_json=$1".into(),vec![r#"{"chapters":[{"start_time":"0","end_time":"1.5","tags":{"title":"Opening"}}],"private":"PRIVATE PROBE"}"#.to_owned().into()])]).await.expect("bounded valid probe");
+            let item = SourceId::parse("9007199254740993").expect("item");
+            let file = SourceId::parse("9223372036854775807").expect("file");
+            let read = store
+                .source_item_details_snapshot(&"b".repeat(64), grant, item.clone())
+                .await
+                .expect("one consistent detail query");
+            let SourceDetailsRead::Authorized(snapshot) = read else {
+                panic!("expected details")
+            };
+            assert_eq!(snapshot.files.len(), 1);
+            let facts = snapshot.files[0].playable_file(&key).expect("closed facts");
+            assert_eq!(facts.chapters[0].end_ms, 1500);
+            let wire_value = serde_json::to_value(&facts).expect("closed wire");
+            let mut injected = wire_value.clone();
+            injected["path"] = serde_json::json!("/private/injected");
+            assert!(
+                serde_json::from_value::<crate::sharing_catalogue_details::SourcePlayableFile>(
+                    injected
+                )
+                .is_err()
+            );
+            for size in ["-1", "01", "9223372036854775808"] {
+                let mut changed = wire_value.clone();
+                changed["size"] = serde_json::json!(size);
+                assert!(serde_json::from_value::<
+                    crate::sharing_catalogue_details::SourcePlayableFile,
+                >(changed)
+                .expect("string size")
+                .validate()
+                .is_err());
+            }
+            let track = serde_json::json!({"index":0,"codec":"aac","channels":2,"sample_rate":48000,"language":"en","title":null,"default":true});
+            let mut duplicates = wire_value.clone();
+            duplicates["audio_streams"] = serde_json::json!([track.clone(), track.clone()]);
+            assert!(
+                serde_json::from_value::<crate::sharing_catalogue_details::SourcePlayableFile>(
+                    duplicates
+                )
+                .expect("bounded duplicate tracks")
+                .validate()
+                .is_err()
+            );
+            let mut excess_tracks = wire_value.clone();
+            excess_tracks["audio_streams"] = serde_json::json!(vec![track; 65]);
+            assert!(
+                serde_json::from_value::<crate::sharing_catalogue_details::SourcePlayableFile>(
+                    excess_tracks
+                )
+                .is_err()
+            );
+            let mut excess = wire_value.clone();
+            excess["chapters"] = serde_json::json!(vec![
+                serde_json::to_value(&facts.chapters[0])
+                    .expect("chapter");
+                1025
+            ]);
+            assert!(
+                serde_json::from_value::<crate::sharing_catalogue_details::SourcePlayableFile>(
+                    excess
+                )
+                .is_err()
+            );
+            let detail = serde_json::json!({"item":snapshot.record.item,"files":vec![wire_value.clone();65]});
+            assert!(
+                serde_json::from_value::<crate::sharing_catalogue_details::SourceItemDetails>(
+                    detail
+                )
+                .is_err()
+            );
+            let duplicated = serde_json::json!({"item":snapshot.record.item,"files":[wire_value.clone(),wire_value]});
+            assert!(
+                serde_json::from_value::<crate::sharing_catalogue_details::SourceItemDetails>(
+                    duplicated
+                )
+                .expect("bounded duplicate")
+                .validate()
+                .is_err()
+            );
+            let wire = serde_json::to_string(&facts).expect("wire");
+            assert!(!wire.contains("PRIVATE") && !wire.contains("/private/"));
+            let tuples = vec![(
+                snapshot.record.item.library_id.clone(),
+                item.clone(),
+                file.clone(),
+            )];
+            assert!(store
+                .source_content_files_authorized(
+                    grant,
+                    identity.server_id,
+                    identity.catalogue_epoch,
+                    &tuples
+                )
+                .await
+                .expect("current tuples"));
+            store
+                .sharing_txn(vec![(
+                    "UPDATE files SET path='/private/changed.mkv'".into(),
+                    vec![],
+                )])
+                .await
+                .expect("benign revision change");
+            assert!(store
+                .source_content_files_authorized(
+                    grant,
+                    identity.server_id,
+                    identity.catalogue_epoch,
+                    &tuples
+                )
+                .await
+                .expect("revision change preserves metadata authority"));
+            store.sharing_txn(vec![("WITH RECURSIVE n(x) AS (VALUES(1) UNION ALL SELECT x+1 FROM n WHERE x<64) INSERT INTO files(id,item_id,path,size,mtime) SELECT x,9007199254740993,'/synthetic/'||x,20,1000 FROM n".into(),vec![])]).await.expect("65 files fixture");
+            assert!(matches!(
+                store
+                    .source_item_details_snapshot(&"b".repeat(64), grant, item.clone())
+                    .await
+                    .expect("file count refusal"),
+                SourceDetailsRead::Capacity
+            ));
+            store
+                .sharing_txn(vec![("DELETE FROM files WHERE id=64".into(), vec![])])
+                .await
+                .expect("64 files fixture");
+            let SourceDetailsRead::Authorized(snapshot) = store
+                .source_item_details_snapshot(&"b".repeat(64), grant, item.clone())
+                .await
+                .expect("64 admitted")
+            else {
+                panic!("64 files fit")
+            };
+            assert_eq!(snapshot.files.len(), 64);
+            store
+                .sharing_txn(vec![(
+                    "UPDATE files SET probe_json=$1 WHERE id<=8".into(),
+                    vec![serde_json::to_string(&"x".repeat(1048574))
+                        .expect("bounded scalar")
+                        .into()],
+                )])
+                .await
+                .expect("aggregate fixture");
+            assert!(matches!(
+                store
+                    .source_item_details_snapshot(&"b".repeat(64), grant, item.clone())
+                    .await
+                    .expect("aggregate refusal"),
+                SourceDetailsRead::Capacity
+            ));
+            store
+                .sharing_txn(vec![
+                    (
+                        "DELETE FROM files WHERE id<9223372036854775807".into(),
+                        vec![],
+                    ),
+                    (
+                        "UPDATE items SET overview=$1".into(),
+                        vec!["x".repeat(8193).into()],
+                    ),
+                ])
+                .await
+                .expect("oversized public fixture");
+            assert!(matches!(
+                store
+                    .source_item_details_snapshot(&"b".repeat(64), grant, item.clone())
+                    .await
+                    .expect("public capacity refusal"),
+                SourceDetailsRead::Capacity
+            ));
+            store
+                .sharing_txn(vec![("UPDATE items SET overview=NULL".into(), vec![])])
+                .await
+                .expect("restore public fields");
+            let initial = key
+                .file_revision(&current(&store, grant).await)
+                .expect("initial revision");
             store.sharing_txn(vec![("UPDATE files SET downloaded_subtitles=json_set(downloaded_subtitles,'$[0].vtt','NEW PRIVATE CAPTION BODY')".into(),vec![])]).await.expect("caption body mutation");
             assert_eq!(
                 initial,

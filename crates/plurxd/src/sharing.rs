@@ -1018,11 +1018,13 @@ pub(crate) enum CatalogueRead {
         limit: usize,
     },
     Batch(plurx_core::sharing_catalogue::MetadataBatch),
+    Item(plurx_core::sharing::SourceId),
 }
 pub(crate) enum CatalogueReply {
     Libraries(Vec<plurx_core::store::sharing_catalogue_source::SourceLibrary>),
     Page(plurx_core::sharing_catalogue::CataloguePeerPage),
     Batch(plurx_core::sharing_catalogue::CataloguePeerBatch),
+    Item(plurx_core::sharing_catalogue_details::SourceItemDetails),
 }
 impl SharingManager {
     pub async fn read_catalogue(
@@ -1126,6 +1128,9 @@ impl SharingManager {
                 )
                 .await?,
             ),
+            CatalogueRead::Item(item) => {
+                CatalogueReply::Item(peer.catalogue_item(&credentials.credential, &item).await?)
+            }
             CatalogueRead::Batch(batch) => CatalogueReply::Batch(
                 peer.catalogue_batch(&credentials.credential, &batch)
                     .await?,
@@ -1164,6 +1169,11 @@ impl SharingManager {
             return Err(PeerError::Authentication);
         }
         match &mut reply {
+            CatalogueReply::Item(details) => {
+                if !assigned.contains(&details.item.library_id) {
+                    return Err(PeerError::Authentication);
+                }
+            }
             CatalogueReply::Libraries(libraries) => {
                 libraries.retain(|library| assigned.contains(&library.library_id))
             }

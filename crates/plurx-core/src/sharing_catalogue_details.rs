@@ -254,3 +254,379 @@ mod tests {
             .contains("private"));
     }
 }
+
+pub const MAX_DETAIL_FILES: usize = 64;
+const MAX_SAFE: i64 = 9_007_199_254_740_991;
+fn text(value: &str, max: usize) -> bool {
+    value.len() <= max && !value.chars().any(char::is_control)
+}
+fn number(value: Option<i64>, max: i64) -> bool {
+    value.is_none_or(|value| (0..=max).contains(&value))
+}
+fn bounded<'de, T: Deserialize<'de>, D: Deserializer<'de>, const N: usize>(
+    deserializer: D,
+) -> Result<Vec<T>, D::Error> {
+    struct Visitor<T, const N: usize>(std::marker::PhantomData<T>);
+    impl<'de, T: Deserialize<'de>, const N: usize> serde::de::Visitor<'de> for Visitor<T, N> {
+        type Value = Vec<T>;
+        fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            write!(f, "at most {N} closed records")
+        }
+        fn visit_seq<A: serde::de::SeqAccess<'de>>(
+            self,
+            mut sequence: A,
+        ) -> Result<Vec<T>, A::Error> {
+            let mut values = Vec::with_capacity(sequence.size_hint().unwrap_or(0).min(N));
+            while let Some(value) = sequence.next_element()? {
+                if values.len() == N {
+                    return Err(serde::de::Error::custom("too many sharing detail records"));
+                }
+                values.push(value);
+            }
+            Ok(values)
+        }
+    }
+    deserializer.deserialize_seq(Visitor::<T, N>(std::marker::PhantomData))
+}
+fn files<'de, D: Deserializer<'de>>(d: D) -> Result<Vec<SourcePlayableFile>, D::Error> {
+    bounded::<_, _, 64>(d)
+}
+fn audio<'de, D: Deserializer<'de>>(d: D) -> Result<Vec<SourceAudioTrack>, D::Error> {
+    bounded::<_, _, 64>(d)
+}
+fn subtitles<'de, D: Deserializer<'de>>(d: D) -> Result<Vec<SourceSubtitleTrack>, D::Error> {
+    bounded::<_, _, 128>(d)
+}
+fn chapters<'de, D: Deserializer<'de>>(d: D) -> Result<Vec<SourceChapter>, D::Error> {
+    bounded::<_, _, 1024>(d)
+}
+fn skips<'de, D: Deserializer<'de>>(d: D) -> Result<Vec<SourceSkipRegion>, D::Error> {
+    bounded::<_, _, 32>(d)
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SourceItemDetails {
+    pub item: crate::sharing_catalogue::SourceCatalogueItem,
+    #[serde(deserialize_with = "files")]
+    pub files: Vec<SourcePlayableFile>,
+}
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SourceAudioTrack {
+    pub index: i64,
+    pub codec: String,
+    pub channels: Option<i64>,
+    pub sample_rate: Option<i64>,
+    pub language: Option<String>,
+    pub title: Option<String>,
+    pub default: bool,
+}
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SourceSubtitleTrack {
+    pub index: i64,
+    pub codec: String,
+    pub language: Option<String>,
+    pub title: Option<String>,
+    pub default: bool,
+    pub forced: bool,
+    pub hearing_impaired: bool,
+}
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SourceChapter {
+    pub index: i64,
+    pub title: String,
+    pub start_ms: i64,
+    pub end_ms: i64,
+}
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SourceSkipRegion {
+    pub kind: crate::segplan::AnnotationKind,
+    pub start_ms: i64,
+    pub end_ms: i64,
+}
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SourceDolbyVision {
+    pub profile: Option<i64>,
+    pub level: Option<i64>,
+    pub bl_compat_id: Option<i64>,
+    pub el_present: Option<bool>,
+    pub rpu_present: Option<bool>,
+}
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SourcePlayableFile {
+    pub file_id: SourceId,
+    pub revision: FileRevision,
+    pub size: String,
+    pub duration_ms: Option<i64>,
+    pub container: Option<String>,
+    pub video_codec: Option<String>,
+    pub video_codec_tag: Option<String>,
+    pub video_profile: Option<String>,
+    pub field_order: Option<String>,
+    pub width: Option<i64>,
+    pub height: Option<i64>,
+    pub bit_depth: Option<i64>,
+    pub hdr: Option<String>,
+    pub hdr_format: Option<String>,
+    pub bitrate: Option<i64>,
+    pub max_cll: Option<i64>,
+    pub max_fall: Option<i64>,
+    pub mastering_max_luminance: Option<i64>,
+    pub luminance_source: Option<String>,
+    pub dolby_vision: SourceDolbyVision,
+    pub audio_offset_ms: i64,
+    pub probed: bool,
+    #[serde(deserialize_with = "audio")]
+    pub audio_streams: Vec<SourceAudioTrack>,
+    #[serde(deserialize_with = "subtitles")]
+    pub subtitle_streams: Vec<SourceSubtitleTrack>,
+    #[serde(deserialize_with = "chapters")]
+    pub chapters: Vec<SourceChapter>,
+    #[serde(deserialize_with = "skips")]
+    pub skip_regions: Vec<SourceSkipRegion>,
+}
+impl SourcePlayableFile {
+    pub fn validate(&self) -> Result<(), StoreError> {
+        let size = self.size.parse::<i64>().map_err(|_| invalid())?;
+        if size < 0
+            || size.to_string() != self.size
+            || !number(self.duration_ms, MAX_SAFE)
+            || !number(self.width, 65535)
+            || !number(self.height, 65535)
+            || !number(self.bit_depth, 64)
+            || !number(self.bitrate, MAX_SAFE)
+            || !number(self.max_cll, MAX_SAFE)
+            || !number(self.max_fall, MAX_SAFE)
+            || !number(self.mastering_max_luminance, MAX_SAFE)
+            || !(-MAX_SAFE..=MAX_SAFE).contains(&self.audio_offset_ms)
+            || !number(self.dolby_vision.profile, 255)
+            || !number(self.dolby_vision.level, 255)
+            || !number(self.dolby_vision.bl_compat_id, 255)
+            || [
+                &self.container,
+                &self.video_codec,
+                &self.video_codec_tag,
+                &self.video_profile,
+                &self.field_order,
+                &self.hdr,
+                &self.hdr_format,
+                &self.luminance_source,
+            ]
+            .iter()
+            .any(|value| value.as_ref().is_some_and(|value| !text(value, 128)))
+            || self.audio_streams.len() > 64
+            || self.subtitle_streams.len() > 128
+            || self.chapters.len() > 1024
+            || self.skip_regions.len() > 32
+        {
+            return Err(invalid());
+        }
+        if self
+            .audio_streams
+            .iter()
+            .map(|t| t.index)
+            .collect::<std::collections::BTreeSet<_>>()
+            .len()
+            != self.audio_streams.len()
+            || self
+                .subtitle_streams
+                .iter()
+                .map(|t| t.index)
+                .collect::<std::collections::BTreeSet<_>>()
+                .len()
+                != self.subtitle_streams.len()
+            || self
+                .chapters
+                .iter()
+                .map(|t| t.index)
+                .collect::<std::collections::BTreeSet<_>>()
+                .len()
+                != self.chapters.len()
+        {
+            return Err(invalid());
+        }
+        let track = |index: i64, codec: &str, language: &Option<String>, title: &Option<String>| {
+            (0..=4095).contains(&index)
+                && text(codec, 64)
+                && language.as_ref().is_none_or(|v| text(v, 64))
+                && title.as_ref().is_none_or(|v| text(v, 512))
+        };
+        if self.audio_streams.iter().any(|a| {
+            !track(a.index, &a.codec, &a.language, &a.title)
+                || !number(a.channels, 128)
+                || !number(a.sample_rate, 1_000_000)
+        }) || self
+            .subtitle_streams
+            .iter()
+            .any(|s| !track(s.index, &s.codec, &s.language, &s.title))
+        {
+            return Err(invalid());
+        }
+        if self.chapters.iter().any(|c| {
+            !(0..=4095).contains(&c.index)
+                || !text(&c.title, 512)
+                || !(0..=MAX_SAFE).contains(&c.start_ms)
+                || !(c.start_ms + 1..=MAX_SAFE).contains(&c.end_ms)
+        }) || self.skip_regions.iter().any(|r| {
+            !(0..=MAX_SAFE).contains(&r.start_ms)
+                || !(r.start_ms + 1..=MAX_SAFE).contains(&r.end_ms)
+        }) {
+            return Err(invalid());
+        }
+        Ok(())
+    }
+}
+impl SourceItemDetails {
+    pub fn validate(&self) -> Result<(), StoreError> {
+        self.item.validate().map_err(|_| invalid())?;
+        if self.files.len() > MAX_DETAIL_FILES
+            || self
+                .files
+                .iter()
+                .map(|file| &file.file_id)
+                .collect::<std::collections::BTreeSet<_>>()
+                .len()
+                != self.files.len()
+        {
+            return Err(invalid());
+        }
+        self.files.iter().try_for_each(SourcePlayableFile::validate)
+    }
+}
+
+impl SourceFileWitness {
+    /// Explicit presentation whitelist derived from the same private snapshot
+    /// as the revision. No filesystem, probe document or caption body is copied.
+    pub fn playable_file(
+        &self,
+        key: &CatalogueRevisionKey,
+    ) -> Result<SourcePlayableFile, StoreError> {
+        let v: serde_json::Value = serde_json::from_str(&self.projection).map_err(|_| invalid())?;
+        if v.as_array().is_none_or(|a| a.len() != 36) {
+            return Err(invalid());
+        }
+        let integer = |index: usize| -> Result<Option<i64>, StoreError> {
+            if v[index].is_null() {
+                Ok(None)
+            } else {
+                v[index].as_i64().map(Some).ok_or_else(invalid)
+            }
+        };
+        let string = |index: usize| -> Result<Option<String>, StoreError> {
+            if v[index].is_null() {
+                Ok(None)
+            } else {
+                v[index]
+                    .as_str()
+                    .map(|s| Some(s.to_owned()))
+                    .ok_or_else(invalid)
+            }
+        };
+        let boolean = |index: usize| -> Result<Option<bool>, StoreError> {
+            integer(index)?
+                .map(|n| match n {
+                    0 => Ok(false),
+                    1 => Ok(true),
+                    _ => Err(invalid()),
+                })
+                .transpose()
+        };
+        let audio: Vec<crate::domain::AudioStream> =
+            serde_json::from_str(v[21].as_str().unwrap_or("[]")).map_err(|_| invalid())?;
+        let subtitles: Vec<crate::domain::SubtitleStream> =
+            serde_json::from_str(v[22].as_str().unwrap_or("[]")).map_err(|_| invalid())?;
+        let mut chapters = Vec::new();
+        if let Some(probe) = v[23].as_str() {
+            let probe: serde_json::Value = serde_json::from_str(probe).map_err(|_| invalid())?;
+            if let Some(values) = probe.get("chapters").and_then(serde_json::Value::as_array) {
+                if values.len() > 1024 {
+                    return Err(invalid());
+                }
+                for (ordinal, c) in values.iter().enumerate() {
+                    let time = |field: &str| -> Result<i64, StoreError> {
+                        let seconds = c[field]
+                            .as_str()
+                            .and_then(|s| s.parse::<f64>().ok())
+                            .or_else(|| c[field].as_f64())
+                            .ok_or_else(invalid)?;
+                        let ms = seconds * 1000.0;
+                        if !ms.is_finite() || !(0.0..=MAX_SAFE as f64).contains(&ms) {
+                            return Err(invalid());
+                        }
+                        Ok(ms.round() as i64)
+                    };
+                    chapters.push(SourceChapter {
+                        index: ordinal as i64,
+                        title: c["tags"]["title"].as_str().unwrap_or("").to_owned(),
+                        start_ms: time("start_time")?,
+                        end_ms: time("end_time")?,
+                    });
+                }
+            }
+        }
+        let file = SourcePlayableFile {
+            file_id: self.file.clone(),
+            revision: key.file_revision(self)?,
+            size: integer(7)?.ok_or_else(invalid)?.to_string(),
+            duration_ms: integer(9)?,
+            container: string(10)?,
+            video_codec: string(11)?,
+            video_profile: string(12)?,
+            video_codec_tag: string(13)?,
+            field_order: string(14)?,
+            width: integer(15)?,
+            height: integer(16)?,
+            bit_depth: integer(17)?,
+            hdr: string(18)?,
+            hdr_format: string(19)?,
+            bitrate: integer(20)?,
+            audio_offset_ms: integer(25)?.unwrap_or(0),
+            dolby_vision: SourceDolbyVision {
+                profile: integer(26)?,
+                level: integer(27)?,
+                bl_compat_id: integer(28)?,
+                el_present: boolean(29)?,
+                rpu_present: boolean(30)?,
+            },
+            max_cll: integer(31)?,
+            max_fall: integer(32)?,
+            mastering_max_luminance: integer(33)?,
+            luminance_source: string(34)?,
+            probed: !v[23].is_null(),
+            audio_streams: audio
+                .into_iter()
+                .map(|a| SourceAudioTrack {
+                    index: a.index,
+                    codec: a.codec,
+                    channels: a.channels,
+                    sample_rate: a.sample_rate,
+                    language: a.language,
+                    title: a.title,
+                    default: a.default,
+                })
+                .collect(),
+            subtitle_streams: subtitles
+                .into_iter()
+                .map(|a| SourceSubtitleTrack {
+                    index: a.index,
+                    codec: a.codec,
+                    language: a.language,
+                    title: a.title,
+                    default: a.default,
+                    forced: a.forced,
+                    hearing_impaired: a.hearing_impaired,
+                })
+                .collect(),
+            chapters,
+            skip_regions: Vec::new(),
+        };
+        file.validate()?;
+        Ok(file)
+    }
+}

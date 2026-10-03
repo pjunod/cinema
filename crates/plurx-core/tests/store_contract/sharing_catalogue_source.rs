@@ -584,7 +584,79 @@ async fn sharing_catalogue_file_witness_three_voters_binds_current_file_and_refu
     let sealing = CredentialKey::from_bytes([17; 32]);
     let envelope =
         CatalogueRevisionKey::generate_sealed(&sealing, identity.clone()).expect("purpose key");
-    let key = CatalogueRevisionKey::open(&sealing, identity, &envelope).expect("purpose material");
+    let key = CatalogueRevisionKey::open(&sealing, identity.clone(), &envelope)
+        .expect("purpose material");
+    client
+        .execute("UPDATE files SET probe_json='{}'", hiqlite::params!())
+        .await
+        .expect("closed valid probe");
+    let item = SourceId::parse("9007199254740993").expect("item");
+    let SourceDetailsRead::Authorized(details) = store
+        .source_item_details_snapshot(&"b".repeat(64), grant, item.clone())
+        .await
+        .expect("consistent quorum details")
+    else {
+        panic!("details authorized")
+    };
+    assert_eq!(details.files.len(), 1);
+    let facts = details.files[0]
+        .playable_file(&key)
+        .expect("closed replicated facts");
+    assert_eq!(facts.file_id.as_str(), "9223372036854775807");
+    assert!(!serde_json::to_string(&facts)
+        .expect("wire facts")
+        .contains("/private/"));
+    let tuples = vec![(details.record.item.library_id, item.clone(), facts.file_id)];
+    assert!(store
+        .source_content_files_authorized(
+            grant,
+            identity.server_id,
+            identity.catalogue_epoch,
+            &tuples
+        )
+        .await
+        .expect("quorum file tuples"));
+    client.execute("WITH RECURSIVE n(x) AS (VALUES(1) UNION ALL SELECT x+1 FROM n WHERE x<64) INSERT INTO files(id,item_id,path,size,mtime,scanned_at) SELECT x,9007199254740993,'/synthetic/'||x,20,1000,1000 FROM n",hiqlite::params!()).await.expect("65 files");
+    assert!(matches!(
+        store
+            .source_item_details_snapshot(&"b".repeat(64), grant, item.clone())
+            .await
+            .expect("quorum file cap"),
+        SourceDetailsRead::Capacity
+    ));
+    client
+        .execute("DELETE FROM files WHERE id=64", hiqlite::params!())
+        .await
+        .expect("64 files");
+    let SourceDetailsRead::Authorized(details) = store
+        .source_item_details_snapshot(&"b".repeat(64), grant, item.clone())
+        .await
+        .expect("64 files admitted")
+    else {
+        panic!("bounded details")
+    };
+    assert_eq!(details.files.len(), 64);
+    client
+        .execute(
+            "UPDATE files SET probe_json=$1 WHERE id<=8",
+            hiqlite::params!(serde_json::to_string(&"x".repeat(1048574)).expect("private bound")),
+        )
+        .await
+        .expect("aggregate fixture");
+    assert!(matches!(
+        store
+            .source_item_details_snapshot(&"b".repeat(64), grant, item)
+            .await
+            .expect("quorum aggregate bound"),
+        SourceDetailsRead::Capacity
+    ));
+    client
+        .execute(
+            "DELETE FROM files WHERE id<9223372036854775807",
+            hiqlite::params!(),
+        )
+        .await
+        .expect("restore bounded file");
     let credential_hash = "b".repeat(64);
     let read = || {
         store.source_item_file_witness(

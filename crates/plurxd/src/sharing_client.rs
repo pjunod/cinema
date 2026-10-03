@@ -350,6 +350,28 @@ impl PeerConnection {
         }
         Ok(response)
     }
+    pub async fn catalogue_item(
+        &mut self,
+        credential: &Secret,
+        item: &SourceId,
+    ) -> Result<plurx_core::sharing_catalogue_details::SourceItemDetails, PeerError> {
+        let response: plurx_core::sharing_catalogue_details::SourceItemDetails = self
+            .request_with_budget(
+                Method::GET,
+                &format!("/sharing/v1/items/{}", item.as_str()),
+                Some(credential),
+                None,
+                ResponseBudget::Catalogue,
+            )
+            .await?;
+        response
+            .validate()
+            .map_err(|_| PeerError::InvalidResponse)?;
+        if &response.item.item_id != item {
+            return Err(PeerError::InvalidResponse);
+        }
+        Ok(response)
+    }
     pub async fn catalogue_batch(
         &mut self,
         credential: &Secret,
@@ -488,6 +510,38 @@ mod tests {
     #[tokio::test]
     async fn sharing_catalogue_client_bounds_closed_records_and_encodes_queries() {
         let credential = plurx_core::sharing::new_secret().expect("synthetic catalogue fixture");
+        for (payload, valid) in [
+            (
+                serde_json::json!({"item":catalogue_item("9007199254740993"),"files":[]}),
+                true,
+            ),
+            (
+                serde_json::json!({"item":catalogue_item("2"),"files":[]}),
+                false,
+            ),
+            (
+                serde_json::json!({"item":catalogue_item("9007199254740993"),"files":[],"path":"/private/injected"}),
+                false,
+            ),
+        ] {
+            let (mut peer, requests, server) = fixture(StatusCode::OK, payload).await;
+            assert_eq!(
+                peer.catalogue_item(
+                    &credential,
+                    &SourceId::parse("9007199254740993").expect("large canonical item")
+                )
+                .await
+                .is_ok(),
+                valid
+            );
+            assert_eq!(
+                requests.lock().expect("requests")[0].0,
+                "/sharing/v1/items/9007199254740993"
+            );
+            drop(peer);
+            server.abort();
+            let _ = server.await;
+        }
         for count in [64, 65] {
             let payload = serde_json::json!({"libraries":(1..=count).map(|id|serde_json::json!({"library_id":id.to_string(),"name":"Fixture","kind":"movies","anime":false})).collect::<Vec<_>>()});
             let (mut peer, _, server) = fixture(StatusCode::OK, payload).await;

@@ -2482,9 +2482,9 @@ Caption resource metadata participates; caption body bytes do not. S5 must
 revision the actual caption resources separately. Nested SQL CASE branches
 refuse oversized raw private fields and a serialized projection above 2 MiB
 before constructing the canonical witness; no truncation hides changes.
-These are single-file reads. The planned all-file detail query must also
-bound 64 files and aggregate private projection bytes at 8 MiB before
-materialization; that query and closed wire media facts remain open.
+The following details checkpoint extends these single-file primitives with
+a consistent all-file read and closed presentation facts. Its additional
+bounds and remaining delivery limits are recorded below.
 
 File revisions derive an HMAC purpose from a stable random Source/epoch key.
 The [candidate key table](../../crates/plurx-core/src/store/sharing_catalogue_keys_schema.sql)
@@ -2586,6 +2586,76 @@ passed (0.62 seconds), both helper/SQLite regressions passed (0.69 seconds),
 denied-warning helper Clippy passed (25.67 seconds), and the six runner plus
 four docs-index tests passed. The exact combined runtime archive must be
 qualified again before its upgrade receipt can cover a later candidate.
+
+
+#### S4 bounded Source details and current file tuples (candidate, open)
+
+The Source item route reads its presentation record and file snapshots in one
+consistent grant/token/library/item/import-state query. A 65th file is a refusal
+sentinel, never a truncated listing. The query checks the aggregate serialized
+private projection estimate at 8 MiB before constructing any canonical file
+snapshot; each file also retains the strict raw-field and 2 MiB projection
+bounds. Public presentation fields are fenced by SQL CASE before JSON
+construction. Existing sealed revision-purpose material is read without
+initialization. Missing or incompatible material keeps details unavailable.
+
+The closed SourceItemDetails vocabulary permits media facts, bounded audio and
+subtitle tracks, chapters, canonical string sizes/IDs and opaque file revisions.
+Presentation is copied explicitly from the same private snapshot as its HMAC;
+paths, probe documents, downloaded caption bodies and Source accounts have no
+wire field. The peer client applies its explicit 4 MiB success budget and
+validates both nested facts and the requested item identity. Receiver details
+recheck import lifecycle and current assignments after that fresh pinned read.
+They expose full shared references and delivery_status=unavailable. There is
+no file_base placeholder, raw-ID delivery path or local playback fallback.
+The future opaque B locator and delivery require S5 session binding and key
+lifetime qualification. Timeline skip-region presentation remains open until
+current analysis fingerprint/generation authority is established; the present
+candidate returns no regions and does not claim that part of the detail contract.
+
+A details response captures at most 64 library/item/file tuples. Its accepted
+connection monitor checks current grant, Source/epoch, import state, effective
+scope and every tuple. File deletion or movement revokes the response even
+when its socket writer is blocked. Ordinary metadata/revision changes preserve
+metadata delivery; actual Source playback admission must still compare the
+received immutable revision with its current private witness. JSON serialization
+uses a writer that refuses growth beyond 4 MiB before extending its buffer.
+Connection monitors keep the previously qualified ownership and registry bounds,
+including HTTP/2 connection-level cancellation and collateral stream impact.
+
+Temporary SQLite and actual three-voter fixtures cover 64-versus-65 files,
+aggregate capacity refusal, current tuple authority, large canonical IDs and
+private-field exclusion. Wire checks refuse injected fields, malformed sizes,
+duplicate file identities and excess chapters. The HTTP fixture exercises the
+real accepted connection with blocked DATA and file deletion/movement, including
+body/data/permit cleanup. All eleven daemon catalogue/cancellation tests passed
+(11.52 seconds, zero ignored), including the existing HTTP/2 delayed-window and
+multiplexed-stream proof. Twelve core catalogue units passed (4.86 seconds) and
+the expanded actual three-voter file/details contract passed (9.00 seconds),
+with zero ignored. Docs-index tests passed. Commands use pinned Rust 1.97.1:
+`cargo test --locked --offline -p plurxd --features plurx-core/hiqlite-contract-tests
+sharing_catalogue`; `cargo test --locked --offline -p plurx-core --features
+hiqlite-contract-tests --lib sharing_catalogue_`; and the same core features
+with `--test store_contract sharing_catalogue_file_witness_three_voters`.
+All-target feature-enabled Clippy with `-D warnings` passed (1 minute 21 seconds).
+The tracked commit hook remains required before integration.
+Source schema installation, revision-key initialization, capability advertisement,
+receiver body authority/cache/artwork/Continue Watching and S5 delivery remain
+open. This checkpoint does not complete S4 or qualify an admission write.
+
+
+**Bounded-detail combined integration:** Source details checkpoint `7b85efec8`
+is integrated with the ownership, opaque observation and resource grammar
+checkpoints through `325617428`. On that exact combined source, pinned Rust
+1.97.1 core feature/daemon all-target checks passed (26.85 seconds and 1m08s).
+All twelve core catalogue units passed (5.05 seconds), all five catalogue and
+private-history store contracts passed (45.65 seconds), all eleven daemon
+catalogue/blocked-connection regressions passed (12.44 seconds), and all four
+HLS resource regressions passed. Every executed test had zero ignored cases.
+Feature-enabled all-target Clippy with denied warnings passed (1m23s), and
+all four docs-index tests passed. These results qualify the combined candidate;
+Source playback admission, receiver cache authority and signed file delivery
+remain open.
 
 
 ### 16.6 S5 resource grammar foundation
