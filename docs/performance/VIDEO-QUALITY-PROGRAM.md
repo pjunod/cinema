@@ -1,6 +1,6 @@
 # Video quality programme — measured improvements and their build order
 
-**Status:** active consolidated implementation; batch workflow authorized 2026-10-02
+**Status:** implementation built; qualification and landing recorded in the execution ledger
 · **Written:** 2026-10-02 · **Source census:** `4fa50b79e`
 
 Companion to [the execution ledger](VIDEO-QUALITY-STATUS.md), which records
@@ -58,7 +58,11 @@ or deployment claims match today's fleet. Capture the actual binary and route.
 
 ## 3. Parallel ownership — one integration branch
 
-The planning and first evidence documents are merged into `main`. Following
+The planning and first evidence documents are merged into `main`. Implementation
+is complete within the measured scope in the execution ledger; the original
+acceptance goals below remain explicit where client or representative-title
+measurements are unavailable. No measured end-to-end latency reduction is
+claimed from a structural optimization alone. Following
 Paul's workflow override, implementation now collects logical commits on
 `codex/video-quality-batch` for one main-bound PR. Workers use independent
 clones and hand commits to the coordinator, who owns integration, the index,
