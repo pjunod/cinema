@@ -104,7 +104,7 @@ impl PlaybackPrincipal {
             }
             _ => return Err(PrincipalError),
         };
-        if principal.owner_key() != owner_key {
+        if !principal.valid_admission_shape() || principal.owner_key() != owner_key {
             return Err(PrincipalError);
         }
         Ok(principal)

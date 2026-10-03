@@ -1864,3 +1864,17 @@ cargo test --locked -p plurxd --bin plurxd started_session_ -- --nocapture
 cargo test --locked -p plurxd --bin plurxd replayed_start_guard_owns_neither_worker_nor_original_claim -- --nocapture
 cargo test --locked -p plurxd --bin plurxd pre_worker_request_guard_releases_an_owned_claim_for_immediate_retry -- --nocapture
 ```
+
+**Route decoding checkpoint:** both existing session readers decode and
+validate the complete canonical owner projection. The replicated reader
+returns typed errors for missing or wrongly typed row data instead of
+panicking. Legacy SELECTs explicitly project real local ownership until
+the guarded rebuild switches them to the persisted columns; this does not
+admit a shared session on the legacy schema. Three decoder tests passed
+(zero ignored), preserving sharing grant/viewer identity and refusing mixed,
+missing, zero/negative local and noncanonical ownership. Runtime key queries,
+installation and member-floor qualification remain open.
+
+```sh
+cargo test --locked -p plurx-core --features hiqlite-store --lib sharing_route_ -- --nocapture
+```

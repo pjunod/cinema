@@ -309,38 +309,60 @@ const ROUTE_COLS: &str = "incarnation_id, session_id, user_id, playback_id,
     request_fingerprint, owner_node_id, owner_epoch, lease_expires_at_ms, state, terminal_reason,
     publication_ready_at_ms, recipe_json, response_json, produced_playable_through_ms, fetched_through_ms,
     media_origin_ms, media_sequence, discontinuity_sequence, updated_at_ms, recovery_epoch,
-    drain_deadline_ms";
+    drain_deadline_ms, ('local:' || user_id) AS owner_key,
+    'local' AS principal_kind, NULL AS share_grant_id, NULL AS share_viewer_key";
 
-struct RouteRow(MediaSessionRoute);
+struct RouteRow(Result<MediaSessionRoute, StoreError>);
 
 impl From<&mut Row<'_>> for RouteRow {
     fn from(row: &mut Row<'_>) -> Self {
-        Self(MediaSessionRoute {
-            incarnation_id: row.get("incarnation_id"),
-            session_id: row.get("session_id"),
-            principal: crate::playback_principal::PlaybackPrincipal::LocalUser {
-                user_id: row.get("user_id"),
-            },
-            playback_id: row.get("playback_id"),
-            request_fingerprint: row.get("request_fingerprint"),
-            owner_node_id: row.get("owner_node_id"),
-            owner_epoch: row.get("owner_epoch"),
-            lease_expires_at_ms: row.get("lease_expires_at_ms"),
-            state: row.get("state"),
-            terminal_reason: row.get("terminal_reason"),
-            publication_ready_at_ms: row.get("publication_ready_at_ms"),
-            recipe_json: row.get("recipe_json"),
-            response_json: row.get("response_json"),
-            produced_playable_through_ms: row.get("produced_playable_through_ms"),
-            fetched_through_ms: row.get("fetched_through_ms"),
-            media_origin_ms: row.get("media_origin_ms"),
-            media_sequence: row.get("media_sequence"),
-            discontinuity_sequence: row.get("discontinuity_sequence"),
-            updated_at_ms: row.get("updated_at_ms"),
-            recovery_epoch: row.get("recovery_epoch"),
-            drain_deadline_ms: row.get("drain_deadline_ms"),
-        })
+        Self(decode_route(row))
     }
+}
+
+fn decode_route(row: &mut Row<'_>) -> Result<MediaSessionRoute, StoreError> {
+    let kind: String = row.try_get("principal_kind").map_err(database_error)?;
+    let user_id: Option<i64> = row.try_get("user_id").map_err(database_error)?;
+    let grant: Option<String> = row.try_get("share_grant_id").map_err(database_error)?;
+    let viewer: Option<String> = row.try_get("share_viewer_key").map_err(database_error)?;
+    let owner_key: String = row.try_get("owner_key").map_err(database_error)?;
+    let principal = crate::playback_principal::PlaybackPrincipal::from_projection(
+        &kind,
+        user_id,
+        grant.as_deref(),
+        viewer.as_deref(),
+        &owner_key,
+    )
+    .map_err(|_| StoreError::Task("invalid media-session owner projection".to_owned()))?;
+    Ok(MediaSessionRoute {
+        incarnation_id: row.try_get("incarnation_id").map_err(database_error)?,
+        session_id: row.try_get("session_id").map_err(database_error)?,
+        principal,
+        playback_id: row.try_get("playback_id").map_err(database_error)?,
+        request_fingerprint: row.try_get("request_fingerprint").map_err(database_error)?,
+        owner_node_id: row.try_get("owner_node_id").map_err(database_error)?,
+        owner_epoch: row.try_get("owner_epoch").map_err(database_error)?,
+        lease_expires_at_ms: row.try_get("lease_expires_at_ms").map_err(database_error)?,
+        state: row.try_get("state").map_err(database_error)?,
+        terminal_reason: row.try_get("terminal_reason").map_err(database_error)?,
+        publication_ready_at_ms: row
+            .try_get("publication_ready_at_ms")
+            .map_err(database_error)?,
+        recipe_json: row.try_get("recipe_json").map_err(database_error)?,
+        response_json: row.try_get("response_json").map_err(database_error)?,
+        produced_playable_through_ms: row
+            .try_get("produced_playable_through_ms")
+            .map_err(database_error)?,
+        fetched_through_ms: row.try_get("fetched_through_ms").map_err(database_error)?,
+        media_origin_ms: row.try_get("media_origin_ms").map_err(database_error)?,
+        media_sequence: row.try_get("media_sequence").map_err(database_error)?,
+        discontinuity_sequence: row
+            .try_get("discontinuity_sequence")
+            .map_err(database_error)?,
+        updated_at_ms: row.try_get("updated_at_ms").map_err(database_error)?,
+        recovery_epoch: row.try_get("recovery_epoch").map_err(database_error)?,
+        drain_deadline_ms: row.try_get("drain_deadline_ms").map_err(database_error)?,
+    })
 }
 
 struct TerminalAckRow(MediaSessionTerminalAck);
@@ -1160,13 +1182,14 @@ async fn route_by(
 ) -> Result<Option<MediaSessionRoute>, StoreError> {
     let sql = format!("SELECT {ROUTE_COLS} FROM media_sessions WHERE {column} = $1");
     validate_sql(&sql)?;
-    Ok(store
+    store
         .client()
         .query_consistent_map::<RouteRow, _>(sql, params!(value))
         .await?
         .into_iter()
         .next()
-        .map(|row| row.0))
+        .map(|row| row.0)
+        .transpose()
 }
 
 async fn request_row(
@@ -3747,8 +3770,7 @@ impl MediaSessionStore for HiqliteAuthStore {
               ORDER BY lease_expires_at_ms, incarnation_id LIMIT $6"
         );
         validate_sql(&sql)?;
-        Ok(self
-            .client()
+        self.client()
             .query_consistent_map::<RouteRow, _>(
                 sql,
                 params!(
@@ -3763,7 +3785,7 @@ impl MediaSessionStore for HiqliteAuthStore {
             .await?
             .into_iter()
             .map(|row| row.0)
-            .collect())
+            .collect()
     }
 
     async fn claim_media_session_takeover(
@@ -5028,5 +5050,65 @@ mod tests {
         assert!(MEDIA_SESSIONS_SCHEMA.contains("publication_ready_at_ms"));
         assert!(MEDIA_SESSION_TERMINAL_REASON_MIGRATION.contains("terminal_reason"));
         assert!(MEDIA_SESSION_PUBLICATION_FENCE_MIGRATION.contains("publication_ready_at_ms"));
+    }
+}
+
+#[cfg(test)]
+mod sharing_route_decoder_tests {
+    use super::*;
+
+    #[test]
+    fn sharing_route_decoder_preserves_namespace_and_refuses_corrupt_projection() {
+        let conn = rusqlite::Connection::open_in_memory().expect("fixture connection");
+        let grant = uuid::Uuid::new_v4().to_string();
+        let viewer = "a".repeat(64);
+        let key = format!("share:{grant}:{viewer}");
+        let decode = |kind: &str,
+                      user: Option<i64>,
+                      grant: Option<&str>,
+                      viewer: Option<&str>,
+                      key: &str| {
+            conn.query_row("SELECT 'incarnation' AS incarnation_id, 'session' AS session_id, ?2 AS user_id, 'playback' AS playback_id, 'fingerprint' AS request_fingerprint, 'node' AS owner_node_id, 1 AS owner_epoch, 2000 AS lease_expires_at_ms, 'active' AS state, NULL AS terminal_reason, 1000 AS publication_ready_at_ms, '{}' AS recipe_json, '{}' AS response_json, 0 AS produced_playable_through_ms, 0 AS fetched_through_ms, 0 AS media_origin_ms, 0 AS media_sequence, 0 AS discontinuity_sequence, 1000 AS updated_at_ms, 'recovery' AS recovery_epoch, NULL AS drain_deadline_ms, ?5 AS owner_key, ?1 AS principal_kind, ?3 AS share_grant_id, ?4 AS share_viewer_key", rusqlite::params![kind, user, grant, viewer, key], |row| Ok(decode_route(&mut Row::Borrowed(row)))).expect("SQL projection")
+        };
+        let local = decode("local", Some(7), None, None, "local:7").expect("local route");
+        assert_eq!(local.principal.local_user_id(), Some(7));
+        let shared =
+            decode("sharing", None, Some(&grant), Some(&viewer), &key).expect("shared route");
+        assert_eq!(
+            shared.principal,
+            crate::playback_principal::PlaybackPrincipal::sharing(
+                uuid::Uuid::parse_str(&grant).expect("grant"),
+                &viewer
+            )
+            .expect("principal")
+        );
+        assert_eq!(shared.principal.local_user_id(), None);
+        assert!(decode("sharing", Some(7), Some(&grant), Some(&viewer), &key).is_err());
+        assert!(decode("sharing", None, Some(&grant), None, &key).is_err());
+        assert!(decode("sharing", None, Some(&grant), Some(&viewer), "local:7").is_err());
+        assert!(decode("local", Some(0), None, None, "local:0").is_err());
+        assert!(decode("local", Some(-1), None, None, "local:-1").is_err());
+        assert!(decode("local", Some(7), None, None, "local:07").is_err());
+    }
+
+    #[test]
+    fn sharing_route_owned_decoder_refuses_missing_or_wrongly_typed_metadata() {
+        let columns = serde_json::json!([
+            {"name":"principal_kind","value":{"Text":"sharing"}},
+            {"name":"user_id","value":"Null"},
+            {"name":"share_grant_id","value":{"Text":uuid::Uuid::new_v4().to_string()}},
+            {"name":"share_viewer_key","value":{"Text":"a".repeat(64)}}
+        ]);
+        let mut missing = Row::Owned(
+            serde_json::from_value(serde_json::json!({"columns":columns})).expect("owned row"),
+        );
+        assert!(decode_route(&mut missing).is_err());
+        let mut wrong = Row::Owned(
+            serde_json::from_value(
+                serde_json::json!({"columns":[{"name":"principal_kind","value":{"Integer":1}}]}),
+            )
+            .expect("owned row"),
+        );
+        assert!(decode_route(&mut wrong).is_err());
     }
 }

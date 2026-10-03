@@ -33,15 +33,28 @@ const ROUTE_COLS: &str = "incarnation_id, session_id, user_id, playback_id, \
     request_fingerprint, owner_node_id, owner_epoch, lease_expires_at_ms, state, terminal_reason, \
     publication_ready_at_ms, recipe_json, response_json, produced_playable_through_ms, fetched_through_ms, \
     media_origin_ms, media_sequence, discontinuity_sequence, updated_at_ms, recovery_epoch, \
-    drain_deadline_ms";
+    drain_deadline_ms, ('local:' || user_id) AS owner_key, \
+    'local' AS principal_kind, NULL AS share_grant_id, NULL AS share_viewer_key";
 
 fn route_from_row(row: &Row<'_>) -> rusqlite::Result<MediaSessionRoute> {
+    let kind: String = row.get(22)?;
+    let grant: Option<String> = row.get(23)?;
+    let viewer: Option<String> = row.get(24)?;
+    let owner_key: String = row.get(21)?;
+    let principal = crate::playback_principal::PlaybackPrincipal::from_projection(
+        &kind,
+        row.get(2)?,
+        grant.as_deref(),
+        viewer.as_deref(),
+        &owner_key,
+    )
+    .map_err(|error| {
+        rusqlite::Error::FromSqlConversionFailure(21, rusqlite::types::Type::Text, Box::new(error))
+    })?;
     Ok(MediaSessionRoute {
         incarnation_id: row.get(0)?,
         session_id: row.get(1)?,
-        principal: crate::playback_principal::PlaybackPrincipal::LocalUser {
-            user_id: row.get(2)?,
-        },
+        principal,
         playback_id: row.get(3)?,
         request_fingerprint: row.get(4)?,
         owner_node_id: row.get(5)?,
@@ -3956,4 +3969,43 @@ fn read_recovery_row(
         updated_at_ms,
     )
     .map(Some)
+}
+
+#[cfg(test)]
+mod sharing_route_decoder_tests {
+    use super::*;
+
+    #[test]
+    fn sharing_route_decoder_preserves_namespace_and_refuses_corrupt_projection() {
+        let conn = rusqlite::Connection::open_in_memory().expect("fixture connection");
+        let grant = uuid::Uuid::new_v4().to_string();
+        let viewer = "a".repeat(64);
+        let key = format!("share:{grant}:{viewer}");
+        let decode = |kind: &str,
+                      user: Option<i64>,
+                      grant: Option<&str>,
+                      viewer: Option<&str>,
+                      key: &str| {
+            conn.query_row("SELECT 'incarnation' AS incarnation_id, 'session' AS session_id, ?2 AS user_id, 'playback' AS playback_id, 'fingerprint' AS request_fingerprint, 'node' AS owner_node_id, 1 AS owner_epoch, 2000 AS lease_expires_at_ms, 'active' AS state, NULL AS terminal_reason, 1000 AS publication_ready_at_ms, '{}' AS recipe_json, '{}' AS response_json, 0 AS produced_playable_through_ms, 0 AS fetched_through_ms, 0 AS media_origin_ms, 0 AS media_sequence, 0 AS discontinuity_sequence, 1000 AS updated_at_ms, 'recovery' AS recovery_epoch, NULL AS drain_deadline_ms, ?5 AS owner_key, ?1 AS principal_kind, ?3 AS share_grant_id, ?4 AS share_viewer_key", rusqlite::params![kind, user, grant, viewer, key], route_from_row)
+        };
+        let local = decode("local", Some(7), None, None, "local:7").expect("local route");
+        assert_eq!(local.principal.local_user_id(), Some(7));
+        let shared =
+            decode("sharing", None, Some(&grant), Some(&viewer), &key).expect("shared route");
+        assert_eq!(
+            shared.principal,
+            crate::playback_principal::PlaybackPrincipal::sharing(
+                uuid::Uuid::parse_str(&grant).expect("grant"),
+                &viewer
+            )
+            .expect("principal")
+        );
+        assert_eq!(shared.principal.local_user_id(), None);
+        assert!(decode("sharing", Some(7), Some(&grant), Some(&viewer), &key).is_err());
+        assert!(decode("sharing", None, Some(&grant), None, &key).is_err());
+        assert!(decode("sharing", None, Some(&grant), Some(&viewer), "local:7").is_err());
+        assert!(decode("local", Some(0), None, None, "local:0").is_err());
+        assert!(decode("local", Some(-1), None, None, "local:-1").is_err());
+        assert!(decode("local", Some(7), None, None, "local:07").is_err());
+    }
 }
