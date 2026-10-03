@@ -89,6 +89,16 @@ ownership. No new retry task is spawned for every GET.
 Each new admission reads current hardware/software pool limits. Changing an
 operator limit affects the next child, without confiscating a running
 child's already-held permit. Encoder recipe choices remain immutable.
+For software encoding, the policy floor is the frozen encoder allowance, bounded by
+the conservative whole-pipeline estimate. A fresh 2160p recipe capped at
+three encoder threads can use the shared pool's existing one-oversize-job
+exception when its three-thread pool is empty. It still reserves the full
+eight-thread pipeline estimate, blocking competing CPU work until reap;
+this is not a decoder/filter thread cap or a realtime guarantee. Lowering
+the pool below the frozen three-thread allowance refuses its next start.
+Without a known frozen allowance, the whole estimate remains the floor.
+Hardware encoding does not enforce that software encoder cap; mixed CPU
+decode/filter work therefore keeps its full estimate as the policy floor.
 The related policy values come from one Store snapshot under a one-second
 deadline. A hung read returns no permit and leaves no foreground waiter;
 only the existing driver owns its bounded retry.

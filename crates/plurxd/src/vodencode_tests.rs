@@ -70,6 +70,153 @@ fn refresh_encoded_plan(file: &MediaFile, encoding: &mut crate::vodencode::Encod
     encoding.resources = resources;
 }
 
+#[test]
+fn encoded_vod_frozen_cpu_floor_preserves_empty_pool_and_lowered_policy() {
+    use crate::admission::{Admissions, Priority, TranscodeResourceEstimate, Workload};
+    use crate::vodencode::{frozen_software_threads, try_admit_frozen_bundle};
+    use plurx_core::transcode::{
+        vod_pipe_args, Encoder, Pacing, TranscodeExecution, TranscodeOptions, VodFrameGrid,
+    };
+
+    // Metadata-only: no media generation, child process, or runtime measurement.
+    let mut file = media_file_at(PathBuf::from("/s02-source-chain-only.mkv"), 45_000);
+    file.width = Some(3840);
+    file.height = Some(2160);
+    file.bit_depth = Some(10);
+    file.hdr = Some("hdr10".into());
+    let work = Workload::of(&file, 2160);
+    assert_eq!(work.software_threads(), 8);
+    let options = TranscodeOptions {
+        target_height: 2160,
+        software_threads: Some(frozen_software_threads(&work, 3)),
+        ..Default::default()
+    };
+    assert_eq!(options.software_threads, Some(3));
+    let plan = encoded_plan(&file, &options, Encoder::Software);
+    let resources = TranscodeResourceEstimate::of(&plan, &work);
+    assert_eq!(resources.cpu_threads, 8);
+    assert_eq!(resources.decoder_threads, None);
+    assert!(!resources.hardware_slot);
+    let execution = TranscodeExecution::from_options(&file, &options, Pacing::unpaced(), ".")
+        .expect("frozen execution");
+    let args = vod_pipe_args(
+        &file,
+        &plan,
+        &execution,
+        VodFrameGrid::new(24000, 1001).expect("grid"),
+        45.0,
+    );
+    let input = args.iter().position(|arg| arg == "-i").expect("input");
+    let encoder_threads = args
+        .windows(2)
+        .position(|pair| pair == ["-threads", "3"])
+        .expect("frozen output encoder threads");
+    assert!(encoder_threads > input);
+    assert!(!args[..input].iter().any(|arg| arg == "-threads"));
+    assert!(!args
+        .iter()
+        .any(|arg| matches!(arg.as_str(), "-filter_threads" | "-filter_complex_threads")));
+
+    let admissions = Admissions::new();
+    let permit = try_admit_frozen_bundle(
+        &admissions,
+        1,
+        3,
+        &resources,
+        &options,
+        Priority::Live,
+        None,
+    )
+    .expect("empty pool admits the capped frozen recipe");
+    assert_eq!(admissions.software_in_use(), 8);
+    for priority in [Priority::Live, Priority::Background, Priority::Speculative] {
+        assert!(admissions
+            .try_admit_bundle(1, 3, &resources, priority)
+            .is_none());
+        assert_eq!(admissions.software_in_use(), 8);
+    }
+    let (hardware, software) = permit.into_parts();
+    assert!(hardware.is_none());
+    let software = software.expect("full CPU reservation");
+    assert_eq!(software.threads(), 8);
+    drop(software);
+    assert_eq!(admissions.software_in_use(), 0);
+    for lowered in [2, 0] {
+        assert!(matches!(
+            try_admit_frozen_bundle(
+                &admissions,
+                1,
+                lowered,
+                &resources,
+                &options,
+                Priority::Live,
+                None
+            ),
+            Err(true)
+        ));
+        assert_eq!(admissions.software_in_use(), 0);
+    }
+    let restored = try_admit_frozen_bundle(
+        &admissions,
+        1,
+        3,
+        &resources,
+        &options,
+        Priority::Live,
+        None,
+    )
+    .expect("restored policy admits the unchanged recipe");
+    drop(restored);
+    let unknown = TranscodeOptions {
+        software_threads: None,
+        ..options.clone()
+    };
+    assert!(matches!(
+        try_admit_frozen_bundle(
+            &admissions,
+            1,
+            3,
+            &resources,
+            &unknown,
+            Priority::Live,
+            None
+        ),
+        Err(true)
+    ));
+    let hardware_only = TranscodeResourceEstimate {
+        hardware_slot: true,
+        cpu_threads: 0,
+        decoder_threads: None,
+    };
+    // Resolve a real hardware encoder with a CPU filter graph: its output
+    // does not enforce options.software_threads, so Some(3) cannot excuse8.
+    let mixed_plan = encoded_plan(&file, &options, Encoder::Vaapi);
+    assert!(!mixed_plan.options().pipeline.keeps_frames_off_the_cpu());
+    let mixed = TranscodeResourceEstimate::of(&mixed_plan, &work);
+    assert!(mixed.hardware_slot);
+    assert_eq!(mixed.cpu_threads, 8);
+    assert!(matches!(
+        try_admit_frozen_bundle(&admissions, 1, 3, &mixed, &options, Priority::Live, None),
+        Err(true)
+    ));
+    assert_eq!(admissions.software_in_use(), 0);
+    assert_eq!(admissions.in_use(), 0);
+    let hardware = try_admit_frozen_bundle(
+        &admissions,
+        1,
+        0,
+        &hardware_only,
+        &unknown,
+        Priority::Live,
+        None,
+    )
+    .expect("CPU-free hardware still follows hardware admission");
+    assert_eq!(admissions.in_use(), 1);
+    assert_eq!(admissions.software_in_use(), 0);
+    drop(hardware);
+    assert_eq!(admissions.in_use(), 0);
+}
+
 // Each test below owns a fresh `Admissions`, while production encoders on
 // one daemon share a single admission budget. Running these restart campaigns
 // concurrently can therefore launch more real FFmpeg processes than a daemon

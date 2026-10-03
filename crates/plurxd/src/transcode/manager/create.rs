@@ -1011,10 +1011,10 @@ impl TranscodeManager {
             }
             None => (None, None),
         };
-        let software_threads = Workload::of(file, target_height)
-            .software_threads()
-            .min(self.software_budget().await)
-            .max(1) as u32;
+        let software_threads = crate::vodencode::frozen_software_threads(
+            &Workload::of(file, target_height),
+            self.software_budget().await,
+        );
         let mut options = self.live_lookup_options(
             self.rate_control_snapshot(),
             encoder,
