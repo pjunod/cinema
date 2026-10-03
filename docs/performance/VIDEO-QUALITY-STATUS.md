@@ -1,6 +1,6 @@
 # Video quality status — what is built, measured and merged
 
-**Status:** final review addressed; runtime qualification and fast lane next · **Updated:** 2026-10-03
+**Status:** final review addressed; runtime receipts retained; fast lane next · **Updated:** 2026-10-03
 
 Companion to [the programme](VIDEO-QUALITY-PROGRAM.md), which owns scope,
 acceptance and order. This ledger records actual execution. Empty evidence is
@@ -24,7 +24,7 @@ effort only. Whole-suite unit repair remains with the separate process.
 | HLS acknowledgement batching | Implemented, validation deferred | Current pump allocates and schedules a separate channel acknowledgement for every 4 KiB despite 128 KiB storage reads; preserve the 4 KiB proof while reducing coordination, rather than weakening accounting. |
 | Apply encoder calibration (2) | Retain baseline | QSV Q22 failed all six quality comparisons; no default change is justified. |
 | VOD B-frames (6) | Integrated `6a9599295` and Developer controls | Strict decode/presentation-grid publication, signed offsets and optional software x264 recipe; compile and hook passed, runtime/client evidence pending. |
-| Broader HDR (3) | Implemented `5a8356329` | Plain HDR10 VAAPI Main10 at 1080p with P010 upload and its own graph proof. Compile/hook passed; isolated m6 output qualification pending. |
+| Broader HDR (3) | Implemented `5a8356329` | Plain HDR10 VAAPI Main10 at 1080p with P010 upload and its own graph proof. Compile/hook and isolated m6 continuous-PQ output qualification passed; hard-edge image and client limits remain recorded below. |
 | Cold start (4) | Integrated `133be1706` | One sealed full source collection serves verification and decoder planning. Existing 5-second verification and 10-second refinement budgets remain separate; tests count one stream probe instead of two. PR #745 is integrated. |
 
 The agent's first pinned Rust 1.97.1 compile check in the independent clone
@@ -46,28 +46,39 @@ revision token. It must not consume a viewer session or mark the next item
 watched; use the existing autoplay preference rather than an extra feature
 switch. Preserve delivery-proof granularity in the batching design.
 
-## Final qualification in progress
+## Final qualification — receipts retained before the fast lane
 
 The one final adversarial review completed on `6cdddaeef`. Its two findings
 were addressed in `827023fd2` (application-owned probe metadata) and
 `09ab30374` (VAAPI source cadence), with normal compile hooks passing.
+[Review receipt](../evidence/video-quality-2026-10-03/adversarial-review.json).
 
-- The first VAAPI capture completed its encode but refused qualification:
-  actual hvcC constraints were `B0`, while the shared declaration said `90`.
-  `117570654` carries the measured encoder-specific declaration. The diagnostic
-  MP4 also exposed the muxer's default `hev1`; the production encoded-VOD
-  contract is being made explicitly `hvc1`, with argv already hashed in its
-  immutable identity. Only this failed qualification will be repeated.
-- The native C2 proof initially rejected its synthetic source's actual color
-  metadata. The fixture now assigns color facts to the authored frames and
-  reads the real probe document. The corrected proof passed once: three
-  windows × four recipes, complete metrics, source hash and scratch cleanup.
-  Production metadata checks were not relaxed.
-- Packaging first failed when static libvmaf's C++ link closure was absent.
-  `555c7defb` supplies it and the lavfi frame decoder; the failed runtime-assets
-  build is being retried in an isolated, bounded builder on idle nuc3.
-- The fast lane has not started. It follows these failed-check repairs and
-  the durable qualification receipts, so the final candidate gets one run.
+| Check | Result and precise scope |
+|---|---|
+| Native content samples | Passed one test: three windows × four recipes, metrics, source identity and scratch cleanup. The fixture now assigns actual BT.709 frame metadata and reads its emitted probe. Production checks remain strict. [Receipt](../evidence/video-quality-2026-10-03/native-content-proof-fixed.json). |
+| Shipping scorer | Actual Docker runtime-assets stage passed on idle nuc3 in 398 s with 2 CPUs / 3 GiB, including static ELF closure and built-in VMAF model smoke. The first build exposed the missing C++ runtime link; `555c7defb` fixes it. [Receipt](../evidence/video-quality-2026-10-03/scorer/qualification.json). |
+| VAAPI HDR graph | Continuous neutral PQ ramp passed on idle m6: 96 frames at 1920×1080/24, exact timestamps, Main10/PQ/BT.2020/limited range and complete decode. Actual `hvc1.2.4.H120.B0` equals the declaration. Mean luma error 0.531 and maximum 2 ten-bit codes; 1.960 s encode for 4 s content (2.04× in this synthetic capture). [Receipt](../evidence/video-quality-2026-10-03/vaapi-qualification.json). |
+| Developer settings | 36/36 passed, once after review; this changed suite is outside fast lane. Both saved choices remain independent of readiness. [Receipt](../evidence/video-quality-2026-10-03/settings-sections.json). |
+| Fast lane | Next, on the final committed candidate. Passing checks are retained and only failures retried. PR #766 is the live CI/merge record; no full promotion campaign is required for this effort. |
+
+**What the failed HDR captures taught us:** the first output used constraints
+`B0`, not the shared `90`, and MP4 defaulted to `hev1`. Commits `117570654`
+and `addfac9f1` align the encoder-specific declaration and explicit sample
+entry; the actual mux argv already participates in immutable VOD identity.
+The next capture exposed missing tags on authored FFV1 frames; the fixture now
+sets and verifies them before encoding. A discontinuous three-panel fixture
+then met metadata/timing checks with mean error 0.368 but exceeded the
+worst-pixel criterion (35 vs less than 32 codes). That remains a
+[failed image result](../evidence/video-quality-2026-10-03/vaapi-third-qualification.json),
+not a pass. A separate continuous PQ ramp met the unchanged criteria; it
+qualifies signal preservation only and does not establish sharp-edge quality,
+gamut/skin fidelity, Dolby processing, 4K, subtitle burn, physical displays or
+the full client matrix. Original failures and exact commands are retained.
+
+The scorer builder/image/containers/volumes and m6 container/media/control
+scratch are removed. No production settings, queues or deployments changed.
+The batch keeps B-frames and measured per-title encoding in Developer pending
+their stated broader evidence; readiness cannot veto either saved choice.
 
 ## 1. Integration and compiler
 

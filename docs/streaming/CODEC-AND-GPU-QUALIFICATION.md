@@ -912,3 +912,10 @@ trailers `Agent-Model:` / `Agent-Session:` on every commit of the branch.
 | Date | Model | Session | Milestone | PR | Outcome / evidence |
 |---|---|---|---|---|---|
 | 2026-09-21 | gpt-5.6-sol | agent:/root/c02_builder | M0 | [`17dfebc4` / #422](http://192.168.4.7:3000/noirr/plurx/pulls/422) | Implemented five-family availability, family/grade accepted-start, and eight-pipeline counters with closed enum labels. Count points are manager registration for rolling, reader attachment for VOD, and first publishable/fenced Live TV inventory (encoder only; Live TV currently refuses tone-map-required routes). Read-only inventory found QSV/VA-API nodes only; M7 NVENC and M8 VideoToolbox are refused for this fleet. Review correction: the seven-day gate is reset-aware and bound to the exact build; focused production-seam tests cover rolling, VOD and Live TV once-only/pre-boundary behavior. Needs: deploy and collect one valid reset-aware week before M1-M6. |
+
+The batch's [isolated VAAPI receipt](../evidence/video-quality-2026-10-03/vaapi-qualification.json)
+verifies the actual sample entry, profile/tier/constraints, all 96 timestamps,
+PQ/BT.2020 tags, complete decode and a continuous neutral ramp on m6. A separate
+discontinuous fixture exceeded its worst-pixel limit; see the
+[execution ledger](../performance/VIDEO-QUALITY-STATUS.md#final-qualification--receipts-retained-before-the-fast-lane)
+for that failed result and the exact limits of the passing capture.
