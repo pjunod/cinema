@@ -4345,3 +4345,36 @@ Auto changes. This is a focused diagnostic, not a replacement for the full
 twenty-change campaign. Default campaigns still start at zero. Unknown dropped
 frame counters remain unknown rather than being reported as zero. Syntax checks
 pass; no units executed.
+
+
+### 10.146 Separate focused Firefox backward-frame evidence from gap evidence
+
+The first focused `8e722ca14` attempt omitted the node's `PLURX_BOUND_FFPROBE`
+setting. It failed before creating a VOD session; its receipt is retained and
+is not playback evidence. The corrected operational launcher uses the existing
+verified `/tmp/plurx-cq-cd9bb38ad/ffprobe` with unchanged committed source.
+
+That corrected run completed three manual changes from film 990 seconds in one
+session. Gaps were 67.36, 83.82 and 84.26 ms, so the earlier p95 failure was
+not reproduced in this focused window. The run still failed: the production
+hitch detector recorded two 333 ms backward steps, at 990.54 and 1053.42
+seconds. Auto was not executed after the manual failure. No waits, reopens or
+stalls occurred. End had one zombie child at the immediate sample and zero
+children at one, three and five seconds on the same living daemon. The receipt
+and supervisor status are retained and its job runtime is removed.
+
+The independent lab frame observer now keeps at most sixteen backward-frame
+pairs, including metadata timestamps, presented-frame sequence and live element
+position/state, and includes the relevant pairs in each switch receipt. This
+will check whether the continuous subscription agrees with the production
+detector's renewed subscriptions. It changes neither hitch criteria nor
+presentation authority; no browser defect or production root cause is claimed.
+Syntax checks pass; no units executed.
+
+The Mac daemon cannot establish a production descriptor-bound decoder identity:
+that implementation supports Linux production images. Physical phone playback
+therefore uses a fresh exact-source Linux daemon and the generated fixture,
+through an owned SSH forward and the lab's separate LAN proxy. Its process has
+a twelve-minute deadline and verified identity at cleanup. Browser and native
+cases run serially on that node. The native unlock window remains bounded;
+physical playback has not been observed.

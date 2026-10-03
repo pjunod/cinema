@@ -5,14 +5,15 @@
 <p class="state"><strong>Incomplete — final adversarial review has not started.</strong>
 The human requests a stop immediately after that review for external Fable
 reviews, before fast-lane tests or merge.</p>
-<p><strong>Working now:</strong> diagnosing the completed Firefox failure with
-bounded per-switch frame metadata. All twenty changes completed in one session,
-but p95 was 133.66 ms against the unchanged 100 ms limit; two late gaps were
-183.36 ms and 133.66 ms. There were zero waits, reopens, stalls or hitches.
-The receipt remains failed and the owned runtime is cleaned up. The committed
-mixed manual/Auto command awaits execution. Separate signed Plurx CQ Lab build
-206 is installed on 17promax; the latest launch still reported Locked, so native
-playback evidence remains unmeasured. No unit tests have run.</p>
+<p><strong>Working now:</strong> checking independent frame evidence for Firefox's
+two backward steps in the focused <code>8e722ca14</code> late-window run. Its
+three manual gaps were at most 84.26 ms, but two 333 ms backward steps failed
+the unchanged hitch criterion. Auto did not run. End retired owned producers
+within one second and the job runtime is cleaned up. The earlier twenty-switch
+receipt remains failed at 133.66 ms p95. Separate Plurx CQ Lab build 206 is
+installed on 17promax; an isolated Linux daemon is ready for its bounded unlock
+window, because the Mac daemon lacks a production bound decoder identity.
+Physical playback remains unmeasured. No unit tests have run.</p>
 <p><strong>Latest runtime result:</strong> the focused <code>c8484d19b</code>
 Chrome campaign passed three manual and five actual Auto changes, with at most
 66.8 ms callback gap on all eight transitions, zero stalls or hitches, and

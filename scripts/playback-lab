@@ -2340,7 +2340,7 @@ async function setCasePreferences(driver, quality, frameDiagnostics = false) {
         v.__plurxLabFrameProbe=true;
         if(!globalThis.__plurxLabFrameProbe||!globalThis.__plurxLabFrameProbe.supported)
           globalThis.__plurxLabFrameProbe={supported:true,sequence:0,last_frame_at_ms:null,
-            maximum_gap_ms:0,maximum_gap_detail:null,frames:0,last_frame:null,auto_presentations:[]};
+            maximum_gap_ms:0,maximum_gap_detail:null,frames:0,last_frame:null,auto_presentations:[],backward_frames:[]};
         const frame=(now,metadata)=>{
           const diagnostic=globalThis.__plurxLabFrameDiagnostics;
           if(diagnostic){
@@ -2423,6 +2423,13 @@ async function setCasePreferences(driver, quality, frameDiagnostics = false) {
               width:metadata&&Number.isFinite(metadata.width)?metadata.width:v.videoWidth,
               height:metadata&&Number.isFinite(metadata.height)?metadata.height:v.videoHeight,
               method:p.method||null,session_id:p.sessionId||null,attempt_id:p.attemptId||null};
+            if(priorFrame&&Number.isFinite(priorFrame.media_time)
+                &&Number.isFinite(presented.media_time)&&presented.media_time<priorFrame.media_time-0.001){
+              if(!Array.isArray(probe.backward_frames))probe.backward_frames=[];
+              probe.backward_frames.push({from:{...priorFrame},to:{...presented},
+                current_time:v.currentTime,seeking:!!v.seeking,paused:!!v.paused});
+              if(probe.backward_frames.length>16)probe.backward_frames.shift();
+            }
             probe.last_frame=presented;
             if(probe.maximum_gap_detail&&probe.maximum_gap_detail.end_at_ms===now){
               Object.assign(probe.maximum_gap_detail,{to_session_id:presented.session_id,
@@ -2699,6 +2706,8 @@ async function performOperation(driver, testCase, start) {
       change.dropped_frames = Number.isFinite(evidenceEnd.video.dropped)
         && Number.isFinite(before.video.dropped)
         ? Math.max(0, evidenceEnd.video.dropped - before.video.dropped) : null;
+      change.independent_backward_frames = (probe?.backward_frames || [])
+        .filter(row => Number(row.to?.sequence) > Number(before.frame_probe?.sequence || 0));
       change.frame_probe_operative = frameProbeOperative;
       changes.push(change);
       before = evidenceEnd;
