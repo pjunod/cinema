@@ -4032,9 +4032,19 @@ pub(super) async fn settle_armed_activation_handoff(
         .max(0);
     let boundary_deadline = tokio::time::Instant::now()
         + Duration::from_millis(u64::try_from(remaining_ms).unwrap_or(u64::MAX));
-    let acknowledged =
-        project_activation_predecessor_until(state, &predecessor_incarnation, boundary_deadline)
-            .await;
+    let projection = project_activation_predecessor_while_current(
+        state,
+        &predecessor_incarnation,
+        boundary_deadline,
+        Some(&successor),
+    )
+    .await;
+    // A durably terminal or replaced successor has no publication to finish.
+    // Release its admission owner without completing the predecessor fence.
+    if matches!(projection, PredecessorProjection::SuccessorGone) {
+        return true;
+    }
+    let acknowledged = matches!(projection, PredecessorProjection::Acknowledged);
     if acknowledged
         && matches!(
             complete_activation_handoff_until(
@@ -4161,12 +4171,55 @@ pub(super) async fn project_activation_predecessor_until(
     predecessor_incarnation: &str,
     deadline: tokio::time::Instant,
 ) -> bool {
+    matches!(
+        project_activation_predecessor_while_current(
+            state,
+            predecessor_incarnation,
+            deadline,
+            None
+        )
+        .await,
+        PredecessorProjection::Acknowledged
+    )
+}
+
+enum PredecessorProjection {
+    Acknowledged,
+    SuccessorGone,
+    Pending,
+}
+
+async fn project_activation_predecessor_while_current(
+    state: &AppState,
+    predecessor_incarnation: &str,
+    deadline: tokio::time::Instant,
+    successor: Option<&MediaSessionRoute>,
+) -> PredecessorProjection {
     loop {
         let now = tokio::time::Instant::now();
         if now >= deadline {
-            return false;
+            return PredecessorProjection::Pending;
         }
         let read_deadline = (now + ACTIVATION_STORE_DEADLINE).min(deadline);
+        if let Some(successor) = successor {
+            if let Ok(Ok(Some(current))) = tokio::time::timeout_at(
+                read_deadline,
+                state
+                    .store
+                    .media_session_route_by_incarnation(&successor.incarnation_id),
+            )
+            .await
+            {
+                if current.incarnation_id == successor.incarnation_id
+                    && (current.state != "active"
+                        || current.owner_node_id != successor.owner_node_id
+                        || current.owner_epoch != successor.owner_epoch)
+                {
+                    return PredecessorProjection::SuccessorGone;
+                }
+            }
+            // Unknown durable state never authorizes release or publication.
+        }
         let route = tokio::time::timeout_at(
             read_deadline,
             state
@@ -4187,7 +4240,7 @@ pub(super) async fn project_activation_predecessor_until(
                     );
                     let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
                     if remaining.is_zero() {
-                        return false;
+                        return PredecessorProjection::Pending;
                     }
                     tokio::time::sleep(PREDECESSOR_PROJECTION_RETRY_DELAY.min(remaining)).await;
                     continue;
@@ -4218,14 +4271,14 @@ pub(super) async fn project_activation_predecessor_until(
                         .filter(|proof| proof.terminal_projection_complete())
                     {
                         state.transcode.complete_session_release_durable(&proof);
-                        return true;
+                        return PredecessorProjection::Acknowledged;
                     }
                 }
             }
         }
         let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
         if remaining.is_zero() {
-            return false;
+            return PredecessorProjection::Pending;
         }
         tokio::time::sleep(PREDECESSOR_PROJECTION_RETRY_DELAY.min(remaining)).await;
     }

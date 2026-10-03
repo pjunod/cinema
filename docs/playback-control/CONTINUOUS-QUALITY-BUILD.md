@@ -5570,3 +5570,34 @@ cancelled backoff and malformed/unbound capability fields.
 Pinned Rust 1.97.1 daemon test-source check PASSED in 29.51s; served-source
 and test-file JavaScript syntax checks pass. Normal hook, exact Linux build
 and focused disposal qualification are pending. No units or final review ran.
+
+
+### 10.191 · Terminal successors must release background handoff ownership
+
+Source `aa2847fca` passed its normal hook, exact Linux build and Linux
+all-target daemon Clippy. The scoped disposal receipt
+`continuous-chrome-aa2847fca-targeted-handoff-disposal2` PASSED: three
+crashed-owner children retired, the exact unpublished family DELETE settled
+in 364 ms, replacement producers retired, and End raw/playback counts were
+0/0/0/0. Saved manual 720p survived. Two fault-window stalls remain;
+this proves disposal, not automatic recovery. The first disposal receipt
+failed a helper assumption that a no-body 204 must emit loadingFinished;
+the corrected helper treats HTTP 204 as completion and separately checks
+physical producer retirement.
+
+The shipped Retry action then FAILED in
+`continuous-chrome-aa2847fca-targeted-owner-retry1` with
+`transcode_capacity_pending`. Only two durable parents started. Exact
+family disposal stopped its producers but its background handoff retained
+the replacement permit through the old owner's response safety window.
+
+The armed handoff now polls its exact successor alongside predecessor
+projection. A confirmed terminal successor or changed owner ends the wait
+and releases its guard. Missing rows, lookup errors and timeouts remain
+unknown and do not authorize release. This path performs no publication
+completion and shortens no response safety boundary. The existing
+predecessor-only fast path is unchanged. An unrun regression holds a permit
+while a successor is active, durably ends it, and checks prompt release
+with terminal publication still blocked. Pinned Rust 1.97.1 daemon test-source compilation PASSED in 13.49s.
+Normal hook, exact Linux build and focused Retry requalification are pending.
+No units or final review ran.

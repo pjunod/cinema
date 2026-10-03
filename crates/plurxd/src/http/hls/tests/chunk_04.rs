@@ -553,6 +553,57 @@ quality_catalog: None,
         .await
     }
 
+    #[tokio::test]
+    async fn terminal_successor_releases_armed_handoff_without_publication() {
+        let dir = crate::test_tempdir().expect("state dir");
+        let playback_id = unique_playback_id("terminal-handoff-successor");
+        let (fixture, session_id, mut successor) =
+            staging_fixture_for_playback(dir.path(), &playback_id).await;
+        successor.publication_ready_at_ms = unix_ms() + 60_000;
+        let authority = crate::serving_fence::ServingAuthority::always_ready();
+        let admitted = authority.admit().expect("serving generation");
+        let permits = std::sync::Arc::new(tokio::sync::Semaphore::new(1));
+        let permit = permits.clone().acquire_owned().await.expect("permit");
+        let state = fixture.state.clone();
+        let waiter = tokio::spawn(async move {
+            let _permit = permit;
+            settle_armed_activation_handoff(
+                &state,
+                uuid::Uuid::new_v4().to_string(),
+                successor,
+                authority,
+                admitted,
+            )
+            .await
+        });
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        assert!(!waiter.is_finished(), "an active successor must keep waiting");
+        assert_eq!(permits.available_permits(), 0);
+        fixture
+            .state
+            .store
+            .end_media_session(&session_id, "deleted", unix_ms())
+            .await
+            .expect("durable terminal successor");
+        assert!(tokio::time::timeout(std::time::Duration::from_secs(3), waiter)
+            .await
+            .expect("terminal successor must release promptly")
+            .expect("handoff task"));
+        assert_eq!(permits.available_permits(), 1);
+        let terminal = fixture
+            .state
+            .store
+            .media_session_route(&session_id)
+            .await
+            .expect("route lookup")
+            .expect("terminal route");
+        assert_eq!(terminal.state, "ended");
+        assert_eq!(
+            terminal.publication_ready_at_ms,
+            plurx_core::domain::MEDIA_SESSION_PUBLICATION_BLOCKED,
+        );
+    }
+
     /// Wait for a settlement to have taken the successor's durable row.
     async fn await_aborted_preparation_row(
         fixture: &HlsDeliveryFixture,
