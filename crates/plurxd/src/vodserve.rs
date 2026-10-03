@@ -947,8 +947,8 @@ mod vod_serve_control;
 #[path = "vod/serve/create.rs"]
 mod vod_serve_create;
 #[cfg(test)]
-pub(crate) use vod_serve_create::AdmittedSourceCopyRendition;
-pub(crate) use vod_serve_create::ReservedSourceCopyRendition;
+pub(crate) use vod_serve_create::AdmittedSourceVodRendition;
+pub(crate) use vod_serve_create::ReservedSourceVodRendition;
 #[path = "vod/serve/delivery.rs"]
 mod vod_serve_delivery;
 #[path = "vod/serve/end.rs"]

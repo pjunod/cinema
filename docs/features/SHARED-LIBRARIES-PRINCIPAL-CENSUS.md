@@ -1601,3 +1601,82 @@ The affected daemon all-target denied-warning Clippy passed in 88 seconds.
 The supported bare-core `cargo check -p plurx-core --no-default-features`
 surface also compiled in 14.53 seconds; its existing unused-code warnings
 remain, so this is compile evidence rather than a bare-core denied-lint claim.
+
+### Source encoded VOD: owned preparation candidate
+
+The next finite lane accepts the actual common unburned SDR Transcode recipe.
+Native subtitles, subtitle burn, HDR/Dolby Vision and reopen still refuse before
+physical work in this lane. Local recipe resolution and Local admission remain
+unchanged. The Source response describes the actual normalized encoder and
+height; a requested sub-ladder height does not bypass the common rung policy.
+
+A detached Source preparation operation owns a real CPU4 permit, held-file
+identity, complete immutable dispatch assignment and original member observation.
+The actual FFprobe reporter query, held-descriptor media probe, FFmpeg version
+and dependency-capture commands run through its closed executor. Each spawn
+rechecks the same-write preparation guard, original observation age, absolute
+start deadline and strict no-follow Source object fence. The Source engine
+snapshot reuses the common attestation algorithm without mutating the ordinary
+Local engine cache. Stored probe evidence is bounded in SQL before allocation,
+and the actual held document must pass the common media/reporter comparison.
+
+The operation retains child/job and stdout/stderr tasks until successful reap
+and joined readers. An initial wait error kills and retries the actual wait;
+it cannot release the permit or mint settlement while the retry is unresolved.
+Only that private completed operation mints a full-assignment preparation
+receipt. Probe capacity is released after actual settlement, before acquiring
+the common Encoding permit. The actor retains the sealed receipt through failed
+start or registered producer retirement and the subsequent exact g1 SQL fence.
+Neither a public boolean nor ordinary SQL permission supplies physical proof.
+
+The admitted Encoding permit precedes blocked activation. The Source VOD driver
+consumes that actual retained first permit instead of acquiring a duplicate;
+later producer attempts use the existing Encoding admission policy. Readiness,
+complete retained response, counted Start/media bodies and registered producer
+reap/writer retirement use the existing Source actor algorithm. Cold restarted
+cache and abrupt daemon-death physical recovery remain separate open work.
+This section describes the candidate algorithm; exact qualification receipts
+follow after its focused actual-media and failure tests pass.
+
+Initial pinned qualification on committed `5db9d2063` plus this encoded candidate:
+
+```sh
+cargo test -p plurxd --bin plurxd source_encoded_ -- --nocapture
+cargo test -p plurxd --bin plurxd source_copy_ -- --nocapture
+cargo test -p plurxd --bin plurxd \
+  the_estimate_reads_the_cost_off_the_plan_and_not_off_the_encoders_name \
+  -- --nocapture
+cargo test -p plurxd --bin plurxd \
+  hevc_vod_checks_proof_before_reusing_a_cached_rendition -- --nocapture
+```
+
+The encoded filter passed nine tests, zero ignored, in 31.54 seconds on normal
+stacks with actual one-voter Stores and FFmpeg. It covers actual encoded ready
+media, complete response, counted Start/playlist/init bodies, waiter
+cancellation, sharing-off retirement, CPU4 preadmission refusal, confirmed probe
+settlement before separate encoder-capacity refusal, pre-spawn switch/file/floor
+and original-clock refusals, and retained CPU4 during an injected initial wait
+error before successful reap retry. The paused post-spawn failure cases act on
+the operation's actual FFprobe reporter child; successful encoded playback also
+runs the actual held media probe and actual FFmpeg dependency capture. This is
+fault-injection evidence, not a claim that the host produced a natural wait
+error. The fixture's candidate capability/schema setup is explicit and does not
+replace the separately qualified production startup factory.
+
+The existing Source copy filter passed 13 tests, zero ignored, in 34.74 seconds.
+The common Local resource-estimate and Local cached HEVC proof regressions each
+passed, zero ignored, in 0.16 and 0.43 seconds respectively. Documentation index
+checks passed all four tests; catalog lint covered 2,704 audited files. Final
+compiler/denied-lint and exact current-Root integration receipts remain required.
+
+The actual memory/pooled Source preparation guard regression also passed with
+`cargo test -p plurx-core --features hiqlite-store --lib
+sharing_source_index_permission_and_bounded_evidence_preserve_lineage --
+--nocapture`, one test, zero ignored, in 1.12 seconds. The final affected daemon
+all-target denied-warning Clippy passed in 83 seconds. Probe/capture refusal
+never mutates the Local cached engine snapshot. An expired original observation
+still refuses a later preparation spawn; this candidate does not synthesize an
+applied Raft wall clock or silently extend an earlier proof. Native/burn,
+HDR/Dolby Vision, cold restart and abrupt-death recovery remain open.
+The final unchanged-candidate `cargo check -p plurxd --all-targets` passed in
+51.20 seconds after the nine-case matrix and seam additions.

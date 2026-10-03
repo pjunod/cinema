@@ -711,6 +711,39 @@ impl TranscodeManager {
         req: &SessionRequest,
         file: &plurx_core::domain::MediaFile,
     ) -> Result<Option<Arc<crate::vodencode::Encoding>>, String> {
+        Box::pin(self.prepare_vod_encoding_with_source(req, file, None)).await
+    }
+
+    pub(in crate::transcode) async fn prepare_source_vod_encoding(
+        &self,
+        prepared: &crate::http::hls::PreparedSourcePlayback,
+        evidence: &crate::transcode::source_preparation::SourceHeldProbeEvidence,
+        proof: &plurx_core::sharing_source_sessions::SourceSessionWriteAuthority,
+    ) -> Result<Arc<crate::vodencode::Encoding>, String> {
+        if !prepared.matches_assignment(proof.assignment())
+            || prepared.request().subtitle_burn.is_some()
+            || !matches!(prepared.request().kind, SessionKind::Transcode { .. })
+        {
+            return Err("Source encoding requires exact unburned prepared assignment".into());
+        }
+        Box::pin(self.prepare_vod_encoding_with_source(
+            prepared.request(),
+            prepared.file(),
+            Some((evidence, proof)),
+        ))
+        .await?
+        .ok_or_else(|| "Source encoding recipe missing".to_owned())
+    }
+
+    async fn prepare_vod_encoding_with_source(
+        &self,
+        req: &SessionRequest,
+        file: &plurx_core::domain::MediaFile,
+        source_evidence: Option<(
+            &crate::transcode::source_preparation::SourceHeldProbeEvidence,
+            &plurx_core::sharing_source_sessions::SourceSessionWriteAuthority,
+        )>,
+    ) -> Result<Option<Arc<crate::vodencode::Encoding>>, String> {
         if matches!(req.kind, SessionKind::Copy { .. }) {
             match req.subtitle_burn {
                 None => return Ok(None),
@@ -729,14 +762,24 @@ impl TranscodeManager {
                 Some(_) => {}
             }
         }
-        let source = crate::fragment_index_cluster::open_source_fence(file, None)
-            .await
-            .map_err(|error| {
-                vod_refusal_error(
-                    "vod_source_rescan_required",
-                    format!("the source could not be held for encoded preparation: {error}"),
-                )
-            })?;
+        let source = if source_evidence.is_some() {
+            crate::fragment_index_cluster::open_source_playback_fence(file, None).await
+        } else {
+            crate::fragment_index_cluster::open_source_fence(file, None).await
+        }
+        .map_err(|error| {
+            vod_refusal_error(
+                "vod_source_rescan_required",
+                format!("the source could not be held for encoded preparation: {error}"),
+            )
+        })?;
+        if let Some((evidence, proof)) = source_evidence {
+            if !evidence.matches(proof.assignment(), source.object_version()) {
+                return Err(
+                    "Source held-probe evidence differs from actual file/assignment".into(),
+                );
+            }
+        }
         // Bind preparation, burn extraction, key construction, and the final
         // producer open to the same inspected object, not scanner seconds.
         let source_object_version = source.object_version().to_owned();
@@ -802,14 +845,17 @@ impl TranscodeManager {
                 return Err(unsupported_build_error(reason));
             }
         }
-        let probe = self
-            .store
-            .get_file_probe_json(file.id)
-            .await
-            .map_err(|error| {
-                start_infrastructure_error(format!("reading the stored source probe: {error}"))
-            })?;
-        let held_probe =
+        let probe = if let Some((_, proof)) = source_evidence {
+            self.store.source_index_probe_evidence(proof).await
+        } else {
+            self.store.get_file_probe_json(file.id).await
+        }
+        .map_err(|error| {
+            start_infrastructure_error(format!("reading the stored source probe: {error}"))
+        })?;
+        let held_probe = if let Some((evidence, _)) = source_evidence {
+            evidence.document().to_owned()
+        } else {
             crate::ffmpeg::held_source_probe_json(&source.handle, VOD_START_HELD_PROBE)
                 .await
                 .map_err(|error| {
@@ -817,7 +863,8 @@ impl TranscodeManager {
                         "vod_source_rescan_required",
                         format!("the held source could not be verified against its scan: {error}"),
                     )
-                })?;
+                })?
+        };
         let comparison = probe
             .as_deref()
             .map(|stored| crate::ffmpeg::compare_probe_documents(stored, &held_probe))
@@ -1031,15 +1078,19 @@ impl TranscodeManager {
         } else {
             None
         };
-        let engine = crate::ffmpeg::EncodedEngine::capture(
-            options
-                .subtitle_burn
-                .as_ref()
-                .is_some_and(|burn| !burn.bitmap)
-                .then_some(self.runtime_cache.as_path()),
-        )
-        .await
-        .map_err(|error| vod_refusal_error("vod_engine_unattested", error))?;
+        let engine = if let Some((evidence, _)) = source_evidence {
+            evidence.engine()
+        } else {
+            crate::ffmpeg::EncodedEngine::capture(
+                options
+                    .subtitle_burn
+                    .as_ref()
+                    .is_some_and(|burn| !burn.bitmap)
+                    .then_some(self.runtime_cache.as_path()),
+            )
+            .await
+            .map_err(|error| vod_refusal_error("vod_engine_unattested", error))?
+        };
         if !source.unchanged() {
             return Err(vod_refusal_error(
                 "vod_source_rescan_required",
@@ -1054,7 +1105,11 @@ impl TranscodeManager {
             grid,
             subtitle,
             subtitle_digest,
-            ffmpeg_build: crate::ffmpeg::ffmpeg_build().await,
+            ffmpeg_build: if let Some((evidence, _)) = source_evidence {
+                evidence.build().into()
+            } else {
+                crate::ffmpeg::ffmpeg_build().await
+            },
             executable: crate::ffmpeg::EncodedExecutable::capture()
                 .await
                 .map_err(|error| vod_refusal_error("vod_engine_unattested", error))?,

@@ -334,7 +334,11 @@ async fn source_copy_preadmission_fixture(mode: u8) {
         .await
         .expect("actual planning read")
         .is_some());
-    let body:CreateSession = serde_json::from_value(serde_json::json!({"playback_id":"copy-source","request_id":"copy-source-request","copy":true,"height":72,"quality_auto":false,"presentation":"vod","caps":{"v":2,"video":[{"codec":"h264","max_height":2160,"present":["sdr"]}],"audio":["aac"],"containers":["mp4"],"transports":["hls","progressive"]}})).expect("actual Source request");
+    let mut body:CreateSession = serde_json::from_value(serde_json::json!({"playback_id":"copy-source","request_id":"copy-source-request","copy":true,"height":72,"quality_auto":false,"presentation":"vod","caps":{"v":2,"video":[{"codec":"h264","max_height":2160,"present":["sdr"]}],"audio":["aac"],"containers":["mp4"],"transports":["hls","progressive"]}})).expect("actual Source request");
+    if mode >= 12 {
+        body.copy = Some(false);
+        body.height = Some(36);
+    }
     assert_eq!(
         body.caps.as_ref().expect("v2 caps").v,
         plurx_core::playback::DeviceCaps::VERSION
@@ -357,6 +361,12 @@ async fn source_copy_preadmission_fixture(mode: u8) {
         std::mem::size_of_val(preparation.as_ref().get_ref())
     );
     let prepared = preparation.await.expect("actual Source engine preparation");
+    if mode >= 12 {
+        assert!(
+            matches!(prepared.request().kind, SessionKind::Transcode { .. }),
+            "actual common preparation resolves an encoded recipe"
+        );
+    }
     let SourceIntentRead::Ready(intent) = store
         .prepare_source_session_intent(
             SourceSessionRequest {
@@ -490,7 +500,7 @@ async fn source_copy_preadmission_fixture(mode: u8) {
 fn source_actual_copy_attachment_boxed<'a>(
     state: &'a crate::state::AppState,
     manager: &'a TranscodeManager,
-    admitted: crate::vodserve::AdmittedSourceCopyRendition,
+    admitted: crate::vodserve::AdmittedSourceVodRendition,
     prepared: &'a crate::http::hls::PreparedSourcePlayback,
     assignment: &'a plurx_core::sharing_source_sessions::SourceDispatchAssignment,
 ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + 'a>> {
@@ -505,7 +515,7 @@ fn source_actual_copy_attachment_boxed<'a>(
 async fn source_actual_copy_attachment(
     state: &crate::state::AppState,
     manager: &TranscodeManager,
-    admitted: crate::vodserve::AdmittedSourceCopyRendition,
+    admitted: crate::vodserve::AdmittedSourceVodRendition,
     prepared: &crate::http::hls::PreparedSourcePlayback,
     assignment: &plurx_core::sharing_source_sessions::SourceDispatchAssignment,
 ) {
@@ -521,7 +531,7 @@ async fn source_actual_copy_attachment(
     };
     let mut reserved = manager
         .vod
-        .reserve_source_copy(admitted)
+        .reserve_source_vod(admitted)
         .expect("owned preactivation association");
     let session_id = uuid::Uuid::new_v4().to_string();
     let facts = reserved
@@ -585,7 +595,7 @@ async fn source_actual_copy_attachment(
     authority
         .validate_observation_freshness(crate::fragment_index_cluster::unix_ms())
         .expect("original postcommit clock");
-    let start = Box::pin(manager.vod.commit_source_copy(
+    let start = Box::pin(manager.vod.commit_source_vod(
         &mut reserved,
         &session_id,
         &gate,
@@ -733,7 +743,7 @@ async fn source_actual_actor(
     mode: u8,
     client: hiqlite::Client,
 ) {
-    if mode == 3 {
+    if matches!(mode, 3 | 19) {
         state
             .store
             .put_setting(keys::SW_POOL_THREADS, "3")
@@ -763,6 +773,15 @@ async fn source_actual_actor(
                 .index_hooks
                 .pause_after_wait_failure(),
         ),
+        13 => Some(manager.source_workers.probe_hooks.pause_after_spawn()),
+        14 | 16 | 17 | 18 => Some(manager.source_workers.probe_hooks.pause_before_spawn()),
+        15 => Some(
+            manager
+                .source_workers
+                .probe_hooks
+                .pause_after_wait_failure(),
+        ),
+        20 => Some(manager.source_workers.probe_hooks.pause_after_evidence()),
         _ => None,
     };
     let actor = Box::pin(manager.start_source_worker(
@@ -780,7 +799,10 @@ async fn source_actual_actor(
     assert!(Arc::ptr_eq(&actor.0, &joined.0));
     if let Some(pause) = index_pause {
         let held = pause.reached().await;
-        assert_eq!(manager.admissions.software_in_use(), 4);
+        assert_eq!(
+            manager.admissions.software_in_use(),
+            if mode == 20 { 0 } else { 4 }
+        );
         assert!(manager.vod.session_ids().await.is_empty());
         assert!(state
             .store
@@ -788,8 +810,12 @@ async fn source_actual_actor(
             .await
             .expect("no preactivation media route")
             .is_none());
-        let pid = manager.source_workers.index_hooks.spawned_pid();
-        if matches!(mode, 6 | 8) {
+        let pid = if mode >= 12 {
+            manager.source_workers.probe_hooks.spawned_pid()
+        } else {
+            manager.source_workers.index_hooks.spawned_pid()
+        };
+        if matches!(mode, 6 | 8 | 13 | 15 | 20) {
             assert!(pid > 0, "actual Source index child started");
         } else {
             assert_eq!(pid, 0, "refusal point precedes any actual child");
@@ -799,14 +825,21 @@ async fn source_actual_actor(
             Err(SourceWorkerError::Deadline)
         ));
         drop(joined); // A disconnected waiter cannot abandon the scan owner.
-        if matches!(mode, 6 | 7) {
+        if matches!(mode, 6 | 7 | 13 | 14) {
             state
                 .store
                 .put_setting(keys::SHARING_ENABLED, "false")
                 .await
                 .expect("actual saved sharing off");
         }
-        if mode == 10 {
+        if mode == 20 {
+            state
+                .store
+                .put_setting(keys::SW_POOL_THREADS, "0")
+                .await
+                .expect("actual encoder capacity removed after confirmed probe settlement");
+        }
+        if matches!(mode, 10 | 17) {
             let file = state
                 .store
                 .get_file(1)
@@ -816,7 +849,7 @@ async fn source_actual_actor(
             std::fs::write(&file.path, b"changed physical Source before scan")
                 .expect("actual held Source object drift");
         }
-        if mode == 11 {
+        if matches!(mode, 11 | 18) {
             client
                 .execute(
                     "DELETE FROM cluster_node_capabilities WHERE capability=$1",
@@ -827,13 +860,13 @@ async fn source_actual_actor(
                 .await
                 .expect("actual purpose capability disappearance after observation");
         }
-        if mode == 9 {
+        if matches!(mode, 9 | 16) {
             tokio::time::sleep(Duration::from_millis(5100)).await;
         }
         assert_eq!(
             manager.admissions.software_in_use(),
-            4,
-            "no confirmed child/writer settlement yet"
+            if mode == 20 { 0 } else { 4 },
+            "probe capacity matches actual settlement stage"
         );
         assert_eq!(actor.settlement_status(), None);
         drop(held);
@@ -875,7 +908,7 @@ async fn source_actual_actor(
         );
         return;
     }
-    if mode == 3 {
+    if matches!(mode, 3 | 19) {
         assert!(actor
             .wait_ready(Instant::now() + Duration::from_secs(10))
             .await
@@ -913,6 +946,29 @@ async fn source_actual_actor(
         .await
         .expect("actual published actor");
     assert!(response.control.is_some());
+    if mode >= 12 {
+        let value = serde_json::to_value(&response).expect("complete encoded response");
+        assert_eq!(value["height"], 72);
+        assert_eq!(
+            value["encoder"],
+            plurx_core::transcode::Encoder::Software.label()
+        );
+        let segment = actor
+            .open_resource(
+                &SharingHlsResource::parse("seg00000.m4s").expect("typed actual encoded segment"),
+                Instant::now() + Duration::from_secs(10),
+            )
+            .await
+            .expect("actual encoded segment");
+        let (payload, guard) = segment.into_parts();
+        let SourceResourcePayload::File(file) = payload else {
+            panic!("encoded media file")
+        };
+        assert!(file.len > 0);
+        drop(file);
+        drop(guard);
+    }
+
     if mode == 5 {
         let file = state
             .store
@@ -1105,4 +1161,48 @@ async fn source_copy_cold_index_refuses_changed_actual_file_before_child() {
 #[tokio::test]
 async fn source_copy_cold_index_refuses_purpose_floor_loss_before_child() {
     source_copy_preadmission_fixture(11).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn source_encoded_actor_real_probe_recipe_media_and_body_retirement() {
+    Box::pin(source_copy_preadmission_fixture(12)).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn source_encoded_probe_child_survives_cancelled_waiter_and_revoke() {
+    Box::pin(source_copy_preadmission_fixture(13)).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn source_encoded_probe_refuses_sharing_off_before_child() {
+    Box::pin(source_copy_preadmission_fixture(14)).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn source_encoded_probe_retains_actual_permit_after_injected_wait_failure() {
+    Box::pin(source_copy_preadmission_fixture(15)).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn source_encoded_probe_refuses_expired_original_observation() {
+    Box::pin(source_copy_preadmission_fixture(16)).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn source_encoded_probe_refuses_changed_physical_file() {
+    Box::pin(source_copy_preadmission_fixture(17)).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn source_encoded_probe_refuses_lost_purpose_floor() {
+    Box::pin(source_copy_preadmission_fixture(18)).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn source_encoded_probe_requires_actual_cpu_admission_before_child() {
+    Box::pin(source_copy_preadmission_fixture(19)).await;
+}
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn source_encoded_probe_settles_before_separate_encoder_capacity_wait() {
+    Box::pin(source_copy_preadmission_fixture(20)).await;
 }

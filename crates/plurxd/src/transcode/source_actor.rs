@@ -119,6 +119,7 @@ pub(crate) enum SourceWorkerError {
 pub(super) struct SourceWorkerRegistry {
     entries: std::sync::Mutex<Vec<Arc<SourceViewerInner>>>,
     index_hooks: Arc<crate::fragindex::SourceIndexHookOwner>,
+    probe_hooks: Arc<super::source_preparation::SourceProbeHookOwner>,
 }
 struct SourceViewerInner {
     assignment: SourceDispatchAssignment,
@@ -127,13 +128,27 @@ struct SourceViewerInner {
     state: std::sync::Mutex<SourceViewerState>,
     changed: tokio::sync::Notify,
 }
+#[derive(Default)]
+struct SourcePreparationSettlements {
+    index: Option<crate::fragindex::SourceIndexSettlement>,
+    probe: Option<super::source_preparation::SourceProbeSettlement>,
+}
+impl SourcePreparationSettlements {
+    fn matches(&self, assignment: &SourceDispatchAssignment) -> bool {
+        self.index
+            .as_ref()
+            .is_none_or(|receipt| receipt.matches(assignment))
+            && self
+                .probe
+                .as_ref()
+                .is_none_or(|receipt| receipt.matches(assignment))
+    }
+}
 enum SourcePhysicalSettlement {
-    // No media producer was dispatched. An admitted index requires its own
-    // exact confirmed child/writer receipt; absence never proves settlement.
-    NoProducer(Option<crate::fragindex::SourceIndexSettlement>),
+    NoProducer(SourcePreparationSettlements),
     Registered(
         Box<crate::vodserve::SourceProducerAssociationsSettled>,
-        Option<crate::fragindex::SourceIndexSettlement>,
+        SourcePreparationSettlements,
     ),
 }
 struct SourceViewerState {
@@ -448,7 +463,7 @@ impl SourceViewerActor {
     }
 }
 impl SourceProducerAuthority {
-    async fn current_index(
+    pub(super) async fn current_preparation(
         &self,
         assignment: &SourceDispatchAssignment,
     ) -> Result<
@@ -471,7 +486,7 @@ impl SourceProducerAuthority {
         };
         if !self
             .store
-            .authorize_source_index_preparation(&proof)
+            .authorize_source_media_preparation(&proof)
             .await
             .map_err(|_| SourceWorkerError::Unresolved)?
         {
@@ -663,7 +678,7 @@ impl TranscodeManager {
             .await
             .map_err(|_| SourceWorkerError::Unavailable)?;
         let object_version = source.object_version().to_owned();
-        let authority = owner.gate.current_index(&owner.assignment).await?;
+        let authority = owner.gate.current_preparation(&owner.assignment).await?;
         let stored_probe = self
             .store
             .source_index_probe_evidence(&authority)
@@ -704,7 +719,7 @@ impl TranscodeManager {
             crate::fragment_index_cluster::open_source_playback_fence(file, Some(&object_version))
                 .await
                 .map_err(|_| SourceWorkerError::Unavailable)?;
-        owner.gate.current_index(&owner.assignment).await?;
+        owner.gate.current_preparation(&owner.assignment).await?;
         self.store
             .put_fragment_index(file.id, &index)
             .await
@@ -712,8 +727,64 @@ impl TranscodeManager {
         if !fence.unchanged() {
             return Err(SourceWorkerError::Unavailable);
         }
-        owner.gate.current_index(&owner.assignment).await?;
+        owner.gate.current_preparation(&owner.assignment).await?;
         Ok(())
+    }
+
+    async fn prepare_source_encoded_recipe(
+        &self,
+        owner: &Arc<SourceViewerInner>,
+        prepared: &crate::http::hls::PreparedSourcePlayback,
+        deadline: Instant,
+        work: &mut Option<super::source_preparation::SourceProbeOperation>,
+    ) -> Result<Arc<crate::vodencode::Encoding>, SourceWorkerError> {
+        let admit_deadline = deadline.min(Instant::now() + crate::admission::QUEUE_WAIT);
+        let permit = loop {
+            if Instant::now() >= admit_deadline {
+                return Err(SourceWorkerError::Capacity);
+            }
+            match crate::vodencode::EncodePermit::try_source_copy(
+                &self.admissions,
+                self.store.as_ref(),
+            )
+            .await
+            {
+                crate::vodencode::SourceCopyPermitRead::Admitted(permit) => break permit,
+                crate::vodencode::SourceCopyPermitRead::Unavailable => {
+                    return Err(SourceWorkerError::Unavailable)
+                }
+                crate::vodencode::SourceCopyPermitRead::Capacity => {
+                    tokio::time::sleep(Duration::from_millis(100)).await
+                }
+            }
+        };
+        let source =
+            crate::fragment_index_cluster::open_source_playback_fence(prepared.file(), None)
+                .await
+                .map_err(|_| SourceWorkerError::Unavailable)?;
+        let proof = owner.gate.current_preparation(&owner.assignment).await?;
+        *work = Some(super::source_preparation::start_source_probe(
+            prepared.file().clone(),
+            source,
+            proof,
+            permit,
+            Arc::clone(&self.store),
+            deadline,
+            Arc::clone(&self.source_workers.probe_hooks),
+        ));
+        let evidence = work
+            .as_ref()
+            .expect("Source probe owner")
+            .outcome()
+            .await
+            .map_err(|_| SourceWorkerError::Unavailable)?;
+        self.source_workers.probe_hooks.after_evidence().await;
+        // The probe permit is already dropped only after actual reap/pipes.
+        // Encoder admission is separate and cannot self-deadlock against it.
+        let current = owner.gate.current_preparation(&owner.assignment).await?;
+        Box::pin(self.prepare_source_vod_encoding(prepared, &evidence, &current))
+            .await
+            .map_err(|_| SourceWorkerError::Unavailable)
     }
 
     async fn run_source_owner(
@@ -724,8 +795,9 @@ impl TranscodeManager {
         deadline: Instant,
     ) {
         let actor = SourceViewerActor(Arc::clone(&owner));
-        let mut reserved: Option<crate::vodserve::ReservedSourceCopyRendition> = None;
+        let mut reserved: Option<crate::vodserve::ReservedSourceVodRendition> = None;
         let mut index_work = None;
+        let mut probe_work = None;
         let mut unowned_existing = true;
         let start = tokio::time::timeout_at(
             tokio::time::Instant::from_std(deadline),
@@ -751,7 +823,13 @@ impl TranscodeManager {
                     || prepared.request().subtitle_burn.is_some()
                     || prepared.request().previous_session_id.is_some()
                     || prepared.request().reopen_reason.is_some()
-                    || !matches!(prepared.request().kind, SessionKind::Copy { .. })
+                    || (matches!(prepared.request().kind, SessionKind::Transcode { .. })
+                        && (plurx_core::playback::hdr_route(prepared.file()).is_some()
+                            || plurx_core::playback::is_dolby_vision(prepared.file())))
+                    || !matches!(
+                        prepared.request().kind,
+                        SessionKind::Copy { .. } | SessionKind::Transcode { .. }
+                    )
                 {
                     return Err(SourceWorkerError::Unsupported);
                 }
@@ -760,26 +838,40 @@ impl TranscodeManager {
                     .await
                     .map_err(|_| SourceWorkerError::Unavailable)?
                     .ok_or(SourceWorkerError::Unavailable)?;
-                Box::pin(self.prepare_source_cold_index(
-                    &owner,
-                    &prepared,
-                    deadline,
-                    &mut index_work,
-                ))
-                .await?;
-                let admitted = Box::pin(self.vod.prepare_admitted_source_copy(
+                let encoding = if matches!(prepared.request().kind, SessionKind::Transcode { .. }) {
+                    Some(
+                        Box::pin(self.prepare_source_encoded_recipe(
+                            &owner,
+                            &prepared,
+                            deadline,
+                            &mut probe_work,
+                        ))
+                        .await?,
+                    )
+                } else {
+                    Box::pin(self.prepare_source_cold_index(
+                        &owner,
+                        &prepared,
+                        deadline,
+                        &mut index_work,
+                    ))
+                    .await?;
+                    None
+                };
+                let admitted = Box::pin(self.vod.prepare_admitted_source_vod(
                     &prepared,
                     &owner.assignment,
                     &settings,
                     &self.admissions,
                     self.store.as_ref(),
                     deadline,
+                    encoding,
                 ))
                 .await
                 .map_err(|_| SourceWorkerError::Unavailable)?;
                 reserved = Some(
                     self.vod
-                        .reserve_source_copy(admitted)
+                        .reserve_source_vod(admitted)
                         .map_err(|_| SourceWorkerError::Unavailable)?,
                 );
                 if owner
@@ -869,7 +961,7 @@ impl TranscodeManager {
                 {
                     return Err(SourceWorkerError::Unavailable);
                 }
-                Box::pin(self.vod.commit_source_copy(
+                Box::pin(self.vod.commit_source_vod(
                     reservation,
                     &session_id,
                     &owner.gate,
@@ -957,12 +1049,15 @@ impl TranscodeManager {
         actor.request_retirement();
         // Deadline/cancellation never releases an admitted scan. The detached
         // scan owner settles its actual child/readers before Source SQL release.
-        let mut index_receipt = if let Some(work) = index_work.as_ref() {
+        let mut preparations = SourcePreparationSettlements::default();
+        if let Some(work) = index_work.as_ref() {
             work.cancel();
-            Some(work.settle().await)
-        } else {
-            None
-        };
+            preparations.index = Some(work.settle().await);
+        }
+        if let Some(work) = probe_work.as_ref() {
+            work.cancel();
+            preparations.probe = Some(work.settle().await);
+        }
         let mut physical = None;
         let settlement = loop {
             let result = if unowned_existing {
@@ -972,7 +1067,7 @@ impl TranscodeManager {
                     &owner,
                     &mut reserved,
                     &mut physical,
-                    &mut index_receipt,
+                    &mut preparations,
                 ))
                 .await
             };
@@ -998,9 +1093,9 @@ impl TranscodeManager {
     async fn settle_source_owner(
         &self,
         owner: &Arc<SourceViewerInner>,
-        reserved: &mut Option<crate::vodserve::ReservedSourceCopyRendition>,
+        reserved: &mut Option<crate::vodserve::ReservedSourceVodRendition>,
         physical: &mut Option<SourcePhysicalSettlement>,
-        index_receipt: &mut Option<crate::fragindex::SourceIndexSettlement>,
+        preparations: &mut SourcePreparationSettlements,
     ) -> Result<(), SourceWorkerError> {
         if physical.is_none() {
             *physical = Some(if let Some(reserved) = reserved.as_mut() {
@@ -1010,23 +1105,23 @@ impl TranscodeManager {
                 if !receipt.matches(&owner.assignment) {
                     return Err(SourceWorkerError::Unresolved);
                 }
-                SourcePhysicalSettlement::Registered(Box::new(receipt), index_receipt.take())
+                SourcePhysicalSettlement::Registered(
+                    Box::new(receipt),
+                    std::mem::take(preparations),
+                )
             } else {
-                SourcePhysicalSettlement::NoProducer(index_receipt.take())
+                SourcePhysicalSettlement::NoProducer(std::mem::take(preparations))
             });
         }
         if matches!(physical, Some(SourcePhysicalSettlement::Registered(receipt, _)) if !receipt.matches(&owner.assignment))
         {
             return Err(SourceWorkerError::Unresolved);
         }
-        let index = match physical.as_ref().expect("Source physical settlement") {
-            SourcePhysicalSettlement::NoProducer(index)
-            | SourcePhysicalSettlement::Registered(_, index) => index,
+        let preparations = match physical.as_ref().expect("Source physical settlement") {
+            SourcePhysicalSettlement::NoProducer(preparations)
+            | SourcePhysicalSettlement::Registered(_, preparations) => preparations,
         };
-        if index
-            .as_ref()
-            .is_some_and(|receipt| !receipt.matches(&owner.assignment))
-        {
+        if !preparations.matches(&owner.assignment) {
             return Err(SourceWorkerError::Unresolved);
         }
         let incarnation = owner.assignment.binding().incarnation_id().to_string();

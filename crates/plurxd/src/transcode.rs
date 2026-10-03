@@ -488,6 +488,7 @@ use hls_codecs::*;
 #[allow(dead_code)] // Finite owned actor API; ordinary Shared ingress remains closed.
 #[path = "transcode/source_actor.rs"]
 pub(crate) mod source_actor;
+pub(crate) mod source_preparation;
 
 // split: begin cluster-adoption
 #[path = "transcode/cluster_adoption.rs"]
