@@ -19,7 +19,82 @@ pub(crate) struct PreparedSourceVodRendition {
     assignment: plurx_core::sharing_source_sessions::SourceDispatchAssignment,
 }
 
+/// A pending copy rendition and its real, indivisible physical reservation.
+/// Dropping this before attachment returns only that reservation; it never
+/// retires the immutable database assignment or certifies a spawned child.
+#[allow(dead_code)] // The private Source actor consumes this first-start handoff.
+pub(crate) struct AdmittedSourceCopyRendition {
+    pending: PreparedSourceVodRendition,
+    permit: crate::vodencode::EncodePermit,
+}
+
+#[cfg(test)]
+impl AdmittedSourceCopyRendition {
+    pub(crate) async fn assert_no_demand_or_child(&self) {
+        let rendition = &self.pending.prepared.attachment.rendition;
+        assert!(rendition.readers.lock().await.is_empty());
+        assert_eq!(rendition.last_child_pid.load(Relaxed), 0);
+        assert!(matches!(
+            rendition.slot.belief().await,
+            Producer::Absent { .. }
+        ));
+    }
+}
+
 impl VodServe {
+    /// No codec/FFprobe/burn work is hidden in this copy-only preparation.
+    /// The real reservation is held before first durable blocked activation.
+    #[allow(dead_code)] // Source actor integration is deliberately incremental.
+    pub(crate) async fn prepare_admitted_source_copy(
+        &self,
+        source: &crate::http::hls::PreparedSourcePlayback,
+        assignment: &plurx_core::sharing_source_sessions::SourceDispatchAssignment,
+        settings: &VodSettings,
+        admissions: &crate::admission::Admissions,
+        store: &dyn plurx_core::store::Store,
+        deadline: Instant,
+    ) -> Result<AdmittedSourceCopyRendition, String> {
+        if !source.matches_assignment(assignment)
+            || !matches!(source.request().kind, SessionKind::Copy { .. })
+            || source.request().subtitle_burn.is_some()
+        {
+            return Err(
+                "Source copy preparation requires its exact unburned copy assignment".into(),
+            );
+        }
+        let admission_deadline = deadline.min(Instant::now() + crate::admission::QUEUE_WAIT);
+        let permit = loop {
+            let attempt = tokio::time::timeout_at(
+                tokio::time::Instant::from_std(admission_deadline),
+                crate::vodencode::EncodePermit::try_source_copy(admissions, store),
+            )
+            .await;
+            match attempt {
+                Ok(crate::vodencode::SourceCopyPermitRead::Admitted(permit)) => break permit,
+                Ok(crate::vodencode::SourceCopyPermitRead::Unavailable) => {
+                    return Err("Source physical admission policy is unavailable".into());
+                }
+                Ok(crate::vodencode::SourceCopyPermitRead::Capacity) => {
+                    if Instant::now() >= admission_deadline {
+                        return Err("Source physical copy capacity is unavailable".into());
+                    }
+                    tokio::time::sleep_until(tokio::time::Instant::from_std(
+                        admission_deadline.min(Instant::now() + Duration::from_millis(100)),
+                    ))
+                    .await;
+                }
+                Err(_) => return Err("Source physical copy admission timed out".into()),
+            }
+        };
+        let pending = tokio::time::timeout_at(
+            tokio::time::Instant::from_std(deadline),
+            Box::pin(self.prepare_source_vod_rendition(source, assignment, settings, None)),
+        )
+        .await
+        .map_err(|_| "Source copy preparation timed out".to_owned())??;
+        Ok(AdmittedSourceCopyRendition { pending, permit })
+    }
+
     /// The VOD arm of session create, called by the manager AFTER it has
     /// decided the request opts in (`presentation=="vod" && settings.enabled`).
     ///
@@ -222,27 +297,32 @@ impl VodServe {
         if !source.matches_assignment(assignment) {
             return Err("Source prepared request differs from its immutable assignment".to_owned());
         }
+        let mut file = source.file().clone();
+        file.audio_offset_ms = if file.audio_streams.is_empty() {
+            0
+        } else {
+            source.request().audio_offset_ms.clamp(-15_000, 15_000)
+        };
         let fences = VodCreateFences {
             release_fence: None,
             serving_admission: None,
             viewer: None,
         };
-        let prepared = self
-            .prepare_vod_rendition(
-                VodRecipeRequest {
-                    request: source.request(),
-                    encoding,
-                },
-                source.file(),
-                settings,
-                &fences,
-                Some(assignment.binding()),
-            )
-            .await?;
+        let prepared = Box::pin(self.prepare_vod_rendition(
+            VodRecipeRequest {
+                request: source.request(),
+                encoding,
+            },
+            &file,
+            settings,
+            &fences,
+            Some(assignment.binding()),
+        ))
+        .await?;
         Ok(PreparedSourceVodRendition {
             prepared,
             request: source.request().clone(),
-            file: source.file().clone(),
+            file,
             settings: settings.clone(),
             assignment: assignment.clone(),
         })
