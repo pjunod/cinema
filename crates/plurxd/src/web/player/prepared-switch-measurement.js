@@ -671,6 +671,8 @@ function controlVerdictText(message){
 // retires it and every ask that was waiting on the previous action epoch.
 function supersedePlaybackControlIntent(p,{preserveHlsStartup=false,preserveContinuousManualQuality=false}={}){
   if(!p) return 0;
+  cancelNextEpisodePreparation(p);
+  clearAutoplayNextPreparation();
   const previous=p.controlIntentGeneration||0;
   p.controlIntentGeneration=previous+1;
   // Pause/resume or an attached VOD seek changes transport intent while

@@ -84,6 +84,7 @@
  * @property {string|null} [attemptReason] cold-start | resume | seek | quality | …
  * @property {number} [attemptAt]          performance.now() at the attempt
  * @property {any} [openToken]             the open attempt's token (PLAY_OPEN_GATE)
+ * @property {{began:number,current:function():boolean,owner:any,promise:Promise<any>,page:any}|null} [nextEpisodePreparation] bounded read-only successor metadata
  * @property {any} [pendingOpenAttempt]    the open attempt this player was minted for, until it settles
  * @property {any} [retiringOpenAttempt]   an open attempt being retired by a reopen
  * @property {Player|null} [mediaPredecessor] the outgoing player kept until preparation succeeds

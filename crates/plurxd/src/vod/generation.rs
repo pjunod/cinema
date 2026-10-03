@@ -374,6 +374,11 @@ async fn run_generation(
     let generation = Generation {
         plan: rendition.plan.clone(),
         index: rendition.index.clone(),
+        encoded_frame_ticks: rendition
+            .recipe
+            .encoding
+            .as_ref()
+            .map(|encoding| encoding.grid.denominator),
         encoded_audio_anchor: rendition.recipe.encoding.as_ref().map(|_| {
             let start = rendition.plan.entry(at).expect("spawn entry").start_ticks as f64
                 / f64::from(rendition.timescale);

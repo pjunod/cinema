@@ -726,6 +726,7 @@ pub struct TranscodeManager {
     dovi_passthrough_qsv: bool,
     hdr10_passthrough: bool,
     hdr10_passthrough_qsv: bool,
+    hdr10_passthrough_vaapi: bool,
     dovi_proofs: std::sync::Mutex<HashMap<String, bool>>,
     /// The ahead-window limits, snapshotted ([`AHEAD_LIMITS_TTL`]).
     ///
@@ -786,6 +787,8 @@ mod manager_cache;
 #[path = "transcode/manager/candidates.rs"]
 mod manager_candidates;
 pub(crate) use manager_candidates::QUALITY_PLANNING_KEYS;
+#[path = "transcode/content_encoding.rs"]
+mod content_encoding;
 #[path = "transcode/manager/construct.rs"]
 mod manager_construct;
 #[path = "transcode/manager/control.rs"]

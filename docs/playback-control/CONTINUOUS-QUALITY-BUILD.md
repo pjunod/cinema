@@ -4795,3 +4795,32 @@ The latest unlocked-phone retry reached a fresh isolated Linux backend at
 unavailable. No CQ Lab process or physical playback was confirmed; the helper
 cleaned its owned backend/proxy/runtime. No production app was touched.
 No units executed, and final adversarial review/Fable handoff remains pending.
+
+
+### 10.164 · Passing focused Firefox trace and current-main integration
+
+The exact `2ebb4b5f3` focused Firefox campaign passed one manual and five
+actual Auto transitions, with 84.02 ms maximum/mixed p95 callback gap, zero
+stalls/hitches/backsteps, and zero owned producers at every End sample.
+The owned supervisor removed its runtime. This remains a focused late-window
+campaign, rather than the full twenty-change or physical-output matrix.
+
+Its bounded trace shows the second pressure request waiting approximately
+162 seconds before selection, followed by approximately 60 seconds of already
+buffered incumbent video. Preparation and target append took about one second.
+Fresh completed link samples remained roughly 25–28 Mb/s against the bound
+33.8 Mb/s rung, but the mild counter alternated between zero and one whenever
+the normal two-second HLS refill raised runway. This explains a phase-sensitive
+selection delay; the earlier failed receipt remains failed. A correction will
+preserve evidence/cooldown and require draining at the actual downgrade,
+without treating a routine refill as recovered link headroom.
+
+Main advanced to `342521018` with measured encoding, sealed source probing,
+media body coordination, signed x264 reordering and AAC interval repairs.
+Integration preserves independent shared AAC and explicit continuous AVC
+color records, combines reordering flags with color publication, retains the
+cached executable attestation while exposing upstream capture-at support, and
+keeps phase timing around upstream single-probe decoder planning. Both sides'
+authored fixture assertions are retained and will compile without execution.
+No unit tests ran. Current-source full qualification will use the integrated
+candidate, not the older passing focused source.

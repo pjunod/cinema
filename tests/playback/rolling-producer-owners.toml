@@ -487,7 +487,10 @@ replacement = "every new sleep requires classification; actor-managed producer v
 [[symbols]]
 id = "all-async-intervals"
 pattern = "tokio::time::interval\\("
-expected_occurrences = 3
+# Video-quality batch: one interval in the existing admitted sample phase checks
+# background yield/cancellation; the phase owns it until completion and reap.
+# It cannot restart a producer or decide viewer playback recovery.
+expected_occurrences = 4
 kind = "structural_timer_scan"
 replacement = "intervals remain only for named sampling, repair, or lifecycle work and cannot decide producer recovery"
 
@@ -1349,7 +1352,9 @@ expected_occurrences = 4
 [[module_symbols]]
 id = "m4-driven-local-body-owner"
 pattern = "driven_local_body"
-expected_occurrences = 5
+# Video-quality batch: +3 direct fixture calls for batched drain, dropped prefix
+# and terminal-failure accounting. The same bounded body remains the only owner.
+expected_occurrences = 8
 
 [[module_symbols]]
 id = "m4-bounded-local-body-channel"
@@ -2384,7 +2389,11 @@ pattern = "(?:[A-Za-z_]\\w*::)+spawn(?:_blocking|_local|_for_test)?\\s*\\("
 # a test-only background consumer, retained in `consumer`, then explicitly
 # aborted and awaited before the cancellation assertions. No producer/process
 # owner is added; the existing daemon consumer owns its fenced work.
-expected_occurrences = 686
+# Video-quality batch: +3 sites. The cached-report metadata snapshot uses one
+# awaited spawn_blocking. Two BoundedDiagnosticChild::spawn calls are existing
+# child-owner construction (one production sample and one cancellation fixture),
+# not detached recovery tasks; both collectors are awaited through reap.
+expected_occurrences = 689
 # E1 plus S-14 M8: both ownership sets retained and counted on the merged source.
 # 643 -> 647 with S-14 M8 (`plan/S-14-5`: `Encoding`, `RollingFlowSync`, `TerminalCleanup`,
 # `HeadChildOwner`, `VodServingAdmission` behind per-owner hooks), measured by
@@ -3544,7 +3553,11 @@ pattern = "(?:[A-Za-z_]\\w*::)+(?:sleep|sleep_until|interval|interval_at|timeout
 # its test runtime owns a two-second persistence timeout and a 10 ms poll
 # awaited inside that deadline, then drains the writer before runtime drop.
 # No production timer or detached timer owner is added.
-expected_occurrences = 1135
+# Video-quality batch: +4 bounds. The one-shot VAAPI capability probe uses a
+# 20-second timeout under status_job_owned. The admitted content phase owns an
+# offset-permit deadline, a cooperative yield/cancel interval and total deadline;
+# cancellation joins the child before releasing source, scratch or admission.
+expected_occurrences = 1139
 # +1 native-startup delayed-init fixture: its joined writer owns one bounded
 # six-second sleep, under the test request's unchanged twelve-second deadline.
 # No production timer or recovery clock is added.
@@ -3881,7 +3894,11 @@ pattern = "(?:[A-Za-z_]\\w*::)*Command::new\\s*\\("
 # Both existing Tools calls still await output_job_owned, which retains the
 # child job and enables kill-on-drop. The HOME=/ regression uses this same
 # constructor and awaits its finite shell child; no new detached owner exists.
-expected_occurrences = 200
+# Video-quality batch: +4 constructors: one boot VAAPI probe, the bounded
+# sample/scorer command factory, one finite cancellation shell fixture and one
+# independent VOD restart decode fixture. Production commands use existing child
+# job owners; fixtures collect completion before dropping their temporary media.
+expected_occurrences = 204
 
 [[module_structures]]
 id = "process-capable-launch-method"
@@ -4343,7 +4360,9 @@ pattern = "\\.(?:spawn|output|status)\\s*\\("
 # Combined current-main 409 plus the queued-publication test child = 410.
 # +1 TCL legacy admission fixture: Response::status() asserts typed Auto/1440
 # overflow versus ordinary copy/manual admission. This does not launch a child.
-expected_occurrences = 413
+# Video-quality batch: +1 output() in the independently decoded reordered VOD
+# restart fixture; it awaits completion with kill-on-drop and owns no viewer.
+expected_occurrences = 414
 # +2 native-startup delayed-init fixture: Axum Response::status() reads
 # assert the master and legacy bridge responses. Neither launches a process.
 
@@ -4572,7 +4591,10 @@ pattern = "\\.(?:kill|start_kill|wait|try_wait|exec)\\s*\\("
 # Queued-publication regression: the test owns one finite sleep child,
 # uses exec to avoid descendants, enables kill-on-drop, and verifies run_part
 # terminated and reaped it for foreground, download, ownership and deadline yields.
-expected_occurrences = 242
+# Video-quality batch: +2 net lifecycle calls in BoundedDiagnosticChild. The
+# cancellable collector adds start_kill and a separate awaited wait branch; its
+# successful ordinary/cancelled wait retains the same child-job owner until reap.
+expected_occurrences = 244
 
 [[module_structures]]
 id = "free-or-ufcs-process-lifecycle"
@@ -4740,7 +4762,9 @@ pattern = "kill_on_drop\\s*\\("
 # Queued-publication regression: the test owns one finite sleep child,
 # uses exec to avoid descendants, enables kill-on-drop, and verifies run_part
 # terminated and reaped it for foreground, download, ownership and deadline yields.
-expected_occurrences = 93
+# Video-quality batch: +2 guards on the one-shot VAAPI capability probe and
+# finite reordered-VOD decode fixture. Their enclosing owners also await reap.
+expected_occurrences = 95
 
 [[module_structures]]
 id = "rolling-supervisor-construction"

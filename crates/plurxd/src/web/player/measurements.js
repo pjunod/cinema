@@ -68,8 +68,8 @@ const PLAY_OPEN_GATE=createPlaybackOpenGate();
 // Network preparation has one absolute lifetime, separate from presentation.
 // A moving predecessor cannot extend it. Cancellation/timeout settles even a
 // transport that ignores abort, and its eventual session result is released.
-function beginPlaybackPreparation(isCurrent){
-  beginPlaybackPreparation.active?.cancel();
+function beginPlaybackPreparation(isCurrent,{background=false}={}){
+  if(!background) beginPlaybackPreparation.active?.cancel();
   const controller=new AbortController(), began=performance.now();
   let abandoned=false, rejectPending=null;
   const cancelled=()=>Object.assign(new Error("Playback preparation superseded."),{name:"AbortError"});
@@ -120,7 +120,7 @@ function beginPlaybackPreparation(isCurrent){
       }finally{clearTimeout(timer);rejectPending=null;}
     }
   };
-  beginPlaybackPreparation.active=owner;
+  if(!background) beginPlaybackPreparation.active=owner;
   return owner;
 }
 // Set by a caller that is about to re-enter play() for a reason play()

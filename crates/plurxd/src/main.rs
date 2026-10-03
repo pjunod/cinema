@@ -2454,6 +2454,11 @@ async fn probe_system(
         } else {
             false
         },
+        hdr10_passthrough_vaapi: if encoder_caps.vaapi {
+            crate::ffmpeg::has_hdr10_passthrough_vaapi().await
+        } else {
+            false
+        },
         dovi_passthrough_qsv: if encoder_caps.qsv {
             crate::ffmpeg::has_dovi_passthrough_with(plurx_core::transcode::Encoder::Qsv).await
         } else {
@@ -2488,6 +2493,7 @@ struct Measured {
     dovi_passthrough_qsv: bool,
     hdr10_passthrough: bool,
     hdr10_passthrough_qsv: bool,
+    hdr10_passthrough_vaapi: bool,
     encoder_selected: String,
     decoders: Vec<String>,
     measured_decoders: plurx_core::transcode::decoder_inventory::MeasuredDecoders,
@@ -2529,6 +2535,7 @@ fn system_info(
         dovi_passthrough_qsv: measured.dovi_passthrough_qsv,
         hdr10_passthrough: measured.hdr10_passthrough,
         hdr10_passthrough_qsv: measured.hdr10_passthrough_qsv,
+        hdr10_passthrough_vaapi: measured.hdr10_passthrough_vaapi,
         dv_disk: measured.dv_disk,
         // Not measured: the conversion is plurx's own code, so the only
         // question is whether an operator has turned it off. The default is
@@ -6590,6 +6597,7 @@ mod startup_tests {
                 dovi_passthrough_qsv: true,
                 hdr10_passthrough: true,
                 hdr10_passthrough_qsv: true,
+                hdr10_passthrough_vaapi: true,
                 encoder_selected: selected.clone(),
                 decoders: vec!["h264".to_owned(), "hevc".to_owned()],
                 tone_map: pipeprobe::PipelineReport::cpu_only("not probed"),

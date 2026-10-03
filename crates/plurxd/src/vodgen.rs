@@ -103,6 +103,8 @@ pub struct Generation {
     /// Encoded AAC begins before video so its transform/overlap state is
     /// warm at the cut. Its origin is a film-global 1024-sample boundary.
     pub encoded_audio_anchor: Option<u64>,
+    /// Frozen output cadence; copy generations have no encoded grid.
+    pub encoded_frame_ticks: Option<u32>,
     pub identity: InitIdentity,
     /// Rewrite this generation's Dolby Vision RPUs to Profile 8.1 as its
     /// fragments arrive.
@@ -439,7 +441,7 @@ impl<S: Sink> GenerationRun<'_, S> {
         let Some(init) = &self.encoded_init else {
             return Ok(());
         };
-        let Some(video) = init.video().and_then(|video| fragment.track(video.id)) else {
+        let Some(_) = init.video().and_then(|video| fragment.track(video.id)) else {
             return Ok(());
         };
         let Some(entry) = self.generation.plan.entry(self.encoded_entry) else {
@@ -453,16 +455,23 @@ impl<S: Sink> GenerationRun<'_, S> {
             .entry(self.generation.start_entry)
             .expect("start entry")
             .start_ticks;
-        if !plurx_core::fmp4::classify(fragment, init).is_clean()
-            || video.base_decode_time != entry.start_ticks - origin
-            || video.duration() != entry.duration_ticks
-            || video.samples().any(|sample| sample.cto != 0)
-        {
-            return Err(landing_failed(format!(
-                "encoded entry {} does not match its clean frame grid: dts {}, duration {}, expected {} + {}",
-                entry.index, video.base_decode_time, video.duration(), entry.start_ticks - origin, entry.duration_ticks,
-            )));
-        }
+        let frame_ticks = self
+            .generation
+            .encoded_frame_ticks
+            .ok_or_else(|| landing_failed("encoded recipe has no frozen frame cadence".into()))?;
+        let start = entry
+            .start_ticks
+            .checked_sub(origin)
+            .ok_or_else(|| landing_failed("encoded entry precedes generation origin".into()))?;
+        plurx_core::fmp4::validate_encoded_grid(
+            fragment,
+            init,
+            self.generation.plan.timescale,
+            start,
+            entry.duration_ticks,
+            frame_ticks,
+        )
+        .map_err(|reason| landing_failed(format!("encoded entry {}: {reason}", entry.index)))?;
         self.encoded_entry += 1;
         Ok(())
     }
@@ -596,21 +605,21 @@ impl<S: Sink> GenerationRun<'_, S> {
             .served
             .take()
             .expect("the landing buffer fills only after the init");
-        let segmenter = match Segmenter::following(
-            init,
-            self.generation.policy,
-            u64::from(start_entry),
-            starts,
-        ) {
-            Ok(segmenter) => {
-                segmenter.retaining_hevc_parameter_sets(self.generation.retain_hevc_parameter_sets)
-            }
-            Err(error) => {
-                return Err(Outcome::Failed(Failure::Stream(format!(
-                    "placing the generation against its plan: {error}"
-                ))))
-            }
+        let following = if self.generation.encoded_audio_anchor.is_some() {
+            Segmenter::following_encoded
+        } else {
+            Segmenter::following
         };
+        let segmenter =
+            match following(init, self.generation.policy, u64::from(start_entry), starts) {
+                Ok(segmenter) => segmenter
+                    .retaining_hevc_parameter_sets(self.generation.retain_hevc_parameter_sets),
+                Err(error) => {
+                    return Err(Outcome::Failed(Failure::Stream(format!(
+                        "placing the generation against its plan: {error}"
+                    ))))
+                }
+            };
         self.segmenter = Some(segmenter);
 
         // Drop the first `discards` video-carrying fragments — the index
@@ -1161,6 +1170,7 @@ mod tests {
             plan: film.plan.clone(),
             index: Some(film.index.clone()),
             encoded_audio_anchor: None,
+            encoded_frame_ticks: None,
             identity: film.identity.clone(),
             start_entry,
             policy: film.policy,
@@ -1587,6 +1597,7 @@ mod tests {
             plan: film.plan.clone(),
             index: Some(film.index.clone()),
             encoded_audio_anchor: None,
+            encoded_frame_ticks: None,
             identity,
             start_entry: 0,
             policy: film.policy,

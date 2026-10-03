@@ -758,7 +758,7 @@ quality_catalog: None,
     .with_dovi_reshape(true);
     let before = spawns_of(background);
     assert!(offline
-        .effective_rate_control_for_new_offline_package(&file)
+        .effective_rate_control_for_new_offline_package(&file, 1080, false)
         .await
         .is_err());
     assert!(

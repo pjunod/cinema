@@ -2920,3 +2920,65 @@ quality_catalog: None,
         );
         (state, user, file_id)
     }
+
+    #[tokio::test]
+    async fn storage_batch_drains_without_a_producer_round_trip_per_proof_unit() {
+        use futures_util::StreamExt;
+        let (sender, receiver) = tokio::sync::mpsc::channel(1);
+        let (accepted, mut acknowledgements) = tokio::sync::watch::channel(0usize);
+        let size = MEDIA_BODY_ACK_GRANULARITY * 3 + 17;
+        sender.send(DrivenLocalChunk { bytes: Bytes::from(vec![7; size]), accepted })
+            .await.expect("batch queued");
+        drop(sender);
+        let mut body = driven_local_body(receiver, StreamedBodyTerminal::new(),
+            tokio::time::Instant::now() + Duration::from_secs(60)).into_data_stream();
+        // No producer or acknowledgement receiver is polled between pieces.
+        for expected in [MEDIA_BODY_ACK_GRANULARITY, MEDIA_BODY_ACK_GRANULARITY,
+            MEDIA_BODY_ACK_GRANULARITY, 17] {
+            let piece = body.next().await.expect("piece").expect("body data");
+            assert_eq!(piece.len(), expected);
+        }
+        acknowledgements.changed().await.expect("last count survives sender drop");
+        assert_eq!(*acknowledgements.borrow_and_update(), size);
+        assert!(acknowledgements.changed().await.is_err());
+        assert!(body.next().await.is_none());
+    }
+
+    #[tokio::test]
+    async fn storage_batch_drop_retains_only_the_polled_prefix() {
+        use futures_util::StreamExt;
+        let (sender, receiver) = tokio::sync::mpsc::channel(1);
+        let (accepted, mut acknowledgements) = tokio::sync::watch::channel(0usize);
+        sender.send(DrivenLocalChunk {
+            bytes: Bytes::from(vec![7; MEDIA_BODY_READ_BUFFER]), accepted,
+        }).await.expect("batch queued");
+        let mut body = driven_local_body(receiver, StreamedBodyTerminal::new(),
+            tokio::time::Instant::now() + Duration::from_secs(60)).into_data_stream();
+        assert_eq!(body.next().await.expect("body piece").expect("body data").len(), MEDIA_BODY_ACK_GRANULARITY);
+        drop(body);
+        acknowledgements.changed().await.expect("accepted prefix survives body drop");
+        assert_eq!(*acknowledgements.borrow_and_update(), MEDIA_BODY_ACK_GRANULARITY);
+        assert!(acknowledgements.changed().await.is_err());
+        assert!(sender.is_closed());
+    }
+
+    #[tokio::test]
+    async fn terminal_failure_discards_the_unpolled_part_of_a_storage_batch() {
+        use futures_util::StreamExt;
+        let (sender, receiver) = tokio::sync::mpsc::channel(1);
+        let (accepted, mut acknowledgements) = tokio::sync::watch::channel(0usize);
+        sender.send(DrivenLocalChunk {
+            bytes: Bytes::from(vec![7; MEDIA_BODY_READ_BUFFER]), accepted,
+        }).await.expect("batch queued");
+        let terminal = StreamedBodyTerminal::new();
+        let mut body = driven_local_body(receiver, terminal.clone(),
+            tokio::time::Instant::now() + Duration::from_secs(60)).into_data_stream();
+        assert_eq!(body.next().await.expect("body piece").expect("body data").len(), MEDIA_BODY_ACK_GRANULARITY);
+        acknowledgements.changed().await.expect("prefix acknowledgement");
+        assert_eq!(*acknowledgements.borrow_and_update(), MEDIA_BODY_ACK_GRANULARITY);
+        terminal.fail(std::io::ErrorKind::TimedOut, "producer expired".to_owned());
+        assert!(body.next().await.expect("terminal frame").is_err());
+        assert!(body.next().await.is_none());
+        assert!(acknowledgements.changed().await.is_err());
+        assert_eq!(*acknowledgements.borrow(), MEDIA_BODY_ACK_GRANULARITY);
+    }

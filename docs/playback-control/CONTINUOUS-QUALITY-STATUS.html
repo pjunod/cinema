@@ -5,15 +5,16 @@
 <p class="state"><strong>Incomplete — final adversarial review has not started.</strong>
 The human requests a stop immediately after that review for external Fable
 reviews, before fast-lane tests or merge.</p>
-<p><strong>Working now:</strong> exact build <code>432a8b322</code> passed one
-manual change (83.48 ms) and actual Auto 1080p → 720p → 1080p (maximum 84 ms),
-but the second pressure downgrade did not present within 240 seconds. The failed
-receipt shows the 720p target already appended at film time 1600 seconds while
-playback was still at 1594.464 seconds. Policy selection and presentation are
-being traced separately, with bounded one-second diagnostics. No thresholds
-were relaxed. End retired both owned producers by the one-second sample.
-Normal hook, exact Linux build and web compiler passed; no units ran.
-Full campaigns, native evidence and final review remain.</p>
+<p><strong>Working now:</strong> exact <code>2ebb4b5f3</code> passed one manual
+and five actual Auto changes in Firefox at 84.02 ms maximum/mixed p95 gap, with
+zero stalls, hitches or backsteps. End showed zero owned producers at all four
+samples; its runtime was removed. The trace identifies phase-sensitive mild
+pressure counting: a routine HLS buffer refill resets the counter despite
+continued low link margin. The downgrade will retain evidence/cooldown and
+require draining at the actual choice. Current main <code>342521018</code> is
+being integrated before full campaigns; five source conflicts are resolved
+with both shared AAC and upstream encoding improvements retained.
+No units ran; native evidence, full campaigns and final review remain.</p>
 <p><strong>Physical iOS:</strong> 17promax was reachable after the latest unlock.
 The separate CQ Lab launch against exact <code>432a8b322</code> again reported
 Locked and then remoteService XPC unavailable. No application process or

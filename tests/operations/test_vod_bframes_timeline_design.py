@@ -1,9 +1,8 @@
 """Executable design contract for a possible reordered encoded-VOD recipe.
 
-This is deliberately independent of production code.  S-12 is a design
-item: the production landing validator continues to reject every nonzero
-composition offset until a later implementation replaces that refusal with
-this presentation-grid proof.
+This independent oracle is shared with parser-produced Rust regressions.
+The production validator additionally checks raw wire shape, overflow and
+that the opening random-access sample presents at the entry start.
 """
 
 from __future__ import annotations
@@ -156,9 +155,9 @@ class VodBframesTimelineDesignTest(unittest.TestCase):
         plan = PLAN.read_text(encoding="utf-8")
         self.assertIn("tests/playback/vod-bframes-timeline-cases.json", plan)
         self.assertRegex(plan, r"Option A is the only\s+admissible reordered design")
-        self.assertRegex(plan, r"current nonzero-CTO\s+refusal stays deployed")
-        self.assertIn("current `Init` does not expose this fact", plan)
-        self.assertIn("discard the raw `trun` version and presence flag", plan)
+        self.assertIn("presentation-grid validator", plan)
+        self.assertIn("parser now retains edit-list state", plan)
+        self.assertIn("parser now retains the raw `trun` version and presence flag", plan)
         self.assertIn("advisory-only", plan)
 
 

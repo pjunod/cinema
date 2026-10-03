@@ -1,0 +1,64 @@
+#!/bin/sh
+# A scoring-only static FFmpeg. The production Jellyfin encoder is unchanged.
+set -eu
+ffmpeg_version=8.1.3
+ffmpeg_sha=7138d28c96d9d3e3af4ee3d8cad72741f8ffb40da90c1112235dea3ecd3178a3
+vmaf_version=3.0.0
+vmaf_sha=7178c4833639e6b989ecae73131d02f70735fdb3fc2c7d84bc36c9c3461d93b1
+binary=${1:?usage: build-static-vmaf-scorer BINARY_PATH DOCUMENTATION_DIR}
+documentation=${2:?usage: build-static-vmaf-scorer BINARY_PATH DOCUMENTATION_DIR}
+jobs=${PLURX_STATIC_SCORER_JOBS:-2}
+case "$jobs" in 1|2|3|4) ;; *) echo 'scorer build jobs must be 1..4' >&2; exit 1 ;; esac
+case "$binary:$documentation" in /*:/*) ;; *) echo 'output paths must be absolute' >&2; exit 1 ;; esac
+work=$(mktemp -d)
+trap 'rm -rf "$work"' EXIT HUP INT TERM
+curl --proto '=https' --tlsv1.2 --fail --location --retry 2 \
+    "https://ffmpeg.org/releases/ffmpeg-${ffmpeg_version}.tar.xz" -o "$work/ffmpeg.tar.xz"
+curl --proto '=https' --tlsv1.2 --fail --location --retry 2 \
+    "https://codeload.github.com/Netflix/vmaf/tar.gz/refs/tags/v${vmaf_version}" -o "$work/vmaf.tar.gz"
+printf '%s  %s\n' "$ffmpeg_sha" "$work/ffmpeg.tar.xz" "$vmaf_sha" "$work/vmaf.tar.gz" | sha256sum -c -
+mkdir "$work/ffmpeg" "$work/vmaf"
+tar -xJf "$work/ffmpeg.tar.xz" --strip-components=1 -C "$work/ffmpeg"
+tar -xzf "$work/vmaf.tar.gz" --strip-components=1 -C "$work/vmaf"
+meson setup "$work/vmaf-build" "$work/vmaf/libvmaf" --prefix="$work/install" --libdir=lib \
+    --buildtype=release --default-library=static -Denable_tests=false -Denable_docs=false \
+    -Denable_float=false -Dbuilt_in_models=true
+ninja -C "$work/vmaf-build" -j "$jobs"
+ninja -C "$work/vmaf-build" install
+cd "$work/ffmpeg"
+# Only local materialized samples are inputs. No network, device, encoder
+# selection or library-title decode path belongs in the scoring executable.
+# libvmaf 3.0's pkg-config metadata omits the C++ runtime used by svm.cpp.
+# The pinned Debian builder uses GCC, so include its static C++ closure.
+# lavfi emits wrapped frames; its decoder is needed by the model self-test.
+PKG_CONFIG_PATH="$work/install/lib/pkgconfig" ./configure \
+    --disable-shared --enable-static --disable-autodetect --disable-everything \
+    --disable-programs --enable-ffmpeg --disable-doc --disable-debug --disable-network \
+    --enable-avdevice --enable-indev=lavfi \
+    --enable-protocol=file,pipe --enable-demuxer=matroska \
+    --enable-decoder=h264,ffv1,rawvideo,wrapped_avframe --enable-parser=h264 \
+    --enable-encoder=wrapped_avframe --enable-muxer=null \
+    --enable-filter=libvmaf,scale,format,setpts,split,testsrc2,buffer,buffersink,null \
+    --enable-libvmaf --pkg-config-flags=--static --extra-ldexeflags=-static \
+    --extra-libs=-lstdc++ || { cat ffbuild/config.log >&2; exit 1; }
+make -j "$jobs" ffmpeg
+readelf -l ffmpeg > "$work/elf-program-headers"
+if grep -Eq '[[:space:]](INTERP|DYNAMIC)[[:space:]]' "$work/elf-program-headers"; then
+    echo 'VMAF scorer unexpectedly has a dynamic dependency closure' >&2; exit 1
+fi
+./ffmpeg -nostdin -hide_banner -loglevel error -filter_complex_threads 1 \
+    -f lavfi -i testsrc2=size=64x64:rate=10:duration=0.2 \
+    -lavfi 'split[a][b];[a][b]libvmaf=model=version=vmaf_v0.6.1:n_threads=1' -f null -
+mkdir -p "$(dirname "$binary")" "$documentation"
+install -m 0755 ffmpeg "$binary"
+cp COPYING.LGPLv2.1 COPYING.LGPLv3 LICENSE.md "$documentation/"
+cp "$work/vmaf/LICENSE" "$documentation/VMAF-LICENSE"
+cp "$work/ffmpeg.tar.xz" "$documentation/ffmpeg-${ffmpeg_version}.tar.xz"
+cp "$work/vmaf.tar.gz" "$documentation/vmaf-${vmaf_version}.tar.gz"
+cp ffbuild/config.log "$documentation/config.log"
+{
+    printf 'ffmpeg_source_sha256=%s\nvmaf_source_sha256=%s\nmodel=vmaf_v0.6.1 (built in)\n' "$ffmpeg_sha" "$vmaf_sha"
+    sha256sum "$binary"
+    cat "$work/elf-program-headers"
+    "$binary" -version
+} > "$documentation/build.txt"

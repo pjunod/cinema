@@ -737,7 +737,7 @@
     #[tokio::test]
     async fn driven_local_body_rejects_queued_data_after_terminal_failure() {
         let (sender, receiver) = tokio::sync::mpsc::channel(1);
-        let (accepted, rejected) = tokio::sync::oneshot::channel();
+        let (accepted, mut rejected) = tokio::sync::watch::channel(0usize);
         sender
             .send(DrivenLocalChunk {
                 bytes: Bytes::from_static(b"stale-chunk"),
@@ -765,7 +765,7 @@
         assert!(error.to_string().contains("body deadline expired"));
         assert!(body.frame().await.is_none());
         assert!(
-            rejected.await.is_err(),
+            rejected.changed().await.is_err(),
             "stale bytes must not be acknowledged"
         );
     }

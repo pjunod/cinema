@@ -1,7 +1,7 @@
 # Encoded VOD B-frames — a timeline-contract design, not a flag
 
-**Status:** design contract complete; production remains no-reorder pending
-fleet and device evidence · **Executes:** Q2 / F-stream-2 (design item,
+**Status:** software implementation in PR #766; no-reorder remains the default
+while client and compression evidence is collected · **Executes:** Q2 / F-stream-2 (design item,
 M–L) from
 [ARCHITECTURE-REVIEW-2026-09-20.md](../reviews/ARCHITECTURE-REVIEW-2026-09-20.md)
 §0, §3.1, §5.3 and the assessment's correction 2 · **Written:** 2026-09-20
@@ -45,9 +45,50 @@ version-1 `trun` composition offsets, the presentation-grid validator in
 §3.4 landing before any reordered recipe, and qualification per encoder
 family and client. Option B is rejected. No efficiency figure is credited
 until it is measured on this pipeline — the appendix's 10–20 % was withdrawn
-by §0 of the review as unmeasured here. Therefore the current nonzero-CTO
-refusal stays deployed while the measurement, compatibility and device rows
-in §5 remain blocked.
+by §0 of the review as unmeasured here. The video-quality batch implements Option A while retaining zero B-frames
+as the default. Operator enablement is advisory-only; every produced fragment
+still has to satisfy the strict publication contract.
+
+## Implementation continuation — 2026-10-03
+
+[PR #766](http://192.168.4.7:3000/noirr/plurx/pulls/766) implements the
+presentation-grid validator, parser-retained edit-list and raw `trun` facts,
+and an optional software x264 recipe. Settings → Developer → Reordered VOD
+frames saves `playback.vod_reorder_frames` as 0 or 2 without a readiness veto.
+The recipe freezes that value, includes it in rendition identity, and uses
+`+negative_cts_offsets` only for software H.264. Other encoder families retain
+their existing output. No watchdog or timing correction hides reordered PTS.
+
+The validator requires the planned timescale and decode anchor, absence of
+edit-list shifts, clean random access, exact frame durations/count, signed
+version-1 offsets when nonzero, and every unique presentation slot on the
+planned grid. The first random-access sample must present at the entry start:
+a complete permutation with an IDR later than its leading B pictures is still
+refused. Checked widened arithmetic precedes publication. Restart init identity
+remains unchanged. The encoded segmenter owns AAC assignment on the same
+presentation boundaries as the plan; it moves complete packets from the next
+muxed fragment into the preceding entry when their start is before its end.
+Only moved audio payloads are copied; video stays in its existing buffer.
+
+The first real reordered encode exposed why this is necessary: FFmpeg grouped
+AAC at video decode time, four packets before the next presentation boundary.
+A continuous entry began audio at sample 92,160 while regenerating it began at
+96,256. The film-global 1,024-sample phase was correct in both; packet ownership
+was not. `Segmenter::following_encoded` now assigns those packets using rational
+film time, without changing AAC timestamps, encoder preroll, or refusal rules.
+Copy segmenting retains its muxed-fragment contract.
+
+The common design oracle is now also consumed by parser-produced Rust tests.
+Additional cases cover raw wire shape, overflow and a falsely shifted IDR.
+An authored real-encode regression covers forward/backward restarts, identical
+init, independent segment decoding and joined audio/video continuity. That
+regression passed after the AAC partition fix, alongside exact packet/sample
+conservation. [Receipt](../evidence/video-quality-2026-10-03/reordered-aac-selective-receipt.json).
+Physical-client qualification and compression measurements remain separate
+evidence and are not implied by these server-side checks.
+
+Sections below retain the dated design rationale; this continuation supersedes
+statements that production source has no presentation-grid implementation.
 
 ## 2. Contract today
 
@@ -339,14 +380,13 @@ it, on both the CI ffmpeg 6 and the shipped jellyfin-ffmpeg 8.
    reorder depth is fixed by the recipe; a family that adapts depth to
    content (hardware B-pyramid heuristics) would fail conjunct (2) on the
    first fragment, which is the right failure.
-5. **AAC lattice.** Untouched in samples: reordering is video-only, audio
-   keeps its 1024-sample lattice and `place_encoded_audio` is unchanged.
-   Interleaving changes — with `delay_moov`+`frag_keyframe` the muxer
-   still cuts on the keyframe *in decode order*, which is still the IDR —
-   so the fragment boundaries are the same. The one thing to watch is that
-   `-t` is applied to encoder input frames, not output, so the delayed
-   last frames still flush inside the same `-t`; the final entry's
-   `trim=end_frame` bound is the real limit and is unchanged.
+5. **AAC lattice.** Audio keeps its 1024-sample lattice and
+   `place_encoded_audio` retains generation-start preroll removal. The initial
+   assumption that muxed audio boundaries also remain identical was disproved
+   by the real-encode regression: the keyframe's decode-time cut precedes its
+   presentation boundary. The implementation continuation above assigns packets
+   to the declared presentation intervals. `trim=end_frame` still owns the
+   final video bound; encoder delay must flush inside the same `-t`.
 
 Not touched: `-force_key_frames`, `-g`, `-keyint_min`, `-sc_threshold 0`,
 `-enc_time_base:v`, `-video_track_timescale`, `-use_editlist 0`,
@@ -420,9 +460,9 @@ The candidate producer's box contract is:
    offset uses version 1 and the sample-composition-time-offset-present flag;
    each on-wire offset is a signed 32-bit `pts - dts`. Today's all-zero output
    may remain version 0. No `ctts` or per-generation init state is introduced.
-   This raw wire-shape rule is proved at B0 by direct box inspection. It is not
-   a runtime-validator claim while `Sample`/`Run` retain only the resolved CTO
-   and discard the raw `trun` version and presence flag.
+   The parser now retains the raw `trun` version and presence flag, so
+   publication checks the wire shape as well as the resolved CTO. Direct
+   inspection remains part of encoder qualification.
 4. `tfhd` and `trex` defaults remain legal. The validator operates on the
    parser's resolved sample durations, regardless of which box supplied each
    value. Every resolved video-sample duration must equal
@@ -430,9 +470,8 @@ The candidate producer's box contract is:
 5. `-use_editlist 0` remains. The selected video track must structurally lack
    `edts`/`elst`, so no presentation shift may repair a fragment after the
    fact. `moof`/`traf` are self-contained against the recipe's immutable
-   `moov`. Because current `Init` does not expose this fact, B2 must first add
-   parser-retained edit-list state and parser-produced positive and negative
-   tests; absence may not be inferred from argv.
+   `moov`. The parser now retains edit-list state on each track and the validator
+   refuses it; absence is not inferred from argv.
 6. All arithmetic is checked after widening to a signed type able to represent
    `u64 + u32 + i32` (an `i128` in the proposed Rust implementation). Overflow,
    a negative PTS, or a value outside the planned interval is a typed landing

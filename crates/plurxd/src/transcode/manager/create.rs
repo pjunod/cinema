@@ -833,15 +833,31 @@ impl TranscodeManager {
                 start_infrastructure_error(format!("reading the stored source probe: {error}"))
             })?;
         let phase_started = std::time::Instant::now();
-        let held_probe =
-            crate::ffmpeg::held_source_probe_json(&source.handle, VOD_START_HELD_PROBE)
-                .await
-                .map_err(|error| {
-                    vod_refusal_error(
-                        "vod_source_rescan_required",
-                        format!("the held source could not be verified against its scan: {error}"),
-                    )
-                })?;
+        let held_plan_handle = source.handle.try_clone().map(Arc::new).map_err(|error| {
+            vod_refusal_error(
+                "vod_source_rescan_required",
+                format!("the held source could not be retained for verification: {error}"),
+            )
+        })?;
+        let collected = self.probe_vod_source_once(file, held_plan_handle).await?;
+        let (held_probe, held_decode_facts) = match collected {
+            Some(mut collected) => (std::mem::take(&mut collected.document), Some(collected)),
+            // Platforms without a sealed probe keep their existing source
+            // verification and stored-facts planning behavior.
+            None => (
+                crate::ffmpeg::held_source_probe_json(&source.handle, VOD_START_HELD_PROBE)
+                    .await
+                    .map_err(|error| {
+                        vod_refusal_error(
+                            "vod_source_rescan_required",
+                            format!(
+                                "the held source could not be verified against its scan: {error}"
+                            ),
+                        )
+                    })?,
+                None,
+            ),
+        };
         note_phase("held_source_probe", phase_started);
         let comparison = probe
             .as_deref()
@@ -1080,9 +1096,13 @@ impl TranscodeManager {
             )
         })?;
         let phase_started = std::time::Instant::now();
-        let plan = self
-            .resolve_vod_movie_plan(file, &options, encoder, held_plan_handle)
-            .await?;
+        let plan = if let Some(prepared) = held_decode_facts {
+            self.resolve_vod_prepared_source(file, &options, encoder, held_plan_handle, prepared)
+                .await?
+        } else {
+            self.resolve_vod_movie_plan(file, &options, encoder, held_plan_handle)
+                .await?
+        };
         note_phase("execution_decoder_plan", phase_started);
         if let Some(frame_rate) = plan
             .output_contract()
@@ -1163,6 +1183,15 @@ impl TranscodeManager {
                 "the source changed while attesting the encoded engine; rescan it before playback",
             ));
         }
+        let reorder_frames = self
+            .store
+            .get_setting("playback.vod_reorder_frames")
+            .await
+            .map_err(|error| {
+                start_infrastructure_error(format!("reading VOD reorder setting: {error}"))
+            })?
+            .as_deref()
+            == Some("2");
         Ok(Some(Arc::new(crate::vodencode::Encoding {
             shared_audio,
             source_object_version,
@@ -1170,6 +1199,7 @@ impl TranscodeManager {
             resources,
             options,
             grid,
+            reorder_frames,
             subtitle,
             subtitle_digest,
             ffmpeg_build: crate::ffmpeg::ffmpeg_build().await,

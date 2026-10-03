@@ -321,24 +321,37 @@ let AUTOPLAY=null;
 // player resolves it later regardless of which layout drew the page, so it is
 // data, not presentation, and a layout that forgot to do it would break
 // playback rather than just look different.
-async function loadItem(id,isCurrent=()=>true){
-  const [d, libs]=await Promise.all([api(`/items/${id}`), libsCached()]);
+async function loadItem(id,isCurrent=()=>true,preparedPage=null){
+  let page=preparedPage&&preparedPage.id===String(id)?preparedPage:null;
+  if(!page){
+    const [d,libs]=await Promise.all([api(`/items/${id}`),libsCached()]);
+    if(!isCurrent())return null;
+    page=itemPageModel(id,d,libs);
+  }
   if(!isCurrent())return null;
-  const it=d.item;
-  // A pre-play track choice belongs to the item it was made on. Arriving at
-  // another one starts from the server's defaults again — the alternative is a
-  // French audio track chosen for one film quietly applying to the next.
+  acceptItemPage(page);
+  return page;
+}
+// Preparing another episode must not clear this episode's track selection or
+// publish file mappings. Model construction is read-only; acceptance owns those
+// effects when the existing item/playback lifecycle actually takes the page.
+function acceptItemPage(page){
   clearPrePlay();
+  page.files.forEach(f=>{ITEM_FOR_FILE[f.id]=page.id;});
+}
+function itemPageModel(id,d,libs){
+  const it=d.item;
   const lib=libs.find(l=>l.id===it.library_id);
-  d.files.forEach(f=>{
-    ITEM_FOR_FILE[f.id]=String(id);
+  const files=d.files.map(original=>{
+    const f={...original};
     // File DTOs are item-scoped and do not repeat their library id. The
     // conversion status endpoint publishes modes per library, so bind the
     // already-loaded item authority once instead of issuing per-file reads.
     f.library_id=it.library_id;
     f.subtitle_search_enabled=it.kind==="movie"||it.kind==="episode";
+    return f;
   });
-  const files=d.files, children=d.children||[], ancestors=d.ancestors||[];
+  const children=d.children||[], ancestors=d.ancestors||[];
   const best=files[0], multi=files.length>1;
   const runtime=it.runtime_ms||(best&&best.duration_ms)||0;
   // Resume threshold in ONE place. Three seconds is "you actually started it"
@@ -655,8 +668,9 @@ function chapterList(p){
 }
 async function viewItem(id,isCurrent=()=>true){
   const generation=PAGE_RENDER_GENERATION;
+  const prepared=takeAutoplayNextPreparation(id);
   layoutChrome("home",`<div class="empty">Loading…</div>`);
-  const page=await loadItem(id,()=>isCurrent()&&generation===PAGE_RENDER_GENERATION&&location.hash===`#/item/${id}`);
+  const page=await loadItem(id,()=>isCurrent()&&generation===PAGE_RENDER_GENERATION&&location.hash===`#/item/${id}`,prepared?.page);
   if(!page)return;
   if(!isCurrent()||generation!==PAGE_RENDER_GENERATION||location.hash!==`#/item/${id}`)return;
   WATCH_ITEM_PAGE=page;
