@@ -1077,6 +1077,42 @@ explicit owner authority; no public write or private-code publication occurred
 in this continuation. M6 remains incomplete. M5 (d)'s §5.6 fleet acceptance is
 separate; declined (b)/(c) and candle's forced `onig` boundary are unchanged.
 
+**M6 source reconciliation and preparation correction, 2026-10-03.**
+The September 30 receipt above remains historical evidence. An expanded
+read-only public title/body scan covered all 367 accessible all-state issue/PR
+identities (pages of 100/100/100/67, then an empty page), with relevant merged
+diffs and immutable upstream source
+[`e0a6a8e9bdde7afb97156eef13a6e93574324feb`](https://github.com/sebadob/hiqlite/tree/e0a6a8e9bdde7afb97156eef13a6e93574324feb).
+It found no complete exact disposition for another pending row. This is not
+an exhaustive claim about comments, discussions, private advisories or
+external-owner submissions; the owner still reconciles any such filing before
+submitting a duplicate.
+
+Two accepted **partial** fixes are now identified precisely in the ledgers:
+[Hiqlite row 1](../../vendor/hiqlite/PLURX-PATCH.md) maps PR 368's durable-id
+lookup but not duplicate rejection; [WAL row 3](../../vendor/hiqlite-wal/PLURX-PATCH.md)
+maps PR 367's changed-start-range memo guard but not complete mmap incarnation
+or reader/path-reuse serialization. Both combined rows remain `pending M6`.
+WAL 2 remains the one accepted complete mechanism; nine rows remain incomplete.
+Related upstream fixes are not newly submitted Plurx reproductions, full
+patch equivalence, upgraded dependencies or permission to remove a patch.
+
+**Hiqlite 17 preparation oracle.** The October 3 nine-row extraction proposal
+incorrectly expected "backup without S3" to exclude `cryptr/s3`. That is not
+this patch's contract: §2.1 and §3.3 preserve the existing backup↔S3 feature
+cycle, so enabling either must retain the supported backend. Preserve that
+proposal as a dated, unexecuted artifact; use this corrected oracle for its
+future public-source specimen. Pin the public version, feature graph and
+dependency resolution, then compare no-default `sqlite` and `cache` cluster
+controls with **both backup and S3 off** against backup-enabled and
+explicit-S3-enabled controls. Only the both-off controls must exclude
+`cryptr/s3` and its S3 dependencies; both enabled controls must retain the
+backend. An empty-feature external-state-machine-only graph does not exercise
+the real cluster edge and cannot replace those controls. No graph command or
+upstream reproduction was executed by this correction, and no public filing
+or private-source disclosure was made. M6 and the separate M5 (d) acceptance
+remain open.
+
 ### 5.8 2026-09-21 implementation boundary
 
 The safe source-only boundary is M1 plus the locally provable portion of M2.
@@ -1205,6 +1241,7 @@ trailers `Agent-Model:` / `Agent-Session:` on every commit of the branch.
 | 2026-09-26 | claude-opus-5-5 | https://claude.ai/code/session_01AZemhL7Y1nXGWxUGRC2tkK | M6 | [#558](http://192.168.4.7:3000/noirr/plurx/pulls/558) | Unchanged: needs public upstream issues/PRs for the generic rows (owner). |
 | 2026-09-27 | claude-opus-5-5 | https://claude.ai/code/session_01AZemhL7Y1nXGWxUGRC2tkK | review ([comment 5513](http://192.168.4.7:3000/noirr/plurx/pulls/558#issuecomment-5513)) | [#558](http://192.168.4.7:3000/noirr/plurx/pulls/558) | One P2, taken. The M5 (d) row's thread-scaling numbers were measured at opt-level 3 applied outside the tree, and a plain run of the committed test (opt-level 0) gives 802 / 360 / 225 / 166 / 129 ms per text, which argues for more threads. The exact command (`--config 'profile.dev.package."*".opt-level=3'`) is now in the test's doc comment and ignore reason and in §3.7(d), and it was rerun that way four times on the merged head: two threads keep 74% to 86% of the best throughput, not 94%. `EMBED_THREADS = 2` is now described as a chosen CPU bound whose cost is measured (3.5 to 6 ms per text), not a near-optimum. No code behaviour changed. |
 | 2026-09-30 | gpt-6.1-sol | agent:/root/k08_upstream_receipt_sol61 | M6 accepted-mechanism receipt | [#642](http://192.168.4.7:3000/noirr/plurx/pulls/642) | Claim checkpoint `2e01577d4` from exact effort base `b952246a97375909b396e0ef4588a8d138578286`. WAL 2 links accepted upstream PR 357 and released source; stronger local durability and all drop conditions remain. Ten generic rows reconcile to one verified accepted mechanism and nine pending exact matches/submissions. No upstream reproduction, public write, upgrade, patch removal or fleet acceptance. Original authors/history retained; root coordinator manages the sole independent review and exact-current Effort gate/integration. |
+| 2026-10-03 | gpt-6.1-sol | agent:/root/union_independent_review_sol61 | M6 evidence-only preparation | not submitted | Isolated source branch from current effort `74b73a9b1f24537a6f96b36f61467f85a6edb9ae`; §5.7 and two ledger receipts record accepted partial Hiqlite 1 / WAL 3 fixes and correct the unexecuted Hiqlite 17 extraction oracle without changing backup↔S3. All counts, pending rows, kinds, drop conditions and earlier receipts remain. No Rust, compiler, test, runtime, AUTO, public submission, upgrade or patch removal; independent review and exact-source documentation checks remain unexecuted. |
 
 M4 lab-corpus corroboration (optional; the structural result already covers
 every input):
