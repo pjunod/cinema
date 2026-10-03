@@ -573,7 +573,8 @@ async function refreshQualityCandidates(p){
       {audio:selectedAudioIndex(p),subtitle:p.curSub>=0?p.curSub:-1,audio_offset_ms:p.aoffset||0});
     if(PLAYER!==p||p.mediaAttachment!==attachment||p.controlIntentGeneration!==intent
       ||candidateQualityContext(p)!==key) return false;
-    p.qualityCandidates=Array.isArray(decision.quality_candidates)?decision.quality_candidates:null;
+    p.qualityCandidates=Array.isArray(decision.quality_candidates)
+      ?continuousQualityBoundCatalog(decision.quality_candidates,p.continuousQuality&&!p.continuousQuality.closed?p.continuousQuality.family:null):null;
     p.capsSnapshot=decision._capsSnapshot||currentCapsDocument();
     p.abr.candidateContext=key;
     p.abr.catalogSelectionKey=qualityCatalogSelectionKey(p);
@@ -598,7 +599,8 @@ async function naturalBoundaryQualityCandidate(p,seekIntent){
       {audio:selectedAudioIndex(p),subtitle:p.curSub>=0?p.curSub:-1,audio_offset_ms:p.aoffset||0},controller.signal);
     if(PLAYER!==p||p.controlSeek!==seekIntent||p.controlIntentGeneration!==generation
       ||qualityForce()!=='auto'||!Array.isArray(decision.quality_candidates)) return null;
-    const candidates=decision.quality_candidates;
+    const candidates=continuousQualityBoundCatalog(decision.quality_candidates,
+      p.continuousQuality&&!p.continuousQuality.closed?p.continuousQuality.family:null);
     const current=(p.qualityCandidates||[]).find(candidate=>candidate.id===p.qualityCandidateId);
     const progress=p.abr.qualityPressureTransfer, now=performance.now();
     const limit=progress&&progress.attachment===p.mediaAttachment&&now-progress.atMs<=15000?progress.bps:null;

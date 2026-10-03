@@ -5,18 +5,17 @@
 <p class="state"><strong>Incomplete — final adversarial review has not started.</strong>
 The human requests a stop immediately after that review for external Fable
 reviews, before fast-lane tests or merge.</p>
-<p><strong>Working now:</strong> retaining live playback clock alongside
-callback metadata in the next failed mixed-case rerun. Original H264/AAC
-direct playback observed zero hitches or stalls for 120 seconds, but its
-receipt remains failed due to inherited VOD-only harness criteria; those
-criteria and its empty-snapshot enrollment check are corrected. The
-intermittent continuous Firefox fault remains open. No timestamps or
-thresholds changed; no units ran. Final review and Fable pause remain ahead.</p>
-<p><strong>Physical iOS:</strong> the user unlocked 17promax; the fresh launch first
-failed the Apple remoteService connection, then its bounded retry ended Locked.
-No CQ Lab process launched. The isolated runtime was removed. Physical
-playback remains unmeasured for separate Plurx CQ Lab build 206. Production app settings
-and credentials were untouched.</p>
+<p><strong>Working now:</strong> binding Auto candidate costs to the actual
+continuous video plus shared audio budget. The latest Firefox case passed
+three manual and three Auto transitions without backward observations, then
+failed when a pressure stage selected 480p and reopened sessions. Its raw
+catalog understated the delivery budget. The fix preserves other routes and
+all continuity thresholds; its regression is authored, unrun.</p>
+<p><strong>Physical iOS:</strong> the newly unlocked 17promax launch was retried
+against exact build <code>f815cf3d6</code>. Apple CoreDevice failed to mount/read
+its developer disk image metadata. No separate CQ Lab process or physical
+playback was observed; the isolated server and proxy were cleaned up.
+Device-service diagnosis continues. Production app remains untouched.</p>
 <p><strong>Latest runtime result:</strong> the focused <code>c8484d19b</code>
 Chrome campaign passed three manual and five actual Auto changes, with at most
 66.8 ms callback gap on all eight transitions, zero stalls or hitches, and

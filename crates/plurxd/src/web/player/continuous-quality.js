@@ -195,6 +195,15 @@ function continuousQualitySelectionCompatible(player,selection){
   const candidate=continuousQualityCandidate(player,selection);
   return !!candidate&&controller.family.video.some(row=>row.candidate_id===candidate.id);
 }
+function continuousQualityBoundCatalog(catalog,family){
+  if(!Array.isArray(catalog)||!family)return catalog;
+  const costs=new Map(family.video.map(row=>{
+    const peak=row.peak_bps+(family.audio?.peak_bps||0);
+    if(!Number.isSafeInteger(peak)||peak<=0)throw new Error('Continuous delivery budget shape');
+    return [row.candidate_id,peak];
+  }));
+  return catalog.map(row=>costs.has(row.id)?{...row,peak_bps:costs.get(row.id)}:row);
+}
 async function openContinuousQualitySession(fileId,body,player,signal){
   if(!player||player.sessionId||player.libraryChannel||body.transport!=='hlsjs'
     ||body.copy===true||body.hdr10===true||body.subtitle_burn!=null||!body.caps
@@ -236,7 +245,7 @@ async function openContinuousQualitySession(fileId,body,player,signal){
     const family=await continuousQualityFetch(bootstrap.family_url,null,{signal,limit:32768});
     if(!continuousQualityFamily(family)||!family.video.some(row=>row.candidate_id===candidate.id)
       ||!family.video.some(row=>row.candidate_id===pair.companion_candidate_id))throw new Error('Continuous family catalog binding');
-    return {...playback,quality_candidates:catalog.candidates,
+    return {...playback,quality_candidates:continuousQualityBoundCatalog(catalog.candidates,family),
       continuous_quality:{...bootstrap,family,primary_candidate_id:candidate.id,selection}};
   }catch(error){if(playback?.session_id)releaseSession(playback.session_id);throw error;}
 }

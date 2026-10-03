@@ -4624,3 +4624,31 @@ currentTime on both sides of a backward callback, so the next failed mixed
 case can distinguish a playback-clock regression from callback metadata
 regressing while the clock stays monotonic. No frame timestamp is rewritten
 or fault suppressed. No units have run.
+
+
+### 10.158 Bind Auto costs to continuous delivery and retry the unlocked phone
+
+The exact `f815cf3d6` mixed Firefox case passed three manual transitions
+(maximum 84.08 ms gap) and the first actual Auto 1080/720/1080 transitions
+(84.00/83.84/83.90 ms), with no backward observations. Its overall receipt
+remains failed: the second pressure stage selected 480p and created three VOD
+sessions. The raw catalog advertised 6.16/12.16 Mb/s for 720/1080, while the
+bound continuous master required 17.799734/33.799734 Mb/s. The qualification
+therefore shaped the low link below the actual 720p budget.
+
+Continuous enrollment and active-adapter catalog refresh now bind each family
+candidate's cost to its video peak plus shared audio peak. Unbound routes are
+preserved, the source catalog is unchanged, and a closed adapter cannot supply
+stale costs. Production Auto and qualification now read the same delivery
+budget; no selection threshold or continuity criterion is relaxed.
+
+Authored, unrun regression:
+`tests/web/continuous-adapter.test.js::continuous Auto selection uses bound video and shared audio delivery budgets`.
+It exercises the shipped selector at 20 Mb/s, includes shared audio, and checks
+catalog immutability and unrelated-route preservation. No units ran.
+
+Following the user's new unlock notice, the separate physical CQ Lab launch
+was retried against exact Linux build `f815cf3d6`. Apple CoreDevice failed to
+mount/read developer disk image metadata (12040/12044/12018). No lab process
+or physical playback was observed. The isolated server and proxy were cleaned
+up. Device-service diagnosis continues; production app remains untouched.

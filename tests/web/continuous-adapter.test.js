@@ -321,3 +321,28 @@ test('controlled HLS errors preserve Plurx quality authority',()=>{
  controller.getLevelSwitchAction({details:VendoredHls.ErrorDetails.FRAG_LOAD_ERROR,frag:{type:'main'}});
  assert.equal(hls.manualLevel,1,'a library retry must not replace the owned rung with library Auto');
 });
+
+
+test('continuous Auto selection uses bound video and shared audio delivery budgets',()=>{
+ const context=vm.createContext({});
+ vm.runInContext(fs.readFileSync('crates/plurxd/src/web/player/continuous-quality.js','utf8'),context);
+ const policy=require('../../crates/plurxd/src/web/playback-policy.js');
+ const row=(digit,height,peak)=>({id:digit.repeat(32),recipe_digest:Array(32).fill(0),route:'encode',
+  width:height===720?1280:1920,height,target_height:height,peak_bps:peak,
+  decoder_compatible:true,sustainable:true});
+ const raw=[row('1',720,6160000),row('2',1080,12160000)];
+ const family={video:[{candidate_id:raw[0].id,peak_bps:17600000},
+  {candidate_id:raw[1].id,peak_bps:33600000}],audio:{peak_bps:199734}};
+ const bound=context.continuousQualityBoundCatalog(raw,family);
+ const select=candidates=>policy.selectQualityCandidate({candidates,linkLimitBps:20000000});
+ assert.equal(select(raw).id,raw[1].id);
+ assert.equal(select(bound).id,raw[0].id);
+ assert.equal(bound[0].peak_bps,17799734);
+ assert.equal(bound[1].peak_bps,33799734);
+ assert.equal(raw[0].peak_bps,6160000);
+ assert.notEqual(bound[0],raw[0]);
+ const unrelated={id:'3'.repeat(32),route:'original',peak_bps:5000000};
+ assert.equal(context.continuousQualityBoundCatalog([unrelated],family)[0],unrelated);
+ assert.equal(context.continuousQualityBoundCatalog(raw,null),raw);
+ assert.throws(()=>context.continuousQualityBoundCatalog(raw,{...family,audio:{peak_bps:Number.MAX_SAFE_INTEGER}}),/budget shape/);
+});
