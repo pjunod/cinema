@@ -452,7 +452,7 @@ player obeys, subtitles and overlays, layouts and themes.
 | [JELLYFIN-PROTOCOL-FOUNDATION.md](clients/JELLYFIN-PROTOCOL-FOUNDATION.md) | J1 pure tick/ID/credential forms, source replacement guard and the remaining service/storage boundary. | open |
 | [JELLYFIN-COMPATIBILITY-REVIEW.md](clients/JELLYFIN-COMPATIBILITY-REVIEW.md) | Sanitized first Opus review and historical author disposition; amended by the re-review. | done |
 | [JELLYFIN-COMPATIBILITY-REREVIEW.md](clients/JELLYFIN-COMPATIBILITY-REREVIEW.md) | Opus approvals and R1–R8 / S1–S4 dispositions: duration, restart attestation, cold-node artwork and trigger coverage. | done |
-| [JELLYFIN-COMPATIBILITY-STATUS.md](clients/JELLYFIN-COMPATIBILITY-STATUS.md) | J0 execution evidence: docs gate, pinned reference/schema/client provenance, compiler loop and untested physical/design gates. | open |
+| [JELLYFIN-COMPATIBILITY-STATUS.md](clients/JELLYFIN-COMPATIBILITY-STATUS.md) | J0/J1 integration, pinned reference/client evidence, and J2 connection/catalog work with remaining qualification gates. | open |
 | [JELLYFIN-PASSIVE-VOD-ROUTE-LIFETIME.md](clients/JELLYFIN-PASSIVE-VOD-ROUTE-LIFETIME.md) | J0 physical idle-reap failure and proposed bounded passive route grant; recovery proof still required. | open |
 | [J0 baseline manifest](clients/jellyfin/baseline-manifest.json) | Pinned server/schema/client provenance and synthetic fixture hashes; physical acceptance tracked separately. | open |
 | [Docs publication evidence](clients/jellyfin/docs-publication-receipt.json) | PR #744 exact-head/base docs fast-lane outcomes; not implementation or final release qualification. | done |

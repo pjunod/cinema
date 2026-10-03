@@ -94,9 +94,20 @@ fn merge(value: &str, token: &mut Option<UserToken>) -> Result<(), CredentialErr
     Ok(())
 }
 fn parse_authorization(value: &str, token: &mut Option<UserToken>) -> Result<(), CredentialError> {
+    visit_authorization(value, |name, field| {
+        if name.eq_ignore_ascii_case("token") {
+            merge(field, token)?;
+        }
+        Ok(())
+    })
+}
+fn visit_authorization(
+    value: &str,
+    mut visit: impl FnMut(&str, &str) -> Result<(), CredentialError>,
+) -> Result<(), CredentialError> {
     let (scheme, rest) = value.split_once(' ').ok_or(CredentialError::Malformed)?;
     if scheme.eq_ignore_ascii_case("bearer") {
-        return merge(rest, token);
+        return visit("Token", rest);
     }
     if !scheme.eq_ignore_ascii_case("mediabrowser") && !scheme.eq_ignore_ascii_case("emby") {
         return Err(CredentialError::Malformed);
@@ -140,18 +151,14 @@ fn parse_authorization(value: &str, token: &mut Option<UserToken>) -> Result<(),
             let (field, remaining) = tail
                 .split_once(',')
                 .map_or((tail, ""), |(field, remaining)| (field, remaining));
-            if name.eq_ignore_ascii_case("token") {
-                merge(field.trim(), token)?;
-            }
+            visit(name, field.trim())?;
             rest = remaining.trim_start();
             if rest.is_empty() && tail.contains(',') {
                 return Err(CredentialError::Malformed);
             }
             continue;
         };
-        if name.eq_ignore_ascii_case("token") {
-            merge(field, token)?;
-        }
+        visit(name, field)?;
         if remaining.is_empty() {
             return Ok(());
         }
@@ -164,6 +171,67 @@ fn parse_authorization(value: &str, token: &mut Option<UserToken>) -> Result<(),
         }
     }
     Ok(())
+}
+/// Optional client metadata never grants authentication or administrative rights.
+/// Device identifiers stay out of Debug output and are hashed before storage.
+#[derive(Clone, Default, PartialEq, Eq)]
+pub struct ClientIdentity {
+    pub client: Option<String>,
+    pub version: Option<String>,
+    pub device: Option<String>,
+    pub device_id: Option<String>,
+}
+pub fn parse_client_identity(
+    carriers: &[(&str, &str)],
+) -> Result<Option<ClientIdentity>, CredentialError> {
+    // Validate the same carrier limits, grammar and credential conflicts first.
+    parse_user_token(carriers)?;
+    let mut metadata = ClientIdentity::default();
+    for &(name, value) in carriers {
+        if !name.eq_ignore_ascii_case("authorization")
+            && !name.eq_ignore_ascii_case("x-emby-authorization")
+        {
+            continue;
+        }
+        visit_authorization(value, |name, raw| {
+            let (slot, bound) = match name.to_ascii_lowercase().as_str() {
+                "client" => (&mut metadata.client, 64),
+                "version" => (&mut metadata.version, 64),
+                "device" => (&mut metadata.device, 256),
+                "deviceid" => (&mut metadata.device_id, 256),
+                _ => return Ok(()),
+            };
+            if raw.len() > bound {
+                return Err(CredentialError::TooLarge);
+            }
+            let mut value = String::new();
+            let mut chars = raw.chars();
+            while let Some(ch) = chars.next() {
+                if ch == '\\' {
+                    match chars.next() {
+                        Some('"') => value.push('"'),
+                        Some('\\') => value.push('\\'),
+                        _ => return Err(CredentialError::Malformed),
+                    }
+                } else {
+                    value.push(ch);
+                }
+            }
+            if value.is_empty() || value.chars().any(char::is_control) {
+                return Err(CredentialError::Malformed);
+            }
+            if slot.as_ref().is_some_and(|prior| prior != &value) {
+                return Err(CredentialError::Conflict);
+            }
+            *slot = Some(value);
+            Ok(())
+        })?;
+    }
+    if metadata == ClientIdentity::default() {
+        Ok(None)
+    } else {
+        Ok(Some(metadata))
+    }
 }
 #[cfg(test)]
 mod tests {
@@ -234,6 +302,56 @@ mod tests {
             .expect("token")
             .expose(),
             "secret"
+        );
+    }
+}
+
+#[cfg(test)]
+mod client_tests {
+    use super::*;
+    #[test]
+    fn client_metadata_is_bounded_conflict_checked_and_never_a_credential() {
+        let header =
+            "MediaBrowser Client=\"Infuse-Direct\", DeviceId=\"tv-device\", Version=\"8.5.6\"";
+        let metadata = parse_client_identity(&[("Authorization", header)])
+            .expect("metadata")
+            .expect("present");
+        assert_eq!(metadata.client.as_deref(), Some("Infuse-Direct"));
+        assert_eq!(metadata.device_id.as_deref(), Some("tv-device"));
+        assert_eq!(
+            parse_user_token(&[("Authorization", header)]).expect("credential grammar"),
+            None
+        );
+        assert!(parse_client_identity(&[
+            ("Authorization", header),
+            (
+                "X-Emby-Authorization",
+                "MediaBrowser DeviceId=\"other-device\""
+            )
+        ])
+        .is_err());
+        assert!(parse_client_identity(&[
+            (
+                "Authorization",
+                "MediaBrowser Client=\"Infuse\", Token=\"one\""
+            ),
+            ("X-Emby-Token", "other")
+        ])
+        .is_err());
+        assert!(parse_client_identity(&[(
+            "Authorization",
+            &format!("MediaBrowser DeviceId=\"{}\"", "x".repeat(257))
+        )])
+        .is_err());
+        assert!(parse_client_identity(&[(
+            "Authorization",
+            "MediaBrowser DeviceId=\"line\nfeed\""
+        )])
+        .is_err());
+        assert!(
+            parse_client_identity(&[("Authorization", "Bearer secret_123")])
+                .expect("token only")
+                .is_none()
         );
     }
 }

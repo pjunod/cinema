@@ -247,6 +247,41 @@ async fn jellyfin_login_replacement_requires_the_exact_live_cluster_claim() {
         .await
         .expect("replaced authority")
         .is_none());
+    store
+        .set_jellyfin_compatibility(true)
+        .await
+        .expect("enable guarded claim login");
+    let generation = store
+        .jellyfin_compatibility_state()
+        .await
+        .expect("claim switch")
+        .generation
+        .expect("claim generation");
+    assert!(store
+        .replace_jellyfin_login_if_enabled(
+            write(user.id, "guarded-claim", "device", Family::Infuse),
+            Some(claim.mutation_claim()),
+            &generation,
+        )
+        .await
+        .expect("enabled exact claim replacement"));
+    store
+        .set_jellyfin_compatibility(false)
+        .await
+        .expect("disable guarded claim login");
+    assert!(!store
+        .replace_jellyfin_login_if_enabled(
+            write(user.id, "disabled-claim", "device", Family::Infuse),
+            Some(claim.mutation_claim()),
+            &generation,
+        )
+        .await
+        .expect("disabled exact claim refused"));
+    assert!(store
+        .user_for_token(&digest("guarded-claim"))
+        .await
+        .expect("guarded authority preserved")
+        .is_some());
     client
         .execute(
             "DELETE FROM cluster_cache_admin_revocation_leases WHERE claim_id=$1",
@@ -262,7 +297,7 @@ async fn jellyfin_login_replacement_requires_the_exact_live_cluster_claim() {
         .await
         .expect("cleaned-up claim no-op"));
     assert!(store
-        .user_for_token(&digest("under-claim"))
+        .user_for_token(&digest("guarded-claim"))
         .await
         .expect("current authority")
         .is_some());
@@ -362,4 +397,98 @@ async fn jellyfin_login_import_preserves_replacement_scope_on_another_node() {
             user.id
         );
     }
+}
+
+#[tokio::test]
+async fn jellyfin_public_login_requires_exact_enabled_generation_across_off_on() {
+    for_each_backend(|store, backend| async move {
+        let (uid, _) = seed_file(&store, "jellyfin-generation").await;
+        let initial = store
+            .jellyfin_compatibility_state()
+            .await
+            .expect("initial switch");
+        assert!(!initial.enabled);
+        assert!(initial.generation.is_none());
+        store
+            .set_jellyfin_compatibility(true)
+            .await
+            .expect("explicit enable");
+        let enabled = store
+            .jellyfin_compatibility_state()
+            .await
+            .expect("enabled switch");
+        let generation = enabled.generation.expect("saved generation");
+        assert!(enabled.enabled);
+        assert!(store
+            .replace_jellyfin_login_if_enabled(
+                write(uid, "first-enabled", "device", Family::Infuse),
+                None,
+                &generation
+            )
+            .await
+            .expect("enabled login"));
+        store
+            .set_jellyfin_compatibility(false)
+            .await
+            .expect("explicit disable");
+        assert!(
+            !store
+                .replace_jellyfin_login_if_enabled(
+                    write(uid, "late-disabled", "device", Family::Infuse),
+                    None,
+                    &generation
+                )
+                .await
+                .expect("disabled late login"),
+            "{backend}"
+        );
+        assert!(store
+            .user_for_token(&digest("late-disabled"))
+            .await
+            .expect("no disabled mint")
+            .is_none());
+        store
+            .set_jellyfin_compatibility(true)
+            .await
+            .expect("reenable");
+        let current = store
+            .jellyfin_compatibility_state()
+            .await
+            .expect("reenabled switch")
+            .generation
+            .expect("new generation");
+        assert_ne!(generation, current);
+        assert!(!store
+            .replace_jellyfin_login_if_enabled(
+                write(uid, "late-old-cycle", "device", Family::Infuse),
+                None,
+                &generation
+            )
+            .await
+            .expect("old cycle refused"));
+        assert!(store
+            .user_for_token(&digest("first-enabled"))
+            .await
+            .expect("failed replacement preserved prior scope")
+            .is_some());
+        assert!(store
+            .replace_jellyfin_login_if_enabled(
+                write(uid, "current-cycle", "device", Family::Infuse),
+                None,
+                &current
+            )
+            .await
+            .expect("current login"));
+        assert!(store
+            .user_for_token(&digest("first-enabled"))
+            .await
+            .expect("current replacement")
+            .is_none());
+        assert!(store
+            .user_for_token(&digest("current-cycle"))
+            .await
+            .expect("current token")
+            .is_some());
+    })
+    .await;
 }

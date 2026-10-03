@@ -2929,6 +2929,7 @@ dependencies = [
  "libc",
  "mdns-sd",
  "mime_guess",
+ "plurx-compat-jellyfin",
  "plurx-compat-plex",
  "plurx-core",
  "plurx-pgs",
