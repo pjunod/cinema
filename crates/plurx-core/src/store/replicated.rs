@@ -351,7 +351,7 @@ pub const SQLITE_TRANSACTION_SITES: &[SqliteTransactionSite] = &[
         method: "invalidate_cache_entry",
         is_async: true,
         mechanism: TransactionMechanism::RusqliteTransaction,
-        shape: TransactionShape::VerbatimBatch,
+        shape: TransactionShape::ReadBranchWrite,
     },
     SqliteTransactionSite {
         module: "cache.rs",
@@ -529,7 +529,7 @@ pub const SQLITE_TRANSACTION_SITES: &[SqliteTransactionSite] = &[
     },
     SqliteTransactionSite {
         module: "fragment_index_cluster.rs",
-        method: "claim_analysis_request_compatible",
+        method: "claim_analysis_request_for_capacity",
         is_async: true,
         mechanism: TransactionMechanism::RusqliteTransaction,
         shape: TransactionShape::ReadBranchWrite,
@@ -749,7 +749,7 @@ pub const SQLITE_TRANSACTION_SITES: &[SqliteTransactionSite] = &[
         method: "maintain_media_sessions",
         is_async: true,
         mechanism: TransactionMechanism::RusqliteTransaction,
-        shape: TransactionShape::VerbatimBatch,
+        shape: TransactionShape::ReadBranchWrite,
     },
     SqliteTransactionSite {
         module: "mod.rs",

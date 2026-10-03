@@ -12,6 +12,16 @@ use crate::error::StoreError;
 use crate::fmp4::{CutClass, PromotionInputs};
 use crate::segplan::{FragmentIndex, IndexRow, SourceIdentity, SEGPLAN_VERSION};
 
+pub(crate) fn analysis_live_viewer_clause(now: &str) -> String {
+    format!(
+        "(analysis_requests.component = 'fragment_index' AND EXISTS (
+        SELECT 1 FROM background_job_waiters viewer
+        WHERE viewer.request_scope = 'playback-analysis'
+          AND viewer.job_id = analysis_requests.request_id
+          AND viewer.state = 'pending' AND viewer.deadline_ms > {now}))"
+    )
+}
+
 pub const CLUSTER_FRAGMENT_INDEX_SCHEMA: &str = r#"
 CREATE TABLE IF NOT EXISTS cluster_fragment_index_sources (
     node_id          TEXT NOT NULL,
@@ -1900,6 +1910,27 @@ pub trait ClusterFragmentIndexStore: Send + Sync + 'static {
         pipeline_version: Option<&str>,
         now_ms: i64,
         lease_expires_ms: i64,
+    ) -> Result<Option<AnalysisRequest>, StoreError> {
+        self.claim_analysis_request_for_capacity(
+            node_id,
+            pipeline_version,
+            now_ms,
+            lease_expires_ms,
+            false,
+        )
+        .await
+    }
+
+    /// A busy playback node may attest only work with an unexpired viewer.
+    /// Both candidate selection and the fenced claim recheck that interest;
+    /// ordinary maintenance remains idle-only and consumes no retry attempt.
+    async fn claim_analysis_request_for_capacity(
+        &self,
+        node_id: &str,
+        pipeline_version: Option<&str>,
+        now_ms: i64,
+        lease_expires_ms: i64,
+        viewer_only: bool,
     ) -> Result<Option<AnalysisRequest>, StoreError>;
 
     async fn renew_analysis_request(
