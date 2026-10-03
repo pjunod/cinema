@@ -83,6 +83,7 @@
     "pages/reader.js",
     "pages/library-channels-page.js",
     "pages/shared-libraries.js",
+    "pages/sharing-management.js",
     "router.js"
   ]
 }

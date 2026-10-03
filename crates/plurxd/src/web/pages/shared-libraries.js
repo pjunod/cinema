@@ -174,12 +174,3 @@ async function sharedCatalogueLoadPage(path,ref,capture,mount,q=""){
   };
   await load();
 }
-
-function sharingManagementRead(path){
-  return sharedCatalogueRead(path,{generation:PAGE_RENDER_GENERATION,auth:AUTH_GENERATION,token:TOKEN,origin:API,route:location.hash});
-}
-function sharingManagementPanel(data){
-  const imports=data.sharingImports?.imports,exports=data.sharingExports?.exports;
-  if(!Array.isArray(imports)||imports.length>32||!Array.isArray(exports)||exports.length>32) throw new Error("Sharing management unavailable");
-  return setHead("Sharing","Share selected libraries with another Cinema.","")+setCard(`${cardHead("Connected Cinemas","Each recipient has its own approved scope.","")}<h3>Imports</h3>${imports.map(row=>`<p>${esc(row.import?.source_name||"Shared source")} · ${esc(row.import?.state||"unavailable")}</p>`).join("")||'<p class="muted">No imports.</p>'}<h3>Exports</h3>${exports.map(row=>`<p>${esc(row.recipient_name||"Recipient")} · ${esc(row.grant?.state||"unavailable")}</p>`).join("")||'<p class="muted">No exports.</p>'}${data.sharingExports.next?'<p class="muted">More exports are available.</p>':""}<p><a href="#/settings/developer/cinema-sharing-settings">Enable shared libraries in Developer</a></p>`)+setCard(`${cardHead("This node","Readiness is advisory. The saved switch remains available in Developer.","")}<p>${esc(data.sharingStatus?.listener||"Readiness unavailable")}</p>`);
-}
