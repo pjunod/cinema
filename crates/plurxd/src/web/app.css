@@ -425,7 +425,7 @@
   .lt-split{display:grid;grid-template-columns:minmax(0,1fr);gap:20px;align-items:start}
   .lt-list{border:1px solid var(--line);border-radius:var(--radius);overflow:auto;background:var(--panel);
     height:var(--live-tv-slot-height,64vh)}
-  .lt-row{display:grid;grid-template-columns:52px minmax(0,1fr) auto;gap:10px;align-items:start;
+  .lt-row{display:grid;grid-template-columns:76px minmax(0,1fr) auto;gap:10px;align-items:start;
     width:100%;text-align:left;background:none;border:0;border-top:1px solid var(--line);
     color:var(--text);cursor:pointer;padding:12px 14px;min-height:78px;font-family:inherit;font-size:13.5px}
   .lt-row:first-child{border-top:0}
@@ -433,9 +433,14 @@
   .lt-row:focus-visible{outline:2px solid var(--accent);outline-offset:-2px}
   .lt-row.on{background:var(--panel2);box-shadow:inset 3px 0 0 var(--accent)}
   .lt-row.locked{opacity:.55;cursor:not-allowed}
-  .lt-chip{width:52px;height:32px;display:grid;place-items:center;border-radius:4px;
+  .lt-chip{width:76px;height:46px;flex:none;display:grid;place-items:center;border-radius:5px;
     background:var(--panel2);border:1px solid var(--line);font-size:10.5px;font-weight:700;
-    letter-spacing:.04em;color:var(--muted)}
+    letter-spacing:.04em;color:var(--muted);overflow:hidden}
+  .lt-chip-fallback,.lt-chip img{grid-area:1/1;min-width:0}
+  .lt-chip-fallback{max-width:100%;padding:0 5px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .lt-chip img{width:74px;height:44px;padding:6px;object-fit:contain;opacity:0}
+  .lt-chip.has-logo img{opacity:1}
+  .lt-chip.has-logo .lt-chip-fallback{visibility:hidden}
   .lt-row b{font-size:13.5px}
   .lt-row .prog{display:block;margin-top:3px;color:var(--muted);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
   .lt-row .next{display:block;margin-top:2px;color:var(--muted);font-size:12px;
@@ -456,6 +461,8 @@
   .lt-showinfo .eyebrow{color:var(--accent);font-size:11px;font-weight:700;letter-spacing:.09em;text-transform:uppercase}
   .lt-showinfo h2{margin:7px 0 5px;font-size:20px;line-height:1.2}
   .lt-showinfo .meta{color:var(--muted);font-size:12px;line-height:1.5}
+  .lt-station-meta{display:flex;align-items:center;gap:12px;margin-top:10px}
+  .lt-station-meta .meta{min-width:0;overflow-wrap:anywhere}
   .lt-showinfo .synopsis{margin:14px 0 0;color:var(--prose);font-size:13px;line-height:1.55}
   .lt-showinfo .nextup{margin-top:18px;padding-top:12px;border-top:1px solid var(--line);font-size:12.5px;color:var(--muted)}
   .lt-tech{margin-top:16px;padding-top:12px;border-top:1px solid var(--line);display:grid;gap:8px}
@@ -483,16 +490,17 @@
   /* the grid: sticky channel column, sticky time header, one now line */
   .lt-gridwrap{border:1px solid var(--line);border-radius:var(--radius);overflow:auto;
     background:var(--panel);height:var(--live-tv-slot-height,64vh);position:relative}
-  .lt-grid{position:relative;min-width:max-content}
+  .lt-grid{--lt-channel-width:205px;position:relative;min-width:max-content}
   .lt-times{display:flex;position:sticky;top:0;z-index:3;background:var(--panel);
     border-bottom:1px solid var(--line)}
-  .lt-times .pad{position:sticky;left:0;z-index:4;width:180px;flex:none;background:var(--panel);
+  .lt-times .pad{position:sticky;left:0;z-index:4;width:var(--lt-channel-width);flex:none;background:var(--panel);
     border-right:1px solid var(--line)}
   .lt-times .t{flex:none;padding:8px 10px;font-size:12px;color:var(--muted);border-left:1px solid var(--line)}
-  .lt-grow{display:flex;align-items:stretch;border-bottom:1px solid var(--line);height:52px}
-  .lt-gname{position:sticky;left:0;z-index:2;width:180px;flex:none;background:var(--panel);
+  .lt-grow{display:flex;align-items:stretch;border-bottom:1px solid var(--line);height:68px}
+  .lt-gname{position:sticky;left:0;z-index:2;width:var(--lt-channel-width);flex:none;background:var(--panel);
     border-right:1px solid var(--line);display:flex;align-items:center;gap:8px;padding:0 10px;font-size:12.5px}
   .lt-gmeta{min-width:0;display:flex;flex-direction:column;gap:3px}
+  .lt-gcallsign{color:var(--muted);font-size:11px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
   .lt-gmeta .lt-badges{margin-left:0;flex-wrap:nowrap;overflow:hidden}
   .lt-gmeta .lt-fbadge{font-size:8px;padding:0 4px}
   .lt-gcells{position:relative;flex:none}
