@@ -5182,3 +5182,36 @@ native or pixel evidence is claimed. Bounded awake assertions do not
 unlock either device. Native policy ownership remains a pending human
 decision; public AVPlayer resolution/bitrate preferences do not promise
 exact manual variant selection. No units or final adversarial review ran.
+
+
+### 10.179 · Pending-target disposal and fresh playback qualification
+
+The first scoped disposal probe FAILED its broad FFmpeg census: startup
+caption-probe children remained at five seconds. Its pending snapshot also
+selected the incumbent transaction too early. Neither observation proves a
+playback cleanup defect. The corrected diagnostic preserves complete
+FFmpeg arguments, separately identifies caption probes by both `pipe:0`
+input and `0:i:0x101` mapping, and waits for the new transaction identity.
+Unknown children remain counted with playback; no producer is discarded
+from the raw census.
+
+The second attempt reached a ready, unpresented target and disposed it,
+but its fresh playback FAILED at 0.796x clock and 550.1 ms callback gap.
+This failure remains preserved. After requesting startup activity proof
+and waiting for then-current children to finish, fresh playback passed;
+that third attempt still FAILED the outer harness because its one-session
+expectation contradicted two deliberate playbacks. No production code or
+playback limit changed.
+
+The fourth exact-source `97967c6ce` probe PASSED with an explicit exactly-
+two-session expectation. It closed a ready, unpresented 720p transaction,
+then opened a distinct session. Fresh playback had 2.016-second TTFF,
+1.001x clock, 66.6 ms maximum callback gap and zero hitches/stalls/drops.
+Playback-or-unclassified child counts were 0/1/0/0 after the first End
+and 0/0/0/0 after the final End at 0/1/3/5-second samples. Caption probes
+remained separately visible in raw samples. The daemon stayed alive
+during both censuses; the owned browser/backend/runtime were then removed.
+
+This receipt does not prove daemon restart/takeover, physical display/audio
+queue retirement, or the full cancellation/source-shape matrix. The failed
+receipts are retained. No units or final adversarial review ran.
