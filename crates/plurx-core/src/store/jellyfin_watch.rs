@@ -165,6 +165,7 @@ WITH args AS (SELECT $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12), eligible AS (
  JOIN items supported_item ON supported_item.id=p.item_id AND supported_item.kind IN ('movie','episode')
  JOIN libraries supported_library ON supported_library.id=supported_item.library_id AND supported_library.kind IN ('movies','shows')
  JOIN files native_file ON native_file.id=p.file_id AND native_file.item_id=p.item_id AND (json_extract(json_extract(p.payload,'$.selection_json'),'$.source.size') IS NULL OR (native_file.size=json_extract(json_extract(p.payload,'$.selection_json'),'$.source.size') AND native_file.mtime=json_extract(json_extract(p.payload,'$.selection_json'),'$.source.mtime')))
+ AND (json_type(json_extract(p.payload,'$.selection_json'),'$.source.probe') IS NULL OR native_file.probe_json IS json_extract(json_extract(p.payload,'$.selection_json'),'$.source.probe'))
  LEFT JOIN watch_state w ON w.user_id=p.user_id AND w.item_id=p.item_id
  WHERE p.play_id=$6 AND p.user_id=$4 AND p.token_digest=$7 AND p.device_digest=$8 AND p.client_family=$9
  AND p.item_id=$1 AND p.state='active' AND ($12 IS NOT NULL OR EXISTS(SELECT 1 FROM file_grants g WHERE g.id=p.direct_grant_id AND g.user_id=p.user_id AND g.file_id=p.file_id AND g.source_token_hash=p.token_digest AND g.revoked_at IS NULL AND g.expires_at>$5)) AND p.manual_revision=$10 AND COALESCE(w.manual_revision,0)=$10
@@ -220,6 +221,7 @@ SELECT EXISTS(SELECT 1 FROM jellyfin_plays p
  JOIN items supported_item ON supported_item.id=p.item_id AND supported_item.kind IN ('movie','episode')
  JOIN libraries supported_library ON supported_library.id=supported_item.library_id AND supported_library.kind IN ('movies','shows')
  JOIN files native_file ON native_file.id=p.file_id AND native_file.item_id=p.item_id AND (json_extract(json_extract(p.payload,'$.selection_json'),'$.source.size') IS NULL OR (native_file.size=json_extract(json_extract(p.payload,'$.selection_json'),'$.source.size') AND native_file.mtime=json_extract(json_extract(p.payload,'$.selection_json'),'$.source.mtime')))
+ AND (json_type(json_extract(p.payload,'$.selection_json'),'$.source.probe') IS NULL OR native_file.probe_json IS json_extract(json_extract(p.payload,'$.selection_json'),'$.source.probe'))
  LEFT JOIN watch_state w ON w.user_id=p.user_id AND w.item_id=p.item_id
  WHERE p.play_id=$1 AND p.user_id=$2 AND p.token_digest=$3 AND p.device_digest=$4 AND p.client_family=$5
  AND p.item_id=$7 AND p.state='active' AND EXISTS(SELECT 1 FROM file_grants g WHERE g.id=p.direct_grant_id AND g.user_id=p.user_id AND g.file_id=p.file_id AND g.source_token_hash=p.token_digest AND g.revoked_at IS NULL AND g.expires_at>$8) AND p.manual_revision=$6 AND COALESCE(w.manual_revision,0)=$6) AS current

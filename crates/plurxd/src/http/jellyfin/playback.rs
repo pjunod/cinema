@@ -47,11 +47,19 @@ async fn live_item(
         .ok_or(ApiError::NotFound("catalog item"))
 }
 async fn current_file(state: &AppState, play: &JellyfinPlay) -> Result<MediaFile, ApiError> {
-    let file = state
+    let snapshot = state
         .store
-        .get_file(play.negotiation.file_id)
+        .playback_planning_snapshot(play.negotiation.file_id, &[])
         .await?
         .ok_or(ApiError::NotFound("play source"))?;
+    let selection: Value = serde_json::from_str(&play.negotiation.selection_json)
+        .map_err(|_| ApiError::Conflict("play selection changed; renegotiate".into()))?;
+    if let Some(probe) = selection["source"].get("probe") {
+        if *probe != serde_json::to_value(&snapshot.probe_json)? {
+            return Err(ApiError::Conflict("play probe changed; renegotiate".into()));
+        }
+    }
+    let file = snapshot.file;
     if file.item_id != play.negotiation.item_id
         || fingerprint(&file)? != play.negotiation.source_fingerprint
     {
@@ -176,7 +184,11 @@ pub(super) struct InfoRequest {
     #[serde(flatten)]
     extra: std::collections::BTreeMap<String, Value>,
 }
-fn profiles(request: &InfoRequest, file: &MediaFile) -> Vec<plurx_core::playback::DeviceProfile> {
+fn profiles(
+    request: &InfoRequest,
+    file: &MediaFile,
+    facts: &plurx_compat_jellyfin::profile::Facts,
+) -> Vec<plurx_core::playback::DeviceProfile> {
     if request.enable_direct_play == Some(false) {
         return Vec::new();
     }
@@ -203,15 +215,43 @@ fn profiles(request: &InfoRequest, file: &MediaFile) -> Vec<plurx_core::playback
     }) {
         return Vec::new();
     }
-    // Unknown constraints do not grant capability. J4 translates supported conditions.
-    if ["CodecProfiles", "ContainerProfiles"].iter().any(|key| {
-        profile.get(key).is_some_and(|value| {
-            !value.is_null()
-                && value
-                    .as_array()
-                    .is_none_or(|conditions| !conditions.is_empty())
-        })
+    use plurx_compat_jellyfin::profile::{CodecKind, CodecRule};
+    let rules = match profile.get("CodecProfiles").filter(|v| !v.is_null()) {
+        None => Vec::new(),
+        Some(value) => match serde_json::from_value::<Vec<CodecRule>>(value.clone()) {
+            Ok(rules) if rules.len() <= 64 => rules,
+            _ => return Vec::new(),
+        },
+    };
+    if rules.iter().any(|rule| {
+        !rule.accepts(
+            CodecKind::Video,
+            file.video_codec.as_deref(),
+            file.container.as_deref(),
+            None,
+            facts,
+        ) || !rule.accepts(
+            CodecKind::VideoAudio,
+            file.audio_streams.first().map(|a| a.codec.as_str()),
+            file.container.as_deref(),
+            None,
+            facts,
+        )
     }) {
+        return Vec::new();
+    }
+    use plurx_compat_jellyfin::profile::{ContainerRule, MediaKind};
+    let container_rules = match profile.get("ContainerProfiles").filter(|v| !v.is_null()) {
+        None => Vec::new(),
+        Some(value) => match serde_json::from_value::<Vec<ContainerRule>>(value.clone()) {
+            Ok(rules) if rules.len() <= 64 => rules,
+            _ => return Vec::new(),
+        },
+    };
+    if container_rules
+        .iter()
+        .any(|rule| !rule.accepts(MediaKind::Video, file.container.as_deref(), facts))
+    {
         return Vec::new();
     }
     let Some(profiles) = profile.get("DirectPlayProfiles").and_then(Value::as_array) else {
@@ -277,6 +317,118 @@ fn profiles(request: &InfoRequest, file: &MediaFile) -> Vec<plurx_core::playback
         })
         .collect()
 }
+fn source_facts(
+    file: &MediaFile,
+    probe: Option<&str>,
+    audio_index: Option<i64>,
+) -> plurx_compat_jellyfin::profile::Facts {
+    use plurx_compat_jellyfin::profile::{Fact, Facts, Property as P};
+    let mut facts = Facts::new();
+    for (key, value) in [
+        (P::Width, file.width),
+        (P::Height, file.height),
+        (P::VideoBitDepth, file.bit_depth),
+        (
+            P::AudioChannels,
+            file.audio_streams.first().and_then(|a| a.channels),
+        ),
+        (
+            P::AudioSampleRate,
+            file.audio_streams.first().and_then(|a| a.sample_rate),
+        ),
+    ] {
+        if let Some(value) = value.filter(|value| *value > 0) {
+            facts.insert(key, Fact::Number(value as f64));
+        }
+    }
+    for (key, value) in [
+        (P::VideoProfile, &file.video_profile),
+        (P::VideoCodecTag, &file.video_codec_tag),
+    ] {
+        if let Some(value) = value {
+            facts.insert(key, Fact::Text(value.clone()));
+        }
+    }
+    match plurx_core::domain::ScanType::from_field_order(file.field_order.as_deref()) {
+        plurx_core::domain::ScanType::Progressive => {
+            facts.insert(P::IsInterlaced, Fact::Boolean(false));
+        }
+        plurx_core::domain::ScanType::Interlaced(_) => {
+            facts.insert(P::IsInterlaced, Fact::Boolean(true));
+        }
+        plurx_core::domain::ScanType::Unknown => {}
+    }
+    let Some(probe) = probe.and_then(|s| serde_json::from_str::<Value>(s).ok()) else {
+        return facts;
+    };
+    let Some(streams) = probe["streams"].as_array() else {
+        return facts;
+    };
+    let video = streams.iter().find(|s| {
+        s["codec_type"] == "video" && s["disposition"]["attached_pic"].as_i64() != Some(1)
+    });
+    let audio = streams
+        .iter()
+        .filter(|s| s["codec_type"] == "audio")
+        .find(|s| audio_index.is_none_or(|index| s["index"].as_i64() == Some(index)));
+    for (key, kind) in [(P::NumAudioStreams, "audio"), (P::NumVideoStreams, "video")] {
+        facts.insert(
+            key,
+            Fact::Number(streams.iter().filter(|s| s["codec_type"] == kind).count() as f64),
+        );
+    }
+    facts.insert(P::NumStreams, Fact::Number(streams.len() as f64));
+    let number = |v: &Value| {
+        v.as_f64()
+            .or_else(|| v.as_str().and_then(|v| v.parse::<f64>().ok()))
+            .filter(|v| v.is_finite() && *v >= 0.0)
+    };
+    if let Some(video) = video {
+        for (key, field) in [
+            (P::VideoLevel, "level"),
+            (P::VideoBitrate, "bit_rate"),
+            (P::RefFrames, "refs"),
+        ] {
+            if let Some(value) = number(&video[field]) {
+                facts.insert(key, Fact::Number(value));
+            }
+        }
+        if let Some(rate) = video["avg_frame_rate"]
+            .as_str()
+            .and_then(|s| s.split_once('/'))
+            .and_then(|(n, d)| Some((n.parse::<f64>().ok()?, d.parse::<f64>().ok()?)))
+            .filter(|(n, d)| n.is_finite() && d.is_finite() && *n > 0.0 && *d > 0.0)
+        {
+            facts.insert(P::VideoFramerate, Fact::Number(rate.0 / rate.1));
+        }
+        if video["color_transfer"] == "bt709" && file.hdr.is_none() {
+            facts.insert(P::VideoRangeType, Fact::Text("SDR".into()));
+        }
+        if let Some((n, d)) = video["sample_aspect_ratio"]
+            .as_str()
+            .and_then(|s| s.split_once(':'))
+            .and_then(|(n, d)| Some((n.parse::<u64>().ok()?, d.parse::<u64>().ok()?)))
+            .filter(|(n, d)| *n > 0 && *d > 0)
+        {
+            facts.insert(P::IsAnamorphic, Fact::Boolean(n != d));
+        }
+    }
+    if let Some(audio) = audio {
+        for (key, field) in [
+            (P::AudioBitrate, "bit_rate"),
+            (P::AudioBitDepth, "bits_per_raw_sample"),
+        ] {
+            if let Some(value) = number(&audio[field]).filter(|v| *v > 0.0) {
+                facts.insert(key, Fact::Number(value));
+            }
+        }
+        if let Some(value) = audio["profile"].as_str() {
+            facts.insert(P::AudioProfile, Fact::Text(value.into()));
+        }
+    }
+    facts
+}
+
 pub(super) async fn info_post(
     client: ClientUser,
     State(state): State<AppState>,
@@ -376,7 +528,7 @@ async fn info(
     client: &ClientUser,
     state: &AppState,
     id: &str,
-    request: InfoRequest,
+    mut request: InfoRequest,
 ) -> Result<Json<Value>, ApiError> {
     if let Some(uid) = request.user_id.as_deref() {
         check_user(client, uid)?;
@@ -415,11 +567,26 @@ async fn info(
         .jellyfin_resolve_entity(JellyfinEntityKind::File, &source.id.to_hex())
         .await?
         .ok_or(ApiError::NotFound("source"))?;
-    let file = state
+    let snapshot = state
         .store
-        .get_file(file_id)
+        .playback_planning_snapshot(file_id, &[])
         .await?
         .ok_or(ApiError::NotFound("source"))?;
+    let file = snapshot.file;
+    if request.audio_stream_index.is_none() {
+        request.audio_stream_index = source
+            .media_streams
+            .iter()
+            .filter(|stream| stream.stream_type == wire::StreamType::Audio)
+            .find(|stream| stream.is_default)
+            .or_else(|| {
+                source
+                    .media_streams
+                    .iter()
+                    .find(|stream| stream.stream_type == wire::StreamType::Audio)
+            })
+            .map(|stream| stream.index);
+    }
     let mut selected_file = file.clone();
     if let Some(index) = request.audio_stream_index {
         let audio = source
@@ -440,10 +607,18 @@ async fn info(
                 ))?];
     }
     let node = super::super::stream::render_caps(state).await;
-    if !profiles(&request, &selected_file).iter().any(|profile| {
-        plurx_core::playback::decide(&selected_file, profile, &node).method
-            == plurx_core::playback::PlaybackMethod::DirectPlay
-    }) {
+    let facts = source_facts(
+        &selected_file,
+        snapshot.probe_json.as_deref(),
+        request.audio_stream_index,
+    );
+    if !profiles(&request, &selected_file, &facts)
+        .iter()
+        .any(|profile| {
+            plurx_core::playback::decide(&selected_file, profile, &node).method
+                == plurx_core::playback::PlaybackMethod::DirectPlay
+        })
+    {
         return Ok(Json(json!({"MediaSources":[],"ErrorCode":"NotSupported"})));
     }
     if let Some(index) = request.audio_stream_index {
@@ -481,7 +656,7 @@ async fn info(
     if file.item_id != item_id {
         return Err(ApiError::BadRequest("source membership changed".into()));
     }
-    let selection=json!({"audio":request.audio_stream_index,"subtitle":request.subtitle_stream_index,"source":{"size":file.size,"mtime":file.mtime}}).to_string();
+    let selection=json!({"audio":request.audio_stream_index,"subtitle":request.subtitle_stream_index,"source":{"size":file.size,"mtime":file.mtime,"probe":snapshot.probe_json}}).to_string();
     let profile_json = serde_json::to_string(&request.device_profile)
         .map_err(|_| ApiError::BadRequest("invalid device profile".into()))?;
     let play_id = uuid::Uuid::new_v4().simple().to_string();

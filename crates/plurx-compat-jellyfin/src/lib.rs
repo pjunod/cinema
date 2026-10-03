@@ -2,5 +2,6 @@
 pub mod catalog;
 pub mod credentials;
 pub mod identity;
+pub mod profile;
 pub mod query;
 pub mod ticks;

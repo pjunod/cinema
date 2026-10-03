@@ -1235,3 +1235,28 @@ async fn jellyfin_logout_terminalizes_only_exact_login_scope_and_retains_release
     })
     .await;
 }
+
+#[tokio::test]
+async fn jellyfin_progress_rejects_a_changed_probe_even_when_source_size_and_mtime_match() {
+    for_each_backend(|store, backend| async move {
+        let mut initial = fixture(&store).await;
+        let snapshot = store.playback_planning_snapshot(initial.file_id, &[]).await.expect(backend).expect("source");
+        initial.selection_json = serde_json::json!({"source":{"size":snapshot.file.size,"mtime":snapshot.file.mtime,"probe":snapshot.probe_json}}).to_string();
+        let play = manual_active(&store, initial).await;
+        let leading = progress_write(&play, 0, 1000, false);
+        assert!(store.put_jellyfin_progress(leading.clone(), None).await.expect(backend).is_some());
+        let source = snapshot.file;
+        store.upsert_file(source.item_id, source.path.to_str().expect("path"), source.size, source.mtime,
+            &plurx_core::domain::ProbeResult {
+                duration_ms: source.duration_ms, container: source.container, video_codec: source.video_codec,
+                video_codec_tag: source.video_codec_tag, video_profile: source.video_profile,
+                width: source.width, height: source.height, bit_depth: source.bit_depth,
+                bitrate: source.bitrate, audio_streams: source.audio_streams, subtitle_streams: source.subtitle_streams,
+                raw_json: Some("{\"streams\":[],\"jellyfin_test_probe_revision\":2}".into()),
+                ..Default::default()
+            }).await.expect(backend);
+        assert!(!store.jellyfin_progress_is_current(&leading).await.expect(backend));
+        assert!(store.put_jellyfin_progress(progress_write(&play, 0, 9000, true), None).await.expect(backend).is_none());
+        assert_eq!(store.watch_state(play.scope.user_id, play.item_id).await.expect(backend).expect("watch").position_ms, 1000);
+    }).await;
+}
