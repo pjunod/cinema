@@ -347,13 +347,7 @@ pub const SQLITE_TRANSACTION_SITES: &[SqliteTransactionSite] = &[
         mechanism: TransactionMechanism::RusqliteTransaction,
         shape: TransactionShape::ReadBranchWrite,
     },
-    SqliteTransactionSite {
-        module: "watch.rs",
-        method: "set_watched_tree",
-        is_async: true,
-        mechanism: TransactionMechanism::RusqliteTransaction,
-        shape: TransactionShape::ReadExpandWrite,
-    },
+    // Manual tree marks now use one shared atomic statement plus revision triggers.
     SqliteTransactionSite {
         module: "media.rs",
         method: "delete_files",

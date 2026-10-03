@@ -1201,6 +1201,8 @@ pub(crate) const MIGRATIONS: &[&str] = &[
     super::jellyfin_login::JELLYFIN_LOGIN_SCHEMA,
     // v94: bounded compatibility negotiations and exact native references.
     super::jellyfin_play::SCHEMA,
+    // v95: manual-edit revisions and trusted compatibility own-edit continuation.
+    super::jellyfin_watch::SCHEMA,
 ];
 
 /// Highest SQLite schema version this binary can read and migrate.

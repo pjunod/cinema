@@ -97,3 +97,31 @@ document/source guards and mandatory workspace lint checks also pass.
 No public compatibility route is mounted yet. Replaced-play retirement still
 requires the binding lifecycle work; token replacement alone is not evidence
 that those native playback resources have been released.
+
+## 6. J3 watch revision and terminal work — under verification
+
+`watch::apply_jellyfin_progress` shares the native effect service after guarded
+compatibility acceptance. Direct presence uses the validated native play key;
+manual origin comes from current token membership rather than claimed device
+metadata. Native progress still retains its existing online/offline authority.
+
+The shared SQLite/replicated manual statement bumps a monotonic per-user/item
+revision even for explicit no-ops. Deterministic triggers advance only one
+eligible active own binding. Ambiguous or already fenced plays stay fenced.
+The replicated migration commits the columns/triggers and schema marker in one
+transaction. Imports retain counters while clearing saved edit context.
+
+The shared coalescer preserves original compatibility provenance through
+mixed native/compatibility pending beats and repeats its guard at commit.
+`put_final` commits one supplied final and its exact terminal state under the
+entry lock; another viewer's pending value remains queued. Stop without a
+position writes no zero. Injected final-write failure returns a failure and
+releases exact resources; the binding remains retriable. Protocol constraints,
+media credential policy, physical clients and current-candidate qualification
+remain open until their separate evidence exists.
+
+Compatibility logout begins the native digest-cache exclusion, terminalizes
+only plays with that exact user/token/device/family scope, releases their
+native direct references and deletes the presented native token. It does not
+invoke native logout's user-wide file-grant revocation. Returned terminal
+references also let a failed release retry cleanly before token deletion.

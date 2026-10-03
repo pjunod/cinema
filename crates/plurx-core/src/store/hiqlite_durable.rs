@@ -328,6 +328,29 @@ impl FileGrantStore for HiqliteAuthStore {
             }))
     }
 
+    async fn file_grant_by_id(&self, id: &str) -> Result<Option<FileGrant>, StoreError> {
+        let sql = "SELECT g.id, g.file_id, g.user_id, g.expires_at, g.revoked_at,
+                          EXISTS (SELECT 1 FROM tokens t WHERE t.token_hash = g.source_token_hash
+                                    AND t.user_id = g.user_id) AS source_active
+                   FROM file_grants g WHERE g.id = $1 AND g.purpose = 'open_in'";
+        validate_sql(sql)?;
+        Ok(self
+            .client()
+            // authority: a media activation/continuation validates its exact native grant, expiry and source-token revocation.
+            .query_consistent_map::<FileGrantRow, _>(sql, params!(id))
+            .await?
+            .into_iter()
+            .next()
+            .map(|row| FileGrant {
+                id: row.id,
+                file_id: row.file_id,
+                user_id: row.user_id,
+                expires_at: row.expires_at,
+                revoked_at: row.revoked_at,
+                source_active: row.source_active != 0,
+            }))
+    }
+
     async fn revoke_file_grant(
         &self,
         id: &str,

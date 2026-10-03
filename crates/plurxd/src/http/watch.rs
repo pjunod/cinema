@@ -55,7 +55,6 @@ pub(crate) async fn apply_progress(
     // re-notify. The same row is the cluster-wide previous beat the watched
     // seconds ledger credits from when another node wrote it.
     let durable_before = state.store.watch_state(user_id, id).await?;
-    let was_watched = durable_before.as_ref().is_some_and(|w| w.watched);
     let (watch, reported_position_ms, reported_duration_ms) = if req.recorded_at.is_some() {
         // Imported/offline facts carry their own ordering clock and are rare,
         // semantically complete writes rather than an active player's beat.
@@ -78,6 +77,64 @@ pub(crate) async fn apply_progress(
             update.reported_duration_ms,
         )
     };
+    progress_effects(
+        state,
+        user_id,
+        id,
+        &req,
+        durable_before,
+        crate::progress::ProgressUpdate {
+            watch,
+            reported_position_ms,
+            reported_duration_ms,
+            committed: true,
+        },
+        None,
+    )
+    .await;
+    Ok(watch)
+}
+
+/// Compatibility writes share native effects only after their admission/commit fence accepts them.
+pub(crate) async fn apply_jellyfin_progress(
+    state: &AppState,
+    write: plurx_core::store::JellyfinProgressWrite,
+    direct_key: &crate::delivery::Key,
+) -> Result<Option<plurx_core::domain::WatchState>, ApiError> {
+    let user_id = write.provenance.scope.user_id;
+    let id = write.item_id;
+    if state.store.get_item(id).await?.is_none() {
+        return Err(ApiError::NotFound("item"));
+    }
+    let before = state.store.watch_state(user_id, id).await?;
+    let req = ProgressRequest {
+        position_ms: write.position_ms,
+        duration_ms: write.duration_ms,
+        recorded_at: None,
+        method: Some("direct_play".into()),
+    };
+    let Some(update) = state.progress.put_jellyfin(write).await? else {
+        return Ok(None);
+    };
+    let watch = update.watch;
+    progress_effects(state, user_id, id, &req, before, update, Some(direct_key)).await;
+    Ok(Some(watch))
+}
+
+async fn progress_effects(
+    state: &AppState,
+    user_id: i64,
+    id: i64,
+    req: &ProgressRequest,
+    durable_before: Option<plurx_core::domain::WatchState>,
+    update: crate::progress::ProgressUpdate,
+    direct_key: Option<&crate::delivery::Key>,
+) {
+    let watch = update.watch;
+    let reported_position_ms = update.reported_position_ms;
+    let reported_duration_ms = update.reported_duration_ms;
+    let position = req.position_ms.max(0);
+    let was_watched = durable_before.as_ref().is_some_and(|w| w.watched);
     let applied = req.recorded_at.is_none_or(|at| at >= watch.updated_at);
     // This beat is also the heartbeat for a direct play (`crate::delivery`).
     // It is the only signal that reaches the server from a player which has
@@ -87,7 +144,11 @@ pub(crate) async fn apply_progress(
     // synchronous — a hash lookup, not a store read — because every open
     // player in the house arrives here every few seconds.
     if req.recorded_at.is_none() {
-        state.direct_plays.touch_item(user_id, id);
+        if let Some(key) = direct_key {
+            state.direct_plays.touch_key(key);
+        } else {
+            state.direct_plays.touch_item(user_id, id);
+        }
         // And the play it belongs to stays one start attempt however long
         // the viewer is paused (C-08 M5 row 4).
         state
@@ -121,7 +182,6 @@ pub(crate) async fn apply_progress(
     if applied && watch.watched && !was_watched {
         state.watched.on_watched(user_id, id).await;
     }
-    Ok(watch)
 }
 
 /// POST /api/v1/items/:id/scrobble — mark watched. On a show, season, or
@@ -156,10 +216,23 @@ pub(crate) async fn apply_watched(
     id: i64,
     watched: bool,
 ) -> Result<usize, ApiError> {
+    apply_watched_with_origin(state, user_id, id, watched, None).await
+}
+
+pub(crate) async fn apply_watched_with_origin(
+    state: &AppState,
+    user_id: i64,
+    id: i64,
+    watched: bool,
+    origin: Option<&plurx_core::store::JellyfinPlayScope>,
+) -> Result<usize, ApiError> {
     if state.store.get_item(id).await?.is_none() {
         return Err(ApiError::NotFound("item"));
     }
-    let changed = state.store.set_watched_tree(user_id, id, watched).await?;
+    let changed = state
+        .store
+        .set_watched_tree_with_origin(user_id, id, watched, origin)
+        .await?;
     if watched {
         for item in &changed {
             state.watched.on_watched(user_id, *item).await;

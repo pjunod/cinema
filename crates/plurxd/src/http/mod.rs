@@ -357,7 +357,15 @@ fn http_route_group(path: &str) -> usize {
         "/api/v1/search" | "/api/v1/search/related" | "/api/v1/search/settings" | "/search" => 4,
 
         // Playback decisions, control, media bodies and watch state.
-        "/api/v1/items/{id}/progress"
+        "/jellyfin/Items/{item_id}/PlaybackInfo"
+        | "/jellyfin/Videos/{item_id}/stream"
+        | "/jellyfin/Videos/{item_id}/{filename}"
+        | "/jellyfin/Sessions/Logout"
+        | "/jellyfin/Sessions/Playing"
+        | "/jellyfin/Sessions/Playing/Progress"
+        | "/jellyfin/Sessions/Playing/Stopped"
+        | "/jellyfin/Users/{user_id}/PlayedItems/{item_id}"
+        | "/api/v1/items/{id}/progress"
         | "/api/v1/items/{id}/scrobble"
         | "/api/v1/items/{id}/unscrobble"
         | "/api/v1/files/{id}/decision"

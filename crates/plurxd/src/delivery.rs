@@ -290,6 +290,20 @@ impl DirectPlays {
         }
     }
 
+    /// Compatibility heartbeats and stop target only their validated native key.
+    pub fn touch_key(&self, key: &Key) {
+        if let Ok(mut live) = self.live.lock() {
+            if let Some(entry) = live.get_mut(key) {
+                entry.last_seen = Instant::now();
+            }
+        }
+    }
+    pub fn remove_key(&self, key: &Key) {
+        if let Ok(mut live) = self.live.lock() {
+            live.remove(key);
+        }
+    }
+
     /// Everything still live, newest first, pruning what is not as it goes.
     ///
     /// The read *is* the sweep. A background reaper would be a second clock to

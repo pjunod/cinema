@@ -42,11 +42,13 @@ mod hiqlite_jellyfin_catalog;
 mod jellyfin_identity;
 mod jellyfin_login;
 mod jellyfin_play;
+mod jellyfin_watch;
 pub use jellyfin_play::{
     JellyfinPlay, JellyfinPlayActivation, JellyfinPlayScope, JellyfinPlayStore, NewJellyfinPlay,
     JELLYFIN_PENDING_PLAYS_PER_LOGIN, JELLYFIN_PENDING_PLAYS_SERVER, JELLYFIN_PENDING_PLAY_TTL_MS,
     JELLYFIN_TERMINAL_PLAY_TTL_MS,
 };
+pub use jellyfin_watch::{JellyfinProgressProvenance, JellyfinProgressWrite};
 #[cfg(feature = "hiqlite-store")]
 mod hiqlite_jellyfin_play;
 pub use jellyfin_login::{
@@ -3380,6 +3382,26 @@ pub trait WatchStore: Send + Sync + 'static {
         user_id: i64,
         item_ids: &[i64],
     ) -> Result<Vec<(i64, WatchState)>, StoreError>;
+    /// Commit only the original play/revision provenance. Final commits also
+    /// terminalize that exact active play atomically with the durable row.
+    /// Admission check only; the eventual write repeats the atomic fence.
+    async fn jellyfin_progress_is_current(
+        &self,
+        _write: &JellyfinProgressWrite,
+    ) -> Result<bool, StoreError> {
+        Err(StoreError::Identity(
+            "compatibility progress unsupported by this Store".into(),
+        ))
+    }
+    async fn put_jellyfin_progress(
+        &self,
+        _write: JellyfinProgressWrite,
+        _expected: Option<&WatchState>,
+    ) -> Result<Option<WatchState>, StoreError> {
+        Err(StoreError::Identity(
+            "compatibility progress unsupported by this Store".into(),
+        ))
+    }
     /// Record playback progress; crossing 95% marks watched automatically.
     async fn put_progress(
         &self,
@@ -3445,6 +3467,22 @@ pub trait WatchStore: Send + Sync + 'static {
         item_id: i64,
         watched: bool,
     ) -> Result<Vec<i64>, StoreError>;
+    /// Trusted compatibility context permits only an unambiguous own-edit advance.
+    /// Native/Plex callers use `set_watched_tree`, whose origin is absent.
+    async fn set_watched_tree_with_origin(
+        &self,
+        user_id: i64,
+        item_id: i64,
+        watched: bool,
+        origin: Option<&JellyfinPlayScope>,
+    ) -> Result<Vec<i64>, StoreError> {
+        if origin.is_some() {
+            return Err(StoreError::Identity(
+                "manual origin unsupported by this Store".into(),
+            ));
+        }
+        self.set_watched_tree(user_id, item_id, watched).await
+    }
     /// Count the playable leaves under `item_id` and how many of them are
     /// watched. A playable item is its own leaf, so this answers for movies
     /// too — a movie is 1/1 or 0/1.

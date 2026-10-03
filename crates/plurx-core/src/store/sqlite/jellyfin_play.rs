@@ -9,6 +9,44 @@ use rusqlite::{params, OptionalExtension};
 
 #[async_trait]
 impl JellyfinPlayStore for SqliteStore {
+    async fn end_jellyfin_login_plays(
+        &self,
+        scope: &JellyfinPlayScope,
+        now_ms: i64,
+    ) -> Result<Vec<JellyfinPlay>, StoreError> {
+        jp::validate_scope(scope)?;
+        let expiry = jp::terminal_expiry(now_ms)?;
+        let scope = scope.clone();
+        let rows = self
+            .with_conn(move |conn| {
+                let mut stmt = conn.prepare(jp::END_LOGIN)?;
+                let rows = stmt
+                    .query_map(
+                        params![
+                            expiry,
+                            scope.user_id,
+                            scope.token_digest,
+                            scope.device_digest,
+                            scope.client_family.as_str()
+                        ],
+                        |row| {
+                            Ok(jp::RawPlay {
+                                payload: row.get(0)?,
+                                state: row.get(1)?,
+                                expires_at_ms: row.get(2)?,
+                                manual_revision: row.get(3)?,
+                                native_incarnation_id: row.get(4)?,
+                                direct_grant_id: row.get(5)?,
+                            })
+                        },
+                    )?
+                    .collect::<Result<Vec<_>, _>>()?;
+                Ok(rows)
+            })
+            .await?;
+        rows.into_iter().map(jp::RawPlay::decode).collect()
+    }
+
     async fn create_jellyfin_play(&self, play: NewJellyfinPlay) -> Result<bool, StoreError> {
         let (payload, expiry) = jp::encode(&play)?;
         self.with_conn(move |conn| {

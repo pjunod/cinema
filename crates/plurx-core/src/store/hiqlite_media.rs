@@ -3979,6 +3979,61 @@ impl WatchStore for HiqliteAuthStore {
         Ok(rows.into_iter().next().map(Into::into))
     }
 
+    async fn jellyfin_progress_is_current(
+        &self,
+        write: &super::JellyfinProgressWrite,
+    ) -> Result<bool, StoreError> {
+        let p = &write.provenance;
+        super::jellyfin_play::validate_key(&p.play_id, &p.scope)?;
+        let rows = self
+            .client()
+            // authority: queued compatibility admission observes the exact live play and manual-edit revision.
+            .query_consistent_map::<super::jellyfin_watch::CurrentRow, _>(
+                super::jellyfin_watch::CURRENT,
+                params!(
+                    p.play_id.clone(),
+                    p.scope.user_id,
+                    p.scope.token_digest.clone(),
+                    p.scope.device_digest.clone(),
+                    p.scope.client_family.as_str(),
+                    p.manual_revision,
+                    write.item_id,
+                    self.now()?
+                ),
+            )
+            .await?;
+        Ok(rows.into_iter().next().is_some_and(|row| row.current))
+    }
+    async fn put_jellyfin_progress(
+        &self,
+        write: super::JellyfinProgressWrite,
+        expected: Option<&WatchState>,
+    ) -> Result<Option<WatchState>, StoreError> {
+        let now = self.now()?;
+        let (expected, context) = super::jellyfin_watch::progress_context(&write, now, expected)?;
+        let p = &write.provenance;
+        let rows = self
+            .watch_write_returning::<WatchRow>(
+                p.scope.user_id,
+                super::jellyfin_watch::PROGRESS,
+                params!(
+                    write.item_id,
+                    write.duration_ms,
+                    write.position_ms,
+                    p.scope.user_id,
+                    now,
+                    p.play_id.clone(),
+                    p.scope.token_digest.clone(),
+                    p.scope.device_digest.clone(),
+                    p.scope.client_family.as_str(),
+                    p.manual_revision,
+                    expected,
+                    context
+                ),
+            )
+            .await?;
+        Ok(rows.into_iter().next().map(Into::into))
+    }
     async fn set_watched(
         &self,
         user_id: i64,
@@ -3986,69 +4041,45 @@ impl WatchStore for HiqliteAuthStore {
         watched: bool,
     ) -> Result<(), StoreError> {
         let now = self.now()?;
-        if watched {
-            self.watch_write(
-                user_id,
-                "INSERT INTO watch_state (user_id, item_id, position_ms, watched, updated_at) \
-                 VALUES ($1, $2, 0, 1, $3) \
-                 ON CONFLICT(user_id, item_id) DO UPDATE SET watched = 1, updated_at = $3",
-                params!(user_id, item_id, now),
-            )
-            .await?;
-        } else {
-            self.watch_write(
-                user_id,
-                "INSERT INTO watch_state (user_id, item_id, position_ms, watched, updated_at) \
-                 VALUES ($1, $2, 0, 0, $3) \
-                 ON CONFLICT(user_id, item_id) DO UPDATE SET \
-                     watched = 0, position_ms = 0, updated_at = $3",
-                params!(user_id, item_id, now),
-            )
-            .await?;
-        }
+        let sql = super::jellyfin_watch::manual_sql(false, watched);
+        validate_sql(&sql)?;
+        self.watch_write_returning::<super::jellyfin_watch::EditRow>(
+            user_id,
+            sql,
+            params!(item_id, user_id, now, Option::<String>::None),
+        )
+        .await?;
         Ok(())
     }
-
     async fn set_watched_tree(
         &self,
         user_id: i64,
         item_id: i64,
         watched: bool,
     ) -> Result<Vec<i64>, StoreError> {
+        self.set_watched_tree_with_origin(user_id, item_id, watched, None)
+            .await
+    }
+    async fn set_watched_tree_with_origin(
+        &self,
+        user_id: i64,
+        item_id: i64,
+        watched: bool,
+        origin: Option<&super::JellyfinPlayScope>,
+    ) -> Result<Vec<i64>, StoreError> {
         let now = self.now()?;
-        let sql = if watched {
-            format!(
-                "WITH RECURSIVE tree(id) AS ( \
-                     SELECT id FROM items WHERE id = $1 \
-                     UNION SELECT i.id FROM items i JOIN tree t ON i.parent_id = t.id \
-                 ) \
-                 INSERT INTO watch_state (user_id, item_id, position_ms, watched, updated_at) \
-                 SELECT $2, i.id, 0, 1, $3 FROM tree t JOIN items i ON i.id = t.id \
-                 WHERE i.kind IN ({PLAYABLE_KINDS}) \
-                 ON CONFLICT(user_id, item_id) DO UPDATE SET watched = 1, updated_at = $3 \
-                 WHERE watch_state.watched = 0 RETURNING item_id AS id"
-            )
-        } else {
-            format!(
-                "WITH RECURSIVE tree(id) AS ( \
-                     SELECT id FROM items WHERE id = $1 \
-                     UNION SELECT i.id FROM items i JOIN tree t ON i.parent_id = t.id \
-                 ) \
-                 INSERT INTO watch_state (user_id, item_id, position_ms, watched, updated_at) \
-                 SELECT $2, i.id, 0, 0, $3 FROM tree t JOIN items i ON i.id = t.id \
-                 WHERE i.kind IN ({PLAYABLE_KINDS}) \
-                 ON CONFLICT(user_id, item_id) DO UPDATE SET \
-                     watched = 0, position_ms = 0, updated_at = $3 \
-                 WHERE watch_state.watched = 1 OR watch_state.position_ms <> 0 \
-                 RETURNING item_id AS id"
-            )
-        };
+        let origin = super::jellyfin_watch::origin_json(user_id, origin, now)?;
+        let sql = super::jellyfin_watch::manual_sql(true, watched);
         validate_sql(&sql)?;
         let mut changed = self
-            .watch_write_returning::<IdRow>(user_id, sql, params!(item_id, user_id, now))
+            .watch_write_returning::<super::jellyfin_watch::EditRow>(
+                user_id,
+                sql,
+                params!(item_id, user_id, now, origin),
+            )
             .await?
             .into_iter()
-            .map(|row| row.id)
+            .filter_map(|row| row.changed.then_some(row.id))
             .collect::<Vec<_>>();
         changed.sort_unstable();
         Ok(changed)

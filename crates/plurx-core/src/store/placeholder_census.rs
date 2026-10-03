@@ -178,6 +178,7 @@ const SHARED_CONSTANT_SOURCES: &[(&str, &str)] = &[
     ("jellyfin_login.rs", include_str!("jellyfin_login.rs")),
     ("jellyfin_catalog.rs", include_str!("jellyfin_catalog.rs")),
     ("jellyfin_play.rs", include_str!("jellyfin_play.rs")),
+    ("jellyfin_watch.rs", include_str!("jellyfin_watch.rs")),
     (
         "../live_tv_resource.rs",
         include_str!("../live_tv_resource.rs"),
@@ -937,7 +938,9 @@ fn is_sqlite_candidate(text: &str) -> bool {
 // analysis_reconciliation_preserves_work_and_fences_changed_requests executes
 // the paginated query; the separate preparation keeps its arity out of this
 // same-statement scanner's reach.
-const EXPECTED_UNCHECKED_SQLITE_ARITY: usize = 92;
+// J3 removes three separately prepared watch-tree loop statements; the shared
+// atomic manual SQL is exercised by both-backend revision contracts.
+const EXPECTED_UNCHECKED_SQLITE_ARITY: usize = 89;
 
 #[test]
 fn every_sqlite_placeholder_and_local_binding_arity_is_valid() {

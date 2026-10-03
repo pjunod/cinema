@@ -1,6 +1,6 @@
 # Jellyfin compatibility — measured build progress and remaining gates
 
-**Status:** open · J0/J1 integrated; J2 connection and browsing underway; physical Infuse repeat deferred · **Updated:** 2026-10-03 EDT.
+**Status:** open · J0–J2 integrated; J3 direct/watch implementation underway; physical Infuse repeat deferred · **Updated:** 2026-10-03 EDT.
 
 Companion to [the reviewed build contract](JELLYFIN-COMPATIBILITY-BUILD.md)
 (what must be built and proved) — this records execution and evidence. The
@@ -330,8 +330,8 @@ remaining facade/worker/race boundaries are still pending; see the
 |---|---|---|
 | J0 | Admitted for implementation by user direction | Corrected physical Infuse repeat retained as J6 qualification requirement |
 | J1 | Ready after J0 task integration | Identity, deterministic retirement/replacement guard, token-only service seams |
-| J2 | Connection/catalog implementation under verification; anonymous artwork decision pending | Connect/browse, bounded misses and cold-node first sync |
-| J3 | Waiting on J2 | Direct/watch, Store revisions and per-play final durability |
+| J2 | Integrated into effort; anonymous artwork decision pending | Connect/browse, bounded misses and cold-node first sync |
+| J3 | Local direct/watch validation complete; effort integration pending | Direct/watch, Store revisions and per-play final durability |
 | J4 | Waiting on J3 and J0 hard-seam decisions | VOD-only negotiation/activation, refusal mapping, bounded retries and aliases |
 | J5 | Waiting on J4 | Track, subtitle and observed ancillary completion |
 | J6 | Waiting on J5 | Frozen physical/cluster matrix, qualification and graduation |
@@ -459,7 +459,7 @@ exposed by J1. The Apple TV remains untouched under Paul's explicit deferral;
 its availability does not block implementation or the J1 integration gate.
 
 
-## 10. J1 integrated; J2 connection and browsing underway
+## 10. J0–J2 integrated; J3 direct/watch underway
 
 [Effort run 3963](http://192.168.4.7:3000/noirr/plurx/actions/runs/3963)
 passes all eight required jobs on J1 head `0e4318355`.
@@ -495,3 +495,26 @@ pending. Neither anonymous behavior nor physical client browsing is qualified.
 The Android TV's previously authorized address is currently unreachable. The
 Apple TV remains deferred and untouched under Paul's instruction; these device
 checks do not block implementation or automated compilation.
+
+[Effort run 3983](http://192.168.4.7:3000/noirr/plurx/actions/runs/3983)
+passed all eight jobs on J2 head `5a5514b7f`. [PR #772](http://192.168.4.7:3000/noirr/plurx/pulls/772)
+merged as `e5d17b1c8` with the eighteen checked regression references in its
+landing message. The full local web check passed without increasing the
+TypeScript ratchet. Artwork remains authenticated pending the direct decision.
+
+J3 runs on that integrated tree. Manual revision, guarded queue admission and
+commit, atomic final/terminal writes, and exact-login logout have focused
+SQLite and real three-voter evidence. Import drops saved edit context while
+preserving counters and existing fences. Released bindings cannot gain an
+own-edit exemption while waiting for a failed final to retry.
+
+All fifteen HTTP/shared-progress regressions pass, including direct Range and
+HEAD, positionless Stop, cross-login rejection, profile separation, injected
+final-write failure/retry, and logout preserving another device's token and
+native file grant. The native watch contract also passes on both backends;
+27 native watch unit regressions, 28 SQL/read censuses and two transaction
+inventories pass. Workspace/all-target Clippy passes on pinned Rust 1.97.1. All 22 Jellyfin
+Store contracts pass on SQLite and three voters (214.11 seconds), and all ten
+shared coalescer regressions pass. Route deadline and metric-group inventories
+also pass. These results do not qualify either physical client,
+J4/J5 transport completion, or release promotion.

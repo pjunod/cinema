@@ -4346,7 +4346,11 @@ pattern = "\\.(?:spawn|output|status)\\s*\\("
 # a process, task or producer; cold demand uses the existing artwork owner.
 # +2 warm Jellyfin artwork response/conditional status assertions; the
 # fixture uses the existing finite image generator and native queue owner.
-expected_occurrences = 419
+# +6 Jellyfin J3: in-process Axum Response::status reads cover playback
+# authorization, Range, HEAD, late events and the event helper. No process,
+# task, timer or producer is created by these response inspections.
+# +1 logout fixture: an in-process HTTP status assertion; no resource owner.
+expected_occurrences = 426
 # +2 native-startup delayed-init fixture: Axum Response::status() reads
 # assert the master and legacy bridge responses. Neither launches a process.
 
