@@ -2207,7 +2207,30 @@ pub async fn decision(
     }
     let network_prior =
         super::network::stored_prior(state.store.as_ref(), identity.as_ref()).await?;
-    let mut file = load_file(&state, id).await?;
+    let file = load_file(&state, id).await?;
+    decision_for_file(&state, file, q, network_prior, Some(&user))
+        .await
+        .map(Json)
+}
+
+/// The actual engine for both local and authorized Source media. Source callers
+/// never supply a local account or its node-local network prior.
+pub(super) async fn decision_for_source_file(
+    state: &AppState,
+    file: MediaFile,
+    q: Caps,
+) -> Result<DecisionResponse, ApiError> {
+    decision_for_file(state, file, q, None, None).await
+}
+
+async fn decision_for_file(
+    state: &AppState,
+    mut file: MediaFile,
+    q: Caps,
+    network_prior: Option<plurx_core::domain::NetworkPrior>,
+    user: Option<&plurx_core::domain::User>,
+) -> Result<DecisionResponse, ApiError> {
+    let id = file.id;
     // Older builds stored this against the file. A fresh playback must never
     // inherit that historical value; its client starts at zero and carries
     // any adjustment on each stream request for this one playback only.
@@ -2264,7 +2287,7 @@ pub async fn decision(
     // therefore about whether `Auto` wants full subtitles at all.
     let container_audio_streams = file.audio_streams.clone();
     set_selected_audio_default(&mut file.audio_streams, selected_audio);
-    let node = decision_render_caps(render_caps(&state).await, q.caps_v2.as_ref());
+    let node = decision_render_caps(render_caps(state).await, q.caps_v2.as_ref());
     let decision_now_ms = crate::media_sessions::unix_ms();
     let mut decision = q.decide(&file, &node, decision_now_ms);
     if let Some(caps) = q.caps_v2.as_ref().filter(|caps| {
@@ -2407,8 +2430,8 @@ pub async fn decision(
         })
         .unwrap_or_default();
     tracing::info!(
-        user_id = user.id,
-        username = %user.username,
+        user_id = user.map(|user| user.id),
+        username = user.map(|user| user.username.as_str()),
         file_id = id,
         client = q.client.as_deref().unwrap_or("unknown"),
         device = q.device.as_deref().unwrap_or("unknown"),
@@ -2457,7 +2480,7 @@ pub async fn decision(
     } else {
         None
     };
-    let markers = markers_for(&state, &file).await;
+    let markers = markers_for(state, &file).await;
 
     // DTO defaults and the verdict now come from the same selection above.
     let audio = audio_tracks(&file);
@@ -2490,7 +2513,7 @@ pub async fn decision(
                 state
                     .media_pool
                     .quality_candidates(
-                        &state,
+                        state,
                         crate::media_pool::QualityCatalogRequest {
                             copy_contract: None,
                             file_id: file.id,
@@ -2563,7 +2586,7 @@ pub async fn decision(
                 })
         }
     });
-    Ok(Json(DecisionResponse {
+    Ok(DecisionResponse {
         display_aware_auto_protocol: Some("route-v1".to_owned()),
         quality_candidate_id,
         quality_candidates,
@@ -2584,11 +2607,11 @@ pub async fn decision(
         }),
         markers,
         audio_offset_ms: file.audio_offset_ms,
-        declared_offset_ms: declared_av_offset(&state, id).await,
+        declared_offset_ms: declared_av_offset(state, id).await,
         ladder: crate::transcode::ladder(file.height),
         prior_kbps: network_prior.and_then(|prior| prior.sustained_kbps),
         prefer_segmented,
-    }))
+    })
 }
 
 /// The container's own per-stream start-time story: audio start minus video

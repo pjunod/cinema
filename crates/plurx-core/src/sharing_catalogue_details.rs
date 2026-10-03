@@ -54,6 +54,22 @@ pub struct SourceFileWitness {
     projection: String,
 }
 impl SourceFileWitness {
+    /// Compare the complete Source tuple without exposing the private path,
+    /// probe or canonical revision projection.
+    pub fn matches_source_file(
+        &self,
+        server: Uuid,
+        epoch: Uuid,
+        library: &SourceId,
+        item: &SourceId,
+        file: &SourceId,
+    ) -> bool {
+        self.server == server
+            && self.epoch == epoch
+            && &self.library == library
+            && &self.item == item
+            && &self.file == file
+    }
     pub(crate) fn from_current_projection(
         server: Uuid,
         epoch: Uuid,
@@ -104,6 +120,16 @@ fn hex(bytes: &[u8]) -> String {
     value
 }
 impl CatalogueRevisionKey {
+    pub(crate) fn art_context(&self) -> (Uuid, Uuid) {
+        (self.server, self.epoch)
+    }
+    pub(crate) fn art_signature(&self, bytes: &[u8]) -> ring::hmac::Tag {
+        let key = ring::hmac::Key::new(ring::hmac::HMAC_SHA256, &self.key);
+        let mut context = ring::hmac::Context::with_key(&key);
+        context.update(b"plurx.sharing.source-art-resource.v1\0");
+        context.update(bytes);
+        context.sign()
+    }
     /// Cryptographic factory only. Qualified schema activation owns durable
     /// insertion; catalogue reads must never call this factory to repair state.
     pub fn generate_sealed(

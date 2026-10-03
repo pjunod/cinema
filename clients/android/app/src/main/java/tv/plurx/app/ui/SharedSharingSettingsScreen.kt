@@ -20,6 +20,8 @@ import tv.plurx.app.ui.components.tvFocusRing
 
 @Composable
 fun SharedSharingSettingsScreen(onBack: () -> Unit, onLibraries: () -> Unit, onDeveloper: () -> Unit) {
+    var management by remember { mutableStateOf(false) }
+    if (management) { SharedSharingManagementScreen(onBack = { management = false }); return }
     var summaries by remember { mutableStateOf<List<Pair<String, String>>>(emptyList()) }
     var errors by remember { mutableStateOf<List<String>>(emptyList()) }
     var busy by remember { mutableStateOf(false) }
@@ -57,7 +59,7 @@ fun SharedSharingSettingsScreen(onBack: () -> Unit, onLibraries: () -> Unit, onD
         summaries.forEach { (label, value) -> Text("$label: $value") }
         errors.forEach { Text(it) }
         TextButton(enabled = !busy, onClick = { scope.launch { load() } }) { Text("Refresh status") }
-        Text("Pairing, invitations and library assignments are managed in the web app.")
+        TextButton(onClick = { management = true }) { Text("Manage invitations and Sources") }
     }
 }
 

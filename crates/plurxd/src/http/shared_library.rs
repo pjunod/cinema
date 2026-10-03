@@ -25,6 +25,10 @@ pub(crate) fn peer_router(state: AppState) -> Router<AppState> {
         .route("/sharing/v1/items/{id}", get(item))
         .route("/sharing/v1/items/{id}/children", get(children))
         .route("/sharing/v1/items:batch", post(batch))
+        .route(
+            "/sharing/v1/art/{resource}",
+            get(super::shared_artwork::source),
+        )
         .route_layer(middleware::from_fn_with_state(state, source_content_guard))
         .route("/sharing/v1/current-scope", post(current_scope))
 }
@@ -91,7 +95,7 @@ fn missing() -> ApiError {
 fn source_id(value: &str) -> Result<SourceId, ApiError> {
     SourceId::parse(value).map_err(|_| invalid())
 }
-async fn authority(
+pub(super) async fn authority(
     state: &AppState,
     headers: &HeaderMap,
 ) -> Result<(String, uuid::Uuid), ApiError> {
@@ -329,7 +333,8 @@ async fn browse(
         .iter()
         .map(|record| (record.item.library_id.clone(), record.item.item_id.clone()))
         .collect();
-    source_json(state,grant,json!({"items":page.records.into_iter().map(|r|r.item).collect::<Vec<_>>(),"next_cursor":next_cursor,"catalogue_revision":page.counters.library_revision,"scope_generation":page.counters.scope_generation,"catalogue_generation":page.counters.catalogue_generation}),vec![library_id],visible).await
+    let artwork_items = super::shared_artwork::source_records(state, grant, page.records).await?;
+    source_json(state,grant,json!({"items":artwork_items,"next_cursor":next_cursor,"catalogue_revision":page.counters.library_revision,"scope_generation":page.counters.scope_generation,"catalogue_generation":page.counters.catalogue_generation}),vec![library_id],visible).await
 }
 async fn item(
     State(state): State<AppState>,
@@ -397,10 +402,11 @@ async fn item(
         snapshot.record.item.library_id.clone(),
         snapshot.record.item.item_id.clone(),
     )];
-    let details = SourceItemDetails {
-        item: snapshot.record.item,
-        files,
-    };
+    let item = super::shared_artwork::source_records(&state, grant, vec![snapshot.record])
+        .await?
+        .pop()
+        .ok_or_else(missing)?;
+    let details = SourceItemDetails { item, files };
     details.validate().map_err(unavailable)?;
     let mut response = source_json(
         &state,
@@ -443,7 +449,16 @@ async fn batch(
                 .map(|record| (record.item.library_id.clone(), record.item.item_id.clone()))
         })
         .collect();
-    source_json(&state,grant,json!({"items":entries.into_iter().map(|e|json!({"item_id":e.item_id,"item":e.record.map(|r|r.item)})).collect::<Vec<_>>()}),Vec::new(),visible).await
+    let records = entries
+        .iter()
+        .filter_map(|entry| entry.record.clone())
+        .collect();
+    let artwork_items = super::shared_artwork::source_records(&state, grant, records).await?;
+    let mut mapped = artwork_items
+        .into_iter()
+        .map(|item| (item.item_id.clone(), item))
+        .collect::<std::collections::BTreeMap<_, _>>();
+    source_json(&state,grant,json!({"items":entries.into_iter().map(|e|json!({"item_id":e.item_id,"item":mapped.remove(&e.item_id)})).collect::<Vec<_>>()}),Vec::new(),visible).await
 }
 
 #[derive(Clone)]
@@ -560,6 +575,23 @@ async fn source_content_current(state: &AppState, authority: &SourceContentAutho
     .await
         == Ok(Some(true))
 }
+pub(super) async fn source_art_scope_current(
+    state: &AppState,
+    reference: &plurx_core::sharing_artwork::SourceArtReference,
+) -> bool {
+    source_content_current(
+        state,
+        &SourceContentAuthority {
+            grant: reference.grant_id,
+            server: reference.server_id,
+            epoch: reference.catalogue_epoch,
+            libraries: vec![reference.library_id.clone()],
+            items: vec![(reference.library_id.clone(), reference.item_id.clone())],
+            files: Vec::new(),
+        },
+    )
+    .await
+}
 async fn source_content_guard(
     State(state): State<AppState>,
     request: Request<Body>,
@@ -602,8 +634,13 @@ async fn source_content_guard(
         .into_response();
     }
     let cancel = connection.0.clone();
+    let art_lease = response
+        .extensions()
+        .get::<std::sync::Arc<super::shared_artwork::ArtBodyLease>>()
+        .cloned();
     let monitored=connection.monitor(async move {
         let _permit=permit;
+        let _art_body_owner=art_lease;
         let mut interval=tokio::time::interval(std::time::Duration::from_secs(1));
         interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         loop {
@@ -627,21 +664,40 @@ async fn source_content_guard(
     }
     response
 }
+pub(super) fn attach_source_art_authority(
+    response: &mut Response,
+    reference: &plurx_core::sharing_artwork::SourceArtReference,
+) {
+    response.extensions_mut().insert(SourceContentAuthority {
+        grant: reference.grant_id,
+        server: reference.server_id,
+        epoch: reference.catalogue_epoch,
+        libraries: vec![reference.library_id.clone()],
+        items: vec![(reference.library_id.clone(), reference.item_id.clone())],
+        files: Vec::new(),
+    });
+}
 
 #[derive(Clone)]
-struct ReceiverSourceScope {
+pub(super) struct ReceiverSourceScope {
     scope: plurx_core::store::sharing_catalogue::ReceiverCatalogueScope,
     items: Vec<plurx_core::sharing_catalogue_details::SourceScopeItem>,
     files: Vec<plurx_core::sharing_catalogue_details::SourceScopeFile>,
 }
+#[derive(Clone, Copy)]
+enum ReceiverAccess {
+    Viewer,
+    Administrator,
+}
 #[derive(Clone)]
 struct ReceiverContentAuthority {
+    access: ReceiverAccess,
     hash: String,
     user: i64,
     scopes: Vec<plurx_core::store::sharing_catalogue::ReceiverCatalogueScope>,
     sources: Vec<ReceiverSourceScope>,
 }
-fn receiver_scope(
+pub(super) fn receiver_scope(
     summary: &plurx_core::sharing::ImportSummary,
     mut libraries: Vec<SourceId>,
     items: Vec<(SourceId, SourceId)>,
@@ -653,17 +709,7 @@ fn receiver_scope(
         return Err(invalid());
     }
     Ok(ReceiverSourceScope {
-        scope: plurx_core::store::sharing_catalogue::ReceiverCatalogueScope {
-            import_id: summary.id,
-            source_server_id: summary.source_server_id,
-            catalogue_epoch: summary.catalogue_epoch,
-            lifecycle_generation: summary.lifecycle_generation,
-            assignment_generation: summary.assignment_generation,
-            endpoint_generation: summary.endpoint_generation,
-            claim_id: summary.claim_id,
-            remote_grant_id: summary.remote_grant_id.ok_or_else(missing)?,
-            libraries,
-        },
+        scope: receiver_import_scope(summary, libraries)?,
         items: items
             .into_iter()
             .map(
@@ -685,24 +731,66 @@ fn receiver_scope(
             .collect(),
     })
 }
+fn receiver_import_scope(
+    summary: &plurx_core::sharing::ImportSummary,
+    libraries: Vec<SourceId>,
+) -> Result<plurx_core::store::sharing_catalogue::ReceiverCatalogueScope, ApiError> {
+    if libraries.len() > 64 {
+        return Err(invalid());
+    }
+    Ok(
+        plurx_core::store::sharing_catalogue::ReceiverCatalogueScope {
+            import_id: summary.id,
+            source_server_id: summary.source_server_id,
+            catalogue_epoch: summary.catalogue_epoch,
+            lifecycle_generation: summary.lifecycle_generation,
+            assignment_generation: summary.assignment_generation,
+            endpoint_generation: summary.endpoint_generation,
+            claim_id: summary.claim_id,
+            remote_grant_id: summary.remote_grant_id.ok_or_else(missing)?,
+            libraries,
+        },
+    )
+}
+async fn receiver_login_current(
+    state: &AppState,
+    authority: &ReceiverContentAuthority,
+) -> Option<bool> {
+    match authority.access {
+        ReceiverAccess::Viewer => state
+            .store
+            .receiver_catalogue_authorized(
+                &authority.hash,
+                authority.user,
+                &authority.scopes,
+                clock_ms() / 1000,
+            )
+            .await
+            .ok(),
+        ReceiverAccess::Administrator => {
+            let [scope] = authority.scopes.as_slice() else {
+                return Some(false);
+            };
+            state
+                .store
+                .receiver_admin_catalogue_authorized(
+                    &authority.hash,
+                    authority.user,
+                    scope,
+                    clock_ms() / 1000,
+                )
+                .await
+                .ok()
+        }
+    }
+}
 async fn receiver_content_current(state: &AppState, authority: &ReceiverContentAuthority) -> bool {
     use futures_util::{stream, StreamExt};
     tokio::time::timeout(std::time::Duration::from_secs(1), async {
         if !crate::sharing::enabled(state.store.as_ref()).await.ok()? {
             return Some(false);
         }
-        let scopes = &authority.scopes;
-        if !state
-            .store
-            .receiver_catalogue_authorized(
-                &authority.hash,
-                authority.user,
-                scopes,
-                clock_ms() / 1000,
-            )
-            .await
-            .ok()?
-        {
+        if !receiver_login_current(state, authority).await? {
             return Some(false);
         }
         let mut checks = stream::iter(authority.sources.clone().into_iter().map(|source| {
@@ -721,16 +809,7 @@ async fn receiver_content_current(state: &AppState, authority: &ReceiverContentA
             }
         }
         // Local login/assignment may change during the remote checks.
-        state
-            .store
-            .receiver_catalogue_authorized(
-                &authority.hash,
-                authority.user,
-                scopes,
-                clock_ms() / 1000,
-            )
-            .await
-            .ok()
+        receiver_login_current(state, authority).await
     })
     .await
         == Ok(Some(true))
@@ -753,10 +832,31 @@ async fn receiver_json_scoped(
     sources: Vec<ReceiverSourceScope>,
     value: Value,
 ) -> Result<Response, ApiError> {
+    receiver_json_authorized(
+        state,
+        token,
+        user,
+        scopes,
+        sources,
+        value,
+        ReceiverAccess::Viewer,
+    )
+    .await
+}
+async fn receiver_json_authorized(
+    state: &AppState,
+    token: &str,
+    user: i64,
+    scopes: Vec<plurx_core::store::sharing_catalogue::ReceiverCatalogueScope>,
+    sources: Vec<ReceiverSourceScope>,
+    value: Value,
+    access: ReceiverAccess,
+) -> Result<Response, ApiError> {
     if scopes.len() > 32 || sources.len() > 32 {
         return Err(invalid());
     }
     let authority = ReceiverContentAuthority {
+        access,
         hash: plurx_core::auth::hash_token(token),
         user,
         scopes,
@@ -772,6 +872,39 @@ async fn receiver_json_scoped(
     let mut response = bounded_json(value)?;
     response.extensions_mut().insert(authority);
     Ok(response)
+}
+pub(super) async fn attach_receiver_art_authority(
+    state: &AppState,
+    token: &str,
+    user: i64,
+    summary: &plurx_core::sharing::ImportSummary,
+    reference: &plurx_core::sharing_artwork::ReceiverArtReference,
+    response: &mut Response,
+) -> Result<(), ApiError> {
+    let source = receiver_scope(
+        summary,
+        vec![reference.item.library_id.clone()],
+        vec![(
+            reference.item.library_id.clone(),
+            reference.item.item_id.clone(),
+        )],
+        vec![],
+    )?;
+    let authority = ReceiverContentAuthority {
+        access: ReceiverAccess::Viewer,
+        hash: plurx_core::auth::hash_token(token),
+        user,
+        scopes: vec![source.scope.clone()],
+        sources: vec![source],
+    };
+    if !receiver_content_current(state, &authority).await {
+        return Err(fail(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "sharing_body_authority_unavailable",
+        ));
+    }
+    response.extensions_mut().insert(authority);
+    Ok(())
 }
 static RECEIVER_MONITORS: std::sync::LazyLock<std::sync::Arc<tokio::sync::Semaphore>> =
     std::sync::LazyLock::new(|| std::sync::Arc::new(tokio::sync::Semaphore::new(32)));
@@ -816,9 +949,14 @@ async fn receiver_content_guard(
         )
         .into_response();
     }
+    let art_lease = response
+        .extensions()
+        .get::<std::sync::Arc<super::shared_artwork::ArtBodyLease>>()
+        .cloned();
     let cancel = connection.0.clone();
     if connection.monitor(async move{
         let _permit=permit;
+        let _art_body_owner=art_lease;
         let mut interval=tokio::time::interval(std::time::Duration::from_secs(1));
         interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         loop {
@@ -829,8 +967,48 @@ async fn receiver_content_guard(
     response
 }
 
+pub(crate) fn admin_library_router(state: AppState) -> Router<AppState> {
+    Router::new()
+        .route("/sharing/imports/{import}/libraries", get(admin_libraries))
+        .route_layer(middleware::from_fn_with_state(
+            state,
+            receiver_content_guard,
+        ))
+}
+async fn admin_libraries(
+    State(state): State<AppState>,
+    super::extract::AdminUser(user): super::extract::AdminUser,
+    super::extract::RawToken(token): super::extract::RawToken,
+    Path(import): Path<String>,
+) -> Result<Response, ApiError> {
+    let hash = plurx_core::auth::hash_token(&token);
+    let (summary, libraries) = state
+        .sharing
+        .read_admin_libraries(&state, import_id(&import)?, user.id, &hash)
+        .await
+        .map_err(peer_failure)?;
+    let scope = receiver_import_scope(
+        &summary,
+        libraries
+            .iter()
+            .map(|library| library.library_id.clone())
+            .collect(),
+    )?;
+    let source = ReceiverSourceScope {
+        scope: scope.clone(),
+        items: vec![],
+        files: vec![],
+    };
+    receiver_json_authorized(&state, &token, user.id, vec![scope], vec![source],
+        json!({"import_id":summary.id,"server_id":summary.source_server_id,"catalogue_epoch":summary.catalogue_epoch,"lifecycle_generation":summary.lifecycle_generation,"expected_assignment_generation":summary.assignment_generation,"state":summary.state,"libraries":libraries}),
+        ReceiverAccess::Administrator).await
+}
 pub(crate) fn viewer_router(state: AppState) -> Router<AppState> {
     Router::new()
+        .route(
+            "/shared/imports/{import}/art/{resource}",
+            get(super::shared_artwork::receiver),
+        )
         .route("/shared/libraries", get(viewer_assigned_libraries))
         .route("/shared/continue-watching", get(viewer_continue_groups))
         .route(
@@ -879,7 +1057,12 @@ fn peer_failure(error: crate::sharing_client::PeerError) -> ApiError {
         )
     }
 }
-fn shared_item(summary: &plurx_core::sharing::ImportSummary, item: SourceCatalogueItem) -> Value {
+fn shared_item(
+    summary: &plurx_core::sharing::ImportSummary,
+    item: SourceCatalogueItem,
+    user: i64,
+    art_key: Option<&plurx_core::sharing_file_locators::FileLocatorKey>,
+) -> Value {
     let reference = SharedReference {
         import_id: summary.id,
         server_id: summary.source_server_id,
@@ -891,7 +1074,39 @@ fn shared_item(summary: &plurx_core::sharing::ImportSummary, item: SourceCatalog
         item_id: id,
         ..reference.clone()
     });
-    json!({"source":"shared","reference":reference,"parent":parent,"title":item.title,"sort_title":item.sort_title,"kind":item.kind,"year":item.year,"overview":item.overview,"genres":item.genres,"season_number":item.season_number,"episode_number":item.episode_number})
+    let mut art = Vec::new();
+    if let Some(key) = art_key {
+        for entry in item.art {
+            let context = plurx_core::sharing_artwork::ReceiverArtReference {
+                item: reference.clone(),
+                user_id: user,
+                lifecycle_generation: summary.lifecycle_generation,
+                source: entry.resource,
+            };
+            if let Ok(resource) = key.issue_art(&context, clock_ms()) {
+                art.push(json!({"kind":entry.kind,"variant":entry.variant,"url":resource.url()}));
+            }
+        }
+    }
+    let poster = art
+        .iter()
+        .find(|a| a["kind"] == "poster" && a["variant"] == "w300")
+        .map(|a| a["url"].clone());
+    let backdrop = art
+        .iter()
+        .find(|a| a["kind"] == "backdrop" && a["variant"] == "w780")
+        .map(|a| a["url"].clone());
+    let mut value = json!({"source":"shared","reference":reference,"parent":parent,"title":item.title,"sort_title":item.sort_title,"kind":item.kind,"year":item.year,"overview":item.overview,"genres":item.genres,"season_number":item.season_number,"episode_number":item.episode_number});
+    if !art.is_empty() {
+        value["art"] = json!(art);
+    }
+    if let Some(poster) = poster {
+        value["poster_url"] = poster;
+    }
+    if let Some(backdrop) = backdrop {
+        value["backdrop_url"] = backdrop;
+    }
+    value
 }
 #[derive(Default, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -951,6 +1166,7 @@ async fn viewer_continue_import(
     Path(import): Path<String>,
     RawQuery(raw): RawQuery,
 ) -> Result<Response, ApiError> {
+    let art_key = super::shared_artwork::receiver_key(&state).await?;
     let import = import_id(&import)?;
     let groups = tokio::time::timeout(
         std::time::Duration::from_secs(1),
@@ -1010,7 +1226,7 @@ async fn viewer_continue_import(
                 };
                 // A fresh changed library is not an implicit history move.
                 tuples.push((item.library_id.clone(), item.item_id.clone()));
-                items.push(json!({"item":shared_item(&summary,item),"watch":history.watch}));
+                items.push(json!({"item":shared_item(&summary,item,user.id,art_key.as_ref()),"watch":history.watch}));
             }
             if !tuples.is_empty() {
                 sources.push(receiver_scope(
@@ -1106,6 +1322,7 @@ async fn viewer_page(
     parent: Option<SourceId>,
     q: BrowseQuery,
 ) -> Result<Response, ApiError> {
+    let art_key = super::shared_artwork::receiver_key(state).await?;
     let scope_library = library.clone();
     let scope_parent = parent.clone();
     let (summary, reply) = state
@@ -1140,7 +1357,7 @@ async fn viewer_page(
     }
     let scope = receiver_scope(&summary, vec![scope_library], tuples, Vec::new())?;
     receiver_json(state,token,user,vec![scope],
-        json!({"items":page.items.into_iter().map(|item|shared_item(&summary,item)).collect::<Vec<_>>(),"next_cursor":page.next_cursor,"catalogue_revision":page.catalogue_revision,"scope_generation":page.scope_generation,"catalogue_generation":page.catalogue_generation})).await
+        json!({"items":page.items.into_iter().map(|item|shared_item(&summary,item,user,art_key.as_ref())).collect::<Vec<_>>(),"next_cursor":page.next_cursor,"catalogue_revision":page.catalogue_revision,"scope_generation":page.scope_generation,"catalogue_generation":page.catalogue_generation})).await
 }
 async fn viewer_batch(
     State(state): State<AppState>,
@@ -1149,6 +1366,7 @@ async fn viewer_batch(
     Path(import): Path<String>,
     body: Body,
 ) -> Result<Response, ApiError> {
+    let art_key = super::shared_artwork::receiver_key(&state).await?;
     let bytes = to_bytes(body, 16 * 1024).await.map_err(|_| invalid())?;
     let batch: MetadataBatch = serde_json::from_slice(&bytes).map_err(|_| invalid())?;
     batch.validate().map_err(|_| invalid())?;
@@ -1188,7 +1406,7 @@ async fn viewer_batch(
     };
     let scope = receiver_scope(&summary, libraries, tuples, Vec::new())?;
     receiver_json(&state,&token,user.id,vec![scope],
-        json!({"items":batch.items.into_iter().map(|entry|json!({"item_id":entry.item_id,"item":entry.item.map(|item|shared_item(&summary,item))})).collect::<Vec<_>>()})).await
+        json!({"items":batch.items.into_iter().map(|entry|json!({"item_id":entry.item_id,"item":entry.item.map(|item|shared_item(&summary,item,user.id,art_key.as_ref()))})).collect::<Vec<_>>()})).await
 }
 
 async fn current_viewer_item(
@@ -1228,6 +1446,7 @@ async fn viewer_item(
     super::extract::RawToken(token): super::extract::RawToken,
     Path((import, item)): Path<(String, String)>,
 ) -> Result<Response, ApiError> {
+    let art_key = super::shared_artwork::receiver_key(&state).await?;
     let import = import_id(&import)?;
     let item = source_id(&item)?;
     let (summary, reply) = state
@@ -1286,7 +1505,7 @@ async fn viewer_item(
         .await
         .map_err(unavailable)?;
     receiver_json(&state,&token,user.id,vec![scope],
-        json!({"item":shared_item(&summary,metadata),"files":files,"watch":progress,"delivery_status":"unavailable"})).await
+        json!({"item":shared_item(&summary,metadata,user.id,art_key.as_ref()),"files":files,"watch":progress,"delivery_status":"unavailable"})).await
 }
 async fn viewer_progress(
     State(state): State<AppState>,
@@ -1566,16 +1785,23 @@ mod tests {
         body_server_app(app, body_dropped, data_dropped).await
     }
     fn fixture_tracks_shared_body(path: &str) -> bool {
+        if path.starts_with("/sharing/v1/art/")
+            || (path.contains("/shared/imports/") && path.contains("/art/"))
+        {
+            return true;
+        }
         path.ends_with("/items")
             || path.starts_with("/sharing/v1/items/")
             || (path.contains("/shared/imports/")
                 && (path.contains("/items/") || path.ends_with("/continue-watching")))
+            || (path.contains("/sharing/imports/") && path.ends_with("/libraries"))
     }
 
     #[test]
     fn sharing_body_fixture_tracks_continue_watching_and_item_responses() {
         for path in [
             "/api/v1/shared/imports/fixture/continue-watching",
+            "/api/v1/sharing/imports/fixture/libraries",
             "/api/v1/shared/imports/fixture/items/7",
             "/api/v1/shared/imports/fixture/libraries/7/items",
             "/sharing/v1/items/7",
@@ -1883,6 +2109,370 @@ mod tests {
             drop(client);
             stop.send(()).expect("fixture stop");
             served.await.expect("server task").expect("server result");
+        }
+    }
+    #[tokio::test]
+    async fn sharing_artwork_blocked_http1_http2_releases_bytes_on_grant_delete_or_move() {
+        use plurx_core::{
+            sharing_artwork::{artwork_expiry, ArtKind, ArtVariant, SourceArtReference},
+            sharing_catalogue_details::CatalogueRevisionKey,
+        };
+        let _serial = BODY_FIXTURES.lock().await;
+        let _art_serial = super::super::shared_artwork::ART_FIXTURES.lock().await;
+        for h2 in [false, true] {
+            for change in 0..4 {
+                if !h2 && change == 3 {
+                    continue;
+                }
+                let mut fixture = body_fixture().await;
+                fixture.state.artwork_dir = fixture
+                    ._directory
+                    .path()
+                    .canonicalize()
+                    .expect("canonical owned path")
+                    .join("artwork");
+                std::fs::create_dir(&fixture.state.artwork_dir).expect("owned artwork fixture");
+                let mut bytes = vec![23u8; 8 * 1024 * 1024];
+                bytes[..8].copy_from_slice(b"\x89PNG\r\n\x1a\n");
+                std::fs::write(fixture.state.artwork_dir.join("fixture.png"), bytes)
+                    .expect("bounded original");
+                let identity = fixture
+                    .state
+                    .store
+                    .sharing_identity(1000)
+                    .await
+                    .expect("identity");
+                let envelope = CatalogueRevisionKey::generate_sealed(
+                    &fixture.state.sharing.key,
+                    identity.clone(),
+                )
+                .expect("fixture key");
+                let key = CatalogueRevisionKey::open(
+                    &fixture.state.sharing.key,
+                    identity.clone(),
+                    &envelope,
+                )
+                .expect("fixture key open");
+                let writer = rusqlite::Connection::open(&fixture.path).expect("fixture writer");
+                writer
+                    .execute_batch(
+                        plurx_core::store::sharing_catalogue_source::CANDIDATE_REVISION_KEY_SCHEMA,
+                    )
+                    .expect("candidate key only");
+                writer
+                    .execute(
+                        "INSERT INTO sharing_catalogue_keys VALUES(1,?1,?2,?3)",
+                        rusqlite::params![
+                            identity.server_id.to_string(),
+                            identity.catalogue_epoch.to_string(),
+                            envelope.as_stored()
+                        ],
+                    )
+                    .expect("key selection");
+                writer
+                    .execute(
+                        "UPDATE items SET poster_path='fixture.png' WHERE id=?1",
+                        [fixture.item],
+                    )
+                    .expect("poster");
+                drop(writer);
+                let now = clock_ms();
+                let resource = key
+                    .issue_art(
+                        &SourceArtReference {
+                            server_id: identity.server_id,
+                            catalogue_epoch: identity.catalogue_epoch,
+                            grant_id: fixture.grant,
+                            library_id: SourceId::parse(&fixture.library.to_string())
+                                .expect("library"),
+                            item_id: SourceId::parse(&fixture.item.to_string()).expect("item"),
+                            kind: ArtKind::Poster,
+                            variant: ArtVariant::Original,
+                            expires_at_ms: artwork_expiry(now).expect("expiry"),
+                        },
+                        now,
+                    )
+                    .expect("opaque resource");
+                let reference = resource.reference_unverified().expect("closed reference");
+                assert!(key.verify_art(&resource, fixture.grant, clock_ms()).is_ok());
+                let snapshot = fixture
+                    .state
+                    .store
+                    .source_art_snapshot(
+                        &secret_hash(SecretDomain::Grant, &fixture.secret),
+                        fixture.grant,
+                        &reference,
+                    )
+                    .await
+                    .expect("snapshot query");
+                let plurx_core::store::sharing_catalogue_artwork::SourceArtRead::Authorized(
+                    snapshot,
+                ) = snapshot
+                else {
+                    panic!("current source artwork snapshot absent");
+                };
+                assert_eq!(snapshot.filename(), "fixture.png");
+                let asset = super::super::images::shared_artwork_asset(
+                    &fixture.state,
+                    &snapshot,
+                    &secret_hash(SecretDomain::Grant, &fixture.secret),
+                    super::super::shared_artwork::ArtBodyLease::source(false).expect("lease"),
+                )
+                .await
+                .expect("opened image")
+                .expect("original exists");
+                assert!(asset.still_current().await);
+                drop(asset);
+                assert!(
+                    source_art_scope_current(&fixture.state, &reference).await,
+                    "current source scope"
+                );
+                if !h2 && change == 0 {
+                    let variant = plurx_core::sharing_artwork::SourceArtReference {
+                        variant: ArtVariant::W300,
+                        ..reference.clone()
+                    };
+                    let variant = key
+                        .issue_art(&variant, clock_ms())
+                        .expect("exact canonical variant");
+                    let mut headers = HeaderMap::new();
+                    headers.insert(
+                        "authorization",
+                        axum::http::HeaderValue::from_str(&format!(
+                            "CinemaShare {}",
+                            fixture.secret.expose()
+                        ))
+                        .expect("fixture auth"),
+                    );
+                    for _ in 0..2 {
+                        let response = super::super::shared_artwork::source(
+                            State(fixture.state.clone()),
+                            headers.clone(),
+                            Path(variant.as_str().to_owned()),
+                            RawQuery(None),
+                        )
+                        .await
+                        .expect_err("unpublished variant never falls back to original")
+                        .into_response();
+                        assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
+                    }
+                    let jobs = rusqlite::Connection::open(&fixture.path)
+                        .expect("job census")
+                        .query_row(
+                            "SELECT count(*) FROM background_jobs WHERE kind='artwork_derivative'",
+                            [],
+                            |row| row.get::<_, i64>(0),
+                        )
+                        .expect("count");
+                    assert_eq!(jobs, 1, "canonical demand is deduplicated");
+                    headers.insert(
+                        "authorization",
+                        axum::http::HeaderValue::from_str(&format!(
+                            "CinemaShare {}",
+                            new_secret().expect("wrong credential").expose()
+                        ))
+                        .expect("auth"),
+                    );
+                    let denied = super::super::shared_artwork::source(
+                        State(fixture.state.clone()),
+                        headers,
+                        Path(variant.as_str().to_owned()),
+                        RawQuery(None),
+                    )
+                    .await
+                    .expect_err("wrong credential before demand")
+                    .into_response();
+                    assert_eq!(denied.status(), StatusCode::NOT_FOUND);
+                    assert_eq!(rusqlite::Connection::open(&fixture.path).expect("job census").query_row("SELECT count(*) FROM background_jobs WHERE kind='artwork_derivative'",[],|row|row.get::<_,i64>(0)).expect("count"),jobs,"refused authority cannot add render work");
+                }
+                let dropped = Arc::new(AtomicBool::new(false));
+                let data = Arc::new(AtomicBool::new(false));
+                let before = super::super::shared_artwork::source_capacity();
+                let (address, captured, stop, served) =
+                    body_server(&fixture, dropped.clone(), data.clone()).await;
+                let socket = tokio::net::TcpSocket::new_v4().expect("socket");
+                socket.set_recv_buffer_size(4096).expect("bounded window");
+                let client = socket.connect(address).await.expect("connect");
+                let mut raw = None;
+                let mut h2_sender = None;
+                let mut h2_driver = None;
+                let mut h2_body = None;
+                if h2 {
+                    let (mut sender, driver) = hyper::client::conn::http2::Builder::new(
+                        hyper_util::rt::TokioExecutor::new(),
+                    )
+                    .initial_stream_window_size(1024)
+                    .initial_connection_window_size(1024)
+                    .handshake::<_, Body>(hyper_util::rt::TokioIo::new(client))
+                    .await
+                    .expect("H2");
+                    h2_driver = Some(tokio::spawn(driver));
+                    let response = sender
+                        .send_request(
+                            Request::builder()
+                                .uri(format!(
+                                    "http://fixture/sharing/v1/art/{}",
+                                    resource.as_str()
+                                ))
+                                .header(
+                                    "authorization",
+                                    format!("CinemaShare {}", fixture.secret.expose()),
+                                )
+                                .body(Body::empty())
+                                .expect("request"),
+                        )
+                        .await
+                        .expect("art head");
+                    assert_eq!(response.status(), StatusCode::OK);
+                    h2_body = Some(response.into_body());
+                    h2_sender = Some(sender);
+                } else {
+                    let mut client = client;
+                    client.write_all(format!("GET /sharing/v1/art/{} HTTP/1.1\r\nHost: fixture\r\nAuthorization: CinemaShare {}\r\n\r\n",resource.as_str(),fixture.secret.expose()).as_bytes()).await.expect("request");
+                    let mut head = Vec::new();
+                    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+                        while !head.ends_with(b"\r\n\r\n") {
+                            head.push(client.read_u8().await.expect("head"));
+                        }
+                    })
+                    .await
+                    .expect("head deadline");
+                    assert!(
+                        head.starts_with(b"HTTP/1.1 200"),
+                        "{}",
+                        String::from_utf8_lossy(&head)
+                    );
+                    raw = Some(client);
+                }
+                let connection = captured.await.expect("connection");
+                await_flag(&dropped, true).await;
+                assert!(
+                    !data.load(Ordering::SeqCst),
+                    "queued DATA retains actual bytes"
+                );
+                assert_eq!(
+                    super::super::shared_artwork::source_capacity(),
+                    (before.0 - 1, before.1 - 8193)
+                );
+                if change == 3 {
+                    h2_body
+                        .take()
+                        .expect("first artwork body")
+                        .collect()
+                        .await
+                        .expect("consume artwork");
+                    for count in 2..=4 {
+                        let response = h2_sender
+                            .as_mut()
+                            .expect("sender")
+                            .send_request(
+                                Request::builder()
+                                    .uri(format!(
+                                        "http://fixture/sharing/v1/art/{}",
+                                        resource.as_str()
+                                    ))
+                                    .header(
+                                        "authorization",
+                                        format!("CinemaShare {}", fixture.secret.expose()),
+                                    )
+                                    .body(Body::empty())
+                                    .expect("art request"),
+                            )
+                            .await
+                            .expect("idle art");
+                        assert_eq!(response.status(), StatusCode::OK);
+                        response.into_body().collect().await.expect("consume");
+                        assert_eq!(
+                            super::super::shared_artwork::source_capacity(),
+                            (before.0 - count, before.1 - count * 8193)
+                        );
+                    }
+                    let response = h2_sender
+                        .as_mut()
+                        .expect("sender")
+                        .send_request(
+                            Request::builder()
+                                .uri(format!(
+                                    "http://fixture/sharing/v1/art/{}",
+                                    resource.as_str()
+                                ))
+                                .header(
+                                    "authorization",
+                                    format!("CinemaShare {}", fixture.secret.expose()),
+                                )
+                                .body(Body::empty())
+                                .expect("art request"),
+                        )
+                        .await
+                        .expect("bounded refusal");
+                    assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
+                    response.into_body().collect().await.expect("refusal");
+                    tokio::time::sleep(std::time::Duration::from_millis(1200)).await;
+                    assert!(!connection.0.is_cancelled());
+                    assert_eq!(
+                        super::super::shared_artwork::source_capacity(),
+                        (0, before.1 - 4 * 8193),
+                        "idle completed responses retain actual bounded ownership"
+                    );
+                    drop(h2_sender);
+                    if let Some(driver) = h2_driver {
+                        driver.abort();
+                        let _ = driver.await;
+                    }
+                    tokio::time::timeout(std::time::Duration::from_secs(3), async {
+                        while super::super::shared_artwork::source_capacity() != before {
+                            tokio::task::yield_now().await;
+                        }
+                    })
+                    .await
+                    .expect("connection close releases all idle art owners");
+                    stop.send(()).expect("stop");
+                    served.await.expect("server task").expect("server");
+                    continue;
+                }
+                match change {
+                    0 => fixture
+                        .state
+                        .store
+                        .revoke_share(fixture.grant, clock_ms())
+                        .await
+                        .expect("revoke"),
+                    1 => {
+                        rusqlite::Connection::open(&fixture.path)
+                            .expect("writer")
+                            .execute("DELETE FROM items WHERE id=?1", [fixture.item])
+                            .expect("delete");
+                    }
+                    _ => {
+                        rusqlite::Connection::open(&fixture.path)
+                            .expect("writer")
+                            .execute(
+                                "UPDATE items SET library_id=?1 WHERE id=?2",
+                                rusqlite::params![fixture.private, fixture.item],
+                            )
+                            .expect("move");
+                    }
+                }
+                tokio::time::timeout(std::time::Duration::from_secs(3), connection.0.cancelled())
+                    .await
+                    .expect("revocation closes accepted transport");
+                await_flag(&data, true).await;
+                tokio::time::timeout(std::time::Duration::from_secs(3), async {
+                    while super::super::shared_artwork::source_capacity() != before {
+                        tokio::task::yield_now().await;
+                    }
+                })
+                .await
+                .expect("actual task/byte/operation cleanup");
+                drop(raw);
+                drop(h2_body);
+                drop(h2_sender);
+                if let Some(driver) = h2_driver {
+                    let _ = driver.await;
+                }
+                stop.send(()).expect("stop");
+                served.await.expect("server task").expect("server");
+            }
         }
     }
     #[tokio::test]
@@ -2468,8 +3058,29 @@ mod tests {
             .expect("numeric address");
         assert!(is_tailnet_address(address));
         for h2 in [false, true] {
-            for change in 0..9 {
-                let source = body_fixture().await;
+            for change in 0..16 {
+                let mut source = body_fixture().await;
+                let artwork = change >= 9;
+                if artwork {
+                    source.state.artwork_dir = source
+                        ._directory
+                        .path()
+                        .canonicalize()
+                        .expect("canonical Source art")
+                        .join("artwork");
+                    std::fs::create_dir(&source.state.artwork_dir).expect("art namespace");
+                    let mut bytes = vec![23u8; 8 * 1024 * 1024];
+                    bytes[..8].copy_from_slice(b"\x89PNG\r\n\x1a\n");
+                    std::fs::write(source.state.artwork_dir.join("fixture.png"), bytes)
+                        .expect("bounded asset");
+                    rusqlite::Connection::open(&source.path)
+                        .expect("poster writer")
+                        .execute(
+                            "UPDATE items SET poster_path='fixture.png' WHERE id=?1",
+                            [source.item],
+                        )
+                        .expect("poster");
+                }
                 let tls_dir = tempfile::tempdir().expect("Source TLS fixture");
                 let tls = Arc::new(
                     LiveNodeTls::open(tls_dir.path(), clock_ms() / 1000).expect("Source TLS"),
@@ -2501,6 +3112,12 @@ mod tests {
                 let receiver_path = receiver_dir.path().join("receiver.sqlite");
                 let (_, mut receiver) = super::super::tests::test_app_with_state();
                 receiver.store = Arc::new(SqliteStore::open(&receiver_path).expect("B Store"));
+                receiver.runtime_cache_dir = receiver_dir
+                    .path()
+                    .canonicalize()
+                    .expect("canonical B cache")
+                    .join("runtime");
+                std::fs::create_dir(&receiver.runtime_cache_dir).expect("runtime cache fixture");
                 receiver.sharing = Arc::new(crate::sharing::SharingManager::new(
                     receiver.sharing.key.clone(),
                     receiver_dir.path().join("unused-tls"),
@@ -2666,7 +3283,7 @@ mod tests {
                     }
                 }
                 let details = matches!(change, 3 | 4);
-                if details {
+                if details || artwork {
                     use plurx_core::sharing_catalogue_details::CatalogueRevisionKey;
                     let envelope = CatalogueRevisionKey::generate_sealed(
                         &source.state.sharing.key,
@@ -2687,10 +3304,76 @@ mod tests {
                         )
                         .expect("fixture purpose key");
                     let probe=json!({"chapters":(0..1024).map(|n|json!({"start_time":n.to_string(),"end_time":(n+1).to_string(),"tags":{"title":"x".repeat(512)}})).collect::<Vec<_>>()}).to_string();
-                    for file in 1..=3 {
+                    for file in 1..=if details { 3 } else { 0 } {
                         writer.execute("INSERT INTO files(id,item_id,path,size,mtime,probe_json) VALUES(?1,?2,?4,20,1000,?3)",rusqlite::params![file,source.item,probe,format!("/private/fixture-{file}.mkv")]).expect("bounded details file");
                     }
                 }
+                let art_path = if artwork {
+                    use plurx_core::{
+                        sharing_artwork::{ArtVariant, ReceiverArtReference},
+                        sharing_file_locators::FileLocatorKey,
+                    };
+                    let envelope = FileLocatorKey::generate_sealed(&receiver.sharing.key, &local)
+                        .expect("B fixture purpose material");
+                    let writer =
+                        rusqlite::Connection::open(&receiver_path).expect("B key fixture writer");
+                    writer.execute_batch(plurx_core::store::sharing_file_locators::CANDIDATE_FILE_LOCATOR_KEY_SCHEMA).expect("candidate B key schema");
+                    writer
+                        .execute(
+                            "INSERT INTO sharing_file_locator_keys VALUES(1,?1,?2,?3)",
+                            rusqlite::params![
+                                local.server_id.to_string(),
+                                local.catalogue_epoch.to_string(),
+                                envelope.as_stored()
+                            ],
+                        )
+                        .expect("B key selection");
+                    drop(writer);
+                    let key = FileLocatorKey::open(&receiver.sharing.key, &local, &envelope)
+                        .expect("B key");
+                    let (summary, reply) = receiver
+                        .sharing
+                        .read_catalogue(
+                            &receiver,
+                            import,
+                            user.id,
+                            crate::sharing::CatalogueRead::Item(
+                                source_id(&source.item.to_string()).expect("item"),
+                            ),
+                        )
+                        .await
+                        .expect("fresh pinned Source art resources");
+                    let crate::sharing::CatalogueReply::Item(details) = reply else {
+                        panic!("details");
+                    };
+                    let art = details
+                        .item
+                        .art
+                        .into_iter()
+                        .find(|art| art.variant == ArtVariant::Original)
+                        .expect("fresh Source opaque original");
+                    Some(
+                        key.issue_art(
+                            &ReceiverArtReference {
+                                item: SharedReference {
+                                    import_id: import,
+                                    server_id: remote.server_id,
+                                    catalogue_epoch: remote.catalogue_epoch,
+                                    library_id: library.clone(),
+                                    item_id: source_id(&source.item.to_string()).expect("item"),
+                                },
+                                user_id: user.id,
+                                lifecycle_generation: summary.lifecycle_generation,
+                                source: art.resource,
+                            },
+                            clock_ms(),
+                        )
+                        .expect("user/import bound B resource")
+                        .url(),
+                    )
+                } else {
+                    None
+                };
                 let app = super::super::router(receiver.clone()).route(
                     "/ordinary/pending",
                     get(|| async {
@@ -2704,7 +3387,10 @@ mod tests {
                 let baseline = RECEIVER_MONITORS.available_permits();
                 let (b_address, captured, stop, served) =
                     body_server_app(app, body_dropped.clone(), data_dropped.clone()).await;
-                let path = if change == 1 {
+                let art_baseline = super::super::shared_artwork::receiver_capacity();
+                let path = if let Some(path) = art_path {
+                    path
+                } else if change == 1 {
                     format!("/api/v1/shared/imports/{import}/continue-watching?limit=200")
                 } else if details {
                     format!("/api/v1/shared/imports/{import}/items/{}", source.item)
@@ -2722,6 +3408,13 @@ mod tests {
                     !data_dropped.load(Ordering::SeqCst),
                     "B DATA blocked h2={h2}/change={change}"
                 );
+                if artwork {
+                    assert_eq!(
+                        super::super::shared_artwork::receiver_capacity(),
+                        (art_baseline.0 - 1, art_baseline.1 - 8193),
+                        "actual B artwork bytes held behind DATA"
+                    );
+                }
                 let ordinary = if let BlockedReceiverClient::Http2(sender, _, _) = &mut client {
                     Some(
                         sender
@@ -2887,6 +3580,54 @@ mod tests {
                             .await
                             .expect("B assignment loss");
                     }
+                    9 => source
+                        .state
+                        .store
+                        .revoke_share(source.grant, clock_ms())
+                        .await
+                        .expect("art grant loss"),
+                    10 => {
+                        rusqlite::Connection::open(&source.path)
+                            .expect("writer")
+                            .execute("DELETE FROM items WHERE id=?1", [source.item])
+                            .expect("art item delete");
+                    }
+                    11 => {
+                        rusqlite::Connection::open(&source.path)
+                            .expect("writer")
+                            .execute(
+                                "UPDATE items SET library_id=?1 WHERE id=?2",
+                                rusqlite::params![source.private, source.item],
+                            )
+                            .expect("art item move");
+                    }
+                    12 => {
+                        assert!(receiver
+                            .store
+                            .delete_token(&hash)
+                            .await
+                            .expect("art B login loss"));
+                    }
+                    13 => receiver
+                        .store
+                        .disable_share_import(import, clock_ms())
+                        .await
+                        .expect("art B import loss"),
+                    14 => {
+                        receiver
+                            .store
+                            .assign_share_viewers(import, 2, Vec::new(), clock_ms())
+                            .await
+                            .expect("art B assignment loss");
+                    }
+                    15 => {
+                        source
+                            .state
+                            .store
+                            .put_setting(plurx_core::store::keys::SHARING_ENABLED, "false")
+                            .await
+                            .expect("art Source offline");
+                    }
                     _ => {
                         assert!(
                             receiver.sharing.catalogue_cache_entries() > 0,
@@ -2949,6 +3690,15 @@ mod tests {
                     32,
                     "Source control permit cleanup"
                 );
+                if artwork {
+                    tokio::time::timeout(std::time::Duration::from_secs(3), async {
+                        while super::super::shared_artwork::receiver_capacity() != art_baseline {
+                            tokio::task::yield_now().await;
+                        }
+                    })
+                    .await
+                    .expect("B art operation/byte settlement");
+                }
                 release_receiver_client(client).await;
                 stop.send(()).expect("stop B");
                 served.await.expect("B task").expect("B result");
@@ -2957,6 +3707,242 @@ mod tests {
                     .await
                     .expect("Source task")
                     .expect("Source result");
+            }
+        }
+    }
+
+    /// Actual pinned Source read and accepted connection authority for an administrator
+    /// whose import has no viewer assignments. This is an isolated CGNAT fixture.
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    #[ignore = "requires disposable CGNAT network and PLURX_SHARING_FIXTURE_IP"]
+    async fn sharing_admin_pinned_library_read_bootstraps_empty_matrix_and_fences_connection() {
+        use plurx_core::{
+            config::{SharingEgressConfig, SharingNetworkConfig},
+            secrets::SharingSecretPurpose,
+            sharing_tls::{LiveNodeTls, SharingTlsListener},
+            store::SqliteStore,
+        };
+        let _serial = BODY_FIXTURES.lock().await;
+        let address: std::net::IpAddr = std::env::var("PLURX_SHARING_FIXTURE_IP")
+            .expect("explicit CGNAT")
+            .parse()
+            .expect("address");
+        assert!(is_tailnet_address(address));
+        for h2 in [false, true] {
+            for loss in 0..5 {
+                let source = body_fixture().await;
+                let tls_dir = tempfile::tempdir().expect("Source TLS fixture");
+                let tls = Arc::new(
+                    LiveNodeTls::open(tls_dir.path(), clock_ms() / 1000).expect("Source TLS"),
+                );
+                let (pin, _) = tls.status().expect("Source SPKI");
+                let listener = tokio::net::TcpListener::bind((address, 0))
+                    .await
+                    .expect("Source CGNAT listener");
+                let endpoint = Endpoint {
+                    ipv4: match address {
+                        std::net::IpAddr::V4(ip) => ip,
+                        _ => panic!("IPv4 fixture"),
+                    },
+                    ipv6: None,
+                    ts_fqdn: "source.fixture.ts.net".into(),
+                    port: listener.local_addr().expect("Source address").port(),
+                    spki_sha256: pin,
+                };
+                let (source_stop, source_stopped) = tokio::sync::oneshot::channel();
+                let source_task = tokio::spawn(crate::serve_http(
+                    SharingTlsListener::new(listener, tls),
+                    sharing::peer_router(source.state.clone()),
+                    async move {
+                        let _ = source_stopped.await;
+                    },
+                    crate::HTTP_TIMEOUTS,
+                ));
+                let receiver_dir = tempfile::tempdir().expect("B fixture");
+                let receiver_path = receiver_dir.path().join("receiver.sqlite");
+                let (_, mut receiver) = super::super::tests::test_app_with_state();
+                receiver.store = Arc::new(SqliteStore::open(&receiver_path).expect("B Store"));
+                receiver.sharing = Arc::new(crate::sharing::SharingManager::new(
+                    receiver.sharing.key.clone(),
+                    receiver_dir.path().join("unused-tls"),
+                    SharingNetworkConfig {
+                        bind: "127.0.0.1:32444".parse().expect("unused bind"),
+                        egress: SharingEgressConfig::LocalAddress { address },
+                    },
+                ));
+                receiver
+                    .store
+                    .put_setting(plurx_core::store::keys::SHARING_ENABLED, "true")
+                    .await
+                    .expect("enable B");
+                let user = receiver
+                    .store
+                    .create_user("receiver-library-admin", "synthetic-hash", true)
+                    .await
+                    .expect("viewer");
+                let token = "synthetic-receiver-current-login";
+                let hash = plurx_core::auth::hash_token(token);
+                receiver
+                    .store
+                    .create_token(&hash, user.id, None)
+                    .await
+                    .expect("login");
+                let local = receiver
+                    .store
+                    .sharing_identity(1000)
+                    .await
+                    .expect("B identity");
+                let remote = source
+                    .state
+                    .store
+                    .sharing_identity(1000)
+                    .await
+                    .expect("Source identity");
+                rusqlite::Connection::open(&source.path)
+                    .expect("Source fixture writer")
+                    .execute(
+                        "UPDATE sharing_exports SET recipient_server_id=?1 WHERE id=?2",
+                        rusqlite::params![local.server_id.to_string(), source.grant.to_string()],
+                    )
+                    .expect("bind grant to actual B identity");
+                let import = uuid::Uuid::new_v4();
+                let credential = crate::sharing::ImportCredential::encode(
+                    &source.secret,
+                    uuid::Uuid::new_v4(),
+                    1000,
+                    "Fixture B",
+                    2000,
+                    None,
+                )
+                .expect("closed credential");
+                assert_eq!(
+                    receiver
+                        .store
+                        .create_share_import(NewImport {
+                            id: import,
+                            source: remote.clone(),
+                            source_name: "Fixture Source".into(),
+                            claim_id: uuid::Uuid::new_v4(),
+                            credential: receiver
+                                .sharing
+                                .key
+                                .seal_sharing(
+                                    SharingSecretPurpose::Credential,
+                                    local.server_id,
+                                    import,
+                                    credential.expose()
+                                )
+                                .expect("seal credential"),
+                            claim_secret: receiver
+                                .sharing
+                                .key
+                                .seal_sharing(
+                                    SharingSecretPurpose::Claim,
+                                    local.server_id,
+                                    import,
+                                    "synthetic-claim"
+                                )
+                                .expect("seal claim"),
+                            endpoints: vec![endpoint.clone()],
+                            now_ms: 1000
+                        })
+                        .await
+                        .expect("B import"),
+                    ImportOutcome::Created
+                );
+                receiver
+                    .store
+                    .settle_share_claim(import, source.grant, true, 1001)
+                    .await
+                    .expect("active B import");
+
+                let snapshot = receiver
+                    .store
+                    .sharing_import_assignments(import)
+                    .await
+                    .expect("snapshot")
+                    .expect("import");
+                assert!(snapshot.assignments.is_empty());
+                let (summary, libraries) = receiver
+                    .sharing
+                    .read_admin_libraries(&receiver, import, user.id, &hash)
+                    .await
+                    .expect("actual fresh pinned admin read");
+                assert_eq!(summary.id, import);
+                assert_eq!(libraries.len(), 1);
+                assert_eq!(libraries[0].library_id.as_str(), source.library.to_string());
+                assert!(
+                    receiver
+                        .sharing
+                        .read_catalogue(
+                            &receiver,
+                            import,
+                            user.id,
+                            crate::sharing::CatalogueRead::Libraries
+                        )
+                        .await
+                        .is_err(),
+                    "admin does not gain viewer authority"
+                );
+                let app = super::super::router(receiver.clone());
+                let body_dropped = Arc::new(AtomicBool::new(false));
+                let data_dropped = Arc::new(AtomicBool::new(false));
+                let baseline = RECEIVER_MONITORS.available_permits();
+                let (b_address, captured, stop, served) =
+                    body_server_app(app, body_dropped.clone(), data_dropped.clone()).await;
+                let path = format!("/api/v1/sharing/imports/{import}/libraries");
+                let client = blocked_receiver_client(b_address, &path, token, h2).await;
+                let connection = captured.await.expect("accepted B connection");
+                assert_eq!(RECEIVER_MONITORS.available_permits(), baseline - 1);
+                await_flag(&body_dropped, true).await;
+                match loss {
+                    0 => {
+                        receiver
+                            .store
+                            .set_admin(user.id, false)
+                            .await
+                            .expect("demote current admin");
+                    }
+                    1 => {
+                        assert!(receiver.store.delete_token(&hash).await.expect("logout"));
+                    }
+                    2 => receiver
+                        .store
+                        .disable_share_import(import, 1003)
+                        .await
+                        .expect("disconnect"),
+                    3 => source
+                        .state
+                        .store
+                        .revoke_share(source.grant, 1003)
+                        .await
+                        .expect("Source revoke"),
+                    4 => receiver
+                        .store
+                        .put_setting(plurx_core::store::keys::SHARING_ENABLED, "false")
+                        .await
+                        .expect("sharing off"),
+                    _ => unreachable!(),
+                }
+                tokio::time::timeout(std::time::Duration::from_secs(3), connection.0.cancelled())
+                    .await
+                    .expect("current admin/source connection authority closes");
+                tokio::time::timeout(std::time::Duration::from_secs(3), async {
+                    while RECEIVER_MONITORS.available_permits() != baseline {
+                        tokio::task::yield_now().await;
+                    }
+                })
+                .await
+                .expect("monitor permit returned");
+                release_receiver_client(client).await;
+                stop.send(()).expect("stop B");
+                served.await.expect("B task").expect("B server");
+                source_stop.send(()).expect("stop Source");
+                source_task
+                    .await
+                    .expect("Source task")
+                    .expect("Source server");
             }
         }
     }
@@ -3401,5 +4387,221 @@ mod tests {
         assert!(query(Some(&format!("q={}", "a".repeat(513)))).is_err());
         assert!(query(Some(&format!("cursor={}", "a".repeat(4097)))).is_err());
         assert!(query(Some("q=film&limit=60")).is_ok());
+    }
+    #[tokio::test]
+    async fn sharing_source_preparation_uses_complete_live_file_and_real_principal_engine() {
+        use super::super::{
+            hls::{prepare_source_playback, CreateSession, SourcePlaybackTarget},
+            stream,
+        };
+        use plurx_core::{
+            sharing_catalogue_details::CatalogueRevisionKey,
+            store::sharing_catalogue_details::SourceDetailsRead,
+        };
+        let _serial = BODY_FIXTURES.lock().await;
+        let fixture = body_fixture().await;
+        let identity = fixture
+            .state
+            .store
+            .sharing_identity(1000)
+            .await
+            .expect("identity");
+        let envelope =
+            CatalogueRevisionKey::generate_sealed(&fixture.state.sharing.key, identity.clone())
+                .expect("fixture key");
+        let key =
+            CatalogueRevisionKey::open(&fixture.state.sharing.key, identity.clone(), &envelope)
+                .expect("open");
+        let source = fixture._directory.path().join("prepared.mp4");
+        std::fs::write(&source, b"actual source presence").expect("actual file");
+        let writer = rusqlite::Connection::open(&fixture.path).expect("writer");
+        writer
+            .execute_batch(
+                plurx_core::store::sharing_catalogue_source::CANDIDATE_REVISION_KEY_SCHEMA,
+            )
+            .expect("fixture purpose schema");
+        writer
+            .execute(
+                "INSERT INTO sharing_catalogue_keys VALUES(1,?1,?2,?3)",
+                rusqlite::params![
+                    identity.server_id.to_string(),
+                    identity.catalogue_epoch.to_string(),
+                    envelope.as_stored()
+                ],
+            )
+            .expect("fixture purpose key");
+        writer.execute("INSERT INTO files(id,item_id,path,size,mtime,duration_ms,container,video_codec,width,height,bit_depth,bitrate) VALUES(1,?1,?2,20,1000,60000,'mp4','h264',1920,1080,8,1000000)",rusqlite::params![fixture.item,source.to_str().expect("path")]).expect("actual Source file");
+        let hash = secret_hash(SecretDomain::Grant, &fixture.secret);
+        let SourceDetailsRead::Authorized(witness) = fixture
+            .state
+            .store
+            .source_item_file_witness(
+                &hash,
+                fixture.grant,
+                SourceId::parse(&fixture.item.to_string()).expect("valid Source fixture value"),
+                SourceId::parse("1").expect("valid Source fixture value"),
+            )
+            .await
+            .expect("witness")
+        else {
+            panic!("authorized witness")
+        };
+        let target = SourcePlaybackTarget {
+            server_id: identity.server_id,
+            catalogue_epoch: identity.catalogue_epoch,
+            library_id: SourceId::parse(&fixture.library.to_string())
+                .expect("valid Source fixture value"),
+            item_id: SourceId::parse(&fixture.item.to_string())
+                .expect("valid Source fixture value"),
+            file_id: SourceId::parse("1").expect("valid Source fixture value"),
+            revision: key.file_revision(&witness).expect("revision"),
+        };
+        let caps:plurx_core::playback::DeviceCaps=serde_json::from_value(json!({"v":2,"video":[{"codec":"h264","max_height":2160,"present":["sdr"]}],"audio":["aac"],"containers":["mp4"],"transports":["hls","progressive"]})).expect("caps");
+        let body = || {
+            serde_json::from_value::<CreateSession>(json!({"playback_id":"shared-player","request_id":"shared-request","copy":true,"height":1080,"quality_auto":false,"presentation":"vod","caps":caps})).expect("body")
+        };
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            "authorization",
+            format!("CinemaShare {}", fixture.secret.expose())
+                .parse()
+                .expect("valid Source fixture value"),
+        );
+        headers.insert(
+            "cinemashare-viewer",
+            "a".repeat(64).parse().expect("valid Source fixture value"),
+        );
+        let prepared = prepare_source_playback(&fixture.state, &headers, target.clone(), body())
+            .await
+            .expect("actual Source preparation");
+        assert_eq!(prepared.file().id, 1);
+        assert_eq!(prepared.file().path, source);
+        assert_eq!(prepared.principal().local_user_id(), None);
+        assert_eq!(prepared.decision().prior_kbps, None);
+        assert_eq!(
+            prepared.request().request_id.as_deref(),
+            Some("shared-request")
+        );
+        assert!(matches!(
+            prepared.request().kind,
+            crate::transcode::SessionKind::Copy { .. }
+        ));
+        assert_ne!(
+            prepared.fingerprint(),
+            prepared.request().durable_intent_fingerprint(
+                &plurx_core::playback_principal::PlaybackPrincipal::LocalUser { user_id: 1 }
+            )
+        );
+        let mut other_headers = headers.clone();
+        other_headers.insert(
+            "cinemashare-viewer",
+            "b".repeat(64).parse().expect("valid Source fixture value"),
+        );
+        let other = prepare_source_playback(&fixture.state, &other_headers, target.clone(), body())
+            .await
+            .expect("distinct Source viewer");
+        assert_ne!(
+            prepared.fingerprint(),
+            other.fingerprint(),
+            "equal numeric Source files and request IDs do not collapse distinct sharing viewers"
+        );
+        let prior = plurx_core::domain::NetworkPrior {
+            sustained_kbps: Some(1),
+            ..Default::default()
+        };
+        assert!(
+            super::super::hls::resolve_plan_for_principal(
+                super::super::hls::FilePlanInputs {
+                    snapshot: None,
+                    state: &fixture.state,
+                    file_id: 1,
+                    source: Some(prepared.file()),
+                    network_prior: Some(&prior)
+                },
+                prepared.principal(),
+                None,
+                body()
+            )
+            .await
+            .is_err(),
+            "Source planner refuses Local network-prior injection"
+        );
+        let user = fixture
+            .state
+            .store
+            .create_user("local-engine-fixture", "synthetic-hash", false)
+            .await
+            .expect("real local account");
+        let Json(local) = stream::decision(
+            super::super::extract::AuthUser(user),
+            State(fixture.state.clone()),
+            axum::extract::Path(1),
+            axum::extract::Query(stream::Caps {
+                caps_v2: Some(caps.clone()),
+                ..Default::default()
+            }),
+            HeaderMap::new(),
+            super::super::network::RemoteAddress(None),
+        )
+        .await
+        .expect("actual Local decision");
+        assert_eq!(serde_json::to_value(prepared.decision()).expect("valid Source fixture value"),serde_json::to_value(local).expect("valid Source fixture value"),"full actual engine decision parity, including source facts, tracks, delivery, quality candidates and ladder");
+        for changed in [
+            SourcePlaybackTarget {
+                server_id: uuid::Uuid::new_v4(),
+                ..target.clone()
+            },
+            SourcePlaybackTarget {
+                catalogue_epoch: uuid::Uuid::new_v4(),
+                ..target.clone()
+            },
+            SourcePlaybackTarget {
+                library_id: SourceId::parse(&fixture.private.to_string())
+                    .expect("valid Source fixture value"),
+                ..target.clone()
+            },
+            SourcePlaybackTarget {
+                revision: plurx_core::sharing_catalogue_details::FileRevision::parse(
+                    &"0".repeat(64),
+                )
+                .expect("valid Source fixture value"),
+                ..target.clone()
+            },
+        ] {
+            assert!(
+                prepare_source_playback(&fixture.state, &headers, changed, body())
+                    .await
+                    .is_err()
+            );
+        }
+        writer
+            .execute("UPDATE files SET mtime=2000 WHERE id=1", [])
+            .expect("real file revision changed");
+        assert!(
+            prepare_source_playback(&fixture.state, &headers, target.clone(), body())
+                .await
+                .is_err()
+        );
+        writer
+            .execute("UPDATE files SET mtime=1000 WHERE id=1", [])
+            .expect("restore snapshot");
+        writer
+            .execute(
+                "UPDATE items SET library_id=?1 WHERE id=?2",
+                rusqlite::params![fixture.private, fixture.item],
+            )
+            .expect("move outside grant");
+        assert!(
+            prepare_source_playback(&fixture.state, &headers, target, body())
+                .await
+                .is_err()
+        );
+        let sessions: i64 = writer
+            .query_row("SELECT count(*) FROM media_sessions", [], |row| row.get(0))
+            .expect("actual session rows");
+        assert_eq!(
+            sessions, 0,
+            "preparation allocates no physical or durable Source session"
+        );
     }
 }

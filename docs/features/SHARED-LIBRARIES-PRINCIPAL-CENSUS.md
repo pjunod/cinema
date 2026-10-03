@@ -1043,3 +1043,71 @@ Pinned Rust 1.97.1 daemon all-target check passed in 1 minute 19 seconds,
 Core feature all-target check in 30.66 seconds, and Core feature all-target
 Clippy with denied warnings in 35.81 seconds. Documentation index tests,
 catalogue lint and diff checks passed.
+
+## Complete Source decision and prepared recipe
+
+The daemon now shares its actual file decision engine and recipe resolver
+between Local playback and a Source preparation adapter. Source preparation
+uses the current peer grant and viewer pseudonym as its canonical principal,
+requires the complete current file witness and catalogue revision, and rechecks
+both after planning. It supplies no Local account or LAN network prior. The
+opaque prepared result retains the actual file, full decision response, recipe,
+principal and fingerprint for the physical owner to consume.
+
+The focused preparation regression compares the complete Source response with
+the Local engine on the same file, distinguishes fingerprints for Local and two
+Shared viewers, rejects injected network priors, and refuses changed Source,
+epoch, library, revision, file metadata and private-library movement. It leaves
+media sessions empty. This proves preparation and recipe identity; the peer
+HTTP consumer, physical producer admission and B relay remain open.
+
+Pinned Rust 1.97.1 passed the preparation test (one test, zero ignored), all 62
+stream decision tests, and the three existing recipe regressions. Daemon
+all-target check and Clippy with denied warnings passed with
+`plurx-core/hiqlite-contract-tests`; the four documentation index tests passed.
+The focused commands were:
+
+```sh
+scripts/require-test-count cargo test --locked -p plurxd --features plurx-core/hiqlite-contract-tests --lib http::shared_library::tests::sharing_source_preparation_uses_complete_live_file_and_real_principal_engine -- --exact
+scripts/require-test-count cargo test --locked -p plurxd --features plurx-core/hiqlite-contract-tests --lib http::stream::tests::
+scripts/require-test-count cargo test --locked -p plurxd --features plurx-core/hiqlite-contract-tests --lib http::hls::tests::the_height_resolution_keeps_its_three_promises -- --exact
+scripts/require-test-count cargo test --locked -p plurxd --features plurx-core/hiqlite-contract-tests --lib http::hls::tests::the_intent_fingerprint_ignores_the_review -- --exact
+scripts/require-test-count cargo test --locked -p plurxd --features plurx-core/hiqlite-contract-tests --lib http::hls::tests::a_reviews_notes_reach_the_resolved_plan -- --exact
+```
+
+## Supported bare Core proof surface
+
+Source admission uses the actual replicated membership observation whenever
+`hiqlite-store` is present. Bare Core exposes an uninhabited opaque observation
+with no constructor; SQLite and the public domain types remain compilable,
+while that build cannot mint Source admission authority. It supplies no
+synthetic roster, node identity, cached readiness flag or alternate runtime.
+The real single-server daemon uses its activated one-voter replicated store;
+SQLite recovery remains unavailable for Source admission.
+
+Against the merged `fb7368c3c` preparation base, pinned Rust 1.97.1 passed bare
+Core all-target compilation in 16.09 seconds, replicated Core all-target
+compilation, all 13 Source Store unit regressions in 29.37 seconds with zero
+ignored tests, and replicated Core all-target Clippy with denied warnings in
+34.09 seconds. Bare Core retains its existing unrelated warning baseline;
+this receipt claims successful compilation, not warning-free bare lint.
+
+```sh
+cargo check --locked -p plurx-core --no-default-features --all-targets
+cargo check --locked -p plurx-core --features hiqlite-contract-tests --all-targets
+cargo test --locked -p plurx-core --features hiqlite-contract-tests --lib store::sharing_source_sessions -- --nocapture
+cargo clippy --locked -p plurx-core --features hiqlite-contract-tests --all-targets -- -D warnings
+```
+
+The same tree also passed the actual three-voter Source reservation, activation,
+renewal, publication and terminal-accounting contract in 11.36 seconds (one
+test, zero ignored), daemon feature all-target compilation in 1 minute
+48 seconds, and daemon feature Clippy with denied warnings in 1 minute
+31 seconds. Documentation index tests (four), catalogue lint and diff checks
+passed. These fixtures do not dispatch the future physical Source actor.
+
+```sh
+cargo test --locked -p plurx-core --features hiqlite-contract-tests --test store_contract sharing_source_reservations_three_voters_atomic_claim_caps_replay_and_release -- --nocapture
+cargo check --locked -p plurxd --features plurx-core/hiqlite-contract-tests --all-targets
+cargo clippy --locked -p plurxd --features plurx-core/hiqlite-contract-tests --all-targets -- -D warnings
+```

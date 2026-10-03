@@ -286,6 +286,12 @@ impl BrowseSeen {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SourceCatalogueItem {
+    #[serde(
+        default,
+        deserialize_with = "crate::sharing_artwork::bounded_art",
+        skip_serializing_if = "Vec::is_empty"
+    )]
+    pub art: Vec<crate::sharing_artwork::SourceArtwork>,
     pub item_id: SourceId,
     pub library_id: SourceId,
     pub parent_id: Option<SourceId>,
@@ -308,6 +314,24 @@ pub enum SourceItemKind {
 }
 impl SourceCatalogueItem {
     pub fn validate(&self) -> Result<(), CatalogueError> {
+        if self.art.len() > 8 {
+            return Err(CatalogueError::Invalid);
+        }
+        let mut seen = std::collections::BTreeSet::new();
+        for art in &self.art {
+            let reference = art
+                .resource
+                .reference_unverified()
+                .map_err(|_| CatalogueError::Invalid)?;
+            if reference.library_id != self.library_id
+                || reference.item_id != self.item_id
+                || reference.kind != art.kind
+                || reference.variant != art.variant
+                || !seen.insert((art.kind.label(), art.variant.label()))
+            {
+                return Err(CatalogueError::Invalid);
+            }
+        }
         if self.title.len() > 512
             || self.sort_title.len() > 512
             || self.overview.as_ref().is_some_and(|v| v.len() > 8192)

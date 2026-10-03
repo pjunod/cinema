@@ -619,6 +619,7 @@ All paths below are under `/api/v1/sharing` and require `AdminUser`:
 | DELETE `/exports/{id}` | Revoke, not merely hide |
 | POST `/imports` | `{invitation, endpoint_overrides?}`; parse, verify pinned identity, persist, claim; return import state, never echo invitation |
 | GET `/imports` | Local import status and pairing code |
+| GET `/imports/{id}/libraries` | Administrator fresh pinned Source scope for assignment bootstrap, independent of viewer assignments; return exact import/Source/epoch/lifecycle/assignment generation and active state with at most 64 movie/show libraries |
 | GET `/imports/{id}/assignments` | Complete bounded current import/Source/epoch/lifecycle/state and `expected_assignment_generation` with grouped Source library strings and exact local user IDs; refuse corrupt/oversized matrices |
 | PUT `/imports/{id}/assignments` | `{expected_assignment_generation, assignments:[{library_id,user_ids}]}`; explicit whole-set replacement |
 | PUT `/imports/{id}/endpoints` | `{expected_endpoint_generation, endpoints, confirm_new_pins:false}`; address edits retain pins; new pins require explicit out-of-band admin confirmation or authenticated manifest proof |
@@ -3088,6 +3089,28 @@ sharing regressions passed (29.12s), with zero ignored cases. The web ID parser
 also accepts canonical zero consistently with SourceId and both native clients;
 its eight browse regressions and unchanged type baseline pass. Pinned feature-enabled core/daemon all-target Clippy passed with denied warnings (1m26s), and all four docs-index cases pass.
 
+**Administrator Source-library bootstrap candidate:** GET
+`/api/v1/sharing/imports/{id}/libraries` reads current Source scope before B has
+any viewer assignments. This is a separate administrator surface: a live token,
+current administrator role and exact import lifecycle/claim/grant are read in
+one consistent authority query. The existing viewer query still requires its
+own assignments. The fresh pinned Source response has at most 64 unique
+movie/show libraries and 256 UTF-8 bytes per name. Empty scope is a successful
+empty read, while unavailable Source authority refuses the read.
+
+The accepted connection uses the same bounded receiver monitor registry and
+current Source tuple checks, including after the response body drops. Role,
+login, import, Source grant or sharing-switch loss cancels current connection
+authority. The isolated Linux H1/H2 regression is added but still awaits an
+exact committed archive run. No cached scope or Local library set bootstraps the
+editor. Backend administrator bootstrap/current-role proof passed on memory,
+pooled SQLite and three actual voters (one case, 9.28s); unchanged viewer proof
+passed (one case, 9.26s). HTTP management authentication isolation passed
+(one case, 0.19s); the unchanged idle-expiry/bad-policy reader passed
+(one case, 0.32s). All 33 daemon sharing cases passed (29.07s), zero ignored.
+Pinned feature-enabled all-target check passed (1m30s), final denied-warning
+Clippy passed (1m21s). These native checks exclude the Linux-only new fixture.
+
 **Linux fixture observation correction:** The exact `c220f6270` source archive
 (SHA-256 `0072b4b224ab34d05be670b21a7bcc9bfb6a0cbed8b23d479a7cc0d3c4d36c3f`)
 compiled with pinned Linux Rust 1.97.1, but its CGNAT fixture failed twice while
@@ -3104,7 +3127,17 @@ seeded files reused a unique path (6.38s). Each file now has its own fixture pat
 no production file or serving logic changes. The independent pinned transport
 claim/rotation restart case passed on that archive (one test, zero ignored,
 0.43s). The combined blocked-response fixture still requires an exact corrected
-archive run; neither result proves actual Tailscale or two-NAT operation.
+archive run; neither result proves actual Tailscale or two-NAT operation. The exact
+`719fde0bd` archive (SHA-256
+`b8698779b2f356c81c9bebe11c78b75acb973f8ff7979b368300031a6cf5c314`)
+first lost its compiler to signal 9 without a Rust diagnostic. The same frozen
+source then compiled in 2m40s after coordinating heavy Docker workloads: the
+blocked scope fixture passed all 18 actual HTTP/1 and HTTP/2 scenarios in one
+case (23.06s), and the independent claim/rotation restart case passed (0.37s),
+both zero ignored. Log: `/private/tmp/plurx-sharing-719f-linux-retry.log`.
+This qualifies the isolated protocol fixture on that commit; it does not
+qualify the subsequently added administrator or artwork routes, actual
+Tailscale, two-NAT operation or physical playback devices.
 
 ### 16.8 S7 native file-context foundation
 
@@ -3150,6 +3183,97 @@ The normal hook passed. Integration has no native diff against that qualified
 checkpoint. These are caller/context regressions, not Shared producer, device
 playback, new Shared wire-model or UI qualification.
 
+### S4 opaque artwork candidate (2026-10-03, integration qualification open)
+
+Source catalogue rows may now carry at most eight closed artwork facts, each a
+kind, variant and 143-character opaque resource. Source paths are
+`/sharing/v1/art/{resource}`. B translates fresh facts into user/import-bound
+272-character resources under `/api/v1/shared/imports/{import}/art/{resource}`;
+`poster_url` (poster/w300) and `backdrop_url` (backdrop/w780) exist only with the
+corresponding mapped resource. Missing existing purpose material leaves artwork
+fields absent. There is no numeric Local image route or original fallback for
+an unpublished canonical variant.
+
+The MAC domains are distinct from file revision, cursor and media locator
+signatures. They use the existing stable Source/epoch catalogue key and B/epoch
+file-locator key material; neither key is exported or initialized by a read.
+Resources bind the full Source/epoch/grant/library/item/kind/variant, and B also
+binds current user and import lifecycle. Expiry uses the actual captured server
+clock, with a maximum five-minute lifetime and thirty-second mint buckets.
+Credential rotation and sealing-master rewrap preserve purpose material. Current
+Store authority is still required on every request; the opaque resource is no
+replacement for current login, effective assignment, grant, catalogue floor or
+import fence.
+
+Source resolves only the current private persisted artwork name, opens through
+the no-follow descriptor helper, and hashes the actual bounded bytes every time.
+A canonical derivative requires a current published local Store location; the
+shared reader bypasses the existing twenty-four-hour location cache. Current
+item/grant authority is checked before demand and again after asset selection.
+The existing worker retains its fragment admission, derive permit, claim and
+joined child cancellation through settlement and cleanup. Its demand table is
+bounded to 4,096 entries/30-second deduplication, candidate pages to 128, and
+encoder work to five seconds/15 MiB output. This preserves the existing worker
+and governor path; it adds no assertion of a new hard encoder RSS limit.
+
+An absent local original uses a Shared-specific collector: at most three current
+trusted roster destinations are tried sequentially within two seconds, with one
+preallocated 15 MiB object plus sentinel and a separately charged object-sized
+transport workspace. Its HTTP/1-only client uses no proxy or redirect, node proof,
+actual content signature and digest validation. It rechecks current authority
+before moving its allocation directly into the held-directory blocking writer.
+Source, local-image and peer permits remain owned through actual write settlement.
+The ordinary three-peer racer and derivative scheduler are unchanged.
+
+A successful asset response identifies the exact opened-byte snapshot with its
+SHA-256, byte count, closed MIME and variant. Source and B each admit at most
+four operations without queuing, with an independent 64 MiB byte budget and a
+15 MiB payload limit. Foreground Source derivatives reserve original plus
+variant; B reserves bounded fetch/disk working space. Reservations include the
+read sentinel and shrink only after work settles. Blocking reads, disk hashers
+and atomic writers retain actual lease ownership after their async caller is
+cancelled. Accepted connection monitors retain the remaining body lease until
+actual connection completion; neither Body Drop nor another H2 stream's flush
+releases it. Idle accepted artwork responses therefore occupy bounded capacity.
+Revocation closes the accepted connection, including unrelated multiplexed H2
+streams. A benign asset replacement affects the next fresh read while an already
+accepted snapshot remains under current grant/item body authority.
+
+B's private `sharing-art-v1` managed disk namespace is bounded to 256 MiB and
+2,048 entries. Serialized publication evicts deterministically by current file
+age/name, uses held-directory atomic writes, and refuses malformed files,
+symlinks or an invalid cache shape. Each reuse hashes the current opened cache
+file only after a fresh pinned Source response proves that exact digest. The
+response uses fresh Source bytes; offline, busy or revoked Source authority
+never serves disk bytes. Cache keys include user, import lifecycle, full Source
+identity, grant, item, kind, variant and digest. Artwork RAM has its own byte
+owners and is not retained in the 32 MiB catalogue metadata cache.
+
+Focused native checks cover purpose separation/rewrap, large decimal IDs,
+malformed and oversized resources, closed optional artwork arrays, current
+memory/pooled Store scope and private-name bounds, opened inode replacement,
+same-inode changes, symlinks, binary digest/size/encoding/variant and redirect
+refusal, nonqueued byte capacity, disk LRU concurrency and user isolation, and
+actual blocked H1/H2 Source response cleanup, completed idle H2 capacity, and
+refused variant demand with existing worker deduplication. The three-voter candidate Store
+reader and owned atomic-write cancellation test exercise the production Store
+and filesystem boundaries. Final exact-tree receipts are appended after
+integration. The opt-in pinned CGNAT fixture now includes B artwork cases 9–15:
+Source grant/item deletion/move, B login/import/assignment loss and Source
+unavailability, with accepted DATA, operation/byte cleanup and H2 collateral
+checks. Its artwork extension remains unqualified until the exact committed
+Linux source archive runs. Source schema/key installation, capability
+advertisement, actual Tailscale/two-NAT topology and physical-device artwork
+qualification remain open, as do the separately recorded S5 history-progress
+binding and explicit history-move reconciliation dependencies.
+
+The pre-integration candidate passed pinned Rust 1.97.1 all-target core/daemon
+checking; core artwork tests (2 passed); daemon artwork tests (6 passed, zero
+ignored, 13.87 seconds); existing worker publication/child-cancellation tests
+(2 passed); the actual three-voter artwork Store test (1 passed, zero ignored);
+and the owned filesystem writer cancellation test (1 passed). Documentation
+index checks passed (4 tests). These receipts qualify the candidate on its
+recorded base, not the newer integrated effort or the Linux-only artwork cases.
 **Native Shared wire-model candidate:** integrated checkpoint `5d42f292c`
 adds separate, lossless Shared decision/start envelopes and string-ID PGS
 models, plus a typed Local/Shared subject. Validation binds all import/Source/
@@ -3191,3 +3315,13 @@ Content-Length cannot bypass the streaming bound. Android lint passed (5m56s),
 its normal hook passed, and all 381 native files byte-match the tested source.
 Archive SHA-256 is
 `01aa335f5dee172a5d7f3eccb7651cffd3b445d81215afb9e5e758734362330f`.
+
+The artwork candidate integrated the full `bf9747e6` effort ancestor and passed
+pinned Rust 1.97.1 all-target core/daemon checking (49.41 seconds), feature
+Clippy with denied warnings (1 minute 28 seconds), core sharing regressions
+(95 passed, zero ignored, 48.07 seconds), daemon sharing regressions (39 passed,
+zero ignored, 43.49 seconds), and the exact fully qualified three-voter artwork
+reader regression (1 passed, zero ignored, 9.00 seconds). Documentation index
+checks passed (4 tests). The merge retains the current admin authority seam,
+Continue Watching tracker and unique Linux fixture paths. Linux artwork cases
+remain open until the archive of this committed integrated candidate runs.

@@ -1106,12 +1106,58 @@ pub(crate) struct PlanInputs<'a> {
 pub(crate) async fn resolve_plan(
     inputs: PlanInputs<'_>,
     review: Option<PlanReview>,
-    mut body: CreateSession,
+    body: CreateSession,
 ) -> Result<ResolvedPlan, ApiError> {
     let PlanInputs {
         snapshot,
         state,
         user_id,
+        file_id,
+        source,
+        network_prior,
+    } = inputs;
+    resolve_plan_for_principal(
+        FilePlanInputs {
+            snapshot,
+            state,
+            file_id,
+            source,
+            network_prior,
+        },
+        &plurx_core::playback_principal::PlaybackPrincipal::LocalUser { user_id },
+        review,
+        body,
+    )
+    .await
+}
+
+/// File planning has no implicit local-user identity. The normalized intent
+/// fingerprint belongs to the actual principal that will own the session.
+pub(crate) struct FilePlanInputs<'a> {
+    pub snapshot: Option<&'a plurx_core::store::PlaybackPlanningSnapshot>,
+    pub state: &'a AppState,
+    pub file_id: i64,
+    pub source: Option<&'a MediaFile>,
+    pub network_prior: Option<&'a plurx_core::domain::NetworkPrior>,
+}
+
+pub(crate) async fn resolve_plan_for_principal(
+    inputs: FilePlanInputs<'_>,
+    principal: &plurx_core::playback_principal::PlaybackPrincipal,
+    review: Option<PlanReview>,
+    mut body: CreateSession,
+) -> Result<ResolvedPlan, ApiError> {
+    if !principal.valid_admission_shape()
+        || matches!(
+            principal,
+            plurx_core::playback_principal::PlaybackPrincipal::Sharing { .. }
+        ) && inputs.network_prior.is_some()
+    {
+        return Err(ApiError::BadRequest("invalid planning principal".into()));
+    }
+    let FilePlanInputs {
+        snapshot,
+        state,
         file_id,
         source,
         network_prior,
@@ -1393,9 +1439,7 @@ pub(crate) async fn resolve_plan(
     // retry of the same body recover the same session no matter which binary
     // answers it. Only after it is taken does the server's reconciliation
     // apply to the request that will actually be built.
-    let fingerprint = request.durable_intent_fingerprint(
-        &plurx_core::playback_principal::PlaybackPrincipal::LocalUser { user_id },
-    );
+    let fingerprint = request.durable_intent_fingerprint(principal);
     let plan_notes = match review {
         Some(review) => apply_plan_review(&mut request, review),
         None => Vec::new(),
@@ -4067,4 +4111,244 @@ mod quorum_candidate_tests {
             "catalogue_authority_unavailable"
         );
     }
+}
+
+/// Full expected Source file identity. Construction does not authorize a read.
+#[allow(dead_code)]
+#[derive(Clone)]
+pub(crate) struct SourcePlaybackTarget {
+    pub server_id: uuid::Uuid,
+    pub catalogue_epoch: uuid::Uuid,
+    pub library_id: plurx_core::sharing::SourceId,
+    pub item_id: plurx_core::sharing::SourceId,
+    pub file_id: plurx_core::sharing::SourceId,
+    pub revision: plurx_core::sharing_catalogue_details::FileRevision,
+}
+
+/// Prepared by current Source authority and the actual shared planning engine.
+/// No wire constructor, serialization, local account, physical readiness or
+/// replicated-write authority is carried by this observation.
+#[allow(dead_code)]
+pub(crate) struct PreparedSourcePlayback {
+    target: SourcePlaybackTarget,
+    principal: plurx_core::playback_principal::PlaybackPrincipal,
+    file: MediaFile,
+    resolved: ResolvedPlan,
+    decision: super::super::stream::DecisionResponse,
+}
+#[allow(dead_code)]
+impl PreparedSourcePlayback {
+    pub(crate) fn request(&self) -> &crate::transcode::SessionRequest {
+        &self.resolved.request
+    }
+    pub(crate) fn file(&self) -> &MediaFile {
+        &self.file
+    }
+    pub(crate) fn decision(&self) -> &super::super::stream::DecisionResponse {
+        &self.decision
+    }
+    pub(crate) fn principal(&self) -> &plurx_core::playback_principal::PlaybackPrincipal {
+        &self.principal
+    }
+    pub(crate) fn plan_notes(&self) -> &[String] {
+        &self.resolved.plan_notes
+    }
+    pub(crate) fn native_subtitles(&self) -> (bool, Option<i64>) {
+        (
+            self.resolved.native_subtitles,
+            self.resolved.native_subtitle,
+        )
+    }
+    pub(crate) fn fingerprint(&self) -> &str {
+        &self.resolved.intent_fingerprint
+    }
+    pub(crate) fn matches_assignment(
+        &self,
+        assignment: &plurx_core::sharing_source_sessions::SourceDispatchAssignment,
+    ) -> bool {
+        let binding = assignment.binding();
+        binding.principal() == &self.principal
+            && binding.source_server_id() == self.target.server_id
+            && binding.catalogue_epoch() == self.target.catalogue_epoch
+            && binding.library_id() == &self.target.library_id
+            && binding.item_id() == &self.target.item_id
+            && binding.file_id() == &self.target.file_id
+            && binding.file_revision() == &self.target.revision
+            && binding.playback_id() == self.resolved.request.playback_id
+            && Some(binding.request_id()) == self.resolved.request.request_id.as_deref()
+            && binding.request_fingerprint() == self.resolved.intent_fingerprint
+    }
+}
+
+#[allow(dead_code)]
+pub(crate) async fn prepare_source_playback(
+    state: &AppState,
+    headers: &HeaderMap,
+    target: SourcePlaybackTarget,
+    body: CreateSession,
+) -> Result<PreparedSourcePlayback, ApiError> {
+    use plurx_core::{
+        sharing_catalogue_details::CatalogueRevisionKey,
+        store::sharing_catalogue_details::SourceDetailsRead,
+    };
+    let refused = || {
+        ApiError::typed(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "sharing_playback_authority_unavailable",
+            "Shared playback authority is unavailable",
+        )
+    };
+    if !crate::sharing::enabled(state.store.as_ref()).await?
+        || target.server_id.is_nil()
+        || target.catalogue_epoch.is_nil()
+        || !valid_playback_id(&body.playback_id)
+        || body
+            .request_id
+            .as_deref()
+            .is_none_or(|id| id.is_empty() || id.len() > 128 || id.chars().any(char::is_control))
+        || body
+            .presentation
+            .as_deref()
+            .is_some_and(|value| value != "vod")
+    {
+        return Err(refused());
+    }
+    if let Some(intent) = body.intent.as_ref() {
+        intent
+            .validate()
+            .map_err(|error| ApiError::BadRequest(format!("intent: {error}")))?;
+    }
+    let caps = body
+        .caps
+        .as_ref()
+        .filter(|caps| caps.v == plurx_core::playback::DeviceCaps::VERSION && !caps.is_empty())
+        .cloned()
+        .ok_or_else(refused)?;
+    super::super::stream::validate_device_caps(&caps)?;
+    let (hash, grant) = super::super::shared_library::authority(state, headers).await?;
+    let viewer = headers
+        .get("cinemashare-viewer")
+        .and_then(|value| value.to_str().ok())
+        .ok_or_else(refused)?;
+    let principal = plurx_core::playback_principal::PlaybackPrincipal::sharing(grant, viewer)
+        .map_err(|_| refused())?;
+    let read_witness = || {
+        state.store.source_item_file_witness(
+            &hash,
+            grant,
+            target.item_id.clone(),
+            target.file_id.clone(),
+        )
+    };
+    let SourceDetailsRead::Authorized(witness) = read_witness().await? else {
+        return Err(refused());
+    };
+    if !witness.matches_source_file(
+        target.server_id,
+        target.catalogue_epoch,
+        &target.library_id,
+        &target.item_id,
+        &target.file_id,
+    ) {
+        return Err(refused());
+    }
+    let envelope = state
+        .store
+        .source_catalogue_revision_key(target.server_id, target.catalogue_epoch)
+        .await?
+        .ok_or_else(refused)?;
+    let key = CatalogueRevisionKey::open(
+        &state.sharing.key,
+        plurx_core::sharing::SharingIdentity {
+            server_id: target.server_id,
+            catalogue_epoch: target.catalogue_epoch,
+            created_at_ms: 0,
+        },
+        &envelope,
+    )?;
+    if key.file_revision(&witness)? != target.revision {
+        return Err(refused());
+    }
+    // The ordinary file/planning store is entered only after the current grant
+    // query produced this exact Source tuple. Foreign B IDs never reach it.
+    let file_id = target
+        .file_id
+        .as_str()
+        .parse::<i64>()
+        .map_err(|_| refused())?;
+    let snapshot = state
+        .store
+        .playback_planning_snapshot(file_id, &crate::transcode::QUALITY_PLANNING_KEYS)
+        .await?
+        .ok_or_else(refused)?;
+    let file = snapshot.file.clone();
+    let q = super::super::stream::Caps {
+        caps_v2: Some(caps.clone()),
+        audio: body.audio,
+        subtitle: body.subtitle_burn.or(body.subtitle),
+        audio_offset_ms: body.audio_offset_ms,
+        force: body.overrides.as_ref().and_then(|o| o.force.clone()),
+        ..Default::default()
+    };
+    let decision = super::super::stream::decision_for_source_file(state, file.clone(), q).await?;
+    let node = super::super::stream::render_caps_from_snapshot(state, &snapshot);
+    let review = review_client_plan(
+        &caps,
+        body.overrides.as_ref(),
+        &file,
+        &node,
+        body.preserve_dolby_vision == Some(true),
+        body.hdr10 == Some(true),
+        unix_ms(),
+    );
+    let hdr10_requested = review.hdr10;
+    let resolved = resolve_plan_for_principal(
+        FilePlanInputs {
+            snapshot: Some(&snapshot),
+            state,
+            file_id,
+            source: Some(&file),
+            network_prior: None,
+        },
+        &principal,
+        Some(review),
+        body,
+    )
+    .await?;
+    validate_hevc_copy_transport(state, &file, &caps, &resolved.request).await?;
+    if burn_would_discard_this_session_hdr(
+        state,
+        Some(&file),
+        &resolved.request,
+        hdr10_requested,
+        resolved.height,
+    )
+    .await
+    {
+        return Err(ApiError::Unprocessable(
+            serde_json::json!({"code":"hdr_subtitle_burn_refused","error":HDR_SUBTITLE_BURN_REFUSAL}),
+        ));
+    }
+    let SourceDetailsRead::Authorized(current) = read_witness().await? else {
+        return Err(refused());
+    };
+    if !current.matches_source_file(
+        target.server_id,
+        target.catalogue_epoch,
+        &target.library_id,
+        &target.item_id,
+        &target.file_id,
+    ) || key.file_revision(&current)? != target.revision
+        || !crate::sharing::enabled(state.store.as_ref()).await?
+        || super::super::shared_library::authority(state, headers).await? != (hash.clone(), grant)
+    {
+        return Err(refused());
+    }
+    Ok(PreparedSourcePlayback {
+        target,
+        principal,
+        file,
+        resolved,
+        decision,
+    })
 }

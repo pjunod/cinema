@@ -89,7 +89,7 @@ fn mutation(result: MutationOutcome) -> Result<Json<Value>, ApiError> {
         MutationOutcome::Expired => Err(failure(StatusCode::GONE, "sharing_expired")),
     }
 }
-pub(crate) fn admin_router() -> Router<AppState> {
+pub(crate) fn admin_router(state: AppState) -> Router<AppState> {
     Router::new()
         .route("/sharing/settings", get(settings).put(save_settings))
         .route("/sharing/status", get(status))
@@ -109,6 +109,7 @@ pub(crate) fn admin_router() -> Router<AppState> {
         )
         .route("/sharing/imports/{id}/endpoints", put(import_endpoints))
         .route("/sharing/imports/{id}", delete(disconnect))
+        .merge(super::shared_library::admin_library_router(state))
         .layer(axum::middleware::from_fn(private_response))
 }
 pub(crate) fn peer_router(state: AppState) -> Router {
