@@ -6809,6 +6809,39 @@ test("severe route pressure skips intermediate rungs despite voluntary budget",(
   assert.equal(result.emergency,true);
 });
 
+test("mild route pressure survives ordinary HLS refills but only moves while draining",()=>{
+  const f=routeQualityFixture();
+  const args={state:{previousRunwayMs:61000},candidates:[f.low,f.middle,f.high],
+    currentId:f.high.id,target:f.target,aspect:16/9,
+    sample:{...f.sample,cause:"link",runway_ms:60000,
+      transfer:{...f.transfer,bytes:3000000}}};
+  const first=policy.decideCandidateTransition(args);
+  assert.equal(first.candidate,null);
+  assert.equal(first.state.mildSamples,1);
+  const refill=policy.decideCandidateTransition({...args,state:first.state,
+    sample:{...args.sample,now_ms:121000,runway_ms:61000}});
+  assert.equal(refill.candidate,null,"refilling is not a draining-buffer decision");
+  assert.equal(refill.state.mildSamples,2,"low link margin persists across the refill");
+  const drained={...args,state:refill.state,
+    sample:{...args.sample,now_ms:122000,runway_ms:60000}};
+  const move=policy.decideCandidateTransition(drained);
+  assert.equal(move.candidate.id,f.middle.id);
+  assert.equal(move.emergency,false);
+  assert.equal(policy.decideCandidateTransition({...drained,
+    state:{...refill.state,lastSwitchMs:121000}}).candidate,null,"cooldown still applies");
+  assert.equal(policy.decideCandidateTransition({...drained,
+    state:{...refill.state,switchTimesMs:Array(6).fill(119000)}}).candidate,null,"voluntary budget still applies");
+  for(const transfer of [{...f.transfer,bytes:5000000},
+    {...args.sample.transfer,age_ms:15001}, {...args.sample.transfer,producer_paced:true}]){
+    const reset=policy.decideCandidateTransition({...drained,
+      sample:{...drained.sample,transfer}});
+    assert.equal(reset.state.mildSamples,0,"recovered or invalid link proof clears the counter");
+    assert.equal(policy.decideCandidateTransition({...args,state:reset.state,
+      sample:{...args.sample,now_ms:123000,runway_ms:59000}}).candidate,null,
+      "one new low-margin observation cannot reuse cleared pressure");
+  }
+});
+
 test("unknown peak original downshifts from fresh demand without inventing upgrade proof",()=>{
   const f=routeQualityFixture(), original={...f.original,peak_bps:null,average_bps:50000000};
   const args={state:{},candidates:[f.low,f.middle,original],currentId:original.id,

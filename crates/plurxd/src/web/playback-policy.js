@@ -2251,10 +2251,15 @@
     const severe = sample.cause === "link" && link > 0 && demand > 0
       && link * 10 < demand * 7 && draining;
     const lowMargin = sample.cause === "link" && link > 0 && demand > 0
-      && link < demand * 1.2 && draining;
-    next.mildSamples = lowMargin ? (next.mildSamples || 0) + 1 : 0;
+      && link < demand * 1.2;
+    // A routine HLS refill is not recovered link headroom. Retain consecutive
+    // fresh low-margin observations across it, but require draining when
+    // actually choosing a downgrade. Otherwise the two-second refill cycle
+    // can reset every one-second observation and postpone pressure forever.
+    next.mildSamples = lowMargin ? Math.min(2, (next.mildSamples || 0) + 1) : 0;
     const emergency = severe || sample.cause === "decode";
-    const pressure = severe || next.mildSamples >= 2 || ["encode", "decode"].includes(sample.cause);
+    const pressure = severe || next.mildSamples >= 2 && draining
+      || ["encode", "decode"].includes(sample.cause);
     const area = candidate => candidate.width * candidate.height;
     let chosen;
     if (pressure) {

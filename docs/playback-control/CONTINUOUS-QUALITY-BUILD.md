@@ -4824,3 +4824,27 @@ keeps phase timing around upstream single-probe decoder planning. Both sides'
 authored fixture assertions are retained and will compile without execution.
 No unit tests ran. Current-source full qualification will use the integrated
 candidate, not the older passing focused source.
+
+
+### 10.165 · Preserve low link margin across normal HLS refills
+
+Current-main integration committed as `1de833ab2`; pinned all-target Clippy,
+Rust formatting, catalog lint and served JavaScript syntax passed. The local
+compiler required the new fragment-run version/composition fields and init
+edit-list field in the shared AAC splitter/fixtures; these were fixed before
+commit. No unit execution was used to discover or verify those type changes.
+
+The route controller now counts consecutive fresh low-margin observations
+independently of the normal HLS runway sawtooth. A mild downgrade still needs
+at least two observations and a draining buffer at the moment of choice.
+Recovered or invalid transfer proof clears the counter; cooldown, switch
+budget and severe-pressure rules are unchanged. The bounded count saturates
+at two. This removes the phase-sensitive counter reset identified by the
+passing focused trace, without treating buffer position as bandwidth proof.
+
+Authored, unrun regression:
+`tests/playback/web-policy.test.js::mild route pressure survives ordinary HLS refills but only moves while draining`.
+It reproduces 60/61/60-second runway across sustained fresh low margin, rejects
+a move during refill, permits the next draining observation, and retains
+cooldown/budget and invalid/recovered-proof reset behavior. No units executed.
+The integrated corrected candidate still needs exact-source qualification.
