@@ -767,15 +767,23 @@ impl SharingManager {
             secrets::{Secret, SharingSecretPurpose},
             sharing::*,
         };
-        let unavailable = |_| PeerError::Unavailable;
-        if !enabled(state.store.as_ref()).await.map_err(unavailable)? {
+        let unavailable = |phase: &'static str| {
+            move |_| {
+                tracing::warn!(phase, "sharing rotation failed");
+                PeerError::Unavailable
+            }
+        };
+        if !enabled(state.store.as_ref())
+            .await
+            .map_err(unavailable("enabled"))?
+        {
             return Err(PeerError::Unavailable);
         }
         let mut rotation = state
             .store
             .sharing_import_rotation(import.summary.id)
             .await
-            .map_err(unavailable)?;
+            .map_err(unavailable("load_rotation"))?;
         if rotation.is_none() && !start {
             return Ok(());
         }
@@ -787,11 +795,11 @@ impl SharingManager {
             .store
             .sharing_identity(clock_ms())
             .await
-            .map_err(unavailable)?;
-        let current =
-            ImportCredential::open(self, local.server_id, &import).map_err(unavailable)?;
+            .map_err(unavailable("identity"))?;
+        let current = ImportCredential::open(self, local.server_id, &import)
+            .map_err(unavailable("open_current_credential"))?;
         if rotation.is_none() {
-            let secret = new_secret().map_err(unavailable)?;
+            let secret = new_secret().map_err(unavailable("new_credential"))?;
             let payload = ImportCredential::encode(
                 &secret,
                 current.invitation_id,
@@ -800,7 +808,7 @@ impl SharingManager {
                 current.claim_deadline_ms,
                 current.pending_expires_at_ms,
             )
-            .map_err(unavailable)?;
+            .map_err(unavailable("encode_credential"))?;
             let sealed = self
                 .key
                 .seal_sharing(
@@ -820,7 +828,7 @@ impl SharingManager {
                     now_ms: clock_ms(),
                 })
                 .await
-                .map_err(unavailable)?;
+                .map_err(unavailable("begin_rotation"))?;
             if result != MutationOutcome::Applied {
                 return Err(PeerError::Rejected(axum::http::StatusCode::CONFLICT));
             }
@@ -828,7 +836,7 @@ impl SharingManager {
                 .store
                 .sharing_import_rotation(import.summary.id)
                 .await
-                .map_err(unavailable)?;
+                .map_err(unavailable("reload_rotation"))?;
         }
         let rotation = rotation.ok_or(PeerError::Unavailable)?;
         if rotation.expires_at_ms <= clock_ms() {
@@ -850,9 +858,16 @@ impl SharingManager {
             catalogue_epoch: import.summary.catalogue_epoch,
             created_at_ms: 0,
         };
-        let (mut peer, _) =
-            PeerConnection::verified(self, &import.summary.endpoints, &source).await?;
-        self.ensure_current(state, &import.summary).await?;
+        let (mut peer, _) = PeerConnection::verified(self, &import.summary.endpoints, &source)
+            .await
+            .inspect_err(|_| {
+                tracing::warn!(phase = "verify_peer", "sharing rotation failed");
+            })?;
+        self.ensure_current(state, &import.summary)
+            .await
+            .inspect_err(|_| {
+                tracing::warn!(phase = "current_import", "sharing rotation failed");
+            })?;
         // Status is the only request allowed with the old credential after a
         // committed swap. Try recovery before issuing another mutation.
         let already = peer
@@ -875,9 +890,18 @@ impl SharingManager {
                 })
                 .map_err(|_| PeerError::InvalidResponse)?,
             );
-            peer.rotate(&current.credential, &payload).await?;
+            peer.rotate(&current.credential, &payload)
+                .await
+                .inspect_err(|_| {
+                    tracing::warn!(phase = "peer_swap", "sharing rotation failed");
+                })?;
         }
-        let confirmed: GrantResponse = peer.grant(&replacement_credential.credential).await?;
+        let confirmed: GrantResponse = peer
+            .grant(&replacement_credential.credential)
+            .await
+            .inspect_err(|_| {
+                tracing::warn!(phase = "confirm_replacement", "sharing rotation failed");
+            })?;
         if confirmed.id != grant_id
             || confirmed.recipient_server_id != local.server_id
             || confirmed.state != "active"
@@ -900,7 +924,10 @@ impl SharingManager {
                 replacement.expose(),
             )
             .map_err(|_| PeerError::Unavailable)?;
-        if !enabled(state.store.as_ref()).await.map_err(unavailable)? {
+        if !enabled(state.store.as_ref())
+            .await
+            .map_err(unavailable("enabled_before_commit"))?
+        {
             return Err(PeerError::Unavailable);
         }
         if state
@@ -914,7 +941,7 @@ impl SharingManager {
                 clock_ms(),
             )
             .await
-            .map_err(unavailable)?
+            .map_err(unavailable("commit_rotation"))?
             != MutationOutcome::Applied
         {
             return Err(PeerError::Rejected(axum::http::StatusCode::CONFLICT));

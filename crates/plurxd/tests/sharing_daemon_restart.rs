@@ -143,6 +143,16 @@ async fn call(
     let status = response.status();
     let value = response.json::<Value>().await.expect("fixture JSON");
     // Never print an invitation or credential-bearing API body on failure.
+    if !status.is_success() {
+        for line in std::fs::read_to_string(&daemon.log)
+            .unwrap_or_default()
+            .lines()
+        {
+            if line.contains("sharing rotation failed") {
+                eprintln!("{line}");
+            }
+        }
+    }
     assert!(
         status.is_success(),
         "{path}: HTTP {status}; code={}",
