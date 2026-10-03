@@ -16,6 +16,7 @@ const net = require("node:net");
 const os = require("node:os");
 const path = require("node:path");
 const { spawn, spawnSync } = require("node:child_process");
+const {FRAME_CLOCK, frameClockFilter, decodeFrameClockRgb} = require("./playback-frame-clock");
 
 const ROOT = path.resolve(__dirname, "..");
 const MANIFEST_PATH = path.join(ROOT, "tests", "playback", "cases.json");
@@ -450,7 +451,8 @@ function fixtureCommand(fixture, output, directory, fixtures) {
         ...ffmpegPrefix(),
         "-f", "lavfi", "-i", `testsrc2=size=1920x1080:rate=24:duration=${seconds}`,
         "-f", "lavfi", "-i", `sine=frequency=440:sample_rate=48000:duration=${seconds}`,
-        "-map", "0:v:0", "-map", "1:a:0",
+        "-filter_complex_threads", "1", "-filter_complex", frameClockFilter(duration),
+        "-map", "[clocked_video]", "-map", "1:a:0",
         "-c:v", "mpeg4", "-threads", "1", "-b:v", "4M", "-g", "48", "-bf", "0",
         "-pix_fmt", "yuv420p", "-colorspace", "bt709", "-color_primaries", "bt709", "-color_trc", "bt709",
         "-c:a", "aac", "-b:a", "192k", "-movflags", "+faststart", "-shortest", output,
@@ -546,6 +548,25 @@ function ffprobe(file) {
   return JSON.parse(result.stdout);
 }
 
+function verifyFixtureFrameClock(file) {
+  const clock = FRAME_CLOCK;
+  const stride = clock.readWidth * clock.readHeight * 3;
+  const decoded = spawnSync("ffmpeg", ["-hide_banner", "-loglevel", "error", "-nostdin",
+    "-threads", "1", "-i", file, "-an", "-filter_threads", "1", "-vf",
+    `crop=${clock.width}:${clock.height}:${clock.x}:${clock.y},scale=${clock.readWidth}:${clock.readHeight}:flags=area`,
+    "-frames:v", "24", "-fps_mode", "passthrough", "-pix_fmt", "rgb24", "-f", "rawvideo", "pipe:1"],
+  {timeout: 20_000, maxBuffer: stride * 25, encoding: null});
+  if (decoded.error || decoded.status !== 0 || decoded.stdout?.length !== stride * 24) {
+    throw new Error("Encoded optical frame clock could not be verified");
+  }
+  for (let frame = 0; frame < 24; frame++) {
+    if (decodeFrameClockRgb(decoded.stdout.subarray(frame * stride, (frame + 1) * stride)) !== frame) {
+      throw new Error(`Encoded optical frame clock mismatch at frame ${frame}`);
+    }
+  }
+  return {...clock, verified_frames: 24};
+}
+
 function verifyFixture(fixture, file) {
   const probe = ffprobe(file);
   const video = probe.streams.find((stream) => stream.codec_type === "video");
@@ -574,9 +595,19 @@ function verifyFixture(fixture, file) {
   const minimumDuration = Math.max(want.minDuration || 0, Number(fixture.duration_seconds || 0) - 0.1);
   if (duration < minimumDuration) failures.push(`duration ${duration.toFixed(1)}s, want >= ${minimumDuration}s`);
   if (want.minBitrate && bitrate < want.minBitrate) failures.push(`bitrate ${(bitrate / 1e6).toFixed(1)} Mb/s, want >= ${(want.minBitrate / 1e6).toFixed(0)} Mb/s`);
+  let frameClock = null;
+  if (fixture.frame_clock_version !== undefined) {
+    if (fixture.frame_clock_version !== FRAME_CLOCK.version) failures.push("unknown optical clock version");
+    const rate = String(video?.avg_frame_rate || "").split("/").map(Number);
+    if (rate.length !== 2 || !rate.every(Number.isFinite) || rate[1] <= 0 || rate[0] / rate[1] !== FRAME_CLOCK.fps) {
+      failures.push("optical clock source cadence differs from its encoded counter");
+    }
+    if (!failures.length) frameClock = verifyFixtureFrameClock(file);
+  }
   if (failures.length) throw new Error(`${fixture.id}: ${failures.join("; ")}`);
   return {
     codec: video.codec_name,
+    ...(frameClock ? {frame_clock: frameClock} : {}),
     dimensions: `${video.width}x${video.height}`,
     audio: audio.map((stream) => stream.codec_name),
     subtitles: subtitles.map((stream) => stream.codec_name),

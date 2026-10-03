@@ -5813,3 +5813,138 @@ and all qualification thresholds are unchanged. The source-067 diagnostic
 therefore retains trustworthy raw maxima, but its reported raw per-Auto
 stage values are cumulative rather than independently scoped. Node syntax
 checks pass; no unit tests were executed.
+
+
+### 10.200 Bound the artifact diagnostic independently of Auto qualification
+
+`continuous-firefox-067788318-headed3-artifact-binding1` ended with
+`deadline_exceeded` at its fixed 600-second supervisor bound. It entered
+Auto only after the three-manual result passed and logged three actual
+Auto presentations before the timeout. No terminal raster/artifact report
+was produced: the helper collected it after the campaign, so the budget
+cutoff left no comparison evidence. This is a failed helper attempt, not a
+full campaign pass. The supervisor retired the owned display, removed the
+runtime and a separate exact-runtime process census found zero survivors.
+Its log/supervisor receipt and the previous failed source-067 raster/source
+comparison receipts were preserved in the independent clone's ignored
+evidence directory.
+
+Committed candidate `087e27680` passed the normal hook (pinned Clippy
+36.59 seconds, catalog lint, formatting and 72 served JavaScript syntax
+checks), then its exact source-only Linux build passed in 1m38s. The
+corrected `continuous-firefox-087e27680-headed3-artifact-binding2` explicitly
+uses the shipped lab's manual-only runner, saves its bounded artifact and
+raster evidence before End, and retains the same 600-second cleanup bound.
+It is running; full fifteen-manual/five-Auto qualification remains separate
+and requires a campaign-appropriate bounded supervisor. No units or final
+adversarial review ran.
+
+
+### 10.201 Corrected focused Firefox run and full campaign start
+
+`continuous-firefox-087e27680-headed3-artifact-binding2` **PASSED** its
+manual-only case: three targets presented, maximum presentation and raw
+callback gaps 85.58ms, no suspect raster samples and four browser-reported
+dropped frames. The suspect-metadata condition did not reproduce; the
+artifact index is empty, so this run provides no new raster/append identity
+comparison and does not resolve the previous source-067 failure. End
+producer counts were 1/0/0/0, helper exit 0, owned display retired and
+runtime removed. Immediate retirement remains visible rather than being
+reported as zero. Physical output is unmeasured.
+
+The full
+`continuous-firefox-087e27680-headed20-artifact-binding1` is now running on
+the same exact compiled source: fifteen manual changes followed, if they
+pass, by five actual Auto stages. The helper has a 1800-second supervisor
+bound and exports changed diagnostic raster/artifact state every fifteen
+seconds, so a later timeout cannot discard every capture. Copied video
+bytes remain bounded and compared with canonical append receipts. The
+software-display crop capture covers only the first 120 seconds and stays
+diagnostic. No thresholds were widened, no old receipt rescored, and no
+units or final adversarial review ran.
+
+
+### 10.202 Full current Firefox campaign: one coalesced observation remains unqualified
+
+`continuous-firefox-087e27680-headed20-artifact-binding1` **FAILED** the
+unchanged 100ms quality-window p95 bound at 168.94ms. All fifteen manual
+targets presented on one session/player. There were zero reported
+hitches/stalls/backward callbacks, seven browser-reported dropped frames,
+TTFF 2729ms and measured clock rate 0.999x. No Auto stages ran. End producer
+counts were 0/0/0/0; the helper exited 1, retired the owned display and
+removed its runtime. Periodic capture reported no error, no suspect
+raster rows and an empty artifact index.
+
+Fourteen transition-window maxima were approximately 84.94–85.68ms. The
+fourteenth window (720p incumbent, requested future 1080p) contained
+callback/display times 759236.58→759405.52ms, media time
+756.791666→756.958333s and compositor presented-frame counts 18164→18168.
+Element clocks were 756.794277→756.958671s. Both endpoints remained 720p
+on the same element/session. The request began near film 750.375s and its
+1080p target first presented at 812.083333s: this observation occurred
+during incumbent playback, not at the rendition handoff.
+
+The four-frame compositor-count advance agrees with the four-frame media
+advance, suggesting callbacks were coalesced rather than pictures skipped.
+That does not establish the timing of the intermediate images: dividing
+the gap by the count could conceal an actual held picture. The independent
+software-display capture covers only the first 120 seconds, so it cannot
+resolve this late observation. The failure remains failed; no threshold or
+hitch rule is changed. Further focused independent display evidence is
+needed before repeating a full campaign.
+
+The separate bounded target CPU/source-reader contention probe starts only
+after this runtime's cleanup. Its two owned foreground viewers retain
+normal pool settings; an owned competing decoder and the new 720p target
+share one CPU temporarily, with per-process identity, CPU/I/O samples and
+a bounded affinity restoration/worker retirement. This measures actual
+decode/read contention, not physical disk pressure or shared-reader
+fairness. No units or final adversarial review ran.
+
+
+### 10.203 Actual target CPU/source-read contention preserves the incumbent
+
+`continuous-chrome-087e27680-targeted-target-source-load1` produced a
+**PASS** receipt. Two actual foreground viewers presented 1080p and 480p
+with the normal software pool at 9 used / 32 allowed; no pool limit was
+lowered. An owned competing source decoder and the new 720p target shared
+one CPU. Ten samples recorded concurrent target/workload activity: over
+the comparable span the worker consumed 896 CPU ticks and read 29,626,667
+characters, while the target consumed eight CPU ticks and read 872,928
+characters (100 ticks/second). Both physical `read_bytes` deltas were zero.
+This exercises real decode/read contention, not disk pressure or
+shared-source-reader fairness.
+
+The optional target retained healthy 1080p while saved quality remained
+720p. After workload retirement and target affinity restoration, shipped
+Retry presented 720p in the same session/player, 60.285 seconds after the
+request at the existing append frontier. Maximum observed gap was 50.10ms,
+with zero added hitches/stalls/dropped frames; the competing 480p viewer
+also remained continuous. End producer counts were 0/0/0/0. The remote
+daemon, worker and all owned native/browser runtimes retired. The local
+Node wrapper lingered after its passing report and resource cleanup; its
+exact command/PID was verified and terminated, giving cleanup exit 143.
+This is recorded separately from the passing playback receipt.
+
+### 10.204 Independent encoded frame-clock instrumentation
+
+The generated continuous MPEG-4 source now contains a versioned optical
+frame clock in the video itself: a guard byte, 24-bit frame counter and
+checksum, sampled from high-contrast cell centers. The small clock plane
+uses [FFmpeg geq](https://ffmpeg.org/ffmpeg-filters.html#geq), whose `N`
+starts at zero, then overlays it before encoding; no fonts or browser DOM
+clock are required. The fixture filename changes to `clock-v1` so a cached
+unclocked source cannot be reused. Fixture verification requires 24fps and
+independently decodes its first 24 encoded counters.
+
+A conservative decoder rejects ambiguous pixels, corrupt guards/checksums
+and malformed buffers. Capture analysis requires an explicit time window
+and keeps sampling holes, missing pixels and backward counters visible.
+It reports both observed lower and conservative upper held-picture bounds;
+it never divides a gap by a counter advance. Two authored, unrun
+regressions cover independent on-wire pixels/corruption and actual held
+pictures versus incomplete sampling. Node syntax passes. A tiny encoded
+media prototype will qualify the codec/filter path before generating the
+new long fixture or repeating browser campaigns. This instrumentation does
+not widen the existing callback/continuity thresholds or claim physical
+output. No units or final adversarial review ran.

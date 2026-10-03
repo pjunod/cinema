@@ -80,10 +80,11 @@
     },
     {
       "id": "continuous-mpeg4-aac-1080",
-      "filename": "continuous-mpeg4-aac-1080.mp4",
+      "filename": "continuous-mpeg4-aac-1080-clock-v1.mp4",
       "builder": "mpeg4_aac_mp4_continuous",
+      "frame_clock_version": 1,
       "duration_seconds": 1800,
-      "description": "30 minutes of 1080p SDR MPEG-4 Part 2 with AAC; browser Auto must choose encoded rungs so continuous-family decisions can be measured without disabling Original",
+      "description": "30 minutes of 1080p SDR MPEG-4 Part 2 with AAC; browser Auto must choose encoded rungs so continuous-family decisions can be measured without disabling Original; encoded frame clock v1 for independent pixel capture",
       "tags": [
         "continuous",
         "transcode",

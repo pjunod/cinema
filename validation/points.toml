@@ -174,7 +174,7 @@ timeout_seconds = 3600
 [[checks]]
 id = "playback-shaping"
 title = "Network-shaping harness contract"
-command = "node tests/playback/network-shaping.test.js && node --test tests/playback/preparation-measurement.test.js"
+command = "node tests/playback/network-shaping.test.js && node --test tests/playback/preparation-measurement.test.js tests/playback/frame-clock.test.js"
 profiles = ["commit", "ci", "full", "nightly"]
 requires = ["node"]
 missing = "fail"
@@ -826,6 +826,7 @@ paths = [
   "scripts/verify-dv-timeline",
   "scripts/dv-timeline-check",
   "scripts/playback-lab",
+  "scripts/playback-frame-clock.js",
   "scripts/continuous-quality-qualification",
   "scripts/continuous-quality-lab.mjs",
   "scripts/playback-startup-lab",
