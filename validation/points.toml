@@ -1154,6 +1154,7 @@ paths = [
   "crates/plurx-core/src/store/session_principal_rebuild.sql",
   "crates/plurx-core/src/store/session_principal_tests.rs",
   "crates/plurx-core/tests/fixtures/session-principal-local.sql",
+  "crates/plurx-core/tests/fixtures/session-principal-sharing.sql",
   "crates/plurx-core/tests/store_contract/session_principals.rs",
   "crates/plurx-core/src/sharing_tls.rs",
   "crates/plurx-core/src/sharing_dns.rs",

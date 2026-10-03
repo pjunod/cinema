@@ -521,3 +521,57 @@ BEGIN
             AND live.lease_expires_at_ms > NEW.updated_at_ms
             AND json_extract(live.recipe_json, '$.request.file_id') = json_extract(NEW.recipe_json, '$.request.file_id'));
 END;
+
+-- next statement
+CREATE TRIGGER media_sessions_local_owner_delete
+    BEFORE DELETE ON users
+    
+    BEGIN
+      UPDATE sharing_delivery_grants SET state = 'revoked'
+       WHERE incarnation_id IN (SELECT incarnation_id FROM media_sessions WHERE principal_kind = 'local' AND user_id = OLD.id);
+      UPDATE media_sessions SET state = 'ended', terminal_reason = 'deleted', lease_expires_at_ms = 0
+       WHERE principal_kind = 'local' AND user_id = OLD.id AND state != 'ended';
+      UPDATE job_leases SET expires_at_ms = 0
+       WHERE resource IN (SELECT 'session:' || incarnation_id FROM media_sessions WHERE principal_kind = 'local' AND user_id = OLD.id);
+      UPDATE media_session_requests SET state = 'failed', claim_expires_at_ms = 0, response_json = NULL
+       WHERE principal_kind = 'local' AND user_id = OLD.id;
+      DELETE FROM media_playback_pointers WHERE principal_kind = 'local' AND user_id = OLD.id;
+      DELETE FROM media_session_preparations WHERE principal_kind = 'local' AND user_id = OLD.id;
+      DELETE FROM media_playback_desired WHERE principal_kind = 'local' AND user_id = OLD.id;
+    END;
+
+-- next statement
+CREATE TRIGGER media_sessions_sharing_owner_revoke
+    AFTER UPDATE OF state ON sharing_exports
+    WHEN NEW.state = 'revoked' AND OLD.state != 'revoked'
+    BEGIN
+      UPDATE sharing_delivery_grants SET state = 'revoked'
+       WHERE incarnation_id IN (SELECT incarnation_id FROM media_sessions WHERE principal_kind = 'sharing' AND share_grant_id = OLD.id);
+      UPDATE media_sessions SET state = 'ended', terminal_reason = 'revoked', lease_expires_at_ms = 0
+       WHERE principal_kind = 'sharing' AND share_grant_id = OLD.id AND state != 'ended';
+      UPDATE job_leases SET expires_at_ms = 0
+       WHERE resource IN (SELECT 'session:' || incarnation_id FROM media_sessions WHERE principal_kind = 'sharing' AND share_grant_id = OLD.id);
+      UPDATE media_session_requests SET state = 'failed', claim_expires_at_ms = 0, response_json = NULL
+       WHERE principal_kind = 'sharing' AND share_grant_id = OLD.id;
+      DELETE FROM media_playback_pointers WHERE principal_kind = 'sharing' AND share_grant_id = OLD.id;
+      DELETE FROM media_session_preparations WHERE principal_kind = 'sharing' AND share_grant_id = OLD.id;
+      DELETE FROM media_playback_desired WHERE principal_kind = 'sharing' AND share_grant_id = OLD.id;
+    END;
+
+-- next statement
+CREATE TRIGGER media_sessions_sharing_owner_delete
+    BEFORE DELETE ON sharing_exports
+    
+    BEGIN
+      UPDATE sharing_delivery_grants SET state = 'revoked'
+       WHERE incarnation_id IN (SELECT incarnation_id FROM media_sessions WHERE principal_kind = 'sharing' AND share_grant_id = OLD.id);
+      UPDATE media_sessions SET state = 'ended', terminal_reason = 'revoked', lease_expires_at_ms = 0
+       WHERE principal_kind = 'sharing' AND share_grant_id = OLD.id AND state != 'ended';
+      UPDATE job_leases SET expires_at_ms = 0
+       WHERE resource IN (SELECT 'session:' || incarnation_id FROM media_sessions WHERE principal_kind = 'sharing' AND share_grant_id = OLD.id);
+      UPDATE media_session_requests SET state = 'failed', claim_expires_at_ms = 0, response_json = NULL
+       WHERE principal_kind = 'sharing' AND share_grant_id = OLD.id;
+      DELETE FROM media_playback_pointers WHERE principal_kind = 'sharing' AND share_grant_id = OLD.id;
+      DELETE FROM media_session_preparations WHERE principal_kind = 'sharing' AND share_grant_id = OLD.id;
+      DELETE FROM media_playback_desired WHERE principal_kind = 'sharing' AND share_grant_id = OLD.id;
+    END;

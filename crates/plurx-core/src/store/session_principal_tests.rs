@@ -131,6 +131,36 @@ fn sharing_principal_rebuild_preserves_every_old_column_and_retention_row() {
         }
         conn.execute("DELETE FROM users WHERE id = 1", [])
             .expect("owner deletion");
+        assert_eq!(conn.query_row("SELECT state || ':' || terminal_reason || ':' || lease_expires_at_ms FROM media_sessions WHERE incarnation_id='live'", [], |r| r.get::<_, String>(0)).expect("deleted owner fenced"), "ended:deleted:0");
+        assert_eq!(
+            conn.query_row(
+                "SELECT expires_at_ms FROM job_leases WHERE resource='session:live'",
+                [],
+                |r| r.get::<_, i64>(0)
+            )
+            .expect("deleted owner lease fenced"),
+            0
+        );
+        assert_eq!(
+            conn.query_row(
+                "SELECT state FROM sharing_delivery_grants WHERE incarnation_id='live'",
+                [],
+                |r| r.get::<_, String>(0)
+            )
+            .expect("deleted owner delivery fenced"),
+            "revoked"
+        );
+        assert_eq!(
+            conn.query_row(
+                "SELECT count(*) FROM media_playback_pointers WHERE owner_key='local:1'",
+                [],
+                |r| r.get::<_, i64>(0)
+            )
+            .expect("deleted pointer"),
+            0
+        );
+        conn.execute("INSERT INTO users(id,username,password_hash,is_admin,created_at) VALUES(1,'replacement','hash',0,2)", []).expect("reuse numeric ID");
+        assert_eq!(conn.query_row("SELECT count(*) FROM media_sessions WHERE user_id=1 AND state IN ('starting','active')", [], |r| r.get::<_, i64>(0)).expect("old authority remains retired"), 0);
         assert_eq!(
             conn.query_row("SELECT count(*) FROM media_sessions", [], |r| r
                 .get::<_, i64>(0))
@@ -317,6 +347,80 @@ fn sharing_principal_rebuild_isolates_viewer_keys_and_existing_fence_triggers() 
             |r| r.get::<_, i64>(0)
         )
         .expect("recipes"),
+        0
+    );
+}
+
+#[test]
+fn sharing_principal_rebuild_owner_deletion_and_revocation_retire_only_matching_authority() {
+    let conn = current_database();
+    conn.execute_batch(MEDIA_SESSION_PRINCIPAL_REBUILD_SCHEMA)
+        .expect("candidate rebuild");
+    let grant_a = "00000000-0000-4000-a000-000000000001";
+    let grant_b = "00000000-0000-4000-a000-000000000002";
+    conn.execute_batch(include_str!(
+        "../../tests/fixtures/session-principal-sharing.sql"
+    ))
+    .expect("two grant fixture");
+    conn.execute("DELETE FROM users WHERE id=1", [])
+        .expect("delete local owner");
+    assert_eq!(
+        conn.query_row(
+            "SELECT count(*) FROM media_sessions WHERE principal_kind='sharing' AND state='active'",
+            [],
+            |r| r.get::<_, i64>(0)
+        )
+        .expect("sharing unaffected"),
+        2
+    );
+    conn.execute(
+        "UPDATE sharing_exports SET state='revoked' WHERE id=?1",
+        [&grant_a],
+    )
+    .expect("revoke source grant");
+    assert_eq!(conn.query_row("SELECT state || ':' || terminal_reason || ':' || lease_expires_at_ms FROM media_sessions WHERE incarnation_id=?1", [&grant_a], |r| r.get::<_,String>(0)).expect("revoked source fenced"), "ended:revoked:0");
+    assert_eq!(
+        conn.query_row(
+            "SELECT count(*) FROM media_sessions WHERE principal_kind='sharing' AND state='active'",
+            [],
+            |r| r.get::<_, i64>(0)
+        )
+        .expect("other grant unaffected"),
+        1
+    );
+    conn.execute("DELETE FROM sharing_exports WHERE id=?1", [&grant_b])
+        .expect("delete active grant");
+    assert_eq!(
+        conn.query_row(
+            "SELECT count(*) FROM media_sessions WHERE principal_kind='sharing'",
+            [],
+            |r| r.get::<_, i64>(0)
+        )
+        .expect("terminal sharing rows retained"),
+        2
+    );
+    assert_eq!(
+        conn.query_row(
+            "SELECT count(*) FROM media_sessions WHERE principal_kind='sharing' AND state!='ended'",
+            [],
+            |r| r.get::<_, i64>(0)
+        )
+        .expect("all deleted authority retired"),
+        0
+    );
+    assert_eq!(
+        conn.query_row(
+            "SELECT count(*) FROM media_session_terminal_acks",
+            [],
+            |r| r.get::<_, i64>(0)
+        )
+        .expect("unrelated terminal ack retained"),
+        1
+    );
+    assert_eq!(
+        conn.query_row("SELECT count(*) FROM media_playback_pointers", [], |r| r
+            .get::<_, i64>(0))
+            .expect("pointers retired"),
         0
     );
 }

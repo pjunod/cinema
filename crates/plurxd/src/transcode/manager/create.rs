@@ -1192,7 +1192,9 @@ impl TranscodeManager {
                         admission.deadline.into_std(),
                     ),
                     user_id.map(|user_id| crate::state::PlaybackViewerDemand {
-                        user_id,
+                        principal: plurx_core::playback_principal::PlaybackPrincipal::LocalUser {
+                            user_id,
+                        },
                         playback_id: req.playback_id.clone(),
                     }),
                 )
@@ -1217,7 +1219,9 @@ impl TranscodeManager {
                     attribution,
                     session_id,
                     user_id.map(|user_id| crate::state::PlaybackViewerDemand {
-                        user_id,
+                        principal: plurx_core::playback_principal::PlaybackPrincipal::LocalUser {
+                            user_id,
+                        },
                         playback_id: req.playback_id.clone(),
                     }),
                 )

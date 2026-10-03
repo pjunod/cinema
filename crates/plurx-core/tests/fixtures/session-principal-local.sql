@@ -31,7 +31,7 @@ INSERT INTO users (id, username, password_hash, is_admin, created_at) VALUES (1,
            (user_id, request_id, incarnation_id, recipe_json, created_at_ms)
          VALUES (1, 'request', 'live', '{}', 10);
          INSERT INTO job_leases (resource, owner_node_id, fence, revision, expires_at_ms, updated_at_ms)
-         VALUES ('media:live', 'node', 2, 3, 9000, 10);
+         VALUES ('session:live', 'node', 2, 3, 9000, 10);
          INSERT INTO media_session_terminal_acks
            (incarnation_id, session_id, owner_node_id, owner_epoch, client_instance_id,
             sequence, request_fingerprint, response_json, expires_at_ms, updated_at_ms)

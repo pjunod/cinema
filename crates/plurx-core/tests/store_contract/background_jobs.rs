@@ -475,7 +475,7 @@ async fn background_jobs_one_fragment_build_keeps_remote_delivery_durable() {
             cache_key: cache_key.clone(),
             file_id,
             target_node_id: "node-b".into(),
-            user_id: 1,
+            principal: plurx_core::playback_principal::PlaybackPrincipal::LocalUser { user_id: 1 },
             playback_id: "remote-fragment-viewer".into(),
             now_ms: 1_001,
         };

@@ -1772,3 +1772,27 @@ actual old-binary and rollback qualification. Shared playback remains unavailabl
 cargo test --locked -p plurx-core --features hiqlite-store --lib sharing_principal_rebuild -- --nocapture
 cargo test --locked -p plurx-core --features hiqlite-contract-tests --test store_contract session_principals::sharing_principal_rebuild_is_atomic_and_preserves_rows_on_three_voters -- --exact --nocapture
 ```
+
+**S3 checkpoint, 2026-10-02:** background analysis/artifact interest and daemon
+viewer demand now carry `PlaybackPrincipal`. Local consumer hashes retain their
+old numeric encoding; shared consumers separate grant and viewer identities.
+The temporary local-only admission adapter remains explicit, so these typed
+interfaces do not admit shared background work before the runtime migration.
+The hash regression passed, and all eight `viewer` store contracts passed
+against SQLite and the three-voter fixture (74.75 seconds).
+
+The candidate rebuild also retires matching authority on local-user deletion,
+export revocation and export deletion: sessions end, their leases expire,
+delivery grants revoke, requests fail and current pointers/preparations/desired
+selections disappear. Terminal rows remain retained. Tests prove another grant
+and its viewer remain active, and reuse of a deleted numeric user ID cannot
+reactivate old sessions. Four SQLite candidate tests passed (5.03 seconds),
+and both replicated candidate tests passed (18.69 seconds). These triggers
+remain candidate DDL; runtime installation and upgrade qualification are open.
+
+```sh
+cargo test --locked -p plurx-core --features hiqlite-store --lib sharing_background_consumer_keys -- --nocapture
+cargo test --locked -p plurx-core --features hiqlite-store --lib sharing_principal_rebuild -- --nocapture
+cargo test --locked -p plurx-core --features hiqlite-contract-tests --test store_contract session_principals -- --nocapture
+cargo test --locked -p plurx-core --features hiqlite-contract-tests --test store_contract viewer -- --nocapture
+```

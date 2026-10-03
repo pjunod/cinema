@@ -183,3 +183,85 @@ async fn sharing_principal_rebuild_is_atomic_and_preserves_rows_on_three_voters(
     // current runtime intentionally still has the old ownership signatures.
     drop(store);
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn sharing_principal_owner_deletion_and_revocation_fence_three_voter_authority() {
+    let _case = HIQLITE_CASE.lock().await;
+    let cluster = ContractCluster::start().await;
+    let store = open_contract_hiqlite_store(&cluster).await;
+    let client = Client::remote(
+        cluster.addresses.clone(),
+        true,
+        true,
+        CONTRACT_API_SECRET.to_owned(),
+        false,
+        None,
+    )
+    .await
+    .expect("connect migration client");
+    for result in client
+        .batch(include_str!("../fixtures/session-principal-local.sql"))
+        .await
+        .expect("local fixture")
+    {
+        result.expect("populate local retention");
+    }
+    for result in client
+        .txn(rebuild_statements())
+        .await
+        .expect("candidate ownership rebuild")
+    {
+        result.expect("atomic rebuild");
+    }
+    for result in client
+        .batch(include_str!("../fixtures/session-principal-sharing.sql"))
+        .await
+        .expect("sharing fixture")
+    {
+        result.expect("populate two independent grants");
+    }
+    client
+        .execute("DELETE FROM users WHERE id=1", hiqlite::params!())
+        .await
+        .expect("delete local owner");
+    assert_eq!(text_rows(&client, "SELECT state || ':' || terminal_reason || ':' || lease_expires_at_ms AS value FROM media_sessions WHERE incarnation_id='live'".into()).await, ["ended:deleted:0"]);
+    assert_eq!(text_rows(&client, "SELECT CAST(expires_at_ms AS TEXT) AS value FROM job_leases WHERE resource='session:live'".into()).await, ["0"]);
+    assert_eq!(
+        text_rows(
+            &client,
+            "SELECT state AS value FROM sharing_delivery_grants WHERE incarnation_id='live'".into()
+        )
+        .await,
+        ["revoked"]
+    );
+    assert_eq!(text_rows(&client, "SELECT CAST(count(*) AS TEXT) AS value FROM media_sessions WHERE principal_kind='sharing' AND state='active'".into()).await, ["2"]);
+    client.execute("INSERT INTO users(id,username,password_hash,is_admin,created_at) VALUES(1,'replacement','hash',0,2)", hiqlite::params!()).await.expect("reuse local numeric ID");
+    assert_eq!(text_rows(&client, "SELECT CAST(count(*) AS TEXT) AS value FROM media_sessions WHERE principal_kind='local' AND user_id=1 AND state!='ended'".into()).await, ["0"]);
+    client.execute("UPDATE sharing_exports SET state='revoked' WHERE id='00000000-0000-4000-a000-000000000001'", hiqlite::params!()).await.expect("revoke first grant");
+    assert_eq!(text_rows(&client, "SELECT state || ':' || terminal_reason || ':' || lease_expires_at_ms AS value FROM media_sessions WHERE incarnation_id='00000000-0000-4000-a000-000000000001'".into()).await, ["ended:revoked:0"]);
+    assert_eq!(text_rows(&client, "SELECT CAST(count(*) AS TEXT) AS value FROM media_sessions WHERE principal_kind='sharing' AND state='active'".into()).await, ["1"]);
+    client
+        .execute(
+            "DELETE FROM sharing_exports WHERE id='00000000-0000-4000-a000-000000000002'",
+            hiqlite::params!(),
+        )
+        .await
+        .expect("delete second grant");
+    assert_eq!(text_rows(&client, "SELECT CAST(count(*) AS TEXT) AS value FROM media_sessions WHERE principal_kind='sharing'".into()).await, ["2"]);
+    assert_eq!(text_rows(&client, "SELECT CAST(count(*) AS TEXT) AS value FROM media_sessions WHERE principal_kind='sharing' AND state!='ended'".into()).await, ["0"]);
+    assert_eq!(
+        text_rows(
+            &client,
+            "SELECT session_id AS value FROM media_session_terminal_acks".into()
+        )
+        .await,
+        ["ended-session"]
+    );
+    assert!(text_rows(
+        &client,
+        "SELECT owner_key AS value FROM media_playback_pointers".into()
+    )
+    .await
+    .is_empty());
+    drop(store);
+}

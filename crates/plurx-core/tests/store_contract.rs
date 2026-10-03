@@ -872,7 +872,7 @@ async fn viewer_analysis_keeps_a_source_slot_across_backend_claims() {
                 pipeline_version: request.pipeline_version.clone(),
                 video_identity: request.video_identity.clone(),
                 target_node_id: request.target_node_id.clone(),
-                user_id,
+                principal: plurx_core::playback_principal::PlaybackPrincipal::LocalUser { user_id },
                 playback_id: format!("viewer-{user_id}"),
                 now_ms: 1_005,
             };
@@ -1014,7 +1014,9 @@ async fn concurrent_viewers_keep_cancelled_reader_reservation_until_expiry() {
                     pipeline_version: request.pipeline_version.clone(),
                     video_identity: request.video_identity.clone(),
                     target_node_id: request.target_node_id.clone(),
-                    user_id: index as i64,
+                    principal: plurx_core::playback_principal::PlaybackPrincipal::LocalUser {
+                        user_id: index as i64
+                    },
                     playback_id: format!("viewer-{index}"),
                     now_ms: 1_002,
                 })
@@ -1100,7 +1102,9 @@ async fn playback_analysis_maps_to_valid_foreground_artifact_admission() {
                 pipeline_version: request.pipeline_version.clone(),
                 video_identity: request.video_identity.clone(),
                 target_node_id: request.target_node_id.clone(),
-                user_id: 1,
+                principal: plurx_core::playback_principal::PlaybackPrincipal::LocalUser {
+                    user_id: 1
+                },
                 playback_id: "viewer-artifact".into(),
                 now_ms: 1_001,
             })
@@ -1187,7 +1191,7 @@ async fn attested_fragment_build_accepts_exact_target_viewer() {
             cache_key: key,
             file_id,
             target_node_id: "attested-viewer".into(),
-            user_id: 1,
+            principal: plurx_core::playback_principal::PlaybackPrincipal::LocalUser { user_id: 1 },
             playback_id: "active-playback".into(),
             now_ms: 1_001,
         };
@@ -24012,7 +24016,7 @@ async fn analysis_reconciliation_preserves_work_and_fences_changed_requests() {
                 pipeline_version: viewer_request.pipeline_version.clone(),
                 video_identity: viewer_request.video_identity.clone(),
                 target_node_id: viewer_request.target_node_id.clone(),
-                user_id,
+                principal: plurx_core::playback_principal::PlaybackPrincipal::LocalUser { user_id },
                 playback_id: "reconciliation-viewer".into(),
                 now_ms: 2000,
             })
