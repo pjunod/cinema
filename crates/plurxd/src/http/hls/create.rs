@@ -1999,7 +1999,7 @@ async fn create_with_purpose_inner(
     // same responsibility together with exact worker ownership.
     let mut request_guard = MediaSessionRequestGuard::new(
         state.clone(),
-        user.id,
+        plurx_core::playback_principal::PlaybackPrincipal::LocalUser { user_id: user.id },
         request_claim_id.clone(),
         incarnation_id.clone(),
     );
@@ -2356,7 +2356,9 @@ async fn create_with_purpose_inner(
                         guard_owner,
                         guard_incarnation,
                         session_id,
-                        guard_user,
+                        plurx_core::playback_principal::PlaybackPrincipal::LocalUser {
+                            user_id: guard_user,
+                        },
                         guard_request,
                         Some(replacement),
                     )
@@ -2366,7 +2368,9 @@ async fn create_with_purpose_inner(
                         guard_owner,
                         guard_incarnation,
                         session_id,
-                        guard_user,
+                        plurx_core::playback_principal::PlaybackPrincipal::LocalUser {
+                            user_id: guard_user,
+                        },
                         guard_request,
                         Some(replacement),
                     )
@@ -2421,7 +2425,9 @@ async fn create_with_purpose_inner(
                                 candidate.clone(),
                                 incarnation_id.clone(),
                                 started.info.session_id.clone(),
-                                user.id,
+                                plurx_core::playback_principal::PlaybackPrincipal::LocalUser {
+                                    user_id: user.id,
+                                },
                                 request_claim_id.clone(),
                             ))
                         }
@@ -3482,7 +3488,7 @@ pub(in crate::http) async fn prime_live_prepared_session(
             state.node_id.clone(),
             recipe.incarnation_id.clone(),
             info.session_id.clone(),
-            user_id,
+            recipe.principal.clone(),
             recipe.incarnation_id.clone(),
             Some(replacement),
         )
@@ -3492,7 +3498,7 @@ pub(in crate::http) async fn prime_live_prepared_session(
             state.node_id.clone(),
             recipe.incarnation_id.clone(),
             info.session_id.clone(),
-            user_id,
+            recipe.principal.clone(),
             recipe.incarnation_id.clone(),
             Some(replacement),
         )

@@ -83,7 +83,7 @@
             fixture.state.node_id.clone(),
             incarnation_id.clone(),
             "guard-lifetime".to_owned(),
-            user.id,
+            plurx_core::playback_principal::PlaybackPrincipal::LocalUser { user_id: user.id },
             request_id.to_owned(),
             Some(replacement),
         );
@@ -163,7 +163,7 @@
             fixture.state.node_id.clone(),
             uuid::Uuid::new_v4().to_string(),
             "guard-lifetime".to_owned(),
-            7,
+            plurx_core::playback_principal::PlaybackPrincipal::LocalUser { user_id: 7 },
             "guard-disarm-request".to_owned(),
             Some(replacement),
         );
@@ -225,7 +225,7 @@
             fixture.state.node_id.clone(),
             uuid::Uuid::new_v4().to_string(),
             "cleanup-shape".to_owned(),
-            7,
+            plurx_core::playback_principal::PlaybackPrincipal::LocalUser { user_id: 7 },
             "cleanup-shape-request".to_owned(),
             Some(replacement),
         ));
@@ -346,7 +346,7 @@
             fixture.state.node_id.clone(),
             incarnation_id.clone(),
             session_id.to_owned(),
-            user.id,
+            plurx_core::playback_principal::PlaybackPrincipal::LocalUser { user_id: user.id },
             request_id.to_owned(),
             None,
         );
@@ -426,7 +426,7 @@
 
         drop(MediaSessionRequestGuard::new(
             state.clone(),
-            user.id,
+            plurx_core::playback_principal::PlaybackPrincipal::LocalUser { user_id: user.id },
             request_id.to_owned(),
             incarnation_id,
         ));

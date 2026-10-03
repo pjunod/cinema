@@ -1848,3 +1848,19 @@ Rust 1.97.1 all-target compilation passed. Shared worker admission remains open.
 ```sh
 cargo test --locked -p plurxd --bin plurxd media_sessions::tests -- --nocapture
 ```
+
+**Request cleanup ownership checkpoint:** HLS request and started-session
+cleanup guards retain the complete `PlaybackPrincipal`, including forwarded
+worker ownership, through bounded failure settlement and cancellation. Local
+callers explicitly construct a principal from their authenticated user. Rust
+1.97.1 all-target compilation passed; the three `started_session_` tests,
+`replayed_start_guard_owns_neither_worker_nor_original_claim` and
+`pre_worker_request_guard_releases_an_owned_claim_for_immediate_retry` passed
+with zero ignored. These local cleanup regressions do not qualify shared
+worker admission, which remains refused while grant-aware Store work is open.
+
+```sh
+cargo test --locked -p plurxd --bin plurxd started_session_ -- --nocapture
+cargo test --locked -p plurxd --bin plurxd replayed_start_guard_owns_neither_worker_nor_original_claim -- --nocapture
+cargo test --locked -p plurxd --bin plurxd pre_worker_request_guard_releases_an_owned_claim_for_immediate_retry -- --nocapture
+```

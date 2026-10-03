@@ -242,7 +242,7 @@ pub(crate) async fn start(
                 start_state.node_id.clone(),
                 request.incarnation_id.clone(),
                 info.session_id.clone(),
-                user_id,
+                request.principal.clone(),
                 request.incarnation_id.clone(),
                 Some(replacement),
             )
@@ -252,7 +252,7 @@ pub(crate) async fn start(
                 start_state.node_id.clone(),
                 request.incarnation_id.clone(),
                 info.session_id.clone(),
-                user_id,
+                request.principal.clone(),
                 request.incarnation_id.clone(),
                 Some(replacement),
             )
