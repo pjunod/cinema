@@ -4115,7 +4115,8 @@ mod quorum_candidate_tests {
 
 /// Full expected Source file identity. Construction does not authorize a read.
 #[allow(dead_code)]
-#[derive(Clone)]
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct SourcePlaybackTarget {
     pub server_id: uuid::Uuid,
     pub catalogue_epoch: uuid::Uuid,

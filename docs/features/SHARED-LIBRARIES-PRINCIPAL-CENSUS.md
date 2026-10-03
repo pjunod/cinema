@@ -988,11 +988,11 @@ all-target check and Clippy with denied warnings passed with
 The focused commands were:
 
 ```sh
-scripts/require-test-count cargo test --locked -p plurxd --features plurx-core/hiqlite-contract-tests --lib http::shared_library::tests::sharing_source_preparation_uses_complete_live_file_and_real_principal_engine -- --exact
-scripts/require-test-count cargo test --locked -p plurxd --features plurx-core/hiqlite-contract-tests --lib http::stream::tests::
-scripts/require-test-count cargo test --locked -p plurxd --features plurx-core/hiqlite-contract-tests --lib http::hls::tests::the_height_resolution_keeps_its_three_promises -- --exact
-scripts/require-test-count cargo test --locked -p plurxd --features plurx-core/hiqlite-contract-tests --lib http::hls::tests::the_intent_fingerprint_ignores_the_review -- --exact
-scripts/require-test-count cargo test --locked -p plurxd --features plurx-core/hiqlite-contract-tests --lib http::hls::tests::a_reviews_notes_reach_the_resolved_plan -- --exact
+scripts/require-test-count cargo test --locked -p plurxd --features plurx-core/hiqlite-contract-tests --bin plurxd http::shared_library::tests::sharing_source_preparation_uses_complete_live_file_and_real_principal_engine -- --exact
+scripts/require-test-count cargo test --locked -p plurxd --features plurx-core/hiqlite-contract-tests --bin plurxd http::stream::tests::
+scripts/require-test-count cargo test --locked -p plurxd --features plurx-core/hiqlite-contract-tests --bin plurxd http::hls::tests::the_height_resolution_keeps_its_three_promises -- --exact
+scripts/require-test-count cargo test --locked -p plurxd --features plurx-core/hiqlite-contract-tests --bin plurxd http::hls::tests::the_intent_fingerprint_ignores_the_review -- --exact
+scripts/require-test-count cargo test --locked -p plurxd --features plurx-core/hiqlite-contract-tests --bin plurxd http::hls::tests::a_reviews_notes_reach_the_resolved_plan -- --exact
 ```
 
 ## Assigned worker failure before activation
@@ -1074,3 +1074,21 @@ Pinned Rust 1.97.1 daemon all-target check passed in 1 minute 19 seconds,
 Core feature all-target check in 30.66 seconds, and Core feature all-target
 Clippy with denied warnings in 35.81 seconds. Documentation index tests,
 catalogue lint and diff checks passed.
+
+## Private Source decision ingress
+
+The private peer router now accepts the bounded POST decision operation at
+`/sharing/v1/items/{item}/files/{file}/decision`. Its closed request carries the
+complete expected Source reference, v2 capabilities and request-local choices.
+A current grant-authorized file witness admits the actual planning snapshot;
+the adapter checks the sealed catalogue revision before and after the common
+engine and rechecks the current peer credential. It returns the complete engine
+decision in a protocol envelope, without a Local user or LAN throughput prior.
+
+The response uses the existing four-MiB JSON bound and accepted-connection
+monitor, including the exact library/item/file membership. The decision lane
+has sixteen nonqueued permits and a ten-second request deadline. It allocates
+no media session, resource admission permit or producer. The focused preparation
+regression now also exercises the peer decision adapter and compares every
+engine field, refusing a changed Source identity and empty capabilities. The
+B file-decision consumer and live Source starts remain separate open work.
