@@ -36,6 +36,15 @@ pub struct JellyfinCompatibilityState {
 }
 #[async_trait]
 pub trait JellyfinLoginStore: Send + Sync {
+    /// Trusted device/family context comes from native token membership, never a claimed DeviceId.
+    async fn jellyfin_login_scope(
+        &self,
+        _token_hash: String,
+    ) -> Result<Option<super::JellyfinPlayScope>, StoreError> {
+        Err(StoreError::Credential(
+            "compatibility scope lookup unsupported by this Store".into(),
+        ))
+    }
     async fn jellyfin_compatibility_state(&self) -> Result<JellyfinCompatibilityState, StoreError>;
     /// Save the explicit choice and its generation atomically; readiness is advisory.
     async fn set_jellyfin_compatibility(&self, enabled: bool) -> Result<(), StoreError>;
@@ -111,3 +120,5 @@ pub(crate) fn switch_save_time() -> i64 {
         .unwrap_or_default()
         .as_secs() as i64
 }
+
+pub(crate) const LOGIN_SCOPE: &str = "SELECT json_object('user_id',l.user_id,'token_digest',l.token_hash,'device_digest',l.device_digest,'client_family',l.client_family) AS result_json FROM jellyfin_login_tokens l JOIN tokens t ON t.token_hash=l.token_hash AND t.user_id=l.user_id WHERE l.token_hash=$1";

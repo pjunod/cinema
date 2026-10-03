@@ -20,6 +20,30 @@ impl From<&mut Row<'_>> for jp::RawPlay {
 }
 #[async_trait]
 impl JellyfinPlayStore for HiqliteAuthStore {
+    async fn end_jellyfin_login_plays(
+        &self,
+        scope: &JellyfinPlayScope,
+        now_ms: i64,
+    ) -> Result<Vec<JellyfinPlay>, StoreError> {
+        jp::validate_scope(scope)?;
+        let expiry = jp::terminal_expiry(now_ms)?;
+        self.client()
+            .execute_returning_map::<_, jp::RawPlay>(
+                jp::END_LOGIN,
+                params!(
+                    expiry,
+                    scope.user_id,
+                    &scope.token_digest,
+                    &scope.device_digest,
+                    scope.client_family.as_str()
+                ),
+            )
+            .await?
+            .into_iter()
+            .map(|row| row.map_err(database_error).and_then(jp::RawPlay::decode))
+            .collect()
+    }
+
     async fn create_jellyfin_play(&self, play: NewJellyfinPlay) -> Result<bool, StoreError> {
         let (payload, expiry) = jp::encode(&play)?;
         let results = self

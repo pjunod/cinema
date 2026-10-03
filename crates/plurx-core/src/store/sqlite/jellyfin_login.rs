@@ -3,10 +3,29 @@ use super::SqliteStore;
 use crate::error::StoreError;
 use crate::store::{CacheAdminMutationClaim, JellyfinLoginStore, JellyfinLoginWrite};
 use async_trait::async_trait;
-use rusqlite::params;
+use rusqlite::{params, OptionalExtension};
 
 #[async_trait]
 impl JellyfinLoginStore for SqliteStore {
+    async fn jellyfin_login_scope(
+        &self,
+        token_hash: String,
+    ) -> Result<Option<crate::store::JellyfinPlayScope>, StoreError> {
+        self.with_conn(move |conn| {
+            let json: Option<String> = conn
+                .query_row(
+                    crate::store::jellyfin_login::LOGIN_SCOPE,
+                    params![token_hash],
+                    |row| row.get(0),
+                )
+                .optional()?;
+            json.map(|json| {
+                serde_json::from_str(&json).map_err(|e| StoreError::Credential(e.to_string()))
+            })
+            .transpose()
+        })
+        .await
+    }
     async fn jellyfin_compatibility_state(
         &self,
     ) -> Result<crate::store::JellyfinCompatibilityState, StoreError> {

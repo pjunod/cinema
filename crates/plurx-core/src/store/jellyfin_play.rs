@@ -52,6 +52,14 @@ pub trait JellyfinPlayStore: Send + Sync {
     /// Admission and expired pending/terminal cleanup are one transaction.
     /// Active rows are never evicted to make room for negotiations.
     async fn create_jellyfin_play(&self, play: NewJellyfinPlay) -> Result<bool, StoreError>;
+    /// Terminalize only this authenticated login's plays, returning references
+    /// for the coordinator to release through their native resource owners.
+    async fn end_jellyfin_login_plays(
+        &self,
+        scope: &JellyfinPlayScope,
+        now_ms: i64,
+    ) -> Result<Vec<JellyfinPlay>, StoreError>;
+
     async fn jellyfin_play(
         &self,
         play_id: &str,
@@ -183,8 +191,8 @@ CREATE UNIQUE INDEX IF NOT EXISTS jellyfin_plays_direct_reference ON jellyfin_pl
 pub(crate) const CLEANUP: &str =
     "DELETE FROM jellyfin_plays WHERE state IN ('pending','ended') AND expires_at_ms <= $1";
 pub(crate) const CREATE: &str = r#"
-INSERT INTO jellyfin_plays(play_id,user_id,token_digest,device_digest,client_family,playback_id,item_id,file_id,payload,expires_at_ms,item_wire_id,file_wire_id,state)
-SELECT $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,'pending'
+INSERT INTO jellyfin_plays(play_id,user_id,token_digest,device_digest,client_family,playback_id,item_id,file_id,payload,expires_at_ms,item_wire_id,file_wire_id,state,manual_revision)
+SELECT $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,'pending',COALESCE((SELECT manual_revision FROM watch_state WHERE user_id=$2 AND item_id=$7),0)
 FROM files f JOIN jellyfin_login_tokens l ON l.user_id=$2 AND l.token_hash=$3 AND l.device_digest=$4 AND l.client_family=$5
 JOIN jellyfin_entity_ids i ON i.wire_id=$11 AND i.entity_kind='item' AND i.native_id=$7 AND i.retired=0
 JOIN jellyfin_entity_ids s ON s.wire_id=$12 AND s.entity_kind='file' AND s.native_id=$8 AND s.retired=0
@@ -244,3 +252,5 @@ pub(crate) fn activation_sql(
     }
     Ok((sql, reference))
 }
+
+pub(crate) const END_LOGIN: &str = "UPDATE jellyfin_plays SET state='ended',expires_at_ms=$1 WHERE user_id=$2 AND token_digest=$3 AND device_digest=$4 AND client_family=$5 AND state IN ('pending','active','ended') RETURNING payload,state,expires_at_ms,manual_revision,native_incarnation_id,direct_grant_id";

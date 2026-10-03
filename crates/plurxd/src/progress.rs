@@ -16,7 +16,7 @@ use std::time::Duration;
 
 use plurx_core::domain::WatchState;
 use plurx_core::error::StoreError;
-use plurx_core::store::Store;
+use plurx_core::store::{JellyfinProgressProvenance, JellyfinProgressWrite, Store};
 use tokio::sync::Mutex;
 use tokio::time::Instant;
 
@@ -28,8 +28,9 @@ type ProgressKey = (i64, i64);
 type SharedEntry = Arc<Mutex<Entry>>;
 type TimeSource = Arc<dyn Fn() -> Instant + Send + Sync>;
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone)]
 struct Pending {
+    provenance: Option<JellyfinProgressProvenance>,
     position_ms: i64,
     duration_ms: Option<i64>,
 }
@@ -146,18 +147,148 @@ impl ProgressCoalescer {
         position_ms: i64,
         duration_ms: Option<i64>,
     ) -> Result<ProgressUpdate, StoreError> {
+        self.put_inner(user_id, item_id, position_ms, duration_ms, None)
+            .await?
+            .ok_or_else(|| StoreError::Database("native progress unexpectedly refused".into()))
+    }
+
+    /// Retain the authenticated play and observation revision through the shared queue.
+    pub async fn put_jellyfin(
+        self: &Arc<Self>,
+        write: JellyfinProgressWrite,
+    ) -> Result<Option<ProgressUpdate>, StoreError> {
+        if write.final_commit {
+            return self.put_final(write).await;
+        }
+        self.put_inner(
+            write.provenance.scope.user_id,
+            write.item_id,
+            write.position_ms,
+            write.duration_ms,
+            Some(write.provenance),
+        )
+        .await
+    }
+
+    /// Forced final commit for exactly one play. Another viewer's pending beat
+    /// remains queued, with its original provenance, under the same entry lock.
+    pub async fn put_final(
+        self: &Arc<Self>,
+        mut write: JellyfinProgressWrite,
+    ) -> Result<Option<ProgressUpdate>, StoreError> {
+        write.final_commit = true;
+        let key = (write.provenance.scope.user_id, write.item_id);
+        let entry = self.entry(key).await;
+        let mut slot = match entry.as_ref() {
+            Some(entry) => Some(entry.lock().await),
+            None => None,
+        };
+        if let Some(slot) = slot.as_mut() {
+            if slot
+                .pending
+                .as_ref()
+                .and_then(|p| p.provenance.as_ref())
+                .is_some_and(|p| {
+                    p.play_id == write.provenance.play_id
+                        && p.scope.token_digest == write.provenance.scope.token_digest
+                        && p.scope.device_digest == write.provenance.scope.device_digest
+                        && p.scope.client_family == write.provenance.scope.client_family
+                        && p.scope.user_id == key.0
+                })
+            {
+                slot.pending = None;
+            }
+        }
+        let watch = self.store.put_jellyfin_progress(write, None).await?;
+        if let Some(slot) = slot.as_mut() {
+            slot.committed = match watch {
+                Some(watch) => Some(watch),
+                None => self.store.watch_state(key.0, key.1).await?,
+            };
+            slot.last_commit = slot.committed.as_ref().map(|_| (self.now)());
+            slot.retry_attempts = 0;
+        }
+        Ok(watch.map(|watch| ProgressUpdate {
+            reported_position_ms: watch.position_ms,
+            reported_duration_ms: watch.duration_ms,
+            watch,
+            committed: true,
+        }))
+    }
+
+    async fn commit(
+        &self,
+        key: ProgressKey,
+        pending: &Pending,
+        expected: Option<&WatchState>,
+    ) -> Result<Option<WatchState>, StoreError> {
+        if let Some(provenance) = pending.provenance.as_ref() {
+            self.store
+                .put_jellyfin_progress(
+                    JellyfinProgressWrite {
+                        provenance: provenance.clone(),
+                        item_id: key.1,
+                        position_ms: pending.position_ms,
+                        duration_ms: pending.duration_ms,
+                        final_commit: false,
+                    },
+                    expected,
+                )
+                .await
+        } else if let Some(expected) = expected {
+            self.store
+                .put_progress_if_current(
+                    key.0,
+                    key.1,
+                    expected,
+                    pending.position_ms,
+                    pending.duration_ms,
+                )
+                .await
+        } else {
+            self.store
+                .put_progress(key.0, key.1, pending.position_ms, pending.duration_ms)
+                .await
+                .map(Some)
+        }
+    }
+
+    async fn put_inner(
+        self: &Arc<Self>,
+        user_id: i64,
+        item_id: i64,
+        position_ms: i64,
+        duration_ms: Option<i64>,
+        provenance: Option<JellyfinProgressProvenance>,
+    ) -> Result<Option<ProgressUpdate>, StoreError> {
+        let observation = Pending {
+            position_ms,
+            duration_ms,
+            provenance,
+        };
+        if let Some(provenance) = observation.provenance.as_ref() {
+            let write = JellyfinProgressWrite {
+                provenance: provenance.clone(),
+                item_id,
+                position_ms,
+                duration_ms,
+                final_commit: false,
+            };
+            if !self.store.jellyfin_progress_is_current(&write).await? {
+                return Ok(None);
+            }
+        }
         let key = (user_id, item_id);
         let Some(entry) = self.entry(key).await else {
-            let watch = self
-                .store
-                .put_progress(user_id, item_id, position_ms, duration_ms)
-                .await?;
-            return Ok(ProgressUpdate {
+            let Some(watch) = self.commit(key, &observation, None).await? else {
+                return Ok(None);
+            };
+            return Ok(Some(ProgressUpdate {
                 reported_position_ms: watch.position_ms,
                 reported_duration_ms: watch.duration_ms,
                 watch,
                 committed: true,
-            });
+            }));
         };
         let mut slot = entry.lock().await;
         // Read the durable baseline while excluding this entry's flush worker.
@@ -201,24 +332,24 @@ impl ProgressCoalescer {
             });
 
         if due || newly_complete {
+            let Some(watch) = self.commit(key, &observation, None).await? else {
+                return Ok(None);
+            };
             slot.pending = None;
-            let watch = self
-                .store
-                .put_progress(user_id, item_id, position_ms, duration_ms)
-                .await?;
             slot.last_commit = Some((self.now)());
             slot.committed = Some(watch);
-            return Ok(ProgressUpdate {
+            return Ok(Some(ProgressUpdate {
                 reported_position_ms: watch.position_ms,
                 reported_duration_ms: watch.duration_ms,
                 watch,
                 committed: true,
-            });
+            }));
         }
 
         slot.pending = Some(Pending {
             position_ms,
             duration_ms,
+            provenance: observation.provenance,
         });
         slot.retry_attempts = 0;
         let watch = *slot.committed.as_ref().ok_or_else(|| {
@@ -234,12 +365,12 @@ impl ProgressCoalescer {
                 coalescer.flush_loop(key, worker_entry).await;
             });
         }
-        Ok(ProgressUpdate {
+        Ok(Some(ProgressUpdate {
             watch,
             reported_position_ms: position_ms,
             reported_duration_ms: resolved_duration,
             committed: false,
-        })
+        }))
     }
 
     async fn flush_loop(self: Arc<Self>, key: ProgressKey, entry: SharedEntry) {
@@ -267,15 +398,14 @@ impl ProgressCoalescer {
                 continue;
             };
             match self
-                .store
-                .put_progress_if_current(
-                    key.0,
-                    key.1,
-                    slot.committed
-                        .as_ref()
-                        .expect("pending requires committed state"),
-                    pending.position_ms,
-                    pending.duration_ms,
+                .commit(
+                    key,
+                    &pending,
+                    Some(
+                        slot.committed
+                            .as_ref()
+                            .expect("pending requires committed state"),
+                    ),
                 )
                 .await
             {
@@ -376,17 +506,7 @@ impl ProgressCoalescer {
                 }
                 continue;
             };
-            match self
-                .store
-                .put_progress_if_current(
-                    key.0,
-                    key.1,
-                    expected,
-                    pending.position_ms,
-                    pending.duration_ms,
-                )
-                .await
-            {
+            match self.commit(key, &pending, Some(expected)).await {
                 Ok(Some(watch)) => {
                     slot.committed = Some(watch);
                     slot.last_commit = Some((self.now)());
@@ -465,6 +585,279 @@ mod tests {
             .await
             .expect("item");
         (store, user.id, item)
+    }
+
+    async fn compatibility_play(
+        store: &Arc<dyn Store>,
+        user_id: i64,
+        item_id: i64,
+    ) -> JellyfinProgressWrite {
+        use plurx_core::store::{
+            JellyfinClientFamily, JellyfinEntityKind, JellyfinLoginWrite, JellyfinPlayActivation,
+            JellyfinPlayScope, NewFileGrant, NewJellyfinPlay,
+        };
+        let hash = plurx_core::auth::hash_token;
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("clock")
+            .as_secs() as i64;
+        let scope = JellyfinPlayScope {
+            user_id,
+            token_digest: hash("compatibility-token"),
+            device_digest: hash("compatibility-device"),
+            client_family: JellyfinClientFamily::AndroidTv,
+        };
+        store
+            .replace_jellyfin_login(
+                JellyfinLoginWrite {
+                    token_hash: scope.token_digest.clone(),
+                    user_id,
+                    device_digest: scope.device_digest.clone(),
+                    client_family: scope.client_family,
+                    device_label: None,
+                    expected_password_hash: "hash".into(),
+                    created_at: now,
+                },
+                None,
+            )
+            .await
+            .expect("login");
+        let file_id = store
+            .upsert_file(
+                item_id,
+                "/progress/compatibility.mkv",
+                100,
+                1,
+                &plurx_core::domain::ProbeResult {
+                    duration_ms: Some(100_000),
+                    ..Default::default()
+                },
+            )
+            .await
+            .expect("file");
+        let item_wire = store
+            .jellyfin_entity_ids(JellyfinEntityKind::Item, &[item_id])
+            .await
+            .expect("item identity")[0]
+            .wire_id
+            .clone();
+        let file_wire = store
+            .jellyfin_entity_ids(JellyfinEntityKind::File, &[file_id])
+            .await
+            .expect("file identity")[0]
+            .wire_id
+            .clone();
+        // This module is also compiled by the cluster-load harness, which
+        // deliberately has no UUID dependency. Unique valid wire IDs suffice
+        // for this isolated storage fixture.
+        static NEXT_PLAY: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+        let play_id = format!(
+            "{:032x}",
+            NEXT_PLAY.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+        );
+        let play = NewJellyfinPlay {
+            play_id: play_id.clone(),
+            scope: scope.clone(),
+            playback_id: "compatibility-player".into(),
+            item_id,
+            file_id,
+            item_wire_id: item_wire,
+            file_wire_id: file_wire,
+            source_fingerprint: hash("source"),
+            profile_fingerprint: hash("profile"),
+            native_request_fingerprint: hash("request"),
+            selection_json: "{}".into(),
+            source_origin_ms: 0,
+            created_at_ms: now * 1000,
+        };
+        assert!(store.create_jellyfin_play(play).await.expect("binding"));
+        let grant = format!("progress-fixture-{play_id}");
+        store
+            .create_file_grant(NewFileGrant {
+                id: grant.clone(),
+                token_hash: hash(&grant),
+                file_id,
+                user_id,
+                source_token_hash: scope.token_digest.clone(),
+                created_at: now,
+                expires_at: i64::MAX,
+            })
+            .await
+            .expect("grant");
+        assert!(store
+            .activate_jellyfin_play(
+                &play_id,
+                &scope,
+                JellyfinPlayActivation::DirectGrant(grant),
+                now * 1000
+            )
+            .await
+            .expect("activate"));
+        let manual_revision = store
+            .jellyfin_play(&play_id, &scope)
+            .await
+            .expect("play")
+            .expect("play")
+            .manual_revision;
+        JellyfinProgressWrite {
+            provenance: JellyfinProgressProvenance {
+                play_id,
+                scope,
+                manual_revision,
+            },
+            item_id,
+            position_ms: 1000,
+            duration_ms: Some(100_000),
+            final_commit: false,
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn jellyfin_queue_keeps_pre_edit_revision_when_native_and_compatibility_beats_mix() {
+        let (store, user_id, item_id) = fixture().await;
+        let mut write = compatibility_play(&store, user_id, item_id).await;
+        let coalescer = ProgressCoalescer::new(Arc::clone(&store));
+        coalescer
+            .put(user_id, item_id, 1000, Some(100_000))
+            .await
+            .expect("native leading");
+        assert!(
+            !coalescer
+                .put_jellyfin(write.clone())
+                .await
+                .expect("compat queue")
+                .expect("accepted")
+                .committed
+        );
+        store
+            .set_watched_tree_with_origin(user_id, item_id, true, Some(&write.provenance.scope))
+            .await
+            .expect("own mark");
+        coalescer
+            .put(user_id, item_id, 1000, Some(100_000))
+            .await
+            .expect("native authoritative after edit");
+        write.provenance.manual_revision = 1;
+        write.position_ms = 5000;
+        assert!(
+            !coalescer
+                .put_jellyfin(write.clone())
+                .await
+                .expect("queued revision one")
+                .expect("accepted")
+                .committed
+        );
+        let before = store.watch_state(user_id, item_id).await.expect("before");
+        store
+            .set_watched_tree_with_origin(user_id, item_id, true, Some(&write.provenance.scope))
+            .await
+            .expect("explicit own no-op");
+        assert_eq!(
+            before,
+            store
+                .watch_state(user_id, item_id)
+                .await
+                .expect("same row and same clock")
+        );
+        assert_eq!(coalescer.drain().await.expect("drain fenced beat"), 0);
+        assert_eq!(
+            before,
+            store
+                .watch_state(user_id, item_id)
+                .await
+                .expect("preserved")
+        );
+        assert!(coalescer
+            .put_jellyfin(write.clone())
+            .await
+            .expect("old revision admission")
+            .is_none());
+        write.provenance.manual_revision = 2;
+        assert!(coalescer
+            .put_jellyfin(write.clone())
+            .await
+            .expect("new observation")
+            .is_some());
+        coalescer
+            .put(user_id, item_id, 8000, Some(100_000))
+            .await
+            .expect("native replaces pending provenance");
+        store
+            .set_watched_tree(user_id, item_id, true)
+            .await
+            .expect("external no-op fences compatibility only");
+        assert_eq!(coalescer.drain().await.expect("native trailing"), 1);
+        assert_eq!(
+            store
+                .watch_state(user_id, item_id)
+                .await
+                .expect("native row")
+                .expect("native row")
+                .position_ms,
+            8000
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn jellyfin_final_discards_only_its_own_pending_and_preserves_native_viewer() {
+        let (store, user_id, item_id) = fixture().await;
+        let mut write = compatibility_play(&store, user_id, item_id).await;
+        let coalescer = ProgressCoalescer::new(Arc::clone(&store));
+        coalescer
+            .put_jellyfin(write.clone())
+            .await
+            .expect("leading")
+            .expect("leading");
+        write.position_ms = 5000;
+        coalescer
+            .put_jellyfin(write.clone())
+            .await
+            .expect("pending")
+            .expect("pending");
+        coalescer
+            .put(user_id, item_id, 8000, Some(100_000))
+            .await
+            .expect("another viewer");
+        write.position_ms = 3000;
+        let final_state = coalescer
+            .put_final(write.clone())
+            .await
+            .expect("forced final")
+            .expect("committed");
+        assert!(final_state.committed);
+        assert_eq!(final_state.watch.position_ms, 3000);
+        assert_eq!(
+            store
+                .jellyfin_play(&write.provenance.play_id, &write.provenance.scope)
+                .await
+                .expect("play")
+                .expect("play")
+                .state,
+            "ended"
+        );
+        assert!(coalescer
+            .put_final(write.clone())
+            .await
+            .expect("duplicate")
+            .is_none());
+        assert_eq!(
+            coalescer.drain().await.expect("other viewer still pending"),
+            1
+        );
+        assert_eq!(
+            store
+                .watch_state(user_id, item_id)
+                .await
+                .expect("watch")
+                .expect("watch")
+                .position_ms,
+            8000
+        );
+        assert!(coalescer
+            .put_jellyfin(write)
+            .await
+            .expect("late beat")
+            .is_none());
     }
 
     #[tokio::test(start_paused = true)]
@@ -654,6 +1047,7 @@ mod tests {
 
         let broken = Arc::new(Mutex::new(Entry {
             pending: Some(Pending {
+                provenance: None,
                 position_ms: 9_000,
                 duration_ms: Some(100_000),
             }),

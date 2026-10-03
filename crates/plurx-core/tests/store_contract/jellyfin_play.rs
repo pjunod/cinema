@@ -708,3 +708,530 @@ async fn jellyfin_server_pending_limit_is_atomic_across_login_scopes() {
     })
     .await;
 }
+
+async fn manual_active(store: &Arc<dyn Store>, play: NewJellyfinPlay) -> NewJellyfinPlay {
+    assert!(store
+        .create_jellyfin_play(play.clone())
+        .await
+        .expect("negotiation"));
+    let grant = uuid::Uuid::new_v4().to_string();
+    store
+        .create_file_grant(plurx_core::store::NewFileGrant {
+            id: grant.clone(),
+            token_hash: digest(&grant),
+            file_id: play.file_id,
+            user_id: play.scope.user_id,
+            source_token_hash: play.scope.token_digest.clone(),
+            created_at: unix_seconds(),
+            expires_at: i64::MAX,
+        })
+        .await
+        .expect("grant");
+    assert!(store
+        .activate_jellyfin_play(
+            &play.play_id,
+            &play.scope,
+            Activation::DirectGrant(grant),
+            1_001
+        )
+        .await
+        .expect("activation"));
+    play
+}
+#[tokio::test]
+async fn jellyfin_manual_edits_advance_only_eligible_own_play_and_never_revive_an_external_fence() {
+    for_each_backend(|store, backend| async move {
+        let initial = fixture(&store).await;
+        let play = manual_active(&store, initial).await;
+        assert_eq!(
+            store
+                .set_watched_tree_with_origin(
+                    play.scope.user_id,
+                    play.item_id,
+                    true,
+                    Some(&play.scope)
+                )
+                .await
+                .expect("own edit"),
+            vec![play.item_id],
+            "{backend}"
+        );
+        assert_eq!(
+            store
+                .jellyfin_play(&play.play_id, &play.scope)
+                .await
+                .expect("play")
+                .expect("play")
+                .manual_revision,
+            1
+        );
+        let before = store
+            .watch_state(play.scope.user_id, play.item_id)
+            .await
+            .expect("watch")
+            .expect("watch");
+        assert!(store
+            .set_watched_tree_with_origin(play.scope.user_id, play.item_id, true, Some(&play.scope))
+            .await
+            .expect("own explicit no-op")
+            .is_empty());
+        assert_eq!(
+            store
+                .watch_state(play.scope.user_id, play.item_id)
+                .await
+                .expect("watch"),
+            Some(before)
+        );
+        assert_eq!(
+            store
+                .jellyfin_play(&play.play_id, &play.scope)
+                .await
+                .expect("play")
+                .expect("play")
+                .manual_revision,
+            2
+        );
+        store
+            .set_watched(play.scope.user_id, play.item_id, false)
+            .await
+            .expect("external native edit");
+        assert_eq!(
+            store
+                .jellyfin_play(&play.play_id, &play.scope)
+                .await
+                .expect("play")
+                .expect("play")
+                .manual_revision,
+            2
+        );
+        assert!(store
+            .set_watched_tree_with_origin(
+                play.scope.user_id,
+                play.item_id,
+                false,
+                Some(&play.scope)
+            )
+            .await
+            .expect("fenced own edit")
+            .is_empty());
+        assert_eq!(
+            store
+                .jellyfin_play(&play.play_id, &play.scope)
+                .await
+                .expect("play")
+                .expect("play")
+                .manual_revision,
+            2
+        );
+        let mut fresh = play.clone();
+        fresh.play_id = uuid::Uuid::new_v4().simple().to_string();
+        assert!(store
+            .create_jellyfin_play(fresh.clone())
+            .await
+            .expect("fresh negotiation"));
+        assert_eq!(
+            store
+                .jellyfin_play(&fresh.play_id, &fresh.scope)
+                .await
+                .expect("fresh play")
+                .expect("fresh play")
+                .manual_revision,
+            4
+        );
+    })
+    .await;
+}
+#[tokio::test]
+async fn jellyfin_manual_own_edit_refuses_ambiguous_scope_and_terminal_reduction_cannot_revive_it()
+{
+    for_each_backend(|store, backend| async move {
+        let initial = fixture(&store).await;
+        let first = manual_active(&store, initial).await;
+        let mut another = first.clone();
+        another.play_id = uuid::Uuid::new_v4().simple().to_string();
+        let second = manual_active(&store, another).await;
+        store
+            .set_watched_tree_with_origin(
+                first.scope.user_id,
+                first.item_id,
+                true,
+                Some(&first.scope),
+            )
+            .await
+            .expect("ambiguous own edit");
+        for play in [&first, &second] {
+            assert_eq!(
+                store
+                    .jellyfin_play(&play.play_id, &play.scope)
+                    .await
+                    .expect("play")
+                    .expect("play")
+                    .manual_revision,
+                0,
+                "{backend}"
+            );
+        }
+        assert!(store
+            .end_jellyfin_play(&first.play_id, &first.scope, 1_002)
+            .await
+            .expect("stop first"));
+        store
+            .set_watched_tree_with_origin(
+                second.scope.user_id,
+                second.item_id,
+                false,
+                Some(&second.scope),
+            )
+            .await
+            .expect("later own edit");
+        assert_eq!(
+            store
+                .jellyfin_play(&second.play_id, &second.scope)
+                .await
+                .expect("second")
+                .expect("second")
+                .manual_revision,
+            0
+        );
+    })
+    .await;
+}
+
+fn progress_write(
+    play: &NewJellyfinPlay,
+    revision: i64,
+    position: i64,
+    final_commit: bool,
+) -> plurx_core::store::JellyfinProgressWrite {
+    plurx_core::store::JellyfinProgressWrite {
+        provenance: plurx_core::store::JellyfinProgressProvenance {
+            play_id: play.play_id.clone(),
+            scope: play.scope.clone(),
+            manual_revision: revision,
+        },
+        item_id: play.item_id,
+        position_ms: position,
+        duration_ms: Some(10_000),
+        final_commit,
+    }
+}
+#[tokio::test]
+async fn jellyfin_manual_progress_retains_queued_revision_and_final_is_atomic_with_its_exact_tombstone(
+) {
+    for_each_backend(|store, backend| async move {
+        let initial = fixture(&store).await;
+        let play = manual_active(&store, initial).await;
+        let old = store
+            .put_jellyfin_progress(progress_write(&play, 0, 1000, false), None)
+            .await
+            .expect("leading beat")
+            .expect("committed beat");
+        store
+            .set_watched_tree_with_origin(
+                play.scope.user_id,
+                play.item_id,
+                false,
+                Some(&play.scope),
+            )
+            .await
+            .expect("own unwatch");
+        assert!(
+            store
+                .put_jellyfin_progress(progress_write(&play, 0, 1500, false), Some(&old))
+                .await
+                .expect("queued old beat")
+                .is_none(),
+            "{backend}"
+        );
+        let resumed = store
+            .put_jellyfin_progress(progress_write(&play, 1, 1800, false), None)
+            .await
+            .expect("new own observation")
+            .expect("new revision commit");
+        assert_eq!(resumed.position_ms, 1800);
+        store
+            .set_watched_tree(play.scope.user_id, play.item_id, true)
+            .await
+            .expect("external edit");
+        let edited = store
+            .watch_state(play.scope.user_id, play.item_id)
+            .await
+            .expect("edited state");
+        assert!(store
+            .put_jellyfin_progress(progress_write(&play, 1, 9000, true), None)
+            .await
+            .expect("fenced final")
+            .is_none());
+        assert_eq!(
+            store
+                .watch_state(play.scope.user_id, play.item_id)
+                .await
+                .expect("preserved edit"),
+            edited
+        );
+        let mut fresh = play.clone();
+        fresh.play_id = uuid::Uuid::new_v4().simple().to_string();
+        let fresh = manual_active(&store, fresh).await;
+        let revision = store
+            .jellyfin_play(&fresh.play_id, &fresh.scope)
+            .await
+            .expect("fresh play")
+            .expect("fresh play")
+            .manual_revision;
+        assert_eq!(revision, 2);
+        let final_state = store
+            .put_jellyfin_progress(progress_write(&fresh, revision, 2500, true), None)
+            .await
+            .expect("durable final")
+            .expect("final row");
+        assert_eq!(final_state.position_ms, 2500);
+        assert_eq!(
+            store
+                .jellyfin_play(&fresh.play_id, &fresh.scope)
+                .await
+                .expect("terminal play")
+                .expect("terminal play")
+                .state,
+            "ended"
+        );
+        assert!(store
+            .put_jellyfin_progress(progress_write(&fresh, revision, 9999, false), None)
+            .await
+            .expect("late beat")
+            .is_none());
+        assert!(store
+            .put_jellyfin_progress(progress_write(&fresh, revision, 9999, true), None)
+            .await
+            .expect("duplicate final")
+            .is_none());
+        assert_eq!(
+            store
+                .watch_state(play.scope.user_id, play.item_id)
+                .await
+                .expect("final preserved"),
+            Some(final_state)
+        );
+        assert_eq!(
+            store
+                .jellyfin_play(&play.play_id, &play.scope)
+                .await
+                .expect("other play")
+                .expect("other play")
+                .state,
+            "active"
+        );
+    })
+    .await;
+}
+
+#[cfg(feature = "hiqlite-contract-tests")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn jellyfin_manual_import_drops_edit_origin_without_reviving_an_ambiguous_play() {
+    let _case = HIQLITE_CASE.lock().await;
+    let source = tempfile::tempdir().expect("watch import source");
+    let path = source
+        .path()
+        .join(plurx_core::cluster::migration::SQLITE_FILENAME);
+    let local: Arc<dyn Store> = Arc::new(SqliteStore::open(&path).expect("source"));
+    local
+        .put_setting(plurx_core::store::keys::INSTANCE_ID, CONTRACT_INSTANCE_ID)
+        .await
+        .expect("instance");
+    let initial = fixture(&local).await;
+    let first = manual_active(&local, initial).await;
+    let mut second = first.clone();
+    second.play_id = uuid::Uuid::new_v4().simple().to_string();
+    let second = manual_active(&local, second).await;
+    local
+        .set_watched_tree_with_origin(first.scope.user_id, first.item_id, true, Some(&first.scope))
+        .await
+        .expect("ambiguous own edit");
+    local
+        .end_jellyfin_play(&first.play_id, &first.scope, 1002)
+        .await
+        .expect("end one play");
+    let expected = local
+        .watch_state(first.scope.user_id, first.item_id)
+        .await
+        .expect("watch");
+    drop(local);
+    let prepared = prepare_sqlite_import(source.path()).expect("prepare");
+    let cluster = ContractCluster::start().await;
+    let store = open_contract_hiqlite_store(&cluster).await;
+    store
+        .import_sqlite_backup(
+            &prepared.backup_path,
+            &prepared.backup_sha256,
+            prepared.schema_version,
+        )
+        .await
+        .expect("import");
+    drop(store);
+    let mut addresses = cluster.addresses.clone();
+    addresses.rotate_left(1);
+    let client = Client::remote(
+        addresses,
+        true,
+        true,
+        CONTRACT_API_SECRET.to_owned(),
+        false,
+        None,
+    )
+    .await
+    .expect("alternate client");
+    let store: Arc<dyn Store> = Arc::new(
+        HiqliteAuthStore::open(
+            client,
+            &cluster._root.path().join("manual-import-telemetry.db"),
+        )
+        .await
+        .expect("alternate store"),
+    );
+    let restored = store
+        .jellyfin_play(&second.play_id, &second.scope)
+        .await
+        .expect("binding")
+        .expect("binding");
+    assert_eq!(restored.state, "active");
+    assert_eq!(
+        restored.manual_revision, 0,
+        "import must not replay a trusted edit context"
+    );
+    assert!(store
+        .put_jellyfin_progress(progress_write(&second, 0, 5000, false), None)
+        .await
+        .expect("fenced progress")
+        .is_none());
+    assert_eq!(
+        store
+            .watch_state(first.scope.user_id, first.item_id)
+            .await
+            .expect("preserved"),
+        expected
+    );
+    let mut fresh = second.clone();
+    fresh.play_id = uuid::Uuid::new_v4().simple().to_string();
+    let fresh = manual_active(&store, fresh).await;
+    assert_eq!(
+        store
+            .jellyfin_play(&fresh.play_id, &fresh.scope)
+            .await
+            .expect("fresh")
+            .expect("fresh")
+            .manual_revision,
+        1
+    );
+    assert!(store
+        .put_jellyfin_progress(progress_write(&fresh, 1, 6000, false), None)
+        .await
+        .expect("fresh progress")
+        .is_some());
+}
+
+#[tokio::test]
+async fn jellyfin_manual_edit_cannot_advance_a_released_play_waiting_for_terminal_retry() {
+    for_each_backend(|store, backend| async move {
+        let initial = fixture(&store).await;
+        let play = manual_active(&store, initial).await;
+        store
+            .put_jellyfin_progress(progress_write(&play, 0, 1000, false), None)
+            .await
+            .expect("initial")
+            .expect("initial");
+        let binding = store
+            .jellyfin_play(&play.play_id, &play.scope)
+            .await
+            .expect("binding")
+            .expect("binding");
+        store
+            .revoke_file_grant(
+                binding.direct_grant_id.as_deref().expect("grant"),
+                play.scope.user_id,
+                unix_seconds(),
+            )
+            .await
+            .expect("release after failed final");
+        assert!(
+            !store
+                .jellyfin_progress_is_current(&progress_write(&play, 0, 2000, false))
+                .await
+                .expect("released admission"),
+            "{backend}"
+        );
+        store
+            .set_watched_tree_with_origin(
+                play.scope.user_id,
+                play.item_id,
+                false,
+                Some(&play.scope),
+            )
+            .await
+            .expect("own edit after failed stop");
+        assert_eq!(
+            store
+                .jellyfin_play(&play.play_id, &play.scope)
+                .await
+                .expect("binding")
+                .expect("binding")
+                .manual_revision,
+            0,
+            "released reconciliation is not an eligible active play: {backend}"
+        );
+        let edited = store
+            .watch_state(play.scope.user_id, play.item_id)
+            .await
+            .expect("edit");
+        assert!(store
+            .put_jellyfin_progress(progress_write(&play, 0, 9000, true), None)
+            .await
+            .expect("terminal retry fenced by edit")
+            .is_none());
+        assert_eq!(
+            store
+                .watch_state(play.scope.user_id, play.item_id)
+                .await
+                .expect("preserved"),
+            edited
+        );
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn jellyfin_logout_terminalizes_only_exact_login_scope_and_retains_release_references() {
+    for_each_backend(|store, backend| async move {
+        let initial = fixture(&store).await;
+        let first = manual_active(&store, initial.clone()).await;
+        let mut sibling = initial;
+        sibling.play_id = uuid::Uuid::new_v4().simple().to_string();
+        sibling.playback_id = uuid::Uuid::new_v4().to_string();
+        let second = manual_active(&store, sibling).await;
+        let mut wrong = first.scope.clone();
+        wrong.device_digest = digest("wrong-device");
+        assert!(store
+            .end_jellyfin_login_plays(&wrong, 10_000)
+            .await
+            .expect(backend)
+            .is_empty());
+        let ended = store
+            .end_jellyfin_login_plays(&first.scope, 10_000)
+            .await
+            .expect(backend);
+        assert_eq!(ended.len(), 2, "{backend}");
+        assert!(ended
+            .iter()
+            .all(|p| p.state == "ended" && p.direct_grant_id.is_some()));
+        for play in [first, second] {
+            assert_eq!(
+                store
+                    .jellyfin_play(&play.play_id, &play.scope)
+                    .await
+                    .expect(backend)
+                    .expect("binding")
+                    .state,
+                "ended"
+            );
+        }
+    })
+    .await;
+}

@@ -518,6 +518,7 @@ paths = [
   "crates/plurx-core/src/store/sqlite/jellyfin_login.rs",
   "crates/plurx-core/tests/store_contract/jellyfin_login.rs",
   "crates/plurx-core/src/store/jellyfin_play.rs",
+  "crates/plurx-core/src/store/jellyfin_watch.rs",
   "crates/plurx-core/src/store/hiqlite_jellyfin_play.rs",
   "crates/plurx-core/src/store/sqlite/jellyfin_play.rs",
   "crates/plurx-core/tests/store_contract/jellyfin_play.rs",
@@ -1009,6 +1010,7 @@ title = "Jellyfin compatibility for pinned Infuse and Android TV clients"
 contract = "The Jellyfin protocol layer preserves checked time and opaque identity forms, refuses conflicting or scoped-key credentials, and participates in workspace validation. Physical acceptance and release qualification remain separate requirements."
 paths = [
   "crates/plurxd/src/http/jellyfin.rs",
+  "crates/plurxd/src/http/jellyfin/**",
   "crates/plurx-compat-jellyfin/**",
   "crates/plurx-core/src/store/jellyfin_catalog.rs",
   "crates/plurx-core/src/store/sqlite/jellyfin_catalog.rs",
@@ -1017,6 +1019,7 @@ paths = [
   "crates/plurx-core/src/store/jellyfin_identity.rs",
   "crates/plurx-core/src/store/jellyfin_login.rs",
   "crates/plurx-core/src/store/jellyfin_play.rs",
+  "crates/plurx-core/src/store/jellyfin_watch.rs",
   "crates/plurx-core/src/store/sqlite/jellyfin_play.rs",
   "crates/plurx-core/src/store/hiqlite_jellyfin_play.rs",
   "crates/plurx-core/src/store/hiqlite_jellyfin_login.rs",

@@ -19,6 +19,25 @@ impl From<&mut hiqlite::Row<'_>> for SwitchRow {
 }
 #[async_trait]
 impl JellyfinLoginStore for HiqliteAuthStore {
+    async fn jellyfin_login_scope(
+        &self,
+        token_hash: String,
+    ) -> Result<Option<super::JellyfinPlayScope>, StoreError> {
+        let row = self
+            .client()
+            // authority: play and manual-edit origin must use current native token membership, never client-claimed device context.
+            .query_consistent_map::<SwitchRow, _>(
+                super::jellyfin_login::LOGIN_SCOPE,
+                params!(token_hash),
+            )
+            .await?
+            .into_iter()
+            .next();
+        row.map(|row| {
+            serde_json::from_str(&row.0).map_err(|e| StoreError::Credential(e.to_string()))
+        })
+        .transpose()
+    }
     async fn jellyfin_compatibility_state(
         &self,
     ) -> Result<crate::store::JellyfinCompatibilityState, StoreError> {

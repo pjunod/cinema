@@ -765,6 +765,8 @@ const TABLES: &[TablePlan] = &[
             "duration_ms",
             "watched",
             "updated_at",
+            "manual_revision",
+            "manual_origin",
         ],
         order_by: "user_id, item_id",
         minimum_schema: 2,
@@ -2813,7 +2815,13 @@ fn value_projection(table: TablePlan, schema_version: i64, qualify: bool) -> Str
         .columns
         .iter()
         .map(|column| {
-            if table.name == "media_playback_pointers"
+            if table.name == "watch_state" && *column == "manual_origin" {
+                // Origin is mutation context, never restored authority. Replaying
+                // it could advance an otherwise fenced binding during import.
+                "NULL".to_owned()
+            } else if table.name == "watch_state" && *column == "manual_revision" && schema_version < 95 {
+                "0".to_owned()
+            } else if table.name == "media_playback_pointers"
                 && *column == "desired_revision"
                 && schema_version < 49
             {

@@ -1,4 +1,5 @@
 //! Jellyfin connection and catalog facade over native authentication and Store.
+mod playback;
 use super::{auth, error::ApiError};
 use crate::state::AppState;
 use axum::{
@@ -29,6 +30,34 @@ pub(super) fn router() -> Router<AppState> {
             "/Users/AuthenticateByName",
             post(login).layer(DefaultBodyLimit::max(16 * 1024)),
         )
+        .route(
+            "/Items/{item_id}/PlaybackInfo",
+            get(playback::info_get)
+                .post(playback::info_post)
+                .layer(DefaultBodyLimit::max(64 * 1024)),
+        )
+        .route("/Videos/{item_id}/stream", get(playback::direct))
+        .route(
+            "/Videos/{item_id}/{filename}",
+            get(playback::direct_extension),
+        )
+        .route(
+            "/Sessions/Playing",
+            post(playback::playing).layer(DefaultBodyLimit::max(16 * 1024)),
+        )
+        .route(
+            "/Sessions/Playing/Progress",
+            post(playback::progress).layer(DefaultBodyLimit::max(16 * 1024)),
+        )
+        .route(
+            "/Sessions/Playing/Stopped",
+            post(playback::stopped).layer(DefaultBodyLimit::max(16 * 1024)),
+        )
+        .route(
+            "/Users/{user_id}/PlayedItems/{item_id}",
+            post(playback::mark_played).delete(playback::mark_unplayed),
+        )
+        .route("/Sessions/Logout", post(playback::logout))
         .route("/Users/{user_id}", get(user))
         .route("/Users/Me", get(me))
         .route("/Users/{user_id}/Views", get(views))
@@ -237,7 +266,7 @@ fn user_dto(
             is_administrator: false,
             is_hidden: false,
             is_disabled: false,
-            enable_media_playback: false,
+            enable_media_playback: true,
             enable_remote_control_of_other_users: false,
             enable_shared_device_control: false,
             enable_content_downloading: false,
@@ -1080,6 +1109,574 @@ mod tests {
             body["AccessToken"].as_str().expect("login token").into(),
             body["User"]["Id"].as_str().expect("user wire").into(),
         )
+    }
+    struct PlaybackFixture {
+        app: Router,
+        state: AppState,
+        root: tempfile::TempDir,
+        token: String,
+        user: String,
+        item: String,
+        source: String,
+        native_item: i64,
+    }
+    async fn playback_fixture() -> PlaybackFixture {
+        use plurx_core::domain::{
+            AudioStream, ItemKind, LibraryKind, NewItem, NewLibrary, ProbeResult,
+        };
+        let root = tempfile::tempdir().expect("playback root");
+        let store = std::sync::Arc::new(
+            plurx_core::store::SqliteStore::open(&root.path().join("state.db")).expect("store"),
+        );
+        let dirs = crate::state::Dirs {
+            artwork: root.path().join("artwork"),
+            transcode: root.path().join("transcode"),
+            cache: root.path().join("cache"),
+            subs: root.path().join("subs"),
+            runtime_cache: root.path().join("runtime"),
+            renditions: root.path().join("renditions"),
+        };
+        let state = AppState::new_unhooked(
+            "playback-contract".into(),
+            store,
+            dirs,
+            "test-node".into(),
+            Default::default(),
+            Default::default(),
+            std::sync::Arc::new(crate::logbuf::LogBuffer::new(64)),
+        );
+        let app = super::super::router(state.clone());
+        setup(&app).await;
+        state
+            .store
+            .set_jellyfin_compatibility(true)
+            .await
+            .expect("enable");
+        let library = state
+            .store
+            .create_library(&NewLibrary {
+                name: "Direct films".into(),
+                kind: LibraryKind::Movies,
+                paths: vec![root.path().into()],
+                anime: false,
+            })
+            .await
+            .expect("library");
+        let native_item = state
+            .store
+            .insert_item(&NewItem {
+                library_id: library.id,
+                kind: ItemKind::Movie,
+                parent_id: None,
+                title: "Direct contract".into(),
+                year: None,
+                season_number: None,
+                episode_number: None,
+            })
+            .await
+            .expect("item");
+        let path = root
+            .path()
+            .canonicalize()
+            .expect("canonical media root")
+            .join("movie.mp4");
+        std::fs::write(&path, b"0123456789abcdef").expect("bytes");
+        state.store.upsert_file(native_item,path.to_str().expect("path"),16,1,&ProbeResult {duration_ms:Some(100_000),container:Some("mp4".into()),video_codec:Some("h264".into()),video_codec_tag:Some("avc1".into()),video_profile:Some("Main".into()),width:Some(1920),height:Some(1080),bit_depth:Some(8),bitrate:Some(100_000),audio_streams:vec![AudioStream {index:0,codec:"aac".into(),channels:Some(2),sample_rate:Some(48_000),language:None,title:None,default:true}],raw_json:Some(json!({"streams":[{"index":0,"codec_type":"audio","codec_name":"aac","channels":2,"sample_rate":"48000"},{"index":1,"codec_type":"video","codec_name":"h264","width":1920,"height":1080}]}).to_string()),..Default::default()}).await.expect("file");
+        let (token, user) = facade_login(&app).await;
+        let (status, page) = json_call(
+            &app,
+            request(
+                "GET",
+                "/jellyfin/Items?Recursive=true",
+                Some(&token),
+                json!({}),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let item = page["Items"][0]["Id"].as_str().expect("item").to_owned();
+        let source = page["Items"][0]["MediaSources"][0]["Id"]
+            .as_str()
+            .expect("source")
+            .to_owned();
+        PlaybackFixture {
+            app,
+            state,
+            root,
+            token,
+            user,
+            item,
+            source,
+            native_item,
+        }
+    }
+    async fn negotiate(f: &PlaybackFixture) -> Value {
+        let (status,body)=json_call(&f.app,request("POST",&format!("/jellyfin/Items/{}/PlaybackInfo",f.item),Some(&f.token),json!({"UserId":f.user,"MediaSourceId":f.source,"AudioStreamIndex":0,"SubtitleStreamIndex":-1,"EnableDirectPlay":true,"DeviceProfile":{"DirectPlayProfiles":[{"Type":"Video","Container":"mp4","VideoCodec":"h264","AudioCodec":"aac"}]}}))).await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(body["ErrorCode"].is_null(), "negotiation refused: {body}");
+        assert_eq!(body["MediaSources"][0]["SupportsDirectPlay"], true);
+        assert_eq!(body["MediaSources"][0]["DefaultAudioStreamIndex"], 0);
+        assert!(!body
+            .to_string()
+            .contains(f.root.path().to_str().expect("path")));
+        body
+    }
+    async fn play_event(
+        f: &PlaybackFixture,
+        route: &str,
+        play: &str,
+        position: Option<i64>,
+    ) -> StatusCode {
+        let mut body = json!({"UserId":f.user,"ItemId":f.item,"MediaSourceId":f.source,"PlaySessionId":play,"PlayMethod":"DirectPlay"});
+        if let Some(position) = position {
+            body["PositionTicks"] = json!(position * 10_000);
+        }
+        f.app
+            .clone()
+            .oneshot(request("POST", route, Some(&f.token), body))
+            .await
+            .expect("event")
+            .status()
+    }
+    #[tokio::test]
+    async fn jellyfin_direct_range_head_and_stop_preserve_native_authority_and_final_position() {
+        let f = playback_fixture().await;
+        let negotiation = negotiate(&f).await;
+        let play = negotiation["PlaySessionId"].as_str().expect("play");
+        let url = negotiation["MediaSources"][0]["DirectStreamUrl"]
+            .as_str()
+            .expect("direct URL");
+        let unauthorized = f
+            .app
+            .clone()
+            .oneshot(request("GET", url, None, json!({})))
+            .await
+            .expect("unauthorized");
+        assert_eq!(unauthorized.status(), StatusCode::UNAUTHORIZED);
+        let mut ranged = request("GET", url, Some(&f.token), json!({}));
+        ranged
+            .headers_mut()
+            .insert("range", "bytes=2-5".parse().expect("range"));
+        let response = f.app.clone().oneshot(ranged).await.expect("range");
+        if response.status() != StatusCode::PARTIAL_CONTENT {
+            let status = response.status();
+            let bytes = response
+                .into_body()
+                .collect()
+                .await
+                .expect("error body")
+                .to_bytes();
+            panic!(
+                "range refused {status}: {}",
+                String::from_utf8_lossy(&bytes)
+            );
+        }
+        assert_eq!(response.headers()["content-range"], "bytes 2-5/16");
+        assert_eq!(
+            &response
+                .into_body()
+                .collect()
+                .await
+                .expect("body")
+                .to_bytes()[..],
+            b"2345"
+        );
+        let head = f
+            .app
+            .clone()
+            .oneshot(request("HEAD", url, Some(&f.token), json!({})))
+            .await
+            .expect("head");
+        assert_eq!(head.status(), StatusCode::OK);
+        assert!(head
+            .into_body()
+            .collect()
+            .await
+            .expect("head body")
+            .to_bytes()
+            .is_empty());
+        assert_eq!(
+            play_event(&f, "/jellyfin/Sessions/Playing", play, Some(1000)).await,
+            StatusCode::NO_CONTENT
+        );
+        assert_eq!(
+            play_event(&f, "/jellyfin/Sessions/Playing/Progress", play, Some(5000)).await,
+            StatusCode::NO_CONTENT
+        );
+        assert_eq!(
+            play_event(&f, "/jellyfin/Sessions/Playing/Stopped", play, Some(7000)).await,
+            StatusCode::NO_CONTENT
+        );
+        let watch = f
+            .state
+            .store
+            .watch_state(1, f.native_item)
+            .await
+            .expect("watch")
+            .expect("watch");
+        assert_eq!(watch.position_ms, 7000);
+        assert_eq!(
+            play_event(&f, "/jellyfin/Sessions/Playing/Stopped", play, Some(9000)).await,
+            StatusCode::NO_CONTENT
+        );
+        assert_eq!(
+            f.state
+                .store
+                .watch_state(1, f.native_item)
+                .await
+                .expect("preserved"),
+            Some(watch)
+        );
+        assert!(f.state.direct_plays.list().is_empty());
+        let late = f
+            .app
+            .clone()
+            .oneshot(request("GET", url, Some(&f.token), json!({})))
+            .await
+            .expect("late range");
+        assert_eq!(late.status(), StatusCode::CONFLICT);
+    }
+    #[tokio::test]
+    async fn jellyfin_stop_without_position_and_external_edit_never_write_zero_or_restore_progress()
+    {
+        let f = playback_fixture().await;
+        let first = negotiate(&f).await;
+        let play = first["PlaySessionId"].as_str().expect("play");
+        assert_eq!(
+            play_event(&f, "/jellyfin/Sessions/Playing", play, Some(1000)).await,
+            StatusCode::NO_CONTENT
+        );
+        assert_eq!(
+            play_event(&f, "/jellyfin/Sessions/Playing/Stopped", play, None).await,
+            StatusCode::NO_CONTENT
+        );
+        assert_eq!(
+            f.state
+                .store
+                .watch_state(1, f.native_item)
+                .await
+                .expect("watch")
+                .expect("watch")
+                .position_ms,
+            1000
+        );
+        let second = negotiate(&f).await;
+        let play = second["PlaySessionId"].as_str().expect("second play");
+        assert_eq!(
+            play_event(&f, "/jellyfin/Sessions/Playing", play, Some(2000)).await,
+            StatusCode::NO_CONTENT
+        );
+        f.state
+            .store
+            .set_watched_tree(1, f.native_item, false)
+            .await
+            .expect("external unwatch");
+        let edited = f
+            .state
+            .store
+            .watch_state(1, f.native_item)
+            .await
+            .expect("edit");
+        assert_eq!(
+            play_event(&f, "/jellyfin/Sessions/Playing/Stopped", play, Some(8000)).await,
+            StatusCode::NO_CONTENT
+        );
+        assert_eq!(
+            f.state
+                .store
+                .watch_state(1, f.native_item)
+                .await
+                .expect("edit preserved"),
+            edited
+        );
+    }
+    #[tokio::test]
+    async fn jellyfin_failed_final_releases_exact_resources_and_retry_commits_before_success() {
+        let f = playback_fixture().await;
+        let negotiation = negotiate(&f).await;
+        let play = negotiation["PlaySessionId"].as_str().expect("play");
+        assert_eq!(
+            play_event(&f, "/jellyfin/Sessions/Playing", play, Some(1000)).await,
+            StatusCode::NO_CONTENT
+        );
+        let scope = f
+            .state
+            .store
+            .jellyfin_login_scope(plurx_core::auth::hash_token(&f.token))
+            .await
+            .expect("scope")
+            .expect("scope");
+        let binding = f
+            .state
+            .store
+            .jellyfin_play(play, &scope)
+            .await
+            .expect("binding")
+            .expect("binding");
+        let conn =
+            rusqlite::Connection::open(f.root.path().join("state.db")).expect("fault connection");
+        conn.execute_batch("CREATE TRIGGER injected_final_failure BEFORE INSERT ON watch_state BEGIN SELECT RAISE(ABORT,'injected final failure'); END;").expect("inject");
+        assert_eq!(
+            play_event(&f, "/jellyfin/Sessions/Playing/Stopped", play, Some(8000)).await,
+            StatusCode::INTERNAL_SERVER_ERROR
+        );
+        assert_eq!(
+            f.state
+                .store
+                .jellyfin_play(play, &scope)
+                .await
+                .expect("retry binding")
+                .expect("retry binding")
+                .state,
+            "active"
+        );
+        let grant = f
+            .state
+            .store
+            .file_grant_by_id(binding.direct_grant_id.as_deref().expect("grant"))
+            .await
+            .expect("grant")
+            .expect("grant");
+        assert!(grant.revoked_at.is_some());
+        assert!(f.state.direct_plays.list().is_empty());
+        assert_eq!(
+            f.state
+                .store
+                .watch_state(1, f.native_item)
+                .await
+                .expect("old watch")
+                .expect("watch")
+                .position_ms,
+            1000
+        );
+        conn.execute_batch("DROP TRIGGER injected_final_failure;")
+            .expect("repair");
+        assert_eq!(
+            play_event(&f, "/jellyfin/Sessions/Playing/Stopped", play, Some(8000)).await,
+            StatusCode::NO_CONTENT
+        );
+        assert_eq!(
+            f.state
+                .store
+                .watch_state(1, f.native_item)
+                .await
+                .expect("durable final")
+                .expect("watch")
+                .position_ms,
+            8000
+        );
+        assert_eq!(
+            f.state
+                .store
+                .jellyfin_play(play, &scope)
+                .await
+                .expect("terminal")
+                .expect("terminal")
+                .state,
+            "ended"
+        );
+    }
+    #[tokio::test]
+    async fn jellyfin_negotiation_keeps_profiles_separate_and_rejects_unknown_constraints_before_allocation(
+    ) {
+        let f = playback_fixture().await;
+        let path = format!("/jellyfin/Items/{}/PlaybackInfo", f.item);
+        let direct =
+            json!({"Type":"Video","Container":"mp4","VideoCodec":"h264","AudioCodec":"aac"});
+        for profile in [
+            json!({"DirectPlayProfiles":[{"Type":"Video","Container":"mp4","VideoCodec":"hevc","AudioCodec":"aac"},{"Type":"Video","Container":"mkv","VideoCodec":"h264","AudioCodec":"ac3"}]}),
+            json!({"DirectPlayProfiles":[direct.clone()],"CodecProfiles":[{"Type":"Video","Conditions":[{"Property":"UnknownCapability","Condition":"Equals","Value":"true"}]}]}),
+            json!({"DirectPlayProfiles":[direct.clone()],"CodecProfiles":"invalid constraints"}),
+            json!({"DirectPlayProfiles":[direct.clone()],"MaxStaticBitrate":10_000}),
+        ] {
+            let (status,body)=json_call(&f.app,request("POST",&path,Some(&f.token),json!({"UserId":f.user,"MediaSourceId":f.source,"EnableDirectPlay":true,"MaxStreamingBitrate":1_000_000,"DeviceProfile":profile}))).await;
+            assert_eq!(status, StatusCode::OK);
+            assert_eq!(body["ErrorCode"], "NotSupported");
+            assert!(body["PlaySessionId"].is_null());
+        }
+        let conn = rusqlite::Connection::open(f.root.path().join("state.db")).expect("inspect");
+        assert_eq!(
+            conn.query_row("SELECT COUNT(*) FROM jellyfin_plays", [], |row| row
+                .get::<_, i64>(0))
+                .expect("count"),
+            0
+        );
+        let (status,body)=json_call(&f.app,request("POST",&path,Some(&f.token),json!({"MediaSourceId":f.source,"DeviceProfile":{"DirectPlayProfiles":[{"Type":"Video","Container":"mp4","VideoCodec":"h264","AudioCodec":"ac3"},direct]}}))).await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(
+            body["PlaySessionId"].is_string(),
+            "an independently valid second profile wins"
+        );
+        let (status, _) = json_call(
+            &f.app,
+            request(
+                "POST",
+                &path,
+                Some(&f.token),
+                json!({"MediaSourceId":f.source,"UnknownPlaybackLimit":1}),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+    }
+    #[tokio::test]
+    async fn jellyfin_logout_releases_only_presented_login_and_preserves_other_device() {
+        let f = playback_fixture().await;
+        let info = negotiate(&f).await;
+        let play = info["PlaySessionId"].as_str().expect("play");
+        assert_eq!(
+            play_event(&f, "/jellyfin/Sessions/Playing", play, Some(1000)).await,
+            StatusCode::NO_CONTENT
+        );
+        let mut login = request(
+            "POST",
+            "/jellyfin/Users/AuthenticateByName",
+            None,
+            json!({"Username":"catalog-admin","Pw":"supersecret"}),
+        );
+        login.headers_mut().insert("x-emby-authorization", "MediaBrowser Client=\"Jellyfin+Android+TV\", DeviceId=\"logout-other-device\", Version=\"0.19.10\"".parse().expect("metadata"));
+        let (status, other) = json_call(&f.app, login).await;
+        assert_eq!(status, StatusCode::OK);
+        let other_token = other["AccessToken"].as_str().expect("other login");
+        let scope = f
+            .state
+            .store
+            .jellyfin_login_scope(plurx_core::auth::hash_token(&f.token))
+            .await
+            .expect("scope")
+            .expect("scope");
+        let active = f
+            .state
+            .store
+            .jellyfin_play(play, &scope)
+            .await
+            .expect("binding")
+            .expect("binding");
+        let other_scope = f
+            .state
+            .store
+            .jellyfin_login_scope(plurx_core::auth::hash_token(other_token))
+            .await
+            .expect("other scope")
+            .expect("other scope");
+        f.state
+            .store
+            .create_file_grant(plurx_core::store::NewFileGrant {
+                id: "other-device-grant".into(),
+                token_hash: plurx_core::auth::hash_token("other-device-secret"),
+                file_id: active.negotiation.file_id,
+                user_id: 1,
+                source_token_hash: other_scope.token_digest,
+                created_at: 1,
+                expires_at: i64::MAX,
+            })
+            .await
+            .expect("other native grant");
+        let response = f
+            .app
+            .clone()
+            .oneshot(request(
+                "POST",
+                "/jellyfin/Sessions/Logout",
+                Some(&f.token),
+                json!({}),
+            ))
+            .await
+            .expect("logout");
+        assert_eq!(response.status(), StatusCode::NO_CONTENT);
+        assert!(f
+            .state
+            .store
+            .jellyfin_login_scope(scope.token_digest.clone())
+            .await
+            .expect("revoked login")
+            .is_none());
+        let ended = f
+            .state
+            .store
+            .jellyfin_play(play, &scope)
+            .await
+            .expect("tombstone")
+            .expect("tombstone");
+        assert_eq!(ended.state, "ended");
+        assert!(f
+            .state
+            .store
+            .file_grant_by_id(active.direct_grant_id.as_deref().expect("grant"))
+            .await
+            .expect("grant")
+            .expect("grant")
+            .revoked_at
+            .is_some());
+        assert!(f
+            .state
+            .store
+            .file_grant_by_id("other-device-grant")
+            .await
+            .expect("other grant")
+            .expect("other grant")
+            .revoked_at
+            .is_none());
+        let (status, _) = json_call(
+            &f.app,
+            request("GET", "/jellyfin/Users/Me", Some(other_token), json!({})),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let (status, _) = json_call(
+            &f.app,
+            request("GET", "/jellyfin/Users/Me", Some(&f.token), json!({})),
+        )
+        .await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+    }
+    #[tokio::test]
+    async fn jellyfin_play_events_reject_other_login_even_when_it_claims_the_owner_device() {
+        let f = playback_fixture().await;
+        let negotiation = negotiate(&f).await;
+        let play = negotiation["PlaySessionId"].as_str().expect("play");
+        assert_eq!(
+            play_event(&f, "/jellyfin/Sessions/Playing", play, Some(1000)).await,
+            StatusCode::NO_CONTENT
+        );
+        let mut login = request(
+            "POST",
+            "/jellyfin/Users/AuthenticateByName",
+            None,
+            json!({"Username":"catalog-admin","Pw":"supersecret"}),
+        );
+        login.headers_mut().insert("x-emby-authorization","MediaBrowser Client=\"Jellyfin+Android+TV\", DeviceId=\"other-playback-device\", Version=\"0.19.10\"".parse().expect("metadata"));
+        let (status, other) = json_call(&f.app, login).await;
+        assert_eq!(status, StatusCode::OK);
+        let token = other["AccessToken"].as_str().expect("token");
+        for route in [
+            "/jellyfin/Sessions/Playing/Progress",
+            "/jellyfin/Sessions/Playing/Stopped",
+        ] {
+            let mut report = request(
+                "POST",
+                route,
+                Some(token),
+                json!({"ItemId":f.item,"MediaSourceId":f.source,"PlaySessionId":play,"PositionTicks":80_000_000,"DeviceId":"catalog-contract"}),
+            );
+            report.headers_mut().insert("x-emby-authorization","MediaBrowser Client=\"Jellyfin+Android+TV\", DeviceId=\"catalog-contract\", Version=\"0.19.10\"".parse().expect("claimed owner"));
+            let (status, _) = json_call(&f.app, report).await;
+            assert_eq!(status, StatusCode::NOT_FOUND);
+        }
+        assert_eq!(
+            play_event(&f, "/jellyfin/Sessions/Playing/Stopped", play, Some(3000)).await,
+            StatusCode::NO_CONTENT
+        );
+        assert_eq!(
+            f.state
+                .store
+                .watch_state(1, f.native_item)
+                .await
+                .expect("watch")
+                .expect("watch")
+                .position_ms,
+            3000
+        );
     }
     #[tokio::test]
     async fn jellyfin_disabled_bare_paths_and_mutations_are_json_404_and_native_shell_survives() {

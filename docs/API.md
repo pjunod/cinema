@@ -14,7 +14,7 @@ This file is the specification in the meantime, written by reading the routers
 and the handlers on 2026-09-07. Where a plan document and the code disagreed,
 the code won and the disagreement is recorded in §23.
 
-One binary serves everything on one port (`:32400` by default). plurx has 271
+One binary serves everything on one port (`:32400` by default). plurx has 279
 routes across the five surfaces below. Every path here is absolute; the native
 API is the only one under a version prefix, and §7-§18 state that prefix once
 per section rather than repeating it in every row.
@@ -50,7 +50,7 @@ Five surfaces, five different rules:
 - **Native `/api/v1`** — JSON, bearer or scoped-key credentials, WebSocket-free
   (clients poll). This is what the web app and the Apple and Android clients
   speak.
-- **Jellyfin-compat `/jellyfin`** — default-off JSON connection/catalog facade
+- **Jellyfin-compat `/jellyfin`** — default-off connection/catalog/direct-play facade
   for the pinned Infuse and Android TV clients, using shared native authentication
   and permanent item identities. Implementation and qualification remain open (§24).
 - **Plex-compat** — XML at Plex's own absolute paths, `X-Plex-Token` carrying
@@ -3228,6 +3228,15 @@ mint. Media resource cleanup belongs to the later playback adapter.
 | GET | `/jellyfin/Shows/{item_id}/Seasons` | Compatibility token; direct season children |
 | GET | `/jellyfin/Shows/{item_id}/Episodes` | Compatibility token; descendant episodes; optional season parent |
 
+| GET, POST | `/jellyfin/Items/{item_id}/PlaybackInfo` | Compatibility token; live source membership, checked times and one independently eligible direct profile; unsupported constraints refuse before allocation |
+| GET, HEAD | `/jellyfin/Videos/{item_id}/stream` | Compatibility token and exact play/source binding; native direct bytes, Range and HEAD; live native grant and source fingerprint |
+| GET, HEAD | `/jellyfin/Videos/{item_id}/{filename}` | Same authenticated direct adapter; only the supported `stream` filename aliases |
+| POST | `/jellyfin/Sessions/Logout` | Presented compatibility login only; native token exclusion, exact play release, other devices retained. |
+| POST | `/jellyfin/Sessions/Playing` | Compatibility token; exact own play/item/source; activates its native direct reference |
+| POST | `/jellyfin/Sessions/Playing/Progress` | Exact active play; checked position ticks, original manual revision and shared native watch effects |
+| POST | `/jellyfin/Sessions/Playing/Stopped` | Forced durable final when supplied; no-position stop does not write zero; exact resource release and retry on storage failure |
+| POST, DELETE | `/jellyfin/Users/{user_id}/PlayedItems/{item_id}` | Own user and supported item; shared cascading watched/unwatched marks with trusted login origin |
+
 Disabled requests, including unsupported mutations, answer JSON 404. Enabled
 unsupported methods answer JSON 405; unknown paths answer JSON 404. The
 native root still serves its app shell. Connection/catalog handlers use the
@@ -3264,3 +3273,14 @@ playback negotiation and resource lifecycle remain under implementation; the
 current source capabilities and playback policy do not advertise delivery.
 Qualification progress is in
 [the compatibility status](clients/JELLYFIN-COMPATIBILITY-STATUS.md).
+
+Direct media currently requires the compatibility login on every request.
+Scoped bearer media URLs are pending explicit approval; no such URL is issued.
+The compatibility queue retains each beat's original play/revision through
+leading and trailing writes. An explicit manual edit advances an eligible
+unambiguous own play only if its prior revision was current; external edits
+fence old compatibility beats without changing native online progress.
+A final stop is serialized under the same user/item entry lock and commits
+its exact tombstone with its watch update. It preserves another viewer's
+pending beat. Failure still releases the exact direct presence/grant, leaves
+reconciliation retriable, and returns an error rather than durable success.

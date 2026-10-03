@@ -162,7 +162,9 @@ const JELLYFIN_LOGIN_SCHEMA_VERSION: i64 = 71;
 const JELLYFIN_LOGIN_SCHEMA_MIGRATION_SOURCE: i64 = JELLYFIN_IDENTITY_SCHEMA_VERSION;
 const JELLYFIN_PLAY_SCHEMA_VERSION: i64 = 72;
 const JELLYFIN_PLAY_SCHEMA_MIGRATION_SOURCE: i64 = JELLYFIN_LOGIN_SCHEMA_VERSION;
-pub const AUTH_SCHEMA_VERSION: i64 = JELLYFIN_PLAY_SCHEMA_VERSION;
+const JELLYFIN_WATCH_SCHEMA_VERSION: i64 = 73;
+const JELLYFIN_WATCH_SCHEMA_MIGRATION_SOURCE: i64 = JELLYFIN_PLAY_SCHEMA_VERSION;
+pub const AUTH_SCHEMA_VERSION: i64 = JELLYFIN_WATCH_SCHEMA_VERSION;
 /// Oldest schema this binary can advance through the complete migration chain.
 pub const AUTH_SCHEMA_MIGRATION_SOURCE: i64 = 5;
 const READING_SCHEMA_VERSION: i64 = 6;
@@ -1630,6 +1632,20 @@ impl HiqliteAuthStore {
             result.map_err(database_error)?;
         }
         for result in timeout_store(client.batch(super::jellyfin_play::SCHEMA)).await? {
+            result.map_err(database_error)?;
+        }
+        let columns = timeout_store(
+            client
+                // authority: restartable watch migration must inspect committed columns before its atomic schema transaction.
+                .query_consistent_map::<super::jellyfin_watch::ColumnRow, _>(
+                    "SELECT name FROM pragma_table_info('watch_state')",
+                    params!(),
+                ),
+        )
+        .await?;
+        for result in
+            timeout_store(client.txn(super::jellyfin_watch::migration_statements(&columns))).await?
+        {
             result.map_err(database_error)?;
         }
         super::hiqlite_durable::install_schema(&client).await?;
@@ -3197,6 +3213,21 @@ impl HiqliteAuthStore {
                     let now = self.now()?;
                     let attempt = self.client().txn(vec![("UPDATE cluster_meta SET schema_version=$1,migrated_at=$2 WHERE singleton=1 AND schema_version=$3".to_owned(),params!(JELLYFIN_PLAY_SCHEMA_VERSION,now,JELLYFIN_PLAY_SCHEMA_MIGRATION_SOURCE))]).await;
                     self.settle_migration_attempt(JELLYFIN_PLAY_SCHEMA_MIGRATION_SOURCE, attempt)
+                        .await?;
+                }
+                SchemaMigrationAction::MigrateFrom(JELLYFIN_WATCH_SCHEMA_MIGRATION_SOURCE) => {
+                    let columns = self
+                        .client()
+                        // authority: the manual-edit schema and marker migrate atomically even after partial setup or another coordinator.
+                        .query_consistent_map::<super::jellyfin_watch::ColumnRow, _>(
+                            "SELECT name FROM pragma_table_info('watch_state')",
+                            params!(),
+                        )
+                        .await?;
+                    let mut statements = super::jellyfin_watch::migration_statements(&columns);
+                    statements.push(("UPDATE cluster_meta SET schema_version=$1,migrated_at=$2 WHERE singleton=1 AND schema_version=$3".to_owned(),params!(JELLYFIN_WATCH_SCHEMA_VERSION,self.now()?,JELLYFIN_WATCH_SCHEMA_MIGRATION_SOURCE)));
+                    let attempt = self.client().txn(statements).await;
+                    self.settle_migration_attempt(JELLYFIN_WATCH_SCHEMA_MIGRATION_SOURCE, attempt)
                         .await?;
                 }
                 SchemaMigrationAction::MigrateFrom(version) => {
@@ -5268,7 +5299,8 @@ fn schema_migration_action(
         | PLAYBACK_INPUT_SCHEMA_MIGRATION_SOURCE
         | JELLYFIN_IDENTITY_SCHEMA_MIGRATION_SOURCE
         | JELLYFIN_LOGIN_SCHEMA_MIGRATION_SOURCE
-        | JELLYFIN_PLAY_SCHEMA_MIGRATION_SOURCE => {
+        | JELLYFIN_PLAY_SCHEMA_MIGRATION_SOURCE
+        | JELLYFIN_WATCH_SCHEMA_MIGRATION_SOURCE => {
             Ok(SchemaMigrationAction::MigrateFrom(meta.schema_version))
         }
         version => Err(StoreError::Migration(format!(
