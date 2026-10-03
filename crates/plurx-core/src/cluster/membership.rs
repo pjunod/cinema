@@ -37,6 +37,7 @@ use super::migration::ActivationMarker;
 use super::ClusterIdentity;
 
 pub mod lifecycle;
+mod sharing_source_schema;
 
 /// What a node is called when nothing usable could be derived for it: no
 /// reported hostname, no advertised name, and no reverse lookup. It is a
@@ -1452,8 +1453,9 @@ impl SharingJoinCapabilities {
     /// same-write factory result, and old requests with absent fields refuse.
     pub fn for_current_binary() -> Self {
         Self {
+            session_principal: true,
+            catalogue_item_identity: true,
             purpose_keys: true,
-            ..Self::default()
         }
     }
     fn proves(self, required: Self) -> bool {
@@ -3922,6 +3924,7 @@ struct ReplicatedMembership {
     artwork_http: String,
     secrets: JoinSecrets,
     purpose_master: Mutex<Option<Arc<crate::secrets::CredentialKey>>>,
+    source_boot_attempt: Mutex<Option<String>>,
     activity_signing_key: ActivitySigningKey,
     activity_public_keys: Mutex<BTreeMap<String, Vec<u8>>>,
     activity_auth_admission: Mutex<BTreeMap<String, ActivityAuthAdmission>>,
@@ -4326,6 +4329,7 @@ impl MembershipManager {
                 artwork_http,
                 secrets,
                 purpose_master: Mutex::new(None),
+                source_boot_attempt: Mutex::new(None),
                 activity_signing_key,
                 activity_public_keys: Mutex::new(BTreeMap::new()),
                 activity_auth_admission: Mutex::new(BTreeMap::new()),
@@ -5609,6 +5613,8 @@ impl MembershipManager {
             .clone();
         if let Some(master) = purpose_master {
             for proof in [
+                SHARING_SESSION_PRINCIPAL_CAPABILITY.to_owned(),
+                SHARING_CATALOGUE_ITEM_IDENTITY_CAPABILITY.to_owned(),
                 SHARING_PURPOSE_KEYS_CAPABILITY.to_owned(),
                 format!(
                     "sharing_purpose_master_v1:{}",
@@ -5617,6 +5623,17 @@ impl MembershipManager {
             ] {
                 statements.push(("INSERT INTO cluster_node_capabilities(node_id,capability,last_seen_at) SELECT $1,$2,$3 WHERE NOT EXISTS(SELECT 1 FROM sharing_purpose_census_intents WHERE node_id=$1) ON CONFLICT(node_id,capability) DO UPDATE SET last_seen_at=excluded.last_seen_at".to_owned(),params!(inner.identity.node_id.as_str(),proof,now)));
             }
+        }
+        // One bounded current attempt per node; previous boot capability rows
+        // cannot accumulate across restarts or survive a serving heartbeat.
+        statements.push(("DELETE FROM cluster_node_capabilities WHERE node_id=$1 AND capability GLOB 'sharing_source_boot_v1:*'".to_owned(),params!(inner.identity.node_id.as_str())));
+        let source_boot_attempt = inner
+            .source_boot_attempt
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .clone();
+        if let Some(attempt) = source_boot_attempt {
+            statements.push(("INSERT INTO cluster_node_capabilities(node_id,capability,last_seen_at) SELECT $1,$2,$3 WHERE EXISTS(SELECT 1 FROM sharing_source_boot_intents WHERE node_id=$1 AND attempt_id=$4) ON CONFLICT(node_id,capability) DO UPDATE SET last_seen_at=excluded.last_seen_at".to_owned(),params!(inner.identity.node_id.as_str(),format!("sharing_source_boot_v1:{attempt}"),now,attempt)));
         }
         statements.push((
             "DELETE FROM cluster_node_maintenance_heartbeat_intents WHERE node_id = $1 \
@@ -9563,9 +9580,23 @@ impl MembershipManager {
         source_member_observation(&inner.client, inner.identity.raft_id, master.as_deref()).await
     }
 
+    pub(crate) fn active_storage_root_for_startup(
+        &self,
+    ) -> Result<PathBuf, crate::error::StoreError> {
+        self.inner
+            .as_ref()
+            .map(|inner| inner.storage_root.clone())
+            .ok_or_else(|| {
+                crate::error::StoreError::Migration(
+                    "Source startup has no admitted replicated member".to_owned(),
+                )
+            })
+    }
+
     /// Explicit boot qualification. The actual master has passed startup
     /// census; open all current purpose material again before publishing its
-    /// fingerprint. This never claims installed keys or Source writer support.
+    /// fingerprint and binary protocol support. Installed schemas and worker
+    /// readiness require their separate guarded coordinators.
     pub async fn prepare_purpose_master(
         &self,
         master: Arc<crate::secrets::CredentialKey>,

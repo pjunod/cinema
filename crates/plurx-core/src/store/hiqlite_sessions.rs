@@ -3682,6 +3682,7 @@ impl MediaSessionStore for HiqliteAuthStore {
             ));
         }
         let layout = LocalSessionSql::load(self).await?;
+        let live_route_sql = layout.live_local_user("route");
         let owner_1 = layout.equals(1);
         let user_exists_1 = layout.existing_user(1);
         self.client()
@@ -3689,14 +3690,14 @@ impl MediaSessionStore for HiqliteAuthStore {
                 format!("UPDATE media_session_requests SET state = 'resolved',
                         response_json = (SELECT route.response_json FROM media_sessions route
                           WHERE route.{owner_1} AND $2 != '' AND route.incarnation_id = $3
-                            AND route.state = 'active' AND route.publication_ready_at_ms = 0
+                            AND route.state = 'active' AND route.publication_ready_at_ms = 0 {live_route_sql}
                             AND route.lease_expires_at_ms > $4
                             AND route.request_fingerprint = media_session_requests.request_fingerprint
                             AND route.playback_id = media_session_requests.playback_id
                             AND route.owner_node_id = media_session_requests.owner_node_id),
                         claim_expires_at_ms = (SELECT route.lease_expires_at_ms FROM media_sessions route
                           WHERE route.{owner_1} AND route.incarnation_id = $3
-                            AND route.state = 'active' AND route.publication_ready_at_ms = 0
+                            AND route.state = 'active' AND route.publication_ready_at_ms = 0 {live_route_sql}
                             AND route.lease_expires_at_ms > $4
                             AND route.request_fingerprint = media_session_requests.request_fingerprint
                             AND route.playback_id = media_session_requests.playback_id
@@ -3706,7 +3707,7 @@ impl MediaSessionStore for HiqliteAuthStore {
                     AND state = 'starting'
                     AND EXISTS (SELECT 1 FROM media_sessions route
                       WHERE route.{owner_1} AND route.incarnation_id = $3
-                        AND route.state = 'active' AND route.publication_ready_at_ms = 0
+                        AND route.state = 'active' AND route.publication_ready_at_ms = 0 {live_route_sql}
                         AND route.lease_expires_at_ms > $4
                         AND route.request_fingerprint = media_session_requests.request_fingerprint
                         AND route.playback_id = media_session_requests.playback_id
@@ -3718,7 +3719,7 @@ impl MediaSessionStore for HiqliteAuthStore {
             .into_iter()
             .collect::<Result<Vec<_>, _>>()
             .map_err(database_error)?;
-        let route = route_by(self, "incarnation_id", incarnation_id)
+        let route = live_local_route(self, incarnation_id)
             .await?
             .filter(|route| {
                 route.principal

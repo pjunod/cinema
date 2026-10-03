@@ -41,6 +41,8 @@ pub(crate) struct SharingStatus {
     pub imports: Vec<ImportTransportStatus>,
 }
 pub(crate) struct SharingManager {
+    #[allow(dead_code)] // Receiver HTTP registration follows relay qualification.
+    pub(crate) receiver_starts: crate::http::shared_receiver_playback::ReceiverStartRegistry,
     pub key: Arc<CredentialKey>,
     pub network: SharingNetworkConfig,
     key_directory: PathBuf,
@@ -49,6 +51,16 @@ pub(crate) struct SharingManager {
     catalogue_admission: Arc<CatalogueAdmission>,
     catalogue_cache: Mutex<CatalogueCache>,
     scope_control: Arc<tokio::sync::Semaphore>,
+}
+/// Server-only received facts, retained for cleanup before any B publication
+/// await. The authenticated credential is sealed into the upstream capsule;
+/// it never crosses B's viewer response or a log boundary.
+#[allow(dead_code)]
+pub(crate) struct ReceiverSourceStartResult {
+    pub summary: plurx_core::sharing::ImportSummary,
+    pub credential: plurx_core::secrets::Secret,
+    pub viewer_hash: String,
+    pub source: crate::http::DecodedSourceHlsStart,
 }
 pub(crate) async fn enabled(store: &dyn Store) -> Result<bool, StoreError> {
     let result = tokio::time::timeout(
@@ -60,12 +72,106 @@ pub(crate) async fn enabled(store: &dyn Store) -> Result<bool, StoreError> {
     Ok(stored_switch(result.as_deref(), false))
 }
 impl SharingManager {
+    /// Dispatch only after B has committed its blocked owner and retained the
+    /// Source request identity. A received Source handle must survive a later
+    /// B revocation so the owning task can settle its physical obligation.
+    #[allow(dead_code)] // Wired by the receiver owner, never by a catalogue read.
+    pub(crate) async fn start_file_source(
+        &self,
+        state: &AppState,
+        intent: &plurx_core::sharing_receiver_sessions::ReceiverSessionIntent,
+        owner: &plurx_core::sharing_receiver_sessions::ReceiverPendingRenewal,
+        request_json: &str,
+    ) -> Result<ReceiverSourceStartResult, crate::sharing_client::PeerError> {
+        use crate::sharing_client::{PeerConnection, PeerError};
+        let expected = receiver_source_request(intent, request_json)?;
+        if owner.incarnation_id != intent.recipe.source_request_id.to_string()
+            || owner.owner_node_id != state.node_id
+        {
+            return Err(PeerError::Authentication);
+        }
+        let import = state
+            .store
+            .sharing_import(intent.scope.import_id)
+            .await
+            .map_err(|_| PeerError::Unavailable)?
+            .ok_or(PeerError::Unavailable)?;
+        let summary = &import.summary;
+        if summary.state != "active"
+            || summary.source_server_id != intent.scope.source_server_id
+            || summary.catalogue_epoch != intent.scope.catalogue_epoch
+            || summary.lifecycle_generation != intent.scope.lifecycle_generation
+            || summary.assignment_generation < intent.scope.assignment_generation
+            || summary.endpoint_generation < intent.scope.endpoint_generation
+            || summary.claim_id != intent.scope.claim_id
+            || summary.remote_grant_id != Some(intent.scope.remote_grant_id)
+        {
+            return Err(PeerError::Authentication);
+        }
+        self.ensure_current(state, summary).await?;
+        let local = state
+            .store
+            .sharing_identity(clock_ms())
+            .await
+            .map_err(|_| PeerError::Unavailable)?;
+        let credential = ImportCredential::open(self, local.server_id, &import)
+            .map_err(|_| PeerError::Unavailable)?;
+        let source = plurx_core::sharing::SharingIdentity {
+            server_id: expected.server_id,
+            catalogue_epoch: expected.catalogue_epoch,
+            created_at_ms: 0,
+        };
+        let (mut peer, _) = PeerConnection::verified(self, &summary.endpoints, &source).await?;
+        // The handshake can park. Reobserve the original login and committed
+        // blocked owner immediately before the first non-idempotent send.
+        self.ensure_current(state, summary).await?;
+        let authority = state
+            .store
+            .prepare_receiver_session_authority(intent.clone())
+            .await
+            .map_err(|_| PeerError::Unavailable)?
+            .ok_or(PeerError::Authentication)?;
+        let mut fresh_owner = owner.clone();
+        fresh_owner.now_ms = clock_ms();
+        fresh_owner.lease_expires_at_ms = fresh_owner.now_ms.saturating_add(30_000);
+        if !state
+            .store
+            .renew_pending_receiver_session(&authority, &fresh_owner)
+            .await
+            .map_err(|_| PeerError::Unavailable)?
+        {
+            return Err(PeerError::Authentication);
+        }
+        let viewer = state
+            .store
+            .authorize_share_viewer(
+                summary.id,
+                intent.recipe.reference.library_id.clone(),
+                intent.user_id,
+            )
+            .await
+            .map_err(|_| PeerError::Unavailable)?
+            .ok_or(PeerError::Authentication)?;
+        let reply = peer
+            .file_start(&credential.credential, &expected, &viewer, request_json)
+            .await?;
+        // Do not discard a known Source result after an await. Publication
+        // repeats B authority; cleanup retains this handle independently.
+        Ok(ReceiverSourceStartResult {
+            summary: summary.clone(),
+            credential: credential.credential,
+            viewer_hash: viewer,
+            source: reply,
+        })
+    }
+
     pub fn new(
         key: Arc<CredentialKey>,
         key_directory: PathBuf,
         network: SharingNetworkConfig,
     ) -> Self {
         Self {
+            receiver_starts: Default::default(),
             key,
             key_directory,
             status: RwLock::new(SharingStatus {
@@ -254,6 +360,48 @@ impl SharingManager {
             }
         }
     }
+}
+
+/// Compare the complete retained client recipe; only the private Source
+/// request UUID is replaced. This check precedes peer lookup and any send.
+pub(crate) fn receiver_source_request(
+    intent: &plurx_core::sharing_receiver_sessions::ReceiverSessionIntent,
+    request_json: &str,
+) -> Result<crate::http::hls::SourcePlaybackTarget, crate::sharing_client::PeerError> {
+    use crate::sharing_client::PeerError;
+    let recipe = &intent.recipe;
+    let expected = crate::http::hls::SourcePlaybackTarget {
+        server_id: recipe.reference.server_id,
+        catalogue_epoch: recipe.reference.catalogue_epoch,
+        library_id: recipe.reference.library_id.clone(),
+        item_id: recipe.reference.item_id.clone(),
+        file_id: recipe.file_id.clone(),
+        revision: recipe.file_revision.clone(),
+    };
+    crate::http::validate_source_start_request(request_json.as_bytes(), &expected)
+        .map_err(|_| PeerError::InvalidResponse)?;
+    let wrapper: serde_json::Value =
+        serde_json::from_str(request_json).map_err(|_| PeerError::InvalidResponse)?;
+    let mut retained: serde_json::Value =
+        serde_json::from_str(&recipe.request_json).map_err(|_| PeerError::InvalidResponse)?;
+    retained
+        .as_object_mut()
+        .ok_or(PeerError::InvalidResponse)?
+        .insert(
+            "request_id".into(),
+            recipe.source_request_id.to_string().into(),
+        );
+    if wrapper.get("session") != Some(&retained)
+        || recipe.parent_login_hash != intent.login_hash
+        || recipe.reference.import_id != intent.scope.import_id
+        || recipe.reference.server_id != intent.scope.source_server_id
+        || recipe.reference.catalogue_epoch != intent.scope.catalogue_epoch
+        || recipe.lifecycle_generation != intent.scope.lifecycle_generation
+        || intent.scope.libraries.as_slice() != [recipe.reference.library_id.clone()]
+    {
+        return Err(PeerError::InvalidResponse);
+    }
+    Ok(expected)
 }
 
 /// Versioned ciphertext payload retains the non-secret pairing identity after
@@ -1773,6 +1921,87 @@ mod tests {
         secrets::{CredentialKey, SharingSecretPurpose},
         sharing::{ImportSummary, StoredImport},
     };
+    #[test]
+    fn sharing_source_dispatch_retains_complete_receiver_recipe_and_private_request() {
+        use plurx_core::{
+            sharing::SourceId,
+            sharing_catalogue::SharedReference,
+            sharing_catalogue_details::FileRevision,
+            sharing_receiver_sessions::{
+                ReceiverProducerKind, ReceiverSessionIntent, RemoteSourceRecipe,
+            },
+            store::sharing_catalogue::ReceiverCatalogueScope,
+        };
+        let reference = SharedReference {
+            import_id: uuid::Uuid::new_v4(),
+            server_id: uuid::Uuid::new_v4(),
+            catalogue_epoch: uuid::Uuid::new_v4(),
+            library_id: SourceId::parse("0").expect("receiver request fixture"),
+            item_id: SourceId::parse("9007199254740993").expect("receiver request fixture"),
+        };
+        let original = serde_json::json!({"playback_id":"player", "request_id":"client-attempt",
+            "start":30.5,"caps":{"v":2,"nested":{"codec":"original"}},"audio":2});
+        let intent = ReceiverSessionIntent {
+            scope: ReceiverCatalogueScope {
+                import_id: reference.import_id,
+                source_server_id: reference.server_id,
+                catalogue_epoch: reference.catalogue_epoch,
+                lifecycle_generation: 3,
+                assignment_generation: 4,
+                endpoint_generation: 5,
+                claim_id: uuid::Uuid::new_v4(),
+                remote_grant_id: uuid::Uuid::new_v4(),
+                libraries: vec![reference.library_id.clone()],
+            },
+            user_id: 1,
+            login_hash: "a".repeat(64),
+            source_position_ms: 0,
+            recipe: RemoteSourceRecipe {
+                kind: ReceiverProducerKind::RemoteSource,
+                version: 1,
+                reference,
+                lifecycle_generation: 3,
+                file_id: SourceId::parse("0").expect("receiver request fixture"),
+                file_revision: FileRevision::parse(&"b".repeat(64))
+                    .expect("receiver request fixture"),
+                source_request_id: uuid::Uuid::new_v4(),
+                parent_login_hash: "a".repeat(64),
+                request_json: serde_json::to_string(&original).expect("receiver request fixture"),
+            },
+        };
+        let recipe = &intent.recipe;
+        let target = crate::http::hls::SourcePlaybackTarget {
+            server_id: recipe.reference.server_id,
+            catalogue_epoch: recipe.reference.catalogue_epoch,
+            library_id: recipe.reference.library_id.clone(),
+            item_id: recipe.reference.item_id.clone(),
+            file_id: recipe.file_id.clone(),
+            revision: recipe.file_revision.clone(),
+        };
+        let mut private = original.clone();
+        private["request_id"] = recipe.source_request_id.to_string().into();
+        let mut wrapper = serde_json::json!({"reference":target,"session":private});
+        let encode = |value: &serde_json::Value| {
+            serde_json::to_string(value).expect("receiver request fixture")
+        };
+        assert!(receiver_source_request(&intent, &encode(&wrapper)).is_ok());
+        assert_eq!(recipe.request_json, encode(&original));
+        for field in ["start", "audio", "caps"] {
+            let saved = wrapper["session"][field].clone();
+            wrapper["session"][field] = serde_json::Value::Null;
+            assert!(
+                receiver_source_request(&intent, &encode(&wrapper)).is_err(),
+                "{field}"
+            );
+            wrapper["session"][field] = saved;
+        }
+        wrapper["session"]["request_id"] = uuid::Uuid::new_v4().to_string().into();
+        assert!(receiver_source_request(&intent, &encode(&wrapper)).is_err());
+        let mut different_login = intent.clone();
+        different_login.login_hash = "c".repeat(64);
+        wrapper["session"]["request_id"] = recipe.source_request_id.to_string().into();
+        assert!(receiver_source_request(&different_login, &encode(&wrapper)).is_err());
+    }
     #[test]
     fn sharing_import_ciphertext_preserves_pairing_metadata_without_the_bootstrap_secret() {
         let key = Arc::new(CredentialKey::from_bytes([41; 32]));

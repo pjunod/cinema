@@ -60,6 +60,61 @@ pub struct ReceiverPendingRenewal {
     pub lease_expires_at_ms: i64,
 }
 
+/// Exact B owner captured by the receiver actor. This is metadata identity,
+/// not evidence that Source has admitted or published a producer.
+#[derive(Clone)]
+pub struct ReceiverSourceOwner {
+    pub incarnation_id: Uuid,
+    pub session_id: Uuid,
+    pub owner_node_id: String,
+    pub owner_epoch: i64,
+    pub request_id: String,
+    pub lease_expires_at_ms: i64,
+    pub now_ms: i64,
+}
+
+/// Complete Source result retained by B. The caller must verify actual Source
+/// publication and seal its upstream capability with the selected B key/AAD.
+/// Store checks the closed envelope and current B authority; it grants no
+/// Source authority. No wire encoding or cleartext credential representation.
+#[derive(Clone)]
+pub struct ReceiverSourceBinding {
+    pub reference: SharedReference,
+    pub file_id: SourceId,
+    pub file_revision: FileRevision,
+    pub source_request_id: Uuid,
+    pub source_session_id: Uuid,
+    pub source_incarnation_id: Uuid,
+    pub capability_envelope: crate::secrets::SealedSecret,
+}
+
+#[derive(Clone)]
+pub struct ReceiverSourceAttachment {
+    pub owner: ReceiverSourceOwner,
+    pub binding: ReceiverSourceBinding,
+}
+
+/// Canonical complete B response, produced by the receiver projection after
+/// verifying Source's published result. Store atomically resolves the B claim.
+#[derive(Clone)]
+pub struct ReceiverSourcePublication {
+    pub attachment: ReceiverSourceAttachment,
+    pub response_json: String,
+}
+
+#[derive(Clone)]
+pub struct ReceiverSourceRenewal {
+    pub attachment: ReceiverSourceAttachment,
+    pub lease_expires_at_ms: i64,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ReceiverSourceWrite {
+    Applied,
+    Replay,
+    Refused,
+}
+
 impl RemoteSourceRecipe {
     /// Request identity excludes the planned incarnation so exact request
     /// replay can recover its previously persisted Source request UUID.

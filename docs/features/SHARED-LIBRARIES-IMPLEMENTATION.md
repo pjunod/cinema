@@ -3519,6 +3519,103 @@ physical producer or public network qualification.
 Feature-enabled all-target Clippy with denied warnings also passed (1 minute
 27 seconds), and the documentation index suite passed all four tests.
 
+### S4 Source schema startup — bounded nonrolling factory
+
+The normal daemon calls the single-use `SelectedStore` Source coordinator
+before constructing `State`, opening application listeners or probing media
+workers. SQLite recovery cannot obtain its authority. Normal standalone uses
+an actual one-voter replicated store, with the same master and member-proof
+factory as a larger topology. The current binary advertises Principal,
+Catalogue and Purpose protocol support after its selected master passes the
+actual sealed-material census; this advertisement does not claim installed
+schema or permission to create a producer.
+
+Replicated v70 remains the ordinary readable baseline. The binary also
+supports v71, whose installation is one guarded Raft transaction: the frozen
+seven-family principal rebuild, catalogue membership/order maintenance,
+monotone item allocator, Source binding adjunct and final installation marker.
+The factory requires the exact current Raft/SQL roster and generation,
+heartbeat-coupled selected-master proof, all three sharing capabilities,
+no membership or census transition, current saved Sharing=true, and fresh
+startup attempts from every active member. Each member advertises only its
+current boot UUID; its heartbeat deletes older boot labels. A retained row
+from a stopped process does not prove that process is still in startup.
+The same-write assertions validate the complete admission schema, captured
+boot attempts, exact installed definitions and successful final guard row.
+A competing coordinator adopts only the complete validated winner.
+
+The predecessor census freezes the thirty affected table/index/trigger
+objects, including the refresh trigger on the background command table.
+Only explicit known SQLite ALTER-built and replicated declarations are
+accepted; the historical v10 session ALTER chain has its own frozen variant.
+Unknown persisted columns, changed constraints, extra indexes, substituted
+triggers, partial principal/allocator state and nonpositive Local user
+ownership refuse the rebuild. Existing Local rows retain their original
+columns through the frozen copy projections. Active sessions, starting
+requests, preparations and live worker leases prevent installation; the
+coordinator never drains or deletes them.
+
+A twenty-second incomplete-floor wait leaves Shared readiness pending only
+after the exact own boot attempt has been confirmed released and the unchanged
+legacy layout has been checked again. Startup also retires its own previous
+crashed process's intent after the actual selected-master heartbeat has
+withdrawn the old boot label. Unknown release outcome or an ignored deletion
+prevents serving. A complete recognized two-capability guard is a Local-only
+pending state: its saved Sharing choice and schema remain untouched, with no
+key mint, ALTER or rebuild. Unknown or partial guards and unreadable material
+refuse startup even when Sharing is disabled. The advisory switch remains
+saved; readiness never substitutes a different choice.
+
+After commit, the node's durable activation file records the actual committed
+schema version, rather than the binary's maximum. A restart verifies every
+installed definition before serving and does not repair missing objects.
+The media-session projection cache is initially uncaptured: the normal boot
+performs this transition before its first session reader. There is no cache
+reset or schema rebuild during serving, and the heartbeat coordinator never
+installs Source DDL.
+
+These startup fixtures qualify schema authority and bounded Local-only
+readiness, not active playback drain, interruption during the rebuild,
+production backup tooling, a global runtime master replacement, physical
+Source dispatch, Tailscale/two-NAT operation or final effort promotion. The
+historical daemon/whole-topology receipt above remains scoped to its recorded
+candidate; it does not become evidence for this v71 factory merely because
+both use the same seven-family copy statements.
+
+The focused startup and schema regressions are:
+
+```sh
+cargo test --locked -p plurx-core --features hiqlite-contract-tests --lib actual_source_schema_coordinator -- --nocapture
+cargo test --locked -p plurx-core --features hiqlite-contract-tests --lib sharing_source_schema -- --nocapture
+cargo check --locked -p plurx-core -p plurxd --all-targets --features plurx-core/hiqlite-contract-tests
+cargo clippy --locked -p plurx-core -p plurxd --all-targets --features plurx-core/hiqlite-contract-tests -- -D warnings
+```
+
+On the initial `75882facb8d` development ancestor, the final `source_schema`
+filter passed nine tests with zero ignored (109.43 seconds): five schema units
+and four actual replicated startup cases. These include one-voter install,
+restart and missing-index refusal; retained Local lease and crashed-intent
+retirement with Sharing disabled; complete legacy guard pending readiness and
+disabled partial-guard refusal; and three-voter single-boot refusal followed by
+full-stop competing installation. Feature-enabled core/daemon all-target
+Clippy with denied warnings passed in 1 minute 24 seconds. The schema migration
+chain regression and existing compatibility regressions also passed. This is
+a development checkpoint; qualification must run again after integrating the
+current effort and canonical-zero Source adjunct correction.
+
+The full intended-base integration with `b4e04e417` retains the canonical-zero
+Source binding checks and incoming receiver/client changes. On that exact tree,
+`--lib source_schema` passed nine tests (104.41 seconds),
+`--lib sharing_source` passed twenty-two tests (39.03 seconds), and
+`--lib purpose` passed fourteen tests (15.48 seconds), all with zero ignored.
+The actual three-voter Source reservation contract passed in 11.78 seconds;
+the three-voter purpose factory/master-proof contract passed in 9.81 seconds.
+Affected feature-enabled core/daemon all-target compilation passed in
+1 minute 8 seconds and Clippy with denied warnings passed in 1 minute 38 seconds.
+The actual fourth-learner raw admission/promotion capability-race regression
+passed in 11.44 seconds. These remain startup and Store receipts with the limits
+above; they do not qualify a live relay or promote the complete effort.
+
 ### S5 B remote activation checkpoint — delivery remains closed
 
 The receiver now has a distinct `remote_source` recipe with complete import,
@@ -3655,3 +3752,172 @@ memory-limit failures; the successful fresh compilation recorded zero OOM
 kills. This proves the pinned Source/B HTTP path and advertised alias, not an
 actual Tailscale, DERP, hardware-decoder or live playback scenario. Later
 combined candidates still require their own affected qualification before push.
+
+### Current playback-base startup integration qualification
+
+The actual Source startup factory checkpoint `ec2f82a1d` was integrated on
+`1ba0814b9`, which includes complete Source response construction, canonical
+zero preparation, strict Start decoding and B control projection. Pinned Rust
+1.97.1 passed Source schema tests (9, zero ignored, 109.76 seconds), Source
+binding regressions (22, zero ignored, 31.11 seconds), purpose regressions
+(14, zero ignored, 15.24 seconds) and the actual Source three-voter contract
+(1, zero ignored, 11.70 seconds). Feature all-target Clippy with denied
+warnings passed in 1 minute 36 seconds, and all four docs-index tests passed.
+This qualifies the integrated startup/storage tree; live Source/B actor,
+transport/body relay, hardware and real Tailscale acceptance remain open.
+
+### S5 receiver Source attachment, publication and attached renewal
+
+The dedicated receiver Store now attaches an exact Source result to an existing
+blocked B owner, publishes its canonical projected response and resolves the
+original starting request in one transaction, and renews an attached blocked
+or published owner. These are B metadata writers. The caller must verify the
+actual Source published response and seal/open its upstream capability with the
+selected B key and identity/import AAD; none of these methods admits Source
+physical work or infers Source authority from a persisted tuple.
+
+Every write repeats current original-login, idle policy, saved switch, import
+lifecycle, Source server/epoch and effective library authorization together with
+the exact B session/incarnation, owner node/epoch, pointer, request fingerprint,
+recipe and matching live job lease. The Source binding retains the complete
+reference, file/revision, request/session/incarnation UUIDs and exact sealed
+envelope. Envelope size is checked before parsing (four KiB), including its
+nonce/tag structural minimum; projected responses are canonical JSON objects
+bounded to sixty-four KiB. Partial or different bindings refuse without repair,
+replacement or rebinding. Exact replay performs no writes. Expired owners are
+not resurrected and leases are never shortened. Attached renewal updates the
+starting claim only while blocked; an already resolved request stays unchanged.
+The original null-only pending renewal remains separate.
+
+The existing receiver activation, adjunct and pending-renewal assertions also
+refuse before an INSERT trigger can suppress their failure. Their refused
+branch evaluates a fixed SQL expression error before the trigger runs, while
+the allowed branch emits no assertion row; the older named NOT-NULL error
+remains recognized. Both ordinary backend publication methods now exclude a
+remote recipe before returning a ready/resolved reply, requiring the dedicated
+current-login publication path. Other Source and general lifecycle assertions
+are outside this change. Ownership is confined to the receiver DTO/Store and
+its existing tests, plus the two publication methods in
+`store/sqlite/sessions.rs` and `store/hiqlite_sessions.rs`.
+
+On the complete intended-base integration with `726ed039e`, pinned Rust 1.97.1
+affected feature-enabled all-target compilation passed in 1 minute 10 seconds
+and Clippy with denied warnings passed in 1 minute 37 seconds. The
+`--lib sharing_receiver` filter passed three tests with zero ignored
+(19.72 seconds), including both SQLite storage modes and both principal
+layouts, stale/current-scope races, original-login loss, malformed/oversized
+envelopes, partial binding refusal, exact replay and ignored assertion/update
+rollback. The extended actual three-voter receiver contract passed in
+9.53 seconds; the existing Local activation/publication contract through
+`dyn Store` passed in 11.53 seconds. These Store fixtures do not qualify the
+HTTP actor, a live Source/B relay, delivery, progress ordering or two-NAT work.
+
+```sh
+cargo test --locked -p plurx-core --features hiqlite-contract-tests --lib sharing_receiver -- --nocapture
+cargo test --locked -p plurx-core --features hiqlite-contract-tests --test store_contract sharing_receiver_three_voters_atomic_admission_replay_scope_and_unresolved_retention -- --nocapture
+cargo test --locked -p plurx-core --features hiqlite-contract-tests --test store_contract media_session_activation_prepare_settle_contract_runs_through_dyn_store -- --nocapture
+cargo check --locked -p plurx-core -p plurxd --all-targets --features plurx-core/hiqlite-contract-tests
+cargo clippy --locked -p plurx-core -p plurxd --all-targets --features plurx-core/hiqlite-contract-tests -- -D warnings
+```
+
+### B Source Start dispatch — retained owner before sending
+
+`SharingManager::start_file_source` accepts the complete retained receiver
+intent and its existing blocked owner. Before peer lookup it compares the
+canonical private wrapper against the original complete playback request,
+allowing only replacement of `request_id` with the retained Source request
+UUID. The original B login, import, Source identity, library assignment and
+lifecycle must match the retained intent. The ordinary client request remains
+unchanged in the durable remote recipe.
+
+After the pinned peer handshake, the caller repeats current import authority,
+prepares fresh original-login authority, and atomically renews the existing
+blocked owner, pending claim and matching lease before the first Source send.
+The pseudonymous viewer comes from B's current assignment Store. The exchange
+uses the qualified bounded pinned Source Start transport without a retry.
+Once a complete Source result arrives, this method returns it to the owning
+task even if B's scope changed during the exchange: guarded B publication must
+repeat authority, while the known Source result remains a cleanup obligation.
+An error or dropped waiter proves no Source rollback.
+
+The method is a candidate owner seam; no viewer Start route, relay, control,
+delivery grant or restart cleanup is registered by this change. The focused
+recipe test checks retained nested playback selections, Source ID zero and an
+item ID above JavaScript's exact integer range, exact private request identity,
+unchanged original client request and refusal of a different parent login.
+It does not prove a real Source/B playback exchange.
+
+```sh
+cargo test -p plurxd --bin plurxd sharing_source_dispatch_retains_complete_receiver_recipe_and_private_request
+```
+
+### Candidate B owned Start task — no HTTP registration yet
+
+`shared_receiver_playback.rs` adds a bounded registry on the actual
+`SharingManager`. It captures the original B login and complete request before
+spawning a detached owner. An exact client retry joins the retained owner and
+keeps its original Source request UUID; a changed recipe, login, player or
+client key refuses. A failed or timed-out attempt remains an obligation and
+continues occupying its registry entry.
+
+The owner uses the actual Local principal to claim and assign B's request,
+then commits the guarded blocked remote session before sending Source Start.
+While waiting, it renews the pending request, owner and lease through fresh
+original-login authority. Immediately after receiving Source's complete
+result, it retains the actual authenticated Source credential, pseudonymous
+viewer, Source incarnation and response before any B Store await. The upstream
+capsule is sealed under the selected B master with the Upstream purpose and
+B-server/import AAD; its exact ciphertext is retained through attachment,
+publication and renewal. The public response projects session, playlist and
+control identity to the actual B owner.
+
+This finite owner accepts only the implemented full-film VOD lane with
+Source origin zero. Resume remains in the original engine request. It does
+not reinterpret an encoded origin or force an unsupported Source lane into
+copy. After guarded attachment and publication it renews the attached B
+metadata independently of Local worker renewal. A received Source result or
+an uncertain send is never released because a waiter times out or B loses
+its original login.
+
+The candidate is deliberately unregistered pending real Source HTTP/B Start
+qualification, fresh delivery/body grants, Source status/end settlement,
+relay, control and progress. Its registry tests qualify exact retry identity,
+complete request conflict, captured login, retained Source request identity,
+capacity and waiter-timeout retention; they are not physical Source/B proof.
+
+```sh
+cargo test -p plurxd --bin plurxd sharing_receiver_registry
+cargo test -p plurxd --bin plurxd source_copy_
+```
+
+### Combined startup stack regression
+
+The combined real Source actor fixture initially overflowed the default test
+thread stack during one-voter schema startup, before Source admission. A batch
+debugger identified `HiqliteAuthStore::migrate_schema` reserving 1,635,152 bytes
+in its polling frame. Raising the test stack would have hidden this startup
+failure. Migration transactions now collect their statements into one fixed
+vector representation and box the transaction future through a synchronous
+helper. SQL, parameter order, validation, deadlines and commit-unknown handling
+remain in the existing transaction and migration settlement paths.
+
+The learner/voter regression now uses the ordinary baseline version 70, while
+the Source-only installer retains version 71. Before the voter arm, the fixture
+removes migration-70 tables and restores version 69, so it exercises a real
+migration rather than only reopening an already-current schema. This regression
+passed on pinned Rust 1.97.1 with the default stack: one test, zero ignored,
+9.05 seconds. The actual Source response Body guard also checks its retained
+physical file fence when observing cancellation; a path replacement cannot
+remain authorized merely because the database still reports the old revision.
+
+```sh
+cargo test -p plurx-core --features hiqlite-store,hiqlite-contract-tests --lib a_learner_refuses_a_behind_schema_that_a_voter_migrates
+```
+
+On this combined tree, the six Source copy/admission/actor tests passed with
+zero ignored in 26.33 seconds, including physical file drift cancellation
+while a returned Body still holds settlement capacity. The two retained B
+registry tests and complete Source-dispatch recipe test also passed with zero
+ignored. Documentation index checks passed all four tests. These are focused
+integration receipts; the unregistered B candidate still requires the live
+HTTP, relay, delivery and cleanup qualification listed above.

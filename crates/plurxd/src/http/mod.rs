@@ -50,12 +50,19 @@ pub(crate) mod scan_identity;
 pub(crate) mod shared_artwork;
 pub(crate) mod shared_library;
 pub(crate) mod shared_playback;
+#[allow(dead_code)] // Owner remains unregistered until relay/control qualify.
+pub(crate) mod shared_receiver_playback;
 // Candidate projection helpers remain unregistered until Source/B lifecycle
 // authority and actual delivery binding are qualified.
 pub(crate) mod sharing;
 mod sharing_decision_decode;
 #[allow(dead_code)]
 mod sharing_playback_wire;
+#[allow(dead_code)]
+mod sharing_start_decode;
+pub(crate) use sharing_start_decode::{
+    decode_source_start_response, validate_source_start_request, DecodedSourceHlsStart,
+};
 pub(crate) mod stream;
 pub(crate) mod subtitle_downloads;
 pub(crate) mod system;
