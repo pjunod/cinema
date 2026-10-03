@@ -25,6 +25,9 @@ mod background_jobs;
 mod session_principals;
 #[path = "store_contract/sharing.rs"]
 mod sharing;
+#[cfg(feature = "hiqlite-contract-tests")]
+#[path = "store_contract/sharing_member_floor.rs"]
+mod sharing_member_floor;
 
 #[cfg(feature = "hiqlite-contract-tests")]
 use std::borrow::Cow;

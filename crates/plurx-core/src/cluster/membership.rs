@@ -2177,6 +2177,54 @@ pub fn sharing_session_principal_guard_predicate(
     )
 }
 
+/// Quorum observation used by the membership manager. `local_raft_id` must
+/// identify the serving member; identities outside the committed roster refuse.
+/// This is advisory evidence only; admission must still embed the SQL guard.
+pub async fn sharing_session_principal_floor_ready(
+    client: &Client,
+    local_raft_id: u64,
+) -> Result<bool, MembershipError> {
+    let before = client.metrics_db().await?;
+    let members = before
+        .membership_config
+        .nodes()
+        .map(|(id, _)| *id)
+        .collect::<BTreeSet<_>>();
+    if before.current_leader.is_none() || !members.contains(&local_raft_id) {
+        return Ok(false);
+    }
+    let members_json = bounded_committed_raft_ids_json(&members)?;
+    let now = unix_ms()?;
+    let cutoff = now.saturating_sub(PROTOCOL_CHANGE_ABSENCE_WINDOW_MS);
+    let rows = client
+        .query_consistent_map::<SharingPrincipalFloorRow, _>(
+            format!(
+                "SELECT CASE WHEN {} THEN 1 ELSE 0 END AS ready, \
+                 MIN(node.last_seen_at) AS oldest_heartbeat \
+                 FROM cluster_nodes AS node WHERE node.removed_at IS NULL",
+                sharing_session_principal_guard_predicate(1, 2, 3),
+            ),
+            params!(members_json, cutoff, now),
+        )
+        .await?;
+    let after = client.metrics_db().await?;
+    if after.current_leader.is_none()
+        || before.membership_config.log_id() != after.membership_config.log_id()
+        || members
+            != after
+                .membership_config
+                .nodes()
+                .map(|(id, _)| *id)
+                .collect::<BTreeSet<_>>()
+    {
+        return Ok(false);
+    }
+    let [row] = rows.as_slice() else {
+        return Ok(false);
+    };
+    Ok(sharing_principal_floor_observation_ready(row, unix_ms()?))
+}
+
 fn sharing_principal_floor_observation_ready(
     row: &SharingPrincipalFloorRow,
     observed_at: i64,
@@ -8495,46 +8543,7 @@ impl MembershipManager {
     /// the same guard in the Store admission write remain required separately.
     pub async fn sharing_session_principal_floor_ready(&self) -> Result<bool, MembershipError> {
         let inner = self.replicated_inner()?;
-        let before = inner.client.metrics_db().await?;
-        let members = before
-            .membership_config
-            .nodes()
-            .map(|(id, _)| *id)
-            .collect::<BTreeSet<_>>();
-        if before.current_leader.is_none() || !members.contains(&inner.identity.raft_id) {
-            return Ok(false);
-        }
-        let members_json = bounded_committed_raft_ids_json(&members)?;
-        let now = unix_ms()?;
-        let cutoff = now.saturating_sub(PROTOCOL_CHANGE_ABSENCE_WINDOW_MS);
-        let rows = inner
-            .client
-            .query_consistent_map::<SharingPrincipalFloorRow, _>(
-                format!(
-                    "SELECT CASE WHEN {} THEN 1 ELSE 0 END AS ready, \
-                     MIN(node.last_seen_at) AS oldest_heartbeat \
-                     FROM cluster_nodes AS node WHERE node.removed_at IS NULL",
-                    sharing_session_principal_guard_predicate(1, 2, 3),
-                ),
-                params!(members_json, cutoff, now),
-            )
-            .await?;
-        let after = inner.client.metrics_db().await?;
-        if after.current_leader.is_none()
-            || before.membership_config.log_id() != after.membership_config.log_id()
-            || members
-                != after
-                    .membership_config
-                    .nodes()
-                    .map(|(id, _)| *id)
-                    .collect::<BTreeSet<_>>()
-        {
-            return Ok(false);
-        }
-        let [row] = rows.as_slice() else {
-            return Ok(false);
-        };
-        Ok(sharing_principal_floor_observation_ready(row, unix_ms()?))
+        sharing_session_principal_floor_ready(&inner.client, inner.identity.raft_id).await
     }
 
     /// Active nodes that cannot currently prove the always-compiled live-TV
