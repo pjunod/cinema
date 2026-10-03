@@ -29,12 +29,32 @@ const MAX_TERMINAL_ACK_BYTES: usize = 64 * 1024;
 const TAKEOVER_RECOVERY_MS: i64 = 60 * 1_000;
 const FAILED_RETENTION_MS: i64 = 60 * 60 * 1_000;
 const RESOLVED_RETENTION_MS: i64 = 24 * 60 * 60 * 1_000;
-const ROUTE_COLS: &str = "incarnation_id, session_id, user_id, playback_id, \
+const LEGACY_ROUTE_COLS: &str = "incarnation_id, session_id, user_id, playback_id, \
     request_fingerprint, owner_node_id, owner_epoch, lease_expires_at_ms, state, terminal_reason, \
     publication_ready_at_ms, recipe_json, response_json, produced_playable_through_ms, fetched_through_ms, \
     media_origin_ms, media_sequence, discontinuity_sequence, updated_at_ms, recovery_epoch, \
     drain_deadline_ms, ('local:' || user_id) AS owner_key, \
     'local' AS principal_kind, NULL AS share_grant_id, NULL AS share_viewer_key";
+
+const PRINCIPAL_ROUTE_COLS: &str = "incarnation_id, session_id, user_id, playback_id, \
+    request_fingerprint, owner_node_id, owner_epoch, lease_expires_at_ms, state, terminal_reason, \
+    publication_ready_at_ms, recipe_json, response_json, produced_playable_through_ms, fetched_through_ms, \
+    media_origin_ms, media_sequence, discontinuity_sequence, updated_at_ms, recovery_epoch, \
+    drain_deadline_ms, owner_key, principal_kind, share_grant_id, share_viewer_key";
+
+fn route_projection(conn: &rusqlite::Connection) -> rusqlite::Result<&'static str> {
+    let columns: i64 = conn
+        .prepare_cached(
+            "SELECT count(*) FROM pragma_table_info('media_sessions')
+         WHERE name IN ('owner_key','principal_kind','share_grant_id','share_viewer_key')",
+        )?
+        .query_row([], |row| row.get(0))?;
+    match columns {
+        0 => Ok(LEGACY_ROUTE_COLS),
+        4 => Ok(PRINCIPAL_ROUTE_COLS),
+        _ => Err(rusqlite::Error::InvalidQuery),
+    }
+}
 
 fn route_from_row(row: &Row<'_>) -> rusqlite::Result<MediaSessionRoute> {
     let kind: String = row.get(22)?;
@@ -424,7 +444,10 @@ fn prepare_within(
         return if replay {
             Ok(tx
                 .query_row(
-                    &format!("SELECT {ROUTE_COLS} FROM media_sessions WHERE incarnation_id = ?1"),
+                    &format!(
+                        "SELECT {route_cols} FROM media_sessions WHERE incarnation_id = ?1",
+                        route_cols = route_projection(tx)?
+                    ),
                     [preparation.incarnation_id.as_str()],
                     route_from_row,
                 )
@@ -581,7 +604,10 @@ fn prepare_within(
     )?;
     Ok(tx
         .query_row(
-            &format!("SELECT {ROUTE_COLS} FROM media_sessions WHERE incarnation_id = ?1"),
+            &format!(
+                "SELECT {route_cols} FROM media_sessions WHERE incarnation_id = ?1",
+                route_cols = route_projection(tx)?
+            ),
             [preparation.incarnation_id.as_str()],
             route_from_row,
         )
@@ -779,7 +805,8 @@ impl MediaSessionStore for SqliteStore {
                     } else if state == "resolved" {
                         tx.query_row(
                             &format!(
-                                "SELECT {ROUTE_COLS} FROM media_sessions WHERE incarnation_id = ?1"
+                                "SELECT {route_cols} FROM media_sessions WHERE incarnation_id = ?1",
+                                route_cols = route_projection(conn)?
                             ),
                             [existing_incarnation.as_str()],
                             route_from_row,
@@ -956,9 +983,7 @@ impl MediaSessionStore for SqliteStore {
             if current_pointer.as_deref() == Some(activation.incarnation_id.as_str()) {
                 let route = tx
                     .query_row(
-                        &format!(
-                            "SELECT {ROUTE_COLS} FROM media_sessions WHERE incarnation_id = ?1"
-                        ),
+                        &format!("SELECT {route_cols} FROM media_sessions WHERE incarnation_id = ?1", route_cols = route_projection(conn)?),
                         [activation.incarnation_id.as_str()],
                         route_from_row,
                     )
@@ -974,9 +999,7 @@ impl MediaSessionStore for SqliteStore {
                 {
                     Some(incarnation_id) => tx
                         .query_row(
-                            &format!(
-                                "SELECT {ROUTE_COLS} FROM media_sessions WHERE incarnation_id = ?1"
-                            ),
+                            &format!("SELECT {route_cols} FROM media_sessions WHERE incarnation_id = ?1", route_cols = route_projection(conn)?),
                             [incarnation_id],
                             route_from_row,
                         )
@@ -1086,13 +1109,11 @@ impl MediaSessionStore for SqliteStore {
             }
             let predecessor = tx
                 .query_row(
-                    &format!(
-                        "SELECT {ROUTE_COLS} FROM media_sessions
+                    &format!("SELECT {route_cols} FROM media_sessions
                           WHERE incarnation_id = (
                             SELECT current_incarnation_id FROM media_playback_pointers
                              WHERE user_id = ?1 AND playback_id = ?2)
-                            AND incarnation_id != ?3"
-                    ),
+                            AND incarnation_id != ?3", route_cols = route_projection(conn)?),
                     params![
                         crate::store::local_media_principal_id(&activation.principal)?,
                         activation.playback_id,
@@ -1218,7 +1239,7 @@ impl MediaSessionStore for SqliteStore {
             )?;
             let route = tx
                 .query_row(
-                    &format!("SELECT {ROUTE_COLS} FROM media_sessions WHERE incarnation_id = ?1"),
+                    &format!("SELECT {route_cols} FROM media_sessions WHERE incarnation_id = ?1", route_cols = route_projection(conn)?),
                     [activation.incarnation_id.as_str()],
                     route_from_row,
                 )
@@ -1292,9 +1313,7 @@ impl MediaSessionStore for SqliteStore {
             let predecessor = match predecessor {
                 Some(predecessor) => tx
                     .query_row(
-                        &format!(
-                            "SELECT {ROUTE_COLS} FROM media_sessions WHERE incarnation_id = ?1"
-                        ),
+                        &format!("SELECT {route_cols} FROM media_sessions WHERE incarnation_id = ?1", route_cols = route_projection(conn)?),
                         [predecessor.incarnation_id.as_str()],
                         route_from_row,
                     )
@@ -1324,7 +1343,7 @@ impl MediaSessionStore for SqliteStore {
             let tx = conn.unchecked_transaction()?;
             let route = tx
                 .query_row(
-                    &format!("SELECT {ROUTE_COLS} FROM media_sessions WHERE incarnation_id = ?1"),
+                    &format!("SELECT {route_cols} FROM media_sessions WHERE incarnation_id = ?1", route_cols = route_projection(conn)?),
                     [activation.incarnation_id.as_str()],
                     route_from_row,
                 )
@@ -1580,7 +1599,7 @@ impl MediaSessionStore for SqliteStore {
             let route = tx
                 .query_row(
                     &format!(
-                        "SELECT {ROUTE_COLS} FROM media_sessions route
+                        "SELECT {route_cols} FROM media_sessions route
                           WHERE route.user_id = ?1 AND route.incarnation_id = ?2
                             AND route.state = 'active'
                             AND route.publication_ready_at_ms = 0
@@ -1593,7 +1612,8 @@ impl MediaSessionStore for SqliteStore {
                                 AND request.request_fingerprint = route.request_fingerprint
                                 AND request.playback_id = route.playback_id
                                 AND (request.state = 'resolved'
-                                  OR request.owner_node_id = route.owner_node_id))"
+                                  OR request.owner_node_id = route.owner_node_id))",
+                        route_cols = route_projection(conn)?
                     ),
                     params![user_id, incarnation_id, now_ms, request_id],
                     route_from_row,
@@ -1705,7 +1725,10 @@ impl MediaSessionStore for SqliteStore {
             };
             let route = tx
                 .query_row(
-                    &format!("SELECT {ROUTE_COLS} FROM media_sessions WHERE incarnation_id = ?1"),
+                    &format!(
+                        "SELECT {route_cols} FROM media_sessions WHERE incarnation_id = ?1",
+                        route_cols = route_projection(conn)?
+                    ),
                     [incarnation_id.as_str()],
                     route_from_row,
                 )
@@ -1884,7 +1907,8 @@ impl MediaSessionStore for SqliteStore {
                 let route = tx
                     .query_row(
                         &format!(
-                            "SELECT {ROUTE_COLS} FROM media_sessions WHERE incarnation_id = ?1"
+                            "SELECT {route_cols} FROM media_sessions WHERE incarnation_id = ?1",
+                            route_cols = route_projection(conn)?
                         ),
                         [preparation.incarnation_id.as_str()],
                         route_from_row,
@@ -1930,7 +1954,10 @@ impl MediaSessionStore for SqliteStore {
             // a wrong named incarnation from being reported as a rejoin.
             let named_was_replaced = tx
                 .query_row(
-                    &format!("SELECT {ROUTE_COLS} FROM media_sessions WHERE incarnation_id = ?1"),
+                    &format!(
+                        "SELECT {route_cols} FROM media_sessions WHERE incarnation_id = ?1",
+                        route_cols = route_projection(conn)?
+                    ),
                     [staged_incarnation_id.as_str()],
                     route_from_row,
                 )
@@ -2034,13 +2061,11 @@ impl MediaSessionStore for SqliteStore {
                 // already happened and its outcome is the truthful answer.
                 let route = tx
                     .query_row(
-                        &format!(
-                            "SELECT {ROUTE_COLS} FROM media_sessions
+                        &format!("SELECT {route_cols} FROM media_sessions
                               WHERE incarnation_id = (SELECT current_incarnation_id
                                 FROM media_playback_pointers
                                  WHERE user_id = ?1 AND playback_id = ?2)
-                                AND incarnation_id = ?3"
-                        ),
+                                AND incarnation_id = ?3", route_cols = route_projection(conn)?),
                         params![user_id, playback_id, staged_incarnation_id],
                         route_from_row,
                     )
@@ -2179,7 +2204,7 @@ impl MediaSessionStore for SqliteStore {
             )?;
             let predecessor = tx
                 .query_row(
-                    &format!("SELECT {ROUTE_COLS} FROM media_sessions WHERE incarnation_id = ?1"),
+                    &format!("SELECT {route_cols} FROM media_sessions WHERE incarnation_id = ?1", route_cols = route_projection(conn)?),
                     [staged.expected_predecessor_incarnation_id.as_str()],
                     route_from_row,
                 )
@@ -2283,13 +2308,11 @@ impl MediaSessionStore for SqliteStore {
             // `rows_affected`, so a replay reads the same as a first commit.
             let route = tx
                 .query_row(
-                    &format!(
-                        "SELECT {ROUTE_COLS} FROM media_sessions
+                    &format!("SELECT {route_cols} FROM media_sessions
                           WHERE incarnation_id = (SELECT current_incarnation_id
                             FROM media_playback_pointers
                              WHERE user_id = ?1 AND playback_id = ?2)
-                            AND incarnation_id = ?3"
-                    ),
+                            AND incarnation_id = ?3", route_cols = route_projection(conn)?),
                     params![user_id, playback_id, staged.staged_incarnation_id],
                     route_from_row,
                 )
@@ -2308,9 +2331,7 @@ impl MediaSessionStore for SqliteStore {
             let predecessor = match predecessor {
                 Some(previous) => tx
                     .query_row(
-                        &format!(
-                            "SELECT {ROUTE_COLS} FROM media_sessions WHERE incarnation_id = ?1"
-                        ),
+                        &format!("SELECT {route_cols} FROM media_sessions WHERE incarnation_id = ?1", route_cols = route_projection(conn)?),
                         [previous.incarnation_id.as_str()],
                         route_from_row,
                     )
@@ -2414,7 +2435,10 @@ impl MediaSessionStore for SqliteStore {
             // the playback the caller named.
             let route = tx
                 .query_row(
-                    &format!("SELECT {ROUTE_COLS} FROM media_sessions WHERE incarnation_id = ?1"),
+                    &format!(
+                        "SELECT {route_cols} FROM media_sessions WHERE incarnation_id = ?1",
+                        route_cols = route_projection(conn)?
+                    ),
                     [request.staged_incarnation_id.as_str()],
                     route_from_row,
                 )
@@ -2472,7 +2496,10 @@ impl MediaSessionStore for SqliteStore {
             )?;
             let route = tx
                 .query_row(
-                    &format!("SELECT {ROUTE_COLS} FROM media_sessions WHERE incarnation_id = ?1"),
+                    &format!(
+                        "SELECT {route_cols} FROM media_sessions WHERE incarnation_id = ?1",
+                        route_cols = route_projection(conn)?
+                    ),
                     [incarnation_id.as_str()],
                     route_from_row,
                 )
@@ -2528,7 +2555,10 @@ impl MediaSessionStore for SqliteStore {
             )?;
             let route = tx
                 .query_row(
-                    &format!("SELECT {ROUTE_COLS} FROM media_sessions WHERE incarnation_id = ?1"),
+                    &format!(
+                        "SELECT {route_cols} FROM media_sessions WHERE incarnation_id = ?1",
+                        route_cols = route_projection(conn)?
+                    ),
                     [incarnation_id.as_str()],
                     route_from_row,
                 )
@@ -2601,7 +2631,10 @@ impl MediaSessionStore for SqliteStore {
             };
             let route = tx
                 .query_row(
-                    &format!("SELECT {ROUTE_COLS} FROM media_sessions WHERE incarnation_id = ?1"),
+                    &format!(
+                        "SELECT {route_cols} FROM media_sessions WHERE incarnation_id = ?1",
+                        route_cols = route_projection(conn)?
+                    ),
                     [incarnation_id.as_str()],
                     route_from_row,
                 )
@@ -2658,7 +2691,10 @@ impl MediaSessionStore for SqliteStore {
         self.with_read(move |conn| {
             Ok(conn
                 .query_row(
-                    &format!("SELECT {ROUTE_COLS} FROM media_sessions WHERE session_id = ?1"),
+                    &format!(
+                        "SELECT {route_cols} FROM media_sessions WHERE session_id = ?1",
+                        route_cols = route_projection(conn)?
+                    ),
                     [session_id],
                     route_from_row,
                 )
@@ -2678,7 +2714,10 @@ impl MediaSessionStore for SqliteStore {
         self.with_read(move |conn| {
             Ok(conn
                 .query_row(
-                    &format!("SELECT {ROUTE_COLS} FROM media_sessions WHERE incarnation_id = ?1"),
+                    &format!(
+                        "SELECT {route_cols} FROM media_sessions WHERE incarnation_id = ?1",
+                        route_cols = route_projection(conn)?
+                    ),
                     [incarnation_id],
                     route_from_row,
                 )
@@ -2709,10 +2748,11 @@ impl MediaSessionStore for SqliteStore {
             Ok(conn
                 .query_row(
                     &format!(
-                        "SELECT {ROUTE_COLS} FROM media_sessions
+                        "SELECT {route_cols} FROM media_sessions
                           WHERE incarnation_id = (SELECT current_incarnation_id
                             FROM media_playback_pointers
-                            WHERE user_id = ?1 AND playback_id = ?2)"
+                            WHERE user_id = ?1 AND playback_id = ?2)",
+                        route_cols = route_projection(conn)?
                     ),
                     params![user_id, playback_id],
                     route_from_row,
@@ -3059,7 +3099,7 @@ impl MediaSessionStore for SqliteStore {
         };
         self.with_read(move |conn| {
             let mut statement = conn.prepare(&format!(
-                "SELECT {ROUTE_COLS} FROM media_sessions
+                "SELECT {route_cols} FROM media_sessions
                   WHERE state = 'active' AND lease_expires_at_ms <= ?1
                     AND publication_ready_at_ms != ?6
                     -- A draining predecessor is not work to inherit. Its
@@ -3077,7 +3117,8 @@ impl MediaSessionStore for SqliteStore {
                         AND request.claim_expires_at_ms <= media_sessions.lease_expires_at_ms)
                     AND (?2 = 0 OR lease_expires_at_ms > ?3
                       OR (lease_expires_at_ms = ?3 AND incarnation_id > ?4))
-                  ORDER BY lease_expires_at_ms, incarnation_id LIMIT ?5"
+                  ORDER BY lease_expires_at_ms, incarnation_id LIMIT ?5",
+                route_cols = route_projection(conn)?
             ))?;
             let routes = statement
                 .query_map(
@@ -3110,7 +3151,7 @@ impl MediaSessionStore for SqliteStore {
             let route = tx
                 .query_row(
                     &format!(
-                        "SELECT {ROUTE_COLS} FROM media_sessions session
+                        "SELECT {route_cols} FROM media_sessions session
                           WHERE incarnation_id = ?1 AND owner_node_id = ?2
                             AND owner_epoch = ?3 AND state = 'active'
                             AND lease_expires_at_ms <= ?4
@@ -3133,7 +3174,8 @@ impl MediaSessionStore for SqliteStore {
                                 AND lease.expires_at_ms = session.lease_expires_at_ms
                                 AND lease.expires_at_ms <= ?4
                                 AND lease.fence < 9223372036854775807
-                                AND lease.revision < 9223372036854775807)"
+                                AND lease.revision < 9223372036854775807)",
+                        route_cols = route_projection(conn)?
                     ),
                     params![
                         takeover.incarnation_id,
@@ -3296,11 +3338,9 @@ impl MediaSessionStore for SqliteStore {
             let tx = conn.unchecked_transaction()?;
             let mut route = tx
                 .query_row(
-                    &format!(
-                        "SELECT {ROUTE_COLS} FROM media_sessions
+                    &format!("SELECT {route_cols} FROM media_sessions
                           WHERE incarnation_id = ?1 AND session_id = ?2
-                            AND owner_node_id = ?3 AND owner_epoch = ?4"
-                    ),
+                            AND owner_node_id = ?3 AND owner_epoch = ?4", route_cols = route_projection(conn)?),
                     params![
                         end.incarnation_id,
                         end.session_id,
@@ -3398,7 +3438,10 @@ impl MediaSessionStore for SqliteStore {
             let tx = conn.unchecked_transaction()?;
             let mut route = tx
                 .query_row(
-                    &format!("SELECT {ROUTE_COLS} FROM media_sessions WHERE session_id = ?1"),
+                    &format!(
+                        "SELECT {route_cols} FROM media_sessions WHERE session_id = ?1",
+                        route_cols = route_projection(conn)?
+                    ),
                     [session_id.as_str()],
                     route_from_row,
                 )
@@ -3974,6 +4017,58 @@ fn read_recovery_row(
 #[cfg(test)]
 mod sharing_route_decoder_tests {
     use super::*;
+
+    #[tokio::test]
+    async fn sharing_route_reads_rebuilt_sqlite_rows_without_a_local_user() {
+        let directory = tempfile::tempdir().expect("pooled store directory");
+        for store in [
+            SqliteStore::open_in_memory().expect("in-memory store"),
+            SqliteStore::open(&directory.path().join("store.db")).expect("pooled store"),
+        ] {
+            store
+                .with_conn(|conn| {
+                    conn.execute_batch(include_str!(
+                        "../../../tests/fixtures/session-principal-local.sql"
+                    ))?;
+                    conn.execute_batch("BEGIN IMMEDIATE")?;
+                    conn.execute_batch(crate::store::MEDIA_SESSION_PRINCIPAL_REBUILD_SCHEMA)?;
+                    conn.execute_batch("COMMIT")?;
+                    conn.execute_batch(include_str!(
+                        "../../../tests/fixtures/session-principal-sharing.sql"
+                    ))?;
+                    Ok(())
+                })
+                .await
+                .expect("rebuild and populate");
+            for id in [
+                "00000000-0000-4000-a000-000000000001",
+                "00000000-0000-4000-a000-000000000002",
+            ] {
+                let route = store
+                    .media_session_route_by_incarnation(id)
+                    .await
+                    .expect("typed route read")
+                    .expect("route");
+                assert_eq!(
+                    route.principal,
+                    crate::playback_principal::PlaybackPrincipal::sharing(
+                        uuid::Uuid::parse_str(id).expect("grant"),
+                        &"a".repeat(64)
+                    )
+                    .expect("principal")
+                );
+                assert_eq!(route.principal.local_user_id(), None);
+            }
+        }
+    }
+
+    #[test]
+    fn sharing_route_projection_refuses_an_incomplete_rebuild() {
+        let conn = rusqlite::Connection::open_in_memory().expect("connection");
+        conn.execute_batch("CREATE TABLE media_sessions(user_id INTEGER, owner_key TEXT)")
+            .expect("partial schema");
+        assert!(route_projection(&conn).is_err());
+    }
 
     #[test]
     fn sharing_route_decoder_preserves_namespace_and_refuses_corrupt_projection() {

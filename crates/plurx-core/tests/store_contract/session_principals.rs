@@ -220,6 +220,25 @@ async fn sharing_principal_owner_deletion_and_revocation_fence_three_voter_autho
     {
         result.expect("populate two independent grants");
     }
+    for id in [
+        "00000000-0000-4000-a000-000000000001",
+        "00000000-0000-4000-a000-000000000002",
+    ] {
+        let route = store
+            .media_session_route_by_incarnation(id)
+            .await
+            .expect("production route read after rebuilt schema")
+            .expect("sharing route");
+        assert_eq!(
+            route.principal,
+            plurx_core::playback_principal::PlaybackPrincipal::sharing(
+                uuid::Uuid::parse_str(id).expect("grant UUID"),
+                &"a".repeat(64)
+            )
+            .expect("principal")
+        );
+        assert_eq!(route.principal.local_user_id(), None);
+    }
     client
         .execute("DELETE FROM users WHERE id=1", hiqlite::params!())
         .await

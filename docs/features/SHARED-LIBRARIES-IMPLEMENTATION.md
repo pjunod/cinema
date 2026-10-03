@@ -1878,3 +1878,23 @@ installation and member-floor qualification remain open.
 ```sh
 cargo test --locked -p plurx-core --features hiqlite-store --lib sharing_route_ -- --nocapture
 ```
+
+**Rebuilt route reader checkpoint:** production route queries now select
+stored principal columns from a complete rebuilt table, retaining the explicit
+local projection on the legacy table. A partial rebuild is refused. SQLite
+checks the schema within its connection; Hiqlite caches the quorum-observed
+shape for the Store lifetime, which is fixed between coordinated restarts.
+That cache proves neither grant authority nor member compatibility. Five
+route tests passed (zero ignored, 0.71 seconds), including actual rebuilt
+rows in memory and the pooled SQLite store. Both three-voter candidate
+contracts passed (zero ignored, 18.42 seconds), now exercising production
+route reads for two distinct grants with no local user ID. All 28 existing local/replicated media-session contracts passed
+(zero ignored, 256.32 seconds), including preparation, rejoin, replay,
+cap enforcement and terminal retention; denied-warning Clippy passed with
+`hiqlite-contract-tests`. Writer queries, installation and the mixed-version
+floor remain open.
+
+```sh
+cargo test --locked -p plurx-core --features hiqlite-store --lib sharing_route_ -- --nocapture
+cargo test --locked -p plurx-core --features hiqlite-contract-tests --test store_contract session_principals -- --nocapture
+```

@@ -305,12 +305,61 @@ pub(super) async fn install_schema(client: &hiqlite::Client) -> Result<(), Store
     Ok(())
 }
 
-const ROUTE_COLS: &str = "incarnation_id, session_id, user_id, playback_id,
+const LEGACY_ROUTE_COLS: &str = "incarnation_id, session_id, user_id, playback_id,
     request_fingerprint, owner_node_id, owner_epoch, lease_expires_at_ms, state, terminal_reason,
     publication_ready_at_ms, recipe_json, response_json, produced_playable_through_ms, fetched_through_ms,
     media_origin_ms, media_sequence, discontinuity_sequence, updated_at_ms, recovery_epoch,
     drain_deadline_ms, ('local:' || user_id) AS owner_key,
     'local' AS principal_kind, NULL AS share_grant_id, NULL AS share_viewer_key";
+
+const PRINCIPAL_ROUTE_COLS: &str = "incarnation_id, session_id, user_id, playback_id,
+    request_fingerprint, owner_node_id, owner_epoch, lease_expires_at_ms, state, terminal_reason,
+    publication_ready_at_ms, recipe_json, response_json, produced_playable_through_ms, fetched_through_ms,
+    media_origin_ms, media_sequence, discontinuity_sequence, updated_at_ms, recovery_epoch,
+    drain_deadline_ms, owner_key, principal_kind, share_grant_id, share_viewer_key";
+
+struct RouteProjectionRow(Result<i64, StoreError>);
+impl From<&mut Row<'_>> for RouteProjectionRow {
+    fn from(row: &mut Row<'_>) -> Self {
+        Self(row.try_get("columns").map_err(database_error))
+    }
+}
+async fn route_projection(store: &HiqliteAuthStore) -> Result<&'static str, StoreError> {
+    use std::sync::atomic::Ordering;
+    // Runtime installation is a coordinated schema transition. A Store is
+    // constructed after install_schema; its schema shape stays fixed until
+    // that process restarts. This cache is no grant or membership authority.
+    match store.media_session_projection.load(Ordering::Acquire) {
+        1 => return Ok(LEGACY_ROUTE_COLS),
+        2 => return Ok(PRINCIPAL_ROUTE_COLS),
+        _ => {}
+    }
+    let columns = store
+        .client()
+        .query_consistent_map::<RouteProjectionRow, _>(
+            "SELECT count(*) AS columns FROM pragma_table_info('media_sessions')
+         WHERE name IN ('owner_key','principal_kind','share_grant_id','share_viewer_key')",
+            params!(),
+        )
+        .await?
+        .into_iter()
+        .next()
+        .ok_or_else(|| StoreError::Task("missing media-session schema projection".into()))?
+        .0?;
+    let (mode, projection) = match columns {
+        0 => (1, LEGACY_ROUTE_COLS),
+        4 => (2, PRINCIPAL_ROUTE_COLS),
+        _ => {
+            return Err(StoreError::Task(
+                "incomplete media-session principal schema".into(),
+            ))
+        }
+    };
+    store
+        .media_session_projection
+        .store(mode, Ordering::Release);
+    Ok(projection)
+}
 
 struct RouteRow(Result<MediaSessionRoute, StoreError>);
 
@@ -1180,7 +1229,8 @@ async fn route_by(
     column: &str,
     value: &str,
 ) -> Result<Option<MediaSessionRoute>, StoreError> {
-    let sql = format!("SELECT {ROUTE_COLS} FROM media_sessions WHERE {column} = $1");
+    let route_cols = route_projection(store).await?;
+    let sql = format!("SELECT {route_cols} FROM media_sessions WHERE {column} = $1");
     validate_sql(&sql)?;
     store
         .client()
@@ -3752,8 +3802,9 @@ impl MediaSessionStore for HiqliteAuthStore {
             }
             None => (0_i64, 0_i64, String::new()),
         };
+        let route_cols = route_projection(self).await?;
         let sql = format!(
-            "SELECT {ROUTE_COLS} FROM media_sessions
+            "SELECT {route_cols} FROM media_sessions
               WHERE state = 'active' AND lease_expires_at_ms <= $1
                 AND publication_ready_at_ms != $2
                 -- A draining predecessor is not work to inherit; the sweep
