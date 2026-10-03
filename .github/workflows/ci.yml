@@ -7,6 +7,19 @@ on:
   push:
     tags: ["v*"]
   workflow_dispatch:
+    inputs:
+      promotion_pr:
+        description: "Optional open same-repo effort/integration promotion PR to main"
+        required: false
+        default: ""
+      promotion_head_sha:
+        description: "Immutable promotion head SHA; dispatch on that head branch"
+        required: false
+        default: ""
+      promotion_base_sha:
+        description: "Immutable current main SHA already merged into the promotion head"
+        required: false
+        default: ""
 
 env:
   CARGO_TERM_COLOR: always
@@ -54,11 +67,25 @@ jobs:
       docs_only: ${{ steps.scope.outputs.docs_only }}
       qualification: ${{ steps.scope.outputs.qualification }}
       execution_mode: ${{ steps.execution_mode.outputs.mode }}
+      promotion_binding: ${{ steps.promotion.outputs.promotion_binding }}
+      promotion_pr: ${{ steps.promotion.outputs.promotion_pr }}
+      promotion_base_sha: ${{ steps.promotion.outputs.promotion_base_sha }}
     steps:
       - uses: https://data.forgejo.org/actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           persist-credentials: false
           fetch-depth: 0
+      - name: Bind the manual qualification to its actual promotion PR
+        id: promotion
+        if: >-
+          github.event_name == 'workflow_dispatch' &&
+          (inputs.promotion_pr != '' || inputs.promotion_head_sha != '' || inputs.promotion_base_sha != '')
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          PLURX_PROMOTION_PR: ${{ inputs.promotion_pr }}
+          PLURX_PROMOTION_HEAD_SHA: ${{ inputs.promotion_head_sha }}
+          PLURX_PROMOTION_BASE_SHA: ${{ inputs.promotion_base_sha }}
+        run: python3 -m validation.qualification --bind-manual >> "$GITHUB_OUTPUT"
       - name: Select affected CI surfaces
         id: scope
         env:
@@ -66,9 +93,16 @@ jobs:
           VALIDATION_BASE: ${{ github.event.pull_request.base.sha || github.event.before }}
           HEAD_REF: ${{ github.event.pull_request.head.ref }}
           BASE_REF: ${{ github.event.pull_request.base.ref }}
+          PROMOTION_BINDING: ${{ steps.promotion.outputs.promotion_binding }}
+          PROMOTION_BASE_SHA: ${{ steps.promotion.outputs.promotion_base_sha }}
         run: |
           scope_event="$EVENT_NAME"
           qualification=false
+          if [ -n "$PROMOTION_BINDING" ]; then
+            scope_event=effort_qualification
+            qualification=true
+            VALIDATION_BASE="$PROMOTION_BASE_SHA"
+          fi
           if [ "$EVENT_NAME" = pull_request ] \
             && [ "$BASE_REF" = main ]; then
             case "$HEAD_REF" in
@@ -111,19 +145,27 @@ jobs:
       # actually ships, while the recorded base still scopes which release
       # inputs this branch touched.
       - name: Resolve the current merge target
-        if: github.event_name == 'pull_request'
+        if: github.event_name == 'pull_request' || needs.scope.outputs.qualification == 'true'
         env:
           BASE_REF: ${{ github.event.pull_request.base.ref }}
           GITHUB_TOKEN: ${{ github.token }}
+          BOUND_BASE_SHA: ${{ needs.scope.outputs.promotion_base_sha }}
         run: |
+          set -euo pipefail
+          if [ -n "$BOUND_BASE_SHA" ]; then BASE_REF=main; fi
           auth="$(printf 'x-access-token:%s' "$GITHUB_TOKEN" | base64 | tr -d '\n')"
           git -c http.extraheader="AUTHORIZATION: basic $auth" fetch --no-tags --force origin \
             "+refs/heads/$BASE_REF:refs/remotes/origin/$BASE_REF"
+          if [ -n "$BOUND_BASE_SHA" ]; then
+            test "$(git rev-parse "origin/$BASE_REF")" = "$BOUND_BASE_SHA"
+          fi
           echo "MERGE_TARGET=origin/$BASE_REF" >> "$GITHUB_ENV"
       - name: Check mobile release hygiene
         env:
           VALIDATION_BASE: ${{ github.event.pull_request.base.sha || github.event.before }}
+          BOUND_BASE_SHA: ${{ needs.scope.outputs.promotion_base_sha }}
         run: |
+          if [ -n "$BOUND_BASE_SHA" ]; then VALIDATION_BASE="$BOUND_BASE_SHA"; fi
           if [ -n "$VALIDATION_BASE" ] \
             && git cat-file -e "$VALIDATION_BASE^{commit}" 2>/dev/null; then
             PLURX_VALIDATION_MODE=changed-from \
@@ -1478,7 +1520,10 @@ jobs:
   publish:
     name: publish image (local registry)
     needs: [check, package_smoke]
-    if: startsWith(github.ref, 'refs/tags/v')
+    if: >-
+      startsWith(github.ref, 'refs/tags/v') && inputs.promotion_pr == '' &&
+      inputs.promotion_head_sha == '' && inputs.promotion_base_sha == '' &&
+      needs.scope.outputs.qualification != 'true'
     uses: ./.github/workflows/publish-release.yml
     with:
       release_tag: ${{ github.ref_name }}
@@ -1509,7 +1554,9 @@ jobs:
       - package_smoke
     if: >-
       always() && github.event_name == 'workflow_dispatch' &&
-      github.ref == 'refs/heads/main'
+      github.ref == 'refs/heads/main' && inputs.promotion_pr == '' &&
+      inputs.promotion_head_sha == '' && inputs.promotion_base_sha == '' &&
+      needs.scope.outputs.qualification != 'true'
     runs-on: [self-hosted, Linux, X64, lab, general, high-cpu]
     timeout-minutes: 90
     concurrency:
@@ -1582,7 +1629,10 @@ jobs:
   # its surface was unaffected.
   pr_gate:
     name: Main promotion gate
-    if: always() && github.event_name == 'pull_request'
+    if: >-
+      always() && (github.event_name == 'pull_request' ||
+        (github.event_name == 'workflow_dispatch' &&
+          (inputs.promotion_pr != '' || inputs.promotion_head_sha != '' || inputs.promotion_base_sha != '')))
     needs:
       - scope
       - mobile_version
@@ -1642,7 +1692,7 @@ jobs:
           persist-credentials: false
           fetch-depth: 0
       - name: Resolve the current qualification refs
-        if: needs.scope.outputs.qualification == 'true'
+        if: needs.scope.outputs.qualification == 'true' && github.event_name == 'pull_request'
         env:
           HEAD_REF: ${{ github.event.pull_request.head.ref }}
           BASE_REF: ${{ github.event.pull_request.base.ref }}
@@ -1663,16 +1713,29 @@ jobs:
           PLURX_PULL_REQUEST: ${{ github.event.pull_request.number }}
           PLURX_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
           PLURX_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          GITHUB_TOKEN: ${{ github.token }}
+          PLURX_PROMOTION_PR: ${{ inputs.promotion_pr }}
+          PLURX_PROMOTION_HEAD_SHA: ${{ inputs.promotion_head_sha }}
+          PLURX_PROMOTION_BASE_SHA: ${{ inputs.promotion_base_sha }}
+          PLURX_PROMOTION_BINDING: ${{ needs.scope.outputs.promotion_binding }}
           PLURX_QUALIFICATION_RESULTS: >-
-            {"scope":"${{ needs.scope.result }}","mobile_version":"${{ needs.mobile_version.result }}","preflight":"${{ needs.preflight.result }}","rust":"${{ needs.check.result }}","cluster_store":"${{ needs.cluster_store.result }}","cluster_topology":"${{ needs.cluster_topology.result }}","cluster_transport_recovery":"${{ needs.cluster_transport_recovery.result }}","cluster_wal":"${{ needs.cluster_wal.result }}","cluster_daemon":"${{ needs.cluster_daemon.result }}","web_layout":"${{ needs.web_layout.result }}","vod_web":"${{ needs.vod_web.result }}","android_jvm":"${{ needs.android_jvm.result }}","apple":"${{ needs.apple.result }}","android_device":"${{ needs.android_device.result }}","package_smoke":"${{ needs.package_smoke.result }}"}
+            {"scope":"${{ needs.scope.result }}","mobile_version":"${{ needs.mobile_version.result }}","preflight":"${{ needs.preflight.result }}","rust":"${{ needs.check.result }}","windows_compile":"${{ needs.windows_compile.result }}","cluster_store":"${{ needs.cluster_store.result }}","cluster_topology":"${{ needs.cluster_topology.result }}","cluster_transport_recovery":"${{ needs.cluster_transport_recovery.result }}","cluster_wal":"${{ needs.cluster_wal.result }}","cluster_daemon":"${{ needs.cluster_daemon.result }}","web_layout":"${{ needs.web_layout.result }}","vod_web":"${{ needs.vod_web.result }}","android_jvm":"${{ needs.android_jvm.result }}","apple":"${{ needs.apple.result }}","android_device":"${{ needs.android_device.result }}","package_smoke":"${{ needs.package_smoke.result }}"}
         run: >-
           python3 -m validation.qualification
           --output target/validation/qualification-receipt.json
       - name: Retain the effort qualification record
-        if: needs.scope.outputs.qualification == 'true'
+        if: needs.scope.outputs.qualification == 'true' && github.event_name == 'pull_request'
         uses: https://data.forgejo.org/forgejo/upload-artifact@16871d9e8cfcf27ff31822cac382bbb5450f1e1e # v4
         with:
           name: effort-qualification-${{ github.event.pull_request.number }}
+          path: target/validation/qualification-receipt.json
+          if-no-files-found: error
+          retention-days: 14
+      - name: Retain the authenticated manual qualification record
+        if: needs.scope.outputs.qualification == 'true' && github.event_name == 'workflow_dispatch'
+        uses: https://data.forgejo.org/forgejo/upload-artifact@16871d9e8cfcf27ff31822cac382bbb5450f1e1e # v4
+        with:
+          name: effort-qualification-${{ needs.scope.outputs.promotion_pr }}
           path: target/validation/qualification-receipt.json
           if-no-files-found: error
           retention-days: 14
