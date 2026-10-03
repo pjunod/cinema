@@ -1153,6 +1153,7 @@ paths = [
   "crates/plurx-core/src/sharing_catalogue.rs",
   "crates/plurx-core/src/sharing_catalogue_details.rs",
   "crates/plurx-core/src/sharing_resources.rs",
+  "crates/plurx-core/src/sharing_file_locators.rs",
   "crates/plurx-core/src/store/sharing_catalogue.rs",
   "crates/plurx-core/src/store/sharing_catalogue_source.rs",
   "crates/plurx-core/src/store/sharing_catalogue_details.rs",

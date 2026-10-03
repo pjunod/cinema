@@ -2743,6 +2743,27 @@ This expands tested resource compatibility; no Shared relay/resource route,
 Source worker, file locator or response-publication authority is enabled.
 
 
+**Receiver-signed locator crypto candidate:**
+[file locators](../../crates/plurx-core/src/sharing_file_locators.rs) bind the
+receiver identity and epoch, import lifecycle generation, complete Source item
+reference, exact file ID and file revision in a fixed, versioned HMAC-SHA256
+frame. Canonical base64url encoding yields a bounded B-relative file base.
+IDs remain exact through the signed integer maximum. Purpose-separated sealed
+signing material survives master-key rewrap without changing issued locators.
+
+Three focused regressions passed with zero ignored cases: complete reference
+round trips and Source collision separation; every-byte tampering, malformed
+encoding and signed invalid fields; master rewrap and deliberate signing-key
+reuse across receiver identity/epoch boundaries. Final pinned feature-enabled
+all-target Clippy passed with denied warnings (34.42 seconds), and the existing
+file-revision regression also passed. Catalog lint covers the new module.
+
+This is crypto evidence only. Durable receiver key installation, sealed-row
+census, restart/clone qualification and authenticated file routes remain open.
+A verified locator identifies a reference; every use still needs current B
+viewer/import/assignment and Source grant/file authority, plus current B session
+delivery authority for media. No locator is exposed by current item details.
+
 ### 16.7 S6 file-context integration foundation
 
 The verified parallel checkpoint `4865de285` is integrated after catalogue
