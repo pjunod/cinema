@@ -608,3 +608,24 @@ replay and changed-viewer-request regressions pass. Workspace/all-target
 Clippy, all 28 SQL/read/process censuses and all 17 documentation/identity/
 ownership contracts pass on pinned Rust 1.97.1. Physical qualification and the
 remaining VOD transport work are not included in these results.
+
+
+The supersession slice landed in PR #782 at `acbce39ee`, with exact parents
+`e5c6e9d34` and `a37ade039`. All eight jobs passed in
+[effort run 4025](http://192.168.4.7:3000/noirr/plurx/actions/runs/4025), and
+its landing preserves all nine checked regression references.
+
+The next native watch slice admits a ready, leased native incarnation only
+through its exact current playback pointer, request fingerprint and original
+media clock. Expired and replaced ownership refuse progress. Native cleanup
+with the exact `deleted` reason permits final Stop retry when no replacement
+pointer exists, retaining the shared atomic final/tombstone transaction.
+This does not advertise HLS or complete physical qualification.
+
+
+On integrated supersession base `acbce39ee`, all 26 Jellyfin Store contracts
+pass on SQLite and three voters (258.51 seconds). All 20 Jellyfin HTTP and
+shared-progress regressions pass (8.36 seconds). Workspace/all-target Clippy,
+all 28 SQL/read/process censuses and all 14 focused documentation/identity/
+ownership contracts pass on pinned Rust 1.97.1. These receipts concern native
+watch admission; they do not qualify an HLS adapter or a physical client.

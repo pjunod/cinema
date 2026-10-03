@@ -125,3 +125,22 @@ only plays with that exact user/token/device/family scope, releases their
 native direct references and deletes the presented native token. It does not
 invoke native logout's user-wide file-grant revocation. Returned terminal
 references also let a failed release retry cleanly before token deletion.
+
+
+## 7. Native VOD watch admission
+
+A compatibility binding to a native media incarnation uses the existing
+native playback pointer, ready publication state, live media lease, exact
+request fingerprint and original media clock for both read admission and the
+atomic progress write. It does not require a direct-file grant or renew a
+producer lease. Token, item/source membership, probe and manual-revision
+predicates still apply.
+
+Ordinary progress refuses an expired, replaced or deleted native route. A
+final Stop retry may use its exact native `deleted` reference after cleanup
+only while no replacement pointer exists; the accepted final and compatibility
+tombstone remain one transaction. The Store contract exercises expired and
+renewed ownership, original-clock progress, deleted-resource final retry and
+an unmapped native replacement on SQLite and three voters. HLS negotiation,
+serving and resource cleanup are separate work; this change advertises no new
+client transport.
