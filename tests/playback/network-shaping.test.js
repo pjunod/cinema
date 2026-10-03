@@ -67,6 +67,47 @@ test("quality baseline requires an advancing outgoing frame rather than preload"
     "a real outgoing-frame blackout is still measured in full");
 });
 
+test("presentation gaps retain late callback diagnostics and refuse invalid display evidence", () => {
+  // Exact Firefox receipt: the first callback precedes display by one refresh;
+  // the next arrives at display. Dispatch spacing is not presentation spacing.
+  const before={at_ms:71831.76,expected_display_time_ms:71848.72,
+    media_time:69.5,presented_frames:1669,element_id:1};
+  const after={at_ms:71933.34,expected_display_time_ms:71933.34,
+    media_time:69.583333,presented_frames:1671,element_id:1};
+  const gap=lab.framePresentationGap(before,after);
+  assert.equal(gap.clock,"expected_display");
+  assert.ok(Math.abs(gap.gap_ms-84.62)<1e-6);
+  assert.ok(Math.abs(gap.callback_gap_ms-101.58)<1e-6);
+  const stalled={...after,at_ms:72000,expected_display_time_ms:72000};
+  assert.ok(lab.framePresentationGap(before,stalled).gap_ms>100,
+    "a real compositor gap still exceeds the unchanged presentation bound");
+  for(const invalid of [
+    {...after,expected_display_time_ms:null},
+    {...after,expected_display_time_ms:71840},
+    {...after,expected_display_time_ms:71933.34+10000},
+    {...after,presented_frames:1669},
+    {...after,media_time:69.4},
+  ]){
+    const refused=lab.framePresentationGap(before,invalid);
+    assert.equal(refused.clock,"callback");
+    assert.ok(refused.gap_ms>100,"unknown evidence cannot erase the raw failure");
+  }
+  const scored=lab.transitionMetrics({media_event_seq:0},{
+    media_event_seq:0,media_events:[],sampled_at_ms:71940,
+    frame_probe:{supported:true,last_frame_at_ms:after.at_ms,last_frame:after,
+      maximum_gap_ms:gap.gap_ms,maximum_callback_gap_ms:gap.callback_gap_ms},
+    video:{paused:false,ended:false},
+  });
+  assert.ok(Math.abs(scored.maximum_video_gap_ms-84.62)<1e-6);
+  assert.ok(Math.abs(scored.maximum_callback_gap_ms-101.58)<1e-6);
+  const silent=lab.transitionMetrics({media_event_seq:0},{
+    media_event_seq:0,media_events:[],sampled_at_ms:72100,
+    frame_probe:{supported:true,last_frame_at_ms:after.at_ms,last_frame:after,maximum_gap_ms:0},
+    video:{paused:false,ended:false},
+  });
+  assert.ok(silent.maximum_video_gap_ms>100,"an open presentation gap must still fail");
+});
+
 test("steady frame window excludes preload time but preserves later and switch gaps", () => {
   assert.ok(Math.abs(lab.frameGapSince(4921.2, 5421.2, 5300) - 121.2) < 1e-6);
   assert.equal(lab.frameGapSince(5421.2, 5921.2, 5300), 500,

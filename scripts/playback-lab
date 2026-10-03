@@ -2316,6 +2316,31 @@ function frameGapSince(lastFrameAtMs, nowMs, windowStartMs = null) {
   return Math.max(0, nowMs - from);
 }
 
+// requestVideoFrameCallback may dispatch one refresh after composition. Keep
+// dispatch timing separately; expectedDisplayTime describes the display clock.
+// Missing, stale, wrong-clock or nonadvancing evidence falls back to dispatch.
+function framePresentationTime(frame) {
+  if (!frame || !Number.isFinite(frame.at_ms) || frame.at_ms < 0
+      || !Number.isFinite(frame.expected_display_time_ms) || frame.expected_display_time_ms < 0
+      || Math.abs(frame.expected_display_time_ms - frame.at_ms) > 100
+      || !Number.isFinite(frame.media_time) || frame.media_time < 0
+      || !Number.isInteger(frame.presented_frames) || frame.presented_frames <= 0) return null;
+  return frame.expected_display_time_ms;
+}
+
+function framePresentationGap(before, after, windowStartMs = null) {
+  const callbackGap = frameGapSince(before?.at_ms ?? null, after.at_ms, windowStartMs);
+  const from = framePresentationTime(before), through = framePresentationTime(after);
+  const sameElement = before?.element_id === after.element_id;
+  const advances = sameElement
+    ? after.presented_frames > before?.presented_frames && after.media_time >= before?.media_time
+    : Number.isFinite(before?.absolute_time) && Number.isFinite(after.absolute_time)
+      && after.absolute_time >= before.absolute_time;
+  const supported = from != null && through != null && through > from && advances;
+  return {gap_ms: supported ? frameGapSince(from, through, windowStartMs) : callbackGap,
+    callback_gap_ms: callbackGap, clock: supported ? "expected_display" : "callback"};
+}
+
 function advancingOutgoingFrame(snapshot, baselineSequence) {
   const probe = snapshot.frame_probe;
   if (probe?.supported !== true) return true;
@@ -2334,6 +2359,9 @@ async function setCasePreferences(driver, quality, frameDiagnostics = false) {
     globalThis.__plurxLabFrameDiagnostics=${frameDiagnostics ? `{windows:[],dropped_windows:0,max_windows:4,max_records:512}` : "null"};
     globalThis.__plurxLabDiagnosticCommit=${diagnosticSwitchCommit.toString()};
     globalThis.__plurxLabFrameGapSince=${frameGapSince.toString()};
+    const frameGapSince=globalThis.__plurxLabFrameGapSince;
+    const framePresentationTime=${framePresentationTime.toString()};
+    globalThis.__plurxLabFramePresentationGap=${framePresentationGap.toString()};
     globalThis.__plurxLabMediaEvents=[];
     globalThis.__plurxLabMediaEventSeq=globalThis.__plurxLabMediaEventSeq||0;
     globalThis.__plurxLabInstallVideoProbe=(v)=>{
@@ -2411,18 +2439,6 @@ async function setCasePreferences(driver, quality, frameDiagnostics = false) {
           const probe=globalThis.__plurxLabFrameProbe;
           if(probe){
             const priorFrame=probe.last_frame;
-            const gap=globalThis.__plurxLabFrameGapSince(probe.last_frame_at_ms,now,probe.measurement_start_at_ms);
-            if(gap>probe.maximum_gap_ms){
-              probe.maximum_gap_ms=gap;
-              probe.maximum_gap_detail={start_at_ms:probe.measurement_start_at_ms==null?probe.last_frame_at_ms:
-                  Math.max(probe.last_frame_at_ms,probe.measurement_start_at_ms),
-                end_at_ms:now,from_element:priorFrame?.element_id||null,
-                to_element:v.__plurxLabElementId||null,
-                from_session_id:priorFrame?.session_id||null,
-                from_media_time:priorFrame?.media_time??null,
-                from_expected_display_time_ms:priorFrame?.expected_display_time_ms??null,
-                from_presented_frames:priorFrame?.presented_frames??null};
-            }
             probe.last_frame_at_ms=now;
             probe.frames+=1;
             probe.sequence+=1;
@@ -2439,6 +2455,24 @@ async function setCasePreferences(driver, quality, frameDiagnostics = false) {
               width:metadata&&Number.isFinite(metadata.width)?metadata.width:v.videoWidth,
               height:metadata&&Number.isFinite(metadata.height)?metadata.height:v.videoHeight,
               method:p.method||null,session_id:p.sessionId||null,attempt_id:p.attemptId||null};
+            const measured=globalThis.__plurxLabFramePresentationGap(priorFrame,presented,probe.measurement_start_at_ms);
+            const gap=measured.gap_ms;
+            if(measured.callback_gap_ms>Number(probe.maximum_callback_gap_ms||0)){
+              probe.maximum_callback_gap_ms=measured.callback_gap_ms;
+              probe.maximum_callback_gap_detail={start_at_ms:priorFrame?.at_ms??null,end_at_ms:now,
+                gap_ms:measured.callback_gap_ms,from:{...priorFrame},to:{...presented}};
+            }
+            if(gap>probe.maximum_gap_ms){
+              probe.maximum_gap_ms=gap;
+              probe.maximum_gap_detail={start_at_ms:probe.measurement_start_at_ms==null?(priorFrame?.at_ms??null):
+                  Math.max(priorFrame?.at_ms??probe.measurement_start_at_ms,probe.measurement_start_at_ms),
+                end_at_ms:now,gap_ms:gap,gap_clock:measured.clock,callback_gap_ms:measured.callback_gap_ms,from_element:priorFrame?.element_id||null,
+                to_element:v.__plurxLabElementId||null,
+                from_session_id:priorFrame?.session_id||null,
+                from_media_time:priorFrame?.media_time??null,
+                from_expected_display_time_ms:priorFrame?.expected_display_time_ms??null,
+                from_presented_frames:priorFrame?.presented_frames??null};
+            }
             if(priorFrame&&Number.isFinite(priorFrame.media_time)
                 &&Number.isFinite(presented.media_time)&&presented.media_time<priorFrame.media_time-0.001){
               if(!Array.isArray(probe.backward_frames))probe.backward_frames=[];
@@ -2627,7 +2661,7 @@ async function performOperation(driver, testCase, start) {
       `outgoing frame before quality switch to ${quality}`, 50);
       await driver.exec(`
         { const probe=globalThis.__plurxLabFrameProbe;
-          if(probe){probe.maximum_gap_ms=0;probe.maximum_gap_detail=null;probe.frames=0;probe.measurement_start_at_ms=null;}
+          if(probe){probe.maximum_gap_ms=0;probe.maximum_callback_gap_ms=0;probe.maximum_callback_gap_detail=null;probe.maximum_gap_detail=null;probe.frames=0;probe.measurement_start_at_ms=null;}
         }
         return true;
       `);
@@ -2719,6 +2753,8 @@ async function performOperation(driver, testCase, start) {
       if (testCase.require_continuous) change.continuous_after = evidenceEnd.continuous;
       change.video_gap_ms = measuredTransition.maximum_video_gap_ms;
       change.frame_probe_gap_detail = measuredTransition.frame_probe_gap_detail;
+      change.callback_gap_ms = measuredTransition.maximum_callback_gap_ms;
+      change.frame_probe_callback_gap_detail = measuredTransition.frame_probe_callback_gap_detail;
       change.dropped_frames = Number.isFinite(evidenceEnd.video.dropped)
         && Number.isFinite(before.video.dropped)
         ? Math.max(0, evidenceEnd.video.dropped - before.video.dropped) : null;
@@ -2785,7 +2821,7 @@ function transitionMetrics(before, after) {
   const probe = after?.frame_probe || {};
   const openFrameGap = probe.supported && probe.last_frame_at_ms != null
     && !after?.video?.paused && !after?.video?.ended
-    ? frameGapSince(Number(probe.last_frame_at_ms), Number(after?.sampled_at_ms || 0),
+    ? frameGapSince(framePresentationTime(probe.last_frame) ?? Number(probe.last_frame_at_ms), Number(after?.sampled_at_ms || 0),
       probe.measurement_start_at_ms ?? null)
     : 0;
   maximumGapMs = Math.max(maximumGapMs, Number(probe.maximum_gap_ms || 0), openFrameGap);
@@ -2794,7 +2830,12 @@ function transitionMetrics(before, after) {
     event_count: events.length,
     expected_event_count: expectedEvents,
     maximum_video_gap_ms: maximumGapMs,
+    maximum_callback_gap_ms: Math.max(Number(probe.maximum_callback_gap_ms || 0),
+      probe.supported && probe.last_frame_at_ms != null && !after?.video?.paused && !after?.video?.ended
+        ? frameGapSince(Number(probe.last_frame_at_ms), Number(after?.sampled_at_ms || 0),
+          probe.measurement_start_at_ms ?? null) : 0),
     frame_probe_gap_detail: probe.maximum_gap_detail || null,
+    frame_probe_callback_gap_detail: probe.maximum_callback_gap_detail || null,
     wait_events: events.filter((event) => event.event === "waiting" || event.event === "stalled").length,
     reopen_events: events.filter((event) => event.event === "emptied" || event.event === "abort").length,
     stalls: Math.max(0, Number(after?.lifetime_stalls || 0) - Number(before?.lifetime_stalls || 0)),
@@ -2956,7 +2997,7 @@ async function observeShapedCliff(driver, shaper, testCase, start) {
   for (let cliffIndex = 1; cliffIndex < shaper.profile.stages.length; cliffIndex += 1) {
     await driver.exec(`
       { const probe=globalThis.__plurxLabFrameProbe;
-          if(probe){probe.maximum_gap_ms=0;probe.maximum_gap_detail=null;probe.frames=0;probe.measurement_start_at_ms=null;}
+          if(probe){probe.maximum_gap_ms=0;probe.maximum_callback_gap_ms=0;probe.maximum_callback_gap_detail=null;probe.maximum_gap_detail=null;probe.frames=0;probe.measurement_start_at_ms=null;}
       }
       return true;
     `);
@@ -3177,6 +3218,7 @@ function scoreCase(
       switches: changes.length,
       video_gap_p95_ms: p95Gap,
       video_gap_max_ms: maximumGap,
+      callback_gap_p95_ms: percentile(changes.map(change => Number(change.callback_gap_ms)).filter(Number.isFinite), 0.95),
     };
     if (testCase.evidence_scope === "browser_video_partial") {
       warnings.push(
@@ -3910,7 +3952,7 @@ async function runOneCase(driver, server, manifest, fixture, testCase, browserIn
   const continuityStart = testCase.operation === "steady"
     ? await driver.eval(`(()=>{
         const probe=globalThis.__plurxLabFrameProbe;
-        if(probe){probe.maximum_gap_ms=0;probe.maximum_gap_detail=null;probe.frames=0;
+        if(probe){probe.maximum_gap_ms=0;probe.maximum_callback_gap_ms=0;probe.maximum_callback_gap_detail=null;probe.maximum_gap_detail=null;probe.frames=0;
           probe.measurement_start_at_ms=performance.now();}
         return ${playerSnapshotExpression()};
       })()`)
@@ -5176,6 +5218,8 @@ module.exports = {
   timeToSustained,
   transitionMetrics,
   frameGapSince,
+  framePresentationTime,
+  framePresentationGap,
   advancingOutgoingFrame,
   waitForDeviceAcceptance,
   writePreparationReport,

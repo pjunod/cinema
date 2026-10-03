@@ -5722,3 +5722,43 @@ helper verifies eligibility before calling the unchanged shipped action,
 then judges actual presentation. No production patch or tolerance change
 was made. Actual main's schema-69 vs candidate schema-71 join refusal
 continues to apply. No units or final adversarial review ran.
+
+
+### 10.197 · Separate callback dispatch from display estimates
+
+Exact `2d79e2e22` focused headed Firefox runtime
+`continuous-firefox-2d79e2e22-headed3-software-output1` remains FAILED:
+all three targets presented, but one callback interval was 101.58ms against
+100ms. TTFF was 2.739s, clock 0.998x, with zero hitches/stalls/drops and one
+parent. The owned Xvfb camera completed 7,200 timestamped crop checksums over
+120s; its exit was zero, while the runtime's third change extended beyond
+that capture. The supervisor exited the harness with failure, retired its
+display and removed its runtime. No physical display/audio or content-order
+proof is claimed from a checksum crop.
+
+The failing callbacks advanced expectedDisplayTime from 71848.72 to
+71933.34ms: 84.62ms. The first callback ran at 71831.76ms, roughly one refresh
+before that display estimate; the next callback arrived at its estimate.
+Media PTS advanced 69.5→69.583333 and presented-frame count 1669→1671.
+This accounts for the 16.96ms difference between display and dispatch
+spacing. Estimated wall-clock alignment with the Xvfb sample shows multiple
+crop changes through that interval, consistent with continuing rendering;
+camera startup/clock uncertainty and crop semantics remain unqualified.
+
+The [requestVideoFrameCallback specification](https://wicg.github.io/video-rvfc/)
+distinguishes callback dispatch from expected display time and explicitly
+permits a refresh-late callback. The qualification harness now uses sane,
+monotonic display estimates with advancing frame evidence for its existing
+presentation-gap bound, while retaining raw callback maxima, endpoint
+records and per-stage percentiles separately. Missing/stale/wrong-clock or
+nonadvancing evidence falls back to dispatch timing. Open gaps and real
+compositor gaps still fail. The 100ms bound, backward-frame and drop/stall
+checks are unchanged. This corrects measurement; it does not fix Firefox
+rendering or retroactively pass an older receipt. Browser display estimates
+remain different from physical output evidence.
+
+A new unrun regression uses the exact captured timings, rejects a real
+compositor stall, invalid/missing/backward metadata and an open blackout,
+and confirms raw callback diagnostics survive. Node syntax checks pass.
+Normal hook, exact committed build and a focused new-harness runtime are
+pending. No units or final adversarial review ran.

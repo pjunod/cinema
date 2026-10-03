@@ -115,9 +115,12 @@ async function measureAuto(driver, shaper, result) {
     ...detail.changes.map(c => c.transition.maximum_video_gap_ms)].sort((a, b) => a - b);
   const p95 = gaps[Math.ceil(gaps.length * 0.95) - 1];
   if (gaps.some(gap => !Number.isFinite(gap)) || p95 > 100) {
-    throw new Error(`mixed campaign p95 callback gap ${p95} ms exceeds 100 ms`);
+    throw new Error(`mixed campaign p95 presentation gap ${p95} ms exceeds 100 ms`);
   }
   detail.mixed_video_gap_p95_ms = p95;
+  const callbackGaps = [...result.operation_detail.changes.map(c => c.callback_gap_ms),
+    ...detail.changes.map(c => c.transition.maximum_callback_gap_ms)].filter(Number.isFinite).sort((a,b)=>a-b);
+  detail.mixed_callback_gap_p95_ms = callbackGaps.length ? callbackGaps[Math.ceil(callbackGaps.length*0.95)-1] : null;
   detail.status = "passed";
 }
 
