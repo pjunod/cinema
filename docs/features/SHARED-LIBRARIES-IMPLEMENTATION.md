@@ -2565,3 +2565,24 @@ the contract-only wrapper must execute the actual quorum observation path.
 Neither constructor is present in production builds. These checks qualify the
 closed guard and readiness refactor; a Source binding write using the opaque
 observation still needs its own actual-voter admission regression.
+
+
+**Coordinated qualification integration:** the indexed
+[daemon/rollback receipt](SHARED-LIBRARIES-COORDINATED-UPGRADE.md) records the
+actual source-only `9b99fcd0f` qualification on catalogue integration `a8bf5ce1d`:
+four historical/current future-schema refusals, three historical voters,
+bounded full stop, whole-topology backup, membership factory before the frozen
+principal rebuild, three current daemon restarts and historical restore. The
+separate SQLiteStore drill checks closed-file backup, injected rollback,
+current candidate reopen and byte-identical legacy restore. Strict inventory
+compares all eleven tables immediately across rebuild; post-restart predicates
+separately classify expected terminal maintenance and runtime worker leases.
+It remains an empty-media workload, with no active producer drain or production
+schema activation. This receipt does not qualify later Source admission code.
+
+The helper/runner checkpoint `95314e279` is integrated after opaque membership
+checkpoint `f6ee7a1bd`. On this combined source, pinned feature all-target check
+passed (0.62 seconds), both helper/SQLite regressions passed (0.69 seconds),
+denied-warning helper Clippy passed (25.67 seconds), and the six runner plus
+four docs-index tests passed. The exact combined runtime archive must be
+qualified again before its upgrade receipt can cover a later candidate.
