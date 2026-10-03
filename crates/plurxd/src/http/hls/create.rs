@@ -1430,7 +1430,15 @@ pub(crate) async fn resolve_plan_for_principal(
             "request_id must contain 1 to 128 characters".to_owned(),
         ));
     }
-    if !worker_session_request_is_valid(&request) {
+    let request_valid = match principal {
+        plurx_core::playback_principal::PlaybackPrincipal::Sharing { .. } => {
+            crate::media_sessions::source_session_request_is_valid(&request, principal)
+        }
+        plurx_core::playback_principal::PlaybackPrincipal::LocalUser { .. } => {
+            worker_session_request_is_valid(&request)
+        }
+    };
+    if !request_valid {
         return Err(ApiError::BadRequest(
             "media session request exceeds the supported cluster contract".to_owned(),
         ));
@@ -4163,6 +4171,113 @@ impl PreparedSourcePlayback {
     pub(crate) fn fingerprint(&self) -> &str {
         &self.resolved.intent_fingerprint
     }
+    /// Build the complete durable HLS response from the admitted engine facts.
+    /// This describes the pending session; it grants neither readiness nor
+    /// publication authority. The actor persists it before attaching a reader.
+    pub(crate) async fn start_response(
+        &self,
+        state: &AppState,
+        info: &crate::transcode::StartInfo,
+        incarnation_id: &str,
+        owner_epoch: i64,
+    ) -> Result<StartResponse, ApiError> {
+        let refused = || {
+            ApiError::typed(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "sharing_playback_response_unavailable",
+                "Shared playback response is unavailable",
+            )
+        };
+        let canonical_uuid = |value: &str| {
+            uuid::Uuid::parse_str(value).is_ok_and(|id| {
+                id.get_version_num() == 4
+                    && id.get_variant() == uuid::Variant::RFC4122
+                    && id.to_string() == value
+            })
+        };
+        if !canonical_uuid(&info.session_id)
+            || !canonical_uuid(incarnation_id)
+            || info.kind != self.resolved.request.kind
+            || !info.start_seconds.is_finite()
+            || info.start_seconds < 0.0
+            || !info.media_origin_seconds.is_finite()
+            || info.media_origin_seconds < 0.0
+            || info.media_origin_seconds * 1000.0 >= i64::MAX as f64
+            || info.duration_ms.is_some_and(|duration| duration < 0)
+            || info.playlist_url != format!("/api/v1/hls/{}/index.m3u8", info.session_id)
+        {
+            return Err(refused());
+        }
+        let control = crate::playback_control::ControlBootstrap::new(
+            &info.session_id,
+            incarnation_id,
+            owner_epoch,
+            info.control_lease_timeout_ms,
+        )
+        .ok_or_else(refused)?;
+        let ladder_ceiling = state
+            .transcode
+            .capability_height_ceiling_for_request(Some(&self.file), self.resolved.request.hdr10)
+            .await;
+        let quality_negotiated = self.resolved.request.candidate_context.is_some();
+        let playlist_url = if self.resolved.native_subtitles {
+            let master = format!("/api/v1/hls/{}/master.m3u8", info.session_id);
+            match self.resolved.native_subtitle {
+                Some(index) => format!("{master}?subtitle={index}"),
+                None => master,
+            }
+        } else {
+            info.playlist_url.clone()
+        };
+        Ok(StartResponse {
+            quality_catalog_status: self.resolved.quality_catalog.as_ref().map(
+                |catalog| serde_json::json!({"complete":catalog.complete,"causes":catalog.causes}),
+            ),
+            display_aware_auto_protocol: quality_negotiated.then(|| "route-v1".to_owned()),
+            quality_candidate_id: self
+                .resolved
+                .request
+                .candidate_context
+                .as_ref()
+                .map(|context| context.candidate_id),
+            quality_candidates: quality_negotiated.then(|| {
+                self.resolved
+                    .quality_catalog
+                    .as_ref()
+                    .into_iter()
+                    .flat_map(|catalog| catalog.candidates.iter())
+                    .filter(|entry| {
+                        entry.dispatch_supported
+                            && (!entry.partial || entry.node_id == state.node_id)
+                    })
+                    .map(|entry| entry.candidate.clone())
+                    .collect()
+            }),
+            session_id: info.session_id.clone(),
+            playlist_url,
+            duration_ms: info.duration_ms,
+            start_seconds: info.start_seconds,
+            media_origin_ms: Some((info.media_origin_seconds * 1000.0).round() as i64),
+            height: info.target_height,
+            encoder: info.encoder.to_owned(),
+            vod: info.vod,
+            ladder: crate::transcode::advertised_ladder(self.file.height, ladder_ceiling),
+            prior_kbps: None,
+            delivered_dynamic_range: session_delivered_dynamic_range(
+                Some(&self.file),
+                &info.kind,
+                info.grade,
+            )
+            .map(str::to_owned),
+            delivered_dolby_vision_profile: session_delivered_dolby_vision_profile(
+                Some(&self.file),
+                &info.kind,
+            ),
+            control: Some(control),
+            plan_notes: self.resolved.plan_notes.clone(),
+        })
+    }
+
     pub(crate) fn matches_assignment(
         &self,
         assignment: &plurx_core::sharing_source_sessions::SourceDispatchAssignment,

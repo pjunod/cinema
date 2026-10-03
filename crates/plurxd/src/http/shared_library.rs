@@ -5045,7 +5045,7 @@ mod tests {
                 ],
             )
             .expect("fixture purpose key");
-        writer.execute("INSERT INTO files(id,item_id,path,size,mtime,duration_ms,container,video_codec,width,height,bit_depth,bitrate) VALUES(1,?1,?2,20,1000,60000,'mp4','h264',1920,1080,8,1000000)",rusqlite::params![fixture.item,source.to_str().expect("path")]).expect("actual Source file");
+        writer.execute("INSERT INTO files(id,item_id,path,size,mtime,duration_ms,container,video_codec,width,height,bit_depth,bitrate) VALUES(0,?1,?2,20,1000,60000,'mp4','h264',1920,1080,8,1000000)",rusqlite::params![fixture.item,source.to_str().expect("path")]).expect("actual Source file");
         let hash = secret_hash(SecretDomain::Grant, &fixture.secret);
         let SourceDetailsRead::Authorized(witness) = fixture
             .state
@@ -5054,7 +5054,7 @@ mod tests {
                 &hash,
                 fixture.grant,
                 SourceId::parse(&fixture.item.to_string()).expect("valid Source fixture value"),
-                SourceId::parse("1").expect("valid Source fixture value"),
+                SourceId::parse("0").expect("valid Source fixture value"),
             )
             .await
             .expect("witness")
@@ -5068,7 +5068,7 @@ mod tests {
                 .expect("valid Source fixture value"),
             item_id: SourceId::parse(&fixture.item.to_string())
                 .expect("valid Source fixture value"),
-            file_id: SourceId::parse("1").expect("valid Source fixture value"),
+            file_id: SourceId::parse("0").expect("valid Source fixture value"),
             revision: key.file_revision(&witness).expect("revision"),
         };
         let caps:plurx_core::playback::DeviceCaps=serde_json::from_value(json!({"v":2,"video":[{"codec":"h264","max_height":2160,"present":["sdr"]}],"audio":["aac"],"containers":["mp4"],"transports":["hls","progressive"]})).expect("caps");
@@ -5089,6 +5089,48 @@ mod tests {
         let prepared = prepare_source_playback(&fixture.state, &headers, target.clone(), body())
             .await
             .expect("actual Source preparation");
+        // Response projection is pure presentation evidence; this StartInfo
+        // fixture does not assert physical admission or publication.
+        let session = uuid::Uuid::new_v4().to_string();
+        let incarnation = uuid::Uuid::new_v4().to_string();
+        let info = crate::transcode::StartInfo {
+            session_id: session.clone(),
+            playlist_url: format!("/api/v1/hls/{session}/index.m3u8"),
+            duration_ms: Some(60_000),
+            start_seconds: 0.0,
+            media_origin_seconds: 0.0,
+            target_height: 1080,
+            kind: prepared.request().kind,
+            encoder: "vod",
+            grade: plurx_core::transcode::OutputGrade::Sdr,
+            vod: true,
+            control_lease_timeout_ms: crate::playback_control::VOD_LEASE_TIMEOUT_MS,
+        };
+        let response = prepared
+            .start_response(&fixture.state, &info, &incarnation, 7)
+            .await
+            .expect("complete Source response");
+        assert_eq!(response.session_id, session);
+        assert_eq!(response.playlist_url, info.playlist_url);
+        assert_eq!(response.duration_ms, info.duration_ms);
+        assert_eq!(response.height, info.target_height);
+        assert_eq!(response.encoder, info.encoder);
+        assert_eq!(response.media_origin_ms, Some(0));
+        assert!(response.vod);
+        assert_eq!(response.prior_kbps, None);
+        assert_eq!(response.plan_notes, prepared.plan_notes());
+        let control = response.control.as_ref().expect("private control");
+        assert_eq!(control.generation, incarnation);
+        assert_eq!(control.control_epoch, 7);
+        assert_eq!(control.url, format!("/api/v1/hls/{session}/control"));
+        assert!(prepared
+            .start_response(&fixture.state, &info, &incarnation, 0)
+            .await
+            .is_err());
+        assert!(prepared
+            .start_response(&fixture.state, &info, "not-an-incarnation", 7)
+            .await
+            .is_err());
         let decision_input = || super::super::shared_playback::SourceDecisionRequest {
             reference: target.clone(),
             caps: caps.clone(),
@@ -5133,7 +5175,24 @@ mod tests {
                 .await
                 .is_err()
         );
-        assert_eq!(prepared.file().id, 1);
+        assert_eq!(prepared.file().id, 0);
+        assert!(crate::media_sessions::source_session_request_is_valid(
+            prepared.request(),
+            prepared.principal()
+        ));
+        assert!(!crate::media_sessions::worker_session_request_is_valid(
+            prepared.request()
+        ));
+        let mut negative = prepared.request().clone();
+        negative.file_id = -1;
+        assert!(!crate::media_sessions::source_session_request_is_valid(
+            &negative,
+            prepared.principal()
+        ));
+        assert!(!crate::media_sessions::source_session_request_is_valid(
+            prepared.request(),
+            &plurx_core::playback_principal::PlaybackPrincipal::LocalUser { user_id: 1 }
+        ));
         assert_eq!(prepared.file().path, source);
         assert_eq!(prepared.principal().local_user_id(), None);
         assert_eq!(prepared.decision().prior_kbps, None);
@@ -5173,7 +5232,7 @@ mod tests {
                 super::super::hls::FilePlanInputs {
                     snapshot: None,
                     state: &fixture.state,
-                    file_id: 1,
+                    file_id: 0,
                     source: Some(prepared.file()),
                     network_prior: Some(&prior)
                 },
@@ -5194,7 +5253,7 @@ mod tests {
         let Json(local) = stream::decision(
             super::super::extract::AuthUser(user),
             State(fixture.state.clone()),
-            axum::extract::Path(1),
+            axum::extract::Path(0),
             axum::extract::Query(stream::Caps {
                 caps_v2: Some(caps.clone()),
                 ..Default::default()
@@ -5234,7 +5293,10 @@ mod tests {
             );
         }
         writer
-            .execute("UPDATE files SET mtime=2000 WHERE id=1", [])
+            .execute(
+                "UPDATE files SET mtime=2000 WHERE id=?1",
+                [prepared.file().id],
+            )
             .expect("real file revision changed");
         assert!(
             prepare_source_playback(&fixture.state, &headers, target.clone(), body())
@@ -5242,7 +5304,10 @@ mod tests {
                 .is_err()
         );
         writer
-            .execute("UPDATE files SET mtime=1000 WHERE id=1", [])
+            .execute(
+                "UPDATE files SET mtime=1000 WHERE id=?1",
+                [prepared.file().id],
+            )
             .expect("restore snapshot");
         writer
             .execute(
