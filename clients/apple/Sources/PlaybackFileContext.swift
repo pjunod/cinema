@@ -167,6 +167,57 @@ struct PlaybackFileContext: Hashable {
         let query = components.queryItems?.filter { $0.name != "session" } ?? []
         return try path(String(components.percentEncodedPath.dropFirst(fileBase.count + 1)), query: query)
     }
+    /// Validation of metadata never admits media or binds a new session.
+    func validateSharedReference(_ item: SharedPlaybackReference, file: String, revision: String) throws {
+        try requireCurrent()
+        guard reference != nil, reference == item, sourceFileId == file, self.revision == revision,
+              Self.canonicalID(file), Self.matches(revision, "^[0-9a-f]{64}$") else { throw APIError.badURL }
+    }
+    func validateDescriptiveURL(_ value: String) throws {
+        try requireCurrent()
+        guard reference != nil, !value.contains("%"),
+              let parts = URLComponents(string: value), parts.scheme == nil, parts.host == nil,
+              parts.fragment == nil,
+              [fileBase + "/direct", fileBase + "/stream.mp4", fileBase + "/hls/sessions"].contains(parts.path)
+        else { throw APIError.badURL }
+        let query = parts.queryItems ?? []
+        guard Set(query.map(\.name)).count == query.count, parts.query == nil || !query.isEmpty else { throw APIError.badURL }
+        for field in query {
+            if field.name == "session" {
+                guard sessionId != nil, field.value == sessionId else { throw APIError.badURL }
+            } else {
+                guard parts.path == fileBase + "/stream.mp4", field.name == "audio",
+                      let text = field.value, let n = Int(text), String(n) == text, (0...4095).contains(n)
+                else { throw APIError.badURL }
+            }
+        }
+    }
+    func validateSessionPlaylist(_ value: String, session: String) throws {
+        try requireCurrent()
+        guard reference != nil, sessionId == session, Self.canonicalV4(session),
+              !value.contains("%"), let parts = URLComponents(string: value),
+              parts.scheme == nil, parts.host == nil, parts.fragment == nil,
+              ["master.m3u8", "index.m3u8", "video.m3u8"].contains(String(parts.path.dropFirst("/api/v1/hls/\(session)/".count))),
+              parts.path.hasPrefix("/api/v1/hls/\(session)/") else { throw APIError.badURL }
+        let query = parts.queryItems ?? []
+        guard Set(query.map(\.name)).count == query.count, value.utf8.count <= 512,
+              (parts.percentEncodedQuery?.utf8.count ?? 0) <= 256,
+              parts.query == nil || !query.isEmpty else { throw APIError.badURL }
+        for field in query {
+            let valid: Bool
+            switch field.name {
+            case "native": valid = field.value == "0" || field.value == "1"
+            case "subtitle":
+                if let text = field.value, let index = Int(text) { valid = text == "-1" || (Self.matches(text, "^[0-9]+$") && (0...4095).contains(index)) } else { valid = false }
+            case "diagnostic": valid = ["video-only", "video-only-codecs", "video-only-range", "video-only-hdr"].contains(field.value ?? "")
+            default: valid = false
+            }
+            guard valid else { throw APIError.badURL }
+        }
+    }
+    static func canonicalV4(_ id: String) -> Bool {
+        matches(id, "^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$")
+    }
     private static func validateQuery(_ resource: String, _ query: [URLQueryItem]) throws {
         let capabilities = ["client", "device", "profile", "vcodec", "vmaxheight", "acodec", "container", "maxheight", "hdr", "dv", "dvprofile", "dvhls", "hdr10t"]
         let allowed = resource == "decision" ? capabilities + ["force", "audio", "subtitle", "audio_offset_ms", "achannels", "capver", "hdrtypes", "dvdecoders", "dvraw", "dvstatus"]
