@@ -11623,6 +11623,45 @@ async fn downgrade_dv_request_provenance(client: &Client) {
         .expect("commit provenance rewind");
 }
 
+// Background job objects (v49+) and sharing (v70) did not exist in v27/v31.
+// Keeping them blocks old column removal/table rebuilds and leaves extension
+// columns/tables that forward migration would add a second time. These fixtures
+// seed no extension rows; remove the later schema and retain the full background
+// trigger inventory as proof that actual migration restores it.
+#[cfg(feature = "hiqlite-contract-tests")]
+async fn drop_post_v39_extension_schema(client: &Client) -> Vec<String> {
+    let mut rows = client
+        .query_consistent("SELECT type,name FROM sqlite_master WHERE type IN ('trigger','view','table') AND (name GLOB 'background_*' OR name GLOB 'sharing_*' OR name='analysis_required_resources' OR (type='trigger' AND (instr(sql,'background_')>0 OR instr(sql,'analysis_required_resources')>0))) ORDER BY CASE type WHEN 'trigger' THEN 0 WHEN 'view' THEN 1 ELSE 2 END,name",hiqlite::params!())
+        .await.expect("read later background schema inventory");
+    let mut triggers = Vec::new();
+    let statements = rows
+        .iter_mut()
+        .map(|row| {
+            let kind = row.get::<String>("type");
+            let name = row.get::<String>("name");
+            if kind == "trigger" {
+                triggers.push(name.clone());
+            }
+            (
+                format!("DROP {} \"{}\"", kind, name.replace('"', "\"\"")),
+                hiqlite::params!(),
+            )
+        })
+        .collect::<Vec<_>>();
+    assert!(
+        !triggers.is_empty(),
+        "current fixture must contain background triggers"
+    );
+    client
+        .txn(statements)
+        .await
+        .expect("remove later background schema from historical fixture")
+        .into_iter()
+        .collect::<Result<Vec<_>, _>>()
+        .expect("commit later schema removal");
+    triggers
+}
+
 #[cfg(feature = "hiqlite-contract-tests")]
 fn post_v39_downgrade_statements() -> Vec<(&'static str, hiqlite::Params)> {
     [
@@ -11659,6 +11698,7 @@ fn post_v39_downgrade_statements() -> Vec<(&'static str, hiqlite::Params)> {
 
 #[cfg(feature = "hiqlite-contract-tests")]
 async fn downgrade_current_schema_after_request_identity(client: &Client) {
+    drop_post_v39_extension_schema(client).await;
     let mut statements = post_v39_downgrade_statements();
     statements.extend([
         (
@@ -11737,7 +11777,8 @@ async fn downgrade_current_schema_after_request_identity(client: &Client) {
 }
 
 #[cfg(feature = "hiqlite-contract-tests")]
-async fn downgrade_current_schema_after_producer_recovery(client: &Client) {
+async fn downgrade_current_schema_after_producer_recovery(client: &Client) -> Vec<String> {
+    let triggers = drop_post_v39_extension_schema(client).await;
     let mut statements = post_v39_downgrade_statements();
     statements.extend([
         (
@@ -11781,6 +11822,7 @@ async fn downgrade_current_schema_after_producer_recovery(client: &Client) {
         .into_iter()
         .collect::<Result<Vec<_>, _>>()
         .expect("commit post-v32 fixture downgrade");
+    triggers
 }
 
 #[cfg(feature = "hiqlite-contract-tests")]
@@ -12913,7 +12955,8 @@ async fn replicated_v32_store_migrates_the_producer_recovery_ledger_on_daemon_op
 
     // Rewind to v31: no ledger, marker pinned to the exact predecessor of the
     // producer-recovery migration.
-    downgrade_current_schema_after_producer_recovery(&client).await;
+    let expected_background_triggers =
+        downgrade_current_schema_after_producer_recovery(&client).await;
     client
         .txn([
             (
@@ -12968,6 +13011,18 @@ async fn replicated_v32_store_migrates_the_producer_recovery_ledger_on_daemon_op
             .expect("inspect the migrated producer-recovery schema");
         assert_eq!(rows[0].value, expected, "{sql}");
     }
+
+    let mut trigger_rows = client.query_consistent(
+        "SELECT name FROM sqlite_master WHERE type='trigger' AND (name GLOB 'background_*' OR instr(sql,'background_')>0 OR instr(sql,'analysis_required_resources')>0) ORDER BY name",
+        hiqlite::params!()).await.expect("read restored background trigger inventory");
+    let restored_triggers = trigger_rows
+        .iter_mut()
+        .map(|row| row.get::<String>("name"))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        restored_triggers, expected_background_triggers,
+        "historical migration must restore every current background trigger"
+    );
 
     // The migrated store is the working store, not merely a shaped one.
     let reservation = migrated
