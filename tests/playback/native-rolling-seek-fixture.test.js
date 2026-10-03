@@ -21,7 +21,8 @@ Object.defineProperty(video, 'currentTime', {
   get() { return position; }, set(value) { position = value; video.seeking = true; },
 });
 const context = vm.createContext({
-  document: { querySelector(selector) { return selector === '#v' ? video : (controls[selector] ||= {}); } },
+  crypto: { randomUUID: () => 'page-unit' },
+  document: { visibilityState: 'visible', querySelector(selector) { return selector === '#v' ? video : (controls[selector] ||= {}); } },
   performance: { now: () => now }, navigator: { userAgent: 'fixture-unit', sendBeacon(_, raw) { reports.push(JSON.parse(raw)); } },
   setTimeout() {}, setInterval() {},
   fetch(url) {
@@ -34,7 +35,11 @@ const api = vm.runInContext('({start,paired,seek,state:()=>({run,pending,frameCo
 (async () => {
   await api.start('baseline');
   video.pause();
+  const retiredIntentFrame = callbacks.get(api.state().frameId);
+  const floor = api.state().frameCount;
   const seeking = api.seek(10);
+  retiredIntentFrame(now, {mediaTime:10});
+  assert.equal(api.state().frameCount, floor, 'a retired intent callback cannot supply destination evidence');
   const id = api.state().frameId;
   now = 140;
   callbacks.get(id)(now, { mediaTime: 10 });
@@ -46,6 +51,13 @@ const api = vm.runInContext('({start,paired,seek,state:()=>({run,pending,frameCo
   assert.equal(frame.event.media_time_s, 10);
   assert.equal(frame.event.click_latency_ms, 40);
   assert.equal(api.state().pending, null, 'paused sole frame settles without Play or a second frame');
+  assert.equal(frame.event.last_frame.media_time_s, 10);
+  assert.equal(frame.event.visibility, 'visible');
+  const missed = api.seek(10);
+  callbacks.get(api.state().frameId)(now, { mediaTime: 10 });
+  video.seeking = false;
+  handlers.seeked();
+  assert.equal(api.state().pending.target, 20, 'a stale picture at seeked cannot settle the target');
 
   let resolveState;
   pendingState = new Promise(resolve => { resolveState = resolve; });
@@ -53,6 +65,7 @@ const api = vm.runInContext('({start,paired,seek,state:()=>({run,pending,frameCo
   pendingState = null;
   const staleFrame = callbacks.get(api.state().frameId);
   await api.start('short');
+  await missed;
   const count = api.state().frameCount;
   staleFrame(now, { mediaTime: 10 });
   assert.equal(api.state().frameCount, count, 'retired attachment callback cannot advance current evidence');
@@ -60,5 +73,10 @@ const api = vm.runInContext('({start,paired,seek,state:()=>({run,pending,frameCo
   await stale;
   assert.equal(reports.some(row => row.event.event === 'stale-observer'), false,
     'old served state cannot be tagged with the new attachment');
+  range.end = () => Infinity;
+  await api.seek(10);
+  assert.equal(api.state().pending, null, 'a nonfinite native range cannot admit a target');
+  const sequences = reports.filter(row => row.run === api.state().run).map(row => row.event.event_seq);
+  assert.deepEqual(sequences, sequences.map((_, i) => i + 1), 'beacons carry monotonic per-run intent order');
   console.log('native rolling fixture: sole-frame and attachment/sample fences passed');
 })().catch(error => { console.error(error); process.exitCode = 1; });

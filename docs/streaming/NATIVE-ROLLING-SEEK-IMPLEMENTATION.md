@@ -37,6 +37,16 @@ existing startup-phase logging. This makes actual savings measurable. Two
 avoided reads are not evidence that a 6.5–9.5 s native reopen now takes less
 than 2 s.
 
+The copy start now overlaps its independent census, audio-policy and title
+reads with `tokio::join!`, then awaits the census before choosing video options.
+Pacing overlaps the existing media-origin probe; the achieved origin still
+finishes before presentation identity, retry recipe and actor admission. These
+are inline futures under the existing start owner, with the probe's owned child
+and timeout retained. No source/GOP result, authority or scratch is cached.
+`copy_policy_reads` and `copy_media_origin` record the monotonic branch/join
+times. The latency benefit remains a measured-max-versus-serial-sum hypothesis
+until the exact candidate runs against reference-fleet media.
+
 ## The shorter-GOP experiment uses actual writer cuts
 
 The ignored `copyseg::tests::native_seek_short_gop_media_export` test exports
@@ -67,9 +77,10 @@ click-to-frame latency, landing error and outside-reach outcomes. The native
 guard remains: an unreachable destination is recorded, never assigned as a
 local seek and credited as success.
 
-The fixture models a 48 s allowance, an 8× initial burst through 48 s and
+The fixture models a 48 s target for new publication, an 8× initial burst through 48 s and
 2× production afterward. It uses the actual segmenter bytes but a modeled
-publication/flow layer. It does **not** exercise daemon scratch grants,
+publication/flow layer. Backward seeks retain previously published media;
+48 s is not a proven invariant on total retained or browser-visible bytes. It does **not** exercise daemon scratch grants,
 concurrent streams, generation/authority fences, reattachment or successor
 creation. Its requests identify what Safari was served separately from the
 observer's most recent served snapshot. A sample cannot assume Safari has
@@ -88,7 +99,7 @@ python3 tests/playback/native-rolling-seek-fixture.py \
 ```
 
 Start each arm, capture the first attachment, run twenty reach attempts and
-five spaced +30 presses, and observe a full ten-minute refill interval.
+five spaced and five coalesced +30 presses, and observe a full ten-minute refill interval.
 Record failures and outside-reach attempts in the denominator. The fixture
 never silently replaces an attachment to hide a reach failure. Pause, resume
 and 2× controls support separate rate/intent rows.
@@ -191,7 +202,13 @@ The reviewer reproduced a fixture receipt race (48 s transmitted but 56 s
 logged) and found cross-run asynchronous sampling and paused-frame hazards.
 Receipts now capture the exact transmitted snapshot, asynchronous work is
 fenced to its run, and destination frames arriving before `seeked` are retained.
-Frame subscriptions are cancelled and rearmed on attachment replacement.
+Frame subscriptions are cancelled and rearmed on attachment replacement and
+before each committed seek, with separate run and intent epochs. Pending-frame
+observations retain callback media time even when it misses the target. Samples
+record tab visibility and the last callback media time/arrival. Per-page UUIDs
+keep separate tabs from overwriting a run. Monotonic event sequences prevent
+late beacon delivery from rewinding modeled demand; late observations remain
+in the receipt. Nonfinite native range endpoints do not admit a target.
 The actual-script Node counterexamples and Python payload-boundary regression
 pass:
 
@@ -227,6 +244,40 @@ The unrelated hung-Docker janitor fixture took 60 s on this Mac because GNU
 case. Validate that unchanged fixture from committed source on Linux rather
 than changing production janitor behavior for this task.
 
-Physical Safari evidence remains open. CUA reported that the Mac was
-locked during the first test attempt; the user was asked to unlock it. Apple
-hardware availability is not an inferred blocker.
+## First real Safari comparison
+
+[The bounded receipt](../../tests/playback/native-rolling-seek-safari-2026-10-03.json)
+records Safari 27.0.1 on this Mac using native `<video>` HLS and actual exported
+copyseg bytes. The first twenty mixed ±10/±30 attempts produced 13 target frames
+and seven outside-reach outcomes in the baseline; all twenty reached target
+frames in the short arm. Local frame latency was 22–47 ms and 23–79 ms
+respectively. The five spaced +30 short-arm presses produced four frames and
+one outside-reach outcome. That failure remains in the denominator.
+
+The short arm continued foreground 1× playback for a full ten minutes, with
+500 ms paired refill observations. This supplements the actual writer-cadence
+comparison; it does not qualify a production shorter target or a replacement.
+The baseline paused sweep recorded eight forward target timeouts despite
+`seeked` and frame-count advancement. The original recorder did not preserve
+the rejected callback's media time or rearm per intent, so these cannot be
+classified as browser picture failures yet. Its later 2× chain was interrupted
+when the short-arm tab became foreground, and is not continuous 2× acceptance.
+The revised recorder retains these missing distinctions. Original failures
+are preserved rather than replaced by a cleaner run.
+
+The real copy lifecycle regression now covers both zero and 1.5 s requested
+starts against a source with one-second GOPs. Both publish, serve, stop and
+retire; the non-keyframe response retains the independently expected 1.0 s
+media origin. Pinned daemon all-target check and denied-lint Clippy pass.
+
+The Windows job in effort run 3966 failed before compilation because runner
+`gha-m6-general-03` lacked the pinned public rust-toolchain object. The adjacent
+runner's cache was healthy. Fetching the exact pinned SHA into only the affected
+public bare cache enabled attempt 4 to enter compilation. No runner settings,
+services, repository credentials or production daemon were changed. The new
+source candidate still requires its own effort gate.
+
+Native acceptance remains open for the incident source, actual daemon
+publication/admission, newest-intent successor timing, paused/2× rows, concurrent
+streams and constrained scratch. macOS locked again after the first foreground
+comparison; CUA cannot drive the remaining native controls until it is unlocked.

@@ -1261,10 +1261,6 @@ impl TranscodeManager {
                 .await?;
         }
 
-        let probe_json = crate::hevc_census::probe_json_for_copy(self.store.as_ref(), &file)
-            .await
-            .ok()
-            .flatten();
         file.audio_offset_ms = if file.audio_streams.is_empty() {
             0
         } else {
@@ -1292,24 +1288,38 @@ impl TranscodeManager {
             ),
             true,
         );
-        let track_selection_at = Instant::now();
-        let audio_index = self
-            .copy_audio_index(&file, audio_override, copy_delivers_hdr)
-            .await;
-        tracing::info!(
-            target: "plurxd::transcode", phase = "copy_track_selection",
-            elapsed_ms = track_selection_at.elapsed().as_millis() as u64,
-            settings_reads = u8::from(audio_override.is_none()),
-            "playback startup phase completed"
+        // These reads describe independent facts of the same held file. Keep
+        // them in this start future so cancellation drops every owned probe,
+        // and await the census before freezing any video or retry recipe.
+        let policy_reads_at = Instant::now();
+        let (probe_json, audio_index, item) = tokio::join!(
+            crate::hevc_census::probe_json_for_copy(self.store.as_ref(), &file),
+            async {
+                let track_selection_at = Instant::now();
+                let audio_index = self
+                    .copy_audio_index(&file, audio_override, copy_delivers_hdr)
+                    .await;
+                tracing::info!(
+                    target: "plurxd::transcode", phase = "copy_track_selection",
+                    elapsed_ms = track_selection_at.elapsed().as_millis() as u64,
+                    settings_reads = u8::from(audio_override.is_none()),
+                    "playback startup phase completed"
+                );
+                audio_index
+            },
+            self.store.get_item(file.item_id),
         );
-        let item_title = self
-            .store
-            .get_item(file.item_id)
-            .await
+        let probe_json = probe_json.ok().flatten();
+        let item_title = item
             .ok()
             .flatten()
             .map(|i| i.title)
             .unwrap_or_else(|| "(unknown)".to_owned());
+        tracing::info!(
+            target: "plurxd::transcode", phase = "copy_policy_reads",
+            elapsed_ms = policy_reads_at.elapsed().as_millis() as u64,
+            "playback startup phase completed"
+        );
         // Every object this session writes passes a Rust grant boundary
         // before it exists, so it may start small and grow. Sizing covers the
         // *effective* startup gate —
@@ -1415,7 +1425,19 @@ impl TranscodeManager {
                     .to_owned(),
             );
         }
-        let pacing = self.pacing(true).await;
+        // The media-origin probe and pacing policy do not depend on one
+        // another. Both finish here, under this start's cancellation owner,
+        // before arguments, presentation identity or actor admission exist.
+        let (pacing, media_origin_seconds) = tokio::join!(self.pacing(true), async {
+            let origin_at = Instant::now();
+            let origin = probe_media_origin(&file.path, start_seconds).await;
+            tracing::info!(
+                target: "plurxd::transcode", phase = "copy_media_origin",
+                elapsed_ms = origin_at.elapsed().as_millis() as u64,
+                "playback startup phase completed"
+            );
+            origin
+        });
         let legacy_args = |output: &str| match takeover.as_ref() {
             Some(takeover) => transcode::hls_copy_args_with_sequence(
                 &file,
@@ -1467,11 +1489,6 @@ impl TranscodeManager {
             "{}",
             ffmpeg_args_log_message("copy-video HLS ffmpeg args", &initial_args, &session_id)
         );
-
-        // Freeze the achieved media origin before actor admission. The actor,
-        // retry recipe, and response contract must describe one immutable
-        // presentation even if the start future is later cancelled.
-        let media_origin_seconds = probe_media_origin(&file.path, start_seconds).await;
 
         // `served`, not `options`, from here on: the playlist must advertise
         // the HDR10 base this path serves and the session record must not

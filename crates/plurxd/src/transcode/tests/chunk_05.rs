@@ -1219,135 +1219,144 @@
             EncoderCaps::default(),
             Pipeline::Cpu,
         ));
-        // Unpaced, so the first playlist does not wait on real time.
-        store.put_setting(keys::HLS_READRATE, "0").await.expect("s");
-        let info = tokio::time::timeout(
-            Duration::from_secs(30),
-            mgr.start_copy(
-                file_id,
-                0.0,
-                None,
-                CopySessionOptions {
-                    convert_dolby_vision: false,
-                    transcode_audio: false,
-                    preserve_dolby_vision: false,
-                },
-                "paul",
-                "pb-shipped-shape",
-            ),
-        )
-        .await
-        .expect("the production start answers")
-        .expect("copy session");
-        let session = mgr
-            .sessions
-            .lock()
+        // Exercise both initial playback and a non-keyframe successor.
+        for requested_start in [0.0, 1.5] {
+            // Unpaced, so the first playlist does not wait on real time.
+            store.put_setting(keys::HLS_READRATE, "0").await.expect("s");
+            let info = tokio::time::timeout(
+                Duration::from_secs(30),
+                mgr.start_copy(
+                    file_id,
+                    requested_start,
+                    None,
+                    CopySessionOptions {
+                        convert_dolby_vision: false,
+                        transcode_audio: false,
+                        preserve_dolby_vision: false,
+                    },
+                    "paul",
+                    "pb-shipped-shape",
+                ),
+            )
             .await
-            .get(&info.session_id)
-            .cloned()
-            .expect("session is tracked");
-
-        let hooks = session.hooks.get();
-        let installed: &dyn std::any::Any = hooks;
-        assert!(
-            installed.is::<NoopSessionHooks>(),
-            "the production start leaves the session on the no-op hooks"
-        );
-        let waker = futures_util::task::noop_waker();
-        let mut context = std::task::Context::from_waker(&waker);
-        for (point, mut hook) in [
-            ("before_path_owner_sample", hooks.before_path_owner_sample()),
-            ("before_playlist_publication", hooks.before_playlist_publication()),
-            (
-                "after_producer_install_authorized",
-                hooks.after_producer_install_authorized(),
-            ),
-            ("after_refresh_playlist_read", hooks.after_refresh_playlist_read()),
-            ("after_activity_snapshot", hooks.after_activity_snapshot()),
-            ("after_control_applied", hooks.after_control_applied()),
-            ("before_flow_completion", hooks.before_flow_completion()),
-            ("after_media_committed", hooks.after_media_committed()),
-            (
-                "before_first_media_owner_claim",
-                hooks.before_first_media_owner_claim(),
-            ),
-            (
-                "after_retirement_cleanup_handoff",
-                hooks.after_retirement_cleanup_handoff(),
-            ),
-            ("before_scratch_cleanup", hooks.before_scratch_cleanup()),
-            ("before_retention_unlink", hooks.before_retention_unlink()),
-            ("after_retention_batch", hooks.after_retention_batch()),
-        ] {
+            .expect("the production start answers")
+            .expect("copy session");
+            assert_eq!(info.start_seconds, requested_start);
+            let expected_origin = if requested_start == 0.0 { 0.0 } else { 1.0 };
             assert!(
-                hook.as_mut().poll(&mut context).is_ready(),
-                "the production {point} point is ready at its first poll"
+                (info.media_origin_seconds - expected_origin).abs() < 0.05,
+                "the response freezes the achieved preceding keyframe, not the requested start"
+            );
+            let session = mgr
+                .sessions
+                .lock()
+                .await
+                .get(&info.session_id)
+                .cloned()
+                .expect("session is tracked");
+
+            let hooks = session.hooks.get();
+            let installed: &dyn std::any::Any = hooks;
+            assert!(
+                installed.is::<NoopSessionHooks>(),
+                "the production start leaves the session on the no-op hooks"
+            );
+            let waker = futures_util::task::noop_waker();
+            let mut context = std::task::Context::from_waker(&waker);
+            for (point, mut hook) in [
+                ("before_path_owner_sample", hooks.before_path_owner_sample()),
+                ("before_playlist_publication", hooks.before_playlist_publication()),
+                (
+                    "after_producer_install_authorized",
+                    hooks.after_producer_install_authorized(),
+                ),
+                ("after_refresh_playlist_read", hooks.after_refresh_playlist_read()),
+                ("after_activity_snapshot", hooks.after_activity_snapshot()),
+                ("after_control_applied", hooks.after_control_applied()),
+                ("before_flow_completion", hooks.before_flow_completion()),
+                ("after_media_committed", hooks.after_media_committed()),
+                (
+                    "before_first_media_owner_claim",
+                    hooks.before_first_media_owner_claim(),
+                ),
+                (
+                    "after_retirement_cleanup_handoff",
+                    hooks.after_retirement_cleanup_handoff(),
+                ),
+                ("before_scratch_cleanup", hooks.before_scratch_cleanup()),
+                ("before_retention_unlink", hooks.before_retention_unlink()),
+                ("after_retention_batch", hooks.after_retention_batch()),
+            ] {
+                assert!(
+                    hook.as_mut().poll(&mut context).is_ready(),
+                    "the production {point} point is ready at its first poll"
+                );
+            }
+
+            let playlist = tokio::time::timeout(Duration::from_secs(60), async {
+                loop {
+                    if let Ok((bytes, _)) = mgr.playlist_with_owner(&info.session_id).await {
+                        break bytes;
+                    }
+                    assert!(
+                        !session.failed.load(Acquire),
+                        "the copy failed: {:?}",
+                        session.failure_reason()
+                    );
+                    tokio::time::sleep(Duration::from_millis(50)).await;
+                }
+            })
+            .await
+            .expect("the running session publishes its playlist");
+            let playlist = String::from_utf8(playlist).expect("UTF-8 playlist");
+            let first = playlist
+                .lines()
+                .map(str::trim)
+                .find(|line| !line.is_empty() && !line.starts_with('#'))
+                .expect("the published playlist names a segment")
+                .to_owned();
+            assert!(
+                tokio::time::timeout(Duration::from_secs(10), mgr.segment(&info.session_id, &first))
+                    .await
+                    .expect("the segment request answers")
+                    .expect("segment open")
+                    .is_some(),
+                "the published segment is served"
+            );
+            assert_eq!(
+                tokio::time::timeout(
+                    Duration::from_secs(10),
+                    mgr.delivery_details_bounded(std::slice::from_ref(&info.session_id), 1),
+                )
+                .await
+                .expect("the activity read answers")
+                .len(),
+                1
+            );
+
+            assert!(
+                tokio::time::timeout(
+                    Duration::from_secs(10),
+                    mgr.stop_session(&info.session_id, "shipped-shape")
+                )
+                .await
+                .expect("the stop answers"),
+                "the stop retires the session"
+            );
+            tokio::time::timeout(Duration::from_secs(10), async {
+                while !session.retirement_cleanup_finished.load(Acquire) {
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+            })
+            .await
+            .expect("retirement passes its handoff point and finishes its cleanup");
+            assert!(!mgr.sessions.lock().await.contains_key(&info.session_id));
+            let installed: &dyn std::any::Any = session.hooks.get();
+            assert!(
+                installed.is::<NoopSessionHooks>(),
+                "no production path fills the slot"
             );
         }
-
-        let playlist = tokio::time::timeout(Duration::from_secs(60), async {
-            loop {
-                if let Ok((bytes, _)) = mgr.playlist_with_owner(&info.session_id).await {
-                    break bytes;
-                }
-                assert!(
-                    !session.failed.load(Acquire),
-                    "the copy failed: {:?}",
-                    session.failure_reason()
-                );
-                tokio::time::sleep(Duration::from_millis(50)).await;
-            }
-        })
-        .await
-        .expect("the running session publishes its playlist");
-        let playlist = String::from_utf8(playlist).expect("UTF-8 playlist");
-        let first = playlist
-            .lines()
-            .map(str::trim)
-            .find(|line| !line.is_empty() && !line.starts_with('#'))
-            .expect("the published playlist names a segment")
-            .to_owned();
-        assert!(
-            tokio::time::timeout(Duration::from_secs(10), mgr.segment(&info.session_id, &first))
-                .await
-                .expect("the segment request answers")
-                .expect("segment open")
-                .is_some(),
-            "the published segment is served"
-        );
-        assert_eq!(
-            tokio::time::timeout(
-                Duration::from_secs(10),
-                mgr.delivery_details_bounded(std::slice::from_ref(&info.session_id), 1),
-            )
-            .await
-            .expect("the activity read answers")
-            .len(),
-            1
-        );
-
-        assert!(
-            tokio::time::timeout(
-                Duration::from_secs(10),
-                mgr.stop_session(&info.session_id, "shipped-shape")
-            )
-            .await
-            .expect("the stop answers"),
-            "the stop retires the session"
-        );
-        tokio::time::timeout(Duration::from_secs(10), async {
-            while !session.retirement_cleanup_finished.load(Acquire) {
-                tokio::time::sleep(Duration::from_millis(10)).await;
-            }
-        })
-        .await
-        .expect("retirement passes its handoff point and finishes its cleanup");
-        assert!(!mgr.sessions.lock().await.contains_key(&info.session_id));
-        let installed: &dyn std::any::Any = session.hooks.get();
-        assert!(
-            installed.is::<NoopSessionHooks>(),
-            "no production path fills the slot"
-        );
     }
 
     /// The whole point of the telemetry is that it comes from a running

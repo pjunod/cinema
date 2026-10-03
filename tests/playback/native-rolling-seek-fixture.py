@@ -42,45 +42,52 @@ PAGE = r'''<!doctype html><meta charset="utf-8"><title>Native rolling seek compa
 Both retain a 48 s allowance. Generated AVC/AAC; modeled pacing and publication. This is not daemon or incident-source qualification.</p>
 <button id="baseline">Start baseline</button><button id="short">Start short-GOP candidate</button>
 <button id="sweep">20 local reach attempts</button><button id="chain">Five spaced +30 presses</button>
-<button id="pause">Pause</button><button id="resume">Resume</button><button id="double">2×</button>
+<button id="coalesced">Five coalesced +30 presses</button>
+<button id="single">1×</button><button id="pause">Pause</button><button id="resume">Resume</button><button id="double">2×</button>
 <video id="v" muted controls playsinline></video><pre id="result">Ready</pre>
 <script>
 const v=document.querySelector('#v'), result=document.querySelector('#result');
-let run=null, count=0, pending=null, frameCount=0, frameId=null, samples=[];
+const pageId=crypto.randomUUID();
+let run=null, count=0, pending=null, frameCount=0, frameId=null, frameEpoch=0, lastFrame=null, eventSeq=0, samples=[];
 const ranges=r=>Array.from({length:r.length},(_,i)=>[r.start(i),r.end(i)]);
-function snapshot(){return {at_ms:performance.now(),position_s:v.currentTime,rate:v.playbackRate,paused:v.paused,seeking:v.seeking,buffered:ranges(v.buffered),seekable:ranges(v.seekable),ready_state:v.readyState,frames:frameCount};}
-function report(event,details={},own=run){if(!own||own!==run)return;const row={event,...snapshot(),...details};
+function snapshot(){return {at_ms:performance.now(),position_s:v.currentTime,rate:v.playbackRate,paused:v.paused,seeking:v.seeking,buffered:ranges(v.buffered),seekable:ranges(v.seekable),ready_state:v.readyState,frames:frameCount,last_frame:lastFrame,visibility:document.visibilityState};}
+function report(event,details={},own=run){if(!own||own!==run)return;const row={event,event_seq:++eventSeq,...snapshot(),...details};
  samples.push(row);result.textContent=JSON.stringify(samples.slice(-5),null,2);
  navigator.sendBeacon('/event',JSON.stringify({run,event:row}));}
 async function paired(event,own=run){if(!own||own!==run)return;const m=await(await fetch('/state/'+own)).json();if(own!==run)return;report(event,{served:m},own);}
 async function start(name){
  if(pending){report('cancelled',{target_s:pending.target,reason:'attachment-change'});pending.resolve();pending=null;}
  if(frameId!==null){v.cancelVideoFrameCallback(frameId);frameId=null;}
- const own=name+'-'+(++count);run=own;samples=[];
+ const own=name+'-'+pageId+'-'+(++count);run=own;samples=[];lastFrame=null;eventSeq=0;
  await fetch('/begin',{method:'POST',body:JSON.stringify({run:own,variant:name,user_agent:navigator.userAgent})});
  if(own!==run)return;
  v.pause();v.removeAttribute('src');v.load();v.playbackRate=1;v.src='/media/'+own+'/index.m3u8';
- armFrame(own);report('input-start',{variant:name},own);await v.play();if(own!==run)return;await paired('attachment',own);}
+ rearmFrame(own);report('input-start',{variant:name},own);await v.play();if(own!==run)return;await paired('attachment',own);}
 function seek(delta,own=run){if(!own||own!==run)return Promise.resolve();if(pending){report('cancelled',{target_s:pending.target});pending.resolve();pending=null;}
- const before=snapshot(),target=Math.max(0,v.currentTime+delta),reachable=before.seekable.some(r=>target>=r[0]&&target<=r[1]);
+ const before=snapshot(),target=Math.max(0,v.currentTime+delta),reachable=before.seekable.some(r=>Number.isFinite(r[0])&&Number.isFinite(r[1])&&target>=r[0]&&target<=r[1]);
  report('committed-input',{delta,target_s:target,reachable,before});
  if(!reachable){report('outside-reach',{delta,target_s:target});return Promise.resolve();}
  return new Promise(resolve=>{const at=performance.now(),floor=frameCount;pending={target,at,floor,resolve,own,frame:null};
- v.currentTime=target;setTimeout(()=>{if(pending&&pending.at===at&&pending.own===own){report('target-timeout',{target_s:target});pending=null;resolve();}},3000);});}
+ rearmFrame(own);v.currentTime=target;setTimeout(()=>{if(pending&&pending.at===at&&pending.own===own){report('target-timeout',{target_s:target});pending=null;resolve();}},3000);});}
 function settleFrame(){if(!pending||pending.own!==run||!pending.frame||v.seeking)return;
  const p=pending;pending=null;report('target-frame',{target_s:p.target,media_time_s:p.frame.mediaTime,
  click_latency_ms:p.frame.at_ms-p.at,settlement_latency_ms:performance.now()-p.at,
  landing_error_s:p.frame.mediaTime-p.target},p.own);p.resolve();}
-function armFrame(own){frameId=v.requestVideoFrameCallback((_,meta)=>{if(own!==run)return;frameId=null;frameCount++;
+function rearmFrame(own){if(frameId!==null)v.cancelVideoFrameCallback(frameId);frameId=null;armFrame(own,++frameEpoch);}
+function armFrame(own,epoch){frameId=v.requestVideoFrameCallback((_,meta)=>{if(own!==run||epoch!==frameEpoch)return;frameId=null;frameCount++;lastFrame={media_time_s:meta.mediaTime,at_ms:performance.now()};
+ if(pending&&pending.own===own)report('frame-observed',{media_time_s:meta.mediaTime,target_s:pending.target,frame_epoch:epoch,dispatch_frame_floor:pending.floor,within_target:Math.abs(meta.mediaTime-pending.target)<1},own);
  if(pending&&pending.own===own&&frameCount>pending.floor&&Math.abs(meta.mediaTime-pending.target)<1){
  pending.frame={mediaTime:meta.mediaTime,at_ms:performance.now()};settleFrame();}
- armFrame(own);});}
+ armFrame(own,epoch);});}
 v.addEventListener('playing',()=>report('playing'));v.addEventListener('waiting',()=>report('waiting'));
 v.addEventListener('error',()=>report('error',{code:v.error?.code}));
 v.addEventListener('seeked',()=>{report('seeked');settleFrame();});setInterval(()=>paired('paired-sample').catch(()=>{}),500);
 document.querySelector('#baseline').onclick=()=>start('baseline');document.querySelector('#short').onclick=()=>start('short');
 document.querySelector('#sweep').onclick=async()=>{const own=run;for(let i=0;i<20&&own===run;i++){await paired('pre-input',own);await seek([10,30,-10,-30][i%4],own);await new Promise(r=>setTimeout(r,1000));}report('sweep-complete',{},own);};
 document.querySelector('#chain').onclick=async()=>{const own=run;for(let i=0;i<5&&own===run;i++){await paired('pre-chain-input',own);await seek(30,own);await new Promise(r=>setTimeout(r,5000));}report('chain-complete',{},own);};
+document.querySelector('#coalesced').onclick=async()=>{const own=run;await paired('pre-coalesced-input',own);if(own!==run)return;
+ for(let i=0;i<5;i++)report('coalesced-input',{delta:30,ordinal:i+1},own);await seek(150,own);report('coalesced-complete',{},own);};
+document.querySelector('#single').onclick=()=>{v.playbackRate=1;report('rate-change');};
 document.querySelector('#pause').onclick=()=>{v.pause();report('pause');};document.querySelector('#resume').onclick=()=>{v.play();report('resume');};
 document.querySelector('#double').onclick=()=>{v.playbackRate=2;report('rate-change');};
 </script>'''
@@ -115,7 +122,7 @@ def state(run, rows=None):
 
 def save():
     args.receipt.parent.mkdir(parents=True, exist_ok=True)
-    data = {'schema_version': 1, 'qualification': 'generated copyseg media; modeled publication, not daemon',
+    data = {'schema_version': 2, 'qualification': 'generated copyseg media; modeled publication, not daemon',
             'variants': {name: {'target_s': v['target'], 'duration_s': v['duration'],
                                 'durations_s': [r[1] for r in v['segments']]} for name, v in variants.items()},
             'runs': {key: {k: val for k, val in run.items() if k not in ('began', 'publish_at', 'published')}
@@ -150,12 +157,17 @@ class Handler(BaseHTTPRequestHandler):
                     return self.send('{}', status=400)
                 runs[data['run']] = {'variant': data['variant'], 'user_agent': data['user_agent'],
                                     'began': time.monotonic(), 'publish_at': 0, 'published': [],
-                                    'revision': 0, 'position': 0, 'rate': 1, 'events': [], 'requests': []}
+                                    'revision': 0, 'position': 0, 'rate': 1, 'last_event_seq': 0, 'events': [], 'requests': []}
             elif self.path == '/event' and data['run'] in runs:
                 run = runs[data['run']]
                 event = data['event']
-                run['position'] = max(0, float(event['position_s']))
-                run['rate'] = min(4, max(.25, float(event['rate'])))
+                # Beacon delivery order is not intent order. Retain every
+                # observation, but only newest intent may move modeled demand.
+                sequence = int(event['event_seq'])
+                if sequence > run['last_event_seq']:
+                    run['last_event_seq'] = sequence
+                    run['position'] = max(0, float(event['position_s']))
+                    run['rate'] = min(4, max(.25, float(event['rate'])))
                 run['events'].append(event)
                 save()
         self.send('{}')
