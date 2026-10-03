@@ -5431,3 +5431,43 @@ against a 128 KiB ceiling without constructing or polling daemon state.
 Pinned Rust 1.97.1 `cargo check --locked -p plurxd --tests` PASSED
 in 1m32s; it compiled test sources without executing them. Normal hook
 and exact-source runtime verification of the patch are pending. No units or final review ran.
+
+
+### 10.187 · Relay stack fix compiles and mixed-owner switching passes
+
+Fix `3983c6cef` PASSED pinned Rust 1.97.1 production/test-source check
+in 1m32s, the normal catalog/formatting/workspace-all-target Clippy/served
+JavaScript hook in 47.6s, and the exact committed Linux build in 1m32s.
+The future-footprint regression compiles but remains unrun. All 214 PR
+regression fields resolve statically; no units have executed.
+
+The fourth mixed-ingress probe PASSED against that executable. Catalog
+and session creation went through voter B; twenty-one quality exchanges
+and media went through ingress A. The durable session/incarnation/owner
+B/epoch 1 tuple remained unchanged while 720p presented on the same
+element/Hls/MediaSource/buffers/session/player. Maximum callback gap
+was 88.8 ms, zero stalls/hitches/drops, one actual durable parent start
+across node-local event streams. TTFF was 9.272 s, observed initial clock
+0.961x. No worker stack overflow occurred, without increasing stacks.
+
+Playback-or-unclassified End counts across all three still-live daemons
+were 0/0/0/0. Raw counts were 1/2/1/1, each identified by its exact
+caption-probe arguments; those children remain visible in the receipt.
+All three software-credit counts were zero at the final worker snapshot.
+Owned browser, proxy, daemons and runtime trees were cleaned up; helper
+exited zero. Report: `continuous-chrome-3983c6cef-targeted-mixed-owner4`;
+bounded node logs: `continuous-cluster-3983c6cef-mixed-owner4-node-*`.
+
+Post-fix attempts 2 and 3 remain FAILED. The helper first assumed peer
+Activity rows exposed session ids and that ingress playback events covered
+other nodes; both are intentionally node-local/private surfaces. It then
+incorrectly required nonzero publication time, although ordinary confirmed
+activations use zero for immediate publication. Corrected proof reads the
+exact durable owner tuple read-only on the isolated leader, accepts only
+already-publishable active rows, and aggregates node-local start events.
+No additional production patch was needed for those helper failures.
+
+This is three logical voters on one physical host, not a multi-host network
+partition drill. Owner loss/takeover, older-peer runtime negotiation, broad
+source/load coverage, Firefox continuity and native physical evidence remain
+open. The Fable pause after the final adversarial review still applies.
