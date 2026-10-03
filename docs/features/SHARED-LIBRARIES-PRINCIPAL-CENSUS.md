@@ -1397,3 +1397,19 @@ revision and library-move refusal, distinct viewers, absence of durable
 activation, Source negative-ID refusal and Local zero-ID refusal (1 passed,
 zero ignored, 0.67 seconds). The existing private Local worker contract also
 passed (1 passed, zero ignored). Both ran with pinned Rust 1.97.1.
+
+### Closed Source Start and receiver control projection
+
+The complete private Source HLS Start decoder is integrated on the current
+Source preparation and client base. All five decoder regressions passed
+(zero ignored, 0.03 seconds), covering full response retention, complete
+Source identity, canonical incarnation/control binding, unknown/missing
+fields, Source URL containment, duplicate keys and whole-body parser limits.
+
+The public Start projection now requires the actual B incarnation and owner
+epoch. It rewrites control generation, epoch and URL to B while retaining
+all quality, timing, VOD and dynamic-range fields. Missing control or invalid
+B identity/epoch refuses the projection; Source control generation is absent
+from the public response. All five wire regressions passed (zero ignored,
+0.01 seconds). These are wire and identity proofs, not live actor or relay
+qualification. Both suites used pinned Rust 1.97.1 on the integrated tree.
