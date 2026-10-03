@@ -1,6 +1,6 @@
 # Video quality status — what is built, measured and merged
 
-**Status:** building consolidated batch · **Updated:** 2026-10-03
+**Status:** implementation integrated; final review and validation next · **Updated:** 2026-10-03
 
 Companion to [the programme](VIDEO-QUALITY-PROGRAM.md), which owns scope,
 acceptance and order. This ledger records actual execution. Empty evidence is
@@ -17,9 +17,9 @@ effort only. Whole-suite unit repair remains with the separate process.
 | Work | Current state | Cause and architectural direction |
 |---|---|---|
 | Independent workspace | Ready | `/private/tmp/plurx-video-quality-build-20261003`, cloned directly from Forgejo; no borrowed Git objects or access to Paul's checkout. |
-| Consolidated branch | Building | [PR #766](http://192.168.4.7:3000/noirr/plurx/pulls/766), `codex/video-quality-batch`; main `9416dbe89` integrated as `9c93f303f`; commit `6ef61fb1f` retains all three tool branches. PRs #760/#761/#762 are closed as superseded. |
+| Consolidated branch | Implementation integrated | [PR #766](http://192.168.4.7:3000/noirr/plurx/pulls/766), `codex/video-quality-batch`; main `9416dbe89` integrated as `9c93f303f`; commit `6ef61fb1f` retains all three tool branches. PRs #760/#761/#762 are closed as superseded. |
 | Old per-task CI | Stopped | Encoder run 3936 passed; still-running C1/HDR runs 3938/3942 were cancelled after the workflow override. No additional per-task test campaigns. |
-| Content-aware runtime C2 | Integrated `8fd3bba7d`; cache-consumer integration finishing | Bounded measurements in existing durable producers, persisted source/recipe identities, offline snapshots and a packaged static scorer. Play never waits for analysis; cached output selection is being joined to the measured recipe. |
+| Content-aware runtime C2 | Integrated `8fd3bba7d` + `e56c80274` | Bounded measurements in existing durable producers, persisted source/recipe identities, offline snapshots and a packaged static scorer. Retained-HLS can reuse a completed measured artifact; misses preserve live policy. Modern immutable VOD is separate. |
 | Next episode | Implemented `f632af81d` | Warm one successor metadata page during the final 30 seconds, cancel with the existing playback lifecycle, and retain a fresh authoritative decision at Play. Five regressions authored; hook passed. |
 | HLS acknowledgement batching | Implemented, validation deferred | Current pump allocates and schedules a separate channel acknowledgement for every 4 KiB despite 128 KiB storage reads; preserve the 4 KiB proof while reducing coordination, rather than weakening accounting. |
 | Apply encoder calibration (2) | Retain baseline | QSV Q22 failed all six quality comparisons; no default change is justified. |
@@ -29,8 +29,10 @@ effort only. Whole-suite unit repair remains with the separate process.
 
 The agent's first pinned Rust 1.97.1 compile check in the independent clone
 passed. Package-only unused-item warnings are pre-existing; the normal
-workspace hook remains the lint check. Tests and adversarial review are now
-deferred until the batch is ready. Existing reports below remain dated evidence,
+workspace hook remains the lint check. The combined tree passed pinned all-target
+compilation and the normal hook at `d717b82b6`; the cache-consumer follow-up is
+receiving the same integrated compile check. The final adversarial review is
+next, followed by its fixes and the once-only fast lane. Existing reports below remain dated evidence,
 not a claim that newly implemented code has already passed its future checks.
 
 Decisions taken without requiring Paul: preparation caches metadata but retains a fresh

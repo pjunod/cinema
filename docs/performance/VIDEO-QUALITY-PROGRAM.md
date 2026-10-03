@@ -186,7 +186,10 @@ The batch's native analyser runs as a bounded phase of the existing retained-HLS
 offline producer, under its admission, source descriptor and cancellation
 ownership. It persists a source/engine/scorer/recipe-bound report in the
 existing probe document. Cached construction can use a measured winner before
-naming its artifact. Modern immutable VOD remains a separate encoding contract.
+naming its artifact. Retained-HLS playback can select a completed measured
+artifact through the existing cache owner; a miss preserves its live recipe,
+with no analysis, media hash or new encode on the lookup path. Modern immutable
+VOD remains a separate encoding contract.
 An offline request keeps its accepted immutable recipe;
 its worker can prepare evidence for a later request. Play never waits for this
 analysis, and a missing, changed, unsupported or failed measurement retains the
@@ -197,7 +200,8 @@ Settings → Developer → Measured per-title encoding saves
 BT.709, progressive square-pixel SDR software x264 without burned subtitles.
 Three two-second windows, bounded media/scratch, a three-minute job budget and
 existing background-yield rules limit work. Every window's mean and lower-tail
-VMAF must preserve baseline quality, aggregate bytes must fall at least 10%,
+VMAF must preserve baseline quality, each candidate window's mean must reach
+93, aggregate bytes must fall at least 10%,
 and the candidate encode-time total may not exceed baseline by more than 10%.
 These sampled results do not promise whole-title quality or hardware-family
 benefits. Explicit operator rate-control choices take precedence.
