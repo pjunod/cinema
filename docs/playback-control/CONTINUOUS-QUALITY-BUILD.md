@@ -5000,3 +5000,146 @@ inventory/renewal, refused handoff arming, retained confirmation ownership,
 then successful confirmation/publication across SQLite and replicated storage.
 Pinned Rust 1.97.1 `cargo check --locked -p plurx-core --tests --features
 hiqlite-contract-tests` passed without executing tests.
+
+
+### 10.172 · Exact activation fix build and passing transport probe
+
+Fix `97967c6ce` passed the normal hook: catalog, pinned workspace/all-target
+Clippy, Rust formatting and 72 served-script syntax checks. Its committed
+source-only Linux build verified Rust 1.97.1 and passed in 2m24s. Source
+archives/extractions were removed; no repository credentials or Git directory
+were transferred. The batched PR remains draft, with 212 regression fields.
+No units ran.
+
+The exact-source targeted Chrome probe passed its first frame in 3806 ms,
+with a 1.003x sampled clock, zero startup hitches/stalls, then passed three
+rapid intents, pause/resume and pending-quality cold seek in the same session
+and player. The 2.5-second pause held the film clock at 2.688 seconds; resume
+presented 720p. The pending-quality seek landed at 900.019 seconds and 1080p,
+with no continuous observation refusal at the landing snapshot. End showed
+zero owned producers at every 0/1/3/5-second alive-daemon sample. Its owned
+backend/proxy were cleaned up. This is transport/process evidence, not a full
+current-source campaign or physical display/audio qualification.
+
+A focused Mac Firefox run against that backend stopped before playback:
+macOS refused its helper sandbox extension, and WebDriver reported an exited
+browser. The owned profile/backend were cleaned up. Full bundle signature
+verification succeeds outside the tool sandbox; the earlier sandboxed signature
+check could not validate it. No browser replacement or sandbox disabling was
+performed. A disposable Launch Services launch check is now boundedly attempting
+normal app startup with the owned profile and localhost WebDriver connection.
+
+
+### 10.173 · Normal Mac Firefox launch works; focused reopen remains open
+
+The disposable Launch Services startup passed with a unique owned profile and
+localhost geckodriver connected to that profile's Marionette port. The bundle
+sandbox remains enabled. The helper verifies profile/process ownership and
+retires only its own browser, driver and runtime.
+
+The exact-source focused late-start probe began playback at 378 seconds, but
+its first 720p → 1080p request timed out waiting for a committed switch and
+created a second session. This failed receipt remains failed. A narrowed
+read-only owner/selection trace is investigating the fallback. Its first
+attempt accidentally dropped arguments in the operational exec wrapper, so
+playback never began; that harness error is corrected for the new attempt
+and is not a production startup finding.
+
+All 212 PR regression fields statically resolve against source `97967c6ce`;
+this validates names only and executes no tests. The phone still reports
+`passcodeRequired=true` despite the unlock update, so physical playback
+remains unmeasured. No final adversarial review or unit run has started.
+
+
+### 10.174 · Correct family reproduces late-window switches successfully
+
+The narrowed 720p-start trace showed the active family was 480p/720p;
+1080p was outside that bound family. That failed probe is not equivalent
+to the full campaign's 720p/1080p family. The focused follow-up starts
+1080p at 378 seconds, then requests 720p and 1080p using the unchanged
+committed playback-lab checks. Both switches passed on `97967c6ce` with
+one durable session create and player generation, zero measured hitches,
+stalls, waits, reopens or dropped frames. Maximum/p95 callback gap was
+100 ms against the unchanged 100 ms limit. Ownership/selection tracing
+confirmed the return to 1080p remained compatible with the bound family.
+Its owned browser/profile/backend were retired.
+
+This narrow pass does not replace the full mixed manual/Auto campaign or
+prove physical output. The source-only backend's optional runtime lifetime
+is now bounded to 60..2100 seconds for the full campaign; the default
+720-second guard remains. The separate physical phone launch is retrying
+boundedly after further Locked refusals; no phone playback is claimed.
+
+
+### 10.175 · Phone retry refused; current-source full Firefox starts
+
+The bounded physical CQ Lab retry ended with CoreDevice 10002 / FBS 7
+Locked: the device was not, or could not be, unlocked. No lab PID or
+playback was obtained. Its generated credentials were not printed and
+its owned isolated backend/runtime were removed. Physical iOS evidence
+remains unmeasured.
+
+The full current-source Mac Firefox campaign now runs with fifteen manual
+changes and the committed five-stage actual Auto measurement. It uses
+normal Launch Services startup, the approved isolated Linux `97967c6ce`
+backend, unchanged callback/continuity bounds and explicit source/decoder
+identity checks. End will census actual owned Linux FFmpeg processes
+while that daemon remains alive. The runtime has a 2100-second deadline;
+physical display/audio output remains outside this browser receipt.
+Main remains `342521018`. No units or final adversarial review ran.
+
+
+### 10.176 · Full current-source Mac Firefox fails; calibrate the observer
+
+The exact `97967c6ce` full Mac Firefox run presented all fifteen manual
+targets with one session/player, zero stalls, waits, reopens or dropped
+frames, but FAILED one transition hitch and the unchanged 100 ms p95
+callback bound: maximum/p95 was 119.3 ms. Auto did not run. End observed
+zero owned Linux FFmpeg children at all 0/1/3/5-second samples while the
+daemon stayed alive. Its owned profile/browser/backend were removed.
+
+The hitch was a backward callback: media time 325.25 while the element
+clock was 324.884604, followed by media time 324.916667 while the element
+clock was 324.931145. These are raw observations, not proof of a physical
+backstep. The largest gap was during change ten preparation, at film
+521.291667 → 521.375, before the target at 568.083333. Callback time
+advanced 119.3 ms; expected-display time advanced 102.64 ms and the
+presented-frame count advanced two. The failed receipt remains failed.
+
+A bounded two-minute no-switch 1080p baseline now calibrates callback
+metadata against read-only suspicious-frame raster samples. The raster
+probe is installed after browser setup so reload cannot erase it; it
+records at most 32 suspicious samples. This is diagnostic readback, not
+physical display capture. No production code, acceptance threshold,
+feature gate or unit-test timing was changed.
+
+
+### 10.177 · No-switch calibration, idle capture and Mac relock
+
+The first two-minute no-switch 1080p baseline failed a 599.44 ms initial
+held-frame interval; no suspicious raster rows were captured. A second
+baseline preserved the initial hold separately and measured a 100 ms
+maximum callback gap after clock advance, without any quality requests.
+Its first compositor hook started on the final read because the steady
+operation does not poll snapshots; it was terminated without image data.
+That harness mistake is corrected with a bounded startup-only clock poll.
+
+The corrected ScreenCaptureKit attempt selected only the verified owned
+Firefox process/window and DOM-derived video rectangle, with audio and
+cursor capture disabled. It returned 5,220 idle samples and zero complete
+image frames over 90 seconds. A separate read-only CoreGraphics query
+then confirmed `screen_locked=true`. This is no pixel evidence and does
+not erase any failed Firefox receipt. The full run did not monitor lock
+state, so relock timing cannot be retroactively correlated to its failures.
+
+Further headed helpers refuse a known locked Mac before launch. After
+unlock, a temporary `caffeinate` assertion follows the exact owned browser
+PID and has a 2100-second maximum lifetime; browser exit/cleanup releases
+it. It changes no lock settings and cannot unlock the session. These are
+operational measurement helpers, not production feature gates.
+
+Independent full Linux Chrome qualification now runs against `97967c6ce`,
+using the committed fifteen-manual/five-actual-Auto runner and unchanged
+criteria. Its supervisor has a 1800-second deadline and removes only its
+owned runtime. Staging had 4.81 GB quota remaining; no quota was changed.
+All unit tests and the final adversarial review remain deferred.
