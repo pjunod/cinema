@@ -476,6 +476,8 @@ is streamed (`streaming/`) and what is replicated (`cluster/`).
 
 ## performance/ — where the seconds go
 
+[Video quality programme](performance/VIDEO-QUALITY-PROGRAM.md) — approved calibration and performance build order; [execution ledger](performance/VIDEO-QUALITY-STATUS.md) — parallel ownership, actual measurements, merges and remaining evidence. **Open.**
+
 Two rounds of performance work, each with its plan, review, and response.
 
 | File | Answers | |
