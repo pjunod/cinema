@@ -4603,3 +4603,24 @@ long H264/AAC fixture and ordinary Original selection, records the actual
 transport, and refuses unexpected continuous enrollment. This is a diagnostic
 comparison without quality requests, not continuous-family qualification.
 The original continuity thresholds remain intact. No units ran.
+
+
+### 10.157 Original playback observations and corrected diagnostic criteria
+
+The `f94c273ca` Original comparison served direct H264/AAC, started in 177 ms
+and played for 120 seconds with zero hitches, stalls, waits, reopens or drops
+(2884 frames, 84.38 ms maximum gap, 1.000x overall clock). No backward
+observations occurred. Its machine receipt nevertheless remains failed: the
+new diagnostic inherited VOD-only requirements, and its enrollment check
+mistook the snapshot's all-null continuous object for an actual adapter.
+These are harness mistakes, not playback failures. The failed receipt is
+preserved without relabelling. One direct-play observation does not establish
+the intermittent continuous fault's underlying cause.
+
+Original controls now explicitly omit VOD/session/continuous requirements
+while retaining continuity thresholds. The enrollment check requires a real
+family identity. The lab's bounded frame observations now retain live
+currentTime on both sides of a backward callback, so the next failed mixed
+case can distinguish a playback-clock regression from callback metadata
+regressing while the clock stays monotonic. No frame timestamp is rewritten
+or fault suppressed. No units have run.

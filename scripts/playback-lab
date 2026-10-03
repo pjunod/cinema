@@ -2420,6 +2420,7 @@ async function setCasePreferences(driver, quality, frameDiagnostics = false) {
             probe.sequence+=1;
             const p=(typeof PLAYER!=='undefined'&&PLAYER)||{};
             const presented={sequence:probe.sequence,at_ms:now,
+              current_time:Number.isFinite(v.currentTime)?v.currentTime:null,
               presentation_time_ms:Number.isFinite(metadata?.presentationTime)?metadata.presentationTime:null,
               expected_display_time_ms:Number.isFinite(metadata?.expectedDisplayTime)?metadata.expectedDisplayTime:null,
               presented_frames:Number.isFinite(metadata?.presentedFrames)?metadata.presentedFrames:null,

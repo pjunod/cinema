@@ -116,7 +116,7 @@ async function mixedCase(driver, server, manifest, fixture, testCase, info, obse
     if (testCase.operation === "steady") {
       result.diagnostic_scope = testCase.quality === "original"
         ? "steady_original_without_quality_requests" : "steady_manual_720_without_quality_requests";
-      if (testCase.quality === "original" && result.end?.continuous) {
+      if (testCase.quality === "original" && result.end?.continuous?.family_id) {
         throw new Error("Original baseline unexpectedly enrolled continuous quality");
       }
     } else if (result.status === "passed") await measureAuto(driver, shaper, result);
@@ -178,7 +178,9 @@ async function main(args) {
   if (steadySeconds) {
     Object.assign(testCase, {name: steadySource === "original" ? "original H264 steady control without quality requests" : "continuous steady 720p control without quality requests",
       fixture: steadySource === "original" ? "continuous-h264-aac-1080" : "continuous-mpeg4-aac-1080",
-      quality: steadySource === "original" ? "original" : "720", operation: "steady", switches: []});
+      quality: steadySource === "original" ? "original" : "720", operation: "steady", switches: [],
+      require_vod: steadySource !== "original", require_continuous: steadySource !== "original",
+      require_same_session: steadySource !== "original"});
     manifest.thresholds.maximum_hitches = 0;
     options.observe = steadySeconds;
   }
