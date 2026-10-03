@@ -1,0 +1,19 @@
+[package]
+name = "plurx-compat-jellyfin"
+description = "Pure Jellyfin protocol forms for the pinned Infuse and Android TV compatibility surface"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+repository.workspace = true
+
+[dependencies]
+serde = { workspace = true, features = ["derive"] }
+thiserror = { workspace = true }
+uuid = { workspace = true }
+
+[dev-dependencies]
+serde_json = { workspace = true }
+
+[lints]
+workspace = true
