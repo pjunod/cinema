@@ -1832,3 +1832,19 @@ cargo test --locked -p plurx-core --features hiqlite-store --lib sharing_princip
 cargo test --locked -p plurx-core --features hiqlite-contract-tests --test store_contract session_principals -- --nocapture
 cargo test --locked -p plurx-core --features hiqlite-contract-tests --test store_contract viewer -- --nocapture
 ```
+
+**Forwarded ownership checkpoint:** worker start/preparation requests now carry
+`PlaybackPrincipal` in Rust. The closed wire adapter keeps the existing local
+`user_id` encoding for retained recipes and old local peers, and encodes a
+shared request exclusively as a validated principal. Two namespaces, absent
+ownership, zero users, malformed viewers and unknown fields are rejected.
+Preparation/takeover comparisons use the complete principal; producer recovery
+retains it. Current worker ingress explicitly refuses sharing before placement
+or producer creation while Store/grant admission is unfinished. All 66
+media-session/internal-relay tests passed (zero ignored, 3.68 seconds), including
+`sharing_forwarded_principal_preserves_local_wire_and_refuses_mixed_ownership`;
+Rust 1.97.1 all-target compilation passed. Shared worker admission remains open.
+
+```sh
+cargo test --locked -p plurxd --bin plurxd media_sessions::tests -- --nocapture
+```

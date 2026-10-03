@@ -2106,7 +2106,9 @@ async fn create_with_purpose_inner(
             .flatten(),
         protocol_version: crate::media_pool::PROTOCOL_VERSION,
         incarnation_id: incarnation_id.clone(),
-        user_id: user.id,
+        principal: plurx_core::playback_principal::PlaybackPrincipal::LocalUser {
+            user_id: user.id,
+        },
         // The source snapshot a later takeover must match exactly (§7.3). A
         // row we could not read records an impossible snapshot rather than a
         // plausible one, so takeover refuses instead of reproducing a session
@@ -3437,14 +3439,15 @@ pub(in crate::http) async fn prime_live_prepared_session(
     let Some(admitted_generation) = authority.admit() else {
         return false;
     };
-    let user = match state.store.get_user(recipe.user_id).await {
+    let Some(user_id) = recipe.principal.local_user_id() else {
+        return false;
+    };
+    let user = match state.store.get_user(user_id).await {
         Ok(Some(user)) => user,
         _ => return false,
     };
     let recovery = crate::transcode::SessionRecoveryIdentity {
-        principal: plurx_core::playback_principal::PlaybackPrincipal::LocalUser {
-            user_id: recipe.user_id,
-        },
+        principal: recipe.principal.clone(),
         incarnation_id: recipe.incarnation_id.clone(),
         recovery_epoch: recovery_epoch.to_owned(),
     };
@@ -3479,7 +3482,7 @@ pub(in crate::http) async fn prime_live_prepared_session(
             state.node_id.clone(),
             recipe.incarnation_id.clone(),
             info.session_id.clone(),
-            recipe.user_id,
+            user_id,
             recipe.incarnation_id.clone(),
             Some(replacement),
         )
@@ -3489,7 +3492,7 @@ pub(in crate::http) async fn prime_live_prepared_session(
             state.node_id.clone(),
             recipe.incarnation_id.clone(),
             info.session_id.clone(),
-            recipe.user_id,
+            user_id,
             recipe.incarnation_id.clone(),
             Some(replacement),
         )

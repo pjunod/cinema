@@ -2507,7 +2507,7 @@
             decoder_caps: None,
             protocol_version: crate::media_pool::PROTOCOL_VERSION,
             incarnation_id: incarnation_id.clone(),
-            user_id: user.id,
+            principal: plurx_core::playback_principal::PlaybackPrincipal::LocalUser { user_id: user.id },
             source_size: 1,
             source_mtime: 1,
             typeless_playlist: false,

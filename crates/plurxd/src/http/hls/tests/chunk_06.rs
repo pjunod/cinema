@@ -2666,7 +2666,7 @@
                     decoder_caps: None,
                     protocol_version: crate::media_pool::PROTOCOL_VERSION,
                     incarnation_id: route.incarnation_id.clone(),
-                    user_id: route.principal.local_user_id().expect("local test principal"),
+                    principal: plurx_core::playback_principal::PlaybackPrincipal::LocalUser { user_id: route.principal.local_user_id().expect("local test principal") },
                     source_size: 0,
                     source_mtime: 0,
                     typeless_playlist: false,

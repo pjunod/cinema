@@ -1943,7 +1943,7 @@ async fn staged_successor_action(
         })?;
     if !recipe.is_valid()
         || recipe.incarnation_id != successor.incarnation_id
-        || successor.principal.local_user_id() != Some(recipe.user_id)
+        || successor.principal != recipe.principal
         || recipe.request.playback_id != successor.playback_id
         || start.session_id != successor.session_id
         || start.media_origin_ms != Some(successor.media_origin_ms)

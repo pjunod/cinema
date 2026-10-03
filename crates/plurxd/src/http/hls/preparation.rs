@@ -1023,7 +1023,10 @@ pub(super) async fn plan_preparation_candidate(
         PlanInputs {
             snapshot: None,
             state,
-            user_id: predecessor.user_id,
+            user_id: predecessor
+                .principal
+                .local_user_id()
+                .ok_or_else(|| unsupported("sharing requires the principal-aware planner"))?,
             file_id: predecessor.request.file_id,
             source: Some(source),
             network_prior: None,
@@ -1574,7 +1577,9 @@ pub(super) async fn stage_prepared_successor_with_prime(
         decoder_caps: predecessor.decoder_caps.clone(),
         protocol_version: crate::media_pool::PROTOCOL_VERSION,
         incarnation_id: staged_incarnation_id.clone(),
-        user_id: local_user_id,
+        principal: plurx_core::playback_principal::PlaybackPrincipal::LocalUser {
+            user_id: local_user_id,
+        },
         source_size: source.size,
         source_mtime: source.mtime,
         // Read from the predecessor rather than assumed: this decides whether
@@ -1846,7 +1851,10 @@ pub(super) async fn stage_prepared_successor_with_prime(
                             protocol_version: crate::media_pool::PROTOCOL_VERSION,
                             incarnation_id: preparation.incarnation_id.clone(),
                             session_id: preparation.session_id.clone(),
-                            user_id: local_user_id,
+                            principal:
+                                plurx_core::playback_principal::PlaybackPrincipal::LocalUser {
+                                    user_id: local_user_id,
+                                },
                             expected_owner_epoch: 1,
                         },
                         prime_deadline.into(),

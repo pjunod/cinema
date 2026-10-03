@@ -170,12 +170,18 @@ pub(crate) async fn start(
         .ok()
         .filter(RemoteStartRequest::is_valid)
         .ok_or(StatusCode::BAD_REQUEST)?;
+    // Until the shared ownership store and grant admission are installed,
+    // reject a forwarded sharing principal before resource allocation.
+    let user_id = request
+        .principal
+        .local_user_id()
+        .ok_or(StatusCode::FORBIDDEN)?;
     if !state.media_pool.remote_placement_ready(&state).await {
         return Err(StatusCode::SERVICE_UNAVAILABLE.into());
     }
     let user = state
         .store
-        .get_user(request.user_id)
+        .get_user(user_id)
         .await
         .map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?
         .ok_or(StatusCode::NOT_FOUND)?;
@@ -212,9 +218,7 @@ pub(crate) async fn start(
                 // the least-loaded path and absent on the most-loaded one.
                 // Owed until the epoch reaches this recipe.
                 &crate::transcode::SessionRecoveryIdentity {
-                    principal: plurx_core::playback_principal::PlaybackPrincipal::LocalUser {
-                        user_id: request.user_id,
-                    },
+                    principal: request.principal.clone(),
                     incarnation_id: request.incarnation_id.clone(),
                     recovery_epoch: String::new(),
                 },
@@ -238,7 +242,7 @@ pub(crate) async fn start(
                 start_state.node_id.clone(),
                 request.incarnation_id.clone(),
                 info.session_id.clone(),
-                request.user_id,
+                user_id,
                 request.incarnation_id.clone(),
                 Some(replacement),
             )
@@ -248,7 +252,7 @@ pub(crate) async fn start(
                 start_state.node_id.clone(),
                 request.incarnation_id.clone(),
                 info.session_id.clone(),
-                request.user_id,
+                user_id,
                 request.incarnation_id.clone(),
                 Some(replacement),
             )
@@ -492,6 +496,9 @@ pub(crate) async fn prepare(
     else {
         return StatusCode::BAD_REQUEST.into_response();
     };
+    let Some(user_id) = request.principal.local_user_id() else {
+        return StatusCode::FORBIDDEN.into_response();
+    };
     let route = match state
         .store
         .media_session_route_by_incarnation(&request.incarnation_id)
@@ -500,7 +507,7 @@ pub(crate) async fn prepare(
         Ok(Some(route))
             if route.incarnation_id == request.incarnation_id
                 && route.session_id == request.session_id
-                && route.principal.local_user_id() == Some(request.user_id)
+                && route.principal == request.principal
                 && route.owner_node_id == state.node_id
                 && route.owner_epoch == request.expected_owner_epoch
                 && route.state == "active"
@@ -518,7 +525,7 @@ pub(crate) async fn prepare(
         .filter(RemoteStartRequest::is_valid)
         .filter(|recipe| {
             recipe.incarnation_id == request.incarnation_id
-                && recipe.user_id == request.user_id
+                && recipe.principal == request.principal
                 && recipe.request.request_id.as_deref() == Some(request.incarnation_id.as_str())
         })
     else {
@@ -564,7 +571,7 @@ pub(crate) async fn prepare(
         .vod_resurrect_before(
             &route.recipe_json,
             &request.session_id,
-            request.user_id,
+            user_id,
             adoption,
             deadline.into(),
             true,
