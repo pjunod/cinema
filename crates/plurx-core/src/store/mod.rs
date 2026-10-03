@@ -318,6 +318,24 @@ ALTER TABLE files ADD COLUMN max_fall INTEGER;
 ALTER TABLE files ADD COLUMN mastering_max_luminance INTEGER;
 ALTER TABLE files ADD COLUMN luminance_source TEXT CHECK (luminance_source IN ('stream','frame','none'));";
 
+/// Refuse sharing before the ownership rebuild and its writer floor are installed.
+/// This adapter is removed from common session SQL when those keys are switched.
+pub(crate) fn local_media_principal_id(
+    principal: &crate::playback_principal::PlaybackPrincipal,
+) -> Result<i64, StoreError> {
+    principal.local_user_id().ok_or_else(|| {
+        StoreError::Task("sharing principal requires the ownership migration".to_owned())
+    })
+}
+
+/// Frozen ownership rebuild; both backends must install the same statements.
+/// Incompatible writers must be drained before applying this schema.
+pub const MEDIA_SESSION_PRINCIPAL_REBUILD_SCHEMA: &str =
+    include_str!("session_principal_rebuild.sql");
+
+#[cfg(all(test, feature = "hiqlite-store"))]
+mod session_principal_tests;
+
 /// The staged-generation ledger, shared verbatim by both backends.
 ///
 /// One statement, because SQLite's append-only migration list keeps one
@@ -503,7 +521,7 @@ pub(crate) fn validated_recovery_request(
     request: &crate::domain::ProducerRecoveryRequest,
 ) -> Result<crate::domain::ProducerRecoveryRequest, StoreError> {
     let (user_id, playback_id, recovery_epoch) = validated_epoch_key(
-        request.user_id,
+        local_media_principal_id(&request.principal)?,
         &request.playback_id,
         &request.recovery_epoch,
     )?;
@@ -538,7 +556,7 @@ pub(crate) fn validated_recovery_request(
         ));
     }
     Ok(crate::domain::ProducerRecoveryRequest {
-        user_id,
+        principal: crate::playback_principal::PlaybackPrincipal::LocalUser { user_id },
         playback_id,
         recovery_epoch,
         failed_incarnation_id: request.failed_incarnation_id.clone(),
@@ -620,7 +638,7 @@ pub(crate) fn recovery_reservation_from_row(
     let state = crate::domain::ProducerRecoveryState::parse(state)
         .ok_or_else(|| StoreError::Task(format!("unknown recovery state {state}")))?;
     Ok(crate::domain::ProducerRecoveryReservation {
-        user_id,
+        principal: crate::playback_principal::PlaybackPrincipal::LocalUser { user_id },
         playback_id: playback_id.to_owned(),
         recovery_epoch: recovery_epoch.to_owned(),
         failed_incarnation_id,
@@ -4600,7 +4618,7 @@ pub trait MediaSessionStore: Send + Sync + 'static {
     #[allow(clippy::too_many_arguments)]
     async fn claim_media_session_request(
         &self,
-        user_id: i64,
+        principal: &crate::playback_principal::PlaybackPrincipal,
         request_id: &str,
         request_fingerprint: &str,
         playback_id: &str,
@@ -4613,7 +4631,7 @@ pub trait MediaSessionStore: Send + Sync + 'static {
     /// durable identity before producer placement.
     async fn record_library_channel_session_recipe(
         &self,
-        user_id: i64,
+        principal: &crate::playback_principal::PlaybackPrincipal,
         request_id: &str,
         incarnation_id: &str,
         recipe_json: &str,
@@ -4622,7 +4640,7 @@ pub trait MediaSessionStore: Send + Sync + 'static {
 
     async fn assign_media_session_request_owner(
         &self,
-        user_id: i64,
+        principal: &crate::playback_principal::PlaybackPrincipal,
         request_id: &str,
         incarnation_id: &str,
         owner_node_id: &str,
@@ -4683,7 +4701,7 @@ pub trait MediaSessionStore: Send + Sync + 'static {
     /// was taken and nothing durable says so.
     async fn record_desired_selection(
         &self,
-        user_id: i64,
+        principal: &crate::playback_principal::PlaybackPrincipal,
         playback_id: &str,
         digest: &str,
         canonical_form: &str,
@@ -4718,13 +4736,13 @@ pub trait MediaSessionStore: Send + Sync + 'static {
     /// but a proof that the write chain reaches it does.
     async fn validation_playback_pointer_desired_revision(
         &self,
-        user_id: i64,
+        principal: &crate::playback_principal::PlaybackPrincipal,
         playback_id: &str,
     ) -> Result<Option<i64>, StoreError>;
 
     async fn validation_write_legacy_playback_pointer(
         &self,
-        user_id: i64,
+        principal: &crate::playback_principal::PlaybackPrincipal,
         playback_id: &str,
         incarnation_id: &str,
         now_ms: i64,
@@ -4732,7 +4750,7 @@ pub trait MediaSessionStore: Send + Sync + 'static {
 
     async fn desired_selection(
         &self,
-        user_id: i64,
+        principal: &crate::playback_principal::PlaybackPrincipal,
         playback_id: &str,
     ) -> Result<Option<crate::domain::DesiredOwnership>, StoreError>;
 
@@ -4765,7 +4783,7 @@ pub trait MediaSessionStore: Send + Sync + 'static {
     /// The staged successor for one playback, if there is one.
     async fn staged_media_session_for_playback(
         &self,
-        user_id: i64,
+        principal: &crate::playback_principal::PlaybackPrincipal,
         playback_id: &str,
     ) -> Result<Option<crate::domain::MediaSessionStagedGeneration>, StoreError>;
 
@@ -4795,7 +4813,7 @@ pub trait MediaSessionStore: Send + Sync + 'static {
     /// with a successful advance for replay after the predecessor retires.
     async fn commit_media_session_preparation(
         &self,
-        user_id: i64,
+        principal: &crate::playback_principal::PlaybackPrincipal,
         playback_id: &str,
         request: &crate::domain::MediaSessionPreparationCommitRequest,
     ) -> Result<Option<crate::domain::MediaSessionPreparationCommit>, StoreError>;
@@ -4816,7 +4834,7 @@ pub trait MediaSessionStore: Send + Sync + 'static {
     /// owner's timer cannot tear down a successor after takeover.
     async fn abort_media_session_preparation(
         &self,
-        user_id: i64,
+        principal: &crate::playback_principal::PlaybackPrincipal,
         playback_id: &str,
         request: &crate::domain::MediaSessionPreparationAbortRequest,
     ) -> Result<Option<MediaSessionRoute>, StoreError>;
@@ -4879,7 +4897,7 @@ pub trait MediaSessionStore: Send + Sync + 'static {
     /// continuation still has to avoid it.
     async fn settle_producer_recovery(
         &self,
-        user_id: i64,
+        principal: &crate::playback_principal::PlaybackPrincipal,
         playback_id: &str,
         recovery_epoch: &str,
         failed_incarnation_id: &str,
@@ -4895,7 +4913,7 @@ pub trait MediaSessionStore: Send + Sync + 'static {
     /// or looking up a cached one.
     async fn producer_recovery_for_epoch(
         &self,
-        user_id: i64,
+        principal: &crate::playback_principal::PlaybackPrincipal,
         playback_id: &str,
         recovery_epoch: &str,
     ) -> Result<Option<crate::domain::ProducerRecoveryReservation>, StoreError>;
@@ -4914,7 +4932,7 @@ pub trait MediaSessionStore: Send + Sync + 'static {
     /// `Ok(false)` when there is no such row.
     async fn validation_corrupt_recovery_restriction(
         &self,
-        user_id: i64,
+        principal: &crate::playback_principal::PlaybackPrincipal,
         playback_id: &str,
         recovery_epoch: &str,
         stored: &str,
@@ -4932,7 +4950,7 @@ pub trait MediaSessionStore: Send + Sync + 'static {
     /// the same resolved request returns its durable route.
     async fn publish_media_session_activation(
         &self,
-        user_id: i64,
+        principal: &crate::playback_principal::PlaybackPrincipal,
         request_id: &str,
         incarnation_id: &str,
         now_ms: i64,
@@ -4987,7 +5005,7 @@ pub trait MediaSessionStore: Send + Sync + 'static {
 
     async fn fail_media_session_request(
         &self,
-        user_id: i64,
+        principal: &crate::playback_principal::PlaybackPrincipal,
         request_id: &str,
         incarnation_id: &str,
         now_ms: i64,
@@ -5008,7 +5026,7 @@ pub trait MediaSessionStore: Send + Sync + 'static {
     /// so commit-unknown reconciliation retains the identity it must fence.
     async fn media_session_route_for_playback(
         &self,
-        user_id: i64,
+        principal: &crate::playback_principal::PlaybackPrincipal,
         playback_id: &str,
     ) -> Result<Option<MediaSessionRoute>, StoreError>;
 

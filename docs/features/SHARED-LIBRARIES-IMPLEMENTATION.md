@@ -1463,7 +1463,7 @@ implied by the build handoff.
 | S0 | contract ready to build | Original `4e81bc38c`, revision `eb9038755`, PR #740 | Opus re-review corrections incorporated in §16; runtime evidence is recorded per milestone |
 | S1 | merged into effort | [PR #746](http://192.168.4.7:3000/noirr/plurx/pulls/746), `aaafc1a0f5` | SQLite v92 / Hiqlite v70; purpose-bound secrets; pairing/rotation/assignment transactions. Five store contracts, 11 sharing unit tests, schema migration parity and 31 import-inventory tests passed; workspace Clippy and catalog lint passed. Run 3890 and the final Effort development gate passed on the exact candidate; landed in the effort as `971265536a` with all seven regression fields. |
 | S2 | implementation in progress; topology qualification open | [draft PR #759](http://192.168.4.7:3000/noirr/plurx/pulls/759) | Dedicated loopback TLS transport, pinned direct dialing and fixed Tailscale DNS, isolated peer/admin routes, durable claim/rotation recovery, authenticated endpoint refresh and advisory Developer switch implemented. Two-NAT, shared-machine Serve and Docker isolation/egress receipts remain open; S2 is not complete. |
-| S3 | not started | — | — |
+| S3 | implementation started; ownership migration open | `codex/sharing-s3-principals` (unpublished) | Typed session interfaces, caller handoffs and seven-table candidate rebuild implemented; 28 local/replicated lifecycle regressions passed. Runtime owner-key SQL, owner checks, migration installation, cluster floor and old-binary qualification remain open; §16.4 records the boundaries. |
 | S4 | source catalogue and private history candidates implemented; qualification pending | `codex/sharing-s4-catalogue` | Consistent live keysets and batch metadata, candidate order maintenance and durable item identities, peer metadata routes and receiver-only ordered history. Viewer/cache/artwork/details, activation floor and qualification remain open. |
 | S5 | not started | — | — |
 | S6 | not started | — | — |
@@ -1574,17 +1574,17 @@ rejected the isolated Hiqlite spike lockfile before compilation. Commit
 `aaafc1a0f5af031c3adbfe6760ad4edcff7cb082` synchronizes that lockfile;
 `make spike-lock-check` and the normal hook passed locally. Exact-candidate
 [run 3890](http://192.168.4.7:3000/noirr/plurx/actions/runs/3890) has passed
-scope, policy, Rust, web, Apple and Android. Windows compilation reached
-its 30-minute runner deadline without a compiler error. Only that job was
-rerun as attempt 2 on the same commit; the effort gate remains blocking
-until it passes.
+scope, policy, Rust, web, Apple and Android. Windows attempt 1 reached its
+30-minute runner deadline without a compiler error. The individual retry on
+the same commit passed in 20 minutes 17 seconds; the final Effort development
+gate passed. PR #746 integrated that candidate into the effort as
+`971265536a259dea38b0f7a9a8752a5a74e8c025`, preserving all seven regression fields.
 
-**Still owed:** the gate on the corrected S1 candidate. S2 requires disposable two-NAT/Tailscale
+**Still owed:** S2 requires disposable two-NAT/Tailscale
 and Docker profiles; S7/S8 require physical Apple TV/Google TV and the
 cluster/resource matrix. No network, shared playback, native client, promotion
 or Developer graduation evidence is claimed by S1. S2–S8 remain work after
-the S1 task is integrated; no deployment is authorized.
-
+the completed S1 integration; no deployment is authorized.
 
 ### 16.3 Implementation progress — S2, 2026-10-02
 
@@ -1702,6 +1702,218 @@ status-shaped calls launch no process. The response-loss fixture now owns its
 accepted connections in a JoinSet, and client fixture servers are aborted and
 awaited. The seven ownership-inventory tests passed after this review. The
 changed candidate must pass its focused transport tests and a fresh effort gate.
+
+### 16.4 Implementation progress — S3, 2026-10-02
+
+The unpublished S3 worktree starts from local S2 checkpoint `269900c6a`;
+its final review branch must be ported to the current gated effort. The
+primary checkout remains untouched. The S2 disabled-import fix was subsequently
+ported into this worktree, and its exact `6b2c69dbb` archive passed the pinned
+Linux recovery and disabled-import refusal tests (0.49 and 0.20 seconds).
+
+`PlaybackPrincipal` now distinguishes a real local numeric user from a grant
+UUID and validated 64-character viewer pseudonym. Only its constructor
+builds an owner key. The row-projection decoder rejects mixed local/shared
+columns, noncanonical UUIDs, malformed pseudonyms and mismatched keys; it
+never adopts a foreign local user. Debug output redacts the pseudonym.
+Two focused tests passed; core Clippy with denied warnings passed using
+Rust 1.97.1 and `hiqlite-store`.
+
+The Store recount confirms 36 `MediaSessionStore` operations: 16 explicit
+ownership arguments now take a borrowed `PlaybackPrincipal`, and 20 retain
+session/incarnation/owner keys or structured input. Activation, preparation,
+route, desired-selection, staged-generation, recovery-request/reservation and
+owned-lease results carry the principal. Preparation/control and producer
+recovery handoffs pass it through; route comparisons compare the principal.
+Local authenticated ingress constructs an explicit local principal.
+
+This interface conversion still uses a temporary local-only adapter in the
+common SQL implementation. That adapter refuses a sharing principal before
+any statement runs; it cannot create a numeric user for a share. Existing
+runtime tables retain their old numeric ownership keys. Legacy source-worker
+and VOD dispatch, cluster forwarding, ordinary-router authorization, telemetry
+and account/grant deletion still need the complete principal-aware conversion.
+The legacy process-local test entry points now pass an absent recovery
+identity explicitly. No zero user ID stands for an unbound producer or VOD
+viewer; cluster starts still require a complete typed recovery identity. The
+focused no-budget regression passed (0.05 seconds).
+
+Durable request hashing now takes the principal. Local hashes retain their
+existing JSON/numeric encoding; sharing hashes use the canonical owner key.
+Producer supersession and takeover gates share the typed namespace helper,
+with the established local encoding preserved. The daemon intent-identity
+regression passed after this conversion and proves local hash/gate stability
+and separation by grant and viewer.
+ These changes do not qualify
+sharing admission. The complete predicate/conflict-target/decoder census,
+runtime table rebuild, writer floor and migration acceptance remain open.
+The typed local session adapter passed all 28 `media_session_` contract
+regressions against SQLite and the actual three-voter fixture in 258.12 seconds.
+The first activation run caught a Rust helper mistakenly substituted into SQL;
+all such substitutions were removed from both backends before this successful
+lifecycle run. The ownership conversion still needs the runtime key switch.
+
+The current numeric-ownership SQL inventory contains 140 statement literals
+in the session implementations (75 SQLite, 65 Hiqlite). Each must be switched
+or explicitly justified as local-only; this statement inventory does not yet
+include the remaining decoders, schema definitions, other stores or callers.
+
+```sh
+cargo test --locked -p plurx-core --features hiqlite-store --lib playback_principal::tests -- --nocapture
+cargo test --locked -p plurx-core --features hiqlite-contract-tests --test store_contract media_session_ -- --nocapture
+cargo test --locked -p plurxd --bin plurxd the_grade_is_part_of_a_request_identity -- --nocapture
+cargo clippy --locked -p plurx-core --features hiqlite-store --lib -- -D warnings
+```
+
+**Candidate ownership rebuild:** a frozen seven-table rebuild is now exercised
+against SQLite v92 and the actual three-voter replicated v70 schema. It
+backfills canonical local keys, changes all six ownership composite primary
+keys, keeps the incarnation/session namespace, adds checked nullable principal
+projections, and preserves every pre-existing column in the populated fixture.
+The Library-channel session-recipe table is the seventh ownership table.
+Terminal acknowledgements and job leases remain unchanged and retained rows
+stay FK-free. Existing desired-revision, drain, publication, recipe-retirement
+and background-viewer triggers are recreated; the latter also require
+principal-aware joins across the rebuilt tables.
+
+Three SQLite tests passed. The replicated case passed in 9.39 seconds after
+one fixture correction: Hiqlite requires explicit user `is_admin`/`created_at`
+values where SQLite has defaults. A failing final write rolls the entire
+replicated DDL/backfill transaction back, then the successful transaction
+retains the original data. Both engines refuse an old local insert which
+omits `owner_key` and an upsert using the old `(user_id, request_id)` conflict
+target. These are SQL-shape probes, not execution of an old daemon binary.
+They provide evidence for the coordinated-drain fallback; they do not qualify
+a live upgrade, the membership floor or backup restoration.
+
+The populated fixture now includes `sharing_relay_upstream` and
+`sharing_delivery_grants`. A retention regression exposed DROP TABLE cascading
+into both children. The candidate rebuild evacuates and restores them inside
+the same transaction, with coverage for SQLite's migration FK setting and the
+replicated writer's enabled FK setting. The source capability envelope, remote
+IDs, position, delivery deadline and generation coordinates must remain exact;
+backup tables must disappear and foreign-key integrity must hold. The three
+SQLite migration regressions passed in 2.64 seconds, including preservation
+with foreign keys both enabled and disabled. The source still uses SQLite v92
+and replicated v70; this is a candidate rebuild, not an installed migration. The
+updated three-voter transaction test passed in 9.38 seconds and proves both
+children retain every original column after success and after a failed final
+write rolls the complete rebuild back.
+
+The rebuild is not installed in the runtime migration chain. The remaining
+S3 work is the principal-aware Store/runtime conversion, owner-existence and
+admission checks, full predicate/decoder census, cluster floor and forwarding,
+actual old-binary and rollback qualification. Shared playback remains unavailable.
+
+```sh
+cargo test --locked -p plurx-core --features hiqlite-store --lib sharing_principal_rebuild -- --nocapture
+cargo test --locked -p plurx-core --features hiqlite-contract-tests --test store_contract session_principals::sharing_principal_rebuild_is_atomic_and_preserves_rows_on_three_voters -- --exact --nocapture
+```
+
+**S3 checkpoint, 2026-10-02:** background analysis/artifact interest and daemon
+viewer demand now carry `PlaybackPrincipal`. Local consumer hashes retain their
+old numeric encoding; shared consumers separate grant and viewer identities.
+The temporary local-only admission adapter remains explicit, so these typed
+interfaces do not admit shared background work before the runtime migration.
+The hash regression passed, and all eight `viewer` store contracts passed
+against SQLite and the three-voter fixture (74.75 seconds).
+
+The candidate rebuild also retires matching authority on local-user deletion,
+export revocation and export deletion: sessions end, their leases expire,
+delivery grants revoke, requests fail and current pointers/preparations/desired
+selections disappear. Terminal rows remain retained. Tests prove another grant
+and its viewer remain active, and reuse of a deleted numeric user ID cannot
+reactivate old sessions. Four SQLite candidate tests passed (5.03 seconds),
+and both replicated candidate tests passed (18.69 seconds). These triggers
+remain candidate DDL; runtime installation and upgrade qualification are open.
+
+```sh
+cargo test --locked -p plurx-core --features hiqlite-store --lib sharing_background_consumer_keys -- --nocapture
+cargo test --locked -p plurx-core --features hiqlite-store --lib sharing_principal_rebuild -- --nocapture
+cargo test --locked -p plurx-core --features hiqlite-contract-tests --test store_contract session_principals -- --nocapture
+cargo test --locked -p plurx-core --features hiqlite-contract-tests --test store_contract viewer -- --nocapture
+```
+
+**Forwarded ownership checkpoint:** worker start/preparation requests now carry
+`PlaybackPrincipal` in Rust. The closed wire adapter keeps the existing local
+`user_id` encoding for retained recipes and old local peers, and encodes a
+shared request exclusively as a validated principal. Two namespaces, absent
+ownership, zero users, malformed viewers and unknown fields are rejected.
+Preparation/takeover comparisons use the complete principal; producer recovery
+retains it. Current worker ingress explicitly refuses sharing before placement
+or producer creation while Store/grant admission is unfinished. All 66
+media-session/internal-relay tests passed (zero ignored, 3.68 seconds), including
+`sharing_forwarded_principal_preserves_local_wire_and_refuses_mixed_ownership`;
+Rust 1.97.1 all-target compilation passed. Shared worker admission remains open.
+
+```sh
+cargo test --locked -p plurxd --bin plurxd media_sessions::tests -- --nocapture
+```
+
+**Request cleanup ownership checkpoint:** HLS request and started-session
+cleanup guards retain the complete `PlaybackPrincipal`, including forwarded
+worker ownership, through bounded failure settlement and cancellation. Local
+callers explicitly construct a principal from their authenticated user. Rust
+1.97.1 all-target compilation passed; the three `started_session_` tests,
+`replayed_start_guard_owns_neither_worker_nor_original_claim` and
+`pre_worker_request_guard_releases_an_owned_claim_for_immediate_retry` passed
+with zero ignored. These local cleanup regressions do not qualify shared
+worker admission, which remains refused while grant-aware Store work is open.
+
+```sh
+cargo test --locked -p plurxd --bin plurxd started_session_ -- --nocapture
+cargo test --locked -p plurxd --bin plurxd replayed_start_guard_owns_neither_worker_nor_original_claim -- --nocapture
+cargo test --locked -p plurxd --bin plurxd pre_worker_request_guard_releases_an_owned_claim_for_immediate_retry -- --nocapture
+```
+
+**Route decoding checkpoint:** both existing session readers decode and
+validate the complete canonical owner projection. The replicated reader
+returns typed errors for missing or wrongly typed row data instead of
+panicking. Legacy SELECTs explicitly project real local ownership until
+the guarded rebuild switches them to the persisted columns; this does not
+admit a shared session on the legacy schema. Three decoder tests passed
+(zero ignored), preserving sharing grant/viewer identity and refusing mixed,
+missing, zero/negative local and noncanonical ownership. Runtime key queries,
+installation and member-floor qualification remain open.
+
+```sh
+cargo test --locked -p plurx-core --features hiqlite-store --lib sharing_route_ -- --nocapture
+```
+
+**Rebuilt route reader checkpoint:** production route queries now select
+stored principal columns from a complete rebuilt table, retaining the explicit
+local projection on the legacy table. A partial rebuild is refused. SQLite
+checks the schema within its connection; Hiqlite caches the quorum-observed
+shape for the Store lifetime, which is fixed between coordinated restarts.
+That cache proves neither grant authority nor member compatibility. Five
+route tests passed (zero ignored, 0.71 seconds), including actual rebuilt
+rows in memory and the pooled SQLite store. Both three-voter candidate
+contracts passed (zero ignored, 18.42 seconds), now exercising production
+route reads for two distinct grants with no local user ID. All 28 existing local/replicated media-session contracts passed
+(zero ignored, 256.32 seconds), including preparation, rejoin, replay,
+cap enforcement and terminal retention; denied-warning Clippy passed with
+`hiqlite-contract-tests`. Writer queries, installation and the mixed-version
+floor remain open.
+
+```sh
+cargo test --locked -p plurx-core --features hiqlite-store --lib sharing_route_ -- --nocapture
+cargo test --locked -p plurx-core --features hiqlite-contract-tests --test store_contract session_principals -- --nocapture
+```
+
+**Principal pointer checkpoint:** the production current-playback lookup uses
+the canonical owner key on rebuilt tables and retains real local-user lookup
+on legacy tables. It verifies that the returned session belongs to the
+requested principal. Two grants can therefore use the same playback ID
+without sharing pointers, and a corrupt cross-grant pointer returns no route.
+Other viewers receive no route; legacy tables refuse shared lookups.
+Six route tests passed with zero ignored (0.93 seconds), covering memory and
+pooled SQLite. Both actual three-voter candidate contracts passed with zero
+ignored (18.50 seconds), including the same cross-grant refusal. These reads
+do not admit shared workers or qualify grant authority, schema installation
+or the mixed-version floor; those remain open.
+The existing `media_session_contract_runs_through_dyn_store` regression also
+passed on SQLite and the three-voter backend (zero ignored, 13.25 seconds);
+denied-warning Clippy passed with `hiqlite-contract-tests`.
 
 **Separate-process restart regression:**
 `crates/plurxd/tests/sharing_daemon_restart.rs` starts the shipped daemon twice

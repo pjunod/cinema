@@ -1023,7 +1023,10 @@ pub(super) async fn plan_preparation_candidate(
         PlanInputs {
             snapshot: None,
             state,
-            user_id: predecessor.user_id,
+            user_id: predecessor
+                .principal
+                .local_user_id()
+                .ok_or_else(|| unsupported("sharing requires the principal-aware planner"))?,
             file_id: predecessor.request.file_id,
             source: Some(source),
             network_prior: None,
@@ -1555,6 +1558,9 @@ pub(super) async fn stage_prepared_successor_with_prime(
         control_sequence: None,
         ..candidate.clone()
     };
+    let Some(local_user_id) = route.principal.local_user_id() else {
+        return;
+    };
     let staged_recipe = RemoteStartRequest {
         candidate_catalog: candidate.candidate_context.as_ref().and_then(|context| {
             Some(crate::media_sessions::CandidateCatalogContext {
@@ -1571,7 +1577,9 @@ pub(super) async fn stage_prepared_successor_with_prime(
         decoder_caps: predecessor.decoder_caps.clone(),
         protocol_version: crate::media_pool::PROTOCOL_VERSION,
         incarnation_id: staged_incarnation_id.clone(),
-        user_id: route.user_id,
+        principal: plurx_core::playback_principal::PlaybackPrincipal::LocalUser {
+            user_id: local_user_id,
+        },
         source_size: source.size,
         source_mtime: source.mtime,
         // Read from the predecessor rather than assumed: this decides whether
@@ -1699,7 +1707,7 @@ pub(super) async fn stage_prepared_successor_with_prime(
     let executor = crate::playback_control::PreparationExecutor::new(
         Arc::clone(&state.store),
         gate,
-        route.user_id,
+        route.principal.clone(),
         route.playback_id.clone(),
         route.owner_node_id.clone(),
         route.owner_epoch,
@@ -1711,7 +1719,7 @@ pub(super) async fn stage_prepared_successor_with_prime(
     let preparation = plurx_core::domain::MediaSessionPreparation {
         incarnation_id: staged_incarnation_id,
         session_id: staged_session_id,
-        user_id: route.user_id,
+        principal: route.principal.clone(),
         playback_id: route.playback_id.clone(),
         // Recorded now rather than read fresh at commit, so a lost CAS aborts
         // this successor and never reaps a newer player generation.
@@ -1721,7 +1729,11 @@ pub(super) async fn stage_prepared_successor_with_prime(
         // The successor's own intent, not the predecessor's: the
         // fingerprint encodes `kind` and `start_seconds`, both of which this
         // row deliberately changes.
-        request_fingerprint: staged_request.durable_intent_fingerprint(route.user_id),
+        request_fingerprint: staged_request.durable_intent_fingerprint(
+            &plurx_core::playback_principal::PlaybackPrincipal::LocalUser {
+                user_id: local_user_id,
+            },
+        ),
         owner_node_id: successor_owner.to_owned(),
         recipe_json,
         response_json,
@@ -1739,7 +1751,7 @@ pub(super) async fn stage_prepared_successor_with_prime(
         // before the work started.
         expected_desired_revision: state
             .store
-            .desired_selection(route.user_id, &route.playback_id)
+            .desired_selection(&route.principal, &route.playback_id)
             .await
             .ok()
             .flatten()
@@ -1820,7 +1832,7 @@ pub(super) async fn stage_prepared_successor_with_prime(
                                 .vod_resurrect_before(
                                     &preparation.recipe_json,
                                     &preparation.session_id,
-                                    preparation.user_id,
+                                    local_user_id,
                                     adoption,
                                     prime_deadline,
                                     true,
@@ -1839,7 +1851,10 @@ pub(super) async fn stage_prepared_successor_with_prime(
                             protocol_version: crate::media_pool::PROTOCOL_VERSION,
                             incarnation_id: preparation.incarnation_id.clone(),
                             session_id: preparation.session_id.clone(),
-                            user_id: preparation.user_id,
+                            principal:
+                                plurx_core::playback_principal::PlaybackPrincipal::LocalUser {
+                                    user_id: local_user_id,
+                                },
                             expected_owner_epoch: 1,
                         },
                         prime_deadline.into(),

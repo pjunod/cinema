@@ -20,6 +20,9 @@ use queue_fixture::QueueFixture;
 
 #[path = "store_contract/background_jobs.rs"]
 mod background_jobs;
+#[cfg(feature = "hiqlite-contract-tests")]
+#[path = "store_contract/session_principals.rs"]
+mod session_principals;
 #[path = "store_contract/sharing.rs"]
 mod sharing;
 #[path = "store_contract/sharing_catalogue.rs"]
@@ -27,6 +30,9 @@ mod sharing_catalogue;
 #[cfg(feature = "hiqlite-contract-tests")]
 #[path = "store_contract/sharing_catalogue_source.rs"]
 mod sharing_catalogue_source;
+#[cfg(feature = "hiqlite-contract-tests")]
+#[path = "store_contract/sharing_member_floor.rs"]
+mod sharing_member_floor;
 
 #[cfg(feature = "hiqlite-contract-tests")]
 use std::borrow::Cow;
@@ -874,7 +880,7 @@ async fn viewer_analysis_keeps_a_source_slot_across_backend_claims() {
                 pipeline_version: request.pipeline_version.clone(),
                 video_identity: request.video_identity.clone(),
                 target_node_id: request.target_node_id.clone(),
-                user_id,
+                principal: plurx_core::playback_principal::PlaybackPrincipal::LocalUser { user_id },
                 playback_id: format!("viewer-{user_id}"),
                 now_ms: 1_005,
             };
@@ -1016,7 +1022,9 @@ async fn concurrent_viewers_keep_cancelled_reader_reservation_until_expiry() {
                     pipeline_version: request.pipeline_version.clone(),
                     video_identity: request.video_identity.clone(),
                     target_node_id: request.target_node_id.clone(),
-                    user_id: index as i64,
+                    principal: plurx_core::playback_principal::PlaybackPrincipal::LocalUser {
+                        user_id: index as i64
+                    },
                     playback_id: format!("viewer-{index}"),
                     now_ms: 1_002,
                 })
@@ -1102,7 +1110,9 @@ async fn playback_analysis_maps_to_valid_foreground_artifact_admission() {
                 pipeline_version: request.pipeline_version.clone(),
                 video_identity: request.video_identity.clone(),
                 target_node_id: request.target_node_id.clone(),
-                user_id: 1,
+                principal: plurx_core::playback_principal::PlaybackPrincipal::LocalUser {
+                    user_id: 1
+                },
                 playback_id: "viewer-artifact".into(),
                 now_ms: 1_001,
             })
@@ -1189,7 +1199,7 @@ async fn attested_fragment_build_accepts_exact_target_viewer() {
             cache_key: key,
             file_id,
             target_node_id: "attested-viewer".into(),
-            user_id: 1,
+            principal: plurx_core::playback_principal::PlaybackPrincipal::LocalUser { user_id: 1 },
             playback_id: "active-playback".into(),
             now_ms: 1_001,
         };
@@ -1283,7 +1293,13 @@ async fn an_activation_is_refused_when_the_viewer_has_asked_for_something_else()
         .await;
 
         let first_ask = store
-            .record_desired_selection(user.id, playback, &"a".repeat(64), "v1;quality=auto", 2_000)
+            .record_desired_selection(
+                &plurx_core::playback_principal::PlaybackPrincipal::LocalUser { user_id: user.id },
+                playback,
+                &"a".repeat(64),
+                "v1;quality=auto",
+                2_000,
+            )
             .await
             .unwrap_or_else(|error| panic!("{backend}: record first ask: {error}"));
         assert_eq!(
@@ -1294,7 +1310,7 @@ async fn an_activation_is_refused_when_the_viewer_has_asked_for_something_else()
         // The viewer changes their mind while the create is in flight.
         let second_ask = store
             .record_desired_selection(
-                user.id,
+                &plurx_core::playback_principal::PlaybackPrincipal::LocalUser { user_id: user.id },
                 playback,
                 &"b".repeat(64),
                 "v1;quality=original",
@@ -1312,7 +1328,9 @@ async fn an_activation_is_refused_when_the_viewer_has_asked_for_something_else()
             recovery_epoch: String::new(),
             incarnation_id: "11111111-1111-4111-8111-111111111103".to_owned(),
             session_id: "11111111-1111-4111-8111-111111111104".to_owned(),
-            user_id: user.id,
+            principal: plurx_core::playback_principal::PlaybackPrincipal::LocalUser {
+                user_id: user.id,
+            },
             playback_id: playback.to_owned(),
             expected_predecessor_incarnation_id: Some(predecessor.to_owned()),
             fence_predecessor: true,
@@ -1338,7 +1356,10 @@ async fn an_activation_is_refused_when_the_viewer_has_asked_for_something_else()
         // The refusal is whole. A partially applied activation would leave the
         // pointer moved, or the predecessor reaped, or a session row behind.
         let route = store
-            .media_session_route_for_playback(user.id, playback)
+            .media_session_route_for_playback(
+                &plurx_core::playback_principal::PlaybackPrincipal::LocalUser { user_id: user.id },
+                playback,
+            )
             .await
             .unwrap_or_else(|error| panic!("{backend}: route: {error}"))
             .unwrap_or_else(|| panic!("{backend}: the playback still points somewhere"));
@@ -1383,7 +1404,10 @@ async fn an_activation_is_refused_when_the_viewer_has_asked_for_something_else()
             "{backend}: the same activation against the current ask must win"
         );
         let advanced = store
-            .media_session_route_for_playback(user.id, playback)
+            .media_session_route_for_playback(
+                &plurx_core::playback_principal::PlaybackPrincipal::LocalUser { user_id: user.id },
+                playback,
+            )
             .await
             .unwrap_or_else(|error| panic!("{backend}: route: {error}"))
             .unwrap_or_else(|| panic!("{backend}: the playback points somewhere"));
@@ -1401,7 +1425,7 @@ async fn an_activation_is_refused_when_the_viewer_has_asked_for_something_else()
         let fresh_playback = "playback-activation-first";
         let first = store
             .record_desired_selection(
-                user.id,
+                &plurx_core::playback_principal::PlaybackPrincipal::LocalUser { user_id: user.id },
                 fresh_playback,
                 &"e".repeat(64),
                 "v1;quality=auto",
@@ -1411,7 +1435,7 @@ async fn an_activation_is_refused_when_the_viewer_has_asked_for_something_else()
             .unwrap_or_else(|error| panic!("{backend}: record fresh ask: {error}"));
         store
             .record_desired_selection(
-                user.id,
+                &plurx_core::playback_principal::PlaybackPrincipal::LocalUser { user_id: user.id },
                 fresh_playback,
                 &"f".repeat(64),
                 "v1;quality=original",
@@ -1424,7 +1448,9 @@ async fn an_activation_is_refused_when_the_viewer_has_asked_for_something_else()
             recovery_epoch: String::new(),
             incarnation_id: "11111111-1111-4111-8111-111111111107".to_owned(),
             session_id: "11111111-1111-4111-8111-111111111108".to_owned(),
-            user_id: user.id,
+            principal: plurx_core::playback_principal::PlaybackPrincipal::LocalUser {
+                user_id: user.id,
+            },
             playback_id: fresh_playback.to_owned(),
             expected_predecessor_incarnation_id: None,
             fence_predecessor: true,
@@ -1448,7 +1474,12 @@ async fn an_activation_is_refused_when_the_viewer_has_asked_for_something_else()
         );
         assert!(
             store
-                .media_session_route_for_playback(user.id, fresh_playback)
+                .media_session_route_for_playback(
+                    &plurx_core::playback_principal::PlaybackPrincipal::LocalUser {
+                        user_id: user.id
+                    },
+                    fresh_playback
+                )
                 .await
                 .unwrap_or_else(|error| panic!("{backend}: fresh route: {error}"))
                 .is_none(),
@@ -1476,7 +1507,9 @@ async fn an_activation_with_no_recorded_ask_is_still_admitted() {
             recovery_epoch: String::new(),
             incarnation_id: "11111111-1111-4111-8111-111111111105".to_owned(),
             session_id: "11111111-1111-4111-8111-111111111106".to_owned(),
-            user_id: user.id,
+            principal: plurx_core::playback_principal::PlaybackPrincipal::LocalUser {
+                user_id: user.id,
+            },
             playback_id: playback.to_owned(),
             expected_predecessor_incarnation_id: None,
             fence_predecessor: false,
@@ -1540,7 +1573,7 @@ async fn a_pointer_written_without_an_ask_is_refused_while_an_ask_exists() {
         // would refuse every playback that predates the schema.
         store
             .validation_write_legacy_playback_pointer(
-                user.id,
+                &plurx_core::playback_principal::PlaybackPrincipal::LocalUser { user_id: user.id },
                 playback,
                 "11111111-1111-4111-8111-111111111203",
                 3_000,
@@ -1551,14 +1584,20 @@ async fn a_pointer_written_without_an_ask_is_refused_while_an_ask_exists() {
             });
 
         store
-            .record_desired_selection(user.id, playback, &"a".repeat(64), "v1;quality=auto", 2_000)
+            .record_desired_selection(
+                &plurx_core::playback_principal::PlaybackPrincipal::LocalUser { user_id: user.id },
+                playback,
+                &"a".repeat(64),
+                "v1;quality=auto",
+                2_000,
+            )
             .await
             .unwrap_or_else(|error| panic!("{backend}: record ask: {error}"));
 
         // Now there is an ask, and the same write is refused.
         let refused = store
             .validation_write_legacy_playback_pointer(
-                user.id,
+                &plurx_core::playback_principal::PlaybackPrincipal::LocalUser { user_id: user.id },
                 playback,
                 "11111111-1111-4111-8111-111111111204",
                 4_000,
@@ -1571,7 +1610,10 @@ async fn a_pointer_written_without_an_ask_is_refused_while_an_ask_exists() {
 
         // And the pointer is where it was, not partly moved.
         let route = store
-            .media_session_route_for_playback(user.id, playback)
+            .media_session_route_for_playback(
+                &plurx_core::playback_principal::PlaybackPrincipal::LocalUser { user_id: user.id },
+                playback,
+            )
             .await
             .unwrap_or_else(|error| panic!("{backend}: route: {error}"));
         assert!(
@@ -1592,7 +1634,7 @@ async fn a_pointer_written_without_an_ask_is_refused_while_an_ask_exists() {
         let fresh = "playback-pointer-fence-first";
         store
             .record_desired_selection(
-                user.id,
+                &plurx_core::playback_principal::PlaybackPrincipal::LocalUser { user_id: user.id },
                 fresh,
                 &"b".repeat(64),
                 "v1;quality=original",
@@ -1603,7 +1645,9 @@ async fn a_pointer_written_without_an_ask_is_refused_while_an_ask_exists() {
         assert!(
             store
                 .validation_write_legacy_playback_pointer(
-                    user.id,
+                    &plurx_core::playback_principal::PlaybackPrincipal::LocalUser {
+                        user_id: user.id
+                    },
                     fresh,
                     "11111111-1111-4111-8111-111111111205",
                     6_000,
@@ -1614,7 +1658,12 @@ async fn a_pointer_written_without_an_ask_is_refused_while_an_ask_exists() {
         );
         assert!(
             store
-                .media_session_route_for_playback(user.id, fresh)
+                .media_session_route_for_playback(
+                    &plurx_core::playback_principal::PlaybackPrincipal::LocalUser {
+                        user_id: user.id
+                    },
+                    fresh
+                )
                 .await
                 .unwrap_or_else(|error| panic!("{backend}: fresh route: {error}"))
                 .is_none(),
@@ -1657,7 +1706,7 @@ async fn current_media_session(
         expected_desired_revision: None,
         incarnation_id: incarnation_id.to_owned(),
         session_id: session_id.to_owned(),
-        user_id,
+        principal: plurx_core::playback_principal::PlaybackPrincipal::LocalUser { user_id },
         playback_id: playback_id.to_owned(),
         expected_predecessor_incarnation_id: None,
         fence_predecessor: false,
@@ -1774,7 +1823,9 @@ async fn media_activation_confirmation_recovers_a_committed_timeout() {
         expected_desired_revision: None,
         incarnation_id: "00000000-0000-4000-8000-00000000fc11".to_owned(),
         session_id: "00000000-0000-4000-8000-00000000fc12".to_owned(),
-        user_id: user.id,
+        principal: plurx_core::playback_principal::PlaybackPrincipal::LocalUser {
+            user_id: user.id,
+        },
         playback_id: "activation-committed-timeout-playback".to_owned(),
         expected_predecessor_incarnation_id: None,
         fence_predecessor: false,
@@ -1862,7 +1913,13 @@ async fn a_newer_ask_reconciles_against_a_commit_that_landed_first() {
         .await;
 
         let first = store
-            .record_desired_selection(user.id, playback, &"a".repeat(64), "v1;quality=auto", 2_000)
+            .record_desired_selection(
+                &plurx_core::playback_principal::PlaybackPrincipal::LocalUser { user_id: user.id },
+                playback,
+                &"a".repeat(64),
+                "v1;quality=auto",
+                2_000,
+            )
             .await
             .unwrap_or_else(|error| panic!("{backend}: first ask: {error}"));
 
@@ -1884,12 +1941,19 @@ async fn a_newer_ask_reconciles_against_a_commit_that_landed_first() {
         let mut commit = preparation_commit_request(b, 3_000, 900_000);
         commit.expected_desired_revision = Some(first.revision);
         store
-            .commit_media_session_preparation(user.id, playback, &commit)
+            .commit_media_session_preparation(
+                &plurx_core::playback_principal::PlaybackPrincipal::LocalUser { user_id: user.id },
+                playback,
+                &commit,
+            )
             .await
             .unwrap_or_else(|error| panic!("{backend}: commit B: {error}"))
             .unwrap_or_else(|| panic!("{backend}: B's commit lands first"));
         let after_b = store
-            .media_session_route_for_playback(user.id, playback)
+            .media_session_route_for_playback(
+                &plurx_core::playback_principal::PlaybackPrincipal::LocalUser { user_id: user.id },
+                playback,
+            )
             .await
             .unwrap_or_else(|error| panic!("{backend}: route: {error}"))
             .unwrap_or_else(|| panic!("{backend}: the playback points somewhere"));
@@ -1898,7 +1962,7 @@ async fn a_newer_ask_reconciles_against_a_commit_that_landed_first() {
         // C: the viewer's newer ask, arriving after B landed.
         let second = store
             .record_desired_selection(
-                user.id,
+                &plurx_core::playback_principal::PlaybackPrincipal::LocalUser { user_id: user.id },
                 playback,
                 &"b".repeat(64),
                 "v1;quality=original",
@@ -1975,7 +2039,7 @@ fn staged_preparation(
         expected_desired_revision: None,
         incarnation_id: incarnation_id.to_owned(),
         session_id: session_id.to_owned(),
-        user_id,
+        principal: plurx_core::playback_principal::PlaybackPrincipal::LocalUser { user_id },
         playback_id: playback_id.to_owned(),
         expected_predecessor_incarnation_id: predecessor.to_owned(),
         expected_predecessor_owner_node_id: "staged-node".to_owned(),
@@ -2077,7 +2141,7 @@ async fn a_successor_is_refused_when_the_viewer_has_asked_for_something_else() {
         .await;
 
         let first_ask = store
-            .record_desired_selection(user.id, playback, &"a".repeat(64), "v1;quality=auto", 1_000)
+            .record_desired_selection(&plurx_core::playback_principal::PlaybackPrincipal::LocalUser { user_id: user.id }, playback, &"a".repeat(64), "v1;quality=auto", 1_000)
             .await
             .unwrap_or_else(|error| panic!("{backend}: record first ask: {error}"));
         assert_eq!(first_ask.revision, 1);
@@ -2121,7 +2185,7 @@ async fn a_successor_is_refused_when_the_viewer_has_asked_for_something_else() {
         // Now the viewer changes their mind while that successor is in flight.
         let second_ask = store
             .record_desired_selection(
-                user.id,
+                &plurx_core::playback_principal::PlaybackPrincipal::LocalUser { user_id: user.id },
                 playback,
                 &"b".repeat(64),
                 "v1;quality=manual:720",
@@ -2135,7 +2199,7 @@ async fn a_successor_is_refused_when_the_viewer_has_asked_for_something_else() {
         commit.expected_desired_revision = Some(first_ask.revision);
         assert!(
             store
-                .commit_media_session_preparation(user.id, playback, &commit)
+                .commit_media_session_preparation(&plurx_core::playback_principal::PlaybackPrincipal::LocalUser { user_id: user.id }, playback, &commit)
                 .await
                 .unwrap_or_else(|error| panic!("{backend}: stale commit: {error}"))
                 .is_none(),
@@ -2145,7 +2209,7 @@ async fn a_successor_is_refused_when_the_viewer_has_asked_for_something_else() {
         // And the pointer did not move: the refusal is a refusal, not a
         // partially applied commit.
         let route = store
-            .media_session_route_for_playback(user.id, playback)
+            .media_session_route_for_playback(&plurx_core::playback_principal::PlaybackPrincipal::LocalUser { user_id: user.id }, playback)
             .await
             .unwrap_or_else(|error| panic!("{backend}: route: {error}"))
             .unwrap_or_else(|| panic!("{backend}: the playback still points somewhere"));
@@ -2169,7 +2233,7 @@ async fn a_successor_is_refused_when_the_viewer_has_asked_for_something_else() {
         // lost pointer race does, in both.
         assert!(
             store
-                .staged_media_session_for_playback(user.id, playback)
+                .staged_media_session_for_playback(&plurx_core::playback_principal::PlaybackPrincipal::LocalUser { user_id: user.id }, playback)
                 .await
                 .unwrap_or_else(|error| panic!("{backend}: staged read: {error}"))
                 .is_none(),
@@ -2197,7 +2261,7 @@ async fn a_successor_is_refused_when_the_viewer_has_asked_for_something_else() {
         let mut commit = preparation_commit_request(replacement, 5_000, 900_000);
         commit.expected_desired_revision = Some(second_ask.revision);
         store
-            .commit_media_session_preparation(user.id, playback, &commit)
+            .commit_media_session_preparation(&plurx_core::playback_principal::PlaybackPrincipal::LocalUser { user_id: user.id }, playback, &commit)
             .await
             .unwrap_or_else(|error| panic!("{backend}: fresh commit: {error}"))
             .unwrap_or_else(|| panic!("{backend}: a current ask must commit"));
@@ -2231,7 +2295,12 @@ async fn a_playback_with_no_recorded_ask_is_still_admitted() {
         .await;
         assert!(
             store
-                .desired_selection(user.id, playback)
+                .desired_selection(
+                    &plurx_core::playback_principal::PlaybackPrincipal::LocalUser {
+                        user_id: user.id
+                    },
+                    playback
+                )
                 .await
                 .unwrap_or_else(|error| panic!("{backend}: read: {error}"))
                 .is_none(),
@@ -2258,7 +2327,11 @@ async fn a_playback_with_no_recorded_ask_is_still_admitted() {
         let mut commit = preparation_commit_request(staged, 3_000, 900_000);
         commit.expected_desired_revision = Some(7);
         store
-            .commit_media_session_preparation(user.id, playback, &commit)
+            .commit_media_session_preparation(
+                &plurx_core::playback_principal::PlaybackPrincipal::LocalUser { user_id: user.id },
+                playback,
+                &commit,
+            )
             .await
             .unwrap_or_else(|error| panic!("{backend}: commit: {error}"))
             .unwrap_or_else(|| panic!("{backend}: an absent ask must commit, not fence"));
@@ -2342,7 +2415,10 @@ async fn a_staged_successor_cannot_renew_past_its_deadline() {
             "{backend}: the expired successor must not still be active"
         );
         let current = store
-            .media_session_route_for_playback(user.id, playback)
+            .media_session_route_for_playback(
+                &plurx_core::playback_principal::PlaybackPrincipal::LocalUser { user_id: user.id },
+                playback,
+            )
             .await
             .unwrap_or_else(|error| panic!("{backend}: route after maintenance: {error}"))
             .unwrap_or_else(|| panic!("{backend}: the playback still has a pointer"));
@@ -2457,7 +2533,10 @@ async fn a_staged_successor_expires_on_its_own_deadline() {
         // The viewer's own session is untouched throughout — an abandoned
         // preparation is not allowed to be visible to them at all.
         let current = store
-            .media_session_route_for_playback(user.id, playback)
+            .media_session_route_for_playback(
+                &plurx_core::playback_principal::PlaybackPrincipal::LocalUser { user_id: user.id },
+                playback,
+            )
             .await
             .unwrap_or_else(|error| panic!("{backend}: route after maintenance: {error}"))
             .unwrap_or_else(|| panic!("{backend}: the playback still has a pointer"));
@@ -2503,7 +2582,10 @@ async fn media_session_prepare_stages_a_successor_that_changes_nothing() {
         )
         .await;
         let before = store
-            .media_session_route_for_playback(user.id, playback)
+            .media_session_route_for_playback(
+                &plurx_core::playback_principal::PlaybackPrincipal::LocalUser { user_id: user.id },
+                playback,
+            )
             .await
             .unwrap_or_else(|error| panic!("{backend}: route before prepare: {error}"))
             .unwrap_or_else(|| panic!("{backend}: the predecessor must be current"));
@@ -2531,7 +2613,10 @@ async fn media_session_prepare_stages_a_successor_that_changes_nothing() {
         // 1. The predecessor is still current, still active, still untouched.
         // 2. The same lookup gives the same answer with a staged row present.
         let after = store
-            .media_session_route_for_playback(user.id, playback)
+            .media_session_route_for_playback(
+                &plurx_core::playback_principal::PlaybackPrincipal::LocalUser { user_id: user.id },
+                playback,
+            )
             .await
             .unwrap_or_else(|error| panic!("{backend}: route after prepare: {error}"))
             .unwrap_or_else(|| panic!("{backend}: the predecessor must still be current"));
@@ -2578,7 +2663,10 @@ async fn media_session_prepare_stages_a_successor_that_changes_nothing() {
         assert_eq!(replay.incarnation_id, staged, "{backend}");
 
         let ledger = store
-            .staged_media_session_for_playback(user.id, playback)
+            .staged_media_session_for_playback(
+                &plurx_core::playback_principal::PlaybackPrincipal::LocalUser { user_id: user.id },
+                playback,
+            )
             .await
             .unwrap_or_else(|error| panic!("{backend}: staged lookup: {error}"))
             .unwrap_or_else(|| panic!("{backend}: the ledger must remember it"));
@@ -2614,7 +2702,10 @@ async fn media_session_rejoin_replaces_one_preparation_without_committing_video(
         )
         .await;
         let current_before = store
-            .media_session_route_for_playback(user.id, playback)
+            .media_session_route_for_playback(
+                &plurx_core::playback_principal::PlaybackPrincipal::LocalUser { user_id: user.id },
+                playback,
+            )
             .await
             .unwrap_or_else(|error| panic!("{backend}: current route before rejoin: {error}"))
             .unwrap_or_else(|| panic!("{backend}: predecessor must be current"));
@@ -2656,7 +2747,10 @@ async fn media_session_rejoin_replaces_one_preparation_without_committing_video(
         assert_eq!(route.recipe_json, merged.recipe_json, "{backend}");
 
         let staged = store
-            .staged_media_session_for_playback(user.id, playback)
+            .staged_media_session_for_playback(
+                &plurx_core::playback_principal::PlaybackPrincipal::LocalUser { user_id: user.id },
+                playback,
+            )
             .await
             .unwrap_or_else(|error| panic!("{backend}: merged staged lookup: {error}"))
             .unwrap_or_else(|| panic!("{backend}: merged preparation owns the slot"));
@@ -2680,7 +2774,10 @@ async fn media_session_rejoin_replaces_one_preparation_without_committing_video(
             "{backend}"
         );
         let current_after = store
-            .media_session_route_for_playback(user.id, playback)
+            .media_session_route_for_playback(
+                &plurx_core::playback_principal::PlaybackPrincipal::LocalUser { user_id: user.id },
+                playback,
+            )
             .await
             .unwrap_or_else(|error| panic!("{backend}: current route after rejoin: {error}"))
             .unwrap_or_else(|| panic!("{backend}: predecessor stays current"));
@@ -2795,7 +2892,7 @@ async fn media_session_rejoin_loses_safely_after_the_occupied_slot_commits() {
             .unwrap_or_else(|| panic!("{backend}: occupied preparation must win"));
         store
             .commit_media_session_preparation(
-                user.id,
+                &plurx_core::playback_principal::PlaybackPrincipal::LocalUser { user_id: user.id },
                 playback,
                 &preparation_commit_request(occupied, 3_000, 900_000),
             )
@@ -2803,7 +2900,10 @@ async fn media_session_rejoin_loses_safely_after_the_occupied_slot_commits() {
             .unwrap_or_else(|error| panic!("{backend}: commit occupied slot: {error}"))
             .unwrap_or_else(|| panic!("{backend}: occupied preparation must commit"));
         let committed = store
-            .media_session_route_for_playback(user.id, playback)
+            .media_session_route_for_playback(
+                &plurx_core::playback_principal::PlaybackPrincipal::LocalUser { user_id: user.id },
+                playback,
+            )
             .await
             .unwrap_or_else(|error| panic!("{backend}: committed route: {error}"))
             .unwrap_or_else(|| panic!("{backend}: committed successor is current"));
@@ -2828,7 +2928,12 @@ async fn media_session_rejoin_loses_safely_after_the_occupied_slot_commits() {
         );
         assert_eq!(
             store
-                .media_session_route_for_playback(user.id, playback)
+                .media_session_route_for_playback(
+                    &plurx_core::playback_principal::PlaybackPrincipal::LocalUser {
+                        user_id: user.id
+                    },
+                    playback
+                )
                 .await
                 .unwrap_or_else(|error| panic!("{backend}: current route after loss: {error}"))
                 .unwrap_or_else(|| panic!("{backend}: committed route survives")),
@@ -2893,7 +2998,10 @@ async fn media_session_rejoin_is_guarded_by_the_named_preparation() {
             "{backend}: a wrong incarnation cannot replace the occupied slot"
         );
         let staged = store
-            .staged_media_session_for_playback(user.id, playback)
+            .staged_media_session_for_playback(
+                &plurx_core::playback_principal::PlaybackPrincipal::LocalUser { user_id: user.id },
+                playback,
+            )
             .await
             .unwrap_or_else(|error| panic!("{backend}: guarded staged lookup: {error}"))
             .unwrap_or_else(|| panic!("{backend}: occupied slot must survive"));
@@ -2967,7 +3075,12 @@ async fn media_session_rejoin_preserves_a_present_named_slot_on_invalid_replacem
         );
         assert_eq!(
             store
-                .staged_media_session_for_playback(user.id, playback)
+                .staged_media_session_for_playback(
+                    &plurx_core::playback_principal::PlaybackPrincipal::LocalUser {
+                        user_id: user.id
+                    },
+                    playback
+                )
                 .await
                 .unwrap_or_else(|error| panic!(
                     "{backend}: staged row after bad predecessor: {error}"
@@ -3006,7 +3119,12 @@ async fn media_session_rejoin_preserves_a_present_named_slot_on_invalid_replacem
         );
         assert_eq!(
             store
-                .staged_media_session_for_playback(user.id, playback)
+                .staged_media_session_for_playback(
+                    &plurx_core::playback_principal::PlaybackPrincipal::LocalUser {
+                        user_id: user.id
+                    },
+                    playback
+                )
                 .await
                 .unwrap_or_else(|error| panic!("{backend}: ledger after terminal refusal: {error}"))
                 .unwrap_or_else(|| panic!("{backend}: terminal named ledger remains"))
@@ -3059,7 +3177,9 @@ async fn media_session_rejoin_cannot_retarget_an_occupied_preparation_after_poin
             expected_desired_revision: None,
             incarnation_id: current.to_owned(),
             session_id: "00000000-0000-4000-8000-00000000d366".to_owned(),
-            user_id: user.id,
+            principal: plurx_core::playback_principal::PlaybackPrincipal::LocalUser {
+                user_id: user.id,
+            },
             playback_id: playback.to_owned(),
             expected_predecessor_incarnation_id: Some(predecessor.to_owned()),
             fence_predecessor: true,
@@ -3108,7 +3228,12 @@ async fn media_session_rejoin_cannot_retarget_an_occupied_preparation_after_poin
         );
         assert_eq!(
             store
-                .staged_media_session_for_playback(user.id, playback)
+                .staged_media_session_for_playback(
+                    &plurx_core::playback_principal::PlaybackPrincipal::LocalUser {
+                        user_id: user.id
+                    },
+                    playback
+                )
                 .await
                 .unwrap_or_else(|error| panic!("{backend}: ledger after retarget refusal: {error}"))
                 .unwrap_or_else(|| panic!("{backend}: old ledger remains occupied"))
@@ -3130,7 +3255,12 @@ async fn media_session_rejoin_cannot_retarget_an_occupied_preparation_after_poin
         );
         assert_eq!(
             store
-                .media_session_route_for_playback(user.id, playback)
+                .media_session_route_for_playback(
+                    &plurx_core::playback_principal::PlaybackPrincipal::LocalUser {
+                        user_id: user.id
+                    },
+                    playback
+                )
                 .await
                 .unwrap_or_else(|error| panic!(
                     "{backend}: current route after retarget refusal: {error}"
@@ -3207,7 +3337,10 @@ async fn media_session_rejoin_preserves_the_occupied_slot_when_reprepare_is_refu
             "{backend}: {error}"
         );
         let staged = store
-            .staged_media_session_for_playback(user.id, playback)
+            .staged_media_session_for_playback(
+                &plurx_core::playback_principal::PlaybackPrincipal::LocalUser { user_id: user.id },
+                playback,
+            )
             .await
             .unwrap_or_else(|error| panic!("{backend}: staged row after refusal: {error}"))
             .unwrap_or_else(|| panic!("{backend}: atomic refusal must preserve the old slot"));
@@ -3291,7 +3424,7 @@ async fn hiqlite_media_session_rejoin_cannot_resurrect_an_aborted_preparation() 
         .expect("stale rejoin publishes ledger-read seam");
     store
         .abort_media_session_preparation(
-            user.id,
+            &plurx_core::playback_principal::PlaybackPrincipal::LocalUser { user_id: user.id },
             playback,
             &preparation_abort_request(occupied, merged.now_ms),
         )
@@ -3311,7 +3444,10 @@ async fn hiqlite_media_session_rejoin_cannot_resurrect_an_aborted_preparation() 
     );
     assert!(
         store
-            .staged_media_session_for_playback(user.id, playback)
+            .staged_media_session_for_playback(
+                &plurx_core::playback_principal::PlaybackPrincipal::LocalUser { user_id: user.id },
+                playback
+            )
             .await
             .expect("inspect ledger after abort race")
             .is_none(),
@@ -3327,7 +3463,10 @@ async fn hiqlite_media_session_rejoin_cannot_resurrect_an_aborted_preparation() 
     );
     assert_eq!(
         store
-            .media_session_route_for_playback(user.id, playback)
+            .media_session_route_for_playback(
+                &plurx_core::playback_principal::PlaybackPrincipal::LocalUser { user_id: user.id },
+                playback
+            )
             .await
             .expect("inspect pointer after abort race")
             .expect("predecessor remains current")
@@ -3402,7 +3541,7 @@ async fn hiqlite_media_session_rejoin_survives_a_post_proposal_commit() {
         .expect("rejoin publishes post-proposal seam");
     let committed = store
         .commit_media_session_preparation(
-            user.id,
+            &plurx_core::playback_principal::PlaybackPrincipal::LocalUser { user_id: user.id },
             playback,
             &preparation_commit_request(&merged.incarnation_id, 3_000, 900_000),
         )
@@ -3421,7 +3560,10 @@ async fn hiqlite_media_session_rejoin_survives_a_post_proposal_commit() {
     assert_eq!(route, committed.route);
     assert!(
         store
-            .staged_media_session_for_playback(user.id, playback)
+            .staged_media_session_for_playback(
+                &plurx_core::playback_principal::PlaybackPrincipal::LocalUser { user_id: user.id },
+                playback
+            )
             .await
             .expect("inspect committed replacement ledger")
             .is_none(),
@@ -3496,7 +3638,7 @@ async fn hiqlite_media_session_rejoin_classifies_a_post_proposal_abort() {
         .expect("rejoin publishes post-proposal abort seam");
     let aborted = store
         .abort_media_session_preparation(
-            user.id,
+            &plurx_core::playback_principal::PlaybackPrincipal::LocalUser { user_id: user.id },
             playback,
             &preparation_abort_request(&merged.incarnation_id, 3_000),
         )
@@ -3518,7 +3660,10 @@ async fn hiqlite_media_session_rejoin_classifies_a_post_proposal_abort() {
     );
     assert!(
         store
-            .staged_media_session_for_playback(user.id, playback)
+            .staged_media_session_for_playback(
+                &plurx_core::playback_principal::PlaybackPrincipal::LocalUser { user_id: user.id },
+                playback
+            )
             .await
             .expect("inspect aborted replacement ledger")
             .is_none(),
@@ -3535,7 +3680,10 @@ async fn hiqlite_media_session_rejoin_classifies_a_post_proposal_abort() {
     );
     assert_eq!(
         store
-            .media_session_route_for_playback(user.id, playback)
+            .media_session_route_for_playback(
+                &plurx_core::playback_principal::PlaybackPrincipal::LocalUser { user_id: user.id },
+                playback
+            )
             .await
             .expect("inspect pointer after post-proposal abort")
             .expect("predecessor remains current")
@@ -3579,7 +3727,7 @@ async fn media_session_commit_advances_the_exact_expected_pointer_once() {
 
         let commit = store
             .commit_media_session_preparation(
-                user.id,
+                &plurx_core::playback_principal::PlaybackPrincipal::LocalUser { user_id: user.id },
                 playback,
                 &preparation_commit_request(staged, 3_000, 900_000),
             )
@@ -3628,14 +3776,22 @@ async fn media_session_commit_advances_the_exact_expected_pointer_once() {
         );
 
         let current = store
-            .media_session_route_for_playback(user.id, playback)
+            .media_session_route_for_playback(
+                &plurx_core::playback_principal::PlaybackPrincipal::LocalUser { user_id: user.id },
+                playback,
+            )
             .await
             .unwrap_or_else(|error| panic!("{backend}: route after commit: {error}"))
             .unwrap_or_else(|| panic!("{backend}: the successor is current now"));
         assert_eq!(current.incarnation_id, staged, "{backend}");
         assert!(
             store
-                .staged_media_session_for_playback(user.id, playback)
+                .staged_media_session_for_playback(
+                    &plurx_core::playback_principal::PlaybackPrincipal::LocalUser {
+                        user_id: user.id
+                    },
+                    playback
+                )
                 .await
                 .unwrap_or_else(|error| panic!("{backend}: staged after commit: {error}"))
                 .is_none(),
@@ -3645,7 +3801,7 @@ async fn media_session_commit_advances_the_exact_expected_pointer_once() {
         // Once. A replay reads the same rather than reaping a second time.
         let replay = store
             .commit_media_session_preparation(
-                user.id,
+                &plurx_core::playback_principal::PlaybackPrincipal::LocalUser { user_id: user.id },
                 playback,
                 &preparation_commit_request(staged, 4_000, 900_000),
             )
@@ -3692,7 +3848,10 @@ async fn media_session_commit_advances_the_exact_expected_pointer_once() {
              the same one the owner's own end writes"
         );
         let successor = store
-            .media_session_route_for_playback(user.id, playback)
+            .media_session_route_for_playback(
+                &plurx_core::playback_principal::PlaybackPrincipal::LocalUser { user_id: user.id },
+                playback,
+            )
             .await
             .unwrap_or_else(|error| panic!("{backend}: route after the sweep: {error}"))
             .unwrap_or_else(|| {
@@ -3762,7 +3921,9 @@ async fn media_session_commit_against_a_moved_pointer_aborts_the_successor() {
         assert!(
             store
                 .commit_media_session_preparation(
-                    user.id,
+                    &plurx_core::playback_principal::PlaybackPrincipal::LocalUser {
+                        user_id: user.id
+                    },
                     playback,
                     &preparation_commit_request(staged, 5_000, 900_000),
                 )
@@ -3772,7 +3933,10 @@ async fn media_session_commit_against_a_moved_pointer_aborts_the_successor() {
             "{backend}: a commit whose expected predecessor is stale loses"
         );
         let current = store
-            .media_session_route_for_playback(user.id, playback)
+            .media_session_route_for_playback(
+                &plurx_core::playback_principal::PlaybackPrincipal::LocalUser { user_id: user.id },
+                playback,
+            )
             .await
             .unwrap_or_else(|error| panic!("{backend}: route after stale commit: {error}"))
             .unwrap_or_else(|| panic!("{backend}: the newer generation is still current"));
@@ -3793,7 +3957,12 @@ async fn media_session_commit_against_a_moved_pointer_aborts_the_successor() {
         );
         assert!(
             store
-                .staged_media_session_for_playback(user.id, playback)
+                .staged_media_session_for_playback(
+                    &plurx_core::playback_principal::PlaybackPrincipal::LocalUser {
+                        user_id: user.id
+                    },
+                    playback
+                )
                 .await
                 .unwrap_or_else(|error| panic!("{backend}: staged after stale commit: {error}"))
                 .is_none(),
@@ -3823,7 +3992,10 @@ async fn media_session_abort_removes_only_the_staged_successor() {
         )
         .await;
         let before = store
-            .media_session_route_for_playback(user.id, playback)
+            .media_session_route_for_playback(
+                &plurx_core::playback_principal::PlaybackPrincipal::LocalUser { user_id: user.id },
+                playback,
+            )
             .await
             .unwrap_or_else(|error| panic!("{backend}: route before abort: {error}"))
             .unwrap_or_else(|| panic!("{backend}: predecessor current"));
@@ -3842,7 +4014,7 @@ async fn media_session_abort_removes_only_the_staged_successor() {
 
         let aborted = store
             .abort_media_session_preparation(
-                user.id,
+                &plurx_core::playback_principal::PlaybackPrincipal::LocalUser { user_id: user.id },
                 playback,
                 &preparation_abort_request(staged, 6_000),
             )
@@ -3858,7 +4030,10 @@ async fn media_session_abort_removes_only_the_staged_successor() {
              really was replaced, by the predecessor it never displaced"
         );
         let after = store
-            .media_session_route_for_playback(user.id, playback)
+            .media_session_route_for_playback(
+                &plurx_core::playback_principal::PlaybackPrincipal::LocalUser { user_id: user.id },
+                playback,
+            )
             .await
             .unwrap_or_else(|error| panic!("{backend}: route after abort: {error}"))
             .unwrap_or_else(|| panic!("{backend}: the current stream stays authoritative"));
@@ -3868,7 +4043,9 @@ async fn media_session_abort_removes_only_the_staged_successor() {
         assert!(
             store
                 .abort_media_session_preparation(
-                    user.id,
+                    &plurx_core::playback_principal::PlaybackPrincipal::LocalUser {
+                        user_id: user.id
+                    },
                     playback,
                     &preparation_abort_request(staged, 7_000),
                 )
@@ -3920,7 +4097,9 @@ async fn media_session_abort_cannot_end_a_session_it_never_staged() {
         assert!(
             store
                 .abort_media_session_preparation(
-                    user.id,
+                    &plurx_core::playback_principal::PlaybackPrincipal::LocalUser {
+                        user_id: user.id
+                    },
                     "a-playback-it-does-not-belong-to",
                     &preparation_abort_request(stranger, 9_000),
                 )
@@ -3981,7 +4160,7 @@ async fn media_session_abort_after_commit_leaves_the_promoted_successor_alone() 
             .unwrap_or_else(|| panic!("{backend}: prepare must win"));
         store
             .commit_media_session_preparation(
-                user.id,
+                &plurx_core::playback_principal::PlaybackPrincipal::LocalUser { user_id: user.id },
                 playback,
                 &preparation_commit_request(staged, 3_000, 900_000),
             )
@@ -3992,7 +4171,9 @@ async fn media_session_abort_after_commit_leaves_the_promoted_successor_alone() 
         assert!(
             store
                 .abort_media_session_preparation(
-                    user.id,
+                    &plurx_core::playback_principal::PlaybackPrincipal::LocalUser {
+                        user_id: user.id
+                    },
                     playback,
                     &preparation_abort_request(staged, 4_000),
                 )
@@ -4002,7 +4183,10 @@ async fn media_session_abort_after_commit_leaves_the_promoted_successor_alone() 
             "{backend}: an abort of a committed successor loses"
         );
         let current = store
-            .media_session_route_for_playback(user.id, playback)
+            .media_session_route_for_playback(
+                &plurx_core::playback_principal::PlaybackPrincipal::LocalUser { user_id: user.id },
+                playback,
+            )
             .await
             .unwrap_or_else(|error| panic!("{backend}: route after late abort: {error}"))
             .unwrap_or_else(|| panic!("{backend}: the successor is still current"));
@@ -4051,7 +4235,7 @@ async fn media_session_commit_rejects_an_expired_preparation_in_the_store_cas() 
 
         assert!(store
             .commit_media_session_preparation(
-                user.id,
+                &plurx_core::playback_principal::PlaybackPrincipal::LocalUser { user_id: user.id },
                 playback,
                 &preparation_commit_request(staged, 2_500, 900_000),
             )
@@ -4060,7 +4244,12 @@ async fn media_session_commit_rejects_an_expired_preparation_in_the_store_cas() 
             .is_none());
         assert_eq!(
             store
-                .media_session_route_for_playback(user.id, playback)
+                .media_session_route_for_playback(
+                    &plurx_core::playback_principal::PlaybackPrincipal::LocalUser {
+                        user_id: user.id
+                    },
+                    playback
+                )
                 .await
                 .unwrap_or_else(|error| panic!("{backend}: current route: {error}"))
                 .map(|route| route.incarnation_id),
@@ -4068,7 +4257,10 @@ async fn media_session_commit_rejects_an_expired_preparation_in_the_store_cas() 
             "{backend}: the expired successor cannot become current"
         );
         assert!(store
-            .staged_media_session_for_playback(user.id, playback)
+            .staged_media_session_for_playback(
+                &plurx_core::playback_principal::PlaybackPrincipal::LocalUser { user_id: user.id },
+                playback
+            )
             .await
             .unwrap_or_else(|error| panic!("{backend}: ledger: {error}"))
             .is_none());
@@ -4121,7 +4313,11 @@ async fn media_session_commit_atomically_retains_its_control_receipt() {
         let mut commit = preparation_commit_request(staged, 3_000, 900_000);
         commit.control_receipt = Some(receipt.clone());
         let first = store
-            .commit_media_session_preparation(user.id, playback, &commit)
+            .commit_media_session_preparation(
+                &plurx_core::playback_principal::PlaybackPrincipal::LocalUser { user_id: user.id },
+                playback,
+                &commit,
+            )
             .await
             .unwrap_or_else(|error| panic!("{backend}: commit: {error}"))
             .unwrap_or_else(|| panic!("{backend}: commit must win"));
@@ -4138,7 +4334,11 @@ async fn media_session_commit_atomically_retains_its_control_receipt() {
             "{backend}: pointer advance and receipt are one outcome"
         );
         let replay = store
-            .commit_media_session_preparation(user.id, playback, &commit)
+            .commit_media_session_preparation(
+                &plurx_core::playback_principal::PlaybackPrincipal::LocalUser { user_id: user.id },
+                playback,
+                &commit,
+            )
             .await
             .unwrap_or_else(|error| panic!("{backend}: replay commit: {error}"))
             .unwrap_or_else(|| panic!("{backend}: replay must remain visible"));
@@ -4159,7 +4359,13 @@ async fn media_session_commit_atomically_retains_its_control_receipt() {
             .response_json = "{\"action\":\"different\"}".to_owned();
         assert!(
             store
-                .commit_media_session_preparation(user.id, playback, &mismatched)
+                .commit_media_session_preparation(
+                    &plurx_core::playback_principal::PlaybackPrincipal::LocalUser {
+                        user_id: user.id
+                    },
+                    playback,
+                    &mismatched
+                )
                 .await
                 .unwrap_or_else(|error| panic!("{backend}: mismatched replay: {error}"))
                 .is_none(),
@@ -4199,7 +4405,12 @@ async fn media_session_commit_atomically_retains_its_control_receipt() {
         );
         assert_eq!(
             store
-                .media_session_route_for_playback(user.id, playback)
+                .media_session_route_for_playback(
+                    &plurx_core::playback_principal::PlaybackPrincipal::LocalUser {
+                        user_id: user.id
+                    },
+                    playback
+                )
                 .await
                 .unwrap_or_else(|error| panic!("{backend}: pointer after the end: {error}"))
                 .map(|route| route.incarnation_id),
@@ -4257,7 +4468,7 @@ async fn stale_predecessor_owner_cannot_stage_rejoin_commit_or_abort_a_preparati
 
         assert!(store
             .commit_media_session_preparation(
-                user.id,
+                &plurx_core::playback_principal::PlaybackPrincipal::LocalUser { user_id: user.id },
                 playback,
                 &preparation_commit_request(staged, 900_002, 1_800_000),
             )
@@ -4266,7 +4477,7 @@ async fn stale_predecessor_owner_cannot_stage_rejoin_commit_or_abort_a_preparati
             .is_none());
         assert!(store
             .abort_media_session_preparation(
-                user.id,
+                &plurx_core::playback_principal::PlaybackPrincipal::LocalUser { user_id: user.id },
                 playback,
                 &preparation_abort_request(staged, 900_003),
             )
@@ -4274,7 +4485,10 @@ async fn stale_predecessor_owner_cannot_stage_rejoin_commit_or_abort_a_preparati
             .unwrap_or_else(|error| panic!("{backend}: stale abort: {error}"))
             .is_none());
         assert!(store
-            .staged_media_session_for_playback(user.id, playback)
+            .staged_media_session_for_playback(
+                &plurx_core::playback_principal::PlaybackPrincipal::LocalUser { user_id: user.id },
+                playback
+            )
             .await
             .unwrap_or_else(|error| panic!("{backend}: retained ledger: {error}"))
             .is_some());
@@ -4293,7 +4507,12 @@ async fn stale_predecessor_owner_cannot_stage_rejoin_commit_or_abort_a_preparati
         );
         assert_eq!(
             store
-                .staged_media_session_for_playback(user.id, playback)
+                .staged_media_session_for_playback(
+                    &plurx_core::playback_principal::PlaybackPrincipal::LocalUser {
+                        user_id: user.id
+                    },
+                    playback
+                )
                 .await
                 .expect("retained ledger")
                 .expect("original staged row")
@@ -4303,7 +4522,7 @@ async fn stale_predecessor_owner_cannot_stage_rejoin_commit_or_abort_a_preparati
 
         let cleaned = store
             .abort_media_session_preparation(
-                user.id,
+                &plurx_core::playback_principal::PlaybackPrincipal::LocalUser { user_id: user.id },
                 playback,
                 &plurx_core::domain::MediaSessionPreparationAbortRequest {
                     staged_incarnation_id: staged.to_owned(),
@@ -4383,7 +4602,7 @@ async fn media_session_a_committed_successor_can_renew_and_outlives_its_preparat
             .unwrap_or_else(|| panic!("{backend}: prepare must win"));
         let commit = store
             .commit_media_session_preparation(
-                user.id,
+                &plurx_core::playback_principal::PlaybackPrincipal::LocalUser { user_id: user.id },
                 playback,
                 &preparation_commit_request(staged, 3_000, 5_000_000),
             )
@@ -4431,7 +4650,10 @@ async fn media_session_a_committed_successor_can_renew_and_outlives_its_preparat
             .await
             .unwrap_or_else(|error| panic!("{backend}: maintenance: {error}"));
         let current = store
-            .media_session_route_for_playback(user.id, playback)
+            .media_session_route_for_playback(
+                &plurx_core::playback_principal::PlaybackPrincipal::LocalUser { user_id: user.id },
+                playback,
+            )
             .await
             .unwrap_or_else(|error| panic!("{backend}: route after maintenance: {error}"))
             .unwrap_or_else(|| panic!("{backend}: the playback still has a pointer"));
@@ -4475,7 +4697,7 @@ async fn media_session_commit_replay_survives_a_later_preparation() {
             .unwrap_or_else(|| panic!("{backend}: first prepare must win"));
         store
             .commit_media_session_preparation(
-                user.id,
+                &plurx_core::playback_principal::PlaybackPrincipal::LocalUser { user_id: user.id },
                 playback,
                 &preparation_commit_request(first, 3_000, 900_000),
             )
@@ -4496,7 +4718,7 @@ async fn media_session_commit_replay_survives_a_later_preparation() {
 
         let replay = store
             .commit_media_session_preparation(
-                user.id,
+                &plurx_core::playback_principal::PlaybackPrincipal::LocalUser { user_id: user.id },
                 playback,
                 &preparation_commit_request(first, 4_000, 900_000),
             )
@@ -4591,7 +4813,10 @@ async fn media_session_commit_of_an_ended_successor_releases_the_slot() {
         )
         .await;
         let before = store
-            .media_session_route_for_playback(user.id, playback)
+            .media_session_route_for_playback(
+                &plurx_core::playback_principal::PlaybackPrincipal::LocalUser { user_id: user.id },
+                playback,
+            )
             .await
             .unwrap_or_else(|error| panic!("{backend}: route before: {error}"))
             .unwrap_or_else(|| panic!("{backend}: predecessor current"));
@@ -4619,7 +4844,9 @@ async fn media_session_commit_of_an_ended_successor_releases_the_slot() {
         assert!(
             store
                 .commit_media_session_preparation(
-                    user.id,
+                    &plurx_core::playback_principal::PlaybackPrincipal::LocalUser {
+                        user_id: user.id
+                    },
                     playback,
                     &preparation_commit_request(staged, 3_000, 900_000),
                 )
@@ -4629,7 +4856,10 @@ async fn media_session_commit_of_an_ended_successor_releases_the_slot() {
             "{backend}: an ended successor cannot become current"
         );
         let after = store
-            .media_session_route_for_playback(user.id, playback)
+            .media_session_route_for_playback(
+                &plurx_core::playback_principal::PlaybackPrincipal::LocalUser { user_id: user.id },
+                playback,
+            )
             .await
             .unwrap_or_else(|error| panic!("{backend}: route after: {error}"))
             .unwrap_or_else(|| panic!("{backend}: the predecessor is still current"));
@@ -4639,7 +4869,12 @@ async fn media_session_commit_of_an_ended_successor_releases_the_slot() {
         );
         assert!(
             store
-                .staged_media_session_for_playback(user.id, playback)
+                .staged_media_session_for_playback(
+                    &plurx_core::playback_principal::PlaybackPrincipal::LocalUser {
+                        user_id: user.id
+                    },
+                    playback
+                )
                 .await
                 .unwrap_or_else(|error| panic!("{backend}: staged after: {error}"))
                 .is_none(),
@@ -4801,7 +5036,12 @@ async fn media_session_maintenance_reaps_an_abandoned_preparation() {
 
         assert!(
             store
-                .staged_media_session_for_playback(user.id, playback)
+                .staged_media_session_for_playback(
+                    &plurx_core::playback_principal::PlaybackPrincipal::LocalUser {
+                        user_id: user.id
+                    },
+                    playback
+                )
                 .await
                 .unwrap_or_else(|error| panic!("{backend}: staged after maintenance: {error}"))
                 .is_none(),
@@ -4809,7 +5049,10 @@ async fn media_session_maintenance_reaps_an_abandoned_preparation() {
              one-per-playback slot forever"
         );
         let current = store
-            .media_session_route_for_playback(user.id, playback)
+            .media_session_route_for_playback(
+                &plurx_core::playback_principal::PlaybackPrincipal::LocalUser { user_id: user.id },
+                playback,
+            )
             .await
             .unwrap_or_else(|error| panic!("{backend}: route after maintenance: {error}"))
             .unwrap_or_else(|| panic!("{backend}: the current stream survives"));
@@ -4834,7 +5077,7 @@ async fn media_session_activation_prepare_settle_contract_runs_through_dyn_store
             expected_desired_revision: None,
             incarnation_id: incarnation_id.to_owned(),
             session_id: "00000000-0000-4000-8000-0000000000e2".to_owned(),
-            user_id: user.id,
+            principal: plurx_core::playback_principal::PlaybackPrincipal::LocalUser { user_id: user.id },
             playback_id: "activation-settle-playback".to_owned(),
             expected_predecessor_incarnation_id: None,
             fence_predecessor: false,
@@ -4851,7 +5094,7 @@ async fn media_session_activation_prepare_settle_contract_runs_through_dyn_store
         assert!(matches!(
             store
                 .claim_media_session_request(
-                    user.id,
+                    &plurx_core::playback_principal::PlaybackPrincipal::LocalUser { user_id: user.id },
                     request_id,
                     &fingerprint,
                     &activation.playback_id,
@@ -4867,7 +5110,7 @@ async fn media_session_activation_prepare_settle_contract_runs_through_dyn_store
         ));
         assert!(store
             .assign_media_session_request_owner(
-                user.id,
+                &plurx_core::playback_principal::PlaybackPrincipal::LocalUser { user_id: user.id },
                 request_id,
                 incarnation_id,
                 &activation.owner_node_id,
@@ -4939,7 +5182,7 @@ async fn media_session_activation_prepare_settle_contract_runs_through_dyn_store
         assert!(matches!(
             store
                 .claim_media_session_request(
-                    user.id,
+                    &plurx_core::playback_principal::PlaybackPrincipal::LocalUser { user_id: user.id },
                     request_id,
                     &fingerprint,
                     &activation.playback_id,
@@ -4974,14 +5217,19 @@ async fn media_session_activation_prepare_settle_contract_runs_through_dyn_store
             .unwrap_or_else(|error| panic!("{backend}: renew unpublished confirmed route: {error}"))
             .is_empty());
         assert!(store
-            .publish_media_session_activation(user.id, request_id, incarnation_id, 151)
+            .publish_media_session_activation(
+                &plurx_core::playback_principal::PlaybackPrincipal::LocalUser { user_id: user.id },
+                request_id,
+                incarnation_id,
+                151
+            )
             .await
             .unwrap_or_else(|error| panic!("{backend}: publish confirmed route: {error}"))
             .is_some());
         assert!(matches!(
             store
                 .claim_media_session_request(
-                    user.id,
+                    &plurx_core::playback_principal::PlaybackPrincipal::LocalUser { user_id: user.id },
                     request_id,
                     &fingerprint,
                     &activation.playback_id,
@@ -5018,7 +5266,12 @@ async fn media_session_activation_prepare_settle_contract_runs_through_dyn_store
             .expect("published route takeover");
         assert_eq!(taken.owner_node_id, "activation-survivor", "{backend}");
         let replayed = store
-            .publish_media_session_activation(user.id, request_id, incarnation_id, 251)
+            .publish_media_session_activation(
+                &plurx_core::playback_principal::PlaybackPrincipal::LocalUser { user_id: user.id },
+                request_id,
+                incarnation_id,
+                251,
+            )
             .await
             .unwrap_or_else(|error| panic!("{backend}: replay published after takeover: {error}"))
             .expect("resolved publication replay after takeover");
@@ -5031,7 +5284,7 @@ async fn media_session_activation_prepare_settle_contract_runs_through_dyn_store
             expected_desired_revision: None,
             incarnation_id: race_incarnation.to_owned(),
             session_id: "00000000-0000-4000-8000-0000000000e4".to_owned(),
-            user_id: user.id,
+            principal: plurx_core::playback_principal::PlaybackPrincipal::LocalUser { user_id: user.id },
             playback_id: "activation-race-playback".to_owned(),
             expected_predecessor_incarnation_id: None,
             fence_predecessor: false,
@@ -5048,7 +5301,7 @@ async fn media_session_activation_prepare_settle_contract_runs_through_dyn_store
         assert!(matches!(
             store
                 .claim_media_session_request(
-                    user.id,
+                    &plurx_core::playback_principal::PlaybackPrincipal::LocalUser { user_id: user.id },
                     "activation-race-request",
                     &fingerprint,
                     &race_activation.playback_id,
@@ -5062,7 +5315,7 @@ async fn media_session_activation_prepare_settle_contract_runs_through_dyn_store
         ));
         assert!(store
             .assign_media_session_request_owner(
-                user.id,
+                &plurx_core::playback_principal::PlaybackPrincipal::LocalUser { user_id: user.id },
                 "activation-race-request",
                 race_incarnation,
                 &race_activation.owner_node_id,
@@ -5076,6 +5329,7 @@ async fn media_session_activation_prepare_settle_contract_runs_through_dyn_store
             .unwrap_or_else(|error| panic!("{backend}: prepare activation race: {error}"))
             .expect("activation race prepare");
         confirm_media_activation(store.as_ref(), &race_activation, 0, backend).await;
+        let race_principal = plurx_core::playback_principal::PlaybackPrincipal::LocalUser { user_id: user.id };
         let (abandon_result, publish_result) = tokio::join!(
             store.settle_media_session_activation(
                 &race_activation,
@@ -5083,7 +5337,7 @@ async fn media_session_activation_prepare_settle_contract_runs_through_dyn_store
                 220,
             ),
             store.publish_media_session_activation(
-                user.id,
+                &race_principal,
                 "activation-race-request",
                 race_incarnation,
                 220,
@@ -5114,7 +5368,9 @@ async fn media_session_activation_prepare_settle_contract_runs_through_dyn_store
             assert!(matches!(
                 store
                     .claim_media_session_request(
-                        user.id,
+                        &plurx_core::playback_principal::PlaybackPrincipal::LocalUser {
+                            user_id: user.id
+                        },
                         "activation-race-request",
                         &fingerprint,
                         &race_activation.playback_id,
@@ -5139,7 +5395,9 @@ async fn media_session_activation_prepare_settle_contract_runs_through_dyn_store
             assert!(matches!(
                 store
                     .claim_media_session_request(
-                        user.id,
+                        &plurx_core::playback_principal::PlaybackPrincipal::LocalUser {
+                            user_id: user.id
+                        },
                         "activation-race-request",
                         &fingerprint,
                         &race_activation.playback_id,
@@ -5160,7 +5418,7 @@ async fn media_session_activation_prepare_settle_contract_runs_through_dyn_store
             expected_desired_revision: None,
             incarnation_id: finite_incarnation.to_owned(),
             session_id: "00000000-0000-4000-8000-0000000000f2".to_owned(),
-            user_id: user.id,
+            principal: plurx_core::playback_principal::PlaybackPrincipal::LocalUser { user_id: user.id },
             playback_id: activation.playback_id.clone(),
             expected_predecessor_incarnation_id: Some(incarnation_id.to_owned()),
             fence_predecessor: true,
@@ -5177,7 +5435,7 @@ async fn media_session_activation_prepare_settle_contract_runs_through_dyn_store
         assert!(matches!(
             store
                 .claim_media_session_request(
-                    user.id,
+                    &plurx_core::playback_principal::PlaybackPrincipal::LocalUser { user_id: user.id },
                     finite_request_id,
                     &fingerprint,
                     &finite_activation.playback_id,
@@ -5191,7 +5449,7 @@ async fn media_session_activation_prepare_settle_contract_runs_through_dyn_store
         ));
         assert!(store
             .assign_media_session_request_owner(
-                user.id,
+                &plurx_core::playback_principal::PlaybackPrincipal::LocalUser { user_id: user.id },
                 finite_request_id,
                 finite_incarnation,
                 &finite_activation.owner_node_id,
@@ -5211,7 +5469,7 @@ async fn media_session_activation_prepare_settle_contract_runs_through_dyn_store
         assert!(matches!(
             store
                 .claim_media_session_request(
-                    user.id,
+                    &plurx_core::playback_principal::PlaybackPrincipal::LocalUser { user_id: user.id },
                     finite_request_id,
                     &fingerprint,
                     &finite_activation.playback_id,
@@ -5281,7 +5539,7 @@ async fn media_session_activation_prepare_settle_contract_runs_through_dyn_store
         assert!(matches!(
             store
                 .claim_media_session_request(
-                    user.id,
+                    &plurx_core::playback_principal::PlaybackPrincipal::LocalUser { user_id: user.id },
                     finite_request_id,
                     &fingerprint,
                     &finite_activation.playback_id,
@@ -5314,7 +5572,7 @@ async fn media_session_activation_prepare_settle_contract_runs_through_dyn_store
         assert!(matches!(
             store
                 .claim_media_session_request(
-                    user.id,
+                    &plurx_core::playback_principal::PlaybackPrincipal::LocalUser { user_id: user.id },
                     finite_request_id,
                     &fingerprint,
                     &finite_activation.playback_id,
@@ -5387,7 +5645,12 @@ async fn media_session_activation_prepare_settle_contract_runs_through_dyn_store
             "{backend}: ready retry grace cannot renew twice"
         );
         let finite_published = store
-            .publish_media_session_activation(user.id, finite_request_id, finite_incarnation, 405)
+            .publish_media_session_activation(
+                &plurx_core::playback_principal::PlaybackPrincipal::LocalUser { user_id: user.id },
+                finite_request_id,
+                finite_incarnation,
+                405,
+            )
             .await
             .unwrap_or_else(|error| panic!("{backend}: publish taken-over handoff: {error}"))
             .expect("taken-over finite publication");
@@ -5402,7 +5665,7 @@ async fn media_session_activation_prepare_settle_contract_runs_through_dyn_store
             expected_desired_revision: None,
             incarnation_id: failed_confirm_incarnation.to_owned(),
             session_id: "00000000-0000-4000-8000-0000000000e7".to_owned(),
-            user_id: user.id,
+            principal: plurx_core::playback_principal::PlaybackPrincipal::LocalUser { user_id: user.id },
             playback_id: "activation-failed-confirm-playback".to_owned(),
             expected_predecessor_incarnation_id: None,
             fence_predecessor: false,
@@ -5419,7 +5682,7 @@ async fn media_session_activation_prepare_settle_contract_runs_through_dyn_store
         assert!(matches!(
             store
                 .claim_media_session_request(
-                    user.id,
+                    &plurx_core::playback_principal::PlaybackPrincipal::LocalUser { user_id: user.id },
                     "activation-failed-confirm",
                     &"e".repeat(64),
                     &failed_confirm_activation.playback_id,
@@ -5433,7 +5696,7 @@ async fn media_session_activation_prepare_settle_contract_runs_through_dyn_store
         ));
         assert!(store
             .assign_media_session_request_owner(
-                user.id,
+                &plurx_core::playback_principal::PlaybackPrincipal::LocalUser { user_id: user.id },
                 "activation-failed-confirm",
                 failed_confirm_incarnation,
                 &failed_confirm_activation.owner_node_id,
@@ -5449,7 +5712,7 @@ async fn media_session_activation_prepare_settle_contract_runs_through_dyn_store
         confirm_media_activation(store.as_ref(), &failed_confirm_activation, 0, backend).await;
         assert!(store
             .fail_media_session_request(
-                user.id,
+                &plurx_core::playback_principal::PlaybackPrincipal::LocalUser { user_id: user.id },
                 "activation-failed-confirm",
                 failed_confirm_incarnation,
                 301,
@@ -5877,7 +6140,7 @@ async fn media_session_contract_runs_through_dyn_store() {
         assert!(
             store
                 .claim_media_session_request(
-                    first_user.id,
+                    &plurx_core::playback_principal::PlaybackPrincipal::LocalUser { user_id: first_user.id },
                     "uppercase-fingerprint",
                     &"A".repeat(64),
                     "uppercase-playback",
@@ -5895,7 +6158,7 @@ async fn media_session_contract_runs_through_dyn_store() {
         assert!(matches!(
             store
                 .claim_media_session_request(
-                    first_user.id,
+                    &plurx_core::playback_principal::PlaybackPrincipal::LocalUser { user_id: first_user.id },
                     "expired-attempt",
                     &fingerprint,
                     "expired-attempt-playback",
@@ -5910,7 +6173,7 @@ async fn media_session_contract_runs_through_dyn_store() {
         assert!(matches!(
             store
                 .claim_media_session_request(
-                    first_user.id,
+                    &plurx_core::playback_principal::PlaybackPrincipal::LocalUser { user_id: first_user.id },
                     "expired-attempt",
                     &fingerprint,
                     "expired-attempt-playback",
@@ -5925,7 +6188,7 @@ async fn media_session_contract_runs_through_dyn_store() {
         ));
         assert!(store
             .fail_media_session_request(
-                first_user.id,
+                &plurx_core::playback_principal::PlaybackPrincipal::LocalUser { user_id: first_user.id },
                 "expired-attempt",
                 recovered_incarnation,
                 3,
@@ -5938,7 +6201,7 @@ async fn media_session_contract_runs_through_dyn_store() {
         assert!(matches!(
             store
                 .claim_media_session_request(
-                    first_user.id,
+                    &plurx_core::playback_principal::PlaybackPrincipal::LocalUser { user_id: first_user.id },
                     "retryable-attempt",
                     &fingerprint,
                     "retryable-attempt-playback",
@@ -5952,13 +6215,13 @@ async fn media_session_contract_runs_through_dyn_store() {
                 if incarnation_id == failed_incarnation
         ));
         assert!(store
-            .fail_media_session_request(first_user.id, "retryable-attempt", failed_incarnation, 11,)
+            .fail_media_session_request(&plurx_core::playback_principal::PlaybackPrincipal::LocalUser { user_id: first_user.id }, "retryable-attempt", failed_incarnation, 11,)
             .await
             .unwrap_or_else(|error| panic!("{backend}: fail retry fixture: {error}")));
         assert!(matches!(
             store
                 .claim_media_session_request(
-                    first_user.id,
+                    &plurx_core::playback_principal::PlaybackPrincipal::LocalUser { user_id: first_user.id },
                     "retryable-attempt",
                     &fingerprint,
                     "retryable-attempt-playback",
@@ -5974,7 +6237,7 @@ async fn media_session_contract_runs_through_dyn_store() {
         assert_eq!(
             store
                 .claim_media_session_request(
-                    first_user.id,
+                    &plurx_core::playback_principal::PlaybackPrincipal::LocalUser { user_id: first_user.id },
                     "retryable-attempt",
                     &conflicting,
                     "retryable-attempt-playback",
@@ -5990,7 +6253,7 @@ async fn media_session_contract_runs_through_dyn_store() {
         assert!(
             store
                 .fail_media_session_request(
-                    first_user.id,
+                    &plurx_core::playback_principal::PlaybackPrincipal::LocalUser { user_id: first_user.id },
                     "retryable-attempt",
                     retried_incarnation,
                     14,
@@ -6002,7 +6265,7 @@ async fn media_session_contract_runs_through_dyn_store() {
         assert_eq!(
             store
                 .claim_media_session_request(
-                    first_user.id,
+                    &plurx_core::playback_principal::PlaybackPrincipal::LocalUser { user_id: first_user.id },
                     "attempt-a",
                     &fingerprint,
                     "shared-playback",
@@ -6020,7 +6283,7 @@ async fn media_session_contract_runs_through_dyn_store() {
         assert!(matches!(
             store
                 .claim_media_session_request(
-                    first_user.id,
+                    &plurx_core::playback_principal::PlaybackPrincipal::LocalUser { user_id: first_user.id },
                     "attempt-a",
                     &fingerprint,
                     "shared-playback",
@@ -6036,7 +6299,7 @@ async fn media_session_contract_runs_through_dyn_store() {
         assert_eq!(
             store
                 .claim_media_session_request(
-                    first_user.id,
+                    &plurx_core::playback_principal::PlaybackPrincipal::LocalUser { user_id: first_user.id },
                     "attempt-a",
                     &conflicting,
                     "shared-playback",
@@ -6051,7 +6314,7 @@ async fn media_session_contract_runs_through_dyn_store() {
         );
         assert!(store
             .assign_media_session_request_owner(
-                first_user.id,
+                &plurx_core::playback_principal::PlaybackPrincipal::LocalUser { user_id: first_user.id },
                 "attempt-a",
                 incarnation_a,
                 "node-a",
@@ -6065,7 +6328,7 @@ async fn media_session_contract_runs_through_dyn_store() {
             expected_desired_revision: None,
                 incarnation_id: incarnation_a.to_owned(),
                 session_id: session_a.to_owned(),
-                user_id: first_user.id,
+                principal: plurx_core::playback_principal::PlaybackPrincipal::LocalUser { user_id: first_user.id },
                 playback_id: "shared-playback".to_owned(),
                 expected_predecessor_incarnation_id: None,
                 fence_predecessor: false,
@@ -6106,7 +6369,7 @@ async fn media_session_contract_runs_through_dyn_store() {
         assert!(matches!(
             store
                 .claim_media_session_request(
-                    first_user.id,
+                    &plurx_core::playback_principal::PlaybackPrincipal::LocalUser { user_id: first_user.id },
                     "attempt-a",
                     &fingerprint,
                     "shared-playback",
@@ -6129,7 +6392,7 @@ async fn media_session_contract_runs_through_dyn_store() {
             "{backend}: confirmed but unpublished route remains hidden"
         );
         assert!(store
-            .publish_media_session_activation(first_user.id, "attempt-a", incarnation_a, 141)
+            .publish_media_session_activation(&plurx_core::playback_principal::PlaybackPrincipal::LocalUser { user_id: first_user.id }, "attempt-a", incarnation_a, 141)
             .await
             .unwrap_or_else(|error| panic!("{backend}: publish activation: {error}"))
             .is_some());
@@ -6145,7 +6408,7 @@ async fn media_session_contract_runs_through_dyn_store() {
         assert!(matches!(
             store
                 .claim_media_session_request(
-                    first_user.id,
+                    &plurx_core::playback_principal::PlaybackPrincipal::LocalUser { user_id: first_user.id },
                     "attempt-a",
                     &fingerprint,
                     "shared-playback",
@@ -6165,7 +6428,7 @@ async fn media_session_contract_runs_through_dyn_store() {
             expected_desired_revision: None,
                 incarnation_id: incarnation_b.to_owned(),
                 session_id: session_b.to_owned(),
-                user_id: second_user.id,
+                principal: plurx_core::playback_principal::PlaybackPrincipal::LocalUser { user_id: second_user.id },
                 playback_id: "shared-playback".to_owned(),
                 expected_predecessor_incarnation_id: None,
                 fence_predecessor: false,
@@ -6207,7 +6470,7 @@ async fn media_session_contract_runs_through_dyn_store() {
             expected_desired_revision: None,
             incarnation_id: incarnation_a2.to_owned(),
             session_id: session_a2.to_owned(),
-            user_id: first_user.id,
+            principal: plurx_core::playback_principal::PlaybackPrincipal::LocalUser { user_id: first_user.id },
             playback_id: "shared-playback".to_owned(),
             expected_predecessor_incarnation_id: Some(incarnation_a.to_owned()),
             fence_predecessor: true,
@@ -6453,7 +6716,7 @@ async fn media_session_contract_runs_through_dyn_store() {
                 expected_desired_revision: None,
                 incarnation_id: boundary_incarnation.to_owned(),
                 session_id: boundary_session.to_owned(),
-                user_id: second_user.id,
+                principal: plurx_core::playback_principal::PlaybackPrincipal::LocalUser { user_id: second_user.id },
                 playback_id: "terminal-boundary".to_owned(),
                 expected_predecessor_incarnation_id: None,
                 fence_predecessor: false,
@@ -6536,7 +6799,7 @@ async fn media_session_contract_runs_through_dyn_store() {
                 expected_desired_revision: None,
                 incarnation_id: "00000000-0000-4000-8000-0000000000a5".to_owned(),
                 session_id: "00000000-0000-4000-8000-0000000000b4".to_owned(),
-                user_id: first_user.id,
+                principal: plurx_core::playback_principal::PlaybackPrincipal::LocalUser { user_id: first_user.id },
                 playback_id: "shared-playback".to_owned(),
                 expected_predecessor_incarnation_id: Some(incarnation_a.to_owned()),
                 fence_predecessor: true,
@@ -6562,7 +6825,7 @@ async fn media_session_contract_runs_through_dyn_store() {
                 expected_desired_revision: None,
                 incarnation_id: "00000000-0000-4000-8000-0000000000a8".to_owned(),
                 session_id: "00000000-0000-4000-8000-0000000000b6".to_owned(),
-                user_id: first_user.id,
+                principal: plurx_core::playback_principal::PlaybackPrincipal::LocalUser { user_id: first_user.id },
                 playback_id: "shared-playback".to_owned(),
                 expected_predecessor_incarnation_id: None,
                 fence_predecessor: true,
@@ -6810,7 +7073,7 @@ async fn media_session_contract_runs_through_dyn_store() {
         assert!(matches!(
             store
                 .claim_media_session_request(
-                    first_user.id,
+                    &plurx_core::playback_principal::PlaybackPrincipal::LocalUser { user_id: first_user.id },
                     "attempt-a",
                     &fingerprint,
                     "shared-playback",
@@ -6828,7 +7091,7 @@ async fn media_session_contract_runs_through_dyn_store() {
         assert!(matches!(
             store
                 .claim_media_session_request(
-                    first_user.id,
+                    &plurx_core::playback_principal::PlaybackPrincipal::LocalUser { user_id: first_user.id },
                     "expired-activation",
                     &fingerprint,
                     "expired-playback",
@@ -6842,7 +7105,7 @@ async fn media_session_contract_runs_through_dyn_store() {
         ));
         assert!(store
             .assign_media_session_request_owner(
-                first_user.id,
+                &plurx_core::playback_principal::PlaybackPrincipal::LocalUser { user_id: first_user.id },
                 "expired-activation",
                 expired_activation_incarnation,
                 "node-a",
@@ -6856,7 +7119,7 @@ async fn media_session_contract_runs_through_dyn_store() {
                 expected_desired_revision: None,
                 incarnation_id: expired_activation_incarnation.to_owned(),
                 session_id: "00000000-0000-4000-8000-0000000000b5".to_owned(),
-                user_id: first_user.id,
+                principal: plurx_core::playback_principal::PlaybackPrincipal::LocalUser { user_id: first_user.id },
                 playback_id: "expired-playback".to_owned(),
                 expected_predecessor_incarnation_id: None,
                 fence_predecessor: false,
@@ -6878,7 +7141,7 @@ async fn media_session_contract_runs_through_dyn_store() {
         assert!(matches!(
             store
                 .claim_media_session_request(
-                    first_user.id,
+                    &plurx_core::playback_principal::PlaybackPrincipal::LocalUser { user_id: first_user.id },
                     "expired-owner",
                     &fingerprint,
                     "expired-owner-playback",
@@ -6892,7 +7155,7 @@ async fn media_session_contract_runs_through_dyn_store() {
         ));
         assert!(!store
             .assign_media_session_request_owner(
-                first_user.id,
+                &plurx_core::playback_principal::PlaybackPrincipal::LocalUser { user_id: first_user.id },
                 "expired-owner",
                 expired_owner_incarnation,
                 "node-a",
@@ -6951,7 +7214,9 @@ async fn terminal_control_ack_atomically_fences_takeover_and_outlives_settlement
             expected_desired_revision: None,
             incarnation_id: incarnation.to_owned(),
             session_id: session.to_owned(),
-            user_id: user.id,
+            principal: plurx_core::playback_principal::PlaybackPrincipal::LocalUser {
+                user_id: user.id,
+            },
             playback_id: "terminal-ack-playback".to_owned(),
             expected_predecessor_incarnation_id: None,
             fence_predecessor: false,
@@ -7080,7 +7345,9 @@ async fn ending_a_taken_over_session_acts_on_the_current_owner() {
             expected_desired_revision: None,
             incarnation_id: incarnation.to_owned(),
             session_id: session.to_owned(),
-            user_id: user.id,
+            principal: plurx_core::playback_principal::PlaybackPrincipal::LocalUser {
+                user_id: user.id,
+            },
             playback_id: "takeover-end-playback".to_owned(),
             expected_predecessor_incarnation_id: None,
             fence_predecessor: false,
@@ -7271,7 +7538,9 @@ async fn media_session_expired_inventory_cursor_advances_past_a_full_refused_pag
                 expected_desired_revision: None,
                 incarnation_id,
                 session_id: uuid::Uuid::from_u128(0x5000 + index).to_string(),
-                user_id: user.id,
+                principal: plurx_core::playback_principal::PlaybackPrincipal::LocalUser {
+                    user_id: user.id,
+                },
                 playback_id: format!("expiry-cursor-{index}"),
                 expected_predecessor_incarnation_id: None,
                 fence_predecessor: false,
@@ -7362,7 +7631,9 @@ async fn media_session_same_playback_replacement_is_admitted_at_user_cap() {
                 expected_desired_revision: None,
                 incarnation_id: incarnation_id.clone(),
                 session_id,
-                user_id: user.id,
+                principal: plurx_core::playback_principal::PlaybackPrincipal::LocalUser {
+                    user_id: user.id,
+                },
                 playback_id: playback_id.clone(),
                 expected_predecessor_incarnation_id: None,
                 fence_predecessor: false,
@@ -7391,7 +7662,7 @@ async fn media_session_same_playback_replacement_is_admitted_at_user_cap() {
         assert!(matches!(
             store
                 .claim_media_session_request(
-                    user.id,
+                    &plurx_core::playback_principal::PlaybackPrincipal::LocalUser { user_id: user.id },
                     "cap-replacement",
                     &fingerprint,
                     "cap-playback-0",
@@ -7408,7 +7679,7 @@ async fn media_session_same_playback_replacement_is_admitted_at_user_cap() {
         assert!(matches!(
             store
                 .claim_media_session_request(
-                    user.id,
+                    &plurx_core::playback_principal::PlaybackPrincipal::LocalUser { user_id: user.id },
                     "cap-replacement",
                     &fingerprint,
                     "cap-playback-0",
@@ -7425,7 +7696,7 @@ async fn media_session_same_playback_replacement_is_admitted_at_user_cap() {
         ));
         assert!(store
             .assign_media_session_request_owner(
-                user.id,
+                &plurx_core::playback_principal::PlaybackPrincipal::LocalUser { user_id: user.id },
                 "cap-replacement",
                 &replacement,
                 "cap-node",
@@ -7438,7 +7709,7 @@ async fn media_session_same_playback_replacement_is_admitted_at_user_cap() {
             expected_desired_revision: None,
             incarnation_id: replacement.clone(),
             session_id: uuid::Uuid::from_u128(0x4000).to_string(),
-            user_id: user.id,
+            principal: plurx_core::playback_principal::PlaybackPrincipal::LocalUser { user_id: user.id },
             playback_id: "cap-playback-0".to_owned(),
             expected_predecessor_incarnation_id: predecessor.clone(),
             fence_predecessor: true,
@@ -7505,7 +7776,7 @@ async fn hiqlite_media_activation_requires_its_lease_mutation() {
     assert!(matches!(
         store
             .claim_media_session_request(
-                user.id,
+                &plurx_core::playback_principal::PlaybackPrincipal::LocalUser { user_id: user.id },
                 "max-revision-attempt",
                 &fingerprint,
                 "max-revision-playback",
@@ -7519,7 +7790,7 @@ async fn hiqlite_media_activation_requires_its_lease_mutation() {
     ));
     assert!(store
         .assign_media_session_request_owner(
-            user.id,
+            &plurx_core::playback_principal::PlaybackPrincipal::LocalUser { user_id: user.id },
             "max-revision-attempt",
             max_incarnation,
             "removed-node",
@@ -7546,7 +7817,9 @@ async fn hiqlite_media_activation_requires_its_lease_mutation() {
             expected_desired_revision: None,
             incarnation_id: max_incarnation.to_owned(),
             session_id: "00000000-0000-4000-8000-0000000000c2".to_owned(),
-            user_id: user.id,
+            principal: plurx_core::playback_principal::PlaybackPrincipal::LocalUser {
+                user_id: user.id
+            },
             playback_id: "max-revision-playback".to_owned(),
             expected_predecessor_incarnation_id: None,
             fence_predecessor: false,
@@ -7568,7 +7841,7 @@ async fn hiqlite_media_activation_requires_its_lease_mutation() {
     assert!(matches!(
         store
             .claim_media_session_request(
-                user.id,
+                &plurx_core::playback_principal::PlaybackPrincipal::LocalUser { user_id: user.id },
                 "removed-owner-attempt",
                 &fingerprint,
                 "removed-owner-playback",
@@ -7582,7 +7855,7 @@ async fn hiqlite_media_activation_requires_its_lease_mutation() {
     ));
     assert!(store
         .assign_media_session_request_owner(
-            user.id,
+            &plurx_core::playback_principal::PlaybackPrincipal::LocalUser { user_id: user.id },
             "removed-owner-attempt",
             removed_incarnation,
             "removed-node",
@@ -7615,7 +7888,9 @@ async fn hiqlite_media_activation_requires_its_lease_mutation() {
             expected_desired_revision: None,
             incarnation_id: removed_incarnation.to_owned(),
             session_id: "00000000-0000-4000-8000-0000000000c4".to_owned(),
-            user_id: user.id,
+            principal: plurx_core::playback_principal::PlaybackPrincipal::LocalUser {
+                user_id: user.id
+            },
             playback_id: "removed-owner-playback".to_owned(),
             expected_predecessor_incarnation_id: None,
             fence_predecessor: false,
@@ -7655,7 +7930,9 @@ async fn hiqlite_stale_activation_transaction_cannot_revoke_a_renewed_lease() {
         expected_desired_revision: None,
         incarnation_id: incarnation_id.to_owned(),
         session_id: session_id.to_owned(),
-        user_id: user.id,
+        principal: plurx_core::playback_principal::PlaybackPrincipal::LocalUser {
+            user_id: user.id,
+        },
         playback_id: "activation-replay-playback".to_owned(),
         expected_predecessor_incarnation_id: None,
         fence_predecessor: false,
@@ -11351,6 +11628,45 @@ async fn downgrade_dv_request_provenance(client: &Client) {
         .expect("commit provenance rewind");
 }
 
+// Background job objects (v49+) and sharing (v70) did not exist in v27/v31.
+// Keeping them blocks old column removal/table rebuilds and leaves extension
+// columns/tables that forward migration would add a second time. These fixtures
+// seed no extension rows; remove the later schema and retain the full background
+// trigger inventory as proof that actual migration restores it.
+#[cfg(feature = "hiqlite-contract-tests")]
+async fn drop_post_v39_extension_schema(client: &Client) -> Vec<String> {
+    let mut rows = client
+        .query_consistent("SELECT type,name FROM sqlite_master WHERE type IN ('trigger','view','table') AND (name GLOB 'background_*' OR name GLOB 'sharing_*' OR name='analysis_required_resources' OR (type='trigger' AND (instr(sql,'background_')>0 OR instr(sql,'analysis_required_resources')>0))) ORDER BY CASE type WHEN 'trigger' THEN 0 WHEN 'view' THEN 1 ELSE 2 END,name",hiqlite::params!())
+        .await.expect("read later background schema inventory");
+    let mut triggers = Vec::new();
+    let statements = rows
+        .iter_mut()
+        .map(|row| {
+            let kind = row.get::<String>("type");
+            let name = row.get::<String>("name");
+            if kind == "trigger" {
+                triggers.push(name.clone());
+            }
+            (
+                format!("DROP {} \"{}\"", kind, name.replace('"', "\"\"")),
+                hiqlite::params!(),
+            )
+        })
+        .collect::<Vec<_>>();
+    assert!(
+        !triggers.is_empty(),
+        "current fixture must contain background triggers"
+    );
+    client
+        .txn(statements)
+        .await
+        .expect("remove later background schema from historical fixture")
+        .into_iter()
+        .collect::<Result<Vec<_>, _>>()
+        .expect("commit later schema removal");
+    triggers
+}
+
 #[cfg(feature = "hiqlite-contract-tests")]
 fn post_v39_downgrade_statements() -> Vec<(&'static str, hiqlite::Params)> {
     [
@@ -11387,6 +11703,7 @@ fn post_v39_downgrade_statements() -> Vec<(&'static str, hiqlite::Params)> {
 
 #[cfg(feature = "hiqlite-contract-tests")]
 async fn downgrade_current_schema_after_request_identity(client: &Client) {
+    drop_post_v39_extension_schema(client).await;
     let mut statements = post_v39_downgrade_statements();
     statements.extend([
         (
@@ -11465,7 +11782,8 @@ async fn downgrade_current_schema_after_request_identity(client: &Client) {
 }
 
 #[cfg(feature = "hiqlite-contract-tests")]
-async fn downgrade_current_schema_after_producer_recovery(client: &Client) {
+async fn downgrade_current_schema_after_producer_recovery(client: &Client) -> Vec<String> {
+    let triggers = drop_post_v39_extension_schema(client).await;
     let mut statements = post_v39_downgrade_statements();
     statements.extend([
         (
@@ -11509,6 +11827,7 @@ async fn downgrade_current_schema_after_producer_recovery(client: &Client) {
         .into_iter()
         .collect::<Result<Vec<_>, _>>()
         .expect("commit post-v32 fixture downgrade");
+    triggers
 }
 
 #[cfg(feature = "hiqlite-contract-tests")]
@@ -12641,7 +12960,8 @@ async fn replicated_v32_store_migrates_the_producer_recovery_ledger_on_daemon_op
 
     // Rewind to v31: no ledger, marker pinned to the exact predecessor of the
     // producer-recovery migration.
-    downgrade_current_schema_after_producer_recovery(&client).await;
+    let expected_background_triggers =
+        downgrade_current_schema_after_producer_recovery(&client).await;
     client
         .txn([
             (
@@ -12697,6 +13017,18 @@ async fn replicated_v32_store_migrates_the_producer_recovery_ledger_on_daemon_op
         assert_eq!(rows[0].value, expected, "{sql}");
     }
 
+    let mut trigger_rows = client.query_consistent(
+        "SELECT name FROM sqlite_master WHERE type='trigger' AND (name GLOB 'background_*' OR instr(sql,'background_')>0 OR instr(sql,'analysis_required_resources')>0) ORDER BY name",
+        hiqlite::params!()).await.expect("read restored background trigger inventory");
+    let restored_triggers = trigger_rows
+        .iter_mut()
+        .map(|row| row.get::<String>("name"))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        restored_triggers, expected_background_triggers,
+        "historical migration must restore every current background trigger"
+    );
+
     // The migrated store is the working store, not merely a shaped one.
     let reservation = migrated
         .reserve_producer_recovery(&recovery_request("migrated-1"), 1_000)
@@ -12742,7 +13074,11 @@ async fn replicated_v32_store_migrates_the_producer_recovery_ledger_on_daemon_op
     );
     assert_eq!(
         reopened
-            .producer_recovery_for_epoch(1, "pb-recovery", "migrated-1")
+            .producer_recovery_for_epoch(
+                &plurx_core::playback_principal::PlaybackPrincipal::LocalUser { user_id: 1 },
+                "pb-recovery",
+                "migrated-1"
+            )
             .await
             .expect("read across the repeated attempt")
             .map(|row| row.state),
@@ -23743,7 +24079,7 @@ async fn analysis_reconciliation_preserves_work_and_fences_changed_requests() {
                 pipeline_version: viewer_request.pipeline_version.clone(),
                 video_identity: viewer_request.video_identity.clone(),
                 target_node_id: viewer_request.target_node_id.clone(),
-                user_id,
+                principal: plurx_core::playback_principal::PlaybackPrincipal::LocalUser { user_id },
                 playback_id: "reconciliation-viewer".into(),
                 now_ms: 2000,
             })
@@ -29577,7 +29913,9 @@ async fn a_recovery_epoch_is_written_once_and_inherited_by_a_successor() {
             expected_desired_revision: None,
             incarnation_id: "00000000-0000-4000-8000-0000000ec001".to_owned(),
             session_id: "00000000-0000-4000-8000-0000000ec101".to_owned(),
-            user_id: user,
+            principal: plurx_core::playback_principal::PlaybackPrincipal::LocalUser {
+                user_id: user,
+            },
             playback_id: "epoch-playback".to_owned(),
             expected_predecessor_incarnation_id: None,
             fence_predecessor: false,
@@ -29706,7 +30044,11 @@ async fn a_recovery_epoch_is_written_once_and_inherited_by_a_successor() {
         // `validated_epoch_key`, so it is asserted rather than assumed.
         assert!(
             store
-                .producer_recovery_for_epoch(user, "epoch-playback", "")
+                .producer_recovery_for_epoch(
+                    &plurx_core::playback_principal::PlaybackPrincipal::LocalUser { user_id: user },
+                    "epoch-playback",
+                    ""
+                )
                 .await
                 .is_err(),
             "{backend}: an empty epoch names no budget, so a row that has one \
@@ -31334,7 +31676,11 @@ async fn hiqlite_preparation_commit_loser_cannot_mutate_canonical_winner() {
     let loser_commit = commit.clone();
     let loser = tokio::spawn(async move {
         loser_store
-            .commit_media_session_preparation(user.id, playback, &loser_commit)
+            .commit_media_session_preparation(
+                &plurx_core::playback_principal::PlaybackPrincipal::LocalUser { user_id: user.id },
+                playback,
+                &loser_commit,
+            )
             .await
     });
     tokio::time::timeout(Duration::from_secs(10), ledger_read)
@@ -31343,7 +31689,11 @@ async fn hiqlite_preparation_commit_loser_cannot_mutate_canonical_winner() {
         .expect("losing commit dropped the post-ledger-read seam");
 
     let winner = store
-        .commit_media_session_preparation(user.id, playback, &commit)
+        .commit_media_session_preparation(
+            &plurx_core::playback_principal::PlaybackPrincipal::LocalUser { user_id: user.id },
+            playback,
+            &commit,
+        )
         .await
         .expect("winning preparation commit")
         .expect("winning preparation commit must advance the pointer");
@@ -31392,7 +31742,10 @@ async fn hiqlite_preparation_commit_loser_cannot_mutate_canonical_winner() {
     );
 
     let canonical = store
-        .media_session_route_for_playback(user.id, playback)
+        .media_session_route_for_playback(
+            &plurx_core::playback_principal::PlaybackPrincipal::LocalUser { user_id: user.id },
+            playback,
+        )
         .await
         .expect("read canonical winner after losing proposal")
         .expect("canonical winner must remain current");
@@ -31426,7 +31779,7 @@ const RECOVERY_INCARNATION: &str = "11111111-1111-4111-8111-111111111111";
 
 fn recovery_request(epoch: &str) -> plurx_core::domain::ProducerRecoveryRequest {
     plurx_core::domain::ProducerRecoveryRequest {
-        user_id: 1,
+        principal: plurx_core::playback_principal::PlaybackPrincipal::LocalUser { user_id: 1 },
         playback_id: "pb-recovery".to_owned(),
         recovery_epoch: epoch.to_owned(),
         failed_incarnation_id: RECOVERY_INCARNATION.to_owned(),
@@ -31511,7 +31864,7 @@ async fn producer_recovery_settles_once_and_never_returns_the_budget() {
 
         let installed = store
             .settle_producer_recovery(
-                1,
+                &plurx_core::playback_principal::PlaybackPrincipal::LocalUser { user_id: 1 },
                 "pb-recovery",
                 "settle-1",
                 RECOVERY_INCARNATION,
@@ -31536,7 +31889,7 @@ async fn producer_recovery_settles_once_and_never_returns_the_budget() {
         assert!(
             store
                 .settle_producer_recovery(
-                    1,
+                    &plurx_core::playback_principal::PlaybackPrincipal::LocalUser { user_id: 1 },
                     "pb-recovery",
                     "settle-1",
                     RECOVERY_INCARNATION,
@@ -31555,7 +31908,7 @@ async fn producer_recovery_settles_once_and_never_returns_the_budget() {
         assert_eq!(
             store
                 .settle_producer_recovery(
-                    1,
+                    &plurx_core::playback_principal::PlaybackPrincipal::LocalUser { user_id: 1 },
                     "pb-recovery",
                     "settle-1",
                     RECOVERY_INCARNATION,
@@ -31583,7 +31936,7 @@ async fn producer_recovery_settles_once_and_never_returns_the_budget() {
         assert!(
             store
                 .settle_producer_recovery(
-                    1,
+                    &plurx_core::playback_principal::PlaybackPrincipal::LocalUser { user_id: 1 },
                     "pb-recovery",
                     "settle-1",
                     RECOVERY_INCARNATION,
@@ -31604,7 +31957,11 @@ async fn producer_recovery_is_readable_by_epoch_and_refuses_a_corrupt_restrictio
     for_each_backend(|store, backend| async move {
         assert!(
             store
-                .producer_recovery_for_epoch(1, "pb-recovery", "absent")
+                .producer_recovery_for_epoch(
+                    &plurx_core::playback_principal::PlaybackPrincipal::LocalUser { user_id: 1 },
+                    "pb-recovery",
+                    "absent"
+                )
                 .await
                 .unwrap_or_else(|error| panic!("{backend}: read absent: {error}"))
                 .is_none(),
@@ -31616,7 +31973,11 @@ async fn producer_recovery_is_readable_by_epoch_and_refuses_a_corrupt_restrictio
             .unwrap_or_else(|error| panic!("{backend}: reserve: {error}"))
             .unwrap_or_else(|| panic!("{backend}: reserved"));
         let read = store
-            .producer_recovery_for_epoch(1, "pb-recovery", "read-1")
+            .producer_recovery_for_epoch(
+                &plurx_core::playback_principal::PlaybackPrincipal::LocalUser { user_id: 1 },
+                "pb-recovery",
+                "read-1",
+            )
             .await
             .unwrap_or_else(|error| panic!("{backend}: read: {error}"))
             .unwrap_or_else(|| panic!("{backend}: the reservation is readable"));
@@ -31667,7 +32028,11 @@ async fn producer_recovery_grants_one_budget_to_two_racing_identities() {
 
         // And what the store holds is what the winner was told it holds.
         let stored = store
-            .producer_recovery_for_epoch(1, "pb-recovery", "race-1")
+            .producer_recovery_for_epoch(
+                &plurx_core::playback_principal::PlaybackPrincipal::LocalUser { user_id: 1 },
+                "pb-recovery",
+                "race-1",
+            )
             .await
             .unwrap_or_else(|error| panic!("{backend}: read after race: {error}"))
             .unwrap_or_else(|| panic!("{backend}: the winner's row is there"));
@@ -31716,7 +32081,9 @@ async fn an_unreadable_stored_restriction_is_refused_identically_on_both_backend
             assert!(
                 store
                     .validation_corrupt_recovery_restriction(
-                        1,
+                        &plurx_core::playback_principal::PlaybackPrincipal::LocalUser {
+                            user_id: 1
+                        },
                         "pb-recovery",
                         "corrupt-1",
                         &stored,
@@ -31726,7 +32093,11 @@ async fn an_unreadable_stored_restriction_is_refused_identically_on_both_backend
                 "{backend}: {label}: the row to corrupt has to exist"
             );
             let error = match store
-                .producer_recovery_for_epoch(1, "pb-recovery", "corrupt-1")
+                .producer_recovery_for_epoch(
+                    &plurx_core::playback_principal::PlaybackPrincipal::LocalUser { user_id: 1 },
+                    "pb-recovery",
+                    "corrupt-1",
+                )
                 .await
             {
                 Ok(row) => {
@@ -31781,7 +32152,11 @@ async fn a_replay_carrying_a_different_restriction_is_not_a_replay() {
         // And the stored restriction is still the one that was accepted.
         assert_eq!(
             store
-                .producer_recovery_for_epoch(1, "pb-recovery", "restriction-1")
+                .producer_recovery_for_epoch(
+                    &plurx_core::playback_principal::PlaybackPrincipal::LocalUser { user_id: 1 },
+                    "pb-recovery",
+                    "restriction-1"
+                )
                 .await
                 .unwrap_or_else(|error| panic!("{backend}: read: {error}"))
                 .and_then(|row| row.decode_restriction),
@@ -31811,7 +32186,7 @@ async fn only_the_reserving_identity_can_settle_its_recovery() {
         assert!(
             store
                 .settle_producer_recovery(
-                    1,
+                    &plurx_core::playback_principal::PlaybackPrincipal::LocalUser { user_id: 1 },
                     "pb-recovery",
                     "fence-1",
                     "33333333-3333-4333-8333-333333333333",
@@ -31827,7 +32202,11 @@ async fn only_the_reserving_identity_can_settle_its_recovery() {
         // The reservation is untouched, so its owner can still install.
         assert_eq!(
             store
-                .producer_recovery_for_epoch(1, "pb-recovery", "fence-1")
+                .producer_recovery_for_epoch(
+                    &plurx_core::playback_principal::PlaybackPrincipal::LocalUser { user_id: 1 },
+                    "pb-recovery",
+                    "fence-1"
+                )
                 .await
                 .unwrap_or_else(|error| panic!("{backend}: read after stranger: {error}"))
                 .map(|row| row.state),
@@ -31837,7 +32216,7 @@ async fn only_the_reserving_identity_can_settle_its_recovery() {
         assert_eq!(
             store
                 .settle_producer_recovery(
-                    1,
+                    &plurx_core::playback_principal::PlaybackPrincipal::LocalUser { user_id: 1 },
                     "pb-recovery",
                     "fence-1",
                     RECOVERY_INCARNATION,

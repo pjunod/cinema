@@ -417,6 +417,7 @@ pub struct HiqliteAuthStore {
     activity_refreshes: Arc<ActivityRefreshGate>,
     cache_touches: Arc<ReplaceableWriteGate<CacheTouchKey>>,
     watch_fences: Arc<super::watch_fence::WatchWriteFences>,
+    pub(super) media_session_projection: Arc<std::sync::atomic::AtomicU8>,
 }
 
 /// Cache activity is advisory recency, not ownership or completion. One
@@ -3646,6 +3647,7 @@ impl HiqliteAuthStore {
             activity_refreshes: Arc::new(ActivityRefreshGate::default()),
             cache_touches: Arc::new(ReplaceableWriteGate::default()),
             watch_fences: Arc::new(super::watch_fence::WatchWriteFences::default()),
+            media_session_projection: Arc::new(std::sync::atomic::AtomicU8::new(0)),
         }
     }
 

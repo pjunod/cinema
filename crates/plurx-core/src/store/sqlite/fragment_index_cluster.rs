@@ -2807,7 +2807,7 @@ mod tests {
             pipeline_version: analysis.pipeline_version.clone(),
             video_identity: analysis.video_identity.clone(),
             target_node_id: analysis.target_node_id.clone(),
-            user_id,
+            principal: crate::playback_principal::PlaybackPrincipal::LocalUser { user_id },
             playback_id: "playback-one".to_owned(),
             now_ms: 1_001,
         };
@@ -2908,7 +2908,7 @@ mod tests {
             pipeline_version: request.pipeline_version.clone(),
             video_identity: request.video_identity.clone(),
             target_node_id: request.target_node_id.clone(),
-            user_id,
+            principal: crate::playback_principal::PlaybackPrincipal::LocalUser { user_id },
             playback_id: format!("viewer-{user_id}"),
             now_ms: 1_005,
         };

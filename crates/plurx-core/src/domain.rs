@@ -953,7 +953,7 @@ pub struct PretranscodeJob {
 pub struct MediaSessionRoute {
     pub incarnation_id: String,
     pub session_id: String,
-    pub user_id: i64,
+    pub principal: crate::playback_principal::PlaybackPrincipal,
     pub playback_id: String,
     /// The server-owned budget identity this session belongs to.
     ///
@@ -1060,7 +1060,7 @@ pub enum MediaSessionRequestClaim {
 pub struct MediaSessionActivation {
     pub incarnation_id: String,
     pub session_id: String,
-    pub user_id: i64,
+    pub principal: crate::playback_principal::PlaybackPrincipal,
     pub playback_id: String,
     /// The budget identity this activation belongs to.
     ///
@@ -1139,7 +1139,7 @@ pub struct MediaSessionActivation {
 /// fingerprint is deliberately lossy so a retry recovers the first answer.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct DesiredOwnership {
-    pub user_id: i64,
+    pub principal: crate::playback_principal::PlaybackPrincipal,
     pub playback_id: String,
     /// Monotone per playback, and advanced only when `digest` changes.
     ///
@@ -1167,7 +1167,7 @@ pub struct MediaSessionPreparation {
     /// The successor being staged. Minted like any other incarnation.
     pub incarnation_id: String,
     pub session_id: String,
-    pub user_id: i64,
+    pub principal: crate::playback_principal::PlaybackPrincipal,
     pub playback_id: String,
     /// The incarnation the playback pointer must name right now, and the one
     /// commit will advance away from. Never optional: a preparation with no
@@ -1210,7 +1210,7 @@ pub struct MediaSessionPreparation {
 /// One staged successor, as the ledger remembers it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, serde::Deserialize)]
 pub struct MediaSessionStagedGeneration {
-    pub user_id: i64,
+    pub principal: crate::playback_principal::PlaybackPrincipal,
     pub playback_id: String,
     pub staged_incarnation_id: String,
     pub expected_predecessor_incarnation_id: String,
@@ -1399,6 +1399,7 @@ pub fn valid_media_session_terminal_reason(reason: &str) -> bool {
 /// path so renewal cost is independent of user-shaped JSON sizes.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OwnedMediaSessionLease {
+    pub principal: crate::playback_principal::PlaybackPrincipal,
     pub incarnation_id: String,
     pub session_id: String,
     pub owner_epoch: i64,
@@ -2293,7 +2294,7 @@ impl ProducerRecoveryState {
 /// cannot present themselves as a new playback.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProducerRecoveryReservation {
-    pub user_id: i64,
+    pub principal: crate::playback_principal::PlaybackPrincipal,
     pub playback_id: String,
     pub recovery_epoch: String,
     pub failed_incarnation_id: String,
@@ -2315,7 +2316,7 @@ pub struct ProducerRecoveryReservation {
 /// wearing the first one's identity.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProducerRecoveryRequest {
-    pub user_id: i64,
+    pub principal: crate::playback_principal::PlaybackPrincipal,
     pub playback_id: String,
     pub recovery_epoch: String,
     pub failed_incarnation_id: String,

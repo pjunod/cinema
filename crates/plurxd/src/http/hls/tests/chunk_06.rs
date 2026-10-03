@@ -77,7 +77,7 @@
         let moved = state
             .store
             .record_desired_selection(
-                user.id,
+                &plurx_core::playback_principal::PlaybackPrincipal::LocalUser { user_id: user.id },
                 playback,
                 &"9".repeat(64),
                 "v1;quality=manual:720",
@@ -103,7 +103,7 @@
         assert!(
             state
                 .store
-                .media_session_route_for_playback(user.id, playback)
+                .media_session_route_for_playback(&plurx_core::playback_principal::PlaybackPrincipal::LocalUser { user_id: user.id }, playback)
                 .await
                 .expect("route")
                 .is_none(),
@@ -133,7 +133,7 @@
 
         let recorded = state
             .store
-            .desired_selection(7, "player-a")
+            .desired_selection(&plurx_core::playback_principal::PlaybackPrincipal::LocalUser { user_id: 7 }, "player-a")
             .await
             .expect("reading the desired row");
         let recorded = recorded.expect("the ask is recorded even though the create failed");
@@ -192,7 +192,7 @@
 
         let recorded = state
             .store
-            .desired_selection(user.id, "chain-player")
+            .desired_selection(&plurx_core::playback_principal::PlaybackPrincipal::LocalUser { user_id: user.id }, "chain-player")
             .await
             .expect("reading the ask")
             .expect("the create recorded its viewer's ask");
@@ -204,7 +204,7 @@
         // binary — the guard turned against the thing it protects.
         let carried = state
             .store
-            .validation_playback_pointer_desired_revision(user.id, "chain-player")
+            .validation_playback_pointer_desired_revision(&plurx_core::playback_principal::PlaybackPrincipal::LocalUser { user_id: user.id }, "chain-player")
             .await
             .expect("reading the pointer revision");
         assert_eq!(
@@ -285,13 +285,13 @@
         // session serving a selection nothing says the viewer wants.
         let recorded = state
             .store
-            .desired_selection(user.id, playback)
+            .desired_selection(&plurx_core::playback_principal::PlaybackPrincipal::LocalUser { user_id: user.id }, playback)
             .await
             .expect("reading the ask")
             .expect("two creates recorded an ask between them");
         let carried = state
             .store
-            .validation_playback_pointer_desired_revision(user.id, playback)
+            .validation_playback_pointer_desired_revision(&plurx_core::playback_principal::PlaybackPrincipal::LocalUser { user_id: user.id }, playback)
             .await
             .expect("reading the pointer revision");
         if let Some(carried) = carried {
@@ -330,7 +330,7 @@
         assert!(
             state
                 .store
-                .desired_selection(7, "player-bad")
+                .desired_selection(&plurx_core::playback_principal::PlaybackPrincipal::LocalUser { user_id: 7 }, "player-bad")
                 .await
                 .expect("reading the desired row")
                 .is_none(),
@@ -354,7 +354,7 @@
         assert!(
             state
                 .store
-                .desired_selection(7, "player-legacy")
+                .desired_selection(&plurx_core::playback_principal::PlaybackPrincipal::LocalUser { user_id: 7 }, "player-legacy")
                 .await
                 .expect("reading the desired row")
                 .is_none(),
@@ -2538,7 +2538,7 @@
                 expected_desired_revision: None,
                 incarnation_id: uuid::Uuid::new_v4().to_string(),
                 session_id: session_id.clone(),
-                user_id: user.id,
+                principal: plurx_core::playback_principal::PlaybackPrincipal::LocalUser { user_id: user.id },
                 playback_id: "shipped-release".to_owned(),
                 expected_predecessor_incarnation_id: None,
                 fence_predecessor: false,
@@ -2578,7 +2578,7 @@
         assert!(
             fixture
                 .store
-                .media_session_route_for_playback(route.user_id, &route.playback_id)
+                .media_session_route_for_playback(&route.principal, &route.playback_id)
                 .await
                 .expect("pointer after release")
                 .is_none(),
@@ -2666,7 +2666,7 @@
                     decoder_caps: None,
                     protocol_version: crate::media_pool::PROTOCOL_VERSION,
                     incarnation_id: route.incarnation_id.clone(),
-                    user_id: route.user_id,
+                    principal: plurx_core::playback_principal::PlaybackPrincipal::LocalUser { user_id: route.principal.local_user_id().expect("local test principal") },
                     source_size: 0,
                     source_mtime: 0,
                     typeless_playlist: false,
@@ -2697,7 +2697,7 @@
         assert!(
             fixture
                 .store
-                .staged_media_session_for_playback(route.user_id, &playback_id)
+                .staged_media_session_for_playback(&route.principal, &playback_id)
                 .await
                 .expect("ledger read at the registration point")
                 .is_none(),
@@ -2851,7 +2851,7 @@
             fixture
                 .state
                 .store
-                .media_session_route_for_playback(route.user_id, &route.playback_id)
+                .media_session_route_for_playback(&route.principal, &route.playback_id)
                 .await
                 .expect("pointer after the expired settlement")
                 .expect("the predecessor stays current")
@@ -2882,7 +2882,7 @@
                 expected_desired_revision: None,
                 incarnation_id: uuid::Uuid::new_v4().to_string(),
                 session_id: session_id.clone(),
-                user_id: user.id,
+                principal: plurx_core::playback_principal::PlaybackPrincipal::LocalUser { user_id: user.id },
                 playback_id: "release-fence".to_owned(),
                 expected_predecessor_incarnation_id: None,
                 fence_predecessor: false,
@@ -2963,7 +2963,7 @@
                 expected_desired_revision: None,
                 incarnation_id: uuid::Uuid::new_v4().to_string(),
                 session_id: session_id.clone(),
-                user_id: user.id,
+                principal: plurx_core::playback_principal::PlaybackPrincipal::LocalUser { user_id: user.id },
                 playback_id: "release-tombstone".to_owned(),
                 expected_predecessor_incarnation_id: None,
                 fence_predecessor: false,

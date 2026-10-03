@@ -2745,7 +2745,7 @@ pub(crate) async fn enqueue_copy_preparation_for_object(
 
 #[derive(Clone, Debug)]
 pub(crate) struct PlaybackViewerDemand {
-    pub user_id: i64,
+    pub principal: plurx_core::playback_principal::PlaybackPrincipal,
     pub playback_id: String,
 }
 
@@ -2789,7 +2789,9 @@ pub(crate) async fn enqueue_copy_preparation_for_object_with_viewer(
             created_at_ms: now,
         })
         .await?;
-    if let Some(viewer) = viewer.filter(|viewer| viewer.user_id > 0) {
+    if let Some(viewer) =
+        viewer.filter(|viewer| viewer.principal.local_user_id().is_some_and(|id| id > 0))
+    {
         store
             .join_analysis_viewer(plurx_core::store::AnalysisViewerInterest {
                 analysis_request_id: request.request_id.clone(),
@@ -2797,7 +2799,7 @@ pub(crate) async fn enqueue_copy_preparation_for_object_with_viewer(
                 pipeline_version: request.pipeline_version.clone(),
                 video_identity: request.video_identity.clone(),
                 target_node_id: request.target_node_id.clone(),
-                user_id: viewer.user_id,
+                principal: viewer.principal.clone(),
                 playback_id: viewer.playback_id.clone(),
                 now_ms: clock_ms(),
             })
@@ -10641,7 +10643,9 @@ mod tests {
             convert,
             None,
             Some(&PlaybackViewerDemand {
-                user_id: viewer.id,
+                principal: plurx_core::playback_principal::PlaybackPrincipal::LocalUser {
+                    user_id: viewer.id,
+                },
                 playback_id: "first-play".into(),
             }),
         )

@@ -321,7 +321,7 @@
         crate::playback_control::PreparationExecutor::new(
             Arc::clone(&fixture.state.store),
             gate,
-            route.user_id,
+            route.principal.clone(),
             route.playback_id.clone(),
             route.owner_node_id.clone(),
             route.owner_epoch,
@@ -373,12 +373,12 @@
             expected_desired_revision: None,
             incarnation_id: staged_incarnation_id.to_owned(),
             session_id: staged_session_id,
-            user_id: route.user_id,
+            principal: route.principal.clone(),
             playback_id: route.playback_id.clone(),
             expected_predecessor_incarnation_id: route.incarnation_id.clone(),
             expected_predecessor_owner_node_id: route.owner_node_id.clone(),
             expected_predecessor_owner_epoch: route.owner_epoch,
-            request_fingerprint: staged_request.durable_intent_fingerprint(route.user_id),
+            request_fingerprint: staged_request.durable_intent_fingerprint(&route.principal),
             owner_node_id: fixture.state.node_id.clone(),
             recipe_json: serde_json::to_string(&RemoteStartRequest {
                 candidate_catalog: None,
@@ -387,7 +387,7 @@
                 decoder_caps: None,
                 protocol_version: crate::media_pool::PROTOCOL_VERSION,
                 incarnation_id: staged_incarnation_id.to_owned(),
-                user_id: route.user_id,
+                principal: plurx_core::playback_principal::PlaybackPrincipal::LocalUser { user_id: route.principal.local_user_id().expect("local test principal") },
                 source_size: 1,
                 source_mtime: 1,
                 typeless_playlist: false,
@@ -465,7 +465,7 @@
             decoder_caps: None,
             protocol_version: crate::media_pool::PROTOCOL_VERSION,
             incarnation_id: incarnation_id.clone(),
-            user_id: predecessor.user_id,
+            principal: plurx_core::playback_principal::PlaybackPrincipal::LocalUser { user_id: predecessor.principal.local_user_id().expect("local test principal") },
             source_size: 1,
             source_mtime: 1,
             typeless_playlist: false,
@@ -505,12 +505,12 @@
                 expected_desired_revision: None,
                 incarnation_id,
                 session_id,
-                user_id: predecessor.user_id,
+                principal: predecessor.principal.clone(),
                 playback_id: predecessor.playback_id.clone(),
                 expected_predecessor_incarnation_id: Some(predecessor.incarnation_id.clone()),
                 fence_predecessor: true,
                 request_id: None,
-                request_fingerprint: request.durable_intent_fingerprint(predecessor.user_id),
+                request_fingerprint: request.durable_intent_fingerprint(&predecessor.principal),
                 owner_node_id: fixture.state.node_id.clone(),
                 lease_expires_at_ms: now_ms.saturating_add(900_000),
                 recipe_json: serde_json::to_string(&recipe).expect("recipe"),
@@ -706,7 +706,7 @@
             fixture
                 .state
                 .store
-                .staged_media_session_for_playback(route.user_id, &playback_id)
+                .staged_media_session_for_playback(&route.principal, &playback_id)
                 .await
                 .expect("ledger read")
                 .is_none(),
@@ -830,7 +830,7 @@
             fixture
                 .state
                 .store
-                .staged_media_session_for_playback(route.user_id, &ending_playback)
+                .staged_media_session_for_playback(&route.principal, &ending_playback)
                 .await
                 .expect("ledger read")
                 .is_some(),
@@ -1111,7 +1111,7 @@
             fixture
                 .state
                 .store
-                .staged_media_session_for_playback(route.user_id, &playback_id)
+                .staged_media_session_for_playback(&route.principal, &playback_id)
                 .await
                 .expect("ledger read")
                 .is_none(),
@@ -1263,7 +1263,7 @@
         let staged = fixture
             .state
             .store
-            .staged_media_session_for_playback(route.user_id, &playback_id)
+            .staged_media_session_for_playback(&route.principal, &playback_id)
             .await
             .expect("ledger read")
             .expect("a successor is staged");
@@ -1305,7 +1305,7 @@
         let current = fixture
             .state
             .store
-            .media_session_route_for_playback(route.user_id, &playback_id)
+            .media_session_route_for_playback(&route.principal, &playback_id)
             .await
             .expect("current route")
             .expect("the playback still has a pointer");
@@ -1448,7 +1448,7 @@
             fixture
                 .state
                 .store
-                .staged_media_session_for_playback(route.user_id, &playback_id)
+                .staged_media_session_for_playback(&route.principal, &playback_id)
                 .await
                 .expect("ledger read")
                 .is_none(),
@@ -1764,7 +1764,7 @@
             decoder_caps: None,
             protocol_version: crate::media_pool::PROTOCOL_VERSION,
             incarnation_id: route.incarnation_id.clone(),
-            user_id: route.user_id,
+            principal: plurx_core::playback_principal::PlaybackPrincipal::LocalUser { user_id: route.principal.local_user_id().expect("local test principal") },
             source_size: 4_096,
             source_mtime: 1_700_000_000,
             typeless_playlist: false,
@@ -2003,7 +2003,7 @@
                 expected_desired_revision: None,
                 incarnation_id: incarnation_id.clone(),
                 session_id: session_id.clone(),
-                user_id: user.id,
+                principal: plurx_core::playback_principal::PlaybackPrincipal::LocalUser { user_id: user.id },
                 playback_id: "control-loss".to_owned(),
                 expected_predecessor_incarnation_id: None,
                 fence_predecessor: false,
@@ -2229,7 +2229,7 @@
             recovery_epoch: String::new(),
             incarnation_id: "00000000-0000-4000-8000-0000000000d1".to_owned(),
             session_id: "00000000-0000-4000-8000-0000000000d2".to_owned(),
-            user_id: 7,
+            principal: plurx_core::playback_principal::PlaybackPrincipal::LocalUser { user_id: 7 },
             playback_id: "replay-player".to_owned(),
             request_fingerprint: "d".repeat(64),
             owner_node_id: "node-d".to_owned(),
@@ -2275,7 +2275,7 @@
             expected_desired_revision: None,
             incarnation_id: incarnation_id.to_owned(),
             session_id: session_id.to_owned(),
-            user_id: 7,
+            principal: plurx_core::playback_principal::PlaybackPrincipal::LocalUser { user_id: 7 },
             playback_id: "activation-confirmation".to_owned(),
             expected_predecessor_incarnation_id: None,
             fence_predecessor: false,
@@ -2293,7 +2293,7 @@
             recovery_epoch: String::new(),
             incarnation_id: incarnation_id.to_owned(),
             session_id: session_id.to_owned(),
-            user_id: 7,
+            principal: plurx_core::playback_principal::PlaybackPrincipal::LocalUser { user_id: 7 },
             playback_id: "activation-confirmation".to_owned(),
             request_fingerprint: fingerprint,
             owner_node_id: "node-e".to_owned(),
@@ -2327,7 +2327,7 @@
             recovery_epoch: String::new(),
             incarnation_id: "00000000-0000-4000-8000-0000000000e3".to_owned(),
             session_id: "00000000-0000-4000-8000-0000000000e4".to_owned(),
-            user_id: 7,
+            principal: plurx_core::playback_principal::PlaybackPrincipal::LocalUser { user_id: 7 },
             playback_id: "publication-replay".to_owned(),
             request_fingerprint: "f".repeat(64),
             owner_node_id: "departed-owner".to_owned(),

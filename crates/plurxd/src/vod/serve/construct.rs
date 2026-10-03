@@ -462,14 +462,16 @@ impl VodServe {
                 .await
                 .map_err(|error| format!("queueing the exact v2 artifact: {error}"))?;
             if queued {
-                if let Some(viewer) = viewer.filter(|viewer| viewer.user_id > 0) {
+                if let Some(viewer) = viewer
+                    .filter(|viewer| viewer.principal.local_user_id().is_some_and(|id| id > 0))
+                {
                     self.shared
                         .store
                         .join_artifact_viewer(plurx_core::store::ArtifactViewerInterest {
                             cache_key: cache_key.clone(),
                             file_id: file.id,
                             target_node_id: node_id.to_owned(),
-                            user_id: viewer.user_id,
+                            principal: viewer.principal.clone(),
                             playback_id: viewer.playback_id.clone(),
                             now_ms: crate::fragment_index_cluster::unix_ms(),
                         })

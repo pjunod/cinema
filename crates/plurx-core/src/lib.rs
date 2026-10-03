@@ -36,6 +36,7 @@ pub mod live_tv_resource;
 pub mod mediafacts;
 pub mod metadata;
 pub mod playback;
+pub mod playback_principal;
 pub mod process;
 pub mod scan;
 pub mod secrets;

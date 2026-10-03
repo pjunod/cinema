@@ -305,40 +305,113 @@ pub(super) async fn install_schema(client: &hiqlite::Client) -> Result<(), Store
     Ok(())
 }
 
-const ROUTE_COLS: &str = "incarnation_id, session_id, user_id, playback_id,
+const LEGACY_ROUTE_COLS: &str = "incarnation_id, session_id, user_id, playback_id,
     request_fingerprint, owner_node_id, owner_epoch, lease_expires_at_ms, state, terminal_reason,
     publication_ready_at_ms, recipe_json, response_json, produced_playable_through_ms, fetched_through_ms,
     media_origin_ms, media_sequence, discontinuity_sequence, updated_at_ms, recovery_epoch,
-    drain_deadline_ms";
+    drain_deadline_ms, ('local:' || user_id) AS owner_key,
+    'local' AS principal_kind, NULL AS share_grant_id, NULL AS share_viewer_key";
 
-struct RouteRow(MediaSessionRoute);
+const PRINCIPAL_ROUTE_COLS: &str = "incarnation_id, session_id, user_id, playback_id,
+    request_fingerprint, owner_node_id, owner_epoch, lease_expires_at_ms, state, terminal_reason,
+    publication_ready_at_ms, recipe_json, response_json, produced_playable_through_ms, fetched_through_ms,
+    media_origin_ms, media_sequence, discontinuity_sequence, updated_at_ms, recovery_epoch,
+    drain_deadline_ms, owner_key, principal_kind, share_grant_id, share_viewer_key";
+
+struct RouteProjectionRow(Result<i64, StoreError>);
+impl From<&mut Row<'_>> for RouteProjectionRow {
+    fn from(row: &mut Row<'_>) -> Self {
+        Self(row.try_get("columns").map_err(database_error))
+    }
+}
+async fn route_projection(store: &HiqliteAuthStore) -> Result<&'static str, StoreError> {
+    use std::sync::atomic::Ordering;
+    // Runtime installation is a coordinated schema transition. A Store is
+    // constructed after install_schema; its schema shape stays fixed until
+    // that process restarts. This cache is no grant or membership authority.
+    match store.media_session_projection.load(Ordering::Acquire) {
+        1 => return Ok(LEGACY_ROUTE_COLS),
+        2 => return Ok(PRINCIPAL_ROUTE_COLS),
+        _ => {}
+    }
+    let columns = store
+        .client()
+        .query_consistent_map::<RouteProjectionRow, _>(
+            "SELECT count(*) AS columns FROM pragma_table_info('media_sessions')
+         WHERE name IN ('owner_key','principal_kind','share_grant_id','share_viewer_key')",
+            params!(),
+        )
+        .await?
+        .into_iter()
+        .next()
+        .ok_or_else(|| StoreError::Task("missing media-session schema projection".into()))?
+        .0?;
+    let (mode, projection) = match columns {
+        0 => (1, LEGACY_ROUTE_COLS),
+        4 => (2, PRINCIPAL_ROUTE_COLS),
+        _ => {
+            return Err(StoreError::Task(
+                "incomplete media-session principal schema".into(),
+            ))
+        }
+    };
+    store
+        .media_session_projection
+        .store(mode, Ordering::Release);
+    Ok(projection)
+}
+
+struct RouteRow(Result<MediaSessionRoute, StoreError>);
 
 impl From<&mut Row<'_>> for RouteRow {
     fn from(row: &mut Row<'_>) -> Self {
-        Self(MediaSessionRoute {
-            incarnation_id: row.get("incarnation_id"),
-            session_id: row.get("session_id"),
-            user_id: row.get("user_id"),
-            playback_id: row.get("playback_id"),
-            request_fingerprint: row.get("request_fingerprint"),
-            owner_node_id: row.get("owner_node_id"),
-            owner_epoch: row.get("owner_epoch"),
-            lease_expires_at_ms: row.get("lease_expires_at_ms"),
-            state: row.get("state"),
-            terminal_reason: row.get("terminal_reason"),
-            publication_ready_at_ms: row.get("publication_ready_at_ms"),
-            recipe_json: row.get("recipe_json"),
-            response_json: row.get("response_json"),
-            produced_playable_through_ms: row.get("produced_playable_through_ms"),
-            fetched_through_ms: row.get("fetched_through_ms"),
-            media_origin_ms: row.get("media_origin_ms"),
-            media_sequence: row.get("media_sequence"),
-            discontinuity_sequence: row.get("discontinuity_sequence"),
-            updated_at_ms: row.get("updated_at_ms"),
-            recovery_epoch: row.get("recovery_epoch"),
-            drain_deadline_ms: row.get("drain_deadline_ms"),
-        })
+        Self(decode_route(row))
     }
+}
+
+fn decode_route(row: &mut Row<'_>) -> Result<MediaSessionRoute, StoreError> {
+    let kind: String = row.try_get("principal_kind").map_err(database_error)?;
+    let user_id: Option<i64> = row.try_get("user_id").map_err(database_error)?;
+    let grant: Option<String> = row.try_get("share_grant_id").map_err(database_error)?;
+    let viewer: Option<String> = row.try_get("share_viewer_key").map_err(database_error)?;
+    let owner_key: String = row.try_get("owner_key").map_err(database_error)?;
+    let principal = crate::playback_principal::PlaybackPrincipal::from_projection(
+        &kind,
+        user_id,
+        grant.as_deref(),
+        viewer.as_deref(),
+        &owner_key,
+    )
+    .map_err(|_| StoreError::Task("invalid media-session owner projection".to_owned()))?;
+    Ok(MediaSessionRoute {
+        incarnation_id: row.try_get("incarnation_id").map_err(database_error)?,
+        session_id: row.try_get("session_id").map_err(database_error)?,
+        principal,
+        playback_id: row.try_get("playback_id").map_err(database_error)?,
+        request_fingerprint: row.try_get("request_fingerprint").map_err(database_error)?,
+        owner_node_id: row.try_get("owner_node_id").map_err(database_error)?,
+        owner_epoch: row.try_get("owner_epoch").map_err(database_error)?,
+        lease_expires_at_ms: row.try_get("lease_expires_at_ms").map_err(database_error)?,
+        state: row.try_get("state").map_err(database_error)?,
+        terminal_reason: row.try_get("terminal_reason").map_err(database_error)?,
+        publication_ready_at_ms: row
+            .try_get("publication_ready_at_ms")
+            .map_err(database_error)?,
+        recipe_json: row.try_get("recipe_json").map_err(database_error)?,
+        response_json: row.try_get("response_json").map_err(database_error)?,
+        produced_playable_through_ms: row
+            .try_get("produced_playable_through_ms")
+            .map_err(database_error)?,
+        fetched_through_ms: row.try_get("fetched_through_ms").map_err(database_error)?,
+        media_origin_ms: row.try_get("media_origin_ms").map_err(database_error)?,
+        media_sequence: row.try_get("media_sequence").map_err(database_error)?,
+        discontinuity_sequence: row
+            .try_get("discontinuity_sequence")
+            .map_err(database_error)?,
+        updated_at_ms: row.try_get("updated_at_ms").map_err(database_error)?,
+        recovery_epoch: row.try_get("recovery_epoch").map_err(database_error)?,
+        drain_deadline_ms: row.try_get("drain_deadline_ms").map_err(database_error)?,
+    })
 }
 
 struct TerminalAckRow(MediaSessionTerminalAck);
@@ -381,7 +454,9 @@ struct DesiredRow(crate::domain::DesiredOwnership);
 impl From<&mut Row<'_>> for DesiredRow {
     fn from(row: &mut Row<'_>) -> Self {
         Self(crate::domain::DesiredOwnership {
-            user_id: row.get("user_id"),
+            principal: crate::playback_principal::PlaybackPrincipal::LocalUser {
+                user_id: row.get("user_id"),
+            },
             playback_id: row.get("playback_id"),
             revision: row.get("revision"),
             digest: row.get("digest"),
@@ -438,7 +513,9 @@ struct StagedRow(crate::domain::MediaSessionStagedGeneration);
 impl From<&mut Row<'_>> for StagedRow {
     fn from(row: &mut Row<'_>) -> Self {
         Self(crate::domain::MediaSessionStagedGeneration {
-            user_id: row.get("user_id"),
+            principal: crate::playback_principal::PlaybackPrincipal::LocalUser {
+                user_id: row.get("user_id"),
+            },
             playback_id: row.get("playback_id"),
             staged_incarnation_id: row.get("staged_incarnation_id"),
             expected_predecessor_incarnation_id: row.get("expected_predecessor_incarnation_id"),
@@ -533,7 +610,7 @@ async fn classify_preparation_commit_cas_loss(
     }
     store
         .abort_media_session_preparation(
-            user_id,
+            &crate::playback_principal::PlaybackPrincipal::LocalUser { user_id },
             playback_id,
             &MediaSessionPreparationAbortRequest {
                 staged_incarnation_id: request.staged_incarnation_id.clone(),
@@ -580,7 +657,12 @@ async fn classify_rejoin_after_attempt(
     staged_incarnation_id: &str,
     preparation: &crate::domain::MediaSessionPreparation,
 ) -> Result<Option<MediaSessionRoute>, StoreError> {
-    let staged = staged_row(store, preparation.user_id, &preparation.playback_id).await?;
+    let staged = staged_row(
+        store,
+        crate::store::local_media_principal_id(&preparation.principal)?,
+        &preparation.playback_id,
+    )
+    .await?;
     if staged.as_ref().is_some_and(|staged| {
         staged.staged_incarnation_id == preparation.incarnation_id
             && staged.expected_predecessor_incarnation_id
@@ -605,7 +687,7 @@ async fn classify_rejoin_after_attempt(
 
 fn prepare_statements(
     preparation: &crate::domain::MediaSessionPreparation,
-) -> Vec<(&'static str, hiqlite::Params)> {
+) -> Result<Vec<(&'static str, hiqlite::Params)>, StoreError> {
     let prepare_lease_resource = format!("session:{}", preparation.incarnation_id);
     let removed_owner_key = removed_job_owner_key(&preparation.owner_node_id);
     // Zero is "no expectation", and it can never collide with a real one:
@@ -621,7 +703,7 @@ fn prepare_statements(
     // has no ask to disagree with. An upgraded node that fenced every session
     // older than itself would be a worse failure than the one this closes.
     let expected_desired_revision = preparation.expected_desired_revision.unwrap_or(0);
-    vec![
+    Ok(vec![
         (
             // Every statement carries the same fixed preconditions. A
             // replicated transaction cannot branch between statements, so a
@@ -664,7 +746,7 @@ fn prepare_statements(
                 preparation.owner_node_id.as_str(),
                 preparation.deadline_ms,
                 preparation.now_ms,
-                preparation.user_id,
+                crate::store::local_media_principal_id(&preparation.principal)?,
                 preparation.playback_id.as_str(),
                 preparation.expected_predecessor_incarnation_id.as_str(),
                 preparation.incarnation_id.as_str(),
@@ -723,7 +805,7 @@ fn prepare_statements(
             params!(
                 preparation.incarnation_id.as_str(),
                 preparation.session_id.as_str(),
-                preparation.user_id,
+                crate::store::local_media_principal_id(&preparation.principal)?,
                 preparation.playback_id.as_str(),
                 preparation.request_fingerprint.as_str(),
                 preparation.owner_node_id.as_str(),
@@ -765,7 +847,7 @@ fn prepare_statements(
                AND ($12 = 0 OR NOT EXISTS (SELECT 1 FROM media_playback_desired
                  WHERE user_id = $1 AND playback_id = $2 AND revision != $12))",
             params!(
-                preparation.user_id,
+                crate::store::local_media_principal_id(&preparation.principal)?,
                 preparation.playback_id.as_str(),
                 preparation.incarnation_id.as_str(),
                 preparation.expected_predecessor_incarnation_id.as_str(),
@@ -779,7 +861,7 @@ fn prepare_statements(
                 expected_desired_revision
             ),
         ),
-    ]
+    ])
 }
 
 fn abort_statements(
@@ -914,6 +996,9 @@ struct OwnedLeaseRow(OwnedMediaSessionLease);
 impl From<&mut Row<'_>> for OwnedLeaseRow {
     fn from(row: &mut Row<'_>) -> Self {
         Self(OwnedMediaSessionLease {
+            principal: crate::playback_principal::PlaybackPrincipal::LocalUser {
+                user_id: row.get("user_id"),
+            },
             incarnation_id: row.get("incarnation_id"),
             session_id: row.get("session_id"),
             owner_epoch: row.get("owner_epoch"),
@@ -1002,7 +1087,7 @@ fn validate_claim(
 fn validate_activation(activation: &MediaSessionActivation) -> Result<(), StoreError> {
     let valid = valid_uuid(&activation.incarnation_id)
         && valid_uuid(&activation.session_id)
-        && activation.user_id > 0
+        && activation.principal.local_user_id().is_some_and(|id| id > 0)
         && !activation.playback_id.is_empty()
         && activation.playback_id.len() <= 128
         && activation
@@ -1050,7 +1135,7 @@ fn validate_preparation(
         && !preparation.expected_predecessor_owner_node_id.is_empty()
         && preparation.expected_predecessor_owner_node_id.len() <= 256
         && preparation.expected_predecessor_owner_epoch > 0
-        && preparation.user_id > 0
+        && preparation.principal.local_user_id().is_some_and(|id| id > 0)
         && !preparation.playback_id.is_empty()
         && preparation.playback_id.len() <= 128
         && valid_fingerprint(&preparation.request_fingerprint)
@@ -1081,7 +1166,7 @@ fn preparation_route_matches(
 ) -> bool {
     route.incarnation_id == preparation.incarnation_id
         && route.session_id == preparation.session_id
-        && route.user_id == preparation.user_id
+        && route.principal == preparation.principal
         && route.playback_id == preparation.playback_id
         && route.request_fingerprint == preparation.request_fingerprint
         && route.owner_node_id == preparation.owner_node_id
@@ -1101,7 +1186,7 @@ fn activation_route_matches(
 ) -> bool {
     route.incarnation_id == activation.incarnation_id
         && route.session_id == activation.session_id
-        && route.user_id == activation.user_id
+        && route.principal == activation.principal
         && route.playback_id == activation.playback_id
         && route.request_fingerprint == activation.request_fingerprint
         && route.owner_node_id == activation.owner_node_id
@@ -1144,15 +1229,17 @@ async fn route_by(
     column: &str,
     value: &str,
 ) -> Result<Option<MediaSessionRoute>, StoreError> {
-    let sql = format!("SELECT {ROUTE_COLS} FROM media_sessions WHERE {column} = $1");
+    let route_cols = route_projection(store).await?;
+    let sql = format!("SELECT {route_cols} FROM media_sessions WHERE {column} = $1");
     validate_sql(&sql)?;
-    Ok(store
+    store
         .client()
         .query_consistent_map::<RouteRow, _>(sql, params!(value))
         .await?
         .into_iter()
         .next()
-        .map(|row| row.0))
+        .map(|row| row.0)
+        .transpose()
 }
 
 async fn request_row(
@@ -1275,7 +1362,7 @@ async fn claim_existing_or_reacquire(
 impl MediaSessionStore for HiqliteAuthStore {
     async fn claim_media_session_request(
         &self,
-        user_id: i64,
+        principal: &crate::playback_principal::PlaybackPrincipal,
         request_id: &str,
         request_fingerprint: &str,
         playback_id: &str,
@@ -1283,6 +1370,7 @@ impl MediaSessionStore for HiqliteAuthStore {
         now_ms: i64,
         claim_expires_at_ms: i64,
     ) -> Result<MediaSessionRequestClaim, StoreError> {
+        let user_id = crate::store::local_media_principal_id(principal)?;
         validate_claim(
             user_id,
             request_id,
@@ -1369,12 +1457,13 @@ impl MediaSessionStore for HiqliteAuthStore {
 
     async fn record_library_channel_session_recipe(
         &self,
-        user_id: i64,
+        principal: &crate::playback_principal::PlaybackPrincipal,
         request_id: &str,
         incarnation_id: &str,
         recipe_json: &str,
         now_ms: i64,
     ) -> Result<bool, StoreError> {
+        let user_id = crate::store::local_media_principal_id(principal)?;
         if user_id <= 0
             || request_id.is_empty()
             || request_id.len() > 128
@@ -1408,12 +1497,13 @@ impl MediaSessionStore for HiqliteAuthStore {
 
     async fn assign_media_session_request_owner(
         &self,
-        user_id: i64,
+        principal: &crate::playback_principal::PlaybackPrincipal,
         request_id: &str,
         incarnation_id: &str,
         owner_node_id: &str,
         now_ms: i64,
     ) -> Result<bool, StoreError> {
+        let user_id = crate::store::local_media_principal_id(principal)?;
         if user_id <= 0
             || request_id.is_empty()
             || request_id.len() > 128
@@ -1448,7 +1538,10 @@ impl MediaSessionStore for HiqliteAuthStore {
             .query_consistent_map::<PointerRow, _>(
                 "SELECT current_incarnation_id FROM media_playback_pointers
                   WHERE user_id = $1 AND playback_id = $2",
-                params!(activation.user_id, activation.playback_id.as_str()),
+                params!(
+                    crate::store::local_media_principal_id(&activation.principal)?,
+                    activation.playback_id.as_str()
+                ),
             )
             .await?
             .into_iter()
@@ -1522,7 +1615,7 @@ impl MediaSessionStore for HiqliteAuthStore {
                     activation.lease_expires_at_ms,
                     activation.now_ms,
                     removed_owner_key.as_str(),
-                    activation.user_id,
+                    crate::store::local_media_principal_id(&activation.principal)?,
                     activation.playback_id.as_str(),
                     activation.incarnation_id.as_str()
                 ),
@@ -1594,7 +1687,7 @@ impl MediaSessionStore for HiqliteAuthStore {
                 params!(
                     activation.incarnation_id.as_str(),
                     activation.session_id.as_str(),
-                    activation.user_id,
+                    crate::store::local_media_principal_id(&activation.principal)?,
                     activation.playback_id.as_str(),
                     activation.request_fingerprint.as_str(),
                     activation.owner_node_id.as_str(),
@@ -1639,7 +1732,7 @@ impl MediaSessionStore for HiqliteAuthStore {
                 params!(
                     activation.now_ms,
                     MEDIA_SESSION_PUBLICATION_BLOCKED,
-                    activation.user_id,
+                    crate::store::local_media_principal_id(&activation.principal)?,
                     activation.playback_id.as_str(),
                     activation.incarnation_id.as_str(),
                     activation.session_id.as_str(),
@@ -1657,7 +1750,7 @@ impl MediaSessionStore for HiqliteAuthStore {
                          AND incarnation_id != $3 AND state = 'ended'
                          AND updated_at_ms = $4)",
                 params!(
-                    activation.user_id,
+                    crate::store::local_media_principal_id(&activation.principal)?,
                     activation.playback_id.as_str(),
                     activation.incarnation_id.as_str(),
                     activation.now_ms
@@ -1679,7 +1772,7 @@ impl MediaSessionStore for HiqliteAuthStore {
                         AND session.owner_epoch = job_leases.fence)",
                 params!(
                     activation.now_ms,
-                    activation.user_id,
+                    crate::store::local_media_principal_id(&activation.principal)?,
                     activation.playback_id.as_str(),
                     activation.incarnation_id.as_str(),
                     predecessor_incarnation
@@ -1718,7 +1811,7 @@ impl MediaSessionStore for HiqliteAuthStore {
                     AND media_playback_pointers.current_incarnation_id
                         != excluded.current_incarnation_id",
                 params!(
-                    activation.user_id,
+                    crate::store::local_media_principal_id(&activation.principal)?,
                     activation.playback_id.as_str(),
                     activation.incarnation_id.as_str(),
                     activation.now_ms,
@@ -1740,7 +1833,7 @@ impl MediaSessionStore for HiqliteAuthStore {
                     MEDIA_SESSION_PUBLICATION_BLOCKED,
                     activation.incarnation_id.as_str(),
                     activation.session_id.as_str(),
-                    activation.user_id,
+                    crate::store::local_media_principal_id(&activation.principal)?,
                     activation.playback_id.as_str()
                 ),
             ),
@@ -1814,7 +1907,10 @@ impl MediaSessionStore for HiqliteAuthStore {
             .query_consistent_map::<PointerRow, _>(
                 "SELECT current_incarnation_id FROM media_playback_pointers
                   WHERE user_id = $1 AND playback_id = $2",
-                params!(activation.user_id, activation.playback_id.as_str()),
+                params!(
+                    crate::store::local_media_principal_id(&activation.principal)?,
+                    activation.playback_id.as_str()
+                ),
             )
             .await?
             .into_iter()
@@ -1856,8 +1952,12 @@ impl MediaSessionStore for HiqliteAuthStore {
         // Replay by exact identity, before anything is attempted. The ledger's
         // primary key would otherwise turn an owner's retry into "you already
         // have one".
-        if let Some(existing) =
-            staged_row(self, preparation.user_id, &preparation.playback_id).await?
+        if let Some(existing) = staged_row(
+            self,
+            crate::store::local_media_principal_id(&preparation.principal)?,
+            &preparation.playback_id,
+        )
+        .await?
         {
             if existing.staged_incarnation_id != preparation.incarnation_id
                 || existing.expected_predecessor_incarnation_id
@@ -1874,7 +1974,7 @@ impl MediaSessionStore for HiqliteAuthStore {
         // The same fixed statement builder is concatenated after abort for an
         // occupied-slot rejoin, so admission and replay cannot drift between
         // the two entry points.
-        let statements = prepare_statements(preparation);
+        let statements = prepare_statements(preparation)?;
         for (sql, _) in &statements {
             validate_sql(sql)?;
         }
@@ -1897,7 +1997,12 @@ impl MediaSessionStore for HiqliteAuthStore {
         let route = route_by(self, "incarnation_id", &preparation.incarnation_id)
             .await?
             .filter(|route| preparation_route_matches(route, preparation));
-        let staged = staged_row(self, preparation.user_id, &preparation.playback_id).await?;
+        let staged = staged_row(
+            self,
+            crate::store::local_media_principal_id(&preparation.principal)?,
+            &preparation.playback_id,
+        )
+        .await?;
         let staged_is_ours = staged.map(|staged| staged.staged_incarnation_id).as_deref()
             == Some(preparation.incarnation_id.as_str());
         let Some(route) = route.filter(|_| staged_is_ours) else {
@@ -1916,7 +2021,7 @@ impl MediaSessionStore for HiqliteAuthStore {
                 .await?
                 {
                     self.abort_media_session_preparation(
-                        preparation.user_id,
+                        &preparation.principal,
                         &preparation.playback_id,
                         &MediaSessionPreparationAbortRequest {
                             staged_incarnation_id: preparation.incarnation_id.clone(),
@@ -1935,12 +2040,13 @@ impl MediaSessionStore for HiqliteAuthStore {
 
     async fn record_desired_selection(
         &self,
-        user_id: i64,
+        principal: &crate::playback_principal::PlaybackPrincipal,
         playback_id: &str,
         digest: &str,
         canonical_form: &str,
         now_ms: i64,
     ) -> Result<crate::domain::DesiredOwnership, StoreError> {
+        let user_id = crate::store::local_media_principal_id(principal)?;
         validate_desired_selection(playback_id, digest, canonical_form, now_ms)?;
         // The revision decision is made by the statement, not by a read
         // followed by a write. Two exchanges for the same playback can
@@ -1977,9 +2083,10 @@ impl MediaSessionStore for HiqliteAuthStore {
 
     async fn validation_playback_pointer_desired_revision(
         &self,
-        user_id: i64,
+        principal: &crate::playback_principal::PlaybackPrincipal,
         playback_id: &str,
     ) -> Result<Option<i64>, StoreError> {
+        let user_id = crate::store::local_media_principal_id(principal)?;
         let rows: Vec<PointerRevisionRow> = timeout_store(self.client().query_consistent_map(
             "SELECT desired_revision FROM media_playback_pointers
               WHERE user_id = $1 AND playback_id = $2",
@@ -1991,11 +2098,12 @@ impl MediaSessionStore for HiqliteAuthStore {
 
     async fn validation_write_legacy_playback_pointer(
         &self,
-        user_id: i64,
+        principal: &crate::playback_principal::PlaybackPrincipal,
         playback_id: &str,
         incarnation_id: &str,
         now_ms: i64,
     ) -> Result<(), StoreError> {
+        let user_id = crate::store::local_media_principal_id(principal)?;
         // The replicated twin of the same pre-v49 statement.
         let sql = "INSERT INTO media_playback_pointers
                     (user_id, playback_id, current_incarnation_id, updated_at_ms)
@@ -2014,9 +2122,10 @@ impl MediaSessionStore for HiqliteAuthStore {
 
     async fn desired_selection(
         &self,
-        user_id: i64,
+        principal: &crate::playback_principal::PlaybackPrincipal,
         playback_id: &str,
     ) -> Result<Option<crate::domain::DesiredOwnership>, StoreError> {
+        let user_id = crate::store::local_media_principal_id(principal)?;
         desired_row(self, user_id, playback_id).await
     }
 
@@ -2036,7 +2145,12 @@ impl MediaSessionStore for HiqliteAuthStore {
         // A read narrows proposals to either the named occupied slot or an
         // exact replay. Every mutation remains SQL-gated in the proposal, so
         // a commit racing this read makes the observable ledger CAS reject.
-        let existing = staged_row(self, preparation.user_id, &preparation.playback_id).await?;
+        let existing = staged_row(
+            self,
+            crate::store::local_media_principal_id(&preparation.principal)?,
+            &preparation.playback_id,
+        )
+        .await?;
         let exact_replay = existing.as_ref().is_some_and(|staged| {
             staged.staged_incarnation_id == preparation.incarnation_id
                 && staged.expected_predecessor_incarnation_id
@@ -2073,7 +2187,7 @@ impl MediaSessionStore for HiqliteAuthStore {
         // preparation's pointer/admission/empty-ledger predicates therefore
         // observe the abort statements that precede them.
         let mut statements = abort_statements(
-            preparation.user_id,
+            crate::store::local_media_principal_id(&preparation.principal)?,
             &preparation.playback_id,
             staged_incarnation_id,
             &preparation.expected_predecessor_owner_node_id,
@@ -2096,7 +2210,7 @@ impl MediaSessionStore for HiqliteAuthStore {
               RETURNING user_id, playback_id, staged_incarnation_id,
                         expected_predecessor_incarnation_id",
             params!(
-                preparation.user_id,
+                crate::store::local_media_principal_id(&preparation.principal)?,
                 preparation.playback_id.as_str(),
                 staged_incarnation_id,
                 preparation.expected_predecessor_incarnation_id.as_str(),
@@ -2105,7 +2219,7 @@ impl MediaSessionStore for HiqliteAuthStore {
         ));
         let guarded_delete_index = statements.len() - 1;
         statements[guarded_delete_index].1[2] = Param::StmtOutputNamed(0, "incarnation_id".into());
-        let mut prepare = prepare_statements(preparation);
+        let mut prepare = prepare_statements(preparation)?;
         // Each stage is observable and the next stage consumes its output.
         // Missing old ledger, refused lease mutation, or refused session
         // insert therefore aborts the proposal before a later statement can
@@ -2145,7 +2259,7 @@ impl MediaSessionStore for HiqliteAuthStore {
                 preparation.deadline_ms,
                 preparation.now_ms,
                 staged_incarnation_id,
-                preparation.user_id
+                crate::store::local_media_principal_id(&preparation.principal)?
             ),
         ));
         for (sql, _) in &statements {
@@ -2234,9 +2348,10 @@ impl MediaSessionStore for HiqliteAuthStore {
 
     async fn staged_media_session_for_playback(
         &self,
-        user_id: i64,
+        principal: &crate::playback_principal::PlaybackPrincipal,
         playback_id: &str,
     ) -> Result<Option<crate::domain::MediaSessionStagedGeneration>, StoreError> {
+        let user_id = crate::store::local_media_principal_id(principal)?;
         if user_id <= 0 || playback_id.is_empty() || playback_id.len() > 128 {
             return Err(StoreError::Task(
                 "invalid staged media-session lookup".to_owned(),
@@ -2247,10 +2362,11 @@ impl MediaSessionStore for HiqliteAuthStore {
 
     async fn commit_media_session_preparation(
         &self,
-        user_id: i64,
+        principal: &crate::playback_principal::PlaybackPrincipal,
         playback_id: &str,
         request: &MediaSessionPreparationCommitRequest,
     ) -> Result<Option<crate::domain::MediaSessionPreparationCommit>, StoreError> {
+        let user_id = crate::store::local_media_principal_id(principal)?;
         if user_id <= 0
             || playback_id.is_empty()
             || playback_id.len() > 128
@@ -2605,7 +2721,7 @@ impl MediaSessionStore for HiqliteAuthStore {
             // the staged successor rather than reap that generation — this is
             // the clause the whole predecessor-recording design exists for.
             self.abort_media_session_preparation(
-                user_id,
+                principal,
                 playback_id,
                 &MediaSessionPreparationAbortRequest {
                     staged_incarnation_id: staged.staged_incarnation_id.clone(),
@@ -2646,10 +2762,11 @@ impl MediaSessionStore for HiqliteAuthStore {
 
     async fn abort_media_session_preparation(
         &self,
-        user_id: i64,
+        principal: &crate::playback_principal::PlaybackPrincipal,
         playback_id: &str,
         request: &MediaSessionPreparationAbortRequest,
     ) -> Result<Option<MediaSessionRoute>, StoreError> {
+        let user_id = crate::store::local_media_principal_id(principal)?;
         if user_id <= 0
             || playback_id.is_empty()
             || playback_id.len() > 128
@@ -2701,7 +2818,8 @@ impl MediaSessionStore for HiqliteAuthStore {
                 .filter(|route| {
                     route.state == "ended"
                         && route.terminal_reason.as_deref() == Some("replaced")
-                        && route.user_id == user_id
+                        && route.principal
+                            == (crate::playback_principal::PlaybackPrincipal::LocalUser { user_id })
                         && route.playback_id == playback_id
                 }),
         )
@@ -2770,7 +2888,7 @@ impl MediaSessionStore for HiqliteAuthStore {
                             now_ms,
                             activation.incarnation_id.as_str(),
                             activation.session_id.as_str(),
-                            activation.user_id,
+                            crate::store::local_media_principal_id(&activation.principal)?,
                             activation.playback_id.as_str(),
                             activation.request_fingerprint.as_str(),
                             activation.owner_node_id.as_str(),
@@ -2798,7 +2916,10 @@ impl MediaSessionStore for HiqliteAuthStore {
                     .query_consistent_map::<PointerRow, _>(
                         "SELECT current_incarnation_id FROM media_playback_pointers
                           WHERE user_id = $1 AND playback_id = $2",
-                        params!(activation.user_id, activation.playback_id.as_str()),
+                        params!(
+                            crate::store::local_media_principal_id(&activation.principal)?,
+                            activation.playback_id.as_str()
+                        ),
                     )
                     .await?
                     .into_iter()
@@ -2826,7 +2947,7 @@ impl MediaSessionStore for HiqliteAuthStore {
                             params!(
                                 now_ms,
                                 request_id,
-                                activation.user_id,
+                                crate::store::local_media_principal_id(&activation.principal)?,
                                 activation.incarnation_id.as_str(),
                                 activation.request_fingerprint.as_str(),
                                 activation.playback_id.as_str(),
@@ -2853,7 +2974,7 @@ impl MediaSessionStore for HiqliteAuthStore {
                                 MEDIA_SESSION_PUBLICATION_BLOCKED,
                                 activation.incarnation_id.as_str(),
                                 activation.session_id.as_str(),
-                                activation.user_id,
+                                crate::store::local_media_principal_id(&activation.principal)?,
                                 activation.playback_id.as_str(),
                                 activation.request_fingerprint.as_str(),
                                 activation.owner_node_id.as_str(),
@@ -2871,7 +2992,7 @@ impl MediaSessionStore for HiqliteAuthStore {
                                   WHERE incarnation_id = $3 AND state = 'ended'
                                     AND terminal_reason = 'replaced' AND updated_at_ms = $4)",
                             params!(
-                                activation.user_id,
+                                crate::store::local_media_principal_id(&activation.principal)?,
                                 activation.playback_id.as_str(),
                                 activation.incarnation_id.as_str(),
                                 now_ms
@@ -2918,7 +3039,7 @@ impl MediaSessionStore for HiqliteAuthStore {
                 }
                 let request = request_row(
                     self,
-                    activation.user_id,
+                    crate::store::local_media_principal_id(&activation.principal)?,
                     activation.request_id.as_deref().unwrap_or_default(),
                 )
                 .await?;
@@ -2941,11 +3062,12 @@ impl MediaSessionStore for HiqliteAuthStore {
 
     async fn publish_media_session_activation(
         &self,
-        user_id: i64,
+        principal: &crate::playback_principal::PlaybackPrincipal,
         request_id: &str,
         incarnation_id: &str,
         now_ms: i64,
     ) -> Result<Option<MediaSessionRoute>, StoreError> {
+        let user_id = crate::store::local_media_principal_id(principal)?;
         if user_id <= 0
             || request_id.is_empty()
             || request_id.len() > 128
@@ -2992,7 +3114,8 @@ impl MediaSessionStore for HiqliteAuthStore {
         let route = route_by(self, "incarnation_id", incarnation_id)
             .await?
             .filter(|route| {
-                route.user_id == user_id
+                route.principal
+                    == (crate::playback_principal::PlaybackPrincipal::LocalUser { user_id })
                     && route.state == "active"
                     && route.publication_ready_at_ms == 0
             });
@@ -3253,11 +3376,12 @@ impl MediaSessionStore for HiqliteAuthStore {
 
     async fn fail_media_session_request(
         &self,
-        user_id: i64,
+        principal: &crate::playback_principal::PlaybackPrincipal,
         request_id: &str,
         incarnation_id: &str,
         now_ms: i64,
     ) -> Result<bool, StoreError> {
+        let user_id = crate::store::local_media_principal_id(principal)?;
         if user_id <= 0
             || request_id.is_empty()
             || request_id.len() > 128
@@ -3300,10 +3424,10 @@ impl MediaSessionStore for HiqliteAuthStore {
 
     async fn media_session_route_for_playback(
         &self,
-        user_id: i64,
+        principal: &crate::playback_principal::PlaybackPrincipal,
         playback_id: &str,
     ) -> Result<Option<MediaSessionRoute>, StoreError> {
-        if user_id <= 0
+        if !principal.valid_admission_shape()
             || playback_id.is_empty()
             || playback_id.len() > 128
             || playback_id
@@ -3314,19 +3438,31 @@ impl MediaSessionStore for HiqliteAuthStore {
                 "invalid media-session playback route".to_owned(),
             ));
         }
+        let (owner_column, owner): (&str, Param) =
+            if route_projection(self).await? == PRINCIPAL_ROUTE_COLS {
+                ("owner_key", principal.owner_key().into())
+            } else {
+                (
+                    "user_id",
+                    crate::store::local_media_principal_id(principal)?.into(),
+                )
+            };
+        let sql = format!(
+            "SELECT current_incarnation_id FROM media_playback_pointers
+                  WHERE {owner_column} = $1 AND playback_id = $2"
+        );
+        validate_sql(&sql)?;
         let incarnation = self
             .client()
-            .query_consistent_map::<PointerRow, _>(
-                "SELECT current_incarnation_id FROM media_playback_pointers
-                  WHERE user_id = $1 AND playback_id = $2",
-                params!(user_id, playback_id),
-            )
+            .query_consistent_map::<PointerRow, _>(sql, params!(owner, playback_id))
             .await?
             .into_iter()
             .next()
             .map(|row| row.0);
         match incarnation {
-            Some(incarnation) => route_by(self, "incarnation_id", &incarnation).await,
+            Some(incarnation) => Ok(route_by(self, "incarnation_id", &incarnation)
+                .await?
+                .filter(|route| route.principal == *principal)),
             None => Ok(None),
         }
     }
@@ -3677,8 +3813,9 @@ impl MediaSessionStore for HiqliteAuthStore {
             }
             None => (0_i64, 0_i64, String::new()),
         };
+        let route_cols = route_projection(self).await?;
         let sql = format!(
-            "SELECT {ROUTE_COLS} FROM media_sessions
+            "SELECT {route_cols} FROM media_sessions
               WHERE state = 'active' AND lease_expires_at_ms <= $1
                 AND publication_ready_at_ms != $2
                 -- A draining predecessor is not work to inherit; the sweep
@@ -3695,8 +3832,7 @@ impl MediaSessionStore for HiqliteAuthStore {
               ORDER BY lease_expires_at_ms, incarnation_id LIMIT $6"
         );
         validate_sql(&sql)?;
-        Ok(self
-            .client()
+        self.client()
             .query_consistent_map::<RouteRow, _>(
                 sql,
                 params!(
@@ -3711,7 +3847,7 @@ impl MediaSessionStore for HiqliteAuthStore {
             .await?
             .into_iter()
             .map(|row| row.0)
-            .collect())
+            .collect()
     }
 
     async fn claim_media_session_takeover(
@@ -3947,7 +4083,7 @@ impl MediaSessionStore for HiqliteAuthStore {
                             AND owner_node_id = $5 AND owner_epoch = $6
                             AND state = 'ended')",
                     params!(
-                        route.user_id,
+                        crate::store::local_media_principal_id(&route.principal)?,
                         route.playback_id.as_str(),
                         end.incarnation_id.as_str(),
                         end.session_id.as_str(),
@@ -4052,7 +4188,7 @@ impl MediaSessionStore for HiqliteAuthStore {
                     "DELETE FROM media_playback_pointers
                       WHERE user_id = $1 AND playback_id = $2 AND current_incarnation_id = $3",
                     params!(
-                        route.user_id,
+                        crate::store::local_media_principal_id(&route.principal)?,
                         route.playback_id.as_str(),
                         route.incarnation_id.as_str()
                     ),
@@ -4332,7 +4468,7 @@ impl MediaSessionStore for HiqliteAuthStore {
             .client()
             .query_consistent_map::<OwnedLeaseRow, _>(
                 "SELECT incarnation_id, session_id, owner_epoch, lease_expires_at_ms,
-                        drain_deadline_ms
+                        drain_deadline_ms, user_id
                    FROM media_sessions
                   WHERE owner_node_id = $1 AND state = 'active'
                     AND lease_expires_at_ms > $2
@@ -4402,7 +4538,7 @@ impl MediaSessionStore for HiqliteAuthStore {
             .execute(
                 sql,
                 params!(
-                    request.user_id,
+                    crate::store::local_media_principal_id(&request.principal)?,
                     request.playback_id.clone(),
                     request.recovery_epoch.clone(),
                     request.failed_incarnation_id.clone(),
@@ -4418,7 +4554,7 @@ impl MediaSessionStore for HiqliteAuthStore {
             .map_err(database_error)?;
         let Some(existing) = recovery_row(
             self,
-            request.user_id,
+            crate::store::local_media_principal_id(&request.principal)?,
             &request.playback_id,
             &request.recovery_epoch,
         )
@@ -4454,13 +4590,14 @@ impl MediaSessionStore for HiqliteAuthStore {
 
     async fn settle_producer_recovery(
         &self,
-        user_id: i64,
+        principal: &crate::playback_principal::PlaybackPrincipal,
         playback_id: &str,
         recovery_epoch: &str,
         failed_incarnation_id: &str,
         state: crate::domain::ProducerRecoveryState,
         now_ms: i64,
     ) -> Result<Option<crate::domain::ProducerRecoveryReservation>, StoreError> {
+        let user_id = crate::store::local_media_principal_id(principal)?;
         if matches!(state, crate::domain::ProducerRecoveryState::Reserved) {
             return Err(StoreError::Task(
                 "a recovery cannot be settled back into reserved".to_owned(),
@@ -4506,21 +4643,23 @@ impl MediaSessionStore for HiqliteAuthStore {
 
     async fn producer_recovery_for_epoch(
         &self,
-        user_id: i64,
+        principal: &crate::playback_principal::PlaybackPrincipal,
         playback_id: &str,
         recovery_epoch: &str,
     ) -> Result<Option<crate::domain::ProducerRecoveryReservation>, StoreError> {
+        let user_id = crate::store::local_media_principal_id(principal)?;
         crate::store::validated_epoch_key(user_id, playback_id, recovery_epoch)?;
         recovery_row(self, user_id, playback_id, recovery_epoch).await
     }
 
     async fn validation_corrupt_recovery_restriction(
         &self,
-        user_id: i64,
+        principal: &crate::playback_principal::PlaybackPrincipal,
         playback_id: &str,
         recovery_epoch: &str,
         stored: &str,
     ) -> Result<bool, StoreError> {
+        let user_id = crate::store::local_media_principal_id(principal)?;
         let sql = "UPDATE media_session_producer_recovery
                       SET decode_restriction = $1
                     WHERE user_id = $2 AND playback_id = $3 AND recovery_epoch = $4";
@@ -4645,7 +4784,7 @@ mod tests {
             expected_desired_revision: None,
             incarnation_id: "00000000-0000-4000-8000-000000000002".to_owned(),
             session_id: "session".to_owned(),
-            user_id: 1,
+            principal: crate::playback_principal::PlaybackPrincipal::LocalUser { user_id: 1 },
             playback_id: "playback".to_owned(),
             expected_predecessor_incarnation_id: "00000000-0000-4000-8000-000000000001".to_owned(),
             expected_predecessor_owner_node_id: "owner".to_owned(),
@@ -4752,7 +4891,7 @@ mod tests {
         let method = method_source("prepare_media_session");
         let normalized_method = method.split_whitespace().collect::<Vec<_>>().join(" ");
         assert!(
-            normalized_method.contains("let statements = prepare_statements(preparation);")
+            normalized_method.contains("let statements = prepare_statements(preparation)?;")
                 && method.matches("let statements =").count() == 1
                 && method.matches(".txn(").count() == 1
                 && method.matches(".txn(statements)").count() == 1
@@ -4767,7 +4906,7 @@ mod tests {
             "the public preparation path must submit the shared statement vector unchanged"
         );
         let preparation = statement_test_preparation();
-        let statements = prepare_statements(&preparation);
+        let statements = prepare_statements(&preparation).expect("local preparation statements");
         assert_eq!(
             statements.len(),
             3,
@@ -4973,5 +5112,65 @@ mod tests {
         assert!(MEDIA_SESSIONS_SCHEMA.contains("publication_ready_at_ms"));
         assert!(MEDIA_SESSION_TERMINAL_REASON_MIGRATION.contains("terminal_reason"));
         assert!(MEDIA_SESSION_PUBLICATION_FENCE_MIGRATION.contains("publication_ready_at_ms"));
+    }
+}
+
+#[cfg(test)]
+mod sharing_route_decoder_tests {
+    use super::*;
+
+    #[test]
+    fn sharing_route_decoder_preserves_namespace_and_refuses_corrupt_projection() {
+        let conn = rusqlite::Connection::open_in_memory().expect("fixture connection");
+        let grant = uuid::Uuid::new_v4().to_string();
+        let viewer = "a".repeat(64);
+        let key = format!("share:{grant}:{viewer}");
+        let decode = |kind: &str,
+                      user: Option<i64>,
+                      grant: Option<&str>,
+                      viewer: Option<&str>,
+                      key: &str| {
+            conn.query_row("SELECT 'incarnation' AS incarnation_id, 'session' AS session_id, ?2 AS user_id, 'playback' AS playback_id, 'fingerprint' AS request_fingerprint, 'node' AS owner_node_id, 1 AS owner_epoch, 2000 AS lease_expires_at_ms, 'active' AS state, NULL AS terminal_reason, 1000 AS publication_ready_at_ms, '{}' AS recipe_json, '{}' AS response_json, 0 AS produced_playable_through_ms, 0 AS fetched_through_ms, 0 AS media_origin_ms, 0 AS media_sequence, 0 AS discontinuity_sequence, 1000 AS updated_at_ms, 'recovery' AS recovery_epoch, NULL AS drain_deadline_ms, ?5 AS owner_key, ?1 AS principal_kind, ?3 AS share_grant_id, ?4 AS share_viewer_key", rusqlite::params![kind, user, grant, viewer, key], |row| Ok(decode_route(&mut Row::Borrowed(row)))).expect("SQL projection")
+        };
+        let local = decode("local", Some(7), None, None, "local:7").expect("local route");
+        assert_eq!(local.principal.local_user_id(), Some(7));
+        let shared =
+            decode("sharing", None, Some(&grant), Some(&viewer), &key).expect("shared route");
+        assert_eq!(
+            shared.principal,
+            crate::playback_principal::PlaybackPrincipal::sharing(
+                uuid::Uuid::parse_str(&grant).expect("grant"),
+                &viewer
+            )
+            .expect("principal")
+        );
+        assert_eq!(shared.principal.local_user_id(), None);
+        assert!(decode("sharing", Some(7), Some(&grant), Some(&viewer), &key).is_err());
+        assert!(decode("sharing", None, Some(&grant), None, &key).is_err());
+        assert!(decode("sharing", None, Some(&grant), Some(&viewer), "local:7").is_err());
+        assert!(decode("local", Some(0), None, None, "local:0").is_err());
+        assert!(decode("local", Some(-1), None, None, "local:-1").is_err());
+        assert!(decode("local", Some(7), None, None, "local:07").is_err());
+    }
+
+    #[test]
+    fn sharing_route_owned_decoder_refuses_missing_or_wrongly_typed_metadata() {
+        let columns = serde_json::json!([
+            {"name":"principal_kind","value":{"Text":"sharing"}},
+            {"name":"user_id","value":"Null"},
+            {"name":"share_grant_id","value":{"Text":uuid::Uuid::new_v4().to_string()}},
+            {"name":"share_viewer_key","value":{"Text":"a".repeat(64)}}
+        ]);
+        let mut missing = Row::Owned(
+            serde_json::from_value(serde_json::json!({"columns":columns})).expect("owned row"),
+        );
+        assert!(decode_route(&mut missing).is_err());
+        let mut wrong = Row::Owned(
+            serde_json::from_value(
+                serde_json::json!({"columns":[{"name":"principal_kind","value":{"Integer":1}}]}),
+            )
+            .expect("owned row"),
+        );
+        assert!(decode_route(&mut wrong).is_err());
     }
 }

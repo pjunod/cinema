@@ -29,7 +29,7 @@
                 .state
                 .store
                 .claim_media_session_request(
-                    user.id,
+                    &plurx_core::playback_principal::PlaybackPrincipal::LocalUser { user_id: user.id },
                     request_id,
                     &fingerprint,
                     "guard-lifetime-player",
@@ -66,7 +66,7 @@
             .transcode
             .acquire_cluster_takeover_replacement(
                 &request,
-                7,
+                &plurx_core::playback_principal::PlaybackPrincipal::LocalUser { user_id: 7 },
                 tokio::time::Instant::now() + Duration::from_secs(1),
             )
             .await
@@ -83,7 +83,7 @@
             fixture.state.node_id.clone(),
             incarnation_id.clone(),
             "guard-lifetime".to_owned(),
-            user.id,
+            plurx_core::playback_principal::PlaybackPrincipal::LocalUser { user_id: user.id },
             request_id.to_owned(),
             Some(replacement),
         );
@@ -102,7 +102,7 @@
             .state
             .store
             .claim_media_session_request(
-                user.id,
+                &plurx_core::playback_principal::PlaybackPrincipal::LocalUser { user_id: user.id },
                 request_id,
                 &fingerprint,
                 "guard-lifetime-player",
@@ -124,7 +124,7 @@
         // may reclaim an abandoned holder after its own three-second wait.
         let replacement_wait = fixture.state.transcode.acquire_cluster_takeover_replacement(
             &request,
-            7,
+            &plurx_core::playback_principal::PlaybackPrincipal::LocalUser { user_id: 7 },
             tokio::time::Instant::now() + Duration::from_secs(60),
         );
         tokio::pin!(replacement_wait);
@@ -144,7 +144,7 @@
         assert!(fixture
             .state
             .store
-            .fail_media_session_request(user.id, request_id, &retry_incarnation, unix_ms())
+            .fail_media_session_request(&plurx_core::playback_principal::PlaybackPrincipal::LocalUser { user_id: user.id }, request_id, &retry_incarnation, unix_ms())
             .await
             .expect("settle retry claim"));
 
@@ -153,7 +153,7 @@
             .transcode
             .acquire_cluster_takeover_replacement(
                 &request,
-                7,
+                &plurx_core::playback_principal::PlaybackPrincipal::LocalUser { user_id: 7 },
                 tokio::time::Instant::now() + Duration::from_secs(1),
             )
             .await
@@ -163,7 +163,7 @@
             fixture.state.node_id.clone(),
             uuid::Uuid::new_v4().to_string(),
             "guard-lifetime".to_owned(),
-            7,
+            plurx_core::playback_principal::PlaybackPrincipal::LocalUser { user_id: 7 },
             "guard-disarm-request".to_owned(),
             Some(replacement),
         );
@@ -173,7 +173,7 @@
             .transcode
             .acquire_cluster_takeover_replacement(
                 &request,
-                7,
+                &plurx_core::playback_principal::PlaybackPrincipal::LocalUser { user_id: 7 },
                 tokio::time::Instant::now() + Duration::from_secs(1),
             )
             .await
@@ -215,7 +215,7 @@
             .transcode
             .acquire_cluster_takeover_replacement(
                 &request,
-                7,
+                &plurx_core::playback_principal::PlaybackPrincipal::LocalUser { user_id: 7 },
                 tokio::time::Instant::now() + Duration::from_secs(1),
             )
             .await
@@ -225,7 +225,7 @@
             fixture.state.node_id.clone(),
             uuid::Uuid::new_v4().to_string(),
             "cleanup-shape".to_owned(),
-            7,
+            plurx_core::playback_principal::PlaybackPrincipal::LocalUser { user_id: 7 },
             "cleanup-shape-request".to_owned(),
             Some(replacement),
         ));
@@ -235,7 +235,7 @@
             Duration::from_secs(1),
             fixture.state.transcode.acquire_cluster_takeover_replacement(
                 &request,
-                7,
+                &plurx_core::playback_principal::PlaybackPrincipal::LocalUser { user_id: 7 },
                 tokio::time::Instant::now() + Duration::from_secs(10),
             ),
         )
@@ -329,7 +329,7 @@
                 .state
                 .store
                 .claim_media_session_request(
-                    user.id,
+                    &plurx_core::playback_principal::PlaybackPrincipal::LocalUser { user_id: user.id },
                     request_id,
                     &fingerprint,
                     "replayed-guard-player",
@@ -346,7 +346,7 @@
             fixture.state.node_id.clone(),
             incarnation_id.clone(),
             session_id.to_owned(),
-            user.id,
+            plurx_core::playback_principal::PlaybackPrincipal::LocalUser { user_id: user.id },
             request_id.to_owned(),
             None,
         );
@@ -364,7 +364,7 @@
                 .state
                 .store
                 .claim_media_session_request(
-                    user.id,
+                    &plurx_core::playback_principal::PlaybackPrincipal::LocalUser { user_id: user.id },
                     request_id,
                     &fingerprint,
                     "replayed-guard-player",
@@ -382,7 +382,7 @@
         assert!(fixture
             .state
             .store
-            .fail_media_session_request(user.id, request_id, &incarnation_id, unix_ms())
+            .fail_media_session_request(&plurx_core::playback_principal::PlaybackPrincipal::LocalUser { user_id: user.id }, request_id, &incarnation_id, unix_ms())
             .await
             .expect("settle original claim"));
         assert!(
@@ -411,7 +411,7 @@
             state
                 .store
                 .claim_media_session_request(
-                    user.id,
+                    &plurx_core::playback_principal::PlaybackPrincipal::LocalUser { user_id: user.id },
                     request_id,
                     &fingerprint,
                     "request-guard-player",
@@ -426,7 +426,7 @@
 
         drop(MediaSessionRequestGuard::new(
             state.clone(),
-            user.id,
+            plurx_core::playback_principal::PlaybackPrincipal::LocalUser { user_id: user.id },
             request_id.to_owned(),
             incarnation_id,
         ));
@@ -441,7 +441,7 @@
             match state
                 .store
                 .claim_media_session_request(
-                    user.id,
+                    &plurx_core::playback_principal::PlaybackPrincipal::LocalUser { user_id: user.id },
                     request_id,
                     &fingerprint,
                     "request-guard-player",
@@ -467,7 +467,7 @@
         }
         assert!(state
             .store
-            .fail_media_session_request(user.id, request_id, &retry_incarnation, unix_ms(),)
+            .fail_media_session_request(&plurx_core::playback_principal::PlaybackPrincipal::LocalUser { user_id: user.id }, request_id, &retry_incarnation, unix_ms(),)
             .await
             .expect("settle retry claim"));
     }
@@ -2765,7 +2765,7 @@
                 state
                     .store
                     .claim_media_session_request(
-                        user.id,
+                        &plurx_core::playback_principal::PlaybackPrincipal::LocalUser { user_id: user.id },
                         &request_id,
                         &"c".repeat(64),
                         &playback_id,
@@ -2779,7 +2779,7 @@
             ));
             assert!(state
                 .store
-                .fail_media_session_request(user.id, &request_id, &incarnation, unix_ms())
+                .fail_media_session_request(&plurx_core::playback_principal::PlaybackPrincipal::LocalUser { user_id: user.id }, &request_id, &incarnation, unix_ms())
                 .await
                 .expect("settle inspection claim"));
         }

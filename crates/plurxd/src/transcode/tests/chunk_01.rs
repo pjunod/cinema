@@ -835,7 +835,7 @@
         let fingerprint = "a".repeat(64);
         store
             .claim_media_session_request(
-                7,
+                &plurx_core::playback_principal::PlaybackPrincipal::LocalUser { user_id: 7 },
                 generation,
                 &fingerprint,
                 "player-control",
@@ -846,7 +846,7 @@
             .await
             .expect("claim route");
         assert!(store
-            .assign_media_session_request_owner(7, generation, generation, owner_node_id, now_ms,)
+            .assign_media_session_request_owner(&plurx_core::playback_principal::PlaybackPrincipal::LocalUser { user_id: 7 }, generation, generation, owner_node_id, now_ms,)
             .await
             .expect("assign route owner"));
         let activation = plurx_core::domain::MediaSessionActivation {
@@ -854,7 +854,7 @@
             expected_desired_revision: None,
             incarnation_id: generation.to_owned(),
             session_id: session_id.to_owned(),
-            user_id: 7,
+            principal: plurx_core::playback_principal::PlaybackPrincipal::LocalUser { user_id: 7 },
             playback_id: "player-control".to_owned(),
             expected_predecessor_incarnation_id: None,
             fence_predecessor: false,
@@ -3135,13 +3135,29 @@
             "the legacy process-local key keeps its global username scope"
         );
         assert_eq!(
-            request.durable_intent_fingerprint(7),
-            request.clone().durable_intent_fingerprint(7),
+            request.durable_intent_fingerprint(&plurx_core::playback_principal::PlaybackPrincipal::LocalUser { user_id: 7 }),
+            request.clone().durable_intent_fingerprint(&plurx_core::playback_principal::PlaybackPrincipal::LocalUser { user_id: 7 }),
             "the replicated key is scoped by immutable user id, not username"
         );
         assert_ne!(
-            request.durable_intent_fingerprint(7),
-            request.durable_intent_fingerprint(8),
+            request.durable_intent_fingerprint(&plurx_core::playback_principal::PlaybackPrincipal::LocalUser { user_id: 7 }),
+            request.durable_intent_fingerprint(&plurx_core::playback_principal::PlaybackPrincipal::LocalUser { user_id: 8 }),
             "different durable users remain distinct"
         );
+        let local = plurx_core::playback_principal::PlaybackPrincipal::LocalUser { user_id: 7 };
+        let legacy = serde_json::json!([7, request.intent_fingerprint_with_user_scope(None)]);
+        assert_eq!(request.durable_intent_fingerprint(&local), hex::encode(Sha256::digest(legacy.to_string().as_bytes())));
+        assert_eq!(principal_supersession_scope(&local), "[\"user_id\",7]");
+        let grant = uuid::Uuid::new_v4();
+        let viewer = plurx_core::playback_principal::PlaybackPrincipal::sharing(grant, &"a".repeat(64)).expect("viewer");
+        let sibling = plurx_core::playback_principal::PlaybackPrincipal::sharing(grant, &"b".repeat(64)).expect("sibling");
+        let other_grant = plurx_core::playback_principal::PlaybackPrincipal::sharing(uuid::Uuid::new_v4(), &"a".repeat(64)).expect("other grant");
+        assert_ne!(request.durable_intent_fingerprint(&local), request.durable_intent_fingerprint(&viewer));
+        assert_ne!(request.durable_intent_fingerprint(&viewer), request.durable_intent_fingerprint(&sibling));
+        assert_ne!(request.durable_intent_fingerprint(&viewer), request.durable_intent_fingerprint(&other_grant));
+        assert_ne!(principal_supersession_scope(&local), principal_supersession_scope(&viewer));
+        assert_ne!(principal_supersession_scope(&viewer), principal_supersession_scope(&sibling));
+        assert_ne!(principal_supersession_scope(&viewer), principal_supersession_scope(&other_grant));
+
+
     }

@@ -27,19 +27,12 @@ impl TranscodeManager {
         user_name: &str,
     ) -> Result<StartInfo, String> {
         let supersession_user = serde_json::json!(["username", user_name]).to_string();
-        // A legacy process-local start has no cluster identity: no user id, no
-        // incarnation, and therefore no epoch. The ledger refuses an empty
-        // epoch, so this is "no budget" rather than "an unused one".
-        let recovery = SessionRecoveryIdentity {
-            user_id: 0,
-            incarnation_id: String::new(),
-            recovery_epoch: String::new(),
-        };
+        // A process-local start has no durable recovery identity.
         self.create_session_inner(
             req,
             user_name,
             &supersession_user,
-            &recovery,
+            None,
             None,
             None,
             None,
@@ -102,13 +95,12 @@ impl TranscodeManager {
         admitted_serving_generation: u64,
         priority: Priority,
     ) -> Result<ClusterSessionStart, String> {
-        let user_id = recovery.user_id;
         let serving_admission = ClusterServingAdmission {
             generation: admitted_serving_generation,
             deadline,
         };
         self.require_cluster_serving_authority(serving_admission)?;
-        let supersession_user = serde_json::json!(["user_id", user_id]).to_string();
+        let supersession_user = recovery.supersession_scope();
         let gate_key =
             serde_json::json!([supersession_user.as_str(), req.playback_id.as_str(),]).to_string();
         let replacement = self
@@ -129,7 +121,7 @@ impl TranscodeManager {
                 req,
                 user_name,
                 &supersession_user,
-                recovery,
+                Some(recovery),
                 Some(deadline),
                 None,
                 Some(serving_admission),
@@ -168,10 +160,10 @@ impl TranscodeManager {
     pub(crate) async fn acquire_cluster_takeover_replacement(
         &self,
         req: &SessionRequest,
-        user_id: i64,
+        principal: &plurx_core::playback_principal::PlaybackPrincipal,
         deadline: tokio::time::Instant,
     ) -> Result<ClusterReplacementGuard, String> {
-        let supersession_user = serde_json::json!(["user_id", user_id]).to_string();
+        let supersession_user = principal_supersession_scope(principal);
         let gate_key =
             serde_json::json!([supersession_user.as_str(), req.playback_id.as_str()]).to_string();
         self.acquire_cluster_replacement_gate(
@@ -193,7 +185,7 @@ impl TranscodeManager {
         deadline: tokio::time::Instant,
         takeover: SessionTakeoverStart,
     ) -> Result<StartInfo, String> {
-        let supersession_user = serde_json::json!(["user_id", recovery.user_id]).to_string();
+        let supersession_user = recovery.supersession_scope();
         // Same check the ordinary cluster start makes after its gate wait: a
         // start with no budget left cannot finish, and spawning ffmpeg only to
         // abandon it costs an admission slot for nothing.
@@ -206,7 +198,7 @@ impl TranscodeManager {
             req,
             user_name,
             &supersession_user,
-            recovery,
+            Some(recovery),
             Some(deadline),
             Some(takeover),
             None,
@@ -425,7 +417,7 @@ impl TranscodeManager {
         req: &SessionRequest,
         user_name: &str,
         supersession_user: &str,
-        recovery: &SessionRecoveryIdentity,
+        recovery: Option<&SessionRecoveryIdentity>,
         replacement_deadline: Option<tokio::time::Instant>,
         takeover: Option<SessionTakeoverStart>,
         serving_admission: Option<ClusterServingAdmission>,
@@ -503,7 +495,13 @@ impl TranscodeManager {
             let vod = self
                 .try_vod_session(
                     req,
-                    recovery.user_id,
+                    recovery
+                        .map(|identity| {
+                            identity.principal.local_user_id().ok_or_else(|| {
+                                "sharing VOD requires typed viewer demand".to_owned()
+                            })
+                        })
+                        .transpose()?,
                     user_name,
                     supersession_user,
                     replacement_deadline,
@@ -624,7 +622,7 @@ impl TranscodeManager {
         req: &SessionRequest,
         user_name: &str,
         supersession_user: &str,
-        recovery: &SessionRecoveryIdentity,
+        recovery: Option<&SessionRecoveryIdentity>,
         replacement_deadline: Option<tokio::time::Instant>,
         takeover: Option<SessionTakeoverStart>,
         priority: Priority,
@@ -1088,7 +1086,7 @@ impl TranscodeManager {
     async fn try_vod_session(
         &self,
         req: &SessionRequest,
-        user_id: i64,
+        user_id: Option<i64>,
         user_name: &str,
         supersession_user: &str,
         replacement_deadline: Option<tokio::time::Instant>,
@@ -1193,10 +1191,12 @@ impl TranscodeManager {
                         admission.generation,
                         admission.deadline.into_std(),
                     ),
-                    crate::state::PlaybackViewerDemand {
-                        user_id,
+                    user_id.map(|user_id| crate::state::PlaybackViewerDemand {
+                        principal: plurx_core::playback_principal::PlaybackPrincipal::LocalUser {
+                            user_id,
+                        },
                         playback_id: req.playback_id.clone(),
-                    },
+                    }),
                 )
                 .await
                 .map_err(|error| {
@@ -1218,10 +1218,12 @@ impl TranscodeManager {
                     &settings,
                     attribution,
                     session_id,
-                    crate::state::PlaybackViewerDemand {
-                        user_id,
+                    user_id.map(|user_id| crate::state::PlaybackViewerDemand {
+                        principal: plurx_core::playback_principal::PlaybackPrincipal::LocalUser {
+                            user_id,
+                        },
                         playback_id: req.playback_id.clone(),
-                    },
+                    }),
                 )
                 .await?
         };
