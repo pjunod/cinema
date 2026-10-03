@@ -1529,6 +1529,8 @@ mod tests {
             ("VideoAudio", "aac", "AudioChannels", "2", true),
             ("VideoAudio", "aac", "AudioChannels", "1", false),
             ("Video", "h264", "VideoLevel", "52", false),
+            ("Video", "-hevc", "Height", "720", false),
+            ("Video", "-h264", "Height", "720", true),
         ] {
             let body = json!({"UserId":f.user,"AudioStreamIndex":0,"SubtitleStreamIndex":-1,
                 "DeviceProfile":{"DirectPlayProfiles":[{"Type":"Video","Container":"mp4","VideoCodec":"h264","AudioCodec":"aac"}],

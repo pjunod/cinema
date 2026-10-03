@@ -542,3 +542,10 @@ regression proves that an indexed copy can be checked without attaching a
 reader, rendition, preparation session or producer; unresolved encoded
 recipes refuse before allocation. Activation, aliases, bounded startup retries
 and real-client transport qualification remain subsequent J4 work.
+
+The selector implementation follows the pinned 10.11.11
+[ContainerHelper](https://raw.githubusercontent.com/jellyfin/jellyfin/1fbd8739292cce610231be93daf43368733edf63/MediaBrowser.Model/Extensions/ContainerHelper.cs):
+a leading minus excludes named codecs/containers, and an empty selector is a
+wildcard. A negative codec selector must still apply its required conditions
+to every non-excluded source; the regression covers that bypass. Accepting a
+protocol wildcard never fills in HDR/DV claims in the native planner.

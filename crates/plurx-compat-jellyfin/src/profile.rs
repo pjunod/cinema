@@ -283,15 +283,31 @@ pub struct CodecRule {
     #[serde(default)]
     pub apply_conditions: Vec<Condition>,
 }
-fn selected(selector: Option<&str>, value: Option<&str>) -> bool {
+/// Pinned ContainerHelper wildcard/negative-list semantics, bounded before use.
+pub fn selector_matches(selector: Option<&str>, value: Option<&str>) -> bool {
     let Some(selector) = selector.filter(|s| !s.is_empty()) else {
         return true;
     };
-    value.is_some_and(|value| {
-        selector
-            .split(',')
-            .any(|name| name.trim().eq_ignore_ascii_case(value))
-    })
+    if selector.len() > 4096 || selector.split(',').count() > 32 {
+        return false;
+    }
+    let (negative, selector) = selector
+        .strip_prefix('-')
+        .map_or((false, selector), |s| (true, s));
+    if selector.is_empty() {
+        return true;
+    }
+    let matched = value.filter(|v| !v.is_empty()).is_some_and(|value| {
+        value.split(',').any(|value| {
+            selector
+                .split(',')
+                .any(|name| !name.is_empty() && name.eq_ignore_ascii_case(value))
+        })
+    });
+    matched != negative
+}
+fn selected(selector: Option<&str>, value: Option<&str>) -> bool {
+    selector_matches(selector, value)
 }
 impl CodecRule {
     /// Evaluate only the exact source/output tuple presented by the adapter.
@@ -394,6 +410,8 @@ pub enum MediaKind {
 #[derive(Clone, Debug, Deserialize)]
 #[serde(rename_all = "PascalCase", deny_unknown_fields)]
 pub struct ContainerRule {
+    #[serde(default)]
+    pub sub_container: Option<String>,
     #[serde(rename = "Type")]
     pub kind: MediaKind,
     #[serde(default)]
@@ -407,6 +425,10 @@ impl ContainerRule {
             || self.conditions.iter().any(|c| !c.is_valid())
             || self
                 .container
+                .as_ref()
+                .is_some_and(|c| c.len() > 4096 || c.split(',').count() > 32)
+            || self
+                .sub_container
                 .as_ref()
                 .is_some_and(|c| c.len() > 4096 || c.split(',').count() > 32)
         {
@@ -562,5 +584,22 @@ mod transcoding_tests {
         assert!(!serde_json::from_value::<TranscodingRule>(value)
             .expect("shape")
             .valid());
+    }
+}
+
+#[cfg(test)]
+mod selector_tests {
+    use super::*;
+    #[test]
+    fn negative_codec_selector_cannot_skip_an_applicable_required_constraint() {
+        let rule: CodecRule = serde_json::from_str(r#"{"Type":"Video","Codec":"-hevc","Conditions":[{"Property":"Height","Condition":"LessThanEqual","Value":"720","IsRequired":true}]}"#).expect("rule");
+        let facts = Facts::from([(Property::Height, Fact::Number(1080.0))]);
+        assert!(!rule.accepts(CodecKind::Video, Some("h264"), Some("mp4"), None, &facts));
+        assert!(rule.accepts(CodecKind::Video, Some("hevc"), Some("mp4"), None, &facts));
+        assert!(selector_matches(None, Some("h264")));
+        assert!(selector_matches(Some(""), Some("h264")));
+        assert!(!selector_matches(Some("-h264,hevc"), Some("H264")));
+        assert!(!selector_matches(Some("h264"), None));
+        assert!(!selector_matches(Some(&"x".repeat(4097)), Some("h264")));
     }
 }
