@@ -48,7 +48,8 @@ SHA256 match within the original deadline before recommending anything. An
 optional direct Linux source transfer was rejected by automatic approval
 review because it lacked explicit payload/destination authorization; no such
 transfer or direct Linux test ran. Normal repository CI supplies Linux
-verification. HDR
+verification; the corrected C1 candidate is running in
+[run 3938](http://192.168.4.7:3000/noirr/plurx/actions/runs/3938). HDR
 preflight, Rust, web, Apple and Android checks passed, but Windows setup could not resolve
 its pinned `dtolnay/rust-toolchain` action revision
 `4716b85f2fac3e324e64fa2810f6b5c3905760a5`, before compiling any project code.
@@ -77,6 +78,11 @@ client, renderer or physical-display run.
 Calibration proceeds without user-operated tests. If a route cannot be measured
 autonomously, continue other routes and report that limitation; do not silently
 broaden a pass from one hardware family or source to another.
+
+The documentation/evidence follow-up received one independent adversarial
+review with no blocking finding. Its optional source-container reproducibility
+clarification was incorporated. Four docs-index/link tests and the tracked
+hook passed; the affected-surface resolver confirms documentation-only scope.
 
 ## 5. Initial measured evidence
 
