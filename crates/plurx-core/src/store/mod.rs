@@ -17,6 +17,12 @@
 
 pub mod sharing;
 pub use sharing::SharingStore;
+pub mod sharing_catalogue;
+pub use sharing_catalogue::SharingCatalogueStore;
+pub mod sharing_catalogue_source;
+pub use sharing_catalogue_source::SharingSourceCatalogueStore;
+pub mod sharing_catalogue_details;
+pub use sharing_catalogue_details::SharingSourceDetailsStore;
 pub mod classification;
 #[cfg(feature = "hiqlite-store")]
 mod hiqlite_sharing;
@@ -5319,6 +5325,9 @@ pub trait TimelineAnnotationStore: Send + Sync + 'static {
 pub trait Store:
     crate::live_tv_resource::LiveTvResourceStore
     + SharingStore
+    + SharingCatalogueStore
+    + SharingSourceCatalogueStore
+    + SharingSourceDetailsStore
     + SettingsStore
     + BackgroundJobStore
     + DvConversionStore
@@ -5357,6 +5366,9 @@ pub trait Store:
 impl<T> Store for T where
     T: crate::live_tv_resource::LiveTvResourceStore
         + SharingStore
+        + SharingCatalogueStore
+        + SharingSourceCatalogueStore
+        + SharingSourceDetailsStore
         + SettingsStore
         + BackgroundJobStore
         + DvConversionStore

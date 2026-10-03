@@ -1463,8 +1463,8 @@ implied by the build handoff.
 | S0 | contract ready to build | Original `4e81bc38c`, revision `eb9038755`, PR #740 | Opus re-review corrections incorporated in §16; runtime evidence is recorded per milestone |
 | S1 | merged into effort | [PR #746](http://192.168.4.7:3000/noirr/plurx/pulls/746), `aaafc1a0f5` | SQLite v92 / Hiqlite v70; purpose-bound secrets; pairing/rotation/assignment transactions. Five store contracts, 11 sharing unit tests, schema migration parity and 31 import-inventory tests passed; workspace Clippy and catalog lint passed. Run 3890 and the final Effort development gate passed on the exact candidate; landed in the effort as `971265536a` with all seven regression fields. |
 | S2 | implementation in progress; topology qualification open | [draft PR #759](http://192.168.4.7:3000/noirr/plurx/pulls/759) | Dedicated loopback TLS transport, pinned direct dialing and fixed Tailscale DNS, isolated peer/admin routes, durable claim/rotation recovery, authenticated endpoint refresh and advisory Developer switch implemented. Two-NAT, shared-machine Serve and Docker isolation/egress receipts remain open; S2 is not complete. |
-| S3 | implementation started; ownership migration open | `codex/sharing-s3-principals` (unpublished) | Canonical Local writers, complete principal reads and seven-table candidate rebuild implemented; ownership and actual-voter lifecycle regressions passed. Shared grant/scope admission, caller census, migration installation and coordinated upgrade qualification remain open; §16.4 records the boundaries. |
-| S4 | not started | — | — |
+| S3 | implementation started; ownership migration open | `codex/sharing-s3-principals` (unpublished) | Canonical Local writers, complete principal reads and seven-table candidate rebuild implemented; ownership and actual-voter lifecycle regressions passed. Caller refusal and retained-read census are qualified; Shared grant/scope admission, migration installation and coordinated upgrade qualification remain open; §16.4 records the boundaries. |
+| S4 | source catalogue and private history candidates implemented; qualification pending | `codex/sharing-s4-catalogue` | Consistent live keysets and batch metadata, candidate order maintenance and durable item identities, peer metadata routes and receiver-only ordered history. Viewer/cache/artwork/details, activation floor and qualification remain open. |
 | S5 | not started | — | — |
 | S6 | not started | — | — |
 | S7 | not started | — | — |
@@ -2194,3 +2194,344 @@ acknowledgement/projection regression (one test, zero ignored, 9.22 seconds),
 feature-enabled all-target check (25.37 seconds) and denied-warning Clippy
 (30.40 seconds). Wrong owner tuples fail, retained exact acknowledgements
 replay, and retirement preserves a foreign pointer and physical pin.
+
+### 16.5 Parallel S4 implementation — catalogue boundaries and private progress
+
+The isolated task starts from S1 effort landing `971265536`, using the pinned
+Rust 1.97.1 compiler. It does not enable a peer or viewer route.
+
+**Built:** [catalogue values](../../crates/plurx-core/src/sharing_catalogue.rs)
+keep full import/server/catalogue/library/item identities and canonical string
+IDs. Cursor MACs derive a catalogue key from the provisioned credential key and
+use a fixed catalogue purpose prefix; key bytes are not exported. Cursors last five minutes, are
+bounded to 4 KiB, and bind the grant, library, query and exact sort boundary.
+A changed order revision retains that boundary. Current authority still has
+to be read with the page; a signed cursor is never an authorization grant.
+Batch parsing stops before retaining more than 200 IDs. Logical browse
+identity retention suppresses duplicates across evicted pages.
+
+The [private watch Store](../../crates/plurx-core/src/store/sharing_catalogue.rs)
+uses the existing receiver-only table. A single guarded write checks current
+import, viewer assignment and captured lifecycle/assignment generations.
+Higher sequences replace progress; identical retries replay; lower sequences
+and conflicting same-sequence values cannot overwrite a newer position.
+A changed item/library identity is refused. Reads check current assignments,
+so disconnect or unassignment hides retained progress. No statement writes
+local household watch state or source-side history. The HTTP caller still
+has to verify a live local login and current source item membership; these
+Store methods do not attest foreign metadata.
+
+**Observed:** four catalogue/progress unit regressions passed with zero ignored
+tests (0.10 seconds). The private-watch contract passed on both SQLite modes and
+three actual Hiqlite voters (9.33 seconds, one contract, zero ignored tests).
+The reference/dedup fixture retained 40,000 distinct references; this is not
+a process-memory measurement. Documentation indexing passed four tests and
+catalog lint passed. Clippy passed all core targets with denied warnings
+and the replicated contract feature (39.10 seconds). The focused
+pinned-toolchain commands were:
+
+```sh
+cargo test --locked --offline -p plurx-core --features hiqlite-store --lib sharing_catalogue -- --nocapture
+cargo test --locked --offline -p plurx-core --features hiqlite-contract-tests --test store_contract sharing_private_watch -- --nocapture
+cargo clippy --locked --offline -p plurx-core --features hiqlite-contract-tests --all-targets -- -D warnings
+```
+
+**Still owed:** consistent source catalogue reads and order-revision updates,
+closed presentation DTOs, peer/viewer route wiring, scoped artwork, bounded
+metadata/art caches, batch concurrency, source revalidation of Continue
+Watching, and measured paging under actual continuous scan writes. Cursor
+unit tests that advance revisions are not the scan-liveness receipt. S4 is
+partial; no Tailscale, playback, client or promotion qualification is claimed.
+
+
+### 16.6 Parallel S4 source catalogue and item identity candidate
+
+**Built, awaiting activation:** the [source Store](../../crates/plurx-core/src/store/sharing_catalogue_source.rs)
+reads active credential/grant, current library membership, revision and page in
+one consistent SQL boundary. It uses fixed BINARY indexes and numeric item
+IDs with tuple seeks; child order includes numeric season/episode keys and
+explicit NULL ordering. Pages are bounded to 201 rows including lookahead.
+Batch requests retain at most 200 IDs and return no metadata for missing or
+out-of-scope IDs. The [peer routes](../../crates/plurxd/src/http/shared_library.rs)
+compose the existing private listener guard and expose closed library/item
+metadata, children, batches and signed live cursors. Internal artwork names
+cannot be serialized by these records. The routes refuse service while
+catalogue order or item identity maintenance is absent or an import is active.
+
+The [candidate order DDL](../../crates/plurx-core/src/store/sharing_catalogue_schema.sql)
+indexes title and child order and maintains revisions on library/item insert,
+item deletion, library moves and actual sort/parent/kind/ordinal changes.
+Descriptions, artwork and analysis updates do not advance order revisions.
+The finite production writer census covers ordinary media writes in
+`sqlite/media.rs` and `hiqlite_media.rs`, lease-fenced scanner/publication
+writes in `sqlite/publication.rs` and `hiqlite_publication.rs`, reconciliation
+and pruning in those same modules, and explicit-ID backend import in
+`hiqlite_import.rs`. Old table rebuild migrations and test SQL are not runtime
+writers. Membership/order maintenance is implemented in storage triggers, so
+the enumerated writer paths do not have independent counter updates to omit.
+
+An actual SQLite `insert_item` → delete highest item → unrelated `insert_item`
+reproduced ID reuse (`old=1`, `new=1`). Because shared references and retained
+private history bind source server/epoch/item IDs, reuse would make retained
+state refer to another title. The [candidate allocator DDL](../../crates/plurx-core/src/store/item_identity_schema.sql)
+keeps a durable high-water mark and rejects every implicit or explicit insert
+at or below it outside a dedicated fresh-target import mode. Ordinary writers
+allocate the next ID within the insert statement. The replicated fenced
+writer replaces random high-i64 allocation with a consistent candidate read
+and an atomic lease-checked insertion; competing allocation rolls back and
+retries at most four times. Failed inserts do not spend an ID. All inserts
+observe explicit source IDs. The immutable import actor additionally preserves
+a source watermark above live IDs; interrupted imports retain unavailable
+import mode and require the existing discard-incoming-target recovery.
+Catalogue triggers suppress derived revision changes during import and seed
+missing older-backup revisions only after parity succeeds.
+
+**Observed:** eight focused core tests passed with zero failures/ignored tests
+(2.80 seconds), including actual metadata writes while 5,000 finite items are
+paged to exhaustion on memory and disk SQLite. This is a live-list receipt;
+it is not snapshot isolation. Isolated native test-process measurements were
+0.10 seconds and 24,690,688-byte peak RSS for the 40,000-reference dedup
+fixture, and 1.85 seconds and 41,500,672-byte peak RSS for the complete live
+scan fixture. These include the test runtime, source fixtures and SQLite;
+they do not attribute heap bytes solely to retained references. Two additional
+contracts passed on three actual Hiqlite voters (18.95 seconds, zero ignored):
+current scope removal, live boundary continuation after metadata/sort changes,
+per-ID batch denial, a real prepared SQLite backup with spent watermark 1000,
+post-import monotone allocation, deleted-highest allocation, stale scanner
+lease refusal, old writer refusal and concurrent distinct IDs.
+
+```sh
+cargo test --locked --offline -p plurx-core --features hiqlite-contract-tests --lib sharing_catalogue -- --nocapture
+cargo test --locked --offline -p plurx-core --features hiqlite-contract-tests --test store_contract sharing_catalogue_ -- --nocapture
+cargo test --locked --offline -p plurxd --bin plurxd sharing_catalogue_http_ -- --nocapture
+cargo clippy --locked --offline -p plurxd -p plurx-core --all-targets --features plurx-core/hiqlite-contract-tests -- -D warnings
+```
+
+Two daemon HTTP regressions also passed (0.18 seconds, zero ignored):
+unknown/duplicate/oversized query rejection and live-grant/maintenance
+refusal on every catalogue route, with private headers and no out-of-scope
+names or source paths.
+
+All core/daemon targets passed denied-warning Clippy (1 minute 42 seconds).
+Documentation indexing passed four tests and catalog lint passed (28 points,
+35 checks and 2,609 audited files).
+
+**Still owed:** the schema remains candidate-only and uninstalled. Activation
+requires coordinated migration versions and the separate
+`sharing_catalogue_item_identity_v1` floor on every active voter and learner;
+the old random explicit publication writer must not remain admitted.
+No capability is advertised by this candidate. Rejoin/promotion must treat an
+installed allocator table conservatively as requiring the new floor. Viewer
+routes, closed playable-file details, bounded receiver metadata/art caches,
+current source revalidation of Continue Watching, scoped artwork and blocked
+body revocation remain open. The earlier private-watch Store still requires
+live login and current foreign item membership at its HTTP caller. This is
+not S4 completion, playback admission or Tailscale/promotion qualification.
+
+
+The isolated S4 branch also integrated the verified member-floor dependency
+chain through `18999f044`, retaining its principal fixtures and all catalogue
+registrations. The resulting tree passed core/daemon all-target check
+(1 minute 22 seconds), 46 focused sharing unit tests (13.81 seconds) and
+14 focused sharing contracts (110.23 seconds, zero ignored) on SQLite and
+actual three-voter fixtures. Those contracts include both independent floor
+capability cases and the source/allocator/private-history cases. Serving
+admission integration is the next change; these observations do not install
+schemas, advertise capabilities or authorize a new shared writer.
+
+
+#### S4 receiver runtime checkpoint (candidate, open)
+
+The candidate now mounts authenticated receiver library, browse/search,
+children, batch, item metadata and a closed private-progress refusal route. Every operation
+uses a verified pinned source connection, a closed bounded response and fresh
+local assignment authority. Admission retains no wait queue: four metadata
+operations process-wide and one per import. Permit ownership releases both
+limits on errors and cancellation. Assignment filtering uses one consistent,
+generation-bound query, bounded at the existing 64 libraries per grant, instead of one Store lookup
+per remote item. Captured source/epoch, import lifecycle, endpoint, grant and
+assignment generations are checked after the network operation. The private-progress Store enforces those generations atomically. Its HTTP
+writer remains unavailable until S5 supplies current active-session observation
+binding; a fresh source batch alone cannot authorize playback progress.
+
+Catalogue success bodies have an explicit 4 MiB client cap; management and
+error bodies retain a 128 KiB cap. Unknown response fields, mismatched batch
+IDs/order, noncanonical IDs, excessive fields and oversized streams refuse
+without retaining peer error text. Query components are percent-encoded and
+malformed percent encodings or UTF-8 refuse before cursor/filter processing.
+Source metadata serving now requires the actual CatalogueItemIdentity member
+floor on replicated nodes, with a one-second read deadline. That read check
+is not a write admission predicate and does not install a schema or advertise
+capabilities.
+
+This checkpoint remains open: playable-file details, metadata/art caches,
+scoped art with blocked-socket revocation and current-source Continue Watching
+are still owed. Private progress refuses a changed stored library identity;
+a later explicit reconciliation must prove the same durable source/epoch/item
+in its new library and recheck the new assignment. A progress body cannot
+perform that reconciliation. Neither this checkpoint nor the earlier Store
+primitives constitutes S4 completion or S5 playback qualification.
+
+
+The exact receiver checkpoint passed six focused daemon catalogue regressions
+(0.59 seconds, zero ignored), including authenticated-route refusal, malformed
+UTF-8/query fields, 64-versus-65 library response bounds, the management versus
+catalogue body budgets, mismatched per-ID results and cancelled admission.
+The generation-bound private-watch/assignment contract passed memory, pooled
+SQLite and actual three-voter storage (9.37 seconds, zero ignored).
+Core/daemon all-target denied-warning Clippy passed on the same source; its
+reported 5 minutes 4 seconds includes waiting for the focused test compiler.
+Commands: `cargo test --locked --offline -p plurxd --bin plurxd sharing_catalogue_`,
+`cargo test --locked --offline -p plurx-core --features hiqlite-contract-tests
+--test store_contract sharing_private_watch_orders_updates_and_isolates_sources_and_assignments`
+and `cargo clippy --locked --offline -p plurxd -p plurx-core --all-targets
+--features plurx-core/hiqlite-contract-tests -- -D warnings`, with the pinned
+1.97.1 compiler and the isolated S4 target directory.
+
+
+#### S4 accepted content transport checkpoint (candidate, open)
+
+Source catalogue responses now retain captured grant, source/epoch, library
+and item authority through accepted-connection completion. The Store check
+uses one consistent current query; credential rotation alone preserves an
+already accepted response, while removed grants, narrowed library scope,
+item moves/deletion, unavailable qualified layout and import mode refuse.
+The actual catalogue query also checks import mode after its earlier readiness
+read, closing a transition between those reads. Replicated serving continues
+to require the real catalogue member-floor read check. This does not authorize
+writes or activate the candidate schemas.
+
+A sharing handler registers its authority monitor on the accepted transport.
+Each monitor checks current authority every second with a one-second deadline
+and cancels that connection on refusal or unavailable authority. The
+connection task selects that cancellation while Hyper is writing and owns the
+monitor tasks. This closes blocked transports within the three-second grant
+bound, including after Hyper has consumed the entire application body.
+Hyper 1.10.1 / h2 0.4.16 may still own queued DATA after Body Drop; a flush from
+another stream does not establish that the protected stream has drained.
+Therefore no Body Drop, global flush counter or timer retires these monitors.
+
+The registries are finite: 64 content monitors process-wide and 32 per accepted
+connection, with immediate refusal rather than a waiting queue. Completed
+responses on an idle connection retain those slots until connection completion.
+A request exceeding the connection bound cancels that connection; global
+exhaustion returns a closed 429. On HTTP/2, authority cancellation closes all
+multiplexed streams on that connection, including unrelated ordinary responses.
+Ordinary handlers do not register monitors or cancel the sharing token.
+
+This checkpoint covers source catalogue JSON. Scoped artwork, receiver login
+and assignment body monitors, full file details, caches and Continue Watching
+remain open; these results do not qualify S4 or S5. The transport seam is
+available to subsequent scoped artwork/relay handlers, which must retain their
+own captured authority and bounded monitor admission through the same lifetime.
+
+
+Ten daemon catalogue regressions passed on this checkpoint (6.40 seconds,
+zero ignored), including actual HTTP/1 blocked transport revocation for grant,
+scope and item mutations, delayed HTTP/2 stream windows after Body Drop and
+another stream flush, credential rotation, collateral multiplex cancellation,
+global admission refusal, 32 idle response monitors and owned registry cleanup.
+The source Store contract passed on actual three-voter storage (8.93 seconds,
+zero ignored), checking source identity, current item moves, import mode and
+scope removal. The interposed SQLite query test also passed: import activation
+after readiness refuses each actual catalogue query (0.16 seconds, zero ignored).
+Commands: `cargo test --locked --offline -p plurxd --bin plurxd sharing_catalogue_`,
+`cargo test --locked --offline -p plurx-core --features hiqlite-contract-tests
+--test store_contract sharing_catalogue_source_three_voters_refuse_removed_scope_and_preserve_live_boundaries`
+and `cargo test --locked --offline -p plurx-core --features hiqlite-contract-tests
+--lib sharing_catalogue_actual_query_refuses_import_started_after_readiness`.
+The socket/voter tests use local loopback fixtures and the pinned 1.97.1 compiler;
+no production schemas, network settings or installations are changed.
+
+Core/daemon all-target Clippy with `-D warnings` passed (1 minute 51 seconds,
+including compiler lock wait); docs-index tests passed. The tracked commit
+hook must also pass before this checkpoint is integrated.
+
+
+#### S4 stable file revisions and existing-key census (candidate, open)
+
+The cancellation checkpoint was integrated with the full principal-storage
+ancestry through `cac78a97e` and verified transport ancestry through
+`c99c3769e`; the resulting `139d30b` passed ten daemon catalogue/cancellation
+regressions (7.30 seconds), two actual-voter catalogue/allocator contracts
+(18.95 seconds), eight core catalogue units (3.16 seconds), all with zero
+ignored, plus feature-enabled core/daemon all-target denied-warning Clippy.
+Those results describe that frozen integration tree, not later additions.
+
+The [closed revision type](../../crates/plurx-core/src/sharing_catalogue_details.rs)
+contains a canonical 64-hex opaque file revision and a server-only file witness.
+The witness has no Serialize or Debug implementation; only a current-authorized
+Store query constructs its private canonical projection. The
+[Source witness reader](../../crates/plurx-core/src/store/sharing_catalogue_details.rs)
+correlates current grant, source/epoch, effective movie/show library,
+movie/episode item, file and import state in its actual query. It returns a
+closed authorized/unavailable/capacity outcome. Admission must regenerate the
+same persisted-column projection and compare the captured witness within its
+atomic write. A wire digest or an earlier read cannot authorize that write.
+
+The projection includes exact persisted path, size/mtime, selected media
+facts, streams, probe input, scan time, audio offset, DV and luminance values.
+Caption resource metadata participates; caption body bytes do not. S5 must
+revision the actual caption resources separately. Nested SQL CASE branches
+refuse oversized raw private fields and a serialized projection above 2 MiB
+before constructing the canonical witness; no truncation hides changes.
+These are single-file reads. The planned all-file detail query must also
+bound 64 files and aggregate private projection bytes at 8 MiB before
+materialization; that query and closed wire media facts remain open.
+
+File revisions derive an HMAC purpose from a stable random Source/epoch key.
+The [candidate key table](../../crates/plurx-core/src/store/sharing_catalogue_keys_schema.sql)
+seals that random material under the distinct CatalogueRevision context.
+Peer credential rotation does not change it, and replacing the sealing master
+rewraps the same material rather than replacing it. The cryptographic factory
+writes no database state; catalogue readers never initialize a missing key.
+Existing-key reads are bound to the requested Source and epoch and refuse
+absent, malformed or incompatible state.
+
+The startup sealed-row census includes this optional candidate table and
+refuses wrong object/column/type/nullability/primary-key shapes, excess rows,
+foreign Source/epoch bindings, malformed envelopes and oversized rows. SQLite
+reads table shape and rows in one read transaction. Hiqlite currently performs
+separate consistent reads; this is not an atomic schema/data snapshot.
+Coordinated schema creation and key rewrap must remain quiescent around its
+startup census and key selection. No runtime initializer is installed.
+
+Activation remains open: the qualified coordinator must provision the purpose
+key before publishing its marker, compose the Source capability floor and
+same-write intents, and preserve the key through backup/import. The earlier
+session coordinator receipt does not qualify this new table. File details,
+receiver caches, scoped artwork, receiver body authority and Continue Watching
+remain required S4 work; these revision primitives do not complete S4 or
+qualify Source playback admission.
+
+
+The revision checkpoint passed twelve focused core catalogue units (4.85
+seconds, zero ignored). The existing-key census and current-file witness each
+passed actual three-voter contracts (8.87 seconds each, zero ignored).
+The witness regression covers private file replacement, huge canonical IDs,
+capacity refusal before malformed caption JSON is evaluated and current scope
+removal. Memory/pooled tests also cover read-only absent-key refusal, wrong
+epoch, caption body exclusion and metadata revision changes. Feature-enabled
+core/daemon all-target Clippy with `-D warnings` passed (2 minutes 7 seconds,
+including compiler lock wait); docs-index tests passed.
+Commands: `cargo test --locked --offline -p plurx-core --features hiqlite-contract-tests
+--lib sharing_catalogue_`, and the same features with `--test store_contract`
+filtered to `sharing_catalogue_revision_key_census_three_voters_refuses_partial_and_foreign_state`
+and `sharing_catalogue_file_witness_three_voters_binds_current_file_and_refuses_capacity`.
+These are pinned Rust 1.97.1 results, with key provisioning confined to temporary
+fixtures. Production schemas, activation and Source advertisements remain unchanged.
+
+
+**Combined ownership/catalogue integration:** the retained-read and caller
+checkpoint `f65eaace4` integrates S4 through stable revision/current witness
+checkpoint `ae626d8e6`. Pinned daemon and feature-enabled core all-target checks
+passed (1m06s and 27.72 seconds). All 13 core catalogue units passed (4.47
+seconds), all five catalogue/private-history contracts passed through their
+SQLite and actual three-voter fixtures (45.50 seconds), all ten daemon
+catalogue/connection cancellation regressions passed (6.20 seconds), and all
+19 SQLite principal regressions passed (18.99 seconds). Denied-warning
+feature Clippy passed (31.49 seconds); every executed test had zero ignored
+cases. The integration preserves canonical ownership fixes while adding the
+bounded catalogue, allocator/import identity, private history, transport body
+cancellation and stable existing-key-only file-witness candidates. It does
+not install their schemas or enable Shared producer admission.

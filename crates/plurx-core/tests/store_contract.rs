@@ -25,6 +25,11 @@ mod background_jobs;
 mod session_principals;
 #[path = "store_contract/sharing.rs"]
 mod sharing;
+#[path = "store_contract/sharing_catalogue.rs"]
+mod sharing_catalogue;
+#[cfg(feature = "hiqlite-contract-tests")]
+#[path = "store_contract/sharing_catalogue_source.rs"]
+mod sharing_catalogue_source;
 #[cfg(feature = "hiqlite-contract-tests")]
 #[path = "store_contract/sharing_member_floor.rs"]
 mod sharing_member_floor;

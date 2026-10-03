@@ -325,6 +325,20 @@ impl CredentialKey {
         &self.id
     }
 
+    /// Authenticate a bounded catalogue cursor without exporting credential key material.
+    /// The fixed purpose prefix prevents reuse of an envelope or other sharing MAC.
+    pub(crate) fn sharing_catalogue_cursor_mac(&self, payload: &[u8]) -> [u8; 32] {
+        let root = ring::hmac::Key::new(ring::hmac::HMAC_SHA256, &self.key);
+        let derived = ring::hmac::sign(&root, b"cinema-sharing-catalogue-key-v1");
+        let key = ring::hmac::Key::new(ring::hmac::HMAC_SHA256, derived.as_ref());
+        let mut context = ring::hmac::Context::with_key(&key);
+        context.update(b"cinema-sharing-catalogue-cursor-v1\0");
+        context.update(payload);
+        let mut result = [0; 32];
+        result.copy_from_slice(context.sign().as_ref());
+        result
+    }
+
     /// Mint fresh key material that is never written anywhere.
     ///
     /// For callers with no data directory to resolve a key file from. Anything
@@ -533,6 +547,8 @@ pub enum SharingSecretPurpose {
     Claim,
     Rotation,
     Upstream,
+    /// A stable random catalogue revision key, sealed to its Source and epoch.
+    CatalogueRevision,
 }
 
 fn sharing_aad(purpose: SharingSecretPurpose, server: uuid::Uuid, import: uuid::Uuid) -> Vec<u8> {
@@ -541,6 +557,7 @@ fn sharing_aad(purpose: SharingSecretPurpose, server: uuid::Uuid, import: uuid::
         SharingSecretPurpose::Claim => b"claim".as_slice(),
         SharingSecretPurpose::Rotation => b"rotation".as_slice(),
         SharingSecretPurpose::Upstream => b"upstream".as_slice(),
+        SharingSecretPurpose::CatalogueRevision => b"catalogue-revision".as_slice(),
     };
     let mut aad = b"plurx.sharing.v1\0".to_vec();
     aad.extend_from_slice(&(tag.len() as u32).to_be_bytes());
@@ -1079,6 +1096,50 @@ mod tests {
 mod sharing_tests {
     use super::*;
     use uuid::Uuid;
+    #[test]
+    fn sharing_catalogue_revision_key_rewrap_preserves_purpose_and_epoch() {
+        let old = CredentialKey::from_bytes([7; 32]);
+        let new = CredentialKey::from_bytes([8; 32]);
+        let server = Uuid::new_v4();
+        let epoch = Uuid::new_v4();
+        let purpose = SharingSecretPurpose::CatalogueRevision;
+        let sealed = old
+            .seal_sharing(
+                purpose,
+                server,
+                epoch,
+                "synthetic-stable-random-purpose-key",
+            )
+            .expect("sealed purpose key");
+        let clear = old
+            .open_sharing(purpose, server, epoch, &sealed)
+            .expect("old key");
+        let rewrapped = new
+            .seal_sharing(purpose, server, epoch, clear.expose())
+            .expect("rewrap");
+        assert_eq!(
+            new.open_sharing(purpose, server, epoch, &rewrapped)
+                .expect("new sealing key")
+                .expose(),
+            clear.expose()
+        );
+        assert_ne!(sealed.key_id(), rewrapped.key_id());
+        for (p, s, e) in [
+            (SharingSecretPurpose::Credential, server, epoch),
+            (purpose, Uuid::new_v4(), epoch),
+            (purpose, server, Uuid::new_v4()),
+        ] {
+            assert!(new.open_sharing(p, s, e, &rewrapped).is_err());
+        }
+        assert!(old
+            .open_sharing(purpose, server, epoch, &rewrapped)
+            .is_err());
+        let mut census = SealedRowCensus::default();
+        census.observe_envelopes("catalogue-revision", &[&rewrapped]);
+        assert_eq!(census.sealed_rows(), 1);
+        let directory = tempfile::tempdir().expect("key fixture");
+        assert!(open_credential_key(&directory.path().join("missing.key"), &census).is_err());
+    }
     #[test]
     fn sharing_ciphertext_binds_server_import_and_purpose_without_plaintext() {
         let key = CredentialKey::from_bytes([7; 32]);

@@ -47,6 +47,7 @@ pub(crate) mod publication;
 mod reading;
 mod scan;
 pub(crate) mod scan_identity;
+pub(crate) mod shared_library;
 pub(crate) mod sharing;
 pub(crate) mod stream;
 pub(crate) mod subtitle_downloads;
@@ -1319,6 +1320,7 @@ pub fn router(state: AppState) -> Router {
     // unlimited while JSON work cannot occupy a request slot forever.
     let json_short = Router::new()
         .merge(sharing::admin_router())
+        .merge(shared_library::viewer_router())
         .route("/server", get(system::server_info))
         .route("/me", get(auth::me))
         .route("/settings", get(system::get_settings))

@@ -21,6 +21,23 @@ impl From<&mut hiqlite::Row<'_>> for Payload {
 }
 #[async_trait]
 impl Backend for HiqliteAuthStore {
+    async fn sharing_revision_key_rows(&self) -> Result<Vec<String>, StoreError> {
+        // These are individual consistent reads, not one schema/data snapshot.
+        // Candidate activation/rewrap must hold coordinated quiescence around
+        // startup census and key selection. No runtime initializer exists here.
+        let present=self.sharing_read("SELECT json_quote(CASE WHEN count(*)=0 THEN 0 WHEN count(*)=1 AND max(type)='table' THEN 1 ELSE 2 END) AS payload FROM sqlite_master WHERE name='sharing_catalogue_keys'",vec![]).await?;
+        match present.first().map(String::as_str) {
+            Some("0") => return Ok(Vec::new()),
+            Some("1") => {}
+            _ => return Err(crate::sharing::invalid()),
+        }
+        super::sharing::revision_key_columns(
+            self.sharing_read(super::sharing::REVISION_KEY_COLUMNS_SQL, vec![])
+                .await?,
+        )?;
+        self.sharing_read(super::sharing::REVISION_KEY_ROWS_SQL, vec![])
+            .await
+    }
     async fn sharing_read(&self, sql: &str, params: Vec<Value>) -> Result<Vec<String>, StoreError> {
         let (sql, params) = super::sharing::ordered(sql, params)?;
         super::hiqlite::validate_sql(&sql)?;

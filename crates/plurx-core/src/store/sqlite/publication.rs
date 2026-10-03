@@ -158,11 +158,12 @@ impl FencedPublicationStore for SqliteStore {
             } else {
                 sort_title_for(&item.title)
             };
-            conn.execute(
-                "INSERT INTO items
-                   (library_id, kind, parent_id, title, sort_title, year,
-                    season_number, episode_number)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            let changed = conn.execute(
+                if conn.query_row("SELECT count(*) FROM sqlite_master WHERE type='table' AND name='item_identity_watermark'", [], |r| r.get::<_,i64>(0))? == 1 {
+                    "INSERT INTO items(id,library_id,kind,parent_id,title,sort_title,year,season_number,episode_number) SELECT high_water+1,?1,?2,?3,?4,?5,?6,?7,?8 FROM item_identity_watermark WHERE singleton=1 AND importing=0 AND high_water<9223372036854775807"
+                } else {
+                    "INSERT INTO items(library_id,kind,parent_id,title,sort_title,year,season_number,episode_number) VALUES(?1,?2,?3,?4,?5,?6,?7,?8)"
+                },
                 params![
                     item.library_id,
                     item.kind.as_str(),
@@ -174,6 +175,7 @@ impl FencedPublicationStore for SqliteStore {
                     item.episode_number,
                 ],
             )?;
+            if changed != 1 { return Err(StoreError::Database("item identity allocation unavailable".into())); }
             Ok(conn.last_insert_rowid())
         })
         .await

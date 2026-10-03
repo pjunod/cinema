@@ -65,6 +65,62 @@ pub(crate) fn ordered(sql: &str, values: Vec<Value>) -> Result<Statement, StoreE
 pub(crate) trait Backend: Send + Sync {
     async fn sharing_read(&self, sql: &str, values: Vec<Value>) -> Result<Vec<String>, StoreError>;
     async fn sharing_txn(&self, statements: Vec<Statement>) -> Result<Vec<usize>, StoreError>;
+    /// Optional candidate table. SQLite reads its shape and rows in one
+    /// snapshot; Hiqlite currently requires coordinated schema/rewrap quiescence.
+    async fn sharing_revision_key_rows(&self) -> Result<Vec<String>, StoreError>;
+}
+pub(super) const REVISION_KEY_COLUMNS_SQL: &str = "SELECT json_array(name,type,\"notnull\",pk) AS payload FROM pragma_table_info('sharing_catalogue_keys') ORDER BY cid";
+pub(super) const REVISION_KEY_ROWS_SQL: &str = "SELECT json_object('singleton',singleton,'server_id',substr(server_id,1,37),'catalogue_epoch',substr(catalogue_epoch,1,37),'envelope',CASE WHEN length(revision_envelope)<=4096 THEN revision_envelope ELSE NULL END,'source_matches',EXISTS(SELECT 1 FROM sharing_identity s WHERE s.singleton=1 AND s.server_id=sharing_catalogue_keys.server_id AND s.catalogue_epoch=sharing_catalogue_keys.catalogue_epoch)) AS payload FROM sharing_catalogue_keys LIMIT 2";
+pub(super) fn revision_key_columns(rows: Vec<String>) -> Result<(), StoreError> {
+    let columns: Vec<(String, String, i64, i64)> = rows
+        .into_iter()
+        .map(|r| decode(&r))
+        .collect::<Result<_, _>>()?;
+    if columns
+        != [
+            ("singleton".into(), "INTEGER".into(), 1, 1),
+            ("server_id".into(), "TEXT".into(), 1, 0),
+            ("catalogue_epoch".into(), "TEXT".into(), 1, 0),
+            ("revision_envelope".into(), "TEXT".into(), 1, 0),
+        ]
+    {
+        return Err(invalid());
+    }
+    Ok(())
+}
+pub(super) fn revision_key_envelopes(rows: Vec<String>) -> Result<Vec<SealedSecret>, StoreError> {
+    #[derive(serde::Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct Row {
+        singleton: i64,
+        server_id: String,
+        catalogue_epoch: String,
+        envelope: String,
+        source_matches: i64,
+    }
+    if rows.len() > 1 {
+        return Err(invalid());
+    }
+    rows.into_iter()
+        .map(|row| {
+            let row: Row = decode(&row)?;
+            if row.singleton != 1
+                || row.source_matches != 1
+                || [row.server_id, row.catalogue_epoch].iter().any(|id| {
+                    Uuid::parse_str(id)
+                        .ok()
+                        .is_none_or(|uuid| uuid.to_string() != *id)
+                })
+            {
+                return Err(invalid());
+            }
+            let envelope = SealedSecret::from_stored(row.envelope);
+            if !envelope.is_wrapped() {
+                return Err(invalid());
+            }
+            Ok(envelope)
+        })
+        .collect()
 }
 fn decode<T: DeserializeOwned>(s: &str) -> Result<T, StoreError> {
     serde_json::from_str(s).map_err(|_| invalid())
@@ -850,6 +906,9 @@ impl<T: Backend> SharingStore for T {
                 v["purpose"].as_str().ok_or_else(invalid)?,
                 &envelopes.iter().collect::<Vec<_>>(),
             );
+        }
+        for envelope in revision_key_envelopes(self.sharing_revision_key_rows().await?)? {
+            census.observe_envelopes("catalogue-revision", &[&envelope]);
         }
         Ok(census)
     }
