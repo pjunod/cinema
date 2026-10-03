@@ -1520,6 +1520,15 @@ function fragmentIndexPassBuiltFile(entry, fileId) {
   return builtFiles[1].split(",").some((value) => value.trim() === String(fileId));
 }
 
+function fragmentIndexTargets(files, filenames) {
+  return filenames.map((filename) => {
+    const file = files.get(filename);
+    if (!file) throw new Error(`scan missed VOD fixture ${filename}`);
+    if (!file.video_codec) throw new Error(`scan did not identify the video codec for ${filename}`);
+    return file;
+  }).filter((file) => ["h264", "hevc"].includes(file.video_codec));
+}
+
 async function startServer(options, fixtureDirectory) {
   // A throwaway daemon owns three listeners. Reserving all three together
   // prevents concurrent Forgejo jobs from sharing the default Raft/API ports
@@ -1625,23 +1634,20 @@ async function startServer(options, fixtureDirectory) {
   if (options.enable_vod) {
     process.stdout.write("INDEX   enable VOD and wait for the node-local fragment pass\n");
     const indexStartedAt = performance.now();
+    const requested = options.vod_filenames || [];
+    const targets = fragmentIndexTargets(files, requested);
+    const needsIndex = !requested.length || targets.length > 0;
     await api(baseUrl, "/settings", {
       token,
       method: "PUT",
       body: {
         vod_presentation: true,
-        vod_index_mins: 15,
+        vod_index_mins: needsIndex ? 15 : 0,
         vod_block_budget_secs: "8",
         vod_materialize_budget_secs: "30",
       },
     });
-    const requested = options.vod_filenames || [];
-    const targets = requested.map((filename) => {
-      const file = files.get(filename);
-      if (!file) throw new Error(`scan missed VOD fixture ${filename}`);
-      return file;
-    });
-    await waitFor(async () => {
+    if (needsIndex) await waitFor(async () => {
       const logs = await api(baseUrl, "/system/logs?level=debug&limit=500", { token });
       if (targets.length) {
         return targets.every((file) => logs.some((entry) =>
@@ -1650,13 +1656,16 @@ async function startServer(options, fixtureDirectory) {
       }
       return completedFragmentIndexPass(logs);
     }, 180_000, "VOD fragment indexing pass", 1_000);
+    preparation.cache_condition.fragment_index_at_playback = needsIndex ? "local" : "not_applicable";
     preparation.source_indexing = {
-      wall_status: "measured",
-      wall_ms: Math.round(performance.now() - indexStartedAt),
+      wall_status: needsIndex ? "measured" : "not_required",
+      wall_ms: needsIndex ? Math.round(performance.now() - indexStartedAt) : null,
       bytes_read_status: "unavailable",
       bytes_read: null,
-      reason: "request-to-completed-pass wall time includes scheduler wake-up; the daemon exposes no per-pass I/O byte counter",
-      full_source: true,
+      reason: needsIndex
+        ? "request-to-completed-pass wall time includes scheduler wake-up; the daemon exposes no per-pass I/O byte counter"
+        : "the selected encoded-source fixtures are not eligible for the AVC/HEVC copy fragment index",
+      full_source: needsIndex,
       target_count: targets.length,
     };
   }
@@ -4334,7 +4343,7 @@ async function runSuite(manifest, options, dependencies = {}) {
     generated_at: new Date().toISOString(),
     suite,
     browser: browserInfo,
-    network_profile: profile,
+    network_profile: shaper?.profile || profile,
     shaping: shaper ? shaper.telemetry() : null,
     server: {
       base_url: server.baseUrl,
@@ -5067,6 +5076,12 @@ module.exports = {
   SHAPER_SLICE_BYTES,
   ShapingProxy,
   TokenBucket,
+  CdpDriver,
+  FirefoxDriver,
+  runOneCase,
+  startServer,
+  api,
+  fragmentIndexTargets,
   automaticSwitchesAfter,
   cdpBrowserArgs,
   findOrCreateCdpPageTarget,

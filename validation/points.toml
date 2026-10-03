@@ -825,6 +825,7 @@ paths = [
   "scripts/verify-dv-timeline",
   "scripts/dv-timeline-check",
   "scripts/playback-lab",
+  "scripts/continuous-quality-qualification",
   "scripts/continuous-quality-lab.mjs",
   "scripts/playback-startup-lab",
   "scripts/playback-startup-trace",

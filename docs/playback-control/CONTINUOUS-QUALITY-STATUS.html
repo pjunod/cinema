@@ -1,13 +1,17 @@
 <!doctype html><html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Continuous quality — build status</title>
 <style>body{max-width:960px;margin:48px auto;padding:0 24px;background:#15191e;color:#e8edf2;font:17px/1.6 system-ui}a{color:#8ecbff}h1{line-height:1.15}table{border-collapse:collapse;width:100%}td,th{padding:12px;text-align:left;border-bottom:1px solid #3c4650}.muted{color:#bbc5cf}.state{padding:10px 16px;background:#293544;border-radius:8px}code{font-size:.9em}</style>
 <h1>Continuous quality</h1>
-<p class="muted">Updated October 2, 2026 · Independent clone · <code>codex/continuous-quality-cq0</code></p>
+<p class="muted">Updated October 3, 2026 · Independent clone · <code>codex/continuous-quality-cq0</code></p>
 <p class="state"><strong>Incomplete — final adversarial review has not started.</strong>
 The human requests a stop immediately after that review for external Fable
 reviews, before fast-lane tests or merge.</p>
 <p><strong>Working now:</strong> the committed twenty-switch continuous
 suite on owned Linux Firefox and exact daemon <code>c8484d19b</code>, following
-Chrome cleanup. No unit tests have run.</p>
+Chrome cleanup. The first Firefox connection ended without a receipt after a
+disk-quota failure; its diagnostics were preserved and owned orphan processes
+and obsolete runtime data removed. The new run has persisted supervision,
+a bounded deadline and automatic cleanup. A committed mixed manual/Auto command
+is being prepared for reproducible review. No unit tests have run.</p>
 <p><strong>Latest runtime result:</strong> the focused <code>c8484d19b</code>
 Chrome campaign passed three manual and five actual Auto changes, with at most
 66.8 ms callback gap on all eight transitions, zero stalls or hitches, and

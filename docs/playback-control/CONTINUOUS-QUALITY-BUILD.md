@@ -4251,3 +4251,56 @@ owned Linux Firefox, the generated AVC/shared-AAC fixture and daemon
 `c8484d19b`. Chrome and its isolated daemon closed before Firefox started.
 No units executed. Final adversarial review has not started; the human's Fable
 stop remains immediately after that review and before fast-lane units or merge.
+
+
+### 10.143 Preserve failed Firefox diagnostics and commit mixed qualification tooling
+
+The first Linux Firefox CLI lost its connection without writing a result,
+leaving an owned daemon and browser behind. Its retained daemon log shows
+`Disk quota exceeded (os error 122)` during producer writes at film segment
+324, followed by storage self-fencing and 503s. This is unqualified infrastructure
+failure, not a passing playback receipt. Bounded daemon/browser log tails and
+an explicit orphan diagnostic were preserved; exact process identities were
+verified before termination. Only the completed owned runtime, its browser
+profile and the older completed mixed-campaign runtime were removed, freeing
+about 1.2 GiB. The warm compiler and generated fixtures remain.
+
+A new supervised Firefox run persists status and results independently of
+SSH/tool lifetime, has a forty-minute deadline, and finally cleans only its
+own process group and job runtime. It runs the committed twenty-manual AVC
+suite on daemon `c8484d19b`. Its result remains pending; no units executed.
+
+`scripts/continuous-quality-qualification` makes the mixed campaign reproducible
+from committed code instead of a private temporary harness. It uses the existing
+lab and generated MPEG4/shared-AAC fixture, fifteen manual changes and five real
+Auto changes (or three manual changes for a focused diagnostic), a 1920×1200
+browser surface, catalog-derived pressure bounded between the two actual rung
+peaks, exact build identity, sampled removal evidence and alive-daemon End census.
+The complete mixed p95 must remain at most 100 ms and every Auto maximum at most
+250 ms. Unsupported pressure intervals fail; no scripted height impersonates
+Auto. Startup owned FFmpeg probes settle for eight seconds and ordinary Activity
+attestation is explicitly recorded as warmed. Physical display/audio remain
+unmeasured. Syntax checks pass; authored regressions are unrun.
+
+The lab now skips the copy-fragment indexing wait only when the selected known
+video codecs cannot use the AVC/HEVC copy index. Missing scan entries and unknown
+codecs fail rather than become false evidence. It records this as not required,
+not a completed index pass. Shaping receipts use the actual supplied five-stage
+profile. These are qualification-tool changes, not production policy changes.
+
+After the pinned source-only compiler loop builds the exact committed archive,
+set `PLURX_BUILD_REF` to the reference used for that build and run on the isolated
+Linux node (archive extractions carry no `.git`):
+
+```sh
+node scripts/continuous-quality-qualification \
+  --server target/debug/plurxd --source-ref "$PLURX_BUILD_REF" \
+  --browser firefox --firefox ../browsers/firefox/firefox \
+  --geckodriver ../browsers/geckodriver --fixtures ../fixtures \
+  --json ../reports/continuous-firefox-mixed.json
+```
+
+Use `--manual-count 3` for the focused eight-change diagnostic; the default
+fifteen manual plus five Auto changes is the full twenty-change campaign.
+Run one browser case at a time. Final main-ready adversarial review and the
+subsequent human-requested Fable stop remain ahead.

@@ -1,0 +1,211 @@
+#!/usr/bin/env node
+"use strict";
+
+// Linux-owned daemon/browser qualification. Uses the committed playback lab;
+// no remote service, saved browser profile, repository token or device app.
+const fs = require("node:fs/promises");
+const path = require("node:path");
+const lab = require("./playback-lab");
+
+function autoLinkProfile(catalog) {
+  const peak = height => Math.max(0, ...catalog.filter(c => c.route === "encode"
+    && c.height === height).map(c => Number(c.peak_bps) || 0));
+  const lowFloor = peak(720) / 0.95;
+  const lowCeiling = peak(1080) * 0.68;
+  if (!(lowFloor > 0 && lowFloor < lowCeiling)) {
+    throw new Error("catalog has no safe pressure interval between its two encoded rungs");
+  }
+  const high = 100000;
+  if (high * 1000 < peak(1080) * 1.8) throw new Error("high link cannot prove the upgrade margin");
+  const low = Math.ceil((lowFloor + lowCeiling) / 2000);
+  if (!(low * 1000 >= lowFloor && low * 1000 < lowCeiling)) {
+    throw new Error("safe pressure interval is narrower than the shaper rate resolution");
+  }
+  return {low_floor_bps: lowFloor, low_ceiling_bps: lowCeiling,
+    stages: [high, low, high, low, high]};
+}
+
+async function producerCensus(server) {
+  const pid = server.child.pid;
+  const cmd = await fs.readFile(`/proc/${pid}/cmdline`);
+  if (!cmd.subarray(0, cmd.indexOf(0)).equals(Buffer.from(server.qualification_binary))) {
+    throw new Error("owned daemon identity changed before producer census");
+  }
+  const children = [];
+  for (const entry of await fs.readdir("/proc")) {
+    if (!/^\d+$/.test(entry)) continue;
+    try {
+      const stat = await fs.readFile(`/proc/${entry}/stat`, "utf8");
+      const fields = stat.slice(stat.lastIndexOf(")") + 2).split(" ");
+      if (Number(fields[1]) !== pid) continue;
+      if ((await fs.readFile(`/proc/${entry}/comm`, "utf8")).trim() !== "ffmpeg") continue;
+      children.push({pid: Number(entry), state: fields[0], start_ticks: fields[19]});
+    } catch (error) {
+      if (!["ENOENT", "ESRCH"].includes(error.code)) throw error;
+    }
+  }
+  return {at_unix_ms: Date.now(), daemon_pid: pid, daemon_identity_verified: true, children};
+}
+
+async function measureAuto(driver, shaper, result) {
+  const catalog = await driver.eval("PLAYER.qualityCandidates.map(c=>({id:c.id,route:c.route,height:c.target_height||c.height,peak_bps:c.peak_bps}))");
+  const detail = result.actual_auto = {catalog, status: "running", changes: [],
+    presentation_target: await driver.eval("measuredPresentationTarget()")};
+  const measured = autoLinkProfile(catalog);
+  detail.link = measured;
+  measured.stages.forEach((kbps, i) => {
+    shaper.stages[i].kbps = kbps; shaper.profile.stages[i].kbps = kbps;
+  });
+  shaper.bucket.setRate(measured.stages[0], shaper.now());
+  shaper.wakeLimiter();
+  await driver.exec('setQuality("auto"); return true;');
+  for (let i = 0; i < 5; i++) {
+    const height = i % 2 ? 720 : 1080;
+    await driver.exec("{const p=globalThis.__plurxLabFrameProbe;if(p){p.maximum_gap_ms=0;p.maximum_gap_detail=null;p.frames=0;p.measurement_start_at_ms=null;}}return true;");
+    const before = await driver.eval(lab.playerSnapshotExpression());
+    const removals = lab.continuousRemovalEvidence(before.continuous);
+    const deadline = Date.now() + 240000;
+    let after, event, presented = false;
+    while (Date.now() < deadline) {
+      after = await driver.eval(lab.playerSnapshotExpression());
+      lab.observeContinuousRemovals(removals, after.continuous);
+      if (after.video.error) throw new Error("Auto media error");
+      if (after.continuous?.observation === "Continuous target retained current") {
+        throw new Error("Auto target retained current");
+      }
+      const moves = lab.automaticSwitchesAfter(before, after);
+      if (moves.expected_event_count > 1) throw new Error("multiple Auto changes in one link stage");
+      event = moves.events[0];
+      if (event && event.to_height !== height) throw new Error(`Auto chose ${event.to_height}p; expected ${height}p`);
+      presented = Boolean(event?.first_presented_frame && after.video.height === height
+        && after.continuous?.transaction?.first_presented_at_ms >= before.sampled_unix_ms);
+      if (presented) break;
+      await new Promise(resolve => setTimeout(resolve, 250));
+    }
+    if (!presented) throw new Error(`Auto did not present ${height}p within 240 seconds`);
+    const errors = lab.continuousSwitchErrors(before.continuous, after.continuous,
+      before.sampled_unix_ms, height, removals);
+    const transition = lab.transitionMetrics(before, after);
+    if (before.session_id !== after.session_id || before.player_generation !== after.player_generation) {
+      errors.push("Auto replaced the attachment");
+    }
+    if (transition.maximum_video_gap_ms > 250 || transition.wait_events
+        || transition.reopen_events || transition.stalls || transition.hitches) {
+      errors.push("Auto continuity bound failed");
+    }
+    detail.changes.push({height, event, before: before.continuous, after: after.continuous,
+      removal_evidence: removals, transition, errors});
+    if (errors.length) throw new Error(errors.join("; "));
+    process.stdout.write(`AUTO    ${i + 1}/5 actually presented ${height}p\n`);
+    if (i < 4) shaper.applyCliff(i % 2 ? "measured recovery link rise" : "measured pressure link drop");
+  }
+  const gaps = [...result.operation_detail.changes.map(c => c.video_gap_ms),
+    ...detail.changes.map(c => c.transition.maximum_video_gap_ms)].sort((a, b) => a - b);
+  const p95 = gaps[Math.ceil(gaps.length * 0.95) - 1];
+  if (gaps.some(gap => !Number.isFinite(gap)) || p95 > 100) {
+    throw new Error(`mixed campaign p95 callback gap ${p95} ms exceeds 100 ms`);
+  }
+  detail.mixed_video_gap_p95_ms = p95;
+  detail.status = "passed";
+}
+
+async function mixedCase(driver, server, manifest, fixture, testCase, info, observe, shaper, diagnostics) {
+  const result = await lab.runOneCase(driver, server, manifest, fixture, testCase, info, observe, shaper, diagnostics);
+  const began = Date.now();
+  try {
+    if (result.status === "passed") await measureAuto(driver, shaper, result);
+  } catch (error) {
+    result.status = "failed"; result.errors.push(error.message);
+    if (result.actual_auto) result.actual_auto.status = "failed";
+  }
+  try {
+    result.end = await driver.eval(lab.playerSnapshotExpression());
+    const before = await producerCensus(server);
+    const requested = Date.now();
+    await driver.exec("closePlayer(); return true;");
+    const samples = [];
+    for (const elapsed of [0, 1000, 3000, 5000]) {
+      const remaining = requested + elapsed - Date.now();
+      if (remaining > 0) await new Promise(resolve => setTimeout(resolve, remaining));
+      samples.push(await producerCensus(server));
+    }
+    result.producer_end = {requested_at_unix_ms: requested, before, samples,
+      scope: "owned FFmpeg processes; physical device queues unmeasured"};
+    if (samples.at(-1).children.length) throw new Error("End did not retire owned producers within five seconds");
+  } catch (error) {result.status = "failed"; result.errors.push(`End evidence: ${error.message}`);}
+  result.duration_ms += Date.now() - began;
+  return result;
+}
+
+async function main(args) {
+  if (args.includes("--help")) {
+    process.stdout.write("Usage: scripts/continuous-quality-qualification --server PATH --source-ref BUILD_REF --browser chrome|firefox [--fixtures DIR] [--manual-count 3|15] [--chrome PATH] [--firefox PATH] [--geckodriver PATH] [--json PATH] [--junit PATH]\n");
+    return 0;
+  }
+  const options = {};
+  const allowed = new Set(["server", "source-ref", "browser", "fixtures", "manual-count", "chrome", "firefox", "geckodriver", "json", "junit"]);
+  for (let i = 0; i < args.length; i += 2) {
+    const key = args[i].replace(/^--/, "");
+    if (!args[i].startsWith("--") || !allowed.has(key) || !args[i + 1] || args[i + 1].startsWith("--")) throw new Error(`invalid option ${args[i]}`);
+    options[key.replaceAll("-", "_")] = args[i + 1];
+  }
+  if (process.platform !== "linux") throw new Error("owned producer census requires Linux");
+  if (!options.server || !options.source_ref) throw new Error("explicit --server and --source-ref are required");
+  if (!["chrome", "firefox"].includes(options.browser)) throw new Error("choose --browser chrome or firefox");
+  const count = Number(options.manual_count || 15);
+  if (![3, 15].includes(count)) throw new Error("--manual-count must be 3 (focused) or 15 (twenty total changes)");
+  const manifest = lab.loadManifest();
+  const testCase = manifest.suites.continuous.cases[0];
+  Object.assign(testCase, {fixture: "continuous-mpeg4-aac-1080", repetitions: 1,
+    switches: Array.from({length: count}, (_, i) => ({quality: i % 2 ? "1080" : "720",
+      expected_method: "transcode", expected_height: i % 2 ? 1080 : 720}))});
+  Object.assign(options, {suite: "continuous", network_profile: "100mbps-to-10mbps"});
+  const outcome = await lab.executeRun(manifest, options, {
+    startServer: async (opts, directory) => {
+      const server = await lab.startServer({...opts, enable_auto_abr: true}, directory);
+      try {
+        const system = await lab.api(server.baseUrl, "/system", {token: server.token});
+        if (system.build !== options.source_ref) throw new Error(`daemon build ${system.build} differs from expected ${options.source_ref}`);
+        await lab.api(server.baseUrl, "/settings", {token: server.token, method: "PUT", body: {playback_display_aware_auto: true}});
+        server.qualification_binary = path.resolve(options.server);
+        const quietStart = Date.now(); let quietSince = null;
+        while (Date.now() - quietStart < 120000) {
+          if ((await producerCensus(server)).children.length) quietSince = null;
+          else if (quietSince == null) quietSince = Date.now();
+          if (quietSince != null && Date.now() - quietSince >= 8000) break;
+          await new Promise(resolve => setTimeout(resolve, 1000));
+        }
+        if (quietSince == null || Date.now() - quietSince < 8000) throw new Error("owned startup FFmpeg probes did not settle");
+        server.preparation.cache_condition.startup_producer_quiet_ms = Date.now() - quietStart;
+        const at = Date.now(); await lab.api(server.baseUrl, "/activity/detail", {token: server.token});
+        server.preparation.cache_condition.engine_attestation_before_playback = "warmed_by_ordinary_activity_detail_read";
+        server.preparation.cache_condition.engine_attestation_wall_ms = Date.now() - at;
+        return server;
+      } catch (error) {await server.close(false); throw error;}
+    },
+    createDriver: (opts, base, runtime, browser) => {
+      const driver = browser === "firefox" ? new lab.FirefoxDriver(opts, base, runtime)
+        : new lab.CdpDriver(opts, base, runtime, browser);
+      const start = driver.start.bind(driver);
+      driver.start = async () => {
+        await start();
+        if (browser === "firefox") await driver.wd("POST", `/session/${driver.sessionId}/window/rect`, {width: 1920, height: 1200});
+        else await driver.send("Emulation.setDeviceMetricsOverride", {width: 1920, height: 1200, deviceScaleFactor: 1, mobile: false});
+      };
+      return driver;
+    },
+    createShaper: (profile, origin) => new lab.ShapingProxy({...profile,
+      id: "continuous-auto-catalog-derived",
+      spec: "100 Mb/s, catalog-derived lower link, recovery, pressure, recovery",
+      description: "Five actual Auto stages; lower rate derived from measured candidate peaks",
+      stages: [100000, 10000, 100000, 10000, 100000].map((kbps, index) => ({index,
+        label: index % 2 ? "pressure" : "recovery", kbps}))}, origin),
+    runOneCase: mixedCase,
+  });
+  if (outcome.error) throw outcome.error;
+  return outcome.code;
+}
+
+module.exports = {autoLinkProfile, producerCensus, measureAuto, mixedCase, main};
+if (require.main === module) main(process.argv.slice(2)).then(code => {process.exitCode = code;})
+  .catch(error => {process.stderr.write(`continuous qualification: ${error.message}\n`);process.exitCode = 1;});

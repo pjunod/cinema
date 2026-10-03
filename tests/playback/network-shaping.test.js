@@ -2194,6 +2194,41 @@ test("VOD readiness waits for the exact file built by an indexing pass", () => {
   }, 42), false);
 });
 
+test("actual Auto pressure uses measured peaks and refuses an unsafe two-rung interval", () => {
+  const qualification = require("../../scripts/continuous-quality-qualification");
+  const catalog = [{route: "encode", height: 720, peak_bps: 6160000},
+    {route: "encode", height: 1080, peak_bps: 12160000},
+    {route: "copy", height: 1080, peak_bps: 999999999}];
+  const profile = qualification.autoLinkProfile(catalog);
+  assert.equal(profile.stages.length, 5);
+  assert.equal(profile.stages[0], profile.stages[2]);
+  assert.equal(profile.stages[2], profile.stages[4]);
+  assert.equal(profile.stages[1], profile.stages[3]);
+  assert.ok(profile.stages[1] * 1000 >= profile.low_floor_bps);
+  assert.ok(profile.stages[1] * 1000 < profile.low_ceiling_bps);
+  assert.throws(() => qualification.autoLinkProfile([]), /safe pressure interval/);
+  assert.throws(() => qualification.autoLinkProfile([
+    {route: "encode", height: 720, peak_bps: 1000000},
+    {route: "encode", height: 1080, peak_bps: 1548000}]), /shaper rate resolution/);
+  assert.throws(() => qualification.autoLinkProfile([
+    {route: "encode", height: 720, peak_bps: 9000000},
+    {route: "encode", height: 1080, peak_bps: 10000000}]), /safe pressure interval/);
+});
+
+test("encoded-only qualification does not wait for an impossible copy fragment index", () => {
+  const files = new Map([
+    ["encoded.mp4", {id: 1, video_codec: "mpeg4"}],
+    ["avc.mp4", {id: 2, video_codec: "h264"}],
+    ["hevc.mp4", {id: 3, video_codec: "hevc"}],
+    ["unknown.mp4", {id: 4}],
+  ]);
+  assert.deepEqual(lab.fragmentIndexTargets(files, ["encoded.mp4"]), []);
+  assert.deepEqual(lab.fragmentIndexTargets(files, ["encoded.mp4", "avc.mp4", "hevc.mp4"])
+    .map(file => file.id), [2, 3]);
+  assert.throws(() => lab.fragmentIndexTargets(files, ["unknown.mp4"]), /video codec/);
+  assert.throws(() => lab.fragmentIndexTargets(files, ["missing.mp4"]), /scan missed/);
+});
+
 test("VOD acceptance pauses startup indexing until its fixture scan is complete", () => {
   const source = fs.readFileSync(LAB, "utf8");
   const start = source.indexOf("async function startServer");
