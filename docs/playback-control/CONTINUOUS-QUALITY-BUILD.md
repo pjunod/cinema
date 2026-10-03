@@ -5143,3 +5143,42 @@ using the committed fifteen-manual/five-actual-Auto runner and unchanged
 criteria. Its supervisor has a 1800-second deadline and removes only its
 owned runtime. Staging had 4.81 GB quota remaining; no quota was changed.
 All unit tests and the final adversarial review remain deferred.
+
+
+### 10.178 · Current Chrome full campaign and natural tail pass
+
+Executable source `97967c6ce` PASSED the committed full Linux Chrome
+qualification: fifteen manual and five actual Auto changes, one session
+and player, maximum/mixed p95 callback gap 66.8 ms, and zero hitches,
+stalls, backward callbacks, drops, waits or reopens. First frame was
+3.443 seconds and observed clock rate 1.001x. The 758 bounded producer
+census samples contained 711 one-video/one-audio, fourteen two-video/
+one-audio, twelve startup-unclassified-only and twenty-one empty samples.
+End counts were 2/0/0/0 at 0/1/3/5 seconds with the daemon alive. The
+owned runtime was removed; physical display/audio remain unmeasured.
+
+A separate exact-source late-title probe PASSED: start at 1785 seconds,
+1080p→720p presentation at 1792 seconds in the same session/player,
+66.8 ms maximum/p95 callback gap, and natural EOF at 1800 seconds.
+End counts were 0/0/0/0. Its 21 bounded media copies were preserved
+before its owned runtime was removed. Independent ffprobe inspection
+found monotonic AVC and AAC through the title tail: copied 1080p packets
+ended at 1799.958333 and AAC at 1799.978667 seconds without decoder errors.
+AAC segment indices do not share the video two-second index clock.
+
+The copy budget preserved only 720p segments at 1784..1787.958333;
+the actual target artifact at 1792..1794 was not copied. This is not an
+independently decoded current presentation join. File SHA256 matches
+artifact identity where compared with appended receipts; the initial
+1080p copied artifact was bound that way. Publisher binding is not
+claimed for missing target bytes. Earlier independently decoded join
+evidence remains labelled with its earlier source.
+
+After the latest human unlock message, read-only checks still reported
+Mac screen lock and phone `passcodeRequired=true`. The third owned-window
+calibration refused the known locked Mac before browser launch, retained
+its failed harness receipt, and cleaned its isolated backend. No new
+native or pixel evidence is claimed. Bounded awake assertions do not
+unlock either device. Native policy ownership remains a pending human
+decision; public AVPlayer resolution/bitrate preferences do not promise
+exact manual variant selection. No units or final adversarial review ran.
