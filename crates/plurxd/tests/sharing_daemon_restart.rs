@@ -338,10 +338,15 @@ async fn sharing_separate_daemons_preserve_pending_pairing_and_rotation_across_r
         Some(json!({})),
     )
     .await;
+    eprintln!("initial credential rotation completed");
     source.restart();
     recipient.restart();
     ready(&client, &mut source).await;
     ready(&client, &mut recipient).await;
+    let recovered_source = sharing_status(&client, &mut source, &source_token).await;
+    assert_eq!(recovered_source["certificate"]["spki_sha256"], source_pin);
+    sharing_status(&client, &mut recipient, &recipient_token).await;
+    eprintln!("both restarted sharing listeners ready");
     let after = import_state(&client, &mut recipient, &recipient_token, "active").await;
     assert_eq!(after["import"]["id"], active["import"]["id"]);
     assert_eq!(
