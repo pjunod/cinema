@@ -3532,7 +3532,12 @@ pattern = "(?:[A-Za-z_]\\w*::)+(?:sleep|sleep_until|interval|interval_at|timeout
 # wrapper and directly checks Pending before releasing cleanup. The real
 # gate future retains its production deadline; no production timer changed.
 # Combined native-init fixture and TCL source: measured total 1129.
-expected_occurrences = 1129
+# +2 telemetry store-lifetime regression (731d959bf):
+# a_store_outliving_its_writer_runtime_cannot_reuse_a_stale_sink awaits one
+# two-second timeout around its event assertion and one ten-millisecond sleep
+# inside that bounded wait. Both are owned by the fixture's runtime, which
+# drains its writer before returning; neither adds a production timer or owner.
+expected_occurrences = 1131
 # +1 native-startup delayed-init fixture: its joined writer owns one bounded
 # six-second sleep, under the test request's unchanged twelve-second deadline.
 # No production timer or recovery clock is added.
