@@ -519,7 +519,7 @@ The DVR schedules exact guide airings or manual channel/time windows, writes
 on the configured tuner owner, and links finalized media into the ordinary
 recordings library.
 
-- **The page says what is on.** A channel row carries the network chip, the
+- **The page says what is on.** A channel row carries the station logo, the
   number and callsign, the programme on now with a bar running to its end,
   and what is next. Two views of the same page share every piece of state
   behind one switch: a dense **list** beside the player for surfing, and the
@@ -527,6 +527,12 @@ recordings library.
   never stops the stream and never refetches — it is a re-render of the browse
   region. A protected channel is dimmed rather than hidden, with a
   `Hide protected` filter for a lineup that is mostly DRM.
+- **Station artwork comes from the guide.** The web list, grid and current
+  programme details display HDHomeRun's full-color station image on a neutral
+  tile, matched by channel id. Channel numbers and names stay visible beside
+  it. Missing or failed artwork leaves a callsign fallback; loading a logo
+  never delays tuning. Only HTTPS image URLs without embedded credentials are
+  used, and image requests omit the page referrer.
 - **Source format and live reception stay distinct.** Every channel row and
   guide row uses compact badges for the facts the tuner advertises — `HD` or
   `SD`, video codec and audio codec — and leaves a badge out when the device
