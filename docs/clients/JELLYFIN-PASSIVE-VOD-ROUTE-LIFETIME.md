@@ -113,8 +113,8 @@ experiments finish. Do not advance J4 on a document-only disposition.
 
 ## Implementation scope — explicit transitions, no automated source sweep
 
-The candidate correction touches the following native boundaries. This is a
-reviewable scope, not evidence that the implementation exists or passes:
+The candidate correction touches the following native boundaries. The implementation and bounded evidence are recorded below; the table
+also identifies the remaining acceptance boundaries:
 
 | Boundary | Required change and focused proof |
 |---|---|
@@ -152,9 +152,9 @@ passive-control regressions. The three `vod_only` regressions and the existing
 `idle_reap_and_same_id_resurrection_are_one_reader_transition` also passed.
 
 This proves native metadata, renewal and HTTP recovery boundaries. It does
-not yet prove authenticated facade presence, actual remote worker dispatch,
-disable/drain and renewal-ambiguity races, or physical recovery beyond the
-300-second reader lifetime. Those acceptance items remain open.
+not prove authenticated facade presence, disable/drain or renewal-ambiguity
+races. Physical Android recovery and trusted worker startup are recorded
+below; Infuse recovery and activated worker relay remain open.
 
 ### Physical Android recovery — cleanup no longer ends the route
 
@@ -178,3 +178,28 @@ reaped while the route remained active. The device switched away from the
 synthetic test during the pause; no subsequent native media fetch was observed.
 That interrupted run does not qualify physical Infuse recovery. The repeat
 and the remaining worker/facade/race evidence are still required.
+
+### Trusted remote start — a separate live worker received the policy
+
+An isolated loopback voter signed exact HTTP start requests to a distinct
+live learner using only the generated test-cluster keys. With rolling
+recovery globally enabled and both service policies selected in the worker
+envelope, unindexed copy returned 422 in 4.4 ms; encoded VOD returned 201
+in 1.403 seconds with an activation generation. Its unconfirmed provisional
+worker later received native terminal cleanup. The disposable native HTTP
+constructor was not involved in this internal worker endpoint.
+
+Together with the worker/durable serde regression, this proves the internal
+policy reaches actual worker startup. It does not prove facade activation,
+media relay after activation, disable/drain or renewal-ambiguity races, or
+physical Infuse recovery.
+
+### Cancelled admission — the real create path releases its slot
+
+`passive_vod_cancelled_admission_releases_quota_before_any_reader_attachment`
+passed on Rust 1.97.1. With 63 retained metadata grants, the actual pending
+64th create reserves its slot before reader attachment. Another actual create
+receives typed `vod_passive_capacity` without evicting those grants. Cancelling
+the pending create leaves the session map empty and permits a subsequent
+real create to use the released slot. This proves cancellation at that
+admission boundary; it does not claim 63 physically playing clients.

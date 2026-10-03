@@ -3600,3 +3600,55 @@
         serve.maintain().await;
         assert!(matches!(serve.playlist("successor").await.map(|publication| publication.result), Some(Err(VodError::Gone(Terminal::PauseExpired)))));
     }
+
+    #[tokio::test]
+    async fn passive_vod_cancelled_admission_releases_quota_before_any_reader_attachment() {
+        let base = crate::test_tempdir().expect("passive cancellation base");
+        let (serve, file) = serve_on(base.path()).await;
+        let mut retained = Vec::new();
+        for n in 0..63 {
+            retained.push(serve.shared.passive_grants.reserve(
+                &format!("retained-{n}"), "user", "retained-player", &format!("retained-request-{n}"), false,
+            ).expect("existing grant"));
+        }
+        let mut req = request("cancelled-player", 0.0);
+        req.presentation = crate::transcode::Presentation::Vod;
+        req.vod_only = true;
+        req.passive_vod = true;
+        req.request_id = Some("cancelled-request".to_owned());
+        // Hold the real attachment commit. Admission has to reserve its quota
+        // before it reaches this gate, and cancellation must drop that exact
+        // reservation even though source/rendition preparation already began.
+        let sessions = serve.shared.sessions.lock().await;
+        let pending = tokio::spawn({
+            let serve = Arc::clone(&serve);
+            let req = req.clone();
+            let file = file.clone();
+            async move {
+                serve.try_create(&req, &file, &settings(), VodAttribution {
+                    user_name: "user", item_title: "Fixture", supersession_user: "user",
+                }, "pending-cancel".to_owned()).await
+            }
+        });
+        wait_until("real create quota reservation", Duration::from_secs(2), || {
+            let serve = Arc::clone(&serve);
+            async move {
+                matches!(serve.shared.passive_grants.reserve("overflow", "user", "player", "request", false), Err(passive_grant::Refusal::Capacity))
+            }
+        }).await;
+        let error = serve.try_create(&req, &file, &settings(), VodAttribution {
+            user_name: "user", item_title: "Fixture", supersession_user: "user",
+        }, "overflow-create".to_owned()).await.expect_err("quota refusal precedes reader attachment gate");
+        assert_eq!(crate::transcode::vod_refusal(&error).expect("typed quota refusal").0, "vod_passive_capacity");
+        assert!(retained.iter().all(|grant| grant.live()), "admission must never evict another grant");
+        pending.abort();
+        assert!(pending.await.expect_err("cancelled create").is_cancelled());
+        assert!(sessions.is_empty(), "cancelled creation never attached a session");
+        drop(sessions);
+        serve.try_create(&req, &file, &settings(), VodAttribution {
+            user_name: "user", item_title: "Fixture", supersession_user: "user",
+        }, "pending-cancel".to_owned()).await.expect("cancelled quota is available to the retry");
+        assert_eq!(serve.active_sessions().await, 1);
+        assert!(serve.end("pending-cancel", Terminal::Deleted).await);
+        assert!(retained.iter().all(|grant| grant.live()));
+    }

@@ -75,13 +75,13 @@ scratch after retaining minimized fixtures and findings.
 | Infuse connect/browse/direct/seek/transcode | Physical Infuse 8.5.6 connected; movie details/artwork, static MKV and explicit 750 Kbit/s encoded HLS rendered; forward/backward seeks and 374.353-second same-play pause/resume measured | Native transport wrapper proved on one fixture; production qualification pending |
 | Android TV connect/browse/HLS/remux | Connect, password login, movie details/artwork, direct MKV and 720 Kbit/s encoded HLS rendered on physical TV; 332.6-second pause/resume, forward/backward seek and app-kill replacement measured | Required J0 client gate |
 | Both clients' image/subtitle/media credential carriers and version-implied calls | Android: anonymous artwork/direct media; ApiKey on SRT and HLS; MediaSegments and Intros observed. Infuse: authorization plus API-key HLS query; authorization and Range for SRT/VTT | Required policy/design evidence before J2 |
-| Client pause over 300 seconds, kill/background, renegotiation without old Stopped | Android reference HLS: 332.6-second same-play resume, abrupt kill then new play without old Stopped. Infuse: 374.353-second same-play resume and SIGKILL replacement without old Stopped. Native VOD reap confirmed; recovery returns 410 | Required lifecycle evidence before advancing J0 |
+| Client pause over 300 seconds, kill/background, renegotiation without old Stopped | Android reference HLS: 332.6-second same-play resume, abrupt kill then new play without old Stopped. Infuse: 374.353-second same-play resume and SIGKILL replacement without old Stopped. Initial native recovery returned 410; corrected Android recovery passes after 373.404 seconds; Infuse repeat pending | Required lifecycle evidence before advancing J0 |
 | Native encoded VOD without copy index; bounded capacity | Service regressions passed, including decoded GET bytes after forward/back restarts | Native seam evidence only; client activation and per-create policy pending |
 | Native unindexed HEVC copy and preparation deduplication | Service regression passed; refused copy and one preparation request, no incomplete VOD session | Native seam evidence only; facade immediate fallback pending |
 | Missing duration | New copy/encoded regression refuses absent, zero and negative durations without attaching sessions/renditions | Native prerequisite evidence; HTTP/client mapping pending |
 | Native prototype create with positive duration, missing index | Copy: immediate `vod_index_pending`; encoded: 200 in about 0.13 s, closed fMP4 playlist, physical Android renders native fragments | Single-fixture alias spike; production adapter and per-create policy pending |
 | First-minute engine attestation | Ready at 2.931 s; immediate encoded request returned 200 in 1.732 s; media-engine spawn attestation 0.048434 s | Isolated restart measured within first minute; transient/persistent fault outcomes below |
-| Long-pause real-client resurrection and VOD-only worker/relay propagation | Native idle reap measured; recovery fails with 410; worker envelope unproved | Required J0 hard-seam experiments |
+| Long-pause real-client resurrection and VOD-only worker/relay propagation | Corrected Android recovery passes; trusted remote worker receives both policies and starts VOD; activated relay and Infuse repeat pending | Required J0 hard-seam experiments |
 
 ### Physical Android TV — reference recovered; direct and encoded HLS rendered
 
@@ -301,8 +301,13 @@ be proved in J4 rather than treating Infuse’s declared TS profile as fMP4 proo
 The internal per-create `vod_only` policy now refuses unindexed copy before
 rolling allocation with recovery globally enabled. Three focused regressions
 prove that refusal, worker/durable JSON preservation and distinct identity,
-and native HTTP ignoring the client-supplied policy knob. Actual worker
-dispatch remains unproved. The passive route spike now passes ten focused
+and native HTTP ignoring the client-supplied policy knob. Actual exact-auth
+HTTP worker starts now ran from an isolated voter to a distinct live learner
+with both internal policies selected and rolling recovery globally enabled:
+unindexed copy returned 422 in 4.4 ms; encoded VOD returned 201 in 1.403 s
+with an activation generation. Its unconfirmed provisional worker later
+received native terminal cleanup. This proves worker start, while durable
+facade activation and relay media delivery remain separate acceptance items. The passive route spike now passes ten focused
 regressions, including real reader detach/resurrection, current-play identity,
 quotas, terminal/replacement fencing, reader-free owner renewal and expiry,
 and a public fragment GET against real indexed media retaining the same

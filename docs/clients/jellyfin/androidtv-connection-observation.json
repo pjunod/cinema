@@ -5032,5 +5032,42 @@
       "result": "Device switched away from synthetic test while paused; no post-resume native fetch observed. This run does not qualify physical Infuse recovery."
     },
     "remaining_boundary": "No facade presence ingress, remote worker dispatch, client-specific production wrapper, feature-disable/drain race or renewal-ambiguity claim."
+  },
+  "trusted_worker_start_probe": {
+    "source_commit": "5aae2a6f4",
+    "topology": "Disposable loopback voter and distinct live learner; exact request signatures use only generated test-cluster keys.",
+    "observations": [
+      {
+        "case": "missing_copy_index",
+        "status": 422,
+        "elapsed_seconds": 0.004415958013851196,
+        "vod": null,
+        "activation_generation_present": false,
+        "boundary": "Exact-auth real HTTP start from isolated voter to live loopback learner; no durable facade activation.",
+        "requested_internal_policy": {
+          "vod_only": true,
+          "passive_vod": true
+        },
+        "global_vod_live_recovery_enabled": true,
+        "production_native_http_constructor_involved": false
+      },
+      {
+        "case": "encoded",
+        "status": 201,
+        "elapsed_seconds": 1.4027552499901503,
+        "vod": true,
+        "activation_generation_present": true,
+        "boundary": "Exact-auth real HTTP start from isolated voter to live loopback learner; no durable facade activation.",
+        "requested_internal_policy": {
+          "vod_only": true,
+          "passive_vod": true
+        },
+        "global_vod_live_recovery_enabled": true,
+        "production_native_http_constructor_involved": false,
+        "unconfirmed_worker_cleanup_observed": true,
+        "resource_gauges_after_cleanup": []
+      }
+    ],
+    "boundary": "Actual remote HTTP worker start accepts internal policies; no facade activation, relay media delivery or transparent owner failover claim."
   }
 }
