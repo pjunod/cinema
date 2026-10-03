@@ -620,6 +620,124 @@ async fn sharing_rebuilt_local_activation_preserves_owner_and_foreign_lease() {
         .is_none());
     assert_eq!(request_rows(&client, "SELECT CAST(revision AS TEXT) || ':' || expires_at_ms || ':' || updated_at_ms AS value FROM job_leases WHERE resource='session:00000000-0000-4000-a000-000000000001'").await, ["3:9000:10"]);
     assert_eq!(request_rows(&client, "SELECT state AS value FROM media_sessions WHERE incarnation_id='00000000-0000-4000-a000-000000000001'").await, ["active"]);
+    // Terminal cleanup must agree with the activation principal, even when
+    // a foreign incarnation is already ended at exactly this call's timestamp.
+    client.execute("INSERT INTO cache_consumer_pins(storage_id,recipe_hash,generation_id,consumer_kind,consumer_id,consumer_epoch,expires_at_ms) VALUES('foreign-storage','foreign-recipe','foreign-generation','media_session',$1,1,9000)", hiqlite::params!(SHARED_ROUTE)).await.expect("foreign settlement pin");
+    client.execute("UPDATE media_sessions SET state='ended',terminal_reason='replaced',updated_at_ms=4000 WHERE incarnation_id=$1", hiqlite::params!(SHARED_ROUTE)).await.expect("foreign ended incarnation");
+    assert!(store
+        .settle_media_session_activation(
+            &collision,
+            MediaSessionActivationSettlement::Abandon,
+            4000
+        )
+        .await
+        .expect("foreign settlement refusal")
+        .is_none());
+    assert_eq!(request_rows(&client, "SELECT CAST(revision AS TEXT) || ':' || expires_at_ms || ':' || updated_at_ms AS value FROM job_leases WHERE resource='session:00000000-0000-4000-a000-000000000001'").await, ["3:9000:10"]);
+    assert_eq!(request_rows(&client, "SELECT CAST(count(*) AS TEXT) AS value FROM cache_consumer_pins WHERE consumer_id='00000000-0000-4000-a000-000000000001'").await, ["1"]);
+    assert_eq!(
+        store
+            .settle_media_session_activation(
+                &activation,
+                MediaSessionActivationSettlement::Confirm {
+                    publication_ready_at_ms: 0
+                },
+                1000
+            )
+            .await
+            .expect("confirmation replay")
+            .expect("confirmed local route")
+            .principal,
+        local
+    );
+    let mut pending = activation.clone();
+    pending.incarnation_id = "00000000-0000-4000-a000-000000000150".to_owned();
+    pending.session_id = "00000000-0000-4000-a000-000000000151".to_owned();
+    pending.playback_id = "settlement-runtime".to_owned();
+    store
+        .activate_media_session(&pending)
+        .await
+        .expect("pending local activation")
+        .expect("pending route");
+    assert!(store
+        .settle_media_session_activation(&pending, MediaSessionActivationSettlement::Abandon, 2000)
+        .await
+        .expect("local abandon")
+        .is_none());
+    assert_eq!(
+        store
+            .media_session_route(&pending.session_id)
+            .await
+            .expect("ended local route")
+            .expect("retained ended route")
+            .state,
+        "ended"
+    );
+    assert!(store
+        .media_session_route_for_playback(&local, &pending.playback_id)
+        .await
+        .expect("removed local pointer")
+        .is_none());
+    let mut published = pending.clone();
+    published.incarnation_id = "00000000-0000-4000-a000-000000000152".to_owned();
+    published.session_id = "00000000-0000-4000-a000-000000000153".to_owned();
+    published.playback_id = "publication-runtime".to_owned();
+    published.request_id = Some("publication-request".to_owned());
+    assert!(matches!(
+        store
+            .claim_media_session_request(
+                &local,
+                "publication-request",
+                &published.request_fingerprint,
+                &published.playback_id,
+                &published.incarnation_id,
+                1000,
+                900000
+            )
+            .await
+            .expect("publication claim"),
+        MediaSessionRequestClaim::Acquired { .. }
+    ));
+    store
+        .assign_media_session_request_owner(
+            &local,
+            "publication-request",
+            &published.incarnation_id,
+            &published.owner_node_id,
+            1000,
+        )
+        .await
+        .expect("publication owner");
+    store
+        .activate_media_session(&published)
+        .await
+        .expect("publication activation")
+        .expect("publication route");
+    store
+        .settle_media_session_activation(
+            &published,
+            MediaSessionActivationSettlement::Confirm {
+                publication_ready_at_ms: 0,
+            },
+            1000,
+        )
+        .await
+        .expect("publication confirm")
+        .expect("confirmed pending request");
+    assert_eq!(
+        store
+            .publish_media_session_activation(
+                &local,
+                "publication-request",
+                &published.incarnation_id,
+                1001
+            )
+            .await
+            .expect("publication write")
+            .expect("published local route")
+            .principal,
+        local
+    );
     let mut missing = activation.clone();
     missing.principal = PlaybackPrincipal::LocalUser { user_id: 2 };
     missing.incarnation_id = "00000000-0000-4000-a000-000000000103".to_owned();
@@ -801,4 +919,156 @@ async fn sharing_rebuilt_local_commit_binds_receipt_to_actual_predecessor_sessio
         assert_eq!(staged.principal, principal);
         assert_eq!(staged.staged_incarnation_id, grant);
     }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn sharing_rebuilt_local_renewal_takeover_refuse_shared_and_deleted_owners() {
+    let _case = HIQLITE_CASE.lock().await;
+    let cluster = ContractCluster::start().await;
+    let store = open_contract_hiqlite_store(&cluster).await;
+    let client = Client::remote(
+        cluster.addresses.clone(),
+        true,
+        true,
+        CONTRACT_API_SECRET.to_owned(),
+        false,
+        None,
+    )
+    .await
+    .expect("fixture client");
+    for result in client
+        .batch(include_str!("../fixtures/session-principal-local.sql"))
+        .await
+        .expect("local fixture")
+    {
+        result.expect("local seed");
+    }
+    let statements: Vec<(String, hiqlite::Params)> = MEDIA_SESSION_PRINCIPAL_REBUILD_SCHEMA
+        .split("-- next statement\n")
+        .map(|sql| {
+            (
+                sql.trim().trim_end_matches(';').to_owned(),
+                hiqlite::params!(),
+            )
+        })
+        .collect();
+    for result in client.txn(statements).await.expect("candidate transaction") {
+        result.expect("candidate rebuild");
+    }
+    for result in client
+        .batch(include_str!("../fixtures/session-principal-sharing.sql"))
+        .await
+        .expect("shared fixture")
+    {
+        result.expect("shared seed");
+    }
+    let current = "00000000-0000-4000-a000-000000000160";
+    let session = "00000000-0000-4000-a000-000000000161";
+    current_media_session(
+        &store,
+        1,
+        "renewal-runtime",
+        current,
+        session,
+        "rebuilt renewal",
+    )
+    .await;
+    let renewal = MediaSessionRenewal {
+        incarnation_id: current.to_owned(),
+        owner_epoch: 1,
+        produced_playable_through_ms: 10,
+        fetched_through_ms: 10,
+        media_sequence: 1,
+    };
+    assert_eq!(
+        store
+            .renew_media_sessions("staged-node", std::slice::from_ref(&renewal), 2000, 901000)
+            .await
+            .expect("local renewal"),
+        [current]
+    );
+    client.execute("INSERT INTO job_leases(resource,owner_node_id,fence,revision,expires_at_ms,updated_at_ms) VALUES('session:' || $1,'node',1,3,9000,10)", hiqlite::params!(SHARED_ROUTE)).await.expect("foreign renewal lease");
+    client.execute("INSERT INTO cache_consumer_pins(storage_id,recipe_hash,generation_id,consumer_kind,consumer_id,consumer_epoch,expires_at_ms) VALUES('foreign-storage','foreign-recipe','foreign-generation','media_session',$1,1,9000)", hiqlite::params!(SHARED_ROUTE)).await.expect("foreign renewal pin");
+    let shared_renewal = MediaSessionRenewal {
+        incarnation_id: SHARED_ROUTE.to_owned(),
+        ..renewal.clone()
+    };
+    assert!(store
+        .renew_media_sessions("node", &[shared_renewal], 2000, 10000)
+        .await
+        .expect("closed shared renewal")
+        .is_empty());
+    let shared_takeover = MediaSessionTakeover {
+        incarnation_id: SHARED_ROUTE.to_owned(),
+        expected_owner_node_id: "node".to_owned(),
+        expected_owner_epoch: 1,
+        next_owner_node_id: "successor-owner".to_owned(),
+        now_ms: 9001,
+        lease_expires_at_ms: 10000,
+    };
+    assert!(store
+        .claim_media_session_takeover(&shared_takeover)
+        .await
+        .expect("closed shared takeover")
+        .is_none());
+    assert_eq!(request_rows(&client, "SELECT owner_node_id || ':' || fence || ':' || revision || ':' || expires_at_ms || ':' || updated_at_ms AS value FROM job_leases WHERE resource='session:00000000-0000-4000-a000-000000000001'").await, ["node:1:3:9000:10"]);
+    assert_eq!(request_rows(&client, "SELECT CAST(expires_at_ms AS TEXT) AS value FROM cache_consumer_pins WHERE consumer_id='00000000-0000-4000-a000-000000000001'").await, ["9000"]);
+    assert_eq!(
+        store
+            .media_session_route_by_incarnation(SHARED_ROUTE)
+            .await
+            .expect("shared inventory route")
+            .expect("retained shared route")
+            .owner_epoch,
+        1
+    );
+    let takeover = MediaSessionTakeover {
+        incarnation_id: current.to_owned(),
+        expected_owner_node_id: "staged-node".to_owned(),
+        expected_owner_epoch: 1,
+        next_owner_node_id: "successor-owner".to_owned(),
+        now_ms: 901001,
+        lease_expires_at_ms: 902000,
+    };
+    let transferred = store
+        .claim_media_session_takeover(&takeover)
+        .await
+        .expect("local takeover")
+        .expect("claimed local route");
+    assert_eq!(
+        transferred.principal,
+        PlaybackPrincipal::LocalUser { user_id: 1 }
+    );
+    assert_eq!(transferred.owner_epoch, 2);
+    client
+        .execute("DELETE FROM users WHERE id=1", hiqlite::params!())
+        .await
+        .expect("delete local owner");
+    // Restore a corrupt orphan after the retirement trigger, so absence is
+    // tested independently of state='ended' and the zero lease it writes.
+    client.execute("UPDATE media_sessions SET state='active',terminal_reason=NULL,lease_expires_at_ms=9000,updated_at_ms=10 WHERE incarnation_id=$1", hiqlite::params!(current)).await.expect("orphan active row fixture");
+    client.execute("UPDATE job_leases SET expires_at_ms=9000,revision=3,updated_at_ms=10 WHERE resource='session:' || $1", hiqlite::params!(current)).await.expect("orphan live lease fixture");
+    let orphan_renewal = MediaSessionRenewal {
+        owner_epoch: 2,
+        ..renewal
+    };
+    assert!(store
+        .renew_media_sessions("successor-owner", &[orphan_renewal], 2000, 10000)
+        .await
+        .expect("deleted local renewal refusal")
+        .is_empty());
+    let orphan_takeover = MediaSessionTakeover {
+        expected_owner_node_id: "successor-owner".to_owned(),
+        expected_owner_epoch: 2,
+        next_owner_node_id: "last-owner".to_owned(),
+        now_ms: 9001,
+        lease_expires_at_ms: 10000,
+        ..takeover
+    };
+    assert!(store
+        .claim_media_session_takeover(&orphan_takeover)
+        .await
+        .expect("deleted local takeover refusal")
+        .is_none());
+    assert_eq!(request_rows(&client, "SELECT owner_node_id || ':' || fence || ':' || revision || ':' || expires_at_ms || ':' || updated_at_ms AS value FROM job_leases WHERE resource='session:00000000-0000-4000-a000-000000000160'").await, ["successor-owner:2:3:9000:10"]);
 }

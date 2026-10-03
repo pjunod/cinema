@@ -2096,3 +2096,24 @@ The exact application redemption/rejoin/promotion regression passed (one test,
 passed (one test, 31.55 seconds). Both used the same integrated tree and real
 replicated fixtures, with zero ignored tests. These are executed application
 join paths rather than historical-process or production rollout evidence.
+
+
+**Worker authority integration checkpoint:** SQLite and replicated renewal and
+expired-owner takeover correlate canonical principal keys. Rebuilt-schema
+session, physical lease and pin authority extensions require the stored Local
+principal and its current user. Active handoff arming/completion and completion
+replay also refuse Shared or deleted Local rows. Shared authority extension
+still needs the server-side grant/scope/member-floor proof; terminal retirement
+and complete Shared reads remain separate supported operations.
+
+The new SQLite regression passed in memory and pooled stores (0.76 seconds),
+including legitimate Local renewal/takeover, Shared refusal with the complete
+foreign job-lease tuple unchanged, and a deliberately restored active Local
+row after its user was deleted. On the integrated tree, all 16 ownership units
+passed (16.33 seconds), all five actual-voter candidate cases passed (54.72
+seconds), the existing dyn-store lifecycle passed (12.82 seconds), committed
+successor renewal passed (9.66 seconds), and staged deadline refusal passed
+(9.63 seconds). All had zero ignored tests. Pinned all-target compilation and
+denied-warning feature Clippy passed. This checkpoint also integrates the
+replicated confirmation/publication and foreign abandoned-activation cleanup
+fences; coordinated installation and Shared admission remain open.

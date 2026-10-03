@@ -155,6 +155,47 @@ comparison. Two Shared namespaces using one staged playback name remain
 independent. The original layout continues to refuse Shared reads rather than
 manufacturing a Local user; all Shared mutations remain refused.
 
+## Activation settlement and publication retain the same owner
+
+Confirmation, abandonment and request publication now use the canonical Local
+key on rebuilt session, pointer and request predicates. Confirmation and
+publication require the real user to exist inside the same write. Abandonment
+remains available to retire an existing session after user removal, but each
+dependent pointer, job-lease and cache-pin effect requires the ended session's
+principal to agree with the activation. The owner-node and epoch fences remain
+in place.
+
+The rebuilt activation case includes an already-ended Shared incarnation with
+an update timestamp equal to a corrupted Local abandonment call. Actual foreign
+job-lease revision/expiry and cache-pin retention assertions distinguish cleanup
+ownership from merely observing zero changed session rows. Legitimate Local
+confirmation replay, pending activation abandonment and claimed-request
+publication exercise the same production methods. The rebuilt case passed
+1/1 with zero ignored in 9.32 seconds; the existing dyn-store activation and
+settlement contract passed 1/1 in 11.68 seconds. The exact-state confirmation
+retry regression, all-target check and denied-warning feature Clippy passed.
+
+## Incarnation-only renewal and takeover keep authority closed
+
+Renewal and takeover APIs carry incarnation and owner epoch rather than a
+principal argument. Their pointer and request joins now use the ownership key.
+On rebuilt tables, `LocalSessionSql::live_local_user(table)` requires the stored
+principal kind to be Local and its real user to exist inside each session,
+job-lease and pin authority extension. The original layout retains its existing
+behavior. A readable Shared inventory row does not authorize renewal or
+producer takeover before grant and member-floor proofs are wired.
+
+The dedicated voter case attempts actual Shared renewal and takeover and checks
+foreign lease owner, fence, revision, expiry and pin retention. It also renews
+and takes over a legitimate Local session. After deleting the Local user, it
+restores a deliberately corrupt active session and matching live lease, then
+requires both operations to refuse without changing the lease. This isolates
+the missing-user predicate from the deletion trigger's normal retirement.
+The candidate case passed 1/1 with zero ignored in 9.09 seconds. The existing
+dyn-store lifecycle passed 1/1 in 12.84 seconds; committed successor renewal
+and staged-deadline refusal each passed 1/1 in 9.61 seconds. All-target check
+and denied-warning feature Clippy passed.
+
 ## A rebuilt table is not shared admission authority
 
 The schema shape comes from the existing quorum-observed Store-lifetime
@@ -170,8 +211,8 @@ literals, including three unit-test literals and validation-only legacy
 writers. Earlier counts of 65 preceded the pointer/desired-reader conversion.
 These checkpoints cover request, desired, recovery, preparation, activation and
 commit paths; they are not a complete census closure or qualification of all
-seven ownership tables. Lease, takeover, settlement and maintenance write
-predicates still need conversion and qualification.
+seven ownership tables. Terminal and maintenance write predicates still need conversion and
+qualification; shared authority extension remains closed.
 
 ## Exercise production behavior on three voters
 
