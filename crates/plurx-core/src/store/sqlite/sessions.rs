@@ -2485,7 +2485,11 @@ impl MediaSessionStore for SqliteStore {
             tx.execute(
                 "UPDATE media_sessions SET publication_ready_at_ms = ?1, updated_at_ms = ?2
                   WHERE incarnation_id = ?3 AND owner_node_id = ?4 AND owner_epoch = ?5
-                    AND state = 'active' AND publication_ready_at_ms = ?6",
+                    AND state = 'active' AND publication_ready_at_ms = ?6
+                    AND NOT EXISTS (SELECT 1 FROM media_session_requests request
+                      WHERE request.user_id = media_sessions.user_id
+                        AND request.incarnation_id = media_sessions.incarnation_id
+                        AND request.state = 'starting')",
                 params![
                     publication_ready_at_ms,
                     now_ms,
@@ -3197,8 +3201,7 @@ impl MediaSessionStore for SqliteStore {
                             AND NOT EXISTS (SELECT 1 FROM media_session_requests request
                               WHERE request.user_id = media_sessions.user_id
                                 AND request.incarnation_id = media_sessions.incarnation_id
-                                AND request.state = 'starting'
-                                AND request.claim_expires_at_ms <= media_sessions.lease_expires_at_ms))",
+                                AND request.state = 'starting'))",
                     params![
                         lease_expires_at_ms,
                         now_ms,
@@ -3226,8 +3229,7 @@ impl MediaSessionStore for SqliteStore {
                         AND NOT EXISTS (SELECT 1 FROM media_session_requests request
                           WHERE request.user_id = media_sessions.user_id
                             AND request.incarnation_id = media_sessions.incarnation_id
-                            AND request.state = 'starting'
-                            AND request.claim_expires_at_ms <= media_sessions.lease_expires_at_ms)
+                            AND request.state = 'starting')
                         AND EXISTS (SELECT 1 FROM job_leases
                           WHERE resource = ?6 AND owner_node_id = ?4 AND fence = ?5
                             AND expires_at_ms = ?1)",
@@ -3273,8 +3275,7 @@ impl MediaSessionStore for SqliteStore {
                                    AND NOT EXISTS (SELECT 1 FROM media_session_requests request
                                      WHERE request.user_id = session.user_id
                                        AND request.incarnation_id = session.incarnation_id
-                                       AND request.state = 'starting'
-                                       AND request.claim_expires_at_ms <= session.lease_expires_at_ms))",
+                                       AND request.state = 'starting'))",
                         params![
                             lease_expires_at_ms,
                             renewal.incarnation_id,
@@ -3991,8 +3992,7 @@ impl MediaSessionStore for SqliteStore {
                     AND NOT EXISTS (SELECT 1 FROM media_session_requests request
                       WHERE request.user_id = media_sessions.user_id
                         AND request.incarnation_id = media_sessions.incarnation_id
-                        AND request.state = 'starting'
-                        AND request.claim_expires_at_ms <= media_sessions.lease_expires_at_ms)
+                        AND request.state = 'starting')
                   ORDER BY updated_at_ms, incarnation_id LIMIT ?3",
             )?;
             let leases = statement

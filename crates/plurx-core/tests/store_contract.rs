@@ -4852,7 +4852,7 @@ async fn media_session_activation_prepare_settle_contract_runs_through_dyn_store
                     &activation.playback_id,
                     incarnation_id,
                     100,
-                    200,
+                    400,
                 )
                 .await
                 .unwrap_or_else(|error| panic!(
@@ -4928,6 +4928,24 @@ async fn media_session_activation_prepare_settle_contract_runs_through_dyn_store
             .await
             .unwrap_or_else(|error| panic!("{backend}: claim blocked takeover: {error}"))
             .is_none());
+
+        // The request may outlive the owner's activation lease. That does
+        // not turn this unconfirmed start into a recoverable handoff.
+        assert!(store
+            .arm_media_session_handoff(incarnation_id, &activation.owner_node_id, 1, 400_000, 150,)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: arm an in-flight activation: {error}"))
+            .is_none());
+        assert_eq!(
+            store
+                .media_session_route_by_incarnation(incarnation_id)
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: read refused handoff: {error}"))
+                .expect("in-flight activation survives")
+                .publication_ready_at_ms,
+            MEDIA_SESSION_PUBLICATION_BLOCKED,
+            "{backend}: lease recovery cannot steal confirmation"
+        );
 
         let confirmed = confirm_media_activation(store.as_ref(), &activation, 0, backend).await;
         assert_eq!(confirmed.publication_ready_at_ms, 0, "{backend}");

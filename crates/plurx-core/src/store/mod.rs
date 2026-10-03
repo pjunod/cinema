@@ -4954,7 +4954,9 @@ pub trait MediaSessionStore: Send + Sync + 'static {
 
     /// Replace the durable unobserved sentinel with one full, freshly minted
     /// not-before boundary. Exact ownership changes and terminal state fail
-    /// closed. A concurrent acknowledgement may return an already-ready row.
+    /// closed. A starting request owns activation confirmation, so handoff
+    /// recovery cannot arm it even when its claim deadline exceeds the lease.
+    /// A concurrent acknowledgement may return an already-ready row.
     async fn arm_media_session_handoff(
         &self,
         incarnation_id: &str,

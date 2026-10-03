@@ -4952,3 +4952,51 @@ A full fifteen-manual/five-actual-Auto headed campaign now runs against exact
 `feae4cc28`, using the committed mixedCase and unchanged acceptance criteria.
 The wrapper changes only headed launch and bounded diagnostic raster capture;
 End proof remains the committed alive-daemon census. No units executed.
+
+
+### 10.170 · Full headed Firefox failure is callback delay, not a backstep
+
+The full headed `feae4cc28` run presented all fifteen manual targets, with
+zero backward callbacks, measured hitches or stalls, and one dropped frame.
+It failed the unchanged 100 ms p95 limit on a single 101.74 ms maximum gap
+in change eight (720p → 1080p). Auto did not run. The bounded raster probe
+observed 20100 callbacks and no suspicious timestamp rows. End observed zero
+owned producers at all four samples; display and runtime were removed.
+
+The offending interval was at film 380.833333 → 380.916666 seconds, shortly
+after the request at 378.417 and before target presentation at 440.083333.
+Its callback timestamps advanced 101.74 ms; expected-display timestamps
+advanced 84.78 ms, while the presented-frame count advanced by two. These
+separate observer scheduling from reported display timing; they do not prove
+physical presentation or excuse the failed callback criterion. A focused
+follow-up will investigate this interval before another full campaign.
+
+### 10.171 · Cold start exposes activation-publication recovery race
+
+The current-source rapid/pause/cold-seek attempt failed before its first
+presented frame. None of those transport stages ran. It reported a 503 exact
+activation-publication refusal: the active route had a publication boundary
+about 373 seconds in the future. The isolated backend/proxy were removed.
+The Mac and Linux clocks agreed; no system time or services were changed.
+
+The owner inventory and renewal predicates excluded a starting request only
+when its claim deadline was no later than its activation lease. A longer
+claim could therefore admit an unconfirmed activation to the lease loop.
+That loop can arm BLOCKED routes with the 372-second handoff safety boundary,
+which prevents the creating request's zero-boundary confirmation/publication.
+These source conditions explain a concrete race consistent with the refusal;
+the corrected runtime still needs qualification.
+
+Both stores now exclude starting requests from owner inventory and all three
+renewal projections regardless of deadline ordering. Handoff arming also
+atomically refuses an incarnation with a starting request, protecting against
+an older inventory snapshot. Expiry/takeover predicates and confirmed-handoff
+safety intervals are retained. No feature switch or readiness gate was added.
+
+Extended, unrun regression:
+`crates/plurx-core/tests/store_contract.rs::media_session_activation_prepare_settle_contract_runs_through_dyn_store`.
+Its claim now outlives the activation lease, and it verifies blocked owner
+inventory/renewal, refused handoff arming, retained confirmation ownership,
+then successful confirmation/publication across SQLite and replicated storage.
+Pinned Rust 1.97.1 `cargo check --locked -p plurx-core --tests --features
+hiqlite-contract-tests` passed without executing tests.
