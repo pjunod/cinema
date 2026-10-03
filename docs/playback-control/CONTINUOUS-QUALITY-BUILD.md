@@ -4135,3 +4135,20 @@ background-stop behavior. Both owned tabs and the fixture server were closed.
 An attempted restoration stopped when a fresh UI observation showed the user
 had navigated to their TV library; further automation must not override that
 navigation. Future native experiments require a separate owned window.
+
+
+### 10.138 The full current-source run exposed startup publication refusal
+
+The fifteen-manual / five-real-Auto campaign on `a5476334f` failed before its
+first frame: VOD creation completed in 553 ms, but the final create response
+was refused because exact activation publication did not settle. The ordinary
+Activity read had warmed attestation (356 ms). The failed receipt is retained
+as `continuous-chrome-mixed-auto-linux-a5476334f-current-transport.json`; no
+switch or Auto result is claimed from that run. Owned runtime cleanup finished.
+
+The replicated Store and HTTP publication boundary now report bounded refusal
+facts: route state/publication boundary, claim state and identity-match booleans,
+and exact recipe/response equality. No media bytes, credentials or serialized
+recipes are logged, and no predicate, deadline, admission or recovery rule is
+changed. The next committed-source probe must identify the failed predicate
+before another long campaign. No unit tests executed.

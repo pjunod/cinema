@@ -3109,24 +3109,51 @@ impl MediaSessionStore for HiqliteAuthStore {
             .into_iter()
             .collect::<Result<Vec<_>, _>>()
             .map_err(database_error)?;
-        let route = route_by(self, "incarnation_id", incarnation_id)
-            .await?
-            .filter(|route| {
-                route.user_id == user_id
-                    && route.state == "active"
-                    && route.publication_ready_at_ms == 0
-            });
+        let observed = route_by(self, "incarnation_id", incarnation_id).await?;
+        let route = observed.filter(|route| {
+            let matches = route.user_id == user_id
+                && route.state == "active"
+                && route.publication_ready_at_ms == 0;
+            if !matches {
+                tracing::warn!(
+                    state = %route.state,
+                    publication_ready_at_ms = route.publication_ready_at_ms,
+                    user_matches = route.user_id == user_id,
+                    "media-session publication refused its route projection"
+                );
+            }
+            matches
+        });
         let Some(route) = route else {
             return Ok(None);
         };
-        let resolved = request_row(self, user_id, request_id)
-            .await?
-            .is_some_and(|request| {
-                request.state == "resolved"
-                    && request.incarnation_id == incarnation_id
-                    && request.request_fingerprint == route.request_fingerprint
-                    && request.playback_id == route.playback_id
-            });
+        let request = request_row(self, user_id, request_id).await?;
+        let resolved = request.as_ref().is_some_and(|request| {
+            request.state == "resolved"
+                && request.incarnation_id == incarnation_id
+                && request.request_fingerprint == route.request_fingerprint
+                && request.playback_id == route.playback_id
+        });
+        if !resolved {
+            tracing::warn!(
+                request_state = request.as_ref().map(|request| request.state.as_str()),
+                incarnation_matches = request
+                    .as_ref()
+                    .is_some_and(|request| request.incarnation_id == incarnation_id),
+                fingerprint_matches =
+                    request.as_ref().is_some_and(
+                        |request| request.request_fingerprint == route.request_fingerprint
+                    ),
+                playback_matches = request
+                    .as_ref()
+                    .is_some_and(|request| request.playback_id == route.playback_id),
+                owner_matches = request
+                    .as_ref()
+                    .is_some_and(|request| request.owner_node_id.as_deref()
+                        == Some(route.owner_node_id.as_str())),
+                "media-session publication refused its request projection"
+            );
+        }
         Ok(resolved.then_some(route))
     }
 

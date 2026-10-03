@@ -3222,8 +3222,20 @@ async fn create_with_purpose_inner(
     })?
     .map_err(|error| session_store_error("publishing the media-session response", error))?
     .filter(|route| {
-        route_matches_activation(route, &publication_activation)
-            && route.publication_ready_at_ms == 0
+        let exact = route_matches_activation(route, &publication_activation)
+            && route.publication_ready_at_ms == 0;
+        if !exact {
+            tracing::warn!(
+                state = %route.state,
+                owner_epoch = route.owner_epoch,
+                publication_ready_at_ms = route.publication_ready_at_ms,
+                lease_live = route.lease_expires_at_ms > unix_ms(),
+                recipe_matches = route.recipe_json == publication_activation.recipe_json,
+                response_matches = route.response_json == publication_activation.response_json,
+                "media-session publication refused its exact activation projection"
+            );
+        }
+        exact
     })
     .ok_or_else(|| {
         ApiError::ServiceUnavailable(

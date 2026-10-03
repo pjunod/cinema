@@ -5,16 +5,17 @@
 <p class="state"><strong>Incomplete — final adversarial review has not started.</strong>
 The human requests a stop immediately after that review for external Fable
 reviews, before fast-lane tests or merge.</p>
-<p><strong>Working now:</strong> current-source manual/Auto continuity and
-producer-retirement qualification. Rapid changes across pause/resume and a
-pending-quality cold seek now complete without replacing the attachment or
-session. No unit tests have run.</p>
-<p><strong>Latest runtime result:</strong> source <code>a5476334f</code>
-completed both targeted transport stages with empty stage error lists; 1080p
-presented at 900 s in approximately 3.134 seconds in the original session.
-End left zero FFmpeg children at immediate, one-, three- and five-second
-samples. The complete receipt remains failed on its initial 500 ms callback
-gap against the 250 ms bound. Physical output is unmeasured.</p>
+<p><strong>Working now:</strong> diagnosing a startup ownership-publication
+refusal that stopped the larger manual/Auto campaign before its first frame.
+Bounded diagnostics identify the failed ownership predicate without relaxing
+it. No unit tests have run.</p>
+<p><strong>Latest runtime result:</strong> the larger source
+<code>a5476334f</code> campaign failed before playback: VOD creation completed
+in 553 ms, but exact activation publication was refused. No switches were
+qualified by that run. An earlier probe on the same source completed rapid
+pause/resume and a 900 s pending-quality seek in the original session; its
+whole receipt remains failed on a 500 ms initial callback gap. End retired all
+owned FFmpeg children through the five-second sample.</p>
 <p><strong>Measured startup improvement:</strong> optimized development
 SHA-256 reduced decoder planning to 48–151 ms per lookup, complete VOD creation
 to 798 ms, and the ordinary Activity attestation to 497 ms. All executable
