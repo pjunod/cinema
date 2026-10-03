@@ -234,6 +234,7 @@ function beginPlaybackControlSeek(p,targetSec,supersedeIntent=true,seekTelemetry
   p.controlSeek={sequence,intentGeneration,
     targetMs:Math.max(0,Math.round(targetSec*1000)),
     executed:false,frameFloor,audioPositionMs:null,seekTelemetry};
+  if(preserveContinuousManualQuality)p.continuousQuality?.noteSeek?.(targetSec);
   const reporter=p.controlReporter;
   const predicted=reporter&&!reporter.stopped?(Number(reporter.sequence)||0)+1:null;
   const reported=notifyPlaybackControl();

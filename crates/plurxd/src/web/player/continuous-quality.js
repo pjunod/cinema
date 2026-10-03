@@ -545,21 +545,20 @@ function continuousQualityAdapter(player,video,attachment,bootstrap,exchange=con
       // old forward range must not drag a backward seek's choice to its tail.
       let through=Math.floor(seconds*wanted.timescale/wanted.segment_ticks)*wanted.segment_ticks;
       if(!continuousQualityInteger(through))return false;
-      if(through===seekBoundary)return true; // Identical frontier cannot renew preparation.
-      seekBoundary=through;
+      const changed=through!==seekBoundary;seekBoundary=through;
       for(;;){
         const next=Array.from(records.values()).find(row=>row.type==='video'
           &&(row.exposed||row.appended)&&!row.removed&&!row.disposed
           &&row.interval.from_tick<=through&&through<row.interval.through_tick);
         if(!next)break;through=next.interval.through_tick;
       }
-      frontier=through;seekRevision++;return true;
+      frontier=through;if(changed)seekRevision++;return true;
     },
     choose(candidateId,live=()=>true){return serial(async()=>{
       if(!current())return 'superseded';
       const next=family.video.find(row=>row.candidate_id===candidateId);if(!next)return 'outside_family';
       if(next.rendition_id===wanted.rendition_id)return 'continuous';
-      const previous=wanted,old=transaction;
+      const previous=wanted,old=transaction,choiceSeek=seekRevision;
       try{
         await flushAppends();await flushDisposals(true);
         const level=hls.levels.findIndex(level=>level.url.some(url=>new URL(url,location.href).pathname===parentPath+next.playlist));
@@ -597,6 +596,13 @@ function continuousQualityAdapter(player,video,attachment,bootstrap,exchange=con
             for(const pin of unexposed)records.delete(`${pin.rendition_id}:${pin.artifact_id}`);
           }
         }catch(error){note(error);}
+        if(video.seeking||choiceSeek!==seekRevision){
+          // A completed old-rung XHR can still own FRAG_LOADING while its
+          // authorization was queued behind this choice. Reset network
+          // controllers through the public API; keep the attachment and
+          // SourceBuffers, and do not seek the element a second time.
+          hls.stopLoad();hls.startLoad(Math.max(0,Number(video.currentTime)||0),true);
+        }
         return 'continuous';
       }catch(error){
         note(error);wanted=previous;

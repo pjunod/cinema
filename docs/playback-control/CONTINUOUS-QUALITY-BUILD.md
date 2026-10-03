@@ -4065,3 +4065,37 @@ the Mac had 195 MiB free. Two obsolete owned incremental caches last used at
 05:08–05:09 on October 2 were removed (about 5.5 GiB), retaining current warm
 caches, source and all runtime evidence. This was a compiler-storage failure,
 not a failed unit test; the normal hook is being retried.
+
+
+### 10.136 Rebased cold seeks must retire the old network loader too
+
+Combined committed source `40565116d` built on Linux in 5m11s. Optimized
+SHA-256 reduced the ordinary Activity attestation from about seven seconds
+to 497 ms. Primary catalog/execution planning took 151/50 ms, soundtrack
+execution 48 ms, and companion catalog/execution 52/49 ms; complete initial
+VOD creation took 798 ms. Every executable rehash remains enabled. This
+measures the development-profile repair, not cold attestation qualification.
+
+Rapid/pause again completed in the original session. The cold seek now
+prepared the requested 1080p at exact tick 21600 / 900 s under transaction
+revision 6, but no target video appended. HLS remained in
+`FRAG_LOADING_WAITING_RETRY` after an old-rung load lost authorization. At
+the local-seek deadline it reopened and only then presented 1080p at 900 s.
+The complete receipt remains failed: initial callback gap 516.7 ms, session
+replacement and two VOD creates. Recovered playback is not a passed seek.
+
+The adapter now resets HLS network controllers with the shipped SDK's public
+`stopLoad` / `startLoad(currentTime, true)` after an in-flight quality choice
+spans a seek. The `true` parameter skips a second media-element seek. The
+MediaSource, SourceBuffers and old byte obligations remain attached; there is
+no buffer flush or session reopen. Fenced choices do not restart loading.
+The latest preparation destination is also published before transport demand,
+closing the interval before scrub coalescing; the actual local execution
+rechecks the same frontier without renewing its revision. Duplicate frontiers
+recompute current contiguous exposure but cannot grant another preparation.
+
+The existing authored adapter regression now asserts a single network restart
+at 900 s without an element seek, and no restart for a fenced owner. The
+transport regression checks the destination is recorded before demand is
+reported. Production and test-source JavaScript syntax checks passed. No
+unit tests executed; exact committed-source runtime qualification is open.

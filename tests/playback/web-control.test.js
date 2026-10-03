@@ -7332,19 +7332,21 @@ test("pause and resume preserve only the attached manual continuous quality inte
 
 
 test("local seek preserves only its attached continuous manual request",()=>{
-  const begin=new Function([
-    "function clearPlaybackControlWaiters(){}function playbackSurfaceStep(){}function notifyPlaybackControl(){return false;}",
+  const events=[];
+  const begin=new Function("events",[
+    "function clearPlaybackControlWaiters(){}function playbackSurfaceStep(){}function notifyPlaybackControl(){events.push('report');return false;}",
     "function abandonPreparedReplacement(){}function settleDirectedChange(){}",
     "const document={getElementById(){return null;}};",
     shippedSource("supersedePlaybackControlIntent"),shippedSource("beginPlaybackControlSeek"),
     "return beginPlaybackControlSeek;",
-  ].join("\n"))();
-  const owner={},attachment={};
+  ].join("\n"))(events);
+  const attachment={},owner={noteSeek(target){events.push(target);}};
   const p={controlIntentGeneration:1,sessionId:"attached",continuousQuality:owner,mediaAttachment:attachment,
     directedChange:{intentGeneration:1,reason:"manual",settled:false,incumbentSessionId:"attached",
       continuousOwner:owner,continuousAttachment:attachment}};
   begin(p,900,true,null,{preserveContinuousManualQuality:true});
   assert.equal(p.directedChange.intentGeneration,p.controlIntentGeneration);
+  assert.deepEqual(events,[900,"report"],"publish the new preparation frontier before transport demand");
   p.mediaAttachment={};
   begin(p,100,true,null,{preserveContinuousManualQuality:true});
   assert.notEqual(p.directedChange.intentGeneration,p.controlIntentGeneration,"replacement attachment fences the ask");

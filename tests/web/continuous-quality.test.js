@@ -155,20 +155,24 @@ test('attached quality preparation follows a newer cold seek without reviving a 
    Hls:{Events:{MANIFEST_PARSED:'manifest',BUFFER_CREATED:'buffers',MEDIA_DETACHED:'detach'}}});
   vm.runInContext(fs.readFileSync('crates/plurxd/src/web/player/continuous-quality.js','utf8'),scope);
   vm.runInContext('continuousQualityProtocol=()=>mock;',scope);
-  const player={},attachment={current:()=>true},media={};
+  const player={},attachment={current:()=>true},media={currentTime:0,seeking:false};
   const adapter=scope.continuousQualityAdapter(player,media,attachment,
    {...bootstrap,family,primary_candidate_id:videoRows[0].candidate_id});
   player.continuousQuality=adapter;
-  const hls={levels:videoRows.map(row=>({url:['http://localhost/api/v1/hls/session/'+row.playlist]})),on(){},loadLevel:0};
+  const network=[];
+  const hls={levels:videoRows.map(row=>({url:['http://localhost/api/v1/hls/session/'+row.playlist]})),
+   on(){},loadLevel:0,stopLoad(){network.push('stop');},startLoad(at,skipSeek){network.push({at,skipSeek});}};
   adapter.bind(hls,0);
   const choice=adapter.choose(videoRows[1].candidate_id,()=>!fenced);
-  await started;assert.equal(adapter.noteSeek(900),true);release();
+  await started;assert.equal(adapter.noteSeek(900),true);media.currentTime=900;media.seeking=true;release();
   await secondStarted;assert.equal(adapter.noteSeek(900),true);releaseSecond();
   assert.equal(await choice,fenced?(firstReady?'superseded':'retained_current'):'continuous');
   const prepares=calls.filter(call=>call.operation.kind==='prepare');
   assert.deepEqual(prepares.map(call=>call.frontier.through_tick),[0,21600]);
   assert.equal(adapter.wanted.rendition_id,videoRows[fenced?0:1].rendition_id);
   assert.equal(hls.loadLevel,fenced?0:1);
+  assert.deepEqual(network,fenced?[]:['stop',{at:900,skipSeek:true}],
+   "cold seek resets only network loading and skips a second element seek");
   assert.deepEqual(prepares.map(call=>call.operation.target_rendition_id),
    [videoRows[1].rendition_id,videoRows[fenced?0:1].rendition_id]);
   assert.equal(calls.filter(call=>call.operation.kind==='cancel_unappended').length,firstReady?1:0);
