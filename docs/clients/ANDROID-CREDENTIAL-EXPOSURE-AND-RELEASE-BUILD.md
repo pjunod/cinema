@@ -1,6 +1,6 @@
 # Android credential exposure and the release build — implementation plan
 
-**Status:** in execution; external M3 remains open under §8 · **Executes:** D5 / D6 (release half) /
+**Status:** in execution; external M3 remains open under §8; M9 confirmed on four reachable devices and the shipped M2 rules and absent VIEW handoff confirmed from the release APK (§9, 2026-10-02) · **Executes:** D5 / D6 (release half) /
 F-android-6 / F-android-7 / F-android-8 / F-android-12 from
 [ARCHITECTURE-REVIEW-2026-09-20.md](../reviews/ARCHITECTURE-REVIEW-2026-09-20.md)
 · **Written:** 2026-09-20 against `main` @ `88a3957a`
@@ -675,6 +675,70 @@ payload and recipient, plus a new review of its handoff contract.
 
 ---
 
+## 9. 2026-10-02 device evidence (M9, M2, no external VIEW)
+
+Collected read-only over adb by claude-opus-5-5 (session
+https://claude.ai/code/session_01CAyBrYCQ7PpAtuZwUxKfp7), 2026-10-02
+08:04–08:49 UTC, against installed release build 142 (`4f25ab713` on
+`main`). Raw `dumpsys package`, `dumpsys backup` and manifest dumps are kept
+with the collector's receipt outside the repo. Nothing was installed,
+uninstalled, cleared, backed up or restored.
+
+**M9 — release on every reachable device.**
+
+| Device | API | `run-as tv.plurx.app id` | versionCode | pkgFlags |
+|---|---|---|---|---|
+| Google TV Streamer | 34 | not debuggable | 142 | `HAS_CODE ALLOW_CLEAR_USER_DATA ALLOW_BACKUP` |
+| Pixel 10 Pro Fold | 37 | not debuggable | 142 | same, plus `KILL_AFTER_RESTORE` |
+| Pixel 11 Pro XL | 37 | not debuggable | 142 | same, plus `KILL_AFTER_RESTORE` |
+| motorola razr ultra 2025 | 36 | not debuggable | 142 | `HAS_CODE ALLOW_CLEAR_USER_DATA ALLOW_BACKUP` |
+
+All four carry the same release signing certificate and none is
+`DEBUGGABLE` — the 2026-09-25 baseline (versionCode 124, `DEBUGGABLE` on
+every device) is gone. 142 matched the built counter on the day. **Partial
+against §5.9's bar:** the TCL 9445X, the Lenovo TB322FC and the Xiaomi were not
+visible to adb, so "every device in the role's inventory" is not yet met. The
+source counter is still 142 on this effort branch; the next client build bumps
+it, and that rollout must recheck every device against the new number.
+
+**Observation, not a bar: a leftover test package.** `tv.plurx.app.test` — the
+debug instrumentation APK — is listed by Backup Manager on the Google TV (its
+full-backup queue) and the Pixel 10 Pro Fold, so it is likely still installed
+there. Backup lists can keep entries for removed packages (the Google TV queue
+also lists the `capabilityprobe` packages uninstalled on 2026-09-30), so this is
+not proof. Device step for an operator: `adb -s <device> shell pm list packages
+tv.plurx.app.test`, and if it is listed, `adb -s <device> uninstall
+tv.plurx.app.test`. Uninstall only that exact package — never `tv.plurx.app`.
+
+**M2 — the shipped backup rules.** The release APK was pulled from the Pixel 11
+Pro XL (7.5 MB, resource-shrunk) and its manifest decoded: no `debuggable`,
+`allowBackup=true`, `fullBackupContent=@xml/backup_rules` excluding `offline/`
+and `datastore/`, and `dataExtractionRules=@xml/data_extraction_rules` excluding
+both under **both** `cloud-backup` and `device-transfer`. So the F-android-7
+exclusion reaches devices in the shipped artifact, not only in source. Backup
+Manager state: enabled with the Google transport on the three phones (plurx is
+a participant; on the Pixel 11 it is "ever backed up", queued at install time);
+disabled with only the local transport on the Google TV.
+**Not run:** `bmgr backupnow` and any restore. A physical restore signs the
+user out and touches real data, so it needs Paul's explicit authorization;
+the restore-lands-on-login half of §5.2's bar remains open.
+
+**No external VIEW handoff (§8).** The decoded manifest declares no `VIEW`
+intent filter, and the only `ACTION_VIEW` in 142's source is the
+explicit-component reminder `PendingIntent` that opens plurx's own
+`MainActivity` (`ReminderAlarmReceiver.kt`). `PdfRenderer` is present for the
+internal PDF reader. The external-intent half of §8's internal-reader
+acceptance is therefore met on the shipped build.
+
+**Not collected:** the §8 "PDF and EPUB open and reopen on physical devices"
+half — the library's Books shelf held only an audiobook, and all three phones
+were behind a secure keyguard — and the offline-title-survives-upgrade check,
+for the same reason. The M5 dispatcher trace still needs Paul's ruling on how
+to run it on a release build (`Net.kt` installs the listener only under
+`BuildConfig.DEBUG`).
+
+---
+
 ## Execution log
 
 Executing sessions append one row per milestone PR (see the
@@ -696,3 +760,4 @@ trailers `Agent-Model:` / `Agent-Session:` on every commit of the branch.
 | 2026-09-25 | gpt-6-astra | codex:/root/d03_finish_prep | D-03 internal-reader follow-up | [draft PR #534](http://192.168.4.7:3000/noirr/plurx/pulls/534) | Android PDF navigation now carries the selected file size, refuses unavailable or oversized files and rejects a download whose bytes differ from that selection. Apple PDF loading and progress saving remain bound to the profile that opened the document; PDFKit link actions stay internal. `ANDROID_HOME=/Users/pjunod/Library/Android/sdk ./clients/android/gradlew -p clients/android :app:compileDebugKotlin --offline --no-daemon` passed; `make apple-build` passed iOS and tvOS simulator compilation (log SHA-256 `f2b79010119392776490bceb10619b9dd190ad653b5ebb7984aba9da5498853a`). No tests or adversarial review have run on #534; physical PDF/EPUB reading and the original external-reader M3 acceptance remain open. |
 | 2026-09-26 | gpt-6-astra | codex:/root/d03_finish_prep | D-03 sole review disposition | [draft PR #534](http://192.168.4.7:3000/noirr/plurx/pulls/534) | The one adversarial review on published head `96a78edfc` found two P2 Android PDF issues: `PdfRenderer` could throw on an individual bad page and crash navigation, and vertical scroll position carried from one page to the next. The same PR now reports a render failure inside the reader, recycles an allocated bitmap on failure, offers a previous-page path, and keys scroll state by page. Android `:app:compileDebugKotlin --offline` passed after the fix (log SHA-256 `62243b91bd5876ec09fcf614c926989598771e11e011200790c81289fa4b6e11`). No second adversarial review will run; the fast lane runs after the reviewed fix is committed and the PR is marked ready. Physical PDF/EPUB acceptance remains open. |
 | 2026-09-28 | gpt-6-astra | 01a0d5b2-d294-70c2-a7e9-d884600c68e0 | D03M5/M10 source tooling | `codex/native-review-completion-0928` | Integrated07a78b030/cc4bcb9c1 and followup127c7f1fb. Debug-only bounded existing-dispatcher timings, signed nondebuggable capture target, independently signed self-instrumenting harness and strict paired five-cold-sample report. Compile/APK signature checks pass; no tests/profile generation/device measurements yet. Named Lenovo traces and profile consumption/gains remain open. |
+| 2026-10-02 | claude-opus-5-5 | https://claude.ai/code/session_01CAyBrYCQ7PpAtuZwUxKfp7 | M9, M2, §8 device evidence | `opus/client-evidence` into the architecture effort | Read-only adb on build 142 (§9): Google TV Streamer, Pixel 10 Pro Fold, Pixel 11 Pro XL and razr ultra all not debuggable at versionCode 142 with one release signer; TCL, Lenovo and Xiaomi unreachable, so M9 is partial. Pulled release APK confirms both backup rule files exclude `offline/` and `datastore/` in every section and no VIEW intent filter exists. `bmgr backupnow`/restore, physical PDF/EPUB and offline checks not run. |
