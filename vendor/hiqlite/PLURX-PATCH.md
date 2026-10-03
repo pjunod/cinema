@@ -257,6 +257,17 @@ made-up URL and prevents the fork from being declared fully tracked.
   passive fixed-label metrics. This changes no replicated enum ordinal,
   metadata encoding, completed image format, or install format.
 
+**Partial upstream receipt, 2026-10-03:** row 1's local-node selection by
+durable id is accepted in [upstream PR 368](https://github.com/sebadob/hiqlite/pull/368),
+merged September 24 as
+[`9824bcfcf186a10c747bba5960678f8b1589e9f8`](https://github.com/sebadob/hiqlite/commit/9824bcfcf186a10c747bba5960678f8b1589e9f8).
+The [observed immutable configuration source](https://github.com/sebadob/hiqlite/blob/e0a6a8e9bdde7afb97156eef13a6e93574324feb/hiqlite/src/config.rs#L461)
+checks local-id membership but does not reject duplicate durable ids. The
+combined row therefore stays `pending M6`: duplicate rejection still needs
+an exact submission/disposition, and its unchanged drop condition is not met.
+This is read-only source evidence, not a newly executed upstream reproduction
+or permission to upgrade or remove the patch.
+
 Remove this vendor when both halves of its exit hold. First, the rows an
 upstream release can retire (rows 1, 8, 9, 10, 11, 17, 18 and 19: the
 `generic bug` and `dependency-only` kinds) have met their drop conditions in

@@ -52,6 +52,18 @@ directory `sync_all()` success; acceptance of the shared mechanism does not
 prove full patch or durability equivalence. No upgrade or patch removal is
 recorded here; the exit below still applies.
 
+**Partial upstream receipt, 2026-10-03:** [upstream PR 367](https://github.com/sebadob/hiqlite/pull/367)
+merged September 18 as
+[`52122ae7163d051d6b488d751018f76596f7d8f7`](https://github.com/sebadob/hiqlite/commit/52122ae7163d051d6b488d751018f76596f7d8f7).
+Its memo records `id_from` and rejects reuse when the starting range changes;
+`read_logs_memo_survives_wal_no_reuse` covers different directories/ranges.
+That accepted portion of row 3 is not the full incarnation/layout repair:
+[observed immutable reader refresh](https://github.com/sebadob/hiqlite/blob/e0a6a8e9bdde7afb97156eef13a6e93574324feb/hiqlite-wal/src/wal.rs#L934)
+still retains objects by WAL number while replacing boundaries. Same-path
+stale mmap, suffix-rewrite identity and reader/path-reuse serialization need
+their own exact disposition. Row 3 stays `pending M6`; no new upstream
+reproduction, full equivalence, upgrade or patch removal is claimed.
+
 Remove this vendor when an upstream Hiqlite release contains the same repair
 and Plurx has upgraded to it. Until then,
 `single_file_snapshot_tail_restores_its_missing_purge_boundary`,
