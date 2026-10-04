@@ -6069,8 +6069,32 @@ mod tests {
     }
 
     #[cfg(feature = "hiqlite-store")]
-    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-    async fn daemon_join_refuses_occupied_and_expired_targets_then_resumes_finalization() {
+    #[test]
+    fn daemon_join_refuses_occupied_and_expired_targets_then_resumes_finalization() {
+        // A whole daemon selection migrates the replicated schema from its
+        // first version. `HiqliteAuthStore::migrate_schema` is one async fn
+        // with an arm per version; its unoptimized frame alone measured 1.7 MB
+        // once main's and the Jellyfin effort's arms met, beyond a 2 MiB test
+        // thread. Same owned 8 MiB stack the architecture-review effort gives
+        // full-startup tests.
+        std::thread::Builder::new()
+            .stack_size(8 * 1024 * 1024)
+            .spawn(|| {
+                tokio::runtime::Builder::new_multi_thread()
+                    .worker_threads(4)
+                    .thread_stack_size(8 * 1024 * 1024)
+                    .enable_all()
+                    .build()
+                    .expect("build daemon join runtime")
+                    .block_on(Box::pin(daemon_join_fixture()))
+            })
+            .expect("spawn owned daemon join thread")
+            .join()
+            .expect("daemon join fixture completes");
+    }
+
+    #[cfg(feature = "hiqlite-store")]
+    async fn daemon_join_fixture() {
         install_default_crypto_provider();
 
         let source_dir = tempfile::tempdir().expect("source data dir");

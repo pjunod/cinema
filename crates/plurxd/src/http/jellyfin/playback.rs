@@ -258,10 +258,15 @@ pub(super) async fn activate(
         }
         Err(error) => {
             if negotiated.is_none() {
-                let _ = state
-                    .store
-                    .revoke_file_grant(&id, play.negotiation.scope.user_id, now / 1000)
-                    .await;
+                // Best effort: the unbound link also expires on its own.
+                crate::store_result::observe(
+                    crate::store_result::Operation::RevokeUnboundJellyfinMediaLink,
+                    crate::store_result::Discard::BestEffort,
+                    state
+                        .store
+                        .revoke_file_grant(&id, play.negotiation.scope.user_id, now / 1000)
+                        .await,
+                );
             }
             return Err(error.into());
         }
@@ -1001,10 +1006,15 @@ async fn info(
     let created = state.store.create_jellyfin_play(play).await;
     if !matches!(created, Ok(true)) {
         if let Some((id, _)) = media_link.as_ref() {
-            let _ = state
-                .store
-                .revoke_file_grant(id, scope.user_id, created_at_ms / 1000)
-                .await;
+            // Best effort: the play never bound, and the link expires on its own.
+            crate::store_result::observe(
+                crate::store_result::Operation::RevokeUnboundJellyfinMediaLink,
+                crate::store_result::Discard::BestEffort,
+                state
+                    .store
+                    .revoke_file_grant(id, scope.user_id, created_at_ms / 1000)
+                    .await,
+            );
         }
         created?;
         return Err(ApiError::ServiceUnavailable(

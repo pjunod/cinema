@@ -1,7 +1,34 @@
 use super::*;
 #[cfg(feature = "hiqlite-contract-tests")]
 use plurx_core::store::JellyfinLoginStore;
-use plurx_core::store::{JellyfinClientFamily as Family, JellyfinLoginWrite};
+use plurx_core::store::{
+    JellyfinClientFamily as Family, JellyfinLoginWrite, TokenAudience, TokenAuthentication,
+};
+
+/// The login a token authenticates as under the audience that issued it.
+/// `user_for_token` is the native audience, which refuses every
+/// compatibility login by design, so these liveness checks read both.
+trait LoginLookup {
+    async fn login_for_token(
+        &self,
+        token_hash: &str,
+    ) -> Result<Option<plurx_core::domain::User>, plurx_core::error::StoreError>;
+}
+impl<S: Store + ?Sized> LoginLookup for S {
+    async fn login_for_token(
+        &self,
+        token_hash: &str,
+    ) -> Result<Option<plurx_core::domain::User>, plurx_core::error::StoreError> {
+        for audience in [TokenAudience::JellyfinCompatibility, TokenAudience::Native] {
+            if let TokenAuthentication::Authenticated(user) =
+                self.authenticate_token_for(token_hash, audience).await?
+            {
+                return Ok(Some(user));
+            }
+        }
+        Ok(None)
+    }
+}
 fn digest(label: &str) -> String {
     plurx_core::auth::hash_token(label)
 }
@@ -58,7 +85,7 @@ async fn jellyfin_login_replacement_is_atomic_scoped_and_password_fenced() {
             .await
             .expect("replace own scope"));
         assert!(store
-            .user_for_token(&digest("old"))
+            .login_for_token(&digest("old"))
             .await
             .expect("old lookup")
             .is_none());
@@ -71,7 +98,7 @@ async fn jellyfin_login_replacement_is_atomic_scoped_and_password_fenced() {
         ] {
             assert!(
                 store
-                    .user_for_token(&digest(token))
+                    .login_for_token(&digest(token))
                     .await
                     .expect("preserved lookup")
                     .is_some(),
@@ -91,12 +118,12 @@ async fn jellyfin_login_replacement_is_atomic_scoped_and_password_fenced() {
         assert!(a.expect("race a"));
         assert!(b.expect("race b"));
         let alive_a = store
-            .user_for_token(&digest("race-a"))
+            .login_for_token(&digest("race-a"))
             .await
             .expect("race a lookup")
             .is_some();
         let alive_b = store
-            .user_for_token(&digest("race-b"))
+            .login_for_token(&digest("race-b"))
             .await
             .expect("race b lookup")
             .is_some();
@@ -106,7 +133,7 @@ async fn jellyfin_login_replacement_is_atomic_scoped_and_password_fenced() {
         );
         let winner = if alive_a { "race-a" } else { "race-b" };
         assert!(store
-            .user_for_token(&digest("new"))
+            .login_for_token(&digest("new"))
             .await
             .expect("replaced lookup")
             .is_none());
@@ -119,7 +146,7 @@ async fn jellyfin_login_replacement_is_atomic_scoped_and_password_fenced() {
             .await
             .is_err());
         assert!(store
-            .user_for_token(&digest(winner))
+            .login_for_token(&digest(winner))
             .await
             .expect("rollback winner")
             .is_some());
@@ -130,7 +157,7 @@ async fn jellyfin_login_replacement_is_atomic_scoped_and_password_fenced() {
             .await
             .expect("stale password no-op"));
         assert!(store
-            .user_for_token(&digest("stale-proof"))
+            .login_for_token(&digest("stale-proof"))
             .await
             .expect("stale lookup")
             .is_none());
@@ -146,7 +173,7 @@ async fn jellyfin_login_replacement_is_atomic_scoped_and_password_fenced() {
             .await
             .expect("password change fences verification"));
         assert!(store
-            .user_for_token(&digest(winner))
+            .login_for_token(&digest(winner))
             .await
             .expect("failed replacement preserves scope")
             .is_some());
@@ -180,7 +207,7 @@ async fn jellyfin_login_replacement_is_atomic_scoped_and_password_fenced() {
             .await
             .expect("new user scope"));
         assert!(store
-            .user_for_token(&digest("other-user"))
+            .login_for_token(&digest("other-user"))
             .await
             .expect("deleted user token")
             .is_none());
@@ -230,7 +257,7 @@ async fn jellyfin_login_replacement_requires_the_exact_live_cluster_claim() {
         .await
         .expect("absent claim no-op"));
     assert!(store
-        .user_for_token(&digest("before-claim"))
+        .login_for_token(&digest("before-claim"))
         .await
         .expect("old authority")
         .is_some());
@@ -243,7 +270,7 @@ async fn jellyfin_login_replacement_requires_the_exact_live_cluster_claim() {
         .await
         .expect("exact claim replacement"));
     assert!(store
-        .user_for_token(&digest("before-claim"))
+        .login_for_token(&digest("before-claim"))
         .await
         .expect("replaced authority")
         .is_none());
@@ -278,7 +305,7 @@ async fn jellyfin_login_replacement_requires_the_exact_live_cluster_claim() {
         .await
         .expect("disabled exact claim refused"));
     assert!(store
-        .user_for_token(&digest("guarded-claim"))
+        .login_for_token(&digest("guarded-claim"))
         .await
         .expect("guarded authority preserved")
         .is_some());
@@ -297,12 +324,12 @@ async fn jellyfin_login_replacement_requires_the_exact_live_cluster_claim() {
         .await
         .expect("cleaned-up claim no-op"));
     assert!(store
-        .user_for_token(&digest("guarded-claim"))
+        .login_for_token(&digest("guarded-claim"))
         .await
         .expect("current authority")
         .is_some());
     assert!(store
-        .user_for_token(&digest("late-claim"))
+        .login_for_token(&digest("late-claim"))
         .await
         .expect("late authority")
         .is_none());
@@ -382,14 +409,14 @@ async fn jellyfin_login_import_preserves_replacement_scope_on_another_node() {
         .await
         .expect("replace imported login"));
     assert!(store
-        .user_for_token(&digest("import-old"))
+        .login_for_token(&digest("import-old"))
         .await
         .expect("retired lookup")
         .is_none());
     for token in ["import-native", "import-new"] {
         assert_eq!(
             store
-                .user_for_token(&digest(token))
+                .login_for_token(&digest(token))
                 .await
                 .expect("current lookup")
                 .expect("current authority")
@@ -443,7 +470,7 @@ async fn jellyfin_public_login_requires_exact_enabled_generation_across_off_on()
             "{backend}"
         );
         assert!(store
-            .user_for_token(&digest("late-disabled"))
+            .login_for_token(&digest("late-disabled"))
             .await
             .expect("no disabled mint")
             .is_none());
@@ -467,7 +494,7 @@ async fn jellyfin_public_login_requires_exact_enabled_generation_across_off_on()
             .await
             .expect("old cycle refused"));
         assert!(store
-            .user_for_token(&digest("first-enabled"))
+            .login_for_token(&digest("first-enabled"))
             .await
             .expect("failed replacement preserved prior scope")
             .is_some());
@@ -480,15 +507,60 @@ async fn jellyfin_public_login_requires_exact_enabled_generation_across_off_on()
             .await
             .expect("current login"));
         assert!(store
-            .user_for_token(&digest("first-enabled"))
+            .login_for_token(&digest("first-enabled"))
             .await
             .expect("current replacement")
             .is_none());
         assert!(store
-            .user_for_token(&digest("current-cycle"))
+            .login_for_token(&digest("current-cycle"))
             .await
             .expect("current token")
             .is_some());
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn jellyfin_login_token_audience_separates_native_and_compatibility() {
+    for_each_backend(|store, backend| async move {
+        let (uid, _) = seed_file(&store, "jellyfin-audience").await;
+        let native = digest("audience-native");
+        store
+            .create_token(&native, uid, Some("native"))
+            .await
+            .expect("native token");
+        assert!(store
+            .replace_jellyfin_login(
+                write(uid, "audience-compat", "audience-device", Family::Infuse),
+                None
+            )
+            .await
+            .expect("compatibility login"));
+        let compat = digest("audience-compat");
+        for (token, audience, admitted) in [
+            (&native, TokenAudience::Native, true),
+            (&native, TokenAudience::JellyfinCompatibility, false),
+            (&compat, TokenAudience::Native, false),
+            (&compat, TokenAudience::JellyfinCompatibility, true),
+        ] {
+            let result = store
+                .authenticate_token_for(token, audience)
+                .await
+                .expect("audience lookup");
+            assert_eq!(
+                matches!(result, TokenAuthentication::Authenticated(ref user) if user.id == uid),
+                admitted,
+                "{backend}: {audience:?}"
+            );
+        }
+        assert!(
+            store
+                .user_for_token(&compat)
+                .await
+                .expect("native default")
+                .is_none(),
+            "{backend}: the native default refuses a compatibility login"
+        );
     })
     .await;
 }

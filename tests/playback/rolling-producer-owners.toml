@@ -2422,7 +2422,10 @@ pattern = "(?:[A-Za-z_]\\w*::)+spawn(?:_blocking|_local|_for_test)?\\s*\\("
 # 689 -> 691: the two serving-fence tests that spawn the real fence loop
 # (see `all-detached-tokio-tasks`).
 # Effort (+2) and main (+2) both moved 689 -> 691; merged 693, measured.
-expected_occurrences = 693
+# +1: the Jellyfin HLS flow fixture runs the real owner `lease_loop`, as
+# production renews the route lease. It is aborted and joined (asserted
+# cancelled) at the end of the flow; no production spawn is added.
+expected_occurrences = 694
 # E1 plus S-14 M8: both ownership sets retained and counted on the merged source.
 # 643 -> 647 with S-14 M8 (`plan/S-14-5`: `Encoding`, `RollingFlowSync`, `TerminalCleanup`,
 # `HeadChildOwner`, `VodServingAdmission` behind per-owner hooks), measured by
