@@ -5344,3 +5344,63 @@ Not qualified here: `sharing_receiver_real_pinned_source_direct_range_head_throu
 Source claim across repeated ranges, and logout ending an open body. It needs
 the disposable CGNAT namespace and has not run. Clients, clusters, NAT/DERP
 and devices remain open.
+
+### Shared web direct play (2026-10-04)
+
+The web client now uses the direct play lane above. Copy HLS stays the route
+for everything else, and Local paths are unchanged.
+
+**Route.** `choosePlayRoute` picks `shared_direct` only when the Shared
+decision's method is `direct_play` and the ordinary initial route is `direct`.
+That means the container is in this browser's own caps, the audio is the
+default track, there is no A/V offset and no burn. A direct decision the
+browser cannot take as a raw file, such as a non-default audio track, goes
+to Copy HLS, never a progressive remux. The grade does not matter here: the
+bytes are untouched, and the Source repeats the decision with the same caps
+at Start.
+
+**Start.** `openSession` sends the ordinary `CreateSession` with
+`presentation:"direct"`. It drops the HLS-only fields (segment budget,
+transport, rung, `copy`) and the subtitle ask, because the Source refuses
+those for raw bytes. `SHARED_DECISION.start` accepts only `vod` or `direct`.
+It validates the reply with `sharedPlaybackDirectStartContext`
+(`core/file-context.js`), which requires exactly five fields:
+
+- `presentation:"direct"`;
+- a lowercase v4 B session;
+- a safe, non-negative `length`;
+- one of B's `DIRECT_MIMES`;
+- a `url` equal to this context's own `{file_base}/direct?session=<id>`.
+
+An HLS reply to a direct ask is refused, and so is a direct reply to an HLS
+ask.
+
+**Attach.** `attachSharedDirect` binds the player to the returned context
+and puts the URL on the element with no `token` query. It keeps the B session
+in `PLAYER.sharedDirect`, owned by the attachment it creates. `sessionId`
+stays null, so no status poll runs and no control reporter starts, the same
+as Local direct play. Progress uses the existing Shared beat path through
+the bound context.
+
+**Release.** `DELETE /api/v1/hls/{session}` is sent when a new attachment
+begins on the player (`beginPlaybackMediaAttachment`), when the predecessor
+player is retired, and on close.
+
+**Expiry.** B retires a direct session after 300 s with no byte request.
+When the element raises a network error (code 2) on a Shared direct
+attachment that has reached its metadata, it starts one fresh direct play at
+the current position through `requestPlaybackMediaChange`. Doing so uses up
+the allowance. The new attachment earns another only when it reaches its own
+timeline, so there is no timer and no loop. The stall Try again on a Shared
+direct play uses the same fresh Start instead of the old URL. A direct-bound
+context may start again, direct or Copy HLS, under the accepted login, the
+same rule progress follows. Other route changes on a direct play (audio,
+quality, decode rescue) go to Copy or encoded HLS. An HLS-bound context still
+has no generic replacement.
+
+Evidence on nuc4 (node 22.22.1): `tests/web/file-context.test.js` passes 17
+of 17 and `tests/web/shared-decision.test.js` passes 16 of 16, including the
+new direct cases. `make web-check` passes, and `scripts/web-types` is
+unchanged at 518 diagnostics. Two browser checks in that lane skip because
+Playwright is not installed on nuc4. None of this has been checked in a
+physical browser against a real pinned Source/B pair.
