@@ -208,4 +208,26 @@ class ContinuousQualityProtocolTest {
         assertTrue(ContinuousQualityWire.response(receipt(disposed, mapOf("disposed" to JsonArray(listOf(pin.getValue("artifact_id"))))), disposed))
     }
 
+    @Test fun compactAcknowledgementsUseCurrentLedgerMediaFactsWithoutInventingPins() {
+        val pin = buildJsonObject {
+            put("artifact_id", "c".repeat(64)); put("rendition_id", "b".repeat(64))
+            put("timescale", 24); put("from_tick", 0); put("through_tick", 48); put("byte_length", 1234)
+        }
+        val request = JsonObject(identity + ("transition" to buildJsonObject {
+            identity.forEach { (key, value) -> put(key, value) }
+            put("sequence", 1); put("transaction_id", transaction)
+            put("operation", buildJsonObject { put("kind", "scheduled"); put("intervals", JsonArray(listOf(pin))) })
+        }))
+        val original = reply(request)
+        val compact = JsonObject(requireNotNull(original.obj("receipt")?.obj("transaction")) + ("state" to JsonPrimitive("scheduled")))
+        val receipt = JsonObject(requireNotNull(original.obj("receipt")) + ("transaction" to compact))
+        fun response(current: JsonObject) = JsonObject(original + mapOf("receipt" to receipt,
+            "ledger" to JsonObject(requireNotNull(original.obj("ledger")) + ("transactions" to JsonArray(listOf(current))))))
+        val current = JsonObject(compact + mapOf("ready" to JsonArray(listOf(pin)), "reserved" to JsonArray(listOf(pin))))
+        assertTrue(ContinuousQualityWire.response(response(current), request))
+        assertFalse(ContinuousQualityWire.response(response(compact), request))
+        assertFalse(ContinuousQualityWire.response(response(JsonObject(current + ("transaction_id" to JsonPrimitive(nextTransaction)))), request))
+        assertFalse(ContinuousQualityWire.response(response(JsonObject(current + ("target_rendition_id" to JsonPrimitive("d".repeat(64))))), request))
+    }
+
 }

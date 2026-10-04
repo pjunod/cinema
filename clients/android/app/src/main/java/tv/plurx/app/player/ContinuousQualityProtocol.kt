@@ -199,8 +199,14 @@ internal object ContinuousQualityWire {
         if (transition == null) return value["receipt"] == null || value["receipt"] is JsonNull
         if (receipt == null || !sameIdentity(receipt, request) || receipt.number("accepted_sequence") != transition.number("sequence") ||
             ledger.number("accepted_sequence")!! < (transition.number("sequence") ?: return false)) return false
-        val settled = receipt.obj("transaction") ?: return false
-        if (!transaction(settled) || settled["transaction_id"] != transition["transaction_id"]) return false
+        val acknowledged = receipt.obj("transaction") ?: return false
+        if (!transaction(acknowledged) || acknowledged["transaction_id"] != transition["transaction_id"]) return false
+        // Canonical acknowledgements omit media facts to keep replay storage bounded.
+        // The authenticated current ledger owns those facts; a receipt alone cannot
+        // authorize an interval, presentation or physical disposal.
+        val settled = transactions.singleOrNull { it["transaction_id"] == transition["transaction_id"] } ?: return false
+        if (settled["target_rendition_id"] != acknowledged["target_rendition_id"] ||
+            settled["intent_revision"] != acknowledged["intent_revision"]) return false
         val operation = transition.obj("operation") ?: return false
         fun acceptedIntervals(field: String, destination: String): Boolean {
             val intervals = operation.rows(field, 128) ?: return false
@@ -216,8 +222,8 @@ internal object ContinuousQualityWire {
                 } } }
         }
         return when (operation.text("kind")) {
-            "prepare" -> settled["intent_revision"] == operation["intent_revision"] &&
-                settled["target_rendition_id"] == operation["target_rendition_id"]
+            "prepare" -> acknowledged["intent_revision"] == operation["intent_revision"] &&
+                acknowledged["target_rendition_id"] == operation["target_rendition_id"]
             "scheduled" -> acceptedIntervals("intervals", "reserved")
             "appended" -> acceptedIntervals("intervals", "appended")
             "presented" -> {

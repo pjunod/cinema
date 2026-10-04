@@ -6389,3 +6389,31 @@ playback pass. A separately identified temporary diagnostic APK records only
 bounded app class/method/line identifiers; it contains no exception message,
 URL, credential or media path. Its temporary source instrumentation was
 restored immediately after assembly and will not land in the PR.
+
+### 10.220 Android compact receipts validate against current ledger facts
+
+The isolated wire diagnostic located the second refusal: a `scheduled`
+acknowledgement was compact (empty media arrays), while its same-identity
+current ledger held both exact reserved intervals and the shared audio pins.
+The server intentionally stores media facts only once in its ledger; the
+Android validator incorrectly required them in the canonical acknowledgement.
+The temporary diagnostic source was restored before implementation.
+
+Android now validates acknowledgement identity/sequence/transaction and
+matches its target/revision to the current ledger transaction. Operation
+media facts are checked against that transaction, preserving exact-pin,
+presentation and disposal checks. An acknowledgement without ledger facts
+still cannot authorize media. The new authored regression covers compact
+acknowledgements, absent pins and foreign transaction/target bindings. Unit
+execution remains deferred; Kotlin source compilation and isolated runtime
+verification are in progress. The crash fix `fccbccf00` is pushed to draft
+#774; its normal hook passed Clippy in 42.04s and 72 served scripts.
+
+Production Kotlin, unit-test source compilation and APK assembly for the
+ledger correction passed in 17s, without unit execution. The clean APK
+replaced the diagnostic and its app-private diagnostic file was removed.
+The subsequent runtime attempt failed during item-detail preflight as the
+old bounded backend retired; it never reached a new controlled session and
+provides no verification of the ledger correction. The backend log is saved
+and its owned daemon/forward/runtime retired. A fresh exact committed-source
+backend is required for the next runtime attempt.
