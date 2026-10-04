@@ -1451,15 +1451,18 @@ final class PlaybackControlReporterTests: XCTestCase {
 }
 
 final class DisplayAwareAutoEvidenceTests: XCTestCase {
-    func testA05DecoderAcknowledgementRequiresExactEventAndOriginalAttachmentBudget() {
+    func testA05EvidenceAcknowledgementRequiresTheExactSingleEvent() {
         let event = "12345678-1234-1234-1234-123456789abc"
         XCTAssertTrue(autoNegativeLinkAcknowledgement(receipt: event, values: [event], status: 204, sameEndpoint: true, remainingMs: 250))
         XCTAssertFalse(autoNegativeLinkAcknowledgement(receipt: event, values: [], status: 204, sameEndpoint: true, remainingMs: 250))
         XCTAssertFalse(autoNegativeLinkAcknowledgement(receipt: event, values: [event, event], status: 204, sameEndpoint: true, remainingMs: 250))
-        XCTAssertTrue(autoDecoderAcknowledgementCurrent(accepted: true, observedAtMs: 100, nowMs: 349, remainingMs: 250, sameAttachment: true))
-        for (accepted, now, remaining, same) in [(false, 101, 250, true), (true, 350, 250, true), (true, 99, 250, true), (true, 101, 0, true), (true, 101, 250, false), (true, 120, 20, true)] {
-            XCTAssertFalse(autoDecoderAcknowledgementCurrent(accepted: accepted, observedAtMs: 100, nowMs: now, remainingMs: remaining, sameAttachment: same))
-        }
+    }
+    func testDecoderFailureRejectsTheCandidateLocallyOnceWithoutServerAcknowledgement() {
+        var rejected: Set<String> = []
+        XCTAssertTrue(rejectFailedDecoderCandidate(&rejected, candidateId: "candidate-a"))
+        XCTAssertEqual(rejected, ["candidate-a"])
+        XCTAssertFalse(rejectFailedDecoderCandidate(&rejected, candidateId: "candidate-a"))
+        XCTAssertTrue(rejectFailedDecoderCandidate(&rejected, candidateId: "candidate-b"))
     }
     func testA05NegativeAcknowledgementKeepsExactNonceAttachmentAndOriginalDeadline() {
         let nonce = "12345678-1234-1234-1234-123456789abc"

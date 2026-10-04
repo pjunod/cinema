@@ -3598,18 +3598,18 @@ id = "apple.auto-decoder-accepted-event-original-budget"
 commits = []
 supplements = "apple.auto-typed-candidate-recovery-pressure"
 source = "clients/apple/Sources/PlayerController.swift"
-source_anchor = "func autoDecoderAcknowledgementCurrent(accepted: Bool"
+source_anchor = "func rejectFailedDecoderCandidate(_ rejected: inout Set<String>"
 test = "clients/apple/Tests/PlaybackControlReporterTests.swift"
-test_anchor = "testA05DecoderAcknowledgementRequiresExactEventAndOriginalAttachmentBudget"
+test_anchor = "testDecoderFailureRejectsTheCandidateLocallyOnceWithoutServerAcknowledgement"
 
 [[fixes]]
 id = "android.auto-decoder-accepted-event-original-budget"
 commits = []
 supplements = "apple.auto-typed-candidate-recovery-pressure"
 source = "clients/android/app/src/main/java/tv/plurx/app/player/PlaybackTelemetry.kt"
-source_anchor = "internal fun autoDecoderAcknowledgementCurrent(accepted: Boolean"
-test = "clients/android/app/src/test/java/tv/plurx/app/player/PlaybackControlReporterTest.kt"
-test_anchor = "fun a05DecoderAcknowledgementRequiresExactEventAndOriginalAttachmentBudget()"
+source_anchor = "internal fun rejectFailedDecoderCandidate(rejected: MutableSet<String>"
+test = "clients/android/app/src/test/java/tv/plurx/app/player/PlaybackTelemetryTest.kt"
+test_anchor = "fun decoderFailureRejectsTheCandidateLocallyOnceWithoutServerAcknowledgement()"
 
 # S-09 route sink claims (claude-opus-5-5). Device-route acceptance (M3/M5)
 # remains separate physical evidence.

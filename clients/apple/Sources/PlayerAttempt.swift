@@ -159,7 +159,6 @@ enum AttemptFence: String, CaseIterable, Sendable {
     case itemFailureLadder = "item_failure_ladder"
     case blackFrameDecoderAcknowledgement = "black_frame_decoder_acknowledgement"
     case itemDecoderAcknowledgement = "item_decoder_acknowledgement"
-    case decoderEvidenceAcknowledgement = "decoder_evidence_acknowledgement"
     case stallCandidateAcknowledgement = "stall_candidate_acknowledgement"
     case stallCandidateReturn = "stall_candidate_return"
     case preparedPressureEntry = "prepared_pressure_entry"
@@ -204,7 +203,6 @@ enum AttemptFence: String, CaseIterable, Sendable {
         case .itemFailureLadder: return [.open, .viewerAction]
         case .blackFrameDecoderAcknowledgement: return [.lifecycle, .viewerAction]
         case .itemDecoderAcknowledgement: return [.open, .viewerAction]
-        case .decoderEvidenceAcknowledgement: return [.open, .viewerAction]
         case .stallCandidateAcknowledgement: return [.open, .viewerAction]
         case .stallCandidateReturn: return [.open, .viewerAction]
         case .preparedPressureEntry: return [.lifecycle, .viewerAction]

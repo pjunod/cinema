@@ -73,10 +73,13 @@ func autoNegativeLinkAcknowledgement(receipt: String, values: [String], status: 
         UUID(uuidString: receipt)?.uuidString.lowercased() == receipt
 }
 
-func autoDecoderAcknowledgementCurrent(accepted: Bool, observedAtMs: Int, nowMs: Int,
-                                       remainingMs: Int, sameAttachment: Bool) -> Bool {
-    accepted && sameAttachment && remainingMs > 0 && nowMs >= observedAtMs &&
-        nowMs - observedAtMs < min(remainingMs, 250)
+/// A decoder failure the device observed is its own evidence: the failed
+/// candidate joins the local rejected set at once, with no wait on the server.
+/// The server's acceptance of the sample only authorizes server-side
+/// consequences, which the server verifies itself. False when this candidate
+/// was already rejected, so one failure is reported once.
+func rejectFailedDecoderCandidate(_ rejected: inout Set<String>, candidateId: String) -> Bool {
+    rejected.insert(candidateId).inserted
 }
 
 /// One viewer transaction's optional portion; refusal leaves the same original
@@ -2352,7 +2355,6 @@ final class PlayerController: ObservableObject {
     private var autoDecoderRejected: Set<String> = []
     private var autoDecodePressure = AutoDecodePressureWindow()
     private var autoDecodeQualityResponseUsed = false
-    private var autoDecodeProofPending = false
     private var autoRecoveryCause: AutoRecoveryCauseTicket?
     private var autoPreparedTargetRevision: UInt64?
     private var autoPreparedViewerEpoch: Int?
@@ -3003,13 +3005,6 @@ final class PlayerController: ObservableObject {
         guard payload.link_sample.negative, payload.link_sample.receipt == receipt,
               let body = try? JSONEncoder().encode(payload) else { return false }
         return await acknowledgeClientEvidence(body, receipt: receipt, header: "X-Plurx-Link-Accepted", deadline: deadline)
-    }
-
-    private func acknowledgeDecoderFailure(_ payload: AppleCandidateRecoveryLog, deadline: Double) async -> Bool {
-        guard payload.candidate_recovery.cause == "decode",
-              let body = try? JSONEncoder().encode(payload) else { return false }
-        return await acknowledgeClientEvidence(body, receipt: payload.candidate_recovery.event_id,
-            header: "X-Plurx-Recovery-Accepted", deadline: deadline)
     }
 
     private func acknowledgeClientEvidence(_ body: Data, receipt: String, header: String, deadline: Double) async -> Bool {
@@ -11017,30 +11012,19 @@ extension PlayerController {
               selectedHeight == nil, !selectedQualityIsOriginal,
               let candidates = decision?.qualityCandidates,
               let current = candidates.first(where: { $0.id == autoActiveCandidateId }),
-              !autoDecoderRejected.contains(current.id), !autoDecodeProofPending,
               let sessionId, let item = player.currentItem else { return false }
-        let payload = AppleCandidateRecoveryLog(session_id: sessionId, candidate_recovery: .init(
+        let observedAt = PlaybackControlSession.monotonicMs()
+        // The failure is this device's own evidence, so the candidate joins the
+        // local rejected set now. The server's acceptance of the sample only
+        // authorizes server-side consequences (recording the decode cause on
+        // the reopen), which the server checks for itself; nothing waits on it.
+        guard rejectFailedDecoderCandidate(&autoDecoderRejected, candidateId: current.id) else { return false }
+        postClientLog(AppleCandidateRecoveryLog(session_id: sessionId, candidate_recovery: .init(
                 candidate_id: current.id, recipe_digest: current.recipeDigest,
                 decoder_failed: pressure == nil,
                 rendered_elapsed_ms: pressure?.elapsedMs ?? 0, position_progress_ms: pressure?.progressMs ?? 0,
                 dropped_frames: pressure?.droppedFrames ?? 0,
-                runway_ms: Int(max(0, (bufferedRunwaySeconds() ?? 0) * 1_000))))
-        let captured = snapshotAttempt()
-        let observedAt = PlaybackControlSession.monotonicMs()
-        let deadline = ProcessInfo.processInfo.systemUptime + 0.25
-        autoDecodeProofPending = true
-        defer { autoDecodeProofPending = false }
-        guard await acknowledgeDecoderFailure(payload, deadline: deadline),
-              autoDecoderAcknowledgementCurrent(accepted: true, observedAtMs: observedAt,
-                nowMs: PlaybackControlSession.monotonicMs(), remainingMs: 250,
-                sameAttachment: player.currentItem === item && self.sessionId == sessionId),
-              !Task.isCancelled, attemptStillCurrent(captured, fence: .decoderEvidenceAcknowledgement),
-              PlaybackControlSession.monotonicMs() >= observedAt,
-              ProcessInfo.processInfo.systemUptime < deadline,
-              model?.displayAwareAuto == true, model?.autoAbr == true,
-              player.currentItem === item, self.sessionId == sessionId,
-              autoActiveCandidateId == current.id, selectedHeight == nil, !selectedQualityIsOriginal else { return false }
-        autoDecoderRejected.insert(current.id)
+                runway_ms: Int(max(0, (bufferedRunwaySeconds() ?? 0) * 1_000)))))
         guard !autoDecodeQualityResponseUsed else { return false }
         let next = autoRecoveryCandidate(candidates, current: current, rejected: autoDecoderRejected, decoderRecovery: true)
         if let next {

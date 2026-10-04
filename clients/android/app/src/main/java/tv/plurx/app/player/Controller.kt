@@ -3277,30 +3277,25 @@ class Controller internal constructor(
         surfaceOwner.logOnly(mediaMutationEpoch, "auto_quality_recovery:${if (severe) "link" else "encode"}:${next.id}")
     }
 
-    private var autoDecodeProofPending = false
-    private suspend fun noteAutoDecodeFailure(pressure: AutoDecodePressureEvidence? = null): Boolean {
+    private fun noteAutoDecodeFailure(pressure: AutoDecodePressureEvidence? = null): Boolean {
         if (!tv.plurx.app.data.Session.displayAwareAuto || !tv.plurx.app.data.Session.autoAbr ||
             tv.plurx.app.data.Session.displayAwareAutoProtocol != "route-v1" ||
             autoRouteProtocol != "route-v1" || playbackIntent.desiredQuality != PlaybackQuality.Auto) return false
         val current = autoCatalog.firstOrNull { it.id == autoActiveCandidateId } ?: return false
-        if (autoDecoderRejected.contains(current.id) || autoDecodeProofPending) return false
         val session = sessionId ?: return false
-        val attachment = player
-        val attempt = stallGuard.observeStall()
         val observedAt = monotonicNowMs()
-        val event = PlaybackClientLog(level = "warn",
+        // The failure is this device's own evidence, so the candidate joins the
+        // local rejected set now. The server's acceptance of the sample only
+        // authorizes server-side consequences (recording the decode cause on
+        // the reopen), which the server checks for itself; nothing waits on it.
+        if (!rejectFailedDecoderCandidate(autoDecoderRejected, current.id)) return false
+        postPlaybackClientLog(scope, PlaybackClientLog(level = "warn",
             event = "candidate_recovery", message = "Candidate decoder evidence", ua = "Android Media3", sessionId = session,
-            candidateRecovery = CandidateRecoverySample(event_id = UUID.randomUUID().toString(), candidate_id = current.id,
-                recipe_digest = current.recipe_digest, decoder_failed = pressure == null,
+            candidateRecovery = CandidateRecoverySample(cause = "decode", event_id = UUID.randomUUID().toString(),
+                candidate_id = current.id, recipe_digest = current.recipe_digest, age_ms = 0,
+                decoder_failed = pressure == null,
                 rendered_elapsed_ms = pressure?.elapsedMs ?: 0, position_progress_ms = pressure?.progressMs ?: 0,
-                dropped_frames = pressure?.droppedFrames ?: 0, runway_ms = (player.bufferedPosition - player.currentPosition).coerceAtLeast(0)))
-        autoDecodeProofPending = true
-        val accepted = try { acknowledgeDecoderFailure(event, 250L) } finally { autoDecodeProofPending = false }
-        if (!autoDecoderAcknowledgementCurrent(accepted, observedAt, monotonicNowMs(), 250L,
-                player === attachment && sessionId == session) || !stallGuard.isCurrent(attempt) ||
-            autoActiveCandidateId != current.id || playbackIntent.desiredQuality != PlaybackQuality.Auto ||
-            monotonicNowMs() < observedAt || monotonicNowMs() - observedAt > 250L) return false
-        autoDecoderRejected.add(current.id)
+                dropped_frames = pressure?.droppedFrames ?: 0, runway_ms = (player.bufferedPosition - player.currentPosition).coerceAtLeast(0))))
         if (autoDecodeQualityResponseUsed) return false
         val next = autoRecoveryCandidate(autoCatalog, current, autoDecoderRejected, decoderRecovery = true) ?: return false
         autoDecodeQualityResponseUsed = true
@@ -3501,7 +3496,7 @@ class Controller internal constructor(
             message = "Candidate recovery evidence", ua = "Android Media3", sessionId = session,
             candidateRecovery = CandidateRecoverySample(cause = cause.name.lowercase(),
                 event_id = UUID.randomUUID().toString(), candidate_id = candidate.id,
-                recipe_digest = candidate.recipe_digest, decoder_failed = false,
+                recipe_digest = candidate.recipe_digest, age_ms = 0, decoder_failed = false,
                 rendered_elapsed_ms = 0, position_progress_ms = 0, dropped_frames = 0,
                 runway_ms = (player.bufferedPosition - player.currentPosition).coerceAtLeast(0L))))
     }

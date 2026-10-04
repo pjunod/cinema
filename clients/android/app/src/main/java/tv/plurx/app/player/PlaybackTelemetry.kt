@@ -44,10 +44,15 @@ internal data class PlaybackClientLog(
     @SerialName("candidate_recovery") val candidateRecovery: CandidateRecoverySample? = null,
 )
 
+/**
+ * The server's `ClientRecoverySample` requires every field. [Net.json] does
+ * not encode defaults, so no field here may carry one: a defaulted value
+ * would be omitted from the wire and the whole sample refused.
+ */
 @Serializable
 internal data class CandidateRecoverySample(
-    val cause: String = "decode", val event_id: String, val candidate_id: String,
-    val recipe_digest: List<Int>, val age_ms: Int = 0, val decoder_failed: Boolean,
+    val cause: String, val event_id: String, val candidate_id: String,
+    val recipe_digest: List<Int>, val age_ms: Int, val decoder_failed: Boolean,
     val rendered_elapsed_ms: Long, val position_progress_ms: Long,
     val dropped_frames: Long, val runway_ms: Long,
 )
@@ -130,15 +135,15 @@ internal suspend fun acknowledgeNegativeLink(event: PlaybackClientLog, receipt: 
     return acknowledgeClientEvidence(event, receipt, "X-Plurx-Link-Accepted", remainingMs)
 }
 
-internal fun autoDecoderAcknowledgementCurrent(accepted: Boolean, observedAtMs: Long, nowMs: Long,
-    remainingMs: Long, sameAttachment: Boolean): Boolean = accepted && sameAttachment && remainingMs > 0 &&
-    nowMs >= observedAtMs && nowMs - observedAtMs < minOf(remainingMs, 250L)
-
-internal suspend fun acknowledgeDecoderFailure(event: PlaybackClientLog, remainingMs: Long): Boolean {
-    val sample = event.candidateRecovery ?: return false
-    if (sample.cause != "decode") return false
-    return acknowledgeClientEvidence(event, sample.event_id, "X-Plurx-Recovery-Accepted", remainingMs)
-}
+/**
+ * A decoder failure the device observed is its own evidence: the failed
+ * candidate joins the local rejected set at once, with no wait on the server.
+ * The server's acceptance of the sample only authorizes server-side
+ * consequences, which the server verifies itself. False when this candidate
+ * was already rejected, so one failure is reported once.
+ */
+internal fun rejectFailedDecoderCandidate(rejected: MutableSet<String>, candidateId: String): Boolean =
+    rejected.add(candidateId)
 
 private suspend fun acknowledgeClientEvidence(event: PlaybackClientLog, receipt: String, header: String, remainingMs: Long): Boolean {
     if (remainingMs <= 0) return false
