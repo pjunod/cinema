@@ -3696,3 +3696,11 @@ source = "clients/apple/Sources/PlayerController.swift"
 source_anchor = "struct AutoBoundaryReplan {"
 test = "clients/apple/Tests/PlaybackControlReporterTests.swift"
 test_anchor = "func testBoundaryReplanIsSpentOnlyOnACandidate()"
+
+[[fixes]]
+id = "web.play-after-a-long-pause-never-seeks-on-a-retained-route"
+commits = ["b825457942d388772f96deebd2e5d5a054fcc443"]
+source = "crates/plurxd/src/web/player/transport.js"
+source_anchor = "async function resumeQualityBoundary(p){"
+test = "tests/playback/web-media-recovery.test.js"
+test_anchor = "Play after a long pause never seeks when Auto keeps the route"
