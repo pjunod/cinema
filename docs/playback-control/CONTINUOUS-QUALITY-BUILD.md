@@ -6694,3 +6694,62 @@ several seconds (`slow leader quorum watermark proof`, 4.4 s; 503 on
 heavy compile and lab, so the client reopened. That run is a host-overload
 failure, not a switch result; Android manual/Auto switching stays unqualified.
 Evidence: `target/playback-lab/reports/continuous-android-d1641-cumulative-receipts.tgz`.
+
+### 10.224 FFmpeg decoder/filter thread counts are not a CPU cause
+
+The handoff asked whether the uncapped decoder and filter threads (27–30
+threads per video producer, against `-threads 2`/`3` for x264) explain the
+Firefox callback gaps. A controlled nuc3 experiment encoded the same 40 s of
+the clocked fixture to 720p with the producer's filter chain and x264 at
+`-threads 3`, sampling per-thread CPU time from `/proc`:
+
+| Input decoder / filter threads | Peak threads | CPU seconds | Wall |
+|---|---|---|---|
+| default / default | 30 | 21.8 | 5.0 s |
+| 3 / default | 17 | 20.2 | 5.0 s |
+| 3 / 1 | 13 | 21.5 | 6.8 s |
+| 1 / 1 | 10 | 24.5 | 8.9 s |
+
+CPU time is the same within run-to-run noise (a first pair measured 23.6 vs
+18.9 CPU-seconds the other way round). The extra threads are idle frame
+threads; x264 work dominates, and a producer filling ahead runs about four
+cores whichever way the decoder is configured. Capping decoder threads would
+not reduce contention and would slow heavy software decodes, so nothing is
+changed. The `decoder_threads` field in `admission.rs` stays as its authors
+left it, pending a measured decoder whose cap matters.
+
+The earlier paired Firefox experiment already isolates the contention that
+does matter: the same build failed with browser and server producers on shared
+CPUs and passed with them on disjoint CPU sets. In production the browser does
+not share the server's CPUs, so Firefox continuity is qualified with the
+browser on CPUs disjoint from the server (the same emulation of a separate
+client device used in that experiment). Colocated failures stay recorded as
+lab-topology contention, not as passes. Decision recorded for the human.
+
+### 10.225 Android manual series in one pipeline; superseded pins leaked
+
+On the owned emulator (fixed server and client, display-aware Auto on, family
+480p/720p) fifteen alternating manual changes each presented their target in
+the original session and attachment, with no buffering after cold start;
+quality-switch telemetry reported 12–15 s from request to presentation at
+about 12 s of runway (the controlled load budget). Earlier runs on the same
+build added four more presented changes before the emulator's software GPU
+crashed (`swangle_indirect` segfault after ten minutes; runs now use
+`-gpu guest`).
+
+The ledger exposed a leak. Every change left the superseded transaction one
+reserved interval at the switch boundary, scheduled ahead but never loaded.
+Android disposal only covered artifacts with queue provenance and targets
+cancelled before exposure, so these pins stayed reserved until End, and the
+transactions holding them stayed unresolved. After sixteen changes the
+16-transaction bound would refuse the next preparation with `Capacity`. The
+web adapter already disposes an old owner's never-exposed reservations after
+a successful change; Android now does the same through its existing absence
+barrier (loader quiescence plus resource and digest barriers). The selection
+is a pure function, `ContinuousUnexposedPins.disposable`, with an authored
+regression (`ContinuousUnexposedPinsTest.kt::supersededOwnersDisposeOnlyPinsThatNeverReachedTheQueue`).
+
+Auto on the emulator did not upgrade 480p→720p at a 100 Mb/s shaped link in
+240 s. The upgrade rule needs a completed-transfer link of 1.8× the bound
+720p delivery ceiling (17.8 Mb/s → 32 Mb/s), and emulator user-mode networking
+is the likely limit; this is recorded as unqualified, not as a policy fault.
