@@ -5519,3 +5519,73 @@ Native clients (separate lane) need the same three things the web now does:
 
 Stall recovery that reopens with `previous_session_id` is still refused for
 shared sessions. Clusters, NAT/DERP and devices remain open.
+
+### Android Shared controls, directed reopen and direct play (2026-10-04)
+
+The Android client now does the three things the P0 section above asks of a
+native client, plus current-rendition controls and direct play. Local paths,
+the numeric Local guards and the original-account checks are unchanged.
+
+**Status.** `SharedPlaybackStatus` decodes to a typed `SharedVodMetrics` DTO
+bound to the exact started playback (`sessionId`). Every word must match the
+server's own `status_token` grammar (`[A-Za-z0-9_.-]{1,32}`), so a sentence or a
+path cannot render. The summary is fixed words and bounded numbers only. A
+status read for a session the player has since replaced is dropped.
+
+**Controls.** `SharedControlChannel` speaks `plurx-playback-control-v1` on the
+Start's own route with the B tuple (generation = B incarnation, epoch = B
+epoch), one stable `client_instance_id` per player across reopens, and ordered
+sequences restarting at 1 per B session, with capabilities on sequence 1 (SDR,
+no dual-player preparation). It declares no actions, so B may answer only
+`none`. The selection on every exchange is the frozen raw ask from the Start
+request: Manual 144 stays 144 whatever the encoder delivers. A deferred answer
+(425, 429, 503) is resent byte for byte after `retry_after_ms` (bounded 250 ms
+to 5 s, at most twice). An uncertain one (no answer) is resent once. A 400, 409
+or 422 is a typed refusal and is not retried. 410 means the session ended. An
+answer for another tuple or sequence is not an acceptance.
+
+`SharedPlaybackOwner` runs every viewer command under one fair mutex. Seek
+(`seeking` + `seek_target_ms`), pause (`hold`) and play (`active`) reach
+ExoPlayer only after B accepts. A refusal leaves the picture where it is and
+says why. A play or seek after a 410 is a fresh Start at the position. A
+cadence job owned by the owner sends a renewal at B's 5 s interval, and
+progress plus status every second tick. It skips a tick while a command runs.
+
+**Directed change.** A quality, audio or subtitle choice is sent as an ask on
+the current session. B answers `preparation: "none"`, because it never carries
+a Source successor (absence is an older relay saying the same). The owner then
+asks `/decision` again with the plan's retained caps. It makes a fresh Start
+at the sampled position with the same viewer `playback_id`, a new
+`request_id` and no lineage fields. It attaches that Start, and only then
+DELETEs the predecessor. The ordered progress pool is keyed by the watch key,
+so the next beat names the new session with the next sequence. A refused ask
+keeps the current session.
+
+**Direct play.** `sharedPlaybackPlan` picks `presentation: "direct"` only when
+the Source's decision is `direct_play` for these caps and the ask is the file
+as it is: default audio, no subtitle, no A/V offset, no AAC transcode. The
+Start drops `height`, `copy` and the subtitle fields. The five-field reply is
+decoded exactly, and its URL must equal this context's own
+`{file_base}/direct?session=<B>`. ExoPlayer plays it through a progressive
+source on `Net.capabilityClient`, with no account header. There is no status
+or control exchange, and the renderer is local. Stop sends DELETE. A 404 or 410
+from the renderer earns one fresh direct Start at the current position, once
+per attachment that reached its timeline: no timer and no loop. A reply whose
+type ExoPlayer cannot read as a file (WMA, octet-stream) is released and the
+same decision is played as Copy HLS. A directed change from direct play goes
+to Copy or encoded HLS.
+
+Evidence on nuc3 (pinned `plurx-android-build` image, JDK 25):
+
+- New suites: `SharedPlaybackSessionTest` (4) and `SharedPlaybackOwnerTest`
+  (4). Together with the existing Shared, context and decision suites: 51
+  passed, 0 failed, 0 skipped.
+- Full `testDebugUnitTest`: 869 tests, one failure, `CreateRetryTest.onlyANotYetAnswerIsRetriedAtAll`. It fails the same way on the unchanged base: its expected code set predates `quality_catalog_unavailable`.
+- `lintDebug`: no errors. `compileDebugAndroidTestKotlin` passed.
+- Python fences: player builder, playback surface, control wire, credential
+  exposure, test markers, caps wire and contracts all pass. So do
+  `scripts/playback-surface-fence` and `scripts/player-input-fence`.
+
+Not qualified here: a physical Android device against a real pinned
+Source/B pair, the native subtitle rendition on reopen, rate limiting under a
+real seek storm, and the Apple half of these slices.
