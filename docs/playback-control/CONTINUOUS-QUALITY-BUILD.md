@@ -7169,3 +7169,26 @@ tmpfs, and the campaign was rerun once. Android production and unit sources
 compile and the continuous selection/protocol unit tests pass on the lab
 host; physical-device behaviour remains for the post-merge device checks.
 
+
+### 10.237 Integrating main #797 (Jellyfin compatibility)
+
+Main landed the Jellyfin compatibility facade (#797, off by default) while
+the #793 integration was being re-qualified, so the batch merged main again
+(33 conflicted files):
+
+- **Schema numbers, again.** Main shipped hiqlite 74–77 and SQLite
+  v98–v101. Quality cancellation and the quality ledger move to hiqlite
+  78/79 and SQLite v102/v103. Main independently named the lineage bridge's
+  canonical end `BRIDGED_LINEAGE_SCHEMA_VERSION` (73); the batch's own
+  constant for the same value was removed in its favour. Main's lineage
+  upgrade test still asserted the pre-Jellyfin end markers; it now expects
+  the merged chain's end.
+- **Create purposes.** A continuous start becomes a third
+  `ServiceCreatePurpose` beside native, library-channel and passive
+  compatibility; its policy fingerprint is the native one, since its family
+  already reaches the fingerprint through `continuous_media`.
+- **Requests and sessions** carry both sides' fields (`continuous_media`
+  with `vod_only`, `passive_vod`, `finite_bitrate_limit_bps`; `children`
+  with `passive_grant`). Worker request validation runs both sides' checks.
+  When a session still held by a live passive grant goes idle, its child
+  readers detach with its rendition, the same as when it is removed.
