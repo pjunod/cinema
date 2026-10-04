@@ -6,22 +6,38 @@ use crate::playback_control::{
     PlaybackDemandSnapshot, PreparedSuccessorObservation,
 };
 
-/// One owned current-rendition exchange. `route` and `start` are the exact
-/// Source facts the acceptance was fenced against; the HTTP adapter projects
-/// the wire response from them and never from a stored or caller value.
+#[allow(dead_code)] // Source HTTP control transport follows actual actor qualification.
 pub(crate) struct SourceOpenedControl {
     result: Result<LocalControlResult, ControlStateError>,
     guard: SourceResponseGuard,
-    route: MediaSessionRoute,
-    start: crate::http::hls::StartResponse,
-}
-pub(crate) struct SourceControlParts {
-    pub(crate) result: Result<LocalControlResult, ControlStateError>,
-    pub(crate) guard: SourceResponseGuard,
-    pub(crate) route: MediaSessionRoute,
-    pub(crate) start: crate::http::hls::StartResponse,
+    projection: Box<(
+        MediaSessionRoute,
+        crate::http::hls::StartResponse,
+        crate::transcode::SessionRequest,
+    )>,
 }
 impl SourceOpenedControl {
+    pub(crate) fn into_response(
+        self,
+        request: &ControlRequestV1,
+    ) -> (
+        Result<crate::playback_control::ControlResponseV1, ControlStateError>,
+        SourceResponseGuard,
+    ) {
+        let (route, start, recipe) = *self.projection;
+        let response = self.result.map(|result| {
+            crate::http::hls::source_control_response(
+                &route,
+                &start,
+                &recipe,
+                request,
+                &result,
+                crate::media_sessions::unix_ms(),
+            )
+        });
+        (response, self.guard)
+    }
+    #[allow(dead_code)] // Source HTTP control transport follows actual actor qualification.
     pub(crate) fn into_parts(
         self,
     ) -> (
@@ -29,15 +45,6 @@ impl SourceOpenedControl {
         SourceResponseGuard,
     ) {
         (self.result, self.guard)
-    }
-    /// The HTTP adapter projects its wire answer from these exact facts.
-    pub(crate) fn into_wire_parts(self) -> SourceControlParts {
-        SourceControlParts {
-            result: self.result,
-            guard: self.guard,
-            route: self.route,
-            start: self.start,
-        }
     }
 }
 
@@ -183,6 +190,7 @@ impl SourceControlAuthority<'_> {
 }
 
 impl SourceViewerActor {
+    #[allow(dead_code)] // HTTP control transport follows the qualified actor slice.
     pub(crate) async fn control(
         &self,
         request: ControlRequestV1,
@@ -230,6 +238,16 @@ impl SourceViewerActor {
             .ok_or(SourceWorkerError::Unavailable)?;
         let proof = self.0.gate.current_owned(&self.0.assignment).await?;
         let route = self.0.gate.renew_with(&self.0.assignment, &proof).await?;
+        let recipe: crate::transcode::SessionRequest =
+            serde_json::from_str(&route.recipe_json).map_err(|_| SourceWorkerError::Unavailable)?;
+        if !crate::media_sessions::source_session_request_is_valid(
+            &recipe,
+            self.0.assignment.binding().principal(),
+        ) || recipe.playback_id != self.0.assignment.binding().playback_id()
+            || recipe.file_id.to_string() != self.0.assignment.binding().file_id().as_str()
+        {
+            return Err(SourceWorkerError::Unavailable);
+        }
         let mut authority = SourceControlAuthority {
             actor: self.clone(),
             source: guard
@@ -266,8 +284,7 @@ impl SourceViewerActor {
         Ok(SourceOpenedControl {
             result,
             guard,
-            route,
-            start: response,
+            projection: Box::new((route, current_response, recipe)),
         })
     }
 }

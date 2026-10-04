@@ -1306,7 +1306,7 @@ impl SourceVodStatusReceipt {
 pub(crate) struct SourceControlReceipt(
     Result<
         crate::playback_control::ControlResponseV1,
-        crate::http::shared_source_playback::control::SharedControlRefusal,
+        crate::http::sharing_playback_wire::SharedControlRefusal,
     >,
 );
 impl SourceControlReceipt {
@@ -1318,7 +1318,7 @@ impl SourceControlReceipt {
     ) -> Result<Self, PeerError> {
         let (payload, member) = operation_reply(bytes, session, known, &["response", "refusal"])?;
         if payload == "refusal" {
-            let refusal: crate::http::shared_source_playback::control::SharedControlRefusal =
+            let refusal: crate::http::sharing_playback_wire::SharedControlRefusal =
                 serde_json::from_value(member).map_err(|_| PeerError::InvalidResponse)?;
             if !refusal.is_valid() {
                 return Err(PeerError::InvalidResponse);
@@ -1351,7 +1351,7 @@ impl SourceControlReceipt {
         self,
     ) -> Result<
         crate::playback_control::ControlResponseV1,
-        crate::http::shared_source_playback::control::SharedControlRefusal,
+        crate::http::sharing_playback_wire::SharedControlRefusal,
     > {
         self.0
     }

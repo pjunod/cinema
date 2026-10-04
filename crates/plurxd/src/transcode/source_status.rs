@@ -225,6 +225,10 @@ impl SourceOpenedStatus {
 }
 
 impl SourceViewerActor {
+    #[cfg(test)]
+    pub(crate) fn pause_status_read_for_test(&self) -> Arc<crate::seam_hooks::AsyncPause> {
+        self.0.status_hooks.pause(true)
+    }
     /// The owned observation retains its Body obligation through VOD's nested
     /// metadata jobs even if its HTTP waiter disappears. It never touches the
     /// viewer demand, accepted control sequence, or VOD inactivity clock.

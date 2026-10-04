@@ -347,6 +347,71 @@ pub(crate) fn project_shared_start(
     Ok(response)
 }
 
+/// The closed refusal vocabulary a Source may return for an authenticated
+/// current-rendition exchange. B maps each one onto the ordinary client
+/// control answer under its own session identity.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum SharedControlRefusalCode {
+    StaleControl,
+    OwnerChanged,
+    RateLimited,
+    SessionEnded,
+    OwnerTransition,
+    OwnerLost,
+    Unavailable,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct SharedControlRefusal {
+    pub(crate) code: SharedControlRefusalCode,
+    pub(crate) retry_after_ms: Option<u32>,
+}
+
+impl SharedControlRefusal {
+    pub(crate) fn from_state(error: crate::playback_control::ControlStateError) -> Self {
+        use SharedControlRefusalCode as C;
+        let (code, retry_after_ms) = match error {
+            crate::playback_control::ControlStateError::StaleGeneration
+            | crate::playback_control::ControlStateError::StaleClient
+            | crate::playback_control::ControlStateError::StaleSequence => (C::StaleControl, None),
+            crate::playback_control::ControlStateError::OwnerChanged => (C::OwnerChanged, None),
+            crate::playback_control::ControlStateError::RateLimited(after) => {
+                (C::RateLimited, Some(after.clamp(1, 60_000)))
+            }
+            // Shared controls are VOD current-rendition only; a rolling or
+            // paused terminal on the Source is still an ended session to B.
+            crate::playback_control::ControlStateError::SessionEnded
+            | crate::playback_control::ControlStateError::RollingEnded(_)
+            | crate::playback_control::ControlStateError::PauseExpired => (C::SessionEnded, None),
+            crate::playback_control::ControlStateError::OwnerTransition => {
+                (C::OwnerTransition, Some(500))
+            }
+            crate::playback_control::ControlStateError::OwnerLost => (C::OwnerLost, None),
+            crate::playback_control::ControlStateError::Unavailable => (C::Unavailable, Some(500)),
+        };
+        Self {
+            code,
+            retry_after_ms,
+        }
+    }
+    /// A well-formed refusal carries a retry hint exactly when its code is
+    /// one a client retries on the server's cadence.
+    pub(crate) fn is_valid(&self) -> bool {
+        use SharedControlRefusalCode as C;
+        match self.code {
+            C::RateLimited => self
+                .retry_after_ms
+                .is_some_and(|after| (1..=60_000).contains(&after)),
+            C::OwnerTransition | C::Unavailable => self.retry_after_ms == Some(500),
+            C::StaleControl | C::OwnerChanged | C::SessionEnded | C::OwnerLost => {
+                self.retry_after_ms.is_none()
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -809,5 +874,88 @@ mod tests {
         let mut wrong = manifest;
         wrong.cues[0].end_ms = 1001;
         assert!(project_shared_overlay(wrong, &reference, &key).is_err());
+    }
+
+    #[test]
+    fn sharing_source_control_refusals_are_closed_and_carry_exact_retry_hints() {
+        use crate::playback_control::ControlStateError as E;
+        for (error, code, retry) in [
+            (
+                E::StaleGeneration,
+                SharedControlRefusalCode::StaleControl,
+                None,
+            ),
+            (E::StaleClient, SharedControlRefusalCode::StaleControl, None),
+            (
+                E::StaleSequence,
+                SharedControlRefusalCode::StaleControl,
+                None,
+            ),
+            (
+                E::OwnerChanged,
+                SharedControlRefusalCode::OwnerChanged,
+                None,
+            ),
+            (
+                E::RateLimited(0),
+                SharedControlRefusalCode::RateLimited,
+                Some(1),
+            ),
+            (
+                E::RateLimited(u32::MAX),
+                SharedControlRefusalCode::RateLimited,
+                Some(60_000),
+            ),
+            (
+                E::SessionEnded,
+                SharedControlRefusalCode::SessionEnded,
+                None,
+            ),
+            (
+                E::PauseExpired,
+                SharedControlRefusalCode::SessionEnded,
+                None,
+            ),
+            (
+                E::OwnerTransition,
+                SharedControlRefusalCode::OwnerTransition,
+                Some(500),
+            ),
+            (E::OwnerLost, SharedControlRefusalCode::OwnerLost, None),
+            (
+                E::Unavailable,
+                SharedControlRefusalCode::Unavailable,
+                Some(500),
+            ),
+        ] {
+            let refusal = SharedControlRefusal::from_state(error);
+            assert_eq!(refusal.code, code, "{error:?}");
+            assert_eq!(refusal.retry_after_ms, retry, "{error:?}");
+            assert!(refusal.is_valid(), "{error:?}");
+        }
+        for (code, retry) in [
+            (SharedControlRefusalCode::StaleControl, Some(500)),
+            (SharedControlRefusalCode::RateLimited, None),
+            (SharedControlRefusalCode::RateLimited, Some(60_001)),
+            (SharedControlRefusalCode::Unavailable, None),
+            (SharedControlRefusalCode::OwnerTransition, Some(1)),
+        ] {
+            assert!(!SharedControlRefusal {
+                code,
+                retry_after_ms: retry
+            }
+            .is_valid());
+        }
+        let wire: serde_json::Value =
+            serde_json::to_value(SharedControlRefusal::from_state(E::RateLimited(250)))
+                .expect("refusal wire");
+        assert_eq!(
+            wire,
+            serde_json::json!({"code":"rate_limited","retry_after_ms":250})
+        );
+        assert!(serde_json::from_value::<SharedControlRefusal>(
+            serde_json::json!({"code":"rate_limited","retry_after_ms":250,"message":"raw"})
+        )
+        .is_err());
     }
 }

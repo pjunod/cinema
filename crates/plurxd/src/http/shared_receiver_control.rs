@@ -9,7 +9,7 @@ use super::*;
 use crate::{
     http::{
         hls::control_error,
-        shared_source_playback::control::{SharedControlRefusal, SharedControlRefusalCode},
+        sharing_playback_wire::{SharedControlRefusal, SharedControlRefusalCode},
     },
     playback_control::{ControlAction, ControlRelayRequest, ControlRequestV1, ControlResponseV1},
     sharing_client::{PeerConnection, SharedVodStatus, SourcePeerLineage},

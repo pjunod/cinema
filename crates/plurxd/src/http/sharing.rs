@@ -195,7 +195,8 @@ async fn peer_guard(
     {
         Some(
             "/sharing/v1/items/{item}/files/{file}/decision"
-            | "/sharing/v1/items/{item}/files/{file}/sessions/{request}/status",
+            | "/sharing/v1/items/{item}/files/{file}/sessions/{request}/status"
+            | "/sharing/v1/items/{item}/files/{file}/sessions/{request}/vod-status",
         ) => Duration::from_secs(10),
         Some(
             "/sharing/v1/items/{item}/files/{file}/sessions"
@@ -203,6 +204,9 @@ async fn peer_guard(
         ) => Duration::from_secs(310),
         Some("/sharing/v1/items/{item}/files/{file}/sessions/{request}/resources") => {
             Duration::from_secs(30)
+        }
+        Some("/sharing/v1/items/{item}/files/{file}/sessions/{request}/control") => {
+            Duration::from_secs(5)
         }
         _ => Duration::from_secs(3),
     };
