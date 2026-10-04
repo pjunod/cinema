@@ -305,9 +305,12 @@ impl TranscodeManager {
         fence: crate::background_jobs::JobFence,
         deadline: Instant,
         observation: u64,
-    ) -> Result<bool, String> {
+    ) -> Result<bool, crate::background_jobs::PreparationError> {
+        use crate::background_jobs::PreparationError;
         use plurx_core::store::background_jobs::JobPayload;
-        let payload = job.supported_payload().map_err(|error| error.to_string())?;
+        let payload = job
+            .supported_payload()
+            .map_err(|_| PreparationError::Fail("encoded_payload_unsupported"))?;
         let JobPayload::EncodedOutputPrepare {
             file_id,
             source_size,
@@ -320,13 +323,13 @@ impl TranscodeManager {
             ..
         } = payload
         else {
-            return Err("encoded payload unsupported".to_owned());
+            return Err(PreparationError::Fail("encoded_payload_unsupported"));
         };
         let automatic_candidate = intent.candidate_id.is_some();
         if automatic_candidate && candidate_catalog.is_none()
             || !automatic_candidate && candidate_catalog.is_some()
         {
-            return Self::stop_unverifiable_candidate(&fence).await;
+            return Ok(Self::stop_unverifiable_candidate(&fence).await?);
         }
         if file.id != file_id
             || file.size != source_size
@@ -335,12 +338,12 @@ impl TranscodeManager {
                 != Some(&policy_generation)
         {
             if automatic_candidate {
-                return Self::stop_unverifiable_candidate(&fence).await;
+                return Ok(Self::stop_unverifiable_candidate(&fence).await?);
             }
-            return Err("encoded source or owner changed".to_owned());
+            return Err(PreparationError::Fail("encoded_policy_changed"));
         }
         if !self.encoded_preparation_still_idle(observation) {
-            return Err("encoded owner busy".to_owned());
+            return Err(PreparationError::Yield("owner_busy"));
         }
         // Match foreground's selected offset without rewriting the stored
         // scanner row. The closed intent owns this delivery fact.
@@ -371,7 +374,7 @@ impl TranscodeManager {
                     height: i64::from(
                         intent
                             .requested_height
-                            .ok_or("encoded request height unavailable")?,
+                            .ok_or(PreparationError::Fail("encoded_request_height_unavailable"))?,
                     ),
                 },
             },
@@ -390,7 +393,7 @@ impl TranscodeManager {
         if job.token.as_ref().map(|token| token.node_id.as_str())
             != Some(intent.target_node_id.as_str())
         {
-            return Err("encoded claimed target changed".into());
+            return Err(PreparationError::Fail("claimed_target_mismatch"));
         }
         if expected.is_some() {
             if !self
@@ -408,27 +411,30 @@ impl TranscodeManager {
                 return Ok(false);
             }
         } else if candidate_catalog.is_some() {
-            return Self::stop_unverifiable_candidate(&fence).await;
+            return Ok(Self::stop_unverifiable_candidate(&fence).await?);
         }
         let encoding = self
             .prepare_vod_encoding(&request, file)
             .await?
-            .ok_or("encoded plan unavailable")?;
+            .ok_or(PreparationError::Fail("encoded_plan_unavailable"))?;
         if encoding.source_object_version != source_object_version
             || self.encoded_output_intent(&request, &encoding, &intent.target_node_id)? != intent
         {
             if expected.is_some() {
-                return Self::stop_unverifiable_candidate(&fence).await;
+                return Ok(Self::stop_unverifiable_candidate(&fence).await?);
             }
-            return Err("encoded resolved delivery changed".to_owned());
+            if encoding.source_object_version != source_object_version {
+                return Err(PreparationError::Stop("source_changed"));
+            }
+            return Err(PreparationError::Fail("encoded_delivery_changed"));
         }
         let settings = self
             .vod_settings(&request)
             .await?
-            .ok_or("encoded VOD policy unavailable")?;
+            .ok_or(PreparationError::Fail("vod_policy_unavailable"))?;
         let executable = crate::ffmpeg::EncodedExecutable::capture().await?;
         if executable.digest != intent.executable_digest {
-            return Err("encoded executable changed".to_owned());
+            return Err(PreparationError::Fail("encoded_executable_changed"));
         }
         let engine = encoding.engine.clone();
         let prepared = self
@@ -457,7 +463,8 @@ impl TranscodeManager {
                 file,
                 &settings,
                 &source_object_version,
-                u64::try_from(scratch_bytes).map_err(|_| "encoded cap invalid")?,
+                u64::try_from(scratch_bytes)
+                    .map_err(|_| PreparationError::Fail("encoded_cap_invalid"))?,
                 fence,
                 deadline,
                 self.admissions.clone(),
@@ -465,7 +472,7 @@ impl TranscodeManager {
                 || self.encoded_preparation_still_idle(observation),
             )
             .await?;
-        prepared.settle_encoded_and_expose(&intent).await
+        Ok(prepared.settle_encoded_and_expose(&intent).await?)
     }
 
     #[cfg(test)]
@@ -669,9 +676,12 @@ impl TranscodeManager {
         fence: crate::background_jobs::JobFence,
         admission: &FragmentAdmission,
         deadline: Instant,
-    ) -> Result<bool, String> {
+    ) -> Result<bool, crate::background_jobs::PreparationError> {
+        use crate::background_jobs::PreparationError;
         use plurx_core::store::background_jobs::JobPayload;
-        let payload = job.supported_payload().map_err(|error| error.to_string())?;
+        let payload = job
+            .supported_payload()
+            .map_err(|_| PreparationError::Fail("copy_payload_unsupported"))?;
         let JobPayload::CopyOutputPrepare {
             copy_output_version,
             file_id,
@@ -685,18 +695,18 @@ impl TranscodeManager {
             ..
         } = &payload
         else {
-            return Err("unsupported copy output payload".to_owned());
+            return Err(PreparationError::Fail("copy_payload_unsupported"));
         };
         let manual = *copy_output_version == 2;
         if !manual && candidate_catalog.is_none() || manual && candidate_catalog.is_some() {
-            return Self::stop_unverifiable_candidate(&fence).await;
+            return Ok(Self::stop_unverifiable_candidate(&fence).await?);
         }
         if manual
             && *policy_generation
                 != crate::vodserve::retained::manual_copy_policy_generation(file, intent)
-                    .ok_or("manual source metadata unavailable")?
+                    .ok_or(PreparationError::Fail("manual_source_metadata_unavailable"))?
         {
-            return Err("manual copy source metadata changed".to_owned());
+            return Err(PreparationError::Fail("manual_copy_source_metadata_changed"));
         }
         if file.id != *file_id
             || file.size != *source_size
@@ -708,19 +718,19 @@ impl TranscodeManager {
             || crate::ffmpeg::fragment_index_engine_digest().await != intent.pipeline_identity
         {
             if !manual {
-                return Self::stop_unverifiable_candidate(&fence).await;
+                return Ok(Self::stop_unverifiable_candidate(&fence).await?);
             }
-            return Err("copy output current facts differ".to_owned());
+            return Err(PreparationError::Fail("copy_output_facts_changed"));
         }
         if !self.fragment_worker_idle(admission) {
-            return Err("copy owner busy".into());
+            return Err(PreparationError::Yield("owner_busy"));
         }
         let source = crate::fragment_index_cluster::open_source_fence(file, None).await?;
         if !source.unchanged() || source.object_version() != source_object_version {
             if !manual {
-                return Self::stop_unverifiable_candidate(&fence).await;
+                return Ok(Self::stop_unverifiable_candidate(&fence).await?);
             }
-            return Err("copy output source changed".to_owned());
+            return Err(PreparationError::Stop("source_changed"));
         }
         let selected_audio = intent.audio_index.map_or_else(
             || file.audio_streams.first(),
@@ -733,7 +743,7 @@ impl TranscodeManager {
         let claim = intent
             .audio_claim
             .as_ref()
-            .ok_or("copy output audio claim unavailable")?;
+            .ok_or(PreparationError::Fail("copy_audio_claim_unavailable"))?;
         let audio = plurx_core::playback::audio::resolve_audio(
             selected_audio,
             &claim.profile(),
@@ -742,9 +752,9 @@ impl TranscodeManager {
         );
         if audio != intent.audio_delivery {
             if !manual {
-                return Self::stop_unverifiable_candidate(&fence).await;
+                return Ok(Self::stop_unverifiable_candidate(&fence).await?);
             }
-            return Err("copy output audio delivery changed".to_owned());
+            return Err(PreparationError::Fail("copy_audio_delivery_changed"));
         }
         // The stored row has its default offset; this exact claimed intent
         // owns the resolved delivery offset, just as foreground create does.
@@ -765,9 +775,9 @@ impl TranscodeManager {
         .with_dolby_vision_conversion(intent.convert_dolby_vision);
         if crate::fragindex::identity_for(file, video).argv_fingerprint != intent.video_identity {
             if !manual {
-                return Self::stop_unverifiable_candidate(&fence).await;
+                return Ok(Self::stop_unverifiable_candidate(&fence).await?);
             }
-            return Err("copy output video identity changed".to_owned());
+            return Err(PreparationError::Fail("copy_video_identity_changed"));
         }
         let executable = crate::ffmpeg::EncodedExecutable::capture().await?;
         let engine = crate::ffmpeg::EncodedEngine::capture(None).await?;
@@ -815,7 +825,7 @@ impl TranscodeManager {
         if job.token.as_ref().map(|token| token.node_id.as_str())
             != Some(intent.target_node_id.as_str())
         {
-            return Err("copy claimed target changed".into());
+            return Err(PreparationError::Fail("claimed_target_mismatch"));
         }
         if !manual {
             let id = plurx_core::playback::candidate::CandidateId::for_recipe_digest(digest);
@@ -848,15 +858,15 @@ impl TranscodeManager {
                 || context.selected_candidate.width != intent.width
                 || context.selected_candidate.height != intent.height
             {
-                return Self::stop_unverifiable_candidate(&fence).await;
+                return Ok(Self::stop_unverifiable_candidate(&fence).await?);
             }
         } else if candidate_catalog.is_some() {
-            return Self::stop_unverifiable_candidate(&fence).await;
+            return Ok(Self::stop_unverifiable_candidate(&fence).await?);
         }
         let settings = self
             .vod_settings(&request)
             .await?
-            .ok_or("copy output VOD policy unavailable")?;
+            .ok_or(PreparationError::Fail("vod_policy_unavailable"))?;
         let prepared_request = crate::vodserve::VodRecipeRequest {
             request: &request,
             encoding: None,
@@ -884,7 +894,8 @@ impl TranscodeManager {
                 file,
                 &settings,
                 source_object_version,
-                u64::try_from(*scratch_bytes).map_err(|_| "copy output cap invalid")?,
+                u64::try_from(*scratch_bytes)
+                    .map_err(|_| PreparationError::Fail("copy_cap_invalid"))?,
                 fence,
                 deadline,
                 self.admissions.clone(),
@@ -892,10 +903,13 @@ impl TranscodeManager {
                 || self.fragment_worker_idle(admission),
             )
             .await?;
-        if !source.unchanged() || !self.fragment_worker_idle(admission) {
-            return Ok(false);
+        if !source.unchanged() {
+            return Err(PreparationError::Stop("source_changed"));
         }
-        prepared.settle_and_expose(intent).await
+        if !self.fragment_worker_idle(admission) {
+            return Err(PreparationError::Yield("preempted"));
+        }
+        Ok(prepared.settle_and_expose(intent).await?)
     }
 
     /// Pre-transcode one file at one rung, so the next viewer gets a cache hit.

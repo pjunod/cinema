@@ -19,9 +19,12 @@ impl VodServe {
             crate::ffmpeg::EncodedEngine,
         ),
         still_idle: impl Fn() -> bool,
-    ) -> Result<super::copy_preparation::PreparedCopyOutput, String> {
+    ) -> Result<super::copy_preparation::PreparedCopyOutput, crate::background_jobs::PreparationError>
+    {
         if prepared.encoding.is_some() {
-            return Err("copy preparation not admitted".to_owned());
+            return Err(crate::background_jobs::PreparationError::Fail(
+                "copy_preparation_with_encoding",
+            ));
         }
         self.prepare_complete_output(
             prepared,
@@ -54,9 +57,12 @@ impl VodServe {
             crate::ffmpeg::EncodedEngine,
         ),
         still_idle: impl Fn() -> bool,
-    ) -> Result<super::copy_preparation::PreparedCopyOutput, String> {
+    ) -> Result<super::copy_preparation::PreparedCopyOutput, crate::background_jobs::PreparationError>
+    {
         if prepared.encoding.is_none() {
-            return Err("encoded preparation requires an actual resolved plan".to_owned());
+            return Err(crate::background_jobs::PreparationError::Fail(
+                "encoded_preparation_without_plan",
+            ));
         }
         self.prepare_complete_output(
             prepared,
@@ -89,7 +95,9 @@ impl VodServe {
             crate::ffmpeg::EncodedEngine,
         ),
         still_idle: impl Fn() -> bool,
-    ) -> Result<super::copy_preparation::PreparedCopyOutput, String> {
+    ) -> Result<super::copy_preparation::PreparedCopyOutput, crate::background_jobs::PreparationError>
+    {
+        use crate::background_jobs::PreparationError;
         let expected_encoded_plan = prepared
             .encoding
             .as_ref()
@@ -99,16 +107,21 @@ impl VodServe {
             .preparation_attachment
             .lock()
             .expect("attachment observation");
-        if !still_idle() || Instant::now() >= deadline {
-            return Err("copy preparation not admitted".to_owned());
+        if !still_idle() {
+            return Err(PreparationError::Yield("preempted"));
         }
+        if Instant::now() >= deadline {
+            return Err(PreparationError::Yield("pass_deadline"));
+        }
+        // A full retained budget is refused before any media work starts, so
+        // queueing again costs one reservation check, never a remux/encode.
         let allowance = super::retained::RetainedArtifactRegistry::reserve_preparation(
             &self.shared,
             cap,
             settings.completed_cache_bytes,
         )
         .await
-        .ok_or("copy preparation retention cap unavailable")?;
+        .ok_or(PreparationError::Yield("retention_capacity"))?;
         let (attachment, logical) = self
             .resolve_rendition(&mut prepared, file, settings, None, Some(allowance.nonce))
             .await?;
@@ -117,20 +130,25 @@ impl VodServe {
         let token = fence
             .snapshot()
             .await
-            .ok_or("copy preparation lease lost")?;
+            .ok_or(PreparationError::Yield("lease_lost"))?;
         let readers = rendition.readers.lock().await;
         let manifest = rendition.manifest.lock().await;
+        if !rendition.source.as_ref().is_some_and(|source| {
+            source.unchanged() && source.object_version() == source_version
+        }) {
+            return Err(PreparationError::Stop("source_changed"));
+        }
+        if rendition.recipe.retained_logical.as_ref() != Some(&logical) {
+            return Err(PreparationError::Fail("retained_logical_changed"));
+        }
         if !still_idle()
             || Instant::now() >= deadline
             || !readers.is_empty()
             || manifest.materialized_count() != 0
             || rendition.preparation().is_some()
-            || rendition.recipe.retained_logical.as_ref() != Some(&logical)
-            || !rendition.source.as_ref().is_some_and(|source| {
-                source.unchanged() && source.object_version() == source_version
-            })
         {
-            return Err("copy preparation incumbent or source unavailable".to_owned());
+            // A viewer or another preparation already owns this rendition.
+            return Err(PreparationError::Yield("rendition_busy"));
         }
         let preparation = Arc::new(super::copy_preparation::CopyPreparation::new(
             allowance,
@@ -151,9 +169,9 @@ impl VodServe {
             .begin(
                 super::retained_manifest::MAX_MANIFEST
                     .checked_add(rendition.playlist.len() as u64)
-                    .ok_or("copy preparation metadata overflow")?,
+                    .ok_or(PreparationError::Fail("preparation_metadata_overflow"))?,
             )
-            .ok_or("copy preparation metadata exceeds cap")?;
+            .ok_or(PreparationError::Fail("preparation_metadata_exceeds_cap"))?;
         metadata.commit(false);
         {
             let observation = self
@@ -162,7 +180,7 @@ impl VodServe {
                 .lock()
                 .expect("attachment observation");
             if *observation != attachment_observation || *observation == u64::MAX {
-                return Err("copy preparation foreground attachment changed".to_owned());
+                return Err(PreparationError::Yield("preempted"));
             }
             *rendition.copy_preparation.lock().expect("copy preparation") =
                 Some(Arc::clone(&preparation));

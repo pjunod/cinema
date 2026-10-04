@@ -10280,8 +10280,16 @@ impl JobManager {
                         let operation = async {
                             let plurx_core::store::background_jobs::JobPayload::EncodedOutputPrepare {
                                 file_id, source_size, source_mtime, ..
-                            } = job.supported_payload().map_err(|error| error.to_string())?
-                            else { return Err("encoded payload unsupported".to_owned()); };
+                            } = job.supported_payload().map_err(|_| {
+                                crate::background_jobs::PreparationError::Fail(
+                                    "encoded_payload_unsupported",
+                                )
+                            })?
+                            else {
+                                return Err(crate::background_jobs::PreparationError::Fail(
+                                    "encoded_payload_unsupported",
+                                ));
+                            };
                             let Some(file) =
                                 crate::transcode::TranscodeManager::claimed_preparation_file(
                                     self.store.as_ref(),
@@ -10330,18 +10338,22 @@ impl JobManager {
                         )
                         .await
                     };
-                    match result {
-                        Ok(true) => produced += 1,
-                        Ok(false) | Err(_) => {
-                            let _ = fence
-                                .settle(plurx_core::store::background_jobs::JobSettlement::Yield {
-                                    error_code: Some("encoded_output_unavailable".to_owned()),
-                                    checkpoint: None,
-                                    not_before_ms: clock_ms().saturating_add(5_000),
-                                })
-                                .await;
+                    let reason = self
+                        .settle_output_preparation(
+                            &job,
+                            &fence,
+                            "encoded_output",
+                            result,
+                            fence.loss_token().is_cancelled()
+                                || std::time::Instant::now() >= deadline
+                                || !transcode.encoded_preparation_still_idle(observation),
+                        )
+                        .await;
+                    match reason {
+                        None => produced += 1,
+                        Some(reason) => {
                             skipped += 1;
-                            *reasons.entry("encoded_output_unavailable").or_default() += 1;
+                            *reasons.entry(reason).or_default() += 1;
                         }
                     }
                     active.finish().await;
@@ -10355,8 +10367,11 @@ impl JobManager {
                     let observation = transcode.copy_preparation_attachment_observation();
                     let result = {
                         let operation = async {
-                            let payload =
-                                job.supported_payload().map_err(|error| error.to_string())?;
+                            let payload = job.supported_payload().map_err(|_| {
+                                crate::background_jobs::PreparationError::Fail(
+                                    "copy_payload_unsupported",
+                                )
+                            })?;
                             let plurx_core::store::background_jobs::JobPayload::CopyOutputPrepare {
                                 file_id,
                                 source_size,
@@ -10364,7 +10379,9 @@ impl JobManager {
                                 ..
                             } = payload
                             else {
-                                return Err("copy payload unsupported".to_owned());
+                                return Err(crate::background_jobs::PreparationError::Fail(
+                                    "copy_payload_unsupported",
+                                ));
                             };
                             let Some(file) =
                                 crate::transcode::TranscodeManager::claimed_preparation_file(
@@ -10416,19 +10433,22 @@ impl JobManager {
                         )
                         .await
                     };
-                    match result {
-                        Ok(true) => produced += 1,
-                        Ok(false) | Err(_) => {
-                            let now = clock_ms();
-                            let _ = fence
-                                .settle(plurx_core::store::background_jobs::JobSettlement::Yield {
-                                    error_code: Some("copy_output_unavailable".to_owned()),
-                                    checkpoint: None,
-                                    not_before_ms: now.saturating_add(5_000),
-                                })
-                                .await;
+                    let reason = self
+                        .settle_output_preparation(
+                            &job,
+                            &fence,
+                            "copy_output",
+                            result,
+                            fence.loss_token().is_cancelled()
+                                || std::time::Instant::now() >= deadline
+                                || !transcode.copy_preparation_still_idle(&admission, observation),
+                        )
+                        .await;
+                    match reason {
+                        None => produced += 1,
+                        Some(reason) => {
                             skipped += 1;
-                            *reasons.entry("copy_output_unavailable").or_default() += 1;
+                            *reasons.entry(reason).or_default() += 1;
                         }
                     }
                     active.finish().await;
@@ -10665,6 +10685,56 @@ impl JobManager {
             self.set_producing(None).await;
         }
         self.emit_producer_pass(produced, skipped, serde_json::json!(reasons));
+    }
+
+    /// Settle one copy/encoded output preparation by outcome class. Returns
+    /// `None` when the output was published, else the pass-telemetry reason.
+    /// `Ok(false)` means the callee either settled the row itself (a stop the
+    /// fence then refuses to overwrite) or the staged body lost its exposure
+    /// race; a yield is correct for the latter and harmless for the former.
+    async fn settle_output_preparation(
+        &self,
+        job: &plurx_core::store::background_jobs::BackgroundJob,
+        fence: &crate::background_jobs::JobFence,
+        kind: &'static str,
+        result: Result<bool, crate::background_jobs::PreparationError>,
+        preempted: bool,
+    ) -> Option<&'static str> {
+        let error = match result {
+            Ok(true) => return None,
+            Ok(false) => crate::background_jobs::PreparationError::Yield("output_not_published"),
+            Err(error) => error,
+        };
+        let retry_code = if kind == "encoded_output" {
+            "encoded_output_failed"
+        } else {
+            "copy_output_failed"
+        };
+        let (settlement, reason) = error.settlement(job, retry_code, preempted, clock_ms());
+        let disposition = match &settlement {
+            plurx_core::store::background_jobs::JobSettlement::Yield { .. } => "yield",
+            plurx_core::store::background_jobs::JobSettlement::Retry { .. } => "retry",
+            plurx_core::store::background_jobs::JobSettlement::Fail { .. } => "fail",
+            plurx_core::store::background_jobs::JobSettlement::Stop { .. } => "stop",
+            plurx_core::store::background_jobs::JobSettlement::Cancel => "cancel",
+        };
+        if disposition == "yield" {
+            tracing::debug!(job = %job.id, kind, %error, disposition, "output preparation settled");
+        } else {
+            tracing::warn!(
+                job = %job.id,
+                kind,
+                %error,
+                disposition,
+                failed_attempts = job.failed_attempts,
+                attempt_limit = job.attempt_limit,
+                "output preparation did not publish"
+            );
+        }
+        if let Err(store_error) = fence.settle(settlement).await {
+            tracing::warn!(job = %job.id, kind, %store_error, "output preparation settlement failed");
+        }
+        Some(reason)
     }
 
     fn emit_producer_pass(&self, produced: u64, skipped: u64, reasons: serde_json::Value) {

@@ -76,7 +76,10 @@ async fn manual_copy_queued_metadata_and_unsupported_versions_refuse_before_publ
     let admission = manager.admit_fragment().await.expect("background admission");
     let error = manager.produce_copy_output_job(&current, &claimed, active.fence(),
         &admission, Instant::now() + Duration::from_secs(20)).await.expect_err("metadata refusal");
-    assert_eq!(error, "manual copy source metadata changed");
+    assert_eq!(
+        error,
+        crate::background_jobs::PreparationError::Fail("manual_copy_source_metadata_changed")
+    );
     assert_ne!(store.background_job(&job.id).await.expect("job").expect("row").state,
         JobState::Succeeded, "no historical completion or private publication");
     active.finish().await;

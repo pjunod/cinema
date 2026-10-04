@@ -45,15 +45,19 @@ impl VodServe {
         &self,
         mut run: PreparationRun,
         still_idle: impl Fn() -> bool,
-    ) -> Result<PreparedCopyOutput, String> {
+    ) -> Result<PreparedCopyOutput, crate::background_jobs::PreparationError> {
+        use crate::background_jobs::PreparationError;
         let lost = run.preparation.fence.loss_token();
         loop {
             // Register before inspection to avoid losing assembly completion.
             let progress = run.preparation.progress.notified();
             tokio::pin!(progress);
             progress.as_mut().enable();
-            if !still_idle() || !run.preparation.live(&run.rendition).await {
-                return Err("copy preparation unavailable or preempted".to_owned());
+            if !still_idle() {
+                return Err(PreparationError::Yield("preempted"));
+            }
+            if !run.preparation.live(&run.rendition).await {
+                return Err(run.preparation.refusal(&run.rendition));
             }
             if let Some(artifact) = run.preparation.staged() {
                 run.armed = false;
@@ -66,9 +70,9 @@ impl VodServe {
                 });
             }
             tokio::select! {
-                _ = lost.cancelled() => return Err("copy preparation lease lost".to_owned()),
+                _ = lost.cancelled() => return Err(PreparationError::Yield("lease_lost")),
                 _ = tokio::time::sleep_until(run.preparation.deadline.into()) =>
-                    return Err("copy preparation deadline".to_owned()),
+                    return Err(PreparationError::Yield("pass_deadline")),
                 _ = &mut progress => {},
             }
         }
@@ -314,6 +318,26 @@ impl CopyPreparation {
             && rendition.source.as_ref().is_some_and(|source| {
                 source.unchanged() && source.object_version() == self.source_version
             })
+    }
+
+    /// Why a preparation stopped being live. A production fault consumes an
+    /// attempt, a changed source stops the job, and everything else (viewer
+    /// attachment, admission yield, lease, deadline) is preemption.
+    pub(super) fn refusal(&self, rendition: &Rendition) -> crate::background_jobs::PreparationError {
+        use crate::background_jobs::PreparationError;
+        if !rendition.source.as_ref().is_some_and(|source| {
+            source.unchanged() && source.object_version() == self.source_version
+        }) {
+            PreparationError::Stop("source_changed")
+        } else if let Some(cause) = rendition.failure_cause() {
+            PreparationError::Retry(format!("preparation production failed: {cause}"))
+        } else if self.failed.load(Acquire) {
+            PreparationError::Retry("preparation assembly failed".to_owned())
+        } else if Instant::now() >= self.deadline {
+            PreparationError::Yield("pass_deadline")
+        } else {
+            PreparationError::Yield("preempted")
+        }
     }
 
     pub(super) fn release(&self) {

@@ -32,6 +32,103 @@ pub(crate) use metrics::{accepted_claims, prometheus};
 
 const PUBLICATION_MARGIN: Duration = Duration::from_secs(3);
 
+/// Why one claimed copy/encoded output preparation ended without publishing.
+/// The class, not the message, decides the durable settlement: a preparation
+/// that is refused for a reason that will hold on every rerun must consume
+/// its attempt budget instead of re-running a full remux/encode forever.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum PreparationError {
+    /// Preemption by a viewer, a lost lease, the pass deadline or a busy
+    /// owner. No attempt is consumed; the row is queued again.
+    Yield(&'static str),
+    /// A store, I/O or process failure. Consumes one attempt through the
+    /// shared retry backoff, so the attempt limit bounds a persistent fault.
+    Retry(String),
+    /// The same payload against the same facts refuses identically on every
+    /// run (unsupported payload, changed policy, identity or delivery).
+    Fail(&'static str),
+    /// The source the job names is gone or changed incarnation.
+    Stop(&'static str),
+}
+
+impl std::fmt::Display for PreparationError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Yield(code) => write!(f, "yield: {code}"),
+            Self::Retry(detail) => write!(f, "retry: {detail}"),
+            Self::Fail(code) => write!(f, "fail: {code}"),
+            Self::Stop(code) => write!(f, "stop: {code}"),
+        }
+    }
+}
+
+/// Unclassified failures from store, filesystem and process layers are
+/// transient by default; deterministic refusals are named explicitly.
+impl From<String> for PreparationError {
+    fn from(detail: String) -> Self {
+        Self::Retry(detail)
+    }
+}
+
+impl From<&str> for PreparationError {
+    fn from(detail: &str) -> Self {
+        Self::Retry(detail.to_owned())
+    }
+}
+
+impl PreparationError {
+    /// Durable settlement plus the bounded pass-telemetry reason. `preempted`
+    /// is the caller's re-observation of lease loss, owner preemption or the
+    /// pass deadline: a transient-looking error raised while a viewer was
+    /// taking the owner is that preemption, not a consumed attempt.
+    pub(crate) fn settlement(
+        &self,
+        job: &BackgroundJob,
+        retry_code: &'static str,
+        preempted: bool,
+        now_ms: i64,
+    ) -> (JobSettlement, &'static str) {
+        match self {
+            Self::Yield(code) => (
+                JobSettlement::Yield {
+                    error_code: Some((*code).to_owned()),
+                    checkpoint: None,
+                    not_before_ms: now_ms.saturating_add(5_000),
+                },
+                "yielded",
+            ),
+            Self::Retry(_) if preempted => (
+                JobSettlement::Yield {
+                    error_code: Some("preempted".to_owned()),
+                    checkpoint: None,
+                    not_before_ms: now_ms.saturating_add(5_000),
+                },
+                "yielded",
+            ),
+            Self::Retry(_) => (
+                JobSettlement::Retry {
+                    error_code: retry_code.to_owned(),
+                    not_before_ms: now_ms
+                        .saturating_add(retry_delay_ms(&job.id, job.failed_attempts)),
+                },
+                "retry",
+            ),
+            Self::Fail(code) => (
+                JobSettlement::Fail {
+                    error_code: (*code).to_owned(),
+                },
+                "failed",
+            ),
+            Self::Stop(code) => (
+                JobSettlement::Stop {
+                    error_code: (*code).to_owned(),
+                },
+                "stopped",
+            ),
+        }
+    }
+}
+
 /// One finite Copy watchdog covers resolution through historical settlement.
 /// Returning drops the owned operation before its caller settles or retires;
 /// cancellation does not assert that an already-dispatched SQL write rolled back.
@@ -39,14 +136,17 @@ pub(crate) async fn watch_copy_preparation(
     fence: &JobFence,
     deadline: Instant,
     still_idle: impl Fn() -> bool,
-    operation: impl std::future::Future<Output = Result<bool, String>>,
-) -> Result<bool, String> {
+    operation: impl std::future::Future<Output = Result<bool, PreparationError>>,
+) -> Result<bool, PreparationError> {
     let lost = fence.loss_token();
-    if Instant::now() >= deadline
-        || !still_idle()
-        || (lost.is_cancelled() && !fence.copy_output_completed())
-    {
-        return Err("copy output original admission or deadline unavailable".to_owned());
+    if lost.is_cancelled() && !fence.copy_output_completed() {
+        return Err(PreparationError::Yield("lease_lost"));
+    }
+    if Instant::now() >= deadline {
+        return Err(PreparationError::Yield("pass_deadline"));
+    }
+    if !still_idle() {
+        return Err(PreparationError::Yield("preempted"));
     }
     tokio::pin!(operation);
     loop {
@@ -54,15 +154,17 @@ pub(crate) async fn watch_copy_preparation(
             biased;
             result = &mut operation => return result,
             _ = tokio::time::sleep_until(deadline) =>
-                return Err("copy output original deadline".to_owned()),
+                return Err(PreparationError::Yield("pass_deadline")),
             _ = lost.cancelled(), if !fence.copy_output_completed() => {
                 if !fence.copy_output_completed() {
-                    return Err("copy output lease lost; settlement may be historical".to_owned());
+                    // Settlement may be historical; the caller's settle is
+                    // refused by the fence either way.
+                    return Err(PreparationError::Yield("lease_lost"));
                 }
             },
             _ = tokio::time::sleep(crate::transcode::PRODUCER_POLL) => {
                 if !still_idle() {
-                    return Err("copy output foreground attachment or admission".to_owned());
+                    return Err(PreparationError::Yield("preempted"));
                 }
             },
         }
@@ -1849,6 +1951,50 @@ mod tests {
         CancelJob, EnqueueJob, JobKind, JobPayload, JobRequest, JobState,
     };
     use plurx_core::store::SqliteStore;
+
+    #[tokio::test]
+    async fn preparation_refusals_settle_by_class_not_as_unbounded_yields() {
+        let (store, id, active) = active().await;
+        let job = store.background_job(&id).await.expect("job").expect("row");
+        let now = 1_000_000_i64;
+        let (settlement, reason) = PreparationError::Fail("encoded_policy_changed").settlement(
+            &job,
+            "copy_output_failed",
+            false,
+            now,
+        );
+        assert!(matches!(settlement, JobSettlement::Fail { ref error_code }
+            if error_code == "encoded_policy_changed"));
+        assert_eq!(reason, "failed");
+        let (settlement, reason) = PreparationError::from("store unavailable").settlement(
+            &job,
+            "copy_output_failed",
+            false,
+            now,
+        );
+        let expected = now + retry_delay_ms(&job.id, job.failed_attempts);
+        assert!(matches!(settlement, JobSettlement::Retry { ref error_code, not_before_ms }
+            if error_code == "copy_output_failed" && not_before_ms == expected),
+            "a transient fault consumes an attempt through the shared backoff");
+        assert_eq!(reason, "retry");
+        let (settlement, _) = PreparationError::from("io while a viewer attached").settlement(
+            &job,
+            "copy_output_failed",
+            true,
+            now,
+        );
+        assert!(
+            matches!(settlement, JobSettlement::Yield { .. }),
+            "observed preemption never charges an attempt"
+        );
+        let (settlement, _) =
+            PreparationError::Stop("source_changed").settlement(&job, "copy_output_failed", true, now);
+        assert!(
+            matches!(settlement, JobSettlement::Stop { .. }),
+            "a deterministic refusal is not softened by concurrent preemption"
+        );
+        active.finish().await;
+    }
 
     #[tokio::test]
     async fn copy_watchdog_bounds_pending_operation_and_distinguishes_historical_completion() {
