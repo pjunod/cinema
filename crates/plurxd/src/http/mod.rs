@@ -50,6 +50,11 @@ pub(crate) mod scan_identity;
 pub(crate) mod shared_artwork;
 pub(crate) mod shared_library;
 pub(crate) mod shared_playback;
+#[allow(
+    dead_code,
+    reason = "candidate Shared Start router remains unregistered pending actual relay qualification"
+)]
+pub(crate) mod shared_receiver_ingress;
 #[allow(dead_code)] // Owner remains unregistered until relay/control qualify.
 pub(crate) mod shared_receiver_playback;
 pub(crate) mod shared_source_playback;

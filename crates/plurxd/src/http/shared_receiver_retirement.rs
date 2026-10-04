@@ -1,8 +1,8 @@
 //! Private receiver cleanup. Metadata expiry never constructs these receipts.
 use super::*;
 use plurx_core::sharing_receiver_retirement::{
-    ReceiverRetirementDisposition, ReceiverRetirementOutcome, ReceiverRetirementReason,
-    ReceiverRetirementWitness,
+    ReceiverPendingOwner, ReceiverPendingRetirementWitness, ReceiverRetirementDisposition,
+    ReceiverRetirementOutcome, ReceiverRetirementReason, ReceiverRetirementWitness,
 };
 use sha2::{Digest, Sha256};
 
@@ -91,7 +91,85 @@ impl ReceiverRetirementWitness for ConfirmedRetirement {
     }
 }
 
+// Constructed only after the owned Start and all accepted bodies/jobs joined,
+// dispatch was sealed, and this actual attempt never sent Source Start.
+struct ConfirmedPending {
+    intent: ReceiverSessionIntent,
+    request: String,
+    playback: String,
+    owner: ReceiverPendingOwner,
+    confirmation: String,
+}
+impl ReceiverPendingRetirementWitness for ConfirmedPending {
+    fn intent(&self) -> &ReceiverSessionIntent {
+        &self.intent
+    }
+    fn request_id(&self) -> &str {
+        &self.request
+    }
+    fn playback_id(&self) -> &str {
+        &self.playback
+    }
+    fn owner(&self) -> &ReceiverPendingOwner {
+        &self.owner
+    }
+    fn confirmation_id(&self) -> &str {
+        &self.confirmation
+    }
+}
+
 impl ReceiverStartActor {
+    fn mark_retired(&self) {
+        self.0.state.lock().expect("receiver owner").retired = true;
+        self.0.changed.notify_waiters();
+    }
+    fn confirmed_pending(
+        &self,
+        joined: &JoinedReceiverStart,
+        bodies: &JoinedReceiverBodies,
+        owner: ReceiverPendingOwner,
+    ) -> Result<ConfirmedPending, ReceiverStartError> {
+        if !Arc::ptr_eq(&joined.0, &self.0) || !Arc::ptr_eq(&bodies.0, &self.0.bodies) {
+            return Err(ReceiverStartError::Unresolved);
+        }
+        {
+            let state = self.0.state.lock().expect("receiver owner");
+            if !state.dispatch_closed
+                || state.dispatched.is_some()
+                || state.received.is_some()
+                || state.source.is_some()
+                || state.confirmed_source_end.is_some()
+            {
+                return Err(ReceiverStartError::Unresolved);
+            }
+        }
+        let original: serde_json::Value = serde_json::from_str(&self.0.intent.recipe.request_json)
+            .map_err(|_| ReceiverStartError::Unresolved)?;
+        let playback = original
+            .get("playback_id")
+            .and_then(serde_json::Value::as_str)
+            .ok_or(ReceiverStartError::Unresolved)?
+            .to_owned();
+        let node = match &owner {
+            ReceiverPendingOwner::Unassigned => None,
+            ReceiverPendingOwner::Assigned(node) => Some(node.as_str()),
+        };
+        let identity = serde_json::to_vec(&serde_json::json!({
+            "intent":self.0.intent.recipe,"request":self.0.request_id,"playback":playback,
+            "node":node,
+        }))
+        .map_err(|_| ReceiverStartError::Unresolved)?;
+        let mut digest = Sha256::new();
+        digest.update(b"plurx.receiver.joined-never-dispatched-pending.v1\0");
+        digest.update(identity);
+        Ok(ConfirmedPending {
+            intent: self.0.intent.clone(),
+            request: self.0.request_id.clone(),
+            playback,
+            owner,
+            confirmation: format!("{:x}", digest.finalize()),
+        })
+    }
     pub(crate) fn begin_retirement(&self, state: Arc<AppState>, reason: ReceiverRetirementReason) {
         {
             let mut owned = self.0.state.lock().expect("receiver owner");
@@ -122,6 +200,72 @@ impl ReceiverStartActor {
         // even for a no-send outcome. No elapsed timeout can construct this.
         if !Arc::ptr_eq(&bodies.0, &self.0.bodies) {
             return;
+        }
+        let (claim, never_sent, planned) = {
+            let owned = self.0.state.lock().expect("receiver owner");
+            (
+                owned.claim.clone(),
+                owned.dispatched.is_none(),
+                owned.planned_activation.is_some(),
+            )
+        };
+        if never_sent {
+            // These outcomes never acquired a row or physical producer for this
+            // process-local actor. Release only its joined inert registry slot.
+            if matches!(
+                claim,
+                ReceiverClaimStage::NotAttempted | ReceiverClaimStage::NotAcquired
+            ) {
+                if !planned {
+                    self.mark_retired();
+                }
+                return;
+            }
+            let attempted_node = match &claim {
+                ReceiverClaimStage::Assigning(node) | ReceiverClaimStage::Assigned(node) => {
+                    Some(node.clone())
+                }
+                _ => None,
+            };
+            let owner = attempted_node
+                .as_ref()
+                .map_or(ReceiverPendingOwner::Unassigned, |node| {
+                    ReceiverPendingOwner::Assigned(node.clone())
+                });
+            let Ok(mut pending) = self.confirmed_pending(&joined, &bodies, owner) else {
+                return;
+            };
+            let mut unassigned = if attempted_node.is_some() {
+                self.confirmed_pending(&joined, &bodies, ReceiverPendingOwner::Unassigned)
+                    .ok()
+            } else {
+                None
+            };
+            loop {
+                match state.store.retire_pending_receiver_request(&pending).await {
+                    Ok(ReceiverRetirementOutcome::Applied | ReceiverRetirementOutcome::Replay) => {
+                        self.mark_retired();
+                        return;
+                    }
+                    Ok(ReceiverRetirementOutcome::Refused) => {
+                        if let Some(fallback) = unassigned.take() {
+                            // Change the expected NULL/attempted owner only on
+                            // Refused; an uncertain commit keeps this exact
+                            // witness for every subsequent retry.
+                            pending = fallback;
+                            continue;
+                        }
+                        // Refused proves this exact transaction did not apply.
+                        // A planned activation may instead have committed an
+                        // owned route; only the full route witness can retire it.
+                        if planned {
+                            break;
+                        }
+                    }
+                    Err(_) => {} // Preserve the exact witness after commit-unknown.
+                }
+                tokio::time::sleep(Duration::from_secs(5)).await;
+            }
         }
         let mut witness = loop {
             match self

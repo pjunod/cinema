@@ -4328,3 +4328,162 @@ The affected feature check passes in 50.18 seconds and feature Clippy in
 2,711 files. The normal tracked commit hook remains mandatory. Live HTTP ingress,
 Source transport evidence, and accepted-body/read/writer ownership are separate
 qualification boundaries.
+
+### Candidate authenticated B Start ingress
+
+The isolated `shared_receiver_ingress` module supplies two aliases beneath the
+actual opaque B file base: `hls/sessions` and `playback`. Its router is deliberately
+unregistered. Public installation still needs the actual pinned B-to-Source
+Start/relay/control fixture and accepted Start-response ownership through the
+connection, read jobs and writers. It adds no Play button or Local lookup.
+
+Both aliases require the actual B account token and authenticated user, current
+active import, signed file locator and a fresh opaque original-login receiver
+Store authority after the bounded body read. The signature binds the retained
+Source/epoch/library/item/file/revision and import lifecycle. Decimal Source IDs,
+including zero and values beyond JavaScript's safe integer range, remain strings.
+The complete provided ordinary CreateSession body is retained: omitted fields,
+explicit nulls and integer resume positions are not normalized into guessed
+intent. Duplicate keys, unknown nested fields, trailing JSON and oversized input
+are refused. A new private Source request UUID changes only that wrapper field;
+the retained B request and its fingerprint stay stable across retries.
+
+Initial play/resume preserves `start`, initial quality and device capabilities.
+Non-null `previous_session_id`, `control_sequence`, `reopen_reason` and `intent`
+are refused before actor admission while Source-safe predecessor/control/intent
+planning remains unqualified. Null or omitted values are preserved. Unknown
+staged-recovery fields are rejected by the closed DTO grammar. B session UUIDs
+are never forwarded as Source predecessors or passed to the Local manager.
+
+The existing Root receiver actor owns claim, assignment, activation, Source
+Start and cleanup; this handler starts no second actor. Its 305-second ready
+wait is independent of HTTP waiter cancellation, and unresolved/error replies
+are not producer or retirement evidence. The candidate JSON response still
+awaits the Root accepted-body registry before public enablement.
+
+The focused pinned Rust 1.97.1 ingress command is:
+
+```sh
+cargo test -p plurxd --features plurx-core/hiqlite-store,plurx-core/hiqlite-contract-tests --bin plurxd sharing_receiver_ingress -- --nocapture
+```
+
+It reports 4 passed, zero ignored in 0.19 seconds on the retained `ebd390b20`
+base. The tests cover complete provided DTO preservation, lossless signed-context
+construction and stable retry fingerprint, refusal of each non-null recovery or
+intent field without rewriting the body, closed malformed/duplicate/oversized
+inputs, and actual B account-authentication on both aliases. The ordinary public
+router returns 404 for both candidate aliases. These fixtures neither create a
+Source producer nor claim physical Start/retirement qualification. Documentation
+index checks pass 4/4 and the catalog audits 2,712 files.
+
+Affected feature Clippy passes with `cargo clippy -p plurxd --features
+plurx-core/hiqlite-store,plurx-core/hiqlite-contract-tests --all-targets -- -D
+warnings` in 1 minute 35 seconds. The normal tracked hook also runs before the
+finite checkpoint. Moving the intended base requires the exact combined tree
+qualification again.
+
+### Exact pending request cleanup before B route creation
+
+`ReceiverPendingRetirementWitness` is an immutable interface implemented by the
+private daemon factory after the owned no-send CAS and actual Start/body/job
+joins. It exposes the retained full receiver intent, original request/playback
+IDs, exact captured request owner (`Unassigned` or `Assigned(node)`), and bounded
+canonical confirmation identity. There is no concrete production constructor,
+wire encoding, Debug output or boolean physical assertion in Core.
+
+`retire_pending_receiver_request` repeats the exact original positive B user,
+request fingerprint (including original login and whole recipe), private
+incarnation, playback ID, owner node and null reply in one transaction. NULL
+owner is exact, never a wildcard. Every route, current pointer, session job
+lease, upstream attachment, media pin, delivery grant and terminal acknowledgment
+for that incarnation must be absent. Even an expired lease refuses cleanup.
+The actual owned starting claim becomes failed with the trusted Store clock;
+postconditions verify both state and written deadlines/timestamp. An exact failed
+retry is assertion-only and cannot rewrite a reply or timestamp.
+
+This cleanup alone bypasses current-login enablement, so logout, import
+revocation and deletion of the original user do not strand a safely joined
+no-send owner. A foreign takeover, partial resource, resolved reply or missing
+claim refuses; no successor is deleted. Commit-unknown remains an error and the
+caller must retain its private witness. A failed row or empty route lookup never
+constructs the witness or proves Source termination. Generic Local failure APIs
+remain insufficient for this exact ownership settlement.
+
+Pinned Rust 1.97.1 focused qualification on the finite ingress ancestor:
+
+```sh
+cargo test -p plurx-core --features hiqlite-store,hiqlite-contract-tests --lib sharing_receiver_pending_retirement -- --nocapture
+cargo test -p plurx-core --features hiqlite-store,hiqlite-contract-tests --test store_contract sharing_receiver_pending_retirement_three_voters_refuses_takeover_and_ignored_writes -- --nocapture
+cargo clippy -p plurx-core -p plurxd --features plurx-core/hiqlite-store,plurx-core/hiqlite-contract-tests --all-targets -- -D warnings
+```
+
+The SQLite regression reports 1 passed, zero ignored in 3.29 seconds, exercising
+eight memory/pooled × legacy/rebuilt × unassigned/assigned combinations. It covers
+original-login/whole-recipe mismatch, actual claim/assignment, foreign takeover,
+ignored assertion and UPDATE rollback, expired resource refusal, real B
+import/assignment revocation, logout and original-user deletion, successful
+starting settlement and exact read-only failed retry. The layout-specific user
+deletion triggers may leave starting metadata or fail it already; the fixture
+also uses the actual generic failure writer to qualify the failed-state retry.
+That state never supplies physical evidence.
+
+The registered actual three-voter regression reports 1 passed, zero ignored in
+9.15 seconds, covering real retained NULL/assigned claims, foreign takeover,
+ignored assertion/UPDATE, expired-resource refusal, logout and exact read-only
+retry. Both tests explicitly use metadata-only witness implementations; they
+cannot qualify the daemon's owned no-send CAS or joined jobs. Feature Clippy
+passes in 1 minute 36 seconds. The normal tracked hook remains mandatory, and
+moving the intended base requires exact combined ingress/cleanup qualification.
+
+### S5 joined pending-request cleanup and Source native intent identity
+
+The receiver owner now records its actual claim stage before each claim or
+owner-assignment await. Its Start task waits for its own JoinHandle to be
+installed before it can run, so automatic retirement after a Start failure
+cannot race the handle it must join. Owner failures and loss of authority elect
+one independently owned retirement task; cancelled HTTP waiters still leave
+that owned operation alive.
+
+After dispatch is sealed and the actual Start and accepted body/job owners have
+joined, an attempt that never claimed a row can release only its inert registry
+slot. A claimed, never-dispatched attempt instead constructs the private pending
+retirement witness from its complete original intent, client request, playback
+identity and retained NULL or attempted node owner. The Store's exact transaction
+requires the same genuine starting/failed request and absence of every route,
+pointer, session lease, upstream binding, pin, delivery grant and terminal ack.
+An uncertain commit keeps the same witness. Only Refused can change the expected
+attempted owner to the legitimate original NULL owner; foreign or partially
+activated metadata stays retained. A planned activation can use the full route
+retirement witness only after the exact pending transaction refuses it.
+
+Initial Shared Start independently refuses non-null previous_session_id,
+control_sequence, reopen_reason and intent before receiver registration and
+before Source dispatch. Explicit null and omitted fields retain their original
+representation. These fields remain parseable for closed cleanup recipes; this
+change does not qualify shared recovery or controls.
+
+Source prepared playback now freezes native subtitle enablement and the actual
+selected subtitle ordinal into its own SHA-256 intent domain. Its claim,
+assignment matching and fingerprint getter consume that same value. Disabled
+native presentation normalizes the optional choice away; enabled no-choice,
+ordinal zero and another ordinal are distinct. Local durable fingerprints keep
+the existing calculation. Focused qualification for this combined candidate
+follows before the normal commit.
+
+Pinned combined qualification on `9aa4e8a39` plus pending checkpoint `04b5f45aa`
+and the private factories: Core/daemon all-target check passed in 70 seconds,
+denied-warning feature Clippy in 95 seconds. The receiver owner group passed
+eight tests (including two resource-owner tests), zero ignored, in 0.15 seconds;
+after lint-safe test scoping it passed eight again in 0.16 seconds. Candidate
+ingress passed four tests in 0.17 seconds; Source native fingerprint identity
+passed one test. Actual Source copy/index passed thirteen tests in 40.93 seconds,
+encoded media nine in 31.16 seconds and existing Source HTTP eight in 23.93
+seconds, all zero ignored. The exact pending request memory/pooled matrix passed
+one test in 2.95 seconds, and its actual three-voter contract passed one test in
+9.16 seconds with both replicated-store features. Documentation index checks
+passed four tests. The tracked merge hook remains required before commit.
+
+The inert preclaim test runs the actual owned task against the real fixture
+Store, waits for joined retirement and confirms that no route was created. It
+qualifies that early failure case; it does not claim full pinned B-to-Source
+playback or a physical Source cleanup result from registry absence.
