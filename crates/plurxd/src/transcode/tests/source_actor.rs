@@ -1113,10 +1113,9 @@ async fn source_actual_actor(
         }));
         let paused = pause.reached().await;
         let actual_fd = pause.actual_fd();
-        assert!(actual_fd > 0);
         // This exact actual cache descriptor is owned by the parked filesystem
         // job, not a simulated producer/closed flag.
-        assert!(unsafe { libc::fcntl(actual_fd, libc::F_GETFD) } >= 0);
+        assert_descriptor(actual_fd, true, "parked job owns its descriptor");
         if mode == 44 {
             let called = call.await.expect("actual timed resource waiter");
             assert!(matches!(called, Err(SourceWorkerError::Deadline)));
@@ -1124,7 +1123,11 @@ async fn source_actual_actor(
                 actor.0.state.lock().expect("actual Source state").bodies > 0,
                 "timed waiter cannot release actual unfinished filesystem job"
             );
-            assert!(unsafe { libc::fcntl(actual_fd, libc::F_GETFD) } >= 0);
+            assert_descriptor(
+                actual_fd,
+                true,
+                "timed waiter leaves the job its descriptor",
+            );
             drop(paused);
             tokio::time::timeout(Duration::from_secs(10), async {
                 loop {
@@ -1148,10 +1151,10 @@ async fn source_actual_actor(
                 activity,
                 "late observation cannot touch viewer inactivity/demand"
             );
-            assert_eq!(
-                unsafe { libc::fcntl(actual_fd, libc::F_GETFD) },
-                -1,
-                "timed actual read job descriptor closed before final guard drop"
+            assert_descriptor(
+                actual_fd,
+                false,
+                "timed actual read job descriptor closed before final guard drop",
             );
             actor.retire().await.expect("actual timed read retirement");
             return;
@@ -1164,17 +1167,21 @@ async fn source_actual_actor(
             actor.settlement_status().is_none(),
             "actual opened Source job retains retirement through cancelled waiter"
         );
-        assert!(unsafe { libc::fcntl(actual_fd, libc::F_GETFD) } >= 0);
+        assert_descriptor(
+            actual_fd,
+            true,
+            "cancelled waiter leaves the job its descriptor",
+        );
         drop(paused);
         tokio::time::timeout(Duration::from_secs(10), actor.retire())
             .await
             .expect("actual read job settlement deadline")
             .expect("actual joined read job and physical retirement");
         assert_eq!(actor.settlement_status(), Some(Ok(())));
-        assert_eq!(
-            unsafe { libc::fcntl(actual_fd, libc::F_GETFD) },
-            -1,
-            "actual read descriptor closes before settled actor is visible"
+        assert_descriptor(
+            actual_fd,
+            false,
+            "actual read descriptor closes before settled actor is visible",
         );
         return;
     }
@@ -1869,3 +1876,18 @@ async fn source_resource_media_open_job_retains_actual_fd_and_guard_after_waiter
 async fn source_resource_expired_waiter_joins_actual_job_without_late_viewer_activity() {
     Box::pin(source_copy_preadmission_fixture(44)).await;
 }
+
+/// Whether the exact descriptor a parked Source read job opened is still open.
+/// Only Unix exposes a side-effect-free census of one descriptor; elsewhere the
+/// custody and settlement assertions around these calls still run.
+#[cfg(unix)]
+fn assert_descriptor(fd: i32, open: bool, why: &str) {
+    assert!(fd > 0, "{why}: no descriptor was recorded");
+    assert_eq!(
+        unsafe { libc::fcntl(fd, libc::F_GETFD) } >= 0,
+        open,
+        "{why}"
+    );
+}
+#[cfg(not(unix))]
+fn assert_descriptor(_fd: i32, _open: bool, _why: &str) {}

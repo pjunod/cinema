@@ -1273,7 +1273,8 @@ mod tests {
     }
 }
 
-#[cfg(test)]
+// The receipt counts an exact socket descriptor, which only Unix exposes.
+#[cfg(all(test, unix))]
 mod driver_lifetime_tests {
     use super::*;
     use std::sync::{Arc, Mutex};

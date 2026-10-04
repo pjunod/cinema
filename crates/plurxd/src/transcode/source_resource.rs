@@ -51,7 +51,6 @@ impl SourceResourceReadCustody {
         let path = path.to_owned();
         let custody = self.clone();
         let (file, len) = tokio::task::spawn_blocking(move || {
-            use std::os::unix::fs::OpenOptionsExt;
             if custody
                 .guard
                 .source
@@ -62,10 +61,7 @@ impl SourceResourceReadCustody {
                     "Source physical input changed before resource open",
                 ));
             }
-            let file = std::fs::OpenOptions::new()
-                .read(true)
-                .custom_flags(libc::O_NOFOLLOW)
-                .open(path)?;
+            let file = plurx_core::fs_secure::open_read_nofollow_blocking(&path)?;
             custody.hooks.slot.get().opened(&file);
             let metadata = file.metadata()?;
             if !metadata.is_file()
@@ -104,9 +100,15 @@ pub(super) struct SourceResourceJobPause {
 #[cfg(test)]
 impl ResourceReadHooks for SourceResourceJobPause {
     fn opened(&self, file: &std::fs::File) {
-        use std::os::fd::AsRawFd;
-        self.fd
-            .store(file.as_raw_fd(), std::sync::atomic::Ordering::Release);
+        // Only Unix has a side-effect-free census of one exact descriptor.
+        #[cfg(unix)]
+        {
+            use std::os::fd::AsRawFd;
+            self.fd
+                .store(file.as_raw_fd(), std::sync::atomic::Ordering::Release);
+        }
+        #[cfg(not(unix))]
+        let _ = file;
         self.opened
             .store(true, std::sync::atomic::Ordering::Release);
         self.changed.notify_waiters();
