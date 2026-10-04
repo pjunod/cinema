@@ -681,6 +681,37 @@ pub(crate) fn source_held_probe_command(
     Ok(command)
 }
 
+/// Build native text extraction without starting unowned subtitle work.
+pub(crate) fn source_native_text_command(
+    source: &std::fs::File,
+    ordinal: u16,
+) -> Result<tokio::process::Command, String> {
+    let mut command = tokio::process::Command::new(ffmpeg_bin());
+    #[cfg(unix)]
+    inherit_file_descriptors(&mut command, &[(source, 3)]);
+    command.args(["-hide_banner", "-loglevel", "error", "-threads", "1", "-i"]);
+    #[cfg(unix)]
+    command.arg("/dev/fd/3");
+    #[cfg(windows)]
+    {
+        let path = windows_source_path(source)?;
+        verify_windows_source_path(source, &path)?;
+        command.arg(path);
+    }
+    command.args([
+        "-map",
+        &format!("0:s:{ordinal}"),
+        "-vn",
+        "-an",
+        "-threads",
+        "1",
+        "-f",
+        "webvtt",
+        "pipe:1",
+    ]);
+    Ok(command)
+}
+
 async fn held_source_probe_json_with_limits(
     source: &std::fs::File,
     timeout: Duration,

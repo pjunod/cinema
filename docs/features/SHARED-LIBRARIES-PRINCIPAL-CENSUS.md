@@ -1695,3 +1695,84 @@ merge hook and memory/pooled guard receipt follow below.
 The exact combined memory/pooled guard regression passed one test, zero ignored,
 in 1.03 seconds with `--features hiqlite-store`; malformed private evidence,
 foreign lease/request lineage and genuine database faults remain fenced.
+
+### Source embedded text-native candidate
+
+The Source actor now owns embedded plain-text extraction separately from the
+ordinary subtitle cache and queue. Each actual extraction child requires the
+real CPU4 admission permit, a held no-follow Source file descriptor, the full
+immutable dispatch assignment, a newly observed actual member/master/file
+write proof with its original five-second clock, and the fixed actor start
+deadline. The existing owned preparation runner retains the permit, ChildJob,
+stdout and stderr tasks through confirmed child reap and reader settlement.
+Only that completed owned operation creates a private full-assignment receipt;
+the actor retains it through failed-start or registered-producer g1 settlement.
+A cancelled HTTP waiter, terminal ACK or expired lease supplies no receipt.
+
+Artifacts remain bounded private memory owned by that exact assignment and
+physical object version: at most 32 embedded tracks, 2 MiB per track, 8 MiB in
+aggregate and 50,000 cues per track. The common native-text codec policy is
+preserved. Styled, bitmap and downloaded tracks are not exposed by this lane;
+burn, HDR/Dolby Vision and extraction after restart remain unsupported. Source
+VOD maintenance is checked before extraction admission. The actual extraction
+permit settles before the copy or Encoding permit is acquired.
+
+Actual Source-owned VOD facts and the captured bounded Source probe construct
+the master using the existing pure playlist renderer. Existing Local callers
+retain their complete original track set and behavior. Master/video/subtitle
+playlists pass the closed Core resource grammar and byte bound; VTT segments
+use the actual published video timeline and existing resume/cue clipping code.
+Selectors must match the frozen prepared selection. Each response retains the
+actual Source body guard and physical fence, including subtitle text bodies.
+Native resources do not mutate ordinary Local controllers or create an
+anonymous demand, and transport uses the closed `SubtitleText` payload rather
+than an arbitrary MIME string.
+
+Initial actual qualification on clean encoded integration `28791fa6b` plus
+this native candidate:
+
+```sh
+cargo test -p plurxd --bin plurxd source_native_ -- --nocapture
+```
+
+Eight tests passed, zero ignored, in 30.20 seconds on normal stacks. The fixture
+muxes an actual embedded SubRip track into the actual Source file before
+capturing its file/revision witness. It qualifies copy master/video/VTT media,
+foreign-track refusal, counted VTT retirement, cancellation and revocation of
+an actual extraction child, original-clock/file/floor/saved-switch prechild
+refusal, CPU4 admission refusal, and retained capacity during an injected
+initial wait error until the actual reap retry succeeds. This is controlled
+fault evidence, not a naturally occurring host wait error. The fixture's
+explicit candidate schema/member setup does not replace the separately
+qualified production startup factory. Encoded/native media, further bounded
+text validation and exact final compiler/integration receipts remain pending.
+
+The expanded independent native filter passed ten tests, zero ignored, in
+31.54 seconds: nine actual media/authority/custody cases and one bounded text
+validator. It additionally qualifies actual native encoded VOD media, the
+legacy typed native-index alias, foreign frozen-selector refusal, malformed
+and backwards timestamps, per-document bytes and cue-count refusal. The
+captions are real embedded SubRip evidence; the finite Source lane uses the
+common native codec policy rather than widening it for `mov_text`.
+
+The admission audit found that the common durable SessionRequest fingerprint
+does not include the separate native boolean and selected ordinal. The current
+HTTP whole-recipe registry fences changed retries in one process, but this is
+not sufficient persisted identity evidence. Root owns a Source-only prepared
+fingerprint extension for these normalized fields; exact integration of that
+extension remains required before this native stage is claimed fully qualified.
+Local durable request hashes remain unchanged.
+
+On that independent candidate, the existing actual Source copy matrix passed
+13 tests, zero ignored, in 39.97 seconds and encoded matrix passed nine tests,
+zero ignored, in 32.66 seconds. The existing Local subtitle resume-timeline
+regression `subtitle_playlist_and_vtt_mirror_video_segments_at_resume_timeline`
+passed one test, zero ignored. The pinned daemon all-target check passed in
+51.57 seconds; documentation index checks passed four tests and catalog lint
+covered 2,709 audited files. A denied manual-range lint in the new ordinal
+bound was corrected with the equivalent closed inclusive-range predicate;
+final denied-lint, tracked-hook and current-Root qualification follow.
+The final independent denied-warning daemon all-target Clippy passed in
+57.15 seconds. The normal tracked commit hook remains required; this is an
+independent native checkpoint until the latest Root and Source-only native
+fingerprint extension are integrated and requalified.

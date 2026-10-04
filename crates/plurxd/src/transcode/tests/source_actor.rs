@@ -160,7 +160,11 @@ async fn source_copy_preadmission_fixture(mode: u8) {
         })
         .await
         .expect("item");
-    let file = directory.path().join("source.mp4");
+    let file = directory.path().join(if mode >= 21 {
+        "source.mkv"
+    } else {
+        "source.mp4"
+    });
     let generated = tokio::process::Command::new(crate::ffmpeg::ffmpeg_bin())
         .args([
             "-v",
@@ -186,6 +190,33 @@ async fn source_copy_preadmission_fixture(mode: u8) {
         "{}",
         String::from_utf8_lossy(&generated.stderr)
     );
+    if mode >= 21 {
+        let caption = directory.path().join("actual.srt");
+        std::fs::write(
+            &caption,
+            "1\n00:00:00,200 --> 00:00:01,800\nActual Source caption\n\n",
+        )
+        .expect("actual embedded caption");
+        let muxed = directory.path().join("captioned.mkv");
+        let result = tokio::process::Command::new(crate::ffmpeg::ffmpeg_bin())
+            .arg("-i")
+            .arg(&file)
+            .arg("-i")
+            .arg(&caption)
+            .args([
+                "-map", "0:v:0", "-map", "1:s:0", "-c:v", "copy", "-c:s", "subrip", "-y",
+            ])
+            .arg(&muxed)
+            .output()
+            .await
+            .expect("actual subtitle mux");
+        assert!(
+            result.status.success(),
+            "{}",
+            String::from_utf8_lossy(&result.stderr)
+        );
+        std::fs::rename(muxed, &file).expect("actual captioned source");
+    }
     let metadata = std::fs::metadata(&file).expect("actual Source facts");
     let mtime = metadata
         .modified()
@@ -210,6 +241,32 @@ async fn source_copy_preadmission_fixture(mode: u8) {
     assert!(probe.status.success());
     let probe = String::from_utf8(probe.stdout).expect("actual scan JSON");
     client.execute("INSERT INTO files(id,item_id,path,size,mtime,duration_ms,container,video_codec,width,height,bit_depth,bitrate,probe_json,scanned_at) VALUES(1,$1,$2,$3,$4,2000,'mp4','h264',128,72,8,100000,$5,$6)",hiqlite::params!(item,file.to_string_lossy().to_string(),metadata.len() as i64,mtime,probe,crate::fragment_index_cluster::unix_ms()/1000)).await.expect("actual file facts");
+    if mode >= 21 {
+        client
+            .execute(
+                "UPDATE files SET container='matroska' WHERE id=1",
+                hiqlite::params!(),
+            )
+            .await
+            .expect("actual Source container");
+        let tracks = serde_json::to_string(&vec![plurx_core::domain::SubtitleStream {
+            index: 0,
+            codec: "subrip".into(),
+            language: None,
+            title: None,
+            default: true,
+            forced: false,
+            hearing_impaired: false,
+        }])
+        .expect("actual scanned track");
+        client
+            .execute(
+                "UPDATE files SET subtitle_streams=$1 WHERE id=1",
+                hiqlite::params!(tracks),
+            )
+            .await
+            .expect("actual embedded subtitle facts");
+    }
     let envelope =
         CatalogueRevisionKey::generate_sealed(&master, identity.clone()).expect("Source key");
     let key = CatalogueRevisionKey::open(&master, identity.clone(), &envelope).expect("open key");
@@ -335,9 +392,13 @@ async fn source_copy_preadmission_fixture(mode: u8) {
         .expect("actual planning read")
         .is_some());
     let mut body:CreateSession = serde_json::from_value(serde_json::json!({"playback_id":"copy-source","request_id":"copy-source-request","copy":true,"height":72,"quality_auto":false,"presentation":"vod","caps":{"v":2,"video":[{"codec":"h264","max_height":2160,"present":["sdr"]}],"audio":["aac"],"containers":["mp4"],"transports":["hls","progressive"]}})).expect("actual Source request");
-    if mode >= 12 {
+    if (12..=20).contains(&mode) || mode == 29 {
         body.copy = Some(false);
         body.height = Some(36);
+    }
+    if mode >= 21 {
+        body.native_subtitles = Some(true);
+        body.subtitle = Some(0);
     }
     assert_eq!(
         body.caps.as_ref().expect("v2 caps").v,
@@ -361,7 +422,7 @@ async fn source_copy_preadmission_fixture(mode: u8) {
         std::mem::size_of_val(preparation.as_ref().get_ref())
     );
     let prepared = preparation.await.expect("actual Source engine preparation");
-    if mode >= 12 {
+    if (12..=20).contains(&mode) || mode == 29 {
         assert!(
             matches!(prepared.request().kind, SessionKind::Transcode { .. }),
             "actual common preparation resolves an encoded recipe"
@@ -743,7 +804,7 @@ async fn source_actual_actor(
     mode: u8,
     client: hiqlite::Client,
 ) {
-    if matches!(mode, 3 | 19) {
+    if matches!(mode, 3 | 19 | 28) {
         state
             .store
             .put_setting(keys::SW_POOL_THREADS, "3")
@@ -782,6 +843,14 @@ async fn source_actual_actor(
                 .pause_after_wait_failure(),
         ),
         20 => Some(manager.source_workers.probe_hooks.pause_after_evidence()),
+        22 => Some(manager.source_workers.native_hooks.pause_after_spawn()),
+        23 | 25 | 26 | 27 => Some(manager.source_workers.native_hooks.pause_before_spawn()),
+        24 => Some(
+            manager
+                .source_workers
+                .native_hooks
+                .pause_after_wait_failure(),
+        ),
         _ => None,
     };
     let actor = Box::pin(manager.start_source_worker(
@@ -810,12 +879,14 @@ async fn source_actual_actor(
             .await
             .expect("no preactivation media route")
             .is_none());
-        let pid = if mode >= 12 {
+        let pid = if mode >= 21 {
+            manager.source_workers.native_hooks.spawned_pid()
+        } else if (12..=20).contains(&mode) || mode == 29 {
             manager.source_workers.probe_hooks.spawned_pid()
         } else {
             manager.source_workers.index_hooks.spawned_pid()
         };
-        if matches!(mode, 6 | 8 | 13 | 15 | 20) {
+        if matches!(mode, 6 | 8 | 13 | 15 | 20 | 22 | 24) {
             assert!(pid > 0, "actual Source index child started");
         } else {
             assert_eq!(pid, 0, "refusal point precedes any actual child");
@@ -825,7 +896,7 @@ async fn source_actual_actor(
             Err(SourceWorkerError::Deadline)
         ));
         drop(joined); // A disconnected waiter cannot abandon the scan owner.
-        if matches!(mode, 6 | 7 | 13 | 14) {
+        if matches!(mode, 6 | 7 | 13 | 14 | 22 | 23) {
             state
                 .store
                 .put_setting(keys::SHARING_ENABLED, "false")
@@ -839,7 +910,7 @@ async fn source_actual_actor(
                 .await
                 .expect("actual encoder capacity removed after confirmed probe settlement");
         }
-        if matches!(mode, 10 | 17) {
+        if matches!(mode, 10 | 17 | 26) {
             let file = state
                 .store
                 .get_file(1)
@@ -849,7 +920,7 @@ async fn source_actual_actor(
             std::fs::write(&file.path, b"changed physical Source before scan")
                 .expect("actual held Source object drift");
         }
-        if matches!(mode, 11 | 18) {
+        if matches!(mode, 11 | 18 | 27) {
             client
                 .execute(
                     "DELETE FROM cluster_node_capabilities WHERE capability=$1",
@@ -860,7 +931,7 @@ async fn source_actual_actor(
                 .await
                 .expect("actual purpose capability disappearance after observation");
         }
-        if matches!(mode, 9 | 16) {
+        if matches!(mode, 9 | 16 | 25) {
             tokio::time::sleep(Duration::from_millis(5100)).await;
         }
         assert_eq!(
@@ -908,7 +979,7 @@ async fn source_actual_actor(
         );
         return;
     }
-    if matches!(mode, 3 | 19) {
+    if matches!(mode, 3 | 19 | 28) {
         assert!(actor
             .wait_ready(Instant::now() + Duration::from_secs(10))
             .await
@@ -946,7 +1017,7 @@ async fn source_actual_actor(
         .await
         .expect("actual published actor");
     assert!(response.control.is_some());
-    if mode >= 12 {
+    if (12..=20).contains(&mode) || mode == 29 {
         let value = serde_json::to_value(&response).expect("complete encoded response");
         assert_eq!(value["height"], 72);
         assert_eq!(
@@ -1041,6 +1112,86 @@ async fn source_actual_actor(
         assert_eq!(ended.state, "ended");
         return;
     }
+    let native_body = if mode >= 21 {
+        assert!(response.playlist_url.contains("master.m3u8"));
+        assert!(matches!(
+            actor
+                .open_resource(
+                    &SharingHlsResource::parse("master.m3u8?subtitle=1")
+                        .expect("typed foreign selection"),
+                    Instant::now() + Duration::from_secs(5)
+                )
+                .await,
+            Err(SourceWorkerError::Unsupported)
+        ));
+        let legacy = actor
+            .open_resource(
+                &SharingHlsResource::parse("index.m3u8?native=1&subtitle=0")
+                    .expect("typed native alias"),
+                Instant::now() + Duration::from_secs(5),
+            )
+            .await
+            .expect("guarded native alias");
+        let (payload, guard) = legacy.into_parts();
+        let SourceResourcePayload::Playlist(bytes) = payload else {
+            panic!("native alias")
+        };
+        assert!(String::from_utf8_lossy(&bytes).contains("#EXT-X-MEDIA:TYPE=SUBTITLES"));
+        drop(guard);
+        let master = actor
+            .open_resource(
+                &SharingHlsResource::parse("master.m3u8?subtitle=0").expect("typed master"),
+                Instant::now() + Duration::from_secs(5),
+            )
+            .await
+            .expect("actual native master");
+        let (payload, guard) = master.into_parts();
+        let SourceResourcePayload::Playlist(master) = payload else {
+            panic!("master")
+        };
+        assert!(String::from_utf8_lossy(&master).contains("subs/0/index.m3u8"));
+        drop(guard);
+        for path in ["video.m3u8", "subs/0/index.m3u8"] {
+            let resource = SharingHlsResource::parse(path).expect("typed native playlist");
+            let opened = actor
+                .open_resource(&resource, Instant::now() + Duration::from_secs(5))
+                .await
+                .expect("actual native playlist");
+            let (payload, guard) = opened.into_parts();
+            let SourceResourcePayload::Playlist(bytes) = payload else {
+                panic!("native playlist")
+            };
+            plurx_core::sharing_resources::validate_sharing_playlist(&resource, &bytes)
+                .expect("closed native playlist grammar");
+            drop(guard);
+        }
+        assert!(matches!(
+            actor
+                .open_resource(
+                    &SharingHlsResource::parse("subs/1/index.m3u8").expect("typed missing track"),
+                    Instant::now() + Duration::from_secs(5)
+                )
+                .await,
+            Err(SourceWorkerError::Unsupported)
+        ));
+        let opened = actor
+            .open_resource(
+                &SharingHlsResource::parse("subs/0/seg00000.vtt").expect("typed actual VTT"),
+                Instant::now() + Duration::from_secs(5),
+            )
+            .await
+            .expect("actual native VTT");
+        let (payload, guard) = opened.into_parts();
+        let SourceResourcePayload::SubtitleText(bytes) = payload else {
+            panic!("VTT")
+        };
+        let text = String::from_utf8(bytes).expect("actual bounded UTF8");
+        assert!(text.contains("Actual Source caption"));
+        assert!(text.contains("X-TIMESTAMP-MAP"));
+        Some(guard)
+    } else {
+        None
+    };
     let (start_body, start_guard) = actor
         .open_start_response(Instant::now() + Duration::from_secs(5))
         .await
@@ -1144,6 +1295,14 @@ async fn source_actual_actor(
     );
     drop(start_body);
     drop(start_guard);
+    if let Some(guard) = native_body {
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert!(
+            !retiring.is_finished(),
+            "actual VTT Body retains Source obligation"
+        );
+        drop(guard);
+    }
     tokio::time::timeout(Duration::from_secs(10), retiring)
         .await
         .expect("actual retirement budget")
@@ -1205,4 +1364,49 @@ async fn source_encoded_probe_requires_actual_cpu_admission_before_child() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn source_encoded_probe_settles_before_separate_encoder_capacity_wait() {
     Box::pin(source_copy_preadmission_fixture(20)).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn source_native_embedded_text_media_and_counted_vtt_retirement() {
+    Box::pin(source_copy_preadmission_fixture(21)).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn source_native_child_survives_waiter_cancel_and_revoke() {
+    Box::pin(source_copy_preadmission_fixture(22)).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn source_native_refuses_disabled_before_child() {
+    Box::pin(source_copy_preadmission_fixture(23)).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn source_native_retains_permit_through_actual_reap_retry() {
+    Box::pin(source_copy_preadmission_fixture(24)).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn source_native_refuses_expired_original_observation() {
+    Box::pin(source_copy_preadmission_fixture(25)).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn source_native_refuses_changed_physical_source() {
+    Box::pin(source_copy_preadmission_fixture(26)).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn source_native_refuses_lost_purpose_floor() {
+    Box::pin(source_copy_preadmission_fixture(27)).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn source_native_requires_actual_cpu_admission() {
+    Box::pin(source_copy_preadmission_fixture(28)).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn source_native_encoded_embedded_text_actual_media_and_body_retirement() {
+    Box::pin(source_copy_preadmission_fixture(29)).await;
 }
