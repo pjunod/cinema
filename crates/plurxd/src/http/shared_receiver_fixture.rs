@@ -294,3 +294,300 @@ async fn sharing_receiver_fixture_uses_actual_factories_login_and_genuine_source
         .is_some());
     fixture.shutdown().await;
 }
+
+#[tokio::test]
+#[ignore = "requires an isolated Linux CGNAT namespace and PLURX_SHARING_FIXTURE_IP"]
+async fn sharing_receiver_real_pinned_source_h1_b_h1_h2_start_resources_and_confirmed_end() {
+    let address: IpAddr = std::env::var("PLURX_SHARING_FIXTURE_IP")
+        .expect("explicit disposable CGNAT namespace")
+        .parse()
+        .expect("fixture IP");
+    assert!(plurx_core::sharing::is_tailnet_address(address));
+    for h2 in [false, true] {
+        tokio::time::timeout(
+            std::time::Duration::from_secs(330),
+            Box::pin(actual_pinned_playback(address, h2)),
+        )
+        .await
+        .expect("bounded real playback fixture");
+    }
+}
+
+async fn actual_pinned_playback(address: IpAddr, h2: bool) {
+    use axum::{http::StatusCode, Router};
+    use plurx_core::sharing_tls::{LiveNodeTls, SharingTlsListener};
+    let fixture = real_receiver_fixture(address, SourceFixtureMode::Copy).await;
+    let tls = Arc::new(
+        LiveNodeTls::open(
+            &fixture.directory().join("source-runtime-tls"),
+            crate::state::clock_ms() / 1000,
+        )
+        .expect("actual Source runtime TLS"),
+    );
+    let (pin, _) = tls.status().expect("actual Source runtime SPKI");
+    let source_listener = tokio::net::TcpListener::bind((address, 0))
+        .await
+        .expect("actual Source CGNAT listener");
+    let endpoint = Endpoint {
+        ipv4: match address {
+            IpAddr::V4(ip) => ip,
+            _ => panic!("IPv4 CGNAT fixture"),
+        },
+        ipv6: None,
+        ts_fqdn: "source.fixture.ts.net".into(),
+        port: source_listener.local_addr().expect("Source bind").port(),
+        spki_sha256: pin,
+    };
+    let (source_stop, source_stopped) = tokio::sync::oneshot::channel();
+    let source_task = tokio::spawn(crate::serve_http(
+        SharingTlsListener::new(source_listener, tls),
+        super::sharing::peer_router((*fixture.source.state).clone()),
+        async move {
+            let _ = source_stopped.await;
+        },
+        crate::HTTP_TIMEOUTS,
+    ));
+    fixture.pair(endpoint).await;
+    // The live Start remains uninstalled in production. Only this disposable
+    // fixture installs the typed candidate on the real B serving stack.
+    let app = Router::new()
+        .nest(
+            "/api/v1",
+            super::shared_receiver_ingress::candidate_router().with_state(fixture.state.clone()),
+        )
+        .merge(super::router(fixture.state.clone()));
+    let b_listener = tokio::net::TcpListener::bind((address, 0))
+        .await
+        .expect("actual B CGNAT listener");
+    let b_address = b_listener.local_addr().expect("B bind");
+    let (b_stop, b_stopped) = tokio::sync::oneshot::channel();
+    let b_task = tokio::spawn(crate::serve_http(
+        b_listener,
+        app,
+        async move {
+            let _ = b_stopped.await;
+        },
+        crate::HTTP_TIMEOUTS,
+    ));
+    let detail_path = format!(
+        "/api/v1/shared/imports/{}/items/{}",
+        fixture.import_id,
+        fixture.source.reference.item_id.as_str(),
+    );
+    let (status, _, bytes) = b_request(
+        b_address,
+        h2,
+        "GET",
+        &detail_path,
+        &fixture.original_login,
+        Vec::new(),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "actual authenticated details; H2={h2}"
+    );
+    let details: Value = serde_json::from_slice(&bytes).expect("actual B detail JSON");
+    let base = details["files"][0]["file_base"]
+        .as_str()
+        .expect("actual signed B file alias");
+    assert!(base.starts_with(&format!(
+        "/api/v1/shared/imports/{}/files/",
+        fixture.import_id
+    )));
+    let original: Value =
+        serde_json::from_slice(&fixture.source.request).expect("Source complete recipe fixture");
+    let session =
+        serde_json::to_vec(&original["session"]).expect("complete ordinary CreateSession body");
+    let (status, _, bytes) = b_request(
+        b_address,
+        h2,
+        "POST",
+        &format!("{base}/hls/sessions"),
+        &fixture.original_login,
+        session,
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "actual B Start through real Source actor; H2={h2}"
+    );
+    let start: Value = serde_json::from_slice(&bytes).expect("complete B Start DTO");
+    let session = start["session_id"].as_str().expect("actual B session ID");
+    assert_eq!(
+        Uuid::parse_str(session).expect("B UUID").get_version_num(),
+        4
+    );
+    let prefix = format!("/api/v1/hls/{session}/");
+    let mut playlist_path = start["playlist_url"]
+        .as_str()
+        .expect("actual B playlist")
+        .to_owned();
+    assert!(playlist_path.starts_with(&prefix));
+    assert_eq!(start["control"]["url"], format!("{prefix}control"));
+    let (status, headers, bytes) = b_request(
+        b_address,
+        h2,
+        "GET",
+        &playlist_path,
+        &fixture.original_login,
+        Vec::new(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "real playlist relay; H2={h2}");
+    assert!(headers["content-type"]
+        .to_str()
+        .expect("playlist MIME")
+        .contains("mpegurl"));
+    let mut playlist = String::from_utf8(bytes.to_vec()).expect("actual HLS UTF-8");
+    assert!(playlist.starts_with("#EXTM3U"));
+    if playlist.contains("#EXT-X-STREAM-INF:") {
+        let relative = playlist
+            .lines()
+            .find(|line| !line.is_empty() && !line.starts_with('#'))
+            .expect("actual master variant");
+        plurx_core::sharing_resources::SharingHlsResource::parse(relative)
+            .expect("closed variant grammar");
+        playlist_path = format!("{prefix}{relative}");
+        let (status, _, bytes) = b_request(
+            b_address,
+            h2,
+            "GET",
+            &playlist_path,
+            &fixture.original_login,
+            Vec::new(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "actual variant; H2={h2}");
+        playlist = String::from_utf8(bytes.to_vec()).expect("actual variant UTF-8");
+    }
+    let init = playlist
+        .lines()
+        .find_map(|line| {
+            line.strip_prefix("#EXT-X-MAP:URI=\"")
+                .and_then(|rest| rest.split('"').next())
+        })
+        .expect("actual init map");
+    let segment = playlist
+        .lines()
+        .find(|line| !line.is_empty() && !line.starts_with('#'))
+        .expect("actual video segment");
+    for (resource, marker) in [(init, b"ftyp".as_slice()), (segment, b"moof".as_slice())] {
+        plurx_core::sharing_resources::SharingHlsResource::parse(resource)
+            .expect("closed actual media resource");
+        let (status, headers, bytes) = b_request(
+            b_address,
+            h2,
+            "GET",
+            &format!("{prefix}{resource}"),
+            &fixture.original_login,
+            Vec::new(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "actual media relay; H2={h2}");
+        assert_eq!(headers["content-type"], "video/mp4");
+        assert!(
+            bytes.windows(marker.len()).any(|window| window == marker),
+            "real FFmpeg media box"
+        );
+        assert_eq!(
+            headers["content-length"]
+                .to_str()
+                .expect("actual length")
+                .parse::<usize>()
+                .expect("decimal length"),
+            bytes.len()
+        );
+    }
+    let end_path = format!("/api/v1/hls/{session}");
+    for _ in 0..2 {
+        let (status, _, bytes) = b_request(
+            b_address,
+            h2,
+            "DELETE",
+            &end_path,
+            &fixture.original_login,
+            Vec::new(),
+        )
+        .await;
+        assert_eq!(
+            status,
+            StatusCode::NO_CONTENT,
+            "actual physically confirmed End/retry; H2={h2}"
+        );
+        assert!(bytes.is_empty());
+    }
+    let _ = b_stop.send(());
+    b_task
+        .await
+        .expect("actual B server joined")
+        .expect("B server result");
+    let _ = source_stop.send(());
+    source_task
+        .await
+        .expect("actual Source server joined")
+        .expect("Source server result");
+    fixture.shutdown().await;
+}
+
+async fn b_request(
+    address: std::net::SocketAddr,
+    h2: bool,
+    method: &str,
+    path: &str,
+    original_login: &str,
+    body: Vec<u8>,
+) -> (
+    axum::http::StatusCode,
+    axum::http::HeaderMap,
+    axum::body::Bytes,
+) {
+    use http_body_util::BodyExt;
+    let socket = tokio::net::TcpStream::connect(address)
+        .await
+        .expect("actual B socket");
+    let request = Request::builder()
+        .method(method)
+        .uri(format!("http://{address}{path}"))
+        .header("authorization", format!("Bearer {original_login}"))
+        .header("content-type", "application/json")
+        .body(Body::from(body))
+        .expect("actual B request");
+    let (response, driver) = if h2 {
+        let (mut sender, driver) =
+            hyper::client::conn::http2::Builder::new(hyper_util::rt::TokioExecutor::new())
+                .handshake::<_, Body>(hyper_util::rt::TokioIo::new(socket))
+                .await
+                .expect("actual B H2");
+        let driver = tokio::spawn(driver);
+        let response = sender
+            .send_request(request)
+            .await
+            .expect("actual B H2 response");
+        drop(sender);
+        (response, driver)
+    } else {
+        let (mut sender, driver) =
+            hyper::client::conn::http1::handshake::<_, Body>(hyper_util::rt::TokioIo::new(socket))
+                .await
+                .expect("actual B H1");
+        let driver = tokio::spawn(driver);
+        let response = sender
+            .send_request(request)
+            .await
+            .expect("actual B H1 response");
+        drop(sender);
+        (response, driver)
+    };
+    let (parts, body) = response.into_parts();
+    let bytes = http_body_util::Limited::new(body, 4 * 1024 * 1024)
+        .collect()
+        .await
+        .expect("bounded actual B body")
+        .to_bytes();
+    driver.abort();
+    let _ = driver.await;
+    (parts.status, parts.headers, bytes)
+}
