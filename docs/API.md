@@ -3333,8 +3333,20 @@ the same allowing conversion, then `Encode`. Sidecars are produced only as
 VTT or SRT and manifest renditions only as VTT; a bitmap track is embedded or
 burned, never a sidecar. `External` adds `DeliveryUrl` at the five-segment
 route with a zero start. A selected track that resolves to `Encode` makes the
-play a transcode. On HLS, the master carries subtitle renditions only for
-tracks that resolve to `Hls`.
+play a transcode. Text means any codec the native extractor converts (every
+non-bitmap codec, ASS included). On HLS the master carries renditions when any
+text track resolves to `Hls`, and then every text track is reported as `Hls`,
+because the native master carries them all. A request with no
+`SubtitleProfiles` on an output that declares `ManifestSubtitles` or
+`EnableSubtitlesInManifest` is treated as asking for VTT renditions.
+
+A request that enables direct play over HTTP (`EnableDirectPlay: true`,
+`DirectPlayProtocols` naming `Http`) and declares no `DirectPlayProfiles` is a
+client choosing static delivery itself: Infuse sends exactly this and then
+fetches `/Videos/{id}/stream?Static=true`, even where Jellyfin answered with a
+transcode. It is negotiated as a direct play, and no subtitle selection turns
+it into a transcode. `DirectPlayProtocols` accepts Jellyfin's protocol names
+only.
 
 PlaybackInfo evaluates each direct profile independently, including bounded codec
 and container predicates, against the selected audio and coherent native probe.

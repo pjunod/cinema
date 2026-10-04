@@ -887,13 +887,27 @@ are fixed here too.
 | Returned URLs doubled the base path | `TranscodingUrl`/`DirectStreamUrl` began `/jellyfin/`; both clients prefix their configured address, which already ends in `/jellyfin` | URLs are relative to the configured base, as Jellyfin's are |
 | Android TV HLS and subtitles could not authenticate | Its media requests carry no header, only the URL's `ApiKey` (J0 trace); returned URLs and manifest children carried none | Returned URLs and every manifest child carry the presented compatibility login as `ApiKey`. **Decision for review**, see below |
 | Infuse HLS entry refused | Infuse lower-cases the first letter of each query key; the entry parsed `MediaSourceId`/`PlaySessionId` case-sensitively | Case-insensitive, like the direct route |
+| Infuse could not negotiate | Its normal PlaybackInfo carries `DirectPlayProtocols: ["Http"]`, which the facade refused as an unknown constraint (400), and declares no `DirectPlayProfiles`, so it could never be direct. Infuse static-streams the file anyway (J0: it did so even when Jellyfin answered with a transcode) | `DirectPlayProtocols` is accepted (Jellyfin's names only). Direct play over HTTP with no `DirectPlayProfiles` is the client choosing static delivery: negotiated as a direct play with its link, and no subtitle choice turns it into a transcode |
 | Infuse direct play refused | Infuse requests `/Videos/{id}/stream?MediaSourceId=…&Static=true` with its login and no `PlaySessionId`; the route required one | The login's newest pending or active direct negotiation of exactly that source (new Store read on both backends; contract §7.3 allows an unambiguous binding of the authenticated login) |
 | `System/Info/Public` advertised the Plurx build | Fixed by #803 before this work; pinned by `jellyfin_connection_catalog_…` | Authenticated `System/Info` now also names the Plurx build in `PackageName` (§8.3: compatibility version separate from build) |
 | Nine contract routes missing | Not built | `Users/Public` (always `[]`), authenticated `System/Info`, `Sessions/Capabilities[/Full]` (validated, not stored: nothing reads them), `Sessions/Playing/Ping`, `DELETE Videos/ActiveEncodings` (one named play, binding kept for the final Stopped), `Search/Hints`, `UserPlayedItems/{id}`, `Items/{id}/Download` (`403 download_not_offered`) |
 | Every request a linearizable switch read | The gate and the handler each read the switch | One read, by the gate; the handler uses its snapshot |
-| Leader restart (merge review: fails Jellyfin media on every node) | Not a separate exposure: during authority loss the serving gate answers `/jellyfin` with 503 and `Retry-After` before any store read, as it does native media, and an HLS play is a native session under #798's grace | No new grace. A regression drives a fence loss and recovery in the HLS flow and checks the 503 and the play continuing |
+| Leader restart (merge review: fails Jellyfin media on every node) | Not a separate exposure: during authority loss the serving gate answers `/jellyfin` with 503 and `Retry-After` before any store read, as it does native media, and an HLS play is a native session under #798's grace | No new grace. A regression drives a fence loss and recovery mid-play and checks the 503 and the same play answering afterwards; that the native session outlives a short loss is the serving fence's own tested property |
 | No metrics | Not built | `plurx_jellyfin_requests_total{route,outcome}`: route template or `unmatched`, a closed outcome set |
 | Docs | Not written | CLIENTS, FEATURES, OPERATIONS, PLAYBACK, API, SECURITY |
+
+**Adversarial review (one pass on the whole PR).** No blocker. Fixed: ASS and
+other styled text counted as non-text (it now follows the extractor: anything
+not bitmap is text, so ASS is a converted sidecar, not a burn); a client with
+no `SubtitleProfiles` lost the manifest renditions its output declared (that
+declaration now stands in for an `Hls` entry); a cue out of order before the
+start could wrap its time (dropped or clamped now); a mixed profile could list
+a track both as sidecar and rendition (once the master carries renditions,
+every text track is reported as one); `ActiveEncodings` re-released ended
+plays; the metrics test could pass on another test's request (a delta now);
+the leader-restart test claimed more than it proves (reworded). Added tests:
+another login's play id is 404 on `Ping` and `ActiveEncodings`, and after
+`ActiveEncodings` on an HLS play the final `Stopped` still commits.
 
 **Not built: `RandomSeriesItems`.** §2 names it in prose, but no retained trace
 shows the request. A guessed route would be a band-aid; the metrics now show

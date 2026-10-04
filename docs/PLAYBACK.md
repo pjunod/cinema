@@ -1627,8 +1627,10 @@ encoder, timer or background task.
 
 - **Direct play** is the native direct path: the source file with Range,
   bound to one play. Android TV builds its own URL from the source `ETag` (a
-  one-title link); Infuse sends its login and `MediaSourceId` and resolves
-  that login's newest direct negotiation of exactly that source.
+  one-title link). Infuse declares no direct-play profiles and asks for HTTP
+  direct play, then streams the file itself; it is negotiated as a direct
+  play, and its request (login and `MediaSourceId`, no play id) resolves that
+  login's newest direct negotiation of exactly that source.
 - **Transcode** is native VOD over HLS, copy or encoded, never the rolling
   fallback. The master is always multivariant, and TS-declaring clients get
   fMP4 fragments with the native init prefixed.

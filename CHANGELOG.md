@@ -28,8 +28,9 @@ bump may break compatibility and a **patch** bump never does.
 
 - **Jellyfin clients get subtitles and can play.** Re-checking the `/jellyfin`
   facade against the J0 traces found that neither pinned client could finish
-  a play: Infuse's direct and HLS requests were refused (it sends no
-  `PlaySessionId` on direct play and lower-cases query names), Jellyfin for
+  a play: Infuse's own PlaybackInfo was refused (it names
+  `DirectPlayProtocols`), and its direct and HLS requests were refused (it
+  sends no `PlaySessionId` on direct play and lower-cases query names), Jellyfin for
   Android TV's HLS and subtitle requests carried no credential the facade
   accepted, every returned media URL doubled the `/jellyfin` base, and the
   subtitle route both clients request did not exist. Subtitles now follow each
