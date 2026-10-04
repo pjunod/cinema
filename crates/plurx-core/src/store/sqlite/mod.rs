@@ -1604,6 +1604,38 @@ impl SqliteStore {
         }
     }
 
+    /// Apply one migration step and stamp its `user_version` in the same
+    /// transaction. Dropping the uncommitted transaction on any error rolls
+    /// the DDL and the marker back together. A step whose shape a published
+    /// build already committed (`already_applied`) only advances the marker.
+    fn apply_migration_step(
+        conn: &Connection,
+        version: i64,
+        sql: &str,
+        already_applied: bool,
+    ) -> Result<(), StoreError> {
+        let tx = conn.unchecked_transaction()?;
+        if !already_applied {
+            tx.execute_batch(sql)
+                .map_err(|e| StoreError::Migration(format!("migrating to v{version}: {e}")))?;
+        }
+        // Foreign keys are OFF for the step (see the caller), so integrity is
+        // checked here, before the step can commit.
+        let dangling: i64 =
+            tx.query_row("SELECT COUNT(*) FROM pragma_foreign_key_check", [], |row| {
+                row.get(0)
+            })?;
+        if dangling > 0 {
+            return Err(StoreError::Migration(format!(
+                "migrating to v{version} left {dangling} dangling foreign key \
+                 reference(s) — refusing to continue"
+            )));
+        }
+        tx.pragma_update(None, "user_version", version)?;
+        tx.commit()?;
+        Ok(())
+    }
+
     fn migrate(conn: &Connection) -> Result<(), StoreError> {
         let current: i64 = conn.query_row("PRAGMA user_version", [], |row| row.get(0))?;
         let target = SQLITE_SCHEMA_VERSION;
@@ -1635,36 +1667,29 @@ impl SqliteStore {
             // out here. Integrity is re-checked below instead of enforced
             // statement by statement.
             conn.pragma_update(None, "foreign_keys", "OFF")?;
-            // A migration commits its own transaction and only then bumps
-            // `user_version`, so a crash in that window leaves the shape
-            // applied and the version behind. `ADD COLUMN` is not idempotent,
-            // so the replay would fail on a column that is already there —
-            // permanently. v41 has carried this guard since it landed.
-            let applied = if (version == 41 && Self::analysis_component_schema_is_current(conn)?)
+            // The DDL, the integrity check and the `user_version` bump commit
+            // as one transaction. `PRAGMA user_version` writes the database
+            // header through the pager, so it rolls back with the DDL when it
+            // shares the transaction (the telemetry sidecar relies on the same
+            // property). A crash can therefore never leave a step's shape
+            // applied with the marker behind it, which matters because
+            // `ADD COLUMN` is not idempotent and the schema-lineage bridge
+            // refuses a marker whose objects belong to a later step.
+            //
+            // Published builds committed the DDL first and bumped the marker
+            // separately, so databases they tore in that window still exist;
+            // the shape guards below keep those replays a no-op (v41 has
+            // carried its guard since it landed).
+            let already_applied = (version == 41
+                && Self::analysis_component_schema_is_current(conn)?)
                 || (version == 45 && Self::fragment_index_outcomes_table_exists(conn)?)
                 || (version == 46 && Self::attempt_errors_column_exists(conn)?)
                 || (version == 47 && Self::video_identity_column_exists(conn)?)
                 || (version == 51 && Self::drain_deadline_column_exists(conn)?)
-                || (version == 90 && Self::dv_request_provenance_column_exists(conn)?)
-            {
-                Ok(())
-            } else {
-                conn.execute_batch(&format!("BEGIN;\n{sql}\nCOMMIT;"))
-                    .map_err(|e| StoreError::Migration(format!("migrating to v{version}: {e}")))
-            };
+                || (version == 90 && Self::dv_request_provenance_column_exists(conn)?);
+            let applied = Self::apply_migration_step(conn, version, sql, already_applied);
             conn.pragma_update(None, "foreign_keys", "ON")?;
             applied?;
-            let dangling: i64 =
-                conn.query_row("SELECT COUNT(*) FROM pragma_foreign_key_check", [], |row| {
-                    row.get(0)
-                })?;
-            if dangling > 0 {
-                return Err(StoreError::Migration(format!(
-                    "migrating to v{version} left {dangling} dangling foreign key \
-                     reference(s) — refusing to continue"
-                )));
-            }
-            conn.pragma_update(None, "user_version", version)?;
             tracing::info!(version, "applied schema migration");
         }
 
@@ -2378,6 +2403,63 @@ impl SqliteStore {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn migration_step_commits_its_marker_with_its_shape_or_neither() {
+        let conn = Connection::open_in_memory().expect("step fixture");
+        let version = |conn: &Connection| -> i64 {
+            conn.query_row("PRAGMA user_version", [], |row| row.get(0))
+                .expect("user_version")
+        };
+        let table_exists = |conn: &Connection, name: &str| -> bool {
+            conn.query_row(
+                "SELECT COUNT(*) FROM sqlite_schema WHERE type = 'table' AND name = ?1",
+                [name],
+                |row| row.get::<_, i64>(0),
+            )
+            .expect("schema read")
+                == 1
+        };
+
+        // A step that fails after its first DDL statement leaves neither the
+        // shape nor the marker behind.
+        let failed = SqliteStore::apply_migration_step(
+            &conn,
+            1,
+            "CREATE TABLE torn (x INTEGER); CREATE TABLE torn (y INTEGER);",
+            false,
+        );
+        assert!(failed.is_err(), "duplicate table must fail the step");
+        assert!(conn.is_autocommit(), "failed step leaves no open transaction");
+        assert_eq!(version(&conn), 0);
+        assert!(!table_exists(&conn, "torn"));
+
+        // A step whose DDL leaves a dangling reference rolls back too.
+        conn.pragma_update(None, "foreign_keys", "OFF")
+            .expect("foreign keys off");
+        let dangling = SqliteStore::apply_migration_step(
+            &conn,
+            1,
+            "CREATE TABLE parent (id INTEGER PRIMARY KEY);
+             CREATE TABLE child (parent_id INTEGER REFERENCES parent(id));
+             INSERT INTO child VALUES (7);",
+            false,
+        );
+        assert!(dangling.is_err(), "dangling reference must fail the step");
+        assert_eq!(version(&conn), 0);
+        assert!(!table_exists(&conn, "child"));
+
+        // A successful step commits the shape and the marker together.
+        SqliteStore::apply_migration_step(&conn, 1, "CREATE TABLE applied (x INTEGER);", false)
+            .expect("successful step");
+        assert_eq!(version(&conn), 1);
+        assert!(table_exists(&conn, "applied"));
+
+        // A shape a published build already committed only advances the marker.
+        SqliteStore::apply_migration_step(&conn, 2, "CREATE TABLE applied (x INTEGER);", true)
+            .expect("already-applied step");
+        assert_eq!(version(&conn), 2);
+    }
 
     #[test]
     fn copy_output_source_guards_upgrade_active_rows_without_touching_unrelated_work() {

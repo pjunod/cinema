@@ -588,9 +588,12 @@ pub(super) fn bridge_plan(
         if matches(&objects, backend, main, effort, false) {
             return Ok(None);
         }
-        // Preserve the explicitly known published replay boundaries. SQLite
-        // commits each main step before its separate user_version update;
-        // the existing v90 guard handles an already-present exact column.
+        // Preserve the explicitly known published replay boundaries. The
+        // published SQLite runner committed each main step before its
+        // separate user_version update, so a database it tore can sit one
+        // marker behind its shape; the existing v90 guard handles an
+        // already-present exact column. The current runner stamps the marker
+        // inside each step's transaction, so no effort step (v92+) can tear.
         // Hiqlite's published playback batch can leave its exact ordered
         // object prefix before the v69 marker transaction. No effort object
         // or arbitrary partial/mixed schema is admitted by these cases.
