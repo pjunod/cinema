@@ -3666,14 +3666,6 @@ test = "clients/android/app/src/test/java/tv/plurx/app/player/PlaybackTelemetryT
 test_anchor = "fun candidateRecoverySampleAlwaysEncodesCauseAndAge()"
 
 [[fixes]]
-id = "apple.decoder-failure-rejected-locally"
-commits = ["35f6f21d5bcbe30f6d3aedc2eb0d53932b2cf5c5"]
-source = "clients/apple/Sources/PlayerController.swift"
-source_anchor = "func rejectFailedDecoderCandidate(_ rejected: inout Set<String>, candidateId: String) -> Bool {"
-test = "clients/apple/Tests/PlaybackControlReporterTests.swift"
-test_anchor = "func testDecoderFailureRejectsTheCandidateLocallyOnceWithoutServerAcknowledgement()"
-
-[[fixes]]
 id = "android.play-and-seek-never-wait-on-original-stage"
 commits = ["8ad649654d3de0d15a7f724f0a686a4de5ac1deb"]
 source = "clients/android/app/src/main/java/tv/plurx/app/player/Controller.kt"
