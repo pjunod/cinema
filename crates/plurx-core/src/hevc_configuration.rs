@@ -9,6 +9,22 @@ use serde::{Deserialize, Serialize};
 pub const REVISION: u32 = 1;
 const MAX_LINE: usize = 8192;
 const MAX_PARAMETER: usize = 65536;
+/// What makes a stderr line part of the trace. The index child shares one
+/// stderr with everything else FFmpeg prints, so only lines carrying this are
+/// evidence; `parse` ignores the rest.
+const TRACE_PREFIX: &[u8] = b"[trace_headers @ ";
+
+/// Advance a match of [`TRACE_PREFIX`] by one byte. `[` occurs only at the
+/// start of the prefix, so a mismatch can restart only on `[` itself.
+fn advance_prefix(matched: usize, byte: u8) -> usize {
+    if byte == TRACE_PREFIX[matched] {
+        matched + 1
+    } else if byte == TRACE_PREFIX[0] {
+        1
+    } else {
+        0
+    }
+}
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Proof {
@@ -83,6 +99,11 @@ pub struct Trace {
     slices: u64,
     packets: u64,
     packet_slices: u64,
+    /// Discarding the rest of an over-long line that is not trace output.
+    skipping: bool,
+    /// Progress through [`TRACE_PREFIX`] across the bytes of the current
+    /// over-long line, so trace content anywhere in it still fails closed.
+    prefix_matched: usize,
     refusal: Option<String>,
 }
 
@@ -99,17 +120,49 @@ impl Trace {
             return;
         }
         for &byte in bytes {
-            if byte == b'\n' {
+            // FFmpeg ends its progress line with `\r`; it is a line of its own,
+            // not a prefix of whatever is printed next.
+            if byte == b'\n' || byte == b'\r' {
+                if self.skipping {
+                    self.skipping = false;
+                    self.prefix_matched = 0;
+                    continue;
+                }
                 let line = std::mem::take(&mut self.line);
                 match std::str::from_utf8(&line) {
                     Ok(line) => self.parse(line),
                     Err(_) => self.reject("invalid trace encoding"),
                 }
+            } else if self.skipping {
+                self.prefix_matched = advance_prefix(self.prefix_matched, byte);
+                if self.prefix_matched == TRACE_PREFIX.len() {
+                    self.reject("trace line exceeds the parser limit");
+                    return;
+                }
             } else if self.line.len() < MAX_LINE {
                 self.line.push(byte);
             } else {
-                self.reject("trace line exceeds the parser limit");
-                return;
+                // The bound protects parsing work, and only trace lines are
+                // parsed. An over-long line that carries trace output is still
+                // refused; any other one -- FFmpeg's own output banner names
+                // every tee slave, one per subtitle track -- is not evidence
+                // either way, so it is dropped unbuffered instead of refusing
+                // the source.
+                let matched =
+                    self.line
+                        .iter()
+                        .chain(std::iter::once(&byte))
+                        .try_fold(0, |matched, &byte| {
+                            let matched = advance_prefix(matched, byte);
+                            (matched < TRACE_PREFIX.len()).then_some(matched)
+                        });
+                let Some(matched) = matched else {
+                    self.reject("trace line exceeds the parser limit");
+                    return;
+                };
+                self.line.clear();
+                self.skipping = true;
+                self.prefix_matched = matched;
             }
         }
     }
@@ -244,7 +297,7 @@ impl Trace {
     }
 
     pub fn finish(mut self, source_object_version: String, stream_index: u32) -> Proof {
-        if !self.line.is_empty() {
+        if !self.line.is_empty() || self.skipping {
             self.reject("truncated trace line");
         }
         self.end_section();
@@ -349,6 +402,46 @@ mod tests {
             trace.feed(bad.as_bytes());
             trace.feed(fixture().as_bytes());
             assert!(!trace.finish("source".into(), 0).permits("source"));
+        }
+    }
+    /// The index pass's stderr also carries FFmpeg's own output banner, and
+    /// with one tee slave per PGS track that single line outgrows `MAX_LINE`
+    /// (29 tracks under a 79-byte cache root printed 9,300 bytes). It is not
+    /// trace output, so it must neither refuse the proof nor hide trace
+    /// content that shares its line.
+    #[test]
+    fn oversized_lines_refuse_only_when_they_carry_trace_output() {
+        let tee = format!(
+            "Output #1, tee, to '{}[f=null]-':\n",
+            "[select=0:f=sup:onfail=ignore]/cache/.stage-0/s0.sup|".repeat(MAX_LINE / 40)
+        );
+        let progress =
+            "frame=  240 fps= 48 q=-1.0 size=N/A time=00:00:10.01 bitrate=N/A speed=2x    \r"
+                .repeat(MAX_LINE / 40);
+        for (foreign, chunk) in [
+            (tee.as_str(), 7),
+            (tee.as_str(), 4096),
+            (progress.as_str(), 13),
+        ] {
+            let mut trace = Trace::default();
+            let bytes = [fixture().as_str(), foreign, fixture().as_str()].concat();
+            for part in bytes.as_bytes().chunks(chunk) {
+                trace.feed(part);
+            }
+            assert!(trace.finish("source".into(), 0).permits("source"));
+        }
+        let long_value = line(&format!("0 pps_cb_qp_offset 0 = {}", "9".repeat(MAX_LINE)));
+        let straddling = format!("{}{}", "y".repeat(MAX_LINE - 5), line("Extradata"));
+        let buried = format!("{}{}", "z".repeat(MAX_LINE * 2), line("Extradata"));
+        for bad in [long_value, straddling, buried, "w".repeat(MAX_LINE * 2)] {
+            let mut trace = Trace::default();
+            trace.feed(fixture().as_bytes());
+            trace.feed(bad.as_bytes());
+            assert!(
+                !trace.finish("source".into(), 0).permits("source"),
+                "{}",
+                &bad[..40]
+            );
         }
     }
     #[test]
