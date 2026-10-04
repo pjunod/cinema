@@ -4703,3 +4703,21 @@ fields, noncanonical session identity, fractional or unsafe numbers. These are
 finite refusal/ownership tests, not positive paired playback evidence. The
 existing guarded Store publication/renewal/progress matrix and normal tracked
 hook are the remaining pre-commit checks for this checkpoint.
+
+Combined genuine pairing checkpoint on `cdc567b86`
+-------------------------------------------------
+
+The full `7ad15ba89` history is integrated, including retained Source start
+stages and the genuine invitation helper. The Source fixture uses selected
+identity/catalogue/replication fields and an actual Invitation-domain secret
+whose hash binds invitation creation and claim. The B fixture uses its own
+selected voter and production startup factory, real password login, purpose-
+sealed actual import/claim credentials, settlement and viewer assignment.
+No Source locator, readiness row or schema is supplied by a manual test write.
+
+This exact combined tree passed pinned all-target check in 54.39 seconds,
+Source HTTP twenty-one tests with zero ignored in 54.48 seconds, receiver and
+pairing sixteen tests with zero ignored in 20.64 seconds, and denied feature
+Clippy in 71 seconds. The transport/media fixture is being added separately;
+this pairing checkpoint does not establish pinned B playback, queued B writer
+closure or positive End/progress over the network.
