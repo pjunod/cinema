@@ -3655,3 +3655,52 @@ source = "clients/apple/Sources/PlayerController.swift"
 source_anchor = '"quality_catalog_unavailable",'
 test = "clients/apple/Tests/AppleClientTests.swift"
 test_anchor = "func testOnlyTheContractsNotYetCodesAreRetried() throws"
+
+# 2026-10-04 promotion-review client fixes (Opus).
+[[fixes]]
+id = "android.recovery-sample-encodes-cause-and-age"
+commits = ["35f6f21d5bcbe30f6d3aedc2eb0d53932b2cf5c5"]
+source = "clients/android/app/src/main/java/tv/plurx/app/player/PlaybackTelemetry.kt"
+source_anchor = "internal fun rejectFailedDecoderCandidate(rejected: MutableSet<String>, candidateId: String): Boolean ="
+test = "clients/android/app/src/test/java/tv/plurx/app/player/PlaybackTelemetryTest.kt"
+test_anchor = "fun candidateRecoverySampleAlwaysEncodesCauseAndAge()"
+
+[[fixes]]
+id = "apple.decoder-failure-rejected-locally"
+commits = ["35f6f21d5bcbe30f6d3aedc2eb0d53932b2cf5c5"]
+source = "clients/apple/Sources/PlayerController.swift"
+source_anchor = "func rejectFailedDecoderCandidate(_ rejected: inout Set<String>, candidateId: String) -> Bool {"
+test = "clients/apple/Tests/PlaybackControlReporterTests.swift"
+test_anchor = "func testDecoderFailureRejectsTheCandidateLocallyOnceWithoutServerAcknowledgement()"
+
+[[fixes]]
+id = "android.play-and-seek-never-wait-on-original-stage"
+commits = ["8ad649654d3de0d15a7f724f0a686a4de5ac1deb"]
+source = "clients/android/app/src/main/java/tv/plurx/app/player/Controller.kt"
+source_anchor = "internal class AutoBoundaryReplan {"
+test = "clients/android/app/src/test/java/tv/plurx/app/player/PlaybackControlReporterTest.kt"
+test_anchor = "@Test fun playAfterALongPauseReachesThePlayerImmediately()"
+
+[[fixes]]
+id = "apple.play-and-seek-never-wait-on-original-stage"
+commits = ["44fb5ac0d69c59a4447e3cd90dc3bacf932b907a"]
+source = "clients/apple/Sources/PlayerController.swift"
+source_anchor = "struct AutoBoundaryReplan {"
+test = "clients/apple/Tests/PlaybackControlReporterTests.swift"
+test_anchor = "func testPlayAfterALongPauseIsAppliedAtOnceAndOnlyArmsTheReplan() throws"
+
+[[fixes]]
+id = "android.boundary-replan-that-builds-nothing-is-withdrawn"
+commits = ["8000338dbde659102bedbe69472f6e72db21e1c3"]
+source = "clients/android/app/src/main/java/tv/plurx/app/player/Controller.kt"
+source_anchor = "internal fun autoBoundaryOfferBuiltNothing(boundaryStillOwns: Boolean, built: Boolean, switched: Boolean): Boolean ="
+test = "clients/android/app/src/test/java/tv/plurx/app/player/PlaybackControlReporterTest.kt"
+test_anchor = "@Test fun boundaryOfferThatBuildsNothingIsWithdrawn()"
+
+[[fixes]]
+id = "apple.boundary-replan-spent-only-on-a-candidate"
+commits = ["bb131fad23c46195c116453c558d96bb5c3d68a0"]
+source = "clients/apple/Sources/PlayerController.swift"
+source_anchor = "struct AutoBoundaryReplan {"
+test = "clients/apple/Tests/PlaybackControlReporterTests.swift"
+test_anchor = "func testBoundaryReplanIsSpentOnlyOnACandidate()"
