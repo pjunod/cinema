@@ -311,6 +311,13 @@ const ROUTE_COLS: &str = "incarnation_id, session_id, user_id, playback_id,
     media_origin_ms, media_sequence, discontinuity_sequence, updated_at_ms, recovery_epoch,
     drain_deadline_ms";
 
+struct CompatibilityActivationAdmission(i64);
+impl From<&mut Row<'_>> for CompatibilityActivationAdmission {
+    fn from(row: &mut Row<'_>) -> Self {
+        Self(row.get("admitted"))
+    }
+}
+
 struct RouteRow(MediaSessionRoute);
 
 impl From<&mut Row<'_>> for RouteRow {
@@ -1468,6 +1475,30 @@ impl MediaSessionStore for HiqliteAuthStore {
             }
         }
         if current_pointer.as_deref() == Some(activation.incarnation_id.as_str()) {
+            if let Some(play_id) = activation
+                .request_id
+                .as_deref()
+                .and_then(|id| id.strip_prefix("jellyfin:"))
+            {
+                // authority: native replay must observe current negotiation cancellation and login revocation.
+                let rows = self.client().query_consistent_map::<CompatibilityActivationAdmission, _>(
+                "SELECT COUNT(*) AS admitted FROM jellyfin_plays WHERE play_id=$1 AND user_id=$2 AND playback_id=$3
+                 AND ((state='pending' AND expires_at_ms>$4) OR (state='active' AND native_incarnation_id=$5))
+                 AND json_extract(payload,'$.native_request_fingerprint')=$6
+                 AND json_extract(payload,'$.source_origin_ms')=$7
+                     AND EXISTS(SELECT 1 FROM jellyfin_login_tokens l JOIN tokens t ON t.token_hash=l.token_hash AND t.user_id=l.user_id
+                       WHERE l.token_hash=jellyfin_plays.token_digest AND l.user_id=jellyfin_plays.user_id
+                         AND l.device_digest=jellyfin_plays.device_digest AND l.client_family=jellyfin_plays.client_family)
+                     AND EXISTS(SELECT 1 FROM jellyfin_entity_ids WHERE wire_id=jellyfin_plays.item_wire_id AND retired=0)
+                     AND EXISTS(SELECT 1 FROM jellyfin_entity_ids WHERE wire_id=jellyfin_plays.file_wire_id AND retired=0)",
+                params!(play_id, activation.user_id, activation.playback_id.as_str(), activation.now_ms,
+                    activation.incarnation_id.as_str(), activation.request_fingerprint.as_str(), activation.media_origin_ms),
+            ).await?;
+                if rows.first().map(|row| row.0).unwrap_or(0) != 1 {
+                    return Ok(None);
+                }
+            }
+
             let route = route_by(self, "incarnation_id", &activation.incarnation_id)
                 .await?
                 .filter(|route| activation_route_matches(route, activation));
@@ -1543,6 +1574,16 @@ impl MediaSessionStore for HiqliteAuthStore {
                             AND incarnation_id != COALESCE((
                               SELECT current_incarnation_id FROM media_playback_pointers
                                WHERE user_id = $3 AND playback_id = $4), '')) < $14
+                    AND (substr($15,1,9) != 'jellyfin:' OR EXISTS (
+                      SELECT 1 FROM jellyfin_plays WHERE play_id=substr($15,10) AND user_id=$3 AND playback_id=$4
+                        AND ((state='pending' AND expires_at_ms>$11) OR (state='active' AND native_incarnation_id=$1))
+                        AND json_extract(payload,'$.native_request_fingerprint')=$5
+                        AND json_extract(payload,'$.source_origin_ms')=$10
+                     AND EXISTS(SELECT 1 FROM jellyfin_login_tokens l JOIN tokens t ON t.token_hash=l.token_hash AND t.user_id=l.user_id
+                       WHERE l.token_hash=jellyfin_plays.token_digest AND l.user_id=jellyfin_plays.user_id
+                         AND l.device_digest=jellyfin_plays.device_digest AND l.client_family=jellyfin_plays.client_family)
+                     AND EXISTS(SELECT 1 FROM jellyfin_entity_ids WHERE wire_id=jellyfin_plays.item_wire_id AND retired=0)
+                     AND EXISTS(SELECT 1 FROM jellyfin_entity_ids WHERE wire_id=jellyfin_plays.file_wire_id AND retired=0)))
                     AND ($15 = '' OR EXISTS (
                       SELECT 1 FROM media_session_requests
                        WHERE user_id = $3 AND request_id = $15 AND incarnation_id = $1

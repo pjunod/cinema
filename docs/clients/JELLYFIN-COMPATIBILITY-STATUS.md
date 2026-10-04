@@ -629,3 +629,27 @@ shared-progress regressions pass (8.36 seconds). Workspace/all-target Clippy,
 all 28 SQL/read/process censuses and all 14 focused documentation/identity/
 ownership contracts pass on pinned Rust 1.97.1. These receipts concern native
 watch admission; they do not qualify an HLS adapter or a physical client.
+
+
+The native watch slice landed in PR #783 at `5f27b2905`, with exact parents
+`acbce39ee` and `9414e6f86`. All eight jobs passed in
+[effort run 4027](http://192.168.4.7:3000/noirr/plurx/actions/runs/4027),
+and the landing preserves both checked regression references.
+
+The next admission slice reserves `jellyfin:<PlaySessionId>` native request
+ids and checks their live compatibility binding before native pointer
+replacement. Cancelled and missing negotiations refuse without ending the
+current native route; a valid replacement and its exact active replay still
+work. The replicated insertion repeats admission inside the transaction.
+HLS normalization and serving continue separately. Apple TV physical tests
+remain deferred and do not block implementation.
+
+
+On integrated base `5f27b2905`, all 27 Jellyfin Store contracts pass on
+SQLite and three voters (270.03 seconds), including revoked replay. Both
+ordinary native activation contracts pass. After limiting the new consistent
+lookup to replay, its focused admission regression passes again on both
+backends (9.82 seconds). Final workspace/all-target Clippy and all 28
+SQL/read/process censuses pass on pinned Rust 1.97.1; all 14 focused
+documentation/identity/ownership contracts pass. No physical-client or HLS
+qualification is claimed by these receipts.
