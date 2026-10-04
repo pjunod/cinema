@@ -1071,7 +1071,9 @@ function playbackSeekBufferCovers(v,p,targetMs){
 // destinations seek the attached element; everything else reopens at film time.
 async function seekTo(targetSec, forceReopen=false, autoHeightOverride=null, viewerInitiated=true,
   recoveryEpisode=null,qualityBoundary=false,boundaryCandidate=null){
-  const v=document.getElementById("video"); if(!v||!PLAYER) return;
+  // The element at the press. Only the synchronous routes below use it; the
+  // media route re-reads #video once the awaits are behind it.
+  const pressed=document.getElementById("video"); if(!pressed||!PLAYER) return;
   if(viewerInitiated&&PLAYER.abr) PLAYER.abr.switchBudgetTimes=[];
   targetSec=Math.max(0,targetSec);
   const markerEnd=Number(PLAYER._lastMarkerSkipEndMs)||0;
@@ -1099,7 +1101,7 @@ async function seekTo(targetSec, forceReopen=false, autoHeightOverride=null, vie
       const m=Object.assign({},PLAYER.meta||{},{part_offset_ms:part.part_offset_ms||0});
       const pending=beginPlaybackControlSeek(PLAYER,local,viewerInitiated,
         viewerInitiated&&!forceReopen?{startedAt:null,outcome:null,context:null,cleanup:null}:null);
-      recordPlaybackSeekRoute(PLAYER,pending,v,{route:"reopen"},null,null,null,"part_change");
+      recordPlaybackSeekRoute(PLAYER,pending,pressed,{route:"reopen"},null,null,null,"part_change");
       dispatchPlaybackSeekTelemetry(Object.assign({},PLAYER,{fileId:part.id}),pending);
       PENDING_ATTEMPT_REASON="seek";
       return play(part.id,PLAYER.title,Math.round(local*1000),part.duration_ms||0,m,undefined,
@@ -1140,7 +1142,7 @@ async function seekTo(targetSec, forceReopen=false, autoHeightOverride=null, vie
   const seekIntent=beginPlaybackControlSeek(PLAYER,targetSec,viewerInitiated,seekTelemetry);
   endWait(false);
   if(restartPendingPlaybackOpen(PLAYER,forceReopen?"stall-restart":"seek")){
-    recordPlaybackSeekRoute(PLAYER,seekIntent,v,{route:"reopen"},null,null,null,"pending_open");
+    recordPlaybackSeekRoute(PLAYER,seekIntent,pressed,{route:"reopen"},null,null,null,"pending_open");
     dispatchPlaybackSeekTelemetry(PLAYER,seekIntent);
     return;
   }
@@ -1176,6 +1178,13 @@ async function seekTo(targetSec, forceReopen=false, autoHeightOverride=null, vie
       }
     }
   }
+  // Re-read after the awaits, never the element captured at the press. A
+  // prepared replacement swaps the #video ids during the 100 ms coalesce or
+  // the Auto candidate wait (`exposePreparedReplacement`), and a local seek
+  // written to the captured element moved the hidden predecessor while the
+  // successor the viewer is watching played on: rolling sessions recovered
+  // through `landed_elsewhere`, a VOD-to-VOD handoff lost the seek silently.
+  const v=document.getElementById("video"); if(!v) return;
   const bufferedMs=playbackSeekBufferedRangesMs(v,me);
   const published=playbackSeekPublishedRangeMs(me);
   const seekableMs=playbackSeekSeekableRangesMs(v,me);

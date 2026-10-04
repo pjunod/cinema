@@ -75,7 +75,7 @@ test("rolling and progressive seeks stay local only inside advertised coverage",
   assert.deepEqual(policy.seekRoute({...base,changing:true}),{route:"reopen"});
 });
 
-function localSeekHarness({buffered, published, vod=false, seekable, copyHls=false, hls=true}) {
+function localSeekHarness({buffered, published, vod=false, seekable, copyHls=false, hls=true, onCoalesce=null}) {
   const listeners=new Map(), timers=new Map(), changes=[], logs=[], stalls=[];
   const video={currentTime:10,buffered,seekable,seeking:false,paused:false,ended:false,
     addEventListener(name,fn){listeners.set(name,fn);},
@@ -84,11 +84,15 @@ function localSeekHarness({buffered, published, vod=false, seekable, copyHls=fal
     started:true,wantsPlayback:true,source:{video_codec:"h264"},controlHasFrameCallbacks:false,
     mediaAttachment:{id:1},pendingMediaChange:null,stallRecoveries:1,
     hls:hls?{currentLevel:0,levels:[{details:published}]}:null};
-  const api=new Function("policy","video","player","timers","changes","logs","stalls",[
+  // What `document.getElementById("video")` answers right now. A prepared
+  // handoff moves the id to another element; `onCoalesce` runs inside the
+  // 100 ms coalesce, which is where that swap can land.
+  const elements={current:video};
+  const api=new Function("policy","video","player","timers","changes","logs","stalls","elements","onCoalesce",[
     "let PLAYER=player,now=0;const performance={now:()=>now};",
-    "const document={getElementById:()=>video,hidden:false};",
+    "const document={getElementById:()=>elements.current,hidden:false};",
     "const PlaybackPolicy=policy,PERSISTENT_STALL_MS=8000;",
-    "let nextTimerId=0;function setTimeout(fn,ms){if(ms===100){fn();return -1;}const id=++nextTimerId;timers.set(id,{fn,ms});return id;}",
+    "let nextTimerId=0;function setTimeout(fn,ms){if(ms===100){if(onCoalesce)onCoalesce(elements);fn();return -1;}const id=++nextTimerId;timers.set(id,{fn,ms});return id;}",
     "function clearTimeout(id){timers.delete(id);} function markerNowMs(){return 0;} function pbTotalSec(){return 600;}",
     "function playbackChangeAlreadyInFlight(){return false;} function endWait(){}",
     "function qualityForce(){return null;}",
@@ -115,8 +119,8 @@ function localSeekHarness({buffered, published, vod=false, seekable, copyHls=fal
     source("playbackSeekBufferCovers"),source("settlePlaybackControlSeek"),
     source("playbackProgressTick"),source("seekTo"),
     "return {seekTo,logs,changes,stalls,tick(at){now=at;playbackProgressTick(video,player);},timerDelays(){return [...timers.values()].map(t=>t.ms);},async expire(ms=Infinity){for(const [id,timer] of [...timers])if(timer.ms<=ms){timers.delete(id);timer.fn();}for(let i=0;i<5;i+=1)await Promise.resolve();}};",
-  ].join("\n"))(policy,video,player,timers,changes,logs,stalls);
-  return {api,video,player,listeners};
+  ].join("\n"))(policy,video,player,timers,changes,logs,stalls,elements,onCoalesce);
+  return {api,video,player,listeners,elements};
 }
 
 // Safari plays copy HLS as a growing EVENT playlist, i.e. live: `seekable` ends
@@ -317,6 +321,27 @@ test("a newer VOD seek fences the prior seek's fallback", async () => {
   await h.api.expire(20_000);
   assert.deepEqual(h.api.changes.map(change=>change.target),[60_000]);
   assert.equal(h.player.stallRecoveries,1);
+});
+
+// M4 / D5. `exposePreparedReplacement` swaps the #video ids, and it can do so
+// while a seek is coalescing. seekTo used to capture the element before the
+// 100 ms coalesce and write the local seek to it afterwards: the hidden
+// predecessor moved, the successor on screen did not, and a VOD-to-VOD
+// handoff (no `seeked` listener, no landing check) lost the seek silently.
+test("a local seek lands on the element holding the video id after the coalesce", async () => {
+  const successor={currentTime:10,buffered:{length:0,start:()=>0,end:()=>0},
+    seeking:false,paused:false,ended:false,
+    addEventListener(){},removeEventListener(){}};
+  const h=localSeekHarness({vod:true,
+    buffered:{length:0,start:()=>0,end:()=>0},
+    published:{fragments:[{start:0}],edge:120,targetduration:10},
+    onCoalesce(elements){elements.current=successor;},
+  });
+  await h.api.seekTo(50);
+  assert.equal(h.api.logs[0].detail,"transcode:vod");
+  assert.equal(successor.currentTime,50,"the element the viewer is watching seeks");
+  assert.equal(h.video.currentTime,10,"the hidden predecessor is left alone");
+  assert.equal(h.api.changes.length,0,"the seek stayed local and needed no reopen");
 });
 
 function vodWaitHarness() {
