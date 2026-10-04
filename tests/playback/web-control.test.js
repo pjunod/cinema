@@ -4079,7 +4079,7 @@ async function main() {
         "let PENDING_ATTEMPT_REASON=null; const plays=[],mediaChanges=[];",
         "function playbackSurfaceStep(){return null;}",
         "function closeMenu(){} function toast(){} function qualityLabel(){return 'x';}",
-        "function play(id,title,position,dur,meta){plays.push({id,position,reason:PENDING_ATTEMPT_REASON});PENDING_ATTEMPT_REASON=null;}",
+        "function play(id,title,position,dur,meta){plays.push({id,position,meta,reason:PENDING_ATTEMPT_REASON});PENDING_ATTEMPT_REASON=null;}",
         "async function requestPlaybackMediaChange(p,change){mediaChanges.push(change);return true;}",
         "function selectedAudioIndex(){return 0;} function playQuality(){return quality;}",
         "function hlsStartupCurrent(){return false;}",
@@ -5539,6 +5539,31 @@ async function main() {
     await outcomeOf(pending);
     assert.equal(h.plays.length, 1);
     assert.equal(h.plays[0].position, 90_000);
+  }
+  {
+    // A Shared session: B relays the Source's `none` for every directed
+    // change (no Source successor exists in this phase), so the change
+    // reopens AT ONCE rather than after the offer bound, through the same one
+    // reopen, carrying the bound Shared context the fresh Start is made from.
+    const h = preparedHarness();
+    const fileContext = Object.freeze({ session_id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+      source_ref: { kind: "shared" } });
+    const p = directedPlayer(h, { offset: 0, fileId: "9007199254740993",
+      fileContext, meta: { fileContext } });
+    offerReporter(h);
+    h.live.currentTime = 40;
+    const pending = h.menu("480");
+    await flush();
+    h.live.currentTime = 42.5;          // sampled at the decline, not the tap
+    h.exchange(offerRequest(5), offerResponse({ delivery: { preparation: "none" } }));
+    await outcomeOf(pending);
+    assert.equal(h.plays.length, 1,
+      "the first answer at the ask's sequence reopens; no bound is waited out");
+    assert.equal(h.plays[0].position, 42_500);
+    assert.equal(h.plays[0].id, "9007199254740993");
+    assert.equal(h.plays[0].meta.fileContext, fileContext,
+      "the reopen starts from the bound Shared context and its accepted login");
+    assert.equal(p.directedChange.outcome, "declined");
   }
   {
     // Menu → the bound → one reopen.

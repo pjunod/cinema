@@ -162,7 +162,6 @@ struct SourceViewerInner {
     control_hooks: control::SourceControlHookOwner,
     status_hooks: status::SourceStatusHookOwner,
     resource_hooks: Arc<resource::SourceResourceHookOwner>,
-    original_selection: Option<plurx_core::playback::DesiredSelection>,
     assignment: SourceDispatchAssignment,
     manager: std::sync::Weak<TranscodeManager>,
     gate: Arc<SourceProducerAuthority>,
@@ -865,7 +864,6 @@ impl TranscodeManager {
             control_hooks: Default::default(),
             status_hooks: Default::default(),
             resource_hooks: Arc::new(Default::default()),
-            original_selection: prepared.original_selection().copied(),
             assignment,
             manager: Arc::downgrade(self),
             gate: Arc::new(SourceProducerAuthority {

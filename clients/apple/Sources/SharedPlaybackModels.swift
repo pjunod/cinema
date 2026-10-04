@@ -321,16 +321,62 @@ struct SharedPlaybackPlan {
     let request: CreateSessionRequest
     init(subject: SharedPlaybackSubject, decision: SharedDecision, caps: DeviceCaps, request: CreateSessionRequest) throws {
         try subject.validate(); _ = try decision.validated(subject.context)
+        let direct = request.presentation == "direct"
         guard caps.v == 2, caps.transports.contains("hls"), request.caps == caps,
-              request.presentation == "vod", request.intent == nil,
+              request.presentation == "vod" || direct, request.intent == nil,
               request.previousSessionId == nil, request.controlSequence == nil, request.reopenReason == nil,
               request.subtitleBurn == nil, request.preserveDolbyVision != true, request.hdr10 != true,
-              decision.presentation.deliveredDynamicRange.map({ $0 == "sdr" }) ?? true,
               (request.start ?? 0) == Double(subject.resumeMs) / 1000,
               request.height.map({ $0 > 0 && $0 <= 8192 }) ?? true,
-              decision.method == "transcode" ? request.copy != true : request.copy == true
+              direct ? Self.directEligible(decision) && request.copy == nil && request.height == nil && request.aac == nil
+                    && request.audio == nil && request.nativeSubtitles == nil && request.subtitle == nil
+                : decision.presentation.deliveredDynamicRange.map({ $0 == "sdr" }) ?? true
+                    && (decision.method == "transcode" ? request.copy != true : request.copy == true)
         else { throw APIError.transport("This Shared HLS plan is not available yet.") }
         self.subject = subject; self.decision = decision; self.caps = caps; self.request = request
+    }
+
+    /// Shared direct play: the Source decided direct play for these caps and
+    /// AVPlayer can take the bytes as they are. A Dolby Vision source stays on
+    /// copy HLS for the reason Local gives (`PlayerController.playbackMode`:
+    /// AVPlayer renders a black plane for progressive DV). A planned
+    /// non-default audio track or an A/V offset needs a session, not raw bytes.
+    static func directEligible(_ decision: SharedDecision) -> Bool {
+        let presentation = decision.presentation
+        let plannedAudio = presentation.delivery?.audio
+        let defaultAudio = plannedAudio.map { index in presentation.audio?.first(where: { $0.index == index })?.default == true } ?? true
+        return decision.method == "direct_play" && presentation.delivery?.mode == "direct"
+            && presentation.source?.hdr?.lowercased() != "dolby_vision"
+            && presentation.deliveredDynamicRange != "dolby_vision"
+            && presentation.preserveDolbyVision != true && presentation.delivery?.preserveDolbyVision != true
+            && (presentation.audioOffsetMs ?? 0) == 0 && defaultAudio
+    }
+
+    /// The one place a shared Start request is composed from a decision: the
+    /// initial play and every reopen. A reopen keeps the player's playback id,
+    /// so B supersedes the predecessor once the new session publishes.
+    static func make(subject: SharedPlaybackSubject, decision: SharedDecision, caps: DeviceCaps,
+                     quality: PlaybackQuality, audioIndex: Int? = nil, subtitleIndex: Int? = nil,
+                     playbackId: String = UUID().uuidString.lowercased()) throws -> Self {
+        let start = Double(subject.resumeMs) / 1000
+        let requestId = UUID().uuidString.lowercased()
+        let subtitle = subtitleIndex.flatMap { index in
+            index >= 0 && decision.presentation.subtitles?.contains(where: { $0.index == index && $0.isNativeHLS }) == true ? index : nil
+        }
+        if subtitleIndex.map({ $0 >= 0 }) == true && subtitle == nil {
+            throw APIError.transport("This Shared subtitle needs a burn-in, which is not available.")
+        }
+        var request: CreateSessionRequest
+        if audioIndex == nil, subtitle == nil, quality == .auto || quality == .original, directEligible(decision) {
+            request = CreateSessionRequest(playbackId: playbackId, requestId: requestId, start: start, caps: caps)
+            request.presentation = "direct"
+        } else {
+            request = CreateSessionRequest(playbackId: playbackId, requestId: requestId,
+                height: quality.rungHeight, qualityAuto: quality == .auto, start: start, audio: audioIndex,
+                nativeSubtitles: subtitle == nil ? nil : true, subtitle: subtitle,
+                copy: decision.method != "transcode", aac: decision.presentation.transcodeAudio, caps: caps)
+        }
+        return try Self(subject: subject, decision: decision, caps: caps, request: request)
     }
 }
 
@@ -364,7 +410,21 @@ struct SharedPlaybackStatus {
     let targetHeight: Int64
     let encoder: String
     let producerState: String
-    var summary: String { "Shared HLS · \(targetHeight)p · \(encoder) · \(producerState)" }
+    let serverReadyState: String
+    let aheadSeconds: Int64?
+    /// Rendered only from validated machine tokens and bounded integers; no
+    /// Source prose, path or identity can reach this line.
+    var summary: String {
+        var parts = ["Shared HLS", "\(targetHeight)p", encoder, producerState]
+        if let aheadSeconds { parts.append("\(aheadSeconds) s ahead") }
+        return parts.joined(separator: " · ")
+    }
+    /// The server's `status_token` grammar: short ASCII machine vocabulary.
+    static func isToken(_ text: String) -> Bool {
+        !text.isEmpty && text.utf8.count <= 32 && text.utf8.allSatisfy {
+            (48...57).contains($0) || (65...90).contains($0) || (97...122).contains($0) || $0 == 95 || $0 == 45 || $0 == 46
+        }
+    }
     static let requiredCounters = Set("target_height fetched_end_ms materialized_segments planned_segments materialized_bytes planned_bytes working_set_bytes working_set_budget_bytes completed_cache_bytes delivered_bytes delivered_idle_ms http_wait_count status_generated_unix_ms".split(separator: " ").map(String.init))
     static let optionalCounters = Set("active_encode_milli_realtime active_encode_age_ms active_encode_active_ms active_encode_segments tone_map_peak_nits reported_position_ms client_runway_ms server_ready_anchor_ms server_ready_end_ms server_next_ready_start_ms server_next_ready_end_ms published_end_ms ready_ahead_end_ms fetched_segment ahead_seconds delivered_bps http_wait_oldest_ms http_wait_segment".split(separator: " ").map(String.init))
     static let requiredWords: Set<String> = ["encoder", "playlist_shape", "producer_state", "server_ready_state"]
@@ -409,8 +469,7 @@ struct SharedPlaybackStatus {
         }
         for key in requiredWords.union(optionalWords) {
             guard let value = status[key], value != .null else { continue }
-            guard let text = value.string, !text.isEmpty, text.utf8.count <= 32,
-                  !text.unicodeScalars.contains(where: { $0.value < 32 || $0.value == 127 }) else { throw APIError.badURL }
+            guard let text = value.string, isToken(text) else { throw APIError.badURL }
         }
         for key in booleans { guard case .bool = status[key] else { throw APIError.badURL } }
         if let candidate = status["active_encode_candidate_id"], candidate != .null {
@@ -422,7 +481,10 @@ struct SharedPlaybackStatus {
             guard value.isFinite, value >= 0 else { throw APIError.badURL }
         }
         guard case .integer(let height) = status["target_height"], (1...16384).contains(height),
-              let encoder = status["encoder"]?.string, let producer = status["producer_state"]?.string else { throw APIError.badURL }
-        return Self(wire: status, targetHeight: height, encoder: encoder, producerState: producer)
+              let encoder = status["encoder"]?.string, let producer = status["producer_state"]?.string,
+              let ready = status["server_ready_state"]?.string else { throw APIError.badURL }
+        var ahead: Int64?
+        if case .integer(let value)? = status["ahead_seconds"] { ahead = value }
+        return Self(wire: status, targetHeight: height, encoder: encoder, producerState: producer, serverReadyState: ready, aheadSeconds: ahead)
     }
 }

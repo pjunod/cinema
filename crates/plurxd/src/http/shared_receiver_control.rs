@@ -34,8 +34,8 @@ pub(super) struct ReceiverTuple {
 pub(super) enum SharedControlAnswer {
     Accepted(Box<ControlResponseV1>),
     Refused(SharedControlRefusal),
-    /// The Source cannot honor this exchange's shape (a changed selection, an
-    /// intent envelope or an acknowledgement) on the current rendition.
+    /// The Source cannot honor this exchange's shape (an intent envelope, or
+    /// an acknowledgement naming a successor it never offered).
     Unsupported,
 }
 
@@ -258,6 +258,13 @@ fn rebind_to_receiver(
     response.control_epoch = tuple.owner_epoch;
     response.delivery.owner_node_hash = crate::playback_control::node_hash(&tuple.owner_node_id);
     response.delivery.owner_epoch = tuple.owner_epoch;
+    // B offers the Source no preparation and cannot carry a Source successor
+    // to this client, so any evaluated answer is a decline here: a client
+    // waiting on a directed change reopens with a fresh Start. Absence (an
+    // older Source that did not evaluate the field) stays absence.
+    if response.delivery.preparation.is_some() {
+        response.delivery.preparation = Some("none".to_owned());
+    }
     match &mut response.action {
         ControlAction::Terminal { code, message } => {
             *message = crate::playback_control::terminal_message(*code);
@@ -471,6 +478,20 @@ pub(super) async fn receiver_control(
             None,
         );
     }
+    if request.acknowledgement.is_some() {
+        // B never offers `prepare_replacement` (see `translate_to_source`), so
+        // an acknowledgement names a successor that does not exist. Refused
+        // before any Source exchange is owned or sent.
+        return control_error(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "shared_control_unsupported",
+            "this shared session has no prepared successor to acknowledge",
+            generation,
+            epoch,
+            None,
+            Some("acknowledgement"),
+        );
+    }
     if request.demand == crate::playback_control::PlaybackDemand::End {
         // A terminal exchange ends B's own session through the one retirement
         // owner: it answers only after the actual confirmed Source End.
@@ -546,7 +567,7 @@ pub(super) async fn receiver_control(
         SharedControlAnswer::Unsupported => control_error(
             StatusCode::UNPROCESSABLE_ENTITY,
             "shared_control_unsupported",
-            "this shared session accepts only current-rendition controls with its original selection",
+            "this shared session cannot honor this control shape; reopen playback to change it",
             generation,
             epoch,
             None,
@@ -744,6 +765,39 @@ mod tests {
         let mut later = original.clone();
         later.sequence = 3;
         assert!(rebind_to_receiver(source, &tuple, &later).is_none());
+    }
+
+    #[test]
+    fn sharing_receiver_control_changed_selection_relays_none() {
+        use crate::playback_control as pc;
+        let tuple = tuple();
+        let mut original = request(&tuple);
+        // A directed change: the viewer now asks for a manual rung.
+        original.selection.quality = pc::QualitySelection::Manual { height: 480 };
+        let (received, _, _) = received(11);
+        let forwarded = translate_to_source(&original, &received).expect("translated");
+        assert_eq!(
+            forwarded.selection, original.selection,
+            "the changed ask reaches the Source exactly"
+        );
+        assert!(!forwarded.accepts(pc::PREPARE_REPLACEMENT_ACTION));
+        let mut source = accepted(&forwarded, 11);
+        source.delivery.preparation = Some("none".to_owned());
+        let rebound = rebind_to_receiver(source.clone(), &tuple, &original).expect("rebound");
+        assert_eq!(rebound.delivery.preparation.as_deref(), Some("none"));
+        assert_eq!(
+            rebound.effective_selection, source.effective_selection,
+            "nothing changed on the current rendition; the client reopens"
+        );
+        assert_eq!(rebound.action, ControlAction::None);
+        // B cannot carry a Source successor, so any evaluated answer is a
+        // decline at B; an unevaluated one stays unevaluated.
+        source.delivery.preparation = Some("staging".to_owned());
+        let rebound = rebind_to_receiver(source.clone(), &tuple, &original).expect("rebound");
+        assert_eq!(rebound.delivery.preparation.as_deref(), Some("none"));
+        source.delivery.preparation = None;
+        let rebound = rebind_to_receiver(source, &tuple, &original).expect("rebound");
+        assert_eq!(rebound.delivery.preparation, None);
     }
 
     #[test]

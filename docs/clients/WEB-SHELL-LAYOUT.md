@@ -137,7 +137,7 @@ had to be edited.
 | 5 | [`core/app.js`](../../crates/plurxd/src/web/core/app.js) | `API`, `TOKEN`, `ME`, the `PlaybackPolicy`/`ReaderCore`/`LibraryChannelCore` aliases, and the native-reader handoff. | 3466–3507 |
 | 6 | [`core/api.js`](../../crates/plurxd/src/web/core/api.js) | `api()`, request ids, the 401 path, `toast`. | 3508–3636 |
 | 7 | [`core/file-context.js`](../../crates/plurxd/src/web/core/file-context.js) | Immutable local/shared playback file contexts, full source keys and closed file-resource URL builders. | **New.** Explicit source-context foundation. |
-| 8 | [`core/shared-decision.js`](../../crates/plurxd/src/web/core/shared-decision.js) | Authenticated B detail contexts and bounded Shared decision reads; full Source identities and exact lifecycle integers. Live starts remain unavailable. | **New.** Shared decision adapter. |
+| 8 | [`core/shared-decision.js`](../../crates/plurxd/src/web/core/shared-decision.js) | Authenticated B detail contexts and bounded Shared decision reads; full Source identities and exact lifecycle integers. Shared Start (HLS or direct), the fresh-Start reopen of a bound context under the accepted login, and ordered progress. | **New.** Shared decision adapter. |
 | 9 | [`player/measurements.js`](../../crates/plurxd/src/web/player/measurements.js) | Stall, hitch and TTFF measurement, and the formatters (`esc`, `fmtDur`, `fmtSize`). | 3637–4329 |
 | 10 | [`core/auth.js`](../../crates/plurxd/src/web/core/auth.js) | Sign-in, sign-out, `boot`, session recovery. | 4330–4466 |
 | 11 | [`core/keyboard-reach.js`](../../crates/plurxd/src/web/core/keyboard-reach.js) | Enter/Space activation for click-only cards — the `nav-keyboard-adapter` fence region. | 4467–4525 |

@@ -503,7 +503,10 @@ also_in = ["crates/plurxd/src/transcode"]
 # vodencode's admit_source_copy holds its live waiter for the whole wait.
 # Test additions are freshness windows (5100 ms) or orderings inside
 # asserting timeouts. None decides producer recovery.
-expected_occurrences = 65
+# 65 -> 66 with the shared directed-change reopen (P0): the Source control
+# test crosses the per-session control interval before its directed exchange
+# (the server's own retry hint plus 1 ms). Test-only; no production timer.
+expected_occurrences = 66
 kind = "structural_timer_scan"
 replacement = "every new sleep requires classification; actor-managed producer verdict polls are deleted, while failed exact reap attempts retain ownership across the bounded cleanup retry cadence"
 
@@ -2486,7 +2489,11 @@ pattern = "(?:[A-Za-z_]\\w*::)+spawn(?:_blocking|_local|_for_test)?\\s*\\("
 # registry, run to completion so a sent Source request is never abandoned).
 # Test-only: three direct-test servers/readers and five pinned CGNAT fixture
 # servers/readers, each joined or aborted and awaited before the test ends.
-expected_occurrences = 803
+# +3 for the shared directed-change reopen (P0), all test-only: a completed
+# stand-in Start task the B supersession tests join, and the reopen CGNAT
+# fixture's Source and B servers, each stopped and joined at its end. The
+# supersession itself reuses the existing single retirement owner.
+expected_occurrences = 806
 # E1 plus S-14 M8: both ownership sets retained and counted on the merged source.
 # 643 -> 647 with S-14 M8 (`plan/S-14-5`: `Encoding`, `RollingFlowSync`, `TerminalCleanup`,
 # `HeadChildOwner`, `VodServingAdmission` behind per-owner hooks), measured by
@@ -3672,7 +3679,13 @@ pattern = "(?:[A-Za-z_]\\w*::)+(?:sleep|sleep_until|interval|interval_at|timeout
 # 30 s head deadline, the per-frame idle deadline, the empty-body drain bound
 # and two paused-clock fixture sleeps. Test-only: five direct-test waits and
 # three CGNAT fixture waits, all bounded. No recovery timer is added.
-expected_occurrences = 1310
+# +4 for the shared directed-change reopen (P0), all test-only: the Source
+# control test's wait across the control interval (counted in
+# `all-async-sleeps` too) and the reopen CGNAT fixture's outer bound, its
+# control-interval wait and its bounded predecessor-retirement poll. The reopen
+# itself adds no timer: it is driven by the control answer and the existing
+# client fallback.
+expected_occurrences = 1314
 # +1 native-startup delayed-init fixture: its joined writer owns one bounded
 # six-second sleep, under the test request's unchanged twelve-second deadline.
 # No production timer or recovery clock is added.
@@ -4499,7 +4512,10 @@ pattern = "\\.(?:spawn|output|status)\\s*\\("
 # +19 for Shared direct play: every one is an HTTP `.status()` read on a
 # request/response builder or a reply (4 in the B direct relay, 1 in the
 # direct client, 12 in the direct tests, 2 in the CGNAT fixture). No process.
-expected_occurrences = 567
+# +2 for the shared directed-change reopen (P0): one HTTP `.status()` read in
+# the Source adapter test's directed-change case and the reopen CGNAT
+# fixture's `LiveNodeTls::status()` SPKI read. No process.
+expected_occurrences = 569
 # +2 native-startup delayed-init fixture: Axum Response::status() reads
 # assert the master and legacy bridge responses. Neither launches a process.
 

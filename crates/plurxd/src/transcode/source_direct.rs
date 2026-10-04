@@ -279,7 +279,6 @@ impl TranscodeManager {
             control_hooks: Default::default(),
             status_hooks: Default::default(),
             resource_hooks: Arc::new(Default::default()),
-            original_selection: None,
             assignment,
             manager: Arc::downgrade(self),
             gate: Arc::new(SourceProducerAuthority {

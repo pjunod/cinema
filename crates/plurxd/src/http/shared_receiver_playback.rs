@@ -46,6 +46,10 @@ pub(crate) enum ReceiverStartError {
 pub(crate) struct ReceiverStartRegistry {
     entries: Mutex<Vec<Arc<ReceiverStartInner>>>,
     settled: Mutex<Vec<SettledReceiverAttempt>>,
+    /// Registration order. A published Start supersedes only attempts that
+    /// registered before it, so an older Start that publishes late can never
+    /// retire the newer session that replaced it.
+    registered: std::sync::atomic::AtomicU64,
 }
 struct SettledReceiverAttempt {
     user_id: i64,
@@ -56,6 +60,12 @@ struct SettledReceiverAttempt {
 }
 struct ReceiverStartInner {
     intent: ReceiverSessionIntent,
+    /// The viewer's own playback id from the retained request. B's Store and
+    /// Source sessions use a per-session playback identity
+    /// (`receiver_playback_id`); this groups one player's sessions.
+    playback_id: String,
+    /// Position in registration order (`ReceiverStartRegistry::registered`).
+    ordinal: u64,
     /// The retained recipe asks for direct play: no HLS relay, status or
     /// control; only the `{file_base}/direct` byte relay.
     direct: bool,
@@ -320,6 +330,50 @@ impl ReceiverStartRegistry {
                     .map(|_| ReceiverStartActor(entry.clone()))
             })
     }
+    /// Make-before-break for one player's reopen. Called by an owner only
+    /// after its own Start is published: every older live attempt of the same
+    /// viewer and player playback id is handed to its single retirement owner,
+    /// which sends the Source its End and frees both slots. Nothing here
+    /// deletes a row, abandons an obligation or waits on a timer; an attempt
+    /// that is not yet published supersedes nothing, so a successor that never
+    /// publishes leaves its predecessor serving.
+    fn supersede_predecessors(
+        &self,
+        state: &Arc<AppState>,
+        published: &Arc<ReceiverStartInner>,
+    ) -> usize {
+        {
+            let owned = published.state.lock().expect("receiver owner");
+            if !matches!(owned.start, Some(Ok(_))) || owned.retirement_started {
+                return 0;
+            }
+        }
+        let predecessors: Vec<ReceiverStartActor> = self
+            .entries
+            .lock()
+            .expect("receiver registry")
+            .iter()
+            .filter(|entry| {
+                !Arc::ptr_eq(entry, published)
+                    && entry.intent.user_id == published.intent.user_id
+                    && entry.playback_id == published.playback_id
+                    && entry.ordinal < published.ordinal
+                    && !entry
+                        .state
+                        .lock()
+                        .expect("receiver owner")
+                        .retirement_started
+            })
+            .map(|entry| ReceiverStartActor(entry.clone()))
+            .collect();
+        for predecessor in &predecessors {
+            predecessor.begin_retirement(
+                state.clone(),
+                plurx_core::sharing_receiver_retirement::ReceiverRetirementReason::Superseded,
+            );
+        }
+        predecessors.len()
+    }
     pub(crate) fn begin(
         &self,
         state: Arc<AppState>,
@@ -341,7 +395,7 @@ impl ReceiverStartRegistry {
             if ready.await.is_err() {
                 return;
             }
-            let result = run_owner(state.clone(), owner.clone(), playback_id, source_wrapper).await;
+            let result = run_owner(state.clone(), owner.clone(), source_wrapper).await;
             if let Err(error) = result {
                 owner.state.lock().expect("receiver owner").start = Some(Err(error));
                 owner.changed.notify_waiters();
@@ -453,6 +507,10 @@ impl ReceiverStartRegistry {
         let direct = peer_session.is_direct();
         let entry = Arc::new(ReceiverStartInner {
             intent,
+            playback_id: playback_id.to_owned(),
+            ordinal: self
+                .registered
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed),
             direct,
             peer_session,
             request_id,
@@ -927,10 +985,10 @@ impl ReceiverStartActor {
 async fn run_owner(
     state: Arc<AppState>,
     entry: Arc<ReceiverStartInner>,
-    playback_id: String,
     source_wrapper: String,
 ) -> Result<(), ReceiverStartError> {
     let intent = &entry.intent;
+    let playback_id = crate::sharing::receiver_playback_id(&intent.recipe);
     let principal = PlaybackPrincipal::LocalUser {
         user_id: intent.user_id,
     };
@@ -1291,6 +1349,12 @@ async fn run_owner(
         owned.start = Some(Ok(projected));
     }
     entry.changed.notify_waiters();
+    // Published: only now may this session replace the one its player is
+    // leaving (make-before-break).
+    state
+        .sharing
+        .receiver_starts
+        .supersede_predecessors(&state, &entry);
     // One Source round trip per lease period. The 30 s lease exchange is what
     // answers "is the Source alive"; local revocation is enforced by each
     // accepted connection's monitor and every viewer-visible byte by
@@ -1598,6 +1662,7 @@ mod tests {
         let mut session: serde_json::Value =
             serde_json::from_str(&recipe.request_json).expect("recipe");
         session["request_id"] = recipe.source_request_id.to_string().into();
+        session["playback_id"] = crate::sharing::receiver_playback_id(recipe).into();
         serde_json::to_string(&serde_json::json!({"reference":target,"session":session}))
             .expect("wrapper")
     }
@@ -2051,5 +2116,107 @@ mod tests {
             ),
             Err(ReceiverStartError::Unresolved)
         ));
+    }
+
+    fn player_intent(request: &str, playback: &str, user: i64) -> ReceiverSessionIntent {
+        let mut requested = intent(request);
+        requested.user_id = user;
+        let mut original: serde_json::Value =
+            serde_json::from_str(&requested.recipe.request_json).expect("original request");
+        original["playback_id"] = playback.into();
+        requested.recipe.request_json = original.to_string();
+        requested
+    }
+    fn registered(
+        registry: &ReceiverStartRegistry,
+        request: &str,
+        playback: &str,
+        user: i64,
+    ) -> Arc<ReceiverStartInner> {
+        let intent = player_intent(request, playback, user);
+        let (entry, created) = registry
+            .register(intent.clone(), request.into(), playback, &wrapper(&intent))
+            .expect("owned attempt");
+        assert!(created);
+        // A joinable, never-claimed attempt: its retirement owner ends at once.
+        *entry.start_task.lock().expect("Start handle") = Some(tokio::spawn(async {}));
+        entry
+    }
+    fn publish(entry: &Arc<ReceiverStartInner>) {
+        let session = Uuid::new_v4();
+        entry.state.lock().expect("owner").start = Some(Ok(ReceiverPublished::Direct(
+            crate::http::sharing_direct_wire::SharedDirectStart {
+                presentation: "direct".into(),
+                session_id: session.to_string(),
+                url: format!("/api/v1/shared/imports/x/files/y/direct?session={session}"),
+                length: 1,
+                mime: "video/mp4".into(),
+            },
+        )));
+    }
+    fn superseding(entry: &Arc<ReceiverStartInner>) -> bool {
+        entry.state.lock().expect("owner").retirement_started
+    }
+
+    #[tokio::test]
+    async fn sharing_receiver_new_start_supersedes_same_playback_after_publication() {
+        let registry = ReceiverStartRegistry::default();
+        let state = Arc::new(crate::http::source_actor_test_state());
+        let older = registered(&registry, "older", "player", 1);
+        let other_player = registered(&registry, "other-player", "other", 1);
+        let other_user = registered(&registry, "other-user", "player", 2);
+        publish(&older);
+        publish(&other_player);
+        publish(&other_user);
+        let successor = registered(&registry, "successor", "player", 1);
+        let newer = registered(&registry, "newer", "player", 1);
+        // Each B session is its own Store and Source playback, so the reopen
+        // can be activated beside the session it replaces.
+        assert_ne!(
+            crate::sharing::receiver_playback_id(&older.intent.recipe),
+            crate::sharing::receiver_playback_id(&successor.intent.recipe)
+        );
+        publish(&successor);
+        assert_eq!(registry.supersede_predecessors(&state, &successor), 1);
+        assert!(superseding(&older), "the replaced session retires");
+        for untouched in [&other_player, &other_user, &successor, &newer] {
+            assert!(
+                !superseding(untouched),
+                "only an older attempt of the same viewer and player"
+            );
+        }
+        // Through the single retirement owner, which frees the registry slot.
+        assert!(retired_within(&ReceiverStartActor(older.clone()), Duration::from_secs(5)).await);
+        // Repeating the sweep finds nothing left to supersede.
+        assert_eq!(registry.supersede_predecessors(&state, &successor), 0);
+    }
+
+    #[tokio::test]
+    async fn sharing_receiver_supersede_never_precedes_successor_publication() {
+        let registry = ReceiverStartRegistry::default();
+        let state = Arc::new(crate::http::source_actor_test_state());
+        let older = registered(&registry, "older", "player", 1);
+        publish(&older);
+        let successor = registered(&registry, "successor", "player", 1);
+        // Not yet published: the predecessor keeps serving.
+        assert_eq!(registry.supersede_predecessors(&state, &successor), 0);
+        assert!(!superseding(&older));
+        // A failed successor never publishes and supersedes nothing.
+        successor.state.lock().expect("owner").start = Some(Err(ReceiverStartError::Unresolved));
+        assert_eq!(registry.supersede_predecessors(&state, &successor), 0);
+        assert!(!superseding(&older));
+        // Nor does a published successor that is itself already retiring.
+        publish(&successor);
+        successor.state.lock().expect("owner").retirement_started = true;
+        assert_eq!(registry.supersede_predecessors(&state, &successor), 0);
+        assert!(!superseding(&older));
+        successor.state.lock().expect("owner").retirement_started = false;
+        // An older Start that publishes late never retires its replacement.
+        assert_eq!(registry.supersede_predecessors(&state, &older), 0);
+        assert!(!superseding(&successor));
+        // Published and live: now, and only now, the predecessor retires.
+        assert_eq!(registry.supersede_predecessors(&state, &successor), 1);
+        assert!(superseding(&older));
+        assert!(retired_within(&ReceiverStartActor(older), Duration::from_secs(5)).await);
     }
 }

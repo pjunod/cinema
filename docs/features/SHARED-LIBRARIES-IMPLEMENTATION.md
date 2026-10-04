@@ -5396,7 +5396,7 @@ direct play uses the same fresh Start instead of the old URL. A direct-bound
 context may start again, direct or Copy HLS, under the accepted login, the
 same rule progress follows. Other route changes on a direct play (audio,
 quality, decode rescue) go to Copy or encoded HLS. An HLS-bound context still
-has no generic replacement.
+has no generic replacement. (Superseded by the P0 reopen below.)
 
 Evidence on nuc4 (node 22.22.1): `tests/web/file-context.test.js` passes 17
 of 17 and `tests/web/shared-decision.test.js` passes 16 of 16, including the
@@ -5404,3 +5404,247 @@ new direct cases. `make web-check` passes, and `scripts/web-types` is
 unchanged at 518 diagnostics. Two browser checks in that lane skip because
 Playwright is not installed on nuc4. None of this has been checked in a
 physical browser against a real pinned Source/B pair.
+
+### Shared directed change reopen — P0 (2026-10-04)
+
+A quality, audio or subtitle change on a shared HLS session is now a clean
+make-before-break reopen. No Source successor is staged yet (that is P1/P2);
+the interim drives the change from the existing control answer and the
+existing client fallback, with no new task or timer.
+
+**Source (A).** `SourceViewerActor::control` accepts a changed selection on a
+new sequence and records it like any other ask. Every composed Source answer
+(`source_control_response`) says `delivery.preparation: "none"`: a Source owner
+has no preparation slot, so nothing is ever being built for the current ask.
+A changed ask that reuses an accepted sequence is the ordinary stale fence.
+Still refused with `Unsupported` (422 at the adapter): an acknowledgement (it
+can only name a slot this Source never offered), an intent envelope, End
+(B's retirement owner sends End), and any control on a direct owner. The
+frozen `original_selection` and its create-side derivation are removed; they
+existed only for the old refusal.
+
+**B relay.** The answer is relayed and rebound as before. Because B never
+offers the Source `prepare_replacement` and cannot carry a Source successor,
+any evaluated `preparation` becomes `"none"` at B; an older Source that did
+not evaluate the field stays absent. An acknowledgement is refused at B with
+`422 shared_control_unsupported` (field `acknowledgement`) before any Source
+exchange is owned or sent.
+
+**Reopen.** The client's one reopen is a fresh shared Start of the same file
+at the position sampled when the decline arrived, with the new selection and
+no lineage fields. B publishes it first. Only then, from the publication
+point in `run_owner`, `supersede_predecessors` hands every older live attempt
+of the same user and viewer playback id to its single retirement owner with
+reason `Superseded`. That owner sends the Source its End, waits for the
+receipt, and frees the B and Source slots. Nothing deletes a row or abandons
+an obligation. A registration ordinal keeps an older Start that publishes
+late from retiring its replacement. An unpublished, failed or already retiring
+successor supersedes nothing, so its predecessor keeps serving. The web client
+also DELETEs the predecessor when the new attachment begins; both paths meet
+in the same idempotent `begin_retirement`.
+
+**Deviation: per-session playback identity.** The design assumed the reopen
+could share the viewer's playback id. It cannot. Both the B activation and
+the Source activation use the playback-pointer CAS: one current session per
+(principal, playback id), and with no predecessor named the pointer must be
+absent. Naming the predecessor instead (`expected_predecessor_incarnation_id`)
+would move B's pointer at activation. Every B attach, publish, renew and
+delivery predicate requires that pointer, so the predecessor would stop
+serving before the successor published: break-before-make. Each B session is
+therefore its own playback on both sides, `receiver_playback_id` =
+`shared-<source_request_id>`. B claims and activates its route under it,
+`receiver_source_wrapper` and `receiver_source_request` put it in the Source
+session in place of the viewer's (as they already did for `request_id`), and
+the pending retirement witness names it. The viewer's playback id stays in the
+retained request and fingerprint; B groups one player's sessions by it. The
+same conflict also blocked the direct play lane's move from direct to Copy HLS
+while the direct session was still live; that move now works the same way.
+The sharing schema is unreleased, so no dispatched route from an older build
+needs the old wrapper.
+
+**Web.** `SHARED_DECISION` keeps a `bases` map from every bound context (HLS or
+direct) to its file context. `decision` and `start` accept a bound context
+under the accepted login (the rule progress and the direct restart already
+follow), so `fallBackDirectedChange` reopens through the ordinary
+`play()` path immediately on `preparation: none` instead of after the 12 s
+offer bound. Audio changes, which reopen through `requestPlaybackMediaChange`,
+use the same fresh Start. The new bound context keeps the same accepted
+record, so the ordered watch state carries on: no detail re-read, no re-seed,
+and the next beat names the new B session with the next sequence. Lineage
+fields, burned subtitles and HDR/DV asks stay refused for a shared Start, as
+before.
+
+**Proof boundaries.** Supersession is decided from B's process-local registry
+and needs B publication; it is not inferred from a row. The predecessor's
+retirement is the existing owner and still needs the confirmed Source End.
+The `preparation: none` answer is a statement about the Source owner, not
+evidence of any physical state.
+
+Evidence on nuc4 (rustc 1.97.1, node 22.22.1):
+
+- New focused tests:
+  - Source: `source_control_changed_selection_declines_preparation`,
+    `source_control_ack_refused_without_slot`.
+  - B: `sharing_receiver_control_changed_selection_relays_none`,
+    `sharing_receiver_new_start_supersedes_same_playback_after_publication`,
+    `sharing_receiver_supersede_never_precedes_successor_publication`.
+- Affected daemon filters (`sharing`, `source_`, `direct_range`,
+  `receiver_`): 322 passed, 9 ignored (the opt-in CGNAT fixtures). Four
+  failed on the first run. Three were expectations of the old refusal or the
+  old wrapper and were updated; the fourth,
+  `sharing_artwork_blocked_http1_http2_bytes_own_their_lease_without_a_monitor`,
+  answered 503 for 429 under load. All four then passed on a rerun.
+- Clippy with denied warnings on plurxd and plurx-core, all targets.
+- Web: `tests/web/shared-decision.test.js` 17/17, including the new reopen
+  and sequence carry-over case. `tests/playback/web-control.test.js` 23/23;
+  its new Shared case is a decline that reopens at once from the bound
+  context. `scripts/web-types` unchanged at 518.
+
+Not qualified here:
+`sharing_receiver_real_pinned_quality_reopen_preserves_position_and_releases_slot`
+(registered as an opt-in fixture) covers a real pinned B relaying a changed
+selection with `none`, and a reopen at the sampled position published beside
+its predecessor. It also checks that the predecessor is superseded (route
+ended, Source back to one active session, exact DELETE replaying 204), and
+that the successor serves and controls at the new rung. It needs the
+disposable CGNAT namespace and has not run.
+
+Native clients (separate lane) need the same three things the web now does:
+
+- treat `preparation: "none"` on a shared session as a decline and reopen at
+  once with a fresh Start, with no lineage fields;
+- carry the ordered progress sequence across the reopen;
+- release the predecessor after the new attach. B supersedes it on
+  publication either way.
+
+Stall recovery that reopens with `previous_session_id` is still refused for
+shared sessions. Clusters, NAT/DERP and devices remain open.
+
+### Native Apple Shared controls, directed reopen and direct play (2026-10-04)
+
+The Apple Shared player now does the three things the web does, plus
+server-accepted controls. Android is a separate lane and still has the
+earlier passive player.
+
+**Status.** The word fields of the Shared status grammar use B's
+`status_token` rule exactly (ASCII letters, digits, `_`, `-`, `.`, at most
+32 bytes). The passive summary is composed only from those tokens and bounded
+integers (`Shared HLS · 720p · h264_videotoolbox · running · 42 s ahead`). A
+status answer is shown only while the player still holds the session it was
+read for; direct play has none.
+
+**Controls.** `SharedControlChannel` (`clients/apple/Sources/SharedPlaybackControl.swift`)
+keeps B's exact tuple, one client instance id per player and one ordered
+sequence. Capabilities ride sequence 1; the selection is the frozen raw ask
+from the Start. Seek, pause and play change the renderer only after B accepted
+that exact sequence (`SharedControlStep`). 425/429/503 replay the identical
+bytes once after `retry_after_ms`. A 409 is never adopted, because B's tuple
+does not move. A 410 during a pause pauses locally and the next play or seek
+starts fresh; a 410 on play or seek starts one fresh session per attachment.
+
+**Directed change.** Quality, audio and subtitle go out as a changed selection
+on the next sequence. `preparation: "none"` reopens at once: a fresh decision
+and Start at the position sampled when the answer arrived, with the same
+playback id and no lineage fields. The predecessor is DELETEd only after the
+new media is attached. The ordered progress order is keyed by the Source item,
+so the next beat names the new session with the next sequence. Absence of the
+field is not a decline. Subtitles are native WebVTT renditions only; a track
+that would need a burn is not offered.
+
+**Direct play.** Chosen when the decision is `direct_play` with delivery mode
+`direct`, the source is not Dolby Vision (AVPlayer's progressive-DV black
+plane, as Local), the planned audio is the default track and there is no
+offset or subtitle ask. The Start carries `presentation: "direct"` and no HLS
+field, and only B's five-field reply bound to this context's own
+`{file_base}/direct?session=<B>` is accepted. AVPlayer reads that URL with no
+account header. After the item fails past its own timeline, a header-free HEAD
+that answers 404 or 410 earns one fresh direct Start at the last position. Any
+change from direct play goes to copy or encoded HLS.
+
+**Ownership.** One owned `Void` operation (Start, exchange or reopen) holds the
+player; `stop()` cancels and joins it. Every B session the controller started
+and no longer plays stays listed until its DELETE was sent, so a release that
+`stop()` interrupted is finished by `stop()`. No timer, watchdog or unchecked
+`Sendable` was added. Local paths and guards are unchanged.
+
+Evidence on the lab Mac (Xcode 27 simulators, owned DerivedData): `make
+apple-test` passed 780 iOS and 764 tvOS tests, zero failures (nine new in
+`SharedPlaybackControlTests`). Two deliberate mutations, dropping the
+accepted-sequence check and applying a pause on an ended session, each failed
+their test. `tests.operations.test_playback_surface_fence` passes with the
+Shared player's published inventory updated. These are synthetic
+authenticated protocol tests. Physical playback against a real B/Source pair,
+direct play on device, and the 300 s direct-expiry restart are not qualified
+here.
+
+Regression-Test: clients/apple/Tests/SharedPlaybackControlTests.swift::testRendererMovesOnlyAfterAcceptanceAndDirectedChangeReopensOnNone
+
+### Android Shared controls, directed reopen and direct play (2026-10-04)
+
+The Android client now does the three things the P0 section above asks of a
+native client, plus current-rendition controls and direct play. Local paths,
+the numeric Local guards and the original-account checks are unchanged.
+
+**Status.** `SharedPlaybackStatus` decodes to a typed `SharedVodMetrics` DTO
+bound to the exact started playback (`sessionId`). Every word must match the
+server's own `status_token` grammar (`[A-Za-z0-9_.-]{1,32}`), so a sentence or a
+path cannot render. The summary is fixed words and bounded numbers only. A
+status read for a session the player has since replaced is dropped.
+
+**Controls.** `SharedControlChannel` speaks `plurx-playback-control-v1` on the
+Start's own route with the B tuple (generation = B incarnation, epoch = B
+epoch), one stable `client_instance_id` per player across reopens, and ordered
+sequences restarting at 1 per B session, with capabilities on sequence 1 (SDR,
+no dual-player preparation). It declares no actions, so B may answer only
+`none`. The selection on every exchange is the frozen raw ask from the Start
+request: Manual 144 stays 144 whatever the encoder delivers. A deferred answer
+(425, 429, 503) is resent byte for byte after `retry_after_ms` (bounded 250 ms
+to 5 s, at most twice). An uncertain one (no answer) is resent once. A 400, 409
+or 422 is a typed refusal and is not retried. 410 means the session ended. An
+answer for another tuple or sequence is not an acceptance.
+
+`SharedPlaybackOwner` runs every viewer command under one fair mutex. Seek
+(`seeking` + `seek_target_ms`), pause (`hold`) and play (`active`) reach
+ExoPlayer only after B accepts. A refusal leaves the picture where it is and
+says why. A play or seek after a 410 is a fresh Start at the position. A
+cadence job owned by the owner sends a renewal at B's 5 s interval, and
+progress plus status every second tick. It skips a tick while a command runs.
+
+**Directed change.** A quality, audio or subtitle choice is sent as an ask on
+the current session. B answers `preparation: "none"`, because it never carries
+a Source successor (absence is an older relay saying the same). The owner then
+asks `/decision` again with the plan's retained caps. It makes a fresh Start
+at the sampled position with the same viewer `playback_id`, a new
+`request_id` and no lineage fields. It attaches that Start, and only then
+DELETEs the predecessor. The ordered progress pool is keyed by the watch key,
+so the next beat names the new session with the next sequence. A refused ask
+keeps the current session.
+
+**Direct play.** `sharedPlaybackPlan` picks `presentation: "direct"` only when
+the Source's decision is `direct_play` for these caps and the ask is the file
+as it is: default audio, no subtitle, no A/V offset, no AAC transcode. The
+Start drops `height`, `copy` and the subtitle fields. The five-field reply is
+decoded exactly, and its URL must equal this context's own
+`{file_base}/direct?session=<B>`. ExoPlayer plays it through a progressive
+source on `Net.capabilityClient`, with no account header. There is no status
+or control exchange, and the renderer is local. Stop sends DELETE. A 404 or 410
+from the renderer earns one fresh direct Start at the current position, once
+per attachment that reached its timeline: no timer and no loop. A reply whose
+type ExoPlayer cannot read as a file (WMA, octet-stream) is released and the
+same decision is played as Copy HLS. A directed change from direct play goes
+to Copy or encoded HLS.
+
+Evidence on nuc3 (pinned `plurx-android-build` image, JDK 25):
+
+- New suites: `SharedPlaybackSessionTest` (4) and `SharedPlaybackOwnerTest`
+  (4). Together with the existing Shared, context and decision suites: 51
+  passed, 0 failed, 0 skipped.
+- Full `testDebugUnitTest`: 869 tests, one failure, `CreateRetryTest.onlyANotYetAnswerIsRetriedAtAll`. It fails the same way on the unchanged base: its expected code set predates `quality_catalog_unavailable`.
+- `lintDebug`: no errors. `compileDebugAndroidTestKotlin` passed.
+- Python fences: player builder, playback surface, control wire, credential
+  exposure, test markers, caps wire and contracts all pass. So do
+  `scripts/playback-surface-fence` and `scripts/player-input-fence`.
+
+Not qualified here: a physical Android device against a real pinned
+Source/B pair, the native subtitle rendition on reopen, rate limiting under a
+real seek storm, and the Apple half of these slices.

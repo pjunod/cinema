@@ -38,19 +38,36 @@ internal class SharedDecisionClient private constructor(private val auth: Sessio
         requireCurrent()
         return SharedPlaybackStatus.decode(reply.bytes, playback)
     }
-    /** Best-effort B End reply is never a physical retirement proof. */
-    suspend fun end(playback: SharedStartedPlayback) {
+    /** The byte URL of a started direct play, played with no account headers. */
+    fun directUrl(direct: SharedStartedDirect): String {
+        requireCurrent(); direct.validateBound()
+        return auth.origin + direct.url
+    }
+    class ControlReply(val status: Int, val text: String)
+    /** One control exchange on the B tuple's own route; the status is the answer. */
+    suspend fun control(playback: SharedStartedPlayback, body: String): ControlReply {
         playlistUrl(playback)
-        val request = Request.Builder().url("${auth.origin}/api/v1/hls/${playback.start.response.session_id}")
+        val path = requireNotNull(playback.start.response.control).url
+        require(path == "/api/v1/hls/${playback.sessionId}/control" && body.toByteArray().size <= 65_536)
+        val request = Request.Builder().url(auth.origin + path).header("Authorization", "Bearer ${auth.token}")
+            .post(body.toRequestBody("application/json".toMediaType())).build()
+        val reply = readResponse(request, auth, transport, statuses = setOf(200, 400, 409, 410, 422, 425, 429, 503), maxBytes = 16_384) { playlistUrl(playback) }
+        requireCurrent()
+        return ControlReply(reply.status, strictUtf8(reply.bytes))
+    }
+    /** Best-effort B End reply is never a physical retirement proof. */
+    suspend fun end(playback: SharedBoundSession) {
+        requireCurrent(); playback.validateBound()
+        val request = Request.Builder().url("${auth.origin}/api/v1/hls/${playback.sessionId}")
             .header("Authorization", "Bearer ${auth.token}").delete().build()
         readResponse(request, auth, transport, statuses = setOf(200, 202, 204), maxBytes = 16_384) { requireCurrent() }
     }
-    suspend fun orderedProgress(playback: SharedStartedPlayback, initialWatchSequence: Long,
+    suspend fun orderedProgress(playback: SharedBoundSession, initialWatchSequence: Long,
                                 positionMs: Long, durationMs: Long?, watched: Boolean = false): SharedProgressResult? {
         requireCurrent()
         val reference = requireNotNull(playback.context.reference)
         playback.context.validateSharedReference(reference, playback.context.sourceFileId, requireNotNull(playback.context.revision))
-        playback.start.validated(playback.context)
+        playback.validateBound()
         val key = WatchKey(reference.server_id, reference.catalogue_epoch, reference.item_id)
         val entry = progressMutex.withLock {
             if (progressAccount != auth) { progressAccount = auth; progressEntries.clear() }
@@ -75,7 +92,7 @@ internal class SharedDecisionClient private constructor(private val auth: Sessio
                 if (!entry.order.needsResync) entry.order = SharedProgressOrder(maxOf(entry.order.sequence, fresh))
                 else entry.order.resync(fresh)
             }
-            val beat = entry.order.beat(playback.start.response.session_id, positionMs, durationMs, watched)
+            val beat = entry.order.beat(playback.sessionId, positionMs, durationMs, watched)
             val result = progress(playback, beat); requireCurrent(); entry.order.complete(beat, result)
             if (result == SharedProgressResult.Acknowledged && (beat.position_ms != positionMs || beat.duration_ms != durationMs || beat.watched != watched)) return SharedProgressResult.PreviousBeatAcknowledged
             return result
@@ -83,13 +100,13 @@ internal class SharedDecisionClient private constructor(private val auth: Sessio
             withContext(NonCancellable) { progressMutex.withLock { entry.busy = false; progressActive-- } }
         }
     }
-    suspend fun progress(playback: SharedStartedPlayback, beat: SharedProgressBeat): SharedProgressResult {
+    suspend fun progress(playback: SharedBoundSession, beat: SharedProgressBeat): SharedProgressResult {
         requireCurrent(); beat.validate()
         val context = playback.context
         val reference = requireNotNull(context.reference)
-        require(context.sessionId == beat.session_id && playback.start.response.session_id == beat.session_id)
+        require(context.sessionId == beat.session_id && playback.sessionId == beat.session_id)
         context.validateSharedReference(reference, context.sourceFileId, requireNotNull(context.revision))
-        playback.start.validated(context)
+        playback.validateBound()
         val bytes = Net.json.encodeToString(beat); require(bytes.toByteArray().size <= 1024)
         val request = Request.Builder().url("${auth.origin}/api/v1/shared/imports/${reference.import_id}/items/${reference.item_id}/progress")
             .header("Authorization", "Bearer ${auth.token}").post(bytes.toRequestBody("application/json".toMediaType())).build()
@@ -115,13 +132,26 @@ internal class SharedDecisionClient private constructor(private val auth: Sessio
     /** Initial authenticated Shared Start; unsupported Local control fields are
      * refused without rewriting the original request or issuing a network call. */
     suspend fun start(context: PlaybackFileContext, body: CreateSessionReq): SharedStartedPlayback {
+        require(body.presentation == "vod")
+        val (text, retained) = postStart(context, body)
+        return SharedStart.decode(text).bindInitial(context, retained)
+    }
+    /** Shared direct play: the same ordinary Start with `presentation: direct`
+     * and none of the HLS-only fields the Source refuses for raw bytes. */
+    suspend fun startDirect(context: PlaybackFileContext, body: CreateSessionReq): SharedStartedDirect {
+        require(body.presentation == "direct" && body.copy == null && body.height == null && body.native_subtitles == null
+            && body.subtitle == null && body.block_budget_secs == null)
+        val (text, retained) = postStart(context, body)
+        return SharedStartedDirect.decode(text, context, retained)
+    }
+    private suspend fun postStart(context: PlaybackFileContext, body: CreateSessionReq): Pair<String, CreateSessionReq> {
         coroutineContext.ensureActive(); requireCurrent()
         val reference = requireNotNull(context.reference)
         require(context.sessionId == null && requireNotNull(context.lifecycleGeneration) > 0)
         context.validateSharedReference(reference, context.sourceFileId, requireNotNull(context.revision))
         require(body.intent == null && body.previous_session_id == null && body.control_sequence == null && body.reopen_reason == null
             && body.subtitle_burn == null && body.hdr10 != true && body.preserve_dolby_vision != true) { "This Shared playback change is not available yet." }
-        require(body.caps?.v == 2 && body.presentation == "vod" && body.playback_id.isNotEmpty()
+        require(body.caps?.v == 2 && body.playback_id.isNotEmpty()
             && body.playback_id.toByteArray().size <= 128 && body.playback_id.none { it.code < 32 || it.code == 127 })
         require(body.request_id?.let { Regex("[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}").matches(it) } == true)
         val encoded = Net.json.encodeToString(body); require(encoded.toByteArray().size <= 24_576)
@@ -130,8 +160,10 @@ internal class SharedDecisionClient private constructor(private val auth: Sessio
             .header("Authorization", "Bearer ${auth.token}").post(encoded.toRequestBody("application/json".toMediaType())).build()
         val bytes = read(request, auth, transport, initialStart = true) { requireCurrent(); context.path("hls/sessions") }
         coroutineContext.ensureActive(); requireCurrent()
-        return SharedStart.decode(strictUtf8(bytes)).bindInitial(context, retained)
+        return strictUtf8(bytes) to retained
     }
+    /** A reopen asks again with the plan's retained caps, never a fresh probe. */
+    suspend fun redecide(context: PlaybackFileContext, caps: DeviceCaps, query: Map<String, String>): Result = execute(context, caps, query)
     suspend fun decisionForTest(context: PlaybackFileContext, caps: DeviceCaps, query: Map<String, String> = emptyMap()): Result {
         check(BuildConfig.DEBUG); return execute(context, caps, query)
     }

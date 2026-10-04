@@ -1010,11 +1010,7 @@ final class AppModel: ObservableObject {
             let result = try await client.decision(context: context, quality: playbackQuality)
             let position = detail.watch.map { $0.watched ? 0 : $0.positionMs } ?? 0
             let subject = SharedPlaybackSubject(context: context, title: detail.item.title, resumeMs: position, watchSequence: detail.watch?.sequence ?? 0)
-            let request = CreateSessionRequest(playbackId: UUID().uuidString.lowercased(), requestId: UUID().uuidString.lowercased(),
-                height: playbackQuality.rungHeight, qualityAuto: playbackQuality == .auto,
-                start: Double(position) / 1000, copy: result.decision.method != "transcode",
-                aac: result.decision.presentation.transcodeAudio, caps: result.caps)
-            return try SharedPlaybackPlan(subject: subject, decision: result.decision, caps: result.caps, request: request)
+            return try SharedPlaybackPlan.make(subject: subject, decision: result.decision, caps: result.caps, quality: playbackQuality)
         } catch { noteAuthFailure(error); throw error }
     }
 

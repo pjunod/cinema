@@ -5094,71 +5094,81 @@ internal fun codecShort(mime: String?): String? = when {
 internal fun statusPollIntervalMs(visible: Boolean): Long = if (visible) 2_000L else 10_000L
 
 
-/** Fixed Shared player owner; numeric Local PlanLike/history/recovery are unreachable. */
+/** Fixed Shared player owner; numeric Local PlanLike/history/recovery are unreachable.
+ * The ExoPlayer half of [SharedPlaybackOwner]: it renders what the owner attaches
+ * and reports what the player does, and decides nothing itself. */
 internal class SharedPlayerController(context: android.content.Context, vm: AppViewModel) {
     val player = buildPlayer(context, vm).player
-    val failure = kotlinx.coroutines.flow.MutableStateFlow<String?>(null)
-    val starting = kotlinx.coroutines.flow.MutableStateFlow(false)
-    val statusSummary = kotlinx.coroutines.flow.MutableStateFlow<String?>(null)
+    val playing = kotlinx.coroutines.flow.MutableStateFlow(false)
     private val scope = kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.SupervisorJob() + kotlinx.coroutines.Dispatchers.Main.immediate)
-    private var client: tv.plurx.app.data.SharedDecisionClient? = null
-    private var plan: tv.plurx.app.data.SharedPlaybackPlan? = null
-    private var playback: tv.plurx.app.data.SharedStartedPlayback? = null
-    private var startJob: kotlinx.coroutines.Job? = null
-    private var progressJob: kotlinx.coroutines.Job? = null
+    /** B's direct byte URL already carries its narrow session binding; no account header rides with it. */
+    private val directSource = androidx.media3.exoplayer.source.ProgressiveMediaSource.Factory(
+        androidx.media3.datasource.okhttp.OkHttpDataSource.Factory(tv.plurx.app.data.Net.capabilityClient))
+    private var reachedTimeline = false
     private var authorizationObserver: Long? = null
-    private var closing = false
+    private var stopped = false
+    private val renderer = object : SharedRenderer {
+        override fun attachHls(url: String, positionMs: Long, playWhenReady: Boolean) {
+            reachedTimeline = false
+            val media = MediaItem.Builder().setUri(url).setMimeType(androidx.media3.common.MimeTypes.APPLICATION_M3U8).build()
+            player.setMediaItem(media, positionMs); player.prepare(); player.playWhenReady = playWhenReady
+        }
+        override fun attachDirect(url: String, positionMs: Long, playWhenReady: Boolean) {
+            reachedTimeline = false
+            player.setMediaSource(directSource.createMediaSource(MediaItem.fromUri(url)), positionMs); player.prepare(); player.playWhenReady = playWhenReady
+        }
+        override fun seekTo(positionMs: Long) = player.seekTo(positionMs)
+        override fun setPlaying(playing: Boolean) { player.playWhenReady = playing }
+        override fun snapshot() = SharedRendererSnapshot(
+            positionMs = player.currentPosition.coerceAtLeast(0), bufferedMs = player.bufferedPosition.coerceAtLeast(0),
+            durationMs = player.duration.takeIf { it != C.TIME_UNSET && it >= 0 }, playing = player.playWhenReady,
+            renderState = when (player.playbackState) {
+                androidx.media3.common.Player.STATE_READY -> RenderState.RENDERING
+                androidx.media3.common.Player.STATE_BUFFERING -> if (reachedTimeline) RenderState.WAITING else RenderState.STARTING
+                androidx.media3.common.Player.STATE_ENDED -> RenderState.ENDED
+                else -> RenderState.STARTING
+            },
+            playbackRate = player.playbackParameters.speed.toDouble(),
+        )
+        override fun release() { player.stop(); player.release() }
+    }
+    val owner = SharedPlaybackOwner(scope, { tv.plurx.app.data.SharedDecisionClient.create() }, renderer)
     init {
         player.addListener(object : androidx.media3.common.Player.Listener {
             override fun onPlaybackStateChanged(state: Int) {
+                if (state == androidx.media3.common.Player.STATE_READY && !reachedTimeline) { reachedTimeline = true; owner.timelineReached() }
                 if (state == androidx.media3.common.Player.STATE_ENDED) scope.launch { stop(watched = true) }
             }
-            override fun onPlayerError(error: androidx.media3.common.PlaybackException) { failure.value = error.message ?: "Shared playback failed" }
+            override fun onPlayWhenReadyChanged(playWhenReady: Boolean, reason: Int) { playing.value = playWhenReady }
+            override fun onPlayerError(error: androidx.media3.common.PlaybackException) {
+                val status = generateSequence(error.cause) { it.cause }
+                    .filterIsInstance<androidx.media3.datasource.HttpDataSource.InvalidResponseCodeException>().firstOrNull()?.responseCode
+                owner.rendererFailed(status, error.message)
+            }
         })
-    }
-    fun start(plan: tv.plurx.app.data.SharedPlaybackPlan) {
-        if (this.plan != null) return
-        this.plan = plan; starting.value = true
-        startJob = scope.launch {
-            try {
-                val client = tv.plurx.app.data.SharedDecisionClient.create(); this@SharedPlayerController.client = client
-                val started = client.start(plan.subject.context, plan.request); playback = started; starting.value = false
-                if (closing) { runCatching { client.end(started) }; playback = null; return@launch }
-                val media = androidx.media3.common.MediaItem.Builder().setUri(client.playlistUrl(started))
-                    .setMimeType(androidx.media3.common.MimeTypes.APPLICATION_M3U8).build()
-                player.setMediaItem(media); player.prepare(); player.seekTo(plan.subject.resumeMs); player.play()
-                authorizationObserver = tv.plurx.app.data.Session.observeAuthorizationChanges { scope.launch { stop() } }.id
-                progressJob = scope.launch {
-                    while (!closing) {
-                        kotlinx.coroutines.delay(10_000)
-                        if (!closing) {
-                            runCatching { client.orderedProgress(started, plan.subject.watchSequence, player.currentPosition.coerceAtLeast(0), started.start.response.duration_ms) }
-                            statusSummary.value = runCatching { client.status(started).summary }.getOrNull()
-                        }
-                    }
-                }
-            } catch (error: Exception) {
-                starting.value = false
-                if (!closing && error !is kotlinx.coroutines.CancellationException) failure.value = error.message ?: "Shared playback failed"
+        // Text renditions exist only when the viewer chose a native subtitle;
+        // the Start that carries it is the one being rendered.
+        scope.launch {
+            owner.selection.collect { selection ->
+                player.trackSelectionParameters = player.trackSelectionParameters.buildUpon()
+                    .setTrackTypeDisabled(C.TRACK_TYPE_TEXT, selection?.subtitle == null)
+                    .setSelectUndeterminedTextLanguage(selection?.subtitle != null).build()
             }
         }
     }
+    fun start(plan: tv.plurx.app.data.SharedPlaybackPlan) {
+        if (stopped || owner.currentPlan != null || authorizationObserver != null) return
+        authorizationObserver = tv.plurx.app.data.Session.observeAuthorizationChanges { scope.launch { stop() } }.id
+        owner.begin(plan)
+    }
+    fun seekBy(deltaMs: Long) { owner.launch { seek(renderer.snapshot().positionMs + deltaMs) } }
+    fun togglePlaying() { val next = !player.playWhenReady; owner.launch { setPlaying(next) } }
+    fun change(selection: tv.plurx.app.data.SharedSelection) { owner.launch { change(selection) } }
     suspend fun stop(watched: Boolean = false) {
-        if (closing) return
-        closing = true; player.pause()
+        if (stopped) return
+        stopped = true
         authorizationObserver?.let { tv.plurx.app.data.Session.removeAuthorizationObserver(it) }; authorizationObserver = null
-        val currentJob = kotlinx.coroutines.currentCoroutineContext()[kotlinx.coroutines.Job]
-        if (startJob != currentJob) { startJob?.cancel(); startJob?.join() }
-        progressJob?.cancel(); progressJob?.join()
-        val client = client; val started = playback; val plan = plan
-        if (client != null && started != null && plan != null) {
-            val position = player.currentPosition.coerceAtLeast(0)
-            val result = runCatching { client.orderedProgress(started, plan.subject.watchSequence, position, started.start.response.duration_ms, watched) }.getOrNull()
-            if (result == tv.plurx.app.data.SharedProgressResult.PreviousBeatAcknowledged) runCatching { client.orderedProgress(started, plan.subject.watchSequence, position, started.start.response.duration_ms, watched) }
-            player.stop(); player.release()
-            runCatching { client.end(started) }
-        } else { player.stop(); player.release() }
-        playback = null; statusSummary.value = null
+        owner.stop(watched)
     }
     fun close() { scope.launch { stop() } }
 }

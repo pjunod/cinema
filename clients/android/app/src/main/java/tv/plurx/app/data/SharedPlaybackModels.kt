@@ -139,7 +139,10 @@ internal class SharedStart private constructor(val response: HlsStart, val wire:
 }
 
 /** Authenticated ordinary B Start metadata, never Source physical evidence. */
-internal class SharedStartedPlayback(val start: SharedStart, val context: PlaybackFileContext, val request: CreateSessionReq)
+internal class SharedStartedPlayback(val start: SharedStart, override val context: PlaybackFileContext, override val request: CreateSessionReq) : SharedBoundSession {
+    override val sessionId: String get() = start.response.session_id
+    override fun validateBound() { start.validated(context); require(context.sessionId == sessionId) }
+}
 
 internal fun SharedStart.bindInitial(context: PlaybackFileContext, request: CreateSessionReq): SharedStartedPlayback {
     require(context.reference != null && context.sessionId == null)
@@ -298,16 +301,32 @@ internal data class SharedPlaybackSubject(val context: PlaybackFileContext, val 
 }
 /** Retains the raw original desired ask, not normalized delivered dimensions. */
 internal class SharedPlaybackPlan(val subject: SharedPlaybackSubject, val decision: SharedDecision, val caps: DeviceCaps, val request: CreateSessionReq) {
+    /** Original bytes from B's direct relay; no status or control exchange exists for it. */
+    val direct: Boolean get() = request.presentation == "direct"
     init {
         subject.validate(); decision.validated(subject.context)
         require(caps.v == 2 && "hls" in caps.transports && request.caps == caps)
-        require(request.presentation == "vod" && request.intent == null && request.previous_session_id == null && request.control_sequence == null && request.reopen_reason == null)
+        require(request.presentation in setOf("vod", "direct") && request.intent == null && request.previous_session_id == null && request.control_sequence == null && request.reopen_reason == null)
         require(request.subtitle_burn == null && request.preserve_dolby_vision != true && request.hdr10 != true)
         require(decision.presentation.delivered_dynamic_range?.let { it == "sdr" } != false)
         require((request.start ?: 0.0) == subject.resumeMs.toDouble() / 1000)
         require(request.height?.let { it in 1..8192 } != false)
-        require(if (decision.method == "transcode") request.copy != true else request.copy == true)
+        if (direct) {
+            // The Source repeats the decision at Start and refuses anything but
+            // direct play, a rung, a remux flag or a subtitle ask for raw bytes.
+            require(decision.method == "direct_play" && request.copy == null && request.height == null && request.native_subtitles == null &&
+                request.subtitle == null && request.audio == null && (request.audio_offset_ms ?: 0L) == 0L && request.aac != true)
+        } else require(if (decision.method == "transcode") request.copy != true else request.copy == true)
     }
+    /** The viewer's raw ask, as the Start request carries it. */
+    val selection: SharedSelection get() = SharedSelection(
+        quality = when {
+            request.quality_auto == true -> PlaybackQuality.Auto
+            request.height == null -> PlaybackQuality.Original
+            else -> PlaybackQuality.entries.firstOrNull { it.rungHeight == request.height } ?: PlaybackQuality.Auto
+        },
+        audio = request.audio, subtitle = request.subtitle?.takeIf { request.native_subtitles == true },
+    )
 }
 
 /** Exact original current-rendition selection, without Local candidate coercion. */
@@ -332,14 +351,35 @@ internal fun SharedPlaybackPlan.frozenControlSelection(): JsonObject = buildJson
     put("codec", "auto"); put("dynamic_range", "auto")
 }
 
-/** Shared telemetry cannot acquire numeric Local ownership or recovery policy. */
-internal class SharedPlaybackStatus private constructor(val wire: JsonObject, val targetHeight: Long, val encoder: String, val producerState: String) {
-    val summary: String get() = "Shared HLS · ${targetHeight}p · $encoder · $producerState"
+/** Typed Shared-only metrics. Every word passed the server's own status token
+ * grammar, so nothing rendered from here can be Source prose or a path. */
+internal data class SharedVodMetrics(
+    val targetHeight: Long, val encoder: String, val playlistShape: String, val producerState: String,
+    val serverReadyState: String, val producerHold: String?, val controlDemand: String?, val renderState: String?,
+    val aheadSeconds: Long?, val reportedPositionMs: Long?, val clientRunwayMs: Long?, val serverReadySeconds: Double?,
+    val deliveredBytes: Long, val deliveredIdleMs: Long, val httpWaitCount: ULong,
+    val admitted: Boolean, val suspended: Boolean, val final: Boolean, val statusGeneratedUnixMs: Long,
+) {
+    /** Fixed words and bounded numbers only; never a Local ID or a server sentence. */
+    fun summary(): String = buildList {
+        add("Shared HLS"); add("${targetHeight}p"); add(encoder); add(producerState)
+        aheadSeconds?.let { add("$it s ahead") }
+        if (httpWaitCount > 0UL) add("$httpWaitCount waiting")
+        if (suspended) add("suspended")
+    }.joinToString(" · ")
+}
+
+/** Shared telemetry cannot acquire numeric Local ownership or recovery policy.
+ * It belongs to the exact started playback it was read for ([sessionId]). */
+internal class SharedPlaybackStatus private constructor(val sessionId: String, val metrics: SharedVodMetrics) {
+    val summary: String get() = metrics.summary()
     companion object {
         val requiredCounters = "target_height fetched_end_ms materialized_segments planned_segments materialized_bytes planned_bytes working_set_bytes working_set_budget_bytes completed_cache_bytes delivered_bytes delivered_idle_ms http_wait_count status_generated_unix_ms".split(" ").toSet()
         val optionalCounters = "active_encode_milli_realtime active_encode_age_ms active_encode_active_ms active_encode_segments tone_map_peak_nits reported_position_ms client_runway_ms server_ready_anchor_ms server_ready_end_ms server_next_ready_start_ms server_next_ready_end_ms published_end_ms ready_ahead_end_ms fetched_segment ahead_seconds delivered_bps http_wait_oldest_ms http_wait_segment".split(" ").toSet()
         val requiredWords = setOf("encoder", "playlist_shape", "producer_state", "server_ready_state")
         val optionalWords = setOf("tone_map_peak_source", "producer_hold", "producer_decision", "control_demand", "render_state")
+        /** `status_token` in sharing_playback_client.rs. */
+        private val token = Regex("[A-Za-z0-9_.-]{1,32}")
         fun decode(bytes: ByteArray, playback: SharedStartedPlayback): SharedPlaybackStatus {
             require(bytes.size <= 65_536)
             val outer = Json.parseToJsonElement(bytes.decodeToString()).jsonObject
@@ -349,7 +389,7 @@ internal class SharedPlaybackStatus private constructor(val wire: JsonObject, va
             require(outer.strictString("incarnation_id") == control.generation)
             val epoch = outer.getValue("control_epoch").jsonPrimitive
             require(!epoch.isString && epoch.content.matches(Regex("[1-9][0-9]*")) && epoch.longOrNull == control.controlEpoch)
-            playback.start.validated(playback.context)
+            playback.validateBound()
             Json.decodeFromJsonElement<SharedPlaybackFileReference>(outer.getValue("reference")).validate(playback.context)
             val status = outer.getValue("status").jsonObject
             val booleans = setOf("admitted", "suspended", "final")
@@ -367,18 +407,28 @@ internal class SharedPlaybackStatus private constructor(val wire: JsonObject, va
                 require(key in wideFields || it <= Long.MAX_VALUE.toULong())
                 require(key !in u32Fields || it <= UInt.MAX_VALUE.toULong())
             } }
-            (requiredWords + optionalWords).forEach { key -> status[key]?.takeUnless { it == JsonNull }?.let {
-                val text = status.strictString(key)
-                require(text.isNotEmpty() && text.toByteArray().size <= 32 && text.none { ch -> ch.code < 32 || ch.code == 127 })
-            } }
+            fun word(key: String): String? = status[key]?.takeUnless { it == JsonNull }?.let { status.strictString(key).also { text -> require(token.matches(text)) } }
+            (requiredWords + optionalWords).forEach { word(it) }
             booleans.forEach { require(!status.getValue(it).jsonPrimitive.isString && status.getValue(it).jsonPrimitive.booleanOrNull != null) }
             status["active_encode_candidate_id"]?.takeUnless { it == JsonNull }?.let { require(status.strictString("active_encode_candidate_id").matches(Regex("[0-9a-f]{32}"))) }
-            status["server_ready_seconds"]?.takeUnless { it == JsonNull }?.jsonPrimitive?.let {
-                val number = it.doubleOrNull; require(!it.isString && number != null && number.isFinite() && number >= 0)
+            val readySeconds = status["server_ready_seconds"]?.takeUnless { it == JsonNull }?.jsonPrimitive?.let {
+                val number = it.doubleOrNull; require(!it.isString && number != null && number.isFinite() && number >= 0); number
             }
-            val height = status.getValue("target_height").jsonPrimitive.longOrNull
+            fun long(key: String): Long? = status[key]?.takeUnless { it == JsonNull }?.jsonPrimitive?.longOrNull
+            fun flag(key: String): Boolean = status.getValue(key).jsonPrimitive.boolean
+            val height = long("target_height")
             require(height != null && height in 1..16384)
-            return SharedPlaybackStatus(status, height, status.strictString("encoder"), status.strictString("producer_state"))
+            val metrics = SharedVodMetrics(
+                targetHeight = height, encoder = word("encoder")!!, playlistShape = word("playlist_shape")!!,
+                producerState = word("producer_state")!!, serverReadyState = word("server_ready_state")!!,
+                producerHold = word("producer_hold"), controlDemand = word("control_demand"), renderState = word("render_state"),
+                aheadSeconds = long("ahead_seconds"), reportedPositionMs = long("reported_position_ms"), clientRunwayMs = long("client_runway_ms"),
+                serverReadySeconds = readySeconds, deliveredBytes = long("delivered_bytes")!!, deliveredIdleMs = long("delivered_idle_ms")!!,
+                httpWaitCount = status.getValue("http_wait_count").jsonPrimitive.content.toULong(),
+                admitted = flag("admitted"), suspended = flag("suspended"), final = flag("final"),
+                statusGeneratedUnixMs = long("status_generated_unix_ms")!!,
+            )
+            return SharedPlaybackStatus(playback.sessionId, metrics)
         }
     }
 }

@@ -9162,7 +9162,7 @@ final class PlayerController: ObservableObject {
     }
 
     /// False when the selection could not be resolved onto a real option.
-    private static func selectNativeSubtitle(
+    static func selectNativeSubtitle(
         _ index: Int?,
         tracks: [SubtitleTrack],
         in group: AVMediaSelectionGroup,
@@ -10888,93 +10888,412 @@ extension PlayerController: PreparedSuccessorHost {
 
 /// Separate fixed Shared owner: no Local file/history/recovery dispatch is
 /// reachable from this controller. The server retains physical ownership.
+///
+/// One owned operation holds the player at a time — the Start, a control
+/// exchange, a reopen — so a viewer action never races the attachment it acts
+/// on, and `stop()` joins whatever is in flight before it releases B sessions.
+/// Every B session this controller started and no longer plays is listed in
+/// `unreleased` until its DELETE has been sent, including one whose release
+/// was interrupted by `stop()` cancelling the operation.
 @MainActor
 final class SharedPlayerController: ObservableObject {
+    private enum Operation {
+        case start
+        case control(SharedControlIntent)
+        case change(SharedDirectedChange)
+        case restartDirect(session: String)
+    }
     let player = AVPlayer()
-    @Published private(set) var playback: SharedStartedPlayback?
+    @Published private(set) var playback: SharedStartedMedia?
+    @Published private(set) var plan: SharedPlaybackPlan?
     @Published private(set) var failure: String?
+    @Published private(set) var notice: String?
     @Published private(set) var starting = false
+    @Published private(set) var busy = false
+    @Published private(set) var playing = false
     @Published private(set) var statusSummary: String?
     private var client: SharedDecisionClient?
-    private var plan: SharedPlaybackPlan?
-    private var startTask: Task<Void, Never>?
+    private var channel: SharedControlChannel?
+    /// Stable for this player; B's tuple is per session, this is per viewer.
+    private let clientInstanceId = UUID().uuidString.lowercased()
+    private var operation: Task<Void, Never>?
+    private var operationSerial = 0
     private var progressTask: Task<Void, Never>?
+    private var unreleased: [SharedStartedMedia] = []
     private var timeObserver: Any?
+    private var ticks = 0
+    private var lastPositionMs = 0
     private var authorizationObserver: UUID?
-    private var completionObserver: NSObjectProtocol?
+    private var itemObservers: [NSObjectProtocol] = []
+    private var statusObservation: NSKeyValueObservation?
+    /// B answered 410 to a pause: the item stays paused and the next play or
+    /// seek starts fresh at its position.
+    private var sessionEnded = false
+    /// One fresh Start per attachment after B lost the session. A new
+    /// attachment earns it again when it reaches its own timeline.
+    private var restartAllowance = false
     private var closing = false
+
+    var isDirect: Bool { playback?.isDirect == true }
+
     func start(_ plan: SharedPlaybackPlan) async {
-        guard self.plan == nil else { return }
-        self.plan = plan; starting = true; closing = false
-        let task = Task { await performStart(plan) }
-        startTask = task
-        await task.value
-        startTask = nil
+        guard self.plan == nil, !closing else { return }
+        self.plan = plan; starting = true
+        player.appliesMediaSelectionCriteriaAutomatically = false
+        authorizationObserver = Session.shared.observeAuthorizationChanges { [weak self] _ in
+            Task { @MainActor in await self?.stop() }
+        }.id
+        await run(.start)
     }
-    private func performStart(_ plan: SharedPlaybackPlan) async {
-        do {
-            let client = try SharedDecisionClient(); self.client = client
-            let started = try await client.start(context: plan.subject.context, request: plan.request)
-            starting = false
-            playback = started
-            if closing { try? await client.end(playback: started); playback = nil; return }
-            let url = try client.playlistURL(playback: started)
-            let item = AVPlayerItem(url: url)
-            player.replaceCurrentItem(with: item)
-            completionObserver = NotificationCenter.default.addObserver(forName: .AVPlayerItemDidPlayToEndTime, object: item, queue: .main) { [weak self] _ in
-                Task { @MainActor in await self?.stop(watched: true) }
-            }
-            authorizationObserver = Session.shared.observeAuthorizationChanges { [weak self] _ in
-                Task { @MainActor in await self?.stop() }
-            }.id
-            if plan.subject.resumeMs > 0 {
-                await player.seek(to: CMTime(seconds: Double(plan.subject.resumeMs) / 1000, preferredTimescale: 1000), toleranceBefore: .zero, toleranceAfter: .zero)
-            }
-            guard !closing else { return }
-            player.play()
-            timeObserver = player.addPeriodicTimeObserver(forInterval: CMTime(seconds: 10, preferredTimescale: 1000), queue: .main) { [weak self] _ in
-                Task { @MainActor in self?.reportProgress() }
-            }
-        } catch {
-            starting = false
-            if !closing { failure = error.localizedDescription }
+
+    /// Seek, pause or play. On HLS B accepts it first; on direct play there is
+    /// no control route (Local or shared), so the renderer is the whole state.
+    func control(_ intent: SharedControlIntent) async { await run(.control(intent)) }
+
+    /// Quality, audio or subtitle. B declines a directed change on a shared
+    /// session with `preparation: "none"`, and the answer is a fresh Start.
+    func change(_ change: SharedDirectedChange) async { await run(.change(change)) }
+
+    func currentPositionMs() -> Int { positionMs().map { Int($0) } ?? lastPositionMs }
+
+    private func run(_ op: Operation) async {
+        guard operation == nil, !closing else { return }
+        operationSerial += 1
+        let serial = operationSerial
+        busy = true
+        let task = Task { await self.perform(op) }
+        operation = task
+        await task.value
+        if operationSerial == serial, !closing { operation = nil; busy = false }
+    }
+
+    private func perform(_ op: Operation) async {
+        switch op {
+        case .start: await performStart()
+        case .control(let intent): await performControl(intent)
+        case .change(let change): await performChange(change)
+        case .restartDirect(let session): await restartDirect(session)
         }
     }
+
+    private func performStart() async {
+        guard let plan else { return }
+        do {
+            let client = try SharedDecisionClient(); self.client = client
+            try await attach(plan, client: client, play: true, predecessor: nil)
+        } catch {
+            if !closing, !(error is CancellationError) { failure = error.localizedDescription }
+        }
+        starting = false
+    }
+
+    /// Start `plan`, put its media on the renderer at the plan's position, and
+    /// only then release `predecessor`. A failed successor leaves the
+    /// predecessor attached and serving.
+    private func attach(_ plan: SharedPlaybackPlan, client: SharedDecisionClient, play: Bool,
+                        predecessor: SharedStartedMedia?) async throws {
+        let media = try await client.startMedia(context: plan.subject.context, request: plan.request)
+        let url: URL
+        var nextChannel: SharedControlChannel?
+        do {
+            try Task.checkCancellation()
+            guard !closing else { throw CancellationError() }
+            switch media {
+            case .hls(let started):
+                url = try client.playlistURL(playback: started)
+                var capabilities = Caps.controlCapabilities()
+                capabilities.dualPlayerPreparation = false
+                nextChannel = try SharedControlChannel(playback: started, clientInstanceId: clientInstanceId,
+                                                       capabilities: capabilities)
+            case .direct(let direct):
+                url = try client.directURL(direct)
+            }
+        } catch {
+            unreleased.append(media); await releaseUnreleased(client)
+            throw error
+        }
+        // Direct play reads the signed alias with no account header.
+        let item = AVPlayerItem(url: url)
+        observe(item)
+        player.replaceCurrentItem(with: item)
+        self.plan = plan; playback = media; channel = nextChannel
+        statusSummary = nil; sessionEnded = false; notice = nil
+        if let predecessor { unreleased.append(predecessor) }
+        let resume = plan.subject.resumeMs
+        lastPositionMs = Int(resume)
+        if resume > 0 {
+            await player.seek(to: CMTime(seconds: Double(resume) / 1000, preferredTimescale: 1000),
+                              toleranceBefore: .zero, toleranceAfter: .zero)
+        }
+        await applySubtitle(plan, item: item)
+        await releaseUnreleased(client)
+        guard !closing, player.currentItem === item else { return }
+        if play { player.play() } else { player.pause() }
+        playing = play
+        installTimeObserver()
+    }
+
+    /// DELETE every B session this controller holds but no longer plays. An
+    /// interrupted DELETE stays listed for `stop()`.
+    private func releaseUnreleased(_ client: SharedDecisionClient) async {
+        while let media = unreleased.first {
+            try? await client.end(media: media)
+            if Task.isCancelled { return }
+            unreleased.removeFirst()
+        }
+    }
+
+    private func applySubtitle(_ plan: SharedPlaybackPlan, item: AVPlayerItem) async {
+        guard let group = try? await item.asset.loadMediaSelectionGroup(for: .legible),
+              player.currentItem === item else { return }
+        _ = PlayerController.selectNativeSubtitle(plan.rawSubtitleIndex, tracks: plan.decision.presentation.subtitles ?? [],
+                                              in: group, of: item)
+    }
+
+    private func performControl(_ intent: SharedControlIntent) async {
+        guard let media = playback, let client, let plan else { return }
+        notice = nil
+        switch media {
+        case .direct:
+            await applyRenderer(intent)
+        case .hls(let started):
+            if sessionEnded {
+                if intent == .pause { return }
+                await reopen(at: target(intent), change: nil, play: intent == .play)
+                return
+            }
+            guard var channel else { return }
+            do {
+                let request = try channel.request(intent, sample: sample(), selection: try plan.frozenControlSelection())
+                self.channel = channel
+                let outcome = try await exchange(request, playback: started, channel: channel, client: client)
+                switch SharedControlStep.after(intent, outcome: outcome, playing: playing, restartAllowed: restartAllowance) {
+                case .apply: await applyRenderer(intent)
+                case .pauseEnded: player.pause(); playing = false; sessionEnded = true
+                case .reopen(let play):
+                    restartAllowance = false
+                    await reopen(at: target(intent), change: nil, play: play)
+                case .ended: failure = "This Shared session ended."
+                case .refused: notice = "The Shared server did not accept this control. Try again."
+                }
+            } catch is CancellationError {
+            } catch {
+                notice = "The Shared server did not accept this control. Try again."
+            }
+        }
+    }
+
+    private func performChange(_ change: SharedDirectedChange) async {
+        guard let media = playback, let client, let plan else { return }
+        notice = nil
+        switch media {
+        case .direct:
+            // Raw bytes have no rendition to change: any real change is a
+            // fresh session, which leaves direct play for copy or encoded HLS.
+            guard (change.quality ?? plan.rawQuality) != plan.rawQuality
+                    || (change.audioIndex ?? plan.rawAudioIndex) != plan.rawAudioIndex
+                    || (change.subtitleIndex ?? plan.rawSubtitleIndex) != plan.rawSubtitleIndex else { return }
+            await reopen(at: currentPositionMs(), change: change, play: playing)
+        case .hls(let started):
+            if sessionEnded { await reopen(at: currentPositionMs(), change: change, play: false); return }
+            guard var channel else { return }
+            do {
+                let selection = try plan.directedSelection(change)
+                guard selection != (try plan.frozenControlSelection()) else { return }
+                let request = try channel.request(nil, sample: sample(), selection: selection)
+                self.channel = channel
+                let outcome = try await exchange(request, playback: started, channel: channel, client: client)
+                // B never carries a Source successor, so an evaluated answer is
+                // a decline: reopen at once, at the position sampled when it
+                // arrived. Absence is never a decline.
+                switch SharedControlStep.afterChange(outcome, playing: playing) {
+                case .reopen(let play): await reopen(at: currentPositionMs(), change: change, play: play)
+                default:
+                    if case .accepted = outcome { notice = "This change is not available for this Shared title." }
+                    else { notice = "The Shared server did not accept this change. Try again." }
+                }
+            } catch is CancellationError {
+            } catch {
+                notice = error.localizedDescription
+            }
+        }
+    }
+
+    /// One exchange, replayed once with identical bytes when B asks for it.
+    private func exchange(_ request: SharedControlRequest, playback: SharedStartedPlayback,
+                          channel: SharedControlChannel, client: SharedDecisionClient) async throws -> SharedControlOutcome {
+        let first = try await client.control(playback: playback, channel: channel, request: request)
+        guard case .retry(let delay) = first else { return first }
+        try await Task.sleep(nanoseconds: UInt64(delay) * 1_000_000)
+        return try await client.control(playback: playback, channel: channel, request: request)
+    }
+
+    private func applyRenderer(_ intent: SharedControlIntent) async {
+        switch intent {
+        case .play: player.play(); playing = true
+        case .pause: player.pause(); playing = false; lastPositionMs = currentPositionMs()
+        case .seek(let ms):
+            await player.seek(to: CMTime(seconds: Double(max(0, ms)) / 1000, preferredTimescale: 1000),
+                              toleranceBefore: .zero, toleranceAfter: .zero)
+            lastPositionMs = currentPositionMs()
+        }
+    }
+
+    /// A fresh shared Start of the same file at `positionMs` with no lineage
+    /// fields, under the same playback id. The ordered watch order is keyed by
+    /// the Source item, so the next beat continues the sequence on the new B
+    /// session. The predecessor is released once the new one is attached; B
+    /// also supersedes it when the new session publishes.
+    private func reopen(at positionMs: Int, change: SharedDirectedChange?, play: Bool) async {
+        guard let plan, let client, let predecessor = playback else { return }
+        await progressTask?.value
+        do {
+            let quality = change?.quality ?? plan.rawQuality
+            let audio = change?.audioIndex ?? plan.rawAudioIndex
+            let subtitle = change?.subtitleIndex ?? plan.rawSubtitleIndex
+            let subject = SharedPlaybackSubject(context: plan.subject.context, title: plan.subject.title,
+                                                resumeMs: Int64(max(0, positionMs)), watchSequence: plan.subject.watchSequence)
+            let decided = try await client.decision(context: subject.context,
+                selection: PrePlaySelection(audioIndex: audio, subtitleIndex: subtitle ?? PrePlaySelection.subtitleOff),
+                quality: quality)
+            let next = try SharedPlaybackPlan.make(subject: subject, decision: decided.decision, caps: decided.caps,
+                quality: quality, audioIndex: audio, subtitleIndex: subtitle, playbackId: plan.request.playbackId)
+            try await attach(next, client: client, play: play, predecessor: predecessor)
+        } catch is CancellationError {
+        } catch {
+            notice = "This Shared change could not start: \(error.localizedDescription)"
+        }
+    }
+
+    private func restartDirect(_ session: String) async {
+        guard case .direct(let direct)? = playback, direct.start.sessionId == session, let client else { return }
+        let gone = (try? await client.directSessionGone(direct)) == true
+        guard gone, restartAllowance else {
+            failure = "Shared direct play stopped."
+            return
+        }
+        restartAllowance = false
+        await reopen(at: lastPositionMs, change: nil, play: true)
+    }
+
+    private func target(_ intent: SharedControlIntent) -> Int {
+        if case .seek(let ms) = intent { return ms }
+        return currentPositionMs()
+    }
+
+    private func sample() -> SharedRendererSample {
+        let position = currentPositionMs()
+        var from: Int?, through = position
+        if let item = player.currentItem {
+            for value in item.loadedTimeRanges {
+                let range = value.timeRangeValue
+                let start = range.start.seconds * 1000, end = range.end.seconds * 1000
+                guard start.isFinite, end.isFinite, start <= Double(position), end >= Double(position) else { continue }
+                from = Int(start.rounded(.down)); through = max(position, Int(end.rounded(.down)))
+            }
+        }
+        return SharedRendererSample(positionMs: position, bufferedFromMs: from, bufferedThroughMs: through,
+                                    playing: player.timeControlStatus != .paused)
+    }
+
+    private func observe(_ item: AVPlayerItem) {
+        for observer in itemObservers { NotificationCenter.default.removeObserver(observer) }
+        itemObservers = [
+            NotificationCenter.default.addObserver(forName: .AVPlayerItemDidPlayToEndTime, object: item, queue: .main) { [weak self] _ in
+                Task { @MainActor in await self?.stop(watched: true) }
+            },
+            NotificationCenter.default.addObserver(forName: .AVPlayerItemFailedToPlayToEndTime, object: item, queue: .main) { [weak self, weak item] _ in
+                Task { @MainActor in if let item { self?.rendererFailed(item) } }
+            },
+        ]
+        statusObservation = item.observe(\.status, options: [.new]) { [weak self] item, _ in
+            let status = item.status
+            Task { @MainActor in
+                guard let self, self.player.currentItem === item else { return }
+                // The attachment reached its own timeline: it earns one fresh
+                // Start for a session B later loses.
+                if status == .readyToPlay { self.restartAllowance = true }
+                if status == .failed { self.rendererFailed(item) }
+            }
+        }
+    }
+
+    private func rendererFailed(_ item: AVPlayerItem) {
+        guard !closing, player.currentItem === item else { return }
+        if case .direct(let direct)? = playback {
+            let session = direct.start.sessionId
+            Task { await self.run(.restartDirect(session: session)) }
+        } else {
+            failure = item.error?.localizedDescription ?? "Shared playback stopped."
+        }
+    }
+
+    private func installTimeObserver() {
+        guard timeObserver == nil else { return }
+        timeObserver = player.addPeriodicTimeObserver(forInterval: CMTime(seconds: 1, preferredTimescale: 1000), queue: .main) { [weak self] _ in
+            Task { @MainActor in
+                guard let self, let position = self.positionMs() else { return }
+                self.lastPositionMs = Int(position)
+                self.ticks += 1
+                if self.ticks % 10 == 0 { self.reportProgress() }
+            }
+        }
+    }
+
     private func positionMs() -> Int64? {
         let value = player.currentTime().seconds * 1000
         guard value.isFinite, value >= 0, value <= 9_007_199_254_740_991 else { return nil }
         return Int64(value.rounded(.down))
     }
+
+    private func durationMs(_ media: SharedStartedMedia) -> Int64? {
+        if let duration = media.durationMs { return duration }
+        let seconds = player.currentItem?.duration.seconds ?? .nan
+        guard seconds.isFinite, seconds >= 0 else { return nil }
+        return Int64((seconds * 1000).rounded(.down))
+    }
+
     private func reportProgress() {
-        guard !closing, progressTask == nil, let client, let playback, let plan,
+        guard !closing, progressTask == nil, operation == nil, let client, let media = playback, let plan,
               let position = positionMs() else { return }
+        let duration = durationMs(media)
         progressTask = Task { [weak self] in
-            _ = try? await client.orderedProgress(playback: playback, initialWatchSequence: plan.subject.watchSequence,
-                positionMs: position, durationMs: playback.start.response.durationMs.map(Int64.init))
-            if self?.closing == false { self?.statusSummary = (try? await client.status(playback: playback))?.summary }
+            _ = try? await client.orderedProgress(media: media, initialWatchSequence: plan.subject.watchSequence,
+                                                  positionMs: position, durationMs: duration)
+            // Status belongs to the playback it was read for: a reopen in
+            // between makes the answer stale, and direct play has none.
+            if case .hls(let started) = media, self?.closing == false {
+                let status = try? await client.status(playback: started)
+                if self?.playback?.sessionId == started.start.response.sessionId { self?.statusSummary = status?.summary }
+            }
             self?.progressTask = nil
         }
     }
+
     func stop(watched: Bool = false) async {
         guard !closing else { return }; closing = true
-        player.pause()
+        player.pause(); playing = false
         if let timeObserver { player.removeTimeObserver(timeObserver); self.timeObserver = nil }
-        if let completionObserver { NotificationCenter.default.removeObserver(completionObserver); self.completionObserver = nil }
+        for observer in itemObservers { NotificationCenter.default.removeObserver(observer) }
+        itemObservers = []; statusObservation = nil
         if let authorizationObserver { Session.shared.removeAuthorizationObserver(authorizationObserver); self.authorizationObserver = nil }
-        startTask?.cancel(); await startTask?.value
+        if let operation { operation.cancel(); await operation.value }
+        operation = nil; busy = false
         await progressTask?.value
-        if let client, let playback, let plan {
+        if let client, let media = playback, let plan {
             if let position = positionMs() {
-                let result = try? await client.orderedProgress(playback: playback, initialWatchSequence: plan.subject.watchSequence,
-                    positionMs: position, durationMs: playback.start.response.durationMs.map(Int64.init), watched: watched)
+                let duration = durationMs(media)
+                let result = try? await client.orderedProgress(media: media, initialWatchSequence: plan.subject.watchSequence,
+                    positionMs: position, durationMs: duration, watched: watched)
                 if result == .previousBeatAcknowledged {
-                    _ = try? await client.orderedProgress(playback: playback, initialWatchSequence: plan.subject.watchSequence,
-                        positionMs: position, durationMs: playback.start.response.durationMs.map(Int64.init), watched: watched)
+                    _ = try? await client.orderedProgress(media: media, initialWatchSequence: plan.subject.watchSequence,
+                        positionMs: position, durationMs: duration, watched: watched)
                 }
             }
             player.replaceCurrentItem(with: nil)
-            try? await client.end(playback: playback)
+            unreleased.append(media)
         }
-        player.replaceCurrentItem(with: nil); playback = nil; statusSummary = nil
+        if let client { await releaseUnreleased(client) }
+        player.replaceCurrentItem(with: nil); playback = nil; channel = nil; statusSummary = nil
     }
 }

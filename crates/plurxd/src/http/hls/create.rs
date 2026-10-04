@@ -4144,14 +4144,10 @@ pub(crate) struct PreparedSourcePlayback {
     file: MediaFile,
     resolved: ResolvedPlan,
     source_fingerprint: String,
-    original_selection: Option<plurx_core::playback::DesiredSelection>,
     decision: super::super::stream::DecisionResponse,
 }
 #[allow(dead_code)]
 impl PreparedSourcePlayback {
-    pub(crate) fn original_selection(&self) -> Option<&plurx_core::playback::DesiredSelection> {
-        self.original_selection.as_ref()
-    }
     pub(crate) fn request(&self) -> &crate::transcode::SessionRequest {
         &self.resolved.request
     }
@@ -4425,7 +4421,6 @@ pub(crate) async fn prepare_source_playback(
         unix_ms(),
     );
     let hdr10_requested = review.hdr10;
-    let original_selection = source_original_selection(&body);
     let resolved = resolve_plan_for_principal(
         FilePlanInputs {
             snapshot: Some(&snapshot),
@@ -4475,54 +4470,11 @@ pub(crate) async fn prepare_source_playback(
     );
     Ok(PreparedSourcePlayback {
         source_fingerprint,
-        original_selection,
         target,
         principal,
         file,
         resolved,
         decision,
-    })
-}
-
-// Legacy Source create has no directed codec/range policy: those absent
-// policies are Auto. Freeze the original ask before engine normalization.
-fn source_original_selection(
-    body: &CreateSession,
-) -> Option<plurx_core::playback::DesiredSelection> {
-    use plurx_core::playback::{
-        DesiredCodec, DesiredDynamicRange, DesiredQuality, DesiredSelection, DesiredSubtitles,
-    };
-    if let Some(intent) = &body.intent {
-        return Some(intent.selection);
-    }
-    let quality = if body.quality_auto.unwrap_or(body.height.is_none()) {
-        DesiredQuality::Auto {
-            height: body.height,
-            candidate_id: None,
-        }
-    } else if body.copy == Some(true) {
-        DesiredQuality::Original
-    } else {
-        DesiredQuality::Manual {
-            height: body.height?,
-        }
-    };
-    Some(DesiredSelection {
-        quality,
-        codec: DesiredCodec::Auto,
-        dynamic_range: DesiredDynamicRange::Auto,
-        audio_track: body.audio,
-        audio_offset_ms: body.audio_offset_ms.unwrap_or(0),
-        subtitles: if let Some(track) = body.subtitle_burn {
-            DesiredSubtitles::Burn { track }
-        } else if body.native_subtitles == Some(true) {
-            body.subtitle
-                .map_or(DesiredSubtitles::Off, |track| DesiredSubtitles::Native {
-                    track,
-                })
-        } else {
-            DesiredSubtitles::Off
-        },
     })
 }
 

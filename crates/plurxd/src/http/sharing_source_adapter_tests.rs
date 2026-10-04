@@ -201,6 +201,8 @@ async fn actual_actor_adapters(encoded: bool) {
             json!({"code":"stale_control","retry_after_ms":null})
         );
         assert_eq!(refused["session_id"], body["session_id"]);
+        // A changed ask is accepted on a new sequence (answered
+        // `preparation: none`); reusing the accepted one is a stale fence.
         let mut directed = control.clone();
         directed["control"]["selection"]["audio_track"] = json!(0);
         let response = actual_resource_request(
@@ -211,10 +213,36 @@ async fn actual_actor_adapters(encoded: bool) {
             serde_json::to_vec(&directed).expect("actual adapter fixture observation"),
         )
         .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let bytes = axum::body::to_bytes(response.into_body(), 128 * 1024)
+            .await
+            .expect("actual adapter refusal");
+        let refused: Value = serde_json::from_slice(&bytes).expect("actual adapter refusal");
+        assert_eq!(
+            refused["refusal"],
+            json!({"code":"stale_control","retry_after_ms":null})
+        );
+        // An acknowledgement names a successor this Source never offered.
+        let mut acknowledged = control.clone();
+        acknowledged["control"]["sequence"] = json!(index + 2);
+        acknowledged["control"]["render_state"] = json!("rendering");
+        acknowledged["control"]["seek_target_ms"] = Value::Null;
+        acknowledged["control"]["acknowledgement"] = json!({
+            "action_id":uuid::Uuid::new_v4().to_string(),"state":"metadata_ready",
+            "buffered_through_ms":null,"committed_media_origin_ms":null,"first_frame_unix_ms":null
+        });
+        let response = actual_resource_request(
+            address,
+            h2,
+            &format!("{base}/control"),
+            fixture.headers.clone(),
+            serde_json::to_vec(&acknowledged).expect("actual adapter fixture observation"),
+        )
+        .await;
         assert_eq!(
             response.status(),
             StatusCode::UNPROCESSABLE_ENTITY,
-            "directed mutation stays unsupported"
+            "an acknowledgement without a Source slot stays unsupported"
         );
         let mut changed_recipe = body.clone();
         changed_recipe["session"]["height"] = json!(216);
