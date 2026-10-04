@@ -26,11 +26,15 @@ pub(crate) const QUALITY_CANDIDATES_V2_PATH: &str = "/internal/v2/media/quality-
 pub(crate) const QUALITY_CANDIDATES_PATH: &str = "/internal/v1/media/quality-candidates";
 pub(crate) const QUALITY_CATALOG_DEADLINE: Duration = Duration::from_secs(2);
 pub(crate) const OFFERS_PATH: &str = "/internal/v1/media/offers";
-/// Protocol 8 preserves canonical capability and planning bindings at dispatch,
-/// in addition to pre-filter HEVC proof and source-fenced copy VOD. Exact-version
-/// placement excludes strict older workers. Old ingress and sessions must be
-/// drained on rollout.
-pub(crate) const PROTOCOL_VERSION: i64 = 8;
+/// Protocol 9 adds the resolved audio claim/delivery to `SessionRequest`,
+/// `QualityCatalogRequest` and `RemoteStartResponse`, all strict
+/// (`deny_unknown_fields`) envelopes; protocol 8 preserved canonical capability
+/// and planning bindings at dispatch, in addition to pre-filter HEVC proof and
+/// source-fenced copy VOD. Exact-version placement excludes strict older
+/// workers, so a one-node-at-a-time rollout places locally across the version
+/// line instead of failing mid-start. Old ingress and sessions must be drained
+/// on rollout.
+pub(crate) const PROTOCOL_VERSION: i64 = 9;
 pub(crate) const SNAPSHOT_INTERVAL: Duration = Duration::from_secs(10);
 pub(crate) const SNAPSHOT_DEADLINE: Duration = Duration::from_secs(2);
 pub(crate) const SNAPSHOT_EXPIRY: Duration = Duration::from_secs(15);
