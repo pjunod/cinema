@@ -83,6 +83,16 @@ pub struct Items<T> {
     pub start_index: u64,
 }
 
+/// The Jellyfin server release whose protocol this facade implements: the J0
+/// reference baseline both pinned clients were measured against. Clients read
+/// `Version` as the Jellyfin protocol version to pick API behaviour and to
+/// refuse servers below their supported minimum, so Plurx's own build version
+/// (0.x) there reads as an unsupported server. Plurx identity stays in
+/// `ServerName` and in Plurx's own diagnostics.
+pub const PROTOCOL_BASELINE_VERSION: &str = "10.11.11";
+/// The product the baseline server reports alongside that version.
+pub const PROTOCOL_BASELINE_PRODUCT: &str = "Jellyfin Server";
+
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "PascalCase")]
 pub struct PublicSystemInfo {
@@ -182,6 +192,22 @@ pub struct AuthenticationResult {
     pub user: User,
     pub access_token: String,
     pub server_id: String,
+}
+
+#[cfg(test)]
+mod protocol_baseline_tests {
+    #[test]
+    fn advertised_protocol_version_is_the_measured_j0_baseline() {
+        let manifest: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../docs/clients/jellyfin/baseline-manifest.json"
+        ))
+        .expect("J0 baseline manifest");
+        assert_eq!(
+            manifest["protocol_baseline"]["server_version"],
+            super::PROTOCOL_BASELINE_VERSION,
+            "the facade must advertise the version both pinned clients were measured against"
+        );
+    }
 }
 
 #[cfg(test)]

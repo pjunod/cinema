@@ -3216,7 +3216,7 @@ mint. Media resource cleanup belongs to the later playback adapter.
 | Method | Path | Authority and response |
 |---|---|---|
 | GET | `/jellyfin/` | JSON 404 |
-| GET | `/jellyfin/System/Info/Public` | Enabled switch; native server identity/name/version and setup status |
+| GET | `/jellyfin/System/Info/Public` | Enabled switch; native server identity/name and setup status; `Version`/`ProductName` are the tested protocol baseline (Jellyfin Server 10.11.11, J0), never the Plurx build |
 | POST | `/jellyfin/Users/AuthenticateByName` | Shared native password verification/throttle; `Username` and `Pw`; supported client metadata and device ID; exact enabled generation |
 | GET | `/jellyfin/Users/Me` | Compatibility token; authenticated user projection |
 | GET | `/jellyfin/Users/{user_id}` | Compatibility token; exact own permanent user ID |
