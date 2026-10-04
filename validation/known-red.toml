@@ -11,6 +11,13 @@ entries = []
 # tests. Their exact commands supply a disposable namespace; they are never
 # counted as known-red, and never qualify a production Tailscale topology.
 [[fixtures]]
+test = "crates/plurxd/src/http/shared_receiver_fixture.rs::http::shared_receiver_fixture::sharing_receiver_real_pinned_source_h1_b_h1_h2_start_resources_and_confirmed_end"
+owner = "sharing"
+reason = "Real production-selected B and Source voters plus actual FFmpeg Start, resources and confirmed End require a disposable pinned TLS CGNAT namespace."
+requires = "Linux disposable CGNAT namespace; PLURX_SHARING_FIXTURE_IP"
+command = "PLURX_SHARING_FIXTURE_IP=100.127.89.2 cargo test --locked -p plurxd --bin plurxd http::shared_receiver_fixture::sharing_receiver_real_pinned_source_h1_b_h1_h2_start_resources_and_confirmed_end -- --ignored --exact --nocapture"
+
+[[fixtures]]
 test = "crates/plurxd/src/http/mod.rs::http::tests::sharing_pinned_transport_recovers_committed_claim_and_rotation_after_restart"
 owner = "sharing"
 reason = "Pinned transport response-loss recovery requires an isolated numeric CGNAT fixture, not the host network."
