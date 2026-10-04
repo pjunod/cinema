@@ -802,6 +802,30 @@ pub(crate) async fn run_observed_retained<R: AsyncRead + Unpin>(
                         ));
                     }
                     let video_timescale = init_video.timescale;
+                    // FFmpeg 8 repeats one decoder configuration as a second
+                    // sample description (see the fmp4 function). Collapse it
+                    // here, before the converter and the record removal read
+                    // the init; a genuinely different second description is
+                    // left alone and refused below exactly as before.
+                    match fmp4::collapse_equivalent_hevc_sample_entries(&mut init) {
+                        Ok(0) => {}
+                        Ok(removed) => tracing::info!(
+                            session = %crate::transcode::session_log_id(session_id),
+                            removed,
+                            "collapsed repeated HEVC sample descriptions in the HLS init segment"
+                        ),
+                        Err(fmp4::Fmp4Error::Malformed(reason)) => {
+                            return Outcome::ReaderFailed {
+                                reason: format!("preparing the HLS init segment: {reason}"),
+                                counts: SegmentCounts::default(),
+                            };
+                        }
+                        Err(error) => {
+                            return Outcome::Unsupported(format!(
+                                "preparing the HLS init segment: {error}"
+                            ));
+                        }
+                    }
                     if video.converts_dolby_vision() {
                         match crate::dvpipe::Converter::for_init(&init) {
                             Ok(ready) => converter = Some(ready),
@@ -1785,6 +1809,43 @@ mod tests {
         assert!(reason.contains("2 HEVC sample entries"), "{reason}");
         assert!(!dir.path().join("init.mp4").exists());
         assert!(!dir.path().join("index.m3u8").exists());
+    }
+
+    /// Opt-in, end to end on a real jellyfin-ffmpeg 8 copy pipe (production
+    /// arguments, `extract_extradata` in the chain): the repeated sample
+    /// description is collapsed and the session publishes a one-description
+    /// init instead of asking for the fallback.
+    /// `PLURX_FFMPEG8_MULTI_STSD_PIPE=<file.mp4>`.
+    #[tokio::test]
+    #[ignore = "needs a captured ffmpeg 8 copy pipe"]
+    async fn captured_ffmpeg8_copy_pipe_publishes_one_description() {
+        let path = std::env::var("PLURX_FFMPEG8_MULTI_STSD_PIPE").expect("set the capture path");
+        let feed = std::fs::read(path).expect("reading the capture");
+        let dir = crate::test_tempdir().expect("tempdir");
+        let outcome = run(
+            &feed[..],
+            dir.path().to_path_buf(),
+            "test",
+            brisk(),
+            &plain().0,
+            plain().1,
+            None,
+        )
+        .await;
+        let Outcome::Completed(counts) = outcome else {
+            panic!("the ffmpeg 8 pipe did not publish: {outcome:?}");
+        };
+        assert!(counts.segments >= 2, "{counts:?}");
+        let init = std::fs::read(dir.path().join("init.mp4")).expect("init.mp4");
+        let mut reader = fmp4::FragmentReader::new();
+        reader.push(&init);
+        let Some(fmp4::Unit::Init(init)) = reader.next_unit().expect("init parses") else {
+            panic!("init.mp4 is not an init");
+        };
+        assert_eq!(
+            fmp4::validate_hevc_sample_entries(&init).expect("valid"),
+            fmp4::HevcSampleEntryLayout::Single
+        );
     }
 
     /// The whole point, end to end: given a source that offers clean cut
