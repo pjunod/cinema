@@ -1866,25 +1866,95 @@ class DisplayAwareAutoEvidenceTest {
     @Test fun optionalOriginalReplanNeverBlocksAndIsServedOnceBesideThePlayingIncumbent() {
         val replan = AutoBoundaryReplan()
         val lifetime = Any()
-        assertFalse(replan.take(lifetime, 60_000L), "nothing armed, nothing owed")
+        val original = "original"
+        var asked = 0
+        val produce = { asked += 1; original }
+        assertNull(replan.take(lifetime, 60_000L, produce), "nothing armed, nothing owed")
         replan.arm(lifetime)
         // The incumbent is already playing; the re-plan waits for runway on
         // the ordinary Auto evaluation, not on the viewer.
-        assertFalse(replan.take(lifetime, AutoBoundaryReplan.AUTO_BOUNDARY_RUNWAY_MS - 1))
+        assertNull(replan.take(lifetime, AutoBoundaryReplan.AUTO_BOUNDARY_RUNWAY_MS - 1, produce))
         assertTrue(replan.isArmed, "short runway keeps the boundary owed")
-        assertTrue(replan.take(lifetime, AutoBoundaryReplan.AUTO_BOUNDARY_RUNWAY_MS))
+        assertEquals(0, asked, "no candidate is asked for without runway")
+        assertEquals(original, replan.take(lifetime, AutoBoundaryReplan.AUTO_BOUNDARY_RUNWAY_MS, produce))
         assertFalse(replan.isArmed)
-        assertFalse(replan.take(lifetime, 60_000L), "served exactly once")
+        assertNull(replan.take(lifetime, 60_000L, produce), "served exactly once")
+        assertEquals(1, asked)
 
         // A newer viewer edge renews the lifetime: the old boundary is stale
         // and is dropped, with no timer involved.
         replan.arm(lifetime)
-        assertFalse(replan.take(Any(), 60_000L))
+        assertNull(replan.take(Any(), 60_000L, produce))
         assertFalse(replan.isArmed)
         replan.arm(lifetime)
         replan.clear()
-        assertFalse(replan.take(lifetime, 60_000L))
+        assertNull(replan.take(lifetime, 60_000L, produce))
     }
+
+    @Test fun boundaryReplanIsSpentOnlyOnACandidate() {
+        // Runway alone does not consume the boundary: with no fresh transfer
+        // sample (or every original blocked) there is no candidate, and the
+        // re-plan stays owed for the next evaluation.
+        val replan = AutoBoundaryReplan()
+        val lifetime = Any()
+        replan.arm(lifetime)
+        repeat(3) {
+            assertNull(replan.take<String>(lifetime, 60_000L) { null })
+            assertTrue(replan.isArmed, "no candidate, nothing spent")
+        }
+        assertEquals("original", replan.take(lifetime, 60_000L) { "original" })
+        assertFalse(replan.isArmed)
+        // What ends an unserved boundary is an event, not a clock.
+        replan.arm(lifetime)
+        assertNull(replan.take<String>(lifetime, 60_000L) { null })
+        replan.clear()
+        assertNull(replan.take(lifetime, 60_000L) { "original" })
+    }
+
+    @Test fun boundaryOfferThatBuildsNothingIsWithdrawn() {
+        // Refuse, Same for a settled staging, a closed controller and an
+        // action without a playlist all leave the boundary owning Auto with
+        // no pipeline: that is the one case that must withdraw.
+        assertTrue(autoBoundaryOfferBuiltNothing(boundaryStillOwns = true, built = false, switched = false))
+        assertFalse(autoBoundaryOfferBuiltNothing(true, built = true, switched = false), "a primed successor settles itself")
+        assertFalse(autoBoundaryOfferBuiltNothing(true, built = false, switched = true), "a switched successor is on screen")
+        assertFalse(autoBoundaryOfferBuiltNothing(false, built = false, switched = false), "a newer owner already settled it")
+
+        val source = controllerSource()
+        val begin = source.substringAfter("private fun beginAutoBoundaryPreparation(")
+            .substringBefore("/** Put Auto back where the boundary found it")
+        val prepare = begin.indexOf("onPrepareAction(step.action)")
+        val check = begin.indexOf("autoBoundaryOfferBuiltNothing(autoBoundaryAttempt === boundary")
+        assertTrue(prepare in 0 until check, "the build is checked after the offer was handed over")
+        assertTrue(begin.substring(check).contains("withdrawAutoBoundary(boundary)"))
+        // A Start for the boundary's own candidate keeps the boundary across
+        // the release of a superseded pipeline, so the check above and the
+        // poll's ownership test still see it.
+        val start = source.substringAfter("is PreparationOffer.Start -> {").substringBefore("private fun startSuccessor(")
+        assertTrue(start.contains("if (boundary != null) autoBoundaryAttempt = boundary"))
+    }
+
+    @Test fun armedBoundaryReplanEndsWithStallRecoveryAndQualityChangeAndSkipsBlockedCandidates() {
+        val source = controllerSource()
+        val stall = source.substringAfter("private suspend fun onStall(").substringBefore("selectAutoStallRecoveryCandidate(observation,")
+        val cleared = stall.indexOf("autoBoundaryReplan.clear()")
+        assertTrue(cleared >= 0 && cleared < stall.indexOf("applyStallVerdict(verdict, event)"),
+            "every stall recovery (hold, downgrade, reopen) ends the armed re-plan")
+        val manual = source.substringAfter("fun prepareReplacement(").substringBefore("planReplacement.retain(onPrepared)")
+        assertTrue(manual.contains("autoBoundaryReplan.clear()"), "a viewer quality change ends the armed re-plan")
+        val seek = source.substringAfter("private fun enqueueSeek(").substringBefore("stallGuard.viewerSeek {")
+        assertTrue(seek.contains("autoBoundaryReplan.arm(viewerTransportLifetime)"), "a seek still arms it")
+        val candidate = source.substringAfter("private fun autoOriginalBoundaryCandidate(")
+            .substringBefore("private fun autoBoundaryOwnerIsCurrent(")
+        assertTrue(candidate.contains("(autoBlockedUntil[candidate.id] ?: 0L) <= now"),
+            "a blocked original is not offered by a boundary either")
+    }
+
+    private fun controllerSource(): String = listOf(
+        java.io.File("app/src/main/java/tv/plurx/app/player/Controller.kt"),
+        java.io.File("src/main/java/tv/plurx/app/player/Controller.kt"),
+        java.io.File("clients/android/app/src/main/java/tv/plurx/app/player/Controller.kt"),
+    ).firstOrNull(java.io.File::isFile)?.readText() ?: error("Controller.kt source not found")
 
     @Test fun viewerResumeAndSeekNeverWaitBehindTheOptionalOriginalStage() {
         val source = listOf(

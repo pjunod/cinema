@@ -1613,6 +1613,9 @@ class Controller internal constructor(
         onPrepared: (Long, PlaybackQuality) -> Unit,
     ) {
         resetAutoQualityBudgetForViewer()
+        // A viewer-chosen rung ends the original-first re-plan a previous
+        // boundary owed; Auto starts over from this selection.
+        autoBoundaryReplan.clear()
         autoDesiredCandidate = null
         playbackIntent.requestAutomaticCandidate(null, null)
         if (!playbackControlBootstrapFence.isActive()) return
@@ -2352,6 +2355,10 @@ class Controller internal constructor(
         if (!playbackControlBootstrapFence.isActive() || !presentationForeground) return
         if (!player.playWhenReady || player.playbackState == Player.STATE_ENDED) return
         if (kotlin.math.abs(realPosition() - positionMs) >= 250L) return
+        // The incumbent stalled: whatever recovery follows (a hold, a
+        // downgrade, a reopen), the original-first re-plan a viewer boundary
+        // armed is evidence-free now and is not carried into it.
+        autoBoundaryReplan.clear()
         if (verdict != null && applyStallVerdict(verdict, event)) return
         selectAutoStallRecoveryCandidate(observation,
             observedAtMs, observedAtMs + openStallTracker.remainingRecoveryMs(event, observedAtMs, observedAtMs))
@@ -3307,10 +3314,12 @@ class Controller internal constructor(
         // A viewer boundary re-plans original first, once, on the first
         // evaluation where the incumbent is established, playing and has the
         // runway a handoff needs. The incumbent is never held for it.
-        if (autoBoundaryReplan.take(viewerTransportLifetime, player.bufferedPosition - player.currentPosition)) {
-            autoOriginalBoundaryCandidate(now)?.let { chosen ->
-                if (beginAutoBoundaryPreparation(chosen, now)) return
-            }
+        // Without a fresh link proof there is no candidate, and the boundary
+        // stays owed for the next evaluation rather than being spent on nothing.
+        autoBoundaryReplan.take(viewerTransportLifetime, player.bufferedPosition - player.currentPosition) {
+            autoOriginalBoundaryCandidate(now)
+        }?.let { chosen ->
+            if (beginAutoBoundaryPreparation(chosen, now)) return
         }
         val target = autoPresentationTarget ?: return
         val policyCatalog = measuredCostCatalog()
@@ -3513,6 +3522,7 @@ class Controller internal constructor(
         return autoCatalog.filter { candidate ->
             candidate.id != current.id && candidate.hasValidIdentity && candidate.decoder_compatible &&
                 candidate.route == "remux" && candidate.id !in autoDecoderRejected &&
+                (autoBlockedUntil[candidate.id] ?: 0L) <= now &&
                 (tv.plurx.app.data.measuredCandidatePeak(candidate, autoMeasuredOutputs)?.let { link >= it * 1.8 }
                     ?: autoUnknownOriginalTrial(candidate, autoMeasuredOutputs))
         }.maxByOrNull { it.width.toLong() * it.height }
@@ -3557,8 +3567,21 @@ class Controller internal constructor(
             playbackControl.reportIntent()
             val step = playbackControl.awaitPreparedOffer(now)
             if (step is PreparedOfferWait.Step.Offered && autoBoundaryIsCurrent(boundary) &&
-                step.action.effectiveSelection?.candidateId == chosen.id) onPrepareAction(step.action)
-            else withdrawAutoBoundary(boundary)
+                step.action.effectiveSelection?.candidateId == chosen.id) {
+                onPrepareAction(step.action)
+                // The offer can build nothing: refused, a replay of a staging
+                // that already settled, a closed controller, or an action
+                // without a playlist or media origin. No prepared event will
+                // ever arrive to settle this boundary then, so it is withdrawn
+                // here, as Apple does when its offer does not own the change.
+                if (autoBoundaryOfferBuiltNothing(autoBoundaryAttempt === boundary,
+                        built = preparedPlayer != null, switched = preparedLedger.isSwitched)) {
+                    if (preparedLedger.isLive && preparedLedger.actionId == step.action.actionId) {
+                        abandonPreparedReplacement(failed = false)
+                    }
+                    withdrawAutoBoundary(boundary)
+                }
+            } else withdrawAutoBoundary(boundary)
         }
         return true
     }
@@ -4366,7 +4389,14 @@ class Controller internal constructor(
             is PreparationOffer.Refuse -> Unit
             is PreparationOffer.Start -> {
                 offer.supersedes?.let(::publishAcknowledgement)
+                // Releasing a superseded pipeline must not drop the boundary
+                // this very offer is the preparation for; a boundary for some
+                // other candidate is gone with the pipeline as before.
+                val boundary = autoBoundaryAttempt?.takeIf {
+                    it.candidateId == offer.action.effectiveSelection?.candidateId
+                }
                 releaseSuccessor()
+                if (boundary != null) autoBoundaryAttempt = boundary
                 startSuccessor(offer.action)
             }
         }
@@ -5920,19 +5950,34 @@ internal class AutoBoundaryReplan {
 
     fun clear() { armedBy = null }
 
-    /** True exactly once per armed boundary, when [runwayMs] can carry it. */
-    fun take(lifetime: Any, runwayMs: Long): Boolean {
-        val owner = armedBy ?: return false
+    /**
+     * The candidate [produce] names, exactly once per armed boundary, when
+     * [runwayMs] can carry it. A boundary is spent only on a candidate: with
+     * none (no fresh link proof yet, every original blocked) it stays owed
+     * until it is served, superseded or [clear]ed.
+     */
+    fun <T : Any> take(lifetime: Any, runwayMs: Long, produce: () -> T?): T? {
+        val owner = armedBy ?: return null
         if (owner !== lifetime) {
             armedBy = null
-            return false
+            return null
         }
-        if (runwayMs < AUTO_BOUNDARY_RUNWAY_MS) return false
+        if (runwayMs < AUTO_BOUNDARY_RUNWAY_MS) return null
+        val chosen = produce() ?: return null
         armedBy = null
-        return true
+        return chosen
     }
 
     companion object {
         const val AUTO_BOUNDARY_RUNWAY_MS = 10_000L
     }
 }
+
+/**
+ * After a boundary's offer reached `onPrepareAction`: true when it
+ * left no pipeline behind for the boundary that still owns Auto. A switched
+ * preparation is on screen (its player has already moved to the incumbent
+ * slot) and settles through its own first frame, so it never counts.
+ */
+internal fun autoBoundaryOfferBuiltNothing(boundaryStillOwns: Boolean, built: Boolean, switched: Boolean): Boolean =
+    boundaryStillOwns && !built && !switched
