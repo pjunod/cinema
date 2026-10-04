@@ -741,6 +741,40 @@ pub struct TranscodeManager {
     /// actually elapse. Zero (always, in production) means the real budget —
     /// see [`TranscodeManager::playlist_wait`].
     playlist_wait_override_ms: std::sync::atomic::AtomicU64,
+    /// Complete-output queue publications handed off by VOD starts. Create
+    /// never waits on the catalog rebuild, source fences or replicated
+    /// enqueue; [`TranscodeManager::output_enqueue_loop`] owns them.
+    output_enqueue: OutputEnqueueQueue,
+}
+
+/// Starts that may hand off before the owned worker drains. Beyond this a
+/// start does not queue its preparation; the title's next start offers it.
+const OUTPUT_ENQUEUE_CAPACITY: usize = 64;
+
+/// One complete-output queue publication handed off by a VOD start.
+pub(crate) struct OutputEnqueue {
+    request: SessionRequest,
+    file: plurx_core::domain::MediaFile,
+    settings: crate::vodserve::VodSettings,
+    encoding: Option<Arc<crate::vodencode::Encoding>>,
+    session_id: String,
+    queued_at: Instant,
+}
+
+/// Bounded hand-off from session create to the single owned enqueue worker.
+pub(crate) struct OutputEnqueueQueue {
+    sender: tokio::sync::mpsc::Sender<OutputEnqueue>,
+    receiver: std::sync::Mutex<Option<tokio::sync::mpsc::Receiver<OutputEnqueue>>>,
+}
+
+impl OutputEnqueueQueue {
+    fn new() -> Self {
+        let (sender, receiver) = tokio::sync::mpsc::channel(OUTPUT_ENQUEUE_CAPACITY);
+        Self {
+            sender,
+            receiver: std::sync::Mutex::new(Some(receiver)),
+        }
+    }
 }
 
 // split: begin manager-hooks

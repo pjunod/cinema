@@ -115,6 +115,7 @@ impl TranscodeManager {
             dovi_proofs: std::sync::Mutex::new(HashMap::new()),
             cached_limits: std::sync::RwLock::new(None),
             playlist_wait_override_ms: std::sync::atomic::AtomicU64::new(0),
+            output_enqueue: OutputEnqueueQueue::new(),
         }
     }
 

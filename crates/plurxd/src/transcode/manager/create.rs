@@ -1465,27 +1465,16 @@ impl TranscodeManager {
         } else {
             None
         };
-        if matches!(
+        // Complete-output queue publication is handed to the owned enqueue
+        // worker once the session exists; it never runs on the start path.
+        let output_enqueue = (matches!(
             &retained_capture,
             crate::vodserve::RetainedOutputCapture::New
         ) && req
             .candidate_context
             .as_ref()
-            .is_none_or(|context| context.retained_output.is_none())
-        {
-            // Bounded queue publication only, never full-title preparation in
-            // the foreground. Ordinary unknown-cost playback remains usable.
-            let result = match &encoding {
-                Some(encoding) => {
-                    self.enqueue_encoded_output(req, &file, &settings, encoding)
-                        .await
-                }
-                None => self.enqueue_copy_output(req, &file, &settings).await,
-            };
-            if let Err(error) = result {
-                tracing::debug!(%error, file_id = file.id, "complete output preparation unavailable");
-            }
-        }
+            .is_none_or(|context| context.retained_output.is_none()))
+        .then(|| (req.clone(), file.clone(), settings.clone(), encoding.clone()));
         let prepared = crate::vodserve::VodRecipeRequest {
             measured_candidate,
             retained_capture: match retained_capture {
@@ -1571,6 +1560,16 @@ impl TranscodeManager {
         };
         if let Some((encoder, grade, pipeline)) = codec_qualification {
             self.record_codec_qualification_session(encoder, grade, Some(pipeline));
+        }
+        if let Some((request, file, settings, encoding)) = output_enqueue {
+            self.hand_off_output_enqueue(OutputEnqueue {
+                request,
+                file,
+                settings,
+                encoding,
+                session_id: start.session_id.clone(),
+                queued_at: Instant::now(),
+            });
         }
         Ok(StartInfo {
             retained_output: self
@@ -1921,6 +1920,80 @@ impl TranscodeManager {
         })
         .await
         .unwrap_or(false)
+    }
+
+    /// Hand a started session's complete-output queue publication to the
+    /// owned worker. Never waits: a full hand-off is reported and skipped,
+    /// and the title's next start offers the same deduplicated job again.
+    fn hand_off_output_enqueue(&self, work: OutputEnqueue) {
+        let file_id = work.file.id;
+        if let Err(error) = self.output_enqueue.sender.try_send(work) {
+            let reason = match error {
+                tokio::sync::mpsc::error::TrySendError::Full(_) => "queue_full",
+                tokio::sync::mpsc::error::TrySendError::Closed(_) => "worker_stopped",
+            };
+            tracing::debug!(
+                target: "plurxd::transcode",
+                file_id,
+                reason,
+                "complete output preparation not handed off"
+            );
+        }
+    }
+
+    /// The single owner of post-start complete-output queue publication,
+    /// spawned beside [`Self::vod_maintain_loop`]. Each publication keeps its
+    /// own stage budget (the catalog restore's create-stage deadline and the
+    /// store's own write bound) instead of borrowing the viewer's start
+    /// budget, and every outcome is logged against its file and session.
+    pub async fn output_enqueue_loop(self: Arc<Self>) {
+        let Some(mut receiver) = self
+            .output_enqueue
+            .receiver
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take()
+        else {
+            return;
+        };
+        while let Some(work) = receiver.recv().await {
+            let started = Instant::now();
+            let (kind, result) = match &work.encoding {
+                Some(encoding) => (
+                    "encoded_output",
+                    self.enqueue_encoded_output(&work.request, &work.file, &work.settings, encoding)
+                        .await,
+                ),
+                None => (
+                    "copy_output",
+                    self.enqueue_copy_output(&work.request, &work.file, &work.settings)
+                        .await,
+                ),
+            };
+            let waited_ms = started.duration_since(work.queued_at).as_millis() as u64;
+            let elapsed_ms = started.elapsed().as_millis() as u64;
+            match result {
+                Ok(()) => tracing::debug!(
+                    target: "plurxd::transcode",
+                    file_id = work.file.id,
+                    session_id = %work.session_id,
+                    kind,
+                    waited_ms,
+                    elapsed_ms,
+                    "complete output preparation queued"
+                ),
+                Err(error) => tracing::info!(
+                    target: "plurxd::transcode",
+                    file_id = work.file.id,
+                    session_id = %work.session_id,
+                    kind,
+                    waited_ms,
+                    elapsed_ms,
+                    %error,
+                    "complete output preparation not queued"
+                ),
+            }
+        }
     }
 
     /// The VOD serving maintenance loop, spawned beside [`Self::reap_loop`].
