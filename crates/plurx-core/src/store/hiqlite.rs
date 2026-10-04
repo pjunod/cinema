@@ -184,6 +184,13 @@ const JELLYFIN_PLAY_SCHEMA_MIGRATION_SOURCE: i64 = JELLYFIN_LOGIN_SCHEMA_VERSION
 const JELLYFIN_WATCH_SCHEMA_VERSION: i64 = 77;
 const JELLYFIN_WATCH_SCHEMA_MIGRATION_SOURCE: i64 = JELLYFIN_PLAY_SCHEMA_VERSION;
 pub const AUTH_SCHEMA_VERSION: i64 = JELLYFIN_WATCH_SCHEMA_VERSION;
+// `store_contract.rs` rewinds a real cluster to marker 65 and replays the
+// offline-audio step from there; these are the composed ordinals it depends on.
+// A renumbering that moves either fails here, not in a contract lane no pull
+// request runs.
+const _: () = assert!(
+    ANALYSIS_RESULT_LOOKUP_SCHEMA_VERSION == 66 && OFFLINE_AUDIO_SCHEMA_MIGRATION_SOURCE == 69
+);
 /// The marker the private-lineage bridge stamps: the end of the canonical
 /// union it builds, not the binary's current schema.
 const BRIDGED_LINEAGE_SCHEMA_VERSION: i64 = ENCODED_OUTPUT_SCHEMA_VERSION;

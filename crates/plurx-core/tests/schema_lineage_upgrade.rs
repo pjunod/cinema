@@ -3,7 +3,9 @@
 
 use futures_util::FutureExt;
 use hiqlite::{params, Client, Node, NodeConfig, Row};
-use plurx_core::store::{HiqliteAuthStore, SqliteStore};
+use plurx_core::store::{
+    HiqliteAuthStore, SqliteStore, AUTH_SCHEMA_VERSION, SQLITE_SCHEMA_VERSION,
+};
 use rusqlite::Connection;
 use std::{
     borrow::Cow,
@@ -113,7 +115,7 @@ async fn coherent_advance(
         .validation_coherent_lineage_snapshot()
         .await
         .expect("recognized coherent successor");
-    assert_eq!(successor.0, if private { 73 } else { 70 });
+    assert_eq!(successor.0, if private { AUTH_SCHEMA_VERSION } else { 70 });
     assert_ne!(
         successor.1, predecessor.1,
         "committed schema actually advanced"
@@ -226,7 +228,7 @@ fn sqlite_cases(root: &Path) {
             assert_eq!(
                 conn.query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0))
                     .expect("canonical marker"),
-                97
+                SQLITE_SCHEMA_VERSION
             );
             assert_eq!(
                 conn.query_row(PAYLOAD, [], |row| row.get::<_, String>(0))
@@ -341,7 +343,7 @@ async fn hiqlite_case(
         }
         drop(store);
         let store = Box::pin(HiqliteAuthStore::open_or_migrate(client.clone(), &telemetry)).await.expect("actual replicated lineage upgrade");
-        assert_eq!(value(&client, "SELECT CAST(schema_version AS TEXT) AS value FROM cluster_meta").await, "73");
+        assert_eq!(value(&client, "SELECT CAST(schema_version AS TEXT) AS value FROM cluster_meta").await, AUTH_SCHEMA_VERSION.to_string());
         assert_eq!(value(&client, PAYLOAD).await, "synthetic opaque payload");
         assert_eq!(value(&client, JOB_VALUE).await, expected_job);
         if let Some(expected) = expected_package { assert_eq!(value(&client, PACKAGE_VALUE).await, expected); }

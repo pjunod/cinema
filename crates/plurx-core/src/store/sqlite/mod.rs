@@ -2591,16 +2591,18 @@ mod tests {
     }
 
     #[test]
-    fn a05_v89_sqlite_prior_migration_preserves_unattributed_history() {
+    fn a05_v93_sqlite_prior_migration_preserves_unattributed_history() {
         let dir = tempfile::tempdir().expect("prior root");
         let db = dir.path().join("prior.db");
         {
             let conn = Connection::open(&db).expect("legacy database");
-            for sql in MIGRATIONS.iter().take(88) {
+            // v93 adds the Link-attributed columns; everything before it is
+            // the shape a pre-A-05 node carries.
+            for sql in MIGRATIONS.iter().take(92) {
                 conn.execute_batch(sql).expect("legacy migration");
             }
             conn.execute("INSERT INTO network_priors VALUES (42, 'test-gen', 'safari', 'network', 8000, 720, 100000, 1, 100000)", []).expect("seed legacy negative");
-            conn.pragma_update(None, "user_version", 88)
+            conn.pragma_update(None, "user_version", 92)
                 .expect("legacy version");
         }
         let store = SqliteStore::open(&db).expect("migrate database");
@@ -4989,19 +4991,21 @@ mod tests {
     }
 
     #[test]
-    fn v88_offline_audio_snapshot_upgrade_preserves_legacy_package() {
+    fn v92_offline_audio_snapshot_upgrade_preserves_legacy_package() {
         let dir = tempfile::tempdir().expect("tempdir");
         let db = dir.path().join("plurx.db");
         {
             let conn = Connection::open(&db).expect("raw open");
-            for (index, sql) in MIGRATIONS.iter().enumerate().take(87) {
+            // v92 adds `offline_packages.audio_recipe`; a v91 database is the
+            // last shape without it.
+            for (index, sql) in MIGRATIONS.iter().enumerate().take(91) {
                 conn.execute_batch(&format!("BEGIN;\n{sql}\nCOMMIT;"))
                     .unwrap_or_else(|error| panic!("v{}: {error}", index + 1));
             }
             conn.execute("INSERT INTO users (id, username, password_hash) VALUES (1, 'synthetic-audio', 'unused-test-hash')", []).expect("owned test user");
             conn.execute("INSERT INTO offline_packages (id, request_id, user_id, file_id, node_id, source_path, source_size, source_mtime, target_height, subtitle_mode, state, phase, expires_at) VALUES ('legacy-audio', 'legacy-request', 1, 1, 'owned-node', '/synthetic/source.mkv', 4096, 1, 720, 'none', 'queued', 'queued', 10000)", []).expect("legacy package");
-            conn.pragma_update(None, "user_version", 87)
-                .expect("v87 marker");
+            conn.pragma_update(None, "user_version", 91)
+                .expect("v91 marker");
         }
         SqliteStore::open(&db).expect("migrate legacy snapshot");
         let conn = Connection::open(&db).expect("raw reopen");

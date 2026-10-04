@@ -1112,6 +1112,11 @@ cluster-store-check: ## Run the Store contracts against SQLite and three voters
 	$(CARGO) test --locked -p plurx-core \
 	  --features cluster-read-cost-validation,hiqlite-contract-tests \
 	  --test store_contract -- --test-threads=1
+	# The only end-to-end test of the schema-lineage bridge: a real three-voter
+	# cluster carried from each private and canonical marker to the head.
+	$(CARGO) test --locked -p plurx-core \
+	  --features cluster-read-cost-validation,hiqlite-contract-tests \
+	  --test schema_lineage_upgrade -- --test-threads=1
 
 .PHONY: cluster-harness-check
 cluster-harness-check: ## Run replicated growth and topology harness contracts

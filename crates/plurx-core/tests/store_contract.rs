@@ -31677,7 +31677,7 @@ async fn offline_audio_snapshot_survives_claim_and_server_policy_retry() {
 
 #[cfg(feature = "hiqlite-contract-tests")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn replicated_v65_offline_audio_migration_preserves_legacy_packages() {
+async fn replicated_offline_audio_step_preserves_legacy_packages_from_a_v65_fixture() {
     let _case = HIQLITE_CASE.lock().await;
     let cluster = ContractCluster::start().await;
     let current: Arc<dyn Store> = Arc::new(open_contract_hiqlite_store(&cluster).await);
@@ -31698,6 +31698,10 @@ async fn replicated_v65_offline_audio_migration_preserves_legacy_packages() {
     )
     .await
     .expect("offline audio contract operation");
+    // Marker 65 replays every step to the head, and the 67→68 step adds
+    // `dv_conversions.requested_manually` unconditionally: rewind that shape
+    // too, or the replay fails before it reaches the audio step (69→70).
+    downgrade_dv_request_provenance(&client).await;
     client
         .txn([
             (
@@ -31718,7 +31722,7 @@ async fn replicated_v65_offline_audio_migration_preserves_legacy_packages() {
     let migrated = HiqliteAuthStore::open_or_migrate(client.clone(), &telemetry)
         .await
         .expect("offline audio contract operation");
-    assert_eq!(replicated_schema_marker(&client).await, 66);
+    assert_eq!(replicated_schema_marker(&client).await, AUTH_SCHEMA_VERSION);
     let stored = migrated
         .offline_package_for_user(&legacy.id, user_id)
         .await
@@ -31728,6 +31732,10 @@ async fn replicated_v65_offline_audio_migration_preserves_legacy_packages() {
     assert_eq!(stored.source_path, legacy.source_path);
     assert_eq!(stored.effective_rate_control, legacy.effective_rate_control);
     drop(migrated);
+    // The second rewind leaves `audio_recipe` in place: the audio step must
+    // tolerate its own column on replay. Provenance is rewound again because
+    // its step is not replay-tolerant and is not what this test is about.
+    downgrade_dv_request_provenance(&client).await;
     client
         .txn([(
             "UPDATE cluster_meta SET schema_version = $1 WHERE singleton = 1",
@@ -31741,7 +31749,7 @@ async fn replicated_v65_offline_audio_migration_preserves_legacy_packages() {
     HiqliteAuthStore::open_or_migrate(client.clone(), &telemetry)
         .await
         .expect("additive column replay");
-    assert_eq!(replicated_schema_marker(&client).await, 66);
+    assert_eq!(replicated_schema_marker(&client).await, AUTH_SCHEMA_VERSION);
 }
 
 #[tokio::test]
