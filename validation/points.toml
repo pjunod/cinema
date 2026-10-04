@@ -183,7 +183,7 @@ timeout_seconds = 3600
 [[checks]]
 id = "playback-shaping"
 title = "Network-shaping harness contract"
-command = "node tests/playback/network-shaping.test.js && node --test tests/playback/preparation-measurement.test.js"
+command = "node tests/playback/network-shaping.test.js && node --test tests/playback/preparation-measurement.test.js tests/playback/frame-clock.test.js"
 profiles = ["commit", "ci", "full", "nightly"]
 requires = ["node"]
 missing = "fail"
@@ -442,6 +442,9 @@ paths = [
   "crates/plurx-core/src/store/hiqlite_background_jobs.rs",
   "crates/plurx-core/src/store/sqlite/background_jobs.rs",
   "crates/plurx-core/src/store/hiqlite_sessions.rs",
+  "crates/plurx-core/src/store/quality_cancellation.rs",
+  "crates/plurx-core/src/store/quality_ledger.rs",
+  "crates/plurx-core/src/store/continuous_family.rs",
   "crates/plurx-core/src/store/hiqlite_shared_cache.rs",
   "crates/plurx-core/src/store/sqlite/reading.rs",
   "crates/plurx-core/src/store/sqlite/telemetry.rs",
@@ -878,6 +881,9 @@ paths = [
   "scripts/verify-dv-timeline",
   "scripts/dv-timeline-check",
   "scripts/playback-lab",
+  "scripts/playback-frame-clock.js",
+  "scripts/continuous-quality-qualification",
+  "scripts/continuous-quality-lab.mjs",
   "scripts/audio-downmix-qualification/**",
   "tests/fixtures/audio-downmix/**",
   "scripts/playback-startup-lab",

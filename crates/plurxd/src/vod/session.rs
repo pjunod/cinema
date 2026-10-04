@@ -42,6 +42,9 @@ pub(super) struct Rendition {
     pub(super) cancelled_preparation_epoch: AtomicU64,
     pub(super) identity: Mutex<IdentityState>,
     pub(super) slot: ProducerSlot,
+    /// Capacity can be shared by parents of this exact immutable rendition,
+    /// without keeping a cache-only rendition admitted after the final reap.
+    pub(super) retained_admission: crate::vodencode::RetainedEncodeAdmission,
     pub(super) readers: Mutex<HashMap<String, Reader>>,
     /// Monotonic identity of each successful segment publication. The ledger
     /// stores this beside an entry index so eviction followed by ordinary
@@ -264,10 +267,17 @@ impl Rendition {
         *self.dormant_since.lock().expect("dormant lock") = None;
     }
 
-    pub(super) async fn detach_reader(&self, pool: &crate::waitpool::WaitPool, session_id: &str) {
+    /// Detach one media reader without ending its parent playback. Family
+    /// children release media demand independently; subtitle ownership belongs
+    /// to the public parent and must survive a rung's retirement.
+    pub(super) async fn detach_media_reader(
+        &self,
+        pool: &crate::waitpool::WaitPool,
+        reader_id: &str,
+    ) {
         {
             let mut readers = self.readers.lock().await;
-            readers.remove(session_id);
+            readers.remove(reader_id);
             if readers.is_empty() {
                 *self.dormant_since.lock().expect("dormant lock") = Some(Instant::now());
             }
@@ -278,7 +288,12 @@ impl Rendition {
         // marking the session's oldest wait foreground — so a departed
         // viewer's abandoned request outranks a present viewer's and aims the
         // producer at media nobody is watching until its deadline expires.
-        pool.retire_session(&self.key, session_id);
+        pool.retire_session(&self.key, reader_id);
+    }
+
+    /// End a legacy single-rendition playback and its parent-owned captions.
+    pub(super) async fn detach_reader(&self, pool: &crate::waitpool::WaitPool, session_id: &str) {
+        self.detach_media_reader(pool, session_id).await;
         // Every VOD session *ending* converges here — terminal and idle reap
         // alike — so this is the one place a departing viewer's subtitle
         // window is released. Reattachment is deliberately not one of them:
@@ -298,6 +313,7 @@ impl Rendition {
         let readers = self.readers.lock().await;
         readers
             .values()
+            .filter(|reader| !reader.authority_only)
             .map(|reader| reader_window(reader, self.seconds_per_segment))
             .collect()
     }
@@ -576,6 +592,34 @@ pub(super) fn terminal_reason(cause: Terminal) -> &'static str {
     }
 }
 
+pub(super) struct ResolvedMediaReader {
+    pub(super) rendition: Arc<Rendition>,
+    pub(super) block_budget: Duration,
+    pub(super) delivery: Arc<crate::meter::Meter>,
+}
+
+/// One private media reader owned by a public parent's incarnation. Its
+/// opaque reader id is independent of the public capability, so delayed old
+/// cleanup cannot remove a replacement parent's demand on shared media.
+pub(super) struct ParentMediaReader {
+    /// Only a controlled video child can release and reacquire its credit.
+    pub(super) controlled: bool,
+    pub(super) candidate_id: Option<plurx_core::playback::candidate::CandidateId>,
+    pub(super) reader_id: String,
+    pub(super) rendition: Arc<Rendition>,
+    /// Autonomous admission lasts through detach; controlled cold video may
+    /// release this claim. Workers retain their own claim through confirmed reap.
+    pub(super) _reservation: Option<crate::vodencode::EncodePermit>,
+}
+impl ParentMediaReader {
+    pub(super) async fn detach(self, pool: &crate::waitpool::WaitPool) {
+        self.rendition
+            .detach_media_reader(pool, &self.reader_id)
+            .await;
+        self.rendition.kick();
+    }
+}
+
 /// One session handle (plan §2.5): auth attribution, sliding TTL, reader
 /// window, and — once it ends for good — a tombstone.
 pub(super) struct Session {
@@ -583,6 +627,9 @@ pub(super) struct Session {
     /// publishes completion. The compact fields below retain exact 410/replay
     /// identity without retaining manifests, source handles, readers, or the
     /// producer graph until the next maintenance tick.
+    /// Private video/audio readers share this parent's authority and cleanup.
+    /// They never allocate additional public playback sessions or captions.
+    pub(super) children: Vec<ParentMediaReader>,
     pub(super) rendition: Option<Arc<Rendition>>,
     pub(super) passive_grant: Option<Arc<passive_grant::Grant>>,
     pub(super) retained_output: Option<Arc<retained::RetainedVodArtifact>>,
@@ -703,6 +750,15 @@ impl Session {
         self.tombstone.is_none() && self.passive_grant.as_ref().is_none_or(|grant| grant.live())
     }
 
+    pub(super) fn owns_response_media(&self, owner: &ResponseOwner) -> bool {
+        owner.media_child.as_ref().is_none_or(|target| {
+            self.children.iter().any(|child| {
+                child.reader_id == target.reader_id
+                    && Arc::ptr_eq(&child.rendition, &target.rendition)
+            })
+        })
+    }
+
     pub(super) fn response_owner(&self) -> ResponseOwner {
         ResponseOwner {
             lifecycle: Arc::clone(&self.lifecycle),
@@ -713,6 +769,7 @@ impl Session {
                 .filter(|_| self.tombstone.is_none())
                 .map(Arc::clone),
             rendition: self.rendition.as_ref().map(Arc::clone),
+            media_child: None,
             rendition_key: self.rendition_key.clone(),
             file: Arc::clone(&self.file),
             tombstone: self.tombstone,

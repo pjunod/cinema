@@ -16,6 +16,7 @@ use crate::domain::MediaFile;
 pub mod audio;
 pub mod candidate;
 pub mod caps;
+pub mod continuous_quality;
 pub mod desired;
 pub mod geometry;
 pub mod intent;

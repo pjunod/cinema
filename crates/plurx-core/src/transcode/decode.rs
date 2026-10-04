@@ -1999,10 +1999,47 @@ impl AttemptRestrictions {
     }
 }
 
+/// The codec envelope an immutable video rendition promises. This is output
+/// recipe data, distinct from whether a feature is enabled in client settings.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum VideoSampleEnvelope {
+    EncoderDefault,
+    ContinuousAvcHigh50,
+}
+
+/// Level 5.0 frame-size and macroblock-rate limits, using the exact rational
+/// output cadence. VBR admission bounds both the 3/2 peak and the two-second
+/// coded-picture buffer below High's conservative VCL limits.
+pub(super) fn continuous_avc_envelope_accepts(
+    width: u32,
+    height: u32,
+    rate_numerator: u32,
+    rate_denominator: u32,
+    bitrate_kbps: u32,
+) -> bool {
+    let width_mbs = u64::from(width).div_ceil(16);
+    let height_mbs = u64::from(height).div_ceil(16);
+    let frame_mbs = width_mbs.saturating_mul(height_mbs);
+    width > 0
+        && height > 0
+        && width.is_multiple_of(2)
+        && height.is_multiple_of(2)
+        && rate_numerator > 0
+        && rate_denominator > 0
+        && bitrate_kbps > 0
+        && frame_mbs <= 22_080
+        && width_mbs * width_mbs <= 8 * 22_080
+        && height_mbs * height_mbs <= 8 * 22_080
+        && frame_mbs * u64::from(rate_numerator) <= 589_824 * u64::from(rate_denominator)
+        && u64::from(bitrate_kbps) * 3 <= 337_500
+        && u64::from(bitrate_kbps) * 2 <= 168_750
+}
+
 /// Semantic subset of today's transcode options. Execution coordinates,
 /// paths, pacing, and thread reservations intentionally do not enter it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TranscodeMediaOptions {
+    pub video_sample_envelope: VideoSampleEnvelope,
     pub target_height: i64,
     pub video_bitrate_kbps: u32,
     pub effective_rate_control: EffectiveRateControl,
@@ -2037,6 +2074,7 @@ impl TranscodeMediaOptions {
             |nits| (u32::try_from(nits).unwrap_or(1000), ToneMapPeakSource::Cll),
         );
         Self {
+            video_sample_envelope: options.video_sample_envelope,
             target_height: options.target_height,
             video_bitrate_kbps: options.video_bitrate_kbps,
             effective_rate_control: options.effective_rate_control,
@@ -2045,7 +2083,8 @@ impl TranscodeMediaOptions {
             audio: options.audio.clone(),
             audio_index: options.audio_index,
             audio_offset_ms: source.audio_offset_ms,
-            input_has_audio: !source.audio_streams.is_empty(),
+            input_has_audio: !source.audio_streams.is_empty()
+                && options.video_sample_envelope != VideoSampleEnvelope::ContinuousAvcHigh50,
             tone_map: options.tone_map,
             tone_map_peak_nits,
             tone_map_peak_source,
@@ -2107,10 +2146,12 @@ pub struct TranscodeRequest {
 
 impl TranscodeRequest {
     pub fn new(encoder: Encoder, options: TranscodeMediaOptions) -> Self {
+        let normalized_geometry =
+            options.video_sample_envelope == VideoSampleEnvelope::ContinuousAvcHigh50;
         Self {
             encoder,
             options,
-            normalized_geometry: false,
+            normalized_geometry,
             rate_profile: None,
         }
     }
@@ -2118,6 +2159,15 @@ impl TranscodeRequest {
     /// Opt in only for routes whose complete normalized recipe is supported.
     pub fn with_normalized_geometry(mut self) -> Self {
         self.normalized_geometry = true;
+        self
+    }
+
+    /// A video-only, normalized H.264 High level 5.0 recipe. The soundtrack
+    /// is resolved separately and shared by every compatible rendition.
+    pub fn with_continuous_avc_video(mut self) -> Self {
+        self.normalized_geometry = true;
+        self.options.input_has_audio = false;
+        self.options.video_sample_envelope = VideoSampleEnvelope::ContinuousAvcHigh50;
         self
     }
 
@@ -2646,6 +2696,15 @@ impl ResolvedTranscode {
             );
         }
         let options = &self.options;
+        // Preserve established standalone artifact keys. The new explicit
+        // envelope has its own semantic namespace and never aliases them.
+        if options.video_sample_envelope == VideoSampleEnvelope::ContinuousAvcHigh50 {
+            feed(
+                "video_sample_envelope",
+                b"continuous-avc-high50-bt709-colr-v3",
+            );
+        }
+
         feed("height", options.target_height.to_string().as_bytes());
         feed(
             "video_bitrate",
@@ -2951,6 +3010,15 @@ pub fn resolve_transcode(
     let codec = facts.codec().ok_or(PlanError::MissingCodec)?;
     let mut options = request.options.clone();
     validate_media_options(&options)?;
+    if options.video_sample_envelope == VideoSampleEnvelope::ContinuousAvcHigh50
+        && (!request.normalized_geometry
+            || options.input_has_audio
+            || options.subtitle_burn.is_some()
+            || options.pipeline.output_grade() != OutputGrade::Sdr)
+    {
+        return Err(PlanError::InvalidMediaOption("continuous_video_envelope"));
+    }
+
     let deinterlace = Deinterlace::for_scan_type(facts.scan_type());
     if deinterlace == Deinterlace::BwdifSendFrame
         && matches!(
@@ -3164,6 +3232,27 @@ pub fn resolve_transcode(
     } else {
         effective_output_geometry(facts, requested_max_height)
     };
+    if options.video_sample_envelope == VideoSampleEnvelope::ContinuousAvcHigh50 {
+        let (width, height) =
+            effective_geometry.ok_or(PlanError::InvalidFact("output_geometry"))?;
+        let rate = facts
+            .frame_rate()
+            .value()
+            .ok_or(PlanError::InvalidFact("frame_rate"))?;
+        if options.effective_rate_control != EffectiveRateControl::Vbr
+            || deinterlace != Deinterlace::None
+            || facts.frame_rate().provenance() == FrameRateProvenance::Nominal
+            || !continuous_avc_envelope_accepts(
+                width,
+                height,
+                rate.numerator(),
+                rate.denominator(),
+                options.video_bitrate_kbps,
+            )
+        {
+            return Err(PlanError::InvalidMediaOption("continuous_video_envelope"));
+        }
+    }
     if let Some(profile) = request.rate_profile {
         let (width, height) =
             effective_geometry.ok_or(PlanError::InvalidFact("output_geometry"))?;
@@ -3190,7 +3279,10 @@ pub fn resolve_transcode(
         output_profile: match output_grade {
             OutputGrade::Hdr10 => Some("main10".to_owned()),
             OutputGrade::Sdr
-                if request.encoder == Encoder::Software || request.rate_profile.is_some() =>
+                if request.encoder == Encoder::Software
+                    || request.rate_profile.is_some()
+                    || options.video_sample_envelope
+                        == VideoSampleEnvelope::ContinuousAvcHigh50 =>
             {
                 Some("high".to_owned())
             }

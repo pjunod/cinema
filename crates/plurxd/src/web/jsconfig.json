@@ -41,6 +41,8 @@
     "detail/preplay-selection.js",
     "detail/edit.js",
     "player/player.js",
+    "player/continuous-media.js",
+    "player/continuous-quality.js",
     "player/session.js",
     "player/prepared-replacement.js",
     "player/prepared-switch-measurement.js",

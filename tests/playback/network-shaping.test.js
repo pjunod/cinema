@@ -264,6 +264,83 @@ function cli(args) {
   return spawnSync(process.execPath, [LAB, ...args], { encoding: "utf8", cwd: ROOT });
 }
 
+test("quality baseline requires an advancing outgoing frame rather than preload", () => {
+  const snapshot = {frame_probe: {supported: true, sequence: 1,
+    last_frame_at_ms: 2400, last_frame: {media_time: 0}},
+    video: {paused: false, seeking: false}};
+  assert.equal(lab.advancingOutgoingFrame(snapshot, 0), false);
+  snapshot.frame_probe.last_frame.media_time = 0.041667;
+  assert.equal(lab.advancingOutgoingFrame(snapshot, 1), false);
+  snapshot.frame_probe.sequence = 2;
+  assert.equal(lab.advancingOutgoingFrame(snapshot, 1), true);
+  snapshot.video.paused = true;
+  assert.equal(lab.advancingOutgoingFrame(snapshot, 1), false);
+  snapshot.video.paused = false;
+  snapshot.video.seeking = true;
+  assert.equal(lab.advancingOutgoingFrame(snapshot, 1), false);
+  assert.ok(Math.abs(lab.frameGapSince(2900, 3416.6) - 516.6) < 1e-6,
+    "a real outgoing-frame blackout is still measured in full");
+});
+
+test("presentation gaps retain late callback diagnostics and refuse invalid display evidence", () => {
+  // Exact Firefox receipt: the first callback precedes display by one refresh;
+  // the next arrives at display. Dispatch spacing is not presentation spacing.
+  const before={at_ms:71831.76,expected_display_time_ms:71848.72,
+    media_time:69.5,presented_frames:1669,element_id:1};
+  const after={at_ms:71933.34,expected_display_time_ms:71933.34,
+    media_time:69.583333,presented_frames:1671,element_id:1};
+  const gap=lab.framePresentationGap(before,after);
+  assert.equal(gap.clock,"expected_display");
+  assert.ok(Math.abs(gap.gap_ms-84.62)<1e-6);
+  assert.ok(Math.abs(gap.callback_gap_ms-101.58)<1e-6);
+  const stalled={...after,at_ms:72000,expected_display_time_ms:72000};
+  assert.ok(lab.framePresentationGap(before,stalled).gap_ms>100,
+    "a real compositor gap still exceeds the unchanged presentation bound");
+  for(const invalid of [
+    {...after,expected_display_time_ms:null},
+    {...after,expected_display_time_ms:71840},
+    {...after,expected_display_time_ms:71933.34+10000},
+    {...after,presented_frames:1669},
+    {...after,media_time:69.4},
+  ]){
+    const refused=lab.framePresentationGap(before,invalid);
+    assert.equal(refused.clock,"callback");
+    assert.ok(refused.gap_ms>100,"unknown evidence cannot erase the raw failure");
+  }
+  const scored=lab.transitionMetrics({media_event_seq:0},{
+    media_event_seq:0,media_events:[],sampled_at_ms:71940,
+    frame_probe:{supported:true,last_frame_at_ms:after.at_ms,last_frame:after,
+      maximum_gap_ms:gap.gap_ms,maximum_callback_gap_ms:gap.callback_gap_ms},
+    video:{paused:false,ended:false},
+  });
+  assert.ok(Math.abs(scored.maximum_video_gap_ms-84.62)<1e-6);
+  assert.ok(Math.abs(scored.maximum_callback_gap_ms-101.58)<1e-6);
+  const silent=lab.transitionMetrics({media_event_seq:0},{
+    media_event_seq:0,media_events:[],sampled_at_ms:72100,
+    frame_probe:{supported:true,last_frame_at_ms:after.at_ms,last_frame:after,maximum_gap_ms:0},
+    video:{paused:false,ended:false},
+  });
+  assert.ok(silent.maximum_video_gap_ms>100,"an open presentation gap must still fail");
+});
+
+test("steady frame window excludes preload time but preserves later and switch gaps", () => {
+  assert.ok(Math.abs(lab.frameGapSince(4921.2, 5421.2, 5300) - 121.2) < 1e-6);
+  assert.equal(lab.frameGapSince(5421.2, 5921.2, 5300), 500,
+    "a blackout wholly inside the observed window still fails the 250 ms bound");
+  assert.equal(lab.frameGapSince(4921.2, 5421.2), 500,
+    "a quality switch retains the complete outgoing-to-target frame gap");
+  assert.equal(lab.frameGapSince(null, 5421.2, 5300), 0,
+    "missing first-frame evidence is not invented by a window origin");
+  const measured = lab.transitionMetrics({media_event_seq:0}, {
+    media_event_seq:0,media_events:[],sampled_at_ms:5921.2,
+    frame_probe:{supported:true,last_frame_at_ms:4921.2,
+      maximum_gap_ms:0,measurement_start_at_ms:5300},
+    video:{paused:false,ended:false},
+  });
+  assert.ok(Math.abs(measured.maximum_video_gap_ms - 621.2) < 1e-6,
+    "no new callback after the origin remains an open blackout");
+});
+
 test("VOD readiness requires a pass that stored an index", () => {
   const empty = { message: "fragment indexing pass finished attempted=1 built=0" };
   const ready = { message: "fragment indexing pass finished attempted=2 built=1" };
@@ -2373,6 +2450,41 @@ test("VOD readiness waits for the exact file built by an indexing pass", () => {
   }, 42), false);
 });
 
+test("actual Auto pressure uses measured peaks and refuses an unsafe two-rung interval", () => {
+  const qualification = require("../../scripts/continuous-quality-qualification");
+  const catalog = [{route: "encode", height: 720, peak_bps: 6160000},
+    {route: "encode", height: 1080, peak_bps: 12160000},
+    {route: "copy", height: 1080, peak_bps: 999999999}];
+  const profile = qualification.autoLinkProfile(catalog);
+  assert.equal(profile.stages.length, 5);
+  assert.equal(profile.stages[0], profile.stages[2]);
+  assert.equal(profile.stages[2], profile.stages[4]);
+  assert.equal(profile.stages[1], profile.stages[3]);
+  assert.ok(profile.stages[1] * 1000 >= profile.low_floor_bps);
+  assert.ok(profile.stages[1] * 1000 < profile.low_ceiling_bps);
+  assert.throws(() => qualification.autoLinkProfile([]), /safe pressure interval/);
+  assert.throws(() => qualification.autoLinkProfile([
+    {route: "encode", height: 720, peak_bps: 1000000},
+    {route: "encode", height: 1080, peak_bps: 1548000}]), /shaper rate resolution/);
+  assert.throws(() => qualification.autoLinkProfile([
+    {route: "encode", height: 720, peak_bps: 9000000},
+    {route: "encode", height: 1080, peak_bps: 10000000}]), /safe pressure interval/);
+});
+
+test("encoded-only qualification does not wait for an impossible copy fragment index", () => {
+  const files = new Map([
+    ["encoded.mp4", {id: 1, video_codec: "mpeg4"}],
+    ["avc.mp4", {id: 2, video_codec: "h264"}],
+    ["hevc.mp4", {id: 3, video_codec: "hevc"}],
+    ["unknown.mp4", {id: 4}],
+  ]);
+  assert.deepEqual(lab.fragmentIndexTargets(files, ["encoded.mp4"]), []);
+  assert.deepEqual(lab.fragmentIndexTargets(files, ["encoded.mp4", "avc.mp4", "hevc.mp4"])
+    .map(file => file.id), [2, 3]);
+  assert.throws(() => lab.fragmentIndexTargets(files, ["unknown.mp4"]), /video codec/);
+  assert.throws(() => lab.fragmentIndexTargets(files, ["missing.mp4"]), /scan missed/);
+});
+
 test("VOD acceptance pauses startup indexing until its fixture scan is complete", () => {
   const source = fs.readFileSync(LAB, "utf8");
   const start = source.indexOf("async function startServer");
@@ -2811,6 +2923,61 @@ test("quality-cycle scoring rejects missing runway and a single excessive gap", 
   assert.match(score.errors.join("; "), /video-gap max 300 ms/);
 });
 
+test("continuous switch evidence refuses replacement, future removal and stale presentation", () => {
+  const before = { family_id: "family", closed: false, element: 1, hls: 2, media_source: 3,
+    buffers: ["video", "audio"].map((type, index) => ({ type, identity: index + 4, removal_sequence: 0, completed_removals: [] })) };
+  const after = { ...before, wanted_candidate: "target", presented: { candidate_id: "target", height: 720 },
+    transaction: { first_presented_tick: 50, first_presented_at_ms: 1100,
+      appended: [{ from_tick: 40, through_tick: 60, timescale: 24 }] } };
+  assert.deepEqual(lab.continuousSwitchErrors(before, after, 1000, 720), []);
+  assert.match(lab.continuousSwitchErrors(before, { ...after, hls: 99 }, 1000, 720).join(";"), /hls.*replaced/);
+  assert.match(lab.continuousSwitchErrors(before, { ...after, transaction: { ...after.transaction,
+    first_presented_at_ms: 900 } }, 1000, 720).join(";"), /fresh presented receipt/);
+  assert.match(lab.continuousSwitchErrors(before, { ...after, transaction: { ...after.transaction,
+    first_presented_tick: 60 } }, 1000, 720).join(";"), /actual appended interval/);
+  const removed = { ...after, buffers: after.buffers.map((row) => row.type === "audio" ? { ...row,
+    removal_sequence: 1, completed_removals: [{ sequence: 1, from: 20, through: 22, playhead: 10 }] } : row) };
+  assert.match(lab.continuousSwitchErrors(before, removed, 1000, 720).join(";"), /audio removed media ahead/);
+  removed.buffers[1].completed_removals[0].through = 9;
+  assert.deepEqual(lab.continuousSwitchErrors(before, removed, 1000, 720), [], "ordinary back-buffer eviction is allowed");
+  removed.buffers[1].completed_removals = [];
+  assert.match(lab.continuousSwitchErrors(before, removed, 1000, 720).join(";"), /evidence was truncated/);
+  assert.match(lab.continuousSwitchErrors(before, after, undefined, 720).join(";"), /fresh presented receipt/);
+});
+
+test("continuous snapshots count only completed removals and keep weak transport identities", () => {
+  const listeners = {};
+  const buffer = { updating: false, remove() {}, addEventListener(name, fn) { listeners[name] = fn; } };
+  const video = { currentTime: 20 };
+  const player = { hls: { bufferController: { mediaSource: {}, tracks: { audio: { buffer } } } } };
+  const objects = { next: 0, ids: new WeakMap() };
+  const before = lab.continuousTransportSnapshot(player, video, objects);
+  buffer.remove(0, 10);
+  assert.equal(lab.continuousTransportSnapshot(player, video, objects).buffers[0].removal_sequence, 0);
+  listeners.updateend();
+  const completed = lab.continuousTransportSnapshot(player, video, objects);
+  assert.equal(completed.element, before.element);
+  assert.equal(completed.hls, before.hls);
+  assert.equal(completed.media_source, before.media_source);
+  assert.equal(completed.buffers[0].removal_sequence, 1);
+  buffer.remove(10, 12); listeners.error(); listeners.updateend();
+  assert.equal(lab.continuousTransportSnapshot(player, video, objects).buffers[0].removal_sequence, 1);
+  player.hls.bufferController.tracks.audio.buffer = { ...buffer, addEventListener() {} };
+  assert.notEqual(lab.continuousTransportSnapshot(player, video, objects).buffers[0].identity, before.buffers[0].identity);
+});
+
+test("the continuous suite requires actual production proof for twenty future-load switches", () => {
+  const manifest = lab.loadManifest();
+  const [testCase] = lab.expandCases(manifest, "continuous");
+  assert.equal(testCase.require_continuous, true);
+  assert.equal(testCase.require_vod, true);
+  assert.equal(testCase.repetitions * testCase.switches.length, 20);
+  assert.equal(manifest.suites.continuous.requires_vod, true);
+  const fixture = manifest.fixtures.find((row) => row.id === testCase.fixture);
+  assert.equal(fixture.opt_in, true);
+  assert.ok(fixture.duration_seconds > 20 * 60, "the normal sixty-second frontier must fit without shortening playback buffers");
+});
+
 test("the VOD suite makes native seeking and resume invariants executable", () => {
   const manifest = lab.loadManifest();
   const suite = manifest.suites.vod;
@@ -3130,4 +3297,52 @@ runAll().then(executed => {
     return;
   }
   process.stdout.write(`\n${executed} shaping contracts hold\n`);
+});
+
+
+test("VOD attachment census survives console eviction and counts same-session replacement",()=>{
+ const event={event:"session_start",encoder:"vod",file_id:"9007199254740999",
+  at_unix_ms:2000,session_id:"redacted",extra:'{"presentation":"vod"}'};
+ assert.equal(lab.vodAttachmentCensus([event],event.file_id,1000),1);
+ assert.equal(lab.vodAttachmentCensus([event,{...event,at_unix_ms:3000}],event.file_id,1000),2);
+ assert.equal(lab.vodAttachmentCensus([event,{...event,file_id:"9007199254740998"},
+  {...event,at_unix_ms:999},{...event,encoder:"legacy"}],event.file_id,1000),1);
+ assert.throws(()=>lab.vodAttachmentCensus(Array(2000).fill(event),event.file_id,1000),/truncated/);
+ assert.throws(()=>lab.vodAttachmentCensus(null,event.file_id,1000),/unavailable/);
+});
+
+
+test("sampled removal evidence survives a long Auto window and refuses observation gaps", () => {
+  const listeners = new Map();
+  const makeBuffer = () => {
+    const handlers = {};
+    const buffer = { updating: false, remove() {}, addEventListener(name, fn) { handlers[name] = fn; } };
+    listeners.set(buffer, handlers); return buffer;
+  };
+  const video = { currentTime: 1000 };
+  const tracks = { video: { buffer: makeBuffer() }, audio: { buffer: makeBuffer() } };
+  const player = { hls: { bufferController: { mediaSource: {}, tracks } } };
+  const objects = { next: 0, ids: new WeakMap() };
+  const snapshot = () => ({ ...lab.continuousTransportSnapshot(player, video, objects),
+    family_id: "family", closed: false, wanted_candidate: "target", presented: { candidate_id: "target", height: 720 },
+    transaction: { first_presented_tick: 50, first_presented_at_ms: 1100,
+      appended: [{ from_tick: 40, through_tick: 60, timescale: 24 }] } });
+  const before = snapshot(), evidence = lab.continuousRemovalEvidence(before);
+  for (let index = 0; index < 300; index++) {
+    for (const { buffer } of Object.values(tracks)) { buffer.remove(index, index + 1); listeners.get(buffer).updateend(); }
+    if (index % 16 === 15) lab.observeContinuousRemovals(evidence, snapshot());
+  }
+  const after = snapshot();lab.observeContinuousRemovals(evidence, after);
+  assert.equal(after.buffers[0].completed_removals.length, 64, "the browser journal stays bounded");
+  assert.match(lab.continuousSwitchErrors(before, after, 1000, 720).join(";"), /truncated/);
+  assert.deepEqual(lab.continuousSwitchErrors(before, after, 1000, 720, evidence), []);
+  assert.equal(evidence.buffers[0].completed_count, 300);
+  const missed = lab.continuousRemovalEvidence(before);lab.observeContinuousRemovals(missed, after);
+  assert.match(lab.continuousSwitchErrors(before, after, 1000, 720, missed).join(";"), /truncated/);
+  const next = lab.continuousRemovalEvidence(after);
+  tracks.audio.buffer.remove(1001, 1002);listeners.get(tracks.audio.buffer).updateend();
+  const futureRemoval = snapshot();lab.observeContinuousRemovals(next, futureRemoval);
+  assert.match(lab.continuousSwitchErrors(after, futureRemoval, 1000, 720, next).join(";"), /audio removed media ahead/);
+  tracks.video.buffer = makeBuffer();const replaced = snapshot();lab.observeContinuousRemovals(next, replaced);
+  assert.match(lab.continuousSwitchErrors(after, replaced, 1000, 720, next).join(";"), /buffer.*replaced/);
 });

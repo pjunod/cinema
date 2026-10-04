@@ -369,7 +369,7 @@ async fn prepared_copy_consumer(control: u8) {
     assert_eq!(store.background_job(&id).await.expect("job").expect("job row").state, JobState::Succeeded);
     assert_eq!(serve.shared.preparation_media.load(Relaxed), 0, "live exclusion released exactly once");
     assert_eq!(serve.shared.retained_artifacts.test_preparation_count(), 0);
-    serve.try_create(VodRecipeRequest {
+    serve.try_create(VodRecipeRequest { soundtrack: None, companion: None,
         request: &incoming, encoding: None, measured_candidate: None,
         retained_capture: RetainedOutputCapture::Restore(Some(facts.clone())),
     }, &file, &settings(), VodAttribution { user_name: "paul", item_title: "fixture", supersession_user: "user" },

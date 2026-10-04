@@ -183,9 +183,14 @@ const JELLYFIN_PLAY_SCHEMA_VERSION: i64 = 76;
 const JELLYFIN_PLAY_SCHEMA_MIGRATION_SOURCE: i64 = JELLYFIN_LOGIN_SCHEMA_VERSION;
 const JELLYFIN_WATCH_SCHEMA_VERSION: i64 = 77;
 const JELLYFIN_WATCH_SCHEMA_MIGRATION_SOURCE: i64 = JELLYFIN_PLAY_SCHEMA_VERSION;
-pub const AUTH_SCHEMA_VERSION: i64 = JELLYFIN_WATCH_SCHEMA_VERSION;
+const QUALITY_CANCELLATION_SCHEMA_VERSION: i64 = 78;
+const QUALITY_CANCELLATION_SCHEMA_MIGRATION_SOURCE: i64 = JELLYFIN_WATCH_SCHEMA_VERSION;
+const QUALITY_LEDGER_SCHEMA_VERSION: i64 = 79;
+const QUALITY_LEDGER_SCHEMA_MIGRATION_SOURCE: i64 = QUALITY_CANCELLATION_SCHEMA_VERSION;
+pub const AUTH_SCHEMA_VERSION: i64 = QUALITY_LEDGER_SCHEMA_VERSION;
 /// The marker the private-lineage bridge stamps: the end of the canonical
-/// union it builds, not the binary's current schema.
+/// union it builds (`schema_lineage::bridge_plan`'s `canonical_end`), not the
+/// binary's current schema. Steps after it are ordinary dispatcher steps.
 const BRIDGED_LINEAGE_SCHEMA_VERSION: i64 = ENCODED_OUTPUT_SCHEMA_VERSION;
 /// Leading compare-and-swap for a replicated schema step, bound to the step's
 /// source version. Two voters can read the same marker and both submit the
@@ -3622,6 +3627,30 @@ impl HiqliteAuthStore {
                     self.settle_migration_attempt(JELLYFIN_WATCH_SCHEMA_MIGRATION_SOURCE, attempt)
                         .await?;
                 }
+                // Each new step runs in its own boxed future. This chain is one
+                // async fn with an arm per version, and in debug builds every
+                // inline arm's temporaries widen the frame that polls it; the
+                // daemon join test thread had no headroom left for two more.
+                SchemaMigrationAction::MigrateFrom(
+                    QUALITY_CANCELLATION_SCHEMA_MIGRATION_SOURCE,
+                ) => {
+                    Box::pin(self.migrate_additive_schema_step(
+                        admission,
+                        super::quality_cancellation::QUALITY_CANCELLATION_SCHEMA,
+                        QUALITY_CANCELLATION_SCHEMA_MIGRATION_SOURCE,
+                        QUALITY_CANCELLATION_SCHEMA_VERSION,
+                    ))
+                    .await?;
+                }
+                SchemaMigrationAction::MigrateFrom(QUALITY_LEDGER_SCHEMA_MIGRATION_SOURCE) => {
+                    Box::pin(self.migrate_additive_schema_step(
+                        admission,
+                        super::quality_ledger::SCHEMA,
+                        QUALITY_LEDGER_SCHEMA_MIGRATION_SOURCE,
+                        QUALITY_LEDGER_SCHEMA_VERSION,
+                    ))
+                    .await?;
+                }
                 SchemaMigrationAction::MigrateFrom(version) => {
                     return Err(StoreError::Migration(format!(
                         "cluster schema {version} has no migration implementation"
@@ -3711,8 +3740,10 @@ impl HiqliteAuthStore {
         }
         // The bridge builds the canonical union, which ends at main's v73
         // (`schema_lineage::bridge_plan`'s `canonical_end`); ordinary steps
-        // after it (the Jellyfin v74–v77) then run from that marker. Stamping
-        // the binary's current version here would skip them.
+        // after it (the Jellyfin v74–v77, then quality cancellation v78 and
+        // the continuous ledger v79) then run from that marker through the
+        // dispatcher. Stamping the binary's current version here would skip
+        // them.
         statements.push(("UPDATE cluster_meta SET schema_version = $1, migrated_at = $2 WHERE singleton = 1 AND schema_version = $3".to_owned(), params!(BRIDGED_LINEAGE_SCHEMA_VERSION, self.now()?, marker)));
         // Every query is a single prepared statement. The vendored writer
         // executes sequentially within ONE transaction and rolls back on any
@@ -3942,6 +3973,38 @@ impl HiqliteAuthStore {
         Ok(rows.first().is_some_and(|row| row.count > 0))
     }
 
+    /// One additive schema step, in main's step shape: the source guard, the
+    /// step's DDL and the marker advance from exactly `source` to `target`
+    /// commit in a single Raft transaction, or none of them does. `schema`
+    /// holds `;`-terminated statements, one per line ending.
+    async fn migrate_additive_schema_step(
+        &self,
+        admission: SchemaMigrationAdmission<'_>,
+        schema: &'static str,
+        source: i64,
+        target: i64,
+    ) -> Result<(), StoreError> {
+        let now = self.now()?;
+        let mut statements: Vec<(String, hiqlite::Params)> =
+            vec![(SCHEMA_STEP_SOURCE_GUARD.to_owned(), params!(source))];
+        statements.extend(
+            schema
+                .split_inclusive(";\n")
+                .map(str::trim)
+                .filter(|sql| !sql.is_empty())
+                .map(|sql| (sql.to_owned(), params!())),
+        );
+        statements.push((
+            "UPDATE cluster_meta SET schema_version = $1, migrated_at = $2 \
+             WHERE singleton = 1 AND schema_version = $3"
+                .to_owned(),
+            params!(target, now, source),
+        ));
+        admit_schema_migration(admission)?;
+        let attempt = self.client().txn(statements).await;
+        self.settle_migration_attempt(source, attempt).await
+    }
+
     async fn settle_migration_attempt(
         &self,
         predecessor: i64,
@@ -4158,6 +4221,18 @@ impl HiqliteAuthStore {
                 "DELETE FROM media_session_terminal_acks".to_owned(),
                 params!(),
             ),
+            (
+                "DELETE FROM quality_cancellation_receipts".to_owned(),
+                params!(),
+            ),
+            (
+                "DELETE FROM quality_preparation_owners".to_owned(),
+                params!(),
+            ),
+            (
+                "DELETE FROM continuous_quality_ledgers".to_owned(),
+                params!(),
+            ),
             ("DELETE FROM media_sessions".to_owned(), params!()),
             ("DELETE FROM media_session_requests".to_owned(), params!()),
             ("DELETE FROM job_leases".to_owned(), params!()),
@@ -4235,6 +4310,9 @@ impl HiqliteAuthStore {
             "SELECT user_id, playback_id, current_incarnation_id, updated_at_ms FROM media_playback_pointers ORDER BY user_id, playback_id",
             "SELECT incarnation_id, session_id, user_id, playback_id, request_fingerprint, owner_node_id, owner_epoch, lease_expires_at_ms, state, terminal_reason, publication_ready_at_ms, recipe_json, response_json, produced_playable_through_ms, fetched_through_ms, media_origin_ms, media_sequence, discontinuity_sequence, updated_at_ms FROM media_sessions ORDER BY incarnation_id",
             "SELECT incarnation_id, session_id, owner_node_id, owner_epoch, client_instance_id, sequence, request_fingerprint, response_json, expires_at_ms, updated_at_ms FROM media_session_terminal_acks ORDER BY session_id",
+            "SELECT receipt_key, generation, session_id, owner_node_id, owner_epoch, client_instance_id, lifetime_id, recipe_revision, accepted_sequence, state, created_at_ms, updated_at_ms FROM quality_cancellation_receipts ORDER BY receipt_key",
+            "SELECT staged_incarnation_id, cancellation_key FROM quality_preparation_owners ORDER BY staged_incarnation_id",
+            "SELECT generation, owner_node_id, owner_epoch, revision, attachment_id, ledger_json, updated_at_ms FROM continuous_quality_ledgers ORDER BY generation",
             "SELECT user_id, playback_id, staged_incarnation_id, expected_predecessor_incarnation_id, deadline_ms, created_at_ms, updated_at_ms FROM media_session_preparations ORDER BY user_id, playback_id",
         ] {
             validate_sql(sql)?;
@@ -4334,6 +4412,33 @@ impl HiqliteAuthStore {
                         produced_playable_through_ms, fetched_through_ms, \
                         media_origin_ms, media_sequence, discontinuity_sequence, updated_at_ms \
                    FROM media_sessions ORDER BY incarnation_id",
+                    params!(),
+                )
+                .await?,
+            continuous_quality_ledgers: self
+                .client()
+                .query_map(
+                    "SELECT generation, owner_node_id, owner_epoch, revision, attachment_id, \
+                        ledger_json, updated_at_ms \
+                   FROM continuous_quality_ledgers ORDER BY generation",
+                    params!(),
+                )
+                .await?,
+            quality_preparation_owners: self
+                .client()
+                .query_map(
+                    "SELECT staged_incarnation_id, cancellation_key \
+                   FROM quality_preparation_owners ORDER BY staged_incarnation_id",
+                    params!(),
+                )
+                .await?,
+            quality_cancellation_receipts: self
+                .client()
+                .query_map(
+                    "SELECT receipt_key, generation, session_id, owner_node_id, owner_epoch, \
+                        client_instance_id, lifetime_id, recipe_revision, accepted_sequence, \
+                        state, created_at_ms, updated_at_ms \
+                   FROM quality_cancellation_receipts ORDER BY receipt_key",
                     params!(),
                 )
                 .await?,
@@ -6003,7 +6108,9 @@ fn schema_migration_action(
         | JELLYFIN_IDENTITY_SCHEMA_MIGRATION_SOURCE
         | JELLYFIN_LOGIN_SCHEMA_MIGRATION_SOURCE
         | JELLYFIN_PLAY_SCHEMA_MIGRATION_SOURCE
-        | JELLYFIN_WATCH_SCHEMA_MIGRATION_SOURCE => {
+        | JELLYFIN_WATCH_SCHEMA_MIGRATION_SOURCE
+        | QUALITY_CANCELLATION_SCHEMA_MIGRATION_SOURCE
+        | QUALITY_LEDGER_SCHEMA_MIGRATION_SOURCE => {
             Ok(SchemaMigrationAction::MigrateFrom(meta.schema_version))
         }
         version => Err(StoreError::Migration(format!(
@@ -6051,6 +6158,9 @@ struct AuthStoreDump {
     library_channel_session_recipes: Vec<LibraryChannelSessionRecipeDumpRow>,
     media_playback_pointers: Vec<MediaPlaybackPointerDumpRow>,
     media_sessions: Vec<MediaSessionDumpRow>,
+    continuous_quality_ledgers: Vec<QualityLedgerDumpRow>,
+    quality_preparation_owners: Vec<QualityPreparationOwnerDumpRow>,
+    quality_cancellation_receipts: Vec<QualityCancellationDumpRow>,
     media_session_terminal_acks: Vec<MediaSessionTerminalAckDumpRow>,
     media_session_preparations: Vec<MediaSessionPreparationDumpRow>,
 }
@@ -6512,6 +6622,34 @@ dump_row!(MediaSessionPreparationDumpRow {
     staged_incarnation_id: String,
     expected_predecessor_incarnation_id: String,
     deadline_ms: i64,
+    created_at_ms: i64,
+    updated_at_ms: i64,
+});
+dump_row!(QualityLedgerDumpRow {
+    generation: String,
+    owner_node_id: String,
+    owner_epoch: i64,
+    revision: i64,
+    attachment_id: String,
+    ledger_json: String,
+    updated_at_ms: i64,
+});
+
+dump_row!(QualityPreparationOwnerDumpRow {
+    staged_incarnation_id: String,
+    cancellation_key: String
+});
+dump_row!(QualityCancellationDumpRow {
+    receipt_key: String,
+    generation: String,
+    session_id: String,
+    owner_node_id: String,
+    owner_epoch: i64,
+    client_instance_id: String,
+    lifetime_id: String,
+    recipe_revision: i64,
+    accepted_sequence: i64,
+    state: String,
     created_at_ms: i64,
     updated_at_ms: i64,
 });
@@ -8543,9 +8681,22 @@ mod tests {
             "v77 advances to manual-edit watch revisions"
         );
         assert_eq!(
-            AUTH_SCHEMA_MIGRATION_SOURCE + 72,
+            JELLYFIN_WATCH_SCHEMA_VERSION, QUALITY_CANCELLATION_SCHEMA_MIGRATION_SOURCE,
+            "quality cancellation follows the Jellyfin watch schema"
+        );
+        assert_eq!(
+            QUALITY_CANCELLATION_SCHEMA_VERSION, QUALITY_LEDGER_SCHEMA_MIGRATION_SOURCE,
+            "continuous dependencies follow quality cancellation"
+        );
+        assert_eq!(
+            QUALITY_LEDGER_SCHEMA_MIGRATION_SOURCE + 1,
             AUTH_SCHEMA_VERSION,
-            "this implementation contains every additive v5→v77 step"
+            "the continuous ledger is the final additive step"
+        );
+        assert_eq!(
+            AUTH_SCHEMA_MIGRATION_SOURCE + 74,
+            AUTH_SCHEMA_VERSION,
+            "this implementation contains every additive v5→v79 step"
         );
         let row = |schema_version| CompatibilityRow {
             schema_version,

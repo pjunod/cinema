@@ -2063,6 +2063,7 @@
     fn audio_intent_fingerprint_keys_the_claim_not_a_refreshed_server_answer() {
         use plurx_core::playback::audio::{AudioAction, AudioClaim, AudioDelivery, AudioSink};
         let mut request = SessionRequest {
+            continuous_media: None,
             vod_only: false, passive_vod: false, finite_bitrate_limit_bps: None,
             control_sequence: None, file_id: 1, playback_id: "player".into(), request_id: None,
             quality_catalog: None,
@@ -2121,6 +2122,7 @@
         let claim = AudioClaim { decoders: vec!["aac".into()], sinks: vec![AudioSink {
             codec: "aac".into(), max_channels: 6, passthrough: false, sample_rates_hz: vec![48_000] }] };
         let mut request = SessionRequest {
+            continuous_media: None,
             vod_only: false, passive_vod: false, finite_bitrate_limit_bps: None,
             control_sequence: None, file_id: file.id, playback_id: "integration".into(), request_id: None,
             quality_catalog: None,
@@ -2197,6 +2199,7 @@
             codec: "aac".into(), channels: 6, layout: Some("5.1".into()), bitrate_kbps: 320, sample_rate: 48_000,
         }, downmix: None, reason: "retained actual producer".into() };
         let mut request = SessionRequest {
+            continuous_media: None,
             vod_only: false, passive_vod: false, finite_bitrate_limit_bps: None,
             control_sequence: None, file_id: file.id, playback_id: "retained-player".into(), request_id: None,
             quality_catalog: None,

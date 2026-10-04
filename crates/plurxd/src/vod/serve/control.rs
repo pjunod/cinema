@@ -181,6 +181,40 @@ impl VodServe {
             if crate::media_sessions::unix_ms() >= deadline_unix_ms {
                 return Some(Err(crate::playback_control::ControlStateError::Unavailable));
             }
+            // Private readers share parent control authority, but use their
+            // own sample clocks. Lock every graph before accepting a sequence
+            // so cancellation cannot publish a command to only some children.
+            let mut child_groups: Vec<(Arc<Rendition>, Vec<String>)> = Vec::new();
+            let mut root_children = Vec::new();
+            if control.snapshot.demand != crate::playback_control::PlaybackDemand::End {
+                for child in &session.children {
+                    if Arc::ptr_eq(&child.rendition, &control_rendition) {
+                        if !readers.contains_key(&child.reader_id) {
+                            return Some(Err(
+                                crate::playback_control::ControlStateError::Unavailable,
+                            ));
+                        }
+                        root_children.push(child.reader_id.clone());
+                    } else if let Some((_, ids)) = child_groups
+                        .iter_mut()
+                        .find(|(rendition, _)| Arc::ptr_eq(rendition, &child.rendition))
+                    {
+                        ids.push(child.reader_id.clone());
+                    } else {
+                        child_groups
+                            .push((Arc::clone(&child.rendition), vec![child.reader_id.clone()]));
+                    }
+                }
+            }
+            child_groups.sort_by(|(left, _), (right, _)| left.key.cmp(&right.key));
+            let mut child_readers = Vec::with_capacity(child_groups.len());
+            for (rendition, ids) in &child_groups {
+                let guard = rendition.readers.lock().await;
+                if ids.iter().any(|id| !guard.contains_key(id)) {
+                    return Some(Err(crate::playback_control::ControlStateError::Unavailable));
+                }
+                child_readers.push(guard);
+            }
             // Acceptance and M6's selection gate are one lock scope. They are
             // two reads of the same fence, and taking the lock twice would let
             // another exchange land between them and be measured against a
@@ -242,8 +276,31 @@ impl VodServe {
                     prewarm.enabled = false;
                     prewarm.deactivate();
                 }
+                let anchor_ms = control.snapshot.buffer_anchor_ms();
+                for id in root_children {
+                    readers
+                        .get_mut(&id)
+                        .expect("locked private root reader")
+                        .accept_control(
+                            control.sequence,
+                            media_entry_containing_ms(&control_rendition.plan, anchor_ms),
+                        );
+                }
+                for ((rendition, ids), child_readers) in
+                    child_groups.iter().zip(child_readers.iter_mut())
+                {
+                    let index = media_entry_containing_ms(&rendition.plan, anchor_ms);
+                    for id in ids {
+                        child_readers
+                            .get_mut(id)
+                            .expect("locked private reader")
+                            .accept_control(control.sequence, index);
+                    }
+                    rendition.kick();
+                }
                 control_rendition.kick();
             }
+            drop(child_readers);
             drop(readers);
 
             if disposition == crate::playback_control::ControlDisposition::Accepted

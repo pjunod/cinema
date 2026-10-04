@@ -62,6 +62,211 @@ pub enum Fmp4Error {
     MultipleHevcSampleEntries { count: usize },
 }
 
+/// Output facts read structurally from the one actual AVC sample entry.
+/// These are container facts; decoded joins still need separate qualification.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AvcSampleEntryFacts {
+    pub codec: String,
+    pub width: u16,
+    pub height: u16,
+    pub color_primaries: u16,
+    pub color_transfer: u16,
+    pub color_matrix: u16,
+    pub full_range: bool,
+}
+
+pub fn avc_sample_entry_facts(init: &Init) -> Result<Option<AvcSampleEntryFacts>, Fmp4Error> {
+    let Some(codec) = avc_rfc6381_codec(init)? else {
+        return Ok(None);
+    };
+    let video = init.video().expect("AVC codec requires video");
+    let (count, entries) = locate_avc_sample_entries(&init.bytes, video.id)?;
+    if count != 1 || entries.len() != 1 || entries[0].sample_entry != *b"avc1" {
+        return Err(Fmp4Error::Unsupported(
+            "continuous AVC requires one avc1 sample entry".into(),
+        ));
+    }
+    let entry = &entries[0];
+    let header = peek_box(&init.bytes, entry.entry.start)?
+        .ok_or_else(|| Fmp4Error::Malformed("missing AVC sample entry".into()))?;
+    let body = entry.entry.start + entry.entry.header_len;
+    let end = entry.entry.start + header.size;
+    let width = u16::from_be_bytes(
+        init.bytes[body + 24..body + 26]
+            .try_into()
+            .expect("validated visual header"),
+    );
+    let height = u16::from_be_bytes(
+        init.bytes[body + 26..body + 28]
+            .try_into()
+            .expect("validated visual header"),
+    );
+    if width == 0 || height == 0 || width % 2 != 0 || height % 2 != 0 {
+        return malformed("continuous AVC has an invalid even raster");
+    }
+    let colors = find_children(&init.bytes, body + 78..end, b"colr")?;
+    if colors.len() != 1 {
+        return Err(Fmp4Error::Unsupported(
+            "continuous AVC needs one explicit color record".into(),
+        ));
+    }
+    let (at, color) = &colors[0];
+    let data = &init.bytes[at.start + color.header_len..at.start + color.size];
+    if data.len() != 11 || &data[..4] != b"nclx" || data[10] & 0x7f != 0 {
+        return Err(Fmp4Error::Unsupported(
+            "continuous AVC needs a complete nclx color record".into(),
+        ));
+    }
+    Ok(Some(AvcSampleEntryFacts {
+        codec,
+        width,
+        height,
+        color_primaries: u16::from_be_bytes([data[4], data[5]]),
+        color_transfer: u16::from_be_bytes([data[6], data[7]]),
+        color_matrix: u16::from_be_bytes([data[8], data[9]]),
+        full_range: data[10] & 0x80 != 0,
+    }))
+}
+
+/// Actual configuration of the initial shared soundtrack family. This parser
+/// accepts the production AAC-LC/48 kHz/1024-sample shape, not an arbitrary
+/// audio entry whose filename happens to end in MP4.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AacSampleEntryFacts {
+    pub codec: &'static str,
+    pub channels: u16,
+    pub sample_rate: u32,
+    pub samples_per_frame: u16,
+}
+
+pub fn aac_lc_sample_entry_facts(init: &Init) -> Result<AacSampleEntryFacts, Fmp4Error> {
+    if init.tracks.len() != 1
+        || init.tracks[0].kind != TrackKind::Audio
+        || init.tracks[0].timescale != 48_000
+    {
+        return malformed("shared AAC requires one 48 kHz audio track");
+    }
+    let bytes = &init.bytes;
+    let only_child = |range, kind| -> Result<Range<usize>, Fmp4Error> {
+        let boxes = find_children(bytes, range, kind)?;
+        let [(at, header)] = boxes.as_slice() else {
+            return malformed("shared AAC has a missing or ambiguous configuration box");
+        };
+        Ok(at.start + header.header_len..at.start + header.size)
+    };
+    let moov = only_child(0..bytes.len(), b"moov")?;
+    let selected = find_children(bytes, moov, b"trak")?
+        .into_iter()
+        .map(|(at, header)| at.start + header.header_len..at.start + header.size)
+        .filter_map(|range| match track_id_in_trak(bytes, range.clone()) {
+            Ok(Some(id)) if id == init.tracks[0].id => Some(Ok(range)),
+            Ok(_) => None,
+            Err(error) => Some(Err(error)),
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let [trak] = selected.as_slice() else {
+        return malformed("shared AAC track id is missing or duplicated");
+    };
+    let mdia = only_child(trak.clone(), b"mdia")?;
+    let minf = only_child(mdia, b"minf")?;
+    let stbl = only_child(minf, b"stbl")?;
+    let stsd = only_child(stbl, b"stsd")?;
+    if stsd.len() < 8 || be_u32(bytes, stsd.start + 4) != 1 {
+        return malformed("shared AAC requires one sample description");
+    }
+    let entries = &bytes[stsd.start + 8..stsd.end];
+    let descriptions = children(entries)?;
+    let [(header, start, end)] = descriptions.as_slice() else {
+        return malformed("shared AAC has ambiguous sample descriptions");
+    };
+    if header.kind() != b"mp4a" || end - start < 28 {
+        return malformed("shared AAC has no complete mp4a entry");
+    }
+    let body = &entries[*start..*end];
+    if body[8..10] != [0, 0] || be_u32(body, 24) != 48_000 << 16 {
+        return malformed("shared AAC requires a version-zero 48 kHz sample entry");
+    }
+    let body_start = stsd.start + 8 + start;
+    let esds = only_child(body_start + 28..body_start + body.len(), b"esds")?;
+    let record = &bytes[esds];
+    if record.len() < 4 || record[..4] != [0, 0, 0, 0] {
+        return malformed("shared AAC has an unsupported esds version");
+    }
+    let mut root = &record[4..];
+    let (tag, es) = read_audio_descriptor(&mut root)?;
+    if tag != 3 || !root.is_empty() || es.len() < 3 || es[2] & 0xe0 != 0 {
+        return malformed("shared AAC has an unsupported ES descriptor");
+    }
+    let mut configs = &es[3..];
+    let (tag, decoder) = read_audio_descriptor(&mut configs)?;
+    if tag != 4 || decoder.len() < 13 || decoder[0] != 0x40 || decoder[1] != 0x15 {
+        return malformed("shared AAC has no MPEG-4 audio decoder configuration");
+    }
+    let (tag, sl) = read_audio_descriptor(&mut configs)?;
+    if tag != 6 || sl != [2] || !configs.is_empty() {
+        return malformed("shared AAC has an unsupported synchronization descriptor");
+    }
+    let mut specific = &decoder[13..];
+    let (tag, asc) = read_audio_descriptor(&mut specific)?;
+    if tag != 5 || !specific.is_empty() {
+        return malformed("shared AAC has ambiguous AudioSpecificConfig");
+    }
+    parse_shared_aac_config(asc)
+}
+
+/// Descriptor lengths are bounded to the MPEG-4 four-byte vocabulary and
+/// always checked against their enclosing descriptor before any slice.
+fn read_audio_descriptor<'a>(input: &mut &'a [u8]) -> Result<(u8, &'a [u8]), Fmp4Error> {
+    let Some((&tag, mut remaining)) = input.split_first() else {
+        return malformed("missing MPEG-4 audio descriptor");
+    };
+    let mut length = 0_usize;
+    for _ in 0..4 {
+        let Some((&value, rest)) = remaining.split_first() else {
+            return malformed("truncated MPEG-4 audio descriptor length");
+        };
+        remaining = rest;
+        length = (length << 7) | usize::from(value & 0x7f);
+        if value & 0x80 == 0 {
+            if length > remaining.len() {
+                return malformed("MPEG-4 audio descriptor exceeds its parent");
+            }
+            let (body, rest) = remaining.split_at(length);
+            *input = rest;
+            return Ok((tag, body));
+        }
+    }
+    malformed("MPEG-4 audio descriptor length exceeds four bytes")
+}
+
+fn parse_shared_aac_config(config: &[u8]) -> Result<AacSampleEntryFacts, Fmp4Error> {
+    if config.len() < 2 {
+        return malformed("truncated AAC AudioSpecificConfig");
+    }
+    let bits = u16::from_be_bytes([config[0], config[1]]);
+    let channel_config = (bits >> 3) & 15;
+    // Accept no extension, or the encoder's explicit absent-SBR extension.
+    // HE-AAC, PCE, short frames and unknown extensions need another family.
+    if bits >> 11 != 2
+        || (bits >> 7) & 15 != 3
+        || bits & 7 != 0
+        || !(1..=7).contains(&channel_config)
+        || (!config[2..].is_empty() && config[2..] != [0x56, 0xe5, 0x00])
+    {
+        return malformed("shared AAC requires AAC-LC, 48 kHz and 1024-sample frames");
+    }
+    Ok(AacSampleEntryFacts {
+        codec: "mp4a.40.2",
+        channels: if channel_config == 7 {
+            8
+        } else {
+            channel_config
+        },
+        sample_rate: 48_000,
+        samples_per_frame: 1_024,
+    })
+}
+
 /// The validated HEVC sample-description shape carried by an initialization
 /// segment. Every reported description has already had its decoder
 /// configuration checked; this is therefore safe policy input rather than an
@@ -2739,9 +2944,7 @@ struct HvcCLocation {
 struct AvcCLocation {
     sample_entry: [u8; 4],
     payload: Range<usize>,
-    /// Read only by the fixture builders that duplicate or rewrite a sample
-    /// entry; the production reader needs `sample_entry` and `payload` alone.
-    #[cfg_attr(not(any(test, feature = "fixtures")), expect(dead_code))]
+    /// Structural visual header used by actual raster/color facts and fixtures.
     entry: BoxAt,
     /// `stsd` first, then every enclosing box through `moov`. Fixture-only,
     /// like `entry`.
@@ -4533,6 +4736,195 @@ struct Boundaries {
     starts: Vec<u64>,
 }
 
+/// Cuts a verified, film-global AAC sample stream on its own immutable plan.
+/// Callers remove encoder priming and restore absolute `tfdt` before pushing.
+/// A video boundary never participates in this soundtrack's publication.
+#[derive(Debug)]
+pub struct PlannedAudioSegmenter {
+    init: Init,
+    plan: crate::segplan::SegmentPlan,
+    entry: usize,
+    next_tick: u64,
+    pending: Vec<Fragment>,
+    pending_bytes: usize,
+}
+
+impl PlannedAudioSegmenter {
+    pub fn new(
+        init: Init,
+        plan: crate::segplan::SegmentPlan,
+        start_entry: u32,
+    ) -> Result<Self, Fmp4Error> {
+        let refuse = || {
+            Fmp4Error::Unsupported(
+                "shared AAC requires one 48kHz track and a contiguous sample-clock plan".into(),
+            )
+        };
+        if init.tracks.len() != 1
+            || init.tracks[0].kind != TrackKind::Audio
+            || init.tracks[0].timescale != 48_000
+            || plan.timescale != 48_000
+            || plan.version != crate::segplan::SEGPLAN_VERSION
+            || plan.entries.is_empty()
+            || plan.entries.len() > 100_000
+        {
+            return Err(refuse());
+        }
+        let mut next = 0;
+        for (index, entry) in plan.entries.iter().enumerate() {
+            let final_entry = index + 1 == plan.entries.len();
+            if entry.index as usize != index
+                || entry.kind != crate::segplan::PlanEntryKind::AudioTail
+                || entry.start_ticks != next
+                || entry.start_ticks % 1_024 != 0
+                || entry.duration_ticks == 0
+                || entry.duration_ticks > 480_000
+                || (!final_entry && entry.duration_ticks % 1_024 != 0)
+            {
+                return Err(refuse());
+            }
+            next = next.checked_add(entry.duration_ticks).ok_or_else(refuse)?;
+        }
+        let next_tick = plan.entry(start_entry).ok_or_else(refuse)?.start_ticks;
+        Ok(Self {
+            init,
+            plan,
+            entry: start_entry as usize,
+            next_tick,
+            pending: Vec::new(),
+            pending_bytes: 0,
+        })
+    }
+
+    /// Fully validate the incoming sample run before changing publication
+    /// state. Gaps and overlaps are refused rather than absorbed into an AAC
+    /// sample duration by the general-purpose fragment merger.
+    pub fn push(&mut self, fragment: Fragment) -> Result<Vec<Published>, Fmp4Error> {
+        let refuse =
+            || Fmp4Error::Malformed("shared AAC sample bounds or clock continuity failed".into());
+        if fragment.tracks.len() != 1
+            || fragment.len() > 4 * 1024 * 1024
+            || fragment.tracks[0].track_id != self.init.tracks[0].id
+            || fragment.tracks[0].base_decode_time != self.next_tick
+            || fragment.tracks[0].sample_count() == 0
+            || fragment.tracks[0].sample_count() > 2_048
+        {
+            return Err(refuse());
+        }
+        let end = self
+            .plan
+            .entries
+            .last()
+            .expect("validated plan")
+            .end_ticks();
+        let track = &fragment.tracks[0];
+        let mut tick = self.next_tick;
+        let mut planned_entry = self.entry;
+        let mut interval_bytes = self.pending_bytes;
+        let mut payloads = Vec::with_capacity(track.sample_count());
+        for run in &track.runs {
+            let mut offset = run.data_offset;
+            for sample in &run.samples {
+                let through = offset
+                    .checked_add(sample.size as usize)
+                    .ok_or_else(refuse)?;
+                if sample.duration == 0
+                    || sample.duration > 1_024
+                    || sample.size == 0
+                    || sample.cto != 0
+                    || offset < fragment.mdat_payload.start
+                    || through > fragment.mdat_payload.end
+                    || through > fragment.bytes.len()
+                    || (sample.duration != 1_024 && tick + u64::from(sample.duration) != end)
+                {
+                    return Err(refuse());
+                }
+                let next = tick
+                    .checked_add(u64::from(sample.duration))
+                    .ok_or_else(refuse)?;
+                if next > end {
+                    return Err(refuse());
+                }
+                let entry = self.plan.entries.get(planned_entry).ok_or_else(refuse)?;
+                if next > entry.end_ticks() {
+                    return Err(refuse());
+                }
+                interval_bytes = interval_bytes
+                    .checked_add(sample.size as usize)
+                    .ok_or_else(refuse)?;
+                if interval_bytes > 16 * 1024 * 1024 {
+                    return Err(Fmp4Error::Unsupported(
+                        "shared AAC interval exceeds its publication byte allowance".into(),
+                    ));
+                }
+                if next == entry.end_ticks() {
+                    planned_entry += 1;
+                    interval_bytes = 0;
+                }
+                payloads.push((tick, *sample, fragment.bytes[offset..through].to_vec()));
+                tick = next;
+                offset = through;
+            }
+        }
+        let mut published = Vec::new();
+        for (tick, mut sample, bytes) in payloads {
+            let entry = self.plan.entries.get(self.entry).ok_or_else(refuse)?;
+            let next = tick + u64::from(sample.duration);
+            if next > entry.end_ticks() {
+                return Err(refuse());
+            }
+            self.pending_bytes += bytes.len();
+            if self.pending_bytes > 16 * 1024 * 1024 {
+                return Err(Fmp4Error::Unsupported(
+                    "shared AAC interval exceeds its publication byte allowance".into(),
+                ));
+            }
+            sample.size_at = None;
+            self.pending.push(Fragment {
+                mdat_payload: 0..bytes.len(),
+                bytes,
+                tracks: vec![TrackFragment {
+                    track_id: self.init.tracks[0].id,
+                    base_decode_time: tick,
+                    runs: vec![Run {
+                        version: 0,
+                        composition_offsets_present: false,
+                        data_offset: 0,
+                        data_offset_at: None,
+                        samples: vec![sample],
+                    }],
+                }],
+            });
+            self.next_tick = next;
+            if next == entry.end_ticks() {
+                let segment = merge(&self.pending, &self.init, entry.index + 1)?;
+                if segment.stats.tfdt_adjustments != 0 {
+                    return Err(refuse());
+                }
+                published.push(Published {
+                    index: u64::from(entry.index),
+                    segment,
+                    reason: if self.entry + 1 == self.plan.entries.len() {
+                        CutReason::EndOfStream
+                    } else {
+                        CutReason::Clean
+                    },
+                    seconds: entry.duration_ticks as f64 / 48_000.0,
+                });
+                self.entry += 1;
+                self.pending.clear();
+                self.pending_bytes = 0;
+            }
+        }
+        Ok(published)
+    }
+
+    /// A killed or truncated producer cannot publish a partial promised URI.
+    pub fn complete(&self) -> bool {
+        self.entry == self.plan.entries.len() && self.pending.is_empty()
+    }
+}
+
 /// Accumulates fragments and publishes segments that start on clean keyframes.
 ///
 /// Pure by design: the daemon feeds it fragments and writes what comes back
@@ -5374,6 +5766,271 @@ mod tests {
     use std::process::Command;
 
     use crate::testfixtures::{ffmpeg, ffprobe, pipe, pipe_path, run};
+
+    fn shared_audio_init() -> Init {
+        Init {
+            bytes: vec![],
+            tracks: vec![Track {
+                id: 1,
+                kind: TrackKind::Audio,
+                timescale: 48_000,
+                codec: None,
+                dolby_vision_config: false,
+                has_edit_list: false,
+                nal_length_size: 0,
+                default_sample_duration: 1_024,
+                default_sample_size: 4,
+                default_sample_flags: 0,
+            }],
+        }
+    }
+
+    fn shared_audio_fragment(
+        start_sample: u32,
+        count: u32,
+        final_duration: Option<u32>,
+    ) -> Fragment {
+        let bytes = (start_sample..start_sample + count)
+            .flat_map(u32::to_be_bytes)
+            .collect::<Vec<_>>();
+        let samples = (0..count)
+            .map(|index| Sample {
+                duration: if index + 1 == count {
+                    final_duration.unwrap_or(1_024)
+                } else {
+                    1_024
+                },
+                size: 4,
+                size_at: None,
+                flags: 0,
+                cto: 0,
+            })
+            .collect();
+        Fragment {
+            mdat_payload: 0..bytes.len(),
+            bytes,
+            tracks: vec![TrackFragment {
+                track_id: 1,
+                base_decode_time: u64::from(start_sample) * 1_024,
+                runs: vec![Run {
+                    version: 0,
+                    composition_offsets_present: false,
+                    data_offset: 0,
+                    data_offset_at: None,
+                    samples,
+                }],
+            }],
+        }
+    }
+
+    #[test]
+    fn shared_audio_publication_preserves_every_sample_across_fragment_and_restart_boundaries() {
+        let init = shared_audio_init();
+        let plan = crate::transcode::vod_shared_audio_plan(4_100, 160);
+        let mut cutter = PlannedAudioSegmenter::new(init.clone(), plan.clone(), 0).expect("cutter");
+        assert!(cutter
+            .push(shared_audio_fragment(0, 60, None))
+            .expect("first")
+            .is_empty());
+        let mut published = cutter
+            .push(shared_audio_fragment(60, 80, None))
+            .expect("middle");
+        assert_eq!(published.len(), 1);
+        assert!(!cutter.complete());
+        published.extend(
+            cutter
+                .push(shared_audio_fragment(140, 53, Some(192)))
+                .expect("tail"),
+        );
+        assert!(cutter.complete());
+        assert_eq!(published.len(), 3);
+        let mut actual = Vec::new();
+        for (index, item) in published.iter().enumerate() {
+            assert_eq!(item.index, index as u64);
+            assert_eq!(item.segment.stats.tfdt_adjustments, 0);
+            let mut reader = FragmentReader::new();
+            reader.init_done = true;
+            reader.tracks = init.tracks.clone();
+            reader.push(&item.segment.bytes);
+            let Some(Unit::Fragment(fragment)) = reader.next_unit().expect("published fragment")
+            else {
+                panic!("published audio did not parse");
+            };
+            assert_eq!(
+                fragment.tracks[0].base_decode_time,
+                plan.entries[index].start_ticks
+            );
+            assert_eq!(
+                fragment.tracks[0].duration(),
+                plan.entries[index].duration_ticks
+            );
+            actual.extend(track_samples(&fragment, 1));
+        }
+        assert_eq!(
+            actual,
+            (0u32..193)
+                .map(|sample| sample.to_be_bytes().to_vec())
+                .collect::<Vec<_>>()
+        );
+        let mut restart = PlannedAudioSegmenter::new(init, plan, 1).expect("restart");
+        let middle = restart
+            .push(shared_audio_fragment(94, 94, None))
+            .expect("restart interval");
+        assert_eq!(middle[0].segment.bytes, published[1].segment.bytes);
+    }
+
+    #[test]
+    fn shared_audio_gap_overlap_and_partial_packets_cannot_change_the_publication_frontier() {
+        let mut cutter = PlannedAudioSegmenter::new(
+            shared_audio_init(),
+            crate::transcode::vod_shared_audio_plan(4_100, 160),
+            0,
+        )
+        .expect("cutter");
+        cutter
+            .push(shared_audio_fragment(0, 60, None))
+            .expect("prerun");
+        assert!(cutter.push(shared_audio_fragment(61, 34, None)).is_err());
+        assert!(cutter.push(shared_audio_fragment(59, 34, None)).is_err());
+        assert!(cutter
+            .push(shared_audio_fragment(60, 34, Some(512)))
+            .is_err());
+        assert_eq!(cutter.next_tick, 60 * 1_024);
+        assert_eq!(cutter.entry, 0);
+        let published = cutter
+            .push(shared_audio_fragment(60, 34, None))
+            .expect("correct retry");
+        assert_eq!(published.len(), 1);
+        assert_eq!(published[0].index, 0);
+        assert!(!cutter.complete());
+    }
+
+    #[test]
+    fn shared_soundtrack_facts_verify_actual_aac_configuration() {
+        crate::testfixtures::require_ffmpeg();
+        for channels in [1, 2] {
+            let mut command = Command::new(ffmpeg());
+            command.args([
+                "-hide_banner",
+                "-loglevel",
+                "error",
+                "-f",
+                "lavfi",
+                "-i",
+                "sine=frequency=440:sample_rate=48000",
+                "-t",
+                "0.2",
+                "-vn",
+                "-c:a",
+                "aac",
+                "-profile:a",
+                "aac_low",
+                "-ar",
+                "48000",
+                "-ac",
+            ]);
+            command.arg(channels.to_string()).args([
+                "-movflags",
+                "frag_keyframe+empty_moov+default_base_moof+delay_moov",
+                "-f",
+                "mp4",
+                "pipe:1",
+            ]);
+            let (mut init, _, _) = read_all(&run(&mut command));
+            let facts = aac_lc_sample_entry_facts(&init).expect("actual AAC facts");
+            assert_eq!(facts.channels, channels);
+            assert_eq!(facts.codec, "mp4a.40.2");
+            assert_eq!(facts.sample_rate, 48_000);
+            assert_eq!(facts.samples_per_frame, 1_024);
+            init.tracks.push(init.tracks[0].clone());
+            assert!(aac_lc_sample_entry_facts(&init).is_err());
+        }
+        assert_eq!(
+            parse_shared_aac_config(&[0x11, 0xb8])
+                .expect("eight channels")
+                .channels,
+            8
+        );
+        for config in [
+            &[0x11][..],
+            &[0x11, 0x90, 0x56, 0xe5, 0x80][..],
+            &[0x11, 0x94][..],
+            &[0x12, 0x10][..],
+            &[0x11, 0x80][..],
+            &[0x29, 0x90][..],
+        ] {
+            assert!(parse_shared_aac_config(config).is_err(), "{config:?}");
+        }
+        for bytes in [
+            &[5, 0x80, 0x80, 0x80, 0x80, 0][..],
+            &[5, 3, 0x11, 0x90][..],
+            &[5, 0x80][..],
+        ] {
+            let mut input = bytes;
+            assert!(read_audio_descriptor(&mut input).is_err());
+        }
+    }
+
+    #[test]
+    fn continuous_avc_facts_come_from_the_actual_single_sample_entry() {
+        crate::testfixtures::require_ffmpeg();
+        let mut command = Command::new(ffmpeg());
+        command.args([
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-f",
+            "lavfi",
+            "-i",
+            "testsrc2=size=640x360:rate=24000/1001",
+            "-t",
+            "0.3",
+            // The continuous recipe's own tagging: newer ffmpeg leaves the
+            // stream unspecified unless the frames themselves carry BT.709.
+            "-vf",
+            "setparams=range=limited:color_primaries=bt709:color_trc=bt709:colorspace=bt709",
+            "-c:v",
+            "libx264",
+            "-profile:v",
+            "high",
+            "-level:v",
+            "5.0",
+            "-pix_fmt",
+            "yuv420p",
+            "-color_primaries",
+            "bt709",
+            "-color_trc",
+            "bt709",
+            "-colorspace",
+            "bt709",
+            "-an",
+            "-video_track_timescale",
+            "24000",
+            // As the continuous recipe does: newer ffmpeg writes `colr` only on request.
+            "-movflags",
+            "frag_keyframe+empty_moov+default_base_moof+delay_moov+write_colr",
+            "-f",
+            "mp4",
+            "pipe:1",
+        ]);
+        let (mut init, _, _) = read_all(&run(&mut command));
+        let facts = avc_sample_entry_facts(&init)
+            .expect("actual facts")
+            .expect("AVC");
+        assert_eq!((facts.width, facts.height), (640, 360));
+        assert_eq!(facts.codec, "avc1.640032");
+        assert_eq!(
+            (
+                facts.color_primaries,
+                facts.color_transfer,
+                facts.color_matrix
+            ),
+            (1, 1, 1)
+        );
+        assert!(!facts.full_range);
+        duplicate_avc_sample_entry_for_fixture(&mut init);
+        assert!(avc_sample_entry_facts(&init).is_err());
+    }
 
     /// Everything a feed produces, in order.
     fn read_all(feed: &[u8]) -> (Init, Vec<Fragment>, bool) {

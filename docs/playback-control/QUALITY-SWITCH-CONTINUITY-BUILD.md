@@ -17,6 +17,12 @@ states, the 330 s deadline, the reporter's pinned `renew_after_ms`, the
 `hold` semantics — stop and flag it instead of improvising.** Every line
 number below is from `c9e4edf4`; re-verify against the file before editing.
 
+**2026-09-30 follow-up:** [Continuous quality](CONTINUOUS-QUALITY-BUILD.md)
+now defines the next build and its acceptance. It replaces mandatory
+reopen-on-failure for healthy playback and adds compatible HLS rendition
+switching. This document retains the earlier contract and its historical
+evidence; it does not establish completion of the new work.
+
 ## 1. Objective and the bar
 
 A viewer-directed quality change (the quality menu, on any client) reaches the

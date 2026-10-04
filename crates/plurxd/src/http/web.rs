@@ -5,7 +5,7 @@
 //! non-API GET path.
 //!
 //! The app is not one file. `index.html` is a 97-line shell of markup and tags;
-//! the CSS and the JavaScript live in the sixty-six files of [`WEB_ASSETS`],
+//! the CSS and the JavaScript live in the sixty-eight files of [`WEB_ASSETS`],
 //! which is also their load order. There is no bundler and no build step —
 //! `docs/clients/WEB-SHELL-LAYOUT.md` is the map, and adding a file means a row
 //! there, a row here, and a tag in the shell, or the tests below say so.
@@ -83,6 +83,8 @@ pub const WEB_ASSETS: &[(&str, WebAsset, &str)] = &[
     ("detail/preplay-selection.js",            WebAsset::BodyScript,  include_str!("../web/detail/preplay-selection.js")),
     ("detail/edit.js",                         WebAsset::BodyScript,  include_str!("../web/detail/edit.js")),
     ("player/player.js",                       WebAsset::BodyScript,  include_str!("../web/player/player.js")),
+    ("player/continuous-media.js",             WebAsset::BodyScript,  include_str!("../web/player/continuous-media.js")),
+    ("player/continuous-quality.js",           WebAsset::BodyScript,  include_str!("../web/player/continuous-quality.js")),
     ("player/session.js",                      WebAsset::BodyScript,  include_str!("../web/player/session.js")),
     ("player/prepared-replacement.js",         WebAsset::BodyScript,  include_str!("../web/player/prepared-replacement.js")),
     ("player/prepared-switch-measurement.js",  WebAsset::BodyScript,  include_str!("../web/player/prepared-switch-measurement.js")),

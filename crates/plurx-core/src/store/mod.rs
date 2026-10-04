@@ -38,6 +38,7 @@ pub use candidate_recovery::{
     CandidateRecoveryCause, CandidateRecoveryMemory, CandidateRecoveryObservation,
     CandidateRecoveryScope,
 };
+mod continuous_family;
 mod fragindex;
 mod fragment_index_cluster;
 #[cfg(test)]
@@ -45,6 +46,13 @@ mod fragment_index_cluster;
 mod fragment_prune_tests;
 #[cfg(feature = "hiqlite-store")]
 mod hiqlite_classification;
+mod quality_cancellation;
+mod quality_ledger;
+pub use continuous_family::{
+    ContinuousAudioDescription, ContinuousFamilyDescription, ContinuousVideoDescription,
+};
+pub use quality_cancellation::QualityCancellationReceipt;
+pub use quality_ledger::QualityLedgerSnapshot;
 mod jellyfin_catalog;
 pub use jellyfin_catalog::{
     JellyfinCatalogArtwork, JellyfinCatalogIdentity, JellyfinCatalogLibrary,
@@ -5122,7 +5130,9 @@ pub trait MediaSessionStore: Send + Sync + 'static {
 
     /// Replace the durable unobserved sentinel with one full, freshly minted
     /// not-before boundary. Exact ownership changes and terminal state fail
-    /// closed. A concurrent acknowledgement may return an already-ready row.
+    /// closed. A starting request owns activation confirmation, so handoff
+    /// recovery cannot arm it even when its claim deadline exceeds the lease.
+    /// A concurrent acknowledgement may return an already-ready row.
     async fn arm_media_session_handoff(
         &self,
         incarnation_id: &str,
@@ -5193,6 +5203,86 @@ pub trait MediaSessionStore: Send + Sync + 'static {
         user_id: i64,
         playback_id: &str,
     ) -> Result<Option<MediaSessionRoute>, StoreError>;
+
+    /// Bind actual verified family media into the exact active parent recipe.
+    /// Existing descriptions are immutable across restoration and owner epochs.
+    async fn bind_continuous_family(
+        &self,
+        generation: &str,
+        owner_node_id: &str,
+        owner_epoch: i64,
+        description: &ContinuousFamilyDescription,
+        now_ms: i64,
+    ) -> Result<bool, StoreError>;
+
+    /// Read the durable rendition transaction facts with their CAS revision.
+    async fn quality_ledger(
+        &self,
+        generation: &str,
+    ) -> Result<Option<QualityLedgerSnapshot>, StoreError>;
+
+    /// Exact scheduled/appended dependencies, retained independently of live
+    /// producer state. On lookup failure, callers must retain existing media.
+    async fn quality_reserved_intervals(
+        &self,
+        rendition_id: &str,
+    ) -> Result<Vec<crate::playback::continuous_quality::QualityInterval>, StoreError>;
+
+    /// Publish only under the exact active parent owner and observed revision.
+    /// Takeover may advance epoch, but may not replace the attachment identity.
+    async fn write_quality_ledger(
+        &self,
+        ledger: &crate::playback::continuous_quality::QualityLedger,
+        owner_node_id: &str,
+        expected_revision: i64,
+        now_ms: i64,
+    ) -> Result<bool, StoreError>;
+
+    /// Reduce late completed append/presentation/disposal facts after End.
+    /// Cannot create a ledger, Prepare, schedule new media, or replace old pins.
+    /// The exact old JSON/revision and terminal parent owner fence the write.
+    async fn write_terminal_quality_transition(
+        &self,
+        expected: &QualityLedgerSnapshot,
+        request: &crate::playback::continuous_quality::QualityTransitionRequest,
+        owner_node_id: &str,
+        now_ms: i64,
+    ) -> Result<Option<crate::playback::continuous_quality::QualityTransitionReceipt>, StoreError>;
+
+    /// Record independent target cancellation under the exact current owner.
+    /// At most 128 receipts belong to a generation; settled receipts for an
+    /// older recipe revision of the same client lifetime are pruned first.
+    /// Replays preserve the first timestamps and outcome; no parent session
+    /// or cache pin is changed.
+    async fn request_quality_cancellation(
+        &self,
+        receipt: &QualityCancellationReceipt,
+    ) -> Result<Option<QualityCancellationReceipt>, StoreError>;
+
+    async fn quality_cancellation_receipt(
+        &self,
+        receipt_key: &str,
+    ) -> Result<Option<QualityCancellationReceipt>, StoreError>;
+
+    /// Mark cleanup proven for this exact receipt; cannot change its identity.
+    /// Accepted from the receipt's owner, or from the parent's current live
+    /// owner after a takeover.
+    async fn settle_quality_cancellation(
+        &self,
+        receipt_key: &str,
+        owner_node_id: &str,
+        owner_epoch: i64,
+        now_ms: i64,
+    ) -> Result<bool, StoreError>;
+
+    /// A cancelled recipe intent may not be restaged by cadence or takeover.
+    async fn quality_intent_cancelled(
+        &self,
+        generation: &str,
+        client_instance_id: &str,
+        lifetime_id: &str,
+        recipe_revision: i64,
+    ) -> Result<bool, StoreError>;
 
     /// Atomically store the first exact terminal-control acknowledgement and
     /// fence that exact owner route as ended. A conflicting identity/sequence
