@@ -1157,6 +1157,9 @@ async function main() {
       qualityCancellationSources(), shippedSource("requestQualityChange"),
       shippedSource("fallBackDirectedChange"),
       shippedSource("settleDirectedChange"),
+      // A declined optional manual target retains the incumbent first; the
+      // retained branch reads the staged-successor slot before Apply.
+      shippedSource("preparedState"),
       shippedSource("setQuality"),shippedSource("setSync"),
       shippedSource("setSub"),shippedSource("burnSub"),shippedSource("switchAudio"),
       // A directed change settles a promise chain rather than reopening
@@ -7316,6 +7319,7 @@ test("pause and resume preserve only the attached manual continuous quality inte
     "function clearPlaybackControlWaiters(){}",
     "function abandonPreparedReplacement(p){p.abandoned=true;}",
     "function settleDirectedChange(p,change,outcome){change.settled=true;change.outcome=outcome;}",
+    nextEpisodeCancellationSources(),
     shippedSource("supersedePlaybackControlIntent"),
     "return supersedePlaybackControlIntent;",
   ].join("\n"))();
@@ -7357,12 +7361,96 @@ test("pause and resume preserve only the attached manual continuous quality inte
 });
 
 
+// The shipped native transport edge and continuous directed-change owner.
+function continuousChangeOwner(){
+  return new Function([
+    "let PLAYER=null;const steps=[];",
+    "function clearPlaybackControlWaiters(){}function abandonPreparedReplacement(){}",
+    "function playbackTransportEvents(){return {pause:[],play:[]};}",
+    "function playbackTransportRecord(){return {};}function logPlaybackTransportRecord(){}",
+    "function pauseHlsStartup(){}function resumeHlsStartup(){}function endWait(){}",
+    "function playbackSurfaceStep(step){steps.push(step);}",
+    "function supersedeDirectedChange(p){return settleDirectedChange(p,p&&p.directedChange,'superseded');}",
+    "function playbackControlSelection(){return {quality:{mode:'manual',height:1080}};}",
+    "function continuousQualitySelectionCompatible(){return true;}",
+    "function continuousQualityCandidate(){return {id:'target'};}",
+    "function playbackOwnsAttachedMedia(){return true;}function notifyPlaybackControl(){}",
+    "function fallBackDirectedChange(p,change,why){change.settled=true;change.outcome=why;}",
+    "const released=[];function recordAutoSwitch(){}function releaseAutoFallback(p){released.push(p);}",
+    "const performance={now:()=>1};const timers=[];function setTimeout(run,ms){timers.push({run,ms});return timers.length;}function clearTimeout(){}",
+    shippedConst("CONTINUOUS_OBSERVATION_BOUND_MS"),
+    nextEpisodeCancellationSources(),
+    shippedSource("supersedePlaybackControlIntent"),shippedSource("handlePlaybackTransportEvent"),
+    shippedSource("requestQualityChange"),shippedSource("settleDirectedChange"),
+    shippedSource("settleContinuousDirectedChange"),
+    "return {attach(p){PLAYER=p;},timers,released,handlePlaybackTransportEvent,requestQualityChange,supersedePlaybackControlIntent};",
+  ].join("\n"))();
+}
+function continuousChangeHarness(owner,{autoMove=null}={}){
+  let release;const gate=new Promise(resolve=>release=resolve),attachment={};
+  const adapter={protocol:{ledger:{latest_intent_revision:1,transactions:[]}},
+    async choose(id,live){await gate;return live()?"continuous":"superseded";}};
+  const p={controlIntentGeneration:4,sessionId:"incumbent",started:true,mediaAttachment:attachment,
+    continuousQuality:adapter,wantsPlayback:true,abr:{switching:!!autoMove,requestedCandidateId:autoMove?.candidateId||null}};
+  owner.attach(p);
+  const running=owner.requestQualityChange(p,autoMove?"auto-quality":"manual",null,autoMove,{quality:{mode:"manual",height:720}});
+  return {p,release,running};
+}
+test("native Pause/Play keeps a pending manual continuous choice and a fenced one still settles",async()=>{
+  // OS media keys, PiP and headset buttons arrive as unmatched native edges.
+  const owner=continuousChangeOwner();
+  for(const [edge,paused] of [["pause",true],["play",false]]){
+    const h=continuousChangeHarness(owner),change=h.p.directedChange;
+    owner.handlePlaybackTransportEvent({paused,ended:false,error:null},h.p,edge);
+    assert.equal(change.intentGeneration,h.p.controlIntentGeneration,`native ${edge} carries the pending manual choice`);
+    h.release();
+    assert.equal(await h.running,"continuous",`native ${edge} does not abandon the chosen rung`);
+    assert.equal(change.outcome,"continuous");
+  }
+  // A genuinely fencing intent still wins, and the change it fenced settles.
+  const h=continuousChangeHarness(owner),change=h.p.directedChange;
+  owner.supersedePlaybackControlIntent(h.p);
+  h.release();
+  assert.equal(await h.running,"superseded");
+  assert.equal(change.settled,true,"a fenced continuous change is never left unsettled");
+  assert.equal(change.outcome,"superseded");
+});
+test("an unobserved continuous Auto change settles within the control budget without a reopen",async()=>{
+  const owner=continuousChangeOwner();
+  const move={from:720,to:1080,candidateId:"target",previousCandidateId:"old",switchReason:"fit"};
+  const h=continuousChangeHarness(owner,{autoMove:move}),change=h.p.directedChange;
+  h.release();assert.equal(await h.running,"continuous");
+  assert.equal(change.settled,false,"scheduling is not presentation");
+  const bound=owner.timers.filter(timer=>timer.ms===30000);
+  assert.equal(bound.length,1,"a continuous change carries a settle bound");
+  bound[0].run();
+  assert.equal(change.settled,true);assert.equal(change.outcome,"observation_unknown");
+  assert.equal(h.p.abr.switching,false,"Auto is not latched by an unobserved target");
+  assert.deepEqual(owner.released,[h.p]);
+  assert.equal(h.p.abr.requestedCandidateId,"target","future loads still request the scheduled rung");
+});
+test("a continuous choice settles on its target presented by the adapter's re-Prepare",()=>{
+  const settle=new Function("performance","document","recordAutoSwitch","positionForPlaybackIntent","releaseAutoFallback",
+    [shippedSource("settleDirectedChange"),shippedSource("settleContinuousDirectedChange"),"return settleContinuousDirectedChange;"].join("\n"))(
+      {now:()=>1},{getElementById:()=>({})},()=>{},()=>0,()=>{});
+  const roots=new Map([["tx2","tx"]]);
+  const p={directedChange:{settled:false,outcome:"continuous",continuousCandidateId:"target",continuousTransactionId:"tx"},
+    continuousQuality:{transactionRoot:id=>roots.get(id)||id,protocol:{ledger:{latest_intent_revision:3,transactions:[
+      {transaction_id:"tx",intent_revision:2,intent_superseded:true,cancel_requested:true,first_presented_tick:null,first_presented_at_ms:null},
+      {transaction_id:"tx2",intent_revision:3,intent_superseded:false,cancel_requested:false,first_presented_tick:48,first_presented_at_ms:9}]}}},
+    continuousQualityPresented:{candidate_id:"target"}};
+  roots.clear();assert.equal(settle(p),false,"an unrelated newer transaction cannot settle the choice");
+  roots.set("tx2","tx");assert.equal(settle(p),true);assert.equal(p.directedChange.outcome,"committed");
+});
+
+
 test("local seek preserves only its attached continuous manual request",()=>{
   const events=[];
   const begin=new Function("events",[
     "function clearPlaybackControlWaiters(){}function playbackSurfaceStep(){}function notifyPlaybackControl(){events.push('report');return false;}",
     "function abandonPreparedReplacement(){}function settleDirectedChange(){}",
     "const document={getElementById(){return null;}};",
+    nextEpisodeCancellationSources(),
     shippedSource("supersedePlaybackControlIntent"),shippedSource("beginPlaybackControlSeek"),
     "return beginPlaybackControlSeek;",
   ].join("\n"))(events);
@@ -7417,7 +7505,7 @@ test("abandoned continuous handoff retries release only their unpublished family
     const PlaybackPolicy={classifyStreamFailure:()=>({}),createRetryStep:()=>({action,delayMs:1}),streamFailureOverlay:()=>null};
     const run=new Function("openSession","releaseSession","newRequestId","PlaybackPolicy","playbackRetryDelay",
       "playbackCreateRetryContext","raisePlaybackSurface","clientLog","playbackContext","stopPlayerForExhaustion",
-      shippedSource("openSessionRetryingNotYet")+";return openSessionRetryingNotYet;")(
+      shippedSource("openSessionRetryingNotYet")+"\n;return openSessionRetryingNotYet;")(
         openSession,id=>released.push(id),()=>"one-request",PlaybackPolicy,playbackRetryDelay,
         ()=>"change",()=>{},()=>{},()=>({}),()=>{});
     return {released,posted,waiting:()=>waiting,cancel:()=>controller.abort(),open:()=>run(1,{},controller.signal,{preparation})};

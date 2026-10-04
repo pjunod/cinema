@@ -26,6 +26,8 @@ const snapshot = new Function(`
   function playbackControlCapabilities(){return {platform:'web',max_height:1080,
     codecs:['h264'],dynamic_ranges:['sdr'],dual_player_preparation:false};}
   function pendingPlaybackControlAcknowledgement(){return null;}
+  ${source("qualityControlOwnerKey")}
+  ${source("qualityControlSupported")}
   ${source("playbackControlBufferedRange")}
   ${source("playbackControlObservationOverride")}
   ${source("playbackControlSnapshot")}

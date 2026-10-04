@@ -8,7 +8,13 @@ const copy=value=>JSON.parse(JSON.stringify(value));
 const uuid=n=>`00000000-0000-4000-8000-${String(n).padStart(12,'0')}`;
 const bytes=value=>value.buffer.slice(value.byteOffset,value.byteOffset+value.byteLength);
 const pause=()=>new Promise(resolve=>setImmediate(resolve));
-async function waitFor(condition){for(let i=0;i<50;i++){if(condition())return;await pause();}assert.fail('expected protocol observation');}
+// WebCrypto digests settle on the libuv thread pool, not within a fixed number
+// of event-loop turns; poll against a wall-clock bound instead.
+async function waitFor(condition,ms=5000){
+ const deadline=Date.now()+ms;
+ for(;;){if(condition())return;if(Date.now()>deadline)break;await new Promise(resolve=>setTimeout(resolve,1));}
+ assert.fail('expected protocol observation');
+}
 class BufferSurface {
  constructor(){this.listeners=[];this.updating=false;this.appends=0;this.removes=[];}
  addEventListener(type,handler,capture){this.listeners.push({type,handler,capture:!!capture});}
@@ -32,7 +38,7 @@ function fixture({holdScheduled=false,sharedAudio=false,startLevel=undefined}={}
  const resources=new Map([[prefix+`video/${primary.rendition_id}/init/${primary.init_id}.mp4`,firstInit],
   [prefix+`video/${target.rendition_id}/init/${target.init_id}.mp4`,secondInit],
   [prefix+`video/${primary.rendition_id}/segment/0.m4s`,firstMedia],[prefix+`video/${target.rendition_id}/segment/0.m4s`,secondMedia]]);
- let frame=null,ledger=null,revision=0,releaseScheduled=null;
+ let frame=null,ledger=null,revision=0,releaseScheduled=null,refusePrepares=0;
  const requests=[],events={},surface=new BufferSurface();
  const video={videoWidth:1280,videoHeight:720,requestVideoFrameCallback(callback){frame=callback;return 1;},cancelVideoFrameCallback(){frame=null;}};
  const player={abr:{},qualityCandidates:[{id:primary.candidate_id,target_height:720},{id:target.candidate_id,target_height:1080}]};
@@ -40,6 +46,12 @@ function fixture({holdScheduled=false,sharedAudio=false,startLevel=undefined}={}
  const context=vm.createContext({ArrayBuffer,Uint8Array,DataView,crypto:webcrypto,URL,location:{href:'http://localhost/'},
   Hls,performance:{now:()=>0},CONTROL_CLIENT_ID:uuid(3),newRequestId:()=>uuid(4),setTimeout,clearTimeout,AbortController,TextDecoder});
  for(const path of ['continuous-media.js','continuous-quality.js'])vm.runInContext(fs.readFileSync('crates/plurxd/src/web/player/'+path,'utf8'),context);
+ // The shipped settlement owner the adapter calls on presentation.
+ const directed=fs.readFileSync('crates/plurxd/src/web/player/directed-change.js','utf8');
+ for(const name of ['settleContinuousDirectedChange','settleDirectedChange']){
+  const begin=directed.indexOf(`\nfunction ${name}(`),end=directed.indexOf('\nfunction ',begin+1);
+  vm.runInContext(directed.slice(begin,end),context);
+ }
  const intervals=family.video.flatMap((row,index)=>Array.from({length:4},(_,ordinal)=>{
   const data=ordinal===0?(index?secondMedia:firstMedia):media({start:ordinal*2002,
    payload:Buffer.from([ordinal,index,6,5,4,3,2,1])});
@@ -59,6 +71,10 @@ function fixture({holdScheduled=false,sharedAudio=false,startLevel=undefined}={}
   if(!ledger)ledger={version:1,generation:request.generation,control_epoch:request.control_epoch,attachment:copy(request.attachment),
    latest_intent_revision:0,accepted_sequence:0,transactions:[]};
   const command=request.transition;let transaction,receipt=null;
+  // An owner refusal (e.g. transaction Capacity) applies nothing.
+  if(command?.operation.kind==='prepare'&&refusePrepares>0){
+   refusePrepares--;throw Object.assign(new Error('Continuous quality request refused (409)'),{status:409});
+  }
   if(command){
    transaction=ledger.transactions.find(row=>row.transaction_id===command.transaction_id);
    const operation=command.operation;
@@ -112,7 +128,7 @@ function fixture({holdScheduled=false,sharedAudio=false,startLevel=undefined}={}
  const load=(url,{progress=()=>{}}={})=>new Promise((resolve,reject)=>{
   new Loader({}).load({url},{},{onProgress:progress,onSuccess:response=>resolve(response.data),onError:error=>reject(new Error(error.text))});
  });
- return {adapter,player,surface,hls,requests,load,prefix,primary,target,audio,audioIntervals,firstInit,firstMedia,secondInit,secondMedia,
+ return {adapter,player,surface,hls,requests,load,prefix,refusePrepares:count=>{refusePrepares=count;},primary,target,audio,audioIntervals,firstInit,firstMedia,secondInit,secondMedia,
   releaseScheduled:()=>releaseScheduled?.(),present(time,width=1280,height=720){const callback=frame;frame=null;callback?.(0,{mediaTime:time,width,height});}};
 }
 test('fragment data remains private until exact scheduling acknowledges it',async()=>{
@@ -155,6 +171,53 @@ test('live MediaSource transfer cannot settle disposal',async()=>{
  f.hls.emit('detached',{});await waitFor(()=>f.requests.some(row=>row.transition?.operation.kind==='disposed'));
 });
 
+test('a refused Prepare never becomes the attachment owner at startup',async()=>{
+ const f=fixture();const prefix=f.prefix+`video/${f.primary.rendition_id}/`;
+ await f.load(prefix+`init/${f.primary.init_id}.mp4`);
+ f.refusePrepares(1);
+ await assert.rejects(f.load(prefix+'segment/0.m4s'),/refused \(409\)/);
+ assert.equal(f.adapter.protocol.ledger.transactions.length,0,'the refusal applied nothing');
+ // The hls.js retry of the same fragment prepares afresh; it does not name an
+ // identity the ledger never accepted.
+ await f.load(prefix+'segment/0.m4s');
+ assert.equal(f.adapter.protocol.ledger.transactions.length,1);
+});
+test('a refused quality Prepare and refused restore keep the incumbent owner loading',async()=>{
+ const f=fixture();const prefix=f.prefix+`video/${f.primary.rendition_id}/`;
+ await f.load(prefix+`init/${f.primary.init_id}.mp4`);await f.load(prefix+'segment/0.m4s');
+ const owner=f.adapter.protocol.ledger.transactions[0].transaction_id;
+ f.refusePrepares(2); // the target Prepare and the incumbent restore both refused
+ assert.equal(await f.adapter.choose(f.target.candidate_id),'retained_current');
+ assert.equal(f.adapter.wanted.rendition_id,f.primary.rendition_id);
+ assert.deepEqual(f.adapter.protocol.ledger.transactions.map(row=>row.transaction_id),[owner]);
+ // Later incumbent fragments beyond the reserved window still reserve under
+ // the accepted owner instead of failing locally as superseded.
+ await f.load(prefix+'segment/2.m4s');await f.load(prefix+'segment/3.m4s');
+ const scheduled=f.requests.filter(row=>row.transition?.operation.kind==='scheduled');
+ assert.ok(scheduled.length>=2);assert.ok(scheduled.every(row=>row.transition.transaction_id===owner));
+});
+test('a re-Prepare of the chosen target settles the choice when its rendition is presented',async()=>{
+ const f=fixture();const primary=f.prefix+`video/${f.primary.rendition_id}/`,target=f.prefix+`video/${f.target.rendition_id}/`;
+ f.surface.appendBuffer(await f.load(primary+`init/${f.primary.init_id}.mp4`));f.surface.emit('updateend');
+ f.surface.appendBuffer(await f.load(primary+'segment/0.m4s'));f.surface.emit('updateend');
+ assert.equal(await f.adapter.choose(f.target.candidate_id),'continuous');
+ const ledger=f.adapter.protocol.ledger,chosen=ledger.transactions.find(row=>row.intent_revision===ledger.latest_intent_revision);
+ f.player.directedChange={settled:false,outcome:'continuous',continuousCandidateId:f.target.candidate_id,
+  continuousTransactionId:chosen.transaction_id,autoMove:null};
+ f.surface.appendBuffer(await f.load(target+`init/${f.target.init_id}.mp4`));f.surface.emit('updateend');
+ f.surface.appendBuffer(await f.load(target+'segment/0.m4s'));f.surface.emit('updateend');
+ await waitFor(()=>f.requests.some(row=>row.transition?.operation.kind==='appended'&&row.transition.transaction_id===chosen.transaction_id));
+ // An independent removal disposes the target interval; reloading it makes
+ // the adapter re-Prepare the unchanged target under a new transaction.
+ f.surface.remove(0,2002/24000);f.surface.emit('updateend');
+ f.surface.appendBuffer(await f.load(target+'segment/0.m4s'));f.surface.emit('updateend');
+ const successor=f.adapter.protocol.ledger.transactions.at(-1);
+ assert.notEqual(successor.transaction_id,chosen.transaction_id);
+ assert.equal(successor.target_rendition_id,f.target.rendition_id);
+ await waitFor(()=>{f.present(1001/24000,1920,1080);return f.player.directedChange.settled;});
+ assert.equal(f.player.directedChange.outcome,'committed','presentation of the chosen rendition settles the choice');
+ f.hls.emit('detached',{});await pause();
+});
 test('rolling appends batch actual facts and present each transaction once',async()=>{
  const f=fixture();const prefix=f.prefix+`video/${f.primary.rendition_id}/`;
  const firstInit=await f.load(prefix+`init/${f.primary.init_id}.mp4`);
@@ -163,9 +226,11 @@ test('rolling appends batch actual facts and present each transaction once',asyn
   const fragment=await f.load(prefix+`segment/${ordinal}.m4s`);
   f.surface.appendBuffer(fragment);f.surface.emit('updateend');
   if(ordinal===0)await waitFor(()=>f.requests.some(row=>row.transition?.operation.kind==='appended'));
-  else await pause();
-  f.present((ordinal*2002+1001)/24000);
-  await waitFor(()=>f.player.continuousQualityPresented?.film_tick===ordinal*2002+1001);
+  // requestVideoFrameCallback fires on every displayed frame. Completed
+  // append facts resolve asynchronously (SHA-256), so a frame displayed
+  // before they settle is matched by a later callback, not dropped forever.
+  await waitFor(()=>{f.present((ordinal*2002+1001)/24000);
+   return f.player.continuousQualityPresented?.film_tick===ordinal*2002+1001;});
  }
  const commands=f.requests.filter(row=>row.transition).map(row=>row.transition.operation);
  assert.equal(commands.filter(row=>row.kind==='presented').length,1);
@@ -314,7 +379,7 @@ test('controlled HLS errors preserve Plurx quality authority',()=>{
  let loaded=1,manual=1;
  const hls={config:built.config,levels:[0,1].map(()=>({loadError:0,fragmentError:0,
    codecSet:'avc1',audioCodec:'mp4a.40.2',attrs:{}})),minAutoLevel:0,maxAutoLevel:1,
-  logger:{log(){},warn(){},debug(){},trace(){},error(){}},on(){},off(){},
+  logger:{log(){},warn(){},info(){},debug(){},trace(){},error(){}},on(){},off(){},
   get loadLevel(){return loaded;},set loadLevel(value){loaded=value;manual=value;},
   get manualLevel(){return manual;},get autoLevelEnabled(){return manual===-1;}};
  const controller=new VendoredHls.DefaultConfig.errorController(hls);

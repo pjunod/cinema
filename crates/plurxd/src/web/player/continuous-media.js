@@ -145,8 +145,10 @@ function continuousMediaInspector(){
     }
     occupied.sort((a,b)=>a[0]-b[0]);
     for(let i=1;i<occupied.length;i++)if(occupied[i][0]<occupied[i-1][1])fail('overlapping sample payload');
-    // A failed parse cannot poison the next fragment's init context.
-    for(const [id,track] of nextTracks)tracks.set(id,track);
+    // A failed parse cannot poison the next fragment's init context. A new
+    // init replaces the whole context: nextTracks already carries the old
+    // tracks when no moov was present, so old-init track ids never survive one.
+    tracks.clear();for(const [id,track] of nextTracks)tracks.set(id,track);
     return {bytes,initializations,fragments};
   }
   return inspect;

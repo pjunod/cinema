@@ -63,9 +63,14 @@ test('durable End proof reconciles a lost reservation ack before named disposal'
   requests.push(clone(request));const command=request.transition;
   if(command?.operation.kind==='prepare'){const reply=answer(request,++revision);durable=clone(reply.ledger);return reply;}
   if(command?.operation.kind==='scheduled'){
-   if(ended)throw Object.assign(new Error('ended'),{status:410});
-   durable.accepted_sequence=command.sequence;durable.transactions[0].reserved=[clone(interval)];durable.transactions[0].state='scheduled';
-   ended=true;throw new Error('reservation accepted but acknowledgement lost');
+   // The first send applies durably and End follows; the identical replay is
+   // answered idempotently, but both acknowledgements are lost in transit, so
+   // the command stays pending and only a durable End proof can settle it.
+   if(!ended){
+    durable.accepted_sequence=command.sequence;durable.transactions[0].reserved=[clone(interval)];durable.transactions[0].state='scheduled';
+    ended=true;
+   }
+   throw new Error('reservation accepted but acknowledgement lost');
   }
   let receipt=null;
   if(command?.operation.kind==='disposed'){
@@ -77,7 +82,8 @@ test('durable End proof reconciles a lost reservation ack before named disposal'
    revision:++revision,terminal:true,receipt,ledger:clone(durable)};
  });
  await client.transition(uuid(4),{kind:'prepare',intent_revision:1,target_rendition_id:interval.rendition_id},{timescale:24000,through_tick:0});
- await assert.rejects(client.transition(uuid(4),{kind:'scheduled',intervals:[interval]}));
+ await assert.rejects(client.transition(uuid(4),{kind:'scheduled',intervals:[interval]}),/acknowledgement lost/);
+ assert.deepEqual(requests[1],requests[2],'a lost acknowledgement retries the identical command once');
  assert.ok(client.pending);assert.equal(client.ledger.transactions[0].reserved.length,0,'lost ack is not absence evidence');
  const observed=await client.reconcileTerminal();assert.equal(client.pending,null);assert.equal(observed.transactions[0].reserved.length,1);
  await client.transition(uuid(4),{kind:'disposed',artifacts:[interval.artifact_id]});
@@ -187,7 +193,7 @@ test('attached quality preparation follows a newer cold seek without reviving a 
   }};
   const scope=vm.createContext({AbortController,TextDecoder,setTimeout,clearTimeout,URL,
    location:{href:'http://localhost/'},CONTROL_CLIENT_ID:uuid(2),newRequestId:()=>uuid(9),
-   crypto:{randomUUID:()=>uuid(identity++)},mock,
+   crypto:{getRandomValues:bytes=>{bytes.fill(0);bytes[15]=identity++;return bytes;}},performance:{now:()=>0},mock,
    Hls:{Events:{MANIFEST_PARSED:'manifest',BUFFER_CREATED:'buffers',MEDIA_DETACHED:'detach'}}});
   vm.runInContext(fs.readFileSync('crates/plurxd/src/web/player/continuous-quality.js','utf8'),scope);
   vm.runInContext('continuousQualityProtocol=()=>mock;',scope);

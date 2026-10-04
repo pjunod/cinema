@@ -12,6 +12,11 @@
 // exactly ONE reopen as the answer to every way it can go wrong.
 const PREPARED_OFFER_BOUND_MS=12000;
 const PREPARED_OFFER_CADENCE_MS=500;
+// A continuous change settles on presentation of its target rendition. Its
+// bound is the §4.2 30-second control budget: missing it settles
+// `observation_unknown` (never retained_current, never a reopen), so a target
+// that is never observed cannot latch Auto or leave the change unsettled.
+const CONTINUOUS_OBSERVATION_BOUND_MS=30000;
 // `askPlaybackControl` cannot serve this and cannot be made to. Its waiter
 // settles on the FIRST exchange at or after its floor, and a `Prepare` arrives
 // on a later exchange than the one that carried the ask -- the server has to
@@ -198,11 +203,19 @@ async function requestQualityChange(p,reason,fallback,autoMove,standingSelection
       change.outcome=outcome;change.outcomeAt=performance.now();
       change.continuousCandidateId=candidate.id;
       const ledger=p.continuousQuality.protocol.ledger;
-      change.continuousTransactionId=ledger?.transactions.find(tx=>tx.intent_revision===ledger.latest_intent_revision)?.transaction_id;
-      settleContinuousDirectedChange(p);
+      const newest=ledger?.transactions.find(tx=>tx.intent_revision===ledger.latest_intent_revision)?.transaction_id;
+      // Name the choice by its lineage root, so a later re-Prepare of the same
+      // target still settles it (settleContinuousDirectedChange).
+      change.continuousTransactionId=newest&&typeof p.continuousQuality.transactionRoot==="function"
+        ?p.continuousQuality.transactionRoot(newest):newest;
+      if(!settleContinuousDirectedChange(p))change.commitTimer=setTimeout(()=>{
+        if(p.directedChange===change&&!change.settled)settleDirectedChange(p,change,"observation_unknown","continuous");
+      },CONTINUOUS_OBSERVATION_BOUND_MS);
       notifyPlaybackControl();return outcome;
     }
-    if(outcome==="superseded")return outcome;
+    // A newer intent fenced this ask while it was still this change's own:
+    // settle it, as the prepared path does, so nothing waits on it forever.
+    if(outcome==="superseded"){settleDirectedChange(p,change,"superseded");return outcome;}
     fallBackDirectedChange(p,change,outcome);return outcome;
   }
   // Keep transport reports live while learning the owner's strict-reader
@@ -345,7 +358,11 @@ function settleContinuousDirectedChange(p){
   const change=p?.directedChange,ledger=p?.continuousQuality?.protocol?.ledger;
   if(!change||change.settled||change.outcome!=="continuous"||!ledger
      ||p.continuousQualityPresented?.candidate_id!==change.continuousCandidateId) return false;
-  const transaction=ledger.transactions.find(tx=>tx.transaction_id===change.continuousTransactionId);
+  // The newest transaction settles this choice when it is the choice's own or
+  // the adapter's re-Prepare of that same target (its lineage root).
+  const owner=p.continuousQuality,root=id=>typeof owner.transactionRoot==="function"?owner.transactionRoot(id):id;
+  const transaction=ledger.transactions.find(tx=>tx.intent_revision===ledger.latest_intent_revision
+    &&root(tx.transaction_id)===change.continuousTransactionId);
   if(!transaction||transaction.intent_revision!==ledger.latest_intent_revision
      ||transaction.intent_superseded||transaction.cancel_requested
      ||transaction.first_presented_tick==null||transaction.first_presented_at_ms==null) return false;
@@ -366,7 +383,8 @@ function settleDirectedChange(p,change,why,detail){
   // exchange succeeds: changing to plain Auto here makes the server reject
   // the commit as a different ask and retire the stream we just exposed.
   if(why!=="committed"||!owned.autoMove) p.autoRequestedHeight=null;
-  if(why!=="committed"&&owned.autoMove&&owned.autoMove.candidateId&&p.abr)
+  // An unobserved continuous target is still the rung future loads request.
+  if(why!=="committed"&&why!=="observation_unknown"&&owned.autoMove&&owned.autoMove.candidateId&&p.abr)
     p.abr.requestedCandidateId=owned.autoMove.previousCandidateId||null;
   if(owned.autoMove&&p.abr){
     if(why==="committed"){

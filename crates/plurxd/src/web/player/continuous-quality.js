@@ -318,23 +318,37 @@ function continuousQualityAdapter(player,video,attachment,bootstrap,exchange=con
   function tx(id=transaction){return protocol.ledger?.transactions.find(row=>row.transaction_id===id);}
   function pins(){return (protocol.ledger?.transactions||[]).flatMap(row=>row.reserved)
     .concat(protocol.ledger?.shared_audio_reserved||[]);}
-  async function prepare(row,through){
-    transaction=continuousQualityNewIdentity();revision++;
-    const response=await protocol.transition(transaction,{kind:'prepare',intent_revision:revision,
+  // A re-Prepare of the unchanged target (window disposal, a superseded owner)
+  // continues the choice that asked for it: its presentation settles that
+  // choice. Only lineage is recorded here; a new viewer/Auto choice is a root.
+  const roots=new Map();
+  function root(id){return roots.get(id)||id;}
+  async function prepare(row,through,continues=false){
+    // Revisions only move forward, even past a refused or uncertain Prepare.
+    const id=continuousQualityNewIdentity(),lineage=continues&&transaction?root(transaction):null;
+    revision=Math.max(revision,protocol.ledger?.latest_intent_revision||0)+1;
+    const response=await protocol.transition(id,{kind:'prepare',intent_revision:revision,
       target_rendition_id:row.rendition_id},{timescale:row.timescale,through_tick:through});
-    const ready=response.ledger.transactions.find(row=>row.transaction_id===transaction);
+    // Adopt only an identity the ledger accepted (a receipt, or a refusal the
+    // authoritative ledger read proved applied). A refused Prepare that never
+    // applied leaves the previously accepted owner as this attachment's own.
+    transaction=id;
+    if(lineage){roots.set(id,lineage);if(roots.size>32)roots.delete(roots.keys().next().value);}
+    const ready=response.ledger.transactions.find(row=>row.transaction_id===id);
     if(!ready||!ready.ready.length||ready.cancel_requested||ready.intent_superseded)throw new Error('Continuous target retained current');
     return ready;
   }
   async function reserveWindow(through){
-    if(!transaction)await prepare(wanted,through);
     let ready=tx();
-    if(!ready||ready.intent_superseded||ready.cancel_requested)throw new Error('Continuous target superseded');
+    // No accepted owner yet, or one the ledger shows superseded, cancelled or
+    // bound to another rung: future incumbent scheduling needs a fresh Prepare.
+    if(!ready||ready.intent_superseded||ready.cancel_requested||ready.target_rendition_id!==wanted.rendition_id)
+      ready=await prepare(wanted,through,ready?.target_rendition_id===wanted.rendition_id);
     if(!ready.ready.some(row=>row.from_tick<=through&&through<row.through_tick)){
       await protocol.window(transaction,{timescale:wanted.timescale,through_tick:through});ready=tx();
     }
     if(!ready?.ready.length)throw new Error('Continuous target has no ready samples');
-    if(ready.ready.some(row=>ready.disposed.includes(row.artifact_id)))ready=await prepare(wanted,through);
+    if(ready.ready.some(row=>ready.disposed.includes(row.artifact_id)))ready=await prepare(wanted,through,true);
     const missing=ready.ready.filter(row=>!ready.reserved.some(pin=>continuousQualitySameInterval(pin,row)));
     if(missing.length)await protocol.transition(transaction,{kind:'scheduled',intervals:missing});
   }
@@ -528,6 +542,7 @@ function continuousQualityAdapter(player,video,attachment,bootstrap,exchange=con
   }
   const adapter={
     protocol,family,get wanted(){return wanted;},get frontier(){return frontier;},get closed(){return closed;},
+    transactionRoot:root,
     loader:Base=>class {
       constructor(config){this.base=new Base(config);this.aborted=false;this.destroyed=false;this.context=null;loaders.add(this);}
       get stats(){return this.base.stats;}
@@ -658,8 +673,9 @@ function continuousQualityAdapter(player,video,attachment,bootstrap,exchange=con
         // A failed Prepare may already supersede the old optional transaction.
         // Restore future incumbent scheduling under a new revision, retaining
         // the old reservations/facts rather than trying to revive its intent.
+        // A refused restore keeps whichever owner the ledger last accepted;
+        // reserveWindow re-prepares the incumbent when that owner is not it.
         if(current()&&transaction!==old)try{await prepare(previous,frontier);}catch(restore){note(restore);}
-        else transaction=old;
         return 'retained_current';
       }
     });},

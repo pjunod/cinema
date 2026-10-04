@@ -503,7 +503,9 @@ function handlePlaybackTransportEvent(v,p,event){
     if(proof&&typeof proof.frameBudgetUpdate==="function") proof.frameBudgetUpdate();
     if(typeof play==='function'&&play.pendingIntent&&PLAY_OPEN_GATE.current(play.pendingIntent.attempt))
       play.pendingIntent.wantsPlayback=false;
-    supersedePlaybackControlIntent(p);
+    // OS media keys, PiP and headset controls are viewer Pause too. Pause is
+    // not a reason to abandon a pending manual quality choice (§4.2).
+    supersedePlaybackControlIntent(p,{preserveContinuousManualQuality:true});
     pauseHlsStartup(p);
     endWait(false);
     // §3.1: a `buffering` fault is about a player that WANTS media, and this
@@ -525,7 +527,7 @@ function handlePlaybackTransportEvent(v,p,event){
     if(proof&&typeof proof.frameBudgetUpdate==="function") proof.frameBudgetUpdate();
     if(typeof play==='function'&&play.pendingIntent&&PLAY_OPEN_GATE.current(play.pendingIntent.attempt))
       play.pendingIntent.wantsPlayback=true;
-    supersedePlaybackControlIntent(p);
+    supersedePlaybackControlIntent(p,{preserveContinuousManualQuality:true});
     resumeHlsStartup(v,p);
     // Symmetry, and nothing more: resuming raises no fault back. If the buffer
     // is still empty the element fires `waiting` again and THAT is the raise.
