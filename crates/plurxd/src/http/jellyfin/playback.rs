@@ -668,7 +668,7 @@ pub(super) async fn info_post(
     Path(id): Path<String>,
     RawQuery(raw): RawQuery,
     Json(mut request): Json<InfoRequest>,
-) -> Result<Json<Value>, ApiError> {
+) -> Result<Response, ApiError> {
     merge_info_query(&client, raw.as_deref(), &mut request)?;
     info(&client, &state, &id, request).await
 }
@@ -677,7 +677,7 @@ pub(super) async fn info_get(
     State(state): State<AppState>,
     Path(id): Path<String>,
     RawQuery(raw): RawQuery,
-) -> Result<Json<Value>, ApiError> {
+) -> Result<Response, ApiError> {
     let mut request = InfoRequest::default();
     merge_info_query(&client, raw.as_deref(), &mut request)?;
     info(&client, &state, &id, request).await
@@ -771,7 +771,7 @@ async fn info(
     state: &AppState,
     id: &str,
     mut request: InfoRequest,
-) -> Result<Json<Value>, ApiError> {
+) -> Result<Response, ApiError> {
     if let Some(uid) = request.user_id.as_deref() {
         check_user(client, uid)?;
     }
@@ -949,7 +949,7 @@ async fn info(
         None
     } else {
         let Some(profile) = request.device_profile.as_ref() else {
-            return Ok(Json(json!({"MediaSources":[],"ErrorCode":"NotSupported"})));
+            return Ok(not_supported());
         };
         Box::pin(super::vod::negotiate(
             state,
@@ -974,7 +974,7 @@ async fn info(
         .await?
     };
     if !direct && vod.is_none() {
-        return Ok(Json(json!({"MediaSources":[],"ErrorCode":"NotSupported"})));
+        return Ok(not_supported());
     }
     let selection=json!({"audio":request.audio_stream_index,"subtitle":request.subtitle_stream_index,"source":{"size":file.size,"mtime":file.mtime,"probe":snapshot.probe_json},"vod":vod.as_ref().map(|v| json!({"body":v.body,"bitrate":v.bitrate,"inline_init":v.inline_init}))}).to_string();
     let profile_json = serde_json::to_string(&request.device_profile)
@@ -1160,9 +1160,15 @@ async fn info(
             "/Videos/{item_wire}/stream?MediaSourceId={source_wire}&PlaySessionId={play_id}&Static=true{credential}"
         ));
     }
-    Ok(Json(
-        json!({"MediaSources":[source],"PlaySessionId":play_id}),
-    ))
+    Ok(Json(json!({"MediaSources":[source],"PlaySessionId":play_id})).into_response())
+}
+/// Jellyfin's in-band refusal, marked so the metrics can tell it from a play.
+fn not_supported() -> Response {
+    let mut response = Json(json!({"MediaSources":[],"ErrorCode":"NotSupported"})).into_response();
+    response
+        .extensions_mut()
+        .insert(super::metrics::NotSupported);
+    response
 }
 
 #[derive(Deserialize)]
@@ -1651,6 +1657,107 @@ pub(super) async fn mark_unplayed(
     Path((uid, id)): Path<(String, String)>,
 ) -> Result<Json<Value>, ApiError> {
     manual(client, state, uid, id, false).await
+}
+
+/// `POST`/`DELETE /UserPlayedItems/{itemId}`: the 10.9+ form of the
+/// user-scoped route, with the user optional in the query.
+pub(super) async fn played_item(
+    client: ClientUser,
+    State(state): State<AppState>,
+    method: Method,
+    Path(id): Path<String>,
+    RawQuery(raw): RawQuery,
+) -> Result<Json<Value>, ApiError> {
+    let mut user = None;
+    for (key, value) in query_pairs(raw.as_deref())? {
+        if key.eq_ignore_ascii_case("userId") {
+            if user.as_ref().is_some_and(|old| *old != value) {
+                return Err(ApiError::BadRequest("conflicting userId values".into()));
+            }
+            user = Some(value);
+        }
+    }
+    let user = match user {
+        Some(user) => user,
+        None => client
+            .identity
+            .wire_id
+            .clone()
+            .ok_or(ApiError::Unauthorized)?,
+    };
+    manual(client, state, user, id, method == Method::POST).await
+}
+
+/// The login's own play named by `PlaySessionId` (case-insensitive key).
+async fn named_play(
+    client: &ClientUser,
+    state: &AppState,
+    raw: Option<&str>,
+) -> Result<JellyfinPlay, ApiError> {
+    let mut play_id = None;
+    let mut device = None;
+    for (key, value) in query_pairs(raw)? {
+        let slot = if key.eq_ignore_ascii_case("playSessionId") {
+            &mut play_id
+        } else if key.eq_ignore_ascii_case("deviceId") {
+            &mut device
+        } else {
+            continue;
+        };
+        if slot.as_ref().is_some_and(|old| *old != value) {
+            return Err(ApiError::BadRequest(format!("conflicting {key} values")));
+        }
+        *slot = Some(value);
+    }
+    // Never a kill or renewal by device alone: a play is always named.
+    let play_id =
+        play_id.ok_or_else(|| ApiError::BadRequest("PlaySessionId is required".into()))?;
+    let scope = scope(client, state).await?;
+    if device.is_some_and(|device| plurx_core::auth::hash_token(&device) != scope.device_digest) {
+        return Err(ApiError::Forbidden);
+    }
+    state
+        .store
+        .jellyfin_play(&wire_id(&play_id)?.to_hex(), &scope)
+        .await?
+        .ok_or(ApiError::NotFound("play binding"))
+}
+
+/// `POST /Sessions/Playing/Ping`: keep this login's named active play alive,
+/// exactly as a position-less Progress does. It never activates or revives
+/// a play, and it is not playback evidence.
+pub(super) async fn ping(
+    client: ClientUser,
+    State(state): State<AppState>,
+    RawQuery(raw): RawQuery,
+) -> Result<StatusCode, ApiError> {
+    let play = named_play(&client, &state, raw.as_deref()).await?;
+    same_generation(&play, &client.generation)?;
+    if play.state != "active" {
+        return Err(ApiError::Conflict("play is not active".into()));
+    }
+    if play.native_incarnation_id.is_some() {
+        let session = super::transport::route(&state, &play).await?;
+        renew_passive_presence(&state, &session, &play).await;
+    } else {
+        state.direct_plays.touch_key(&direct_key(&play));
+    }
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// `DELETE /Videos/ActiveEncodings`: stop the encoding of this login's named
+/// play, and only that one. The binding stays, so a later Stopped still
+/// commits its final position; a direct play has no encoding to stop.
+pub(super) async fn active_encodings(
+    client: ClientUser,
+    State(state): State<AppState>,
+    RawQuery(raw): RawQuery,
+) -> Result<StatusCode, ApiError> {
+    let play = named_play(&client, &state, raw.as_deref()).await?;
+    if play.native_incarnation_id.is_some() {
+        release(&state, &play).await?;
+    }
+    Ok(StatusCode::NO_CONTENT)
 }
 
 /// Reuse native digest exclusion and token deletion, retaining other logins.

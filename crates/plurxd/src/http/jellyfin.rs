@@ -1,6 +1,8 @@
 //! Jellyfin connection and catalog facade over native authentication and Store.
 mod ancillary;
+mod metrics;
 mod playback;
+mod protocol;
 mod representation;
 mod startup;
 mod transport;
@@ -31,6 +33,24 @@ pub(super) fn router() -> Router<AppState> {
     Router::new()
         .route("/", get(not_found))
         .route("/System/Info/Public", get(system_info))
+        .route("/System/Info", get(protocol::system_info_authenticated))
+        .route("/Users/Public", get(protocol::public_users))
+        .route("/Sessions/Capabilities", post(protocol::capabilities))
+        .route(
+            "/Sessions/Capabilities/Full",
+            post(protocol::capabilities_full).layer(DefaultBodyLimit::max(16 * 1024)),
+        )
+        .route("/Search/Hints", get(protocol::search_hints))
+        .route("/Items/{item_id}/Download", get(protocol::download))
+        .route(
+            "/UserPlayedItems/{item_id}",
+            post(playback::played_item).delete(playback::played_item),
+        )
+        .route("/Sessions/Playing/Ping", post(playback::ping))
+        .route(
+            "/Videos/ActiveEncodings",
+            axum::routing::delete(playback::active_encodings),
+        )
         .route(
             "/Users/AuthenticateByName",
             post(login).layer(DefaultBodyLimit::max(16 * 1024)),
@@ -102,13 +122,22 @@ pub(super) fn router() -> Router<AppState> {
         .route("/Users/{user_id}/Items/{item_id}", get(user_item))
         .route("/Shows/{item_id}/Seasons", get(seasons))
         .route("/Shows/{item_id}/Episodes", get(episodes))
-        .fallback(not_found)
+        .route_layer(axum::middleware::from_fn(metrics::count_matched))
+        .fallback(unmatched)
         .method_not_allowed_fallback(method_not_allowed)
 }
+pub(crate) use metrics::prometheus;
 pub(super) async fn not_found() -> ApiError {
     ApiError::NotFound("Jellyfin endpoint")
 }
+/// A path no facade route matches: counted, so an unsupported request a
+/// client makes shows up in the metrics rather than only in a client log.
+async fn unmatched() -> ApiError {
+    metrics::record(metrics::UNMATCHED, "not_found");
+    not_found().await
+}
 async fn method_not_allowed() -> Response {
+    metrics::record(metrics::UNMATCHED, "not_found");
     (
         StatusCode::METHOD_NOT_ALLOWED,
         Json(json!({"error":"method not allowed"})),
@@ -117,10 +146,17 @@ async fn method_not_allowed() -> Response {
 }
 
 struct Enabled(String);
+/// The switch snapshot `enabled_gate` admitted this request under, so the
+/// handler reads the same one rather than making a second linearizable read.
+#[derive(Clone)]
+struct AdmittedSwitch(plurx_core::store::JellyfinCompatibilityState);
 impl FromRequestParts<AppState> for Enabled {
     type Rejection = ApiError;
-    async fn from_request_parts(_parts: &mut Parts, state: &AppState) -> Result<Self, ApiError> {
-        let setting = state.store.jellyfin_compatibility_state().await?;
+    async fn from_request_parts(parts: &mut Parts, state: &AppState) -> Result<Self, ApiError> {
+        let setting = match parts.extensions.get::<AdmittedSwitch>() {
+            Some(AdmittedSwitch(setting)) => setting.clone(),
+            None => state.store.jellyfin_compatibility_state().await?,
+        };
         if !setting.enabled {
             return Err(ApiError::NotFound("Jellyfin endpoint"));
         }
@@ -1018,11 +1054,14 @@ fn source_dto(row: &Value) -> Result<wire::MediaSource, ApiError> {
 
 pub(super) async fn enabled_gate(
     State(state): State<AppState>,
-    request: axum::http::Request<axum::body::Body>,
+    mut request: axum::http::Request<axum::body::Body>,
     next: axum::middleware::Next,
 ) -> Response {
     match state.store.jellyfin_compatibility_state().await {
-        Ok(setting) if setting.enabled => next.run(request).await,
+        Ok(setting) if setting.enabled => {
+            request.extensions_mut().insert(AdmittedSwitch(setting));
+            next.run(request).await
+        }
         Ok(_) => not_found().await.into_response(),
         Err(error) => ApiError::from(error).into_response(),
     }
@@ -1032,9 +1071,10 @@ fn image_tag(wire: &str, name: &str) -> String {
     use sha2::Digest;
     hex::encode(sha2::Sha256::digest(format!("{wire}:{name}")))
 }
-// Safe interim access policy: the shared ClientUser extractor verifies native
-// token expiry/revocation and facade membership before any mapped artwork read.
-// Anonymous access remains pending the user's explicit approval decision.
+// Mapped Primary/Backdrop artwork answers without a login while the switch is
+// on (approved 2026-10-03, contract §5.1): the store read checks mapping,
+// incarnation and switch generation, and `serve_jellyfin_artwork` spends the
+// per-address miss budget. A presented login is not required or consulted.
 async fn image(
     _enabled: Enabled,
     auth::ClientPeer(peer): auth::ClientPeer,
@@ -3761,5 +3801,226 @@ mod tests {
                 .0,
             StatusCode::NOT_FOUND
         );
+    }
+
+    #[tokio::test]
+    async fn jellyfin_contract_routes_answer_their_minimum_semantics_and_are_counted() {
+        let f = playback_fixture().await;
+        let call = |method: &str, path: &str, token: Option<&str>, body: Value| {
+            let request = request(method, path, token, body);
+            let app = f.app.clone();
+            async move {
+                let response = app.oneshot(request).await.expect("response");
+                let status = response.status();
+                let bytes = response
+                    .into_body()
+                    .collect()
+                    .await
+                    .expect("body")
+                    .to_bytes();
+                (
+                    status,
+                    serde_json::from_slice::<Value>(&bytes).unwrap_or(Value::Null),
+                )
+            }
+        };
+        let token = Some(f.token.as_str());
+        // Public users: always empty, no login needed.
+        assert_eq!(
+            call("GET", "/jellyfin/Users/Public", None, Value::Null).await,
+            (StatusCode::OK, json!([]))
+        );
+        // Authenticated system information: the baseline plus Plurx's build.
+        assert_eq!(
+            call("GET", "/jellyfin/System/Info", None, Value::Null)
+                .await
+                .0,
+            StatusCode::UNAUTHORIZED
+        );
+        let (status, info) = call("GET", "/jellyfin/System/Info", token, Value::Null).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(info["Version"], "10.11.11");
+        assert!(info["PackageName"]
+            .as_str()
+            .is_some_and(|p| p.starts_with("plurx ")));
+        assert!(info.get("ProgramDataPath").is_none() && info.get("LogPath").is_none());
+        // Capabilities: validated and accepted, not stored.
+        assert_eq!(
+            call("POST", "/jellyfin/Sessions/Capabilities?PlayableMediaTypes=Video&SupportsMediaControl=false", token, Value::Null).await.0,
+            StatusCode::NO_CONTENT
+        );
+        assert_eq!(
+            call(
+                "POST",
+                "/jellyfin/Sessions/Capabilities?SupportsMediaControl=maybe",
+                token,
+                Value::Null
+            )
+            .await
+            .0,
+            StatusCode::BAD_REQUEST
+        );
+        assert_eq!(
+            call(
+                "POST",
+                "/jellyfin/Sessions/Capabilities/Full",
+                token,
+                json!({"PlayableMediaTypes":["Video"]})
+            )
+            .await
+            .0,
+            StatusCode::NO_CONTENT
+        );
+        assert_eq!(
+            call(
+                "POST",
+                "/jellyfin/Sessions/Capabilities/Full",
+                token,
+                json!([])
+            )
+            .await
+            .0,
+            StatusCode::BAD_REQUEST
+        );
+        // Search hints over the catalog search.
+        let (status, hints) = call(
+            "GET",
+            "/jellyfin/Search/Hints?searchTerm=direct&Limit=10",
+            token,
+            Value::Null,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{hints}");
+        assert_eq!(hints["TotalRecordCount"], 1);
+        assert_eq!(hints["SearchHints"][0]["Id"], f.item);
+        assert_eq!(hints["SearchHints"][0]["Type"], "Movie");
+        let (_, people) = call(
+            "GET",
+            "/jellyfin/Search/Hints?searchTerm=direct&IncludeItemTypes=Person",
+            token,
+            Value::Null,
+        )
+        .await;
+        assert_eq!(people["TotalRecordCount"], 0);
+        assert_eq!(
+            call("GET", "/jellyfin/Search/Hints", token, Value::Null)
+                .await
+                .0,
+            StatusCode::BAD_REQUEST
+        );
+        // Downloads: an honest refusal for a mapped item.
+        let (status, refused) = call(
+            "GET",
+            &format!("/jellyfin/Items/{}/Download", f.item),
+            token,
+            Value::Null,
+        )
+        .await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        assert_eq!(refused["code"], "download_not_offered");
+        // Watched state through the 10.9+ route, user optional.
+        let played = format!("/jellyfin/UserPlayedItems/{}", f.item);
+        let (status, data) = call("POST", &played, token, Value::Null).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(data["Played"], true);
+        let (status, data) = call(
+            "DELETE",
+            &format!("{played}?userId={}", f.user),
+            token,
+            Value::Null,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(data["Played"], false);
+        assert_eq!(
+            call(
+                "POST",
+                &format!("{played}?userId={}", f.item),
+                token,
+                Value::Null
+            )
+            .await
+            .0,
+            StatusCode::FORBIDDEN
+        );
+        // Ping and ActiveEncodings act only on a named play of this login.
+        let play = negotiate(&f).await["PlaySessionId"]
+            .as_str()
+            .expect("play")
+            .to_owned();
+        let direct = format!(
+            "/jellyfin/Videos/{}/stream?MediaSourceId={}&PlaySessionId={play}",
+            f.item, f.source
+        );
+        assert_eq!(
+            status_of(&f, request("GET", &direct, token, Value::Null))
+                .await
+                .0,
+            StatusCode::OK
+        );
+        assert_eq!(
+            call(
+                "POST",
+                &format!("/jellyfin/Sessions/Playing/Ping?playSessionId={play}"),
+                token,
+                Value::Null
+            )
+            .await
+            .0,
+            StatusCode::NO_CONTENT
+        );
+        assert_eq!(
+            call(
+                "POST",
+                "/jellyfin/Sessions/Playing/Ping",
+                token,
+                Value::Null
+            )
+            .await
+            .0,
+            StatusCode::BAD_REQUEST
+        );
+        assert_eq!(
+            call(
+                "POST",
+                &format!(
+                    "/jellyfin/Sessions/Playing/Ping?playSessionId={play}&deviceId=someone-else"
+                ),
+                token,
+                Value::Null
+            )
+            .await
+            .0,
+            StatusCode::FORBIDDEN
+        );
+        assert_eq!(
+            call(
+                "DELETE",
+                "/jellyfin/Videos/ActiveEncodings?deviceId=catalog-contract",
+                token,
+                Value::Null
+            )
+            .await
+            .0,
+            StatusCode::BAD_REQUEST,
+            "never a kill by device alone"
+        );
+        assert_eq!(
+            call("DELETE", &format!("/jellyfin/Videos/ActiveEncodings?deviceId=catalog-contract&playSessionId={play}"), token, Value::Null).await.0,
+            StatusCode::NO_CONTENT
+        );
+        // Every request above is counted under its template; an unknown path
+        // under `unmatched`.
+        call("GET", "/jellyfin/No/Such/Route", token, Value::Null).await;
+        let text = super::metrics::prometheus();
+        for line in [
+            "route=\"/jellyfin/Search/Hints\",outcome=\"ok\"",
+            "route=\"/jellyfin/Items/{item_id}/Download\",outcome=\"forbidden\"",
+            "route=\"/jellyfin/Sessions/Playing/Ping\",outcome=\"refused\"",
+            "route=\"unmatched\",outcome=\"not_found\"",
+        ] {
+            assert!(text.contains(line), "{line} missing from:\n{text}");
+        }
+        assert!(!text.contains(&f.item) && !text.contains(&f.token) && !text.contains(&play));
     }
 }
