@@ -4287,3 +4287,56 @@ The affected feature check passes in 50.18 seconds and feature Clippy in
 2,711 files. The normal tracked commit hook remains mandatory. Live HTTP ingress,
 Source transport evidence, and accepted-body/read/writer ownership are separate
 qualification boundaries.
+
+### Candidate authenticated B Start ingress
+
+The isolated `shared_receiver_ingress` module supplies two aliases beneath the
+actual opaque B file base: `hls/sessions` and `playback`. Its router is deliberately
+unregistered. Public installation still needs the actual pinned B-to-Source
+Start/relay/control fixture and accepted Start-response ownership through the
+connection, read jobs and writers. It adds no Play button or Local lookup.
+
+Both aliases require the actual B account token and authenticated user, current
+active import, signed file locator and a fresh opaque original-login receiver
+Store authority after the bounded body read. The signature binds the retained
+Source/epoch/library/item/file/revision and import lifecycle. Decimal Source IDs,
+including zero and values beyond JavaScript's safe integer range, remain strings.
+The complete provided ordinary CreateSession body is retained: omitted fields,
+explicit nulls and integer resume positions are not normalized into guessed
+intent. Duplicate keys, unknown nested fields, trailing JSON and oversized input
+are refused. A new private Source request UUID changes only that wrapper field;
+the retained B request and its fingerprint stay stable across retries.
+
+Initial play/resume preserves `start`, initial quality and device capabilities.
+Non-null `previous_session_id`, `control_sequence`, `reopen_reason` and `intent`
+are refused before actor admission while Source-safe predecessor/control/intent
+planning remains unqualified. Null or omitted values are preserved. Unknown
+staged-recovery fields are rejected by the closed DTO grammar. B session UUIDs
+are never forwarded as Source predecessors or passed to the Local manager.
+
+The existing Root receiver actor owns claim, assignment, activation, Source
+Start and cleanup; this handler starts no second actor. Its 305-second ready
+wait is independent of HTTP waiter cancellation, and unresolved/error replies
+are not producer or retirement evidence. The candidate JSON response still
+awaits the Root accepted-body registry before public enablement.
+
+The focused pinned Rust 1.97.1 ingress command is:
+
+```sh
+cargo test -p plurxd --features plurx-core/hiqlite-store,plurx-core/hiqlite-contract-tests --bin plurxd sharing_receiver_ingress -- --nocapture
+```
+
+It reports 4 passed, zero ignored in 0.19 seconds on the retained `ebd390b20`
+base. The tests cover complete provided DTO preservation, lossless signed-context
+construction and stable retry fingerprint, refusal of each non-null recovery or
+intent field without rewriting the body, closed malformed/duplicate/oversized
+inputs, and actual B account-authentication on both aliases. The ordinary public
+router returns 404 for both candidate aliases. These fixtures neither create a
+Source producer nor claim physical Start/retirement qualification. Documentation
+index checks pass 4/4 and the catalog audits 2,712 files.
+
+Affected feature Clippy passes with `cargo clippy -p plurxd --features
+plurx-core/hiqlite-store,plurx-core/hiqlite-contract-tests --all-targets -- -D
+warnings` in 1 minute 35 seconds. The normal tracked hook also runs before the
+finite checkpoint. Moving the intended base requires the exact combined tree
+qualification again.
