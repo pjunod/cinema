@@ -912,6 +912,25 @@ impl MediaSessionStore for SqliteStore {
         self.with_conn(move |conn| {
             let tx = conn.unchecked_transaction()?;
             let lease_resource = format!("session:{}", activation.incarnation_id);
+            // Reserved compatibility request ids must retain their exact live negotiation
+            // inside this transaction, before an old start can supersede a newer pointer.
+            if let Some(play_id) = activation.request_id.as_deref().and_then(|id| id.strip_prefix("jellyfin:")) {
+                let admitted: i64 = tx.query_row(
+                    "SELECT COUNT(*) FROM jellyfin_plays WHERE play_id=?1 AND user_id=?2 AND playback_id=?3
+                     AND ((state='pending' AND expires_at_ms>?4) OR (state='active' AND native_incarnation_id=?5))
+                     AND json_extract(payload,'$.native_request_fingerprint')=?6
+                     AND json_extract(payload,'$.source_origin_ms')=?7
+                     AND EXISTS(SELECT 1 FROM jellyfin_login_tokens l JOIN tokens t ON t.token_hash=l.token_hash AND t.user_id=l.user_id
+                       WHERE l.token_hash=jellyfin_plays.token_digest AND l.user_id=jellyfin_plays.user_id
+                         AND l.device_digest=jellyfin_plays.device_digest AND l.client_family=jellyfin_plays.client_family)
+                     AND EXISTS(SELECT 1 FROM jellyfin_entity_ids WHERE wire_id=jellyfin_plays.item_wire_id AND retired=0)
+                     AND EXISTS(SELECT 1 FROM jellyfin_entity_ids WHERE wire_id=jellyfin_plays.file_wire_id AND retired=0)",
+                    params![play_id, activation.user_id, activation.playback_id, activation.now_ms,
+                        activation.incarnation_id, activation.request_fingerprint, activation.media_origin_ms],
+                    |row| row.get(0),
+                )?;
+                if admitted != 1 { tx.commit()?; return Ok(None); }
+            }
             let current_pointer = tx
                 .query_row(
                     "SELECT current_incarnation_id FROM media_playback_pointers

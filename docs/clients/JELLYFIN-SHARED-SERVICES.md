@@ -144,3 +144,25 @@ renewed ownership, original-clock progress, deleted-resource final retry and
 an unmapped native replacement on SQLite and three voters. HLS negotiation,
 serving and resource cleanup are separate work; this change advertises no new
 client transport.
+
+
+## 8. Native activation admission
+
+The `jellyfin:<PlaySessionId>` request namespace reserves one native start
+for one compatibility negotiation. Before replacing a playback pointer, the
+SQLite transaction and replicated native-row insertion require that exact
+user/player binding, pending lifetime or active exact incarnation, native
+request fingerprint and media clock. Its login token and mapped item/source
+must still exist. A cancelled, expired or missing negotiation cannot replace
+the viewer's current native stream. An exact active replay remains idempotent.
+
+The replicated insertion repeats these predicates after its consistent read;
+predecessor fencing and pointer writes retain their existing exact-row guards.
+Ordinary native request ids preserve their existing admission. This boundary
+prepares authenticated HLS activation; it does not advertise HLS or add a
+producer, timer or media credential.
+
+An idempotent replay adds one authoritative, indexed negotiation lookup to
+observe cancellation and login revocation. Fresh replicated activation relies
+on the transaction predicate and adds no negotiation read round trip. The
+consistent-read census records this conditional site with its authority reason.

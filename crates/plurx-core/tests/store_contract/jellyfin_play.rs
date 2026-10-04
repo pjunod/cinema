@@ -1596,3 +1596,174 @@ async fn jellyfin_media_progress_requires_the_live_exact_native_pointer_and_pres
     })
     .await;
 }
+
+#[tokio::test]
+async fn jellyfin_reserved_native_start_cannot_replace_a_current_player_after_negotiation_ends() {
+    for_each_backend(|store, backend| async move {
+        let mut play = fixture(&store).await;
+        play.source_origin_ms = 0;
+        assert!(store
+            .create_jellyfin_play(play.clone())
+            .await
+            .expect("pending"));
+        let current = current_media_session(
+            store.as_ref(),
+            play.scope.user_id,
+            &play.playback_id,
+            "00000000-0000-4000-8000-000000000701",
+            "00000000-0000-4000-8000-000000000702",
+            backend,
+        )
+        .await;
+        let request_id = format!("jellyfin:{}", play.play_id);
+        let mut start = current.clone();
+        start.incarnation_id = "00000000-0000-4000-8000-000000000703".into();
+        start.session_id = "00000000-0000-4000-8000-000000000704".into();
+        start.request_id = Some(request_id.clone());
+        start.now_ms = 1001;
+        start.lease_expires_at_ms = 900001;
+        start.expected_predecessor_incarnation_id = Some(current.incarnation_id.clone());
+        start.fence_predecessor = true;
+        assert!(matches!(
+            store
+                .claim_media_session_request(
+                    play.scope.user_id,
+                    &request_id,
+                    &start.request_fingerprint,
+                    &start.playback_id,
+                    &start.incarnation_id,
+                    1001,
+                    900001
+                )
+                .await
+                .expect("claim"),
+            MediaSessionRequestClaim::Acquired { .. }
+        ));
+        assert!(store
+            .assign_media_session_request_owner(
+                play.scope.user_id,
+                &request_id,
+                &start.incarnation_id,
+                &start.owner_node_id,
+                1001
+            )
+            .await
+            .expect("owner"));
+        assert!(store
+            .end_jellyfin_play(&play.play_id, &play.scope, 1002)
+            .await
+            .expect("cancel old negotiation"));
+        assert!(
+            store
+                .activate_media_session(&start)
+                .await
+                .expect("activation guard")
+                .is_none(),
+            "{backend}: cancelled negotiation must not replace native pointer"
+        );
+        let preserved = store
+            .media_session_route_for_playback(play.scope.user_id, &play.playback_id)
+            .await
+            .expect("pointer")
+            .expect("live current");
+        assert_eq!(
+            preserved.incarnation_id, current.incarnation_id,
+            "{backend}"
+        );
+        assert_eq!(preserved.state, "active", "{backend}");
+        assert_eq!(preserved.publication_ready_at_ms, 0, "{backend}");
+        assert!(store
+            .media_session_route_by_incarnation(&start.incarnation_id)
+            .await
+            .expect("old start")
+            .is_none());
+        let mut valid = play.clone();
+        valid.play_id = uuid::Uuid::new_v4().simple().to_string();
+        valid.created_at_ms = 1003;
+        assert!(store
+            .create_jellyfin_play(valid.clone())
+            .await
+            .expect("new pending"));
+        let valid_request = format!("jellyfin:{}", valid.play_id);
+        let mut replacement = start.clone();
+        replacement.incarnation_id = "00000000-0000-4000-8000-000000000705".into();
+        replacement.session_id = "00000000-0000-4000-8000-000000000706".into();
+        replacement.request_id = Some(valid_request.clone());
+        replacement.expected_predecessor_incarnation_id = None;
+        replacement.fence_predecessor = false;
+        replacement.now_ms = 1004;
+        replacement.lease_expires_at_ms = 900004;
+        assert!(matches!(
+            store
+                .claim_media_session_request(
+                    valid.scope.user_id,
+                    &valid_request,
+                    &replacement.request_fingerprint,
+                    &replacement.playback_id,
+                    &replacement.incarnation_id,
+                    1004,
+                    900004
+                )
+                .await
+                .expect("valid claim"),
+            MediaSessionRequestClaim::Acquired { .. }
+        ));
+        assert!(store
+            .assign_media_session_request_owner(
+                valid.scope.user_id,
+                &valid_request,
+                &replacement.incarnation_id,
+                &replacement.owner_node_id,
+                1004
+            )
+            .await
+            .expect("valid owner"));
+        let outcome = store
+            .activate_media_session(&replacement)
+            .await
+            .expect("valid activation")
+            .expect("live negotiation activates");
+        assert_eq!(
+            outcome.route.incarnation_id, replacement.incarnation_id,
+            "{backend}"
+        );
+        confirm_media_activation(store.as_ref(), &replacement, 0, backend).await;
+        assert!(store
+            .activate_jellyfin_play(
+                &valid.play_id,
+                &valid.scope,
+                Activation::MediaIncarnation(replacement.incarnation_id.clone()),
+                1005
+            )
+            .await
+            .expect("bind"));
+        assert!(
+            store
+                .activate_media_session(&replacement)
+                .await
+                .expect("exact replay")
+                .is_some(),
+            "{backend}: active exact binding remains idempotent"
+        );
+        // Purging or missing metadata cannot turn the reserved namespace into an unbound start.
+        start.request_id = Some("jellyfin:ffffffffffffffffffffffffffffffff".into());
+        assert!(store
+            .activate_media_session(&start)
+            .await
+            .expect("missing binding")
+            .is_none());
+        assert!(store
+            .delete_token(&valid.scope.token_digest)
+            .await
+            .expect("revoke login"));
+        assert!(
+            store
+                .activate_media_session(&replacement)
+                .await
+                .expect("revoked replay")
+                .is_none(),
+            "{backend}: deleting the login refuses even an otherwise exact native replay"
+        );
+    })
+    .await;
+}
