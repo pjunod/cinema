@@ -529,6 +529,21 @@ function playerWantsPlayback(v){
   if(PLAYER&&typeof PLAYER.wantsPlayback==="boolean") return PLAYER.wantsPlayback;
   return !v.paused;
 }
+// A pause of a minute or more is a natural quality boundary, but only a
+// different route is worth touching the media. Ask first, while playback
+// resumes untouched: a retained route must not seek, because the answer takes
+// about a second and a seek to the position Play was pressed at would pull the
+// picture back by that much. A picked route reopens at the position it has
+// reached by then.
+async function resumeQualityBoundary(p){
+  if(!p||qualityForce()!=='auto') return false;
+  const intent=p.controlSeek, attachment=p.mediaAttachment;
+  const candidate=await naturalBoundaryQualityCandidate(p,intent);
+  if(!candidate||PLAYER!==p||p.controlSeek!==intent||p.mediaAttachment!==attachment
+    ||p.wantsPlayback===false||hasPendingPlaybackOpen(p)) return false;
+  await seekTo(pbPosSec(),false,null,false,null,true,candidate);
+  return true;
+}
 function togglePlay(origin="viewer_control"){
   const v=document.getElementById("video"); if(!v) return;
   if(PLAYER&&PLAYER.libraryChannel&&v.paused
@@ -566,7 +581,7 @@ function togglePlay(origin="viewer_control"){
       if(PLAYER.wantsPlayback) resumeHlsStartup(v,PLAYER);
       else pauseHlsStartup(PLAYER);
       applyPlaybackTransportIntent(v,PLAYER);
-      if(qualityBoundary) seekTo(pbPosSec(),false,null,false,null,true);
+      if(qualityBoundary) resumeQualityBoundary(PLAYER).catch(()=>{});
     }
   }
   if(PLAYER)playerActivity();
@@ -1051,7 +1066,7 @@ function playbackSeekBufferCovers(v,p,targetMs){
 // Seek that works for every method: direct/VOD and safe rolling/progressive
 // destinations seek the attached element; everything else reopens at film time.
 async function seekTo(targetSec, forceReopen=false, autoHeightOverride=null, viewerInitiated=true,
-  recoveryEpisode=null,qualityBoundary=false){
+  recoveryEpisode=null,qualityBoundary=false,boundaryCandidate=null){
   const v=document.getElementById("video"); if(!v||!PLAYER) return;
   if(viewerInitiated&&PLAYER.abr) PLAYER.abr.switchBudgetTimes=[];
   targetSec=Math.max(0,targetSec);
@@ -1132,7 +1147,8 @@ async function seekTo(targetSec, forceReopen=false, autoHeightOverride=null, vie
   if(!PLAYER||PLAYER.controlSeek!==seekIntent||hasPendingPlaybackOpen(PLAYER)) return;
   const me=PLAYER;
   if((viewerInitiated&&!forceReopen||qualityBoundary)&&qualityForce()==='auto'){
-    const candidate=await naturalBoundaryQualityCandidate(me,seekIntent);
+    // A resume boundary already asked, and only calls with the route it picked.
+    const candidate=boundaryCandidate||await naturalBoundaryQualityCandidate(me,seekIntent);
     if(PLAYER!==me||me.controlSeek!==seekIntent||hasPendingPlaybackOpen(me)) return;
     if(candidate){
       const previousId=me.abr.requestedCandidateId||me.qualityCandidateId;

@@ -7,10 +7,11 @@ const {shellSource} = require("../web/shell-source.js");
 
 function declaration(name) {
   const source = shellSource().bodyScript;
-  const start = source.indexOf(`\nfunction ${name}(`);
+  const plain = source.indexOf(`\nfunction ${name}(`);
+  const start = plain >= 0 ? plain : source.indexOf(`\nasync function ${name}(`);
   assert.ok(start >= 0, `${name} must remain in the served shell`);
   const rest = source.slice(start + 1);
-  const next = rest.indexOf("\nfunction ", 1);
+  const next = rest.search(/\n(?:async )?function /);
   return next < 0 ? rest : rest.slice(0, next);
 }
 
@@ -94,4 +95,66 @@ test("a paused rolling session's failure parks and Play reopens it", () => {
   const park = fatal.indexOf("PlaybackPolicy.parksPausedPlaybackError(");
   assert.ok(park >= 0 && park < fatal.indexOf("playbackControlHlsFatal("),
     "a paused rolling fatal parks before any recovery or surface");
+});
+
+// Play after a pause of a minute or more is a natural quality boundary. It
+// used to run through seekTo() at the position Play was pressed at; the Auto
+// ask took about a second, so a retained route still seeked the attached VOD
+// media back by that second (Safari, 2026-10-04: every `hls_loader_resumed`
+// followed 1.2 s later by a `seek_local` with no viewer seek).
+test("Play after a long pause never seeks when Auto keeps the route", async () => {
+  const toggle = declaration("togglePlay");
+  assert.doesNotMatch(toggle, /if\(qualityBoundary\) seekTo\(/,
+    "the resume boundary does not seek before it knows the route changes");
+  assert.match(toggle, /if\(qualityBoundary\) resumeQualityBoundary\(PLAYER\)/);
+
+  const run = async ({picked, during = () => {}}) => {
+    const seeks = [];
+    const player = {controlSeek: undefined, mediaAttachment: 7, wantsPlayback: true};
+    const scope = {
+      PLAYER: player, position: 100,
+      qualityForce: () => "auto",
+      hasPendingPlaybackOpen: () => false,
+      pbPosSec: () => scope.position,
+      naturalBoundaryQualityCandidate: async () => {
+        scope.position = 101.2;   // playback ran on while the ask was out
+        during(scope, player);
+        return picked;
+      },
+      seekTo: async (...args) => { seeks.push(args); },
+    };
+    const names = Object.keys(scope).filter((name) => name !== "position");
+    const body = `${declaration("resumeQualityBoundary")}
+      return (p) => resumeQualityBoundary(p);`;
+    const make = new Function("scope", `with(scope){${body}}`);
+    const moved = await make(scope)(player);
+    assert.ok(names.length > 0);
+    return {moved, seeks};
+  };
+
+  const kept = await run({picked: null});
+  assert.equal(kept.moved, false);
+  assert.deepEqual(kept.seeks, [], "a retained route leaves the playing media alone");
+
+  const candidate = {id: "2", route: "encode", target_height: 720};
+  const changed = await run({picked: candidate});
+  assert.equal(changed.moved, true);
+  assert.equal(changed.seeks.length, 1);
+  assert.equal(changed.seeks[0][0], 101.2, "a picked route opens where playback has reached");
+  assert.equal(changed.seeks[0][1], false);
+  assert.equal(changed.seeks[0][3], false, "it is not a viewer seek");
+  assert.equal(changed.seeks[0][6], candidate, "the picked route is handed over, not asked again");
+
+  for (const during of [
+    (scope, player) => { player.wantsPlayback = false; },
+    (scope, player) => { player.controlSeek = {sequence: 1}; },
+    (scope, player) => { player.mediaAttachment = 8; },
+    (scope) => { scope.PLAYER = {}; },
+  ]) {
+    const superseded = await run({picked: candidate, during});
+    assert.deepEqual(superseded.seeks, [], "a pause, seek, reattach or new player supersedes it");
+  }
+
+  const seek = declaration("seekTo");
+  assert.match(seek, /const candidate=boundaryCandidate\|\|await naturalBoundaryQualityCandidate\(me,seekIntent\);/);
 });
