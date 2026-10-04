@@ -7153,3 +7153,19 @@ muxed candidate that did not produce the bytes. Every other candidate keeps
 main's measured-output and receipt rules. The rejected alternative was to
 register continuous sessions for receipts: the binding names one muxed
 candidate, so family transfers would have recorded negatives against it.
+
+**Final Chrome campaign on the integrated build.** Source `334d70731`
+(main #793 merged plus the fixes above), shared CPUs, bound FFprobe, 1 Hz
+host-pressure sampling: **PASS** — fifteen manual and five actual Auto
+changes (1080p→720p→1080p→720p→1080p) in one session and player (generation
+3 throughout), **50.1 ms** maximum video gap (quality-cycle p95 66.7 ms),
+zero stalls, hitches and dropped frames over 21,181 frames, first frame in
+2.8 s, clock 1.000×; host load ≤ 4.6, CPU PSI avg10 ≤ 16 %, memory PSI
+avg10 ≤ 0.23 %. Receipt `reports/continuous-chrome-mixed-334d70731-full20-merged793b*`.
+An earlier attempt on the same source reached the fourth Auto change and
+then the harness itself died writing its report (EDQUOT on the lab host's
+shared /tmp); the stale runtime was removed, older receipts were moved off
+tmpfs, and the campaign was rerun once. Android production and unit sources
+compile and the continuous selection/protocol unit tests pass on the lab
+host; physical-device behaviour remains for the post-merge device checks.
+
