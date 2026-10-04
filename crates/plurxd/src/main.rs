@@ -3178,7 +3178,7 @@ fn spawn_background_loops(
     tokio::spawn(std::sync::Arc::clone(&state.transcode).reap_loop());
     tokio::spawn(std::sync::Arc::clone(&state.transcode).vod_maintain_loop());
     // Post-start complete-output queue publication; VOD create only hands off.
-    tokio::spawn(std::sync::Arc::clone(&state.transcode).output_enqueue_loop());
+    tokio::spawn(std::sync::Arc::clone(&state.transcode).output_enqueue_loop(background_shutdown));
     // The expiry sweep in here is a cluster-wide idempotent sweep and stays
     // ungated; claiming the next queued package is not, and takes the same
     // live membership check the other cluster-wide loops do.

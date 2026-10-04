@@ -1321,6 +1321,37 @@ fn render_background_overruns(out: &mut String) {
     );
 }
 
+/// Why a started session's complete-output preparation was not handed to
+/// [`crate::transcode::TranscodeManager::output_enqueue_loop`], in index order.
+pub(crate) const OUTPUT_ENQUEUE_DROP_REASONS: [&str; 2] = ["queue_full", "worker_stopped"];
+
+static OUTPUT_ENQUEUE_DROPS: [AtomicU64; OUTPUT_ENQUEUE_DROP_REASONS.len()] =
+    [const { AtomicU64::new(0) }; OUTPUT_ENQUEUE_DROP_REASONS.len()];
+
+/// Count one complete-output preparation the create could not hand off. The
+/// title's next start offers the same deduplicated job again, so a drop costs
+/// time, not correctness; a rising count names a worker that is behind
+/// (`queue_full`) or gone (`worker_stopped`).
+pub(crate) fn record_output_enqueue_drop(reason: &str) {
+    if let Some(index) = OUTPUT_ENQUEUE_DROP_REASONS
+        .iter()
+        .position(|label| *label == reason)
+    {
+        OUTPUT_ENQUEUE_DROPS[index].fetch_add(1, Ordering::Relaxed);
+    }
+}
+
+fn render_output_enqueue_drops(out: &mut String) {
+    render_counters(
+        out,
+        "plurx_transcode_output_enqueue_dropped_total",
+        "Complete-output preparations a started session could not hand to the output-enqueue worker, by reason.",
+        "reason",
+        &OUTPUT_ENQUEUE_DROP_REASONS,
+        &OUTPUT_ENQUEUE_DROPS,
+    );
+}
+
 #[cfg(test)]
 fn render_start_outcomes_for_test(record: impl FnOnce(&StartOutcomeCounters)) -> String {
     let counters = StartOutcomeCounters::new();
@@ -2080,12 +2111,38 @@ pub fn prometheus() -> String {
     metrics.push_str(&SUBTITLE_SOURCE_METRICS.render());
     metrics.push_str(&START_OUTCOME_COUNTERS.render());
     render_background_overruns(&mut metrics);
+    render_output_enqueue_drops(&mut metrics);
     metrics
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A dropped output-enqueue hand-off is counted by reason on /metrics; an
+    /// unknown reason is not folded into a real one. The counter is node-wide,
+    /// so the test compares before and after.
+    #[test]
+    fn output_enqueue_drops_are_counted_by_reason() {
+        let sample = |reason: &str| -> u64 {
+            let prefix =
+                format!("plurx_transcode_output_enqueue_dropped_total{{reason=\"{reason}\"}} ");
+            prometheus()
+                .lines()
+                .find_map(|line| line.strip_prefix(prefix.as_str()))
+                .and_then(|value| value.trim().parse().ok())
+                .expect("the drop counter is exposed")
+        };
+        let full = sample("queue_full");
+        record_output_enqueue_drop("queue_full");
+        record_output_enqueue_drop("not_a_reason");
+        assert!(sample("queue_full") > full);
+        let _ = sample("worker_stopped");
+        assert!(!prometheus().contains("reason=\"not_a_reason\""));
+        assert!(
+            prometheus().contains("# TYPE plurx_transcode_output_enqueue_dropped_total counter")
+        );
+    }
 
     /// C-08 M5 row 4: the start-outcome families render every enumerated
     /// label pair and nothing else, and the production exposition carries

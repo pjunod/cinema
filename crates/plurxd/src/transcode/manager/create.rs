@@ -1939,11 +1939,12 @@ impl TranscodeManager {
                 tokio::sync::mpsc::error::TrySendError::Full(_) => "queue_full",
                 tokio::sync::mpsc::error::TrySendError::Closed(_) => "worker_stopped",
             };
-            tracing::debug!(
+            crate::telemetry::record_output_enqueue_drop(reason);
+            tracing::info!(
                 target: "plurxd::transcode",
                 file_id,
                 reason,
-                "complete output preparation not handed off"
+                "complete output preparation not handed off; the next start offers it again"
             );
         }
     }
@@ -1953,7 +1954,15 @@ impl TranscodeManager {
     /// own stage budget (the catalog restore's create-stage deadline and the
     /// store's own write bound) instead of borrowing the viewer's start
     /// budget, and every outcome is logged against its file and session.
-    pub async fn output_enqueue_loop(self: Arc<Self>) {
+    ///
+    /// It stops on the daemon's `shutdown` token, both while idle and while a
+    /// publication is in flight: an interrupted publication is the same
+    /// deduplicated job the title's next start offers again, so dropping it
+    /// at shutdown loses nothing durable.
+    pub async fn output_enqueue_loop(
+        self: Arc<Self>,
+        shutdown: tokio_util::sync::CancellationToken,
+    ) {
         let Some(mut receiver) = self
             .output_enqueue
             .receiver
@@ -1963,24 +1972,45 @@ impl TranscodeManager {
         else {
             return;
         };
-        while let Some(work) = receiver.recv().await {
+        loop {
+            let work = tokio::select! {
+                () = shutdown.cancelled() => break,
+                work = receiver.recv() => match work {
+                    Some(work) => work,
+                    None => break,
+                },
+            };
             let started = Instant::now();
-            let (kind, result) = match &work.encoding {
-                Some(encoding) => (
-                    "encoded_output",
-                    self.enqueue_encoded_output(
-                        &work.request,
-                        &work.file,
-                        &work.settings,
-                        encoding,
-                    )
-                    .await,
-                ),
-                None => (
-                    "copy_output",
-                    self.enqueue_copy_output(&work.request, &work.file, &work.settings)
+            let publication = async {
+                match &work.encoding {
+                    Some(encoding) => (
+                        "encoded_output",
+                        self.enqueue_encoded_output(
+                            &work.request,
+                            &work.file,
+                            &work.settings,
+                            encoding,
+                        )
                         .await,
-                ),
+                    ),
+                    None => (
+                        "copy_output",
+                        self.enqueue_copy_output(&work.request, &work.file, &work.settings)
+                            .await,
+                    ),
+                }
+            };
+            let (kind, result) = tokio::select! {
+                () = shutdown.cancelled() => {
+                    tracing::info!(
+                        target: "plurxd::transcode",
+                        file_id = work.file.id,
+                        session_id = %work.session_id,
+                        "complete output preparation interrupted by shutdown"
+                    );
+                    break;
+                }
+                outcome = publication => outcome,
             };
             let waited_ms = started.duration_since(work.queued_at).as_millis() as u64;
             let elapsed_ms = started.elapsed().as_millis() as u64;
