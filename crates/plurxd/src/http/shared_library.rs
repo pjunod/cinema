@@ -1635,17 +1635,69 @@ async fn viewer_item(
 async fn viewer_progress(
     State(state): State<AppState>,
     super::extract::AuthUser(user): super::extract::AuthUser,
+    super::extract::RawToken(token): super::extract::RawToken,
     Path((import, item)): Path<(String, String)>,
     body: Body,
-) -> Result<Json<Value>, ApiError> {
-    let bytes = to_bytes(body, 1024).await.map_err(|_| invalid())?;
-    let _: plurx_core::store::sharing_catalogue::RemoteWatch =
-        serde_json::from_slice(&bytes).map_err(|_| invalid())?;
-    current_viewer_item(&state, user.id, import_id(&import)?, source_id(&item)?).await?;
-    Err(fail(
-        StatusCode::SERVICE_UNAVAILABLE,
-        "sharing_progress_session_binding_unavailable",
-    ))
+) -> Result<Response, ApiError> {
+    let bytes = tokio::time::timeout(std::time::Duration::from_secs(15), to_bytes(body, 1024))
+        .await
+        .map_err(|_| invalid())?
+        .map_err(|_| invalid())?;
+    let beat = super::shared_receiver_playback::ReceiverProgressBeat::parse(&bytes)
+        .map_err(|_| invalid())?;
+    let session = uuid::Uuid::parse_str(&beat.session_id).map_err(|_| invalid())?;
+    let actor = state
+        .sharing
+        .receiver_starts
+        .by_session(session)
+        .ok_or_else(|| {
+            fail(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "sharing_progress_session_binding_unavailable",
+            )
+        })?;
+    let (outcome, current) = actor
+        .record_progress(
+            &state,
+            user.id,
+            &plurx_core::auth::hash_token(&token),
+            import_id(&import)?,
+            &source_id(&item)?,
+            &beat,
+        )
+        .await
+        .map_err(|_| {
+            fail(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "sharing_progress_session_binding_unavailable",
+            )
+        })?;
+    use plurx_core::sharing_receiver_progress::ReceiverProgressOutcome;
+    let (status, value) = match outcome {
+        ReceiverProgressOutcome::Applied | ReceiverProgressOutcome::Replay => {
+            (StatusCode::OK, json!({"sequence":beat.sequence}))
+        }
+        ReceiverProgressOutcome::Stale => (
+            StatusCode::CONFLICT,
+            json!({"code":"sharing_progress_stale","current_sequence":current}),
+        ),
+        ReceiverProgressOutcome::Conflict => (
+            StatusCode::CONFLICT,
+            json!({"code":"sharing_progress_conflict","current_sequence":current}),
+        ),
+        ReceiverProgressOutcome::Refused => {
+            return Err(fail(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "sharing_progress_session_binding_unavailable",
+            ))
+        }
+    };
+    Ok((
+        status,
+        [(axum::http::header::CACHE_CONTROL, "no-store")],
+        Json(value),
+    )
+        .into_response())
 }
 async fn viewer_assigned_libraries(
     State(state): State<AppState>,

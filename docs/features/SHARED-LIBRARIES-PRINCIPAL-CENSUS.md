@@ -1988,3 +1988,13 @@ Logs are `/private/tmp/sharing-source-resource-{name}.log`; they are local
 qualification receipts, not production telemetry. HTTP control and VOD-status
 adapters, directed successors, negative factory receipts, crash physical
 recovery and remote Source worker forwarding remain separate work.
+
+The full current Root integration `6bfd84b39` (code baseline `746c67e5d`)
+merged cleanly into this checkpoint. Its pinned daemon all-target check passed
+in 59.14 seconds. The actual combined resource filter passed five tests in
+15.94 seconds, guarded status seven in 26.30 seconds and Source controls six
+in 25.00 seconds, all zero ignored on the default stack. These combined logs
+are `/private/tmp/sharing-source-custody-combined-{name}.log`.
+Denied daemon all-target Clippy also passed on that exact combined tree in
+67.56 seconds; documentation index checks passed four tests and catalog lint
+covered 2,719 files.

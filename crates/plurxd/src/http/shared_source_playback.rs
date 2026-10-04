@@ -29,6 +29,119 @@ struct SourceStartEntry {
     ending: std::sync::Mutex<Option<std::sync::Arc<SourceEndOwner>>>,
     changed: tokio::sync::Notify,
     result: std::sync::Mutex<Option<Result<SourceStartOwned, SourceStartFailure>>>,
+    task: SourceStartTask,
+}
+// These are retained observations of this exact task, not wire authority or a
+// negative-admission proof. In particular a joined task or failed Store write
+// cannot prove that a historical/competing assignment has no physical owner.
+#[derive(Default)]
+struct SourceStartTask {
+    stage: std::sync::Mutex<SourceStartTaskStage>,
+    joined: std::sync::Mutex<Option<SourceStartTaskJoined>>,
+}
+#[derive(Default)]
+enum SourceStartTaskStage {
+    #[default]
+    Registered,
+    Preparing,
+    Prepared,
+    ReadingIntent {
+        planned_incarnation: Uuid,
+    },
+    IntentReady {
+        planned_incarnation: Uuid,
+        _intent: plurx_core::sharing_source_sessions::SourceSessionIntent,
+    },
+    Claiming {
+        planned_incarnation: Uuid,
+        // Preserve the actual opaque prepared intent across an unknown claim
+        // outcome, even though the HTTP layer cannot turn it into authority.
+        _intent: plurx_core::sharing_source_sessions::SourceSessionIntent,
+    },
+    Acquired(plurx_core::sharing_source_sessions::SourceBindingHandle),
+    Assigning(plurx_core::sharing_source_sessions::SourceBindingHandle),
+    Assigned(plurx_core::sharing_source_sessions::SourceDispatchAssignment),
+    Activating(plurx_core::sharing_source_sessions::SourceDispatchAssignment),
+    InvokingFactory(plurx_core::sharing_source_sessions::SourceDispatchAssignment),
+}
+enum SourceStartTaskJoined {
+    Returned,
+    PanickedOrCancelled,
+}
+impl SourceStartTaskStage {
+    fn incarnation(&self) -> Option<Uuid> {
+        match self {
+            Self::Registered | Self::Preparing | Self::Prepared => None,
+            Self::ReadingIntent {
+                planned_incarnation,
+            }
+            | Self::IntentReady {
+                planned_incarnation,
+                ..
+            }
+            | Self::Claiming {
+                planned_incarnation,
+                ..
+            } => Some(*planned_incarnation),
+            Self::Acquired(binding) | Self::Assigning(binding) => Some(binding.incarnation_id()),
+            Self::Assigned(assignment)
+            | Self::Activating(assignment)
+            | Self::InvokingFactory(assignment) => Some(assignment.binding().incarnation_id()),
+        }
+    }
+}
+impl SourceStartEntry {
+    fn retain_stage(&self, stage: SourceStartTaskStage) {
+        *self.task.stage.lock().expect("Source owned start stage") = stage;
+    }
+    fn start_owned_task(
+        self: &std::sync::Arc<Self>,
+        state: std::sync::Arc<crate::state::AppState>,
+        headers: HeaderMap,
+        input: SourceStartInput,
+        deadline: std::time::Instant,
+    ) {
+        // The detached supervisor owns the actual JoinHandle. Waiter loss
+        // cannot drop this task or replace its retained claim/assignment stage.
+        // Publish an outcome only after this exact worker future has joined.
+        let entry = std::sync::Arc::clone(self);
+        let worker_entry = std::sync::Arc::clone(self);
+        let grant = self.grant;
+        let worker = tokio::spawn(async move {
+            Box::pin(own_start(
+                state,
+                headers,
+                input,
+                grant,
+                deadline,
+                worker_entry,
+            ))
+            .await
+        });
+        tokio::spawn(async move {
+            let (result, joined) = match worker.await {
+                Ok(result) => (result, SourceStartTaskJoined::Returned),
+                Err(_) => (
+                    Err(SourceStartFailure::Unresolved),
+                    SourceStartTaskJoined::PanickedOrCancelled,
+                ),
+            };
+            if let Ok(owned) = &result {
+                debug_assert_eq!(
+                    entry
+                        .task
+                        .stage
+                        .lock()
+                        .expect("Source start stage")
+                        .incarnation(),
+                    Some(owned.assignment.binding().incarnation_id())
+                );
+            }
+            *entry.task.joined.lock().expect("actual Source task join") = Some(joined);
+            *entry.result.lock().expect("Source HTTP outcome") = Some(result);
+            entry.changed.notify_waiters();
+        });
+    }
 }
 struct SourceStartIdentity {
     owner_key: String,
@@ -103,6 +216,7 @@ impl SourceStartRegistry {
             ending: std::sync::Mutex::new(None),
             changed: tokio::sync::Notify::new(),
             result: std::sync::Mutex::new(None),
+            task: SourceStartTask::default(),
         });
         entry.remember_authenticated_hash(authenticated_hash)?;
         entries.push(std::sync::Arc::clone(&entry));
@@ -919,13 +1033,7 @@ async fn start(
         // No await separates insertion and spawning the owned task. Disconnect
         // drops only a waiter; durable/physical work stays owned by this entry.
         let state = std::sync::Arc::new(state.clone());
-        let headers = headers.clone();
-        let entry = std::sync::Arc::clone(&entry);
-        tokio::spawn(async move {
-            let result = Box::pin(own_start(state, headers, input, grant, deadline)).await;
-            *entry.result.lock().expect("Source HTTP outcome") = Some(result);
-            entry.changed.notify_waiters();
-        });
+        entry.start_owned_task(state, headers.clone(), input, deadline);
     }
     let owned = entry
         .wait(deadline)
@@ -1010,12 +1118,14 @@ async fn own_start(
     input: SourceStartInput,
     grant: Uuid,
     deadline: std::time::Instant,
+    entry: std::sync::Arc<SourceStartEntry>,
 ) -> Result<SourceStartOwned, SourceStartFailure> {
     use plurx_core::sharing_source_sessions::{
         SourceClaimOutcome, SourceIntentRead, SourceSessionRequest, SourceWriteAuthorityRead,
     };
     validate_initial_source_start(&input.session)?;
     let reference = input.reference.clone();
+    entry.retain_stage(SourceStartTaskStage::Preparing);
     let prepared = Box::pin(super::hls::prepare_source_playback(
         &state,
         &headers,
@@ -1024,6 +1134,7 @@ async fn own_start(
     ))
     .await
     .map_err(|_| SourceStartFailure::Unavailable)?;
+    entry.retain_stage(SourceStartTaskStage::Prepared);
     let (hash, current_grant) = current_reference(&state, &headers, &reference)
         .await
         .map_err(|_| SourceStartFailure::Unavailable)?;
@@ -1035,6 +1146,10 @@ async fn own_start(
         .saturating_duration_since(std::time::Instant::now())
         .as_millis()
         .min(305000) as i64;
+    let planned_incarnation = Uuid::new_v4();
+    entry.retain_stage(SourceStartTaskStage::ReadingIntent {
+        planned_incarnation,
+    });
     let intent = state
         .store
         .prepare_source_session_intent(
@@ -1043,7 +1158,7 @@ async fn own_start(
                 request_id: input.request_id.to_string(),
                 request_fingerprint: prepared.fingerprint().into(),
                 playback_id: prepared.request().playback_id.clone(),
-                incarnation_id: Uuid::new_v4(),
+                incarnation_id: planned_incarnation,
                 now_ms: now,
                 claim_expires_at_ms: now + remaining,
                 credential_hash: hash,
@@ -1060,12 +1175,20 @@ async fn own_start(
         SourceIntentRead::Unavailable => return Err(SourceStartFailure::Unavailable),
         SourceIntentRead::Capacity => return Err(SourceStartFailure::Capacity),
     };
+    entry.retain_stage(SourceStartTaskStage::IntentReady {
+        planned_incarnation,
+        _intent: (*intent).clone(),
+    });
     let members = state
         .membership
         .observe_source_admission_members()
         .await
         .map_err(|_| SourceStartFailure::Unresolved)?
         .ok_or(SourceStartFailure::Unavailable)?;
+    entry.retain_stage(SourceStartTaskStage::Claiming {
+        planned_incarnation,
+        _intent: (*intent).clone(),
+    });
     let binding = match state
         .store
         .claim_source_media_session(&intent, &members)
@@ -1082,24 +1205,28 @@ async fn own_start(
         SourceClaimOutcome::Unavailable => return Err(SourceStartFailure::Unavailable),
         SourceClaimOutcome::Capacity(_) => return Err(SourceStartFailure::Capacity),
     };
+    entry.retain_stage(SourceStartTaskStage::Acquired(binding.clone()));
     let members = state
         .membership
         .observe_source_admission_members()
         .await
         .map_err(|_| SourceStartFailure::Unresolved)?
         .ok_or(SourceStartFailure::Unresolved)?;
+    entry.retain_stage(SourceStartTaskStage::Assigning(binding.clone()));
     let assignment = state
         .store
         .assign_source_dispatch(&binding, &state.sharing.key, &members)
         .await
         .map_err(|_| SourceStartFailure::Unresolved)?
         .ok_or(SourceStartFailure::Unresolved)?;
+    entry.retain_stage(SourceStartTaskStage::Assigned(assignment.clone()));
     let members = state
         .membership
         .observe_source_admission_members()
         .await
         .map_err(|_| SourceStartFailure::Unresolved)?
         .ok_or(SourceStartFailure::Unresolved)?;
+    entry.retain_stage(SourceStartTaskStage::Activating(assignment.clone()));
     let activation = match state
         .store
         .prepare_source_activation_authority(&assignment, &state.sharing.key, &members)
@@ -1110,6 +1237,7 @@ async fn own_start(
         SourceWriteAuthorityRead::Unavailable => return Err(SourceStartFailure::Unresolved),
         SourceWriteAuthorityRead::Capacity => return Err(SourceStartFailure::Capacity),
     };
+    entry.retain_stage(SourceStartTaskStage::InvokingFactory(assignment.clone()));
     let actor = state
         .transcode
         .start_source_worker(
@@ -1269,11 +1397,35 @@ pub(crate) struct RealSourceStartFixture {
     pub headers: HeaderMap,
     pub request: Vec<u8>,
     pub grant: Uuid,
+    invitation: SourceFixtureInvitation,
     selected: plurx_core::cluster::migration::SelectedStore,
     _directory: tempfile::TempDir,
 }
 #[cfg(test)]
+struct SourceFixtureInvitation {
+    identity: plurx_core::sharing::SharingIdentity,
+    id: Uuid,
+    secret: plurx_core::secrets::Secret,
+    expires_at_ms: i64,
+}
+#[cfg(test)]
 impl RealSourceStartFixture {
+    /// Encode the actual invitation that produced this grant with the caller's
+    /// real runtime TLS endpoint. This grants no alternate approval or readiness.
+    pub fn invitation_for(
+        &self,
+        endpoint: plurx_core::sharing::Endpoint,
+    ) -> Result<plurx_core::sharing::Invitation, plurx_core::error::StoreError> {
+        endpoint.validate()?;
+        Ok(plurx_core::sharing::Invitation {
+            identity: self.invitation.identity.clone(),
+            name: self.state.server_name.clone(),
+            endpoints: vec![endpoint],
+            id: self.invitation.id,
+            secret: plurx_core::secrets::Secret::from_cleartext(self.invitation.secret.expose()),
+            expires_at_ms: self.invitation.expires_at_ms,
+        })
+    }
     pub async fn shutdown(self) {
         self.selected
             .shutdown()
@@ -1342,6 +1494,9 @@ async fn build_real_source_start_fixture(
     let state_mut = Arc::get_mut(&mut state).expect("sole initial State");
     state_mut.store = Arc::clone(&selected.store);
     state_mut.membership = selected.membership_manager();
+    state_mut.node_id = selected.identity.node_id.clone();
+    state_mut.catalogue = selected.catalogue_reader();
+    state_mut.replication = selected.replication_monitor();
     state_mut.sharing = Arc::new(crate::sharing::SharingManager::new(
         Arc::clone(&selected.credential_key),
         config.storage.data_dir.clone(),
@@ -1521,12 +1676,14 @@ async fn build_real_source_start_fixture(
     let now = crate::state::clock_ms();
     let grant = Uuid::new_v4();
     let invitation = Uuid::new_v4();
+    let invitation_secret = new_secret().expect("actual invitation secret");
+    let invitation_hash = secret_hash(SecretDomain::Invitation, &invitation_secret);
     let secret = new_secret().expect("credential");
     let hash = secret_hash(SecretDomain::Grant, &secret);
     store
         .create_share_invitation(InvitationRecord {
             id: invitation,
-            token_hash: "a".repeat(64),
+            token_hash: invitation_hash.clone(),
             library_ids: vec![library],
             created_at_ms: now,
             expires_at_ms: now + 60000,
@@ -1536,7 +1693,7 @@ async fn build_real_source_start_fixture(
     store
         .claim_share(ShareClaim {
             invitation_id: invitation,
-            invitation_hash: "a".repeat(64),
+            invitation_hash,
             claim_id: Uuid::new_v4(),
             grant_id: grant,
             recipient_server_id: recipient_server_id.unwrap_or_else(Uuid::new_v4),
@@ -1631,6 +1788,12 @@ async fn build_real_source_start_fixture(
         headers,
         request,
         grant,
+        invitation: SourceFixtureInvitation {
+            identity,
+            id: invitation,
+            secret: invitation_secret,
+            expires_at_ms: now + 60000,
+        },
         selected,
         _directory: directory,
     }
@@ -1791,6 +1954,130 @@ mod tests {
             receipt.confirmation_id
         );
         fixture.shutdown().await;
+    }
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn sharing_source_http_failed_claim_and_assignment_retain_joined_exact_task_stages() {
+        Box::pin(actual_source_failed_task_stages()).await;
+    }
+    async fn actual_source_failed_task_stages() {
+        use std::time::{Duration, Instant};
+        for assignment_failure in [false, true] {
+            let fixture = real_source_start_fixture().await;
+            let client = fixture.selected.local_client().expect("actual voter");
+            let trigger = if assignment_failure {
+                "CREATE TRIGGER fixture_source_task_failure BEFORE UPDATE OF dispatch_generation ON sharing_source_session_bindings WHEN NEW.dispatch_generation=1 BEGIN SELECT RAISE(ABORT,'fixture assignment write failure'); END"
+            } else {
+                "CREATE TRIGGER fixture_source_task_failure BEFORE INSERT ON sharing_source_session_bindings BEGIN SELECT RAISE(ABORT,'fixture claim write failure'); END"
+            };
+            client
+                .execute(trigger, hiqlite::params![])
+                .await
+                .expect("actual transactional failure");
+            let invoke = || {
+                start(
+                    axum::extract::State((*fixture.state).clone()),
+                    fixture.headers.clone(),
+                    axum::extract::Path((
+                        fixture.reference.item_id.as_str().to_owned(),
+                        fixture.reference.file_id.as_str().to_owned(),
+                    )),
+                    axum::body::Body::from(fixture.request.clone()),
+                )
+            };
+            let first = invoke()
+                .await
+                .expect_err("failed actual write stays unresolved");
+            use axum::response::IntoResponse;
+            assert_eq!(
+                first.into_response().status(),
+                StatusCode::SERVICE_UNAVAILABLE
+            );
+            let entry = fixture
+                .state
+                .transcode
+                .source_http_starts
+                .entries
+                .lock()
+                .expect("retained task")
+                .first()
+                .cloned()
+                .expect("actual owner entry");
+            assert!(matches!(
+                *entry.task.joined.lock().expect("actual joined task"),
+                Some(SourceStartTaskJoined::Returned)
+            ));
+            let incarnation = {
+                let stage = entry.task.stage.lock().expect("exact stage");
+                if assignment_failure {
+                    assert!(
+                        matches!(*stage, SourceStartTaskStage::Assigning(_)),
+                        "retain the acquired g0 binding across failed assignment"
+                    );
+                } else {
+                    assert!(
+                        matches!(*stage, SourceStartTaskStage::Claiming { .. }),
+                        "retain the actual intent and planned incarnation across unknown claim"
+                    );
+                }
+                stage.incarnation().expect("actual planned/claimed lineage")
+            };
+            assert_eq!(incarnation.get_version_num(), 4);
+            assert_eq!(
+                entry
+                    .wait(Instant::now() + Duration::from_secs(1))
+                    .await
+                    .err(),
+                Some(SourceStartFailure::Unresolved)
+            );
+            let end = entry.end();
+            assert_eq!(
+                end.wait(Instant::now() + Duration::from_secs(1))
+                    .await
+                    .err(),
+                Some(SourceStartFailure::Unresolved),
+                "joined failure is not a no-admission/settlement proof"
+            );
+            client
+                .execute(
+                    "DROP TRIGGER fixture_source_task_failure",
+                    hiqlite::params![],
+                )
+                .await
+                .expect("restore real Store writes");
+            assert_eq!(
+                invoke()
+                    .await
+                    .expect_err("exact retry must not redispatch unknown outcome")
+                    .into_response()
+                    .status(),
+                StatusCode::SERVICE_UNAVAILABLE
+            );
+            assert_eq!(
+                entry
+                    .task
+                    .stage
+                    .lock()
+                    .expect("retained immutable stage")
+                    .incarnation(),
+                Some(incarnation)
+            );
+            let after = fixture
+                .state
+                .transcode
+                .source_http_starts
+                .entries
+                .lock()
+                .expect("retained entry")
+                .first()
+                .cloned()
+                .expect("same entry");
+            assert!(std::sync::Arc::ptr_eq(&entry, &after));
+            assert!(
+                std::sync::Arc::ptr_eq(&end, &entry.end()),
+                "no failed task receipt can overwrite End ownership"
+            );
+            fixture.shutdown().await;
+        }
     }
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn sharing_source_http_lost_start_end_uses_actual_assignment_without_inventing_session() {
@@ -2763,6 +3050,84 @@ mod tests {
         assert!(current_reference(&fixture.state, &fixture.headers, &stale)
             .await
             .is_err());
+        fixture.shutdown().await;
+    }
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn sharing_source_http_genuine_invitation_replays_actual_claim_and_selected_identity() {
+        Box::pin(actual_source_genuine_invitation()).await;
+    }
+    async fn actual_source_genuine_invitation() {
+        use plurx_core::sharing::{
+            secret_hash, ClaimOutcome, Endpoint, GrantState, Invitation, SecretDomain, ShareClaim,
+        };
+        let recipient = Uuid::new_v4();
+        let fixture =
+            real_source_start_fixture_with(SourceFixtureMode::Copy, Some(recipient)).await;
+        assert_eq!(fixture.state.node_id, fixture.selected.identity.node_id);
+        let tls = plurx_core::sharing_tls::LiveNodeTls::open(
+            &fixture._directory.path().join("actual-peer-tls"),
+            crate::state::clock_ms() / 1000,
+        )
+        .expect("actual production TLS key");
+        let (pin, _) = tls.status().expect("actual SPKI");
+        let endpoint = Endpoint {
+            ipv4: "100.127.89.2".parse().expect("bounded endpoint"),
+            ipv6: None,
+            ts_fqdn: "source.fixture.ts.net".into(),
+            port: 32443,
+            spki_sha256: pin,
+        };
+        // This verifies the real invitation credential and TLS key material;
+        // an actual pinned network exchange belongs to the separate CGNAT drill.
+        let invitation = fixture
+            .invitation_for(endpoint.clone())
+            .expect("actual invitation");
+        let blob = invitation.encode().expect("real bootstrap blob");
+        let parsed = Invitation::parse(&blob).expect("closed actual invitation");
+        assert_eq!(parsed.identity.server_id, fixture.reference.server_id);
+        assert_eq!(
+            parsed.identity.catalogue_epoch,
+            fixture.reference.catalogue_epoch
+        );
+        assert_eq!(parsed.endpoints, vec![endpoint]);
+        let secret = plurx_core::secrets::Secret::from_cleartext(
+            fixture
+                .headers
+                .get("authorization")
+                .expect("actual grant credential")
+                .to_str()
+                .expect("closed header")
+                .strip_prefix("CinemaShare ")
+                .expect("actual scheme"),
+        );
+        let grant_hash = secret_hash(SecretDomain::Grant, &secret);
+        let status = fixture
+            .state
+            .store
+            .sharing_grant_status(&grant_hash)
+            .await
+            .expect("actual credential status")
+            .expect("actual active claim");
+        assert_eq!(status.invitation_id, parsed.id);
+        assert_eq!(status.grant.id, fixture.grant);
+        assert_eq!(status.grant.recipient_server_id, recipient);
+        assert_eq!(status.grant.state, GrantState::Active);
+        let replay = fixture
+            .state
+            .store
+            .claim_share(ShareClaim {
+                invitation_id: parsed.id,
+                invitation_hash: secret_hash(SecretDomain::Invitation, &parsed.secret),
+                claim_id: status.claim_id,
+                grant_id: status.grant.id,
+                recipient_server_id: recipient,
+                recipient_name: status.recipient_name.clone(),
+                credential_hash: grant_hash,
+                now_ms: crate::state::clock_ms(),
+            })
+            .await
+            .expect("real original claim replay");
+        assert!(matches!(replay,ClaimOutcome::Replay(grant) if grant==status.grant),"bootstrap secret must match the actual consumed invitation and unchanged approved grant");
         fixture.shutdown().await;
     }
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
