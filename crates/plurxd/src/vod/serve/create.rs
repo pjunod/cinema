@@ -268,13 +268,8 @@ impl VodServe {
                 .store
                 .get_setting(plurx_core::store::keys::VOD_INDEX_CLUSTER_CACHE)
                 .await
-                .map_err(|error| format!("reading the cluster index gate: {error}"))?
-                .is_some_and(|value| {
-                    matches!(
-                        value.trim().to_ascii_lowercase().as_str(),
-                        "1" | "true" | "yes" | "on"
-                    )
-                });
+                .map_err(|error| format!("reading the cluster index gate: {error}"))
+                .map(|value| plurx_core::store::stored_switch(value.as_deref(), false))?;
         let cluster_index = if prepared.encoding.is_some() {
             Ok(None)
         } else if cluster_cache_enabled {
