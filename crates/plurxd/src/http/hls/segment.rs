@@ -208,7 +208,22 @@ fn owner_loss_detail(
 /// without minting a second HTTP wait budget. Only an active, unexpired route
 /// this node owns qualifies; Store/attachment uncertainty remains retryable
 /// and must never be relabelled as authoritative absence.
-pub(super) async fn vod_resurrected_before(
+///
+/// The future is constructed outside the caller's polling frame. It holds a
+/// complete VOD create and runs beneath every segment, playlist and subtitle
+/// handler; built inline, unoptimized builds lay it out in each caller's
+/// stack frame, and a resumed segment overflowed a 2 MiB worker stack. This is
+/// the same pattern as the Jellyfin adapter's `native_segment`.
+#[inline(never)]
+pub(super) fn vod_resurrected_before<'a>(
+    state: &'a AppState,
+    session: &'a str,
+    deadline: Instant,
+) -> std::pin::Pin<Box<dyn std::future::Future<Output = VodResurrection> + Send + 'a>> {
+    Box::pin(resurrect_vod_before(state, session, deadline))
+}
+
+async fn resurrect_vod_before(
     state: &AppState,
     session: &str,
     deadline: Instant,

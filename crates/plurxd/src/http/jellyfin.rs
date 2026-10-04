@@ -1271,9 +1271,23 @@ mod tests {
             .expect("epoch")
             .as_secs() as i64;
         let source_probe = if encoded {
-            plurx_core::scan::probe::probe(&path)
+            let mut probe = plurx_core::scan::probe::probe(&path)
                 .await
-                .expect("complete encoded source probe")
+                .expect("complete encoded source probe");
+            // A text track the native master would advertise; this profile
+            // asks for no manifest subtitles, so the facade must not.
+            probe
+                .subtitle_streams
+                .push(plurx_core::domain::SubtitleStream {
+                    index: 2,
+                    codec: "subrip".into(),
+                    language: Some("eng".into()),
+                    title: None,
+                    default: false,
+                    forced: false,
+                    hearing_impaired: false,
+                });
+            probe
         } else {
             plurx_core::domain::ProbeResult {
                 duration_ms: Some(12_000), container: Some("mkv".into()), video_codec: Some("h264".into()),
@@ -1449,10 +1463,29 @@ mod tests {
             master.contains("#EXT-X-STREAM-INF"),
             "the master alias is a multivariant wrapper: {master}"
         );
+        if encoded {
+            assert!(
+                !master.contains("#EXT-X-MEDIA") && !master.contains("SUBTITLES="),
+                "a play negotiated without manifest subtitles advertises none: {master}"
+            );
+        }
         let media_url = master
             .lines()
             .find(|line| line.ends_with("index.m3u8") && !line.starts_with('#'))
             .expect("media child");
+        if encoded {
+            let subtitles = format!(
+                "{}subs/2/index.m3u8",
+                media_url.strip_suffix("index.m3u8").expect("HLS mount")
+            );
+            let refused = f
+                .app
+                .clone()
+                .oneshot(request("GET", &subtitles, Some(&f.token), Value::Null))
+                .await
+                .expect("subtitle playlist");
+            assert_eq!(refused.status(), StatusCode::NOT_FOUND);
+        }
         let response = f
             .app
             .clone()
@@ -1594,6 +1627,7 @@ mod tests {
         let vod = f.state.transcode.vod_for_test();
         vod.force_reader_idle_for_test(&route.session_id).await;
         vod.maintain().await;
+        assert_eq!(vod.active_sessions().await, 0, "the reader was reaped");
         let resume_url = media
             .lines()
             .rfind(|line| !line.is_empty() && !line.starts_with("#"))
@@ -1618,6 +1652,11 @@ mod tests {
             String::from_utf8_lossy(&resumed_bytes)
         );
         assert!(!resumed_bytes.is_empty());
+        assert_eq!(
+            vod.active_sessions().await,
+            1,
+            "the resume resurrected the reader"
+        );
         for (endpoint, position) in [
             ("/jellyfin/Sessions/Playing/Progress", 5000),
             ("/jellyfin/Sessions/Playing/Stopped", 7000),
