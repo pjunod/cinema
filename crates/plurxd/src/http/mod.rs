@@ -346,7 +346,9 @@ fn http_route_group(path: &str) -> usize {
         | "/library/metadata/{key}/children"
         | "/library/metadata/{key}/{kind}"
         | "/api/v1/images/{filename}"
-        | "/api/v1/files/{id}/chapters/{index}/thumb" => 3,
+        | "/api/v1/files/{id}/chapters/{index}/thumb"
+        | "/api/v1/shared/imports/{import}/files/{locator}/hls/sessions"
+        | "/api/v1/shared/imports/{import}/files/{locator}/playback" => 3,
 
         // Search only; maintenance of the search index is a settings action.
         "/api/v1/search" | "/api/v1/search/related" | "/api/v1/search/settings" | "/search" => 4,
@@ -1747,7 +1749,10 @@ pub fn router(state: AppState) -> Router {
         // can send this with `keepalive`, which cannot set headers.
         .route("/hls/{session}", delete(hls::delete))
         .route("/hls/{session}/{segment}", get(hls::segment))
-        .route("/images/{filename}", get(images::serve));
+        .route("/images/{filename}", get(images::serve))
+        // Shared Start: the receiver actor owns dispatch, persistence and
+        // physical cleanup; the request is deadline-free like a local create.
+        .merge(shared_receiver_ingress::start_router());
 
     let api = Router::new()
         .merge(json_short)

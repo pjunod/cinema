@@ -1,5 +1,5 @@
-//! Candidate authenticated Shared Start. The public router does not install it.
-//! The existing receiver actor owns dispatch, persistence and physical cleanup.
+//! Authenticated Shared Start on the public media router. The receiver actor
+//! owns dispatch, persistence and physical cleanup.
 use super::{
     error::ApiError,
     extract::{AuthUser, RawToken},
@@ -26,9 +26,9 @@ use std::{
 };
 use uuid::Uuid;
 
-/// Typed installation seam only. Public enablement requires actual B relay,
-/// control, delivery-grant and accepted Start-body ownership qualification.
-pub(crate) fn candidate_router() -> Router<AppState> {
+/// Installed on the public media group. The real pinned B-to-Source fixture
+/// qualifies relay, status, control, delivery grant and confirmed End.
+pub(crate) fn start_router() -> Router<AppState> {
     Router::new()
         .route(
             "/shared/imports/{import}/files/{locator}/hls/sessions",
@@ -474,7 +474,7 @@ mod tests {
         assert!(parse_request(&vec![b' '; 128 * 1024 + 1]).is_err());
     }
     #[tokio::test]
-    async fn sharing_receiver_ingress_aliases_require_account_auth_and_remain_unregistered() {
+    async fn sharing_receiver_ingress_aliases_require_account_auth_on_the_public_router() {
         let state = super::super::source_actor_test_state();
         let user = state
             .store
@@ -487,7 +487,7 @@ mod tests {
             .create_token(&plurx_core::auth::hash_token(token), user.id, None)
             .await
             .expect("actual login");
-        let app = candidate_router().with_state(state.clone());
+        let app = start_router().with_state(state.clone());
         let prefix = format!("/shared/imports/{}/files/unsigned", Uuid::new_v4());
         for suffix in ["hls/sessions", "playback"] {
             let request = axum::http::Request::builder()
@@ -530,7 +530,21 @@ mod tests {
                     .await
                     .expect("public response")
                     .status(),
-                StatusCode::NOT_FOUND
+                StatusCode::SERVICE_UNAVAILABLE,
+                "the public route is installed and finds no import"
+            );
+            let request = axum::http::Request::builder()
+                .method("POST")
+                .uri(format!("/api/v1{prefix}/{suffix}"))
+                .body(Body::empty())
+                .expect("request");
+            assert_eq!(
+                super::super::router(state.clone())
+                    .oneshot(request)
+                    .await
+                    .expect("public response")
+                    .status(),
+                StatusCode::UNAUTHORIZED
             );
         }
     }

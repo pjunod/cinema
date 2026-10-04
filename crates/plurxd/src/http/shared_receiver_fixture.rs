@@ -325,14 +325,9 @@ async fn receiver_claim_observation(fixture: &RealReceiverFixture, request: &str
     rows[0].get("payload")
 }
 
+// The unchanged public B router: Start, relay, status, control and End.
 fn fixture_router(state: crate::state::AppState) -> axum::Router {
-    axum::Router::new()
-        .without_v07_checks()
-        .nest(
-            "/api/v1",
-            super::shared_receiver_ingress::candidate_router().with_state(state.clone()),
-        )
-        .merge(super::router(state).without_v07_checks())
+    super::router(state)
 }
 
 #[tokio::test]
@@ -416,8 +411,6 @@ async fn actual_pinned_playback(address: IpAddr, h2: bool) {
         crate::HTTP_TIMEOUTS,
     ));
     fixture.pair(endpoint).await;
-    // The live Start remains uninstalled in production. Only this disposable
-    // fixture installs the typed candidate on the real B serving stack.
     let app = fixture_router(fixture.state.clone());
     let b_listener = tokio::net::TcpListener::bind((address, 0))
         .await
@@ -452,6 +445,10 @@ async fn actual_pinned_playback(address: IpAddr, h2: bool) {
         "actual authenticated details; H2={h2}"
     );
     let details: Value = serde_json::from_slice(&bytes).expect("actual B detail JSON");
+    assert_eq!(
+        details["delivery_status"], "available",
+        "a fresh detail with a signed locator reports launch capability; H2={h2}"
+    );
     let base = details["files"][0]["file_base"]
         .as_str()
         .expect("actual signed B file alias");

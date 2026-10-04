@@ -1629,8 +1629,16 @@ async fn viewer_item(
         .remote_watch(import, metadata.library_id.clone(), item, user.id)
         .await
         .map_err(unavailable)?;
+    // This detail was just read from the Source under current authority. A
+    // file can be launched exactly when B issued its signed locator; this
+    // is launch capability, never a claim that a producer is ready.
+    let delivery_status = if files.iter().any(|file| file.get("file_base").is_some()) {
+        "available"
+    } else {
+        "unavailable"
+    };
     receiver_json(&state,&token,user.id,vec![scope],
-        json!({"item":shared_item(&summary,metadata,user.id,art_key.as_ref()),"files":files,"lifecycle_generation":summary.lifecycle_generation,"watch":progress,"delivery_status":"unavailable"})).await
+        json!({"item":shared_item(&summary,metadata,user.id,art_key.as_ref()),"files":files,"lifecycle_generation":summary.lifecycle_generation,"watch":progress,"delivery_status":delivery_status})).await
 }
 async fn viewer_progress(
     State(state): State<AppState>,
