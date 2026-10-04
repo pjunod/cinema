@@ -1028,6 +1028,23 @@
             matches!(&failure, PlaylistError::SessionFailed(reason) if reason.starts_with("rolling_window_budget_exhausted:")),
             "unexpected worker verdict: {failure:?}"
         );
+        // A retirement that ends a viewer's session has to say why in numbers;
+        // the 2026-10-04 incident could not be explained from the bare verdict.
+        let PlaylistError::SessionFailed(reason) = &failure else {
+            unreachable!("matched above")
+        };
+        for field in [
+            "consumed_end_ms=",
+            "allowed_end_ms=",
+            "first_new_end_ms=",
+            "served_end_ms=",
+            "reserve_max_ms=",
+        ] {
+            assert!(
+                reason.contains(field),
+                "the verdict must carry {field}: {reason}"
+            );
+        }
         assert_eq!(failure.code(), "session_failed");
         let lease = session
             .control
