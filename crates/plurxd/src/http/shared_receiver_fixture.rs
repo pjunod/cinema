@@ -341,17 +341,80 @@ async fn sharing_receiver_real_pinned_source_h1_b_h1_h2_start_resources_and_conf
     for h2 in [false, true] {
         tokio::time::timeout(
             std::time::Duration::from_secs(330),
-            Box::pin(actual_pinned_playback(address, h2)),
+            Box::pin(actual_pinned_playback(address, h2, SourceFixtureMode::Copy)),
         )
         .await
         .expect("bounded real playback fixture");
     }
 }
 
-async fn actual_pinned_playback(address: IpAddr, h2: bool) {
+#[tokio::test]
+#[ignore = "requires an isolated Linux CGNAT namespace and PLURX_SHARING_FIXTURE_IP"]
+async fn sharing_receiver_real_pinned_source_encoded_and_native_lanes_through_b() {
+    let address: IpAddr = std::env::var("PLURX_SHARING_FIXTURE_IP")
+        .expect("explicit disposable CGNAT namespace")
+        .parse()
+        .expect("fixture IP");
+    assert!(plurx_core::sharing::is_tailnet_address(address));
+    for mode in [SourceFixtureMode::Encoded, SourceFixtureMode::NativeCopy] {
+        for h2 in [false, true] {
+            tokio::time::timeout(
+                std::time::Duration::from_secs(330),
+                Box::pin(actual_pinned_playback(address, h2, mode)),
+            )
+            .await
+            .expect("bounded real playback fixture");
+        }
+    }
+}
+
+/// The current-rendition control selection a client derives from its own
+/// original Start ask, the same projection the Source freezes.
+fn original_selection(session: &Value) -> crate::playback_control::ClientSelection {
+    use crate::playback_control as pc;
+    let height = session["height"].as_i64();
+    let quality = if session["quality_auto"]
+        .as_bool()
+        .unwrap_or(height.is_none())
+    {
+        pc::QualitySelection::Auto {
+            height,
+            candidate_id: None,
+        }
+    } else if session["copy"].as_bool() == Some(true) {
+        pc::QualitySelection::Original
+    } else {
+        pc::QualitySelection::Manual {
+            height: height.expect("manual fixture height"),
+        }
+    };
+    let subtitle = match (
+        session["native_subtitles"].as_bool(),
+        session["subtitle"].as_i64(),
+    ) {
+        (Some(true), Some(track)) => pc::SubtitleSelection {
+            mode: pc::SubtitleMode::Native,
+            track: Some(track),
+        },
+        _ => pc::SubtitleSelection {
+            mode: pc::SubtitleMode::Off,
+            track: None,
+        },
+    };
+    pc::ClientSelection {
+        quality,
+        audio_track: session["audio"].as_i64(),
+        subtitle,
+        audio_offset_ms: session["audio_offset_ms"].as_i64().unwrap_or(0),
+        codec: pc::CodecPolicy::Auto,
+        dynamic_range: pc::DynamicRangePolicy::Auto,
+    }
+}
+
+async fn actual_pinned_playback(address: IpAddr, h2: bool, mode: SourceFixtureMode) {
     use axum::http::StatusCode;
     use plurx_core::sharing_tls::{LiveNodeTls, SharingTlsListener};
-    let fixture = real_receiver_fixture(address, SourceFixtureMode::Copy).await;
+    let fixture = real_receiver_fixture(address, mode).await;
     let tls = Arc::new(
         LiveNodeTls::open(
             &fixture.directory().join("source-runtime-tls"),
@@ -703,18 +766,7 @@ async fn actual_pinned_playback(address: IpAddr, h2: bool) {
             render_state: pc::RenderState::Rendering,
             seek_target_ms: None,
             observed_download_bps: None,
-            // The fixture asks copy:true, height:72, quality_auto:false.
-            selection: pc::ClientSelection {
-                quality: pc::QualitySelection::Original,
-                audio_track: None,
-                subtitle: pc::SubtitleSelection {
-                    mode: pc::SubtitleMode::Off,
-                    track: None,
-                },
-                audio_offset_ms: 0,
-                codec: pc::CodecPolicy::Auto,
-                dynamic_range: pc::DynamicRangePolicy::Auto,
-            },
+            selection: original_selection(&original["session"]),
             capabilities: Some(pc::DynamicCapabilities {
                 presentation_target: None,
                 decoder_caps: None,
