@@ -2464,17 +2464,18 @@ pub(crate) struct ReadinessEvaluation {
 }
 
 /// Shared Store-free clock consequence for readiness and operations status.
+///
+/// Only while the operator has turned the clock guard on: otherwise one
+/// skewed node would take every node's `/readyz` down. The measurement stays
+/// visible in the Developer readiness rows and the clock metrics either way.
 fn clock_readiness_failure(state: &AppState) -> Option<ReadinessEvaluation> {
-    state
-        .membership
-        .clock_guard()
-        .snapshot()
-        .readiness
-        .is_unbounded()
-        .then_some(ReadinessEvaluation {
+    let guard = state.membership.clock_guard();
+    (guard.is_enforced() && guard.snapshot().readiness.is_unbounded()).then_some(
+        ReadinessEvaluation {
             ready: false,
             reason: Some(ReadinessFailure::ClockUnbounded),
-        })
+        },
+    )
 }
 
 /// One typed readiness decision shared by `/readyz` and cluster status.
@@ -4964,6 +4965,19 @@ mod tests {
             ));
         };
         assert!(evaluate_readiness(&state).await.ready, "standalone NoPeers");
+        publish(2_500_000);
+        publish(2_500_000);
+        assert!(
+            evaluate_readiness(&state).await.ready
+                && cluster_operations::operations_readiness(&state).ready,
+            "an unbounded clock is advisory while the guard is not enforced"
+        );
+        assert_eq!(
+            call_text(&app, get("/readyz", None)).await.0,
+            StatusCode::OK
+        );
+        clock.set_enforced(true);
+        publish(0);
         publish(2_500_000);
         for _ in 0..3 {
             assert!(

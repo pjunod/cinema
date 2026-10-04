@@ -573,11 +573,18 @@ test("Developer keeps only experiments; everyday controls retain their saves and
   const ranges = /Parallel playback subtitle ranges[\s\S]*?(?=<div class="setsection"|TOG:subsrc)/.exec(html);
   assert.ok(ranges, "Developer shows the automatic playback-ranges card");
   assert.doesNotMatch(ranges[0], /TOG:/, "playback ranges have no enable switch");
-  const clocks = /Cluster clock observation[\s\S]*?(?=<div class="setsection")/.exec(html);
-  assert.ok(clocks, "Developer shows clock observation");
-  assert.doesNotMatch(clocks[0], /TOG:|FOOT:/, "clock observation has no meaningful manual switch or save");
-  assert.match(clocks[0], /observes clocks without changing acquisition or readiness/);
+  // The clock guard is an operator switch, off by default, whose readiness
+  // rows are advisory: no hard gate in code.
+  const clocks = /Cluster clock guard[\s\S]*?(?=<div class="setsection")/.exec(html);
+  assert.ok(clocks, "Developer shows the clock guard switch");
+  assert.match(clocks[0], /TOG:cluster-clock-enforced\|[^|]*\|[^|]*\|checked=false/, "enforcement is off by default");
+  assert.match(clocks[0], /FOOT:saveClusterClockGuard/);
+  assert.match(clocks[0], /advisory and never prevent saving/);
   assert.match(clocks[0], /Leaves Developer when/);
+  assert.match(
+    panels.developerPanel({ ...settings, cluster_clock_guard_enforced: true }, readiness),
+    /TOG:cluster-clock-enforced\|[^|]*\|[^|]*\|checked=true/,
+  );
   const unverified = panels.developerPanel({...settings, hevc_unverified_copy:true,
     hevc_header_trace_available:false, vod_index_cluster_cache:false, vod_index_mins:0}, readiness);
   assert.match(unverified, /TOG:hevc-unverified\|[^|]*\|[^|]*\|checked=true\|/);

@@ -411,13 +411,23 @@ async function saveBoundedCatalogueReads(btn){
     const card=document.getElementById("bounded-catalogue-settings");if(card)card.outerHTML=boundedCatalogueCard(saved,DEVELOPER_READINESS);
   }catch(error){if(err)err.textContent=error.message;}finally{btn.disabled=false;}
 }
-function clusterClockCard(readiness){
-  return setCard(`${cardHead("Cluster clock observation","Authenticated peer offset and local clock continuity.",`<span class="pill">measurement only</span>`)}
-    ${devReq(readiness,"cluster_clock","contract","Clock contract","This release observes clocks without changing acquisition or readiness.")}
-    ${devReq(readiness,"cluster_clock","coverage","Observation coverage","Every committed remote member must answer a fresh authenticated probe.")}
-    ${devReq(readiness,"cluster_clock","upper_bound","Worst observed upper bound","Absolute offset plus uncertainty; an unknown peer has no numeric offset.")}
-    ${devReq(readiness,"cluster_clock","consequence","Readiness consequence","The fixed 2,000 ms contract awaits fleet evidence before enforcement.")}
-    ${devGraduation("the identified measurement and enforcement releases have their fleet acceptance receipts.","clock diagnostics move to Settings → Cluster; there is no manual on/off control.")}`);
+function clusterClockCard(settings,readiness){
+  const enabled=!!settings.cluster_clock_guard_enforced;
+  return setCard(`${cardHead("Cluster clock guard","Refuse clock-dependent cluster decisions when peer clock offsets cannot be bounded.",enabled?`<span class="pill warn">enforced</span>`:`<span class="pill">advisory</span>`)}
+    ${togRow("cluster-clock-enforced","Enforce the cluster clock guard","When on, session takeover, the expired-session scan, membership changes and /readyz are refused while clock evidence is unknown or above 2,000 ms. When off, offsets are still measured and what would have been refused is counted. Startup is never refused.",enabled)}
+    ${devReq(readiness,"cluster_clock","coverage","Every member reachable and observed","Every committed remote member, learners included, must answer a fresh authenticated probe.")}
+    ${devReq(readiness,"cluster_clock","upper_bound","Worst observed offset within 2 s","Absolute offset plus uncertainty; an unknown member has no numeric offset.")}
+    ${devReq(readiness,"cluster_clock","ntp","NTP running on every node","Check chronyd or systemd-timesyncd on each node; this server cannot see them.")}
+    ${devReq(readiness,"cluster_clock","consequence","What enforcement refuses","While enforced, one down member blocks takeover, the expiry scan and membership changes on every node until it returns or is removed.")}
+    <p class="hint">Requirements are advisory and never prevent saving, in either direction.</p>
+    ${devGraduation("the identified measurement and enforcement releases have their fleet acceptance receipts.","the switch moves to Settings → Cluster.")}<div class="err" id="cluster-clock-error" role="alert"></div>${setCardFoot("saveClusterClockGuard")}`,{id:"cluster-clock-settings"});
+}
+async function saveClusterClockGuard(btn){
+  const err=document.getElementById("cluster-clock-error");if(err)err.textContent="";btn.disabled=true;
+  try{
+    const saved=cacheSettings(await api("/settings",{method:"PUT",body:{cluster_clock_guard_enforced:/** @type {HTMLInputElement} */(document.getElementById("cluster-clock-enforced")).checked}}));
+    const card=document.getElementById("cluster-clock-settings");if(card)card.outerHTML=clusterClockCard(saved,DEVELOPER_READINESS);
+  }catch(error){if(err)err.textContent=error.message;}finally{btn.disabled=false;}
 }
 function developerPanel(settings,readiness){
   const destinations=`<nav class="setdestinations" aria-label="Everyday settings">
@@ -432,7 +442,7 @@ function developerPanel(settings,readiness){
   return `${setHead("Developer","Experimental features still awaiting device qualification.")}
       ${destinations}
       <div class="setsection" id="enable-live-tv"><h2>Enable Live TV</h2><p>Cluster use of the network tuner, with advisory prerequisites.</p></div>${liveTvEnableCard(settings)}
-      <div class="setsection"><h2>Cluster work</h2><p>Remote media placement and replica catalogue reads.</p></div>${clusterPlacementCard(settings)}${boundedCatalogueCard(settings,readiness)}${clusterClockCard(readiness)}
+      <div class="setsection"><h2>Cluster work</h2><p>Remote media placement and replica catalogue reads.</p></div>${clusterPlacementCard(settings)}${boundedCatalogueCard(settings,readiness)}${clusterClockCard(settings,readiness)}
       <div class="setsection" id="enable-content-encoding"><h2>Content-aware encoding</h2><p>Measured choices for cached and offline video, with baseline fallback.</p></div>${contentEncodingCard(settings)}
       <div class="setsection" id="enable-vod-reorder"><h2>VOD compression</h2><p>Software x264 reordered frames.</p></div>${vodReorderCard(settings)}
       <div class="setsection" id="enable-hevc-copy"><h2>Enable HEVC copy</h2><p>The saved choice controls playback. Requirements below are advisory and never prevent enabling.</p></div>${hevcCopyCard(settings)}

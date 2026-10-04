@@ -1966,6 +1966,11 @@ pub struct SettingsDto {
     /// Opt-in replacement of expired HLS owners. This remains independently
     /// gated after remote placement is enabled so operators can stage rollout.
     pub cluster_session_takeover_enabled: bool,
+    /// Whether the cluster clock guard refuses takeover, expiry scans,
+    /// membership changes and readiness when clock evidence is unbounded.
+    /// Off by default: the guard then only measures and reports. The
+    /// Developer readiness rows are advisory and never block this switch.
+    pub cluster_clock_guard_enforced: bool,
     /// Server-wide scheduled maintenance, in minutes; 0 is off (the default).
     /// Per-library scan/refresh intervals are on the library, not here.
     pub probe_retry_mins: i64,
@@ -2238,6 +2243,10 @@ async fn settings_dto(state: &AppState) -> Result<SettingsDto, ApiError> {
     let cluster_media_pool_ready = state.media_pool.remote_rollout_ready().await;
     let cluster_session_takeover_enabled =
         setting(keys::CLUSTER_SESSION_TAKEOVER_ENABLED).as_deref() == Some("1");
+    let cluster_clock_guard_enforced = plurx_core::store::stored_switch(
+        setting(keys::CLUSTER_CLOCK_GUARD_ENFORCED).as_deref(),
+        false,
+    );
     let analysis_max_attempts = plurx_core::store::bounded_analysis_max_attempts(
         setting(keys::ANALYSIS_MAX_ATTEMPTS).as_deref(),
     );
@@ -2406,6 +2415,7 @@ async fn settings_dto(state: &AppState) -> Result<SettingsDto, ApiError> {
         cluster_media_pool_enabled,
         cluster_media_pool_ready,
         cluster_session_takeover_enabled,
+        cluster_clock_guard_enforced,
         probe_retry_mins,
         artwork_retry_mins,
         transcode_cleanup_mins,
@@ -2686,6 +2696,9 @@ pub struct UpdateSettings {
     /// Replace an expired remote HLS owner while retaining the public session
     /// id. Requires remote placement to remain enabled and rollout-ready.
     pub cluster_session_takeover_enabled: Option<bool>,
+    /// Turn the cluster clock guard's refusals on or off cluster-wide. Never
+    /// refused: readiness prerequisites are advisory only.
+    pub cluster_clock_guard_enforced: Option<bool>,
     /// Server-wide job intervals in minutes; 0 turns one off.
     pub probe_retry_mins: Option<i64>,
     pub artwork_retry_mins: Option<i64>,
@@ -2829,6 +2842,7 @@ impl UpdateSettings {
             || self.hls_typeless_sliding.is_some()
             || self.cluster_media_pool_enabled.is_some()
             || self.cluster_session_takeover_enabled.is_some()
+            || self.cluster_clock_guard_enforced.is_some()
             || self.probe_retry_mins.is_some()
             || self.artwork_retry_mins.is_some()
             || self.transcode_cleanup_mins.is_some()
@@ -3851,6 +3865,18 @@ pub async fn update_settings(
         // loop now. An "on" is never cached, so turning takeover off is seen
         // on the next 2 s tick here and on every other node.
         crate::media_sessions::takeover_settings_changed();
+    }
+    if let Some(enabled) = req.cluster_clock_guard_enforced {
+        state
+            .store
+            .put_setting(
+                keys::CLUSTER_CLOCK_GUARD_ENFORCED,
+                if enabled { "1" } else { "0" },
+            )
+            .await?;
+        // Apply on this node now; every other node picks the replicated value
+        // up on its next enforcement refresh (`clock_offset::run`).
+        state.membership.clock_guard().set_enforced(enabled);
     }
     if let Some(mode) = &req.sub_mode {
         // Normalize through the parser so only valid modes are stored.

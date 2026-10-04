@@ -565,8 +565,44 @@ impl Filter {
     }
 }
 
+/// How often a node re-reads the replicated enforcement switch, so a change
+/// saved on another node reaches this node's guard without a restart.
+const CLOCK_ENFORCEMENT_REFRESH: Duration = Duration::from_secs(10);
+
+/// Apply the stored enforcement switch to this node's guard, parsed by the
+/// same `stored_switch` as the settings page (missing is off). A failed read
+/// keeps the current mode, so an unreadable store never turns enforcement on.
+pub(crate) async fn apply_stored_enforcement(state: &AppState) {
+    match plurx_core::store::Store::get_setting(
+        state.store.as_ref(),
+        plurx_core::store::keys::CLUSTER_CLOCK_GUARD_ENFORCED,
+    )
+    .await
+    {
+        Ok(value) => state
+            .membership
+            .clock_guard()
+            .set_enforced(plurx_core::store::stored_switch(value.as_deref(), false)),
+        Err(error) => {
+            tracing::debug!(%error, "clock guard enforcement setting unreadable; keeping current mode");
+        }
+    }
+}
+
 pub(crate) async fn run(state: AppState, shutdown: tokio_util::sync::CancellationToken) {
-    state.clock_observer.run(shutdown).await;
+    // The store is readable here (startup stays advisory because it is not):
+    // apply the stored switch immediately, then keep following it.
+    let enforcement = async {
+        let mut interval = tokio::time::interval(CLOCK_ENFORCEMENT_REFRESH);
+        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        loop {
+            tokio::select! {
+                () = shutdown.cancelled() => break,
+                _ = interval.tick() => apply_stored_enforcement(&state).await,
+            }
+        }
+    };
+    tokio::join!(state.clock_observer.run(shutdown.clone()), enforcement);
 }
 
 async fn observation_round(

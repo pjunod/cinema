@@ -1752,6 +1752,13 @@ pub mod keys {
     /// Opt in to automatic expired-session takeover after the web/proxy
     /// interruption corpus passes. Kept separate from new-session placement.
     pub const CLUSTER_SESSION_TAKEOVER_ENABLED: &str = "cluster.session_takeover_enabled";
+    /// Operator switch for the cluster clock guard, read with
+    /// `stored_switch(.., false)`, so missing is off: clock evidence is
+    /// measured and reported (advisory refusals, Developer readiness) but
+    /// never refuses takeover, expiry, membership changes or readiness.
+    /// Startup is always advisory because this replicated key is unreadable
+    /// until the store is open.
+    pub const CLUSTER_CLOCK_GUARD_ENFORCED: &str = "cluster.clock_guard_enforced";
     /// Stable unique id for this logical server. Generated on first startup,
     /// immutable thereafter; in a cluster it identifies the *cluster*, not a
     /// node (REQ-HA-5: one logical identity).
