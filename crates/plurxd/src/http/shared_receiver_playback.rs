@@ -38,6 +38,7 @@ struct SettledReceiverAttempt {
     request_id: String,
     login_hash: String,
     fingerprint: String,
+    end_confirmation: Option<Arc<retirement::ReceiverEndConfirmation>>,
 }
 struct ReceiverStartInner {
     intent: ReceiverSessionIntent,
@@ -75,6 +76,7 @@ struct ReceiverStartState {
     planned_activation: Option<MediaSessionActivation>,
     retirement_started: bool,
     retired: bool,
+    end_confirmation: Option<Arc<retirement::ReceiverEndConfirmation>>,
 }
 // The only constructor joins the exact registry-owned Start task. This is
 // neither Source settlement nor accepted B body/writer completion.
@@ -107,7 +109,19 @@ struct ReceivedSource {
 #[derive(Clone)]
 pub(crate) struct ReceiverStartActor(Arc<ReceiverStartInner>);
 impl ReceiverStartRegistry {
-    fn by_session(&self, session: Uuid) -> Option<ReceiverStartActor> {
+    fn confirmed_end(&self, session: Uuid) -> bool {
+        self.settled
+            .lock()
+            .expect("settled receiver attempts")
+            .iter()
+            .any(|attempt| {
+                attempt
+                    .end_confirmation
+                    .as_ref()
+                    .is_some_and(|proof| proof.session_id() == session)
+            })
+    }
+    pub(crate) fn by_session(&self, session: Uuid) -> Option<ReceiverStartActor> {
         self.entries
             .lock()
             .expect("receiver registry")
@@ -214,6 +228,12 @@ impl ReceiverStartRegistry {
                 request_id: entry.request_id.clone(),
                 login_hash: entry.intent.login_hash.clone(),
                 fingerprint: entry.fingerprint.clone(),
+                end_confirmation: entry
+                    .state
+                    .lock()
+                    .expect("receiver owner")
+                    .end_confirmation
+                    .clone(),
             });
             false
         });
@@ -334,6 +354,86 @@ impl ReceiverStartActor {
         }
         Ok((authority, attachment, received))
     }
+    pub(crate) async fn record_progress(
+        &self,
+        state: &AppState,
+        user_id: i64,
+        login_hash: &str,
+        import: Uuid,
+        item: &plurx_core::sharing::SourceId,
+        beat: &ReceiverProgressBeat,
+    ) -> Result<
+        (
+            plurx_core::sharing_receiver_progress::ReceiverProgressOutcome,
+            Option<i64>,
+        ),
+        ReceiverStartError,
+    > {
+        if self.0.intent.user_id != user_id
+            || self.0.intent.login_hash != login_hash
+            || self.0.intent.recipe.reference.import_id != import
+            || &self.0.intent.recipe.reference.item_id != item
+        {
+            return Err(ReceiverStartError::Unavailable);
+        }
+        let (authority, attachment, _) = self.current_delivery_attachment(state).await?;
+        if attachment.owner.session_id.to_string() != beat.session_id {
+            return Err(ReceiverStartError::Unavailable);
+        }
+        self.current_source_status(state).await?;
+        let progress = plurx_core::sharing_receiver_progress::ReceiverProgress {
+            attachment,
+            sequence: beat.sequence,
+            position_ms: beat.position_ms,
+            duration_ms: beat.duration_ms,
+            watched: beat.watched,
+        };
+        let outcome = state
+            .store
+            .save_receiver_progress(&authority, &progress)
+            .await
+            .map_err(|_| ReceiverStartError::Unresolved)?;
+        self.current_delivery_attachment(state).await?;
+        use plurx_core::sharing_receiver_progress::ReceiverProgressOutcome;
+        let current = if matches!(
+            outcome,
+            ReceiverProgressOutcome::Stale | ReceiverProgressOutcome::Conflict
+        ) {
+            let reference = &self.0.intent.recipe.reference;
+            let watch = state
+                .store
+                .remote_watch(import, reference.library_id.clone(), item.clone(), user_id)
+                .await
+                .map_err(|_| ReceiverStartError::Unresolved)?;
+            self.current_delivery_attachment(state).await?;
+            watch.map(|watch| watch.sequence)
+        } else {
+            None
+        };
+        Ok((outcome, current))
+    }
+    async fn wait_confirmed_end(&self, session: Uuid) -> Result<(), ReceiverStartError> {
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(35);
+        loop {
+            let changed = self.0.changed.notified();
+            tokio::pin!(changed);
+            changed.as_mut().enable();
+            if self
+                .0
+                .state
+                .lock()
+                .expect("receiver owner")
+                .end_confirmation
+                .as_ref()
+                .is_some_and(|proof| proof.session_id() == session)
+            {
+                return Ok(());
+            }
+            tokio::time::timeout_at(deadline, changed)
+                .await
+                .map_err(|_| ReceiverStartError::Unresolved)?;
+        }
+    }
     pub(crate) async fn protect_start_response(
         &self,
         state: Arc<AppState>,
@@ -400,14 +500,39 @@ impl ReceiverStartActor {
         state: &AppState,
         resource: &plurx_core::sharing_resources::SharingHlsResource,
     ) -> Result<crate::sharing_client::SourcePeerResource, ReceiverStartError> {
+        let lifetime: Arc<dyn Send + Sync> = self.0.bodies.reserve()?;
+        let actor = self.clone();
+        let state = state.clone();
+        let resource = resource.clone();
+        // A cancelled HTTP waiter cannot cancel a sent Source request or
+        // release custody of its nested dial/body jobs. The bounded counted
+        // task owns the entire open until completion and its actual driver
+        // retains the same guard through subsequent socket closure.
+        tokio::spawn(async move {
+            let custody = lifetime.clone();
+            let result = actor
+                .open_source_resource_owned(&state, &resource, lifetime)
+                .await;
+            drop(custody);
+            result
+        })
+        .await
+        .map_err(|_| ReceiverStartError::Unresolved)?
+    }
+    async fn open_source_resource_owned(
+        &self,
+        state: &AppState,
+        resource: &plurx_core::sharing_resources::SharingHlsResource,
+        lifetime: Arc<dyn Send + Sync>,
+    ) -> Result<crate::sharing_client::SourcePeerResource, ReceiverStartError> {
         let (_, _, received) = self.current_delivery_attachment(state).await?;
-        self.current_source_status(state).await?;
+        self.current_source_status_owned(state, lifetime.clone())
+            .await?;
         let expected = plurx_core::sharing::SharingIdentity {
             server_id: self.0.intent.scope.source_server_id,
             catalogue_epoch: self.0.intent.scope.catalogue_epoch,
             created_at_ms: 0,
         };
-        let lifetime: Arc<dyn Send + Sync> = self.0.bodies.reserve()?;
         let (peer, _) = crate::sharing_client::PeerConnection::verified_with_lifetime(
             &state.sharing,
             std::slice::from_ref(&received.endpoint),
@@ -971,6 +1096,38 @@ async fn run_owner(
     }
 }
 
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct ReceiverProgressBeat {
+    pub(crate) session_id: String,
+    pub(crate) sequence: i64,
+    pub(crate) position_ms: i64,
+    pub(crate) duration_ms: Option<i64>,
+    pub(crate) watched: bool,
+}
+impl ReceiverProgressBeat {
+    pub(crate) fn parse(bytes: &[u8]) -> Result<Self, ReceiverStartError> {
+        if bytes.is_empty() || bytes.len() > 1024 {
+            return Err(ReceiverStartError::Unavailable);
+        }
+        let beat: Self =
+            serde_json::from_slice(bytes).map_err(|_| ReceiverStartError::Unavailable)?;
+        let session =
+            Uuid::parse_str(&beat.session_id).map_err(|_| ReceiverStartError::Unavailable)?;
+        const MAX_SAFE: i64 = 9_007_199_254_740_991;
+        if session.is_nil()
+            || session.to_string() != beat.session_id
+            || !(0..=MAX_SAFE).contains(&beat.sequence)
+            || !(0..=MAX_SAFE).contains(&beat.position_ms)
+            || beat
+                .duration_ms
+                .is_some_and(|n| !(0..=MAX_SAFE).contains(&n))
+        {
+            return Err(ReceiverStartError::Unavailable);
+        }
+        Ok(beat)
+    }
+}
 /// Typed receiver dispatch precedes the Local HLS handlers. A durable remote
 /// recipe cannot recreate the physical actor or authorize a Local producer.
 pub(crate) async fn receiver_media(
@@ -995,6 +1152,13 @@ pub(crate) async fn receiver_media(
     }
     let actor = state.sharing.receiver_starts.by_session(session_id);
     if actor.is_none() {
+        if suffix.is_empty()
+            && request.method() == Method::DELETE
+            && request.uri().query().is_none()
+            && state.sharing.receiver_starts.confirmed_end(session_id)
+        {
+            return StatusCode::NO_CONTENT.into_response();
+        }
         match state.store.media_session_route(session).await {
             Ok(Some(route)) => {
                 // Only the explicit remote discriminant is inspected here;
@@ -1018,6 +1182,16 @@ pub(crate) async fn receiver_media(
         return next.run(request).await;
     }
     let actor = actor.expect("actual receiver actor");
+    if suffix.is_empty() && request.method() == Method::DELETE && request.uri().query().is_none() {
+        actor.begin_retirement(
+            Arc::new(state),
+            plurx_core::sharing_receiver_retirement::ReceiverRetirementReason::Deleted,
+        );
+        return match actor.wait_confirmed_end(session_id).await {
+            Ok(()) => StatusCode::NO_CONTENT.into_response(),
+            Err(_) => StatusCode::SERVICE_UNAVAILABLE.into_response(),
+        };
+    }
     if request.method() != Method::GET {
         return (
             StatusCode::SERVICE_UNAVAILABLE,
@@ -1050,6 +1224,7 @@ pub(crate) async fn receiver_media(
     };
     let opened = match actor.open_source_resource(&state, &resource).await {
         Ok(opened) => opened,
+        Err(ReceiverStartError::Capacity) => return StatusCode::TOO_MANY_REQUESTS.into_response(),
         Err(_) => {
             actor.begin_retirement(
                 state,
@@ -1241,6 +1416,63 @@ mod tests {
             ),
             Err(ReceiverStartError::Unresolved)
         ));
+    }
+    #[tokio::test(start_paused = true)]
+    async fn sharing_receiver_end_never_acknowledges_retired_metadata_without_physical_receipt() {
+        let registry = ReceiverStartRegistry::default();
+        let request = intent("attempt");
+        let (entry, _) = registry
+            .register(
+                request.clone(),
+                "attempt".into(),
+                "player",
+                &wrapper(&request),
+            )
+            .expect("owned attempt");
+        entry.state.lock().expect("owner").retired = true;
+        let actor = ReceiverStartActor(entry);
+        let unknown = Uuid::new_v4();
+        assert!(!registry.confirmed_end(unknown));
+        assert!(matches!(
+            actor.wait_confirmed_end(unknown).await,
+            Err(ReceiverStartError::Unresolved)
+        ));
+        // Pruning into a non-authorizing retry tombstone still creates no
+        // physical completion receipt and cannot produce an End204.
+        assert!(matches!(
+            registry.register(
+                request.clone(),
+                "attempt".into(),
+                "player",
+                &wrapper(&request)
+            ),
+            Err(ReceiverStartError::Unresolved)
+        ));
+        assert!(!registry.confirmed_end(unknown));
+    }
+    #[test]
+    fn sharing_receiver_progress_wire_rejects_foreign_fields_duplicates_and_unsafe_numbers() {
+        let session = Uuid::new_v4();
+        let value = serde_json::json!({"session_id":session,"sequence":9,"position_ms":42,"duration_ms":null,"watched":false});
+        assert!(ReceiverProgressBeat::parse(value.to_string().as_bytes()).is_ok());
+        for field in ["sequence", "position_ms", "duration_ms"] {
+            for number in [-1, 9_007_199_254_740_992_i64] {
+                let mut bad = value.clone();
+                bad[field] = number.into();
+                assert!(ReceiverProgressBeat::parse(bad.to_string().as_bytes()).is_err());
+            }
+        }
+        let mut bad = value.clone();
+        bad["user_id"] = 0.into();
+        assert!(ReceiverProgressBeat::parse(bad.to_string().as_bytes()).is_err());
+        let duplicate = value.to_string().replacen("{", "{\"sequence\":8,", 1);
+        assert!(ReceiverProgressBeat::parse(duplicate.as_bytes()).is_err());
+        let mut bad = value.clone();
+        bad["session_id"] = Uuid::nil().to_string().into();
+        assert!(ReceiverProgressBeat::parse(bad.to_string().as_bytes()).is_err());
+        let mut bad = value;
+        bad["sequence"] = 1.25.into();
+        assert!(ReceiverProgressBeat::parse(bad.to_string().as_bytes()).is_err());
     }
     #[test]
     fn sharing_receiver_registry_exact_retry_retains_original_source_obligation() {
