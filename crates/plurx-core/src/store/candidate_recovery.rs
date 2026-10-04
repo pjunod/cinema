@@ -113,6 +113,11 @@ pub struct CandidateRecoveryMemory {
     pub decode_step_recipe: Option<[u8; 32]>,
 }
 
+/// First SQLite schema containing `candidate_recovery`; stable across later
+/// migrations. `sqlite::MIGRATIONS` asserts at compile time that this entry is
+/// [`SCHEMA`], so the import gate cannot drift from the migration list.
+pub(crate) const SQLITE_INTRODUCED_SCHEMA: i64 = 96;
+
 pub(crate) const SCHEMA: &str = "CREATE TABLE IF NOT EXISTS candidate_recovery (
  scope TEXT NOT NULL, recipe TEXT NOT NULL, cause TEXT NOT NULL,
  event_id TEXT NOT NULL, user_id INTEGER NOT NULL, playback_id TEXT NOT NULL,

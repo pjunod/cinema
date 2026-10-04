@@ -929,7 +929,7 @@ const TABLES: &[TablePlan] = &[
             "quality_step",
         ],
         order_by: "scope, recipe, cause",
-        minimum_schema: 92,
+        minimum_schema: super::candidate_recovery::SQLITE_INTRODUCED_SCHEMA,
         import_filter: None,
         sealed_columns: &[],
         parent_first: false,
@@ -2941,7 +2941,9 @@ fn value_projection(table: TablePlan, schema_version: i64, qualify: bool) -> Str
                         "author" | "book_work_id" | "book_edition_id" | "book_metadata_source"
                     )
                     && schema_version < 21)
-                || (table.name == "offline_packages" && *column == "audio_recipe" && schema_version < 88)
+                || (table.name == "offline_packages"
+                    && *column == "audio_recipe"
+                    && schema_version < super::sqlite::OFFLINE_AUDIO_RECIPE_SCHEMA)
             {
                 "NULL".to_owned()
             } else if table.name == "offline_packages"
@@ -3225,18 +3227,27 @@ mod tests {
     }
 
     #[test]
-    fn pre_v88_offline_projection_preserves_legacy_audio_and_current_snapshot() {
+    fn pre_audio_recipe_offline_projection_preserves_legacy_audio_and_current_snapshot() {
+        use crate::store::sqlite::{MIGRATIONS, OFFLINE_AUDIO_RECIPE_SCHEMA};
         let table = TABLES
             .iter()
             .find(|table| table.name == "offline_packages")
             .copied()
             .expect("offline table import contract");
-        assert!(value_projection(table, 87, false).ends_with("expires_at, NULL"));
-        assert!(value_projection(table, 88, false).ends_with("expires_at, audio_recipe"));
+        // The column lands at v92 on the composed chain; the effort's private
+        // numbering (v88) is a different migration on main.
+        assert_eq!(OFFLINE_AUDIO_RECIPE_SCHEMA, 92);
         assert_eq!(
-            crate::store::sqlite::MIGRATIONS[87],
+            MIGRATIONS[OFFLINE_AUDIO_RECIPE_SCHEMA as usize - 1],
             "ALTER TABLE offline_packages ADD COLUMN audio_recipe TEXT;"
         );
+        assert!(value_projection(table, 88, false).ends_with("expires_at, NULL"));
+        assert!(value_projection(table, OFFLINE_AUDIO_RECIPE_SCHEMA - 1, false)
+            .ends_with("expires_at, NULL"));
+        assert!(value_projection(table, OFFLINE_AUDIO_RECIPE_SCHEMA, false)
+            .ends_with("expires_at, audio_recipe"));
+        assert!(value_projection(table, SQLITE_SCHEMA_VERSION, false)
+            .ends_with("expires_at, audio_recipe"));
     }
 
     #[test]
@@ -3574,8 +3585,10 @@ mod tests {
             .find(|t| t.name == "candidate_recovery")
             .copied()
             .expect("recovery import fixture");
-        assert_eq!(memory.minimum_schema, 92);
-        for version in [51_i64, 53, 92] {
+        let introduced = crate::store::candidate_recovery::SQLITE_INTRODUCED_SCHEMA;
+        assert_eq!(introduced, 96, "candidate_recovery lands at v96 on the composed chain");
+        assert_eq!(memory.minimum_schema, introduced);
+        for version in [51_i64, 53, introduced - 1, introduced] {
             let dir = tempfile::tempdir().expect("recovery import fixture");
             let path = dir.path().join("source.db");
             let source = Connection::open(&path).expect("recovery import fixture");
@@ -3591,7 +3604,7 @@ mod tests {
             if version >= 53 {
                 source.execute("UPDATE media_sessions SET recovery_epoch='d23b2032-2910-469a-bf76-3c0b12735028'", []).expect("recovery import fixture");
             }
-            if version >= 92 {
+            if version >= memory.minimum_schema {
                 for (recipe, step) in [("11".repeat(32), 1_i64), ("22".repeat(32), 0)] {
                     source.execute("INSERT INTO candidate_recovery(scope,recipe,cause,event_id,user_id,playback_id,recovery_epoch,created_ms,quality_step) VALUES('exact-authenticated-scope',?1,'decode','original-event',42,'player','d23b2032-2910-469a-bf76-3c0b12735028',1234,?2)", rusqlite::params![recipe,step]).expect("recovery import fixture");
                 }

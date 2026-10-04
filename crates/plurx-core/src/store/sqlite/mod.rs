@@ -52,6 +52,47 @@ use crate::domain::{DolbyVisionFacts, Item, ItemKind, MediaFile, OfflinePackageS
 use crate::error::StoreError;
 use crate::store::telemetry::{NETWORK_PRIORS_V2_SCHEMA, PLAYBACK_EVENTS_SCHEMA};
 
+/// The SQLite migration that adds `offline_packages.audio_recipe`, and the
+/// schema version it lands at. A source below that version has no resolved
+/// audio snapshot, which the Hiqlite import projects as NULL.
+pub(crate) const OFFLINE_AUDIO_RECIPE_COLUMN: &str =
+    "ALTER TABLE offline_packages ADD COLUMN audio_recipe TEXT;";
+pub(crate) const OFFLINE_AUDIO_RECIPE_SCHEMA: i64 = 92;
+
+/// Whether migration `version` (1-based, as stored in `user_version`) is
+/// exactly `sql`. Used by the compile-time assertions below so a schema
+/// version named elsewhere cannot drift from its entry in [`MIGRATIONS`].
+const fn migration_is(version: i64, sql: &str) -> bool {
+    if version < 1 || version as usize > MIGRATIONS.len() {
+        return false;
+    }
+    let actual = MIGRATIONS[version as usize - 1].as_bytes();
+    let expected = sql.as_bytes();
+    if actual.len() != expected.len() {
+        return false;
+    }
+    let mut index = 0;
+    while index < actual.len() {
+        if actual[index] != expected[index] {
+            return false;
+        }
+        index += 1;
+    }
+    true
+}
+
+const _: () = assert!(
+    migration_is(OFFLINE_AUDIO_RECIPE_SCHEMA, OFFLINE_AUDIO_RECIPE_COLUMN),
+    "OFFLINE_AUDIO_RECIPE_SCHEMA does not name the audio_recipe migration"
+);
+const _: () = assert!(
+    migration_is(
+        super::candidate_recovery::SQLITE_INTRODUCED_SCHEMA,
+        super::candidate_recovery::SCHEMA
+    ),
+    "candidate_recovery::SQLITE_INTRODUCED_SCHEMA does not name its migration"
+);
+
 /// Ordered, append-only migration list. `PRAGMA user_version` tracks the last
 /// applied index + 1. Never edit an entry that has shipped — append instead.
 /// Visible to the import inventory guard, which needs to know which migration
@@ -1192,7 +1233,7 @@ pub(crate) const MIGRATIONS: &[&str] = &[
     // v91: transactional playback planning settings generation.
     super::PLAYBACK_INPUT_SCHEMA,
     // v92: preserve the resolved audio recipe across offline queue retries.
-    "ALTER TABLE offline_packages ADD COLUMN audio_recipe TEXT;",
+    OFFLINE_AUDIO_RECIPE_COLUMN,
     // v93: independently attributed completed-transfer Link negatives.
     super::telemetry::NETWORK_PRIOR_LINK_COLUMNS,
     // v94: exact candidate-bound node-local Link samples, never legacy inference.
