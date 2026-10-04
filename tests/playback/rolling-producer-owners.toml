@@ -2453,7 +2453,11 @@ pattern = "(?:[A-Za-z_]\\w*::)+spawn(?:_blocking|_local|_for_test)?\\s*\\("
 # body, cancelled when that body drops. Artwork: an idempotent disk writer
 # holding its lease, plus awaited spawn_blocking reads. Daemon loops take
 # background_shutdown. Test fixtures are joined, or aborted and joined.
-expected_occurrences = 784
+# 784 -> 787: vod/generation.rs joins the generation writer task in a
+# supervisor that reports only a panic as a rendition failure (the writer's
+# own end reports everything else), plus the two awaited fixture tasks of
+# its regression test.
+expected_occurrences = 787
 # E1 plus S-14 M8: both ownership sets retained and counted on the merged source.
 # 643 -> 647 with S-14 M8 (`plan/S-14-5`: `Encoding`, `RollingFlowSync`, `TerminalCleanup`,
 # `HeadChildOwner`, `VodServingAdmission` behind per-owner hooks), measured by

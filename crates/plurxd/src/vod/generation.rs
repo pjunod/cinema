@@ -249,7 +249,8 @@ pub(super) async fn spawn_generation(
     let epoch = rendition.gen_epoch.load(Relaxed);
     let shared = Arc::clone(shared);
     let rendition = Arc::clone(rendition);
-    tokio::spawn(async move {
+    let (supervised_shared, supervised) = (Arc::clone(&shared), Arc::clone(&rendition));
+    let writer = tokio::spawn(async move {
         let key = rendition.key.clone();
         let (retiring, retired) = tokio::sync::oneshot::channel();
         let (outcome, diagnostic) = tokio::join!(
@@ -305,10 +306,31 @@ pub(super) async fn spawn_generation(
             on_generation_end(&shared, &rendition, outcome, epoch).await;
         }
     });
+    // The writer task owns this generation's segment writes and its end. A
+    // panic unwinds past `on_generation_end` and drops the writer barrier, so
+    // the reaper releases the slot but nothing tells the rendition. Only the
+    // join can: record the failure, which wakes waiters with a terminal class
+    // and kicks the driver to reclaim the producer.
+    tokio::spawn(on_writer_panic(writer, move || {
+        record_failure(
+            &supervised_shared,
+            &supervised,
+            crate::playback_control::ProducerDecisionReason::ReaderFailed,
+            "producer writer task panicked".to_owned(),
+        );
+    }));
     tracing::info!(
         target: "plurxd::vodserve",
         rendition = %rendition_key_field(at), "spawned a producer generation"
     );
+}
+
+/// Join a generation writer and report only a panic. Every other end is the
+/// writer's own to report through `on_generation_end`.
+async fn on_writer_panic(writer: tokio::task::JoinHandle<()>, on_panic: impl FnOnce()) {
+    if writer.await.is_err_and(|error| error.is_panic()) {
+        on_panic();
+    }
 }
 
 pub(super) async fn recipe_engine_is_current(recipe: &Recipe) -> bool {
@@ -971,3 +993,25 @@ impl vodgen::Sink for RenditionSink {
 // ---------------------------------------------------------------------------
 // helpers
 // ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod writer_supervision_tests {
+    #[tokio::test]
+    async fn a_panicked_generation_writer_is_reported_and_a_clean_end_is_not() {
+        let reported = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let panicked = tokio::spawn(async { panic!("writer fixture panics") });
+        let seen = std::sync::Arc::clone(&reported);
+        super::on_writer_panic(panicked, move || {
+            seen.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        })
+        .await;
+        assert_eq!(reported.load(std::sync::atomic::Ordering::SeqCst), 1);
+        let clean = tokio::spawn(async {});
+        let seen = std::sync::Arc::clone(&reported);
+        super::on_writer_panic(clean, move || {
+            seen.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        })
+        .await;
+        assert_eq!(reported.load(std::sync::atomic::Ordering::SeqCst), 1);
+    }
+}
