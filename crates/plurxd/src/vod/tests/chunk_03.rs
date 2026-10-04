@@ -3930,7 +3930,7 @@
         let mut wrong = interval.clone();
         wrong.timescale = 48_000;
         assert!(verify_reserved_publication(&plan, 1, bytes, &[wrong]).is_err());
-        let mut partial = interval;
+        let mut partial = interval.clone();
         partial.from_tick += 1;
         assert!(verify_reserved_publication(&plan, 1, bytes, &[partial]).is_err());
         verify_reserved_publication(&plan, 1, b"new-after-disposal", &[])
@@ -3955,7 +3955,7 @@
         let mut wrong_clock = interval.clone();
         wrong_clock.timescale = 48_000;
         assert!(continuous_dependency_windows(&plan, &[wrong_clock]).is_err());
-        let mut partial = interval;
+        let mut partial = interval.clone();
         partial.from_tick += 1;
         assert!(continuous_dependency_windows(&plan, &[partial]).is_err());
         assert_eq!(manifest.eviction_candidates(&[], u64::MAX), vec![0, 1, 2]);

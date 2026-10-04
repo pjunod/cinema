@@ -516,7 +516,7 @@ async fn shared_audio_vod_reserves_cpu_only_and_publishes_one_audio_track() {
         shortened.through_tick -= 1_024;
         assert!(verify(&cached_init, bytes, &audio, &shortened, false).is_err());
         let damaged = &bytes[..bytes.len() - 1];
-        let mut truncated = interval;
+        let mut truncated = interval.clone();
         truncated.artifact_id = hex::encode(Sha256::digest(damaged));
         truncated.byte_length = damaged.len() as u64;
         assert!(verify(&cached_init, damaged, &audio, &truncated, false).is_err());
