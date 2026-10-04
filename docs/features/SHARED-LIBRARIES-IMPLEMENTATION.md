@@ -2412,23 +2412,26 @@ read, closing a transition between those reads. Replicated serving continues
 to require the real catalogue member-floor read check. This does not authorize
 writes or activate the candidate schemas.
 
-A sharing handler registers its authority monitor on the accepted transport.
-Each monitor checks current authority every second with a one-second deadline
-and cancels that connection on refusal or unavailable authority. The
-connection task selects that cancellation while Hyper is writing and owns the
-monitor tasks. This closes blocked transports within the three-second grant
-bound, including after Hyper has consumed the entire application body.
-Hyper 1.10.1 / h2 0.4.16 may still own queued DATA after Body Drop; a flush from
-another stream does not establish that the protected stream has drained.
-Therefore no Body Drop, global flush counter or timer retires these monitors.
+Superseded 2026-10-04 (Root ownership review, D1). A guarded response's
+authority monitor now lives exactly as long as its response body.
+`MonitoredBody` releases the node-wide permit and cancels a per-response child
+of the accepted connection's token when the body drops. Fully buffered
+responses (catalogue JSON, details, decisions, artwork) are authorized
+immediately before they are returned and start no monitor. A streaming Source
+media body still re-observes authority every second while it is alive and
+cancels the connection on refusal. Replicated revocation has no change feed,
+so this bounded observation is the authority path for bytes that are still
+being produced.
 
-The registries are finite: 64 content monitors process-wide and 32 per accepted
-connection, with immediate refusal rather than a waiting queue. Completed
-responses on an idle connection retain those slots until connection completion.
-A request exceeding the connection bound cancels that connection; global
-exhaustion returns a closed 429. On HTTP/2, authority cancellation closes all
-multiplexed streams on that connection, including unrelated ordinary responses.
-Ordinary handlers do not register monitors or cancel the sharing token.
+The earlier design kept every monitor until the connection closed, because
+Hyper may still own queued DATA after Body Drop. On keep-alive connections that
+held a slot per completed response. The 33rd guarded response on a node was
+refused with 429, the 33rd on one connection cancelled the connection, and an
+art lease held by its monitor refused the fifth poster. Revocation no longer
+cuts bytes from a completed buffered response that are already queued in the
+transport. Those bytes were authorized when the response was built, and no new
+bytes follow. Ordinary handlers do not register monitors or cancel the sharing
+token.
 
 This checkpoint covers source catalogue JSON. Scoped artwork, receiver login
 and assignment body monitors, full file details, caches and Continue Watching
@@ -2648,8 +2651,8 @@ when its socket writer is blocked. Ordinary metadata/revision changes preserve
 metadata delivery; actual Source playback admission must still compare the
 received immutable revision with its current private witness. JSON serialization
 uses a writer that refuses growth beyond 4 MiB before extending its buffer.
-Connection monitors keep the previously qualified ownership and registry bounds,
-including HTTP/2 connection-level cancellation and collateral stream impact.
+Details are buffered, so they are authorized once before return and start no
+monitor (see the 2026-10-04 supersession above).
 
 Temporary SQLite and actual three-voter fixtures cover 64-versus-65 files,
 aggregate capacity refusal, current tuple authority, large canonical IDs and
@@ -2700,14 +2703,9 @@ DNS cannot duplicate an in-flight hint or add a generic fallback. Losing dials
 and connection drivers remain owned and are cancelled.
 
 Receiver authority is checked before bounded 4 MiB serialization and again at
-accepted-body admission. A global pool bounds receiver monitors to 32, and the
-accepted connection retains the established 32-monitor registry bound. Current
-login/import/assignment and Source grant/item/file checks run once per second,
-with a one-second deadline for the whole proof. Failures cancel the accepted
-connection, including a writer blocked by HTTP/1 backpressure or HTTP/2 windows.
-Monitors remain owned until actual connection completion; body drop, another
-stream's flush or a timer is not an EOS witness. HTTP/2 cancellation also closes
-unrelated streams on that connection.
+accepted-body admission. Receiver catalogue responses are buffered, so that
+admission check is their authority point and they start no monitor; the former
+32-slot receiver monitor pool is gone (2026-10-04 supersession above).
 
 The receiver metadata cache charges serialized payload plus conservative entry
 overhead against 32 MiB, permits at most 2048 entries and uses LRU eviction and
@@ -3099,8 +3097,8 @@ own assignments. The fresh pinned Source response has at most 64 unique
 movie/show libraries and 256 UTF-8 bytes per name. Empty scope is a successful
 empty read, while unavailable Source authority refuses the read.
 
-The accepted connection uses the same bounded receiver monitor registry and
-current Source tuple checks, including after the response body drops. Role,
+The response is buffered and authorized against the current Source tuple at
+admission; it starts no monitor. Role,
 login, import, Source grant or sharing-switch loss cancels current connection
 authority. The isolated Linux H1/H2 regression is added but still awaits an
 exact committed archive run. No cached scope or Local library set bootstraps the
@@ -3233,9 +3231,8 @@ four operations without queuing, with an independent 64 MiB byte budget and a
 variant; B reserves bounded fetch/disk working space. Reservations include the
 read sentinel and shrink only after work settles. Blocking reads, disk hashers
 and atomic writers retain actual lease ownership after their async caller is
-cancelled. Accepted connection monitors retain the remaining body lease until
-actual connection completion; neither Body Drop nor another H2 stream's flush
-releases it. Idle accepted artwork responses therefore occupy bounded capacity.
+cancelled. The art lease now lives inside the response bytes and returns when the writer
+drops them, so idle connections no longer hold artwork capacity.
 Revocation closes the accepted connection, including unrelated multiplexed H2
 streams. A benign asset replacement affects the next fresh read while an already
 accepted snapshot remains under current grant/item body authority.
@@ -5022,3 +5019,35 @@ qualify:
 - real Tailscale/NAT/DERP;
 - clusters;
 - devices.
+
+### Root ownership review of the sharing lanes (2026-10-04)
+
+Every task, timer and process shape that the S2/S3/S4/Root lanes added was reviewed
+against its owner and its exit before the inventory counts in
+`tests/playback/rolling-producer-owners.toml` were raised. Eight defects were
+found and fixed at their cause:
+
+| Defect | Cause | Fix |
+|---|---|---|
+| D1 content monitors | Monitor lifetime was the connection, not the body | `MonitoredBody`; buffered responses start no monitor (see supersession above) |
+| D2 receiver liveness | The receiver dialled the Source every second for status; each call wrote the Source lease twice | One Source status probe per 10 s lease renewal; local revocation stays with per-resource validation |
+| D3 retirement and settlement | Retry loops ran every 5 s with no cap, no shutdown token, and retried refusals that cannot change; failed starts never left the registry | Bounded scratch-owner schedules (receiver: 6 attempts, 5 to 80 s; Source: 24 attempts at 5 s). Definitive refusals are final; every exit frees its slot; failed starts move to the settled cache; the receiver End waits 315 s, covering the Source End budget |
+| D4 copy admission | 100 ms polls dropped the live waiter between attempts, so background work could take the capacity | `admit_source_copy` holds one live waiter for the whole wait and reads policy once |
+| D5 init readiness | `wait_ready` kicked the driver every 100 ms | Registers init demand and waits on `init_notify` |
+| D6 abandoned writer | A dropped writer barrier parked the reaper forever, holding the encoder admission | `WriterSettlement::Abandoned`; the reap and release complete |
+| D7 sharing loops | Fixed 1 s and 5 s pacing; enabling sharing locally did not wake the disabled loop | Sleep to the next due import or a local wake, bounded at 10 s for writes made on another node; healthy refresh 60 s |
+| D8 rendition failure | Only the 10 s lease tick noticed a failed rendition | The Source actor also wakes on the rendition failure signal and on the drain token |
+
+`state.shutdown` is now cancelled when a process signal starts the drain as well
+as by a committed cluster leave, so these owners observe one drain token.
+
+Open after this review:
+
+- Nothing sweeps an expired receiver row that still has a relay binding; maintenance keeps such rows on purpose. This is part of the section 4 crash and restart work.
+- `WriterSettlement::Abandoned` is recorded but not yet read. A panicked writer should become a rendition failure.
+- A stuck retirement or settlement is reported only in the log. It belongs in Settings, Developer.
+
+The Encoded and Native text lanes now run through the real pinned B
+(`sharing_receiver_real_pinned_source_encoded_and_native_lanes_through_b`). The
+Source fixture media is 320x180, so both recipes stay inside the v1 control
+height contract (144 to 2160).
