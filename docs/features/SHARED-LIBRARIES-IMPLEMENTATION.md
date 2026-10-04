@@ -1334,6 +1334,74 @@ Proposed focused suite anchors: Rust test modules `sharing` and
 Sol must record exact executed paths/names and nonzero test counts; a filter
 matching zero tests is not evidence.
 
+#### Shared protocol fixture parity matrix (2026-10-04)
+
+Audit of `tests/sharing/protocol-cases.json` (version 2) against the table
+above and the wires added since. The §13.1 groups are behaviour, not wire
+shapes: Pairing, Authorization, Secrets, Progress and most of Catalogue,
+Recovery and Resources are proved by the Store contract and daemon suites
+(`store_contract sharing_*`, plurxd `sharing_*`) and have no fixture row. What
+a row can carry is the wire every implementation must agree on: IDs above
+2^53 (Catalogue), malformed or foreign playlist URIs and the seek origin
+(Playback), old prepared answers and Source loss (Recovery, as preparation and
+refusal rows), and same-viewer concurrent sessions (per-session playback ids).
+
+A row's `layer` names who validates it: `b` the receiver, `client` a player,
+`both` both. "yes" means the named test reads every row of the group for that
+layer; "B-only" means no client parses that wire.
+
+| Fixture group | Rows | Rust | Web | Swift | Kotlin |
+|---|---|---|---|---|---|
+| `cases` Source IDs | 12 | yes, core `sharing_shared_protocol_fixture_validates_exact_wire_ids` | yes, `playbackFileDecimal` | open | open |
+| `status_tokens` × `shared_status.word_fields` | 12 × 9 | yes, `sharing_protocol_fixture_status_grammar` | yes, `sharedPlaybackStatusMetrics` | open | open |
+| `shared_status` accepted + mutations | 1 + 17 (b 10, client 13) | decode and b rows: yes. B's emitted envelope: **open** (built inline in `receiver_status`) | yes | open | open |
+| `control_refusals.source` | 14 (7 valid) | validity and Source minting: yes, `sharing_protocol_fixture_source_control_refusals`. B's mapped answer (`b`): **open** (`refusal_response`) | client outcome (`client`): yes | open | open |
+| `control_refusals.b_precheck` | 4 | **open** (inline in `receiver_control`) | client outcome: yes | open | open |
+| `control_preparation` (`none`) | 3 | **open** (`rebind_to_receiver`) | yes, `settlePreparedOfferWaiter` | open | open |
+| `hls_start` public + mutations | 1 + 17 (b 15, client 16) | yes, `sharing_protocol_fixture_hls_start_projection` | yes, `sharedPlaybackStartContext` | open | open |
+| `direct` MIME set, public + mutations | 13; 1 + 16 (b 9, client 13) | yes, `sharing_protocol_fixture_direct_start` | yes, `sharedPlaybackDirectStartContext` | open | open |
+| `direct_session_query` | 11 | yes, `sharing_protocol_fixture_direct_session_query` | yes | open | open |
+| `file_suffixes` (route class `b`) | 25 | yes, core `sharing_protocol_fixture_file_suffixes` | yes, `playbackFileUrl` | open, fails 5 rows | open, fails 5 rows |
+| `asset_session_query` | 14 | yes, `sharing_protocol_fixture_asset_session_query` | B-only parser; web composes the bound query (next row) | B-only | B-only |
+| `presession_assets` | 4 | yes, same test | yes, `playbackFileUrl` bound and unbound | open | open |
+| `resource_unsupported` (typed 422) | 1 | yes, `sharing_protocol_fixture_resource_unsupported` | B-only | B-only | B-only |
+| `playback_ids` (per-session) | 1 | yes, `sharing_protocol_fixture_per_session_playback_ids` | B-only (B to Source) | B-only | B-only |
+| `receiver_recovery` | 1 + 4 rendered | yes, `sharing_protocol_fixture_receiver_recovery_status` | yes, `sharingRecoveryHTML` | B-only (web node card) | B-only |
+
+Executed 2026-10-04 on the pinned toolchain: plurx-core `--lib` filters
+`sharing_protocol sharing_shared_protocol sharing_file_resources
+sharing_wire_ids` 4 passed; plurxd `--bin plurxd -- sharing_protocol_fixture`
+9 passed (27 with the touched modules' existing tests); `node --test
+tests/web/sharing-protocol-cases.test.js` 9 passed; clippy `-D warnings`
+clean.
+
+The three Rust **open** cells need a test inside
+`http/shared_receiver_control.rs`, which is outside this audit's edit set:
+extract `shared_status_body(recipe, tuple, status)` and
+`receiver_control_precheck(request, tuple) -> Option<Response>` as pure
+functions, then drive `refusal_response`, the precheck and
+`rebind_to_receiver` from `control_refusals.source[].b`, `b_precheck` and
+`control_preparation`. Those functions are already covered by hard-coded tests
+there; the gap is only that the fixture does not drive them.
+
+No Swift or Kotlin test reads the fixture yet. `subs/[0-9]{1,6}` and
+`chapters/[0-9]{1,6}/thumb` in `PlaybackFileContext.swift` and
+`PlaybackFileContext.kt` accept `subs/4096`, `subs/4096.vtt`,
+`subs/4096/overlay.json`, `chapters/4096/thumb` and `subs/01`, which the
+Shared grammar refuses, so those five `file_suffixes` rows fail there until
+the Shared context bounds canonical indexes at 0..4095. The web status binding
+is looser than Swift's: it does not check the exact outer key set,
+`incarnation_id` or `control_epoch`, so the fixture has no rows for those
+yet.
+
+Fixes this audit made: `project_shared_start` accepted a rolling-lease Start
+that every client refuses, so a Source answering `vod: true` with a 60 s lease
+reached the player as a Start it then rejected; it now requires the VOD lease
+and `vod: true` itself (rows `rolling-lease`, `vod-false`; its callers already
+refused `vod: false`). Web `playbackFileUrl` built Shared track and
+chapter indexes above 4095, and web Shared status accepted prose, paths and
+markup in word fields.
+
 ### 13.2 Commands and compiler discipline
 
 Before Rust edits, verify the repository pin, not Homebrew's default:
