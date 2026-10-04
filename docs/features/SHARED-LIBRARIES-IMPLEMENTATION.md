@@ -4800,3 +4800,14 @@ was corrected before the 17-test pass. The combined context failure did not
 reproduce in its complete isolated seven-test class, so the combined run is not
 reported as a pass. Exact Android qualification of the additional frozen-control
 projection and current base remains required.
+
+The combined Apple failure was traced to the existing pure presenter fixture
+creating `AppModel()` and leaving its discovery/bootstrap task running. That
+unjoined task could replace the global account during a later authenticated
+context read. The model initializer now accepts `startServices` with the normal
+application default `true`; only that presenter fixture passes `false`.
+Original-account refusal remains intact. The complete combined iOS set then
+passed 359 tests with zero failures. The preceding exact tvOS Shared/context
+set passed 24 tests with zero failures.
+
+Regression-Test: clients/apple/Tests/AppleClientTests.swift::testTheRowEighteenSitesLogOnceAndDrawNothing

@@ -57,7 +57,7 @@ final class AppModel: ObservableObject {
     private var api: PlurxAPI?
     private var homeLoadTask: Task<Void, Never>?
 
-    init() {
+    init(startServices: Bool = true) {
         discovery = ServerDiscovery()
         origin = settings.origin
         username = settings.username
@@ -74,6 +74,7 @@ final class AppModel: ObservableObject {
         libraryGrouping = settings.libraryGrouping
         offlineQuality = settings.offlineQuality
         offlineNetwork = settings.offlineNetwork
+        guard startServices else { return }
         discovery.start()
         Task {
             // Give NWBrowser a turn to enter its permission-gated operation
