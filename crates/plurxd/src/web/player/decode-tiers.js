@@ -907,6 +907,7 @@ function preparePlayOutgoing(attempt,decision){
       stopPlayerTimers();
       teardownHls();
       if(outgoing.sessionId)releaseSession(outgoing.sessionId);
+      if(outgoing.sharedDirect)releaseSharedDirect(outgoing);
       PLAYER=incoming;
     }
     if(incoming)incoming.mediaPredecessor=null;
@@ -951,7 +952,7 @@ function buildPlayer(attempt,decided,prepared){
     _markerOffers:new Set(),
     _seekPreview:null, _seekPending:null, _lastFocusedControl:playerLastFocused,
     _opener:playerOpener, _openerClick:playerOpenerClick,
-    idleTimer:null, autoskip:libraryChannel?false:autoskipOn(), stallTimer:null, probeUrl:null, directUrl:null,
+    idleTimer:null, autoskip:libraryChannel?false:autoskipOn(), stallTimer:null, probeUrl:null, directUrl:null, sharedDirect:null,
     triedFallback:false,
     mediaRecoveries:0,
     mediaRecoveredAtMs:null,
@@ -1066,7 +1067,14 @@ function choosePlayRoute(attempt,decided,prepared,initialAudio){
   // purpose and history isolation are enforced. Copy-HLS retains source video
   // when the decision does not require an encode.
   if(libraryChannel) initialRoute=decision.method==='transcode'?'transcode_hls':'copy_hls';
-  if(attempt.fileContext&&playbackFileContext(attempt.fileContext).source_ref.kind!=="local"){
+  // Shared direct play: the actual decision says these original bytes play in
+  // this browser's own container/codec caps, with the default audio and no
+  // offset. The Source re-derives that decision at Start and refuses anything
+  // else; there is no burn, grade or segment capability for raw bytes to need.
+  if(attempt.fileContext&&playbackFileContext(attempt.fileContext).source_ref.kind!=="local"
+    &&preBurn==null&&decision.method==='direct_play'&&initialRoute==='direct'){
+    initialRoute='shared_direct';
+  }else if(attempt.fileContext&&playbackFileContext(attempt.fileContext).source_ref.kind!=="local"){
     const grade=decision.delivered_dynamic_range;
     const supported=decision.method==='transcode'
       ?!noSegments()&&(nativeHls||!!(window.Hls&&Hls.isSupported())):hlsAvailable;
@@ -1127,6 +1135,26 @@ function attachPlayRoute(attempt,decided,prepared,openedPlayer,openIsAttached,in
       detail:(PLAYER.encoder?("encoder: "+PLAYER.encoder+" — "):"")+
         (PLAYER.vod?"already transcoded — playing from the cache":"buffering the first segments")});
     armStall(from);
+    return true;
+  })();
+  if(initialRoute==='shared_direct') return (async()=>{
+    // The B session is the byte URL's binding, not a producer: no playlist,
+    // status poll or control exchange follows it, exactly as Local direct.
+    raisePlaybackSurface("client_preparing",{context:"start",
+      title:"Loading…",detail:"direct play — no conversion needed"});
+    let info; try{info=await preparation.run(
+      signal=>openSession(attempt.fileContext,{presentation:"direct",start:startSec,audio:initialAudio},signal),
+      late=>releaseSession(late&&late.session_id));}catch(e){
+      if(openIsAttached())failPreparation(e,attempt);
+      return false;
+    }
+    if(!PLAY_OPEN_GATE.acceptResource(openAttempt,info&&info.session_id,releaseSession)) return false;
+    if(!openIsAttached()){
+      releaseSession(info&&info.session_id);
+      return false;
+    }
+    retireOutgoing();
+    armStall(attachSharedDirect(video,openedPlayer,info,startSec));
     return true;
   })();
   if(initialRoute==='copy_hls') return (async()=>{
@@ -1307,7 +1335,19 @@ async function executePlaybackMediaChange(p,change){
       if(change.height>0) p.autoHeight=change.height;
       if(change.note) p.rescuedNote=change.note;
       armStall(attachSession(v,p,info,pos),PlaybackPolicy.HLS_STARTUP.seek_deadline_ms);
-    }else if(change.copyHls){
+    }else if(change.sharedDirect&&method==='direct_play'){
+      // A fresh Shared direct Start of the same file at the saved position.
+      // Attaching it retires the B session the element could no longer read.
+      const info=await preparation.run(
+        signal=>openSession(playbackFileContextForPlayer(p),{presentation:"direct",start:pos,audio},signal),
+        late=>releaseSession(late&&late.session_id));
+      if(!live()){ releaseSession(info&&info.session_id); return false; }
+      retirePlaybackPredecessor(p);
+      teardownHls();
+      armStall(attachSharedDirect(v,p,info,pos),20000);
+    }else if(change.copyHls||playbackFileContextForPlayer(p).source_ref.kind!=="local"){
+      // A Shared file has no progressive remux: every other route change of a
+      // Shared direct play (an audio switch, a quality move) is Copy HLS.
       if(!await startCopyHls(v,pos,live,null,preparation,()=>retirePlaybackPredecessor(p))) return false;
     }else{
       retirePlaybackPredecessor(p);

@@ -70,6 +70,7 @@
  * @property {any} source                  the decision's source facts (duration, container, streams)
  * @property {string|null} [probeUrl]      the URL the current attach is reading
  * @property {string|null} [directUrl]     the direct-play URL
+ * @property {{session_id:string,attachment:{current:()=>boolean},timeline:boolean}|null} [sharedDirect] the Shared direct B session the current attachment reads
  * @property {string} [segSrc]             the HLS playlist the segment table was read from
  * @property {number[]|null} [segTimes]    HLS segment start times, film seconds
  * @property {number|null} [_segIdx]       segment the stats panel last located

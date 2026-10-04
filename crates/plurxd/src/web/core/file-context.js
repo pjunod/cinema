@@ -250,3 +250,22 @@ function sharedPlaybackStartContext(value,response){
     ||control.next_exchange_ms!==5000||control.lease_timeout_ms!==300000) playbackFileReject();
   return withPlaybackFileSession(c,id);
 }
+// The media types Local direct play can name, which is all B relays for a
+// Shared direct session (sharing_direct_wire::DIRECT_MIMES).
+const SHARED_DIRECT_MIMES=Object.freeze(["video/mp4","video/webm","video/x-matroska","video/mp2t",
+  "video/x-msvideo","audio/mp4","audio/aac","audio/mpeg","audio/flac","audio/ogg","audio/wav",
+  "audio/x-ms-wma","application/octet-stream"]);
+// B's complete direct Start reply. Exactly five fields: no control route, no
+// playlist, and a byte URL that is this context's own file alias bound to the
+// returned B session — never a Source, Local or foreign URL.
+function sharedPlaybackDirectStartContext(value,response){
+  const c=playbackFileContext(value);
+  if(c.source_ref.kind==="local"||c.session_id||!response||typeof response!=="object"||Array.isArray(response)) playbackFileReject();
+  const keys=["presentation","session_id","url","length","mime"],present=Object.keys(response);
+  if(present.length!==keys.length||keys.some(k=>!present.includes(k))) playbackFileReject();
+  if(response.presentation!=="direct"||!Number.isSafeInteger(response.length)||response.length<0
+    ||!SHARED_DIRECT_MIMES.includes(response.mime)) playbackFileReject();
+  const bound=withPlaybackFileSession(c,response.session_id);
+  if(response.url!==playbackFileUrl(bound,"direct")) playbackFileReject();
+  return bound;
+}

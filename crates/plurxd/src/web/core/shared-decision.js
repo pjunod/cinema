@@ -2,7 +2,7 @@
 // Decisions describe delivery; they never acquire a B session or start media.
 const SHARED_DECISION=(()=>{
   const MAX=4*1024*1024,REQUEST_MAX=128*1024;
-  let contexts=new WeakMap();const accepted=new WeakMap(),watches=new Map(),jobs=new Set();let watchAuth=AUTH_GENERATION;
+  let contexts=new WeakMap();const accepted=new WeakMap(),directs=new WeakMap(),watches=new Map(),jobs=new Set();let watchAuth=AUTH_GENERATION;
   const fail=()=>{throw new Error("Shared decision unavailable");};
   function authorized(c){return c.auth===AUTH_GENERATION&&c.token===TOKEN&&c.origin===API;}
   function current(c){return c.auth===AUTH_GENERATION&&c.token===TOKEN&&c.origin===API&&c.generation===PAGE_RENDER_GENERATION&&c.route===location.hash;}
@@ -14,9 +14,9 @@ const SHARED_DECISION=(()=>{
   // cannot be represented by Number remain lossless BigInts.
   function engine(value){if(typeof value==="bigint"&&value>=BigInt(Number.MIN_SAFE_INTEGER)&&value<=BigInt(Number.MAX_SAFE_INTEGER))return Number(value);if(Array.isArray(value))return value.map(engine);if(value&&typeof value==="object"){const o=Object.create(null);for(const [k,v]of Object.entries(value))o[k]=engine(v);return o;}return value;}
   async function read(path,c,body=null,signal=null,mode="page",conflict=false){
-    const valid=()=>mode==="session"?authorized(c):current(c);
+    const valid=()=>mode==="session"||mode==="restart"?authorized(c):current(c);
     if(!valid()||signal?.aborted)fail();const controller=new AbortController(),job={controller,reader:null};jobs.add(job);
-    const abort=()=>controller.abort();signal?.addEventListener("abort",abort,{once:true});const timer=setTimeout(abort,mode==="start"?310000:30000);
+    const abort=()=>controller.abort();signal?.addEventListener("abort",abort,{once:true});const timer=setTimeout(abort,mode==="start"||mode==="restart"?310000:30000);
     try{
       const expected=origin(c)+path,response=await fetch(expected,{method:body===null?"GET":"POST",headers:{authorization:"Bearer "+c.token,...(body===null?{}:{"content-type":"application/json"})},...(body===null?{}:{body}),credentials:"omit",cache:"no-store",redirect:"error",signal:controller.signal});
       if(!valid()||controller.signal.aborted||response.redirected||response.url!==expected){await response.body?.cancel();fail();}
@@ -47,16 +47,24 @@ const SHARED_DECISION=(()=>{
     if(watch!=null)state.sequence=Math.max(state.sequence,integer(watch.sequence));return state;
   }
   function unsupported(){throw Object.assign(new Error("This shared playback change is not available yet."),{code:"sharing_start_unsupported"});}
+  // A direct session has no Source producer to replace, so a fresh start from
+  // one (an expired direct play resumed, or a compatibility move to HLS) is a
+  // new initial Start of the file it was bound to, under the accepted login.
+  // Like progress, it outlives browsing but not an account change.
   async function start(context,body,signal=null){
-    const c=contexts.get(context);if(!c||!current(c)||context.session_id)fail();playbackFileContext(context);
+    const restart=!!context?.session_id,base=restart?directs.get(context):context,c=restart?accepted.get(context):contexts.get(base);
+    if(!c||!base||base.session_id||(restart?!authorized(c):!current(c)))fail();playbackFileContext(base);
     if(!body||typeof body!=="object"||Array.isArray(body))fail();
     for(const field of ["previous_session_id","control_sequence","reopen_reason","intent","candidate_id"])if(body[field]!=null)unsupported();
     if(body.subtitle_burn!=null||body.hdr10===true||body.preserve_dolby_vision===true)unsupported();
+    const direct=body.presentation==="direct";
+    if(body.presentation!=null&&body.presentation!=="vod"&&!direct||direct&&body.native_subtitles===true)unsupported();
     if(body.caps?.v!==2||typeof body.playback_id!=="string"||!body.playback_id||body.playback_id.length>128||/[\u0000-\u001f\u007f]/.test(body.playback_id)
       ||typeof body.request_id!=="string"||! /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(body.request_id))fail();
     const text=JSON.stringify(body);if(new TextEncoder().encode(text).length>24*1024)fail();
-    const raw=await read(playbackFileUrl(context,"hls/sessions"),c,text,signal,"start"),response=engine(raw);
-    if(!current(c))fail();const bound=sharedPlaybackStartContext(context,response);accepted.set(bound,c);
+    const raw=await read(playbackFileUrl(base,"hls/sessions"),c,text,signal,restart?"restart":"start"),response=engine(raw);
+    if(restart?!authorized(c):!current(c))fail();
+    const bound=direct?sharedPlaybackDirectStartContext(base,response):sharedPlaybackStartContext(base,response);accepted.set(bound,c);if(direct)directs.set(bound,base);
     if(c.watch.pending&&c.watch.pending.session_id!==bound.session_id)c.watch.pending=null;
     Object.defineProperty(response,"_sharedContext",{value:bound,enumerable:false});return response;
   }

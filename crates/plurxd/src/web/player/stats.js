@@ -682,6 +682,7 @@ function closePlayer(options={}){
   if(PLAYER&&PLAYER.hls) teardownHls();
   if(PLAYER) PLAYER.sessionId=null;
   if(closingSessionId) releaseSession(closingSessionId);
+  if(PLAYER&&PLAYER.sharedDirect) releaseSharedDirect(PLAYER);
   // Disarm the pending seek as well as clearing it: a skip's self-commit is a
   // timer, and PLAYER survives the close, so an armed one would have fired
   // seekTo on a player the viewer had already left.

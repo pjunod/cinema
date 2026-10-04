@@ -408,11 +408,15 @@ function retirePlaybackPredecessor(p){
   playbackSurfaceStep({retire:playbackSurfaceGeneration(predecessor)});
   PLAYER=predecessor;stopPlayerTimers();teardownHls();
   if(predecessor.sessionId)releaseSession(predecessor.sessionId);
+  if(predecessor.sharedDirect)releaseSharedDirect(predecessor);
   PLAYER=p;p.mediaPredecessor=null;
 }
 // Attachment ownership is not command ownership: a native seek or Pause can
 // change the current command while this same decoder is still loading.
 function beginPlaybackMediaAttachment(p){
+  // A Shared direct session is read by exactly one attachment; any new one on
+  // this player, whatever its route, ends it.
+  if(p.sharedDirect)releaseSharedDirect(p);
   const token={id:(p._mediaAttachmentOrdinal||0)+1};
   p._mediaAttachmentOrdinal=token.id;
   p.mediaAttachment=token;
