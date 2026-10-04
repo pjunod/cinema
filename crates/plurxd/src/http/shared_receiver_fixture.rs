@@ -295,7 +295,34 @@ async fn sharing_receiver_fixture_uses_actual_factories_login_and_genuine_source
     // Construct the exact candidate/production merge: legacy production paths
     // must remain accepted by this disposable outer router.
     let _app = fixture_router(fixture.state.clone());
+    let recipe: Value =
+        serde_json::from_slice(&fixture.source.request).expect("actual Source recipe");
+    let observation = receiver_claim_observation(
+        &fixture,
+        recipe["session"]["request_id"]
+            .as_str()
+            .expect("actual request UUID"),
+    )
+    .await;
+    assert_eq!(
+        serde_json::from_str::<Value>(&observation).expect("bounded counts"),
+        json!({"claims":0,"assigned":0,"sessions":0,"upstream":0})
+    );
     fixture.shutdown().await;
+}
+
+// Diagnostic observation only. Row absence never proves no physical owner.
+async fn receiver_claim_observation(fixture: &RealReceiverFixture, request: &str) -> String {
+    let client = fixture
+        .selected
+        .local_client()
+        .expect("actual B selected voter client");
+    let mut rows = client.query_consistent(
+        "SELECT json_object('claims',COUNT(*),'assigned',COALESCE(SUM(owner_node_id IS NOT NULL),0),'sessions',(SELECT COUNT(*) FROM media_sessions m WHERE m.incarnation_id IN (SELECT incarnation_id FROM media_session_requests WHERE request_id=$1 AND user_id=$2)),'upstream',(SELECT COUNT(*) FROM sharing_relay_upstream b WHERE b.incarnation_id IN (SELECT incarnation_id FROM media_session_requests WHERE request_id=$1 AND user_id=$2))) AS payload FROM media_session_requests WHERE request_id=$1 AND user_id=$2",
+        hiqlite::params!(request.to_owned(), fixture.viewer_id),
+    ).await.expect("actual B read-only claim-stage observation");
+    assert_eq!(rows.len(), 1);
+    rows[0].get("payload")
 }
 
 fn fixture_router(state: crate::state::AppState) -> axum::Router {
@@ -475,6 +502,18 @@ async fn actual_pinned_playback(address: IpAddr, h2: bool) {
         session,
     )
     .await;
+    if status != StatusCode::OK {
+        eprintln!(
+            "actual B diagnostic claim-stage counts: {}",
+            receiver_claim_observation(
+                &fixture,
+                original["session"]["request_id"]
+                    .as_str()
+                    .expect("actual B request UUID")
+            )
+            .await
+        );
+    }
     assert_eq!(
         status,
         StatusCode::OK,
