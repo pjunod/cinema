@@ -53,6 +53,20 @@ pub struct RemoteWatchUpdate {
     pub progress: RemoteWatch,
 }
 
+/// Manual watched/unwatched for one B-private Source item. Marking watched
+/// keeps the stored position; unwatched clears it, as Local history does.
+#[derive(Debug, Clone)]
+pub struct RemoteWatchedOverride {
+    pub import_id: Uuid,
+    pub library_id: SourceId,
+    pub item_id: SourceId,
+    pub user_id: i64,
+    pub lifecycle_generation: i64,
+    pub assignment_generation: i64,
+    pub watched: bool,
+    pub updated_at_ms: i64,
+}
+
 /// Captured receiver authority; no credential or remote item data is persisted.
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -133,6 +147,16 @@ pub trait SharingCatalogueStore: Send + Sync {
         item: SourceId,
         user: i64,
     ) -> Result<Option<RemoteWatch>, StoreError>;
+    /// Explicit viewer watched-state override. One guarded statement takes the
+    /// next global Source/epoch/item/user sequence, so every progress beat that
+    /// was issued before the override (at or below that sequence) is stale or
+    /// conflicting and can never resurrect the old position. The HTTP caller
+    /// must first prove current Source item membership; this Store boundary
+    /// enforces import, assignment and captured generations atomically.
+    async fn set_remote_watched(
+        &self,
+        update: RemoteWatchedOverride,
+    ) -> Result<(RemoteProgressOutcome, Option<RemoteWatch>), StoreError>;
 }
 const AUTH: &str = "FROM sharing_imports i JOIN sharing_assignments a ON a.import_id=i.id JOIN sharing_viewers v ON v.user_id=a.user_id JOIN users u ON u.id=v.user_id WHERE i.id=$1 AND i.state='active' AND a.remote_library_id=$2 AND a.user_id=$4 AND a.enabled=1";
 #[async_trait]
@@ -338,6 +362,56 @@ impl<T: Backend> SharingCatalogueStore for T {
             .first()
             .map(|row| decode_watch(row))
             .transpose()
+    }
+    async fn set_remote_watched(
+        &self,
+        update: RemoteWatchedOverride,
+    ) -> Result<(RemoteProgressOutcome, Option<RemoteWatch>), StoreError> {
+        let RemoteWatchedOverride {
+            import_id: import,
+            library_id: library,
+            item_id: item,
+            user_id: user,
+            lifecycle_generation,
+            assignment_generation,
+            watched,
+            updated_at_ms,
+        } = update;
+        if user <= 0
+            || lifecycle_generation <= 0
+            || assignment_generation <= 0
+            || !(0..=MAX_SAFE).contains(&updated_at_ms)
+        {
+            return Err(invalid());
+        }
+        // The sequence increment is evaluated inside the write, never from an
+        // earlier read: a beat committed between a read and this statement
+        // cannot be overwritten by an override that reused its sequence.
+        let sql = format!("INSERT INTO sharing_watch(source_server_id,catalogue_epoch,remote_library_id,remote_item_id,user_id,position_ms,duration_ms,watched,sequence,updated_at_ms)
+            SELECT i.source_server_id,i.catalogue_epoch,$2,$3,$4,0,NULL,$5,1,$8 {AUTH} AND i.lifecycle_generation=$6 AND i.assignment_generation=$7
+            ON CONFLICT(source_server_id,catalogue_epoch,remote_item_id,user_id) DO UPDATE SET watched=excluded.watched,position_ms=CASE WHEN excluded.watched=1 THEN sharing_watch.position_ms ELSE 0 END,sequence=sharing_watch.sequence+1,updated_at_ms=excluded.updated_at_ms
+            WHERE sharing_watch.remote_library_id=excluded.remote_library_id AND sharing_watch.sequence<{MAX_SAFE}");
+        let mut values = params(import, &library, &item, user);
+        values.extend([
+            i64::from(watched).into(),
+            lifecycle_generation.into(),
+            assignment_generation.into(),
+            updated_at_ms.into(),
+        ]);
+        if self.sharing_txn(vec![(sql, values)]).await?.first() == Some(&1) {
+            let current = self.remote_watch(import, library, item, user).await?;
+            return Ok((RemoteProgressOutcome::Applied, current));
+        }
+        // Nothing was written: either authority is gone, or retained history
+        // for this durable item is bound to another library (no implicit move).
+        let sql=format!("SELECT json_quote(w.remote_library_id) AS payload FROM sharing_watch w WHERE w.source_server_id=(SELECT i.source_server_id {AUTH}) AND w.catalogue_epoch=(SELECT i.catalogue_epoch {AUTH}) AND w.remote_item_id=$3 AND w.user_id=$4 AND EXISTS(SELECT 1 {AUTH} AND i.lifecycle_generation=$5 AND i.assignment_generation=$6)");
+        let mut values = params(import, &library, &item, user);
+        values.extend([lifecycle_generation.into(), assignment_generation.into()]);
+        Ok(if self.sharing_read(&sql, values).await?.is_empty() {
+            (RemoteProgressOutcome::Unauthorized, None)
+        } else {
+            (RemoteProgressOutcome::Conflict, None)
+        })
     }
 }
 fn params(import: Uuid, library: &SourceId, item: &SourceId, user: i64) -> Vec<Value> {

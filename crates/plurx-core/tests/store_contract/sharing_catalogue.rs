@@ -244,6 +244,226 @@ async fn sharing_private_watch_orders_updates_and_isolates_sources_and_assignmen
 }
 
 #[tokio::test]
+async fn sharing_manual_watch_override_takes_next_global_sequence_and_refuses_late_beats() {
+    for_each_backend(|s, b| async move {
+        let user = s
+            .create_user("sharing-manual-viewer", "synthetic-hash", false)
+            .await
+            .expect("viewer");
+        let outsider = s
+            .create_user("sharing-manual-outsider", "synthetic-hash", false)
+            .await
+            .expect("outsider");
+        let a = assigned_import(s.as_ref(), user.id).await;
+        let c = assigned_import(s.as_ref(), user.id).await;
+        let item = || source_id("9007199254740993");
+        let manual = |import: Uuid, library: &str, viewer: i64, assignment: i64, watched: bool| {
+            RemoteWatchedOverride {
+                import_id: import,
+                library_id: source_id(library),
+                item_id: item(),
+                user_id: viewer,
+                lifecycle_generation: 1,
+                assignment_generation: assignment,
+                watched,
+                updated_at_ms: 5000,
+            }
+        };
+        let current = || s.remote_watch(a, source_id("12"), item(), user.id);
+
+        // No history yet: the override takes sequence 1, so a first beat that
+        // was already in flight (also sequence 1) cannot replace it.
+        let (outcome, watch) = s
+            .set_remote_watched(manual(a, "12", user.id, 2, true))
+            .await
+            .expect("first override");
+        assert_eq!(outcome, RemoteProgressOutcome::Applied, "{b}");
+        let watch = watch.expect("override row");
+        assert_eq!(
+            (watch.sequence, watch.position_ms, watch.watched),
+            (1, 0, true),
+            "{b}"
+        );
+        assert_eq!(
+            s.save_remote_watch(update(a, user.id, 1, 1500))
+                .await
+                .expect("late first beat"),
+            RemoteProgressOutcome::Conflict,
+            "{b}"
+        );
+
+        // Playback resumes after a resync and is listed for Continue Watching.
+        assert_eq!(
+            s.save_remote_watch(update(a, user.id, 2, 2200))
+                .await
+                .expect("resumed beat"),
+            RemoteProgressOutcome::Applied,
+            "{b}"
+        );
+        assert_eq!(
+            s.remote_continue_watch_groups(user.id, 200)
+                .await
+                .expect("resumable")
+                .len(),
+            1,
+            "{b}"
+        );
+
+        // Manual unwatched while a beat issued before it (sequence 3) is in
+        // flight: the override takes 3, the late beat conflicts and an older
+        // one is stale. Position is cleared and the item leaves the list.
+        let (outcome, watch) = s
+            .set_remote_watched(manual(a, "12", user.id, 2, false))
+            .await
+            .expect("manual unwatched");
+        assert_eq!(outcome, RemoteProgressOutcome::Applied, "{b}");
+        let watch = watch.expect("unwatched row");
+        assert_eq!(
+            (watch.sequence, watch.position_ms, watch.watched),
+            (3, 0, false),
+            "{b}"
+        );
+        assert_eq!(
+            s.save_remote_watch(update(a, user.id, 3, 2800))
+                .await
+                .expect("late beat"),
+            RemoteProgressOutcome::Conflict,
+            "{b}"
+        );
+        assert_eq!(
+            s.save_remote_watch(update(a, user.id, 2, 2200))
+                .await
+                .expect("old beat"),
+            RemoteProgressOutcome::Stale,
+            "{b}"
+        );
+        let after = current().await.expect("read").expect("override persists");
+        assert_eq!(
+            (after.sequence, after.position_ms, after.watched),
+            (3, 0, false),
+            "{b}"
+        );
+        assert!(
+            s.remote_continue_watch_groups(user.id, 200)
+                .await
+                .expect("cleared")
+                .is_empty(),
+            "{b}: manual unwatched must not leave a resumable row"
+        );
+
+        // Marking watched keeps the stored position, as Local history does.
+        assert_eq!(
+            s.save_remote_watch(update(a, user.id, 4, 4100))
+                .await
+                .expect("watching"),
+            RemoteProgressOutcome::Applied,
+            "{b}"
+        );
+        let (outcome, watch) = s
+            .set_remote_watched(manual(a, "12", user.id, 2, true))
+            .await
+            .expect("manual watched");
+        assert_eq!(outcome, RemoteProgressOutcome::Applied, "{b}");
+        let watch = watch.expect("watched row");
+        assert_eq!(
+            (watch.sequence, watch.position_ms, watch.watched),
+            (5, 4100, true),
+            "{b}"
+        );
+
+        // Same numeric item on another Source, other users and Local history
+        // are untouched; refused overrides write nothing.
+        assert!(
+            s.remote_watch(c, source_id("12"), item(), user.id)
+                .await
+                .expect("other")
+                .is_none(),
+            "{b}"
+        );
+        assert_eq!(
+            s.set_remote_watched(manual(a, "12", outsider.id, 2, false))
+                .await
+                .expect("outsider")
+                .0,
+            RemoteProgressOutcome::Unauthorized,
+            "{b}"
+        );
+        assert_eq!(
+            s.set_remote_watched(manual(a, "12", user.id, 1, false))
+                .await
+                .expect("old assignment generation")
+                .0,
+            RemoteProgressOutcome::Unauthorized,
+            "{b}"
+        );
+        assert!(
+            s.watch_state(user.id, 9007199254740993)
+                .await
+                .expect("local")
+                .is_none(),
+            "{b}: remote override cannot write local watch state"
+        );
+
+        // Retained history for this durable item is bound to library 12; an
+        // override naming another assigned library is not an implicit move.
+        s.assign_share_viewers(
+            a,
+            2,
+            vec![
+                Assignment {
+                    library_id: source_id("12"),
+                    user_id: user.id,
+                },
+                Assignment {
+                    library_id: source_id("13"),
+                    user_id: user.id,
+                },
+            ],
+            1010,
+        )
+        .await
+        .expect("second assigned library");
+        assert_eq!(
+            s.set_remote_watched(manual(a, "13", user.id, 3, false))
+                .await
+                .expect("other library")
+                .0,
+            RemoteProgressOutcome::Conflict,
+            "{b}"
+        );
+        s.assign_share_viewers(a, 3, vec![], 1011)
+            .await
+            .expect("unassign");
+        assert_eq!(
+            s.set_remote_watched(manual(a, "12", user.id, 4, false))
+                .await
+                .expect("unassigned")
+                .0,
+            RemoteProgressOutcome::Unauthorized,
+            "{b}"
+        );
+        s.assign_share_viewers(
+            a,
+            4,
+            vec![Assignment {
+                library_id: source_id("12"),
+                user_id: user.id,
+            }],
+            1012,
+        )
+        .await
+        .expect("reassign");
+        let retained = current().await.expect("read").expect("retained history");
+        assert_eq!(
+            (retained.sequence, retained.position_ms, retained.watched),
+            (5, 4100, true),
+            "{b}: refused overrides wrote nothing"
+        );
+    })
+    .await;
+}
+
+#[tokio::test]
 async fn sharing_receiver_content_authority_is_read_only_and_fences_current_login_and_import() {
     let now_s = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)

@@ -1179,6 +1179,10 @@ pub(crate) fn viewer_router(state: AppState) -> Router<AppState> {
             "/shared/imports/{import}/items/{item}/progress",
             post(viewer_progress),
         )
+        .route(
+            "/shared/imports/{import}/items/{item}/watched",
+            post(viewer_watched),
+        )
         .route("/shared/imports/{import}/items:batch", post(viewer_batch))
         .route_layer(middleware::from_fn_with_state(
             state,
@@ -1791,6 +1795,65 @@ async fn viewer_progress(
         Json(value),
     )
         .into_response())
+}
+/// Explicit B-private watched state. Current Source membership comes from one
+/// fresh pinned read under current assignment; the Store write then takes the
+/// next global history sequence, so a beat issued before this override cannot
+/// restore the old position. Source history and Local watch state are untouched.
+async fn viewer_watched(
+    State(state): State<AppState>,
+    super::extract::AuthUser(user): super::extract::AuthUser,
+    Path((import, item)): Path<(String, String)>,
+    body: Body,
+) -> Result<Response, ApiError> {
+    use plurx_core::store::sharing_catalogue::{RemoteProgressOutcome, RemoteWatchedOverride};
+    #[derive(serde::Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct WatchedBody {
+        watched: bool,
+    }
+    let import = import_id(&import)?;
+    let item = source_id(&item)?;
+    let bytes = tokio::time::timeout(std::time::Duration::from_secs(15), to_bytes(body, 64))
+        .await
+        .map_err(|_| invalid())?
+        .map_err(|_| invalid())?;
+    let WatchedBody { watched } = serde_json::from_slice(&bytes).map_err(|_| invalid())?;
+    let user = user.id;
+    let (summary, metadata) = current_viewer_item(&state, user, import, item.clone()).await?;
+    if !matches!(
+        metadata.kind,
+        SourceItemKind::Movie | SourceItemKind::Episode
+    ) {
+        return Err(fail(StatusCode::CONFLICT, "sharing_watch_unsupported"));
+    }
+    let (outcome, watch) = state
+        .store
+        .set_remote_watched(RemoteWatchedOverride {
+            import_id: import,
+            library_id: metadata.library_id,
+            item_id: item,
+            user_id: user,
+            lifecycle_generation: summary.lifecycle_generation,
+            assignment_generation: summary.assignment_generation,
+            watched,
+            updated_at_ms: clock_ms(),
+        })
+        .await
+        .map_err(unavailable)?;
+    match (outcome, watch) {
+        (RemoteProgressOutcome::Applied, Some(watch)) => Ok((
+            StatusCode::OK,
+            [(axum::http::header::CACHE_CONTROL, "no-store")],
+            Json(json!({"updated":1,"watch":watch})),
+        )
+            .into_response()),
+        (RemoteProgressOutcome::Conflict, _) => Err(fail(
+            StatusCode::CONFLICT,
+            "sharing_history_library_changed",
+        )),
+        _ => Err(missing()),
+    }
 }
 async fn viewer_assigned_libraries(
     State(state): State<AppState>,
@@ -2883,6 +2946,69 @@ mod tests {
                 .to_bytes();
             let body = String::from_utf8(bytes.to_vec()).expect("synthetic catalogue fixture");
             assert!(!body.contains("synthetic-password"));
+        }
+        // Manual watched state needs a login, canonical identities and a fresh
+        // Source read under a current import; none of these fall back.
+        let watched = format!("/api/v1/shared/imports/{import}/items/9007199254740993/watched");
+        for (path, login, body, status) in [
+            (
+                watched.clone(),
+                false,
+                r#"{"watched":false}"#,
+                StatusCode::UNAUTHORIZED,
+            ),
+            (
+                watched.clone(),
+                true,
+                r#"{"watched":false}"#,
+                StatusCode::SERVICE_UNAVAILABLE,
+            ),
+            (
+                watched.clone(),
+                true,
+                r#"{"watched":true}"#,
+                StatusCode::SERVICE_UNAVAILABLE,
+            ),
+            (watched.clone(), true, "", StatusCode::BAD_REQUEST),
+            (
+                watched.clone(),
+                true,
+                r#"{"watched":"no"}"#,
+                StatusCode::BAD_REQUEST,
+            ),
+            (
+                watched.clone(),
+                true,
+                r#"{"watched":false,"position_ms":0}"#,
+                StatusCode::BAD_REQUEST,
+            ),
+            (
+                watched.replace("9007199254740993", "01"),
+                true,
+                r#"{"watched":false}"#,
+                StatusCode::BAD_REQUEST,
+            ),
+            (
+                watched.replace(&import.to_string(), &import.to_string().to_uppercase()),
+                true,
+                r#"{"watched":false}"#,
+                StatusCode::BAD_REQUEST,
+            ),
+        ] {
+            let mut request = axum::http::Request::builder().method("POST").uri(path);
+            if login {
+                request = request.header("authorization", format!("Bearer {token}"));
+            }
+            let response = app
+                .clone()
+                .oneshot(
+                    request
+                        .body(Body::from(body))
+                        .expect("synthetic catalogue fixture"),
+                )
+                .await
+                .expect("synthetic catalogue fixture");
+            assert_eq!(response.status(), status, "{body}");
         }
         assert!(state
             .store

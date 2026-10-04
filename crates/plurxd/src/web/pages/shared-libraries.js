@@ -108,13 +108,20 @@ async function viewSharedCatalogue(generation=++PAGE_RENDER_GENERATION){
         if(sharedCatalogueGroupKey(current)!==sharedCatalogueGroupKey(ref)||current.library_id!==ref.library_id||current.item_id!==ref.item_id) throw new Error("Shared source changed");
         if(!Array.isArray(detail.files)||detail.files.length>64) throw new Error("Shared details unavailable");
         const launch=detail.delivery_status==="available";
-        paint(`${SHARED_ARTWORK.markup(item,ref,capture,true)}<h2>${esc(item.title||"")}</h2><p>${esc(item.overview||"")}</p>${launch?"":'<p class="muted">Playback is not available for this shared item yet.</p>'}<div>${detail.files.map((file,index)=>{
+        const watchable=item.kind==="movie"||item.kind==="episode",watched=!!detail.watch?.watched;
+        paint(`${SHARED_ARTWORK.markup(item,ref,capture,true)}<h2>${esc(item.title||"")}</h2><p>${esc(item.overview||"")}</p>${launch?"":'<p class="muted">Playback is not available for this shared item yet.</p>'}${watchable?`<p><button class="ghost sm" data-shared-watched="${watched?0:1}">${watched?"Mark unwatched":"Mark watched"}</button></p>`:""}<div>${detail.files.map((file,index)=>{
           sharedCatalogueId(file.file_id);
           const fileRef=sharedCatalogueReference(file.reference?.item);
           if(JSON.stringify(fileRef)!==JSON.stringify(current)||file.reference.file_id!==file.file_id) throw new Error("Shared file changed");
           return `<p>${esc(file.video_codec||file.container||"Media file")}${file.duration_ms?` · ${esc(fmtDur(file.duration_ms/1000))}`:""} <button data-shared-play="${index}"${launch?"":" disabled"}>Play</button></p>`;
         }).join("")}</div><div id="shared-children"></div>`);
         const mount=document.getElementById("shared-catalogue");
+        const watchButton=mount?.querySelector("button[data-shared-watched]");
+        if(watchButton instanceof HTMLButtonElement)watchButton.onclick=async()=>{
+          if(!sharedCatalogueCurrent(capture))return;watchButton.disabled=true;
+          try{await sharedCatalogueSetWatched(ref,watchButton.dataset.sharedWatched==="1");if(sharedCatalogueCurrent(capture))void render();}
+          catch(error){if(sharedCatalogueCurrent(capture)){watchButton.disabled=false;watchButton.title=error.message||"Shared watch state unavailable";}}
+        };
         if(mount)for(const button of mount.querySelectorAll("button[data-shared-play]")){
           if(!(button instanceof HTMLButtonElement))continue;
           const index=Number(button.dataset.sharedPlay),file=detail.files[index];
@@ -200,6 +207,13 @@ async function sharedCatalogueLaunch(reference,fileId,stillCurrent){
   if(!Number.isSafeInteger(resume)||resume<0||!Number.isSafeInteger(duration)||duration<0)throw new Error("Shared timeline unavailable.");
   return play(selected.context.source_file_id,fresh.detail.item.title||"Shared item",resume,duration,
     {...fresh.detail.item,fileContext:selected.context,sharedReference:ref});
+}
+// B-private explicit watched state; the server takes the next history
+// sequence, so a beat sent before this click cannot restore the old position.
+async function sharedCatalogueSetWatched(reference,watched){
+  const ref=sharedCatalogueReference(reference);
+  if(typeof watched!=="boolean")throw new TypeError("Invalid shared watched state");
+  return api(`/shared/imports/${ref.import_id}/items/${ref.item_id}/watched`,{method:"POST",body:{watched}});
 }
 // Next episode follows Source hierarchy and order through B: next in the
 // season, else the first episode of the next season. It returns a full Shared

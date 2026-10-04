@@ -174,3 +174,13 @@ test("Shared next episode follows Source order through B and mints a fresh autho
  fixture.context.SHARED_DECISION.details=async()=>({detail:{delivery_status:"unavailable"},files:[]});
  await assert.rejects(fixture.context.launch(at("9007199254740994"),null,()=>true));assert.equal(launches.length,2);
 });
+test("manual Shared watched state posts only to the B-private Shared route",async()=>{
+ const fixture=harness(async path=>reply({updated:1,watch:{sequence:3,position_ms:0,watched:false}})),bodies=[];
+ const api=fixture.context.api;fixture.context.api=async(path,options)=>{bodies.push(options);return api(path,options);};
+ vm.runInContext("this.watched=sharedCatalogueSetWatched",fixture.context);
+ await fixture.context.watched(ref,false);await fixture.context.watched(ref,true);
+ const route=`/shared/imports/${ref.import_id}/items/${ref.item_id}/watched`;
+ assert.deepEqual(fixture.requests,[route,route]);
+ assert.deepEqual(bodies.map(o=>[o.method,o.body.watched]),[["POST",false],["POST",true]]);
+ await assert.rejects(fixture.context.watched(ref,"false"));assert.equal(fixture.requests.length,2);
+});
