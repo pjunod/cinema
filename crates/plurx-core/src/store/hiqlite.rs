@@ -7394,7 +7394,7 @@ mod tests {
         assert_eq!(
             AUTH_SCHEMA_MIGRATION_SOURCE + 65,
             AUTH_SCHEMA_BASELINE_VERSION,
-            "the additive migration dispatcher ends at baseline v70"
+            "this implementation contains every additive v5→v70 step, ending at baseline v70"
         );
         let row = |schema_version| CompatibilityRow {
             schema_version,

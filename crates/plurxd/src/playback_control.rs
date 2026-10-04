@@ -53,11 +53,6 @@ const MAX_ACTION_NAME_LEN: usize = 32;
 const HOLD_ACTION: &str = "hold";
 const TERMINAL_ACTION: &str = "terminal";
 const RETRY_RESOURCE_ACTION: &str = "retry_resource";
-/// The actions that report what production is doing and carry no
-/// transaction, session or URL: a relay may forward exactly these.
-pub(crate) fn is_advisory_action_name(name: &str) -> bool {
-    matches!(name, HOLD_ACTION | TERMINAL_ACTION | RETRY_RESOURCE_ACTION)
-}
 /// The name a client declares to be offered a staged successor.
 ///
 /// Named for the transaction rather than for the moment — roadmap §3.1 calls
@@ -66,6 +61,11 @@ pub(crate) fn is_advisory_action_name(name: &str) -> bool {
 /// declared it is never sent one, which is what makes shipping the server half
 /// ahead of the client half safe.
 pub(crate) const PREPARE_REPLACEMENT_ACTION: &str = "prepare_replacement";
+/// The actions that report what production is doing and carry no
+/// transaction, session or URL: a relay may forward exactly these.
+pub(crate) fn is_advisory_action_name(name: &str) -> bool {
+    matches!(name, HOLD_ACTION | TERMINAL_ACTION | RETRY_RESOURCE_ACTION)
+}
 /// An `action_id` is minted by this server as a UUID; the bound exists for the
 /// relayed case, where it arrives from a peer.
 const MAX_ACTION_ID_LEN: usize = 64;

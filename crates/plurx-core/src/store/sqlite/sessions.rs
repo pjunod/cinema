@@ -4402,6 +4402,8 @@ impl MediaSessionStore for SqliteStore {
         let playback_id = playback_id.to_owned();
         let recovery_epoch = recovery_epoch.to_owned();
         self.with_conn(move |conn| {
+            // A read, so no transaction: the connection mutex already
+            // serializes this against every write in the store.
             read_recovery_row(conn, &principal, &playback_id, &recovery_epoch)
         })
         .await
