@@ -460,7 +460,19 @@ fn owner_loss_detail(
 /// without minting a second HTTP wait budget. Only an active, unexpired route
 /// this node owns qualifies; Store/attachment uncertainty remains retryable
 /// and must never be relabelled as authoritative absence.
-pub(super) async fn vod_resurrected_before(
+// Resurrection rebuilds a whole VOD presentation (catalog, family binding,
+// controlled admission), so its future is tens of kilobytes. Seven delivery
+// handlers call it on a rare branch; boxing it here keeps every one of their
+// futures, and the stacks that poll them, the size of their common path.
+pub(super) fn vod_resurrected_before<'a>(
+    state: &'a AppState,
+    session: &'a str,
+    deadline: Instant,
+) -> std::pin::Pin<Box<dyn std::future::Future<Output = VodResurrection> + Send + 'a>> {
+    Box::pin(vod_resurrected_unboxed(state, session, deadline))
+}
+
+async fn vod_resurrected_unboxed(
     state: &AppState,
     session: &str,
     deadline: Instant,
