@@ -1854,7 +1854,7 @@ fn subtitle_not_ready_503(enabled: bool) -> DeveloperEnableItem {
                 "hlsjs_survives_subtitle_refusal",
                 "hls.js keeps the picture through a subtitle 503",
                 "hls.js retries subtitle fragments on its own schedule and escalates to a fatal \
-                 network error after its retry budget. Whether the bundled 1.6.16 build treats a \
+                 network error after its retry budget. Whether the bundled 1.6.19 build treats a \
                  503 with `Retry-After` on a subtitle rendition as recoverable is a browser \
                  measurement."
                     .to_owned(),
