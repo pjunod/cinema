@@ -11,7 +11,9 @@ bump may break compatibility and a **patch** bump never does.
 ### Added
 
 - **Jellyfin client compatibility (experimental, off by default).** Settings →
-  Developer → *Allow Jellyfin clients* opens a `/jellyfin` facade for the pinned
+  Developer → *Allow Jellyfin clients* opens a Jellyfin facade, reachable by
+  the server's address alone on Jellyfin's standard port 8096 or at
+  `/jellyfin` on Plurx's port, for the pinned
   Infuse 8.5.6 and Jellyfin Android TV 0.19.10 clients: sign-in, movie and TV
   browsing, direct play with Range, native VOD over HLS (copy or encoded, with
   the fMP4 initialization prefix Infuse needs), subtitles, markers and watch
