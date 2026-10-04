@@ -4143,6 +4143,7 @@ pub(crate) struct PreparedSourcePlayback {
     principal: plurx_core::playback_principal::PlaybackPrincipal,
     file: MediaFile,
     resolved: ResolvedPlan,
+    source_fingerprint: String,
     decision: super::super::stream::DecisionResponse,
 }
 #[allow(dead_code)]
@@ -4169,7 +4170,7 @@ impl PreparedSourcePlayback {
         )
     }
     pub(crate) fn fingerprint(&self) -> &str {
-        &self.resolved.intent_fingerprint
+        &self.source_fingerprint
     }
     /// Build the complete durable HLS response from the admitted engine facts.
     /// This describes the pending session; it grants neither readiness nor
@@ -4292,7 +4293,7 @@ impl PreparedSourcePlayback {
             && binding.file_revision() == &self.target.revision
             && binding.playback_id() == self.resolved.request.playback_id
             && Some(binding.request_id()) == self.resolved.request.request_id.as_deref()
-            && binding.request_fingerprint() == self.resolved.intent_fingerprint
+            && binding.request_fingerprint() == self.source_fingerprint
     }
 }
 
@@ -4462,11 +4463,53 @@ pub(crate) async fn prepare_source_playback(
     {
         return Err(refused("final_tuple_revision_switch_grant"));
     }
+    let source_fingerprint = source_playback_fingerprint(
+        &resolved.intent_fingerprint,
+        resolved.native_subtitles,
+        resolved.native_subtitle,
+    );
     Ok(PreparedSourcePlayback {
+        source_fingerprint,
         target,
         principal,
         file,
         resolved,
         decision,
     })
+}
+
+// Source-only durable identity also freezes native presentation selection.
+// The Local planner and its durable fingerprints keep their existing contract.
+fn source_playback_fingerprint(base: &str, native: bool, selected: Option<i64>) -> String {
+    use sha2::{Digest, Sha256};
+    let mut digest = Sha256::new();
+    digest.update(b"plurx.sharing-source-playback.v2\0");
+    digest.update(base.as_bytes());
+    digest.update([u8::from(native)]);
+    match selected.filter(|_| native) {
+        Some(index) => {
+            digest.update([1]);
+            digest.update(index.to_be_bytes());
+        }
+        None => digest.update([0]),
+    }
+    format!("{:x}", digest.finalize())
+}
+
+#[cfg(test)]
+mod source_fingerprint_tests {
+    use super::source_playback_fingerprint;
+    #[test]
+    fn source_fingerprint_freezes_native_choice_and_normalizes_disabled_choice() {
+        let base = "a".repeat(64);
+        let copy = source_playback_fingerprint(&base, false, None);
+        assert_eq!(copy, source_playback_fingerprint(&base, false, Some(0)));
+        let native = source_playback_fingerprint(&base, true, None);
+        let first = source_playback_fingerprint(&base, true, Some(0));
+        let second = source_playback_fingerprint(&base, true, Some(1));
+        assert_ne!(copy, native);
+        assert_ne!(native, first);
+        assert_ne!(first, second);
+        assert!(first.len() == 64 && first.bytes().all(|b| b.is_ascii_hexdigit()));
+    }
 }

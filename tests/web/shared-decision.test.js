@@ -93,3 +93,18 @@ test("late synthetic Start cannot attach after original account replacement",asy
  const h=harness((u,o)=>{if(o.method==='GET')return response(detail(),u);started();return new Promise(r=>release=()=>r(response(JSON.stringify(startReply()),u)));});
  const c=(await h.details(ref)).files[0].context,pending=h.start(c,startBody(h));await ready;h.change();release();await assert.rejects(pending);assert.equal(c.session_id,null);
 });
+
+test("two imports of the same Source item share ordered beats across B sessions",async()=>{
+ const other={...ref,import_id:'44444444-4444-4444-8444-444444444444'},second='dddddddd-dddd-4ddd-8ddd-dddddddddddd';let starts=0;
+ const h=harness((u,o)=>{
+  if(o.method==='GET'){let raw=detail('9007199254740993','1');if(u.includes(other.import_id))raw=raw.replaceAll(ref.import_id,other.import_id);return response(raw.slice(0,-1)+',"watch":{"sequence":4}}',u);}
+  if(u.endsWith('/hls/sessions')){const r=startReply();if(++starts===2){r.session_id=second;r.playlist_url=r.playlist_url.replaceAll(sid,second);r.control.url=r.control.url.replaceAll(sid,second);}return response(JSON.stringify(r),u);}
+  return response('{}',u);
+ });
+ const a=(await h.start((await h.details(ref)).files[0].context,startBody(h)))._sharedContext;
+ assert.equal(await h.progress(a,1000,90000,false),true);
+ const b=(await h.start((await h.details(other)).files[0].context,startBody(h)))._sharedContext;
+ assert.equal(await h.progress(b,2000,90000,false),true);
+ const beats=h.requests.filter(r=>r.url.endsWith('/progress')).map(r=>JSON.parse(r.options.body));
+ assert.deepEqual(beats.map(r=>r.sequence),[5,6]);assert.deepEqual(beats.map(r=>r.session_id),[sid,second]);
+});

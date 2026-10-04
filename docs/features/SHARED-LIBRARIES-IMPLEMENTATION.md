@@ -4094,6 +4094,73 @@ Final affected feature-enabled Clippy with denied warnings passed in
 metadata boundary; they do not qualify a live HTTP progress/control route,
 Source physical work, two-NAT delivery or hardware playback.
 
+### S5 retained receiver cleanup transport
+
+The receiver retains the complete original private Source session request,
+the exact pinned endpoint selected for Start, and the credential and viewer
+hash used at dispatch. It records them before the first Source send. Removing
+an import or losing the original B login therefore does not erase the means
+to clean up an already dispatched Source request. The selected endpoint is
+also included in the bounded sealed upstream capsule.
+
+The cleanup connection exposes only the fixed authenticated file-scoped End
+exchange. It validates the retained private endpoint and SPKI without an
+identity-read preflight, since sharing-off can disable identity reads while
+an existing request still needs retirement. It exposes no catalogue, Start,
+or resource operation. The complete original session recipe and all known
+Source incarnation/session/control identifiers accompany End; a lost Start
+response retains the original request identity instead of inventing a session.
+
+A bounded duplicate-aware closed reply must echo the full Source file
+reference and request identity. A known Source tuple must match exactly;
+unknown lineage may contain the actual assigned tuple or omit both session
+and control epoch. Only a settled reply with a canonical nonnil v4 confirmation
+is accepted. The receiver retains that authenticated receipt before any later
+Store await. The receipt records RPC facts: it cannot alone create retirement
+authority. The independently owned B retirement task must also join its actual
+accepted bodies, readers and writers before using the Core retirement witness.
+The receiver playback ingress and that ownership integration remain closed
+while their end-to-end regressions are outstanding.
+
+The combined cold-index and cleanup candidate passed pinned Rust 1.97.1
+Core/daemon all-target compilation, thirteen actual Source copy/index tests
+(40.14 seconds), the Core guarded index-evidence test (1.07 seconds), and
+seven actual Source HTTP tests (12.19 seconds), with zero ignored tests.
+The four documentation index tests and validation catalog also passed. The
+cleanup wire regressions exercise full recipe preservation, exact known
+lineage, lost-Start settlement, duplicates, oversized replies, unsettled
+states and noncanonical identifiers. These are wire validation regressions;
+actual authenticated End transport and B physical retirement remain open.
+
+### S5 accepted writer completion and owned receiver Start join
+
+The accepted-connection closure observer completes after the actual Hyper
+connection and socket writer are dropped. A Source response retains its
+producer guard through that observer; body EOF and cancellation are not
+settlement. The actual Source HTTP regression blocks the incarnation JSON
+DATA at the accepted HTTP/1 and HTTP/2 writer and requires connection/DATA
+closure before the actor can report settled. Incomplete resource streams and
+independent blocking read jobs still require their own ownership tests.
+
+The receiver registry retains the exact Start task handle. Cleanup seals
+dispatch before joining that task; a private joined token binds the result
+to the same registry entry and is required before its Source End exchange.
+A delayed send cannot follow cleanup's closed gate. An already dispatched
+credential/endpoint obligation survives closure, and an absent or failed
+task cannot synthesize a joined token. Pending renewal stops when cleanup
+requests closure, while an already sent Start remains awaited so its eventual
+Source lineage is retained. The planned activation is stored before its SQL
+await, and the actual B owner/lease is retained immediately after activation
+and successful renewal. Activation commit-unknown still requires exact route
+reconciliation; registry absence or a planned epoch does not settle it.
+
+The exact combined tree passed pinned Rust 1.97.1 feature-enabled all-target
+Core/daemon compilation (53.42 seconds), four receiver ownership/retry tests,
+and eight actual Source HTTP tests (24.04 seconds), all with zero ignored.
+The receiver ownership fixture proves the real spawned task remains joined
+behind its release signal; it does not model a physical Source producer.
+The production B ingress, accepted B body/read/writer joins and private Core
+retirement witness integration remain outstanding.
 ### B confirmed retirement metadata (S4 follow-up)
 
 The receiver retirement Store takes a `ReceiverRetirementWitness` implemented
@@ -4165,72 +4232,46 @@ partial pending attachment, foreign pin epoch and ignored cleanup-write cases
 are inside the named Core receiver regressions above.
 ### S5 retained receiver cleanup transport
 
-The receiver retains the complete original private Source session request,
-the exact pinned endpoint selected for Start, and the credential and viewer
-hash used at dispatch. It records them before the first Source send. Removing
-an import or losing the original B login therefore does not erase the means
-to clean up an already dispatched Source request. The selected endpoint is
-also included in the bounded sealed upstream capsule.
+### S5 private receiver retirement owner and resource admission boundary
 
-The cleanup connection exposes only the fixed authenticated file-scoped End
-exchange. It validates the retained private endpoint and SPKI without an
-identity-read preflight, since sharing-off can disable identity reads while
-an existing request still needs retirement. It exposes no catalogue, Start,
-or resource operation. The complete original session recipe and all known
-Source incarnation/session/control identifiers accompany End; a lost Start
-response retains the original request identity instead of inventing a session.
+The receiver now has a private detached retirement owner. It closes dispatch
+and resource admissions, joins the exact owned Start task, waits for the last
+registered resource/job guard, and then obtains the authenticated Source End
+confirmation. A never-dispatched outcome requires the same closed gate and
+joins. Neither a timer, a stored response nor registry absence creates either
+outcome. The confirmation is purpose-hashed with the full Source reference,
+private request and actual Source lineage before the private Core witness is
+constructed. Known-source confirmations and sealed bindings remain retained
+across Store errors and uncertain commits.
 
-A bounded duplicate-aware closed reply must echo the full Source file
-reference and request identity. A known Source tuple must match exactly;
-unknown lineage may contain the actual assigned tuple or omit both session
-and control epoch. Only a settled reply with a canonical nonnil v4 confirmation
-is accepted. The receiver retains that authenticated receipt before any later
-Store await. The receipt records RPC facts: it cannot alone create retirement
-authority. The independently owned B retirement task must also join its actual
-accepted bodies, readers and writers before using the Core retirement witness.
-The receiver playback ingress and that ownership integration remain closed
-while their end-to-end regressions are outstanding.
+Cleanup captures the actual B route only after these joins and checks its
+original session/incarnation, principal, playback, owner node/epoch, recovery
+epoch, complete recipe, fingerprint and source timeline. Terminal lease
+metadata can refresh only after Refused and through the same immutable checks.
+The exact retained binding is tried first. Only Refused permits the separate
+all-NULL pending transaction; an error never means no attachment. Successful
+retirement is the only path marking an activated entry retired. Later registry
+registration evicts such completed entries into a bounded non-authorizing
+retry tombstone list; unresolved entries continue to consume the eight slots.
 
-The combined cold-index and cleanup candidate passed pinned Rust 1.97.1
-Core/daemon all-target compilation, thirteen actual Source copy/index tests
-(40.14 seconds), the Core guarded index-evidence test (1.07 seconds), and
-seven actual Source HTTP tests (12.19 seconds), with zero ignored tests.
-The four documentation index tests and validation catalog also passed. The
-cleanup wire regressions exercise full recipe preservation, exact known
-lineage, lost-Start settlement, duplicates, oversized replies, unsettled
-states and noncanonical identifiers. These are wire validation regressions;
-actual authenticated End transport and B physical retirement remain open.
+The resource registry allows at most 32 active opens per receiver actor.
+Admissions close before cleanup waits. Each accepted response, independent
+read and upstream client job must retain its actual guard through completion;
+body EOF cannot release a guard still held by a job or writer. The ownership
+test uses a real spawned job held behind a release signal and proves cleanup
+waits after the response's guard is dropped. This is an ownership regression,
+not an HTTP or physical Source fixture.
 
-### S5 accepted writer completion and owned receiver Start join
-
-The accepted-connection closure observer completes after the actual Hyper
-connection and socket writer are dropped. A Source response retains its
-producer guard through that observer; body EOF and cancellation are not
-settlement. The actual Source HTTP regression blocks the incarnation JSON
-DATA at the accepted HTTP/1 and HTTP/2 writer and requires connection/DATA
-closure before the actor can report settled. Incomplete resource streams and
-independent blocking read jobs still require their own ownership tests.
-
-The receiver registry retains the exact Start task handle. Cleanup seals
-dispatch before joining that task; a private joined token binds the result
-to the same registry entry and is required before its Source End exchange.
-A delayed send cannot follow cleanup's closed gate. An already dispatched
-credential/endpoint obligation survives closure, and an absent or failed
-task cannot synthesize a joined token. Pending renewal stops when cleanup
-requests closure, while an already sent Start remains awaited so its eventual
-Source lineage is retained. The planned activation is stored before its SQL
-await, and the actual B owner/lease is retained immediately after activation
-and successful renewal. Activation commit-unknown still requires exact route
-reconciliation; registry absence or a planned epoch does not settle it.
-
-The exact combined tree passed pinned Rust 1.97.1 feature-enabled all-target
-Core/daemon compilation (53.42 seconds), four receiver ownership/retry tests,
-and eight actual Source HTTP tests (24.04 seconds), all with zero ignored.
-The receiver ownership fixture proves the real spawned task remains joined
-behind its release signal; it does not model a physical Source producer.
-The production B ingress, accepted B body/read/writer joins and private Core
-retirement witness integration remain outstanding.
-
+Pinned Rust 1.97.1 Core/daemon all-target compilation passed in 75 seconds
+and affected feature-enabled Clippy passed in 95 seconds. Two resource
+ownership tests and the six-test receiver ownership group passed with zero
+ignored. The combined Core receiver group passed three tests (21.33 seconds)
+and the actual three-voter contract passed one test (9.88 seconds), zero
+ignored. Public receiver ingress remains unregistered. Actual accepted B
+response/read/client-job guard wiring, authenticated pinned End exchange,
+request-only no-activation cleanup and automatic failure-triggered retirement
+must be qualified before it opens. Core metadata and the ownership fixtures
+alone do not qualify physical end-to-end playback.
 ### B session delivery grant Store checkpoint (metadata qualified)
 
 The receiver delivery Store issues only hashed verifiers for an exact published
@@ -4450,3 +4491,72 @@ zero failures. The pinned deadline unit reports 1 passed, zero ignored;
 feature Clippy passes in 1 minute 30 seconds. These are caller/metadata
 regressions only. Moving the intended base requires requalification, and the
 candidate ingress remains unregistered until the actual physical relay receipt.
+
+### S5 joined pending-request cleanup and Source native intent identity
+
+The receiver owner now records its actual claim stage before each claim or
+owner-assignment await. Its Start task waits for its own JoinHandle to be
+installed before it can run, so automatic retirement after a Start failure
+cannot race the handle it must join. Owner failures and loss of authority elect
+one independently owned retirement task; cancelled HTTP waiters still leave
+that owned operation alive.
+
+After dispatch is sealed and the actual Start and accepted body/job owners have
+joined, an attempt that never claimed a row can release only its inert registry
+slot. A claimed, never-dispatched attempt instead constructs the private pending
+retirement witness from its complete original intent, client request, playback
+identity and retained NULL or attempted node owner. The Store's exact transaction
+requires the same genuine starting/failed request and absence of every route,
+pointer, session lease, upstream binding, pin, delivery grant and terminal ack.
+An uncertain commit keeps the same witness. Only Refused can change the expected
+attempted owner to the legitimate original NULL owner; foreign or partially
+activated metadata stays retained. A planned activation can use the full route
+retirement witness only after the exact pending transaction refuses it.
+
+Initial Shared Start independently refuses non-null previous_session_id,
+control_sequence, reopen_reason and intent before receiver registration and
+before Source dispatch. Explicit null and omitted fields retain their original
+representation. These fields remain parseable for closed cleanup recipes; this
+change does not qualify shared recovery or controls.
+
+Source prepared playback now freezes native subtitle enablement and the actual
+selected subtitle ordinal into its own SHA-256 intent domain. Its claim,
+assignment matching and fingerprint getter consume that same value. Disabled
+native presentation normalizes the optional choice away; enabled no-choice,
+ordinal zero and another ordinal are distinct. Local durable fingerprints keep
+the existing calculation. Focused qualification for this combined candidate
+follows before the normal commit.
+
+Pinned combined qualification on `9aa4e8a39` plus pending checkpoint `04b5f45aa`
+and the private factories: Core/daemon all-target check passed in 70 seconds,
+denied-warning feature Clippy in 95 seconds. The receiver owner group passed
+eight tests (including two resource-owner tests), zero ignored, in 0.15 seconds;
+after lint-safe test scoping it passed eight again in 0.16 seconds. Candidate
+ingress passed four tests in 0.17 seconds; Source native fingerprint identity
+passed one test. Actual Source copy/index passed thirteen tests in 40.93 seconds,
+encoded media nine in 31.16 seconds and existing Source HTTP eight in 23.93
+seconds, all zero ignored. The exact pending request memory/pooled matrix passed
+one test in 2.95 seconds, and its actual three-voter contract passed one test in
+9.16 seconds with both replicated-store features. Documentation index checks
+passed four tests. The tracked merge hook remains required before commit.
+
+The inert preclaim test runs the actual owned task against the real fixture
+Store, waits for joined retirement and confirms that no route was created. It
+qualifies that early failure case; it does not claim full pinned B-to-Source
+playback or a physical Source cleanup result from registry absence.
+
+The caller is also qualified on the complete joined-pending receiver ancestor
+`1621b4967`. Additive integration retains its independent Unsupported refusal
+and private cleanup factory. The exact combined focused web run reports 36
+passed, zero skipped; the supplemental case starts two synthetic B sessions
+through different assigned imports of the same Source/epoch/item and sends
+sequences 5 then 6 from an initial watch sequence 4. The complete web lane and
+four documentation index tests pass. The pinned deadline unit reports one
+passed, zero ignored, after the combined Core test compile in 1 minute 3
+seconds. These results remain protocol/metadata evidence, not native hardware
+or physical B-to-Source playback qualification.
+The same combined feature all-target Clippy passes in 1 minute 43 seconds.
+The actual daemon ingress filter reports four passed, zero ignored in 0.19
+seconds, preserving complete request fields, recovery refusal, account-authenticated
+aliases and the unregistered public route. The normal merge hook remains
+required for the exact resulting tree.

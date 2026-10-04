@@ -649,6 +649,38 @@ async fn read_packet_probe_pipe(
     Ok(bytes)
 }
 
+/// Actual held-descriptor probe command for an admitted Source owner. The
+/// caller retains child/job/pipe ownership; this function never spawns.
+pub(crate) fn source_held_probe_command(
+    source: &std::fs::File,
+) -> Result<tokio::process::Command, String> {
+    let mut command = tokio::process::Command::new(ffprobe_bin());
+    #[cfg(unix)]
+    {
+        inherit_file_descriptors(&mut command, &[(source, 3)]);
+    }
+    command.args([
+        "-v",
+        "error",
+        "-threads",
+        "1",
+        "-print_format",
+        "json",
+        "-show_format",
+        "-show_streams",
+        "-show_chapters",
+    ]);
+    #[cfg(unix)]
+    command.arg("/dev/fd/3");
+    #[cfg(windows)]
+    {
+        let path = windows_source_path(source)?;
+        verify_windows_source_path(source, &path)?;
+        command.arg(path);
+    }
+    Ok(command)
+}
+
 async fn held_source_probe_json_with_limits(
     source: &std::fs::File,
     timeout: Duration,
@@ -1867,6 +1899,22 @@ impl EncodedEngine {
         let media = FRAGMENT_INDEX_ENGINE
             .get_or_init(fragment_index_engine_inner)
             .await;
+        Self::capture_with_media(text_burn, source_config, media).await
+    }
+
+    pub(crate) async fn capture_source(
+        execution: &crate::transcode::source_preparation::SourceCommandExecutor<'_>,
+    ) -> Result<(Self, String), String> {
+        // A Source cancellation/refusal cannot poison Local's cached snapshot.
+        let (media, build) = fragment_index_engine_with_source(Some(execution)).await;
+        Ok((Self::capture_with_media(None, None, &media).await?, build))
+    }
+
+    async fn capture_with_media(
+        text_burn: Option<&std::path::Path>,
+        source_config: Option<&std::path::Path>,
+        media: &FragmentIndexEngine,
+    ) -> Result<Self, String> {
         let mut charges = EngineAttestationCharges::default();
         if !media.usable {
             return Err("the encoder dependency closure could not be attested".to_owned());
@@ -2177,6 +2225,11 @@ pub(crate) async fn engine_objects_are_current_batch(
 }
 
 async fn fragment_index_engine_inner() -> FragmentIndexEngine {
+    fragment_index_engine_with_source(None).await.0
+}
+async fn fragment_index_engine_with_source(
+    execution: Option<&crate::transcode::source_preparation::SourceCommandExecutor<'_>>,
+) -> (FragmentIndexEngine, String) {
     let probe_started = Instant::now();
     let bin = ffmpeg_bin();
     let resolved = resolve_executable_path(&bin);
@@ -2188,8 +2241,20 @@ async fn fragment_index_engine_inner() -> FragmentIndexEngine {
     let version_output = {
         let mut command = tokio::process::Command::new(&bin);
         command.arg("-version");
-        bounded_command_output(command).await
+        match execution {
+            Some(execution) => execution.output(command, 1024 * 1024).await,
+            None => bounded_command_output(command).await,
+        }
     };
+    let build = version_output
+        .as_ref()
+        .ok()
+        .and_then(|output| std::str::from_utf8(&output.stdout).ok())
+        .and_then(|text| text.lines().find(|line| !line.trim().is_empty()))
+        .map_or_else(
+            || format!("{bin} (version unavailable)"),
+            |line| format!("{bin} ({line})"),
+        );
     match version_output {
         Ok(output) => {
             digest.update((output.stdout.len() as u64).to_be_bytes());
@@ -2215,7 +2280,11 @@ async fn fragment_index_engine_inner() -> FragmentIndexEngine {
         #[cfg(target_os = "macos")]
         command.arg("-L");
         command.arg(path);
-        match bounded_command_output(command).await {
+        let output = match execution {
+            Some(execution) => execution.output(command, 1024 * 1024).await,
+            None => bounded_command_output(command).await,
+        };
+        match output {
             Ok(output) => {
                 let stdout = normalized_dependency_report(&output.stdout);
                 match dependency_paths_from_report(&stdout) {
@@ -2280,11 +2349,14 @@ async fn fragment_index_engine_inner() -> FragmentIndexEngine {
         digest.update((object_digest.len() as u64).to_be_bytes());
         digest.update(object_digest);
     }
-    FragmentIndexEngine {
-        digest: hex::encode(digest.finalize()),
-        objects: objects.into(),
-        usable,
-    }
+    (
+        FragmentIndexEngine {
+            digest: hex::encode(digest.finalize()),
+            objects: objects.into(),
+            usable,
+        },
+        build,
+    )
 }
 
 /// A Fontconfig enumeration with the two costs it incurred kept apart: the
@@ -2460,7 +2532,7 @@ where
 
 pub(crate) struct BoundedOutput {
     pub(crate) stdout: Vec<u8>,
-    stderr: Vec<u8>,
+    pub(crate) stderr: Vec<u8>,
 }
 
 /// Every engine probe is a capability probe nobody is waiting on.

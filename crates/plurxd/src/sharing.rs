@@ -379,12 +379,30 @@ impl SharingManager {
 
 /// Compare the complete retained client recipe; only the private Source
 /// request UUID is replaced. This check precedes peer lookup and any send.
+pub(crate) fn receiver_initial_request_supported(request_json: &str) -> bool {
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(request_json) else {
+        return false;
+    };
+    value.is_object()
+        && [
+            "previous_session_id",
+            "control_sequence",
+            "reopen_reason",
+            "intent",
+        ]
+        .iter()
+        .all(|key| value.get(key).is_none_or(serde_json::Value::is_null))
+}
+
 pub(crate) fn receiver_source_request(
     intent: &plurx_core::sharing_receiver_sessions::ReceiverSessionIntent,
     request_json: &str,
 ) -> Result<crate::http::hls::SourcePlaybackTarget, crate::sharing_client::PeerError> {
     use crate::sharing_client::PeerError;
     let recipe = &intent.recipe;
+    if !receiver_initial_request_supported(&recipe.request_json) {
+        return Err(PeerError::InvalidResponse);
+    }
     let expected = crate::http::hls::SourcePlaybackTarget {
         server_id: recipe.reference.server_id,
         catalogue_epoch: recipe.reference.catalogue_epoch,

@@ -16,6 +16,8 @@ use std::{
     time::{Duration, Instant},
 };
 use uuid::Uuid;
+#[path = "shared_receiver_retirement.rs"]
+mod retirement;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum ReceiverStartError {
@@ -24,10 +26,18 @@ pub(crate) enum ReceiverStartError {
     Conflict,
     Unresolved,
     Deadline,
+    Unsupported,
 }
 #[derive(Default)]
 pub(crate) struct ReceiverStartRegistry {
     entries: Mutex<Vec<Arc<ReceiverStartInner>>>,
+    settled: Mutex<Vec<SettledReceiverAttempt>>,
+}
+struct SettledReceiverAttempt {
+    user_id: i64,
+    request_id: String,
+    login_hash: String,
+    fingerprint: String,
 }
 struct ReceiverStartInner {
     intent: ReceiverSessionIntent,
@@ -37,10 +47,23 @@ struct ReceiverStartInner {
     state: Mutex<ReceiverStartState>,
     start_task: Mutex<Option<tokio::task::JoinHandle<()>>>,
     stop: tokio_util::sync::CancellationToken,
+    bodies: Arc<retirement::ReceiverBodyRegistry>,
+    retirement_task: Mutex<Option<tokio::task::JoinHandle<()>>>,
     changed: tokio::sync::Notify,
+}
+#[derive(Clone, Default)]
+enum ReceiverClaimStage {
+    #[default]
+    NotAttempted,
+    Claiming,
+    NotAcquired,
+    Acquired,
+    Assigning(String),
+    Assigned(String),
 }
 #[derive(Default)]
 struct ReceiverStartState {
+    claim: ReceiverClaimStage,
     start: Option<Result<StartResponse, ReceiverStartError>>,
     // Never discarded on publication failure or loss of the original login.
     source: Option<ReceiverSourceAttachment>,
@@ -50,6 +73,8 @@ struct ReceiverStartState {
     dispatch_closed: bool,
     owner: Option<ReceiverSourceOwner>,
     planned_activation: Option<MediaSessionActivation>,
+    retirement_started: bool,
+    retired: bool,
 }
 // The only constructor joins the exact registry-owned Start task. This is
 // neither Source settlement nor accepted B body/writer completion.
@@ -97,14 +122,24 @@ impl ReceiverStartRegistry {
         // The owner is inserted before the first claim, activation or Source send.
         // Dropping an HTTP waiter never drops the owned producer obligation.
         let owner = entry.clone();
+        let (installed, ready) = tokio::sync::oneshot::channel();
         let task = tokio::spawn(async move {
-            let result = run_owner(state, owner.clone(), playback_id, source_wrapper).await;
+            // Cleanup cannot race the installation of the exact task it joins.
+            if ready.await.is_err() {
+                return;
+            }
+            let result = run_owner(state.clone(), owner.clone(), playback_id, source_wrapper).await;
             if let Err(error) = result {
                 owner.state.lock().expect("receiver owner").start = Some(Err(error));
                 owner.changed.notify_waiters();
+                ReceiverStartActor(owner).begin_retirement(
+                    state,
+                    plurx_core::sharing_receiver_retirement::ReceiverRetirementReason::Revoked,
+                );
             }
         });
         *entry.start_task.lock().expect("receiver start task") = Some(task);
+        let _ = installed.send(());
         Ok(ReceiverStartActor(entry))
     }
     fn register(
@@ -114,6 +149,9 @@ impl ReceiverStartRegistry {
         playback_id: &str,
         source_wrapper: &str,
     ) -> Result<(Arc<ReceiverStartInner>, bool), ReceiverStartError> {
+        if !crate::sharing::receiver_initial_request_supported(&intent.recipe.request_json) {
+            return Err(ReceiverStartError::Unsupported);
+        }
         let reference = crate::sharing::receiver_source_request(&intent, source_wrapper)
             .map_err(|_| ReceiverStartError::Conflict)?;
         let peer_session =
@@ -146,6 +184,38 @@ impl ReceiverStartRegistry {
             .request_fingerprint()
             .map_err(|_| ReceiverStartError::Conflict)?;
         let mut entries = self.entries.lock().expect("receiver starts");
+        // Only the detached retirement owner can mark an entry retired after
+        // actual joins and Applied/Replay. Keep bounded non-authorizing
+        // tombstones so exact retries cannot recreate an already ended actor.
+        let mut settled = self.settled.lock().expect("settled receiver attempts");
+        entries.retain(|entry| {
+            if !entry.state.lock().expect("receiver owner").retired {
+                return true;
+            }
+            if settled.len() == 64 {
+                settled.remove(0);
+            }
+            settled.push(SettledReceiverAttempt {
+                user_id: entry.intent.user_id,
+                request_id: entry.request_id.clone(),
+                login_hash: entry.intent.login_hash.clone(),
+                fingerprint: entry.fingerprint.clone(),
+            });
+            false
+        });
+        if let Some(previous) = settled
+            .iter()
+            .find(|s| s.user_id == intent.user_id && s.request_id == request_id)
+        {
+            return Err(
+                if previous.fingerprint == fingerprint && previous.login_hash == intent.login_hash {
+                    ReceiverStartError::Unresolved
+                } else {
+                    ReceiverStartError::Conflict
+                },
+            );
+        }
+        drop(settled);
         if let Some(entry) = entries
             .iter()
             .find(|entry| entry.intent.user_id == intent.user_id && entry.request_id == request_id)
@@ -166,6 +236,8 @@ impl ReceiverStartRegistry {
             state: Mutex::new(ReceiverStartState::default()),
             start_task: Mutex::new(None),
             stop: tokio_util::sync::CancellationToken::new(),
+            bodies: Arc::new(retirement::ReceiverBodyRegistry::default()),
+            retirement_task: Mutex::new(None),
             changed: tokio::sync::Notify::new(),
         });
         entries.push(entry.clone());
@@ -250,6 +322,9 @@ impl ReceiverStartActor {
         deadline: Instant,
     ) -> Result<StartResponse, ReceiverStartError> {
         loop {
+            if self.0.stop.is_cancelled() {
+                return Err(ReceiverStartError::Unresolved);
+            }
             let changed = self.0.changed.notified();
             tokio::pin!(changed);
             changed.as_mut().enable();
@@ -280,6 +355,7 @@ async fn run_owner(
         .await
         .map_err(|_| ReceiverStartError::Unavailable)?
         .ok_or(ReceiverStartError::Unavailable)?;
+    entry.state.lock().expect("receiver owner").claim = ReceiverClaimStage::Claiming;
     match state
         .store
         .claim_media_session_request(
@@ -295,13 +371,23 @@ async fn run_owner(
         .map_err(|_| ReceiverStartError::Unresolved)?
     {
         MediaSessionRequestClaim::Acquired { incarnation_id }
-            if incarnation_id == incarnation.to_string() => {}
+            if incarnation_id == incarnation.to_string() =>
+        {
+            entry.state.lock().expect("receiver owner").claim = ReceiverClaimStage::Acquired;
+        }
         // A durable reply or missing process-local actor is never producer proof.
         MediaSessionRequestClaim::InFlight { .. } | MediaSessionRequestClaim::Resolved(_) => {
-            return Err(ReceiverStartError::Unresolved)
+            entry.state.lock().expect("receiver owner").claim = ReceiverClaimStage::NotAcquired;
+            return Err(ReceiverStartError::Unresolved);
         }
-        _ => return Err(ReceiverStartError::Conflict),
+        MediaSessionRequestClaim::Conflict | MediaSessionRequestClaim::Overloaded => {
+            entry.state.lock().expect("receiver owner").claim = ReceiverClaimStage::NotAcquired;
+            return Err(ReceiverStartError::Conflict);
+        }
+        MediaSessionRequestClaim::Acquired { .. } => return Err(ReceiverStartError::Unresolved),
     }
+    entry.state.lock().expect("receiver owner").claim =
+        ReceiverClaimStage::Assigning(state.node_id.clone());
     if !state
         .store
         .assign_media_session_request_owner(
@@ -316,6 +402,8 @@ async fn run_owner(
     {
         return Err(ReceiverStartError::Unresolved);
     }
+    entry.state.lock().expect("receiver owner").claim =
+        ReceiverClaimStage::Assigned(state.node_id.clone());
     // Full-film Source copy is anchored at zero; requested resume is retained
     // only in the actual complete client request, never invented as an origin.
     let now = clock_ms();
@@ -547,7 +635,13 @@ async fn run_owner(
     {
         return Err(ReceiverStartError::Unresolved);
     }
-    entry.state.lock().expect("receiver owner").start = Some(Ok(projected));
+    {
+        let mut owned = entry.state.lock().expect("receiver owner");
+        if owned.dispatch_closed {
+            return Err(ReceiverStartError::Unresolved);
+        }
+        owned.start = Some(Ok(projected));
+    }
     entry.changed.notify_waiters();
     loop {
         tokio::select! {
@@ -646,6 +740,108 @@ mod tests {
         session["request_id"] = recipe.source_request_id.to_string().into();
         serde_json::to_string(&serde_json::json!({"reference":target,"session":session}))
             .expect("wrapper")
+    }
+    #[test]
+    fn sharing_receiver_initial_start_refuses_controls_before_registration() {
+        let registry = ReceiverStartRegistry::default();
+        for (field, value) in [
+            ("previous_session_id", serde_json::json!(Uuid::new_v4())),
+            ("control_sequence", serde_json::json!(1)),
+            ("reopen_reason", serde_json::json!("stall")),
+            ("intent", serde_json::json!({"version":1})),
+        ] {
+            let mut requested = intent("attempt");
+            let mut original: serde_json::Value =
+                serde_json::from_str(&requested.recipe.request_json).expect("original request");
+            original[field] = value;
+            requested.recipe.request_json = original.to_string();
+            assert!(
+                matches!(
+                    registry.register(
+                        requested.clone(),
+                        "attempt".into(),
+                        "player",
+                        &wrapper(&requested)
+                    ),
+                    Err(ReceiverStartError::Unsupported)
+                ),
+                "{field}"
+            );
+            assert!(registry.entries.lock().expect("registry").is_empty());
+        }
+        let mut requested = intent("attempt");
+        let mut original: serde_json::Value =
+            serde_json::from_str(&requested.recipe.request_json).expect("original request");
+        for field in [
+            "previous_session_id",
+            "control_sequence",
+            "reopen_reason",
+            "intent",
+        ] {
+            original[field] = serde_json::Value::Null;
+        }
+        requested.recipe.request_json = original.to_string();
+        assert!(registry
+            .register(
+                requested.clone(),
+                "attempt".into(),
+                "player",
+                &wrapper(&requested)
+            )
+            .is_ok());
+    }
+    #[tokio::test]
+    async fn sharing_receiver_failed_preclaim_owner_joins_before_inert_slot_retirement() {
+        let registry = ReceiverStartRegistry::default();
+        let request = intent("attempt");
+        let state = Arc::new(crate::http::source_actor_test_state());
+        let actor = registry
+            .begin(
+                state.clone(),
+                request.clone(),
+                "attempt".into(),
+                "player".into(),
+                wrapper(&request),
+            )
+            .expect("owned attempt");
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                let changed = actor.0.changed.notified();
+                tokio::pin!(changed);
+                changed.as_mut().enable();
+                if actor.0.state.lock().expect("owner").retired {
+                    break;
+                }
+                changed.await;
+            }
+        })
+        .await
+        .expect("actual owned error and join");
+        {
+            let owned = actor.0.state.lock().expect("owner");
+            assert!(matches!(owned.claim, ReceiverClaimStage::NotAttempted));
+            assert!(
+                owned.dispatch_closed
+                    && owned.dispatched.is_none()
+                    && owned.planned_activation.is_none()
+            );
+        }
+        assert!(actor.0.start_task.lock().expect("Start handle").is_none());
+        assert!(state
+            .store
+            .media_session_route_by_incarnation(&request.recipe.source_request_id.to_string())
+            .await
+            .expect("actual route read")
+            .is_none());
+        assert!(matches!(
+            registry.register(
+                request.clone(),
+                "attempt".into(),
+                "player",
+                &wrapper(&request)
+            ),
+            Err(ReceiverStartError::Unresolved)
+        ));
     }
     #[test]
     fn sharing_receiver_registry_exact_retry_retains_original_source_obligation() {

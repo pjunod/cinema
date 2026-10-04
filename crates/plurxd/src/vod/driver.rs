@@ -528,6 +528,15 @@ pub(super) async fn driver_pass(shared: &Arc<Shared>, rendition: &Arc<Rendition>
                 }
             );
         if matches!(step, Step::Start { .. } | Step::Restart { .. }) && prepared_permit.is_none() {
+            if rendition.key.starts_with("source-") {
+                prepared_permit = rendition.source_owners.take_initial_permit();
+                if prepared_permit.is_some() {
+                    // Fresh actual Source admission preceded blocked activation.
+                    // Re-evaluate belief/demand before consuming this permit.
+                    drop(manifest);
+                    continue;
+                }
+            }
             if let Some(encoding) = &rendition.recipe.encoding {
                 // The old child may own this pool's only permit. Retire it before
                 // admission, but never hold the manifest over process or Store I/O:

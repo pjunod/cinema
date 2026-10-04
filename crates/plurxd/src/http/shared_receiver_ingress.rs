@@ -55,6 +55,10 @@ fn unavailable() -> ApiError {
 }
 fn actor_error(error: ReceiverStartError) -> ApiError {
     let (status, code) = match error {
+        ReceiverStartError::Unsupported => (
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "sharing_start_unsupported",
+        ),
         ReceiverStartError::Conflict => (StatusCode::CONFLICT, "sharing_start_conflict"),
         ReceiverStartError::Capacity => (StatusCode::TOO_MANY_REQUESTS, "sharing_start_capacity"),
         ReceiverStartError::Deadline => (StatusCode::SERVICE_UNAVAILABLE, "sharing_start_deadline"),
