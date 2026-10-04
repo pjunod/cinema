@@ -7,8 +7,8 @@ use crate::{
     error::StoreError,
     sharing::{invalid, is_hash},
     sharing_receiver_retirement::{
-        ReceiverRetirementDisposition, ReceiverRetirementOutcome, ReceiverRetirementReason,
-        ReceiverRetirementWitness,
+        ReceiverPendingOwner, ReceiverPendingRetirementWitness, ReceiverRetirementDisposition,
+        ReceiverRetirementOutcome, ReceiverRetirementReason, ReceiverRetirementWitness,
     },
 };
 use async_trait::async_trait;
@@ -16,6 +16,12 @@ use sha2::{Digest, Sha256};
 use std::time::{SystemTime, UNIX_EPOCH};
 #[async_trait]
 pub trait SharingReceiverRetirementStore: Send + Sync {
+    /// Cleanup-only exact claim with no created route/resources. Caller retains
+    /// its private joined no-send evidence after a commit-unknown error.
+    async fn retire_pending_receiver_request(
+        &self,
+        witness: &dyn ReceiverPendingRetirementWitness,
+    ) -> Result<ReceiverRetirementOutcome, StoreError>;
     /// Cleanup-only: revoked login is permitted for this exact retained lineage.
     /// Commit-unknown remains an error; caller retains the physical receipt.
     async fn retire_receiver_session(
@@ -25,6 +31,89 @@ pub trait SharingReceiverRetirementStore: Send + Sync {
 }
 #[async_trait]
 impl<T: Backend> SharingReceiverRetirementStore for T {
+    async fn retire_pending_receiver_request(
+        &self,
+        w: &dyn ReceiverPendingRetirementWitness,
+    ) -> Result<ReceiverRetirementOutcome, StoreError> {
+        let i = w.intent();
+        let r = &i.recipe;
+        let bounded = |s: &str, max: usize| {
+            !s.is_empty() && s.len() <= max && !s.chars().any(char::is_control)
+        };
+        let node = match w.owner() {
+            ReceiverPendingOwner::Unassigned => None,
+            ReceiverPendingOwner::Assigned(node) if bounded(node, 256) => Some(node.as_str()),
+            ReceiverPendingOwner::Assigned(_) => return Err(invalid()),
+        };
+        if i.user_id <= 0
+            || !is_hash(w.confirmation_id())
+            || !is_hash(&i.login_hash)
+            || r.parent_login_hash != i.login_hash
+            || r.version != 1
+            || r.source_request_id.is_nil()
+            || r.reference.import_id != i.scope.import_id
+            || r.reference.server_id != i.scope.source_server_id
+            || r.reference.catalogue_epoch != i.scope.catalogue_epoch
+            || r.lifecycle_generation != i.scope.lifecycle_generation
+            || i.scope.libraries.as_slice() != [r.reference.library_id.clone()]
+            || !(0..=9_007_199_254_740_991).contains(&i.source_position_ms)
+            || !bounded(w.request_id(), 128)
+            || !bounded(w.playback_id(), 128)
+            || r.request_json.len() > 32768
+            || serde_json::to_string(r).map_err(|_| invalid())?.len() > 65536
+        {
+            return Err(invalid());
+        }
+        let context = serde_json::json!({"user":i.user_id,"request":w.request_id(),"playback":w.playback_id(),"incarnation":r.source_request_id,"fingerprint":r.request_fingerprint()?,"node":node}).to_string();
+        let values = vec![Value::Text(context)];
+        let identity = "r.user_id=json_extract($1,'$.user') AND r.request_id=json_extract($1,'$.request') AND r.playback_id=json_extract($1,'$.playback') AND r.incarnation_id=json_extract($1,'$.incarnation') AND r.request_fingerprint=json_extract($1,'$.fingerprint') AND r.owner_node_id IS json_extract($1,'$.node') AND r.response_json IS NULL";
+        let absent = "NOT EXISTS(SELECT 1 FROM media_sessions s WHERE s.incarnation_id=r.incarnation_id) AND NOT EXISTS(SELECT 1 FROM media_playback_pointers p WHERE p.current_incarnation_id=r.incarnation_id) AND NOT EXISTS(SELECT 1 FROM job_leases j WHERE j.resource='session:'||r.incarnation_id) AND NOT EXISTS(SELECT 1 FROM sharing_relay_upstream b WHERE b.incarnation_id=r.incarnation_id) AND NOT EXISTS(SELECT 1 FROM cache_consumer_pins p WHERE p.consumer_kind='media_session' AND p.consumer_id=r.incarnation_id) AND NOT EXISTS(SELECT 1 FROM sharing_delivery_grants g WHERE g.incarnation_id=r.incarnation_id) AND NOT EXISTS(SELECT 1 FROM media_session_terminal_acks a WHERE a.incarnation_id=r.incarnation_id)";
+        let predicate = |state: &str| {
+            format!("EXISTS(SELECT 1 FROM media_session_requests r WHERE {identity} AND r.state='{state}' AND ({absent}))")
+        };
+        let after = predicate("failed");
+        if !self
+            .sharing_read(
+                &format!("SELECT 'replay' AS payload WHERE {after}"),
+                values.clone(),
+            )
+            .await?
+            .is_empty()
+        {
+            return match self
+                .sharing_txn(vec![ordered(&source_assert(after, vec![]).0, values)?])
+                .await
+            {
+                Ok(_) => Ok(ReceiverRetirementOutcome::Replay),
+                Err(e) if source_write_refused(&e) => Ok(ReceiverRetirementOutcome::Refused),
+                Err(e) => Err(e),
+            };
+        }
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .ok()
+            .and_then(|d| i64::try_from(d.as_millis()).ok())
+            .filter(|n| *n > 0)
+            .ok_or_else(invalid)?;
+        let update = "UPDATE media_session_requests SET state='failed',claim_expires_at_ms=$2,updated_at_ms=$2 WHERE incarnation_id=json_extract($1,'$.incarnation') AND user_id=json_extract($1,'$.user') AND request_id=json_extract($1,'$.request') AND state='starting'";
+        let written = format!("{after} AND EXISTS(SELECT 1 FROM media_session_requests r WHERE {identity} AND r.updated_at_ms=$2 AND r.claim_expires_at_ms=$2)");
+        let statements = vec![
+            ordered(
+                &source_assert(predicate("starting"), vec![]).0,
+                values.clone(),
+            )?,
+            ordered(update, vec![values[0].clone(), Value::Integer(now)])?,
+            ordered(
+                &source_assert(written, vec![]).0,
+                vec![values[0].clone(), Value::Integer(now)],
+            )?,
+        ];
+        match self.sharing_txn(statements).await {
+            Ok(_) => Ok(ReceiverRetirementOutcome::Applied),
+            Err(e) if source_write_refused(&e) => Ok(ReceiverRetirementOutcome::Refused),
+            Err(e) => Err(e),
+        }
+    }
     async fn retire_receiver_session(
         &self,
         w: &dyn ReceiverRetirementWitness,
@@ -591,4 +680,292 @@ pub(crate) async fn pending_metadata_retirement_matrix<T: Backend + super::Media
         ReceiverRetirementOutcome::Replay
     );
     assert_eq!(store.sharing_read("SELECT json_array(response_json,updated_at_ms) AS payload FROM media_sessions WHERE incarnation_id=$1",vec![inc.into()]).await.expect("read-only pending retry"),before);
+}
+
+#[cfg(test)]
+mod pending_request_tests {
+    use super::*;
+    use crate::{
+        domain::MediaSessionRequestClaim,
+        playback_principal::PlaybackPrincipal,
+        sharing::SourceId,
+        sharing_catalogue::SharedReference,
+        sharing_catalogue_details::FileRevision,
+        sharing_receiver_sessions::{
+            ReceiverProducerKind, ReceiverSessionIntent, RemoteSourceRecipe,
+        },
+        store::{
+            sharing_catalogue::ReceiverCatalogueScope, MediaSessionStore, SqliteStore, UserStore,
+        },
+    };
+    use uuid::Uuid;
+    struct MetadataPending {
+        intent: ReceiverSessionIntent,
+        owner: ReceiverPendingOwner,
+    }
+    impl ReceiverPendingRetirementWitness for MetadataPending {
+        fn intent(&self) -> &ReceiverSessionIntent {
+            &self.intent
+        }
+        fn request_id(&self) -> &str {
+            "pending-request"
+        }
+        fn playback_id(&self) -> &str {
+            "pending-player"
+        }
+        fn owner(&self) -> &ReceiverPendingOwner {
+            &self.owner
+        }
+        fn confirmation_id(&self) -> &str {
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        }
+    }
+    #[tokio::test]
+    async fn sharing_receiver_pending_retirement_requires_exact_claim_and_absent_resources() {
+        let dir = tempfile::tempdir().expect("pool");
+        for rebuilt in [false, true] {
+            for pooled in [false, true] {
+                for assigned in [false, true] {
+                    let store = if pooled {
+                        SqliteStore::open(
+                            &dir.path()
+                                .join(format!("{rebuilt}-{pooled}-{assigned}.sqlite")),
+                        )
+                        .expect("pool")
+                    } else {
+                        SqliteStore::open_in_memory().expect("memory")
+                    };
+                    if rebuilt {
+                        store
+                            .sharing_txn(
+                                super::super::MEDIA_SESSION_PRINCIPAL_REBUILD_SCHEMA
+                                    .split("-- next statement\n")
+                                    .map(|s| (s.trim().trim_end_matches(';').into(), vec![]))
+                                    .collect(),
+                            )
+                            .await
+                            .expect("exact principal layout");
+                    }
+                    let user = store
+                        .create_user("pending-owner", "hash", false)
+                        .await
+                        .expect("real user");
+                    let hash = "b".repeat(64);
+                    store
+                        .create_token(&hash, user.id, None)
+                        .await
+                        .expect("actual original login");
+                    let scope = ReceiverCatalogueScope {
+                        import_id: Uuid::new_v4(),
+                        source_server_id: Uuid::new_v4(),
+                        catalogue_epoch: Uuid::new_v4(),
+                        lifecycle_generation: 1,
+                        assignment_generation: 1,
+                        endpoint_generation: 1,
+                        claim_id: Uuid::new_v4(),
+                        remote_grant_id: Uuid::new_v4(),
+                        libraries: vec![SourceId::parse("0").expect("zero")],
+                    };
+                    let recipe = RemoteSourceRecipe {
+                        kind: ReceiverProducerKind::RemoteSource,
+                        version: 1,
+                        reference: SharedReference {
+                            import_id: scope.import_id,
+                            server_id: scope.source_server_id,
+                            catalogue_epoch: scope.catalogue_epoch,
+                            library_id: scope.libraries[0].clone(),
+                            item_id: SourceId::parse("9223372036854775807").expect("item"),
+                        },
+                        lifecycle_generation: 1,
+                        file_id: SourceId::parse("0").expect("file"),
+                        file_revision: FileRevision::parse(&"c".repeat(64)).expect("revision"),
+                        source_request_id: Uuid::new_v4(),
+                        parent_login_hash: hash.clone(),
+                        request_json: "{\"start\":17}".into(),
+                    };
+                    let mut w = MetadataPending {
+                        intent: ReceiverSessionIntent {
+                            scope,
+                            user_id: user.id,
+                            login_hash: hash,
+                            recipe,
+                            source_position_ms: 0,
+                        },
+                        owner: ReceiverPendingOwner::Unassigned,
+                    };
+                    store.sharing_txn(vec![("INSERT INTO sharing_viewers VALUES($1,$2)".into(),vec![user.id.into(),Uuid::new_v4().into()]),("INSERT INTO sharing_imports(id,source_server_id,catalogue_epoch,source_name,claim_id,remote_grant_id,credential_envelope,endpoints_json,assignment_generation,lifecycle_generation,endpoint_generation,state,created_at_ms,updated_at_ms) VALUES($1,$2,$3,'Source',$4,$5,'unopened metadata fixture','[]',1,1,1,'active',1,1)".into(),vec![w.intent.scope.import_id.into(),w.intent.scope.source_server_id.into(),w.intent.scope.catalogue_epoch.into(),w.intent.scope.claim_id.into(),w.intent.scope.remote_grant_id.into()]),("INSERT INTO sharing_assignments VALUES($1,'0',$2,1)".into(),vec![w.intent.scope.import_id.into(),user.id.into()])]).await.expect("actual B import/assignment metadata before revocation");
+                    let principal = PlaybackPrincipal::LocalUser { user_id: user.id };
+                    let inc = w.intent.recipe.source_request_id.to_string();
+                    let now = SystemTime::now()
+                        .duration_since(UNIX_EPOCH)
+                        .expect("clock")
+                        .as_millis() as i64;
+                    assert!(matches!(
+                        store
+                            .claim_media_session_request(
+                                &principal,
+                                w.request_id(),
+                                &w.intent.recipe.request_fingerprint().expect("fp"),
+                                w.playback_id(),
+                                &inc,
+                                now,
+                                now + 30000
+                            )
+                            .await
+                            .expect("genuine claim"),
+                        MediaSessionRequestClaim::Acquired { .. }
+                    ));
+                    if assigned {
+                        assert!(store
+                            .assign_media_session_request_owner(
+                                &principal,
+                                w.request_id(),
+                                &inc,
+                                "B-owned",
+                                now
+                            )
+                            .await
+                            .expect("real assignment"));
+                        w.owner = ReceiverPendingOwner::Assigned("B-owned".into());
+                    }
+                    let read="SELECT json_array(user_id,request_id,request_fingerprint,playback_id,incarnation_id,owner_node_id,state,response_json,claim_expires_at_ms,updated_at_ms) AS payload FROM media_session_requests WHERE incarnation_id=$1";
+                    let retained_intent = w.intent.clone();
+                    w.intent.login_hash = "e".repeat(64);
+                    w.intent.recipe.parent_login_hash = w.intent.login_hash.clone();
+                    assert_eq!(
+                        store
+                            .retire_pending_receiver_request(&w)
+                            .await
+                            .expect("wrong original login lineage"),
+                        ReceiverRetirementOutcome::Refused
+                    );
+                    w.intent = retained_intent.clone();
+                    w.intent.recipe.request_json = "{\"start\":18}".into();
+                    assert_eq!(
+                        store
+                            .retire_pending_receiver_request(&w)
+                            .await
+                            .expect("changed original recipe"),
+                        ReceiverRetirementOutcome::Refused
+                    );
+                    w.intent = retained_intent;
+                    let original = store
+                        .sharing_read(read, vec![inc.clone().into()])
+                        .await
+                        .expect("snapshot");
+                    store.sharing_txn(vec![("CREATE TRIGGER pending_ignore_assertion BEFORE INSERT ON sharing_relay_upstream BEGIN SELECT RAISE(IGNORE); END".into(),vec![]),("UPDATE media_session_requests SET owner_node_id='foreign' WHERE incarnation_id=$1".into(),vec![inc.clone().into()])]).await.expect("foreign takeover plus ignored assertion");
+                    let foreign = store
+                        .sharing_read(read, vec![inc.clone().into()])
+                        .await
+                        .expect("foreign snapshot");
+                    assert_eq!(
+                        store
+                            .retire_pending_receiver_request(&w)
+                            .await
+                            .expect("foreign refuses"),
+                        ReceiverRetirementOutcome::Refused
+                    );
+                    assert_eq!(
+                        store
+                            .sharing_read(read, vec![inc.clone().into()])
+                            .await
+                            .expect("unchanged"),
+                        foreign
+                    );
+                    store.sharing_txn(vec![("UPDATE media_session_requests SET owner_node_id=json_extract($1,'$') WHERE incarnation_id=$2".into(),vec![if assigned {Value::Text("\"B-owned\"".into())}else{Value::Text("null".into())},inc.clone().into()]),("CREATE TRIGGER pending_ignore_update BEFORE UPDATE ON media_session_requests BEGIN SELECT RAISE(IGNORE); END".into(),vec![])]).await.expect("restore real captured owner plus ignored update");
+                    assert_eq!(
+                        store
+                            .retire_pending_receiver_request(&w)
+                            .await
+                            .expect("suppressed UPDATE refuses"),
+                        ReceiverRetirementOutcome::Refused
+                    );
+                    assert_eq!(
+                        store
+                            .sharing_read(read, vec![inc.clone().into()])
+                            .await
+                            .expect("whole rollback"),
+                        original
+                    );
+                    store
+                        .sharing_txn(vec![
+                            ("DROP TRIGGER pending_ignore_update".into(), vec![]),
+                            (
+                                "INSERT INTO job_leases VALUES($1,'B-owned',1,1,1,1)".into(),
+                                vec![format!("session:{inc}").into()],
+                            ),
+                        ])
+                        .await
+                        .expect("even expired resource is retained");
+                    assert_eq!(
+                        store
+                            .retire_pending_receiver_request(&w)
+                            .await
+                            .expect("expired lease is not no-send proof"),
+                        ReceiverRetirementOutcome::Refused
+                    );
+                    store
+                        .sharing_txn(vec![
+                            (
+                                "DELETE FROM job_leases WHERE resource=$1".into(),
+                                vec![format!("session:{inc}").into()],
+                            ),
+                            (
+                                "DELETE FROM sharing_imports WHERE id=$1".into(),
+                                vec![w.intent.scope.import_id.into()],
+                            ),
+                            if assigned {
+                                ("DELETE FROM users WHERE id=$1".into(), vec![user.id.into()])
+                            } else {
+                                (
+                                    "DELETE FROM tokens WHERE token_hash=$1".into(),
+                                    vec![w.intent.login_hash.clone().into()],
+                                )
+                            },
+                        ])
+                        .await
+                        .expect("cleanup after actual user deletion");
+                    // This is an actual metadata failure writer, not physical
+                    // evidence. The test witness remains metadata-only.
+                    if assigned {
+                        let _changed = store
+                            .fail_media_session_request(&principal, w.request_id(), &inc, now + 1)
+                            .await
+                            .expect("existing generic failure state");
+                        assert_eq!(store.sharing_read("SELECT state AS payload FROM media_session_requests WHERE incarnation_id=$1",vec![inc.clone().into()]).await.expect("actual failed metadata"),vec!["failed".to_string()]);
+                    }
+                    assert_eq!(
+                        store
+                            .retire_pending_receiver_request(&w)
+                            .await
+                            .expect("revoked cleanup"),
+                        if assigned {
+                            ReceiverRetirementOutcome::Replay
+                        } else {
+                            ReceiverRetirementOutcome::Applied
+                        }
+                    );
+                    assert_eq!(store.sharing_read("SELECT state AS payload FROM media_session_requests WHERE incarnation_id=$1",vec![inc.clone().into()]).await.expect("failed"),vec!["failed".to_string()]);
+                    let ended = store
+                        .sharing_read(read, vec![inc.clone().into()])
+                        .await
+                        .expect("failed");
+                    assert_eq!(
+                        store
+                            .retire_pending_receiver_request(&w)
+                            .await
+                            .expect("exact retry"),
+                        ReceiverRetirementOutcome::Replay
+                    );
+                    assert_eq!(
+                        store
+                            .sharing_read(read, vec![inc.into()])
+                            .await
+                            .expect("read-only"),
+                        ended
+                    );
+                }
+            }
+        }
+    }
 }
