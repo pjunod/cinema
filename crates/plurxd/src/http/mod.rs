@@ -50,6 +50,7 @@ pub(crate) mod scan_identity;
 pub(crate) mod shared_artwork;
 pub(crate) mod shared_library;
 pub(crate) mod shared_playback;
+pub(crate) mod shared_receiver_assets;
 #[cfg(test)]
 mod shared_receiver_fixture;
 #[allow(
@@ -59,6 +60,7 @@ mod shared_receiver_fixture;
 pub(crate) mod shared_receiver_ingress;
 #[allow(dead_code)] // Owner remains unregistered until relay/control qualify.
 pub(crate) mod shared_receiver_playback;
+pub(crate) mod shared_source_assets;
 pub(crate) mod shared_source_playback;
 // Candidate projection helpers remain unregistered until Source/B lifecycle
 // authority and actual delivery binding are qualified.
@@ -347,6 +349,7 @@ fn http_route_group(path: &str) -> usize {
         | "/library/metadata/{key}/{kind}"
         | "/api/v1/images/{filename}"
         | "/api/v1/files/{id}/chapters/{index}/thumb"
+        | "/api/v1/shared/imports/{import}/files/{locator}/chapters/{index}/thumb"
         | "/api/v1/shared/imports/{import}/files/{locator}/hls/sessions"
         | "/api/v1/shared/imports/{import}/files/{locator}/playback" => 3,
 
@@ -372,6 +375,11 @@ fn http_route_group(path: &str) -> usize {
         | "/api/v1/files/{id}/subs/{subtitle}"
         | "/api/v1/files/{id}/subs/{index}/overlay.json"
         | "/api/v1/files/{id}/subs/{index}/overlay/{generation}/objects/{object}"
+        | "/api/v1/shared/imports/{import}/files/{locator}/subs/{subtitle}"
+        | "/api/v1/shared/imports/{import}/files/{locator}/subs/{index}/overlay.json"
+        | "/api/v1/shared/imports/{import}/files/{locator}/subs/{index}/overlay/{generation}/objects/{object}"
+        | "/api/v1/shared/imports/{import}/files/{locator}/stream.mp4"
+        | "/api/v1/shared/imports/{import}/files/{locator}/direct"
         | "/api/v1/files/{id}/hls/sessions"
         | "/api/v1/files/{id}/hls/start"
         | "/api/v1/offline/packages/{id}"
@@ -1752,7 +1760,11 @@ pub fn router(state: AppState) -> Router {
         .route("/images/{filename}", get(images::serve))
         // Shared Start: the receiver actor owns dispatch, persistence and
         // physical cleanup; the request is deadline-free like a local create.
-        .merge(shared_receiver_ingress::start_router());
+        .merge(shared_receiver_ingress::start_router())
+        // Shared pre-session file assets, relayed fresh from the Source, and
+        // the typed refusal for every shared file suffix B does not serve.
+        .merge(shared_receiver_assets::viewer_router(state.clone()))
+        .merge(shared_receiver_assets::closure_router());
 
     let api = Router::new()
         .merge(json_short)

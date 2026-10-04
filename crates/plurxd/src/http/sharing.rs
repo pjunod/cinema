@@ -122,6 +122,7 @@ pub(crate) fn peer_router(state: AppState) -> Router {
         .route("/sharing/v1/grant/rotation/{id}", get(rotation_status))
         .merge(super::shared_library::peer_router(state.clone()))
         .merge(super::shared_playback::peer_router(state.clone()))
+        .merge(super::shared_source_assets::peer_router(state.clone()))
         .merge(super::shared_source_playback::peer_router(state.clone()))
         .route_layer(axum::middleware::from_fn_with_state(
             state.clone(),
@@ -203,6 +204,9 @@ async fn peer_guard(
             | "/sharing/v1/items/{item}/files/{file}/sessions/{request}/end",
         ) => Duration::from_secs(310),
         Some("/sharing/v1/items/{item}/files/{file}/sessions/{request}/resources") => {
+            Duration::from_secs(30)
+        }
+        Some(path) if super::shared_source_assets::ROUTES.contains(&path) => {
             Duration::from_secs(30)
         }
         Some("/sharing/v1/items/{item}/files/{file}/sessions/{request}/control") => {
