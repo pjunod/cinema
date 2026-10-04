@@ -1782,7 +1782,7 @@ class DisplayAwareAutoEvidenceTest {
         }
         assertEquals(listOf("\"stall\"", "\"link\"", "\"encode\"", "\"decode\"", "\"hold\"", "\"authority\""), causes)
     }
-    @Test fun a05ViewerTransportRefusesStaleWrappersAndKeepsOriginalDeadline() {
+    @Test fun a05ViewerTransportRefusesStaleWrappers() {
         val forwarded = mutableListOf<String>()
         val delegate = java.lang.reflect.Proxy.newProxyInstance(
             androidx.media3.common.Player::class.java.classLoader,
@@ -1805,8 +1805,8 @@ class DisplayAwareAutoEvidenceTest {
             commands.add(requested)
             intent.setPlaybackRequested(requested)
             optionalOwner = if (requested) Any() else null
-            // A prepared resume holds the delegate paused; a second explicit
-            // Pause must still reach this writer without an SDK edge.
+            // A second explicit Pause must still reach this writer without an
+            // SDK edge, so it can revoke any optional boundary preparation.
         }
         wrapper.play()
         assertTrue(intent.playbackRequested)
@@ -1827,26 +1827,87 @@ class DisplayAwareAutoEvidenceTest {
         assertEquals(listOf(true, false, false, true), commands)
         assertTrue(intent.playbackRequested, "stale wrapper cannot pause the successor")
 
-        val deadline = PlaybackTargetDeadline()
-        val owner = deadline.claimOwner(1_000L)
-        val pending = intent.beginSeek(500L, 5_000L)
-        deadline.sample(pending, true, true, 1_000L, owner)
-        assertEquals(6_500L, deadline.remainingActiveMs(2_500L, pending.sequence, owner))
-        assertEquals(6_500L, deadline.remainingActiveMs(2_500L, pending.sequence, owner), "read does not renew")
-        assertNull(deadline.remainingActiveMs(999L, pending.sequence, owner))
-        assertNull(deadline.remainingActiveMs(2_500L, pending.sequence + 1L, owner))
-        deadline.suspendOwner(owner, 3_000L)
-        assertEquals(6_000L, deadline.remainingActiveMs(70_000L, pending.sequence, owner), "inactive time is not charged")
-        val nextOwner = deadline.claimOwner(70_000L)
-        assertNull(deadline.remainingActiveMs(70_000L, pending.sequence, owner))
-        deadline.sample(pending, true, true, 70_000L, nextOwner)
-        assertNotNull(deadline.sample(pending, true, true, 76_000L, nextOwner))
-        assertNull(deadline.remainingActiveMs(76_000L, pending.sequence, nextOwner))
-
         val manifest = "#EXTM3U\n#EXT-X-PLAYLIST-TYPE:VOD\n#EXTINF:1.000000,\nseg00000.m4s\n#EXTINF:1.000000,\nseg00001.m4s\n#EXT-X-ENDLIST\n"
         assertTrue(autoImmutableVodPlaylist(manifest.toByteArray()))
         assertFalse(autoImmutableVodPlaylist(manifest.replace("seg00001", "seg00000").toByteArray()))
         assertFalse(autoImmutableVodPlaylist(manifest.replace("#EXT-X-ENDLIST", "#EXT-X-DISCONTINUITY").toByteArray()))
+    }
+
+    @Test fun playAfterALongPauseReachesThePlayerImmediately() {
+        // The delegate write is decided on the press. A long pause only arms
+        // the original-first re-plan; it never defers or withholds the Play.
+        val long = viewerTransportEdge(requested = true, wasRequested = false, pausedAtMs = 1_000L,
+            pauseOwnerCurrent = true, nowMs = 1_000L + LONG_VIEWER_PAUSE_MS)
+        assertTrue(long.delegatePlayWhenReady, "Play after a long pause is written at once")
+        assertTrue(long.armsAutoBoundaryReplan)
+        val far = viewerTransportEdge(true, false, 0L, true, 3_600_000L)
+        assertTrue(far.delegatePlayWhenReady)
+        assertTrue(far.armsAutoBoundaryReplan)
+
+        val short = viewerTransportEdge(true, false, 1_000L, true, LONG_VIEWER_PAUSE_MS)
+        assertTrue(short.delegatePlayWhenReady)
+        assertFalse(short.armsAutoBoundaryReplan, "59.999 s is not a long pause")
+        // A pause on another attachment, a clock that went backwards, or no
+        // explicit pause at all still plays at once and owes nothing.
+        for (edge in listOf(
+            viewerTransportEdge(true, false, 1_000L, false, 120_000L),
+            viewerTransportEdge(true, false, 120_000L, true, 1_000L),
+            viewerTransportEdge(true, false, null, true, 120_000L),
+            viewerTransportEdge(true, true, 1_000L, true, 120_000L),
+        )) {
+            assertTrue(edge.delegatePlayWhenReady)
+            assertFalse(edge.armsAutoBoundaryReplan)
+        }
+        val pause = viewerTransportEdge(false, true, null, false, 120_000L)
+        assertFalse(pause.delegatePlayWhenReady)
+        assertFalse(pause.armsAutoBoundaryReplan)
+    }
+
+    @Test fun optionalOriginalReplanNeverBlocksAndIsServedOnceBesideThePlayingIncumbent() {
+        val replan = AutoBoundaryReplan()
+        val lifetime = Any()
+        assertFalse(replan.take(lifetime, 60_000L), "nothing armed, nothing owed")
+        replan.arm(lifetime)
+        // The incumbent is already playing; the re-plan waits for runway on
+        // the ordinary Auto evaluation, not on the viewer.
+        assertFalse(replan.take(lifetime, AutoBoundaryReplan.AUTO_BOUNDARY_RUNWAY_MS - 1))
+        assertTrue(replan.isArmed, "short runway keeps the boundary owed")
+        assertTrue(replan.take(lifetime, AutoBoundaryReplan.AUTO_BOUNDARY_RUNWAY_MS))
+        assertFalse(replan.isArmed)
+        assertFalse(replan.take(lifetime, 60_000L), "served exactly once")
+
+        // A newer viewer edge renews the lifetime: the old boundary is stale
+        // and is dropped, with no timer involved.
+        replan.arm(lifetime)
+        assertFalse(replan.take(Any(), 60_000L))
+        assertFalse(replan.isArmed)
+        replan.arm(lifetime)
+        replan.clear()
+        assertFalse(replan.take(lifetime, 60_000L))
+    }
+
+    @Test fun viewerResumeAndSeekNeverWaitBehindTheOptionalOriginalStage() {
+        val source = listOf(
+            java.io.File("app/src/main/java/tv/plurx/app/player/Controller.kt"),
+            java.io.File("src/main/java/tv/plurx/app/player/Controller.kt"),
+            java.io.File("clients/android/app/src/main/java/tv/plurx/app/player/Controller.kt"),
+        ).firstOrNull(java.io.File::isFile)?.readText() ?: error("Controller.kt source not found")
+        val resume = source.substringAfter("private fun setViewerPlaybackRequested(requested: Boolean) {")
+            .substringBefore("private fun reopenAfterPausedRetirement(")
+        assertTrue(resume.contains("writeViewerDelegate(edge.delegatePlayWhenReady)"))
+        assertFalse(resume.contains("scope.launch"), "the viewer writer starts no optional work of its own")
+        val seek = source.substringAfter("private fun enqueueSeek(")
+            .substringBefore("private suspend fun publishIntent(")
+        assertTrue(seek.contains("executeSeek(pending.targetMs, pending.sequence)"))
+        assertFalse(seek.contains("Boundary(pending"), "the seek is not deferred behind an optional stage")
+        assertFalse(source.contains("attemptAutoOriginalBoundary"))
+        assertFalse(source.contains("autoBoundaryResumeJob"))
+        // The boundary is served by the ordinary Auto evaluation and handed
+        // off by the ordinary rendezvous, not by an exact-target hold.
+        val tick = source.substringAfter("private fun tickDisplayAwareAuto() {")
+            .substringBefore("private fun autoTransferOriginCurrent(")
+        assertTrue(tick.contains("autoBoundaryReplan.take(viewerTransportLifetime"))
+        assertFalse(source.contains("seekIssued"))
     }
 
     @Test fun a05StagedMediaIntervalsRequireCapturedPipelineAndOriginalDeadline() {

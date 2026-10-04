@@ -3536,7 +3536,7 @@ commits = ["e7511b9c9945d0ab19a0234d64a74ed19d35ae60", "228874547df1c1c870973e41
 source = "clients/android/app/src/main/java/tv/plurx/app/player/Controller.kt"
 source_anchor = "internal fun autoViewerTransport(delegate: Player"
 test = "clients/android/app/src/test/java/tv/plurx/app/player/PlaybackControlReporterTest.kt"
-test_anchor = "fun a05ViewerTransportRefusesStaleWrappersAndKeepsOriginalDeadline()"
+test_anchor = "fun a05ViewerTransportRefusesStaleWrappers()"
 
 [[fixes]]
 id = "apple.auto-prepared-viewer-boundary-original-budget"

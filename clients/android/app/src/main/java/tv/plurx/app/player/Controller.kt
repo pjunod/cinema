@@ -64,8 +64,6 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
-import kotlinx.coroutines.withTimeoutOrNull
-import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -516,10 +514,10 @@ class Controller internal constructor(
     /** The HLS session this player owns, if the plan opened one. */
     private var sessionId: String? = null
 
-    /** Transport interception happens before Media3 mutates the delegate. In
-     * particular, a second explicit Pause is meaningful while a trial is
-     * already holding that delegate paused. Other player commands still use
-     * ForwardingPlayer's ordinary forwarding and command availability. */
+    /** Transport interception happens before Media3 mutates the delegate, so
+     * MediaSession Play/Pause reaches the same viewer writer as the UI. Other
+     * player commands still use ForwardingPlayer's ordinary forwarding and
+     * command availability. */
     private fun mediaSessionTransport(delegate: ExoPlayer, capturedSession: String?): Player {
         lateinit var transport: Player
         transport = autoViewerTransport(delegate, {
@@ -724,16 +722,19 @@ class Controller internal constructor(
     private var autoLastEvaluation: Triple<Any, Long, Long>? = null
     private val autoSwitchTimes = mutableListOf<Long>()
     private val autoBlockedUntil = mutableMapOf<String, Long>()
+    /** An original-quality preparation a viewer boundary (a seek, or a resume
+     * after a long explicit pause) asked for. It is an ordinary Auto prepared
+     * replacement in every respect — the incumbent keeps playing and the
+     * rendezvous hands off — except that a fresh link proof stands in for the
+     * mid-play quiet window. Nothing waits on it. */
     private class AutoBoundaryAttempt(val incumbent: ExoPlayer, val sessionId: String, val epoch: Long,
-        val sequence: Long?, val targetMs: Long, val enteredAtMs: Long, val deadlineMs: Long,
         val candidateId: String, val recipe: PlaybackMediaRecipe, val qualitySequence: Long?,
-        val transportLifetime: Any, val audio: Long?, val subtitle: Long?, val audioOffsetMs: Long) {
-        val optionalDeadlineMs = deadlineMs - minOf(2_000L, (deadlineMs - enteredAtMs).coerceAtLeast(0L))
-        val outcome = CompletableDeferred<Boolean>()
-        var seekIssued = false
-    }
+        val transportLifetime: Any, val audio: Long?, val subtitle: Long?, val audioOffsetMs: Long,
+        val previousCandidate: tv.plurx.app.data.QualityCandidate?, val previousId: String?,
+        val previousHeight: Int?)
     private var autoBoundaryAttempt: AutoBoundaryAttempt? = null
-    private var autoBoundaryResumeJob: Job? = null
+    /** The viewer boundary the next ordinary Auto evaluation owes a re-plan. */
+    private val autoBoundaryReplan = AutoBoundaryReplan()
     private var viewerTransportLifetime: Any = Any()
     private data class ExplicitViewerPause(val player: ExoPlayer, val session: String?,
         val epoch: Long, val atMs: Long)
@@ -1503,11 +1504,15 @@ class Controller internal constructor(
     private fun enqueueSeek(begin: () -> PlaybackIntent.PendingSeek) {
         if (!playbackControlBootstrapFence.isActive()) return
         revokeAutoBoundaryTransport()
+        // The seek is executed on the incumbent without waiting for anything
+        // optional. The original-quality re-plan this boundary is owed runs
+        // afterwards, from the ordinary Auto evaluation, as a prepared
+        // replacement the playing incumbent hands off to.
+        autoBoundaryReplan.arm(viewerTransportLifetime)
         stallGuard.viewerSeek {
             playbackControl.clearVerdict()
             val pending = begin()
             sampleTargetPresentationDeadline()
-            val enteredAtMs = monotonicNowMs()
             val publicationEpoch = mediaMutationEpoch
             seekJob?.cancel()
             seekJob = scope.launch {
@@ -1515,14 +1520,8 @@ class Controller internal constructor(
                 delay(SEEK_COALESCE_MS)
                 if (!playbackControlBootstrapFence.isActive() ||
                     mediaMutationEpoch != publicationEpoch ||
-                    !playbackIntent.isCurrent(pending.sequence)
+                    !playbackIntent.isCurrent(pending.sequence) || preparedLedger.isSwitched
                 ) return@launch
-                val remaining = targetPresentationDeadline.remainingActiveMs(monotonicNowMs(),
-                    pending.sequence, targetPresentationOwner)
-                if (remaining != null && attemptAutoOriginalBoundary(pending.targetMs, pending.sequence,
-                        enteredAtMs, remaining)) return@launch
-                if (!playbackIntent.isCurrent(pending.sequence) || mediaMutationEpoch != publicationEpoch ||
-                    !playbackControlBootstrapFence.isActive() || preparedLedger.isSwitched) return@launch
                 executeSeek(pending.targetMs, pending.sequence)
             }
         }
@@ -1784,16 +1783,22 @@ class Controller internal constructor(
         player.playWhenReady = effective
     }
 
+    /** A newer viewer transport edge supersedes the boundary that asked for
+     * an optional original preparation. It is withdrawn, not failed: nothing
+     * about the candidate was disproved, so it earns no backoff. A switch
+     * already in flight is left to settle on its own first frame. */
     private fun revokeAutoBoundaryTransport() {
         viewerTransportLifetime = Any()
-        autoBoundaryResumeJob?.cancel()
-        autoBoundaryResumeJob = null
-        autoBoundaryAttempt?.outcome?.complete(false)
-        if (autoBoundaryAttempt != null) abandonPreparedReplacement(failed = false)
+        val boundary = autoBoundaryAttempt ?: return
+        if (preparedLedger.isSwitched) return
+        abandonPreparedReplacement(failed = false)
+        withdrawAutoBoundary(boundary)
     }
 
     /** The same viewer writer serves the UI and pre-dispatch MediaSession
-     * transport. A finite optional resume may hold the delegate, never intent. */
+     * transport. The delegate follows the viewer at once on every edge; a
+     * resume after a long explicit pause only arms the Auto boundary re-plan,
+     * which never holds the delegate. */
     private fun setViewerPlaybackRequested(requested: Boolean) {
         if (!playbackControlBootstrapFence.isActive()) return
         val now = monotonicNowMs()
@@ -1804,7 +1809,6 @@ class Controller internal constructor(
         stallGuard.setPlaybackRequested(playbackIntent, requested) { }
         viewerTransport.report(requested)?.let(surfaceOwner::playbackRequested)
         revokeAutoBoundaryTransport()
-        val lifetime = viewerTransportLifetime
         if (requested && !wasRequested) {
             currentPausedRetirement()?.let { retired ->
                 explicitViewerPause = null
@@ -1824,33 +1828,11 @@ class Controller internal constructor(
             }
         } else explicitViewerPause = null
         playbackControl.clearVerdict()
-        val longResume = requested && !wasRequested && paused != null && paused.player === player &&
-            paused.session == sessionId && paused.epoch == mediaMutationEpoch &&
-            now >= paused.atMs && now - paused.atMs >= 60_000L
-        // Publish the original viewer edge first. Only an exact current receipt
-        // and candidate can defer the ordinary delegate Play.
-        val candidate = if (longResume) autoOriginalBoundaryCandidate(now) else null
-        if (candidate == null) {
-            writeViewerDelegate(requested)
-        } else {
-            val incumbent = player
-            val stalledPosition = realPosition()
-            val incumbentSession = sessionId
-            val epoch = mediaMutationEpoch
-            val targetMs = realPosition()
-            autoBoundaryResumeJob = scope.launch {
-                val elapsed = monotonicNowMs() - now
-                val committed = elapsed >= 0L && attemptAutoOriginalBoundary(targetMs, null, now,
-                    (8_000L - elapsed).coerceAtLeast(0L))
-                if (!committed && viewerTransportLifetime === lifetime && player === incumbent &&
-                    sessionId == incumbentSession && mediaMutationEpoch == epoch &&
-                    playbackIntent.playbackRequested && !preparedLedger.isSwitched) {
-                    writeViewerDelegate(true)
-                    playbackControl.playerChanged()
-                }
-                if (viewerTransportLifetime === lifetime) autoBoundaryResumeJob = null
-            }
-        }
+        val edge = viewerTransportEdge(requested, wasRequested, paused?.atMs,
+            paused != null && paused.player === player && paused.session == sessionId &&
+                paused.epoch == mediaMutationEpoch, now)
+        writeViewerDelegate(edge.delegatePlayWhenReady)
+        if (edge.armsAutoBoundaryReplan) autoBoundaryReplan.arm(viewerTransportLifetime)
         playbackControl.playerChanged()
     }
 
@@ -1924,7 +1906,7 @@ class Controller internal constructor(
         sessionId = null
         currentMediaSessionTransport = null
         explicitViewerPause = null
-        autoBoundaryResumeJob?.cancel()
+        autoBoundaryReplan.clear()
 
         surfaceOwner.retire(mediaMutationEpoch)
         player.removeListener(listener)
@@ -3322,6 +3304,14 @@ class Controller internal constructor(
             autoUpgradeSinceMs = null
             return
         }
+        // A viewer boundary re-plans original first, once, on the first
+        // evaluation where the incumbent is established, playing and has the
+        // runway a handoff needs. The incumbent is never held for it.
+        if (autoBoundaryReplan.take(viewerTransportLifetime, player.bufferedPosition - player.currentPosition)) {
+            autoOriginalBoundaryCandidate(now)?.let { chosen ->
+                if (beginAutoBoundaryPreparation(chosen, now)) return
+            }
+        }
         val target = autoPresentationTarget ?: return
         val policyCatalog = measuredCostCatalog()
         val current = policyCatalog.firstOrNull { it.hasValidIdentity && it.id == autoActiveCandidateId } ?: return
@@ -3537,28 +3527,25 @@ class Controller internal constructor(
             selectedAudio == boundary.audio && selectedSubtitle == boundary.subtitle &&
             audioOffsetMs == boundary.audioOffsetMs &&
             currentRecipe().recipe == boundary.recipe &&
-            playbackIntent.pendingQualityChange?.sequence == boundary.qualitySequence &&
-            (boundary.sequence?.let { playbackIntent.pendingSeek?.sequence == it &&
-                playbackIntent.pendingSeek?.targetMs == boundary.targetMs } ?: true)
+            playbackIntent.pendingQualityChange?.sequence == boundary.qualitySequence
 
     private fun autoBoundaryIsCurrent(boundary: AutoBoundaryAttempt): Boolean =
         autoBoundaryOwnerIsCurrent(boundary) && autoDesiredCandidate?.id == boundary.candidateId
 
-    /** Same accepted prepared transaction at the viewer's exact target. */
-    private suspend fun attemptAutoOriginalBoundary(targetMs: Long, sequence: Long?, enteredAtMs: Long,
-        remainingMs: Long): Boolean {
-        val now = monotonicNowMs()
-        if (remainingMs <= 2_000L || now < enteredAtMs) return false
-        val chosen = autoOriginalBoundaryCandidate(now) ?: return false
+    /**
+     * Ask for the boundary's original candidate through the same accepted
+     * prepared transaction the mid-play upgrade uses, and return at once. The
+     * incumbent is already playing (or already sought) for the viewer; the
+     * successor primes beside it and the rendezvous hands off, or it is
+     * abandoned and the incumbent simply carries on. The commit, the failure
+     * and the withdrawal all settle through the prepared ledger's own events.
+     */
+    private fun beginAutoBoundaryPreparation(chosen: tv.plurx.app.data.QualityCandidate, now: Long): Boolean {
         val currentSession = sessionId ?: return false
-        val deadline = now + remainingMs.coerceAtMost(8_000L)
-        val boundary = AutoBoundaryAttempt(player, currentSession, mediaMutationEpoch, sequence,
-            targetMs, enteredAtMs, deadline, chosen.id, currentRecipe().recipe,
-            playbackIntent.pendingQualityChange?.sequence, viewerTransportLifetime,
-            selectedAudio, selectedSubtitle, audioOffsetMs)
-        val previousCandidate = autoDesiredCandidate
-        val previousId = playbackIntent.automaticCandidateId
-        val previousHeight = playbackIntent.automaticCandidateHeight
+        val boundary = AutoBoundaryAttempt(player, currentSession, mediaMutationEpoch, chosen.id,
+            currentRecipe().recipe, playbackIntent.pendingQualityChange?.sequence, viewerTransportLifetime,
+            selectedAudio, selectedSubtitle, audioOffsetMs, autoDesiredCandidate,
+            playbackIntent.automaticCandidateId, playbackIntent.automaticCandidateHeight)
         autoBoundaryAttempt = boundary
         autoDesiredCandidate = chosen
         autoVoluntary = true
@@ -3566,41 +3553,28 @@ class Controller internal constructor(
         autoPreparedTargetRevision = autoPresentationTarget?.revision
         autoPreparedMutationEpoch = mediaMutationEpoch
         playbackIntent.requestAutomaticCandidate(chosen.id, chosen.target_height)
-        var committed = false
-        try {
-            withTimeoutOrNull((boundary.optionalDeadlineMs - monotonicNowMs()).coerceAtLeast(1L)) {
-                playbackControl.reportIntent()
-                val step = playbackControl.awaitPreparedOffer(enteredAtMs)
-                if (step is PreparedOfferWait.Step.Offered && autoBoundaryIsCurrent(boundary) &&
-                    step.action.effectiveSelection?.candidateId == chosen.id) onPrepareAction(step.action)
-                else boundary.outcome.complete(false)
-                committed = boundary.outcome.await()
-            }
-            // Switched ownership cannot be handed to a healthy fallback until
-            // its exact frame result or rollback has settled.
-            if (!committed && autoBoundaryAttempt === boundary && preparedLedger.isSwitched) {
-                val restored = rollbackSwitchedReplacement()
-                failSwitchedReplacement()
-                if (restored) preparedRollbackReopen = null
-            }
-            return committed
-        } finally {
-            if (autoBoundaryAttempt === boundary) {
-                if (!committed && autoBoundaryOwnerIsCurrent(boundary) &&
-                    (autoDesiredCandidate == null || autoDesiredCandidate?.id == chosen.id)) {
-                    abandonPreparedReplacement(failed = false)
-                    autoDesiredCandidate = previousCandidate
-                    playbackIntent.requestAutomaticCandidate(previousId, previousHeight)
-                    autoPreparing = false
-                    playbackControl.reportEvidence()
-                }
-                autoBoundaryAttempt = null
-            }
+        scope.launch {
+            playbackControl.reportIntent()
+            val step = playbackControl.awaitPreparedOffer(now)
+            if (step is PreparedOfferWait.Step.Offered && autoBoundaryIsCurrent(boundary) &&
+                step.action.effectiveSelection?.candidateId == chosen.id) onPrepareAction(step.action)
+            else withdrawAutoBoundary(boundary)
         }
+        return true
+    }
+
+    /** Put Auto back where the boundary found it, if nothing newer owns it. */
+    private fun withdrawAutoBoundary(boundary: AutoBoundaryAttempt) {
+        if (autoBoundaryAttempt === boundary) autoBoundaryAttempt = null
+        if (autoDesiredCandidate?.id != boundary.candidateId) return
+        autoDesiredCandidate = boundary.previousCandidate
+        playbackIntent.requestAutomaticCandidate(boundary.previousId, boundary.previousHeight)
+        autoPreparing = false
+        playbackControl.reportEvidence()
     }
 
     private fun failAutoPreparation() {
-        autoBoundaryAttempt?.outcome?.complete(false)
+        autoBoundaryAttempt = null
         autoDesiredCandidate?.let { autoBlockedUntil[it.id] = monotonicNowMs() + 300_000L }
         autoDesiredCandidate = null
         playbackIntent.requestAutomaticCandidate(null, null)
@@ -4422,8 +4396,7 @@ class Controller internal constructor(
             stagedSessionId != null && action.effectiveSelection?.candidateId == desired.id)
             AutoStagedObservation(built.player, built.autoTransfers, stagedSessionId, desired.id,
                 desired.recipe_digest.toList(), preparedStartedAtMs,
-                minOf(preparedStartedAtMs + minOf(15_000L, PREPARED_READINESS_BOUND_MS),
-                    autoBoundaryAttempt?.optionalDeadlineMs ?: Long.MAX_VALUE), Session.origin, Session.token) else null
+                preparedStartedAtMs + minOf(15_000L, PREPARED_READINESS_BOUND_MS), Session.origin, Session.token) else null
         rendezvousJob?.cancel()
         rendezvousJob = null
         rendezvous = null
@@ -4458,7 +4431,7 @@ class Controller internal constructor(
             ) {
                 if (reason == Player.DISCONTINUITY_REASON_SEEK &&
                     preparedPlayer === built.player &&
-                    (rendezvous?.rendezvousFilmMs != null || autoBoundaryAttempt?.seekIssued == true)
+                    rendezvous?.rendezvousFilmMs != null
                 ) {
                     rendezvousSeekObserved = true
                 }
@@ -4473,7 +4446,7 @@ class Controller internal constructor(
         built.player.addAnalyticsListener(preparedSwitchAnalytics(built.player))
         built.player.setMediaItem(
             MediaItem.fromUri(Session.url(playlist)),
-            successorAttachPositionMs(originMs, autoBoundaryAttempt?.targetMs ?: realPosition()),
+            successorAttachPositionMs(originMs, realPosition()),
         )
         built.player.prepare()
     }
@@ -4496,8 +4469,7 @@ class Controller internal constructor(
             collectRetiredPlayer()
         }
         awaitingCommitFrameSinceMs?.let { since ->
-            if (monotonicNowMs() - since > PREPARED_COMMIT_FRAME_BOUND_MS ||
-                autoBoundaryAttempt?.let { monotonicNowMs() >= it.optionalDeadlineMs } == true) {
+            if (monotonicNowMs() - since > PREPARED_COMMIT_FRAME_BOUND_MS) {
                 val restored = rollbackSwitchedReplacement()
                 // The directed change takes its one reopen here, and it carries
                 // the viewer's rung. The deferred rollback reopen would only
@@ -4512,6 +4484,15 @@ class Controller internal constructor(
         }
         val successor = preparedPlayer ?: return
         if (!preparedLedger.isLive) return
+        // A boundary preparation whose owner moved on (backgrounded, another
+        // selection, a different rung) is withdrawn, not failed.
+        autoBoundaryAttempt?.let { boundary ->
+            if (!preparedLedger.isSwitched && !autoBoundaryIsCurrent(boundary)) {
+                abandonPreparedReplacement(failed = false)
+                withdrawAutoBoundary(boundary)
+                return
+            }
+        }
         if (autoPreparing && autoVoluntary) {
             val now = monotonicNowMs()
             val observation = autoStagedObservation
@@ -4545,26 +4526,6 @@ class Controller internal constructor(
         if (successor.currentTracks.groups.isEmpty()) return
         publishAcknowledgement(preparedLedger.metadataReady())
         val originMs = preparedLedger.action?.mediaOriginMs ?: return
-        autoBoundaryAttempt?.let { boundary ->
-            if (!autoBoundaryIsCurrent(boundary) || monotonicNowMs() >= boundary.optionalDeadlineMs) {
-                abandonPreparedReplacement(failed = false)
-                return
-            }
-            if (!boundary.seekIssued) {
-                boundary.seekIssued = true
-                rendezvousSeekObserved = false
-                successor.playWhenReady = false
-                successor.seekTo(successorAttachPositionMs(originMs, boundary.targetMs))
-                return
-            }
-            if (!rendezvousSeekObserved) return
-            val through = successorFilmPositionMs(originMs, successor.bufferedPosition)
-            if (successorIsBuffered(through, boundary.targetMs)) {
-                publishAcknowledgement(preparedLedger.bufferReady(through))
-                commitPreparedReplacement(boundary.targetMs)
-            }
-            return
-        }
         if (rendezvous != null) return
         // From here the rendezvous owns this preparation. This tick keeps the
         // readiness bound and the terminal failures; it is far too coarse for
@@ -4689,9 +4650,8 @@ class Controller internal constructor(
                 autoPreparedTargetRevision, autoPresentationTarget?.revision,
                 autoPreparedMutationEpoch, mediaMutationEpoch,
                 playbackIntent.desiredQuality == PlaybackQuality.Auto && tv.plurx.app.data.Session.autoAbr,
-                presentationForeground && (player.isPlaying ||
-                    (autoBoundaryAttempt?.let(::autoBoundaryIsCurrent) == true && establishedPlayback)),
-                playbackIntent.pendingSeek != null && autoBoundaryAttempt?.let(::autoBoundaryIsCurrent) != true)) {
+                presentationForeground && player.isPlaying,
+                playbackIntent.pendingSeek != null)) {
             abandonPreparedReplacement(failed = true)
             return
         }
@@ -4904,19 +4864,9 @@ class Controller internal constructor(
             autoPreparing = false
             autoUpgradeSinceMs = null
         }
-        autoBoundaryAttempt?.let { boundary ->
-            val current = boundary.epoch == mediaMutationEpoch &&
-                viewerTransportLifetime === boundary.transportLifetime &&
-                selectedAudio == boundary.audio && selectedSubtitle == boundary.subtitle &&
-                audioOffsetMs == boundary.audioOffsetMs &&
-                playbackIntent.pendingQualityChange?.sequence == boundary.qualitySequence &&
-                playbackControlBootstrapFence.isActive() && presentationForeground &&
-                playbackIntent.desiredQuality == PlaybackQuality.Auto &&
-                preparedLedger.action?.effectiveSelection?.candidateId == boundary.candidateId &&
-                (boundary.sequence?.let(playbackIntent::isCurrent) ?: playbackIntent.playbackRequested)
-            if (current && boundary.sequence != null) markIntentExecuted(boundary.sequence)
-            boundary.outcome.complete(current)
-        }
+        // A boundary preparation ends with its own first frame, exactly like
+        // the mid-play upgrade it now is.
+        autoBoundaryAttempt = null
         publishAcknowledgement(preparedLedger.committed(firstFrameUnixMs))
         // The viewer is looking at the rung they asked for. The directed change
         // is honoured and owes nothing — least of all a reopen.
@@ -4989,7 +4939,6 @@ class Controller internal constructor(
     private fun failSwitchedReplacement(): Boolean {
         if (awaitingCommitFrameSinceMs == null) return false
         awaitingCommitFrameSinceMs = null
-        autoBoundaryAttempt?.outcome?.complete(false)
         publishAcknowledgement(preparedLedger.failedAfterSwitch())
         return fallBackAfterPreparedFailure()
     }
@@ -5032,15 +4981,6 @@ class Controller internal constructor(
         // fabricate a rendered frame. Settle it as failed; the caller's normal
         // reopen/end path replaces the black successor immediately afterward.
         if (preparedLedger.isSwitched) {
-            if (autoBoundaryAttempt != null) {
-                val restored = rollbackSwitchedReplacement()
-                failSwitchedReplacement()
-                if (restored) {
-                    preparedRollbackReopen = null
-                    applyEffectivePlayWhenReady()
-                }
-                return
-            }
             failSwitchedReplacement()
             return
         }
@@ -5059,7 +4999,8 @@ class Controller internal constructor(
      * is a second decoder the viewer is paying for and cannot see.
      */
     private fun releaseSuccessor() {
-        if (!preparedLedger.isSwitched) autoBoundaryAttempt?.outcome?.complete(false)
+        // The preparation a boundary asked for is gone with its pipeline.
+        if (!preparedLedger.isSwitched) autoBoundaryAttempt = null
         autoStagedPlaylistJob?.cancel()
         autoStagedPlaylistJob = null
         autoStagedObservation = null
@@ -5931,5 +5872,67 @@ internal fun autoViewerTransport(delegate: Player, isCurrent: () -> Boolean,
     override fun pause() { if (isCurrent()) request(false) }
     override fun setPlayWhenReady(playWhenReady: Boolean) {
         if (isCurrent()) request(playWhenReady)
+    }
+}
+
+/** What one viewer Play/Pause edge does to the player right now. */
+internal data class ViewerTransportEdge(
+    /** Written to the delegate immediately. Nothing optional may hold it. */
+    val delegatePlayWhenReady: Boolean,
+    /** The edge is a resume after at least [LONG_VIEWER_PAUSE_MS] of explicit
+     * pause on the same attachment, which owes Auto one original-first
+     * re-plan. The re-plan runs later, beside the playing incumbent. */
+    val armsAutoBoundaryReplan: Boolean,
+)
+
+internal const val LONG_VIEWER_PAUSE_MS = 60_000L
+
+/**
+ * The viewer's Play reaches the player on the press, however long the pause
+ * was. A long pause used to defer that write until an optional original
+ * preparation either committed at the paused frame or timed out — seconds of
+ * a pressed Play doing nothing. The re-plan is still owed; it is just no
+ * longer allowed to stand between the viewer and the picture.
+ */
+internal fun viewerTransportEdge(requested: Boolean, wasRequested: Boolean, pausedAtMs: Long?,
+    pauseOwnerCurrent: Boolean, nowMs: Long): ViewerTransportEdge =
+    ViewerTransportEdge(
+        delegatePlayWhenReady = requested,
+        armsAutoBoundaryReplan = requested && !wasRequested && pauseOwnerCurrent && pausedAtMs != null &&
+            nowMs >= pausedAtMs && nowMs - pausedAtMs >= LONG_VIEWER_PAUSE_MS,
+    )
+
+/**
+ * The one Auto re-plan a viewer boundary is owed, held until the ordinary
+ * Auto evaluation can serve it as a prepared replacement.
+ *
+ * It is keyed by the viewer transport lifetime that armed it, so any newer
+ * viewer edge (a Pause, another seek) makes it stale without a timer, and it
+ * is consumed by the first evaluation where the incumbent has the runway a
+ * handoff needs. Nothing waits on it.
+ */
+internal class AutoBoundaryReplan {
+    private var armedBy: Any? = null
+
+    val isArmed: Boolean get() = armedBy != null
+
+    fun arm(lifetime: Any) { armedBy = lifetime }
+
+    fun clear() { armedBy = null }
+
+    /** True exactly once per armed boundary, when [runwayMs] can carry it. */
+    fun take(lifetime: Any, runwayMs: Long): Boolean {
+        val owner = armedBy ?: return false
+        if (owner !== lifetime) {
+            armedBy = null
+            return false
+        }
+        if (runwayMs < AUTO_BOUNDARY_RUNWAY_MS) return false
+        armedBy = null
+        return true
+    }
+
+    companion object {
+        const val AUTO_BOUNDARY_RUNWAY_MS = 10_000L
     }
 }
