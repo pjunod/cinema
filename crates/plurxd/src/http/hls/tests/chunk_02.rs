@@ -2470,6 +2470,35 @@
         session_id: String,
         playback_id: &str,
     ) -> (HlsDeliveryFixture, String, MediaSessionRoute) {
+        staging_route_with_incumbent_on(fixture, session_id, playback_id, None).await
+    }
+
+    /// `staging_route_on`, optionally describing a real Auto incumbent.
+    ///
+    /// With `incumbent`, the route is what an automatic create writes and
+    /// what `candidate_recovery::incumbent` proves before any of its evidence
+    /// may count: the recipe binds the fixture's actual source (size and
+    /// mtime) and names the candidate, the start response offered exactly
+    /// that candidate and selected it, and the row carries the recovery epoch
+    /// a create mints. Without it the route keeps the placeholder source and
+    /// carries no candidate, so no incumbent can be proved from it.
+    async fn staging_route_with_incumbent_on(
+        fixture: HlsDeliveryFixture,
+        session_id: String,
+        playback_id: &str,
+        incumbent: Option<plurx_core::playback::candidate::QualityCandidate>,
+    ) -> (HlsDeliveryFixture, String, MediaSessionRoute) {
+        let (source_size, source_mtime, recovery_epoch) = if incumbent.is_some() {
+            let file = fixture
+                .store
+                .get_file(fixture.file_id())
+                .await
+                .expect("incumbent source query")
+                .expect("incumbent source");
+            (file.size, file.mtime, uuid::Uuid::new_v4().to_string())
+        } else {
+            (1, 1, String::new())
+        };
         let user = fixture
             .store
             .create_user("stage-on-prepare", "hash", false)
@@ -2506,14 +2535,14 @@
             retained_output: None,
             retained_output_receiver: None,
             candidate_catalog: None,
-            candidate_id: None,
+            candidate_id: incumbent.as_ref().map(|candidate| candidate.id),
             presentation_target: None,
             decoder_caps: None,
             protocol_version: crate::media_pool::PROTOCOL_VERSION,
             incarnation_id: incarnation_id.clone(),
             user_id: user.id,
-            source_size: 1,
-            source_mtime: 1,
+            source_size,
+            source_mtime,
             typeless_playlist: false,
             library_channel: None,
             request: predecessor_request.clone(),
@@ -2522,8 +2551,8 @@
             delivered_audio: None,
         quality_catalog_status: None,
             display_aware_auto_protocol: Some("route-v1".to_owned()),
-            quality_candidate_id: None,
-            quality_candidates: None,
+            quality_candidate_id: incumbent.as_ref().map(|candidate| candidate.id),
+            quality_candidates: incumbent.map(|candidate| vec![candidate]),
             measured_candidate_outputs: None,
             session_id: session_id.clone(),
             playlist_url: format!("/api/v1/hls/{session_id}/index.m3u8"),
@@ -2548,7 +2577,7 @@
         let route = activate_ready(
             &fixture.store,
             MediaSessionActivation {
-                recovery_epoch: String::new(),
+                recovery_epoch,
                 expected_desired_revision: None,
                 incarnation_id,
                 session_id: session_id.clone(),

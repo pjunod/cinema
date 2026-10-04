@@ -1340,6 +1340,7 @@ impl MediaSessionStore for HiqliteAuthStore {
         };
         let rows = self
             .client()
+            // authority: the recovery budget must include the failure just committed, or lag re-offers that recipe.
             .query_consistent_map::<CandidateRecoveryRecipeRow, _>(
                 crate::store::candidate_recovery::READ_SQL,
                 params!(key),

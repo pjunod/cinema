@@ -1302,9 +1302,13 @@ mod tests {
     }
 
     fn prior_connection() -> Connection {
+        // The current sidecar shape: the v3 table plus v11's Link pair, which
+        // `observe_prior` writes on every observation.
         let conn = Connection::open_in_memory().expect("prior connection");
         conn.execute_batch(NETWORK_PRIORS_SCHEMA)
             .expect("prior schema");
+        conn.execute_batch(NETWORK_PRIOR_LINK_COLUMNS)
+            .expect("prior link columns");
         conn
     }
 
@@ -1681,7 +1685,7 @@ mod tests {
         // `SIDECAR_SCHEMA_VERSION`, so an assertion built from the same
         // constant can never fail on a bump. Update it by hand, deliberately,
         // exactly as the single-node backend's `assert_eq!(version, 37)` is.
-        assert!(error.to_string().contains("only knows v10"), "{error}");
+        assert!(error.to_string().contains("only knows v12"), "{error}");
     }
 
     #[tokio::test]
@@ -1694,11 +1698,19 @@ mod tests {
             let conn = Connection::open(&path).expect("seed a v3 sidecar");
             conn.execute_batch(PLAYBACK_EVENTS_SCHEMA).expect("events");
             conn.execute_batch(NETWORK_PRIORS_SCHEMA).expect("priors");
-            observe_prior(
-                &conn,
-                &observation("home", Some(12_000), None, 1_700_000_000_000),
+            // Written with the v3 column list rather than through today's
+            // `observe_prior`, which also writes v11's Link pair: a v3 voter
+            // could only have written these columns.
+            conn.execute(
+                "INSERT INTO network_priors (
+                     user_id, credential_generation, client_class, network_fingerprint,
+                     sustained_kbps, worst_rung_height, starved_at_ms, sample_count,
+                     updated_at_ms
+                 ) VALUES (42, 'test-gen', 'safari', 'home', 12000, NULL, NULL, 1,
+                           1700000000000)",
+                [],
             )
-            .expect("record a prior the way a running voter would");
+            .expect("record a prior the way a v3 voter would");
             conn.pragma_update(None, "user_version", 3)
                 .expect("stamp v3");
         }
@@ -1741,11 +1753,19 @@ mod tests {
             conn.execute_batch(NETWORK_PRIORS_SCHEMA).expect("priors");
             conn.execute_batch(crate::store::fragindex::FRAGMENT_INDEXES_SCHEMA)
                 .expect("indexes");
-            observe_prior(
-                &conn,
-                &observation("home", Some(12_000), None, 1_700_000_000_000),
+            // Written with the v4 column list rather than through today's
+            // `observe_prior`, which also writes v11's Link pair: a v4 voter
+            // could only have written these columns.
+            conn.execute(
+                "INSERT INTO network_priors (
+                     user_id, credential_generation, client_class, network_fingerprint,
+                     sustained_kbps, worst_rung_height, starved_at_ms, sample_count,
+                     updated_at_ms
+                 ) VALUES (42, 'test-gen', 'safari', 'home', 12000, NULL, NULL, 1,
+                           1700000000000)",
+                [],
             )
-            .expect("record a prior the way a running voter would");
+            .expect("record a prior the way a v4 voter would");
             // Written with the v4 column list rather than through today's
             // `put`, because that is what a v4 binary could actually have
             // written -- and the point of the test is that those rows survive.

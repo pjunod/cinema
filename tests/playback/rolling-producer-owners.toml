@@ -3824,7 +3824,10 @@ pattern = "(?:[A-Za-z_]\\w*::)+(?:sleep|sleep_until|interval|interval_at|timeout
 # candidate_recovery::observe gains one timeout_at on that same deadline (+1)
 # so its decoder memory read and durable write end Unrecorded("deadline")
 # instead of spending the create's startup budget. Awaited in place.
-expected_occurrences = 1224
+# +1 test-only: storage_and_downstream_each_get_their_own_no_progress_window
+# lets the pump finish its 20 s storage read with one paused-clock sleep
+# instead of advance-plus-yields, so the consumer wait starts after handoff.
+expected_occurrences = 1225
 
 [[module_structures]]
 id = "bare-time-constructor"

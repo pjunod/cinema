@@ -3484,7 +3484,13 @@ mod tests {
         assert!(names.contains(&"live_tv_resource_records"));
         // The revision/nonce is reconstructed above the greatest restored epoch.
         assert!(!names.contains(&"live_tv_resource_revision"));
-        assert_eq!(names.len(), 70, "review every imported durable table");
+        // Authenticated candidate failures are replicated: any node may serve
+        // the next attempt, and each must refuse the recipe that failed. The
+        // Link samples beside them are one node's measurements and never
+        // reach Raft.
+        assert!(names.contains(&"candidate_recovery"));
+        assert!(!names.contains(&"candidate_link_priors"));
+        assert_eq!(names.len(), 71, "review every imported durable table");
     }
 
     /// A source from before the pointer fence has no revision to attribute its

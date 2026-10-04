@@ -100,6 +100,7 @@ operations! {
     RecordAnalysisRetryWaitPhase => "record_analysis_retry_wait_phase",
     RecordAnalysisFailedPhase => "record_analysis_failed_phase",
     TouchSharedOfflineCacheEntry => "touch_shared_offline_cache_entry",
+    ObserveCandidateLink => "observe_candidate_link",
 }
 
 const OUTCOMES: [&str; 2] = ["ok", "error"];

@@ -2663,6 +2663,8 @@
             ("before_preparation_registered", hooks.before_preparation_registered("p")),
             ("after_release_fence_closed", hooks.after_release_fence_closed(&session_id)),
             ("after_release_tombstoned", hooks.after_release_tombstoned(&session_id)),
+            ("after_link_source_validated", hooks.after_link_source_validated()),
+            ("after_staged_link_route_read", hooks.after_staged_link_route_read()),
         ] {
             assert!(
                 hook.as_mut().poll(&mut context).is_ready(),
@@ -3253,7 +3255,19 @@
         use super::link_receipts::{ClientLinkSample, SessionBinding};
         let dir = crate::test_tempdir().expect("source");
         let playback = unique_playback_id("a05-unknown-original");
-        let (fixture, session, route) = staging_fixture_for_playback(dir.path(), &playback).await;
+        // An automatic session's evidence counts only behind a proved
+        // incumbent, so the route is a real Auto incumbent: it serves the
+        // fixture's actual source and selected this candidate, the one its
+        // link receipts are bound to below.
+        let incumbent_digest = [7;32];
+        let incumbent = QualityCandidate {id:CandidateId::for_recipe_digest(incumbent_digest), recipe_digest:incumbent_digest,
+            route:CandidateRoute::Encode, normalized_geometry:true, width:1920, height:1080, target_height:1080,
+            average_bps:Some(8_000_000), peak_bps:Some(12_000_000), grade:plurx_core::transcode::OutputGrade::Sdr,
+            decoder_compatible:true, complete_cache:false, sustainable:true};
+        let session_id = uuid::Uuid::new_v4().to_string();
+        let published = HlsDeliveryFixture::publish(dir.path(), &session_id).await;
+        let (fixture, session, route) =
+            staging_route_with_incumbent_on(published, session_id, &playback, Some(incumbent.clone())).await;
         fixture.store.put_setting(plurx_core::store::keys::PLAYBACK_NETWORK_PRIORS, "1").await.expect("setting");
         let control = preparing_control_request(&route);
         accepted_exchange(&fixture, &route, &control).await;
@@ -3268,7 +3282,7 @@
         network.user_id = Some(user.id);
         network.credential_generation = Some(plurx_core::domain::CredentialGeneration::derive(user.id, user.created_at, &user.password_hash));
         let file = fixture.store.get_file(fixture.file_id()).await.expect("file query").expect("file");
-        let source = super::link_receipts::binding(&network, &file, [7;32], CandidateRoute::Encode).await.expect("source identity");
+        let source = super::link_receipts::binding(&network, &file, incumbent.recipe_digest, incumbent.route).await.expect("source identity");
         fixture.state.link_receipts.register(SessionBinding {source, session:session.clone(), incarnation:route.incarnation_id.clone(), owner_epoch:route.owner_epoch});
         let (nonce, eof) = fixture.state.link_receipts.mint(&session, "seg00001.m4s", "incumbent-etag", 4_000_000, Some(4000), true).expect("body");
         let sample = ClientLinkSample {receipt:nonce.clone(), object_name:"seg00001.m4s".into(), etag:"incumbent-etag".into(), body_bytes:4_000_000,
@@ -3435,7 +3449,7 @@
             return;
         }
         if mode == 2 {
-            let pause = fixture.state.link_receipts.pause_final_stage_route_for_test();
+            let pause = super::pause_staged_link_route_result(&fixture.state);
             let intake = fixture.state.link_receipts.accept(&fixture.state, &network, Some(&staged), &sample);
             tokio::pin!(intake);
             let held = tokio::select! {

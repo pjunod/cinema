@@ -16629,7 +16629,12 @@ fn populated_v14_import_fixture(data_dir: &std::path::Path) -> PathBuf {
              DROP TABLE IF EXISTS library_channel_generations;
              DROP TABLE IF EXISTS library_channels;
              ALTER TABLE transcode_cache_locations DROP COLUMN publication_generation;
-             -- v88 adds this column; leaving it on a stamped-v14 fixture
+             -- v96's candidate failures and v94's node-local Link samples.
+             -- Both are CREATE TABLE IF NOT EXISTS, so leaving them would be
+             -- silent: a v14 fixture that still held them.
+             DROP TABLE IF EXISTS candidate_recovery;
+             DROP TABLE IF EXISTS candidate_link_priors;
+             -- v92 adds this column; leaving it on a stamped-v14 fixture
              -- makes the actual ordinary upgrade repeat ADD COLUMN.
              ALTER TABLE offline_packages DROP COLUMN audio_recipe;
              ALTER TABLE offline_packages DROP COLUMN alternate_recipe_hash;

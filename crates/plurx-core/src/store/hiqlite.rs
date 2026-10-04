@@ -3456,6 +3456,7 @@ impl HiqliteAuthStore {
                     // Like the desired-selection/drain migrations, tolerate
                     // an already-present additive column during upgrade replay.
                     // An incompatible type/nullability is not an audio snapshot.
+                    // authority: a stale replica could miss a committed audio_recipe column and replay its ADD COLUMN.
                     let columns = self.client().query_consistent_map::<CountRow, _>(
                         "SELECT COUNT(*) AS count FROM pragma_table_info('offline_packages') WHERE name = 'audio_recipe' AND upper(type) = 'TEXT' AND \"notnull\" = 0", params!()).await?;
                     let mut statements = vec![(
@@ -3548,6 +3549,7 @@ impl HiqliteAuthStore {
         );
         let mut rows = self
             .client()
+            // authority: the bridge decides from the committed marker and schema, never a lagging replica's.
             .query_consistent_map::<LineageReadRow, _>(sql, params!())
             .await?;
         if rows.len() != 1 {
@@ -3608,7 +3610,7 @@ impl HiqliteAuthStore {
                 params!(),
             ));
         }
-        statements.push(("UPDATE cluster_meta SET schema_version=$1,migrated_at=$2 WHERE singleton=1 AND schema_version=$3".to_owned(), params!(AUTH_SCHEMA_VERSION, self.now()?, marker)));
+        statements.push(("UPDATE cluster_meta SET schema_version = $1, migrated_at = $2 WHERE singleton = 1 AND schema_version = $3".to_owned(), params!(AUTH_SCHEMA_VERSION, self.now()?, marker)));
         // Every query is a single prepared statement. The vendored writer
         // executes sequentially within ONE transaction and rolls back on any
         // preparation/execution failure, including either read-only CAS guard.
@@ -3669,6 +3671,7 @@ impl HiqliteAuthStore {
     pub async fn validation_lineage_union_fingerprint(&self) -> Result<String, StoreError> {
         let objects = self
             .client()
+            // authority: contract validation fingerprints the committed schema, not replica lag.
             .query_consistent_map::<super::schema_lineage::SchemaObject, _>(
                 super::schema_lineage::OBJECT_QUERY,
                 params!(),
@@ -3760,9 +3763,12 @@ impl HiqliteAuthStore {
             sql.push(statement.to_owned());
         }
         let mut statements: Vec<_> = sql.into_iter().map(|sql| (sql, params!())).collect();
+        // The same marker write as the migration chain, so the store layer
+        // keeps exactly one shape of `cluster_meta` write.
         statements.push((
-            "UPDATE cluster_meta SET schema_version=$1 WHERE singleton=1".to_owned(),
-            params!(marker),
+            "UPDATE cluster_meta SET schema_version = $1, migrated_at = $2 WHERE singleton = 1"
+                .to_owned(),
+            params!(marker, self.now()?),
         ));
         self.client()
             .txn(statements)

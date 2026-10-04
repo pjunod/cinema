@@ -9996,6 +9996,11 @@ mod tests {
         assert_eq!(
             ids,
             vec![
+                // The clock guard's enforcement switch. All four rows are
+                // advisory; on this standalone fixture there is no remote
+                // member to observe, so coverage and the consequence row are
+                // `met` and the offset and NTP rows `unobservable`.
+                "cluster_clock",
                 "durable_cluster_work",
                 "bounded_catalogue_reads",
                 "cluster_backup",
@@ -10126,6 +10131,10 @@ mod tests {
                 // The ffmpeg row is absent here because the fixture never
                 // probed a build.
                 "chapter_thumbs_work",
+                // The clock guard's: no committed remote member, so nothing
+                // is uncovered and current evidence would refuse nothing.
+                "consequence",
+                "coverage",
                 "durable_queue",
                 "durable_role",
                 "rolling_contract_built",
@@ -10156,6 +10165,15 @@ mod tests {
                 seen.get(id).map(String::as_str),
                 Some("unobservable"),
                 "{id} claimed to have read something this process cannot reach: {body}"
+            );
+        }
+        // The clock guard has no member offset to bound here, and this process
+        // never reads a node's time-synchronisation daemon.
+        for id in ["upper_bound", "ntp"] {
+            assert_eq!(
+                seen.get(id).map(String::as_str),
+                Some("unobservable"),
+                "{id} claimed a clock fact this standalone node cannot read: {body}"
             );
         }
         // Statements about this build, true whatever the deployment looks

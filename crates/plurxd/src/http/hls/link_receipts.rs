@@ -141,12 +141,11 @@ struct Rows {
     sessions: HashMap<String, SessionRow>,
     receipts: HashMap<String, Receipt>,
 }
+/// The registry carries no test-only state: its race points are the HLS
+/// route group's hooks, reached through the [`AppState`] every claim is
+/// handed (D-M8-J).
 #[derive(Default)]
-pub(crate) struct LinkReceipts(
-    Mutex<Rows>,
-    #[cfg(test)] crate::seam_hooks::PauseSlot,
-    #[cfg(test)] crate::seam_hooks::PauseSlot,
-);
+pub(crate) struct LinkReceipts(Mutex<Rows>);
 
 #[derive(serde::Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -743,10 +742,6 @@ impl LinkReceipts {
             .gate = gate;
     }
     #[cfg(test)]
-    pub(super) fn pause_final_stage_route_for_test(&self) -> Arc<crate::seam_hooks::AsyncPause> {
-        self.2.arm("staged final route result")
-    }
-    #[cfg(test)]
     pub(super) fn raw_claimed_for_test(&self, nonce: &str) -> bool {
         self.0
             .lock()
@@ -898,8 +893,11 @@ impl LinkReceipts {
         if !fence.unchanged() || fence.object_version() != captured.source.source_object_version {
             return None;
         }
-        #[cfg(test)]
-        self.1.hold().await;
+        state
+            .hls_route_hooks
+            .get()
+            .after_link_source_validated()
+            .await;
         if let Some(proof) = staged.as_ref() {
             let budget = Duration::from_millis(
                 u64::try_from(
@@ -932,9 +930,12 @@ impl LinkReceipts {
         // retired or replaced. Claim only after its current authority fence.
         let route = tokio::time::timeout(Duration::from_secs(1), async {
             let route = state.store.media_session_route(&captured.session).await;
-            #[cfg(test)]
             if staged.is_some() {
-                self.2.hold().await;
+                state
+                    .hls_route_hooks
+                    .get()
+                    .after_staged_link_route_read()
+                    .await;
             }
             route
         })
@@ -2286,7 +2287,7 @@ mod tests {
                 "unraced real intake must accept the raw claim"
             );
             sample.negative = true;
-            let pause = state.link_receipts.1.arm("intake after source validation");
+            let pause = super::super::pause_link_claim_after_source_validation(&state);
             let task = {
                 let state = state.clone();
                 let id = session.session.clone();

@@ -978,10 +978,19 @@ pub async fn client_log(
                     .accept(&proof_state, &identity, proof_session.as_deref(), &sample)
                     .await
                 {
-                    let _ = proof_state
-                        .store
-                        .observe_candidate_link(&value, crate::media_sessions::unix_ms())
-                        .await;
+                    // A client-reported link sample is a prior, not a
+                    // record anything waits on: losing one costs a
+                    // slightly staler estimate, so the failure is counted
+                    // and rate-limit logged rather than propagated to a
+                    // detached task nobody joins.
+                    crate::store_result::observe(
+                        crate::store_result::Operation::ObserveCandidateLink,
+                        crate::store_result::Discard::BestEffort,
+                        proof_state
+                            .store
+                            .observe_candidate_link(&value, crate::media_sessions::unix_ms())
+                            .await,
+                    );
                 }
             }
         });

@@ -3809,11 +3809,48 @@ impl Disposition {
 /// sites and two of the three `?` sites; the third, a missing client platform
 /// after the client is registered, cannot be reached because registration
 /// sets both together.
+///
+/// **Reading `state` and never writing it includes its liveness tokens.**
+/// `ControlState` is `Clone`, and a clone shares `observational_live` and
+/// `observational_stage_live` with the state it came from — that sharing is
+/// what lets a fence handed out earlier see the state retire it. So a step
+/// that ran the body on a plain clone would store `false` into the very
+/// tokens its caller still holds, retiring the caller's fences for an
+/// exchange the caller has not adopted (and, for a refused packet, may never
+/// adopt). The step therefore runs on private copies of both tokens; only
+/// [`ControlState::accept_at`], which adopts the result, carries a retirement
+/// back to the tokens the outstanding fences hold. Production reaches the
+/// step only through `accept_at`, which needs those private copies to adopt;
+/// this form, which drops them, is the one the step's own tests drive.
+#[cfg(test)]
 pub(crate) fn accept_step(
     state: &ControlState,
     now: Instant,
     request: ControlRequestView<'_>,
 ) -> (ControlState, Result<Disposition, ControlStateError>) {
+    let (next, result, _private) = accept_step_detached(state, now, request);
+    (next, result)
+}
+
+/// The liveness tokens [`accept_step_detached`] substituted for the caller's.
+///
+/// Kept so adoption can tell a token the step merely retired (still this
+/// private copy, now `false`) from one the step replaced with a new lifetime
+/// (a different `Arc` altogether).
+struct DetachedObservationTokens {
+    stage_live: Arc<AtomicBool>,
+    live: Arc<AtomicBool>,
+}
+
+fn accept_step_detached(
+    state: &ControlState,
+    now: Instant,
+    request: ControlRequestView<'_>,
+) -> (
+    ControlState,
+    Result<Disposition, ControlStateError>,
+    DetachedObservationTokens,
+) {
     let ControlRequestView {
         generation,
         owner_epoch,
@@ -3822,6 +3859,16 @@ pub(crate) fn accept_step(
         acceptance,
     } = request;
     let mut next = state.clone();
+    let private = DetachedObservationTokens {
+        stage_live: Arc::new(AtomicBool::new(
+            state.observational_stage_live.load(Ordering::Acquire),
+        )),
+        live: Arc::new(AtomicBool::new(
+            state.observational_live.load(Ordering::Acquire),
+        )),
+    };
+    next.observational_stage_live = Arc::clone(&private.stage_live);
+    next.observational_live = Arc::clone(&private.live);
     let result = next
         .accept_in_place(
             now,
@@ -3832,7 +3879,29 @@ pub(crate) fn accept_step(
             acceptance,
         )
         .map(Disposition::from_tuple);
-    (next, result)
+    (next, result, private)
+}
+
+/// Carry one liveness token across adoption of a step's result.
+///
+/// Tokens only ever go from live to retired, so the reconciliation is total:
+/// a token the step kept is reattached to the caller's `Arc` (so fences
+/// already handed out stay connected to the adopted state), retiring that
+/// `Arc` if the step retired its private copy; a token the step replaced
+/// means the caller's lifetime is over, and its `Arc` is retired.
+fn adopt_observation_token(
+    published: &Arc<AtomicBool>,
+    adopted: &mut Arc<AtomicBool>,
+    private: &Arc<AtomicBool>,
+) {
+    if Arc::ptr_eq(adopted, private) {
+        if !private.load(Ordering::Acquire) {
+            published.store(false, Ordering::Release);
+        }
+        *adopted = Arc::clone(published);
+    } else {
+        published.store(false, Ordering::Release);
+    }
 }
 
 impl ControlState {
@@ -3932,7 +4001,7 @@ impl ControlState {
         acceptance: ControlAcceptance,
     ) -> Result<(ControlDisposition, u64, ControlAction, ClientPlatform, bool), ControlStateError>
     {
-        let (next, result) = accept_step(
+        let (mut next, result, private) = accept_step_detached(
             self,
             now,
             ControlRequestView {
@@ -3942,6 +4011,18 @@ impl ControlState {
                 sequence,
                 acceptance,
             },
+        );
+        // Adoption, on both arms (rejection has never been atomic): only now
+        // may the step's retirements reach the tokens outstanding fences hold.
+        adopt_observation_token(
+            &self.observational_stage_live,
+            &mut next.observational_stage_live,
+            &private.stage_live,
+        );
+        adopt_observation_token(
+            &self.observational_live,
+            &mut next.observational_live,
+            &private.live,
         );
         *self = next;
         result.map(Disposition::into_tuple)
@@ -32201,7 +32282,8 @@ mod tests {
             /// its sequence or platform is judged.
             GenerationAdopted,
             /// Finding, preserved: the ask lands before the prepared-successor
-            /// observation can refuse the packet.
+            /// observation can refuse the packet — and with it the new
+            /// observational lifetime a changed ask opens.
             AskAdvanced,
             /// Finding, preserved: an owner-epoch advance resets the sequence
             /// space and registers the client before the observation refuses.
@@ -32633,6 +32715,11 @@ mod tests {
         );
         for row in rows.into_iter().chain(pairs) {
             let before = row.state.clone();
+            // Snapshotted, not re-read: `before` shares its liveness tokens
+            // with every clone below, and the in-place body and `accept_at`
+            // (which adopts) legitimately retire them. What the refused packet
+            // is measured against is the state as it was handed.
+            let handed = format!("{before:?}");
             let request = || ControlRequestView {
                 generation: &row.generation,
                 owner_epoch: row.owner_epoch,
@@ -32642,6 +32729,12 @@ mod tests {
             };
             let (next, result) = accept_step(&before, row.now, request());
             assert_eq!(result, Err(row.expected), "{}", row.site);
+            assert_eq!(
+                format!("{before:?}"),
+                handed,
+                "{}: the step wrote its input",
+                row.site
+            );
 
             let mut mutable = before.clone();
             assert_eq!(
@@ -32703,6 +32796,15 @@ mod tests {
                         row.site
                     );
                     residue.desired_digest = None;
+                    assert_eq!(
+                        residue.observational_desired_lifetime,
+                        before
+                            .observational_desired_lifetime
+                            .and_then(|lifetime| lifetime.checked_add(1)),
+                        "{}: a changed ask opens exactly one new observational lifetime",
+                        row.site
+                    );
+                    residue.observational_desired_lifetime = before.observational_desired_lifetime;
                 }
                 LeftBehind::EpochRolledOver => {
                     assert_eq!(
@@ -32724,7 +32826,7 @@ mod tests {
             }
             assert_eq!(
                 format!("{residue:?}"),
-                format!("{before:?}"),
+                handed,
                 "{}: the refused packet left state behind",
                 row.site
             );
@@ -32809,5 +32911,105 @@ mod tests {
             stepped = next;
         }
         assert_eq!(replays, 1, "the run exercises exactly one replay");
+    }
+
+    /// `ControlState` clones share their liveness tokens, so the step has to
+    /// run on private copies: a fence handed out before an exchange that opens
+    /// a new lifetime stays live until that exchange is **adopted**, and a
+    /// fence that outlives an adopted exchange which kept the lifetime is
+    /// still connected to the adopted state's token.
+    #[test]
+    fn accept_step_retires_outstanding_fences_only_on_adoption() {
+        let started = Instant::now();
+        let generation = uuid::Uuid::new_v4().to_string();
+        let client = uuid::Uuid::new_v4().to_string();
+        let selected = selection_at(QualitySelection::Manual { height: 480 });
+        let away = selection_at(QualitySelection::Manual { height: 720 });
+        let identity =
+            |sequence, fingerprint: &str, selection: &ClientSelection| AcceptedControlIdentity {
+                generation: generation.clone(),
+                owner_epoch: 1,
+                client_instance_id: client.clone(),
+                sequence,
+                fingerprint: fingerprint.to_owned(),
+                desired_digest: selection.desired().digest(),
+            };
+        let mut state = ControlState::default();
+        state
+            .accept_at(
+                started,
+                &generation,
+                1,
+                &client,
+                1,
+                ControlAcceptance::new(Some(ClientPlatform::Web), None)
+                    .asking(&selected)
+                    .fingerprinted("origin"),
+            )
+            .expect("sequence 1 accepted");
+        let origin = state
+            .accepted_observation(identity(1, "origin", &selected))
+            .expect("the accepted exchange mints a fence");
+
+        let moved_at = started + MIN_CONTROL_INTERVAL;
+        let moved = || {
+            ControlAcceptance::new(None, None)
+                .asking(&away)
+                .fingerprinted("away")
+        };
+        let (next, result) = accept_step(
+            &state,
+            moved_at,
+            ControlRequestView {
+                generation: &generation,
+                owner_epoch: 1,
+                client_instance_id: &client,
+                sequence: 2,
+                acceptance: moved(),
+            },
+        );
+        assert!(result.is_ok(), "the changed ask is accepted");
+        assert!(
+            origin.still_live(),
+            "a step nobody adopted must not retire the caller's fence"
+        );
+        assert!(state.observation_is_current(&origin));
+        assert!(
+            !next.observation_is_current(&origin),
+            "the stepped state has opened a new lifetime"
+        );
+
+        state
+            .accept_at(moved_at, &generation, 1, &client, 2, moved())
+            .expect("sequence 2 adopted");
+        assert!(
+            !origin.still_live(),
+            "adopting the new lifetime retires the fence handed out before it"
+        );
+
+        let latest = state
+            .accepted_observation(identity(2, "away", &away))
+            .expect("the new lifetime mints a fence");
+        state
+            .accept_at(
+                moved_at + MIN_CONTROL_INTERVAL,
+                &generation,
+                1,
+                &client,
+                3,
+                ControlAcceptance::new(None, None)
+                    .asking(&away)
+                    .fingerprinted("poll"),
+            )
+            .expect("sequence 3 adopted");
+        assert!(
+            latest.still_live() && state.observation_is_current(&latest),
+            "an exchange that keeps the lifetime keeps its fences"
+        );
+        state.invalidate_observational_attachment();
+        assert!(
+            !latest.still_live(),
+            "the fence is still attached to the adopted state's token"
+        );
     }
 }
