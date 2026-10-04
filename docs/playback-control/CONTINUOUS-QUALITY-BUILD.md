@@ -861,14 +861,14 @@ historical measured outcomes as current evidence.
 |---|---|---|---|
 | Upstream ownership | PR #669, main `91917940e`; integrated tree `7c2a950ef` | Forgejo merged receipt and upstream completed status, 2026-10-01; pinned `cargo check --workspace --locked --all-targets` | Dependency released; integrated source compiles |
 | CQ0 | `codex/continuous-quality-cq0`, planning base `ea5f76d34`; source hashes retained per run | New isolated lab; commands and limitations below | Runnable Chrome mechanics probe; native Safari and output captures incomplete |
-| CQ2a | Integrated upstream route-v1 floor; independent cancellation envelope being built | Pinned workspace/all-target compile; negotiation and exact-cancel regressions authored, not run | Separate bounded public/peer route, exact accepted intent fences; web caller and durable cleanup receipts implemented; client replay/retention settlement remains |
-| CQ1 | Integrated upstream retention/admission | Pending-planning cancellation regression authored; not run | Upstream safety reused; incumbent-wait planning gap closed; manual retention and explicit Retry/restart implemented, qualification pending |
+| CQ2a | Integrated upstream route-v1 floor; independent cancellation envelope being built | Pinned workspace/all-target compile; negotiation and exact-cancel regressions authored, not run | Separate bounded public/peer route, exact accepted intent fences and durable cleanup receipts implemented; rapid/pause/seek, disposal, mixed-owner routing and old-server explicit fallback qualified; broader matrix remains |
+| CQ1 | Integrated upstream retention/admission | Pending-planning cancellation regression authored; not run | Upstream safety reused; manual retention, normal-pool target-load Retry and older-server Apply with restart qualified; broader matrix remains |
 | CQ2 | Strict transaction ledger, owner-fenced storage and serving integration implemented | Pinned workspace/all-target compile; lost append, replay, takeover, pin-pressure and cross-language fixture regressions authored, unrun | Dependency reservations, physical pins and web adapter implemented; pressure/takeover qualification remains |
 | CQ3 | Verified two-rung AVC/shared-AAC family implemented | Actual isolated Linux init verification and production probes | BT.709 proof passes; continuity qualification remains |
 | CQ4 | Controlled cold admission and demand retirement implemented | Pinned all-target compilation; regressions authored | Measured cleanup and pressure qualification remain |
-| CQ5 | Production hls.js enrollment, reserved loader and observers implemented | Exact-source Chrome probes; first frame and first rung observed | AAC pin and logical abort fixes implemented; rate-budget fix awaits replay; full Chrome/Firefox series remain |
+| CQ5 | Production hls.js enrollment, reserved loader and observers implemented | Exact-source Chrome probes; first frame and first rung observed | Full Chrome fifteen-manual/five-Auto campaign passes on recorded source; Firefox full campaign remains failed and independent optical qualification is ongoing |
 | CQ6 | Warm prepared surfaces and original overlap clocks implemented | iOS/tvOS and Android source compilation | Unit execution deferred; physical qualification remains |
-| CQ7 | Public API and SDK constraints audited; prepared path retained | Official variant/track API documentation; device inventory | Continuous native adapters and device evidence remain unfinished |
+| CQ7 | Public API and SDK constraints audited; prepared path retained | Official variant/track API documentation; device inventory | Android continuous adapter implemented and sources compile; Apple policy ownership and physical device evidence remain unfinished |
 | CQ8 | — | — | Not run |
 
 ### 10.1 CQ0 isolated experiment — mechanics evidence, capture incomplete
@@ -5948,3 +5948,82 @@ media prototype will qualify the codec/filter path before generating the
 new long fixture or repeating browser campaigns. This instrumentation does
 not widen the existing callback/continuity thresholds or claim physical
 output. No units or final adversarial review ran.
+
+
+### 10.205 Clocked media codec qualification and baseline capture calibration
+
+Committed `65b068f77` passed normal catalog/formatting/Clippy (37.19 seconds)
+and 72 served JavaScript syntax checks, then its exact source-only Linux
+build passed in 1m33s with verified Rust 1.97.1. All 220 declared regression
+fields resolve statically; no units executed.
+
+`continuous-optical-clock-65b068f77-codec1` **PASSED** actual encoded
+media/filter qualification: a two-second MPEG-4 1080p source and AVC 720p
+companion each independently decoded all 48 optical counters, 0→47. Their
+prototype media were removed. The generated source clock evaluates only a
+42×2 plane before nearest-neighbor enlargement, keeping overhead small.
+The versioned 1800-second fixture was then generated once (935,253,714
+bytes). Decoded source-counter checks passed at 0s (0→23), 895s
+(21480→21503) and 1799s (43176→43199); the temporary encoding file is gone.
+
+The bounded
+`continuous-firefox-65b068f77-optical-baseline1` no-switch calibration completed at film 750s for 45 seconds. Browser steady playback passed,
+but independent capture remained **INCOMPLETE**: 21 unreadable samples
+were confined to the first 171.52ms, with the first readable counter at
+179.87ms. Capture had no sampling gaps, backward counters or skipped
+counter values. Its 221.45ms conservative upper bound includes startup
+uncertainty and cannot establish passing output continuity. End counts
+were 1/0/0/0; helper exit 0 and owned display/runtime removed.
+
+A separate baseline2 now uses a fixed 1000ms warmup after the first raw
+capture packet before starting the 45-second steady window. It retains
+all startup raw pixels/timestamps and counts unreadable startup samples
+separately. The warmup is time based, never conditional on a passing
+decoder result; no startup continuity claim is made. It requests an owned 1920×1200 Firefox
+window, measures actual video/image geometry, and samples the encoded
+clock's center strip through Xvfb at requested 120Hz. Raw RGB packets are
+paired with their timestamp/checksum records. FFmpeg wall-clock timestamps
+are preserved with a microsecond encoder time base; a tiny prior mechanics
+probe confirmed their epoch domain. The final explicit browser measurement
+window is compared with this independent captured counter stream. Missing
+or ambiguous pixels, capture holes and held pictures remain visible; no
+averaging over counter advances is permitted. Software-display pixels
+remain different from physical Apple/Android display and audible output.
+No units or final adversarial review ran.
+
+Baseline2 completed with browser playback **PASS**, zero unreadable steady
+pixels, no backward counters and no skipped counter values. Independent
+capture remains **INCOMPLETE**: one 13.384ms sampling hole at +150.477ms
+exceeded the unchanged 12.5ms maximum. Observed picture-hold lower/upper
+bounds were 58.34/75.09ms. All startup evidence remains recorded (104
+unreadable prefix samples); End and cleanup passed. Baseline3 now requests
+240Hz capture, retaining the same fixed warmup and completeness limit.
+
+Baseline3 at requested 240Hz completed with independent steady capture
+**COMPLETE**: 10,803 measured samples, zero unreadable pixels, capture holes,
+backward counters or skipped counters; picture-hold lower/upper bounds
+58.37/66.64ms. The startup prefix retains 200 unreadable samples and is
+excluded only by the fixed warmup policy. Browser steady playback passed,
+helper exit 0, owned display retired and runtime removed. A focused
+720p→1080p request starting at film 750s now uses the same calibrated
+capture. It does not replace the full campaign or rescore older failures.
+Current main remains integrated (`342521018`); no units or final review ran.
+
+### 10.206 Late optical switch: wrong family attempt retained, corrected probe running
+
+`continuous-firefox-65b068f77-optical-late-switch1` **FAILED**: the helper
+started at 720p, enrolling the 480p/720p family, then requested out-of-family
+1080p. The target wait timed out and two durable VOD session creates were
+recorded. This repeats the known family-enrollment mistake in the diagnostic
+helper; it is not evidence that a compatible family switched successfully.
+Independent capture was complete over 21,630 measured samples, with zero
+unknown pixels, capture holes, backward counters or skipped counter values;
+its picture-hold lower/upper bounds were 71.11/79.75ms. Those pixel results
+do not make the session-changing run pass. End counts were 0/0/0/0; helper
+exit 1 and owned display/runtime cleanup confirmed.
+
+The corrected `optical-late-switch2` starts at 1080p and requests 720p then
+1080p, retaining the full campaign's 720p/1080p family. Its fixed warmup,
+240Hz capture, strict completeness limit and existing browser thresholds
+are unchanged. It is a focused diagnostic, not the full success series.
+No units or final adversarial review ran.
