@@ -3860,6 +3860,11 @@ impl MediaSessionStore for HiqliteAuthStore {
             .map(|row| row.0))
     }
 
+    // A starting request with a BLOCKED route still belongs to activation,
+    // even when its admission claim outlives the initial media lease. Otherwise
+    // inventory can admit it just before confirmation shortens that claim,
+    // and renewal interprets the resulting rejection as ownership loss.
+    // Confirmed finite handoffs must remain renewable while projection settles.
     async fn renew_media_sessions(
         &self,
         owner_node_id: &str,
@@ -3908,7 +3913,9 @@ impl MediaSessionStore for HiqliteAuthStore {
                         AND NOT EXISTS (SELECT 1 FROM media_session_requests request
                           WHERE request.user_id = media_sessions.user_id
                             AND request.incarnation_id = media_sessions.incarnation_id
-                            AND request.state = 'starting'))",
+                            AND request.state = 'starting'
+                            AND (media_sessions.publication_ready_at_ms = $8
+                              OR request.claim_expires_at_ms <= media_sessions.lease_expires_at_ms)))",
                 params!(
                     lease_expires_at_ms,
                     now_ms,
@@ -3939,7 +3946,9 @@ impl MediaSessionStore for HiqliteAuthStore {
                         AND NOT EXISTS (SELECT 1 FROM media_session_requests request
                           WHERE request.user_id = media_sessions.user_id
                             AND request.incarnation_id = media_sessions.incarnation_id
-                            AND request.state = 'starting')
+                            AND request.state = 'starting'
+                            AND (media_sessions.publication_ready_at_ms = $9
+                              OR request.claim_expires_at_ms <= media_sessions.lease_expires_at_ms))
                         AND EXISTS (SELECT 1 FROM job_leases
                           WHERE resource = $10 AND owner_node_id = $7 AND fence = $8
                             AND expires_at_ms = $1)",
@@ -3984,7 +3993,9 @@ impl MediaSessionStore for HiqliteAuthStore {
                            AND NOT EXISTS (SELECT 1 FROM media_session_requests request
                              WHERE request.user_id = session.user_id
                                AND request.incarnation_id = session.incarnation_id
-                               AND request.state = 'starting'))",
+                               AND request.state = 'starting'
+                               AND (session.publication_ready_at_ms = $6
+                                 OR request.claim_expires_at_ms <= session.lease_expires_at_ms)))",
                 params!(
                     lease_expires_at_ms,
                     renewal.incarnation_id.as_str(),
@@ -4737,7 +4748,9 @@ impl MediaSessionStore for HiqliteAuthStore {
                     AND NOT EXISTS (SELECT 1 FROM media_session_requests request
                       WHERE request.user_id = media_sessions.user_id
                         AND request.incarnation_id = media_sessions.incarnation_id
-                        AND request.state = 'starting')
+                        AND request.state = 'starting'
+                        AND (media_sessions.publication_ready_at_ms = $3
+                          OR request.claim_expires_at_ms <= media_sessions.lease_expires_at_ms))
                   ORDER BY updated_at_ms, incarnation_id LIMIT $4",
                 params!(
                     owner_node_id,
