@@ -1,0 +1,7 @@
+version = 1
+
+[[coverage]]
+commits = ["cd1d30a0", "cb698c9c", "b280a7b3", "613f615b"]
+points = ["sharing.authority", "web.experience"]
+checks = ["rust-gate", "rust-gate-ci", "unit-core", "web-static"]
+reason = "S4 catalogue and history audit. B keeps a Source cursor refusal typed (410 sharing_cursor_expired, 409 sharing_query_changed, 400 sharing_cursor_invalid) and a Source 404 as sharing_not_found instead of 503, and the web page reopens such a list exactly once. Shared show and season pages bind their children to the library reference. Shared next episode resolves Source order through B viewer routes and starts from fresh details. A viewer can mark a Shared item watched or unwatched through POST /shared/imports/{i}/items/{item}/watched, whose Store write takes the next global history sequence atomically under import, assignment and captured generations. Proven by sharing_catalogue_page_failures_keep_typed_reopen_and_absence_results, sharing_catalogue_cursor_authenticates_boundary_and_refuses_replay_context, sharing_manual_watch_override_takes_next_global_sequence_and_refuses_late_beats on both backends, sharing_catalogue_viewer_routes_require_login_and_fail_closed_without_import, and the shared-libraries and file-context web suites."
