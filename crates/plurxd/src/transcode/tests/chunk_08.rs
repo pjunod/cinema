@@ -2691,6 +2691,8 @@ scope = "test"
             kind: SessionKind::Transcode { height: 360 },
             start_seconds: 0.0,
             audio_index: None,
+            audio_delivery: None,
+            audio_claim: None,
             subtitle_burn: None,
             audio_offset_ms: 0,
             hdr10: false,

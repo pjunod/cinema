@@ -405,7 +405,8 @@ async fn shared_audio_vod_reserves_cpu_only_and_publishes_one_audio_track() {
     )))).await.expect("audio admits without a video hardware slot");
     assert_eq!(encoding.admissions.software_in_use(), 3);
     let recipe = Recipe {
-        file: file.clone(), audio_index: None, aac: true,
+        retained_logical: None, measured_candidate: None,
+        file: file.clone(), audio_index: None, aac: true, audio_delivery: None,
         video: CopyVideoOptions::new(false, false),
         source_object_version: Some(encoding.source_object_version.clone()),
         cluster_cache_key: None, encoding: Some(Arc::clone(&encoding)),
@@ -556,6 +557,8 @@ async fn shared_audio_vod_reserves_cpu_only_and_publishes_one_audio_track() {
     let mut worker_request = parent_request.clone();
     worker_request.request_id = Some(generation.clone());
     let route_recipe = crate::media_sessions::RemoteStartRequest {
+        retained_output_receiver: None,
+        retained_output: None,
         candidate_catalog: None,
         candidate_id: parent_request.candidate_context.as_ref().map(|context| context.candidate_id),
         presentation_target: None,

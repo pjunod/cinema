@@ -1449,6 +1449,7 @@ mod tests {
             index: 0,
             codec: "aac".into(),
             channels: Some(2),
+            channel_layout: Some("stereo".into()),
             sample_rate: Some(48_000),
             language: None,
             title: None,

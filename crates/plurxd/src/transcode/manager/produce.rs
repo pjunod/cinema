@@ -355,6 +355,7 @@ impl TranscodeManager {
         };
         let file = &resolved_file;
         let mut request = SessionRequest {
+            continuous_media: None,
             quality_catalog: None,
             candidate_context: None,
             file_id,
@@ -801,6 +802,7 @@ impl TranscodeManager {
             (intent.width, intent.height),
         );
         let mut request = SessionRequest {
+            continuous_media: None,
             quality_catalog: None,
             candidate_context: None,
             file_id: file.id,
