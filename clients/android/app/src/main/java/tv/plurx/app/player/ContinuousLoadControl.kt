@@ -16,7 +16,7 @@ import androidx.media3.exoplayer.trackselection.ExoTrackSelection
 internal class ContinuousLoadControl(
     private val delegate: LoadControl,
     private val allocations: ContinuousAllocationOwnership? = null,
-    private val controlled: (MediaSource.MediaPeriodId) -> Boolean,
+    private val controlled: (MediaSource.MediaPeriodId, Timeline) -> Boolean,
 ) : LoadControl {
     // Kotlin delegation does not forward Java interface default methods. Media3's
     // defaults call obsolete overloads that throw, so forward its current API explicitly.
@@ -49,7 +49,7 @@ internal class ContinuousLoadControl(
     }
     override fun shouldContinueLoading(parameters: LoadControl.Parameters): Boolean {
         val withinBudget = delegate.shouldContinueLoading(parameters)
-        if (!withinBudget || !controlled(parameters.mediaPeriodId)) return withinBudget
+        if (!withinBudget || !controlled(parameters.mediaPeriodId, parameters.timeline)) return withinBudget
         val speed = parameters.playbackSpeed.toDouble().takeIf { it.isFinite() && it > 0 }?.coerceAtMost(16.0) ?: 1.0
         return parameters.bufferedDurationUs < (12_000_000 * speed).toLong()
     }

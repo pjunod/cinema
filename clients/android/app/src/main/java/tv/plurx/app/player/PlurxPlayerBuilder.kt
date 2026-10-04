@@ -68,7 +68,7 @@ internal class PlurxPlayerBuilder(private val context: Context, private val role
             .setEnableDecoderFallback(true)
         val ordinaryLoadControl = playbackLoadControl(context, live = role == PlayerRole.LiveTv)
         val loadControl = continuousSources?.let { sources ->
-            ContinuousLoadControl(ordinaryLoadControl, continuousOutput?.allocations) { sources.binding(it) != null }
+            ContinuousLoadControl(ordinaryLoadControl, continuousOutput?.allocations) { id, timeline -> sources.binding(id, timeline) != null }
         } ?: ordinaryLoadControl
         val player = ExoPlayer.Builder(context)
             .setLoadControl(loadControl)

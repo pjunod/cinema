@@ -23,7 +23,7 @@ class ContinuousLoadControlTest {
             override fun getAllocator(playerId: PlayerId) = allocator
             override fun shouldContinueLoading(parameters: LoadControl.Parameters) = byteBudget
         }
-        val control = ContinuousLoadControl(delegate) { it == owned }
+        val control = ContinuousLoadControl(delegate) { id, _ -> id == owned }
         fun request(id: MediaSource.MediaPeriodId, duration: Long, speed: Float = 1f) = LoadControl.Parameters(
             PlayerId.UNSET, Timeline.EMPTY, id, 0, duration, speed, true, false, C.TIME_UNSET, C.TIME_UNSET)
         assertTrue(control.shouldContinueLoading(request(owned, 11_999_999)))
@@ -71,7 +71,7 @@ class ContinuousLoadControlTest {
             override fun onStopped(playerId: PlayerId) { events += "stopped" }
             override fun onReleased(playerId: PlayerId) { events += "released" }
         }
-        val control = ContinuousLoadControl(delegate) { true }
+        val control = ContinuousLoadControl(delegate) { _, _ -> true }
         assertEquals(7_000_000L, control.getBackBufferDurationUs(playerId))
         assertTrue(control.retainBackBufferFromKeyframe(playerId))
         control.onPrepared(playerId)

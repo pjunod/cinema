@@ -131,13 +131,13 @@ internal class ContinuousRenditionSelection(
 }
 
 internal class ContinuousTrackSelectionFactory(
-    private val bindingForPeriod: (MediaSource.MediaPeriodId) -> ContinuousVideoSelection?,
+    private val bindingForPeriod: (MediaSource.MediaPeriodId, Timeline) -> ContinuousVideoSelection?,
 ) : ExoTrackSelection.Factory {
     private val ordinary = AdaptiveTrackSelection.Factory()
     override fun createTrackSelections(definitions: Array<out ExoTrackSelection.Definition?>,
         bandwidthMeter: BandwidthMeter, mediaPeriodId: MediaSource.MediaPeriodId, timeline: Timeline): Array<ExoTrackSelection?> {
         val selections = ordinary.createTrackSelections(definitions, bandwidthMeter, mediaPeriodId, timeline)
-        val binding = bindingForPeriod(mediaPeriodId) ?: return selections
+        val binding = bindingForPeriod(mediaPeriodId, timeline) ?: return selections
         definitions.forEachIndexed { index, definition ->
             if (definition?.group?.type == C.TRACK_TYPE_VIDEO) {
                 selections[index] = checkNotNull(binding.selection(definition)) {

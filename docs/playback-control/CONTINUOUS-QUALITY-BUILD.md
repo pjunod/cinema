@@ -6417,3 +6417,44 @@ old bounded backend retired; it never reached a new controlled session and
 provides no verification of the ledger correction. The backend log is saved
 and its owned daemon/forward/runtime retired. A fresh exact committed-source
 backend is required for the next runtime attempt.
+
+### 10.221 Software Android first frame verified; period ownership correction compiled
+
+Exact committed Linux source `bc1600ee2` built on Rust 1.97.1 in 1m33s.
+The clean Android APK connected to its new bounded backend and displayed
+the generated clocked fixture. Captured pixels show the fixture, and the
+observed playback clock advanced from 0:54 to 1:32, then reached 2:31 before
+explicit Close. No new session-creation or Media3 construction failure was
+recorded. This verifies software-emulator initial playback, not physical
+output, audible audio or continuous quality changes.
+
+The actual Auto family was 480p/720p. Its first manual 480p request refused
+immediately while the incumbent picture continued. The registry keyed the
+child period UID, whereas Media3's playlist and masking layers give its
+selection/load-control callbacks another UID. Official pinned Media3 source
+confirms both mappings. Android now resolves the callback's unique owned
+media ID through its supplied Timeline, then matches the active child's full
+window-sequence/ad coordinates. Foreign sources, sequences, ads, released
+owners and ambiguous active periods do not resolve. Both track selection and
+controlled loading use this mapping; no process-wide family fallback exists.
+Production/test Kotlin compilation and APK assembly passed in 24s. The new
+regression is authored and unrun. The emulator now runs this separately
+identified uncommitted Android-only correction against backend `bc1600ee2`.
+
+A 120s descendant-only process sample measured 414 owned FFmpeg observations.
+The generated 480p and 720p producers reached 27 and 30 threads respectively
+on a 16-CPU allowed set, despite output encoder flags `-threads 2`/`3`.
+Neither set an input decoder or filter-thread cap. Shared AAC set decoder,
+filter and encoder limits to one and reached six total process threads.
+This confirms uncontrolled video pipeline thread creation; it does not by
+itself prove the cause of the earlier Firefox scheduling gaps. The original
+sample is retained for the resource-budget investigation. No units or final
+adversarial review ran.
+
+The next period-correction attempt ended at the emulator's fixed lifetime
+before its result was inspected. Its deadline receipt is preserved; no
+quality-change pass is claimed. A waiting owned ADB command and its separate
+server were retired, then another bounded emulator run started. Initial
+playback evidence, compact-refusal wire data and original thread measurements
+are copied into the independent clone's ignored reports. No user AVD or
+physical-device data was changed.

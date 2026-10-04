@@ -123,7 +123,8 @@ internal class ContinuousAttachment(
         }, writing = { load -> output.allocations.writing(owner, ContinuousAllocator.artifactKey(load)) })
         val hls = HlsMediaSource.Factory(sources).setExtractorFactory(extractor)
             .setLoadErrorHandlingPolicy(ContinuousLoadErrorPolicy())
-            .createMediaSource(MediaItem.fromUri(profile.origin + start.playback.playlist_url))
+            .createMediaSource(MediaItem.Builder().setUri(profile.origin + start.playback.playlist_url)
+                .setMediaId("cq-" + ContinuousQualityWire.newId()).build())
         pump = scope.launch {
             while (isActive && !closed.get()) {
                 withTimeoutOrNull(1000) { wake.receive() }
