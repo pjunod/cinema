@@ -334,20 +334,17 @@ internal class ContinuousAttachment(
 
     private suspend fun retireUnexposedTargets() {
         loads.whenQuiescent {
-            for (tx in transactions()) {
-                val id = requireNotNull(tx.text("transaction_id"))
-                if (!exposure.isCancelled(id)) continue
-                for (item in tx.getValue("reserved").jsonArray) {
-                    val pin = item.jsonObject
-                    if (pin.getValue("artifact_id") in tx.getValue("disposed").jsonArray ||
-                        queues.queuedArtifacts().any { it.authorized.interval == pin }) continue
-                    val row = rows.singleOrNull { it.text("rendition_id") == pin.text("rendition_id") } ?: continue
-                    val entry = requireNotNull(pin.number("from_tick")) / requireNotNull(row.number("segment_ticks"))
-                    val resource = ContinuousQualityMedia.Resource("video", row, false, entry)
-                    val resourceKey = resourceKey(resource)
-                    if (beginDisposal(resourceKey, artifactKey(resource, requireNotNull(pin.text("artifact_id"))))) disposing[resourceKey] = Disposal(
-                        ContinuousLoadContext.Verified(owner, resource, ContinuousQualityMedia.Authorized(pin, setOf(id))), setOf(id))
-                }
+            // Superseded owners' never-exposed pins have no queue, decoder or
+            // sink to retire; without this they stay reserved until End.
+            val pins = ContinuousUnexposedPins.disposable(transactions(), protocol.ledger?.number("latest_intent_revision"),
+                exposure::isCancelled, queues.queuedArtifacts().map { it.authorized.interval })
+            for ((id, pin) in pins) {
+                val row = rows.singleOrNull { it.text("rendition_id") == pin.text("rendition_id") } ?: continue
+                val entry = requireNotNull(pin.number("from_tick")) / requireNotNull(row.number("segment_ticks"))
+                val resource = ContinuousQualityMedia.Resource("video", row, false, entry)
+                val resourceKey = resourceKey(resource)
+                if (beginDisposal(resourceKey, artifactKey(resource, requireNotNull(pin.text("artifact_id"))))) disposing[resourceKey] = Disposal(
+                    ContinuousLoadContext.Verified(owner, resource, ContinuousQualityMedia.Authorized(pin, setOf(id))), setOf(id))
             }
         }
         finishDisposals()
