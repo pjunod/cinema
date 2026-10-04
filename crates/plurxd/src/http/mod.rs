@@ -66,7 +66,7 @@ pub(crate) mod sharing;
 mod sharing_decision_decode;
 pub(crate) use sharing_decision_decode::bounded_decision_value;
 #[allow(dead_code)]
-mod sharing_playback_wire;
+pub(crate) mod sharing_playback_wire;
 #[allow(dead_code)]
 mod sharing_start_decode;
 pub(crate) use sharing_start_decode::{

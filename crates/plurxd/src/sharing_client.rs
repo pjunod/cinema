@@ -27,8 +27,6 @@ pub(crate) use playback::{
     CleanupPeerConnection, SharedVodStatus, SourceEndReceipt, SourcePeerLineage,
     SourcePeerResource, SourcePeerSession, SourceStatusReceipt,
 };
-#[cfg(test)]
-pub(crate) use playback::{SourceControlReceipt, SourceVodStatusReceipt};
 
 const MANAGEMENT_RESPONSE_BYTES: usize = 128 * 1024;
 const CATALOGUE_RESPONSE_BYTES: usize = 4 * 1024 * 1024;
