@@ -1,6 +1,7 @@
 # Apple TV interruptions on a 79.5 GB remux: why they happened and what fixes them
 
-**Status:** finding 4 fixed (resumable whole-file attestation). Findings 1–3 are
+**Status:** finding 4 fixed (resumable whole-file attestation); finding 5 now
+logs its numbers. Findings 1–3 and 5 are
 open, with recommendations. **Written:** 2026-10-04 EDT. **Incident build:**
 `aa3d77101` (PR #788) on all three voters. **Title:** *Bad Boys: Ride or Die*
 (2024), catalog file 5208, a 79.5 GB 2160p HEVC remux, played on the Apple TV
@@ -140,10 +141,15 @@ moment of retirement are not recoverable. The likely shape is that
 `consumed_end_ms` on resume sat more than 124 s behind the next completed
 segment. A 2160p remux running at ~2× while paused could get there.
 
-**Recommendation.** Make "no segment fits the floor" mean "nothing to publish
-yet" while the client's runway is still healthy, and retire only when the
-client is actually starving. Log `consumed_end_ms`, `desired_end_ms`,
-`allowed_end_ms` and the first new segment's end on every retirement. Once
+**Done in the same change:** the retirement reason now carries
+`consumed_end_ms`, `desired_end_ms`, `allowed_end_ms`, `reserve_max_ms`, the
+first new segment and its end, the served end, the demand sequence and the
+observation age (`rolling_publication_budget_low_rate_retires_before_the_window_can_skip`
+pins the fields).
+
+**Recommendation, once those numbers confirm the shape.** Make "no segment fits
+the floor" mean "nothing to publish yet" while the client's runway is still
+healthy, and retire only when the client is actually starving. Once
 finding 4 lets the VOD index exist, this path no longer serves the title, but
 it still serves every title that is waiting for one.
 
