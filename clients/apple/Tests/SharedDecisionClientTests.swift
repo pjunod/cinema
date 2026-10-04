@@ -154,6 +154,38 @@ final class SharedDecisionClientTests: XCTestCase {
         do { _ = try await client.progress(playback: result, beat: beat); XCTFail("accepted string sequence") } catch {}
         DecisionHTTP.answer = { ($0.url!, 200, [:], Data(repeating: 32, count: 16_385)) }
         do { _ = try await client.progress(playback: result, beat: beat); XCTFail("accepted oversized progress ACK") } catch {}
+        var sequences: [Int] = []
+        DecisionHTTP.answer = { request in
+            let object = try JSONSerialization.jsonObject(with: self.body(request)) as! [String: Any]
+            sequences.append(object["sequence"] as! Int)
+            return (request.url!, 200, [:], Data("{}".utf8))
+        }
+        _ = try await client.orderedProgress(playback: result, initialWatchSequence: 7, positionMs: 0, durationMs: 90_000)
+        _ = try await SharedDecisionClient(testConfiguration: configuration).orderedProgress(playback: result, initialWatchSequence: 0, positionMs: 500, durationMs: 90_000)
+        XCTAssertEqual(sequences, [8, 9])
+        let other = SharedPlaybackReference(importId: "dddddddd-dddd-4ddd-8ddd-dddddddddddd", serverId: ref.serverId, catalogueEpoch: ref.catalogueEpoch, libraryId: "0", itemId: ref.itemId)
+        let otherBase = "/api/v1/shared/imports/\(other.importId)/files/" + String(repeating: "L", count: 236)
+        let encoder = JSONEncoder(); encoder.keyEncodingStrategy = .convertToSnakeCase
+        var otherBinding = try binding("0"); otherBinding["item"] = try JSONSerialization.jsonObject(with: encoder.encode(other))
+        let detail = try JSONSerialization.data(withJSONObject: ["lifecycle_generation": Int64.max, "files": [["file_id": "0", "revision": String(repeating: "a", count: 64), "file_base": otherBase, "reference": otherBinding]]])
+        DecisionHTTP.answer = { ($0.url!, 200, [:], detail) }
+        let otherContext = try await PlaybackFileContext.authenticatedDetail(reference: other, fileId: "0", testTransport: URLSession(configuration: configuration))
+        let otherSession = "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee"
+        var otherReply = reply; otherReply["session_id"] = otherSession; otherReply["playlist_url"] = "/api/v1/hls/\(otherSession)/master.m3u8"
+        var control = otherReply["control"] as! [String: Any]; control["url"] = "/api/v1/hls/\(otherSession)/control"; otherReply["control"] = control
+        let otherBytes = try JSONSerialization.data(withJSONObject: otherReply)
+        DecisionHTTP.answer = { ($0.url!, 200, [:], otherBytes) }
+        let otherPlayback = try await client.start(context: otherContext, request: request)
+        DecisionHTTP.answer = { request in
+            XCTAssertEqual(request.url?.path, "/api/v1/shared/imports/\(other.importId)/items/\(other.itemId)/progress")
+            let object = try JSONSerialization.jsonObject(with: self.body(request)) as! [String: Any]
+            sequences.append(object["sequence"] as! Int)
+            return (request.url!, 200, [:], Data("{}".utf8))
+        }
+        _ = try await client.orderedProgress(playback: otherPlayback, initialWatchSequence: 0, positionMs: 1000, durationMs: 90_000)
+        XCTAssertEqual(sequences, [8, 9, 10])
+
+
 
     }
     func testInitialStartRefusesUnsupportedOriginalFieldsBeforeNetwork() async throws {

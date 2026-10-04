@@ -4606,8 +4606,24 @@ and blocks the next beat until a fresh authorized watch read seeds the next
 sequence. It never renumbers the old payload after another device advances
 history. Actual iOS simulator tests pass 12 with zero failures, including
 zero-position network body, identical retries, numeric-only conflict sequence,
-oversized response refusal and journal exhaustion/resync. Android qualification
-for this committed progress slice remains pending its source-only build. Player
-handoff, watch-key serialization across imports and fresh-detail resync wiring
-remain explicit follow-up work. These synthetic protocol fixtures do not prove
+oversized response refusal and journal exhaustion/resync. The committed progress
+primitives then pass Android Kotlin main/unit compilation, 43 tests with zero
+failures/errors/skips, and lint in 4 minutes 50 seconds. Player handoff remains
+explicit follow-up work. These synthetic protocol fixtures do not prove
 physical B-to-Source playback or hardware acceptance.
+
+
+The native progress pool keys orders by captured account authorization, Source
+server, catalogue epoch and item, including across import/library aliases. It
+holds at most 256 orders and four nonqueued operations globally, with one busy
+operation per watch key. Only idle acknowledged entries can be evicted; uncertain
+beats retain their sequence and payload. Account replacement clears the old
+namespace while old operations retain their own counted admission until actual
+network settlement. A changed B session with an uncertain predecessor beat
+requires fresh authorized detail/watch state before a new session beat.
+
+Actual iOS simulator tests pass 12 with zero failures on the bounded-pool source,
+including separate authenticated imports/libraries/B sessions for the same
+Source item observing sequences 8, 9 and 10 rather than restarting the order.
+Android pool qualification remains pending its exact committed-source run.
+This bounded metadata journal never grants Source production or retirement.

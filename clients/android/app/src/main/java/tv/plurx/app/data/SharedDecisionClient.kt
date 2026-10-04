@@ -1,6 +1,9 @@
 package tv.plurx.app.data
 
 import android.content.Context
+import kotlinx.coroutines.NonCancellable
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.InternalCoroutinesApi
 import kotlinx.coroutines.Job
@@ -20,6 +23,41 @@ import kotlin.coroutines.coroutineContext
 /** Captured authenticated B account; Source IDs never enter a Local Decision. */
 internal class SharedDecisionClient private constructor(private val auth: Session.PlaybackAuthorization, private val transport: OkHttpClient) {
     private fun requireCurrent() { require(Session.playbackAuthorization() == auth && !auth.token.isNullOrEmpty()) }
+    suspend fun orderedProgress(playback: SharedStartedPlayback, initialWatchSequence: Long,
+                                positionMs: Long, durationMs: Long?, watched: Boolean = false): SharedProgressResult? {
+        requireCurrent()
+        val reference = requireNotNull(playback.context.reference)
+        val key = WatchKey(reference.server_id, reference.catalogue_epoch, reference.item_id)
+        val entry = progressMutex.withLock {
+            if (progressAccount != auth) { progressAccount = auth; progressEntries.clear() }
+            if (progressActive >= 4) return null
+            if (key !in progressEntries) {
+                if (progressEntries.size >= 256) {
+                    val victim = progressEntries.filter { !it.value.busy && it.value.order.pending == null }.minByOrNull { it.value.lastUse }?.key ?: return null
+                    progressEntries.remove(victim)
+                }
+                progressEntries[key] = ProgressEntry(SharedProgressOrder(initialWatchSequence))
+            }
+            val entry = progressEntries.getValue(key)
+            if (entry.busy) return null
+            entry.busy = true; progressActive++; progressSerial++; entry.lastUse = progressSerial; entry
+        }
+        try {
+            if (entry.order.needsResync || entry.order.pending?.let { it.session_id != playback.context.sessionId } == true) {
+                val text = detail(reference, transport, auth); requireCurrent()
+                val detail = Net.json.decodeFromString<SharedLibraryDetail>(text); detail.validate(reference)
+                require(detail.lifecycle_generation == playback.context.lifecycleGeneration)
+                val fresh = detail.watch?.sequence ?: 0
+                if (!entry.order.needsResync) entry.order = SharedProgressOrder(maxOf(entry.order.sequence, fresh))
+                else entry.order.resync(fresh)
+            }
+            val beat = entry.order.beat(playback.start.response.session_id, positionMs, durationMs, watched)
+            val result = progress(playback, beat); requireCurrent(); entry.order.complete(beat, result)
+            return result
+        } finally {
+            withContext(NonCancellable) { progressMutex.withLock { entry.busy = false; progressActive-- } }
+        }
+    }
     suspend fun progress(playback: SharedStartedPlayback, beat: SharedProgressBeat): SharedProgressResult {
         requireCurrent(); beat.validate()
         val context = playback.context
@@ -99,7 +137,15 @@ internal class SharedDecisionClient private constructor(private val auth: Sessio
         val result = SharedDecision.decode(text).validated(context); requireCurrent()
         return Result(result, boundCaps)
     }
+    private data class WatchKey(val server: String, val epoch: String, val item: String)
+    private class ProgressEntry(var order: SharedProgressOrder, var busy: Boolean = false, var lastUse: Long = 0)
     companion object {
+        private val progressMutex = Mutex()
+        private var progressAccount: Session.PlaybackAuthorization? = null
+        private val progressEntries = mutableMapOf<WatchKey, ProgressEntry>()
+        private var progressActive = 0
+        private var progressSerial = 0L
+
         fun create(): SharedDecisionClient {
             val auth = Session.playbackAuthorization()
             require(Session.canonicalOrigin(auth.origin) != null && !auth.token.isNullOrEmpty())

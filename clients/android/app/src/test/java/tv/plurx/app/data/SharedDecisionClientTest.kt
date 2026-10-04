@@ -179,6 +179,41 @@ class SharedDecisionClientTest {
         assertTrue(runCatching { client.progress(result, beat) }.isFailure)
         progressReply = " ".repeat(16_385)
         assertTrue(runCatching { client.progress(result, beat) }.isFailure)
+        val sequences = mutableListOf<Long>()
+        val orderedTransport = OkHttpClient.Builder().addInterceptor { chain ->
+            val buffer = Buffer(); chain.request().body!!.writeTo(buffer)
+            sequences += Json.parseToJsonElement(buffer.readUtf8()).jsonObject.getValue("sequence").jsonPrimitive.long
+            response(chain.request(), "{}")
+        }.build()
+        SharedDecisionClient.forTest(orderedTransport).orderedProgress(result, 7, 0, 90_000)
+        SharedDecisionClient.forTest(orderedTransport).orderedProgress(result, 0, 500, 90_000)
+        assertEquals(listOf(8L, 9L), sequences)
+        val other = reference.copy(import_id = "dddddddd-dddd-4ddd-8ddd-dddddddddddd", library_id = "0")
+        val otherBase = "/api/v1/shared/imports/${other.import_id}/files/${"L".repeat(236)}"
+        val otherBinding = JsonObject(binding("0") + ("item" to Json.encodeToJsonElement(other)))
+        val detail = buildJsonObject { put("lifecycle_generation", Long.MAX_VALUE); put("files", buildJsonArray { add(buildJsonObject {
+            put("file_id", "0"); put("revision", revision); put("file_base", otherBase); put("reference", otherBinding)
+        }) }) }.toString()
+        val detailTransport = OkHttpClient.Builder().addInterceptor { response(it.request(), detail) }.build()
+        val otherContext = PlaybackFileContext.authenticatedDetailForTest(other, "0", detailTransport)
+        val otherSession = "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee"
+        val originalReply = Json.parseToJsonElement(reply).jsonObject
+        val otherReply = JsonObject(originalReply + mapOf("session_id" to JsonPrimitive(otherSession), "playlist_url" to JsonPrimitive("/api/v1/hls/$otherSession/master.m3u8"),
+            "control" to JsonObject(originalReply.getValue("control").jsonObject + ("url" to JsonPrimitive("/api/v1/hls/$otherSession/control"))))).toString()
+        val otherTransport = OkHttpClient.Builder().addInterceptor { chain ->
+            if (chain.request().url.encodedPath.endsWith("/hls/sessions")) response(chain.request(), otherReply)
+            else {
+                assertEquals("/api/v1/shared/imports/${other.import_id}/items/${other.item_id}/progress", chain.request().url.encodedPath)
+                val buffer = Buffer(); chain.request().body!!.writeTo(buffer)
+                sequences += Json.parseToJsonElement(buffer.readUtf8()).jsonObject.getValue("sequence").jsonPrimitive.long
+                response(chain.request(), "{}")
+            }
+        }.build()
+        val otherClient = SharedDecisionClient.forTest(otherTransport)
+        val otherPlayback = otherClient.start(otherContext, request)
+        otherClient.orderedProgress(otherPlayback, 0, 1000, 90_000)
+        assertEquals(listOf(8L, 9L, 10L), sequences)
+
 
     }
     @Test fun initialStartRefusesUnsupportedFieldsBeforeNetwork(): Unit = runBlocking {

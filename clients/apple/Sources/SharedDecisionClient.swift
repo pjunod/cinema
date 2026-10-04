@@ -58,6 +58,47 @@ struct SharedDecisionClient {
         try Task.checkCancellation(); try requireCurrent()
         return try SharedStart.decode(data).bindInitial(context, request: retained)
     }
+    /// One bounded account/Source/epoch/item watch order across imports.
+    /// Busy callers skip a beat; a conflict always triggers a fresh read before
+    /// a later new beat, never a replay of the stale position with a new number.
+    @MainActor
+    func orderedProgress(playback: SharedStartedPlayback, initialWatchSequence: Int64,
+                         positionMs: Int64, durationMs: Int64?, watched: Bool = false) async throws -> SharedProgressResult? {
+        try requireCurrent()
+        guard let reference = playback.context.reference else { throw APIError.badURL }
+        let account = SharedProgressAccount(origin: origin, token: token, generation: generation)
+        let key = SharedProgressKey(server: reference.serverId, epoch: reference.catalogueEpoch, item: reference.itemId)
+        let registry = Self.progressRegistry
+        if registry.account != account { registry.account = account; registry.entries.removeAll() }
+        guard registry.active < 4 else { return nil }
+        if registry.entries[key] == nil {
+            if registry.entries.count >= 256 {
+                guard let victim = registry.entries.filter({ !$0.value.busy && $0.value.order.pending == nil }).min(by: { $0.value.lastUse < $1.value.lastUse })?.key else { return nil }
+                registry.entries.removeValue(forKey: victim)
+            }
+            registry.entries[key] = SharedProgressEntry(order: try SharedProgressOrder(sequence: initialWatchSequence))
+        }
+        let entry = registry.entries[key]!
+        guard !entry.busy else { return nil }
+        entry.busy = true; registry.active += 1; registry.serial += 1; entry.lastUse = registry.serial
+        defer { entry.busy = false; registry.active -= 1 }
+        if entry.order.needsResync || entry.order.pending.map({ $0.sessionId != playback.context.sessionId }) == true {
+            let expected = Session.shared.playbackAuthorization
+            let data = try await Self.detail(reference: reference, transport: URLSession(configuration: configuration), expected: expected)
+            try requireCurrent()
+            let decoder = JSONDecoder(); decoder.keyDecodingStrategy = .convertFromSnakeCase
+            let detail = try decoder.decode(SharedLibraryDetail.self, from: data); try detail.validate(expected: reference)
+            guard detail.lifecycleGeneration == playback.context.lifecycleGeneration else { throw APIError.badURL }
+            let fresh = detail.watch?.sequence ?? 0
+            if !entry.order.needsResync { entry.order = try SharedProgressOrder(sequence: max(entry.order.sequence, fresh)) }
+            else { try entry.order.resync(freshAuthorizedSequence: fresh) }
+        }
+        let beat = try entry.order.beat(sessionId: playback.start.response.sessionId, positionMs: positionMs, durationMs: durationMs, watched: watched)
+        let result = try await progress(playback: playback, beat: beat)
+        try requireCurrent(); try entry.order.complete(beat, result: result)
+        return result
+    }
+    @MainActor private static let progressRegistry = SharedProgressRegistry()
     /// Exact B session beat only. The caller retains it on an uncertain send
     /// and obtains fresh authorized detail/watch state after a typed conflict.
     func progress(playback: SharedStartedPlayback, beat: SharedProgressBeat) async throws -> SharedProgressResult {
@@ -212,4 +253,17 @@ private final class SharedDecisionReadOperation: NSObject, URLSessionDataDelegat
         lock.lock(); let result = SharedDecisionHTTPResponse(data: data, status: responseStatus); let valid = !data.isEmpty; lock.unlock()
         if valid { finish(.success(result)) } else { finish(.failure(APIError.badURL)) }
     }
+}
+
+private struct SharedProgressAccount: Equatable { let origin: String; let token: String; let generation: UInt64 }
+private struct SharedProgressKey: Hashable { let server: String; let epoch: String; let item: String }
+@MainActor private final class SharedProgressEntry {
+    var order: SharedProgressOrder; var busy = false; var lastUse: UInt64 = 0
+    init(order: SharedProgressOrder) { self.order = order }
+}
+@MainActor private final class SharedProgressRegistry {
+    var account: SharedProgressAccount?
+    var entries: [SharedProgressKey: SharedProgressEntry] = [:]
+    var active = 0
+    var serial: UInt64 = 0
 }
