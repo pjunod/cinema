@@ -292,7 +292,20 @@ async fn sharing_receiver_fixture_uses_actual_factories_login_and_genuine_source
         .await
         .expect("actual viewer authority")
         .is_some());
+    // Construct the exact candidate/production merge: legacy production paths
+    // must remain accepted by this disposable outer router.
+    let _app = fixture_router(fixture.state.clone());
     fixture.shutdown().await;
+}
+
+fn fixture_router(state: crate::state::AppState) -> axum::Router {
+    axum::Router::new()
+        .without_v07_checks()
+        .nest(
+            "/api/v1",
+            super::shared_receiver_ingress::candidate_router().with_state(state.clone()),
+        )
+        .merge(super::router(state).without_v07_checks())
 }
 
 #[tokio::test]
@@ -314,7 +327,7 @@ async fn sharing_receiver_real_pinned_source_h1_b_h1_h2_start_resources_and_conf
 }
 
 async fn actual_pinned_playback(address: IpAddr, h2: bool) {
-    use axum::{http::StatusCode, Router};
+    use axum::http::StatusCode;
     use plurx_core::sharing_tls::{LiveNodeTls, SharingTlsListener};
     let fixture = real_receiver_fixture(address, SourceFixtureMode::Copy).await;
     let tls = Arc::new(
@@ -350,12 +363,7 @@ async fn actual_pinned_playback(address: IpAddr, h2: bool) {
     fixture.pair(endpoint).await;
     // The live Start remains uninstalled in production. Only this disposable
     // fixture installs the typed candidate on the real B serving stack.
-    let app = Router::new()
-        .nest(
-            "/api/v1",
-            super::shared_receiver_ingress::candidate_router().with_state(fixture.state.clone()),
-        )
-        .merge(super::router(fixture.state.clone()));
+    let app = fixture_router(fixture.state.clone());
     let b_listener = tokio::net::TcpListener::bind((address, 0))
         .await
         .expect("actual B CGNAT listener");
