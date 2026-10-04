@@ -1477,7 +1477,10 @@ expected_occurrences = 12
 [[module_symbols]]
 id = "m4-release-adoption-token"
 pattern = "SessionAdoptionToken"
-expected_occurrences = 12
+# +1: `vod_resurrect_before` now constructs its boxed future outside the
+# caller's frame and passes the same token by value to the inner async fn;
+# one owner, moved once, no new adoption.
+expected_occurrences = 13
 
 [[module_symbols]]
 id = "m4-takeover-settlement-owner"

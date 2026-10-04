@@ -1557,7 +1557,31 @@ impl TranscodeManager {
     /// may be cancelled before attachment, while VodServe's final reader-graph
     /// and registry swap is synchronous after it owns every affected lock, so
     /// timeout cannot expose a half-attached incarnation.
-    pub(crate) async fn vod_resurrect_before(
+    /// Resurrect a VOD session from its durable recipe. The future holds a
+    /// complete VOD create, so it is constructed outside the caller's polling
+    /// frame; built inline, unoptimized builds lay it out in every caller's
+    /// stack frame beneath the HTTP segment path.
+    #[inline(never)]
+    pub(crate) fn vod_resurrect_before<'a>(
+        &'a self,
+        recipe_json: &'a str,
+        session_id: &'a str,
+        user_id: i64,
+        adoption: SessionAdoptionToken,
+        deadline: Instant,
+        speculative: bool,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = bool> + Send + 'a>> {
+        Box::pin(self.resurrect_vod_from_recipe_before(
+            recipe_json,
+            session_id,
+            user_id,
+            adoption,
+            deadline,
+            speculative,
+        ))
+    }
+
+    async fn resurrect_vod_from_recipe_before(
         &self,
         recipe_json: &str,
         session_id: &str,
