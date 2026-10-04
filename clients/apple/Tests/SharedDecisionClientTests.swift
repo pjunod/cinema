@@ -131,6 +131,17 @@ final class SharedDecisionClientTests: XCTestCase {
         }
         let request = CreateSessionRequest(playbackId: "shared-browser", requestId: "cccccccc-cccc-4ccc-8ccc-cccccccccccc", height: 720, start: 12.5, audio: 2, copy: true, caps: Caps.snapshot().document)
         let result = try await SharedDecisionClient(testConfiguration: configuration).start(context: context, request: request)
+        let subject = SharedPlaybackSubject(context: context, title: "Shared film", resumeMs: 12_500, watchSequence: 7)
+        let sdrDecision = try SharedDecision.decode(wire("9223372036854775807") { $0["delivered_dynamic_range"] = "sdr"; $0["preserve_dolby_vision"] = false })
+        let plan = try SharedPlaybackPlan(subject: subject, decision: sdrDecision, caps: request.caps!, request: request)
+        XCTAssertEqual(plan.request.height, 720); XCTAssertEqual(plan.request.start, 12.5)
+        XCTAssertEqual(plan.subject.context.sourceFileId, "9223372036854775807")
+        var wrong = request; wrong.copy = false
+        XCTAssertThrowsError(try SharedPlaybackPlan(subject: subject, decision: sdrDecision, caps: request.caps!, request: wrong))
+        wrong = request; wrong.previousSessionId = ""
+        XCTAssertThrowsError(try SharedPlaybackPlan(subject: subject, decision: sdrDecision, caps: request.caps!, request: wrong))
+        XCTAssertThrowsError(try SharedPlaybackSubject(context: .local(0), title: "Local", resumeMs: 0, watchSequence: 0).validate())
+
         XCTAssertEqual(result.context.sourceFileId, "9223372036854775807"); XCTAssertEqual(result.context.reference, ref); XCTAssertEqual(result.context.sessionId, session)
         XCTAssertEqual(result.request.start, 12.5); XCTAssertEqual(result.request.height, 720); XCTAssertEqual(result.request.caps, request.caps)
         let raw = try JSONSerialization.jsonObject(with: XCTUnwrap(sent)) as! [String: Any]

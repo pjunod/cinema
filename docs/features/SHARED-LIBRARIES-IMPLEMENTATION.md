@@ -4627,3 +4627,23 @@ including separate authenticated imports/libraries/B sessions for the same
 Source item observing sequences 8, 9 and 10 rather than restarting the order.
 Android pool qualification remains pending its exact committed-source run.
 This bounded metadata journal never grants Source production or retirement.
+
+
+### Tagged native Shared player plan foundation
+
+The initial Shared subject is a full authenticated compound reference and
+opaque B context, title, safe resume position and watch sequence. It cannot
+carry a Local item/file ID. Its fixed HLS plan requires the same validated
+Shared decision and exact v2 caps as the retained whole CreateSession request.
+It refuses unsupported predecessor/intent/recovery/burn/HDR/DV asks and an
+inconsistent copy/encode choice. The original raw height, quality mode,
+track ask and resume stay intact; eventual Source control comparison must use
+that original ask rather than normalized Start output dimensions.
+
+The actual iOS simulator client/model filter passes 12 tests with zero failures,
+including retained raw 720-height/12.5-second resume, largest signed-i64 Source
+file string, and refusal of Local context/wrong copy/predecessor plans. The
+corrected progress pool plus tagged plan requires its exact Android run next.
+Explicit native controller/view/browser handoff remains unfinished; Shared
+status must use a tagged B-bound common-VOD adapter, never the numeric Local
+status decoder. No physical producer or hardware qualification is implied.

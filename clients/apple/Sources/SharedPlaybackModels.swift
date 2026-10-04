@@ -296,3 +296,39 @@ struct SharedProgressOrder {
         sequence = max(sequence, freshAuthorizedSequence); needsResync = false
     }
 }
+
+/// An initial Shared subject has no numeric Local item or file identity.
+struct SharedPlaybackSubject {
+    let context: PlaybackFileContext
+    let title: String
+    let resumeMs: Int64
+    let watchSequence: Int64
+    func validate() throws {
+        guard context.sessionId == nil, let reference = context.reference,
+              let revision = context.revision, title.utf8.count <= 4096,
+              (0...9_007_199_254_740_991).contains(resumeMs),
+              (0...9_007_199_254_740_991).contains(watchSequence) else { throw APIError.badURL }
+        try context.validateSharedReference(reference, file: context.sourceFileId, revision: revision)
+    }
+}
+/// The fixed initial HLS plan retains the raw original ask for later directed
+/// control equality. Delivered encoder dimensions never replace that ask.
+struct SharedPlaybackPlan {
+    let subject: SharedPlaybackSubject
+    let decision: SharedDecision
+    let caps: DeviceCaps
+    let request: CreateSessionRequest
+    init(subject: SharedPlaybackSubject, decision: SharedDecision, caps: DeviceCaps, request: CreateSessionRequest) throws {
+        try subject.validate(); _ = try decision.validated(subject.context)
+        guard caps.v == 2, caps.transports.contains("hls"), request.caps == caps,
+              request.presentation == "vod", request.intent == nil,
+              request.previousSessionId == nil, request.controlSequence == nil, request.reopenReason == nil,
+              request.subtitleBurn == nil, request.preserveDolbyVision != true, request.hdr10 != true,
+              decision.presentation.deliveredDynamicRange.map({ $0 == "sdr" }) ?? true,
+              (request.start ?? 0) == Double(subject.resumeMs) / 1000,
+              request.height.map({ $0 > 0 && $0 <= 8192 }) ?? true,
+              decision.method == "transcode" ? request.copy != true : request.copy == true
+        else { throw APIError.transport("This Shared HLS plan is not available yet.") }
+        self.subject = subject; self.decision = decision; self.caps = caps; self.request = request
+    }
+}

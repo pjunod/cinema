@@ -286,3 +286,25 @@ internal class SharedProgressOrder(initialSequence: Long) {
         sequence = maxOf(sequence, freshAuthorizedSequence); needsResync = false
     }
 }
+
+/** Initial Shared subject carries full strings/opaque B context, never a Local ID. */
+internal data class SharedPlaybackSubject(val context: PlaybackFileContext, val title: String, val resumeMs: Long, val watchSequence: Long) {
+    fun validate() {
+        require(context.sessionId == null && title.toByteArray().size <= 4096)
+        require(resumeMs in 0..9_007_199_254_740_991L && watchSequence in 0..9_007_199_254_740_991L)
+        context.validateSharedReference(requireNotNull(context.reference), context.sourceFileId, requireNotNull(context.revision))
+    }
+}
+/** Retains the raw original desired ask, not normalized delivered dimensions. */
+internal class SharedPlaybackPlan(val subject: SharedPlaybackSubject, val decision: SharedDecision, val caps: DeviceCaps, val request: CreateSessionReq) {
+    init {
+        subject.validate(); decision.validated(subject.context)
+        require(caps.v == 2 && "hls" in caps.transports && request.caps == caps)
+        require(request.presentation == "vod" && request.intent == null && request.previous_session_id == null && request.control_sequence == null && request.reopen_reason == null)
+        require(request.subtitle_burn == null && request.preserve_dolby_vision != true && request.hdr10 != true)
+        require(decision.presentation.delivered_dynamic_range?.let { it == "sdr" } != false)
+        require((request.start ?: 0.0) == subject.resumeMs.toDouble() / 1000)
+        require(request.height?.let { it in 1..8192 } != false)
+        require(if (decision.method == "transcode") request.copy != true else request.copy == true)
+    }
+}
