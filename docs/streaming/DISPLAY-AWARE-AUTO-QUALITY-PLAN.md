@@ -1594,3 +1594,12 @@ budget, the exact-target hold, the optional deadline, Apple's
 pre-stage are gone. This changes when the original switch happens (after the
 viewer action, through a seamless handoff, rather than instead of it); it does
 not change which candidates qualify.
+
+Web had the other half of the same defect and now follows the same rule
+(2026-10-04, PR #802). Its long-pause resume ran through `seekTo()` at the
+position Play was pressed at; the Auto ask took about a second, so a retained
+route still seeked the attached media back by that second. `togglePlay` now
+calls `resumeQualityBoundary`, which asks while playback runs and touches the
+media only for a picked route. A pause, seek, reattach, or an Auto change
+started during the ask supersedes it, and a picked route that fails before
+attachment retires its intent without a seek.
