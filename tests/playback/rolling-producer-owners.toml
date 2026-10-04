@@ -3882,7 +3882,15 @@ pattern = "(?:[A-Za-z_]\\w*::)+(?:sleep|sleep_until|interval|interval_at|timeout
 # Effort and main union: 1225 (effort) + 4 (main serving-fence loop and tests) = 1229, measured on the merged source.
 # Merged with main's architecture review (#793): main's count plus the
 # effort's reviewed sites, measured on the merged tree.
-expected_occurrences = 1237
+# 1237 -> 1246 with the progressive serving-fence grace. Production is net
+# zero: the outage-grace `tokio::time::timeout` moves from
+# `TranscodeManager::serving_fence_loop` into `serving_fence::SessionGrace`,
+# which that loop and each progressive remux owner now share; the remux owner
+# awaits it in place on its own task, adding no timer task. +9 test-only in
+# http/stream.rs: the five remux-owner tests and the body test add four
+# bounded sleeps that hold a loss or wait past the grace and six bounded
+# waits that assert rather than hang, replacing the old owner test's one wait.
+expected_occurrences = 1246
 
 [[module_structures]]
 id = "bare-time-constructor"
