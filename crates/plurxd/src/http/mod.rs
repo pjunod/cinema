@@ -466,6 +466,10 @@ fn http_route_group(path: &str) -> usize {
         | "/readyz"
         | "/metrics"
         | "/download/plurx-android.apk"
+        // The ordinary listener only refuses peer paths; peers use the
+        // separate sharing listener.
+        | "/sharing"
+        | "/sharing/{*path}"
         | "/identity" => 6,
 
         // Cluster administration and authenticated internal transport.
