@@ -1071,6 +1071,86 @@
         );
     }
 
+    /// The deferral is bounded. A client that reports Waiting forever with a
+    /// frozen position is not consuming, so publication waits for it at the
+    /// reserve ceiling, but only for the pause grace; then it is retired with
+    /// the numbers that say so, rather than holding a producer indefinitely.
+    #[tokio::test(start_paused = true)]
+    async fn rolling_publication_budget_wedged_waiting_viewer_is_retired_after_the_pause_grace() {
+        use crate::playback_control::{PlaybackDemand, RenderState};
+        const CYCLE_MS: i64 = 16_000;
+        const WEDGE_AT: i64 = 6;
+        let directory = crate::test_tempdir().expect("wedged budget");
+        let session = test_session(directory.path().to_path_buf());
+        let started = Instant::now();
+        let limit_steps = WEDGE_AT
+            + 8
+            + i64::try_from(crate::playback_control::ROLLING_PAUSE_GRACE.as_millis())
+                .expect("grace")
+                / CYCLE_MS
+            + 4;
+        let mut retired = None;
+        for step in 0..limit_steps {
+            let elapsed_ms = step * CYCLE_MS;
+            let wedged = step >= WEDGE_AT;
+            let position_ms = if wedged { WEDGE_AT * CYCLE_MS } else { elapsed_ms };
+            let render = if step == 0 {
+                RenderState::Starting
+            } else if wedged {
+                RenderState::Waiting
+            } else {
+                RenderState::Rendering
+            };
+            accept_rolling_publication_demand(
+                &session,
+                u64::try_from(step + 1).expect("sequence"),
+                position_ms,
+                1.0,
+                PlaybackDemand::Active,
+                render,
+            )
+            .await;
+            let produced_end_ms = 64_000 + elapsed_ms * 12 / 10;
+            let count = usize::try_from(produced_end_ms / CYCLE_MS).expect("segment count");
+            tokio::fs::write(
+                directory.path().join("index.m3u8"),
+                rolling_playlist(&vec![16.0; count], false),
+            )
+            .await
+            .expect("writer playlist");
+            if let Err(reason) = session
+                .publication_cycle_at(
+                    "rolling_publication_budget_wedged",
+                    started
+                        + Duration::from_millis(
+                            u64::try_from(elapsed_ms + 1_000).expect("elapsed"),
+                        ),
+                )
+                .await
+            {
+                retired = Some((step, reason));
+                break;
+            }
+            tokio::time::advance(Duration::from_millis(251)).await;
+        }
+        let (step, reason) = retired.expect("a wedged viewer must eventually be retired");
+        assert!(
+            reason.starts_with("rolling_window_budget_exhausted:"),
+            "unexpected verdict at step {step}: {reason}"
+        );
+        let deferred_for_ms = reason
+            .split("deferred_for_ms=")
+            .nth(1)
+            .and_then(|tail| tail.trim_end_matches(')').parse::<u64>().ok())
+            .expect("the verdict names how long publication waited");
+        let grace_ms =
+            u64::try_from(crate::playback_control::ROLLING_PAUSE_GRACE.as_millis()).expect("ms");
+        assert!(
+            deferred_for_ms > grace_ms && deferred_for_ms <= grace_ms + 2 * 16_000,
+            "retired after waiting {deferred_for_ms} ms, expected just past the {grace_ms} ms grace"
+        );
+    }
+
     #[tokio::test(start_paused = true)]
     async fn rolling_publication_budget_low_rate_retires_before_the_window_can_skip() {
         let directory = crate::test_tempdir().expect("low-rate budget");

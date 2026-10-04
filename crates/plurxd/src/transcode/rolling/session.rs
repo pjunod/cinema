@@ -1119,7 +1119,8 @@ impl Session {
                     // - a slower viewer whose wait still fits the hard deadline.
                     //
                     // Only a slow viewer who would wait past the hard deadline
-                    // is retired, which is the case this guard exists for.
+                    // is retired, which is the case this guard exists for, and
+                    // every deferral episode is bounded by the pause grace.
                     let overshoot_ms = first_new.end_ms.saturating_sub(
                         budget
                             .consumed_end_ms
@@ -1136,11 +1137,47 @@ impl Session {
                     } else {
                         i64::MAX
                     };
-                    let hard_ms =
-                        i64::try_from(ROLLING_PUBLICATION_HARD.as_millis()).unwrap_or(i64::MAX);
+                    // A slower viewer must see the next segment before the hard
+                    // deadline measured from the *last* publication, not from
+                    // this cycle, which already runs a full cycle after it.
+                    let slow_wait_fits = previous_served.as_ref().is_some_and(|served| {
+                        let window_left = served
+                            .available_at
+                            .checked_add(ROLLING_PUBLICATION_HARD)
+                            .map_or(Duration::ZERO, |deadline| {
+                                deadline.saturating_duration_since(now)
+                            });
+                        u128::try_from(eligible_in_ms.max(0)).unwrap_or(u128::MAX)
+                            <= window_left.as_millis()
+                    });
+                    // Every deferral episode is bounded whatever its reason: a
+                    // wedged client that keeps reporting Waiting, or a
+                    // Rendering client whose position never advances, must not
+                    // hold a producer forever.
+                    let (deferred_for, first_deferral) = {
+                        let mut clock = self.publication.lock().await;
+                        let first = clock.deferred_since.is_none();
+                        let since = *clock.deferred_since.get_or_insert(now);
+                        (now.saturating_duration_since(since), first)
+                    };
                     if previous_served.is_some()
-                        && (!consuming || playback_rate >= 1.0 || eligible_in_ms <= hard_ms)
+                        && deferred_for <= crate::playback_control::ROLLING_PAUSE_GRACE
+                        && (!consuming || playback_rate >= 1.0 || slow_wait_fits)
                     {
+                        if first_deferral {
+                            tracing::info!(
+                                target: "plurxd::transcode",
+                                session = %crate::transcode::session_log_id(session_id),
+                                consumed_end_ms = budget.consumed_end_ms,
+                                first_new_end_ms = first_new.end_ms,
+                                served_end_ms = previous_served
+                                    .as_ref()
+                                    .map_or(-1, |served| served.end_ms),
+                                consuming,
+                                playback_rate,
+                                "rolling publication waiting for the viewer: the next segment is past the reserve ceiling"
+                            );
+                        }
                         return Ok(());
                     }
                     // The verdict ends the viewer's session, so it carries the
@@ -1149,7 +1186,8 @@ impl Session {
                         "rolling_window_budget_exhausted: next completed segment exceeds the active publication safety floor \
                          (consumed_end_ms={} desired_end_ms={} allowed_end_ms={} reserve_max_ms={} \
                          first_new_segment={} first_new_end_ms={} served_end_ms={} demand_sequence={} observation_age_ms={} \
-                         consuming={consuming} playback_rate={playback_rate:.2} eligible_in_ms={eligible_in_ms})",
+                         consuming={consuming} playback_rate={playback_rate:.2} eligible_in_ms={eligible_in_ms} \
+                         deferred_for_ms={})",
                         budget.consumed_end_ms,
                         budget.desired_end_ms,
                         budget.allowed_end_ms,
@@ -1159,6 +1197,7 @@ impl Session {
                         previous_served.as_ref().map_or(-1, |served| served.end_ms),
                         budget.demand_sequence.unwrap_or_default(),
                         budget.observation_age_ms.unwrap_or(-1),
+                        deferred_for.as_millis(),
                     ));
                 }
                 return Ok(());
@@ -1332,6 +1371,7 @@ impl Session {
             }
             segments.revision = segments.revision.wrapping_add(1);
         }
+        clock.deferred_since = None;
         clock.served = Some(ServedPlaylistSnapshot {
             raw: Arc::from(served_raw),
             producer_attempt,
