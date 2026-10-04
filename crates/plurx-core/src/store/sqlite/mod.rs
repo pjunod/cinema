@@ -19,6 +19,10 @@ mod file_grants;
 mod fragindex;
 mod fragment_index_cluster;
 mod housekeeping;
+mod jellyfin_catalog;
+mod jellyfin_identity;
+mod jellyfin_login;
+mod jellyfin_play;
 mod library;
 mod library_channels;
 mod live_tv_resource;
@@ -104,8 +108,8 @@ const _: () = assert!(
 /// cancellation receipts and preparation owners, then the parent-fenced
 /// ledger. The Hiqlite import gates those tables on these, and the
 /// assertions below keep them naming their entries in [`MIGRATIONS`].
-pub(crate) const QUALITY_CANCELLATION_SQLITE_SCHEMA: i64 = 98;
-pub(crate) const QUALITY_LEDGER_SQLITE_SCHEMA: i64 = 99;
+pub(crate) const QUALITY_CANCELLATION_SQLITE_SCHEMA: i64 = 102;
+pub(crate) const QUALITY_LEDGER_SQLITE_SCHEMA: i64 = 103;
 const _: () = assert!(
     migration_is(
         QUALITY_CANCELLATION_SQLITE_SCHEMA,
@@ -1269,12 +1273,20 @@ pub(crate) const MIGRATIONS: &[&str] = &[
     super::candidate_recovery::SCHEMA,
     // v97: exact encoded preparation shares source-revision cancellation.
     super::background_jobs::ENCODED_OUTPUT_SCHEMA,
-    // v98: independent quality cancellation, without ending the incumbent.
-    // The continuous-quality effort drafted this as v92; main's v92–v97
-    // reached main first, so it appends after them.
+    // v98: permanent Jellyfin wire identities and deterministic retirement.
+    super::jellyfin_identity::JELLYFIN_IDENTITY_SCHEMA,
+    // v99: compatibility-only login scope and transactional replacement.
+    super::jellyfin_login::JELLYFIN_LOGIN_SCHEMA,
+    // v100: bounded compatibility negotiations and exact native references.
+    super::jellyfin_play::SCHEMA,
+    // v101: manual-edit revisions and trusted compatibility own-edit continuation.
+    super::jellyfin_watch::SCHEMA,
+    // v102: independent quality cancellation, without ending the incumbent.
+    // The continuous-quality effort drafted this as v92, then v98; main's
+    // v92–v101 reached main first, so it appends after them.
     super::quality_cancellation::QUALITY_CANCELLATION_SCHEMA,
-    // v99: parent-fenced continuous media facts and dependency reservations
-    // (drafted as v93).
+    // v103: parent-fenced continuous media facts and dependency reservations
+    // (drafted as v93, then v99).
     super::quality_ledger::SCHEMA,
 ];
 
@@ -3252,10 +3264,14 @@ mod tests {
         // v89 indexes preparation history; v90 records explicit DV requests;
         // v91 records transactional planning generation.
         // v92–v97 append offline audio, independent Link columns/table,
-        // copy preparation, candidate recovery and encoded preparation;
-        // v98 adds quality cancellation and v99 continuous dependencies.
+        // copy preparation, candidate recovery and encoded preparation.
+
+        // v98–v101 add Jellyfin compatibility: permanent wire identities,
+        // compatibility-only logins, bounded negotiations with exact native
+        // references, and manual-edit watch revisions; v102 adds quality
+        // cancellation and v103 continuous dependencies.
         assert_eq!(
-            version, 99,
+            version, 103,
             "a new migration must be a deliberate bump, not a surprise — \
              the list is append-only and every entry is one somebody shipped"
         );

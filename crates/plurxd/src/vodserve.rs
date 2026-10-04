@@ -913,6 +913,7 @@ struct Shared {
     sessions: Mutex<HashMap<String, Session>>,
     /// Bounded by in-flight VOD request admission and cleaned by exact RAII.
     /// This closes lease loss against a slow resurrection before attachment.
+    passive_grants: passive_grant::Registry,
     preparing_sessions: StdMutex<HashMap<String, usize>>,
     /// Per-session-id transition gates survive the remove/reattach gap via a
     /// weak registry. A reaper holds the strong gate through reader detach;
@@ -1175,3 +1176,6 @@ mod tests;
 mod vod_serve_quality;
 
 pub(crate) use vod_serve_quality::{QualityScheduleRequest, QualityScheduleResponse};
+
+#[path = "vod/passive_grant.rs"]
+mod passive_grant;

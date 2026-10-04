@@ -1526,6 +1526,9 @@ mod tests {
         ));
         let mut request = SessionRequest {
             continuous_media: None,
+            vod_only: false,
+            passive_vod: false,
+            finite_bitrate_limit_bps: None,
             quality_catalog: None,
             candidate_context: None,
             file_id: file.id,

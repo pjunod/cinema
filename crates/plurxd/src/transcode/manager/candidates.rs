@@ -639,6 +639,9 @@ impl TranscodeManager {
             };
             let request = SessionRequest {
                 continuous_media: None,
+                vod_only: false,
+                passive_vod: false,
+                finite_bitrate_limit_bps: None,
                 // This request probes a row while its catalog is still being
                 // built; it is not the dispatch request retaining that catalog.
                 quality_catalog: None,
@@ -1451,6 +1454,9 @@ mod snapshot_catalog_regression {
         }
         let request = SessionRequest {
             continuous_media: None,
+            vod_only: false,
+            passive_vod: false,
+            finite_bitrate_limit_bps: None,
             quality_catalog: None,
             candidate_context: None,
             file_id: id,
@@ -2302,6 +2308,9 @@ mod snapshot_catalog_regression {
             continuous_media: None,
             quality_catalog: None,
             candidate_context: Some(Box::new(context)),
+            vod_only: false,
+            passive_vod: false,
+            finite_bitrate_limit_bps: None,
             file_id: id,
             playback_id: "binding-regression".to_owned(),
             audio_claim: None,

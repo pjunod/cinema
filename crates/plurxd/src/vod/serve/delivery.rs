@@ -132,7 +132,7 @@ impl VodServe {
             .lock()
             .await
             .values()
-            .filter(|session| session.tombstone.is_none())
+            .filter(|session| session.live_rendition().is_some())
             .count()
     }
 
@@ -239,7 +239,7 @@ impl VodServe {
         let Some(session) = sessions.get_mut(session_id) else {
             return false;
         };
-        if session.tombstone.is_some()
+        if !session.renewable()
             || owner.tombstone.is_some()
             || !Arc::ptr_eq(&session.lifecycle, &owner.lifecycle)
             || !Arc::ptr_eq(&session.incarnation, &owner.incarnation)
@@ -279,6 +279,14 @@ impl VodServe {
         // Every await is above this line. Touch and frontier advance are one
         // cancellation-safe commit: EOF can never renew a session without
         // also recording the exact served frontier (or vice versa).
+        if let Some(grant) = session.passive_grant.as_ref() {
+            let frontier = segment_index
+                .and_then(|index| owner_rendition.plan.entry(index))
+                .map(|entry| ticks_to_ms(entry.end_ticks(), owner_rendition.timescale));
+            if !grant.delivered(frontier) {
+                return false;
+            }
+        }
         *session.last_touch.lock().expect("touch lock") = Instant::now();
         if let (Some(index), Some(readers)) = (segment_index, readers.as_mut()) {
             if let Some(reader) = readers.get_mut(reader_id) {
@@ -327,7 +335,7 @@ impl VodServe {
         let Some(session) = sessions.get(session_id) else {
             return false;
         };
-        session.tombstone.is_none()
+        session.renewable()
             && owner.tombstone.is_none()
             && Arc::ptr_eq(&session.lifecycle, &owner.lifecycle)
             && Arc::ptr_eq(&session.incarnation, &owner.incarnation)

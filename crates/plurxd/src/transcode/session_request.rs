@@ -619,6 +619,18 @@ pub struct SessionRequest {
     pub(crate) quality_catalog: Option<std::sync::Arc<crate::media_pool::QualityCatalogResult>>,
     #[serde(skip)]
     pub candidate_context: Option<Box<CandidateExecutionContext>>,
+    /// Trusted service policy, retained by durable and worker envelopes. Native
+    /// HTTP create never takes this from the client. A VOD-only request may
+    /// not allocate the rolling recovery engine, even when globally enabled.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub(crate) vod_only: bool,
+    /// Trusted passive route retention, independently selected by service ingress.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub(crate) passive_vod: bool,
+    /// Service-owned finite delivery ceiling. The ordinary native HTTP body
+    /// cannot set this. Worker envelopes retain it and require passive VOD.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) finite_bitrate_limit_bps: Option<u32>,
     pub file_id: i64,
     /// Stable for one player instance; the supersession key.
     pub playback_id: String,
@@ -1007,6 +1019,21 @@ impl SessionRequest {
         // fingerprint it always had.
         let kind = if self.presentation == Presentation::Vod {
             format!("{kind}+vod")
+        } else {
+            kind
+        };
+        let kind = if self.vod_only {
+            format!("{kind}+vod-only")
+        } else {
+            kind
+        };
+        let kind = if self.passive_vod {
+            format!("{kind}+passive-vod-600-64-4096")
+        } else {
+            kind
+        };
+        let kind = if let Some(limit) = self.finite_bitrate_limit_bps {
+            format!("{kind}+finite-bitrate-v1:{limit}")
         } else {
             kind
         };

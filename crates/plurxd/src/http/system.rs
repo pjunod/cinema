@@ -1779,6 +1779,7 @@ pub struct SettingsDto {
     pub server_name: String,
     /// Always-compiled Library channels. Readiness is advisory and never
     /// vetoes this explicit runtime choice.
+    pub jellyfin_compatibility_enabled: bool,
     pub library_channels_enabled: bool,
     pub library_channel_subject_matching_enabled: bool,
     /// Always-compiled HDHomeRun integration. The switch is runtime-only and
@@ -2278,6 +2279,10 @@ async fn settings_dto(state: &AppState) -> Result<SettingsDto, ApiError> {
             setting(crate::channel_subjects::ENABLE_KEY).as_deref(),
             true,
         ),
+        jellyfin_compatibility_enabled: plurx_core::store::stored_switch(
+            setting(keys::JELLYFIN_COMPATIBILITY_ENABLED).as_deref(),
+            false,
+        ),
         library_channels_enabled: plurx_core::store::stored_switch(
             setting(keys::LIBRARY_CHANNELS_ENABLED).as_deref(),
             false,
@@ -2589,6 +2594,7 @@ pub struct UpdateSettings {
     /// Rename the logical server on every voter. Configuration is only the
     /// bootstrap seed and is not edited by this operation.
     pub server_name: Option<String>,
+    pub jellyfin_compatibility_enabled: Option<bool>,
     pub library_channels_enabled: Option<bool>,
     pub library_channel_subject_matching_enabled: Option<bool>,
     /// HDHomeRun settings are a generation-CAS tuple. Save the address/owner
@@ -2803,7 +2809,8 @@ impl UpdateSettings {
     /// losing CAS reports 409, so the API makes that transaction boundary
     /// explicit.
     fn has_non_live_tv_update(&self) -> bool {
-        self.server_name.is_some()
+        self.jellyfin_compatibility_enabled.is_some()
+            || self.server_name.is_some()
             || self.tmdb_api_key.is_some()
             || self.omdb_api_key.is_some()
             || self.trakt_client_id.is_some()
@@ -3716,6 +3723,9 @@ pub async fn update_settings(
                 if on { "1" } else { "0" },
             )
             .await?;
+    }
+    if let Some(on) = req.jellyfin_compatibility_enabled {
+        state.store.set_jellyfin_compatibility(on).await?;
     }
     if let Some(on) = req.library_channels_enabled {
         // Deliberately no readiness lookup here. The Developer card is advice;

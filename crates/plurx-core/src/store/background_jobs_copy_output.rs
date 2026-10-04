@@ -113,6 +113,7 @@ mod tests {
         connection
             .execute_batch(super::super::background_jobs::COPY_OUTPUT_SCHEMA)
             .expect("exact predecessor source guards");
+        crate::queue_fixture::remove_jellyfin_compatibility_schema(&connection);
         connection
             .execute_batch(&format!(
                 "DROP TRIGGER background_job_encoded_output_target; PRAGMA user_version={predecessor};"
@@ -128,7 +129,8 @@ mod tests {
                 .query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0))
                 .expect("version"),
             // Opening runs the encoded step and every later step to the end
-            // of the chain; the guards below prove the encoded step itself.
+            // of the chain (Jellyfin v98–v101, then continuous quality
+            // v102–v103); the guards below prove the encoded step itself.
             crate::store::SQLITE_SCHEMA_VERSION
         );
         assert_eq!(connection.query_row("SELECT sql FROM sqlite_master WHERE name='background_job_publish_copy_output_command'", [], |row| row.get::<_,String>(0)).expect("publication unchanged"), publication);

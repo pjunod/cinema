@@ -34,6 +34,7 @@ pub(crate) mod internal_live_tv;
 pub(crate) mod internal_media;
 pub(crate) mod internal_media_sessions;
 mod items;
+mod jellyfin;
 mod keys;
 mod libraries;
 pub(crate) mod library_channels;
@@ -238,7 +239,13 @@ fn http_route_group(path: &str) -> usize {
     // inventory test fails if a registered pattern is left unclassified.
     match path {
         // Authentication and identity administration.
-        "/api/v1/me"
+        "/jellyfin"
+        | "/jellyfin/"
+        | "/jellyfin/System/Info/Public"
+        | "/jellyfin/Users/AuthenticateByName"
+        | "/jellyfin/Users/{user_id}"
+        | "/jellyfin/Users/Me"
+        | "/api/v1/me"
         | "/api/v1/setup"
         | "/api/v1/auth/login"
         | "/api/v1/auth/logout"
@@ -319,6 +326,31 @@ fn http_route_group(path: &str) -> usize {
         | "/api/v1/dvr/reminders"
         | "/api/v1/dvr/reminders/{id}"
         | "/api/v1/dvr/reminders/{id}/ack"
+        | "/jellyfin/Users/{user_id}/Views"
+        | "/jellyfin/UserViews/GroupingOptions"
+        | "/jellyfin/Library/VirtualFolders"
+        | "/jellyfin/DisplayPreferences/{id}"
+        | "/jellyfin/Items/{item_id}/Intros"
+        | "/jellyfin/MediaSegments/{item_id}"
+        | "/jellyfin/Items/{item_id}/LocalTrailers"
+        | "/jellyfin/Items/{item_id}/SpecialFeatures"
+        | "/jellyfin/UserViews"
+        | "/jellyfin/Items/Latest"
+        | "/jellyfin/Items/Resume"
+        | "/jellyfin/UserItems/Resume"
+        | "/jellyfin/Users/{user_id}/Items/Latest"
+        | "/jellyfin/Users/{user_id}/Items/Resume"
+        | "/jellyfin/Shows/Upcoming"
+        | "/jellyfin/Items/{item_id}/Similar"
+        | "/jellyfin/Shows/NextUp"
+        | "/jellyfin/Items"
+        | "/jellyfin/Users/{user_id}/Items"
+        | "/jellyfin/Items/{item_id}/Images/{kind}"
+        | "/jellyfin/Items/{item_id}/Images/{kind}/{index}"
+        | "/jellyfin/Items/{item_id}"
+        | "/jellyfin/Users/{user_id}/Items/{item_id}"
+        | "/jellyfin/Shows/{item_id}/Seasons"
+        | "/jellyfin/Shows/{item_id}/Episodes"
         | "/library/metadata/{key}"
         | "/library/metadata/{key}/children"
         | "/library/metadata/{key}/{kind}"
@@ -329,7 +361,17 @@ fn http_route_group(path: &str) -> usize {
         "/api/v1/search" | "/api/v1/search/related" | "/api/v1/search/settings" | "/search" => 4,
 
         // Playback decisions, control, media bodies and watch state.
-        "/api/v1/items/{id}/progress"
+        "/jellyfin/Items/{item_id}/PlaybackInfo"
+        | "/jellyfin/Videos/{item_id}/{source_id}/Subtitles/{index}/{filename}"
+        | "/jellyfin/Videos/{item_id}/stream"
+        | "/jellyfin/Videos/{item_id}/{play_id}/hls/{*resource}"
+        | "/jellyfin/Videos/{item_id}/{filename}"
+        | "/jellyfin/Sessions/Logout"
+        | "/jellyfin/Sessions/Playing"
+        | "/jellyfin/Sessions/Playing/Progress"
+        | "/jellyfin/Sessions/Playing/Stopped"
+        | "/jellyfin/Users/{user_id}/PlayedItems/{item_id}"
+        | "/api/v1/items/{id}/progress"
         | "/api/v1/items/{id}/scrobble"
         | "/api/v1/items/{id}/unscrobble"
         | "/api/v1/files/{id}/decision"
@@ -1835,6 +1877,22 @@ pub fn router(state: AppState) -> Router {
     // Plex uses literal `:` path segments (`/:/timeline`, `/photo/:/transcode`)
     // which axum 0.8 rejects by default — `without_v07_checks` matches them
     // literally (we still use `{capture}` syntax for real captures).
+    // Every merged root family shares the literal-colon routing policy used
+    // by Plex; merging an ordinary router would turn those checks back on.
+    let jellyfin_json = Router::new()
+        .without_v07_checks()
+        .route("/jellyfin/", axum::routing::any(jellyfin::not_found))
+        .nest("/jellyfin", jellyfin::router())
+        .layer(axum::middleware::from_fn(json_long_deadline))
+        .layer(axum::middleware::from_fn_with_state(
+            state.clone(),
+            jellyfin::enabled_gate,
+        ))
+        .layer(axum::middleware::from_fn_with_state(
+            state.clone(),
+            mutable_media_serving_gate,
+        ))
+        .layer(axum::middleware::from_fn(jellyfin::cache_policy));
     let plex_short = Router::new()
         .without_v07_checks()
         .route("/identity", get(plex::identity))
@@ -2068,6 +2126,7 @@ pub fn router(state: AppState) -> Router {
         // Also opted out of the v0.7 checks so the merged Plex `:` routes pass.
         .without_v07_checks()
         .nest("/api/v1", api)
+        .merge(jellyfin_json)
         .merge(plex_routes)
         .merge(public_short)
         .merge(public_media)
@@ -2469,6 +2528,13 @@ async fn cluster_capacity_gate(
 
 fn safe_trace_target(uri: &Uri) -> String {
     let mut segments = uri.path().split('/').collect::<Vec<_>>();
+    if segments.len() >= 7
+        && segments[1].eq_ignore_ascii_case("jellyfin")
+        && segments[2].eq_ignore_ascii_case("videos")
+        && segments[5].eq_ignore_ascii_case("hls")
+    {
+        segments[4] = "[REDACTED]";
+    }
     for marker in ["media", "hls", "publication", "sessions", "starts"] {
         if let Some(index) = segments.iter().position(|segment| *segment == marker) {
             let is_capability_route = match marker {
@@ -3923,6 +3989,7 @@ mod tests {
             "json_short",
             "json_long",
             "media",
+            "jellyfin_json",
             "plex_short",
             "plex_media",
             "public_short",
@@ -4021,6 +4088,7 @@ mod tests {
             ("let json_short", "let json_long", "/api/v1"),
             ("let json_long", "let media", "/api/v1"),
             ("let media", "let api", "/api/v1"),
+            ("let jellyfin_json", "let plex_short", ""),
             ("let plex_short", "let plex_media", ""),
             ("let plex_media", "let plex_routes", ""),
             ("let public_short", "let public_media", ""),
@@ -4044,6 +4112,7 @@ mod tests {
             }
         }
         for (source, prefix) in [
+            (include_str!("jellyfin.rs"), "/jellyfin"),
             (include_str!("dvr.rs"), "/api/v1/dvr"),
             (
                 include_str!("library_channels.rs"),
@@ -4499,6 +4568,15 @@ mod tests {
             safe_trace_target(&hls),
             "/api/v1/hls/[REDACTED]/seg00001.ts"
         );
+
+        for path in [
+            "/jellyfin/Videos/item/play-secret/hls/seg00001.ts?ApiKey=credential",
+            "/JELLYFIN/VIDEOS/item/play-secret/HLS/seg00001.ts?apikey=credential",
+        ] {
+            let uri: Uri = path.parse().expect("compatibility HLS URI");
+            let target = safe_trace_target(&uri);
+            assert!(!target.contains("play-secret") && !target.contains("credential"));
+        }
 
         let publication: Uri = "/api/v1/publication/session-secret/OEBPS/chapter.xhtml"
             .parse()
@@ -9237,6 +9315,199 @@ mod tests {
         (router(state.clone()), state, fixture)
     }
 
+    #[tokio::test]
+    async fn shared_token_only_revocation_preserves_other_device_reader_grants() {
+        let (app, state) = test_app_with_state();
+        let reader_token = setup_admin(&app).await;
+        let seeded = seed_content(&state).await;
+        let login = auth::login_user(
+            &state,
+            None,
+            &axum::http::HeaderMap::new(),
+            auth::LoginRequest {
+                username: "paul".into(),
+                password: "supersecret".into(),
+                device: Some("compatibility fixture".into()),
+            },
+        )
+        .await
+        .expect("shared login");
+        let reader_hash = plurx_core::auth::hash_token(&reader_token);
+        let compat_hash = plurx_core::auth::hash_token(&login.token);
+        let reader_grant = plurx_core::auth::hash_token("fixture-reader-grant");
+        let compat_grant = plurx_core::auth::hash_token("fixture-compat-grant");
+        for (id, token_hash, source_token_hash) in [
+            ("reader", &reader_grant, &reader_hash),
+            ("compat", &compat_grant, &compat_hash),
+        ] {
+            state
+                .store
+                .create_file_grant(plurx_core::store::NewFileGrant {
+                    id: id.into(),
+                    token_hash: token_hash.clone(),
+                    file_id: seeded.file,
+                    user_id: login.user.id,
+                    source_token_hash: source_token_hash.clone(),
+                    created_at: 1_000,
+                    expires_at: i64::MAX,
+                })
+                .await
+                .expect("file grant");
+        }
+        assert_eq!(
+            extract::authenticate_user_token(&state, &login.token)
+                .await
+                .expect("shared authority")
+                .id,
+            login.user.id
+        );
+        let exclusion =
+            internal_auth_revocation::ClusterCacheRevocation::begin_digest(&state, &compat_hash)
+                .await
+                .expect("exact revocation exclusion");
+        auth::revoke_token_under_exclusion(&state, &compat_hash, exclusion)
+            .await
+            .expect("token-only revoke");
+        assert!(extract::authenticate_user_token(&state, &login.token)
+            .await
+            .is_err());
+        assert_eq!(
+            extract::authenticate_user_token(&state, &reader_token)
+                .await
+                .expect("other device stays signed in")
+                .id,
+            login.user.id
+        );
+        let reader = state
+            .store
+            .file_grant_by_hash(&reader_grant)
+            .await
+            .expect("reader lookup")
+            .expect("reader row");
+        assert!(reader.source_active);
+        assert_eq!(reader.revoked_at, None);
+        let retired = state
+            .store
+            .file_grant_by_hash(&compat_grant)
+            .await
+            .expect("own grant lookup")
+            .expect("own grant row");
+        assert!(!retired.source_active);
+        // Native logout retains its existing broader file-grant revocation.
+        let (status, body) = call(
+            &app,
+            post("/api/v1/auth/logout", Some(&reader_token), json!({})),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert!(state
+            .store
+            .file_grant_by_hash(&reader_grant)
+            .await
+            .expect("native scope lookup")
+            .expect("reader row")
+            .revoked_at
+            .is_some());
+    }
+
+    #[tokio::test]
+    async fn compatibility_login_replaces_only_its_scope_after_password_verification() {
+        let (app, state) = test_app_with_state();
+        let native = setup_admin(&app).await;
+        let headers = axum::http::HeaderMap::new();
+        let request = || auth::LoginRequest {
+            username: "paul".into(),
+            password: "supersecret".into(),
+            device: Some("living room".into()),
+        };
+        let family = plurx_core::store::JellyfinClientFamily::Infuse;
+        let first =
+            auth::login_jellyfin_user(&state, None, &headers, request(), "device-one", family)
+                .await
+                .expect("initial compatibility login");
+        let other =
+            auth::login_jellyfin_user(&state, None, &headers, request(), "device-two", family)
+                .await
+                .expect("other device login");
+        let android = auth::login_jellyfin_user(
+            &state,
+            None,
+            &headers,
+            request(),
+            "device-one",
+            plurx_core::store::JellyfinClientFamily::AndroidTv,
+        )
+        .await
+        .expect("other family login");
+        let mut bad = request();
+        bad.password = "wrong".into();
+        assert!(matches!(
+            auth::login_jellyfin_user(&state, None, &headers, bad, "device-one", family).await,
+            Err(super::error::ApiError::Unauthorized)
+        ));
+        extract::authenticate_compatibility_token(&state, &first.token)
+            .await
+            .expect("failed password preserves old login");
+        // A compatibility login is not a native bearer.
+        assert!(matches!(
+            extract::authenticate_user_token(&state, &first.token).await,
+            Err(super::error::ApiError::Unauthorized)
+        ));
+        assert!(matches!(
+            extract::authenticate_compatibility_token(&state, &native).await,
+            Err(super::error::ApiError::Unauthorized)
+        ));
+        let next =
+            auth::login_jellyfin_user(&state, None, &headers, request(), "device-one", family)
+                .await
+                .expect("replacement login");
+        assert!(
+            extract::authenticate_compatibility_token(&state, &first.token)
+                .await
+                .is_err()
+        );
+        assert_eq!(
+            extract::authenticate_user_token(&state, &native)
+                .await
+                .expect("native token")
+                .id,
+            first.user.id
+        );
+        for token in [&other.token, &android.token, &next.token] {
+            assert_eq!(
+                extract::authenticate_compatibility_token(&state, token)
+                    .await
+                    .expect("unrelated or fresh compatibility token")
+                    .id,
+                first.user.id
+            );
+        }
+        let tokens = state
+            .store
+            .list_tokens_for_user(first.user.id)
+            .await
+            .expect("token inventory");
+        assert_eq!(
+            tokens.len(),
+            4,
+            "replacement creates no orphan native tokens"
+        );
+        let mut oversized = request();
+        oversized.password = "x".repeat(auth::MAX_PASSWORD_BYTES + 1);
+        assert!(matches!(
+            auth::login_jellyfin_user(&state, None, &headers, oversized, "device-one", family)
+                .await,
+            Err(super::error::ApiError::BadRequest(_))
+        ));
+        assert!(matches!(
+            auth::login_jellyfin_user(&state, None, &headers, request(), "", family).await,
+            Err(super::error::ApiError::BadRequest(_))
+        ));
+        extract::authenticate_compatibility_token(&state, &next.token)
+            .await
+            .expect("validation refusals preserve current login");
+    }
+
     async fn login_device(app: &Router, device: &str) -> String {
         let (status, body) = call(
             app,
@@ -10199,6 +10470,9 @@ mod tests {
         assert_eq!(
             ids,
             vec![
+                // Jellyfin compatibility: one advisory row (pinned-client
+                // qualification) that never gates the switch.
+                "jellyfin_compatibility",
                 // The clock guard's enforcement switch. All four rows are
                 // advisory; on this standalone fixture there is no remote
                 // member to observe, so coverage and the consequence row are

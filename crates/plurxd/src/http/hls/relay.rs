@@ -7,7 +7,10 @@ pub(super) async fn relay_if_remote(
     headers: RelayHeaders,
     request_deadline: Instant,
 ) -> Result<Option<Response>, ApiError> {
-    let media_resource = !matches!(resource, RelayResource::Status | RelayResource::Delete);
+    let media_resource = !matches!(
+        resource,
+        RelayResource::Status | RelayResource::Delete | RelayResource::PassivePresence { .. }
+    );
     let resolution = if media_resource {
         state
             .media_sessions
@@ -115,6 +118,39 @@ pub(super) async fn relay_if_remote(
     }
     unreachable!("bounded relay reclassification returns on every branch")
 }
+
+/// Renew one exact passive grant on the session's owner. `true` only when the
+/// owner found the live grant for this user, player and reserved request.
+pub(crate) async fn passive_presence(
+    state: &AppState,
+    session_id: &str,
+    user: &str,
+    player: &str,
+    request: &str,
+) -> Result<bool, ApiError> {
+    let deadline = Instant::now() + PASSIVE_PRESENCE_DEADLINE;
+    let resource = RelayResource::PassivePresence {
+        user: user.to_owned(),
+        player: player.to_owned(),
+        request: request.to_owned(),
+    };
+    match relay_if_remote(
+        state,
+        session_id,
+        resource,
+        RelayHeaders::default(),
+        deadline,
+    )
+    .await?
+    {
+        Some(response) => Ok(response.status() == StatusCode::NO_CONTENT),
+        None => Ok(state
+            .transcode
+            .passive_presence(session_id, user, player, request)
+            .await),
+    }
+}
+const PASSIVE_PRESENCE_DEADLINE: std::time::Duration = std::time::Duration::from_secs(5);
 
 pub(super) fn relay_status_requires_reclassification(status: StatusCode) -> bool {
     matches!(
@@ -241,6 +277,21 @@ pub(crate) async fn relay_local(state: &AppState, request: RelayRequest) -> Resp
                 request_deadline,
             ))
             .await
+        }
+        RelayResource::PassivePresence {
+            user,
+            player,
+            request: play_request,
+        } => {
+            return if state
+                .transcode
+                .passive_presence(&request.session_id, &user, &player, &play_request)
+                .await
+            {
+                StatusCode::NO_CONTENT.into_response()
+            } else {
+                media_session_ended().into_response()
+            };
         }
         RelayResource::Delete => {
             // Mixed-version peers may still send this compatibility shape.

@@ -158,6 +158,53 @@ pub struct SqliteTransactionSite {
 /// Rust-driven backfills remain separate audit populations. Keeping explicit
 /// boundaries here makes their port shape reviewable beside the CAS primitive.
 pub const SQLITE_TRANSACTION_SITES: &[SqliteTransactionSite] = &[
+    // Explicit switch and fresh generation publish together; no observation
+    // of readiness or caller data branches inside this fixed write batch.
+    SqliteTransactionSite {
+        module: "jellyfin_login.rs",
+        method: "set_jellyfin_compatibility",
+        is_async: true,
+        mechanism: TransactionMechanism::RusqliteTransaction,
+        shape: TransactionShape::BatchWrite,
+    },
+    // Expired non-active rows and bounded conditional admission are fixed SQL.
+    SqliteTransactionSite {
+        module: "jellyfin_play.rs",
+        method: "create_jellyfin_play",
+        is_async: true,
+        mechanism: TransactionMechanism::RusqliteTransaction,
+        shape: TransactionShape::BatchWrite,
+    },
+    // Activation binds the native reference only while the exact pending row
+    // remains, and supersedes the scope's older rows only when that
+    // conditional update wrote one; the supersede matches this activation's
+    // nonce. The replicated twin runs both in one transaction.
+    SqliteTransactionSite {
+        module: "jellyfin_play.rs",
+        method: "activate_jellyfin_play",
+        is_async: true,
+        mechanism: TransactionMechanism::RusqliteTransaction,
+        shape: TransactionShape::BranchOnRowsAffected,
+    },
+    // The password-matched mint admits both replacement writes; a collision
+    // or later statement failure rolls the whole scoped replacement back.
+    SqliteTransactionSite {
+        module: "jellyfin_login.rs",
+        method: "replace_jellyfin_login_inner",
+        is_async: true,
+        mechanism: TransactionMechanism::RusqliteTransaction,
+        shape: TransactionShape::BranchOnRowsAffected,
+    },
+    // One read expands the missing page IDs into conditional inserts; read-back
+    // returns the durable winners. The replicated twin batches missing inserts
+    // in one Raft entry and consistently reads the winning mappings afterward.
+    SqliteTransactionSite {
+        module: "jellyfin_identity.rs",
+        method: "jellyfin_entity_ids",
+        is_async: true,
+        mechanism: TransactionMechanism::RusqliteTransaction,
+        shape: TransactionShape::ReadExpandWrite,
+    },
     SqliteTransactionSite {
         module: "background_jobs.rs",
         method: "queue_transaction",
@@ -311,13 +358,7 @@ pub const SQLITE_TRANSACTION_SITES: &[SqliteTransactionSite] = &[
         mechanism: TransactionMechanism::RusqliteTransaction,
         shape: TransactionShape::ReadBranchWrite,
     },
-    SqliteTransactionSite {
-        module: "watch.rs",
-        method: "set_watched_tree",
-        is_async: true,
-        mechanism: TransactionMechanism::RusqliteTransaction,
-        shape: TransactionShape::ReadExpandWrite,
-    },
+    // Manual tree marks now use one shared atomic statement plus revision triggers.
     SqliteTransactionSite {
         module: "media.rs",
         method: "delete_files",
@@ -1037,6 +1078,19 @@ mod tests {
         ),
         ("dvr.rs", include_str!("sqlite/dvr.rs")),
         ("housekeeping.rs", include_str!("sqlite/housekeeping.rs")),
+        (
+            "jellyfin_identity.rs",
+            include_str!("sqlite/jellyfin_identity.rs"),
+        ),
+        (
+            "jellyfin_catalog.rs",
+            include_str!("sqlite/jellyfin_catalog.rs"),
+        ),
+        ("jellyfin_play.rs", include_str!("sqlite/jellyfin_play.rs")),
+        (
+            "jellyfin_login.rs",
+            include_str!("sqlite/jellyfin_login.rs"),
+        ),
         ("library.rs", include_str!("sqlite/library.rs")),
         (
             "library_channels.rs",
@@ -1240,12 +1294,16 @@ mod tests {
         // only when the fenced insert applied. The migration boundary moved
         // from `migrate` into `apply_migration_step` without changing the
         // count: one boundary per step, now stamping `user_version` inside it.
+
+        // Jellyfin play activation binds and conditionally supersedes in one
+        // boundary that branches on the binding's rows affected.
+        // Merged with main's candidate recovery: 96 + 4 + 1.
         //
-        // 99 with continuous quality's two `sessions.rs` boundaries:
+        // 103 with continuous quality's two `sessions.rs` boundaries:
         // `request_quality_cancellation` prunes, inserts and reads the winning
         // receipt back, and `settle_quality_cancellation` settles and reads
         // whether the receipt is settled for this owner.
-        assert_eq!(methods.len(), 99);
+        assert_eq!(methods.len(), 103);
     }
 
     #[test]

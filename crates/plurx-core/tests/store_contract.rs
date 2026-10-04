@@ -20,6 +20,14 @@ use queue_fixture::QueueFixture;
 
 #[path = "store_contract/background_jobs.rs"]
 mod background_jobs;
+#[path = "store_contract/jellyfin_catalog.rs"]
+mod jellyfin_catalog;
+#[path = "store_contract/jellyfin_identity.rs"]
+mod jellyfin_identity;
+#[path = "store_contract/jellyfin_login.rs"]
+mod jellyfin_login;
+#[path = "store_contract/jellyfin_play.rs"]
+mod jellyfin_play;
 
 #[cfg(feature = "hiqlite-contract-tests")]
 use std::borrow::Cow;
@@ -288,6 +296,7 @@ const USER_METHODS: &[&str] = &[
     "create_token",
     "create_token_if_password_matches",
     "authenticate_token",
+    "authenticate_token_for",
     "user_for_token",
     "delete_token",
     "delete_token_with_cache_admin_claim",
@@ -443,6 +452,9 @@ const MEDIA_METHODS: &[&str] = &[
     "prune_empty_items",
 ];
 const WATCH_METHODS: &[&str] = &[
+    "jellyfin_progress_is_current",
+    "put_jellyfin_progress",
+    "set_watched_tree_with_origin",
     "watch_state",
     "watch_map",
     "put_progress",
@@ -12599,9 +12611,11 @@ async fn assert_migrated_fragment_prune_budget(client: &Client) {
 
 /// A fixture rewound to a pre-v92 marker must not keep the composed v92/v93
 /// shapes a fresh chain created (`offline_packages.audio_recipe` and the two
-/// Link columns on `network_priors`): `ADD COLUMN` replays are not idempotent,
-/// and a real database at that marker never had them.
+/// Link columns on `network_priors`), nor v101's watch revision columns:
+/// `ADD COLUMN` replays are not idempotent, and a real database at that marker
+/// never had them.
 fn drop_composed_v92_v93_columns(conn: &rusqlite::Connection) {
+    queue_fixture::remove_jellyfin_compatibility_schema(conn);
     conn.execute_batch(
         "ALTER TABLE offline_packages DROP COLUMN audio_recipe;
          ALTER TABLE network_priors DROP COLUMN link_worst_rung_height;
@@ -16592,6 +16606,7 @@ fn make_trakt_fixture_row_cleartext(path: &std::path::Path) {
 fn populated_v14_import_fixture(data_dir: &std::path::Path) -> PathBuf {
     let path = populated_current_import_fixture(data_dir);
     let connection = rusqlite::Connection::open(&path).expect("open current SQLite fixture");
+    queue_fixture::remove_jellyfin_compatibility_schema(&connection);
     queue_fixture::remove_common_queue_schema(&connection);
     connection
         .execute_batch(
@@ -16609,7 +16624,7 @@ fn populated_v14_import_fixture(data_dir: &std::path::Path) -> PathBuf {
              DROP TABLE IF EXISTS quality_cancellation_receipts;
              ",
         )
-        .expect("remove v98 cancellation and v99 continuous dependencies");
+        .expect("remove v102 cancellation and v103 continuous dependencies");
     // Recreate the exact post-v14 schema differences so this is also a valid
     // input to ordinary SQLite startup migration, not merely a current-schema
     // database carrying an older user_version. The activation coordinator now
@@ -16831,7 +16846,11 @@ async fn populated_v14_sqlite_import_has_exact_three_voter_parity() {
     // is over what the import *plans*, not over what the source happened to
     // hold. The subtitle-source ledgers are node-held facts about local files
     // and are deliberately not imported, so they are not counted here.
-    assert_eq!(report.tables.len(), 74);
+    // 77: main's replicated candidate recovery, plus Jellyfin compatibility's
+    // wire identities, compatibility logins and bounded negotiations
+    // (SQLite v98–v100), plus the three continuous-quality tables (SQLite
+    // v102–v103).
+    assert_eq!(report.tables.len(), 77);
     assert_eq!(report.search_rows, 2);
     assert_eq!(
         report
@@ -18674,10 +18693,14 @@ fn contract_inventory_matches_every_store_method() {
     // The architecture-review effort declares 459 methods; these three main
     // additions are distinct from its luminance and cluster-observation
     // operations (453 -> 462 on main).
-    // +9 -> 471: continuous quality's ledger, reservation, family-binding and
+    // Merged with main (462): +4 for Jellyfin compatibility: audience-scoped token authentication
+    // (jellyfin_login_token_audience_separates_native_and_compatibility), and
+    // the origin-stamped watch tree plus the fenced compatibility progress
+    // write and its currency check (store_contract/jellyfin_play.rs).
+    // +9 -> 475: continuous quality's ledger, reservation, family-binding and
     // cancellation-receipt methods on `MediaSessionStore`, listed in
     // `MEDIA_SESSION_METHODS` with the scenarios that cover them.
-    assert_eq!(declared.len(), 471, "review the Store method count");
+    assert_eq!(declared.len(), 475, "review the Store method count");
     assert_eq!(
         covered, declared,
         "the declared async method name inventory changed"

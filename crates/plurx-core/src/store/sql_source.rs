@@ -251,6 +251,19 @@ const NEXT_UP_FROM: &str = "FROM items e JOIN items season ON season.id = e.pare
                    WHERE w.user_id = @user_id@ AND w.watched = 0 AND w.position_ms > 0) \
              GROUP BY show.id ORDER BY show.sort_title LIMIT @limit@";
 
+/// The facade projects IDs with its own coherent catalog snapshot. Reuse
+/// the native next-episode predicate before any caller paging or series filter.
+pub(super) fn jellyfin_next_up_ids() -> String {
+    let predicate = NEXT_UP_FROM
+        .split_once(" ORDER BY show.sort_title LIMIT @limit@")
+        .expect("native next-up suffix")
+        .0;
+    format!(
+        "SELECT e.id, MIN(season.season_number*100000 + e.episode_number) AS ord {}",
+        predicate.replace("@user_id@", "(SELECT user_id FROM scope)")
+    )
+}
+
 /// Continue-watching and next-up as one statement (K-04 M3).
 ///
 /// Each rail keeps its own filter, order and limit inside its own

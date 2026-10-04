@@ -378,6 +378,21 @@ async fn receive_source<T>(
 
 const TABLES: &[TablePlan] = &[
     TablePlan {
+        name: "jellyfin_entity_ids",
+        columns: &[
+            "wire_id",
+            "entity_kind",
+            "native_id",
+            "incarnation",
+            "retired",
+        ],
+        order_by: "wire_id",
+        minimum_schema: 98,
+        import_filter: None,
+        sealed_columns: &[],
+        parent_first: false,
+    },
+    TablePlan {
         name: "background_jobs",
         columns: &[
             "id",
@@ -541,6 +556,41 @@ const TABLES: &[TablePlan] = &[
         ],
         order_by: "token_hash",
         minimum_schema: 2,
+        import_filter: None,
+        sealed_columns: &[],
+        parent_first: false,
+    },
+    TablePlan {
+        name: "jellyfin_login_tokens",
+        columns: &["token_hash", "user_id", "device_digest", "client_family"],
+        order_by: "token_hash",
+        minimum_schema: 99,
+        import_filter: None,
+        sealed_columns: &[],
+        parent_first: false,
+    },
+    TablePlan {
+        name: "jellyfin_plays",
+        columns: &[
+            "play_id",
+            "user_id",
+            "token_digest",
+            "device_digest",
+            "client_family",
+            "playback_id",
+            "item_id",
+            "file_id",
+            "item_wire_id",
+            "file_wire_id",
+            "payload",
+            "state",
+            "expires_at_ms",
+            "manual_revision",
+            "native_incarnation_id",
+            "direct_grant_id",
+        ],
+        order_by: "play_id",
+        minimum_schema: 100,
         import_filter: None,
         sealed_columns: &[],
         parent_first: false,
@@ -715,6 +765,8 @@ const TABLES: &[TablePlan] = &[
             "duration_ms",
             "watched",
             "updated_at",
+            "manual_revision",
+            "manual_origin",
         ],
         order_by: "user_id, item_id",
         minimum_schema: 2,
@@ -2838,7 +2890,13 @@ fn value_projection(table: TablePlan, schema_version: i64, qualify: bool) -> Str
         .columns
         .iter()
         .map(|column| {
-            if table.name == "media_playback_pointers"
+            if table.name == "watch_state" && *column == "manual_origin" {
+                // Origin is mutation context, never restored authority. Replaying
+                // it could advance an otherwise fenced binding during import.
+                "NULL".to_owned()
+            } else if table.name == "watch_state" && *column == "manual_revision" && schema_version < 101 {
+                "0".to_owned()
+            } else if table.name == "media_playback_pointers"
                 && *column == "desired_revision"
                 && schema_version < 49
             {
@@ -3547,7 +3605,10 @@ mod tests {
         // reach Raft.
         assert!(names.contains(&"candidate_recovery"));
         assert!(!names.contains(&"candidate_link_priors"));
-        assert_eq!(names.len(), 74, "review every imported durable table");
+        assert!(names.contains(&"jellyfin_login_tokens"));
+        assert!(names.contains(&"jellyfin_entity_ids"));
+        assert!(names.contains(&"jellyfin_plays"));
+        assert_eq!(names.len(), 77, "review every imported durable table");
     }
 
     /// A source from before the pointer fence has no revision to attribute its

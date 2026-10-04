@@ -4,6 +4,7 @@ members = [
     "crates/plurx-core",
     "crates/plurx-cluster-check",
     "crates/plurx-compat-plex",
+    "crates/plurx-compat-jellyfin",
     "crates/plurx-pgs",
     "crates/plurxd",
 ]

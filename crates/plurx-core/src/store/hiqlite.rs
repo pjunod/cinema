@@ -175,15 +175,23 @@ const CANDIDATE_RECOVERY_SCHEMA_VERSION: i64 = 72;
 const CANDIDATE_RECOVERY_SCHEMA_MIGRATION_SOURCE: i64 = COPY_OUTPUT_SCHEMA_VERSION;
 const ENCODED_OUTPUT_SCHEMA_VERSION: i64 = 73;
 const ENCODED_OUTPUT_SCHEMA_MIGRATION_SOURCE: i64 = CANDIDATE_RECOVERY_SCHEMA_VERSION;
-/// The lineage bridge's canonical end (`schema_lineage::bridge_plan`): the
-/// marker it stamps after reconciling the private-effort and published
-/// ordinals. Steps after it are ordinary dispatcher steps.
-const LINEAGE_CANONICAL_SCHEMA_VERSION: i64 = ENCODED_OUTPUT_SCHEMA_VERSION;
-const QUALITY_CANCELLATION_SCHEMA_VERSION: i64 = 74;
-const QUALITY_CANCELLATION_SCHEMA_MIGRATION_SOURCE: i64 = ENCODED_OUTPUT_SCHEMA_VERSION;
-const QUALITY_LEDGER_SCHEMA_VERSION: i64 = 75;
+const JELLYFIN_IDENTITY_SCHEMA_VERSION: i64 = 74;
+const JELLYFIN_IDENTITY_SCHEMA_MIGRATION_SOURCE: i64 = ENCODED_OUTPUT_SCHEMA_VERSION;
+const JELLYFIN_LOGIN_SCHEMA_VERSION: i64 = 75;
+const JELLYFIN_LOGIN_SCHEMA_MIGRATION_SOURCE: i64 = JELLYFIN_IDENTITY_SCHEMA_VERSION;
+const JELLYFIN_PLAY_SCHEMA_VERSION: i64 = 76;
+const JELLYFIN_PLAY_SCHEMA_MIGRATION_SOURCE: i64 = JELLYFIN_LOGIN_SCHEMA_VERSION;
+const JELLYFIN_WATCH_SCHEMA_VERSION: i64 = 77;
+const JELLYFIN_WATCH_SCHEMA_MIGRATION_SOURCE: i64 = JELLYFIN_PLAY_SCHEMA_VERSION;
+const QUALITY_CANCELLATION_SCHEMA_VERSION: i64 = 78;
+const QUALITY_CANCELLATION_SCHEMA_MIGRATION_SOURCE: i64 = JELLYFIN_WATCH_SCHEMA_VERSION;
+const QUALITY_LEDGER_SCHEMA_VERSION: i64 = 79;
 const QUALITY_LEDGER_SCHEMA_MIGRATION_SOURCE: i64 = QUALITY_CANCELLATION_SCHEMA_VERSION;
 pub const AUTH_SCHEMA_VERSION: i64 = QUALITY_LEDGER_SCHEMA_VERSION;
+/// The marker the private-lineage bridge stamps: the end of the canonical
+/// union it builds (`schema_lineage::bridge_plan`'s `canonical_end`), not the
+/// binary's current schema. Steps after it are ordinary dispatcher steps.
+const BRIDGED_LINEAGE_SCHEMA_VERSION: i64 = ENCODED_OUTPUT_SCHEMA_VERSION;
 /// Leading compare-and-swap for a replicated schema step, bound to the step's
 /// source version. Two voters can read the same marker and both submit the
 /// step; the trailing marker `UPDATE ... WHERE schema_version = $src` only
@@ -1660,7 +1668,7 @@ impl HiqliteAuthStore {
     /// triggers start enforcing this after a guarded full-roster activation,
     /// so a rolled-back binary cannot race another node's readiness refresh
     /// and mutate authority with legacy SQL.
-    async fn credential_mutation(
+    pub(super) async fn credential_mutation(
         &self,
         statements: Vec<(&'static str, Params)>,
     ) -> Result<Vec<usize>, StoreError> {
@@ -1836,6 +1844,34 @@ impl HiqliteAuthStore {
             result.map_err(database_error)?;
         }
         super::hiqlite_catalog::install_schema(&client).await?;
+        for result in
+            timeout_store(client.batch(super::jellyfin_identity::JELLYFIN_IDENTITY_SCHEMA)).await?
+        {
+            result.map_err(database_error)?;
+        }
+
+        for result in
+            timeout_store(client.batch(super::jellyfin_login::JELLYFIN_LOGIN_SCHEMA)).await?
+        {
+            result.map_err(database_error)?;
+        }
+        for result in timeout_store(client.batch(super::jellyfin_play::SCHEMA)).await? {
+            result.map_err(database_error)?;
+        }
+        let columns = timeout_store(
+            client
+                // authority: restartable watch migration must inspect committed columns before its atomic schema transaction.
+                .query_consistent_map::<super::jellyfin_watch::ColumnRow, _>(
+                    "SELECT name FROM pragma_table_info('watch_state')",
+                    params!(),
+                ),
+        )
+        .await?;
+        for result in
+            timeout_store(client.txn(super::jellyfin_watch::migration_statements(&columns))).await?
+        {
+            result.map_err(database_error)?;
+        }
         super::hiqlite_durable::install_schema(&client).await?;
         super::hiqlite_dv_conversion::install_schema(&client).await?;
         super::hiqlite_pretranscode::install_schema(&client).await?;
@@ -3531,6 +3567,66 @@ impl HiqliteAuthStore {
                     self.settle_migration_attempt(ENCODED_OUTPUT_SCHEMA_MIGRATION_SOURCE, attempt)
                         .await?;
                 }
+                SchemaMigrationAction::MigrateFrom(JELLYFIN_IDENTITY_SCHEMA_MIGRATION_SOURCE) => {
+                    admit_schema_migration(admission)?;
+                    for result in self
+                        .client()
+                        .batch(super::jellyfin_identity::JELLYFIN_IDENTITY_SCHEMA)
+                        .await?
+                    {
+                        result.map_err(database_error)?;
+                    }
+                    admit_schema_migration(admission)?;
+                    let now = self.now()?;
+                    let attempt = self.client().txn(vec![("UPDATE cluster_meta SET schema_version = $1, migrated_at = $2 WHERE singleton = 1 AND schema_version = $3".to_owned(), params!(JELLYFIN_IDENTITY_SCHEMA_VERSION,now,JELLYFIN_IDENTITY_SCHEMA_MIGRATION_SOURCE))]).await;
+                    self.settle_migration_attempt(
+                        JELLYFIN_IDENTITY_SCHEMA_MIGRATION_SOURCE,
+                        attempt,
+                    )
+                    .await?;
+                }
+                SchemaMigrationAction::MigrateFrom(JELLYFIN_LOGIN_SCHEMA_MIGRATION_SOURCE) => {
+                    admit_schema_migration(admission)?;
+                    for result in self
+                        .client()
+                        .batch(super::jellyfin_login::JELLYFIN_LOGIN_SCHEMA)
+                        .await?
+                    {
+                        result.map_err(database_error)?;
+                    }
+                    admit_schema_migration(admission)?;
+                    let now = self.now()?;
+                    let attempt = self.client().txn(vec![("UPDATE cluster_meta SET schema_version = $1, migrated_at = $2 WHERE singleton = 1 AND schema_version = $3".to_owned(),params!(JELLYFIN_LOGIN_SCHEMA_VERSION,now,JELLYFIN_LOGIN_SCHEMA_MIGRATION_SOURCE))]).await;
+                    self.settle_migration_attempt(JELLYFIN_LOGIN_SCHEMA_MIGRATION_SOURCE, attempt)
+                        .await?;
+                }
+                SchemaMigrationAction::MigrateFrom(JELLYFIN_PLAY_SCHEMA_MIGRATION_SOURCE) => {
+                    admit_schema_migration(admission)?;
+                    for result in self.client().batch(super::jellyfin_play::SCHEMA).await? {
+                        result.map_err(database_error)?;
+                    }
+                    admit_schema_migration(admission)?;
+                    let now = self.now()?;
+                    let attempt = self.client().txn(vec![("UPDATE cluster_meta SET schema_version = $1, migrated_at = $2 WHERE singleton = 1 AND schema_version = $3".to_owned(),params!(JELLYFIN_PLAY_SCHEMA_VERSION,now,JELLYFIN_PLAY_SCHEMA_MIGRATION_SOURCE))]).await;
+                    self.settle_migration_attempt(JELLYFIN_PLAY_SCHEMA_MIGRATION_SOURCE, attempt)
+                        .await?;
+                }
+                SchemaMigrationAction::MigrateFrom(JELLYFIN_WATCH_SCHEMA_MIGRATION_SOURCE) => {
+                    let columns = self
+                        .client()
+                        // authority: the manual-edit schema and marker migrate atomically even after partial setup or another coordinator.
+                        .query_consistent_map::<super::jellyfin_watch::ColumnRow, _>(
+                            "SELECT name FROM pragma_table_info('watch_state')",
+                            params!(),
+                        )
+                        .await?;
+                    let mut statements = super::jellyfin_watch::migration_statements(&columns);
+                    statements.push(("UPDATE cluster_meta SET schema_version = $1, migrated_at = $2 WHERE singleton = 1 AND schema_version = $3".to_owned(),params!(JELLYFIN_WATCH_SCHEMA_VERSION,self.now()?,JELLYFIN_WATCH_SCHEMA_MIGRATION_SOURCE)));
+                    admit_schema_migration(admission)?;
+                    let attempt = self.client().txn(statements).await;
+                    self.settle_migration_attempt(JELLYFIN_WATCH_SCHEMA_MIGRATION_SOURCE, attempt)
+                        .await?;
+                }
                 // Each new step runs in its own boxed future. This chain is one
                 // async fn with an arm per version, and in debug builds every
                 // inline arm's temporaries widen the frame that polls it; the
@@ -3642,11 +3738,13 @@ impl HiqliteAuthStore {
                 params!(),
             ));
         }
-        // The bridge reaches the canonical union, which is the encoded-output
-        // marker (the lineage canonical end), not necessarily the binary's
-        // current marker: later ordinary steps (quality cancellation, the
-        // continuous ledger) then run through the dispatcher as usual.
-        statements.push(("UPDATE cluster_meta SET schema_version = $1, migrated_at = $2 WHERE singleton = 1 AND schema_version = $3".to_owned(), params!(LINEAGE_CANONICAL_SCHEMA_VERSION, self.now()?, marker)));
+        // The bridge builds the canonical union, which ends at main's v73
+        // (`schema_lineage::bridge_plan`'s `canonical_end`); ordinary steps
+        // after it (the Jellyfin v74–v77, then quality cancellation v78 and
+        // the continuous ledger v79) then run from that marker through the
+        // dispatcher. Stamping the binary's current version here would skip
+        // them.
+        statements.push(("UPDATE cluster_meta SET schema_version = $1, migrated_at = $2 WHERE singleton = 1 AND schema_version = $3".to_owned(), params!(BRIDGED_LINEAGE_SCHEMA_VERSION, self.now()?, marker)));
         // Every query is a single prepared statement. The vendored writer
         // executes sequentially within ONE transaction and rolls back on any
         // preparation/execution failure, including either read-only CAS guard.
@@ -3668,7 +3766,7 @@ impl HiqliteAuthStore {
         // its final marker and exact schema are durable. Preserve the original
         // transaction error for all other outcomes, including failed rereads.
         if let Ok(current) = self.read_lineage_snapshot().await {
-            if current.compatibility.schema_version == LINEAGE_CANONICAL_SCHEMA_VERSION
+            if current.compatibility.schema_version == BRIDGED_LINEAGE_SCHEMA_VERSION
                 && current.compatibility.protocol_min == rows[0].protocol_min
                 && current.compatibility.protocol_max == rows[0].protocol_max
                 && current.fingerprint == expected
@@ -5512,9 +5610,10 @@ impl UserStore for HiqliteAuthStore {
             > 0)
     }
 
-    async fn authenticate_token(
+    async fn authenticate_token_for(
         &self,
         token_hash: &str,
+        audience: super::TokenAudience,
     ) -> Result<TokenAuthentication, StoreError> {
         // The expiry policy rides the same consistent read as the token row:
         // no extra round trip per request, and every voter judges a token
@@ -5528,7 +5627,9 @@ impl UserStore for HiqliteAuthStore {
                           (SELECT value FROM settings WHERE key = $2) AS expiry_idle_days, \
                           (SELECT value FROM settings WHERE key = $3) AS expiry_since \
                  FROM users u JOIN tokens t ON t.user_id = u.id \
-                 WHERE t.token_hash = $4";
+                 WHERE t.token_hash = $4 \
+                   AND ($5 = 'native') = NOT EXISTS ( \
+                     SELECT 1 FROM jellyfin_login_tokens l WHERE l.token_hash = t.token_hash)";
         validate_sql(sql)?;
         trace_statement("authenticate_token", sql);
         let mut rows = self
@@ -5539,7 +5640,8 @@ impl UserStore for HiqliteAuthStore {
                     keys::AUTH_TOKEN_EXPIRY_ENABLED,
                     keys::AUTH_TOKEN_IDLE_DAYS,
                     keys::AUTH_TOKEN_EXPIRY_SINCE,
-                    token_hash
+                    token_hash,
+                    audience.as_str()
                 ),
             )
             .await?;
@@ -6003,6 +6105,10 @@ fn schema_migration_action(
         | COPY_OUTPUT_SCHEMA_MIGRATION_SOURCE
         | CANDIDATE_RECOVERY_SCHEMA_MIGRATION_SOURCE
         | ENCODED_OUTPUT_SCHEMA_MIGRATION_SOURCE
+        | JELLYFIN_IDENTITY_SCHEMA_MIGRATION_SOURCE
+        | JELLYFIN_LOGIN_SCHEMA_MIGRATION_SOURCE
+        | JELLYFIN_PLAY_SCHEMA_MIGRATION_SOURCE
+        | JELLYFIN_WATCH_SCHEMA_MIGRATION_SOURCE
         | QUALITY_CANCELLATION_SCHEMA_MIGRATION_SOURCE
         | QUALITY_LEDGER_SCHEMA_MIGRATION_SOURCE => {
             Ok(SchemaMigrationAction::MigrateFrom(meta.schema_version))
@@ -8555,8 +8661,28 @@ mod tests {
             "v67 advances exactly one step to request provenance"
         );
         assert_eq!(
-            ENCODED_OUTPUT_SCHEMA_VERSION, QUALITY_CANCELLATION_SCHEMA_MIGRATION_SOURCE,
-            "quality cancellation follows the encoded-output schema"
+            ENCODED_OUTPUT_SCHEMA_VERSION + 1,
+            JELLYFIN_IDENTITY_SCHEMA_VERSION,
+            "v74 advances to Jellyfin wire identities"
+        );
+        assert_eq!(
+            JELLYFIN_IDENTITY_SCHEMA_VERSION + 1,
+            JELLYFIN_LOGIN_SCHEMA_VERSION,
+            "v75 advances to compatibility logins"
+        );
+        assert_eq!(
+            JELLYFIN_LOGIN_SCHEMA_VERSION + 1,
+            JELLYFIN_PLAY_SCHEMA_VERSION,
+            "v76 advances to compatibility negotiations"
+        );
+        assert_eq!(
+            JELLYFIN_PLAY_SCHEMA_VERSION + 1,
+            JELLYFIN_WATCH_SCHEMA_VERSION,
+            "v77 advances to manual-edit watch revisions"
+        );
+        assert_eq!(
+            JELLYFIN_WATCH_SCHEMA_VERSION, QUALITY_CANCELLATION_SCHEMA_MIGRATION_SOURCE,
+            "quality cancellation follows the Jellyfin watch schema"
         );
         assert_eq!(
             QUALITY_CANCELLATION_SCHEMA_VERSION, QUALITY_LEDGER_SCHEMA_MIGRATION_SOURCE,
@@ -8568,9 +8694,9 @@ mod tests {
             "the continuous ledger is the final additive step"
         );
         assert_eq!(
-            AUTH_SCHEMA_MIGRATION_SOURCE + 70,
+            AUTH_SCHEMA_MIGRATION_SOURCE + 74,
             AUTH_SCHEMA_VERSION,
-            "this implementation contains every additive v5→v75 step"
+            "this implementation contains every additive v5→v79 step"
         );
         let row = |schema_version| CompatibilityRow {
             schema_version,

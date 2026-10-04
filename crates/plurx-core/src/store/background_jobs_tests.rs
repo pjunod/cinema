@@ -1087,6 +1087,7 @@ async fn background_subtitles_reconcile_historical_ready_demand_without_overwrit
         // A literal, not `SQLITE_SCHEMA_VERSION - 1`: the fixture is the v83
         // shape, and every later migration (v84's own trigger, v85's queue
         // retention) must replay from there.
+        crate::queue_fixture::remove_jellyfin_compatibility_schema(&connection);
         connection
             .pragma_update(None, "user_version", 83)
             .expect("subtitle reconciliation fixture");

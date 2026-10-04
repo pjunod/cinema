@@ -176,6 +176,9 @@ pub(crate) async fn test_reorder_candidate_cost_isolation(
     serve.shared.retained_artifacts.collect(temp.path()).await;
     let mut request = SessionRequest {
         continuous_media: None,
+        vod_only: false,
+        passive_vod: false,
+        finite_bitrate_limit_bps: None,
         quality_catalog: None,
         candidate_context: Some(Box::new(context)),
         file_id: file.id,
@@ -1658,6 +1661,9 @@ mod tests {
         let file = crate::vodserve::tests::media_file_at(source_path, 10_000);
         let request = SessionRequest {
             continuous_media: None,
+            vod_only: false,
+            passive_vod: false,
+            finite_bitrate_limit_bps: None,
             candidate_context: None,
             file_id: file.id,
             playback_id: "durable".into(),
@@ -2206,6 +2212,9 @@ mod tests {
         };
         let request = SessionRequest {
             continuous_media: None,
+            vod_only: false,
+            passive_vod: false,
+            finite_bitrate_limit_bps: None,
             candidate_context: Some(Box::new(
                 crate::transcode::TranscodeManager::candidate_context(&candidate),
             )),

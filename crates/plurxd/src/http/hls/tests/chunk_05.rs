@@ -45,6 +45,9 @@
             continuous_media: None,
 quality_catalog: None,
             candidate_context: None,
+            vod_only: false,
+            passive_vod: false,
+            finite_bitrate_limit_bps: None,
             control_sequence: None,
             file_id: 1,
             playback_id: "guard-lifetime-player".to_owned(),
@@ -197,6 +200,9 @@ quality_catalog: None,
             continuous_media: None,
 quality_catalog: None,
             candidate_context: None,
+            vod_only: false,
+            passive_vod: false,
+            finite_bitrate_limit_bps: None,
             control_sequence: None,
             file_id: 1,
             playback_id: "cleanup-shape-player".to_owned(),
@@ -2960,6 +2966,88 @@ quality_catalog: None,
             std::sync::Arc::new(crate::logbuf::LogBuffer::new(64)),
         );
         (state, user, file_id)
+    }
+
+    #[tokio::test]
+    async fn passive_vod_public_get_resurrects_same_route_and_stop_fences_late_get() {
+        let (state, user, file_id) = servable_state().await;
+        let file = state.store.get_file(file_id).await.expect("passive test fixture").expect("passive test fixture");
+        let id = uuid::Uuid::new_v4().to_string();
+        let incarnation = uuid::Uuid::new_v4().to_string();
+        let mut request = CreateSession {
+            playback_id: "passive-http-player".to_owned(),
+            request_id: Some(incarnation.clone()),
+            copy: Some(true),
+            ..bare_create()
+        }.into_request(file_id, 360);
+        request.vod_only = true;
+        request.passive_vod = true;
+        let scope = serde_json::json!(["user_id", user.id]).to_string();
+        let vod = state.transcode.vod_for_test();
+        vod.try_create(&request, &file, &crate::vodserve::VodSettings {
+            working_set_bytes: 64 << 20,
+            completed_cache_bytes: 1 << 30,
+            block_budget: Duration::from_secs(8),
+            materialize_budget: Duration::from_secs(30),
+            blocked_get_cap: 64,
+        }, crate::vodserve::VodAttribution {
+            user_name: &user.username,
+            item_title: "Fixture",
+            supersession_user: &scope,
+        }, id.clone()).await.expect("service VOD admission");
+        let recipe = RemoteStartRequest {
+            retained_output_receiver: None, retained_output: None,
+            candidate_catalog: None,
+            candidate_id: None,
+            presentation_target: None,
+            decoder_caps: None,
+            protocol_version: crate::media_pool::PROTOCOL_VERSION,
+            incarnation_id: incarnation.clone(),
+            user_id: user.id,
+            source_size: file.size,
+            source_mtime: file.mtime,
+            typeless_playlist: false,
+            library_channel: None,
+            request: request.clone(),
+        };
+        let now = unix_ms();
+        activate_ready(&state.store, MediaSessionActivation {
+            recovery_epoch: String::new(),
+            expected_desired_revision: None,
+            incarnation_id: incarnation.clone(),
+            session_id: id.clone(),
+            user_id: user.id,
+            playback_id: request.playback_id.clone(),
+            expected_predecessor_incarnation_id: None,
+            fence_predecessor: false,
+            request_id: None,
+            request_fingerprint: request.durable_intent_fingerprint(user.id),
+            owner_node_id: state.node_id.clone(),
+            lease_expires_at_ms: now.saturating_add(60_000),
+            recipe_json: serde_json::to_string(&recipe).expect("passive test fixture"),
+            response_json: "{}".to_owned(),
+            publication_ready_at_ms: 0,
+            media_origin_ms: 0,
+            now_ms: now,
+        }).await;
+        vod.force_reader_idle_for_test(&id).await;
+        vod.maintain().await;
+        assert_eq!(vod.active_sessions().await, 0);
+        let response = segment_local_before(&state, &id, "seg00000.m4s", &RelayHeaders::default(), Instant::now() + Duration::from_secs(20)).await.expect("real public GET resurrects");
+        assert_eq!(response.status(), StatusCode::OK);
+        let bytes = response.into_body().collect().await.expect("drain real media").to_bytes();
+        assert!(!bytes.is_empty());
+        assert_eq!(vod.active_sessions().await, 1);
+        let frontier = vod.frontier_ms(&id).await.expect("passive test fixture");
+        assert!(frontier > 0, "successful real fragment advances frontier");
+        let route = state.store.media_session_route(&id).await.expect("passive test fixture").expect("passive test fixture");
+        assert_eq!(route.state, "active");
+        assert_eq!(route.incarnation_id, incarnation);
+        assert_eq!(route.owner_epoch, 1);
+        state.transcode.begin_session_release(&id).await;
+        assert!(!vod.passive_presence(&id, &scope, &request.playback_id, &incarnation).await);
+        assert!(segment_local_before(&state, &id, "seg00000.m4s", &RelayHeaders::default(), Instant::now() + Duration::from_secs(2)).await.is_err());
+        assert_eq!(vod.active_sessions().await, 0);
     }
 
     #[tokio::test]

@@ -14,8 +14,8 @@ This file is the specification in the meantime, written by reading the routers
 and the handlers on 2026-09-07. Where a plan document and the code disagreed,
 the code won and the disagreement is recorded in §23.
 
-One binary serves everything on one port (`:32400` by default). plurx has 253
-routes across the four surfaces below. Every path here is absolute; the native
+One binary serves everything on one port (`:32400` by default). plurx has 293
+routes across the five surfaces below. Every path here is absolute; the native
 API is the only one under a version prefix, and §7-§18 state that prefix once
 per section rather than repeating it in every row.
 
@@ -27,7 +27,7 @@ count above stops matching.
 
 ---
 
-## 1. Surfaces — four things on one port
+## 1. Surfaces — five things on one port
 
 ```
                          ┌────────────────────────────┐
@@ -45,11 +45,14 @@ count above stops matching.
                          └────────────────────────────┘
 ```
 
-Four surfaces, four different rules:
+Five surfaces, five different rules:
 
 - **Native `/api/v1`** — JSON, bearer or scoped-key credentials, WebSocket-free
   (clients poll). This is what the web app and the Apple and Android clients
-  speak, and the only surface with any compatibility intent.
+  speak.
+- **Jellyfin-compat `/jellyfin`** — default-off connection/catalog/direct-play facade
+  for the pinned Infuse and Android TV clients, using shared native authentication
+  and permanent item identities. Implementation and qualification remain open (§24).
 - **Plex-compat** — XML at Plex's own absolute paths, `X-Plex-Token` carrying
   a plurx token. Tier 1: the endpoint set the Kodi-family clients actually
   use. plex.tv is never contacted.
@@ -3338,3 +3341,160 @@ commit. Nothing yet asserts that every route in the router appears in a table
 here — that is the obvious next test, and until it exists, treat
 `crates/plurxd/src/http/mod.rs` as the authority and this file as its
 description.
+
+
+## 24. Jellyfin client connection and catalog
+
+The compatibility surface is compiled and registered at `/jellyfin` even
+when disabled. `jellyfin_compatibility_enabled` in the admin settings API is
+an explicit, default-off choice. Its Developer readiness is advisory. Saving
+creates a fresh generation atomically with the choice; login checks that exact
+generation alongside password CAS before minting a scoped native user token.
+Disabling during password work, including an off/on cycle, refuses the stale
+mint. Media resource cleanup belongs to the later playback adapter.
+
+| Method | Path | Authority and response |
+|---|---|---|
+| GET | `/jellyfin/` | JSON 404 |
+| GET | `/jellyfin/System/Info/Public` | Enabled switch; native server identity/name/version and setup status |
+| POST | `/jellyfin/Users/AuthenticateByName` | Shared native password verification/throttle; `Username` and `Pw`; supported client metadata and device ID; exact enabled generation |
+| GET | `/jellyfin/Users/Me` | Compatibility token; authenticated user projection |
+| GET | `/jellyfin/Users/{user_id}` | Compatibility token; exact own permanent user ID |
+| GET | `/jellyfin/Users/{user_id}/Views` | Own user ID; mapped movie and TV libraries |
+| GET | `/jellyfin/UserViews/GroupingOptions` | Supported logical library IDs and names |
+| GET | `/jellyfin/Library/VirtualFolders` | Logical library folders, without native scan roots |
+| GET | `/jellyfin/DisplayPreferences/{id}` | Initial client presentation; no native persisted per-client preferences |
+| GET | `/jellyfin/Items/{item_id}/Intros` | Authenticated live media item; empty native pre-roll collection |
+| GET | `/jellyfin/MediaSegments/{item_id}` | Authenticated native skip markers; bounded segment-type filter, source-relative ticks |
+| GET | `/jellyfin/Videos/{item_id}/{source_id}/Subtitles/{index}/{filename}` | Authentication on every request; exact source membership and global subtitle index; native extracted VTT or bounded SRT representation; extraction and bitmap failures propagate |
+| GET | `/jellyfin/Items/{item_id}/LocalTrailers` | Live item; empty array because native Movies/TV has no classified trailer records |
+| GET | `/jellyfin/Items/{item_id}/SpecialFeatures` | Live item; empty array because native Movies/TV has no classified extra records |
+| GET | `/jellyfin/UserViews` | Compatibility token; same library views |
+| GET | `/jellyfin/Items/Latest` | Compatibility token; latest playable items in date order, array response |
+| GET | `/jellyfin/Items/Resume` | Compatibility token; native resumable progress, paged envelope |
+| GET | `/jellyfin/UserItems/Resume` | Same resume projection |
+| GET | `/jellyfin/Users/{user_id}/Items/Latest` | Own user ID; latest array |
+| GET | `/jellyfin/Users/{user_id}/Items/Resume` | Own user ID; resume envelope |
+| GET | `/jellyfin/Shows/Upcoming` | Native episode air dates at/after the bound current UTC date |
+| GET | `/jellyfin/Items/{item_id}/Similar` | Live source item; same supported item kind sharing native provider genres |
+| GET | `/jellyfin/Shows/NextUp` | Native next-episode predicate; series filtering before paging |
+| GET | `/jellyfin/Items` | Compatibility token; bounded catalog page |
+| GET | `/jellyfin/Users/{user_id}/Items` | Own user ID; bounded catalog page |
+| GET | `/jellyfin/Items/{item_id}/Images/{kind}` | Enabled switch, no login; mapped movie/TV Primary or Backdrop; prepared derivative only; per-address miss budget |
+| GET | `/jellyfin/Items/{item_id}/Images/{kind}/{index}` | Same anonymous mapped artwork surface; only index 0 |
+| GET | `/jellyfin/Items/{item_id}` | Compatibility token; live permanent item ID |
+| GET | `/jellyfin/Users/{user_id}/Items/{item_id}` | Own user ID and live permanent item ID |
+| GET | `/jellyfin/Shows/{item_id}/Seasons` | Compatibility token; direct season children |
+| GET | `/jellyfin/Shows/{item_id}/Episodes` | Compatibility token; descendant episodes; optional season parent |
+
+| GET, POST | `/jellyfin/Items/{item_id}/PlaybackInfo` | Compatibility token; live source membership, checked times and independently eligible direct or finite native VOD profile; native prerequisite and output validation precede advertisement |
+| GET, HEAD | `/jellyfin/Videos/{item_id}/stream` | Compatibility token with `PlaySessionId`, or the play's scoped link as `tag` (case-insensitive query names); exact play/source binding; native direct bytes, Range and HEAD; live native grant and source fingerprint |
+| GET, HEAD | `/jellyfin/Videos/{item_id}/{filename}` | Authenticated direct aliases or negotiated `master.m3u8` / `main.m3u8` entry; exact play/source binding |
+| GET, HEAD | `/jellyfin/Videos/{item_id}/{play_id}/hls/{*resource}` | Fresh compatibility login and exact current native incarnation; closed manifest/init/fragment/subtitle names; native reader and publication authority |
+| POST | `/jellyfin/Sessions/Logout` | Presented compatibility login only; native token exclusion, exact play release, other devices retained. |
+| POST | `/jellyfin/Sessions/Playing` | Compatibility token; exact own play/item/source; activates its negotiated native direct or VOD reference |
+| POST | `/jellyfin/Sessions/Playing/Progress` | Exact active play; checked position ticks, original manual revision and shared native watch effects |
+| POST | `/jellyfin/Sessions/Playing/Stopped` | Forced durable final when supplied; no-position stop does not write zero; exact resource release and retry on storage failure |
+| POST, DELETE | `/jellyfin/Users/{user_id}/PlayedItems/{item_id}` | Own user and supported item; shared cascading watched/unwatched marks with trusted login origin |
+
+Player identity is stable within the authenticated user/device/client family,
+including login replacement. Negotiation leaves an active play running.
+Activating a replacement fences earlier bindings atomically; a delayed old
+Stop cannot update watch progress or remove the replacement's direct presence.
+Each direct presence/release key remains specific to its play UUID. Native
+VOD normalization reserves `jellyfin:<PlaySessionId>` native request IDs; stale,
+cancelled and revoked negotiation cannot replace the current native pointer.
+A finite VOD candidate must pass the same native planner and source/index/engine
+prerequisites before its URL is returned. Its private recipe identity includes
+the trusted passive/VOD-only policy and optional bitrate ceiling. Older worker
+request schemas refuse unknown policy fields rather than dropping the ceiling.
+
+Every mapped HLS request requires a fresh login; generated URLs contain no
+credential. Native manifests retain the movie's original clock, with closed
+resource names rewritten to this mount and private native session IDs removed.
+The observed MPEG-TS declaration uses the measured init-prefix fMP4 transport:
+each fragment includes the exact native init bytes. Composite byte ranges map
+to native object ranges, with both native validators rechecked; an adapter
+cannot credit a partial fragment as fully fetched. Native buffered bodies
+preserve their known Content-Length through the admitted lifetime wrapper.
+HEAD keeps representation headers and returns no body. The master URL is
+always a multivariant playlist. A play negotiated without manifest subtitles
+gets one with no subtitle group, and its HLS subtitle resources answer 404;
+its subtitles stay on the out-of-band subtitle route. Stop and logout use
+the existing exact native release path. Bounded startup retry sharing and
+no-signal/client qualification remain open in the compatibility build record.
+
+Disabled requests, including unsupported mutations, answer JSON 404. Enabled
+unsupported methods answer JSON 405; unknown paths answer JSON 404. The
+native root still serves its app shell. Connection/catalog handlers use the
+existing JSON deadline and serving-authority layers and fixed route groups.
+
+Bearer, `X-Emby-Token`, Emby authorization attributes, and the observed query
+token carriers share the bounded credential parser. Duplicates are preserved;
+conflicting carriers and scoped API keys are refused. Client/device metadata
+selects replacement scope only after password authentication.
+
+Catalog queries preserve real `StartIndex` (including an empty final page),
+`Limit` from 0 through 500, parent hierarchy, recursive traversal, literal
+search, supported item types, sort fields and direction. An ID tie-break
+makes equal sort values deterministic. A Store read projects item bodies,
+live wire mappings, token/user membership, watch facts and per-page source
+facts together. Missing identities are primed in bounded batches followed by
+a fresh projection; allocated IDs are never attached to an older item body.
+Sources omit native paths/raw probes and retain actual global stream indices.
+Pages with more than 5,000 sources and bootstrap inventories above 500 supported
+libraries refuse rather than truncate.
+
+PlaybackInfo evaluates each direct profile independently, including bounded codec
+and container predicates, against the selected audio and coherent native probe.
+Unknown constraints refuse; missing known facts follow the pinned reference's
+required/optional rule. The stored exact probe is rechecked during admission
+and durable progress, so a rescan cannot change the negotiation's constraint
+basis while preserving size and modification time. Transcoded URLs are not
+advertised by this profile slice.
+
+Mapped artwork needs no login while the switch is on (approved 2026-10-03):
+anyone who has a mapped artwork URL can read that poster or backdrop. Only
+mapped movie/TV items are served; there is no listing, avatar or path route.
+Target-client artwork parity is not yet qualified. Misses (requests that enqueue work) admit at most 20 per minute per resolved
+client address, an IPv6 client counting per /64; warm hits are not counted. The 4,096-address table refuses new addresses while full instead
+of evicting live budgets. Cold requests enqueue a bounded, deduplicated intent
+for the existing artwork owner and return an uncached JSON 404 with Retry-After.
+The request performs no original read, peer fetch or resize. The owner verifies
+source bytes and rechecks the exact item/source/switch generation before the
+existing durable derivative admission. Warm requests serve verified derivatives.
+
+**Scoped media links.** A direct-play `PlaybackInfo` answer carries one
+unguessable 256-bit link secret in the source's `ETag`; Jellyfin Android TV
+copies it into the direct URL it builds as `tag`, with no credential and no
+`PlaySessionId`. The secret is the hashed secret of a native one-file grant for
+that title, issued only to the authenticated negotiation, expiring within 24
+hours of it, and refused once its play is stopped, superseded or from an
+earlier switch generation, or once its login is revoked or idle-expired. The
+link works only on `/Videos/{item}/stream` for its own item and source; a
+presented login must be the one it was issued under. It never appears in the
+authenticated `DirectStreamUrl`. A stopped or expired link answers typed
+`410 media_link_gone`; an unknown one `404`.
+
+Plays belong to the switch generation they were negotiated under: saving the
+switch off ends every in-flight play, and turning it back on does not revive
+them. Authenticated paused progress renews the current play's native passive
+grant on whichever node owns it; an activation that replaces a play without
+`Stopped` releases the predecessor's native session or direct grant.
+
+This slice exposes connection/catalog, anonymous mapped artwork and playback behavior. Additional
+playback negotiation and resource lifecycle remain under implementation; the
+current source capabilities and playback policy do not advertise delivery.
+Qualification progress is in
+[the compatibility status](clients/JELLYFIN-COMPATIBILITY-STATUS.md).
+
+Direct media currently requires the compatibility login on every request.
+Scoped bearer media URLs are pending explicit approval; no such URL is issued.
+The compatibility queue retains each beat's original play/revision through
+leading and trailing writes. An explicit manual edit advances an eligible
+unambiguous own play only if its prior revision was current; external edits
+fence old compatibility beats without changing native online progress.
+A final stop is serialized under the same user/item entry lock and commits
+its exact tombstone with its watch update. It preserves another viewer's
+pending beat. Failure still releases the exact direct presence/grant, leaves
+reconciliation retriable, and returns an error rather than durable success.

@@ -8,6 +8,22 @@ bump may break compatibility and a **patch** bump never does.
 
 ## [Unreleased]
 
+### Added
+
+- **Jellyfin client compatibility (experimental, off by default).** Settings →
+  Developer → *Allow Jellyfin clients* opens a `/jellyfin` facade for the pinned
+  Infuse 8.5.6 and Jellyfin Android TV 0.19.10 clients: sign-in, movie and TV
+  browsing, direct play with Range, native VOD over HLS (copy or encoded, with
+  the fMP4 initialization prefix Infuse needs), subtitles, markers and watch
+  progress that respects manual edits. Every play runs on the native media
+  owners; nothing in it starts a second encoder, timer or background task.
+  Mapped posters and backdrops answer without a login while the switch is on,
+  and a direct-play link for one title works without a login header for up to
+  24 hours (both approved for client parity; see docs/SECURITY.md). A
+  compatibility login authenticates only `/jellyfin`. Saving the switch off
+  ends every play negotiated under it. Physical client qualification is still
+  open, so the switch stays in Developer.
+
 ### Fixed
 
 - **A day of settled background work no longer stops every new job for a

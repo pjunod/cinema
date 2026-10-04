@@ -2351,6 +2351,33 @@
     }
 
     #[tokio::test]
+    async fn compatibility_recipe_preview_preserves_reader_and_producer_registries() {
+        let base = crate::test_tempdir().expect("preview fixture");
+        let (serve, file) = serve_on(base.path()).await;
+        let mut req = request("compatibility-preview", 0.0);
+        req.vod_only = true;
+        req.passive_vod = true;
+        req.request_id = Some("compatibility-preview-attempt".into());
+        serve.preview_recipe((&req).into(), &file, None).await
+            .expect("the indexed copy is predictable without allocation");
+        assert!(serve.shared.sessions.lock().await.is_empty());
+        assert!(serve.shared.renditions.lock().await.is_empty());
+        assert!(serve.shared.preparing_sessions.lock().expect("preparation registry").is_empty());
+        assert!(serve.shared.session_lifecycles.lock().expect("lifecycle registry").is_empty());
+        assert!(serve.shared.rendition_builds.lock().expect("build registry").is_empty());
+        assert_eq!(serve.shared.working_set.load(std::sync::atomic::Ordering::Acquire), 0);
+        assert_eq!(serve.shared.completed_cache.load(std::sync::atomic::Ordering::Acquire), 0);
+
+        req.kind = SessionKind::Transcode { height: 720 };
+        let error = serve.preview_recipe((&req).into(), &file, None).await
+            .expect_err("an unresolved encoded recipe must fail during negotiation");
+        assert_eq!(crate::transcode::vod_refusal(&error).expect("typed refusal").0,
+            "vod_recipe_unresolved");
+        assert!(serve.shared.sessions.lock().await.is_empty());
+        assert!(serve.shared.renditions.lock().await.is_empty());
+    }
+
+    #[tokio::test]
     async fn requests_the_vod_presentation_cannot_serve_fail_typed() {
         let base = crate::test_tempdir().expect("base");
         let (serve, file) = serve_on(base.path()).await;
@@ -2599,6 +2626,7 @@
             "sess-a".into(),
             Session {
                 children: Vec::new(),
+                passive_grant: None,
                 rendition: Some(Arc::clone(&rendition)),
                 retained_output: None,
                 rendition_key: rendition.key.clone(),
@@ -2736,6 +2764,7 @@
             "sess-a".into(),
             Session {
                 children: Vec::new(),
+                passive_grant: None,
                 rendition: Some(Arc::clone(&rendition)),
                 retained_output: None,
                 rendition_key: rendition.key.clone(),

@@ -631,6 +631,7 @@ pub(super) struct Session {
     /// They never allocate additional public playback sessions or captions.
     pub(super) children: Vec<ParentMediaReader>,
     pub(super) rendition: Option<Arc<Rendition>>,
+    pub(super) passive_grant: Option<Arc<passive_grant::Grant>>,
     pub(super) retained_output: Option<Arc<retained::RetainedVodArtifact>>,
     pub(super) rendition_key: String,
     pub(super) file: Arc<MediaFile>,
@@ -742,7 +743,11 @@ impl Session {
     }
 
     pub(super) fn live_rendition(&self) -> Option<&Arc<Rendition>> {
-        self.rendition.as_ref().filter(|_| self.tombstone.is_none())
+        self.rendition.as_ref().filter(|_| self.renewable())
+    }
+
+    pub(super) fn renewable(&self) -> bool {
+        self.tombstone.is_none() && self.passive_grant.as_ref().is_none_or(|grant| grant.live())
     }
 
     pub(super) fn owns_response_media(&self, owner: &ResponseOwner) -> bool {

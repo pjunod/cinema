@@ -769,7 +769,10 @@ expected_occurrences = 8
 [[module_symbols]]
 id = "m4-vod-resurrection-deadline"
 pattern = "vod_resurrected_before"
-expected_occurrences = 8
+# Continuous-quality (#774) and main (#797) union, measured on the merged tree:
+# ours 8 + main's J0 test-only post-expiry resurrection refusal through the
+# existing HTTP owner (main 6, base 5).
+expected_occurrences = 9
 
 [[module_symbols]]
 id = "m4-first-media-deadline-settlement"
@@ -1017,7 +1020,8 @@ expected_occurrences = 7
 [[module_symbols]]
 id = "m4-vod-supersession-transaction"
 pattern = "supersede_before"
-expected_occurrences = 3
+# J0: one dormant-grant replacement test calls the existing supersession transaction.
+expected_occurrences = 4
 
 [[module_symbols]]
 id = "m4-relay-owner-deadline-budget"
@@ -1170,10 +1174,15 @@ pattern = "media_session_route_for_playback"
 # `a_settlement_delayed_past_its_retry_budget_expires_uncommitted` proves the
 # expired settlement left the predecessor current. Neither is a shipped read;
 # the store's CAS stays the only pointer authority.
+# J4 native HLS adds one read of the exact current playback pointer before
+# mapped bytes or positionless progress are admitted. It does not replace the
+# native transactional pointer authority.
 # A05 recovery: 25 -> 27 for incumbent's authenticated pointer reads before
 # and after physical-source validation. Both refuse stale observations; they
 # neither publish nor mutate the pointer and grant no recovery authority.
-expected_occurrences = 27
+# Merged with main's architecture review (#793): main's count plus the
+# effort's reviewed sites, measured on the merged tree.
+expected_occurrences = 28
 
 [[module_symbols]]
 id = "m4-exact-owner-epoch-end"
@@ -1292,6 +1301,9 @@ pattern = "publication_ready_at_ms"
 # any first activation, and one assertion that the ended row's projection is
 # armed while a release is held after its durable proof. No shipped fence
 # moves.
+# J0: one public recovery fixture verifies the existing durable publication fence.
+# J4 native HLS reads the native ready sentinel when admitting a mapped
+# resource; it neither clears nor publishes the sentinel itself.
 # A05 #683: +3 in http/hls/link_receipts.rs: one refusal-only read requires
 # an already published incumbent; the intake race fixture sets the blocked
 # field then confirms zero. Neither observation nor fixture publishes media.
@@ -1314,8 +1326,9 @@ pattern = "publication_ready_at_ms"
 # a05_committed_preparation_drops_staged_proof_and_binds_as_ordinary, which
 # confirms the activation before committing a prepared successor so the
 # staged link proof can be shown to end at commit. No shipped fence moves.
-# Continuous-quality (#774) and main (#793) union, counted on the merged source.
-expected_occurrences = 118
+# Continuous-quality (#774) and main (#797 Jellyfin facade) union, measured on
+# the merged tree (equals ours + main - merge base).
+expected_occurrences = 120
 
 [[module_symbols]]
 id = "m4-durable-projection-safety-window"
@@ -1463,7 +1476,8 @@ expected_occurrences = 2
 [[module_symbols]]
 id = "m4-exact-session-release-admission"
 pattern = "begin_session_release"
-expected_occurrences = 2
+# J0: one public recovery fixture releases its exact native route through the existing owner.
+expected_occurrences = 3
 
 [[module_symbols]]
 id = "m4-terminal-capability-projection"
@@ -1552,7 +1566,10 @@ expected_occurrences = 12
 [[module_symbols]]
 id = "m4-release-adoption-token"
 pattern = "SessionAdoptionToken"
-expected_occurrences = 12
+# +1: `vod_resurrect_before` now constructs its boxed future outside the
+# caller's frame and passes the same token by value to the inner async fn;
+# one owner, moved once, no new adoption.
+expected_occurrences = 13
 
 [[module_symbols]]
 id = "m4-takeover-settlement-owner"
@@ -1636,7 +1653,8 @@ expected_occurrences = 12
 [[module_symbols]]
 id = "m4-vod-final-release-fence"
 pattern = "try_create_before_release"
-expected_occurrences = 2
+# J0: two test-only resurrection attempts prove a retired grant cannot pass the final release fence.
+expected_occurrences = 4
 
 [[module_symbols]]
 id = "m4-release-registry-shards"
@@ -1704,7 +1722,12 @@ pattern = "(?:VodPreparationGuard|preparing_sessions|begin_preparing_session|own
 # lock for one slot transition, pinned to the exact incarnation it was made
 # for, and releases it. That is why the count moves and the ownership picture
 # does not.
-expected_occurrences = 32
+# J0: three test-only registry reads verify dormant renewal and terminal/expiry retirement.
+# J4 adds three test-only preparation registry/empty-session assertions.
+# Recipe preview reuses the existing preparation queue and creates no reader
+# or rendition producer; it introduces no preparation owner.
+# J4 shared startup: One test-only registry read proves concurrent compatibility entries share one preparing/active native session; no new owner.
+expected_occurrences = 39
 
 [[module_symbols]]
 id = "m4-cancellation-independent-vod-build-owner"
@@ -2538,6 +2561,7 @@ pattern = "(?:[A-Za-z_]\\w*::)+spawn(?:_blocking|_local|_for_test)?\\s*\\("
 # replacement waiter in the test task instead of spawning a joined task.
 # This removes a test-only owner; production cleanup ownership is unchanged.
 # Combined native fixture addition and main cleanup fixture removal.
+# J0: two fixture tasks only: owner lease_loop is aborted and joined; cancelled create is aborted and joined before quota reuse. No production spawn is added.
 # +1 for playback_preparation_wakes_busy_analysis_for_any_live_request_waiter:
 # a test-only background consumer, retained in `consumer`, then explicitly
 # aborted and awaited before the cancellation assertions. No producer/process
@@ -2546,6 +2570,13 @@ pattern = "(?:[A-Za-z_]\\w*::)+spawn(?:_blocking|_local|_for_test)?\\s*\\("
 # awaited spawn_blocking. Two BoundedDiagnosticChild::spawn calls are existing
 # child-owner construction (one production sample and one cancellation fixture),
 # not detached recovery tasks; both collectors are awaited through reap.
+# Merged with main's video-quality batch; measured on the merged tree.
+# 689 -> 691: the two serving-fence tests that spawn the real fence loop
+# (see `all-detached-tokio-tasks`).
+# Effort (+2) and main (+2) both moved 689 -> 691; merged 693, measured.
+# +1: the Jellyfin HLS flow fixture runs the real owner `lease_loop`, as
+# production renews the route lease. It is aborted and joined (asserted
+# cancelled) at the end of the flow; no production spawn is added.
 # Main/effort source union: 724 exact qualified launch sites, retaining both
 # sets of joined fixtures and existing daemon/child owners above. The resolver
 # borrows the captured snapshot; it does not spawn another catalog owner.
@@ -2558,8 +2589,9 @@ pattern = "(?:[A-Za-z_]\\w*::)+spawn(?:_blocking|_local|_for_test)?\\s*\\("
 # 689 -> 691: the two serving-fence tests that spawn the real fence loop
 # (see `all-detached-tokio-tasks`).
 # Effort and main union: 726 (effort) + 2 (main serving-fence tests) = 728, measured on the merged source.
-# Continuous-quality (#774) and main (#793) union, counted on the merged source.
-expected_occurrences = 737
+# Continuous-quality (#774) and main (#797 Jellyfin facade) union, measured on
+# the merged tree (equals ours + main - merge base).
+expected_occurrences = 740
 # E1 plus S-14 M8: both ownership sets retained and counted on the merged source.
 # 643 -> 647 with S-14 M8 (`plan/S-14-5`: `Encoding`, `RollingFlowSync`, `TerminalCleanup`,
 # `HeadChildOwner`, `VodServingAdmission` behind per-owner hooks), measured by
@@ -3787,6 +3819,11 @@ pattern = "(?:[A-Za-z_]\\w*::)+(?:sleep|sleep_until|interval|interval_at|timeout
 # wrapper and directly checks Pending before releasing cleanup. The real
 # gate future retains its production deadline; no production timer changed.
 # Combined native-init fixture and TCL source: measured total 1129.
+# J0: three bounded fixture waits observe the existing owner loop and expiry; no production recovery timer is added.
+# J4 adds one awaited 15-second compatibility-start timeout and one
+# 120-second real native index fixture deadline. Neither spawns a task.
+# Native start/release and serving retain their existing cleanup owners.
+# J4 shared startup: Shared startup adds one bounded route lookup and two awaited backoff sleeps. The outer timeout replaces its predecessor; every wait inherits the caller deadline, and none spawns a task.
 # +4 for playback_preparation_wakes_busy_analysis_for_any_live_request_waiter:
 # a 100 ms maintenance deferral observation, a 20 ms claim poll bounded by
 # a two-second timeout, and a one-second viewer-departure timeout. All are
@@ -3799,9 +3836,11 @@ pattern = "(?:[A-Za-z_]\\w*::)+(?:sleep|sleep_until|interval|interval_at|timeout
 # 20-second timeout under status_job_owned. The admitted content phase owns an
 # offset-permit deadline, a cooperative yield/cancel interval and total deadline;
 # cancellation joins the child before releasing source, scratch or admission.
+# Merged with main's video-quality batch; measured on the merged tree.
 # 1139 -> 1143: `serving_fence_loop` waits for recovery under one bounded
 # `tokio::time::timeout` (the outage grace budget); the serving-fence tests add
 # the flapping sleep and bounded waits that assert rather than hang.
+# Effort 1139 -> 1147 and main 1139 -> 1143; merged 1151, measured.
 # +1 native-startup delayed-init fixture: its joined writer owns one bounded
 # six-second sleep, under the test request's unchanged twelve-second deadline.
 # No production timer or recovery clock is added.
@@ -3847,17 +3886,15 @@ pattern = "(?:[A-Za-z_]\\w*::)+(?:sleep|sleep_until|interval|interval_at|timeout
 # lets the pump finish its 20 s storage read with one paused-clock sleep
 # instead of advance-plus-yields, so the consumer wait starts after handoff.
 # Effort and main union: 1225 (effort) + 4 (main serving-fence loop and tests) = 1229, measured on the merged source.
-# Continuous-quality (#774) and main (#793) union, counted on the merged source:
-# additive 1259 plus one in transcode/manager/candidates.rs
-# restore_continuous_companion_context, which bounds the autonomous companion's
-# catalog re-derivation by the same restoration deadline as the primary
-# (awaited in place; expiry returns Unavailable; nothing spawned or renewed).
-expected_occurrences = 1260
+# Continuous-quality (#774) and main (#797 Jellyfin facade) union, measured on
+# the merged tree (equals ours + main - merge base).
+expected_occurrences = 1268
 
 [[module_structures]]
 id = "bare-time-constructor"
 pattern = "(?<![:.\\w])(?:sleep|sleep_until|interval|interval_at|timeout|timeout_at)\\s*\\("
-expected_occurrences = 1
+# J4 shared startup: Two calls to the local timeout error factory in the shared-start observer return ApiError only; they construct no timer.
+expected_occurrences = 3
 
 [[module_structures]]
 id = "tokio-time-import"
@@ -3867,11 +3904,14 @@ pattern = "use\\s+tokio::time"
 # E1 cache copies: one daemon consumer owns joined transfer/cancellation;
 # request/body deadlines and pressure polling are bounded by that consumer.
 # The response status inspection launches no process.
+# J0: passive_grant imports monotonic Instant for bounded metadata expiry. Existing maintenance owns expiry; the grant owns no timer or producer.
 # C-05 M3, PR #621: availability.rs imports tokio::time::Instant for the
 # cache's 15 s TTL, 120 s maximum observation age and probe-duration metrics.
 # Instant creates no timer, producer, process or recovery authority; the two
 # actual timer constructors and detached task are reviewed in their rows.
-expected_occurrences = 4
+# Merged with main's architecture review (#793): main's count plus the
+# effort's reviewed sites, measured on the merged tree.
+expected_occurrences = 5
 
 [[module_structures]]
 id = "process-command-construction"
@@ -4195,14 +4235,20 @@ pattern = "(?:[A-Za-z_]\\w*::)*Command::new\\s*\\("
 # Both existing Tools calls still await output_job_owned, which retains the
 # child job and enables kill-on-drop. The HOME=/ regression uses this same
 # constructor and awaits its finite shell child; no new detached owner exists.
+# +1 authenticated Jellyfin subtitle regression: finite ffmpeg copy/mux
+# through the existing testfixture runner; synchronous, reaped by that runner.
+# Production aliases delegate the existing subtitle owner and add no launcher.
+# J4 encoded qualification: One finite test-only decoder reads an actually fetched mapped fragment. Its kill-on-drop child is awaited to completion before the fixture is dropped; no production launcher is added.
 # Video-quality batch: +4 constructors: one boot VAAPI probe, the bounded
 # sample/scorer command factory, one finite cancellation shell fixture and one
 # independent VOD restart decode fixture. Production commands use existing child
 # job owners; fixtures collect completion before dropping their temporary media.
+# Merged with main's video-quality batch; measured on the merged tree.
 # Main/effort source union: 208 exact command constructors; both retained finite
 # fixtures and main's admitted diagnostic children remain under their owners.
-# Continuous-quality (#774) and main (#793) union, counted on the merged source.
-expected_occurrences = 212
+# Continuous-quality (#774) and main (#797 Jellyfin facade) union, measured on
+# the merged tree (equals ours + main - merge base).
+expected_occurrences = 214
 
 [[module_structures]]
 id = "process-capable-launch-method"
@@ -4693,14 +4739,46 @@ pattern = "\\.(?:spawn|output|status)\\s*\\("
 # Combined current-main 409 plus the queued-publication test child = 410.
 # +1 TCL legacy admission fixture: Response::status() asserts typed Auto/1440
 # overflow versus ordinary copy/manual admission. This does not launch a child.
+# J0: one Axum Response::status assertion in the public recovery fixture; it launches no process.
+# +3 for Jellyfin J2: two in-process Axum Response::status reads in the
+# facade fixture and one in the bounded cold-artwork fixture. None starts
+# a process, task or producer; cold demand uses the existing artwork owner.
+# +2 warm Jellyfin artwork response/conditional status assertions; the
+# fixture uses the existing finite image generator and native queue owner.
+# +6 Jellyfin J3: in-process Axum Response::status reads cover playback
+# authorization, Range, HEAD, late events and the event helper. No process,
+# task, timer or producer is created by these response inspections.
+# +1 logout fixture: an in-process HTTP status assertion; no resource owner.
+# +3 subtitle fixture: in-process Axum Response::status() inspections for
+# extraction success, anonymous rejection and invalid global index. No child.
+# +1 replacement fixture: an in-process response status check on native
+# direct media delivery; no additional command, timer, task or producer.
+# J4 adds nineteen HTTP Response::status() reads in authenticated HLS,
+# composite range and fixture assertions. These do not launch a process.
+# Native handler delegation introduces no Command or spawn owner.
+# J4 shared startup: Two in-process HTTP status reads verify duplicate entry success and sanitized startup failure; neither launches a child.
+# J4 encoded qualification: One HTTP success status and one synchronously collected decoder output verify real encoded alias bytes. Only the finite fixture decoder launches a child.
+# 453 -> 463 with J4 access and lifecycle: one production Axum
+# `Response::status()` read of the owner's passive-presence relay answer, and
+# nine test `Response::status()` assertions (scoped link, paused presence,
+# PlayMethod labels, direct range matrix). None launches a process.
 # Video-quality batch: +1 output() in the independently decoded reordered VOD
 # restart fixture; it awaits completion with kill-on-drop and owns no viewer.
+# Merged with main's video-quality batch; measured on the merged tree.
+# 463 -> 464 with the review fixes: one test `Response::status()` assertion
+# that a facade login is refused on the native API. No process.
+# +1: one test `Response::status()` read of the facade segment resumed
+# after the native reader was idle-reaped (465 -> 466 on the tree merged
+# with main). No process.
+# 466 -> 467: one test `Response::status()` read asserting a play without
+# manifest subtitles has no HLS subtitle playlist. No process.
 # +2 native-startup delayed-init fixture: Axum Response::status() reads
 # assert the master and legacy bridge responses. Neither launches a process.
 # Main/effort source union: 435 exact method shapes. Response status assertions
 # remain non-process observations; collected commands retain the owners above.
-# Continuous-quality (#774) and main (#793) union, counted on the merged source.
-expected_occurrences = 462
+# Continuous-quality (#774) and main (#797 Jellyfin facade) union, measured on
+# the merged tree (equals ours + main - merge base).
+expected_occurrences = 515
 
 [[module_structures]]
 id = "process-command-ufcs-launch"
@@ -5109,9 +5187,16 @@ pattern = "kill_on_drop\\s*\\("
 # Queued-publication regression: the test owns one finite sleep child,
 # uses exec to avoid descendants, enables kill-on-drop, and verifies run_part
 # terminated and reaped it for foreground, download, ownership and deadline yields.
+# 93 -> 94 with J4 encoded qualification: the Jellyfin HTTP regression decodes
+# one actually fetched mapped encoded fragment with a finite test-only FFmpeg
+# `framehash` child. It is awaited to completion through `output()` before the
+# fixture is dropped; `kill_on_drop` only covers a panicking assertion. No
+# production launcher or producer is added.
 # Video-quality batch: +2 guards on the one-shot VAAPI capability probe and
 # finite reordered-VOD decode fixture. Their enclosing owners also await reap.
-expected_occurrences = 97
+# Continuous-quality (#774) and main (#797 Jellyfin facade) union, measured on
+# the merged tree (equals ours + main - merge base).
+expected_occurrences = 98
 
 [[module_structures]]
 id = "rolling-supervisor-construction"
