@@ -1224,6 +1224,7 @@ paths = [
   "crates/plurxd/src/http/shared_receiver_assets.rs",
   "crates/plurxd/src/http/shared_source_assets.rs",
   "crates/plurxd/src/http/shared_receiver_fixture.rs",
+  "crates/plurxd/src/sharing_protocol_fixture.rs",
   "crates/plurxd/src/http/shared_source_playback.rs",
   "crates/plurxd/src/http/shared_receiver_control.rs",
   "crates/plurxd/src/http/shared_artwork.rs",

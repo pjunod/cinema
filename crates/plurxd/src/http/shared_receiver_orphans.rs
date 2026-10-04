@@ -1109,4 +1109,36 @@ mod tests {
             "the first look retired the never-dispatched route"
         );
     }
+
+    #[test]
+    fn sharing_protocol_fixture_receiver_recovery_status() {
+        let fixture = crate::sharing_protocol_fixture::fixture();
+        let recovery = &fixture["receiver_recovery"];
+        assert_eq!(recovery["stranded_max"], STRANDED_MAX);
+        let wire = &recovery["status"];
+        let status = crate::sharing::ReceiverRecoveryStatus {
+            last_scan_at_ms: wire["last_scan_at_ms"].as_i64(),
+            in_flight: crate::sharing_protocol_fixture::rows(&wire["in_flight"], "in flight")
+                .iter()
+                .map(|id| Uuid::parse_str(id.as_str().expect("id")).expect("id"))
+                .collect(),
+            retired_total: wire["retired_total"].as_u64().expect("retired"),
+            stranded: crate::sharing_protocol_fixture::rows(&wire["stranded"], "stranded")
+                .iter()
+                .map(|row| crate::sharing::StrandedReceiver {
+                    incarnation_id: row["incarnation_id"].as_str().expect("id").to_owned(),
+                    reason: match row["reason"].as_str().expect("reason") {
+                        "dispatch_unknown" => "dispatch_unknown",
+                        other => panic!("unlisted fixture reason {other}"),
+                    },
+                    observed_at_ms: row["observed_at_ms"].as_i64().expect("observed"),
+                })
+                .collect(),
+        };
+        assert_eq!(
+            serde_json::to_value(&status).expect("recovery wire"),
+            *wire,
+            "/sharing/status receiver_recovery is exactly the fixture shape"
+        );
+    }
 }

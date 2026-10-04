@@ -441,4 +441,20 @@ mod tests {
             assert!(!response.headers().contains_key("accept-ranges"));
         }
     }
+
+    #[test]
+    fn sharing_protocol_fixture_direct_session_query() {
+        use crate::sharing_protocol_fixture::{accepted, fixture, rows};
+        let fixture = fixture();
+        let b = Uuid::parse_str(fixture["direct"]["b_session"].as_str().expect("B"))
+            .expect("B session");
+        for row in rows(&fixture["direct_session_query"], "direct session query") {
+            let query = row["query"].as_str().expect("query");
+            assert_eq!(
+                session_query(Some(query)),
+                accepted(row).then_some(b),
+                "{query}"
+            );
+        }
+    }
 }

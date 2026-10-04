@@ -629,4 +629,31 @@ mod tests {
         )
         .is_err());
     }
+    #[test]
+    fn sharing_protocol_fixture_file_suffixes() {
+        let fixture: serde_json::Value =
+            serde_json::from_str(include_str!("../../../tests/sharing/protocol-cases.json"))
+                .expect("synthetic sharing fixture");
+        let rows = fixture["file_suffixes"]
+            .as_array()
+            .expect("file suffix rows");
+        assert!(rows.len() >= 20, "file suffix rows");
+        for row in rows {
+            let suffix = row["suffix"].as_str().expect("suffix");
+            let parsed = SharingFileResource::parse(suffix);
+            assert_eq!(parsed.is_ok(), row["expected"] == "accepted", "{suffix:?}");
+            let Ok(resource) = parsed else { continue };
+            let route = match resource.kind() {
+                SharingFileResourceKind::Decision => "decision",
+                SharingFileResourceKind::Start => "start",
+                SharingFileResourceKind::Direct => "direct",
+                SharingFileResourceKind::Progressive => "closed",
+                SharingFileResourceKind::Subtitle { .. }
+                | SharingFileResourceKind::SubtitleManifest { .. }
+                | SharingFileResourceKind::SubtitleObject { .. }
+                | SharingFileResourceKind::ChapterThumbnail { .. } => "asset",
+            };
+            assert_eq!(row["b"], route, "{suffix:?}");
+        }
+    }
 }
