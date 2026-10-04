@@ -194,10 +194,16 @@ impl Drop for PendingCandidateGuard {
                         let key = quality_cancellation_receipt_key(&identity);
                         // Planning exited before registration. Durable admission
                         // also checks this receipt, so late Store work cannot prime.
-                        let _ = state
-                            .store
-                            .settle_quality_cancellation(&key, &owner, epoch, unix_ms())
-                            .await;
+                        // Best effort: an unsettled receipt still fences the
+                        // successor; settling only lets the client observe it.
+                        crate::store_result::observe(
+                            crate::store_result::Operation::SettleQualityCancellation,
+                            crate::store_result::Discard::BestEffort,
+                            state
+                                .store
+                                .settle_quality_cancellation(&key, &owner, epoch, unix_ms())
+                                .await,
+                        );
                     });
                 }
             }
@@ -448,16 +454,22 @@ pub(super) async fn settle_cancelled_preparation(
     if durable_settled && retired {
         if let Some(identity) = active.quality_intent.as_ref() {
             let key = quality_cancellation_receipt_key(identity);
-            let _ = active
-                .state
-                .store
-                .settle_quality_cancellation(
-                    &key,
-                    &active.preparation.expected_predecessor_owner_node_id,
-                    active.preparation.expected_predecessor_owner_epoch,
-                    unix_ms(),
-                )
-                .await;
+            // Best effort: the durable cancellation already fences the
+            // successor; settling only lets the client observe `cancelled`.
+            crate::store_result::observe(
+                crate::store_result::Operation::SettleQualityCancellation,
+                crate::store_result::Discard::BestEffort,
+                active
+                    .state
+                    .store
+                    .settle_quality_cancellation(
+                        &key,
+                        &active.preparation.expected_predecessor_owner_node_id,
+                        active.preparation.expected_predecessor_owner_epoch,
+                        unix_ms(),
+                    )
+                    .await,
+            );
         }
     }
 }
