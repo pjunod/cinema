@@ -1,5 +1,314 @@
 use super::*;
 
+impl plurx_core::playback::continuous_quality::QualityReservationPublisher for VodServe {
+    /// Publish reservations only while their verified bytes cannot be evicted
+    /// or replaced. Old dependencies survive takeover even without a producer.
+    async fn commit_quality_reservations(
+        &self,
+        owner_node_id: &str,
+        expected: &plurx_core::store::QualityLedgerSnapshot,
+        candidate: &plurx_core::playback::continuous_quality::QualityLedger,
+        family: &plurx_core::transcode::VodPresentationFamily,
+        now_ms: i64,
+        deadline: Instant,
+    ) -> Result<bool, String> {
+        self.commit_quality_reservations_bound(
+            QualityReservationCommit {
+                owner_node_id,
+                expected,
+                candidate,
+                family,
+                now_ms,
+                deadline,
+            },
+            None,
+        )
+        .await
+    }
+}
+
+pub(super) struct QualityReservationCommit<'a> {
+    pub owner_node_id: &'a str,
+    pub expected: &'a plurx_core::store::QualityLedgerSnapshot,
+    pub candidate: &'a plurx_core::playback::continuous_quality::QualityLedger,
+    pub family: &'a plurx_core::transcode::VodPresentationFamily,
+    pub now_ms: i64,
+    pub deadline: Instant,
+}
+
+impl VodServe {
+    pub(super) async fn commit_quality_reservations_bound(
+        &self,
+        commit: QualityReservationCommit<'_>,
+        parent: Option<(&str, &ResponseOwner)>,
+    ) -> Result<bool, String> {
+        let QualityReservationCommit {
+            owner_node_id,
+            expected,
+            candidate,
+            family,
+            now_ms,
+            deadline,
+        } = commit;
+        let commit = async {
+            if !candidate.valid()
+                || !expected.ledger.valid()
+                || expected.revision <= 0
+                || candidate.generation != expected.ledger.generation
+                || candidate.attachment != expected.ledger.attachment
+                || candidate.attachment.family_id != family.id()
+                || candidate.control_epoch < expected.ledger.control_epoch
+                || candidate.shared_audio_rendition_id()
+                    != expected.ledger.shared_audio_rendition_id()
+                || expected
+                    .ledger
+                    .shared_audio_rendition_id()
+                    .is_some_and(|id| {
+                        family
+                            .audio()
+                            .is_none_or(|audio| audio.rendition_id() != id)
+                    })
+                || candidate
+                    .shared_audio_reserved()
+                    .iter()
+                    .any(|interval| !expected.ledger.shared_audio_reserved().contains(interval))
+                || self
+                    .shared
+                    .cluster_node_id
+                    .as_deref()
+                    .is_some_and(|node| node != owner_node_id)
+            {
+                return Err("continuous reservation owner or family changed".into());
+            }
+            let old: Vec<_> = expected
+                .ledger
+                .transactions
+                .iter()
+                .flat_map(|transaction| &transaction.reserved)
+                .collect();
+            let current: Vec<_> = candidate
+                .transactions
+                .iter()
+                .flat_map(|transaction| &transaction.reserved)
+                .collect();
+            let mut keys: Vec<_> = old
+                .iter()
+                .chain(&current)
+                .copied()
+                .chain(expected.ledger.shared_audio_reserved().iter())
+                .chain(candidate.shared_audio_reserved().iter())
+                .map(|interval| interval.rendition_id.as_str())
+                .collect();
+            if let Some(audio) = family.audio() {
+                keys.push(audio.rendition_id());
+            }
+            keys.sort_unstable();
+            keys.dedup();
+            let mut guards = Vec::with_capacity(keys.len());
+            for key in keys {
+                guards.push(self.shared.rendition_build_gate(key).lock_owned().await);
+            }
+            let mut derived_audio = Vec::new();
+            for interval in current.iter().filter(|interval| !old.contains(interval)) {
+                let rung = family
+                    .video()
+                    .rungs()
+                    .iter()
+                    .find(|rung| rung.rendition_id() == interval.rendition_id)
+                    .ok_or("reservation target is outside its verified video family")?;
+                let rendition = self
+                    .shared
+                    .renditions
+                    .lock()
+                    .await
+                    .get(&interval.rendition_id)
+                    .cloned()
+                    .ok_or("reserved rendition is not locally attached")?;
+                if rendition.closed.load(Relaxed)
+                    || rendition.failure().is_some()
+                    || rendition
+                        .source
+                        .as_ref()
+                        .is_none_or(|source| !source.unchanged())
+                    || rendition.recipe.encoding.as_ref().is_none_or(|encoding| {
+                        encoding.shared_audio.is_some()
+                            || encoding.source_object_version != rung.source_object_version()
+                            || encoding.grid != rung.grid()
+                            || encoding.plan.options().input_has_audio
+                            || encoding.plan.options().video_sample_envelope
+                                != plurx_core::transcode::VideoSampleEnvelope::ContinuousAvcHigh50
+                            || rendition.recipe.source_object_version.as_deref()
+                                != Some(encoding.source_object_version.as_str())
+                    })
+                {
+                    return Err("reservation source or rendition is no longer verified".into());
+                }
+                let entry = rendition
+                    .plan
+                    .entries
+                    .iter()
+                    .find(|entry| {
+                        entry.start_ticks == interval.from_tick
+                            && entry.end_ticks() == interval.through_tick
+                    })
+                    .ok_or("reservation does not name one exact planned entry")?;
+                if interval.timescale != rendition.timescale
+                    || !rendition
+                        .manifest
+                        .lock()
+                        .await
+                        .state(entry.index)
+                        .is_some_and(SegState::is_materialized)
+                {
+                    return Err("reserved media is not materialized on its exact clock".into());
+                }
+                let init = read_quality_artifact(&rendition.dir.path().join(INIT_NAME), 256 * 1024)
+                    .await?;
+                let media = read_quality_artifact(
+                    &rendition
+                        .dir
+                        .path()
+                        .join(segment_name(u64::from(entry.index))),
+                    interval.byte_length,
+                )
+                .await?;
+                verify_cached_quality_interval(&init, &media, rung, interval)?;
+                if rendition
+                    .source
+                    .as_ref()
+                    .is_none_or(|source| !source.unchanged())
+                {
+                    return Err("reservation source changed during artifact verification".into());
+                }
+                if let Some(audio) = family.audio() {
+                    let soundtrack = self
+                        .shared
+                        .renditions
+                        .lock()
+                        .await
+                        .get(audio.rendition_id())
+                        .cloned()
+                        .ok_or("shared AAC rendition is not locally attached")?;
+                    if soundtrack.closed.load(Relaxed)
+                        || soundtrack.failure().is_some()
+                        || soundtrack
+                            .source
+                            .as_ref()
+                            .is_none_or(|source| !source.unchanged())
+                        || soundtrack.recipe.encoding.as_ref().is_none_or(|encoding| {
+                            encoding.source_object_version != audio.source_object_version()
+                                || encoding
+                                    .shared_audio
+                                    .as_ref()
+                                    .is_none_or(|recipe| recipe.digest() != audio.recipe_id())
+                                || soundtrack.recipe.source_object_version.as_deref()
+                                    != Some(encoding.source_object_version.as_str())
+                        })
+                    {
+                        return Err("shared AAC source or recipe is no longer verified".into());
+                    }
+                    let dependencies = family
+                        .shared_audio_dependencies(
+                            &interval.rendition_id,
+                            &rendition.plan,
+                            entry.index,
+                            Some(&soundtrack.plan),
+                        )
+                        .map_err(|error| error.to_string())?;
+                    let init =
+                        read_quality_artifact(&soundtrack.dir.path().join(INIT_NAME), 256 * 1024)
+                            .await?;
+                    for index in dependencies {
+                        let entry = soundtrack
+                            .plan
+                            .entry(index)
+                            .ok_or("shared AAC plan changed")?;
+                        if !soundtrack
+                            .manifest
+                            .lock()
+                            .await
+                            .state(index)
+                            .is_some_and(SegState::is_materialized)
+                        {
+                            return Err("shared AAC dependency is not materialized".into());
+                        }
+                        let media = read_quality_artifact(
+                            &soundtrack.dir.path().join(segment_name(u64::from(index))),
+                            16 * 1024 * 1024,
+                        )
+                        .await?;
+                        let dependency =
+                            plurx_core::playback::continuous_quality::QualityInterval {
+                                artifact_id: hex::encode(Sha256::digest(&media)),
+                                rendition_id: audio.rendition_id().into(),
+                                timescale: soundtrack.timescale,
+                                from_tick: entry.start_ticks,
+                                through_tick: entry.end_ticks(),
+                                byte_length: media.len() as u64,
+                            };
+                        verify_cached_shared_audio_interval(
+                            &init,
+                            &media,
+                            audio,
+                            &dependency,
+                            index as usize + 1 == soundtrack.plan.len(),
+                        )?;
+                        if !derived_audio.contains(&dependency) {
+                            derived_audio.push(dependency);
+                        }
+                    }
+                    if soundtrack
+                        .source
+                        .as_ref()
+                        .is_none_or(|source| !source.unchanged())
+                    {
+                        return Err("shared AAC source changed during artifact verification".into());
+                    }
+                }
+            }
+            let lifecycle = if let Some((session_id, response_owner)) = parent {
+                let guard = Arc::clone(&response_owner.lifecycle).lock_owned().await;
+                let sessions = self.shared.sessions.lock().await;
+                if sessions.get(session_id).is_none_or(|session| {
+                    session.tombstone.is_some()
+                        || !Arc::ptr_eq(&session.incarnation, &response_owner.incarnation)
+                        || !session.owns_response_media(response_owner)
+                }) {
+                    return Err("quality reservation parent attachment changed".into());
+                }
+                Some(guard)
+            } else {
+                None
+            };
+            let store = Arc::clone(&self.shared.store);
+            let mut candidate = candidate.clone();
+            candidate
+                .reserve_shared_audio(&derived_audio)
+                .map_err(|error| error.to_string())?;
+            let owner = owner_node_id.to_owned();
+            let revision = expected.revision;
+            let submitted_at_ms = now_ms.max(super::now_ms());
+            // A caller deadline may lose the acknowledgement, never release
+            // these physical gates while a queued Store mutation can still land.
+            let settlement = tokio::spawn(async move {
+                let result = store
+                    .write_quality_ledger(&candidate, &owner, revision, submitted_at_ms)
+                    .await
+                    .map_err(|error| format!("publishing continuous reservations: {error}"));
+                drop(lifecycle);
+                drop(guards);
+                result
+            });
+            settlement
+                .await
+                .map_err(|error| format!("continuous reservation settlement failed: {error}"))?
+        };
+        tokio::time::timeout_at(tokio::time::Instant::from_std(deadline), commit)
+            .await
+            .map_err(|_| "continuous reservation exceeded its inherited deadline".to_owned())?
+    }
+}
+
 impl VodServe {
     /// The facts a stall-reopen's normalization checks against its
     /// predecessor. `None` for unknown/tombstoned.
@@ -282,8 +591,8 @@ impl VodServe {
                 .collect()
         };
         for (id, lifecycle) in expired {
-            let _lifecycle = lifecycle.lock().await;
-            let rendition = {
+            let lifecycle_guard = Arc::clone(&lifecycle).lock_owned().await;
+            let expired_session = {
                 let mut sessions = self.shared.sessions.lock().await;
                 let still_expired = sessions.get(&id).is_some_and(|session| {
                     Arc::ptr_eq(&session.lifecycle, &lifecycle)
@@ -307,28 +616,49 @@ impl VodServe {
                         session.incarnation = Arc::new(());
                         session.marker_destinations.clear();
                         session.retained_output = None;
-                        session.rendition.take()
+                        // The private child readers share the parent's
+                        // authority, so they detach with its rendition.
+                        Some((
+                            std::mem::take(&mut session.children),
+                            session.rendition.take(),
+                        ))
                     } else {
                         if let Some(session) = sessions.get(&id) {
                             session.invalidate_observational_attachment();
                         }
-                        sessions.remove(&id).and_then(|session| session.rendition)
+                        sessions.remove(&id).map(|mut session| {
+                            (
+                                std::mem::take(&mut session.children),
+                                session.rendition.take(),
+                            )
+                        })
                     }
                 } else {
                     None
                 }
             };
-            if let Some(rendition) = rendition {
-                // Keep the per-id gate through detach. A resurrection for the
-                // same durable id must attach only after this old reader is
-                // gone, never between registry removal and detach.
-                rendition.detach_reader(&self.shared.pool, &id).await;
-                tracing::info!(
-                    target: "plurxd::vodserve",
-                    session = %session_log_id(&id),
-                    rendition = %rendition.key,
-                    "vod session idle-reaped (sliding TTL)"
-                );
+            if let Some((children, rendition)) = expired_session {
+                let shared = Arc::clone(&self.shared);
+                let cleanup = spawn_cancellation_independent(async move {
+                    // Keep the exact per-id gate through all child detaches.
+                    // Cancelling maintain cannot let a same-id resurrection
+                    // race the departed parent's still-attached reader graph.
+                    let _lifecycle = lifecycle_guard;
+                    for child in children {
+                        child.detach(&shared.pool).await;
+                    }
+                    if let Some(rendition) = rendition {
+                        rendition.detach_reader(&shared.pool, &id).await;
+                        rendition.kick();
+                        tracing::info!(
+                            target: "plurxd::vodserve",
+                            session = %session_log_id(&id),
+                            rendition = %rendition.key,
+                            "vod session idle-reaped (sliding TTL)"
+                        );
+                    }
+                });
+                let _ = cleanup.await;
             }
         }
 
@@ -387,20 +717,64 @@ impl VodServe {
         &self,
         session_id: &str,
     ) -> Option<VodPublication<(Arc<Rendition>, Duration, Arc<crate::meter::Meter>)>> {
+        let publication = self.session_media_rendition(session_id, None).await?;
+        let result = match publication.result {
+            Ok(Some(reader)) => Ok((reader.rendition, reader.block_budget, reader.delivery)),
+            Ok(None) => return None,
+            Err(error) => Err(error),
+        };
+        Some(VodPublication {
+            result,
+            owner: publication.owner,
+        })
+    }
+
+    /// Child lookup uses only the exact parent's owned graph. A cache key is
+    /// never an authorization capability, including after a detach/rebind.
+    pub(super) async fn session_media_rendition(
+        &self,
+        session_id: &str,
+        child_rendition_id: Option<&str>,
+    ) -> Option<VodPublication<Option<ResolvedMediaReader>>> {
         let sessions = self.shared.sessions.lock().await;
         let session = sessions.get(session_id)?;
-        let owner = session.response_owner();
-        Some(VodPublication {
-            result: match session.tombstone {
-                Some(cause) => Err(VodError::Gone(cause)),
-                None => Ok((
-                    session.live_rendition().map(Arc::clone)?,
-                    session.block_budget,
-                    Arc::clone(&session.delivery),
-                )),
-            },
-            owner,
-        })
+        let mut owner = session.response_owner();
+        let result = if let Some(cause) = session.tombstone {
+            Err(VodError::Gone(cause))
+        } else {
+            let selected = match child_rendition_id {
+                None => session.live_rendition().map(Arc::clone),
+                Some(id) => session
+                    .children
+                    .iter()
+                    .find(|child| {
+                        child.rendition.key == id
+                            && child.rendition.recipe.file.id == session.file.id
+                            && child
+                                .rendition
+                                .source
+                                .as_ref()
+                                .map(|source| source.object_version())
+                                == session
+                                    .live_rendition()
+                                    .and_then(|root| root.source.as_ref())
+                                    .map(|source| source.object_version())
+                    })
+                    .map(|child| {
+                        owner.media_child = Some(MediaReaderResponseOwner {
+                            reader_id: child.reader_id.clone(),
+                            rendition: Arc::clone(&child.rendition),
+                        });
+                        Arc::clone(&child.rendition)
+                    }),
+            };
+            Ok(selected.map(|rendition| ResolvedMediaReader {
+                rendition,
+                block_budget: session.block_budget,
+                delivery: Arc::clone(&session.delivery),
+            }))
+        };
+        Some(VodPublication { result, owner })
     }
 
     pub(super) async fn serve_init(
@@ -419,10 +793,10 @@ impl VodServe {
             );
             return Err(VodError::ProducerFailed(cause));
         }
-        let demand = self
-            .shared
-            .arm_materialize_watchdog(rendition, INIT_DEMAND_INDEX);
-        rendition.kick();
+        // A cached immutable init needs no producer. In particular, checking
+        // an idle controlled rung must not wake it at the ordinary playhead
+        // before its preparation frontier has been admitted.
+        let mut demand = None;
         let deadline = Instant::now() + budget;
         loop {
             // Arm the notification — created AND enabled — before checking
@@ -456,6 +830,13 @@ impl VodServe {
             if let Some(cause) = rendition.failure_cause() {
                 return Err(VodError::ProducerFailed(cause));
             }
+            let demand = demand.get_or_insert_with(|| {
+                let demand = self
+                    .shared
+                    .arm_materialize_watchdog(rendition, INIT_DEMAND_INDEX);
+                rendition.kick();
+                demand
+            });
             if demand.expired() {
                 return Err(VodError::ProducerFailed(
                     "materializing init.mp4 exceeded the producer deadline".to_owned(),
@@ -483,6 +864,18 @@ impl VodServe {
         budget: Duration,
         delivery: Arc<crate::meter::Meter>,
     ) -> Result<SegmentReady, VodError> {
+        self.serve_segment_for(rendition, (session_id, session_id), index, budget, delivery)
+            .await
+    }
+
+    pub(super) async fn serve_segment_for(
+        &self,
+        rendition: &Arc<Rendition>,
+        reader: (&str, &str),
+        index: u32,
+        budget: Duration,
+        delivery: Arc<crate::meter::Meter>,
+    ) -> Result<SegmentReady, VodError> {
         // Materialized → serve immediately: the overwhelmingly common case,
         // and until now the invisible one. It never reaches the wait pool, so
         // nothing counted it: a node serving a hundred concurrent cache hits
@@ -499,16 +892,29 @@ impl VodServe {
         if let Some(cause) = rendition.failure_cause() {
             return Err(VodError::ProducerFailed(cause));
         }
-        self.blocked_wait(rendition, session_id, index, budget, delivery)
+        self.blocked_wait_for(rendition, reader, index, budget, delivery)
             .await
     }
 
     /// The blocking half of a segment GET: register on the wait pool, close
     /// the lost-wakeup window, and sleep until one of the four named ends.
+    #[cfg(test)]
     pub(super) async fn blocked_wait(
         &self,
         rendition: &Arc<Rendition>,
         session_id: &str,
+        index: u32,
+        budget: Duration,
+        delivery: Arc<crate::meter::Meter>,
+    ) -> Result<SegmentReady, VodError> {
+        self.blocked_wait_for(rendition, (session_id, session_id), index, budget, delivery)
+            .await
+    }
+
+    async fn blocked_wait_for(
+        &self,
+        rendition: &Arc<Rendition>,
+        reader: (&str, &str),
         index: u32,
         budget: Duration,
         delivery: Arc<crate::meter::Meter>,
@@ -529,11 +935,9 @@ impl VodServe {
             let wait = self
                 .shared
                 .pool
-                .register(key, session_id)
-                // The class travels with the refusal. `blocked_wait` is the only
-                // production caller of `register`, so this line is the whole
-                // seam between the pool knowing which cap fired and a client
-                // or an operator ever finding out.
+                .register_reader(key, reader.0, reader.1)
+                // Preserve the parent-cap refusal class for HTTP and operator
+                // diagnostics; a refused child creates no persistent demand.
                 .map_err(VodError::Busy)?;
             let demand = self
                 .shared
@@ -641,10 +1045,175 @@ impl VodServe {
         }
     }
 
-    fn source_changed(&self, rendition: &Rendition) -> bool {
+    pub(super) fn source_changed(&self, rendition: &Rendition) -> bool {
         rendition
             .source
             .as_ref()
             .is_some_and(|source| !source.unchanged())
     }
+}
+
+pub(super) async fn read_quality_artifact(path: &Path, limit: u64) -> Result<Vec<u8>, String> {
+    let file = tokio::fs::File::open(path)
+        .await
+        .map_err(|error| error.to_string())?;
+    let metadata = file.metadata().await.map_err(|error| error.to_string())?;
+    if !metadata.is_file() || metadata.len() == 0 || metadata.len() > limit {
+        return Err("continuous artifact is missing or exceeds its byte bound".into());
+    }
+    let mut bytes = Vec::new();
+    file.take(limit + 1)
+        .read_to_end(&mut bytes)
+        .await
+        .map_err(|error| error.to_string())?;
+    if bytes.len() as u64 > limit || bytes.len() as u64 != metadata.len() {
+        return Err("continuous artifact changed while being read".into());
+    }
+    Ok(bytes)
+}
+
+pub(super) fn verify_cached_quality_interval(
+    init_bytes: &[u8],
+    media: &[u8],
+    rung: &plurx_core::transcode::VodVideoRung,
+    interval: &plurx_core::playback::continuous_quality::QualityInterval,
+) -> Result<(), String> {
+    if interval.rendition_id != rung.rendition_id()
+        || !interval.matches_bytes(media)
+        || hex::encode(Sha256::digest(init_bytes)) != rung.init_id()
+    {
+        return Err("continuous artifact bytes do not match their immutable identities".into());
+    }
+    let mut reader = FragmentReader::new();
+    reader.push(init_bytes);
+    let Some(Unit::Init(init)) = reader.next_unit().map_err(|error| error.to_string())? else {
+        return Err("continuous artifact has no complete init".into());
+    };
+    if reader.buffered() != 0
+        || init.tracks.len() != 1
+        || plurx_core::fmp4::avc_sample_entry_facts(&init)
+            .map_err(|error| error.to_string())?
+            .as_ref()
+            != Some(rung.facts())
+    {
+        return Err("continuous artifact init shape changed".into());
+    }
+    let video = init
+        .video()
+        .ok_or("continuous artifact has no video track")?;
+    if video.timescale != interval.timescale || video.timescale != rung.grid().numerator {
+        return Err("continuous artifact clock changed".into());
+    }
+    reader.push(media);
+    let mut next = interval.from_tick;
+    let mut fragments = 0;
+    while let Some(unit) = reader.next_unit().map_err(|error| error.to_string())? {
+        let Unit::Fragment(fragment) = unit else {
+            return Err("continuous media contains an unexpected init or trailer".into());
+        };
+        let track = fragment
+            .track(video.id)
+            .ok_or("continuous media lost its video track")?;
+        if fragment.tracks.len() != 1
+            || track.samples().next().is_none()
+            || track.base_decode_time != next
+            || (fragments == 0 && !plurx_core::fmp4::classify(&fragment, &init).is_clean())
+            || track
+                .samples()
+                .any(|sample| sample.cto != 0 || sample.duration != rung.grid().denominator)
+        {
+            return Err("continuous media does not match its clean rational sample grid".into());
+        }
+        next = next
+            .checked_add(track.duration())
+            .ok_or("continuous media clock overflow")?;
+        if next > interval.through_tick {
+            return Err("continuous media exceeds its declared interval".into());
+        }
+        fragments += 1;
+    }
+    if fragments == 0 || reader.buffered() != 0 || next != interval.through_tick {
+        return Err("continuous media does not complete its declared interval".into());
+    }
+    Ok(())
+}
+
+/// Verify actual published AAC bytes, including the final packet trim. No
+/// fragment number or manifest-only claim can substitute for sample evidence.
+pub(super) fn verify_cached_shared_audio_interval(
+    init_bytes: &[u8],
+    media: &[u8],
+    audio: &plurx_core::transcode::VodSharedAudioRendition,
+    interval: &plurx_core::playback::continuous_quality::QualityInterval,
+    final_interval: bool,
+) -> Result<(), String> {
+    if interval.rendition_id != audio.rendition_id()
+        || !interval.matches_bytes(media)
+        || interval.timescale != plurx_core::transcode::VOD_AUDIO_RATE
+        || hex::encode(Sha256::digest(init_bytes)) != audio.init_id()
+    {
+        return Err("shared AAC artifact bytes or identities changed".into());
+    }
+    let mut reader = FragmentReader::new();
+    reader.push(init_bytes);
+    let Some(Unit::Init(init)) = reader.next_unit().map_err(|error| error.to_string())? else {
+        return Err("shared AAC artifact has no complete init".into());
+    };
+    if reader.buffered() != 0
+        || init.tracks.len() != 1
+        || init.tracks[0].kind != plurx_core::fmp4::TrackKind::Audio
+        || init.tracks[0].timescale != interval.timescale
+        || &plurx_core::fmp4::aac_lc_sample_entry_facts(&init).map_err(|error| error.to_string())?
+            != audio.facts()
+    {
+        return Err("shared AAC init shape or clock changed".into());
+    }
+    reader.push(media);
+    let mut next = interval.from_tick;
+    let mut fragments = 0;
+    while let Some(unit) = reader.next_unit().map_err(|error| error.to_string())? {
+        let Unit::Fragment(fragment) = unit else {
+            return Err("shared AAC media contains an unexpected init or trailer".into());
+        };
+        let track = fragment
+            .track(init.tracks[0].id)
+            .ok_or("shared AAC lost its track")?;
+        if fragment.tracks.len() != 1 || track.sample_count() == 0 || track.base_decode_time != next
+        {
+            return Err("shared AAC sample clock is discontinuous".into());
+        }
+        for run in &track.runs {
+            let mut offset = run.data_offset;
+            for sample in &run.samples {
+                let through = offset
+                    .checked_add(sample.size as usize)
+                    .ok_or("shared AAC payload overflow")?;
+                let end = next
+                    .checked_add(u64::from(sample.duration))
+                    .ok_or("shared AAC clock overflow")?;
+                if sample.duration == 0
+                    || sample.duration > 1_024
+                    || sample.cto != 0
+                    || sample.size == 0
+                    || offset < fragment.mdat_payload.start
+                    || through > fragment.mdat_payload.end
+                    || through > fragment.bytes.len()
+                    || end > interval.through_tick
+                    || (sample.duration != 1_024
+                        && (!final_interval || end != interval.through_tick))
+                {
+                    return Err(
+                        "shared AAC sample payload or final trim differs from its plan".into(),
+                    );
+                }
+                next = end;
+                offset = through;
+            }
+        }
+        fragments += 1;
+    }
+    if fragments == 0 || reader.buffered() != 0 || next != interval.through_tick {
+        return Err("shared AAC media does not complete its exact interval".into());
+    }
+    Ok(())
 }

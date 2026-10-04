@@ -394,6 +394,8 @@ fn http_route_group(path: &str) -> usize {
         | "/api/v1/files/{id}/subs/{index}/overlay.json"
         | "/api/v1/files/{id}/subs/{index}/overlay/{generation}/objects/{object}"
         | "/api/v1/files/{id}/hls/sessions"
+        | "/api/v1/files/{id}/hls/continuous-sessions"
+        | "/api/v1/files/{id}/hls/continuous-candidates"
         | "/api/v1/files/{id}/hls/start"
         | "/api/v1/offline/packages/{id}"
         | "/api/v1/offline/packages/{id}/lease"
@@ -411,9 +413,14 @@ fn http_route_group(path: &str) -> usize {
         | "/api/v1/hls/{session}/subs/{index}/index.m3u8"
         | "/api/v1/hls/{session}/subs/{index}/{segment}"
         | "/api/v1/hls/{session}/status"
+        | "/api/v1/hls/{session}/quality-control"
+        | "/api/v1/hls/{session}/quality-schedule"
+        | "/api/v1/hls/{session}/quality-family"
         | "/api/v1/hls/{session}/control"
         | "/api/v1/hls/{session}"
         | "/api/v1/hls/{session}/{segment}"
+        | "/api/v1/hls/{session}/{role}/{rendition}/{kind}/{object}"
+        | "/api/v1/hls/{session}/{role}/{rendition}/index.m3u8"
         | "/api/v1/live-tv/readiness"
         | "/api/v1/live-tv/readiness/refresh"
         | "/api/v1/live-tv/channels"
@@ -537,6 +544,8 @@ fn http_route_group(path: &str) -> usize {
         | crate::media_sessions::PREPARE_PATH
         | crate::media_sessions::ABORT_PATH
         | crate::media_sessions::RELAY_PATH
+        | hls::QUALITY_CONTROL_PATH
+        | hls::QUALITY_SCHEDULE_PATH
         | crate::media_sessions::CONTROL_PATH => 7,
         _ => 8,
     }
@@ -1803,6 +1812,14 @@ pub fn router(state: AppState) -> Router {
                 // browser holding the full 256 learned limits is about 40 KiB.
                 .layer(DefaultBodyLimit::max(64 * 1024)),
         )
+        .route(
+            "/files/{id}/hls/continuous-candidates",
+            post(hls::continuous_candidates).layer(DefaultBodyLimit::max(64 * 1024)),
+        )
+        .route(
+            "/files/{id}/hls/continuous-sessions",
+            post(hls::create_continuous).layer(DefaultBodyLimit::max(64 * 1024)),
+        )
         .route("/files/{id}/hls/start", get(hls::start))
         .route(
             "/hls/{session}/master.m3u8",
@@ -1821,16 +1838,34 @@ pub fn router(state: AppState) -> Router {
         // Before the `{segment}` catch-all in intent, though the router
         // prefers the static segment regardless of registration order.
         .route("/hls/{session}/status", get(hls::status))
+        .route("/hls/{session}/quality-family", get(hls::continuous_family))
         .route(
             "/hls/{session}/control",
             post(hls::control).layer(DefaultBodyLimit::max(
                 crate::playback_control::MAX_REQUEST_BYTES,
             )),
         )
+        .route(
+            "/hls/{session}/quality-control",
+            post(hls::quality_control).layer(DefaultBodyLimit::max(hls::QUALITY_CONTROL_MAX_BYTES)),
+        )
+        .route(
+            "/hls/{session}/quality-schedule",
+            post(hls::quality_schedule)
+                .layer(DefaultBodyLimit::max(hls::QUALITY_SCHEDULE_MAX_BYTES)),
+        )
         // Capability auth (the session id is the credential) so a closing tab
         // can send this with `keepalive`, which cannot set headers.
         .route("/hls/{session}", delete(hls::delete))
         .route("/hls/{session}/{segment}", get(hls::segment))
+        .route(
+            "/hls/{session}/{role}/{rendition}/{kind}/{object}",
+            get(hls::child_segment),
+        )
+        .route(
+            "/hls/{session}/{role}/{rendition}/index.m3u8",
+            get(hls::child_playlist),
+        )
         .route("/images/{filename}", get(images::serve));
 
     let api = Router::new()
@@ -2075,6 +2110,16 @@ pub fn router(state: AppState) -> Router {
             )),
         )
         .route(
+            hls::QUALITY_CONTROL_PATH,
+            post(internal_media_sessions::quality_control)
+                .layer(DefaultBodyLimit::max(hls::QUALITY_CONTROL_MAX_BYTES)),
+        )
+        .route(
+            hls::QUALITY_SCHEDULE_PATH,
+            post(internal_media_sessions::quality_schedule)
+                .layer(DefaultBodyLimit::max(hls::QUALITY_SCHEDULE_MAX_BYTES)),
+        )
+        .route(
             crate::media_sessions::CONTROL_PATH,
             post(internal_media_sessions::control).layer(DefaultBodyLimit::max(
                 crate::playback_control::MAX_RELAY_BYTES,
@@ -2195,6 +2240,11 @@ fn maintenance_route_eligible(method: &Method, path: &str) -> bool {
             crate::media_sessions::ABORT_PATH
                 | crate::media_sessions::RELAY_PATH
                 | crate::media_sessions::CONTROL_PATH
+                | hls::QUALITY_CONTROL_PATH
+                // Schedule mutations are control of an existing session: a
+                // node in maintenance keeps streaming it, so it must keep
+                // honouring the viewer's quality changes too.
+                | hls::QUALITY_SCHEDULE_PATH
         | crate::live_tv::RESOURCE_PATH
                 | crate::live_tv::STOP_PATH
                 // A retire is a stop plus a fence. Refusing it during
@@ -2221,7 +2271,16 @@ fn maintenance_route_eligible(method: &Method, path: &str) -> bool {
                 | ["api", "v1", "live-tv", "sessions", _, _]
         ) || (segments.len() >= 6 && segments[0..3] == ["api", "v1", "publication"]));
     let existing_media_control = (method == Method::POST
-        && matches!(segments.as_slice(), ["api", "v1", "hls", _, "control"]))
+        && matches!(
+            segments.as_slice(),
+            [
+                "api",
+                "v1",
+                "hls",
+                _,
+                "control" | "quality-control" | "quality-schedule"
+            ]
+        ))
         || (method == Method::DELETE
             && matches!(
                 segments.as_slice(),
@@ -2318,6 +2377,10 @@ fn learner_route_eligible(method: &Method, path: &str) -> bool {
                     | crate::media_sessions::ABORT_PATH
                     | crate::media_sessions::RELAY_PATH
                     | crate::media_sessions::CONTROL_PATH
+                    | hls::QUALITY_CONTROL_PATH
+                    // A learner can own a continuous session; every schedule
+                    // relayed to it arrives here.
+                    | hls::QUALITY_SCHEDULE_PATH
                     | crate::live_tv::RESOURCE_PATH
                     | crate::live_tv::STOP_PATH
             ))
@@ -2395,8 +2458,12 @@ fn learner_route_eligible(method: &Method, path: &str) -> bool {
         && matches!(
             segments.as_slice(),
             ["api", "v1", "files", _, "hls", "sessions"]
+                // The continuous family create walks the same create path as
+                // `hls/sessions`, and its catalog read is the same kind of
+                // node-local, write-nothing POST as the caps-v2 decision.
+                | ["api", "v1", "files", _, "hls", "continuous-sessions" | "continuous-candidates"]
                 | ["api", "v1", "files", _, "publication"]
-                | ["api", "v1", "hls", _, "control"]
+                | ["api", "v1", "hls", _, "control" | "quality-control" | "quality-schedule"]
                 // The caps-v2 spelling of the decision read. It is a POST only
                 // because its capabilities are a JSON document rather than a
                 // query string — it writes nothing, and a learner that answers
@@ -4143,6 +4210,14 @@ mod tests {
             // that have migrated, and nothing else in this matrix would say so.
             (Method::POST, "/api/v1/files/8/decision"),
             (Method::POST, "/api/v1/hls/session-8/control"),
+            (Method::POST, "/api/v1/hls/session-8/quality-control"),
+            // A learner entry node and a learner-owned continuous session
+            // must both accept schedule mutations, and a learner must be
+            // able to start the family it would serve.
+            (Method::POST, "/api/v1/hls/session-8/quality-schedule"),
+            (Method::POST, hls::QUALITY_SCHEDULE_PATH),
+            (Method::POST, "/api/v1/files/8/hls/continuous-sessions"),
+            (Method::POST, "/api/v1/files/8/hls/continuous-candidates"),
             (Method::DELETE, "/api/v1/hls/session-8"),
             (Method::GET, "/api/v1/live-tv/sessions/cap/index.m3u8"),
             (
@@ -4158,6 +4233,7 @@ mod tests {
             (Method::POST, crate::media_sessions::ACTIVATE_PATH),
             (Method::POST, crate::media_sessions::ABORT_PATH),
             (Method::POST, crate::media_sessions::CONTROL_PATH),
+            (Method::POST, hls::QUALITY_CONTROL_PATH),
             // The relay was in the matrix and had never been asserted. It is
             // the highest-traffic path a learner ingress originates: every
             // segment of media owned by another node goes through it.
@@ -4224,8 +4300,14 @@ mod tests {
             (Method::GET, "/api/v1/hls/session/index.m3u8"),
             (Method::GET, "/api/v1/publication/session/chapter.xhtml"),
             (Method::DELETE, "/api/v1/hls/session"),
+            (Method::POST, "/api/v1/hls/session/quality-control"),
+            // An existing continuous session keeps streaming in maintenance,
+            // so its schedule (public and owner relay) stays reachable.
+            (Method::POST, "/api/v1/hls/session/quality-schedule"),
+            (Method::POST, hls::QUALITY_SCHEDULE_PATH),
             (Method::POST, crate::media_sessions::ABORT_PATH),
             (Method::POST, crate::media_sessions::CONTROL_PATH),
+            (Method::POST, hls::QUALITY_CONTROL_PATH),
             (Method::GET, "/api/v1/live-tv/sessions/cap/index.m3u8"),
             (
                 Method::GET,
@@ -4262,6 +4344,8 @@ mod tests {
             (Method::POST, "/api/v1/files/8/decision"),
             (Method::GET, "/api/v1/files/8/direct"),
             (Method::POST, "/api/v1/files/8/hls/sessions"),
+            (Method::POST, "/api/v1/files/8/hls/continuous-sessions"),
+            (Method::POST, "/api/v1/files/8/hls/continuous-candidates"),
             (Method::POST, crate::media_sessions::START_PATH),
             (Method::POST, crate::media_sessions::ACTIVATE_PATH),
             (Method::GET, "/api/v1/live-tv/readiness"),
@@ -4392,6 +4476,77 @@ mod tests {
         assert_eq!(
             app.oneshot(internal).await.expect("response").status(),
             StatusCode::PAYLOAD_TOO_LARGE
+        );
+    }
+
+    #[tokio::test]
+    async fn quality_control_routes_bound_bodies_and_require_peer_auth() {
+        let app = test_app();
+        for path in [
+            format!("/api/v1/hls/{}/quality-control", uuid::Uuid::new_v4()),
+            hls::QUALITY_CONTROL_PATH.to_owned(),
+        ] {
+            let oversized = Request::builder()
+                .method("POST")
+                .uri(&path)
+                .header("content-type", "application/json")
+                .body(Body::from(vec![b'x'; hls::QUALITY_CONTROL_MAX_BYTES + 1]))
+                .expect("quality control test request or response");
+            assert_eq!(
+                app.clone()
+                    .oneshot(oversized)
+                    .await
+                    .expect("quality control test request or response")
+                    .status(),
+                StatusCode::PAYLOAD_TOO_LARGE
+            );
+        }
+        let unsigned = Request::builder()
+            .method("POST")
+            .uri(hls::QUALITY_CONTROL_PATH)
+            .header("content-type", "application/json")
+            .body(Body::from("{}"))
+            .expect("quality control test request or response");
+        assert_eq!(
+            app.oneshot(unsigned)
+                .await
+                .expect("quality control test request or response")
+                .status(),
+            StatusCode::UNAUTHORIZED
+        );
+    }
+
+    #[tokio::test]
+    async fn quality_schedule_routes_bound_bodies_and_require_peer_auth() {
+        let app = test_app();
+        for path in [
+            format!("/api/v1/hls/{}/quality-schedule", uuid::Uuid::new_v4()),
+            hls::QUALITY_SCHEDULE_PATH.to_owned(),
+        ] {
+            let request = Request::builder()
+                .method("POST")
+                .uri(path)
+                .header("content-type", "application/json")
+                .body(Body::from(vec![b'x'; hls::QUALITY_SCHEDULE_MAX_BYTES + 1]))
+                .expect("oversized schedule");
+            assert_eq!(
+                app.clone()
+                    .oneshot(request)
+                    .await
+                    .expect("response")
+                    .status(),
+                StatusCode::PAYLOAD_TOO_LARGE
+            );
+        }
+        let unsigned = Request::builder()
+            .method("POST")
+            .uri(hls::QUALITY_SCHEDULE_PATH)
+            .header("content-type", "application/json")
+            .body(Body::from("{}"))
+            .expect("unsigned schedule");
+        assert_eq!(
+            app.oneshot(unsigned).await.expect("response").status(),
+            StatusCode::UNAUTHORIZED
         );
     }
 

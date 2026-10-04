@@ -499,9 +499,122 @@ pub struct CandidateExecutionContext {
     pub profile: Option<plurx_core::transcode::AutoQualityRateProfile>,
 }
 
+/// Versioned worker media role for one continuous family generation.
+/// Legacy request JSON omits this field; older strict workers refuse it rather
+/// than silently materializing a muxed rendition under a video-only identity.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ContinuousMediaRequest {
+    pub version: u32,
+    /// A controlled loader prepares a cold video child before requesting it.
+    /// Autonomous engines retain all advertised capacity through detach.
+    #[serde(default, skip_serializing_if = "continuous_media_is_autonomous")]
+    pub controlled: bool,
+    pub family_generation: String,
+    pub role: ContinuousMediaRole,
+    /// One additional catalog rung for a capacity-reserved autonomous master.
+    /// Omitted for a standalone role or the controlled active video/audio pair.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub autonomous_companion: Option<plurx_core::playback::candidate::CandidateId>,
+    /// Exact second recipe from the same canonical catalog. Worker revalidation
+    /// scopes to these two shapes rather than discovering a new whole catalog.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub companion_catalog: Option<Box<plurx_core::playback::candidate::QualityCandidate>>,
+    /// Owner-verified immutable output proof, bound once in the durable parent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub family_descriptor: Option<plurx_core::store::ContinuousFamilyDescription>,
+    /// Reconstructed from the same worker catalog and retained decoder caps.
+    #[serde(skip)]
+    pub companion_context: Option<Box<ContinuousCompanionContext>>,
+}
+
+#[derive(Debug, Clone)]
+pub struct ContinuousCompanionContext {
+    pub height: i64,
+    pub candidate: CandidateExecutionContext,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ContinuousMediaRole {
+    Video,
+    SharedAudio,
+}
+
+fn continuous_media_is_autonomous(controlled: &bool) -> bool {
+    !*controlled
+}
+
+impl ContinuousMediaRequest {
+    pub fn valid_for(&self, request: &SessionRequest) -> bool {
+        self.version == 1
+            && self.family_descriptor.as_ref().is_none_or(|description| {
+                description.valid()
+                    && description.mode
+                        == if self.controlled {
+                            "controlled"
+                        } else {
+                            "autonomous_reserved"
+                        }
+                    && self.role == ContinuousMediaRole::Video
+                    && self.autonomous_companion.is_some_and(|companion| {
+                        description
+                            .video
+                            .iter()
+                            .any(|row| row.candidate_id == companion)
+                    })
+                    && request.candidate_context.as_ref().is_none_or(|primary| {
+                        description
+                            .video
+                            .iter()
+                            .any(|row| row.candidate_id == primary.candidate_id)
+                    })
+            })
+            && uuid::Uuid::parse_str(&self.family_generation).is_ok()
+            && request.presentation == Presentation::Vod
+            && matches!(request.kind, SessionKind::Transcode { .. })
+            && !request.hdr10
+            && request.subtitle_burn.is_none()
+            && self.autonomous_companion.is_none_or(|id| {
+                self.role == ContinuousMediaRole::Video
+                    && request
+                        .candidate_context
+                        .as_ref()
+                        .is_none_or(|primary| primary.candidate_id != id)
+            })
+            && self.companion_catalog.as_ref().is_none_or(|companion| {
+                self.autonomous_companion == Some(companion.id)
+                    && companion.identity_matches()
+                    && companion.route == plurx_core::playback::candidate::CandidateRoute::Encode
+                    && companion.normalized_geometry
+                    && companion.grade == plurx_core::transcode::OutputGrade::Sdr
+            })
+            && self.companion_context.as_ref().is_none_or(|companion| {
+                self.autonomous_companion == Some(companion.candidate.candidate_id)
+                    && companion.height >= 2
+                    && companion.candidate.normalized_geometry
+                    && companion.candidate.grade == plurx_core::transcode::OutputGrade::Sdr
+                    && companion.candidate.profile.is_none_or(|profile| {
+                        profile == transcode::AutoQualityRateProfile::H264Sdr1440P30V1
+                            && companion.height == 1440
+                    })
+            })
+            && request.candidate_context.as_ref().is_none_or(|context| {
+                context.normalized_geometry
+                    && context.grade == plurx_core::transcode::OutputGrade::Sdr
+                    && context.profile.is_none_or(|profile| {
+                        profile == plurx_core::transcode::AutoQualityRateProfile::H264Sdr1440P30V1
+                            && matches!(request.kind, SessionKind::Transcode { height: 1440 })
+                    })
+            })
+    }
+}
+
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SessionRequest {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub continuous_media: Option<Box<ContinuousMediaRequest>>,
     #[serde(skip)]
     pub(crate) quality_catalog: Option<std::sync::Arc<crate::media_pool::QualityCatalogResult>>,
     #[serde(skip)]
@@ -867,7 +980,11 @@ impl SessionRequest {
     /// the same `request_id` must still recover the first persisted answer.
     fn intent_fingerprint_with_user_scope(&self, user_name: Option<&str>) -> String {
         let kind = match self.kind {
-            SessionKind::Transcode { height: _ } if self.automatic => "ta".to_owned(),
+            SessionKind::Transcode { height: _ }
+                if self.automatic && self.continuous_media.is_none() =>
+            {
+                "ta".to_owned()
+            }
             SessionKind::Transcode { height } => format!("t{height}"),
             SessionKind::Copy {
                 aac,
@@ -926,6 +1043,22 @@ impl SessionRequest {
                 context.candidate_id.to_hex(),
                 hex::encode(context.recipe_digest)
             )
+        } else {
+            kind
+        };
+        let kind = if let Some(media) = self.continuous_media.as_ref() {
+            let role = match media.role {
+                ContinuousMediaRole::Video => "video",
+                ContinuousMediaRole::SharedAudio => "shared_audio",
+            };
+            let role_identity = format!(
+                "{kind}+continuous:{}:{}:{role}",
+                media.version, media.family_generation
+            );
+            match media.autonomous_companion {
+                Some(id) => format!("{role_identity}:autonomous:{}", id.to_hex()),
+                None => role_identity,
+            }
         } else {
             kind
         };
@@ -1007,4 +1140,27 @@ pub struct StartInfo {
     /// session. A finished transcode-cache hit is seekable VOD to the client
     /// but still belongs to the 60-second rolling registry.
     pub control_lease_timeout_ms: u32,
+}
+
+#[cfg(test)]
+pub(crate) fn continuous_test_candidate_context(
+    id: plurx_core::playback::candidate::CandidateId,
+    digest: [u8; 32],
+    height: u32,
+) -> CandidateExecutionContext {
+    super::TranscodeManager::candidate_context(&plurx_core::playback::candidate::QualityCandidate {
+        id,
+        recipe_digest: digest,
+        route: plurx_core::playback::candidate::CandidateRoute::Encode,
+        normalized_geometry: true,
+        width: height * 16 / 9,
+        height,
+        target_height: height,
+        average_bps: None,
+        peak_bps: None,
+        grade: plurx_core::transcode::OutputGrade::Sdr,
+        decoder_compatible: true,
+        complete_cache: false,
+        sustainable: true,
+    })
 }

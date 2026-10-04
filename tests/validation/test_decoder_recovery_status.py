@@ -1200,7 +1200,10 @@ class DecoderRecoveryStatusContract(unittest.TestCase):
                 encoding="utf-8"
             ),
         )
-        self.assertEqual(replicated.count("TransactionShape::WriteReadBack"), 2)
+        # M5a's two producer-recovery sites, plus continuous quality's
+        # cancellation request and settlement, which write and read back the
+        # winning receipt the same way (and are split the same way on hiqlite).
+        self.assertEqual(replicated.count("TransactionShape::WriteReadBack"), 4)
         # Rust owns the exact transaction census and verifies it against the
         # implementation. This recovery contract requires an explicit audited
         # count, not a second frozen copy that breaks when unrelated adapters

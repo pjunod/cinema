@@ -56,6 +56,37 @@ internal fun handOverAudioFocus(from: AudioFocusOwner, to: AudioFocusOwner) {
 }
 
 /**
+ * The prepared-handoff view of the same ownership. [handOverAudioFocus] is the
+ * one move; this adds the staged successor (it never requests focus) and the
+ * rollback, whose failed successor stays parked behind the surface overlap
+ * until it is collected, up to the overlap bound. Losing focus alone left it
+ * playing and audible over the restored player, so it is paused and muted
+ * before focus moves back. The caller reads any viewer volume it carries over
+ * before this runs.
+ */
+internal fun interface AudioFocusHandling { fun handle(owned: Boolean) }
+
+internal object PreparedAudioFocus {
+    fun stage(successor: AudioFocusHandling) = successor.handle(false)
+    fun move(from: AudioFocusHandling, to: AudioFocusHandling) =
+        handOverAudioFocus(AudioFocusOwner { from.handle(it) }, AudioFocusOwner { to.handle(it) })
+
+    fun rollback(failed: AudioFocusHandling, failedOutput: PlaybackSilencing, restored: AudioFocusHandling) {
+        failedOutput.silence()
+        move(failed, restored)
+    }
+}
+
+internal fun interface PlaybackSilencing { fun silence() }
+
+internal fun ExoPlayer.audioFocusHandling(): AudioFocusHandling {
+    val owner = asAudioFocusOwner()
+    return AudioFocusHandling { owner.ownAudioFocus(it) }
+}
+
+internal fun ExoPlayer.playbackSilencing() = PlaybackSilencing { volume = 0f; playWhenReady = false }
+
+/**
  * One construction path for every player. In particular, Offline still has a
  * cache-only source with no account-bearing upstream, and only finite players
  * request television tunneling. Successor inherits the incumbent's setting.
@@ -66,6 +97,8 @@ internal class PlurxPlayerBuilder(private val context: Context, private val role
         dataSource: DataSource.Factory,
         audioLanguage: String? = null,
         transferListener: TransferListener? = null,
+        continuousSources: ContinuousSourceRegistry? = null,
+        continuousOutput: ContinuousOutputEvidence? = null,
     ): ExoPlayer {
         require(role != PlayerRole.Offline || dataSource is CacheDataSource.Factory) {
             "Offline playback requires a cache-only data source"
@@ -78,7 +111,8 @@ internal class PlurxPlayerBuilder(private val context: Context, private val role
             }
             dataSource.setTransferListener(transferListener)
         }
-        val selector = DefaultTrackSelector(context).apply {
+        val selector = (if (continuousSources == null) DefaultTrackSelector(context)
+            else DefaultTrackSelector(context, ContinuousTrackSelectionFactory(continuousSources::binding))).apply {
             parameters = buildUponParameters()
                 .setPreferredAudioLanguage(audioLanguage)
                 .setTunnelingEnabled(
@@ -97,17 +131,23 @@ internal class PlurxPlayerBuilder(private val context: Context, private val role
                 }
                 .build()
         }
-        val renderers = DefaultRenderersFactory(context).setEnableDecoderFallback(true)
+        val renderers = (if (role in setOf(PlayerRole.Finite, PlayerRole.Successor))
+            PreparedFrameRenderersFactory(context, continuousOutput) else DefaultRenderersFactory(context))
+            .setEnableDecoderFallback(true)
+        val ordinaryLoadControl = playbackLoadControl(
+            context,
+            live = role == PlayerRole.LiveTv,
+            role = when (role) {
+                PlayerRole.Successor -> BufferRole.Successor
+                PlayerRole.LiveTv -> BufferRole.Live
+                else -> BufferRole.Incumbent
+            },
+        )
+        val loadControl = continuousSources?.let { sources ->
+            ContinuousLoadControl(ordinaryLoadControl, continuousOutput?.allocations) { id, timeline -> sources.binding(id, timeline) != null }
+        } ?: ordinaryLoadControl
         val player = ExoPlayer.Builder(context)
-            .setLoadControl(playbackLoadControl(
-                context,
-                live = role == PlayerRole.LiveTv,
-                role = when (role) {
-                    PlayerRole.Successor -> BufferRole.Successor
-                    PlayerRole.LiveTv -> BufferRole.Live
-                    else -> BufferRole.Incumbent
-                },
-            ))
+            .setLoadControl(loadControl)
             .setTrackSelector(selector)
             .setRenderersFactory(renderers)
             .setMediaSourceFactory(DefaultMediaSourceFactory(source))

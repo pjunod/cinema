@@ -1525,6 +1525,7 @@ mod tests {
             &user.password_hash,
         ));
         let mut request = SessionRequest {
+            continuous_media: None,
             vod_only: false,
             passive_vod: false,
             finite_bitrate_limit_bps: None,

@@ -1291,6 +1291,14 @@ mod tests {
             .expect("remove v91 planning generation");
         connection
             .execute_batch(
+                "DROP TABLE IF EXISTS continuous_quality_ledgers;
+                 DROP TABLE IF EXISTS quality_preparation_owners;
+                 DROP TABLE IF EXISTS quality_cancellation_receipts;
+                 ",
+            )
+            .expect("remove v102 cancellation and v103 continuous dependencies");
+        connection
+            .execute_batch(
                 // Everything v44 and later built has to go, or the replayed
                 // migration meets its own leftovers instead of a v43 database:
                 // v44's recovery guards, v45's negative index, v46's attempt
@@ -1485,7 +1493,7 @@ mod tests {
     #[test]
     fn the_downgrade_fixture_undoes_every_migration_after_the_guard() {
         const GUARD_SCHEMA_VERSION: i64 = 44;
-        const DROPPED_BY_THE_FIXTURE: [&str; 57] = [
+        const DROPPED_BY_THE_FIXTURE: [&str; 59] = [
             "fragment_index_outcomes",
             "attempt_errors",
             "video_identity",
@@ -1592,6 +1600,10 @@ mod tests {
             "CREATE TABLE IF NOT EXISTS jellyfin_login_tokens",
             "CREATE TABLE IF NOT EXISTS jellyfin_plays",
             "ADD COLUMN manual_revision",
+            // v102 and v103: continuous quality. Both fixtures drop the three
+            // tables (their indexes go with them) before replay.
+            "CREATE TABLE IF NOT EXISTS quality_cancellation_receipts",
+            "CREATE TABLE IF NOT EXISTS continuous_quality_ledgers",
         ];
 
         assert!(

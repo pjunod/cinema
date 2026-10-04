@@ -250,6 +250,8 @@ final class PictureInPictureController: NSObject, ObservableObject,
 /// focus engine; PlayerView remains the sole owner of playback controls.
 struct PlayerSurface: UIViewRepresentable {
     let player: AVPlayer
+    var stagedPlayer: AVPlayer? = nil
+    var surfaceChanged: ((PlayerSurfaceView, Bool) -> Void)? = nil
     let pictureInPicture: PictureInPictureController
     let pgsOverlay: PGSOverlayWindow?
     let allowsPictureInPicture: Bool
@@ -269,7 +271,11 @@ struct PlayerSurface: UIViewRepresentable {
     func makeUIView(context: Context) -> PlayerSurfaceView {
         let view = PlayerSurfaceView()
         view.presentationTargetChanged = presentationTargetChanged
+        view.pictureInPicture = pictureInPicture
         view.playerLayer.player = player
+        view.stage(stagedPlayer)
+        context.coordinator.surfaceChanged = surfaceChanged
+        surfaceChanged?(view, true)
         view.applyPGSOverlay(pgsOverlay, to: player.currentItem)
         if allowsPictureInPicture {
             context.coordinator.pictureInPicture.attach(to: view.playerLayer)
@@ -283,6 +289,9 @@ struct PlayerSurface: UIViewRepresentable {
         if view.playerLayer.player !== player {
             view.playerLayer.player = player
         }
+        view.stage(stagedPlayer)
+        context.coordinator.surfaceChanged = surfaceChanged
+        surfaceChanged?(view, true)
         view.applyPGSOverlay(pgsOverlay, to: player.currentItem)
         if allowsPictureInPicture {
             context.coordinator.pictureInPicture.attach(to: view.playerLayer)
@@ -300,6 +309,9 @@ struct PlayerSurface: UIViewRepresentable {
         coordinator.pictureInPicture.detach(resetPublishedState: false)
         view.applyPGSOverlay(nil, to: nil)
         view.playerLayer.player = nil
+        view.stage(nil)
+        coordinator.surfaceChanged?(view, false)
+        coordinator.surfaceChanged = nil
         view.presentationTargetChanged?(nil, nil)
         view.presentationTargetChanged = nil
         #if os(tvOS)
@@ -309,6 +321,7 @@ struct PlayerSurface: UIViewRepresentable {
 
     final class Coordinator {
         let pictureInPicture: PictureInPictureController
+        var surfaceChanged: ((PlayerSurfaceView, Bool) -> Void)?
 
         init(pictureInPicture: PictureInPictureController) {
             self.pictureInPicture = pictureInPicture
@@ -317,8 +330,46 @@ struct PlayerSurface: UIViewRepresentable {
 }
 
 final class PlayerSurfaceView: UIView {
-    let playerLayer = AVPlayerLayer()
+    private(set) var playerLayer = AVPlayerLayer()
+    private var stagedLayer = AVPlayerLayer()
+    weak var pictureInPicture: PictureInPictureController?
     var presentationTargetChanged: ((Int?, Int?) -> Void)?
+
+    /// Both layers stay attached. Promotion changes visibility without moving
+    /// an item or rebinding the target's already prepared display layer.
+    func stage(_ player: AVPlayer?) {
+        guard stagedLayer.player !== player else { return }
+        stagedLayer.player = player
+    }
+
+    func canPromote(_ player: AVPlayer) -> Bool {
+        window?.windowScene?.activationState == .foregroundActive
+            && pictureInPicture?.isActive != true && pictureInPicture?.isStarting != true
+            && stagedLayer.player === player && stagedLayer.isReadyForDisplay
+    }
+
+    @discardableResult
+    func promote(_ player: AVPlayer) -> Bool {
+        guard canPromote(player) else { return false }
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        let previous = playerLayer
+        playerLayer = stagedLayer
+        stagedLayer = previous
+        playerLayer.opacity = 1
+        stagedLayer.opacity = 0
+        observeVideoRect()
+        setNeedsLayout()
+        CATransaction.commit()
+        return true
+    }
+
+    private func observeVideoRect() {
+        videoRectObservation = playerLayer.observe(\.videoRect, options: [.new]) {
+            [weak self] _, _ in
+            Task { @MainActor in self?.setNeedsLayout() }
+        }
+    }
 
     func reportPresentationTarget() {
         var ancestor: UIView? = self
@@ -369,12 +420,12 @@ final class PlayerSurfaceView: UIView {
         isUserInteractionEnabled = false
         isAccessibilityElement = false
         playerLayer.videoGravity = .resizeAspect
+        stagedLayer.videoGravity = .resizeAspect
+        stagedLayer.opacity = 0
         layer.addSublayer(playerLayer)
+        layer.addSublayer(stagedLayer)
         clipsToBounds = true
-        videoRectObservation = playerLayer.observe(\.videoRect, options: [.new]) {
-            [weak self] _, _ in
-            Task { @MainActor in self?.setNeedsLayout() }
-        }
+        observeVideoRect()
     }
 
     @available(*, unavailable)
@@ -388,6 +439,7 @@ final class PlayerSurfaceView: UIView {
         CATransaction.begin()
         CATransaction.setDisableActions(true)
         playerLayer.frame = bounds
+        stagedLayer.frame = bounds
         let videoRect = playerLayer.videoRect
         synchronizedLayer?.frame = videoRect
         let destination = CGRect(origin: .zero, size: videoRect.size)

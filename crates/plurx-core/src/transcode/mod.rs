@@ -35,7 +35,7 @@ pub use decode::{
     FrameRate, FrameRateProvenance, InterlaceVerdict, NormalizedGeometry, OutputBandwidth,
     OutputWidthRule, PlanError, PlanSourceBinding, PresentationContract, Rational, ResolvedDecode,
     ResolvedTranscode, SoftwareDecoder, StreamSelectionProvenance, SubtitleRendering,
-    ToneMapPeakSource, TranscodeMediaOptions, TranscodeRequest,
+    ToneMapPeakSource, TranscodeMediaOptions, TranscodeRequest, VideoSampleEnvelope,
     HEALTH_QUALIFIED_ARTIFACT_NAMESPACE, RESOLVED_TRANSCODE_PLAN_VERSION,
     UNQUALIFIED_ARTIFACT_NAMESPACE,
 };
@@ -48,8 +48,10 @@ pub use encoder::{
 pub use pipeline::{Pipeline, CANDIDATES as PIPELINE_CANDIDATES};
 pub use recipe::{PipelineDigest, Recipe, CACHE_RECIPE_VERSION};
 pub use vod::{
-    vod_audio_anchor, vod_pipe_args, vod_pipe_args_with_reorder, VodFrameGrid,
-    VOD_AAC_FRAME_SAMPLES, VOD_AUDIO_RATE, VOD_HEVC_SAMPLE_ENTRY,
+    vod_audio_anchor, vod_pipe_args, vod_pipe_args_with_reorder, vod_shared_audio_args,
+    vod_shared_audio_plan, VodFrameGrid, VodPresentationFamily, VodRenditionBandwidth,
+    VodSharedAudioRecipe, VodSharedAudioRendition, VodVideoFamily, VodVideoRung,
+    VOD_AAC_FRAME_SAMPLES, VOD_AUDIO_RATE, VOD_HEVC_SAMPLE_ENTRY, VOD_SHARED_AUDIO_CPU_THREADS,
 };
 
 use crate::domain::MediaFile;
@@ -803,6 +805,8 @@ pub struct SubtitleBurn {
 /// Everything needed to build a transcode command.
 #[derive(Debug, Clone, PartialEq)]
 pub struct TranscodeOptions {
+    /// Explicit immutable video sample recipe; ordinary encodes preserve defaults.
+    pub video_sample_envelope: VideoSampleEnvelope,
     /// Conditional candidate semantics; absent preserves the legacy recipe.
     pub auto_quality_rate_profile: Option<AutoQualityRateProfile>,
     pub normalized_geometry: bool,
@@ -994,6 +998,7 @@ pub const AUDIO_BITRATE_KBPS_DEFAULT: u32 = 160;
 impl Default for TranscodeOptions {
     fn default() -> Self {
         TranscodeOptions {
+            video_sample_envelope: VideoSampleEnvelope::EncoderDefault,
             auto_quality_rate_profile: None,
             normalized_geometry: false,
             target_height: 1080,
@@ -1591,6 +1596,7 @@ pub fn hls_args(plan: &ResolvedTranscode, execution: &TranscodeExecution) -> Vec
 pub fn hls_args_for_plan(plan: &ResolvedTranscode, execution: &TranscodeExecution) -> Vec<String> {
     let media = plan.options();
     let options = TranscodeOptions {
+        video_sample_envelope: media.video_sample_envelope,
         auto_quality_rate_profile: None,
         normalized_geometry: false,
         target_height: media.target_height,
@@ -1854,10 +1860,15 @@ fn hls_args_inner(
         Some(_) => BURNED_VIDEO_LABEL.to_owned(),
         None => selected_video.clone(),
     });
-    args.push("-map".into());
-    match opts.audio_index {
-        Some(i) => args.push(format!("0:a:{i}?")),
-        None => args.push("0:a:0?".to_owned()),
+    let encode_audio = plan.is_none_or(|plan| plan.options().input_has_audio);
+    if encode_audio {
+        args.push("-map".into());
+        match opts.audio_index {
+            Some(i) => args.push(format!("0:a:{i}?")),
+            None => args.push("0:a:0?".to_owned()),
+        }
+    } else {
+        args.push("-an".into());
     }
 
     match overlay {
@@ -1920,6 +1931,9 @@ fn hls_args_inner(
         .and_then(|plan| plan.output_contract().normalized_geometry())
         .and_then(|geometry| geometry.rate_profile)
         .is_some()
+        || plan.is_some_and(|plan| {
+            plan.options().video_sample_envelope == VideoSampleEnvelope::ContinuousAvcHigh50
+        })
     {
         // The class explicitly promises H.264 High level5.0, not a profile
         // inferred from the requested height or encoder default.
@@ -1936,21 +1950,23 @@ fn hls_args_inner(
 
     // Audio: downmix + AAC (browser-universal), with the A/V correction as
     // a filter on the same input rather than a second read of the source.
-    if let Some(af) = audio_filter_chain(opts.audio.as_ref(), audio_offset) {
-        args.push("-af".into());
-        args.push(af);
-    }
-    if let Some(audio) = &opts.audio {
-        push_audio_delivery_args(&mut args, audio, false);
-    } else {
-        args.push("-c:a".into());
-        args.push("aac".into());
-        args.push("-ac".into());
-        args.push(opts.audio_channels.to_string());
-        args.push("-b:a".into());
-        args.push(format!("{}k", opts.audio_bitrate_kbps));
-        args.push("-ar".into());
-        args.push(crate::playback::audio::AUDIO_SAMPLE_RATE.to_string());
+    if encode_audio {
+        if let Some(af) = audio_filter_chain(opts.audio.as_ref(), audio_offset) {
+            args.push("-af".into());
+            args.push(af);
+        }
+        if let Some(audio) = &opts.audio {
+            push_audio_delivery_args(&mut args, audio, false);
+        } else {
+            args.push("-c:a".into());
+            args.push("aac".into());
+            args.push("-ac".into());
+            args.push(opts.audio_channels.to_string());
+            args.push("-b:a".into());
+            args.push(format!("{}k", opts.audio_bitrate_kbps));
+            args.push("-ar".into());
+            args.push(crate::playback::audio::AUDIO_SAMPLE_RATE.to_string());
+        }
     }
 
     // Start the MPEG-TS timeline at zero.

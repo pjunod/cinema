@@ -33,7 +33,7 @@ pub(crate) fn try_admit_frozen_bundle(
     hardware_limit: usize,
     software_budget: usize,
     resources: &TranscodeResourceEstimate,
-    options: &TranscodeOptions,
+    software_threads: Option<u32>,
     priority: Priority,
     claim: Option<u64>,
 ) -> Result<crate::admission::TranscodePermit, bool> {
@@ -42,11 +42,9 @@ pub(crate) fn try_admit_frozen_bundle(
         // and filter estimate remains the operative policy floor.
         resources.cpu_threads
     } else {
-        resources.cpu_threads.min(
-            options
-                .software_threads
-                .map_or(resources.cpu_threads, |threads| threads as usize),
-        )
+        resources
+            .cpu_threads
+            .min(software_threads.map_or(resources.cpu_threads, |threads| threads as usize))
     };
     if frozen_floor > software_budget {
         return Err(true);
@@ -61,6 +59,8 @@ pub(crate) fn try_admit_frozen_bundle(
 pub(crate) struct Encoding {
     pub source_object_version: String,
     pub plan: ResolvedTranscode,
+    /// A soundtrack producer owns its AAC recipe independently of video.
+    pub shared_audio: Option<plurx_core::transcode::VodSharedAudioRecipe>,
     pub resources: TranscodeResourceEstimate,
     pub options: TranscodeOptions,
     pub grid: VodFrameGrid,
@@ -276,7 +276,7 @@ impl std::fmt::Debug for Encoding {
             .debug_struct("Encoding")
             .field("decoder", &self.plan.decode().backend())
             .field("encoder", &self.plan.encoder())
-            .field("resources", &self.resources)
+            .field("resources", &self.resources())
             .field("options", &self.options)
             .field("grid", &self.grid)
             .finish_non_exhaustive()
@@ -295,12 +295,102 @@ pub(crate) struct PermitRefusal {
     pub pool: PoolSnapshot,
 }
 
-/// Kept by the pipe owner until the exact process has been reaped. The permit
-/// is not kept by a dormant rendition, an HTTP waiter, or a cache hit.
-#[derive(Debug)]
+/// Ordinary producers retain this until their exact process is reaped.
+/// A bounded family may additionally retain the same reservation for its
+/// attachment lifetime; a retiring worker's clone keeps capacity owned even
+/// when its parent has already ended.
+#[derive(Debug, Clone)]
 pub(crate) struct EncodePermit {
+    _reservation: Arc<EncodeReservation>,
+}
+
+#[derive(Debug)]
+struct EncodeReservation {
     _hardware: Option<HwSlot>,
     _software: Option<SwPermit>,
+    worker_claimed: std::sync::atomic::AtomicBool,
+}
+
+/// Weak link from one immutable rendition to its exact retained capacity.
+/// A cached rendition owns no admission by itself. Parents may adopt the
+/// running worker's credit, and later workers borrow that same entitlement.
+#[derive(Debug, Default)]
+pub(crate) struct RetainedEncodeAdmission {
+    reservation: Mutex<std::sync::Weak<EncodeReservation>>,
+}
+impl RetainedEncodeAdmission {
+    pub(crate) fn current(&self) -> Option<EncodePermit> {
+        self.reservation
+            .lock()
+            .expect("retained rendition admission")
+            .upgrade()
+            .map(|reservation| EncodePermit {
+                _reservation: reservation,
+            })
+    }
+
+    pub(crate) fn bind(&self, admitted: EncodePermit) -> EncodePermit {
+        let mut binding = self
+            .reservation
+            .lock()
+            .expect("retained rendition admission");
+        if let Some(existing) = binding.upgrade() {
+            // An attachment arriving while ordinary admission was in flight
+            // already owns this rendition's exact credit. Release the newly
+            // admitted duplicate and preserve the existing worker claim.
+            EncodePermit {
+                _reservation: existing,
+            }
+        } else {
+            *binding = Arc::downgrade(&admitted._reservation);
+            admitted
+        }
+    }
+}
+
+/// Exclusive process ownership, retained by the producer slot until reap.
+/// Retaining a family reservation never grants concurrent use of its capacity.
+#[derive(Debug)]
+pub(crate) struct EncodeWorkerPermit {
+    reservation: Arc<EncodeReservation>,
+}
+
+impl EncodePermit {
+    pub(crate) fn try_claim_worker(self) -> Option<EncodeWorkerPermit> {
+        self._reservation
+            .worker_claimed
+            .compare_exchange(
+                false,
+                true,
+                std::sync::atomic::Ordering::AcqRel,
+                std::sync::atomic::Ordering::Acquire,
+            )
+            .ok()?;
+        Some(EncodeWorkerPermit {
+            reservation: self._reservation,
+        })
+    }
+}
+
+impl Drop for EncodeWorkerPermit {
+    fn drop(&mut self) {
+        self.reservation
+            .worker_claimed
+            .store(false, std::sync::atomic::Ordering::Release);
+    }
+}
+
+impl From<crate::admission::TranscodePermit> for EncodePermit {
+    fn from(bundle: crate::admission::TranscodePermit) -> Self {
+        let (hardware, software) = bundle.into_parts();
+        Self {
+            _reservation: Arc::new(EncodeReservation {
+                _hardware: hardware,
+                _software: software,
+                worker_claimed: std::sync::atomic::AtomicBool::new(false),
+            }),
+        }
+    }
 }
 
 impl Encoding {
@@ -312,6 +402,7 @@ impl Encoding {
         Arc::new(Encoding {
             source_object_version: self.source_object_version.clone(),
             plan: self.plan.clone(),
+            shared_audio: self.shared_audio.clone(),
             resources: self.resources,
             options: self.options.clone(),
             grid: self.grid,
@@ -366,10 +457,15 @@ impl Encoding {
             active,
             ..ActiveProductionWindow::default()
         };
-        self.production_proofs.remove(self.candidate_recipe);
+        if self.shared_audio.is_none() {
+            self.production_proofs.remove(self.candidate_recipe);
+        }
     }
 
     pub(crate) fn note_active_segment(&self, generation: u64, entry: u32, end_ms: i64) {
+        if self.shared_audio.is_some() {
+            return;
+        }
         let mut window = self.active_production.lock().expect("active production");
         let proof = window.observe(Instant::now(), generation, entry, end_ms);
         if let (Some(recipe), Some(proof)) = (self.candidate_recipe, proof) {
@@ -380,6 +476,9 @@ impl Encoding {
     }
 
     pub(crate) fn active_production_evidence(&self) -> Option<ActiveProductionEvidence> {
+        if self.shared_audio.is_some() {
+            return None;
+        }
         self.active_production
             .lock()
             .expect("active production")
@@ -483,6 +582,8 @@ impl Encoding {
             });
             None
         };
+        // A shared-audio producer admits its own bounded AAC estimate, never
+        // the video recipe it was resolved beside.
         let claim = (priority != Priority::Background)
             .then(|| *self.handoff_claim.lock().expect("VOD handoff claim"))
             .flatten();
@@ -490,19 +591,20 @@ impl Encoding {
             &self.admissions,
             hardware_limit,
             software_budget,
-            &self.resources,
-            &self.options,
+            &self.resources(),
+            // The video recipe's software-encoder cap does not bound the AAC
+            // producer: shared audio's fixed estimate is its whole floor.
+            self.shared_audio
+                .is_none()
+                .then_some(self.options.software_threads)
+                .flatten(),
             priority,
             claim,
         ) {
             Ok(bundle) => bundle,
             Err(over_budget) => return refuse(over_budget),
         };
-        let (hardware, software) = bundle.into_parts();
-        let permit = EncodePermit {
-            _hardware: hardware,
-            _software: software,
-        };
+        let permit = EncodePermit::from(bundle);
         queued.take();
         self.handoff_claim.lock().expect("VOD handoff claim").take();
         self.handoff_wait
@@ -558,7 +660,7 @@ impl Encoding {
             && self.admissions.speculative_fits_after_release(
                 refusal.hardware_limit,
                 refusal.software_budget,
-                &self.resources,
+                &self.resources(),
                 released,
             )
     }
@@ -570,44 +672,149 @@ impl Encoding {
         self.queued.lock().expect("VOD encoder admission").is_some()
     }
 
+    pub(crate) fn resources(&self) -> TranscodeResourceEstimate {
+        if self.shared_audio.is_some() {
+            TranscodeResourceEstimate {
+                hardware_slot: false,
+                cpu_threads: plurx_core::transcode::VOD_SHARED_AUDIO_CPU_THREADS,
+                decoder_threads: Some(1),
+            }
+        } else {
+            self.resources
+        }
+    }
+
+    pub(crate) fn media_plan(&self, duration_ms: i64) -> plurx_core::segplan::SegmentPlan {
+        if let Some(audio) = &self.shared_audio {
+            audio.plan_on_grid(duration_ms, self.grid)
+        } else {
+            // Typed audio delivery owns the budget; a copied or downmixed
+            // track is never planned at the transitional scalar rate.
+            let audio_rate = if self.plan.options().input_has_audio {
+                self.options.audio_budget_kbps()
+            } else {
+                0
+            };
+            self.grid.plan(
+                duration_ms,
+                u64::from(self.options.video_bitrate_kbps.saturating_add(audio_rate)) * 1000,
+            )
+        }
+    }
+
+    /// Container-inclusive delivery ceiling, enforced before publication and
+    /// again on cached child delivery. Average rate stays unknown for JIT media.
+    pub(crate) fn continuous_peak_bps(
+        &self,
+        plan: &plurx_core::segplan::SegmentPlan,
+    ) -> Option<u64> {
+        if self.shared_audio.is_none()
+            && (self.plan.options().input_has_audio
+                || self.options.video_sample_envelope
+                    != plurx_core::transcode::VideoSampleEnvelope::ContinuousAvcHigh50)
+        {
+            return None;
+        }
+        let shortest = plan
+            .entries
+            .iter()
+            .map(|entry| entry.duration_ticks)
+            .min()?;
+        if shortest == 0 || plan.timescale == 0 {
+            return None;
+        }
+        let (rate, burst) = if self.shared_audio.is_some() {
+            (
+                u128::from(self.options.audio_bitrate_kbps) * 2_000,
+                64 * 1024 * 8,
+            )
+        } else {
+            let nominal = u128::from(self.options.video_bitrate_kbps) * 1_000;
+            (nominal * 3, nominal * 2 + 256 * 1024 * 8)
+        };
+        u64::try_from(rate + (burst * u128::from(plan.timescale)).div_ceil(u128::from(shortest)))
+            .ok()
+    }
+
+    pub(crate) fn continuous_object_fits(
+        &self,
+        plan: &plurx_core::segplan::SegmentPlan,
+        index: u32,
+        bytes: u64,
+    ) -> Option<bool> {
+        let peak = self.continuous_peak_bps(plan)?;
+        let entry = plan.entry(index)?;
+        Some(
+            u128::from(bytes) * 8 * u128::from(plan.timescale)
+                <= u128::from(peak) * u128::from(entry.duration_ticks),
+        )
+    }
+
     pub fn args(&self, file: &MediaFile, start_seconds: f64, duration_seconds: f64) -> Vec<String> {
         let mut options = self.options.clone();
         options.start_seconds = start_seconds;
         let execution = TranscodeExecution::from_options(file, &options, Pacing::unpaced(), ".")
             .expect("frozen VOD execution remains valid");
-        vod_pipe_args_with_reorder(
-            file,
-            &self.plan,
-            &execution,
-            self.grid,
-            duration_seconds,
-            self.reorder_frames,
-        )
+        if let Some(audio) = &self.shared_audio {
+            // This input is the source duration, not an already rounded plan
+            // end. Re-rounding the latter could add another whole video frame.
+            let duration_ms = (duration_seconds * 1_000.0).round() as i64;
+            let end_seconds = self.grid.shared_audio_end_ticks(duration_ms) as f64
+                / f64::from(plurx_core::transcode::VOD_AUDIO_RATE);
+            audio
+                .args(&execution, end_seconds)
+                .expect("frozen soundtrack execution remains valid")
+        } else {
+            vod_pipe_args_with_reorder(
+                file,
+                &self.plan,
+                &execution,
+                self.grid,
+                duration_seconds,
+                self.reorder_frames,
+            )
+        }
     }
 
     pub fn identity(&self, file: &MediaFile, duration_seconds: f64) -> SourceIdentity {
         let mut hash = Sha256::new();
-        hash.update(b"immutable-vod-encoded-v1\0");
+        hash.update(if self.shared_audio.is_some() {
+            b"immutable-vod-shared-aac-v1\0".as_slice()
+        } else {
+            b"immutable-vod-encoded-v1\0".as_slice()
+        });
         hash.update((self.source_object_version.len() as u64).to_le_bytes());
         hash.update(self.source_object_version.as_bytes());
         hash.update(self.ffmpeg_build.as_bytes());
         hash.update(self.executable.digest.as_bytes());
         hash.update(self.engine.digest.as_bytes());
-        hash.update(self.plan.plan_digest().as_bytes());
-        hash.update(b"vod-reorder-choice-v1\0");
-        hash.update([u8::from(self.reorder_frames)]);
+        hash.update(
+            self.shared_audio
+                .as_ref()
+                .map_or_else(
+                    || self.plan.plan_digest(),
+                    |audio| audio.digest().to_owned(),
+                )
+                .as_bytes(),
+        );
+        if self.shared_audio.is_none() {
+            hash.update(b"vod-reorder-choice-v1\0");
+            hash.update([u8::from(self.reorder_frames)]);
+        }
         for argument in self.args(file, 0.0, duration_seconds) {
             hash.update((argument.len() as u64).to_le_bytes());
             hash.update(argument.as_bytes());
         }
         // The same descriptor path may hold different selected subtitle
         // streams; argv alone cannot name their source-stream identity.
-        if let Some(burn) = &self.options.subtitle_burn {
-            hash.update(burn.subtitle_index.to_le_bytes());
-            hash.update([u8::from(burn.bitmap)]);
-        }
-        if let Some(digest) = &self.subtitle_digest {
-            hash.update(digest.as_bytes());
+        if self.shared_audio.is_none() {
+            if let Some(burn) = &self.options.subtitle_burn {
+                hash.update(burn.subtitle_index.to_le_bytes());
+                hash.update([u8::from(burn.bitmap)]);
+            }
+            if let Some(digest) = &self.subtitle_digest {
+                hash.update(digest.as_bytes());
+            }
         }
         SourceIdentity::new(
             file.size.max(0) as u64,

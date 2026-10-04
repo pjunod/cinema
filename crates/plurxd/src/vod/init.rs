@@ -98,6 +98,15 @@ pub(super) async fn regenerate_init_head(
             "the immutable media engine changed during head regeneration".to_owned(),
         ));
     }
+    if let Some(audio) = recipe
+        .encoding
+        .as_ref()
+        .and_then(|encoding| encoding.shared_audio.as_ref())
+    {
+        audio
+            .verify_init(&muxer)
+            .map_err(|error| HeadRegenerationError::Failed(error.to_string()))?;
+    }
     identity
         .served_init_for(&muxer)
         .map_err(|refused| HeadRegenerationError::Failed(refused.to_string()))

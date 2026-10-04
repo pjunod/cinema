@@ -1335,7 +1335,8 @@ async function executePlaybackMediaChange(p,change){
       // point: which context a create is in is decided in ONE place, not by
       // which branch of this function happened to call which function.
       const info=await preparation.run(
-        signal=>openSessionRetryingNotYet(p.fileId,opts,signal,{preparation}),
+        signal=>openSessionRetryingNotYet(p.fileId,opts,signal,{preparation,
+          continuousRestartSessionId:change.forceReopen&&p.continuousQualityBootstrap?p.sessionId:null}),
         late=>releaseSession(late&&late.session_id));
       if(!live()){ releaseSession(info&&info.session_id); return false; }
       retirePlaybackPredecessor(p);
@@ -1767,7 +1768,7 @@ function armHitchDetector(v){
   if(!p.controlHasFrameCallbacks) return;
   p.hitches={back:0, held:0, late:0, gap:0, drop:0, slow:0, worst:0, last:null, at:[], fps:null,
              n:0, near:{}, flushEdge:null, skewMax:0, skewAt:null, decodeMs:null, frames:0,
-             rate:null, renderedFps:null, faults:[]};
+             rate:null, renderedFps:null, faults:[], metadataAnomalies:0, metadataFaults:[]};
   // When the detector armed, so "zero faults" can be told apart from "zero
   // callbacks". Safari has shipped rVFC for years and still declines to fire
   // it on some pipelines — a session that stutters visibly while this
@@ -1839,6 +1840,19 @@ function armHitchDetector(v){
     if(PLAYER!==p||document.getElementById("video")!==v) return;
     if(!playbackOwnsAttachedMedia(p)){
       prev=null;rateWin.length=0;
+      queuePlaybackFrame(v,p,step);return;
+    }
+    if(!v.paused&&!v.seeking&&PlaybackPolicy.frameMetadataAheadOfClock(meta,{
+      nowMs:now,currentTime:v.currentTime,playbackRate:v.playbackRate||1,nominalSeconds:nominal()||0
+    })){
+      const h=p.hitches;
+      h.metadataAnomalies++;
+      h.metadataFaults.push({kind:'future_media_timestamp',at_ms:now,media_time:meta.mediaTime,
+        current_time:v.currentTime,expected_display_time_ms:meta.expectedDisplayTime??null,
+        presented_frames:meta.presentedFrames??null,session_id:p.sessionId||null});
+      if(h.metadataFaults.length>16) h.metadataFaults.shift();
+      // Preserve the last trustworthy frame: the next callback still spans
+      // this interval and can reveal a real hold, backward step or late frame.
       queuePlaybackFrame(v,p,step);return;
     }
     p.controlPresentedFrames=(p.controlPresentedFrames||0)+1;

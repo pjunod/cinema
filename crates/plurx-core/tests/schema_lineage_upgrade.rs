@@ -113,7 +113,10 @@ async fn coherent_advance(
         .validation_coherent_lineage_snapshot()
         .await
         .expect("recognized coherent successor");
-    assert_eq!(successor.0, if private { 73 } else { 70 });
+    // A private caller bridges to the canonical end (73) and then runs the
+    // ordinary steps after it in the same open: Jellyfin compatibility
+    // (74-77) and continuous quality (78, 79).
+    assert_eq!(successor.0, if private { 79 } else { 70 });
     assert_ne!(
         successor.1, predecessor.1,
         "committed schema actually advanced"
@@ -226,7 +229,10 @@ fn sqlite_cases(root: &Path) {
             assert_eq!(
                 conn.query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0))
                     .expect("canonical marker"),
-                97
+                // The bridge stamps the canonical end (v97); the ordinary
+                // Jellyfin (v98-v101) and continuous-quality (v102-v103)
+                // steps then reach v103.
+                103
             );
             assert_eq!(
                 conn.query_row(PAYLOAD, [], |row| row.get::<_, String>(0))
@@ -341,7 +347,8 @@ async fn hiqlite_case(
         }
         drop(store);
         let store = Box::pin(HiqliteAuthStore::open_or_migrate(client.clone(), &telemetry)).await.expect("actual replicated lineage upgrade");
-        assert_eq!(value(&client, "SELECT CAST(schema_version AS TEXT) AS value FROM cluster_meta").await, "73");
+        // Bridged to the canonical end (73), then the ordinary steps to 79.
+        assert_eq!(value(&client, "SELECT CAST(schema_version AS TEXT) AS value FROM cluster_meta").await, "79");
         assert_eq!(value(&client, PAYLOAD).await, "synthetic opaque payload");
         assert_eq!(value(&client, JOB_VALUE).await, expected_job);
         if let Some(expected) = expected_package { assert_eq!(value(&client, PACKAGE_VALUE).await, expected); }

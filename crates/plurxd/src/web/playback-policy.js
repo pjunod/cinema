@@ -5,6 +5,20 @@
 })(typeof globalThis !== "undefined" ? globalThis : this, function () {
   "use strict";
 
+  // A callback submitted for an expected future display can legitimately
+  // lead the element clock by that interval. Larger unexplained future PTS
+  // is uncertain metadata, not a new baseline for backward/skip counters.
+  function frameMetadataAheadOfClock(meta, {nowMs, currentTime, playbackRate = 1, nominalSeconds = 0} = {}) {
+    if (!Number.isFinite(meta?.mediaTime) || !Number.isFinite(nowMs)
+        || !Number.isFinite(currentTime) || currentTime < 0
+        || !Number.isFinite(playbackRate) || playbackRate <= 0) return false;
+    const futureMs = Number.isFinite(meta.expectedDisplayTime)
+      ? Math.max(0, meta.expectedDisplayTime - nowMs) : 0;
+    // Retain coarse 100ms clock rounding and low-frame-rate presentation.
+    const tolerance = Math.max(0.2, Number.isFinite(nominalSeconds) && nominalSeconds > 0 ? 2 * nominalSeconds : 0);
+    return meta.mediaTime - currentTime > tolerance + futureMs * playbackRate / 1000;
+  }
+
   const DEFAULTS = Object.freeze({
     lostPerMinute: 6,
     minimumSeconds: 150,
@@ -857,6 +871,12 @@
       // without it the viewer is sent back to the start of a film they were
       // ninety minutes into. Absent, null or unparseable stays `null` — a
       // guessed position is worse than no position.
+      // Only this typed refusal carries an unpublished start's release
+      // capability. Other failures and malformed ids cannot name a resource.
+      ...(parsed.code === "media_session_handoff_pending"
+        && typeof parsed.pending_session_id === "string"
+        && /^[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i.test(parsed.pending_session_id)
+        ? { pending_session_id: parsed.pending_session_id } : {}),
       position_ms:
         parsed.film_position_ms != null &&
         Number.isFinite(Number(parsed.film_position_ms))
@@ -2268,10 +2288,15 @@
     const severe = sample.cause === "link" && link > 0 && demand > 0
       && link * 10 < demand * 7 && draining;
     const lowMargin = sample.cause === "link" && link > 0 && demand > 0
-      && link < demand * 1.2 && draining;
-    next.mildSamples = lowMargin ? (next.mildSamples || 0) + 1 : 0;
+      && link < demand * 1.2;
+    // A routine HLS refill is not recovered link headroom. Retain consecutive
+    // fresh low-margin observations across it, but require draining when
+    // actually choosing a downgrade. Otherwise the two-second refill cycle
+    // can reset every one-second observation and postpone pressure forever.
+    next.mildSamples = lowMargin ? Math.min(2, (next.mildSamples || 0) + 1) : 0;
     const emergency = severe || sample.cause === "decode";
-    const pressure = severe || next.mildSamples >= 2 || ["encode", "decode"].includes(sample.cause);
+    const pressure = severe || next.mildSamples >= 2 && draining
+      || ["encode", "decode"].includes(sample.cause);
     const area = candidate => candidate.width * candidate.height;
     let chosen;
     if (pressure) {
@@ -2351,6 +2376,7 @@
     nativeHlsAvailable,
     hlsTransport,
     copyAudioNeedsTranscode,
+    frameMetadataAheadOfClock,
     initialRoute,
     indexPendingFallback,
     fallbackAction,

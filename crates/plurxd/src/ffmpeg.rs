@@ -449,12 +449,25 @@ impl Drop for BoundedDiagnosticChild {
     }
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub(crate) struct EncodedExecutable {
     pub path: std::path::PathBuf,
     pub digest: String,
     object_version: String,
 }
+
+#[derive(Default)]
+struct ExecutableCaptureCache {
+    executable: Option<EncodedExecutable>,
+    #[cfg(test)]
+    hashes: u64,
+}
+
+// One configured encoder, one retained attestation. Concurrent recipe captures
+// share the hash; every reuse still checks the exact object identity that the
+// production launch and publication fences require.
+static EXECUTABLE_CAPTURE_CACHE: std::sync::OnceLock<tokio::sync::Mutex<ExecutableCaptureCache>> =
+    std::sync::OnceLock::new();
 
 impl EncodedExecutable {
     pub(crate) async fn capture_program(program: &str) -> Result<Self, String> {
@@ -468,12 +481,33 @@ impl EncodedExecutable {
     }
 
     pub(crate) async fn capture_at(path: std::path::PathBuf) -> Result<Self, String> {
+        Self::capture_at_with_cache(path, EXECUTABLE_CAPTURE_CACHE.get_or_init(Default::default))
+            .await
+    }
+
+    async fn capture_at_with_cache(
+        path: std::path::PathBuf,
+        cache: &tokio::sync::Mutex<ExecutableCaptureCache>,
+    ) -> Result<Self, String> {
+        let mut cache = cache.lock().await;
+        if let Some(captured) = cache.executable.as_ref().filter(|value| value.path == path) {
+            let objects = vec![captured.attestation_object()].into();
+            if engine_objects_are_current_batch(None, objects).await.0 {
+                return Ok(captured.clone());
+            }
+        }
         let (digest, object_version) = hash_engine_object(&path).await?;
-        Ok(Self {
+        let captured = Self {
             path,
             digest: hex::encode(digest),
             object_version,
-        })
+        };
+        #[cfg(test)]
+        {
+            cache.hashes += 1;
+        }
+        cache.executable = Some(captured.clone());
+        Ok(captured)
     }
 
     /// The `(path, version)` pair this executable attests.
@@ -4756,6 +4790,55 @@ mod tests {
     }
 
     use super::*;
+
+    #[tokio::test]
+    async fn encoded_executable_capture_shares_hash_and_rechecks_replacement() {
+        let base = crate::test_tempdir().expect("encoder capture cache");
+        let path = base.path().join("encoder");
+        tokio::fs::write(&path, b"encoder-a")
+            .await
+            .expect("encoder");
+        let modified = std::fs::metadata(&path)
+            .expect("encoder metadata")
+            .modified()
+            .expect("encoder mtime");
+        let cache = tokio::sync::Mutex::new(ExecutableCaptureCache::default());
+        let (first, second) = tokio::join!(
+            EncodedExecutable::capture_at_with_cache(path.clone(), &cache),
+            EncodedExecutable::capture_at_with_cache(path.clone(), &cache),
+        );
+        let first = first.expect("first capture");
+        assert_eq!(first.digest, second.expect("concurrent capture").digest);
+        assert_eq!(
+            cache.lock().await.hashes,
+            1,
+            "one actual hash for concurrent recipes"
+        );
+        let replacement = base.path().join("replacement");
+        std::fs::write(&replacement, b"encoder-b").expect("replacement bytes");
+        std::fs::File::options()
+            .write(true)
+            .open(&replacement)
+            .expect("replacement handle")
+            .set_times(std::fs::FileTimes::new().set_modified(modified))
+            .expect("preserve mtime");
+        std::fs::rename(replacement, &path).expect("replace encoder");
+        let changed = EncodedExecutable::capture_at_with_cache(path.clone(), &cache)
+            .await
+            .expect("replacement capture");
+        assert_ne!(
+            first.digest, changed.digest,
+            "same size and mtime do not reuse old bytes"
+        );
+        assert_eq!(cache.lock().await.hashes, 2);
+        tokio::fs::remove_file(&path).await.expect("remove encoder");
+        assert!(
+            EncodedExecutable::capture_at_with_cache(path, &cache)
+                .await
+                .is_err(),
+            "a missing encoder cannot reuse its cached attestation"
+        );
+    }
 
     #[tokio::test]
     async fn encoded_executable_refuses_same_size_mtime_replacement() {

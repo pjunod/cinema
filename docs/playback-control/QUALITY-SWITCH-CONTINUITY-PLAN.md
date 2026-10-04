@@ -26,6 +26,12 @@ started priming for it. Every rung change the fleet has ever served has been
 the fallback path, whose interruption is measured at 271–2,246 ms on the web
 and 353–766 ms on Android.
 
+**2026-09-30 follow-up:** [Continuous quality](CONTINUOUS-QUALITY-BUILD.md)
+now defines the next build and its acceptance. It replaces mandatory
+reopen-on-failure for healthy playback and adds compatible HLS rendition
+switching. This document retains the earlier contract and its historical
+evidence; it does not establish completion of the new work.
+
 ## 1. How a rung change works today
 
 ### 1.1 The ladder is per-session, not per-playlist

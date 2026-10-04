@@ -638,6 +638,7 @@ impl TranscodeManager {
                 CandidateRoute::Original => continue,
             };
             let request = SessionRequest {
+                continuous_media: None,
                 vod_only: false,
                 passive_vod: false,
                 finite_bitrate_limit_bps: None,
@@ -823,11 +824,24 @@ impl TranscodeManager {
         deadline: tokio::time::Instant,
     ) -> Result<(), CandidateRestoreError> {
         let Some(id) = envelope.candidate_id else {
+            if envelope
+                .request
+                .continuous_media
+                .as_ref()
+                .is_some_and(|media| media.autonomous_companion.is_some())
+            {
+                return Err(CandidateRestoreError::Incompatible(
+                    "autonomous family primary catalog identity missing".to_owned(),
+                ));
+            }
             return Ok(());
         };
         let catalog = envelope.candidate_catalog.as_ref().ok_or_else(|| {
             CandidateRestoreError::Incompatible("candidate canonical evidence missing".to_owned())
         })?;
+        let restore_deadline = deadline.min(crate::media_pool::create_stage_deadline(
+            Duration::from_secs(2),
+        ));
         let context = self
             .restore_catalog_context(
                 &envelope.request,
@@ -836,13 +850,109 @@ impl TranscodeManager {
                 envelope.source_size,
                 envelope.source_mtime,
                 envelope.decoder_caps.as_ref(),
-                deadline.min(crate::media_pool::create_stage_deadline(
-                    Duration::from_secs(2),
-                )),
+                restore_deadline,
             )
             .await?;
+        let companion_context = match envelope
+            .request
+            .continuous_media
+            .as_ref()
+            .and_then(|media| media.autonomous_companion)
+        {
+            Some(companion_id) => Some(Box::new(
+                self.restore_continuous_companion_context(
+                    &envelope.request,
+                    &context,
+                    companion_id,
+                    restore_deadline,
+                )
+                .await?,
+            )),
+            None => None,
+        };
+        if let Some(media) = envelope.request.continuous_media.as_mut() {
+            media.companion_context = companion_context;
+        }
         envelope.request.candidate_context = Some(Box::new(context));
         Ok(())
+    }
+
+    /// An autonomous continuous family re-derives its one companion rung from
+    /// the primary's held planning snapshot and canonical caps, scoped to the
+    /// exact companion recipe the owner bound. Persistence alone grants nothing.
+    async fn restore_continuous_companion_context(
+        &self,
+        request: &SessionRequest,
+        primary: &CandidateExecutionContext,
+        companion_id: CandidateId,
+        deadline: tokio::time::Instant,
+    ) -> Result<ContinuousCompanionContext, CandidateRestoreError> {
+        let incompatible = |message: &str| CandidateRestoreError::Incompatible(message.to_owned());
+        let selected_companion = request
+            .continuous_media
+            .as_ref()
+            .and_then(|media| media.companion_catalog.as_deref())
+            .filter(|row| row.id == companion_id && row.identity_matches())
+            .ok_or_else(|| incompatible("continuous companion canonical evidence missing"))?;
+        let (Some(planning), Some(canonical_caps)) = (
+            primary.planning_snapshot.as_ref(),
+            primary.canonical_caps.as_ref(),
+        ) else {
+            return Err(incompatible(
+                "continuous companion planning evidence missing",
+            ));
+        };
+        let retained_copy = match request.kind {
+            SessionKind::Copy {
+                aac,
+                preserve_dolby_vision,
+                convert_dolby_vision,
+            } => Some((aac, preserve_dolby_vision, convert_dolby_vision)),
+            SessionKind::Transcode { .. } => None,
+        };
+        let resolved = tokio::time::timeout_at(
+            deadline,
+            self.quality_catalog_from_snapshot_progress(
+                planning,
+                canonical_caps,
+                request.audio_index,
+                request.audio_offset_ms,
+                request.subtitle_burn,
+                request.presentation,
+                retained_copy,
+                request.audio_delivery.as_ref(),
+                request.audio_claim.as_ref(),
+                None,
+                Some(selected_companion),
+            ),
+        )
+        .await
+        .map_err(|_| CandidateRestoreError::Unavailable("candidate restoration deadline".into()))?;
+        if let Some(error) = resolved.selected_unavailable {
+            return Err(CandidateRestoreError::Unavailable(error));
+        }
+        let companion = resolved
+            .candidates
+            .iter()
+            .find(|row| {
+                row.id == companion_id
+                    && row.id != primary.candidate_id
+                    && row.decoder_compatible
+                    && row.route == CandidateRoute::Encode
+                    && row.normalized_geometry
+                    && row.grade == OutputGrade::Sdr
+                    && row.recipe_digest == selected_companion.recipe_digest
+                    && row.target_height != primary.selected_candidate.target_height
+            })
+            .ok_or_else(|| incompatible("autonomous companion recipe or decoder changed"))?;
+        let mut context = Self::candidate_context(companion);
+        context.canonical_caps = Some(canonical_caps.clone());
+        context.planning_binding = primary.planning_binding.clone();
+        context.planning_snapshot = Some(Arc::clone(planning));
+        Ok(ContinuousCompanionContext {
+            height: i64::from(companion.target_height),
+            candidate: context,
+        })
     }
 
     /// Worker envelopes and claimed background intents re-enter the same
@@ -1343,6 +1453,7 @@ mod snapshot_catalog_regression {
             assert!(!TranscodeManager::vod_reorder_from_snapshot(&snapshot));
         }
         let request = SessionRequest {
+            continuous_media: None,
             vod_only: false,
             passive_vod: false,
             finite_bitrate_limit_bps: None,
@@ -2194,6 +2305,7 @@ mod snapshot_catalog_regression {
         context.planning_binding =
             Some(crate::media_pool::PlanningBinding::from_snapshot(&planning));
         let mut request = SessionRequest {
+            continuous_media: None,
             quality_catalog: None,
             candidate_context: Some(Box::new(context)),
             vod_only: false,

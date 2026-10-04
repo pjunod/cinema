@@ -104,6 +104,24 @@ const _: () = assert!(
     "background_jobs::ENCODED_OUTPUT_SQLITE_SCHEMA does not name its migration"
 );
 
+/// First SQLite schemas containing the continuous-quality tables: the
+/// cancellation receipts and preparation owners, then the parent-fenced
+/// ledger. The Hiqlite import gates those tables on these, and the
+/// assertions below keep them naming their entries in [`MIGRATIONS`].
+pub(crate) const QUALITY_CANCELLATION_SQLITE_SCHEMA: i64 = 102;
+pub(crate) const QUALITY_LEDGER_SQLITE_SCHEMA: i64 = 103;
+const _: () = assert!(
+    migration_is(
+        QUALITY_CANCELLATION_SQLITE_SCHEMA,
+        super::quality_cancellation::QUALITY_CANCELLATION_SCHEMA
+    ),
+    "QUALITY_CANCELLATION_SQLITE_SCHEMA does not name its migration"
+);
+const _: () = assert!(
+    migration_is(QUALITY_LEDGER_SQLITE_SCHEMA, super::quality_ledger::SCHEMA),
+    "QUALITY_LEDGER_SQLITE_SCHEMA does not name its migration"
+);
+
 /// Ordered, append-only migration list. `PRAGMA user_version` tracks the last
 /// applied index + 1. Never edit an entry that has shipped — append instead.
 /// Visible to the import inventory guard, which needs to know which migration
@@ -1263,6 +1281,13 @@ pub(crate) const MIGRATIONS: &[&str] = &[
     super::jellyfin_play::SCHEMA,
     // v101: manual-edit revisions and trusted compatibility own-edit continuation.
     super::jellyfin_watch::SCHEMA,
+    // v102: independent quality cancellation, without ending the incumbent.
+    // The continuous-quality effort drafted this as v92, then v98; main's
+    // v92–v101 reached main first, so it appends after them.
+    super::quality_cancellation::QUALITY_CANCELLATION_SCHEMA,
+    // v103: parent-fenced continuous media facts and dependency reservations
+    // (drafted as v93, then v99).
+    super::quality_ledger::SCHEMA,
 ];
 
 /// Highest SQLite schema version this binary can read and migrate.
@@ -3243,9 +3268,10 @@ mod tests {
 
         // v98–v101 add Jellyfin compatibility: permanent wire identities,
         // compatibility-only logins, bounded negotiations with exact native
-        // references, and manual-edit watch revisions.
+        // references, and manual-edit watch revisions; v102 adds quality
+        // cancellation and v103 continuous dependencies.
         assert_eq!(
-            version, 101,
+            version, 103,
             "a new migration must be a deliberate bump, not a surprise — \
              the list is append-only and every entry is one somebody shipped"
         );

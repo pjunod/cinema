@@ -1,5 +1,42 @@
 import Foundation
 
+/// One optional manual choice, separate from the standing media recipe.
+/// A stale failure cannot restore a recipe over a newer viewer command.
+struct ManualQualityRetention: Equatable {
+    struct Attempt: Equatable {
+        var viewerEpoch: Int
+        let incumbent: QualitySelection
+        let seekGeneration: Int
+        let carryingSeek: Bool
+        let incumbentRecipeAttached: Bool
+    }
+    private(set) var pending: Attempt?
+    private(set) var retained: Attempt?
+
+    mutating func begin(_ attempt: Attempt) {
+        pending = attempt
+        retained = nil
+    }
+
+    /// Only the transport owner can advance this fence. A seek or recipe
+    /// choice keeps the old attempt stale and cannot inherit its incumbent.
+    mutating func transportChanged(from oldEpoch: Int, to newEpoch: Int) {
+        if pending?.viewerEpoch == oldEpoch { pending?.viewerEpoch = newEpoch }
+        if retained?.viewerEpoch == oldEpoch { retained?.viewerEpoch = newEpoch }
+    }
+
+    mutating func retain(viewerEpoch: Int, incumbentHealthy: Bool) -> Attempt? {
+        guard let pending, pending.viewerEpoch == viewerEpoch,
+              pending.incumbentRecipeAttached, incumbentHealthy else { return nil }
+        self.pending = nil
+        retained = pending
+        return pending
+    }
+
+    mutating func didAttach() { pending = nil }
+    mutating func clear() { pending = nil; retained = nil }
+}
+
 /// The client half of a prepared quality handoff.
 ///
 /// The server stages a whole second session — an incarnation, a durable row,
@@ -326,6 +363,8 @@ enum PreparedReplacementBounds {
     /// the picture is frozen and the only way out is a reopen, so this is
     /// generous where the readiness bounds are mean.
     static let firstFrameMs = 6_000
+    /// Absolute dual-pipeline lifetime; Pause parks frame observation, not resources.
+    static let overlapMs = 12_000
     /// From the commit's alignment seek to the seek coming back.
     ///
     /// The successor is already playable and buffered past the point it was
@@ -368,13 +407,24 @@ struct PreparedCommitRendezvous: Equatable {
     static func plan(
         stagedFilmPositionMs: Int,
         incumbentFilmPositionMs: Int,
-        mediaOriginMs: Int
+        mediaOriginMs: Int,
+        leadMs: Int = 0
     ) -> PreparedCommitRendezvous {
-        let film = max(max(0, stagedFilmPositionMs), max(0, incumbentFilmPositionMs))
+        let (future, overflow) = max(0, incumbentFilmPositionMs).addingReportingOverflow(max(0, leadMs))
+        let film = max(max(0, stagedFilmPositionMs), overflow ? Int.max : future)
         return PreparedCommitRendezvous(
             filmPositionMs: film,
             itemPositionMs: max(0, film - mediaOriginMs)
         )
+    }
+
+    /// A completed seek and a layer's old ready bit do not identify its new
+    /// decoded sample. Require finite item-local time and an actual raster.
+    func acceptsDecodedAlignment(displaySeconds: Double, width: Int, height: Int, frameDurationSeconds: Double) -> Bool {
+        displaySeconds.isFinite && displaySeconds >= 0
+            && width > 0 && height > 0
+            && frameDurationSeconds.isFinite && frameDurationSeconds > 0 && frameDurationSeconds <= 1
+            && abs(displaySeconds - Double(itemPositionMs) / 1_000) <= frameDurationSeconds + 1e-9
     }
 
     /// What a commit owes when the alignment does not land inside its bound.
@@ -415,6 +465,41 @@ func awaitBoundedValue<Value>(
         // lands in the final poll interval is still the answer.
         if now() >= deadline { return read() }
         await sleep(max(1, pollMs))
+    }
+}
+
+/// Monotonic presentation time spent while the viewer requests Play.
+/// A decoder stall does not pause this clock; explicit transport intent does.
+struct PreparedActiveWallBudget: Equatable {
+    private(set) var remainingMs: Int
+    private(set) var remainingOverlapMs: Int?
+    private var lastUpdateMs: Int
+    private var playbackRequested: Bool
+
+    init(boundMs: Int, nowMs: Int, playbackRequested: Bool,
+         overlapBoundMs: Int? = nil, overlapStartedAtMs: Int? = nil) {
+        remainingMs = max(0, boundMs)
+        remainingOverlapMs = overlapBoundMs.map { bound in
+            let limit = max(0, bound)
+            let spent = max(0, nowMs - (overlapStartedAtMs ?? nowMs))
+            return limit - min(limit, spent)
+        }
+        lastUpdateMs = max(0, nowMs)
+        self.playbackRequested = playbackRequested
+    }
+
+    @discardableResult
+    mutating func update(nowMs: Int, playbackRequested: Bool) -> Bool {
+        let current = max(lastUpdateMs, nowMs)
+        if self.playbackRequested {
+            remainingMs -= min(remainingMs, current - lastUpdateMs)
+        }
+        if let remaining = remainingOverlapMs {
+            remainingOverlapMs = remaining - min(remaining, current - lastUpdateMs)
+        }
+        lastUpdateMs = current
+        self.playbackRequested = playbackRequested
+        return remainingMs == 0 || remainingOverlapMs == 0
     }
 }
 

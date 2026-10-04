@@ -1066,7 +1066,8 @@
         previous_session_id: &str,
     ) -> SessionRequest {
         SessionRequest {
-            quality_catalog: None,
+            continuous_media: None,
+quality_catalog: None,
             candidate_context: None,
             vod_only: false,
             passive_vod: false,
