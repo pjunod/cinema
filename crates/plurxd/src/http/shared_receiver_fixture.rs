@@ -408,6 +408,64 @@ async fn actual_pinned_playback(address: IpAddr, h2: bool) {
         serde_json::from_slice(&fixture.source.request).expect("Source complete recipe fixture");
     let session =
         serde_json::to_vec(&original["session"]).expect("complete ordinary CreateSession body");
+    let summary = fixture
+        .state
+        .store
+        .sharing_import(fixture.import_id)
+        .await
+        .expect("current import read")
+        .expect("current import")
+        .summary;
+    let key = super::shared_artwork::receiver_key(&fixture.state)
+        .await
+        .expect("actual B locator key read")
+        .expect("actual B locator key");
+    let reference = key
+        .verify(
+            base.rsplit('/').next().expect("actual locator"),
+            fixture.import_id,
+            summary.lifecycle_generation,
+        )
+        .expect("actual advertised locator verification");
+    let login_hash = plurx_core::auth::hash_token(&fixture.original_login);
+    let intent = plurx_core::sharing_receiver_sessions::ReceiverSessionIntent {
+        scope: plurx_core::store::sharing_catalogue::ReceiverCatalogueScope {
+            import_id: summary.id,
+            source_server_id: summary.source_server_id,
+            catalogue_epoch: summary.catalogue_epoch,
+            lifecycle_generation: summary.lifecycle_generation,
+            assignment_generation: summary.assignment_generation,
+            endpoint_generation: summary.endpoint_generation,
+            claim_id: summary.claim_id,
+            remote_grant_id: summary.remote_grant_id.expect("actual remote grant"),
+            libraries: vec![reference.item.library_id.clone()],
+        },
+        user_id: fixture.viewer_id,
+        login_hash: login_hash.clone(),
+        recipe: plurx_core::sharing_receiver_sessions::RemoteSourceRecipe {
+            kind: plurx_core::sharing_receiver_sessions::ReceiverProducerKind::RemoteSource,
+            version: 1,
+            reference: reference.item,
+            lifecycle_generation: reference.lifecycle_generation,
+            file_id: reference.file_id,
+            file_revision: reference.revision,
+            source_request_id: Uuid::new_v4(),
+            parent_login_hash: login_hash,
+            request_json: original["session"].to_string(),
+        },
+        source_position_ms: 0,
+    };
+    // This is only an actual read-only B metadata check, never Source admission.
+    assert!(
+        fixture
+            .state
+            .store
+            .prepare_receiver_session_authority(intent)
+            .await
+            .expect("actual B metadata authority read")
+            .is_some(),
+        "current original-login full-reference B metadata authority; H2={h2}"
+    );
     let (status, _, bytes) = b_request(
         b_address,
         h2,
@@ -420,7 +478,11 @@ async fn actual_pinned_playback(address: IpAddr, h2: bool) {
     assert_eq!(
         status,
         StatusCode::OK,
-        "actual B Start through real Source actor; H2={h2}"
+        "actual B Start through real Source actor; H2={h2}; code={}",
+        serde_json::from_slice::<Value>(&bytes)
+            .ok()
+            .and_then(|value| value.get("code").and_then(Value::as_str).map(str::to_owned))
+            .unwrap_or_else(|| "no_typed_error_code".into())
     );
     let start: Value = serde_json::from_slice(&bytes).expect("complete B Start DTO");
     let session = start["session_id"].as_str().expect("actual B session ID");
