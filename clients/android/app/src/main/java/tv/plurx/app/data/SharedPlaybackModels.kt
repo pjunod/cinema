@@ -257,6 +257,7 @@ internal data class SharedProgressBeat(
 }
 internal sealed interface SharedProgressResult {
     data object Acknowledged : SharedProgressResult
+    data object PreviousBeatAcknowledged : SharedProgressResult
     data class ResyncRequired(val currentSequence: Long?) : SharedProgressResult
 }
 /** One watch-key order: uncertain sends retain the exact beat; conflicts require

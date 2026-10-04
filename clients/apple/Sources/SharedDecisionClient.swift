@@ -58,6 +58,23 @@ struct SharedDecisionClient {
         try Task.checkCancellation(); try requireCurrent()
         return try SharedStart.decode(data).bindInitial(context, request: retained)
     }
+    func playlistURL(playback: SharedStartedPlayback) throws -> URL {
+        try requireCurrent(); _ = try playback.start.validated(playback.context)
+        guard let reference = playback.context.reference, let revision = playback.context.revision,
+              playback.context.sessionId == playback.start.response.sessionId else { throw APIError.badURL }
+        try playback.context.validateSharedReference(reference, file: playback.context.sourceFileId, revision: revision)
+        guard let url = URL(string: origin + playback.start.response.playlistUrl) else { throw APIError.badURL }
+        return url
+    }
+    /// Best-effort B End. A successful HTTP reply is never physical settlement
+    /// evidence; the server's actual owner retains that obligation.
+    func end(playback: SharedStartedPlayback) async throws {
+        _ = try playlistURL(playback: playback)
+        guard let url = URL(string: origin + "/api/v1/hls/\(playback.start.response.sessionId)") else { throw APIError.badURL }
+        var request = URLRequest(url: url); request.httpMethod = "DELETE"; request.timeoutInterval = 10
+        request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+        _ = try await SharedDecisionReadOperation(request: request, configuration: configuration, statuses: [200, 202, 204], maxBytes: 16_384, allowEmpty: true, current: requireCurrent).readResponse()
+    }
     /// One bounded account/Source/epoch/item watch order across imports.
     /// Busy callers skip a beat; a conflict always triggers a fresh read before
     /// a later new beat, never a replay of the stale position with a new number.
@@ -65,7 +82,9 @@ struct SharedDecisionClient {
     func orderedProgress(playback: SharedStartedPlayback, initialWatchSequence: Int64,
                          positionMs: Int64, durationMs: Int64?, watched: Bool = false) async throws -> SharedProgressResult? {
         try requireCurrent()
-        guard let reference = playback.context.reference else { throw APIError.badURL }
+        guard let reference = playback.context.reference, let revision = playback.context.revision else { throw APIError.badURL }
+        try playback.context.validateSharedReference(reference, file: playback.context.sourceFileId, revision: revision)
+        _ = try playback.start.validated(playback.context)
         let account = SharedProgressAccount(origin: origin, token: token, generation: generation)
         let key = SharedProgressKey(server: reference.serverId, epoch: reference.catalogueEpoch, item: reference.itemId)
         let registry = Self.progressRegistry
@@ -96,6 +115,7 @@ struct SharedDecisionClient {
         let beat = try entry.order.beat(sessionId: playback.start.response.sessionId, positionMs: positionMs, durationMs: durationMs, watched: watched)
         let result = try await progress(playback: playback, beat: beat)
         try requireCurrent(); try entry.order.complete(beat, result: result)
+        if result == .acknowledged && (beat.positionMs != positionMs || beat.durationMs != durationMs || beat.watched != watched) { return .previousBeatAcknowledged }
         return result
     }
     @MainActor private static let progressRegistry = SharedProgressRegistry()
@@ -116,7 +136,10 @@ struct SharedDecisionClient {
         request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization"); request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         let response = try await SharedDecisionReadOperation(request: request, configuration: configuration, statuses: [200, 409], maxBytes: 16_384, current: requireCurrent).readResponse()
         try requireCurrent(); try Task.checkCancellation()
-        if response.status == 200 { return .acknowledged }
+        if response.status == 200 {
+            guard try JSONDecoder().decode(SharedPlaybackJSON.self, from: response.data).object != nil else { throw APIError.badURL }
+            return .acknowledged
+        }
         struct Refusal: Decodable { let code: String; let currentSequence: Int64? }
         let decoder = JSONDecoder(); decoder.keyDecodingStrategy = .convertFromSnakeCase
         let refusal = try decoder.decode(Refusal.self, from: response.data)
@@ -182,13 +205,14 @@ private final class SharedDecisionReadOperation: NSObject, URLSessionDataDelegat
     private var continuation: CheckedContinuation<SharedDecisionHTTPResponse, Error>?
     private let statuses: Set<Int>
     private let maxBytes: Int
+    private let allowEmpty: Bool
     private var responseStatus = 0
     private var session: URLSession?
     private var task: URLSessionDataTask?
     private var observer: UUID?
-    init(request: URLRequest, configuration: URLSessionConfiguration, statuses: Set<Int> = [200], maxBytes: Int = 4_194_304, current: @escaping () throws -> Void) {
+    init(request: URLRequest, configuration: URLSessionConfiguration, statuses: Set<Int> = [200], maxBytes: Int = 4_194_304, allowEmpty: Bool = false, current: @escaping () throws -> Void) {
         self.request = request; self.configuration = configuration; self.current = current
-        self.statuses = statuses; self.maxBytes = maxBytes
+        self.statuses = statuses; self.maxBytes = maxBytes; self.allowEmpty = allowEmpty
         super.init(); data.reserveCapacity(maxBytes)
     }
     func read() async throws -> Data { try await readResponse().data }
@@ -250,7 +274,7 @@ private final class SharedDecisionReadOperation: NSObject, URLSessionDataDelegat
     func urlSession(_ session: URLSession, task: URLSessionTask, didCompleteWithError error: Error?) {
         if let error { finish(.failure(error)); return }
         do { try current() } catch { finish(.failure(error)); return }
-        lock.lock(); let result = SharedDecisionHTTPResponse(data: data, status: responseStatus); let valid = !data.isEmpty; lock.unlock()
+        lock.lock(); let result = SharedDecisionHTTPResponse(data: data, status: responseStatus); let valid = allowEmpty || !data.isEmpty; lock.unlock()
         if valid { finish(.success(result)) } else { finish(.failure(APIError.badURL)) }
     }
 }

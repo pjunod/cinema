@@ -266,6 +266,7 @@ struct SharedProgressBeat: Encodable, Equatable {
 }
 enum SharedProgressResult: Equatable {
     case acknowledged
+    case previousBeatAcknowledged
     case resyncRequired(currentSequence: Int64?)
 }
 struct SharedProgressOrder {

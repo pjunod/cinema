@@ -195,6 +195,35 @@ final class SharedDecisionClientTests: XCTestCase {
         }
         _ = try await client.orderedProgress(playback: otherPlayback, initialWatchSequence: 0, positionMs: 1000, durationMs: 90_000)
         XCTAssertEqual(sequences, [8, 9, 10])
+        var uncertain: Data?
+        DecisionHTTP.answer = { request in uncertain = try self.body(request); throw URLError(.networkConnectionLost) }
+        do { _ = try await client.orderedProgress(playback: otherPlayback, initialWatchSequence: 0, positionMs: 2000, durationMs: 90_000); XCTFail("accepted uncertain beat") } catch {}
+        DecisionHTTP.answer = { request in
+            XCTAssertEqual(try self.body(request), uncertain)
+            return (request.url!, 200, [:], Data("{}".utf8))
+        }
+        let previous = try await client.orderedProgress(playback: otherPlayback, initialWatchSequence: 0, positionMs: 3000, durationMs: 90_000)
+        XCTAssertEqual(previous, .previousBeatAcknowledged)
+        DecisionHTTP.answer = { request in
+            let value = try JSONSerialization.jsonObject(with: self.body(request)) as! [String: Any]
+            XCTAssertEqual(value["sequence"] as? Int, 12); XCTAssertEqual(value["position_ms"] as? Int, 3000)
+            return (request.url!, 200, [:], Data("{}".utf8))
+        }
+        let current = try await client.orderedProgress(playback: otherPlayback, initialWatchSequence: 0, positionMs: 3000, durationMs: 90_000)
+        XCTAssertEqual(current, .acknowledged)
+        XCTAssertEqual(try client.playlistURL(playback: otherPlayback).absoluteString, "https://b.test/api/v1/hls/\(otherSession)/master.m3u8")
+        var ends = 0
+        DecisionHTTP.answer = { request in
+            ends += 1; XCTAssertEqual(request.httpMethod, "DELETE")
+            XCTAssertEqual(request.url?.path, "/api/v1/hls/\(otherSession)")
+            XCTAssertEqual(request.value(forHTTPHeaderField: "Authorization"), "Bearer decision-bearer")
+            return (request.url!, 204, [:], Data())
+        }
+        try await client.end(playback: otherPlayback)
+        Session.shared.setCredentials(origin: "https://new.test", token: "new-bearer")
+        do { try await client.end(playback: otherPlayback); XCTFail("sent End with replaced account") } catch {}
+        XCTAssertEqual(ends, 1)
+
 
 
 

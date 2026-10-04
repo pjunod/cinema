@@ -23,10 +23,26 @@ import kotlin.coroutines.coroutineContext
 /** Captured authenticated B account; Source IDs never enter a Local Decision. */
 internal class SharedDecisionClient private constructor(private val auth: Session.PlaybackAuthorization, private val transport: OkHttpClient) {
     private fun requireCurrent() { require(Session.playbackAuthorization() == auth && !auth.token.isNullOrEmpty()) }
+    fun playlistUrl(playback: SharedStartedPlayback): String {
+        requireCurrent(); playback.start.validated(playback.context)
+        val reference = requireNotNull(playback.context.reference)
+        playback.context.validateSharedReference(reference, playback.context.sourceFileId, requireNotNull(playback.context.revision))
+        require(playback.context.sessionId == playback.start.response.session_id)
+        return auth.origin + playback.start.response.playlist_url
+    }
+    /** Best-effort B End reply is never a physical retirement proof. */
+    suspend fun end(playback: SharedStartedPlayback) {
+        playlistUrl(playback)
+        val request = Request.Builder().url("${auth.origin}/api/v1/hls/${playback.start.response.session_id}")
+            .header("Authorization", "Bearer ${auth.token}").delete().build()
+        readResponse(request, auth, transport, statuses = setOf(200, 202, 204), maxBytes = 16_384) { requireCurrent() }
+    }
     suspend fun orderedProgress(playback: SharedStartedPlayback, initialWatchSequence: Long,
                                 positionMs: Long, durationMs: Long?, watched: Boolean = false): SharedProgressResult? {
         requireCurrent()
         val reference = requireNotNull(playback.context.reference)
+        playback.context.validateSharedReference(reference, playback.context.sourceFileId, requireNotNull(playback.context.revision))
+        playback.start.validated(playback.context)
         val key = WatchKey(reference.server_id, reference.catalogue_epoch, reference.item_id)
         val entry = progressMutex.withLock {
             if (progressAccount != auth) { progressAccount = auth; progressEntries.clear() }
@@ -53,6 +69,7 @@ internal class SharedDecisionClient private constructor(private val auth: Sessio
             }
             val beat = entry.order.beat(playback.start.response.session_id, positionMs, durationMs, watched)
             val result = progress(playback, beat); requireCurrent(); entry.order.complete(beat, result)
+            if (result == SharedProgressResult.Acknowledged && (beat.position_ms != positionMs || beat.duration_ms != durationMs || beat.watched != watched)) return SharedProgressResult.PreviousBeatAcknowledged
             return result
         } finally {
             withContext(NonCancellable) { progressMutex.withLock { entry.busy = false; progressActive-- } }
@@ -70,7 +87,10 @@ internal class SharedDecisionClient private constructor(private val auth: Sessio
             .header("Authorization", "Bearer ${auth.token}").post(bytes.toRequestBody("application/json".toMediaType())).build()
         val response = readResponse(request, auth, transport, statuses = setOf(200, 409), maxBytes = 16_384) { requireCurrent() }
         requireCurrent()
-        if (response.status == 200) return SharedProgressResult.Acknowledged
+        if (response.status == 200) {
+            Json.parseToJsonElement(strictUtf8(response.bytes)).jsonObject
+            return SharedProgressResult.Acknowledged
+        }
         val refusal = Json.parseToJsonElement(strictUtf8(response.bytes)).jsonObject
         val code = refusal["code"]?.jsonPrimitive?.content
         require(code == "sharing_progress_stale" || code == "sharing_progress_conflict")

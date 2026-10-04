@@ -3088,3 +3088,25 @@ private fun BackChip(onExit: () -> Unit) {
         Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back", tint = Color.White)
     }
 }
+
+
+/** Explicit Shared dispatch, without a numeric Local PlanLike sentinel. */
+@Composable
+internal fun PlayerScreen(vm: AppViewModel, plan: tv.plurx.app.data.SharedPlaybackPlan, onExit: () -> Unit) {
+    val context = androidx.compose.ui.platform.LocalContext.current
+    val controller = remember(vm, plan) { SharedPlayerController(context, vm) }
+    val starting by controller.starting.collectAsStateWithLifecycle()
+    val failure by controller.failure.collectAsStateWithLifecycle()
+    val scope = rememberCoroutineScope()
+    BackHandler { scope.launch { controller.stop(); onExit() } }
+    LaunchedEffect(plan) { controller.start(plan) }
+    DisposableEffect(controller) { onDispose { controller.close() } }
+    Column(Modifier.fillMaxSize()) {
+        Text(plan.subject.title, style = MaterialTheme.typography.headlineSmall)
+        AndroidView(factory = { androidx.media3.ui.PlayerView(it).apply { useController = false; player = controller.player } }, modifier = Modifier.weight(1f).fillMaxWidth())
+        if (starting) Text("Starting Shared playback")
+        failure?.let { Text(it) }
+        Text("Playback controls, quality, audio, subtitles and recovery changes are unavailable for Shared playback.")
+        androidx.compose.material3.TextButton(onClick = { scope.launch { controller.stop(); onExit() } }) { Text("Close") }
+    }
+}

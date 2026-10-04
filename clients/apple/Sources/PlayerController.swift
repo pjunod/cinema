@@ -10884,3 +10884,90 @@ extension PlayerController: PreparedSuccessorHost {
         preparedFallbackInterruptionMs = ms
     }
 }
+
+
+/// Separate fixed Shared owner: no Local file/history/recovery dispatch is
+/// reachable from this controller. The server retains physical ownership.
+@MainActor
+final class SharedPlayerController: ObservableObject {
+    let player = AVPlayer()
+    @Published private(set) var playback: SharedStartedPlayback?
+    @Published private(set) var failure: String?
+    @Published private(set) var starting = false
+    private var client: SharedDecisionClient?
+    private var plan: SharedPlaybackPlan?
+    private var startTask: Task<SharedStartedPlayback, Error>?
+    private var progressTask: Task<Void, Never>?
+    private var timeObserver: Any?
+    private var authorizationObserver: UUID?
+    private var completionObserver: NSObjectProtocol?
+    private var closing = false
+    func start(_ plan: SharedPlaybackPlan) async {
+        guard self.plan == nil else { return }
+        self.plan = plan; starting = true; closing = false
+        do {
+            let client = try SharedDecisionClient(); self.client = client
+            let task = Task { try await client.start(context: plan.subject.context, request: plan.request) }
+            startTask = task
+            let started = try await task.value; startTask = nil; starting = false
+            playback = started
+            if closing { try? await client.end(playback: started); playback = nil; return }
+            let url = try client.playlistURL(playback: started)
+            let item = AVPlayerItem(url: url)
+            player.replaceCurrentItem(with: item)
+            completionObserver = NotificationCenter.default.addObserver(forName: .AVPlayerItemDidPlayToEndTime, object: item, queue: .main) { [weak self] _ in
+                Task { @MainActor in await self?.stop(watched: true) }
+            }
+            authorizationObserver = Session.shared.observeAuthorizationChanges { [weak self] _ in
+                Task { @MainActor in await self?.stop() }
+            }.id
+            if plan.subject.resumeMs > 0 {
+                await player.seek(to: CMTime(seconds: Double(plan.subject.resumeMs) / 1000, preferredTimescale: 1000), toleranceBefore: .zero, toleranceAfter: .zero)
+            }
+            guard !closing else { return }
+            player.play()
+            timeObserver = player.addPeriodicTimeObserver(forInterval: CMTime(seconds: 10, preferredTimescale: 1000), queue: .main) { [weak self] _ in
+                Task { @MainActor in self?.reportProgress() }
+            }
+        } catch {
+            startTask = nil; starting = false
+            if !closing { failure = error.localizedDescription }
+        }
+    }
+    private func positionMs() -> Int64? {
+        let value = player.currentTime().seconds * 1000
+        guard value.isFinite, value >= 0, value <= 9_007_199_254_740_991 else { return nil }
+        return Int64(value.rounded(.down))
+    }
+    private func reportProgress() {
+        guard !closing, progressTask == nil, let client, let playback, let plan,
+              let position = positionMs() else { return }
+        progressTask = Task { [weak self] in
+            _ = try? await client.orderedProgress(playback: playback, initialWatchSequence: plan.subject.watchSequence,
+                positionMs: position, durationMs: playback.start.response.durationMs.map(Int64.init))
+            self?.progressTask = nil
+        }
+    }
+    func stop(watched: Bool = false) async {
+        guard !closing else { return }; closing = true
+        player.pause()
+        if let timeObserver { player.removeTimeObserver(timeObserver); self.timeObserver = nil }
+        if let completionObserver { NotificationCenter.default.removeObserver(completionObserver); self.completionObserver = nil }
+        if let authorizationObserver { Session.shared.removeAuthorizationObserver(authorizationObserver); self.authorizationObserver = nil }
+        startTask?.cancel(); _ = try? await startTask?.value
+        await progressTask?.value
+        if let client, let playback, let plan {
+            if let position = positionMs() {
+                let result = try? await client.orderedProgress(playback: playback, initialWatchSequence: plan.subject.watchSequence,
+                    positionMs: position, durationMs: playback.start.response.durationMs.map(Int64.init), watched: watched)
+                if result == .previousBeatAcknowledged {
+                    _ = try? await client.orderedProgress(playback: playback, initialWatchSequence: plan.subject.watchSequence,
+                        positionMs: position, durationMs: playback.start.response.durationMs.map(Int64.init), watched: watched)
+                }
+            }
+            player.replaceCurrentItem(with: nil)
+            try? await client.end(playback: playback)
+        }
+        player.replaceCurrentItem(with: nil); playback = nil
+    }
+}

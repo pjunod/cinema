@@ -222,6 +222,30 @@ class SharedDecisionClientTest {
         val otherPlayback = otherClient.start(otherContext, request)
         otherClient.orderedProgress(otherPlayback, 0, 1000, 90_000)
         assertEquals(listOf(8L, 9L, 10L), sequences)
+        val uncertainBodies = mutableListOf<String>()
+        var uncertain = true
+        val retryClient = SharedDecisionClient.forTest(OkHttpClient.Builder().addInterceptor { chain ->
+            val buffer = Buffer(); chain.request().body!!.writeTo(buffer)
+            uncertainBodies += buffer.readUtf8()
+            if (uncertain) { uncertain = false; throw java.io.IOException("lost acknowledgement") }
+            response(chain.request(), "{}")
+        }.build())
+        assertTrue(runCatching { retryClient.orderedProgress(otherPlayback, 0, 2000, 90_000) }.isFailure)
+        assertEquals(SharedProgressResult.PreviousBeatAcknowledged, retryClient.orderedProgress(otherPlayback, 0, 3000, 90_000))
+        assertEquals(uncertainBodies[0], uncertainBodies[1])
+        assertEquals(SharedProgressResult.Acknowledged, retryClient.orderedProgress(otherPlayback, 0, 3000, 90_000))
+        assertEquals(12L, Json.parseToJsonElement(uncertainBodies[2]).jsonObject.getValue("sequence").jsonPrimitive.long)
+        var ends = 0
+        val endClient = SharedDecisionClient.forTest(OkHttpClient.Builder().addInterceptor { chain ->
+            assertEquals("DELETE", chain.request().method)
+            assertEquals("/api/v1/hls/$otherSession", chain.request().url.encodedPath)
+            assertEquals("Bearer decision-bearer", chain.request().header("Authorization"))
+            ends++; response(chain.request(), "", 204)
+        }.build())
+        endClient.end(otherPlayback)
+        Session.token = "replacement-bearer"
+        assertTrue(runCatching { endClient.end(otherPlayback) }.isFailure)
+        assertEquals(1, ends)
 
 
     }

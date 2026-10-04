@@ -4717,3 +4717,27 @@ FD-close regression one in 33.95 seconds, all zero ignored. These tests qualify
 Source resources and client/ownership seams; they do not qualify full physical
 B playback, accepted B writers, controls or live Tailscale/hardware behavior.
 Documentation checks and the normal tracked hook remain required before commit.
+
+### Native tagged player draft (2026-10-03)
+
+The existing Apple and Android browser/controller files now dispatch a Shared
+subject through the authenticated signed-file Start client. The player retains
+its complete raw initial request and compound file context; it never supplies a
+numeric Local item/file sentinel or calls Local history, recovery or autoplay.
+Fresh detail delivery readiness controls the Play action. The saved Developer
+Sharing choice remains authoritative.
+
+Progress retains exact uncertain bytes and distinguishes an acknowledged old
+beat from the newly requested final position. Renderer resources close before
+best-effort B End. Original-login replacement refuses retained Start, progress,
+and End requests. Pending renderer controls are hidden until B can translate a
+server-accepted current-rendition control response; quality, tracks and recovery
+remain explicitly unavailable.
+
+On integrated Root `9a9109602`, the iOS Debug simulator client/model filter passed
+12 tests with no failures. The Android controller draft still needs its exact
+source-only compiler, unit-test and lint loop; this checkpoint does not qualify
+physical Source playback, B relay, device hardware, or the unfinished controls.
+
+Regression-Test: clients/apple/Tests/SharedDecisionClientTests.swift::testAuthenticatedInitialStartRetainsWholeRequestAndBContext
+Regression-Test: clients/android/app/src/test/java/tv/plurx/app/data/SharedDecisionClientTest.kt::initialStartRetainsWholeRequestAndBoundBContext

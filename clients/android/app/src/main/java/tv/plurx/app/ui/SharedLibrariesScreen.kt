@@ -131,6 +131,8 @@ private fun SharedLibraryItems(route: SharedBrowseRoute.Library, onItem: (Shared
 
 @Composable
 private fun SharedLibraryDetails(route: SharedBrowseRoute.Detail, onChildren: (String) -> Unit) {
+    val vm: AppViewModel = androidx.lifecycle.viewmodel.compose.viewModel()
+    var playbackPlan by remember { mutableStateOf<SharedPlaybackPlan?>(null) }
     var detail by remember { mutableStateOf<SharedLibraryDetail?>(null) }
     var error by remember { mutableStateOf<String?>(null) }
     var loading by remember { mutableStateOf(false) }
@@ -142,6 +144,10 @@ private fun SharedLibraryDetails(route: SharedBrowseRoute.Detail, onChildren: (S
         finally { loading = false }
     }
     LaunchedEffect(route.reference) { load() }
+    playbackPlan?.let { plan ->
+        tv.plurx.app.player.PlayerScreen(vm, plan) { playbackPlan = null }
+        return
+    }
     LazyColumn(verticalArrangement = Arrangement.spacedBy(14.dp)) {
         item { Text("Source · ${route.row.sourceName}") }
         if (loading) item { CircularProgressIndicator() }
@@ -151,7 +157,7 @@ private fun SharedLibraryDetails(route: SharedBrowseRoute.Detail, onChildren: (S
             item { Text(value.item.title, style = MaterialTheme.typography.headlineMedium); Text(listOfNotNull(value.item.kind, value.item.year?.toString()).joinToString(" · ")) }
             value.item.overview?.let { item { Text(it) } }
             if (value.item.genres.isNotEmpty()) item { Text(value.item.genres.joinToString(" · ")) }
-            item { Text("Playback is unavailable for this Shared title.") }
+            if (value.delivery_status != "available") item { Text("Playback is unavailable for this Shared title.") }
             value.watch?.let { watch -> item { Text(if (watch.watched) "Watched on this server" else "Position on this server: ${watch.position_ms / 1000} seconds") } }
             if (value.item.hasChildren) item { Button(onClick = { onChildren(value.item.title) }) { Text("Browse children") } }
             items(value.files, key = { it.file_id + "|" + it.revision }) { file ->
@@ -159,6 +165,14 @@ private fun SharedLibraryDetails(route: SharedBrowseRoute.Detail, onChildren: (S
                     Text(listOfNotNull(file.container, file.video_codec).joinToString(" · "))
                     if (file.width != null && file.height != null) Text("${file.width} × ${file.height}")
                     file.duration_ms?.let { Text("Duration: ${it / 1000} seconds") }
+                    if (value.delivery_status == "available" && file.file_base != null) Button(enabled = !loading, onClick = {
+                        scope.launch {
+                            loading = true
+                            try { playbackPlan = vm.prepareSharedPlayback(route.reference, file.file_id); error = null }
+                            catch (failure: Exception) { if (failure is kotlinx.coroutines.CancellationException) throw failure; error = failure.message ?: "Shared playback unavailable" }
+                            finally { loading = false }
+                        }
+                    }) { Text("Play Shared file") }
                 }
             }
         }

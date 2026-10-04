@@ -994,6 +994,29 @@ final class AppModel: ObservableObject {
         }
     }
 
+    /// Shared preparation is a distinct typed path; it never calls Local
+    /// decision/session/history helpers with a Source identifier.
+    func prepareSharedPlayback(reference: SharedPlaybackReference, fileId: String) async throws -> SharedPlaybackPlan {
+        do {
+            let catalogue = try SharedLibraryClient()
+            let detail = try await catalogue.detail(reference); try catalogue.requireCurrent()
+            guard detail.deliveryStatus == "available", detail.files.contains(where: { $0.fileId == fileId && $0.fileBase != nil }) else {
+                throw APIError.transport("Playback is unavailable for this Shared title.")
+            }
+            let context = try await PlaybackFileContext.authenticatedDetail(reference: reference, fileId: fileId)
+            guard context.lifecycleGeneration == detail.lifecycleGeneration else { throw APIError.badURL }
+            let client = try SharedDecisionClient()
+            let result = try await client.decision(context: context, quality: playbackQuality)
+            let position = detail.watch.map { $0.watched ? 0 : $0.positionMs } ?? 0
+            let subject = SharedPlaybackSubject(context: context, title: detail.item.title, resumeMs: position, watchSequence: detail.watch?.sequence ?? 0)
+            let request = CreateSessionRequest(playbackId: UUID().uuidString.lowercased(), requestId: UUID().uuidString.lowercased(),
+                height: playbackQuality.rungHeight, qualityAuto: playbackQuality == .auto,
+                start: Double(position) / 1000, copy: result.decision.method != "transcode",
+                aac: result.decision.presentation.transcodeAudio, caps: result.caps)
+            return try SharedPlaybackPlan(subject: subject, decision: result.decision, caps: result.caps, request: request)
+        } catch { noteAuthFailure(error); throw error }
+    }
+
     func createHlsSession(fileId: Int, body: CreateSessionRequest, fileContext: PlaybackFileContext? = nil) async throws -> HlsStart {
         guard body.caps != nil else {
             throw APIError.transport("Playback session is missing its decision capabilities.")
