@@ -233,6 +233,39 @@ AND EXISTS(SELECT 1 FROM jellyfin_plays chosen WHERE chosen.play_id=$1
  AND (jellyfin_plays.state='active' OR COALESCE(json_extract(jellyfin_plays.payload,'$.negotiation_order'),0)<COALESCE(json_extract(chosen.payload,'$.negotiation_order'),0)))
 "#;
 
+/// Save the cleanup reference before the native create response can escape.
+/// Five parameters are user, reserved request, exact incarnation, now and nonce.
+/// Replay checks the same live authority but retains the original nonce.
+pub(crate) const BIND_NATIVE_PUBLICATION: &str = r#"
+WITH args AS (SELECT $1,$2,$3,$4,$5)
+UPDATE jellyfin_plays SET native_incarnation_id=$3,state='active',expires_at_ms=9223372036854775807,
+ payload=CASE WHEN state='pending' THEN json_set(payload,'$.activation_nonce',$5) ELSE payload END
+WHERE user_id=$1 AND play_id=substr($2,10) AND substr($2,1,9)='jellyfin:'
+AND ((state='pending' AND expires_at_ms>$4) OR (state='active' AND native_incarnation_id=$3))
+AND EXISTS(SELECT 1 FROM jellyfin_login_tokens l JOIN tokens t ON t.token_hash=l.token_hash AND t.user_id=l.user_id
+ WHERE l.user_id=jellyfin_plays.user_id AND l.token_hash=jellyfin_plays.token_digest
+ AND l.device_digest=jellyfin_plays.device_digest AND l.client_family=jellyfin_plays.client_family)
+AND EXISTS(SELECT 1 FROM jellyfin_entity_ids WHERE wire_id=jellyfin_plays.item_wire_id AND retired=0)
+AND EXISTS(SELECT 1 FROM jellyfin_entity_ids WHERE wire_id=jellyfin_plays.file_wire_id AND retired=0)
+AND EXISTS(SELECT 1 FROM media_sessions m JOIN media_playback_pointers p ON p.current_incarnation_id=m.incarnation_id
+ JOIN media_session_requests r ON r.user_id=m.user_id AND r.request_id=$2 AND r.incarnation_id=m.incarnation_id
+ WHERE m.user_id=$1 AND m.incarnation_id=$3 AND m.playback_id=jellyfin_plays.playback_id
+ AND p.user_id=$1 AND p.playback_id=m.playback_id AND m.state='active' AND m.publication_ready_at_ms=0
+ AND m.lease_expires_at_ms>$4 AND r.state IN ('starting','resolved')
+ AND r.playback_id=m.playback_id AND r.request_fingerprint=m.request_fingerprint AND r.owner_node_id=m.owner_node_id
+ AND m.request_fingerprint=json_extract(jellyfin_plays.payload,'$.native_request_fingerprint')
+ AND m.media_origin_ms=json_extract(jellyfin_plays.payload,'$.source_origin_ms'))
+"#;
+pub(crate) const SUPERSEDE_NATIVE_PUBLICATION: &str = r#"
+WITH args AS (SELECT $1,$2,$3,$4,$5)
+UPDATE jellyfin_plays SET state='ended',expires_at_ms=$4+86400000
+WHERE user_id=$1 AND state IN ('pending','active') AND 'jellyfin:'||play_id!=$2
+AND EXISTS(SELECT 1 FROM jellyfin_plays chosen WHERE chosen.user_id=$1 AND chosen.play_id=substr($2,10) AND substr($2,1,9)='jellyfin:'
+ AND chosen.state='active' AND chosen.native_incarnation_id=$3 AND json_extract(chosen.payload,'$.activation_nonce')=$5
+ AND chosen.playback_id=jellyfin_plays.playback_id
+ AND (jellyfin_plays.state='active' OR COALESCE(json_extract(jellyfin_plays.payload,'$.negotiation_order'),0)<COALESCE(json_extract(chosen.payload,'$.negotiation_order'),0)))
+"#;
+
 pub(crate) const ACTIVATE_MEDIA: &str = r#"
 WITH args AS (SELECT $1,$2,$3,$4,$5,$6,$7,$8,$9)
 UPDATE jellyfin_plays SET native_incarnation_id=$1,state='active',expires_at_ms=$2,payload=json_set(payload,'$.activation_nonce',$9)

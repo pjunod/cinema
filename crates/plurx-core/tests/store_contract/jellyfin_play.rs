@@ -1767,3 +1767,154 @@ async fn jellyfin_reserved_native_start_cannot_replace_a_current_player_after_ne
     })
     .await;
 }
+
+#[tokio::test]
+async fn jellyfin_native_publication_binds_exact_play_before_response_and_refuses_cancelled_binding(
+) {
+    for_each_backend(|store, backend| async move {
+        let template = fixture(&store).await;
+        for cancelled in [false, true] {
+            let mut play = template.clone();
+            play.play_id = uuid::Uuid::new_v4().simple().to_string();
+            play.source_origin_ms = 0;
+            play.playback_id = format!("publication-{cancelled}");
+            assert!(store
+                .create_jellyfin_play(play.clone())
+                .await
+                .expect("pending"));
+            let current = current_media_session(
+                store.as_ref(),
+                play.scope.user_id,
+                &play.playback_id,
+                &uuid::Uuid::new_v4().to_string(),
+                &uuid::Uuid::new_v4().to_string(),
+                backend,
+            )
+            .await;
+            let request_id = format!("jellyfin:{}", play.play_id);
+            let mut start = current.clone();
+            start.incarnation_id = uuid::Uuid::new_v4().to_string();
+            start.session_id = uuid::Uuid::new_v4().to_string();
+            start.request_id = Some(request_id.clone());
+            start.now_ms = 1001;
+            start.lease_expires_at_ms = 900001;
+            assert!(matches!(
+                store
+                    .claim_media_session_request(
+                        play.scope.user_id,
+                        &request_id,
+                        &start.request_fingerprint,
+                        &start.playback_id,
+                        &start.incarnation_id,
+                        1001,
+                        900001,
+                    )
+                    .await
+                    .expect("claim"),
+                MediaSessionRequestClaim::Acquired { .. }
+            ));
+            assert!(store
+                .assign_media_session_request_owner(
+                    play.scope.user_id,
+                    &request_id,
+                    &start.incarnation_id,
+                    &start.owner_node_id,
+                    1001,
+                )
+                .await
+                .expect("owner"));
+            assert!(store
+                .activate_media_session(&start)
+                .await
+                .expect("activate")
+                .is_some());
+            confirm_media_activation(store.as_ref(), &start, 0, backend).await;
+            if cancelled {
+                assert!(store
+                    .end_jellyfin_play(&play.play_id, &play.scope, 1002)
+                    .await
+                    .expect("cancel"));
+            }
+            let published = store
+                .publish_media_session_activation(
+                    play.scope.user_id,
+                    &request_id,
+                    &start.incarnation_id,
+                    1003,
+                )
+                .await
+                .expect("publish");
+            let bound = store
+                .jellyfin_play(&play.play_id, &play.scope)
+                .await
+                .expect("binding")
+                .expect("row");
+            if cancelled {
+                assert!(
+                    published.is_none(),
+                    "{backend}: cancelled play must refuse publication"
+                );
+                assert_eq!(bound.state, "ended", "{backend}");
+                assert!(bound.native_incarnation_id.is_none(), "{backend}");
+            } else {
+                assert!(published.is_some(), "{backend}");
+                assert_eq!(
+                    bound.state, "active",
+                    "{backend}: publication must save its cleanup reference atomically"
+                );
+                assert_eq!(
+                    bound.native_incarnation_id.as_deref(),
+                    Some(start.incarnation_id.as_str()),
+                    "{backend}"
+                );
+                let mut newer = play.clone();
+                newer.play_id = uuid::Uuid::new_v4().simple().to_string();
+                newer.created_at_ms = 1004;
+                assert!(store
+                    .create_jellyfin_play(newer.clone())
+                    .await
+                    .expect("newer pending"));
+                assert!(
+                    store
+                        .publish_media_session_activation(
+                            play.scope.user_id,
+                            &request_id,
+                            &start.incarnation_id,
+                            1005,
+                        )
+                        .await
+                        .expect("exact replay")
+                        .is_some(),
+                    "{backend}"
+                );
+                let retained = store
+                    .jellyfin_play(&newer.play_id, &newer.scope)
+                    .await
+                    .expect("newer read")
+                    .expect("newer row");
+                assert_eq!(
+                    retained.state, "pending",
+                    "{backend}: exact publication replay cannot fence a later ask"
+                );
+                assert!(store
+                    .end_jellyfin_play(&play.play_id, &play.scope, 1006)
+                    .await
+                    .expect("end published"));
+                assert!(
+                    store
+                        .publish_media_session_activation(
+                            play.scope.user_id,
+                            &request_id,
+                            &start.incarnation_id,
+                            1007
+                        )
+                        .await
+                        .expect("late replay")
+                        .is_none(),
+                    "{backend}: ended binding cannot publish again"
+                );
+            }
+        }
+    })
+    .await;
+}
