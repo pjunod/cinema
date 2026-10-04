@@ -2,7 +2,7 @@ use super::vod_serve_serve::QualityReservationCommit;
 use super::*;
 use plurx_core::playback::continuous_quality::{
     QualityAttachment, QualityLedger, QualityOperation, QualityPreparationBinding, QualityState,
-    QualityTransitionReceipt, QualityTransitionRequest,
+    QualityTransitionError, QualityTransitionReceipt, QualityTransitionRequest,
 };
 use serde::{Deserialize, Serialize};
 
@@ -480,11 +480,22 @@ impl VodServe {
                 .map_err(|error| error.to_string())?
             };
             if let Some(transition) = &request.transition {
-                receipt = Some(
-                    candidate
-                        .apply(transition, now_ms())
-                        .map_err(|error| error.to_string())?,
-                );
+                receipt = Some(candidate.apply(transition, now_ms()).map_err(|error| {
+                    if error == QualityTransitionError::Capacity {
+                        let usage = candidate.capacity_usage();
+                        tracing::debug!(
+                            session_id,
+                            transactions = usage.transactions,
+                            unresolved = usage.unresolved_transactions,
+                            pinned_intervals = usage.pinned_intervals,
+                            pinned_bytes = usage.pinned_bytes,
+                            receipts = usage.receipts,
+                            encoded_bytes = usage.encoded_bytes,
+                            "quality transition refused at a ledger bound"
+                        );
+                    }
+                    error.to_string()
+                })?);
                 if let Some(frontier) = &request.frontier {
                     candidate
                         .bind_preparation(

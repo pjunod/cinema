@@ -13,7 +13,10 @@ pub const MAX_QUALITY_TRANSACTIONS: usize = 16;
 // independent two-second video/AAC intervals, with room for a pending join.
 pub const MAX_QUALITY_INTERVALS: usize = 128;
 pub const MAX_QUALITY_PINNED_BYTES: u64 = 256 * 1024 * 1024;
+/// Decoding bound for stored ledgers. Acceptance retains exactly one replay
+/// receipt (see [`QualityLedger::apply`]); older rows may still hold more.
 pub const MAX_QUALITY_RECEIPTS: usize = 128;
+/// Retention horizon for inactive parents' ledgers in Store maintenance.
 pub const QUALITY_RECEIPT_HORIZON_MS: i64 = 90_000;
 pub const MAX_QUALITY_LEDGER_BYTES: usize = 128 * 1024;
 const JS_MAX_INTEGER: u64 = 9_007_199_254_740_991;
@@ -377,6 +380,16 @@ pub trait QualityReservationPublisher: Send + Sync {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct QualityCapacityUsage {
+    pub transactions: usize,
+    pub unresolved_transactions: usize,
+    pub pinned_intervals: usize,
+    pub pinned_bytes: u64,
+    pub receipts: usize,
+    pub encoded_bytes: usize,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum QualityTransitionError {
     Invalid,
     OwnerChanged,
@@ -539,6 +552,24 @@ impl QualityLedger {
         Ok(())
     }
 
+    /// Bounded facts for diagnosing a [`QualityTransitionError::Capacity`]
+    /// refusal: which of the ledger's bounds the attachment is close to.
+    pub fn capacity_usage(&self) -> QualityCapacityUsage {
+        let (pinned_intervals, pinned_bytes) = self.pinned_dependency_usage().unwrap_or((0, 0));
+        QualityCapacityUsage {
+            transactions: self.transactions.len(),
+            unresolved_transactions: self
+                .transactions
+                .iter()
+                .filter(|tx| tx.unresolved())
+                .count(),
+            pinned_intervals,
+            pinned_bytes,
+            receipts: self.receipts.len(),
+            encoded_bytes: serde_json::to_vec(self).map_or(0, |bytes| bytes.len()),
+        }
+    }
+
     pub fn shared_audio_rendition_id(&self) -> Option<&str> {
         self.shared_audio_rendition_id.as_deref()
     }
@@ -618,12 +649,13 @@ impl QualityLedger {
             return Err(QualityTransitionError::StaleSequence);
         }
         let mut next = self.clone();
-        next.receipts.retain(|receipt| {
-            receipt.accepted_at_ms >= now_ms.saturating_sub(QUALITY_RECEIPT_HORIZON_MS)
-        });
-        if next.receipts.len() >= MAX_QUALITY_RECEIPTS {
-            return Err(QualityTransitionError::Capacity);
-        }
+        // One attachment is one serialized command channel: a client sends
+        // sequence N+1 only after N settled, by its acknowledgement or by an
+        // authoritative ledger read. Accepting a newer sequence therefore
+        // acknowledges every older one cumulatively, and only the newest
+        // command can still be replayed. Retaining older receipts for a time
+        // horizon would turn ordinary fact cadence into a hidden rate limit.
+        next.receipts.clear();
         next.apply_operation(request)?;
         next.accepted_sequence = request.sequence;
         let mut transaction = next
@@ -1181,7 +1213,7 @@ mod tests {
             QualityOperation::Scheduled { intervals: videos },
         );
         alias.transaction_id = second.into();
-        ledger
+        let canonical_alias = ledger
             .apply(&alias, 1300)
             .expect("logical aliases do not double physical demand");
         assert_eq!(ledger.pinned_dependency_usage(), Ok((128, 64 * 540_000)));
@@ -1189,12 +1221,16 @@ mod tests {
         assert!(encoded.len() < MAX_QUALITY_LEDGER_BYTES);
         let mut restored: QualityLedger = serde_json::from_slice(&encoded).expect("restore");
         assert_eq!(
-            restored
-                .apply(&scheduled, 1400)
-                .expect("lost ACK exact replay"),
-            canonical
+            restored.apply(&alias, 1400).expect("lost ACK exact replay"),
+            canonical_alias
         );
-        let mut conflict = scheduled.clone();
+        assert_ne!(canonical, canonical_alias);
+        assert_eq!(
+            restored.apply(&scheduled, 1450),
+            Err(QualityTransitionError::StaleSequence),
+            "a newer accepted command cumulatively acknowledges older ones"
+        );
+        let mut conflict = alias.clone();
         if let QualityOperation::Scheduled { intervals } = &mut conflict.operation {
             intervals[0].byte_length += 1;
         }
@@ -1244,7 +1280,10 @@ mod tests {
         ledger
     }
     #[test]
-    fn sustained_rolling_receipts_remain_bounded_and_replay_exactly() {
+    fn unbatched_fact_cadence_never_exhausts_replay_receipts() {
+        // Per-artifact facts at 2x playback: seven accepted commands every
+        // two wall seconds (about 3.5/s), several times the rate a 90-second
+        // receipt horizon with 128 entries could absorb.
         let mut ledger = ledger();
         let prepare = request(
             &ledger,
@@ -1257,7 +1296,7 @@ mod tests {
         ledger.apply(&prepare, 1000).expect("prepare");
         let mut sequence = 2;
         for window in 0..300_u64 {
-            let now = 2000 + window as i64 * 4000;
+            let now = 2000 + window as i64 * 2000;
             let videos: Vec<_> = (0..2_u64)
                 .map(|offset| QualityInterval {
                     artifact_id: format!("{:064x}", window * 4 + offset + 1),
@@ -1296,17 +1335,19 @@ mod tests {
             );
             assert_eq!(ledger.transactions[0].reserved, videos);
             sequence += 1;
-            let appended = request(
-                &ledger,
-                sequence,
-                QualityOperation::Appended {
-                    intervals: videos.clone(),
-                },
-            );
-            ledger
-                .apply(&appended, now + 1)
-                .expect("actual completed appends");
-            sequence += 1;
+            for (offset, video) in videos.iter().enumerate() {
+                let appended = request(
+                    &ledger,
+                    sequence,
+                    QualityOperation::Appended {
+                        intervals: vec![video.clone()],
+                    },
+                );
+                ledger
+                    .apply(&appended, now + 1 + offset as i64)
+                    .expect("one completed append per command");
+                sequence += 1;
+            }
             if window == 0 {
                 let presented = request(
                     &ledger,
@@ -1314,50 +1355,56 @@ mod tests {
                     QualityOperation::Presented {
                         artifact_id: videos[0].artifact_id.clone(),
                         film_tick: 0,
-                        observed_at_ms: now + 2,
+                        observed_at_ms: now + 3,
                     },
                 );
                 ledger
-                    .apply(&presented, now + 2)
+                    .apply(&presented, now + 3)
                     .expect("first actual frame");
                 sequence += 1;
             }
-            let disposed = request(
-                &ledger,
-                sequence,
-                QualityOperation::Disposed {
-                    artifacts: videos
-                        .iter()
-                        .chain(&audio)
-                        .map(|row| row.artifact_id.clone())
-                        .collect(),
-                },
-            );
-            ledger
-                .apply(&disposed, now + 3)
-                .expect("completed video and AAC removals");
-            sequence += 1;
+            let mut last = None;
+            for (offset, artifact) in videos.iter().chain(&audio).enumerate() {
+                let disposed = request(
+                    &ledger,
+                    sequence,
+                    QualityOperation::Disposed {
+                        artifacts: vec![artifact.artifact_id.clone()],
+                    },
+                );
+                let receipt = ledger
+                    .apply(&disposed, now + 4 + offset as i64)
+                    .expect("one completed removal per command");
+                last = Some((disposed, receipt));
+                sequence += 1;
+            }
+            assert_eq!(ledger.receipts.len(), 1);
             let bytes = serde_json::to_vec(&ledger).expect("durable ledger");
             assert!(bytes.len() < MAX_QUALITY_LEDGER_BYTES);
             ledger = serde_json::from_slice(&bytes).expect("restore exact durable facts");
             assert!(ledger.valid());
+            let (latest, receipt) = last.expect("disposal");
             assert_eq!(
                 ledger
-                    .apply(&scheduled, now + 4)
-                    .expect("lost canonical ACK replay"),
-                canonical
+                    .apply(&latest, now + 1000)
+                    .expect("lost canonical ACK replay of the newest command"),
+                receipt
             );
-            let mut conflict = scheduled.clone();
-            if let QualityOperation::Scheduled { intervals } = &mut conflict.operation {
-                intervals[0].byte_length += 1;
+            assert_eq!(
+                ledger.apply(&scheduled, now + 1001),
+                Err(QualityTransitionError::StaleSequence),
+                "older commands are cumulatively acknowledged"
+            );
+            let mut conflict = latest.clone();
+            if let QualityOperation::Disposed { artifacts } = &mut conflict.operation {
+                artifacts[0] = "f".repeat(64);
             }
             assert_eq!(
-                ledger.apply(&conflict, now + 5),
+                ledger.apply(&conflict, now + 1002),
                 Err(QualityTransitionError::ConflictingReplay)
             );
             assert!(ledger.transactions[0].reserved.is_empty());
             assert!(ledger.shared_audio_reserved().is_empty());
-            assert!(ledger.receipts.len() < MAX_QUALITY_RECEIPTS);
         }
     }
 
