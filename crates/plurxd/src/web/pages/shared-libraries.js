@@ -145,6 +145,7 @@ async function sharedCatalogueLoadPage(path,ref,capture,mount,q=""){
   const load=async()=>{
     if(loading||!sharedCatalogueCurrent(capture)) return;loading=true;
     const el=document.getElementById(mount);if(!el){loading=false;return;}
+    let reopen=false;
     const prior=/** @type {HTMLButtonElement|null} */(el.querySelector("button[data-shared-more]"));if(prior) prior.disabled=true;
     try{
       const page=await sharedCatalogueRead(path+"?limit=100"+(q?`&q=${encodeURIComponent(q)}`:"")+(cursor?`&cursor=${encodeURIComponent(cursor)}`:""),capture);
@@ -162,11 +163,22 @@ async function sharedCatalogueLoadPage(path,ref,capture,mount,q=""){
       cursor=next||null;
       if(cursor&&seenItems.size>=5000){el.insertAdjacentHTML("beforeend",'<p class="muted">Search this library to narrow the results.</p>');}
       else if(cursor){seen.add(cursor);const button=document.createElement("button");button.className="ghost";button.dataset.sharedMore="true";button.textContent="Load more";button.onclick=load;el.appendChild(button);}
-    }catch(error){if(sharedCatalogueCurrent(capture)){if(prior) prior.disabled=false;else el.innerHTML=sharedCatalogueError(error);}}
+    }catch(error){if(sharedCatalogueCurrent(capture)){
+      if(cursor&&SHARED_CATALOGUE_REOPEN.includes(error?.code)) reopen=true;
+      else if(prior) prior.disabled=false;else el.innerHTML=sharedCatalogueError(error);}}
     finally{loading=false;}
+    // An expired, substituted or refused Source cursor is a typed fresh open:
+    // retrying the same cursor can never succeed. One open per request, from
+    // the first page, so this cannot become a restart loop.
+    if(reopen&&sharedCatalogueCurrent(capture)){
+      cursor=null;seen=new Set();seenItems=new Set();
+      el.innerHTML='<p class="muted" role="status">This list changed or its place expired, so it was reopened from the start.</p>';
+      await load();
+    }
   };
   await load();
 }
+const SHARED_CATALOGUE_REOPEN=Object.freeze(["sharing_cursor_expired","sharing_query_changed","sharing_cursor_invalid"]);
 
 // Fresh B details mint the opaque context. Displayed cached file facts never
 // become a Play authority, and Source numbers never enter the Local router.

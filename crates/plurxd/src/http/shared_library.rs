@@ -1193,7 +1193,13 @@ fn import_id(value: &str) -> Result<uuid::Uuid, ApiError> {
     Ok(id)
 }
 fn peer_failure(error: crate::sharing_client::PeerError) -> ApiError {
-    if matches!(error, crate::sharing_client::PeerError::Authentication) {
+    // The Source answered "not in your scope" (deleted, moved out or
+    // unexported). That is a typed absence, not an offline Source.
+    if matches!(
+        error,
+        crate::sharing_client::PeerError::Authentication
+            | crate::sharing_client::PeerError::Rejected(StatusCode::NOT_FOUND)
+    ) {
         missing()
     } else if matches!(
         error,
@@ -1205,6 +1211,22 @@ fn peer_failure(error: crate::sharing_client::PeerError) -> ApiError {
             StatusCode::SERVICE_UNAVAILABLE,
             "sharing_source_unavailable",
         )
+    }
+}
+/// A Source cursor refusal must stay a typed reopen result at B. Mapping it to
+/// "Source unavailable" left an expired or substituted cursor retried forever.
+fn page_failure(error: crate::sharing_client::PeerError, cursor: bool) -> ApiError {
+    use crate::sharing_client::PeerError::Rejected;
+    match error {
+        Rejected(StatusCode::GONE) if cursor => fail(StatusCode::GONE, "sharing_cursor_expired"),
+        Rejected(StatusCode::CONFLICT) if cursor => {
+            fail(StatusCode::CONFLICT, "sharing_query_changed")
+        }
+        // B already validated every other query field the Source checks.
+        Rejected(StatusCode::BAD_REQUEST) if cursor => {
+            fail(StatusCode::BAD_REQUEST, "sharing_cursor_invalid")
+        }
+        other => peer_failure(other),
     }
 }
 fn shared_item(
@@ -1475,6 +1497,7 @@ async fn viewer_page(
     let art_key = super::shared_artwork::receiver_key(state).await?;
     let scope_library = library.clone();
     let scope_parent = parent.clone();
+    let had_cursor = q.cursor.is_some();
     let (summary, reply) = state
         .sharing
         .read_catalogue(
@@ -1493,7 +1516,7 @@ async fn viewer_page(
             },
         )
         .await
-        .map_err(peer_failure)?;
+        .map_err(|error| page_failure(error, had_cursor))?;
     let crate::sharing::CatalogueReply::Page(page) = reply else {
         return Err(invalid());
     };
@@ -4873,6 +4896,86 @@ mod tests {
             assert!(!text.contains("Exported movies"));
             assert!(!text.contains("/source/private/path"));
             assert!(text.contains("sharing_authority_unavailable"));
+        }
+    }
+    #[tokio::test]
+    async fn sharing_catalogue_page_failures_keep_typed_reopen_and_absence_results() {
+        use crate::sharing_client::PeerError;
+        async fn typed(error: ApiError) -> (StatusCode, String) {
+            let response = error.into_response();
+            let status = response.status();
+            let body = response
+                .into_body()
+                .collect()
+                .await
+                .expect("typed body")
+                .to_bytes();
+            let value: Value = serde_json::from_slice(&body).expect("typed JSON");
+            (
+                status,
+                value["code"].as_str().unwrap_or_default().to_owned(),
+            )
+        }
+        for (error, cursor, status, code) in [
+            (
+                PeerError::Rejected(StatusCode::GONE),
+                true,
+                StatusCode::GONE,
+                "sharing_cursor_expired",
+            ),
+            (
+                PeerError::Rejected(StatusCode::CONFLICT),
+                true,
+                StatusCode::CONFLICT,
+                "sharing_query_changed",
+            ),
+            (
+                PeerError::Rejected(StatusCode::BAD_REQUEST),
+                true,
+                StatusCode::BAD_REQUEST,
+                "sharing_cursor_invalid",
+            ),
+            (
+                PeerError::Rejected(StatusCode::BAD_REQUEST),
+                false,
+                StatusCode::SERVICE_UNAVAILABLE,
+                "sharing_source_unavailable",
+            ),
+            (
+                PeerError::Rejected(StatusCode::NOT_FOUND),
+                true,
+                StatusCode::NOT_FOUND,
+                "sharing_not_found",
+            ),
+            (
+                PeerError::Authentication,
+                false,
+                StatusCode::NOT_FOUND,
+                "sharing_not_found",
+            ),
+            (
+                PeerError::Rejected(StatusCode::TOO_MANY_REQUESTS),
+                true,
+                StatusCode::TOO_MANY_REQUESTS,
+                "sharing_metadata_capacity",
+            ),
+            (
+                PeerError::Unavailable,
+                true,
+                StatusCode::SERVICE_UNAVAILABLE,
+                "sharing_source_unavailable",
+            ),
+            (
+                PeerError::IdentityMismatch,
+                true,
+                StatusCode::SERVICE_UNAVAILABLE,
+                "sharing_source_unavailable",
+            ),
+        ] {
+            assert_eq!(
+                typed(page_failure(error, cursor)).await,
+                (status, code.to_owned())
+            );
         }
     }
     #[test]
