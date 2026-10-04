@@ -4859,3 +4859,31 @@ fields, noncanonical session identity, fractional or unsafe numbers. These are
 finite refusal/ownership tests, not positive paired playback evidence. The
 existing guarded Store publication/renewal/progress matrix and normal tracked
 hook are the remaining pre-commit checks for this checkpoint.
+
+### Native tagged player qualification on current receiver base
+
+Frozen `1d5354f81` includes full Root `cdc567b86`, including actual-receipt End
+and ordered progress candidates. Its source-only Android archive passed main,
+unit and instrumentation Kotlin compilation, 47 focused Shared/context and
+Local player-policy/surface tests (zero failures, errors or skipped), and lint
+in 5m52. Instrumentation was compiled, not executed on hardware. The bounded
+owned Docker compiler/container was released on completion.
+
+The same Native source passed 359 combined iOS simulator tests after the
+bootstrap fixture correction and 349 combined tvOS simulator tests. The tvOS
+runner reported `TEST SUCCEEDED` after its idle verbose diagnostic collector
+was stopped; its recorded testcase results were preserved. Both iOS and tvOS
+Release simulator builds reported `BUILD SUCCEEDED`. The full `cdc567b86`
+merge changed no Apple bytes relative to the iOS test tree; the exact combined
+branch was rebuilt for both Release targets and tested on tvOS. Documentation
+index checks passed four tests; the merge's normal hook passed formatting,
+workspace Clippy (1m16), catalog and 75 JavaScript syntax checks.
+
+This qualifies Native compilation and synthetic authenticated protocol
+contracts. It does not qualify a physical Native renderer against paired B/A,
+Tailscale/NAT or device hardware. Initial launch still depends on freshly
+available B delivery. Directed rendition/recovery controls remain unavailable;
+server-accepted current-rendition controls and the Shared-only status reader
+remain the next adapters. Swift's current language mode reports a non-Sendable
+Start task-result warning; the next controller slice will retain an owned Void
+join rather than add an unchecked Sendable claim.
