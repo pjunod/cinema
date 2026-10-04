@@ -1283,7 +1283,10 @@ pattern = "publication_ready_at_ms"
 # MEDIA_SESSION_PUBLICATION_BLOCKED and publish (`publication_ready_at_ms =
 # 0`) only after physical readiness and fresh authority; the receiver
 # projection and Source status read the same sentinel. No new publisher.
-expected_occurrences = 105
+# 105 -> 107 for orphaned-receiver recovery tests: one test-only blocked B
+# activation and one read-only route census column. Recovery never writes the
+# fence itself; the Store retirement it reuses already zeroes it.
+expected_occurrences = 107
 
 [[module_symbols]]
 id = "m4-durable-projection-safety-window"
@@ -1323,7 +1326,10 @@ pattern = "MEDIA_SESSION_PUBLICATION_BLOCKED"
 # MEDIA_SESSION_PUBLICATION_BLOCKED and publish (`publication_ready_at_ms =
 # 0`) only after physical readiness and fresh authority; the receiver
 # projection and Source status read the same sentinel. No new publisher.
-expected_occurrences = 35
+# 35 -> 37 for orphaned-receiver recovery tests: the test-only blocked B
+# activation and an assertion that recovery leaves the sentinel untouched
+# before retirement (it never publishes an adopted producer).
+expected_occurrences = 37
 
 [[module_symbols]]
 id = "m4-terminal-projection-safety-window"
@@ -2457,7 +2463,11 @@ pattern = "(?:[A-Za-z_]\\w*::)+spawn(?:_blocking|_local|_for_test)?\\s*\\("
 # supervisor that reports only a panic as a rendition failure (the writer's
 # own end reports everything else), plus the two awaited fixture tasks of
 # its regression test.
-expected_occurrences = 787
+# +3 for orphaned shared-playback receiver recovery: main.rs spawns the
+# daemon-owned receiver_recovery_loop beside the sharing claim loop; it ends on
+# the background drain token and holds no producer. Two test-only spawns run
+# one recovery attempt and one loop, each joined under a timeout after drain.
+expected_occurrences = 790
 # E1 plus S-14 M8: both ownership sets retained and counted on the merged source.
 # 643 -> 647 with S-14 M8 (`plan/S-14-5`: `Encoding`, `RollingFlowSync`, `TerminalCleanup`,
 # `HeadChildOwner`, `VodServingAdmission` behind per-owner hooks), measured by
@@ -3629,7 +3639,11 @@ pattern = "(?:[A-Za-z_]\\w*::)+(?:sleep|sleep_until|interval|interval_at|timeout
 # authority each second while it lives. Process deadlines: 5 s exit grace for
 # the Source probe and index children. Test timers sit inside asserting
 # timeouts or are fixed window delays.
-expected_occurrences = 1282
+# +9 for orphaned shared-playback receiver recovery: the loop's 30 s pacing
+# sleep, raced with the drain token, owned by receiver_recovery_loop. Eight are
+# test-only bounded waits (four timeouts, three polls, one settle sleep) in
+# the joined recovery fixtures.
+expected_occurrences = 1291
 # +1 native-startup delayed-init fixture: its joined writer owns one bounded
 # six-second sleep, under the test request's unchanged twelve-second deadline.
 # No production timer or recovery clock is added.
@@ -4447,7 +4461,9 @@ pattern = "\\.(?:spawn|output|status)\\s*\\("
 # manager and TLS identity, and `Response::builder().status(..)`. Test
 # `.output()` calls await fixture generation; the JoinSet `spawn` in
 # http/mod.rs owns accepted TLS fixture connections, aborted on Drop.
-expected_occurrences = 517
+# +6 test-only SharingManager::status() reads in the orphaned-receiver
+# recovery tests; they read process-local status and launch nothing.
+expected_occurrences = 523
 # +2 native-startup delayed-init fixture: Axum Response::status() reads
 # assert the master and legacy bridge responses. Neither launches a process.
 

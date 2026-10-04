@@ -118,6 +118,26 @@ impl SourcePeerLineage {
     }
 }
 
+impl SourcePeerLineage {
+    /// The same lineage checks as [`Self::from_start`], applied to the facts
+    /// a recovered owner opened from its sealed upstream capsule.
+    pub(crate) fn from_capsule(
+        incarnation_id: Uuid,
+        session_id: Uuid,
+        control_epoch: u64,
+    ) -> Result<Self, PeerError> {
+        let control_epoch = i64::try_from(control_epoch).map_err(|_| PeerError::InvalidResponse)?;
+        if !v4(incarnation_id) || !v4(session_id) || !(1..=MAX_EPOCH).contains(&control_epoch) {
+            return Err(PeerError::InvalidResponse);
+        }
+        Ok(Self {
+            incarnation_id,
+            session_id,
+            control_epoch,
+        })
+    }
+}
+
 /// Verified bounded reply facts from an authenticated pinned Source exchange.
 /// B must also join its own accepted bodies/tasks before minting retirement
 /// evidence. JSON decoding alone cannot establish physical settlement.

@@ -20,6 +20,7 @@ use uuid::Uuid;
 mod control;
 #[path = "shared_receiver_retirement.rs"]
 mod retirement;
+pub(crate) use retirement::receiver_recovery_loop;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum ReceiverStartError {
@@ -101,6 +102,103 @@ struct DispatchedSource {
     viewer_hash: String,
     endpoint: plurx_core::sharing::Endpoint,
 }
+/// Upstream capability sealed into the attached binding (Upstream purpose,
+/// B-server/import AAD). It exists in cleartext only inside the capsule.
+#[derive(serde::Serialize)]
+struct UpstreamCapsuleOut<'a> {
+    version: u8,
+    reference: &'a plurx_core::sharing_catalogue::SharedReference,
+    file_id: &'a plurx_core::sharing::SourceId,
+    file_revision: &'a plurx_core::sharing_catalogue_details::FileRevision,
+    source_request_id: Uuid,
+    source_session_id: Uuid,
+    source_incarnation_id: Uuid,
+    source_owner_epoch: u64,
+    viewer_hash: &'a str,
+    endpoint: &'a plurx_core::sharing::Endpoint,
+    credential: &'a str,
+}
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct UpstreamCapsule {
+    version: u8,
+    reference: plurx_core::sharing_catalogue::SharedReference,
+    file_id: plurx_core::sharing::SourceId,
+    file_revision: plurx_core::sharing_catalogue_details::FileRevision,
+    #[serde(deserialize_with = "plurx_core::sharing::canonical_uuid")]
+    source_request_id: Uuid,
+    #[serde(deserialize_with = "plurx_core::sharing::canonical_uuid")]
+    source_session_id: Uuid,
+    #[serde(deserialize_with = "plurx_core::sharing::canonical_uuid")]
+    source_incarnation_id: Uuid,
+    source_owner_epoch: u64,
+    viewer_hash: String,
+    endpoint: plurx_core::sharing::Endpoint,
+    #[serde(deserialize_with = "plurx_core::sharing::wire_secret")]
+    credential: plurx_core::secrets::Secret,
+}
+/// Dispatch facts sealed before the first Start byte (same purpose and AAD
+/// as the upstream capsule; the closed `kind` keeps the two apart).
+#[derive(serde::Serialize)]
+struct DispatchCapsuleOut<'a> {
+    version: u8,
+    kind: &'static str,
+    reference: &'a plurx_core::sharing_catalogue::SharedReference,
+    file_id: &'a plurx_core::sharing::SourceId,
+    file_revision: &'a plurx_core::sharing_catalogue_details::FileRevision,
+    source_request_id: Uuid,
+    viewer_hash: &'a str,
+    endpoint: &'a plurx_core::sharing::Endpoint,
+    credential: &'a str,
+}
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct DispatchCapsule {
+    version: u8,
+    kind: String,
+    reference: plurx_core::sharing_catalogue::SharedReference,
+    file_id: plurx_core::sharing::SourceId,
+    file_revision: plurx_core::sharing_catalogue_details::FileRevision,
+    #[serde(deserialize_with = "plurx_core::sharing::canonical_uuid")]
+    source_request_id: Uuid,
+    viewer_hash: String,
+    endpoint: plurx_core::sharing::Endpoint,
+    #[serde(deserialize_with = "plurx_core::sharing::wire_secret")]
+    credential: plurx_core::secrets::Secret,
+}
+const DISPATCH_CAPSULE_KIND: &str = "receiver_dispatch";
+/// Seal the facts a recovered owner needs to send the End this dispatch owes.
+pub(crate) fn seal_dispatch_capsule(
+    key: &plurx_core::secrets::CredentialKey,
+    server: Uuid,
+    intent: &ReceiverSessionIntent,
+    credential: &plurx_core::secrets::Secret,
+    viewer_hash: &str,
+    endpoint: &plurx_core::sharing::Endpoint,
+) -> Result<plurx_core::secrets::SealedSecret, ReceiverStartError> {
+    let recipe = &intent.recipe;
+    let capsule = plurx_core::secrets::Secret::from_cleartext(
+        serde_json::to_string(&DispatchCapsuleOut {
+            version: 1,
+            kind: DISPATCH_CAPSULE_KIND,
+            reference: &recipe.reference,
+            file_id: &recipe.file_id,
+            file_revision: &recipe.file_revision,
+            source_request_id: recipe.source_request_id,
+            viewer_hash,
+            endpoint,
+            credential: credential.expose(),
+        })
+        .map_err(|_| ReceiverStartError::Unresolved)?,
+    );
+    key.seal_sharing(
+        SharingSecretPurpose::Upstream,
+        server,
+        intent.scope.import_id,
+        capsule.expose(),
+    )
+    .map_err(|_| ReceiverStartError::Unresolved)
+}
 struct ReceivedSource {
     credential: plurx_core::secrets::Secret,
     viewer_hash: String,
@@ -121,6 +219,18 @@ impl ReceiverStartRegistry {
                     .end_confirmation
                     .as_ref()
                     .is_some_and(|proof| proof.session_id() == session)
+            })
+    }
+    /// A live (not yet retired) local actor owns this Source request. Crash
+    /// recovery never claims such a route: that actor is its owner.
+    fn holds(&self, incarnation: Uuid) -> bool {
+        self.entries
+            .lock()
+            .expect("receiver registry")
+            .iter()
+            .any(|entry| {
+                entry.intent.recipe.source_request_id == incarnation
+                    && !entry.state.lock().expect("receiver owner").retired
             })
     }
     pub(crate) fn by_session(&self, session: Uuid) -> Option<ReceiverStartActor> {
@@ -921,14 +1031,19 @@ async fn run_owner(
         .await
         .map_err(|_| ReceiverStartError::Unresolved)?;
     let capability = plurx_core::secrets::Secret::from_cleartext(
-        serde_json::to_string(&serde_json::json!({
-            "version":1, "reference":intent.recipe.reference, "file_id":intent.recipe.file_id,
-            "file_revision":intent.recipe.file_revision, "source_request_id":incarnation,
-            "source_session_id":source_session, "source_incarnation_id":source_incarnation,
-            "source_owner_epoch":source_epoch, "viewer_hash":received.viewer_hash,
-            "endpoint":received.endpoint,
-            "credential":received.credential.expose(),
-        }))
+        serde_json::to_string(&UpstreamCapsuleOut {
+            version: 1,
+            reference: &intent.recipe.reference,
+            file_id: &intent.recipe.file_id,
+            file_revision: &intent.recipe.file_revision,
+            source_request_id: incarnation,
+            source_session_id: source_session,
+            source_incarnation_id: source_incarnation,
+            source_owner_epoch: source_epoch,
+            viewer_hash: &received.viewer_hash,
+            endpoint: &received.endpoint,
+            credential: received.credential.expose(),
+        })
         .map_err(|_| ReceiverStartError::Unresolved)?,
     );
     let envelope = state
