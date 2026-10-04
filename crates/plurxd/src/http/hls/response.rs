@@ -506,6 +506,11 @@ pub(super) async fn pump_local_media<S, D, C>(
             let total: usize = provenance.iter().map(|(bytes, _)| bytes).sum();
             let accepted = Arc::new(std::sync::Mutex::new(AcceptedPrefix::default()));
             let changed = Arc::new(tokio::sync::Notify::new());
+            // Storage just made progress: the downstream phase of this batch
+            // gets its own no-progress window from the moment it is handed
+            // over, instead of inheriting what the storage read already spent
+            // since the previous batch's last acceptance.
+            last_progress = tokio::time::Instant::now();
             let batch = ResidentBatch {
                 reads,
                 accepted: Arc::clone(&accepted),
@@ -1105,6 +1110,59 @@ mod batching_tests {
         let notes = receipt.lock().expect("receipt lock");
         assert_eq!(notes.accepted, vec![4096; 11]);
         assert_eq!(notes.failures[0].1, "body_lifetime_exceeded");
+    }
+
+    /// A slow storage read and a slow downstream acceptance are separate
+    /// phases. Twenty seconds of each must not add up to one 30 s
+    /// no-progress failure on the next batch.
+    #[tokio::test(start_paused = true)]
+    async fn storage_and_downstream_each_get_their_own_no_progress_window() {
+        let reader = Box::pin(futures_util::stream::unfold(0u8, |step| async move {
+            match step {
+                0 => Some((Ok(Bytes::from(vec![1; 4096])), 1)),
+                1 => {
+                    tokio::time::sleep(Duration::from_secs(20)).await;
+                    Some((Ok(Bytes::from(vec![2; 4096])), 2))
+                }
+                _ => None,
+            }
+        }));
+        let (mut body, pump, receipt, completed) =
+            fixture(reader, 8192, Duration::from_secs(300));
+        assert_eq!(
+            body.frame()
+                .await
+                .expect("first frame")
+                .expect("first data")
+                .into_data()
+                .expect("first data")
+                .len(),
+            4096
+        );
+        // The second storage read takes 20 s, then the consumer waits 20 s
+        // more before accepting anything from the new batch.
+        tokio::time::advance(Duration::from_secs(20)).await;
+        for _ in 0..8 {
+            tokio::task::yield_now().await;
+        }
+        tokio::time::advance(Duration::from_secs(20)).await;
+        assert_eq!(
+            body.frame()
+                .await
+                .expect("second frame")
+                .expect("downstream still inside its own window")
+                .into_data()
+                .expect("second data")
+                .len(),
+            4096
+        );
+        drop(body);
+        pump.await.expect("pump task");
+        let notes = receipt.lock().expect("receipt lock");
+        assert!(notes.failures.is_empty(), "{:?}", notes.failures);
+        assert_eq!(notes.accepted, vec![4096, 4096]);
+        assert_eq!(notes.finished, 1);
+        assert_eq!(completed.load(Ordering::SeqCst), 1);
     }
 
     #[tokio::test]
