@@ -106,7 +106,10 @@ test("future callback metadata cannot seed false backward hitches or erase real 
     `let PLAYBACK_LIFETIME_HITCHES=0;
      const HITCH_WARMUP=12,HITCH_WINDOW=120,HITCH_NEAR_MS=150,HITCH_GAP_FRAMES=2.5,
        HITCH_SLOW_FACTOR=3,HITCH_LATE_FLOOR_MS=25,HITCH_LATE_FRACTION=0.75;
-     ${shippedSource('armHitchDetector')};armHitchDetector(arguments[8]);`);
+     ${shippedSource('armHitchDetector')}
+     // The slice keeps the comment block that trails the declaration, so the
+     // call must start on its own line or it is commented out.
+     armHitchDetector(arguments[8]);`);
   run(p,policy,{getElementById:()=>v},{now:()=>0},(_v,_p,callback)=>{next=callback;},
     ()=>true,()=>{settled++;},()=>{},v);
   function frame(now,mediaTime,currentTime,count){v.currentTime=currentTime;next(now,
@@ -3474,7 +3477,11 @@ function keepWaitingHarness() {
   const act = new Function(
     "PLAYER", "playbackSurfaceStep", "retryPlayback", "closePlayer",
     "startTranscodeFallback", "logout", "armStall", "pbPosSec",
+    "PLAYBACK_SURFACE", "retryQualityChange",
     [
+      // Retry routes a retained quality change to its own effect; whether one
+      // is retained is the shipped predicate, not a harness answer.
+      shippedSource("retainedQualityChange"),
       shippedSource("playbackSurfaceAction"),
       "return playbackSurfaceAction;",
     ].join("\n"),
@@ -3487,6 +3494,8 @@ function keepWaitingHarness() {
     (options) => calls.push(["logout", options]),
     (from) => calls.push(["armStall", from]),
     () => 742,
+    { state: policy.initialSurfaceState(), surface: null, history: [] },
+    () => calls.push(["retryQualityChange"]),
   );
   return { act, calls, player };
 }
