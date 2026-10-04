@@ -1108,13 +1108,17 @@ cluster-wal-check: ## Run exact Hiqlite and WAL recovery regressions
 	  --lib -- --exact
 
 .PHONY: cluster-store-check
+# 8 MiB test threads: in a debug build, one poll of the hundred-step replicated
+# migration loop needs more than libtest's default 2 MiB, so every test that
+# opens a store from an old marker (v47, v65) aborted the whole binary with a
+# stack overflow. Release builds are unaffected; this is a debug-frame bound.
 cluster-store-check: ## Run the Store contracts against SQLite and three voters
-	$(CARGO) test --locked -p plurx-core \
+	RUST_MIN_STACK=8388608 $(CARGO) test --locked -p plurx-core \
 	  --features cluster-read-cost-validation,hiqlite-contract-tests \
 	  --test store_contract -- --test-threads=1
 	# The only end-to-end test of the schema-lineage bridge: a real three-voter
 	# cluster carried from each private and canonical marker to the head.
-	$(CARGO) test --locked -p plurx-core \
+	RUST_MIN_STACK=8388608 $(CARGO) test --locked -p plurx-core \
 	  --features cluster-read-cost-validation,hiqlite-contract-tests \
 	  --test schema_lineage_upgrade -- --test-threads=1
 
