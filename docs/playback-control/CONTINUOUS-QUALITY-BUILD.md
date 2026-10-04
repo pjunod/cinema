@@ -6894,3 +6894,55 @@ to continue"). A real client talks to one node, so it would hit this only if
 that node is the one rejoining. Whether a create refused during a fence
 should wait for the fence to clear is a cluster serving-fence policy
 question outside continuous quality; left for the human.
+
+### 10.231 Chrome on the merged build
+
+Source `5d9052496` (main #788 merged), shared CPUs, the qualification command
+with the bound FFprobe. Fifteen manual and five actual Auto changes, one
+session and player; 66.7 ms maximum/p95 video gap; zero stalls, hitches and
+dropped frames; End producers 2/0/0/0. Receipt
+`reports/continuous-chrome-mixed-5d9052496-full20-merged2*`. (The first
+attempt, `…-merged1`, ran without `PLURX_BOUND_FFPROBE` and every create was
+refused `no bound FFprobe identity` — a harness environment omission.)
+
+### 10.232 Final adversarial review and dispositions
+
+Four reviewers (core ledger and stores; server routes and producers; web
+player; Android and Apple) read the full branch diff against the merge base.
+Every finding below was confirmed in code before it was fixed; each fix has a
+regression test that fails on the previous code.
+
+| Area | Finding | Disposition |
+|---|---|---|
+| Core | Three receipt-shape unit tests and one store contract assertion did not match the compact receipt / lost-CAS contract | Tests assert ledger state; a changed-attachment write is `Ok(false)` like every lost CAS |
+| Core | A Prepare left older reservation-free transactions `Cancelling`, which only a client cancel resolved; sixteen rapid changes exhausted the transaction bound for the rest of the session | A cancelled transaction without reservations resolves immediately (Superseded / RetainedCurrent / Disposed if it ever appended); Prepare also frees rows an older build left `Cancelling` |
+| Core | Single-node → cluster import skipped the three continuous-quality tables | Import plans added (v92/v93) |
+| Core | Cancellation receipts capped at 128 per generation and pruned only after the parent ended; a receipt could not settle after takeover | Settled receipts of older recipe revisions pruned under the live owner fence; settle accepted under the parent's current owner |
+| Server | Every fragment publish of every rendition read reservations under a 1 s timeout and a timeout retired the rendition | Only recipes a continuous family can pin consult reservations; an unknown answer holds the fragment instead of failing the producer |
+| Server | `quality-schedule` absent from learner and maintenance route lists | Added, with continuous creates on learners |
+| Server | Continuous creates escaped restart-drain admission counting | Counted |
+| Server | Schedule rate limit charged before the session was resolved | Route resolved first |
+| Server | Every owner failure answered 409, which clients settle as final | Classified: 400/409/410 final, 503 + `Retry-After` transient; relays pass owner status and `Retry-After` through; a test pins every refusal message to the owner source |
+| Server | Ended-session reconciliation required the departed owner; preparation hashing ran on the async runtime | Answered locally; hashing on `spawn_blocking` |
+| Web | A refused Prepare became the attachment owner; the stream died one buffer later | Adopted only after acceptance; `reserveWindow` re-prepares a missing or superseded owner |
+| Web | Native pause/play abandoned a pending manual choice; a re-Prepare never settled the choice; no settle bound | Preserved; lineage settles; 30 s control-budget bound settles as `observation_unknown` |
+| Web | A new init merged the previous track map | Replaced |
+| Web | Five continuous web tests failed and no gate ran them | Repaired and added to `web-check` |
+| Android | After a Direct/remux fallback the closed attachment still owned quality | Retired with its transport; closed attachments own nothing |
+| Android | One refused append fact aborted every later flush stage | Facts filtered to live reservations; stages fail independently |
+| Android | Failed-change recovery did not always report, leaving Auto `change_pending` | Always reports the restored rendition |
+| Android | A rolled-back successor stayed audible until collected | Silenced at rollback |
+| Android | `runBlocking(job)` said to cancel the job on failure | Not reproduced: scoped coroutine rethrows without cancelling the parent (checked with kotlinx.coroutines 1.9.0); unchanged |
+
+Compiled and linted after the fixes: rustfmt, Clippy `--all-targets -D
+warnings`, Android debug + unit-test sources, js-check, validation-lint, and
+the history audit (47 client-fix anchor rows added). The continuous web
+tests, `web-control` and `seek-control` were run once to prove the repaired
+fixtures; every other test waits for the single fast-lane pass.
+
+**Decision recorded for the human.** The earlier external Fable pause before
+the fast lane was raised as a conflict and not answered; the newer explicit
+workflow (review → fixes → one fast-lane pass → merge) is followed.
+Android was not re-qualified on the emulator after these fixes: they touch
+fallback retirement, fact filtering and recovery reporting, which the unit
+tests pin; physical-device verification is in the post-merge prompt.
