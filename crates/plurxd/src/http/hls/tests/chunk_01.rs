@@ -159,7 +159,7 @@
     /// added to `http/hls/` without being listed here fails each scan instead
     /// of going unread by it. Test children (`tests.rs`, `tests/`) quote
     /// production code as literals and are not product sources.
-    const HLS_PRODUCT_SOURCES: [(&str, &str); 16] = [
+    const HLS_PRODUCT_SOURCES: [(&str, &str); 18] = [
         ("../hls.rs", include_str!("../../hls.rs")),
         ("hooks.rs", include_str!("../hooks.rs")),
         ("session_guard.rs", include_str!("../session_guard.rs")),
@@ -179,6 +179,8 @@
         ("subtitle_names.rs", include_str!("../subtitle_names.rs")),
         ("playlist_text.rs", include_str!("../playlist_text.rs")),
         ("segment.rs", include_str!("../segment.rs")),
+        ("quality_control.rs", include_str!("../quality_control.rs")),
+        ("quality_schedule.rs", include_str!("../quality_schedule.rs")),
     ];
 
     fn hls_product_source() -> String {
