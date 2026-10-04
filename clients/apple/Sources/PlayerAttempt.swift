@@ -167,15 +167,13 @@ enum AttemptFence: String, CaseIterable, Sendable {
     case seekIntent = "seek_intent"
     /// `issueSeek`: the intent after the awaited control report.
     case seekIntentAfterControl = "seek_intent_after_control"
-    case seekIntentAfterOptionalBoundary = "seek_intent_after_optional_boundary"
+    /// `autoBoundaryIsCurrent`: a boundary's optional original preparation
+    /// belongs to the title, attachment and viewer action that started it.
     case autoBoundaryOwnerCurrent = "auto_boundary_owner_current"
-    case autoBoundarySeekCurrent = "auto_boundary_seek_current"
-    case autoBoundaryResumeCurrent = "auto_boundary_resume_current"
-    case autoBoundaryCommitViewerCurrent = "auto_boundary_commit_viewer_current"
-    case autoBoundaryCommitOwnerCurrent = "auto_boundary_commit_owner_current"
-    case autoBoundaryCommitSeekCurrent = "auto_boundary_commit_seek_current"
-    case autoResumeFallbackCurrent = "auto_resume_fallback_current"
-    case autoResumeCompletedViewerCurrent = "auto_resume_completed_viewer_current"
+    /// `tickDisplayAwareAuto`: the re-plan a viewer seek or long-pause resume
+    /// armed is owed only while that viewer action is still the latest. A
+    /// reopen for the same seek does not supersede it.
+    case autoBoundaryReplanCurrent = "auto_boundary_replan_current"
     /// `issueSeek`: the awaited native seek completion.
     case nativeSeekCompletion = "native_seek_completion"
     /// `issueSeek`: the native seek after awaited subtitle reconciliation.
@@ -209,15 +207,8 @@ enum AttemptFence: String, CaseIterable, Sendable {
         case .preparedPressureAcknowledgement: return [.lifecycle, .viewerAction]
         case .seekIntent: return [.viewerAction, .seek]
         case .seekIntentAfterControl: return [.viewerAction, .seek]
-        case .seekIntentAfterOptionalBoundary: return [.viewerAction, .seek]
         case .autoBoundaryOwnerCurrent: return [.lifecycle, .open, .viewerAction]
-        case .autoBoundarySeekCurrent: return [.seek]
-        case .autoBoundaryResumeCurrent: return [.lifecycle, .open, .viewerAction]
-        case .autoBoundaryCommitViewerCurrent: return [.viewerAction]
-        case .autoBoundaryCommitOwnerCurrent: return [.lifecycle, .open, .viewerAction]
-        case .autoBoundaryCommitSeekCurrent: return [.seek]
-        case .autoResumeFallbackCurrent: return [.lifecycle, .open, .viewerAction]
-        case .autoResumeCompletedViewerCurrent: return [.viewerAction]
+        case .autoBoundaryReplanCurrent: return [.lifecycle, .viewerAction]
         case .nativeSeekCompletion: return [.open, .viewerAction, .seek]
         case .nativeSeekAfterSelection: return [.open, .viewerAction, .seek]
         case .recoveryEvidencePoll: return [.open]

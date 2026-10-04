@@ -1567,3 +1567,30 @@ source proofs, not physical decoder or shaped-network qualification. Current
 committed-source checks, one independent review and the exact effort gate
 precede landing; the original 14-versus-20 Mbit/s, decoder/recovery and complete
 platform acceptance matrix remain open. No saved feature choice is gated.
+
+### 9.16 Viewer boundaries no longer hold Play or a seek (2026-10-04 UTC)
+
+Review finding (P2): after an explicit pause of at least 60 seconds the native
+clients did not write Play to the player until the optional original stage of
+§9.13 committed at the paused frame or exhausted its borrowed budget — up to
+about six seconds of a pressed Play doing nothing — and every viewer seek
+waited behind the same attempt. Apple ran that stage as 25 ms `Task.sleep`
+polling loops on the main actor.
+
+The boundary rule is now: the viewer action is applied to the incumbent at
+once, and the original-first re-plan it is owed is served afterwards by the
+ordinary Auto evaluation as an ordinary prepared replacement beside the
+playing incumbent (Android's rendezvous, Apple's aligned commit). A seek or a
+long-pause resume only arms a one-shot re-plan keyed by the viewer action that
+armed it (Android `AutoBoundaryReplan`, keyed by the transport lifetime; Apple
+`AutoBoundaryReplan`, fence `autoBoundaryReplanCurrent`), so any newer viewer
+action makes it stale without a timer. The first evaluation whose incumbent
+is established, playing and has 10 seconds of runway consumes it, and a fresh
+link proof still stands in for the mid-play quiet window for that one
+preparation. A superseded or refused boundary preparation is withdrawn without
+backoff; a failed one is an ordinary Auto failure. The borrowed transaction
+budget, the exact-target hold, the optional deadline, Apple's
+`AutoViewerBoundaryBudget`, the boundary resume owner and the selection
+pre-stage are gone. This changes when the original switch happens (after the
+viewer action, through a seamless handoff, rather than instead of it); it does
+not change which candidates qualify.

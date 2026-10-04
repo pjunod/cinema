@@ -86,18 +86,18 @@ def fence_arm(case: unittest.TestCase, attempt: str, fence: str) -> str:
 class AttemptScopeCensusCase(unittest.TestCase):
     def test_a05_boundary_named_fences_preserve_original_scope_and_no_allowlist_growth(self) -> None:
         expected = {
-            "seekIntentAfterOptionalBoundary": ("issueSeek", ["viewerAction", "seek"]),
             "autoBoundaryOwnerCurrent": ("autoBoundaryIsCurrent", ["lifecycle", "open", "viewerAction"]),
-            "autoBoundarySeekCurrent": ("autoBoundaryIsCurrent", ["seek"]),
-            "autoBoundaryResumeCurrent": ("autoBoundaryResumeIsLive", ["lifecycle", "open", "viewerAction"]),
-            "autoBoundaryCommitViewerCurrent": ("commitPreparedSuccessor", ["viewerAction"]),
-            "autoBoundaryCommitOwnerCurrent": ("commitPreparedSuccessor", ["lifecycle", "open", "viewerAction"]),
-            "autoBoundaryCommitSeekCurrent": ("commitPreparedSuccessor", ["seek"]),
-            "autoResumeFallbackCurrent": ("setPlaybackRequested", ["lifecycle", "open", "viewerAction"]),
-            "autoResumeCompletedViewerCurrent": ("setPlaybackRequested", ["viewerAction"]),
+            "autoBoundaryReplanCurrent": ("tickDisplayAwareAuto", ["lifecycle", "viewerAction"]),
         }
         self.assertEqual(audit(repository_read), ())
         document = tomllib.loads(repository_read(ALLOWLIST))
+        # The viewer-path optional stage is gone: Play and seek no longer wait
+        # behind it, so its resume/seek/commit fences must not come back.
+        for retired in ("seekIntentAfterOptionalBoundary", "autoBoundarySeekCurrent",
+                        "autoBoundaryResumeCurrent", "autoBoundaryCommitViewerCurrent",
+                        "autoBoundaryCommitOwnerCurrent", "autoBoundaryCommitSeekCurrent",
+                        "autoResumeFallbackCurrent", "autoResumeCompletedViewerCurrent"):
+            self.assertNotIn(retired, document["fences"])
         self.assertFalse(any(key.startswith(("autoBoundary", "commitPreparedSuccessor::boundary"))
                              for key in document["allowed"]))
         self.assertEqual(document["allowed"]["setPlaybackRequested::self.viewerActionEpoch == actionEpoch"], 3)

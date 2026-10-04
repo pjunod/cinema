@@ -1522,15 +1522,8 @@ final class DisplayAwareAutoEvidenceTests: XCTestCase {
         }
         let captured = attempt()
         let expected: [(AttemptFence, Set<Attempt.Scope>)] = [
-            (.seekIntentAfterOptionalBoundary, [.viewerAction, .seek]),
             (.autoBoundaryOwnerCurrent, [.lifecycle, .open, .viewerAction]),
-            (.autoBoundarySeekCurrent, [.seek]),
-            (.autoBoundaryResumeCurrent, [.lifecycle, .open, .viewerAction]),
-            (.autoBoundaryCommitViewerCurrent, [.viewerAction]),
-            (.autoBoundaryCommitOwnerCurrent, [.lifecycle, .open, .viewerAction]),
-            (.autoBoundaryCommitSeekCurrent, [.seek]),
-            (.autoResumeFallbackCurrent, [.lifecycle, .open, .viewerAction]),
-            (.autoResumeCompletedViewerCurrent, [.viewerAction])
+            (.autoBoundaryReplanCurrent, [.lifecycle, .viewerAction])
         ]
         for (fence, scopes) in expected {
             XCTAssertEqual(fence.scopes, scopes, fence.rawValue)
@@ -1548,13 +1541,11 @@ final class DisplayAwareAutoEvidenceTests: XCTestCase {
         let sourceURL = URL(fileURLWithPath: #filePath).deletingLastPathComponent()
             .deletingLastPathComponent().appendingPathComponent("Sources/PlayerController.swift")
         let source = try String(contentsOf: sourceURL, encoding: .utf8)
-        XCTAssertTrue(source.contains("AutoBoundaryAttempt(attempt: snapshotAttempt(), resumeIdentity:"))
-        XCTAssertTrue(source.contains("AutoBoundaryResumeOwner(attempt: snapshotAttempt(),"))
-        XCTAssertTrue(source.contains("let resumeIntentAttempt = snapshotAttempt()"))
-        XCTAssertTrue(source.contains("attemptStillCurrent(boundary.attempt, fence: .autoBoundaryCommitOwnerCurrent)"))
-        XCTAssertTrue(source.contains("AutoResumeIdentity(attempt) == owner.identity"))
+        XCTAssertTrue(source.contains("AutoBoundaryAttempt(attempt: snapshotAttempt(), item:"))
+        XCTAssertTrue(source.contains("attemptStillCurrent(boundary.attempt, fence: .autoBoundaryOwnerCurrent)"))
+        XCTAssertTrue(source.contains("attemptStillCurrent($0, fence: .autoBoundaryReplanCurrent)"))
         XCTAssertFalse(source.contains("lifecycleGeneration == boundary.lifecycle"))
-        XCTAssertFalse(source.contains("owner.viewer == viewerActionEpoch"))
+        XCTAssertFalse(source.contains("AutoBoundaryResumeOwner"))
     }
 
     func testA05SeekCallsitesPreserveViewerAndAutomaticMarkerProvenance() throws {
@@ -1583,18 +1574,80 @@ final class DisplayAwareAutoEvidenceTests: XCTestCase {
         XCTAssertTrue(forwarding.contains("viewerBoundary: viewerOrigin"))
     }
 
-    func testA05ViewerBoundaryRetainsOriginalBudgetAndRefusesRenewal() {
-        let first = AutoViewerBoundaryBudget(enteredAtMs: 1_000, originalDeadlineMs: 16_000, nowMs: 1_500)!
-        XCTAssertEqual(first.deadlineMs, 9_000)
-        XCTAssertEqual(first.optionalDeadlineMs, 7_000)
-        let coalesced = AutoViewerBoundaryBudget(enteredAtMs: 1_000, originalDeadlineMs: 16_000, nowMs: 6_999)!
-        XCTAssertEqual(coalesced.optionalDeadlineMs, first.optionalDeadlineMs)
-        XCTAssertNil(AutoViewerBoundaryBudget(enteredAtMs: 1_000, originalDeadlineMs: 16_000, nowMs: 7_000))
-        XCTAssertNil(AutoViewerBoundaryBudget(enteredAtMs: 1_000, originalDeadlineMs: 16_000, nowMs: 999))
-        XCTAssertNil(AutoViewerBoundaryBudget(enteredAtMs: Int.max, originalDeadlineMs: Int.max, nowMs: Int.max))
-        let earlierExpiry = AutoViewerBoundaryBudget(enteredAtMs: 1_000, originalDeadlineMs: 5_000, nowMs: 2_000)!
-        XCTAssertEqual(earlierExpiry.deadlineMs, 5_000)
-        XCTAssertEqual(earlierExpiry.optionalDeadlineMs, 3_000)
+    func testPlayAfterALongPauseIsAppliedAtOnceAndOnlyArmsTheReplan() throws {
+        // The decision whether Play is applied is not a decision at all: the
+        // long pause only arms the original-first re-plan.
+        XCTAssertTrue(AutoViewerBoundary.resumeArmsReplan(viewerOrigin: true,
+            pauseDurationMs: AutoViewerBoundary.longPauseMs, samePauseOwner: true))
+        XCTAssertFalse(AutoViewerBoundary.resumeArmsReplan(viewerOrigin: true,
+            pauseDurationMs: AutoViewerBoundary.longPauseMs - 1, samePauseOwner: true))
+        XCTAssertFalse(AutoViewerBoundary.resumeArmsReplan(viewerOrigin: false,
+            pauseDurationMs: 3_600_000, samePauseOwner: true), "an internal resume is no viewer boundary")
+        XCTAssertFalse(AutoViewerBoundary.resumeArmsReplan(viewerOrigin: true,
+            pauseDurationMs: 3_600_000, samePauseOwner: false), "a pause on another attachment owes nothing")
+
+        // The controller writes Play to AVPlayer in the buffered branch with
+        // nothing between the press and the command, and never parks the
+        // resume task behind an optional original stage.
+        let sourceURL = URL(fileURLWithPath: #filePath).deletingLastPathComponent()
+            .deletingLastPathComponent().appendingPathComponent("Sources/PlayerController.swift")
+        let source = try String(contentsOf: sourceURL, encoding: .utf8)
+        let lower = try XCTUnwrap(source.range(of: "private func setPlaybackRequested(_ requested: Bool, viewerOrigin: Bool) {"))
+        let upper = try XCTUnwrap(source.range(of: "nonisolated static func applyPlaybackCommand(",
+                                               range: lower.upperBound..<source.endIndex))
+        let resume = String(source[lower.upperBound..<upper.lowerBound])
+        let buffered = try XCTUnwrap(resume.range(of: "path: \"buffered-immediate\","))
+        let tail = resume[buffered.upperBound...]
+        let play = try XCTUnwrap(tail.range(of: "Self.applyPlaybackCommand(to: player, preferredRate: preferredRate, immediately: true)"))
+        let nextBranch = try XCTUnwrap(tail.range(of: "} else if established {"))
+        XCTAssertLessThan(play.lowerBound, nextBranch.lowerBound)
+        XCTAssertNil(tail[..<play.lowerBound].range(of: "isPlaying = false"), "Play is not withheld")
+        XCTAssertTrue(resume.contains("autoBoundaryReplan.arm(snapshotAttempt())"))
+        XCTAssertFalse(resume.contains("attemptAutoOriginalBoundary"))
+        XCTAssertFalse(source.contains("attemptAutoOriginalBoundary"))
+        XCTAssertFalse(source.contains("pollMs: 25"), "no 25 ms polling loop remains on the main actor")
+        XCTAssertFalse(source.contains("Task.sleep(nanoseconds: 25_000_000)"))
+
+        // A viewer seek is executed without an optional stage in front of it.
+        let seekLower = try XCTUnwrap(source.range(of: "private func issueSeek("))
+        let seekUpper = try XCTUnwrap(source.range(of: "let route = Self.seekRoute(",
+                                                   range: seekLower.upperBound..<source.endIndex))
+        let seek = String(source[seekLower.upperBound..<seekUpper.lowerBound])
+        XCTAssertTrue(seek.contains("if viewerBoundary { autoBoundaryReplan.arm(snapshotAttempt()) }"))
+        XCTAssertFalse(seek.contains("await attemptAutoOriginalBoundary"))
+    }
+
+    func testOptionalOriginalReplanNeverBlocksAndIsServedOnceBesideThePlayingIncumbent() {
+        func attempt(viewer: Int) -> Attempt {
+            Attempt(lifecycle: 1, open: 2, viewerAction: viewer, initialDecision: 4, createRetry: 5,
+                    preparedAlignment: 6, seek: 7, pgsSelection: 8, pgsItem: 9, item: nil)
+        }
+        let armed = attempt(viewer: 3)
+        let isCurrent: (Attempt) -> Bool = {
+            $0.stillCurrent(armed, scopes: AttemptFence.autoBoundaryReplanCurrent.scopes)
+        }
+        var replan = AutoBoundaryReplan()
+        XCTAssertNil(replan.take(runwaySeconds: 60, isCurrent: isCurrent), "nothing armed, nothing owed")
+        replan.arm(armed)
+        // The incumbent is already playing; the re-plan waits for handoff
+        // runway on the ordinary Auto evaluation, not on the viewer.
+        XCTAssertNil(replan.take(runwaySeconds: AutoViewerBoundary.handoffRunwaySeconds - 0.001, isCurrent: isCurrent))
+        XCTAssertNil(replan.take(runwaySeconds: nil, isCurrent: isCurrent))
+        XCTAssertTrue(replan.isArmed, "short runway keeps the boundary owed")
+        XCTAssertEqual(replan.take(runwaySeconds: AutoViewerBoundary.handoffRunwaySeconds, isCurrent: isCurrent), armed)
+        XCTAssertFalse(replan.isArmed)
+        XCTAssertNil(replan.take(runwaySeconds: 60, isCurrent: isCurrent), "served exactly once")
+
+        // A newer viewer action makes the armed boundary stale without a timer.
+        replan.arm(attempt(viewer: 2))
+        XCTAssertNil(replan.take(runwaySeconds: 60, isCurrent: isCurrent))
+        XCTAssertFalse(replan.isArmed)
+        replan.arm(armed)
+        replan.clear()
+        XCTAssertNil(replan.take(runwaySeconds: 60, isCurrent: isCurrent))
+    }
+
+    func testA05UpgradeEvidenceCliffIsNotRenewedByRereading() {
         // Quiet/cliff windows are still meaningful for ordinary mid-play, but
         // observing an expired original EOF cannot renew the cliff timestamp.
         let item = NSObject()

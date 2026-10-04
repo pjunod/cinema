@@ -3530,6 +3530,8 @@ test_anchor = "fun a05StagedMediaIntervalsRequireCapturedPipelineAndOriginalDead
 
 # Native original-boundary source-to-current-test bridges. These two methods
 # passed once on exact a82 source; no historical fd74 execution is implied.
+# The boundary no longer holds Play or a seek: the anchors now name the
+# re-plan that the ordinary Auto evaluation serves beside the incumbent.
 [[fixes]]
 id = "android.auto-prepared-viewer-boundary-owner-and-budget"
 commits = ["e7511b9c9945d0ab19a0234d64a74ed19d35ae60", "228874547df1c1c870973e417be0986d7e0948e4", "d9dea0ab387f6e7f69047162d4a47f53ba466481"]
@@ -3543,9 +3545,9 @@ id = "apple.auto-prepared-viewer-boundary-original-budget"
 commits = []
 supplements = "android.auto-prepared-viewer-boundary-owner-and-budget"
 source = "clients/apple/Sources/PlayerController.swift"
-source_anchor = "struct AutoViewerBoundaryBudget"
+source_anchor = "struct AutoBoundaryReplan"
 test = "clients/apple/Tests/PlaybackControlReporterTests.swift"
-test_anchor = "testA05ViewerBoundaryRetainsOriginalBudgetAndRefusesRenewal"
+test_anchor = "testOptionalOriginalReplanNeverBlocksAndIsServedOnceBesideThePlayingIncumbent"
 
 [[fixes]]
 id = "player.ten-and-thirty-second-controls"
@@ -3587,7 +3589,7 @@ test_anchor = "testA05SeekCallsitesPreserveViewerAndAutomaticMarkerProvenance"
 id = "apple.auto-boundary-captured-typed-epoch-ownership"
 commits = ["f94345baa99553e333f0a8280dc9995ee640cc43"]
 source = "clients/apple/Sources/PlayerController.swift"
-source_anchor = "AutoBoundaryAttempt(attempt: snapshotAttempt(), resumeIdentity:"
+source_anchor = "AutoBoundaryAttempt(attempt: snapshotAttempt(), item:"
 test = "clients/apple/Tests/PlaybackControlReporterTests.swift"
 test_anchor = "testA05BoundaryEpochFencesKeepCapturedOwnershipAndIndependentScopes"
 
