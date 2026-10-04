@@ -3173,6 +3173,12 @@ impl SharingConnectionCancellation {
             tokio_util::sync::CancellationToken::new(),
         )
     }
+    /// Opaque weak ownership identity for deduplicating per-actor monitors.
+    /// Holding it cannot keep the connection or monitor owner alive.
+    pub(crate) fn ownership_key(&self) -> std::sync::Weak<dyn Send + Sync> {
+        let identity: std::sync::Arc<dyn Send + Sync> = self.1.clone();
+        std::sync::Arc::downgrade(&identity)
+    }
     /// Completes only after the accepted Hyper connection future is dropped.
     pub(crate) fn closed(&self) -> SharingConnectionClosure {
         SharingConnectionClosure(self.2.clone())
