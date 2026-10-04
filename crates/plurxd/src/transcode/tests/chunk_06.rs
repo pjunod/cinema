@@ -2303,7 +2303,7 @@
     }
 
     #[tokio::test]
-    async fn serving_fence_kills_existing_and_transition_racing_children() {
+    async fn serving_fence_retires_sessions_after_a_sustained_loss_and_refuses_late_children() {
         use plurx_core::cluster::migration::status::ReplicationMonitor;
         use plurx_core::store::SqliteStore;
 
@@ -2332,12 +2332,9 @@
             .insert("existing".to_owned(), Arc::clone(&existing));
 
         let fence_loop = tokio::spawn(Arc::clone(&manager).serving_fence_loop(fence.subscribe()));
-        // Publish loss and recovery without yielding. A boolean watch could
-        // coalesce this to `true` and preserve the old child; the generation
-        // makes the lost authority permanent for generation zero.
+        // A loss that outlasts the session grace retires the existing child.
         fence.validation_set_ready(false).await;
-        fence.validation_set_ready(true).await;
-        tokio::time::timeout(Duration::from_secs(2), async {
+        tokio::time::timeout(super::manager_control::SERVING_FENCE_SESSION_GRACE + Duration::from_secs(10), async {
             loop {
                 let stopped = existing.retirement_cleanup_finished.load(Acquire);
                 if existing.control.is_retired()
@@ -2350,16 +2347,11 @@
             }
         })
         .await
-        .expect("existing child must be retired promptly");
-
-        fence.validation_set_ready(false).await;
-        tokio::time::timeout(Duration::from_secs(2), async {
-            while manager.serving_ready.load(Acquire) {
-                tokio::task::yield_now().await;
-            }
-        })
-        .await
-        .expect("manager gate must close");
+        .expect("existing child must be retired once the grace is spent");
+        assert!(
+            !manager.serving_ready.load(Acquire),
+            "the manager gate stays closed while authority is lost"
+        );
 
         // This insertion linearizes after the fence loop's false store and
         // after its first snapshot. `register_session` is the other half of
@@ -2377,6 +2369,131 @@
             "the rejected late child must already be reaped and released"
         );
 
+        drop(fence);
+        fence_loop.await.expect("serving fence loop");
+    }
+
+    async fn serving_fence_test_manager(
+        root: &std::path::Path,
+    ) -> (
+        Arc<TranscodeManager>,
+        crate::serving_fence::ServingFence,
+        Arc<Session>,
+    ) {
+        use plurx_core::cluster::migration::status::ReplicationMonitor;
+        use plurx_core::store::SqliteStore;
+
+        let store: Arc<dyn Store> = Arc::new(SqliteStore::open_in_memory().expect("store"));
+        let fence =
+            crate::serving_fence::ServingFence::new(ReplicationMonitor::sqlite().metrics_handle());
+        let manager = Arc::new(
+            TranscodeManager::new(
+                store,
+                root.join("manager"),
+                EncoderCaps::default(),
+                Pipeline::Cpu,
+            )
+            .with_serving_authority(fence.authority()),
+        );
+        let existing = watchdog_session(&root.join("existing"), Some(long_running_child()), false);
+        manager
+            .sessions
+            .lock()
+            .await
+            .insert("existing".to_owned(), Arc::clone(&existing));
+        (manager, fence, existing)
+    }
+
+    async fn wait_until_retired(manager: &TranscodeManager, existing: &Session, why: &str) {
+        tokio::time::timeout(
+            super::manager_control::SERVING_FENCE_SESSION_GRACE + Duration::from_secs(10),
+            async {
+                loop {
+                    if existing.control.is_retired()
+                        && existing.retirement_cleanup_finished.load(Acquire)
+                        && manager.sessions.lock().await.is_empty()
+                    {
+                        break;
+                    }
+                    tokio::task::yield_now().await;
+                }
+            },
+        )
+        .await
+        .unwrap_or_else(|_| panic!("{why}"));
+    }
+
+    /// The 2026-10-04 incident: a leader restart and a one-second leader stall
+    /// each cost every voter its serving authority for under two seconds, and
+    /// retiring sessions on that ended healthy playback across the cluster.
+    /// A loss that recovers inside the grace, published with or without the
+    /// loop getting to run in between, must keep the existing session.
+    #[tokio::test]
+    async fn serving_fence_keeps_sessions_through_a_brief_loss() {
+        let root = crate::test_tempdir().expect("serving-fence root");
+        let (manager, fence, existing) = serving_fence_test_manager(root.path()).await;
+        let fence_loop = tokio::spawn(Arc::clone(&manager).serving_fence_loop(fence.subscribe()));
+
+        // Lost, the loop starts waiting, then authority comes back.
+        fence.validation_set_ready(false).await;
+        tokio::task::yield_now().await;
+        fence.validation_set_ready(true).await;
+        // Lost and back without yielding: the loop sees only a new generation.
+        fence.validation_set_ready(false).await;
+        fence.validation_set_ready(true).await;
+        tokio::time::timeout(Duration::from_secs(10), async {
+            while !manager.serving_ready.load(Acquire) {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("the registration gate reopens once authority is back");
+
+        assert!(
+            !existing.control.is_retired(),
+            "a brief authority loss must not retire an existing session"
+        );
+        assert!(
+            manager.sessions.lock().await.contains_key("existing"),
+            "the session stays registered"
+        );
+        assert!(
+            existing.child.lock().await.is_some(),
+            "its producer keeps running"
+        );
+
+        // Shutting down while authority is lost still retires and exits.
+        fence.validation_set_ready(false).await;
+        drop(fence);
+        tokio::time::timeout(Duration::from_secs(10), fence_loop)
+            .await
+            .expect("the fence loop exits when its sender is gone")
+            .expect("serving fence loop");
+        wait_until_retired(&manager, &existing, "shutdown while fenced must retire").await;
+    }
+
+    /// The grace is one budget per outage. Losses that keep returning before
+    /// the quorum has been stable for a grace spend the same budget, so a
+    /// flapping quorum still retires sessions.
+    #[tokio::test]
+    async fn serving_fence_flapping_losses_share_one_grace() {
+        let root = crate::test_tempdir().expect("serving-fence root");
+        let (manager, fence, existing) = serving_fence_test_manager(root.path()).await;
+        let fence_loop = tokio::spawn(Arc::clone(&manager).serving_fence_loop(fence.subscribe()));
+        let slice = super::manager_control::SERVING_FENCE_SESSION_GRACE / 3;
+        for _ in 0..4 {
+            fence.validation_set_ready(false).await;
+            tokio::time::sleep(slice).await;
+            fence.validation_set_ready(true).await;
+            tokio::task::yield_now().await;
+        }
+        // Authority is back now; only the shared budget can have retired it.
+        wait_until_retired(
+            &manager,
+            &existing,
+            "losses summing past the grace must retire the session",
+        )
+        .await;
         drop(fence);
         fence_loop.await.expect("serving fence loop");
     }

@@ -970,6 +970,187 @@
         }
     }
 
+    /// The 2026-10-04 incident shape: a 1x Apple TV viewer paused for about
+    /// a minute on a rolling copy session and was retired two seconds after
+    /// resuming. While paused the publication clock keeps walking one segment
+    /// per cycle up to the reserve ceiling; at the ceiling the next segment
+    /// is merely early, so the session must wait for the viewer, not end.
+    #[tokio::test(start_paused = true)]
+    async fn rolling_publication_budget_pause_then_resume_at_one_x_is_not_retired() {
+        use crate::playback_control::{PlaybackDemand, RenderState};
+        const CYCLE_MS: i64 = 16_000;
+        const PAUSE_AT: i64 = 6;
+        // 176 s, inside the pause grace.
+        const PAUSE_CYCLES: i64 = 11;
+        const RESUME_CYCLES: i64 = 12;
+        let directory = crate::test_tempdir().expect("pause/resume budget");
+        let session = test_session(directory.path().to_path_buf());
+        let started = Instant::now();
+        let resume_at = PAUSE_AT + PAUSE_CYCLES;
+        let mut topped_out_end_ms = None;
+        for step in 0..resume_at + RESUME_CYCLES {
+            let elapsed_ms = step * CYCLE_MS;
+            let paused = (PAUSE_AT..resume_at).contains(&step);
+            let position_ms = if step < PAUSE_AT {
+                elapsed_ms
+            } else if paused {
+                PAUSE_AT * CYCLE_MS
+            } else {
+                (step - PAUSE_CYCLES) * CYCLE_MS
+            };
+            let (demand, rate, render) = if paused {
+                (PlaybackDemand::Hold, 0.0, RenderState::Rendering)
+            } else if step == 0 {
+                (PlaybackDemand::Active, 1.0, RenderState::Starting)
+            } else {
+                (PlaybackDemand::Active, 1.0, RenderState::Rendering)
+            };
+            accept_rolling_publication_demand(
+                &session,
+                u64::try_from(step + 1).expect("sequence"),
+                position_ms,
+                rate,
+                demand,
+                render,
+            )
+            .await;
+            // Worst case for the walk: every cut at the 16 s ceiling and a
+            // producer that is always ahead.
+            let produced_end_ms = 64_000 + elapsed_ms * 12 / 10;
+            let count = usize::try_from(produced_end_ms / CYCLE_MS).expect("segment count");
+            tokio::fs::write(
+                directory.path().join("index.m3u8"),
+                rolling_playlist(&vec![16.0; count], false),
+            )
+            .await
+            .expect("writer playlist");
+            session
+                .publication_cycle_at(
+                    "rolling_publication_budget_pause_resume",
+                    started
+                        + Duration::from_millis(
+                            u64::try_from(elapsed_ms + 1_000).expect("elapsed"),
+                        ),
+                )
+                .await
+                .unwrap_or_else(|reason| {
+                    panic!("1x viewer retired at step {step} (paused={paused}): {reason}")
+                });
+            let clock = session.publication.lock().await;
+            let served = clock.served.as_ref().expect("served snapshot");
+            let lead_ms = served.end_ms - position_ms;
+            assert!(
+                lead_ms <= ROLLING_RESERVE_MAX_MS,
+                "reserve ceiling exceeded at step {step}: {lead_ms}"
+            );
+            if step > 1 {
+                assert!(
+                    lead_ms >= rolling_initial_runway_ms(1.0) - CYCLE_MS,
+                    "runway drained at step {step}: {lead_ms}"
+                );
+            }
+            if paused && step >= resume_at - 2 {
+                let held = *topped_out_end_ms.get_or_insert(served.end_ms);
+                assert_eq!(
+                    served.end_ms, held,
+                    "a paused walk stops at the reserve ceiling instead of retiring"
+                );
+            }
+            drop(clock);
+            tokio::time::advance(Duration::from_millis(251)).await;
+        }
+        assert!(
+            !session.failed.load(Acquire),
+            "pause and resume at 1x must not retire the session"
+        );
+        let clock = session.publication.lock().await;
+        assert!(
+            clock.served.as_ref().expect("served").end_ms
+                > topped_out_end_ms.expect("the pause reached the ceiling"),
+            "publication resumes once the viewer consumes again"
+        );
+    }
+
+    /// The deferral is bounded. A client that reports Waiting forever with a
+    /// frozen position is not consuming, so publication waits for it at the
+    /// reserve ceiling, but only for the pause grace; then it is retired with
+    /// the numbers that say so, rather than holding a producer indefinitely.
+    #[tokio::test(start_paused = true)]
+    async fn rolling_publication_budget_wedged_waiting_viewer_is_retired_after_the_pause_grace() {
+        use crate::playback_control::{PlaybackDemand, RenderState};
+        const CYCLE_MS: i64 = 16_000;
+        const WEDGE_AT: i64 = 6;
+        let directory = crate::test_tempdir().expect("wedged budget");
+        let session = test_session(directory.path().to_path_buf());
+        let started = Instant::now();
+        let limit_steps = WEDGE_AT
+            + 8
+            + i64::try_from(crate::playback_control::ROLLING_PAUSE_GRACE.as_millis())
+                .expect("grace")
+                / CYCLE_MS
+            + 4;
+        let mut retired = None;
+        for step in 0..limit_steps {
+            let elapsed_ms = step * CYCLE_MS;
+            let wedged = step >= WEDGE_AT;
+            let position_ms = if wedged { WEDGE_AT * CYCLE_MS } else { elapsed_ms };
+            let render = if step == 0 {
+                RenderState::Starting
+            } else if wedged {
+                RenderState::Waiting
+            } else {
+                RenderState::Rendering
+            };
+            accept_rolling_publication_demand(
+                &session,
+                u64::try_from(step + 1).expect("sequence"),
+                position_ms,
+                1.0,
+                PlaybackDemand::Active,
+                render,
+            )
+            .await;
+            let produced_end_ms = 64_000 + elapsed_ms * 12 / 10;
+            let count = usize::try_from(produced_end_ms / CYCLE_MS).expect("segment count");
+            tokio::fs::write(
+                directory.path().join("index.m3u8"),
+                rolling_playlist(&vec![16.0; count], false),
+            )
+            .await
+            .expect("writer playlist");
+            if let Err(reason) = session
+                .publication_cycle_at(
+                    "rolling_publication_budget_wedged",
+                    started
+                        + Duration::from_millis(
+                            u64::try_from(elapsed_ms + 1_000).expect("elapsed"),
+                        ),
+                )
+                .await
+            {
+                retired = Some((step, reason));
+                break;
+            }
+            tokio::time::advance(Duration::from_millis(251)).await;
+        }
+        let (step, reason) = retired.expect("a wedged viewer must eventually be retired");
+        assert!(
+            reason.starts_with("rolling_window_budget_exhausted:"),
+            "unexpected verdict at step {step}: {reason}"
+        );
+        let deferred_for_ms = reason
+            .split("deferred_for_ms=")
+            .nth(1)
+            .and_then(|tail| tail.trim_end_matches(')').parse::<u64>().ok())
+            .expect("the verdict names how long publication waited");
+        let grace_ms =
+            u64::try_from(crate::playback_control::ROLLING_PAUSE_GRACE.as_millis()).expect("ms");
+        assert!(
+            deferred_for_ms > grace_ms && deferred_for_ms <= grace_ms + 2 * 16_000,
+            "retired after waiting {deferred_for_ms} ms, expected just past the {grace_ms} ms grace"
+        );
+    }
+
     #[tokio::test(start_paused = true)]
     async fn rolling_publication_budget_low_rate_retires_before_the_window_can_skip() {
         let directory = crate::test_tempdir().expect("low-rate budget");
@@ -1028,6 +1209,23 @@
             matches!(&failure, PlaylistError::SessionFailed(reason) if reason.starts_with("rolling_window_budget_exhausted:")),
             "unexpected worker verdict: {failure:?}"
         );
+        // A retirement that ends a viewer's session has to say why in numbers;
+        // the 2026-10-04 incident could not be explained from the bare verdict.
+        let PlaylistError::SessionFailed(reason) = &failure else {
+            unreachable!("matched above")
+        };
+        for field in [
+            "consumed_end_ms=",
+            "allowed_end_ms=",
+            "first_new_end_ms=",
+            "served_end_ms=",
+            "reserve_max_ms=",
+        ] {
+            assert!(
+                reason.contains(field),
+                "the verdict must carry {field}: {reason}"
+            );
+        }
         assert_eq!(failure.code(), "session_failed");
         let lease = session
             .control

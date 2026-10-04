@@ -242,11 +242,14 @@ pub(crate) async fn readiness(
             .map(String::as_str),
         true,
     );
+    // Missing is off: the key's own contract, and what the queue worker and
+    // the serving path read. A `true` default here showed this card enabled
+    // on a node whose creates answered "shared preparation is disabled".
     let content_analysis_on = plurx_core::store::stored_switch(
         settings
             .get(plurx_core::store::keys::VOD_INDEX_CLUSTER_CACHE)
             .map(String::as_str),
-        true,
+        false,
     );
 
     // Parsed exactly the way the engine parses it. That was the point when all

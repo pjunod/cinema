@@ -2382,8 +2382,10 @@ async fn settings_dto(state: &AppState) -> Result<SettingsDto, ApiError> {
         vod_materialize_budget_secs: setting(keys::VOD_MATERIALIZE_BUDGET_SECS).unwrap_or_default(),
         vod_blocked_get_cap: setting(keys::VOD_BLOCKED_GET_CAP).unwrap_or_default(),
         vod_index_mins: setting(keys::VOD_INDEX_MINS).map_or(15, |value| mins(Some(value))),
-        vod_index_cluster_cache: setting(keys::VOD_INDEX_CLUSTER_CACHE)
-            .is_some_and(|value| value.trim() == "1"),
+        vod_index_cluster_cache: plurx_core::store::stored_switch(
+            setting(keys::VOD_INDEX_CLUSTER_CACHE).as_deref(),
+            false,
+        ),
         bounded_replica_reads: plurx_core::store::stored_switch(
             setting(keys::BOUNDED_REPLICA_READS).as_deref(),
             state.catalogue.bounded_reads_default(),
