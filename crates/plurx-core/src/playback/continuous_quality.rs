@@ -135,6 +135,35 @@ pub struct QualityTransaction {
     pub first_presented_at_ms: Option<i64>,
 }
 impl QualityTransaction {
+    /// A cancelled intent that holds no reservation can no longer prepare,
+    /// schedule or append: `ready` and `Scheduled` refuse cancelled intents,
+    /// and the owner's preparation loop re-reads the ledger and refuses to
+    /// publish them. Nothing can still depend on it, so it resolves here
+    /// rather than waiting for a client cancel the client need not send.
+    /// Appended history resolves as disposed, never as retained/superseded.
+    fn settle_unreserved_cancellation(&mut self) {
+        if !self.cancel_requested
+            || !self.reserved.is_empty()
+            || !matches!(
+                self.state,
+                QualityState::Preparing
+                    | QualityState::Ready
+                    | QualityState::Scheduled
+                    | QualityState::Cancelling
+            )
+        {
+            return;
+        }
+        self.ready.clear();
+        self.state = if self.ever_appended {
+            QualityState::Disposed
+        } else if self.intent_superseded {
+            QualityState::Superseded
+        } else {
+            QualityState::RetainedCurrent
+        };
+    }
+
     fn unresolved(&self) -> bool {
         !self.reserved.is_empty()
             || !matches!(
@@ -727,24 +756,21 @@ impl QualityLedger {
             if *intent_revision <= self.latest_intent_revision {
                 return Err(QualityTransitionError::InvalidTransition);
             }
+            // Earlier cancellations whose reservations are gone (including
+            // rows an older build left `Cancelling`) free their slot first.
+            for previous in &mut self.transactions {
+                previous.settle_unreserved_cancellation();
+            }
             self.transactions.retain(|tx| tx.unresolved());
             if self.transactions.len() >= MAX_QUALITY_TRANSACTIONS {
                 return Err(QualityTransitionError::Capacity);
             }
             for previous in &mut self.transactions {
-                if *intent_revision == self.latest_intent_revision {
-                    continue;
-                }
                 previous.intent_superseded = true;
                 previous.cancel_requested = true;
-                if previous.reserved.is_empty()
-                    && matches!(
-                        previous.state,
-                        QualityState::Preparing | QualityState::Ready
-                    )
-                {
-                    previous.state = QualityState::Cancelling;
-                }
+                // Superseded before any reservation: resolved now, but kept
+                // visible until the next Prepare so a late cancel still finds it.
+                previous.settle_unreserved_cancellation();
             }
             self.latest_intent_revision = *intent_revision;
             self.transactions.push(QualityTransaction {
@@ -831,7 +857,14 @@ impl QualityLedger {
                 }
                 let tx = &mut self.transactions[at];
                 tx.cancel_requested = true;
-                if tx.reserved.is_empty() && !tx.ever_appended {
+                // An owner-resolved cancellation stays resolved on a late cancel.
+                if tx.reserved.is_empty()
+                    && !tx.ever_appended
+                    && !matches!(
+                        tx.state,
+                        QualityState::RetainedCurrent | QualityState::Superseded
+                    )
+                {
                     tx.state = QualityState::Cancelling;
                 }
                 // Reserved dependencies stay pinned even if the owner has not
@@ -1589,8 +1622,11 @@ mod tests {
             .apply(&cancel, 1200)
             .expect("cancel with append fact");
         assert_eq!(reply.transaction.state, QualityState::Appended);
-        assert_eq!(reply.transaction.reserved, vec![interval()]);
         assert!(reply.transaction.ever_appended);
+        // Receipts are compact; the pinned dependency lives in the ledger.
+        assert!(reply.transaction.reserved.is_empty());
+        assert_eq!(ledger.transactions[0].reserved, vec![interval()]);
+        assert_eq!(ledger.transactions[0].appended, vec![interval()]);
         assert_eq!(
             ledger.cancelled(TRANSACTION),
             Err(QualityTransitionError::InvalidTransition)
@@ -1614,7 +1650,8 @@ mod tests {
             .apply(&cancel, 1200)
             .expect("unknown append observation");
         assert_eq!(reply.transaction.state, QualityState::Scheduled);
-        assert_eq!(reply.transaction.reserved, vec![interval()]);
+        assert!(reply.transaction.cancel_requested);
+        assert_eq!(ledger.transactions[0].reserved, vec![interval()]);
         assert_eq!(
             ledger.cancelled(TRANSACTION),
             Err(QualityTransitionError::InvalidTransition)
@@ -1671,12 +1708,218 @@ mod tests {
         assert!(first.transaction.intent_superseded);
         assert_eq!(first.transaction.state, QualityState::Presented);
         assert_eq!(first.transaction.first_presented_tick, Some(241_241));
-        assert_eq!(first.transaction.reserved, vec![interval()]);
+        assert_eq!(ledger.transactions[0].transaction_id, TRANSACTION);
+        assert_eq!(ledger.transactions[0].reserved, vec![interval()]);
+        assert_eq!(ledger.transactions[0].appended, vec![interval()]);
         assert_eq!(
             ledger.apply(&presented, 1600).expect("presentation replay"),
             first
         );
     }
+    fn transaction_id(index: u64) -> String {
+        format!("00000000-0000-4000-8000-{:012x}", 0xcb00 + index)
+    }
+
+    fn prepare_as(
+        ledger: &QualityLedger,
+        sequence: u64,
+        index: u64,
+        target: &str,
+    ) -> QualityTransitionRequest {
+        let mut prepare = request(
+            ledger,
+            sequence,
+            QualityOperation::Prepare {
+                intent_revision: index,
+                target_rendition_id: target.into(),
+            },
+        );
+        prepare.transaction_id = transaction_id(index);
+        prepare
+    }
+
+    #[test]
+    fn rapid_superseded_preparations_never_exhaust_the_transaction_bound() {
+        // Each change supersedes a preparation that never reserved media.
+        // A client need not cancel it, and its owner preparation can no
+        // longer publish Ready, so it must not hold a slot for the session.
+        let mut ledger = ledger();
+        let targets = ["c".repeat(64), "d".repeat(64)];
+        let mut sequence = 1;
+        for index in 1..=(3 * MAX_QUALITY_TRANSACTIONS as u64) {
+            let target = &targets[index as usize % 2];
+            let prepare = prepare_as(&ledger, sequence, index, target);
+            ledger
+                .apply(&prepare, 1000 + sequence as i64)
+                .unwrap_or_else(|error| panic!("change {index}: {error}"));
+            sequence += 1;
+            if index % 2 == 0 {
+                // Some superseded targets had verified readiness first.
+                let mut ready = interval();
+                ready.rendition_id = target.clone();
+                ledger
+                    .ready(&transaction_id(index), vec![ready])
+                    .expect("verified ready");
+            }
+            assert!(ledger.valid());
+            assert!(ledger.transactions.len() <= 2, "change {index}");
+            assert_eq!(ledger.capacity_usage().unresolved_transactions, 1);
+        }
+        let superseded = &ledger.transactions[0];
+        assert_eq!(superseded.state, QualityState::Superseded);
+        assert!(superseded.intent_superseded && superseded.cancel_requested);
+        assert!(superseded.ready.is_empty());
+        // A late client cancel is still accepted and stays resolved.
+        let mut cancel = request(
+            &ledger,
+            sequence,
+            QualityOperation::CancelUnappended { completed: vec![] },
+        );
+        cancel.transaction_id = superseded.transaction_id.clone();
+        let receipt = ledger.apply(&cancel, 9000).expect("late cancel");
+        assert_eq!(receipt.transaction.state, QualityState::Superseded);
+        assert_eq!(ledger.cancelled(&cancel.transaction_id), Ok(()));
+        // A superseded preparation cannot publish readiness or schedule.
+        let mut late = interval();
+        late.rendition_id = ledger.transactions[0].target_rendition_id.clone();
+        assert_eq!(
+            ledger.ready(&cancel.transaction_id, vec![late]),
+            Err(QualityTransitionError::InvalidTransition)
+        );
+    }
+
+    #[test]
+    fn rows_left_cancelling_by_an_earlier_build_free_their_slots_on_prepare() {
+        let mut ledger = ledger();
+        for index in 1..=MAX_QUALITY_TRANSACTIONS as u64 {
+            ledger.transactions.push(QualityTransaction {
+                transaction_id: transaction_id(index),
+                intent_revision: index,
+                target_rendition_id: "c".repeat(64),
+                state: QualityState::Cancelling,
+                intent_superseded: index < MAX_QUALITY_TRANSACTIONS as u64,
+                cancel_requested: index < MAX_QUALITY_TRANSACTIONS as u64,
+                preparation: None,
+                ready: Vec::new(),
+                reserved: Vec::new(),
+                appended: Vec::new(),
+                ever_appended: false,
+                disposed: Vec::new(),
+                first_presented_tick: None,
+                first_presented_at_ms: None,
+            });
+        }
+        let last = ledger.transactions.last_mut().expect("latest");
+        last.state = QualityState::Preparing;
+        ledger.latest_intent_revision = MAX_QUALITY_TRANSACTIONS as u64;
+        ledger.accepted_sequence = 40;
+        assert!(ledger.valid());
+        let next = MAX_QUALITY_TRANSACTIONS as u64 + 1;
+        let prepare = prepare_as(&ledger, 41, next, &"d".repeat(64));
+        ledger.apply(&prepare, 5000).expect("stuck ledger recovers");
+        assert_eq!(ledger.transactions.len(), 2);
+        assert_eq!(ledger.transactions[0].state, QualityState::Superseded);
+        assert_eq!(ledger.transactions[1].state, QualityState::Preparing);
+    }
+
+    #[test]
+    fn cancelled_reservations_disposed_before_append_free_their_slots() {
+        // Web/Android sequence: a target is scheduled ahead, superseded before
+        // any append, cancelled, and its never-exposed pins are disposed.
+        let mut ledger = ledger();
+        let mut sequence = 1;
+        for index in 1..=(2 * MAX_QUALITY_TRANSACTIONS as u64) {
+            let id = transaction_id(index);
+            let mut pin = interval();
+            pin.artifact_id = format!("{:064x}", index);
+            let prepare = prepare_as(&ledger, sequence, index, &pin.rendition_id);
+            ledger
+                .apply(&prepare, 1000)
+                .unwrap_or_else(|error| panic!("change {index}: {error}"));
+            sequence += 1;
+            if index > 1 {
+                let old = transaction_id(index - 1);
+                let mut cancel = request(
+                    &ledger,
+                    sequence,
+                    QualityOperation::CancelUnappended { completed: vec![] },
+                );
+                cancel.transaction_id = old.clone();
+                ledger.apply(&cancel, 1001).expect("cancel");
+                sequence += 1;
+                let reserved = ledger
+                    .transactions
+                    .iter()
+                    .find(|tx| tx.transaction_id == old)
+                    .expect("old owner")
+                    .reserved
+                    .iter()
+                    .map(|pin| pin.artifact_id.clone())
+                    .collect::<Vec<_>>();
+                let mut dispose = request(
+                    &ledger,
+                    sequence,
+                    QualityOperation::Disposed {
+                        artifacts: reserved,
+                    },
+                );
+                dispose.transaction_id = old;
+                ledger.apply(&dispose, 1002).expect("absence barrier");
+                sequence += 1;
+            }
+            ledger.ready(&id, vec![pin.clone()]).expect("ready");
+            let mut schedule = request(
+                &ledger,
+                sequence,
+                QualityOperation::Scheduled {
+                    intervals: vec![pin],
+                },
+            );
+            schedule.transaction_id = id;
+            ledger.apply(&schedule, 1003).expect("scheduled ahead");
+            sequence += 1;
+            assert!(ledger.valid());
+            assert!(ledger.transactions.len() <= 2, "change {index}");
+        }
+    }
+
+    #[test]
+    fn superseded_readiness_after_appended_history_resolves_as_disposed() {
+        let mut ledger = scheduled();
+        for (sequence, operation) in [
+            (
+                3,
+                QualityOperation::Appended {
+                    intervals: vec![interval()],
+                },
+            ),
+            (
+                4,
+                QualityOperation::Disposed {
+                    artifacts: vec![interval().artifact_id],
+                },
+            ),
+        ] {
+            let fact = request(&ledger, sequence, operation);
+            ledger.apply(&fact, 1200).expect("appended then disposed");
+        }
+        let mut renewed = interval();
+        renewed.artifact_id = "e".repeat(64);
+        renewed.from_tick = interval().through_tick;
+        renewed.through_tick = renewed.from_tick + 48_048;
+        ledger
+            .ready(TRANSACTION, vec![renewed])
+            .expect("renewed window");
+        assert_eq!(ledger.transactions[0].state, QualityState::Ready);
+        let prepare = prepare_as(&ledger, 5, 2, &"d".repeat(64));
+        ledger.apply(&prepare, 1300).expect("newer intent");
+        let old = &ledger.transactions[0];
+        assert_eq!(old.state, QualityState::Disposed);
+        assert!(old.ever_appended && old.ready.is_empty());
+        assert_eq!(ledger.capacity_usage().unresolved_transactions, 1);
+        assert!(ledger.valid());
+    }
+
     #[test]
     fn owner_takeover_preserves_appended_facts_but_fences_old_epoch_commands() {
         let mut ledger = scheduled();

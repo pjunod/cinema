@@ -5074,8 +5074,10 @@ pub trait MediaSessionStore: Send + Sync + 'static {
     ) -> Result<Option<crate::playback::continuous_quality::QualityTransitionReceipt>, StoreError>;
 
     /// Record independent target cancellation under the exact current owner.
-    /// At most 128 receipts belong to a generation. Replays preserve the first
-    /// timestamps and outcome; no parent session or cache pin is changed.
+    /// At most 128 receipts belong to a generation; settled receipts for an
+    /// older recipe revision of the same client lifetime are pruned first.
+    /// Replays preserve the first timestamps and outcome; no parent session
+    /// or cache pin is changed.
     async fn request_quality_cancellation(
         &self,
         receipt: &QualityCancellationReceipt,
@@ -5087,6 +5089,8 @@ pub trait MediaSessionStore: Send + Sync + 'static {
     ) -> Result<Option<QualityCancellationReceipt>, StoreError>;
 
     /// Mark cleanup proven for this exact receipt; cannot change its identity.
+    /// Accepted from the receipt's owner, or from the parent's current live
+    /// owner after a takeover.
     async fn settle_quality_cancellation(
         &self,
         receipt_key: &str,

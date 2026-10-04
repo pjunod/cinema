@@ -16415,15 +16415,16 @@ async fn populated_v14_sqlite_import_has_exact_three_voter_parity() {
         .expect("import populated v14 backup");
     assert_eq!(report.source_schema_version, 14);
     assert_eq!(report.backup_sha256, prepared.backup_sha256);
-    // 70 with the current durable tables, including the Library channel
+    // 73 with the current durable tables, including the Library channel
     // entities, media classifications, channel subject jobs and decisions,
-    // the three DVR tables, and the scoped book file grants (SQLite v68). A
+    // the three DVR tables, the scoped book file grants (SQLite v68), and the
+    // three continuous-quality tables that travel with media sessions. A
     // v14 source has no rows for newer tables — each one's `minimum_schema` is
     // later — but every table is still reported, because the digest inventory
     // is over what the import *plans*, not over what the source happened to
     // hold. The subtitle-source ledgers are node-held facts about local files
     // and are deliberately not imported, so they are not counted here.
-    assert_eq!(report.tables.len(), 70);
+    assert_eq!(report.tables.len(), 73);
     assert_eq!(report.search_rows, 2);
     assert_eq!(
         report
@@ -36688,6 +36689,149 @@ async fn quality_cancellation_is_durable_exact_and_does_not_end_the_incumbent() 
 }
 
 #[tokio::test]
+async fn quality_cancellations_outlast_128_changes_and_settle_after_takeover() {
+    for_each_backend(|store, backend| async move {
+        let user = store
+            .create_user("quality-cancel-long-user", "hash", false)
+            .await
+            .expect("create user");
+        let generation = "00000000-0000-4000-8000-00000000f901";
+        let session = "00000000-0000-4000-8000-00000000f902";
+        current_media_session(
+            store.as_ref(),
+            user.id,
+            "quality-cancel-long",
+            generation,
+            session,
+            backend,
+        )
+        .await;
+        let receipt = |revision: i64, at: i64| plurx_core::store::QualityCancellationReceipt {
+            receipt_key: format!("{revision:064x}"),
+            generation: generation.into(),
+            session_id: session.into(),
+            owner_node_id: "staged-node".into(),
+            owner_epoch: 1,
+            client_instance_id: "00000000-0000-4000-8000-00000000f903".into(),
+            lifetime_id: "movie".into(),
+            recipe_revision: revision,
+            accepted_sequence: revision,
+            state: "requested".into(),
+            created_at_ms: at,
+            updated_at_ms: at,
+        };
+        // A long session cancels far more than 128 optional targets; each
+        // settled, older intent of the same lifetime stops counting.
+        for revision in 1..=200_i64 {
+            let at = 1_500 + revision;
+            let cancel = receipt(revision, at);
+            store
+                .request_quality_cancellation(&cancel)
+                .await
+                .expect("cancel")
+                .unwrap_or_else(|| panic!("{backend}: cancellation {revision} refused"));
+            assert!(
+                store
+                    .settle_quality_cancellation(&cancel.receipt_key, "staged-node", 1, at)
+                    .await
+                    .expect("settle"),
+                "{backend}: cancellation {revision} never settled"
+            );
+        }
+        assert!(store
+            .quality_intent_cancelled(generation, &receipt(1, 1).client_instance_id, "movie", 200)
+            .await
+            .expect("newest cancelled intent still fences"));
+        // Unsettled cleanup is never pruned by a newer cancellation.
+        let pending = receipt(201, 1_800);
+        store
+            .request_quality_cancellation(&pending)
+            .await
+            .expect("cancel")
+            .expect("pending receipt");
+        store
+            .request_quality_cancellation(&receipt(202, 1_801))
+            .await
+            .expect("cancel")
+            .expect("newer receipt");
+        assert_eq!(
+            store
+                .quality_cancellation_receipt(&pending.receipt_key)
+                .await
+                .expect("read pending")
+                .expect("pending receipt kept")
+                .state,
+            "requested",
+            "{backend}"
+        );
+        assert_eq!(
+            store
+                .request_quality_cancellation(&pending)
+                .await
+                .expect("replay"),
+            store
+                .quality_cancellation_receipt(&pending.receipt_key)
+                .await
+                .expect("read"),
+            "{backend}: exact replay of a kept receipt"
+        );
+        // After takeover only the parent's current owner (or the receipt's
+        // own owner) can record the cleanup; the receipt identity is kept.
+        let parent = store
+            .media_session_route(session)
+            .await
+            .expect("parent")
+            .expect("route");
+        let takeover_at = parent.lease_expires_at_ms + 1;
+        store
+            .claim_media_session_takeover(&plurx_core::domain::MediaSessionTakeover {
+                incarnation_id: generation.into(),
+                expected_owner_node_id: "staged-node".into(),
+                expected_owner_epoch: 1,
+                next_owner_node_id: "replacement-node".into(),
+                now_ms: takeover_at,
+                lease_expires_at_ms: takeover_at + 900_000,
+            })
+            .await
+            .expect("takeover")
+            .expect("new owner");
+        assert!(
+            !store
+                .settle_quality_cancellation(
+                    &pending.receipt_key,
+                    "wrong-owner",
+                    2,
+                    takeover_at + 1
+                )
+                .await
+                .expect("foreign settlement"),
+            "{backend}"
+        );
+        assert!(
+            store
+                .settle_quality_cancellation(
+                    &pending.receipt_key,
+                    "replacement-node",
+                    2,
+                    takeover_at + 1
+                )
+                .await
+                .expect("current owner settlement"),
+            "{backend}: a requested receipt could not settle after takeover"
+        );
+        let settled = store
+            .quality_cancellation_receipt(&pending.receipt_key)
+            .await
+            .expect("read settled")
+            .expect("receipt");
+        assert_eq!(settled.state, "settled", "{backend}");
+        assert_eq!(settled.owner_node_id, "staged-node", "{backend}");
+        assert_eq!(settled.owner_epoch, 1, "{backend}");
+    })
+    .await;
+}
+
+#[tokio::test]
 async fn a_durable_quality_cancel_fences_late_preparation_admission() {
     for_each_backend(|store, backend| async move {
         let user = store
@@ -37284,12 +37428,23 @@ async fn continuous_quality_ledger_cas_and_takeover_preserve_appended_dependenci
         );
         let mut changed_attachment = ledger.clone();
         changed_attachment.attachment.attachment_id = "00000000-0000-4000-8000-00000000ce06".into();
+        // A changed attachment is an ordinary CAS refusal (Ok(false)), like a
+        // stale revision or owner: writers re-read and observe the change.
         assert!(
-            store
+            !store
                 .write_quality_ledger(&changed_attachment, "staged-node", 2, 2100)
                 .await
-                .is_err(),
+                .expect("attachment CAS"),
             "{backend}: inconsistent receipt attachment accepted"
+        );
+        assert_eq!(
+            store
+                .quality_ledger(generation)
+                .await
+                .expect("read after refused attachment")
+                .expect("snapshot"),
+            persisted,
+            "{backend}: refused attachment write changed the ledger"
         );
         let parent = store
             .media_session_route(session)

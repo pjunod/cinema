@@ -400,6 +400,13 @@ impl From<&mut Row<'_>> for QualityCancellationRow {
     }
 }
 
+struct CancellationSettledRow(i64);
+impl From<&mut Row<'_>> for CancellationSettledRow {
+    fn from(row: &mut Row<'_>) -> Self {
+        Self(row.get("settled"))
+    }
+}
+
 struct TerminalAckRow(MediaSessionTerminalAck);
 
 impl From<&mut Row<'_>> for TerminalAckRow {
@@ -3616,22 +3623,44 @@ impl MediaSessionStore for HiqliteAuthStore {
         if !receipt.valid_request() {
             return Err(StoreError::Task("invalid quality cancellation".into()));
         }
-        timeout_store(self.client().execute(
-            crate::store::quality_cancellation::INSERT_CANCELLATION,
-            params!(
-                receipt.receipt_key.clone(),
-                receipt.generation.clone(),
-                receipt.session_id.clone(),
-                receipt.owner_node_id.clone(),
-                receipt.owner_epoch,
-                receipt.client_instance_id.clone(),
-                receipt.lifetime_id.clone(),
-                receipt.recipe_revision,
-                receipt.accepted_sequence,
-                receipt.created_at_ms
+        let statements = vec![
+            (
+                crate::store::quality_cancellation::PRUNE_SUPERSEDED_CANCELLATIONS,
+                params!(
+                    receipt.generation.clone(),
+                    receipt.session_id.clone(),
+                    receipt.owner_node_id.clone(),
+                    receipt.owner_epoch,
+                    receipt.created_at_ms,
+                    receipt.client_instance_id.clone(),
+                    receipt.lifetime_id.clone(),
+                    receipt.recipe_revision
+                ),
             ),
-        ))
-        .await?;
+            (
+                crate::store::quality_cancellation::INSERT_CANCELLATION,
+                params!(
+                    receipt.receipt_key.clone(),
+                    receipt.generation.clone(),
+                    receipt.session_id.clone(),
+                    receipt.owner_node_id.clone(),
+                    receipt.owner_epoch,
+                    receipt.client_instance_id.clone(),
+                    receipt.lifetime_id.clone(),
+                    receipt.recipe_revision,
+                    receipt.accepted_sequence,
+                    receipt.created_at_ms
+                ),
+            ),
+        ];
+        for (sql, _) in &statements {
+            validate_sql(sql)?;
+        }
+        timeout_store(self.client().txn(statements))
+            .await?
+            .into_iter()
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(database_error)?;
         Ok(self
             .quality_cancellation_receipt(&receipt.receipt_key)
             .await?
@@ -3664,20 +3693,22 @@ impl MediaSessionStore for HiqliteAuthStore {
         owner_epoch: i64,
         now_ms: i64,
     ) -> Result<bool, StoreError> {
-        timeout_store(self.client().execute("UPDATE quality_cancellation_receipts SET state = 'settled', updated_at_ms = $1
-            WHERE receipt_key = $2 AND owner_node_id = $3 AND owner_epoch = $4 AND state = 'requested' AND created_at_ms <= $1
-                AND NOT EXISTS (SELECT 1 FROM quality_preparation_owners owner
-                    JOIN media_sessions child ON child.incarnation_id = owner.staged_incarnation_id
-                    WHERE owner.cancellation_key = $2 AND child.state = 'active')",
-            params!(now_ms, receipt_key, owner_node_id, owner_epoch))).await?;
-        Ok(self
-            .quality_cancellation_receipt(receipt_key)
-            .await?
-            .is_some_and(|receipt| {
-                receipt.owner_node_id == owner_node_id
-                    && receipt.owner_epoch == owner_epoch
-                    && receipt.state == "settled"
-            }))
+        timeout_store(self.client().execute(
+            crate::store::quality_cancellation::SETTLE_CANCELLATION,
+            params!(now_ms, receipt_key, owner_node_id, owner_epoch),
+        ))
+        .await?;
+        Ok(timeout_store(
+            self.client()
+                .query_consistent_map::<CancellationSettledRow, _>(
+                    crate::store::quality_cancellation::CANCELLATION_SETTLED_FOR,
+                    params!(receipt_key, owner_node_id, owner_epoch),
+                ),
+        )
+        .await?
+        .into_iter()
+        .next()
+        .is_some_and(|row| row.0 == 1))
     }
 
     async fn quality_intent_cancelled(

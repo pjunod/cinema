@@ -38,6 +38,59 @@ pub(crate) const INSERT_CANCELLATION: &str = "INSERT OR IGNORE INTO quality_canc
         AND owner_node_id = $4 AND owner_epoch = $5 AND state = 'active' AND lease_expires_at_ms > $10)
     AND (SELECT COUNT(*) FROM quality_cancellation_receipts WHERE generation = $2) < 128";
 
+/// Runs in the same transaction, before [`INSERT_CANCELLATION`]. A client's
+/// recipe revision only increases within one lifetime, and this owner has
+/// already accepted the newer intent, so an older, settled intent of that
+/// lifetime can never be restaged or need exact replay again. Requested
+/// receipts, receipts still owning an active staged child, and other client
+/// lifetimes are kept. This keeps the 128-receipt bound a bound on
+/// unresolved work rather than a per-session limit on how often a viewer
+/// may cancel.
+pub(crate) const PRUNE_SUPERSEDED_CANCELLATIONS: &str =
+    "DELETE FROM quality_cancellation_receipts WHERE receipt_key IN (
+    SELECT old.receipt_key FROM quality_cancellation_receipts old
+    WHERE old.generation = $1 AND old.session_id = $2
+      AND EXISTS (SELECT 1 FROM media_sessions parent WHERE parent.incarnation_id = $1
+        AND parent.session_id = $2 AND parent.owner_node_id = $3 AND parent.owner_epoch = $4
+        AND parent.state = 'active' AND parent.lease_expires_at_ms > $5)
+      AND old.client_instance_id = $6 AND old.lifetime_id = $7
+      AND old.recipe_revision < $8 AND old.state = 'settled'
+      AND NOT EXISTS (SELECT 1 FROM quality_preparation_owners owner
+        JOIN media_sessions child ON child.incarnation_id = owner.staged_incarnation_id
+        WHERE owner.cancellation_key = old.receipt_key AND child.state = 'active'))";
+
+/// Proven cleanup may be recorded by the receipt's own owner or, after a
+/// takeover, by the parent's current live owner at the same or a newer
+/// epoch. Either way no staged child bound to this cancellation may still be
+/// active. The receipt's identity (including its original owner) is never
+/// rewritten, so exact request replay keeps working.
+pub(crate) const SETTLE_CANCELLATION: &str =
+    "UPDATE quality_cancellation_receipts SET state = 'settled', updated_at_ms = $1
+    WHERE receipt_key = $2 AND state = 'requested' AND created_at_ms <= $1
+      AND ((owner_node_id = $3 AND owner_epoch = $4)
+        OR EXISTS (SELECT 1 FROM media_sessions parent
+          WHERE parent.incarnation_id = quality_cancellation_receipts.generation
+            AND parent.session_id = quality_cancellation_receipts.session_id
+            AND parent.owner_node_id = $3 AND parent.owner_epoch = $4
+            AND parent.owner_epoch >= quality_cancellation_receipts.owner_epoch
+            AND parent.state = 'active' AND parent.lease_expires_at_ms > $1))
+      AND NOT EXISTS (SELECT 1 FROM quality_preparation_owners owner
+        JOIN media_sessions child ON child.incarnation_id = owner.staged_incarnation_id
+        WHERE owner.cancellation_key = $2 AND child.state = 'active')";
+
+/// Whether the caller may observe the receipt as settled: its own owner, or
+/// the parent's current owner as accepted by [`SETTLE_CANCELLATION`].
+pub(crate) const CANCELLATION_SETTLED_FOR: &str = "SELECT EXISTS(SELECT 1
+    FROM quality_cancellation_receipts receipt
+    WHERE receipt.receipt_key = $1 AND receipt.state = 'settled'
+      AND ((receipt.owner_node_id = $2 AND receipt.owner_epoch = $3)
+        OR EXISTS (SELECT 1 FROM media_sessions parent
+          WHERE parent.incarnation_id = receipt.generation
+            AND parent.session_id = receipt.session_id
+            AND parent.owner_node_id = $2 AND parent.owner_epoch = $3
+            AND parent.owner_epoch >= receipt.owner_epoch
+            AND parent.state = 'active'))) AS settled";
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct QualityCancellationReceipt {
     pub receipt_key: String,

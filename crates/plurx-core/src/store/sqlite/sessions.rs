@@ -2902,6 +2902,19 @@ impl MediaSessionStore for SqliteStore {
         self.with_conn(move |conn| {
             let tx = conn.unchecked_transaction()?;
             tx.execute(
+                crate::store::quality_cancellation::PRUNE_SUPERSEDED_CANCELLATIONS,
+                params![
+                    receipt.generation,
+                    receipt.session_id,
+                    receipt.owner_node_id,
+                    receipt.owner_epoch,
+                    receipt.created_at_ms,
+                    receipt.client_instance_id,
+                    receipt.lifetime_id,
+                    receipt.recipe_revision
+                ],
+            )?;
+            tx.execute(
                 crate::store::quality_cancellation::INSERT_CANCELLATION,
                 params![
                     receipt.receipt_key,
@@ -2960,17 +2973,19 @@ impl MediaSessionStore for SqliteStore {
         let owner = owner_node_id.to_owned();
         self.with_conn(move |conn| {
             let tx = conn.unchecked_transaction()?;
-            tx.execute("UPDATE quality_cancellation_receipts SET state = 'settled', updated_at_ms = ?4
-                WHERE receipt_key = ?1 AND owner_node_id = ?2 AND owner_epoch = ?3
-                  AND state = 'requested' AND created_at_ms <= ?4
-                AND NOT EXISTS (SELECT 1 FROM quality_preparation_owners owner
-                    JOIN media_sessions child ON child.incarnation_id = owner.staged_incarnation_id
-                    WHERE owner.cancellation_key = ?1 AND child.state = 'active')", params![key, owner, owner_epoch, now_ms])?;
-            let settled = tx.query_row("SELECT EXISTS(SELECT 1 FROM quality_cancellation_receipts
-                WHERE receipt_key = ?1 AND owner_node_id = ?2 AND owner_epoch = ?3 AND state = 'settled')",
-                params![key, owner, owner_epoch], |row| row.get(0))?;
-            tx.commit()?; Ok(settled)
-        }).await
+            tx.execute(
+                crate::store::quality_cancellation::SETTLE_CANCELLATION,
+                params![now_ms, key, owner, owner_epoch],
+            )?;
+            let settled = tx.query_row(
+                crate::store::quality_cancellation::CANCELLATION_SETTLED_FOR,
+                params![key, owner, owner_epoch],
+                |row| row.get(0),
+            )?;
+            tx.commit()?;
+            Ok(settled)
+        })
+        .await
     }
 
     async fn quality_intent_cancelled(
