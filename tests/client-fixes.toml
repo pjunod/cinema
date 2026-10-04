@@ -3499,3 +3499,19 @@ source = "clients/android/app/src/main/java/tv/plurx/app/data/SharedDecisionClie
 source_anchor = 'val text = detail(reference, auth, transport); requireCurrent()'
 test = "clients/android/app/src/test/java/tv/plurx/app/data/SharedDecisionClientTest.kt"
 test_anchor = "initialStartRetainsWholeRequestAndBoundBContext"
+
+[[fixes]]
+id = "sharing.native-shared-status-safe-tokens"
+commits = ["48a865b74"]
+source = "clients/apple/Sources/SharedPlaybackModels.swift"
+source_anchor = "static func isToken(_ text: String) -> Bool {"
+test = "clients/apple/Tests/SharedPlaybackControlTests.swift"
+test_anchor = "testStatusRendersOnlyValidatedTokensBoundToTheRetainedPlayback"
+
+[[fixes]]
+id = "sharing.native-shared-controls-reopen-and-direct-play"
+commits = ["92a642699"]
+source = "clients/apple/Sources/SharedPlaybackControl.swift"
+source_anchor = "response.acceptedSequence == request.sequence"
+test = "clients/apple/Tests/SharedPlaybackControlTests.swift"
+test_anchor = "testAnswersBindOnlyToTheSentSequenceOnBsTuple"
