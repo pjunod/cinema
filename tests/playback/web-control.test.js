@@ -7377,13 +7377,15 @@ function continuousChangeOwner(){
     "function playbackOwnsAttachedMedia(){return true;}function notifyPlaybackControl(){}",
     "function fallBackDirectedChange(p,change,why){change.settled=true;change.outcome=why;}",
     "const released=[];function recordAutoSwitch(){}function releaseAutoFallback(p){released.push(p);}",
-    "const performance={now:()=>1};const timers=[];function setTimeout(run,ms){timers.push({run,ms});return timers.length;}function clearTimeout(){}",
-    shippedConst("CONTINUOUS_OBSERVATION_BOUND_MS"),
+    "const clock={t:1};const performance={now:()=>clock.t};const timers=[];function setTimeout(run,ms){timers.push({run,ms});return timers.length;}function clearTimeout(){}",
+    "const video={currentTime:0,paused:false,seeking:false,playbackRate:1};const document={getElementById:()=>video};function positionForPlaybackIntent(){return 0;}",
+    shippedConst("CONTINUOUS_CONTROL_BUDGET_MS"),shippedConst("CONTINUOUS_OBSERVATION_GRACE_SECONDS"),shippedConst("CONTINUOUS_OBSERVATION_POLL_MS"),
+    shippedSource("continuousTargetBoundary"),shippedSource("continuousObservationDue"),shippedSource("armContinuousObservation"),
     nextEpisodeCancellationSources(),
     shippedSource("supersedePlaybackControlIntent"),shippedSource("handlePlaybackTransportEvent"),
     shippedSource("requestQualityChange"),shippedSource("settleDirectedChange"),
     shippedSource("settleContinuousDirectedChange"),
-    "return {attach(p){PLAYER=p;},timers,released,handlePlaybackTransportEvent,requestQualityChange,supersedePlaybackControlIntent};",
+    "return {attach(p){PLAYER=p;},timers,released,clock,video,handlePlaybackTransportEvent,requestQualityChange,supersedePlaybackControlIntent};",
   ].join("\n"))();
 }
 function continuousChangeHarness(owner,{autoMove=null}={}){
@@ -7415,19 +7417,55 @@ test("native Pause/Play keeps a pending manual continuous choice and a fenced on
   assert.equal(change.settled,true,"a fenced continuous change is never left unsettled");
   assert.equal(change.outcome,"superseded");
 });
-test("an unobserved continuous Auto change settles within the control budget without a reopen",async()=>{
+// Advance the fake clock in poll steps, running only the newest pending poll.
+function pollContinuousObservation(owner,change,ms,{film=null}={}){
+  for(let elapsed=0;elapsed<ms&&!change.settled;elapsed+=500){
+    owner.clock.t+=500;
+    if(film) owner.video.currentTime+=film(500);
+    const timer=owner.timers.pop();
+    if(!timer) break;
+    owner.timers.length=0;timer.run();
+  }
+}
+test("an unreserved continuous Auto change settles within the active control budget without a reopen",async()=>{
   const owner=continuousChangeOwner();
   const move={from:720,to:1080,candidateId:"target",previousCandidateId:"old",switchReason:"fit"};
   const h=continuousChangeHarness(owner,{autoMove:move}),change=h.p.directedChange;
   h.release();assert.equal(await h.running,"continuous");
   assert.equal(change.settled,false,"scheduling is not presentation");
-  const bound=owner.timers.filter(timer=>timer.ms===30000);
-  assert.equal(bound.length,1,"a continuous change carries a settle bound");
-  bound[0].run();
+  owner.video.paused=true;
+  pollContinuousObservation(owner,change,60000);
+  assert.equal(change.settled,false,"paused time is not active control time");
+  owner.video.paused=false;
+  pollContinuousObservation(owner,change,29000);
+  assert.equal(change.settled,false);
+  pollContinuousObservation(owner,change,2000);
   assert.equal(change.settled,true);assert.equal(change.outcome,"observation_unknown");
   assert.equal(h.p.abr.switching,false,"Auto is not latched by an unobserved target");
   assert.deepEqual(owner.released,[h.p]);
   assert.equal(h.p.abr.requestedCandidateId,"target","future loads still request the scheduled rung");
+});
+test("a reserved continuous target is observed until its boundary plus two active seconds",async()=>{
+  // The 60-second prebuffer puts a healthy manual boundary a minute away;
+  // a wall-clock 30-second bound would settle every manual change unobserved.
+  const owner=continuousChangeOwner();
+  const h=continuousChangeHarness(owner),change=h.p.directedChange;
+  h.p.continuousQuality.protocol.ledger={latest_intent_revision:2,transactions:[{transaction_id:"tx",intent_revision:2,
+    reserved:[{from_tick:1680,through_tick:1728,timescale:24}],appended:[]}]};
+  h.release();assert.equal(await h.running,"continuous");
+  change.continuousTransactionId="tx";
+  owner.video.currentTime=10;
+  pollContinuousObservation(owner,change,45000,{film:ms=>ms/1000});
+  assert.equal(change.settled,false,"forty-five seconds before a seventy-second boundary is not late");
+  owner.video.paused=true;
+  pollContinuousObservation(owner,change,30000);
+  assert.equal(change.settled,false,"pause suspends the observation clock");
+  owner.video.paused=false;owner.video.currentTime=71.5;
+  pollContinuousObservation(owner,change,500);
+  assert.equal(change.settled,false,"inside the two-second grace");
+  owner.video.currentTime=72.5;
+  pollContinuousObservation(owner,change,500);
+  assert.equal(change.settled,true);assert.equal(change.outcome,"observation_unknown");
 });
 test("a continuous choice settles on its target presented by the adapter's re-Prepare",()=>{
   const settle=new Function("performance","document","recordAutoSwitch","positionForPlaybackIntent","releaseAutoFallback",

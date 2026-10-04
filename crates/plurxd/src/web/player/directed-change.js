@@ -12,11 +12,18 @@
 // exactly ONE reopen as the answer to every way it can go wrong.
 const PREPARED_OFFER_BOUND_MS=12000;
 const PREPARED_OFFER_CADENCE_MS=500;
-// A continuous change settles on presentation of its target rendition. Its
-// bound is the §4.2 30-second control budget: missing it settles
+// A continuous change settles on presentation of its target rendition. §4.2
+// bounds the wait without promising a false 30-second presentation: until the
+// target holds a reservation, a 30-second active-time control budget applies;
+// after that, the deadline is the target boundary's presentation plus 2 s of
+// active play. Film time is that active clock -- it stops while paused or
+// waiting and moves at the playback rate -- so a healthy 60-second prebuffer
+// is never declared unobserved. Missing the deadline settles
 // `observation_unknown` (never retained_current, never a reopen), so a target
 // that is never observed cannot latch Auto or leave the change unsettled.
-const CONTINUOUS_OBSERVATION_BOUND_MS=30000;
+const CONTINUOUS_CONTROL_BUDGET_MS=30000;
+const CONTINUOUS_OBSERVATION_GRACE_SECONDS=2;
+const CONTINUOUS_OBSERVATION_POLL_MS=500;
 // `askPlaybackControl` cannot serve this and cannot be made to. Its waiter
 // settles on the FIRST exchange at or after its floor, and a `Prepare` arrives
 // on a later exchange than the one that carried the ask -- the server has to
@@ -208,9 +215,7 @@ async function requestQualityChange(p,reason,fallback,autoMove,standingSelection
       // target still settles it (settleContinuousDirectedChange).
       change.continuousTransactionId=newest&&typeof p.continuousQuality.transactionRoot==="function"
         ?p.continuousQuality.transactionRoot(newest):newest;
-      if(!settleContinuousDirectedChange(p))change.commitTimer=setTimeout(()=>{
-        if(p.directedChange===change&&!change.settled)settleDirectedChange(p,change,"observation_unknown","continuous");
-      },CONTINUOUS_OBSERVATION_BOUND_MS);
+      if(!settleContinuousDirectedChange(p))armContinuousObservation(p,change);
       notifyPlaybackControl();return outcome;
     }
     // A newer intent fenced this ask while it was still this change's own:
@@ -353,6 +358,46 @@ function applyQualityWithRestart(){
   PENDING_ATTEMPT_REASON="quality";
   beginPlaybackControlSeek(p,pos);
   return play(p.fileId,p.title||"",Math.round(pos*1000),p.knownDur||0,p.meta);
+}
+// The earliest film second the chosen target (or its re-Prepare lineage)
+// holds media for: the boundary whose presentation settles the choice.
+function continuousTargetBoundary(p,change){
+  const owner=p&&p.continuousQuality,ledger=owner&&owner.protocol&&owner.protocol.ledger;
+  if(!ledger||!change) return null;
+  const root=id=>typeof owner.transactionRoot==="function"?owner.transactionRoot(id):id;
+  let boundary=null;
+  for(const tx of ledger.transactions||[]){
+    if(root(tx.transaction_id)!==change.continuousTransactionId) continue;
+    for(const interval of [...(tx.reserved||[]),...(tx.appended||[])]){
+      const at=Number(interval.from_tick)/Number(interval.timescale);
+      if(Number.isFinite(at)&&(boundary===null||at<boundary)) boundary=at;
+    }
+  }
+  return boundary;
+}
+function continuousObservationDue(p,change,activeMs){
+  const boundary=continuousTargetBoundary(p,change);
+  if(boundary===null) return activeMs>=CONTINUOUS_CONTROL_BUDGET_MS;
+  const v=/** @type {HTMLVideoElement|null} */ (document.getElementById("video"));
+  if(!v) return false;
+  const film=((p&&p.offset)||0)+(Number(v.currentTime)||0);
+  return film>=boundary+CONTINUOUS_OBSERVATION_GRACE_SECONDS*Math.max(Number(v.playbackRate)||1,0);
+}
+function armContinuousObservation(p,change){
+  let activeMs=0,last=performance.now();
+  const poll=()=>{
+    change.commitTimer=null;
+    if(p.directedChange!==change||change.settled||settleContinuousDirectedChange(p)) return;
+    const v=/** @type {HTMLVideoElement|null} */ (document.getElementById("video")),now=performance.now();
+    if(v&&!v.paused&&!v.seeking) activeMs+=now-last;
+    last=now;
+    if(continuousObservationDue(p,change,activeMs)){
+      settleDirectedChange(p,change,"observation_unknown","continuous");
+      return;
+    }
+    change.commitTimer=setTimeout(poll,CONTINUOUS_OBSERVATION_POLL_MS);
+  };
+  change.commitTimer=setTimeout(poll,CONTINUOUS_OBSERVATION_POLL_MS);
 }
 function settleContinuousDirectedChange(p){
   const change=p?.directedChange,ledger=p?.continuousQuality?.protocol?.ledger;
