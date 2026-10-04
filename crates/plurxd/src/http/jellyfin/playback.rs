@@ -161,31 +161,7 @@ pub(super) async fn activate(
     let selection: Value = serde_json::from_str(&play.negotiation.selection_json)
         .map_err(|_| ApiError::Conflict("play selection changed; renegotiate".into()))?;
     if let Some(vod) = selection.get("vod").filter(|v| !v.is_null()) {
-        let user = state
-            .store
-            .get_user(play.negotiation.scope.user_id)
-            .await?
-            .ok_or(ApiError::Unauthorized)?;
-        let body = serde_json::from_value(vod["body"].clone())
-            .map_err(|_| ApiError::Conflict("native play selection changed; renegotiate".into()))?;
-        let policy = super::super::hls::CompatibilityVodPolicy {
-            bitrate_limit_bps: serde_json::from_value(vod["bitrate"].clone())?,
-            expected_fingerprint: play.negotiation.native_request_fingerprint.clone(),
-        };
-        let started = tokio::time::timeout(
-            std::time::Duration::from_secs(15),
-            super::super::hls::create_for_compatibility(
-                user,
-                state.clone(),
-                play.negotiation.file_id,
-                HeaderMap::new(),
-                None,
-                body,
-                policy,
-            ),
-        )
-        .await
-        .map_err(|_| ApiError::ServiceUnavailable("native playback startup timeout".into()))??;
+        let started = Box::pin(super::startup::create(state, &play, vod)).await?;
         let route = state
             .store
             .media_session_route(&started.session_id)
@@ -198,7 +174,7 @@ pub(super) async fn activate(
         {
             return Err(ApiError::Conflict("native play owner changed".into()));
         }
-        if !state
+        state
             .store
             .activate_jellyfin_play(
                 &play.negotiation.play_id,
@@ -206,23 +182,29 @@ pub(super) async fn activate(
                 JellyfinPlayActivation::MediaIncarnation(route.incarnation_id.clone()),
                 now_ms()?,
             )
-            .await?
-        {
-            // Release only the exact native incarnation created for this request.
-            super::super::hls::release_with_terminal(
-                state.clone(),
-                started.session_id,
-                crate::vodserve::Terminal::Deleted,
-                "compatibility activation refused",
-            )
-            .await;
-            return Err(ApiError::Conflict("native play activation refused".into()));
-        }
-        return state
+            .await?;
+        let bound = state
             .store
             .jellyfin_play(&play.negotiation.play_id, &play.negotiation.scope)
-            .await?
-            .ok_or(ApiError::NotFound("play binding"));
+            .await?;
+        if let Some(bound) = bound.filter(|bound| {
+            bound.state == "active"
+                && bound.native_incarnation_id.as_deref() == Some(route.incarnation_id.as_str())
+                && bound.negotiation.native_request_fingerprint == route.request_fingerprint
+                && bound.negotiation.source_origin_ms == route.media_origin_ms
+        }) {
+            // Another waiter may have bound the same canonical native result first.
+            // This waiter owns neither a replacement nor permission to release it.
+            return Ok(bound);
+        }
+        super::super::hls::release_with_terminal(
+            state.clone(),
+            started.session_id,
+            crate::vodserve::Terminal::Deleted,
+            "compatibility activation refused",
+        )
+        .await;
+        return Err(ApiError::Conflict("native play activation refused".into()));
     }
     let now = now_ms()?;
     let id = uuid::Uuid::new_v4().to_string();

@@ -692,3 +692,25 @@ native range/frontier and trace-redaction regressions pass. Workspace/all-target
 Clippy, all 28 SQL/read/process censuses and all 17 documentation/API/identity/
 ownership contracts pass on pinned Rust 1.97.1. These are service receipts;
 encoded/HEVC and physical-client qualification are still open.
+
+
+The native HLS slice landed in PR #785 at `d373716f4`, preserving all sixteen
+checked regression references. All eight jobs passed in
+[effort run 4032](http://192.168.4.7:3000/noirr/plurx/actions/runs/4032).
+
+The shared-start slice waits on the exact native incarnation already claimed
+by the same request, then accepts its exact active compatibility binding when
+another waiter publishes first. A duplicate waiter cannot release that
+canonical session merely because it lost the binding update. Transient native
+startup/capacity/owner-transition errors retry under one fifteen-second create
+deadline, with the remaining allowance propagated into native create. Index,
+source-change and unknown failures remain terminal; native private error
+details are replaced by a public message while preserving typed status/code.
+All waits belong to the calling request; no task, media owner or producer is
+added.
+
+The real native copy regression now exercises two simultaneous master entries,
+one live/preparing session, precise inline ranges, original-clock watch
+progress and Stop cleanup. Cancellation between native publication and
+compatibility binding, no-signal cleanup, encoded/HEVC service qualification
+and the physical client matrix remain open. Apple TV testing stays deferred.
