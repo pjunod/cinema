@@ -108,13 +108,14 @@ test("Play after a long pause never seeks when Auto keeps the route", async () =
     "the resume boundary does not seek before it knows the route changes");
   assert.match(toggle, /if\(qualityBoundary\) resumeQualityBoundary\(PLAYER\)/);
 
-  const run = async ({picked, during = () => {}}) => {
+  const run = async ({picked, during = () => {}, force = "auto", pendingOpen = false}) => {
     const seeks = [];
-    const player = {controlSeek: undefined, mediaAttachment: 7, wantsPlayback: true};
+    const player = {controlSeek: undefined, mediaAttachment: 7, wantsPlayback: true,
+      abr: {switching: false}};
     const scope = {
       PLAYER: player, position: 100,
-      qualityForce: () => "auto",
-      hasPendingPlaybackOpen: () => false,
+      qualityForce: () => force,
+      hasPendingPlaybackOpen: () => pendingOpen,
       pbPosSec: () => scope.position,
       naturalBoundaryQualityCandidate: async () => {
         scope.position = 101.2;   // playback ran on while the ask was out
@@ -123,12 +124,9 @@ test("Play after a long pause never seeks when Auto keeps the route", async () =
       },
       seekTo: async (...args) => { seeks.push(args); },
     };
-    const names = Object.keys(scope).filter((name) => name !== "position");
     const body = `${declaration("resumeQualityBoundary")}
       return (p) => resumeQualityBoundary(p);`;
-    const make = new Function("scope", `with(scope){${body}}`);
-    const moved = await make(scope)(player);
-    assert.ok(names.length > 0);
+    const moved = await new Function("scope", `with(scope){${body}}`)(scope)(player);
     return {moved, seeks};
   };
 
@@ -140,7 +138,7 @@ test("Play after a long pause never seeks when Auto keeps the route", async () =
   const changed = await run({picked: candidate});
   assert.equal(changed.moved, true);
   assert.equal(changed.seeks.length, 1);
-  assert.equal(changed.seeks[0][0], 101.2, "a picked route opens where playback has reached");
+  assert.equal(changed.seeks[0][0], 101.2, "a picked route aims where playback has reached");
   assert.equal(changed.seeks[0][1], false);
   assert.equal(changed.seeks[0][3], false, "it is not a viewer seek");
   assert.equal(changed.seeks[0][6], candidate, "the picked route is handed over, not asked again");
@@ -150,10 +148,60 @@ test("Play after a long pause never seeks when Auto keeps the route", async () =
     (scope, player) => { player.controlSeek = {sequence: 1}; },
     (scope, player) => { player.mediaAttachment = 8; },
     (scope) => { scope.PLAYER = {}; },
+    (scope, player) => { player.abr.switching = true; },
+    (scope, player) => { player.pendingMediaChange = {reason: "auto"}; },
+    (scope, player) => { player.autoFallbackInFlight = true; },
+    (scope, player) => { player.directedChange = {settled: false}; },
   ]) {
     const superseded = await run({picked: candidate, during});
-    assert.deepEqual(superseded.seeks, [], "a pause, seek, reattach or new player supersedes it");
+    assert.equal(superseded.moved, false);
+    assert.deepEqual(superseded.seeks, [],
+      "a pause, seek, reattach, new player or an Auto change in flight supersedes it");
   }
+  const settled = await run({picked: candidate,
+    during: (scope, player) => { player.directedChange = {settled: true}; }});
+  assert.equal(settled.seeks.length, 1, "a settled directed change does not hold the boundary");
+  assert.deepEqual((await run({picked: candidate, pendingOpen: true})).seeks, []);
+  assert.deepEqual((await run({picked: candidate, force: "1080"})).seeks, [],
+    "a pinned quality has no Auto boundary");
+
+  // seekTo with a handed-in candidate: no second ask, and a change that fails
+  // before attachment retires the intent without seeking the retained media.
+  const seekRun = async ({changed}) => {
+    const video = {currentTime: 101.2};
+    const player = {abr: {}, method: "transcode", vod: true, sessionId: "s1", offset: 0};
+    const calls = {asks: 0, changes: [], notified: 0, routed: 0};
+    const scope = {
+      PLAYER: player, document: {getElementById: () => video},
+      pbTotalSec: () => 0, markerNowMs: () => 0, clientLog: () => {},
+      playbackChangeAlreadyInFlight: () => false, playerActivity: () => {},
+      beginPlaybackControlSeek: (p, sec) => (p.controlSeek = {targetMs: Math.round(sec * 1000)}),
+      endWait: () => {}, restartPendingPlaybackOpen: () => false,
+      hasPendingPlaybackOpen: () => false, qualityForce: () => "auto",
+      naturalBoundaryQualityCandidate: async () => { calls.asks += 1; return null; },
+      requestPlaybackMediaChange: async (p, change) => { calls.changes.push(change); return changed; },
+      notifyPlaybackControl: () => { calls.notified += 1; },
+      playbackSeekBufferedRangesMs: () => { calls.routed += 1; return []; },
+      setTimeout: (done) => { done(); return 0; },
+    };
+    const body = `${declaration("seekTo")}
+      return (...args) => seekTo(...args);`;
+    await new Function("scope", `with(scope){${body}}`)(scope)(
+      101.2, false, null, false, null, true, candidate);
+    return {video, player, calls};
+  };
+  const failed = await seekRun({changed: false});
+  assert.equal(failed.calls.asks, 0, "the handed-in route is not asked for again");
+  assert.equal(failed.calls.changes.length, 1);
+  assert.equal(failed.calls.changes[0].candidateId, "2");
+  assert.equal(failed.calls.routed, 0, "a failed boundary change does not fall through to a seek");
+  assert.equal(failed.video.currentTime, 101.2);
+  assert.equal(failed.player.controlSeek, null, "the intent is retired, not left pending");
+  assert.equal(failed.calls.notified, 1);
+  assert.equal(failed.player.abr.requestedCandidateId, null);
+  const landed = await seekRun({changed: true});
+  assert.equal(landed.calls.routed, 0);
+  assert.notEqual(landed.player.controlSeek, null, "a successful change keeps its own intent");
 
   const seek = declaration("seekTo");
   assert.match(seek, /const candidate=boundaryCandidate\|\|await naturalBoundaryQualityCandidate\(me,seekIntent\);/);
