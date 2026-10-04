@@ -613,7 +613,11 @@ async fn actual_pinned_playback(address: IpAddr, h2: bool) {
         .lines()
         .find(|line| !line.is_empty() && !line.starts_with('#'))
         .expect("actual video segment");
-    for (resource, marker) in [(init, b"ftyp".as_slice()), (segment, b"moof".as_slice())] {
+    // The same MIME types the Local HLS routes answer for fMP4 objects.
+    for (resource, marker, mime) in [
+        (init, b"ftyp".as_slice(), "video/mp4"),
+        (segment, b"moof".as_slice(), "video/iso.segment"),
+    ] {
         plurx_core::sharing_resources::SharingHlsResource::parse(resource)
             .expect("closed actual media resource");
         let (status, headers, bytes) = b_request(
@@ -626,7 +630,7 @@ async fn actual_pinned_playback(address: IpAddr, h2: bool) {
         )
         .await;
         assert_eq!(status, StatusCode::OK, "actual media relay; H2={h2}");
-        assert_eq!(headers["content-type"], "video/mp4");
+        assert_eq!(headers["content-type"], mime);
         assert!(
             bytes.windows(marker.len()).any(|window| window == marker),
             "real FFmpeg media box"
