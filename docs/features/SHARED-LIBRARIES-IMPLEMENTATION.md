@@ -4230,6 +4230,7 @@ Documentation index passed four tests; catalog lint covered 2708 files. The
 same-playback successor, real terminal acknowledgement, trigger-cleared reply,
 partial pending attachment, foreign pin epoch and ignored cleanup-write cases
 are inside the named Core receiver regressions above.
+### S5 retained receiver cleanup transport
 
 ### S5 private receiver retirement owner and resource admission boundary
 
@@ -4271,3 +4272,59 @@ response/read/client-job guard wiring, authenticated pinned End exchange,
 request-only no-activation cleanup and automatic failure-triggered retirement
 must be qualified before it opens. Core metadata and the ownership fixtures
 alone do not qualify physical end-to-end playback.
+### B session delivery grant Store checkpoint (metadata qualified)
+
+The receiver delivery Store issues only hashed verifiers for an exact published
+B owner and retained Source attachment. Its same-write predicate repeats the
+original login and policy, current import and effective assignment, full recipe,
+Source reference and revision, resolved original request, current playback
+pointer, node and owner epoch, and matching live job/session lease. The grant
+expires within 30 seconds of the actual Store clock and no later than that lease
+or the original login deadline. Exact issuance retries preserve the deadline;
+revoked verifiers cannot be reinstated or rebound. The existing exact attached
+owner renewal extends active grants for that incarnation and original login in
+the same transaction, capped by the new lease and login deadline. It leaves
+revoked grants unchanged and asserts every active grant reached the exact cap;
+a suppressed grant update rolls back the whole lease/request renewal. This
+keeps the existing static B session capability and adds no player token or
+renewal protocol. No raw bearer enters Core.
+
+The bounded reader and individual revocation require the same fresh opaque
+receiver authority and exact attachment. The reader returns grant metadata only;
+it does not prove Source authority, opened bytes, or accepted-body ownership.
+Confirmed retirement revokes all active grants for the exact retired incarnation
+in the same guarded transaction and asserts that none remains active. Successor
+and foreign-incarnation grants are outside that mutation. Retirement replay
+remains read-only. Cleanup after login loss uses the private retirement witness,
+not a weaker grant revocation caller.
+
+This schema-free candidate uses the existing `sharing_delivery_grants` table.
+It does not enable HTTP delivery or change Local `file_grants`. Production B
+relay must independently retain fresh actual Source evidence and accepted B
+connection/read/writer ownership. The exact candidate on the full `54792d26f` ancestor, merged with the retained
+retirement checkpoint, passes the following pinned Rust 1.97.1 commands:
+
+```sh
+cargo test -p plurx-core --features hiqlite-store,hiqlite-contract-tests --lib sharing_receiver -- --nocapture
+cargo test -p plurx-core --features hiqlite-store,hiqlite-contract-tests --test store_contract sharing_receiver_three_voters_atomic_admission_replay_scope_and_unresolved_retention -- --nocapture
+cargo check -p plurx-core -p plurxd --features plurx-core/hiqlite-store,plurx-core/hiqlite-contract-tests
+cargo clippy -p plurx-core -p plurxd --features plurx-core/hiqlite-store,plurx-core/hiqlite-contract-tests --all-targets -- -D warnings
+```
+
+The first command reports 3 passed, zero ignored in 21.88 seconds, including
+actual memory/pooled receivers in both legacy and rebuilt layouts. The registered
+three-voter regression reports 1 passed, zero ignored in 10.11 seconds. It covers
+canonical verifier and deadline refusal, exact issuer/revocation retries,
+foreign binding and current-login/assignment/owner/pointer/publication loss,
+suppressed grant INSERT/UPDATE assertions, owner lease renewal coupled to active
+grant extension, revoked-verifier preservation, and whole renewal rollback when
+grant deadline UPDATE is ignored. Retirement includes an expired retained grant
+fixture and refuses a suppressed revocation before any metadata settlement.
+These are real B storage fixtures; their retirement witnesses remain explicitly
+metadata fixtures, without synthetic Source physical evidence.
+
+The affected feature check passes in 50.18 seconds and feature Clippy in
+1 minute 22 seconds. Documentation index checks pass 4/4; the catalog audits
+2,711 files. The normal tracked commit hook remains mandatory. Live HTTP ingress,
+Source transport evidence, and accepted-body/read/writer ownership are separate
+qualification boundaries.

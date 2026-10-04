@@ -1158,6 +1158,8 @@ paths = [
   "crates/plurx-core/src/sharing_receiver_sessions.rs",
   "crates/plurx-core/src/sharing_receiver_retirement.rs",
   "crates/plurx-core/src/store/sharing_receiver_retirement.rs",
+  "crates/plurx-core/src/sharing_receiver_delivery.rs",
+  "crates/plurx-core/src/store/sharing_receiver_delivery.rs",
   "crates/plurx-core/src/sharing_receiver_progress.rs",
   "crates/plurx-core/src/store/sharing_receiver_progress.rs",
   "crates/plurx-core/src/store/sharing_receiver_sessions.rs",

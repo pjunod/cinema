@@ -135,7 +135,7 @@ impl<T: Backend> SharingReceiverRetirementStore for T {
         let upstream="b.incarnation_id=s.incarnation_id AND b.import_id=json_extract($1,'$.import') AND b.lifecycle_generation=json_extract($1,'$.lifecycle') AND b.assignment_generation=json_extract($1,'$.assignment') AND b.endpoint_revision=json_extract($1,'$.endpoint') AND b.remote_library_id=json_extract(s.recipe_json,'$.reference.library_id') AND b.remote_item_id=json_extract(s.recipe_json,'$.reference.item_id') AND b.remote_file_id=json_extract(s.recipe_json,'$.file_id') AND b.remote_revision=json_extract(s.recipe_json,'$.file_revision') AND b.source_request_id=json_extract(s.recipe_json,'$.source_request_id') AND b.source_position_ms=s.media_origin_ms AND ((json_extract($1,'$.binding') IS NULL AND b.source_session_id IS NULL AND b.source_incarnation_id IS NULL AND b.capability_envelope IS NULL AND r.state IN('starting','failed') AND r.response_json IS NULL) OR (json_extract($1,'$.binding') IS NOT NULL AND b.source_session_id=json_extract($1,'$.binding.session') AND b.source_incarnation_id=json_extract($1,'$.binding.incarnation') AND b.capability_envelope=json_extract($1,'$.binding.envelope') AND ((r.state='resolved' AND r.response_json=s.response_json AND (s.publication_ready_at_ms=0 OR s.state='ended')) OR (r.state IN('starting','failed') AND r.response_json IS NULL))))";
         let resources="NOT EXISTS(SELECT 1 FROM job_leases j WHERE j.resource='session:'||s.incarnation_id AND (j.owner_node_id<>s.owner_node_id OR j.fence<>s.owner_epoch OR (j.expires_at_ms<>s.lease_expires_at_ms AND (s.state<>'ended' OR j.expires_at_ms>s.lease_expires_at_ms)))) AND NOT EXISTS(SELECT 1 FROM cache_consumer_pins p WHERE p.consumer_kind='media_session' AND p.consumer_id=s.incarnation_id AND p.consumer_epoch<>s.owner_epoch) AND NOT EXISTS(SELECT 1 FROM media_playback_pointers p WHERE p.current_incarnation_id=s.incarnation_id AND (p.user_id<>s.user_id OR p.playback_id<>s.playback_id))";
         let before=format!("EXISTS(SELECT 1 FROM media_sessions s JOIN media_session_requests r ON {request} JOIN sharing_relay_upstream b ON {upstream} WHERE {identity} AND s.state IN('active','ended') AND ({resources}))");
-        let after=format!("EXISTS(SELECT 1 FROM media_sessions s JOIN media_session_requests r ON {request} WHERE {identity} AND s.state='ended' AND s.response_json=$2 AND s.terminal_reason IS NOT NULL AND s.publication_ready_at_ms=0 AND r.state IN('resolved','failed') AND NOT EXISTS(SELECT 1 FROM sharing_relay_upstream b WHERE b.incarnation_id=s.incarnation_id) AND NOT EXISTS(SELECT 1 FROM job_leases j WHERE j.resource='session:'||s.incarnation_id) AND NOT EXISTS(SELECT 1 FROM cache_consumer_pins p WHERE p.consumer_kind='media_session' AND p.consumer_id=s.incarnation_id) AND NOT EXISTS(SELECT 1 FROM media_playback_pointers p WHERE p.current_incarnation_id=s.incarnation_id))");
+        let after=format!("EXISTS(SELECT 1 FROM media_sessions s JOIN media_session_requests r ON {request} WHERE {identity} AND s.state='ended' AND s.response_json=$2 AND s.terminal_reason IS NOT NULL AND s.publication_ready_at_ms=0 AND r.state IN('resolved','failed') AND NOT EXISTS(SELECT 1 FROM sharing_delivery_grants g WHERE g.incarnation_id=s.incarnation_id AND g.state<>'revoked') AND NOT EXISTS(SELECT 1 FROM sharing_relay_upstream b WHERE b.incarnation_id=s.incarnation_id) AND NOT EXISTS(SELECT 1 FROM job_leases j WHERE j.resource='session:'||s.incarnation_id) AND NOT EXISTS(SELECT 1 FROM cache_consumer_pins p WHERE p.consumer_kind='media_session' AND p.consumer_id=s.incarnation_id) AND NOT EXISTS(SELECT 1 FROM media_playback_pointers p WHERE p.current_incarnation_id=s.incarnation_id))");
         let read = retirement_ordered(
             &format!("SELECT 'replay' AS payload WHERE ({after})"),
             vals.clone(),
@@ -156,6 +156,7 @@ impl<T: Backend> SharingReceiverRetirementStore for T {
       format!("DELETE FROM job_leases WHERE resource='session:'||{inc}"),
       format!("DELETE FROM cache_consumer_pins WHERE consumer_kind='media_session' AND consumer_id={inc} AND consumer_epoch=json_extract($1,'$.epoch')"),
       format!("DELETE FROM media_playback_pointers WHERE current_incarnation_id={inc} AND user_id=json_extract($1,'$.user')"),
+      format!("UPDATE sharing_delivery_grants SET state='revoked' WHERE incarnation_id={inc} AND state='active'"),
       format!("DELETE FROM sharing_relay_upstream WHERE incarnation_id={inc}"),source_assert(after,vec![]).0];
         let statements = sqls
             .into_iter()
@@ -204,6 +205,24 @@ pub(crate) async fn metadata_retirement_matrix<T: Backend + super::MediaSessionS
     deleted: bool,
 ) {
     let inc = witness.attachment.owner.incarnation_id;
+    // Metadata corruption fixture: even an expired retained grant must revoke
+    // atomically; expiry by itself is never Source settlement evidence.
+    store.sharing_txn(vec![("INSERT INTO sharing_delivery_grants(token_hash,incarnation_id,source_token_hash,state,deadline_ms) VALUES($1,$2,$3,'active',1)".into(),vec![inc.simple().to_string().repeat(2).into(),inc.into(),witness.intent.login_hash.clone().into()])]).await.expect("retained grant fixture");
+    store.sharing_txn(vec![("CREATE TRIGGER retirement_ignore_grant BEFORE UPDATE ON sharing_delivery_grants BEGIN SELECT RAISE(IGNORE); END".into(),vec![])]).await.expect("ignored grant revocation");
+    assert_eq!(
+        store
+            .retire_receiver_session(&witness)
+            .await
+            .expect("grant revocation must settle"),
+        ReceiverRetirementOutcome::Refused
+    );
+    store
+        .sharing_txn(vec![(
+            "DROP TRIGGER retirement_ignore_grant".into(),
+            vec![],
+        )])
+        .await
+        .expect("restore grant writer");
     let census="SELECT json_array((SELECT json_group_array(json_array(incarnation_id,state,response_json,lease_expires_at_ms,updated_at_ms)) FROM media_sessions),(SELECT json_group_array(json_array(incarnation_id,state,response_json,updated_at_ms)) FROM media_session_requests),(SELECT json_group_array(json_array(resource,owner_node_id,fence,expires_at_ms)) FROM job_leases),(SELECT json_group_array(json_array(user_id,playback_id,current_incarnation_id)) FROM media_playback_pointers),(SELECT count(*) FROM sharing_relay_upstream),(SELECT json_group_array(json_array(session_id,response_json,updated_at_ms)) FROM media_session_terminal_acks)) AS payload";
     let before = store
         .sharing_read(census, vec![])
@@ -442,6 +461,7 @@ pub(crate) async fn metadata_retirement_matrix<T: Backend + super::MediaSessionS
             .expect("successor untouched"),
         successors
     );
+    assert_eq!(store.sharing_read("SELECT CAST(count(*) AS TEXT) AS payload FROM sharing_delivery_grants WHERE incarnation_id=$1 AND state<>'revoked'",vec![inc.into()]).await.expect("all exact grants revoked"),vec!["0".to_string()]);
     let settled = store.sharing_read(census, vec![]).await.expect("receipt");
     assert_eq!(
         store

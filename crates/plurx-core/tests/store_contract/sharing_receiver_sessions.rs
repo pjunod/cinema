@@ -707,6 +707,109 @@ async fn sharing_receiver_three_voters_atomic_admission_replay_scope_and_unresol
                 .await
                 .expect("fresh progress proof")
                 .expect("original login");
+            let mut delivery =
+                plurx_core::sharing_receiver_delivery::assert_receiver_delivery_contract(
+                    &store,
+                    &current,
+                    &attachment,
+                )
+                .await;
+            use plurx_core::sharing_receiver_delivery::ReceiverDeliveryWrite;
+            use plurx_core::store::SharingReceiverDeliveryStore;
+            client.execute("CREATE TRIGGER delivery_ignore_update BEFORE UPDATE ON sharing_delivery_grants BEGIN SELECT RAISE(IGNORE); END",hiqlite::params!()).await.expect("delivery trigger fixture");
+            assert_eq!(
+                store
+                    .revoke_receiver_delivery(&current, &attachment, &delivery.token_hash)
+                    .await
+                    .expect("ignored revoke refuses"),
+                ReceiverDeliveryWrite::Refused
+            );
+            assert_eq!(
+                store
+                    .receiver_delivery(&current, &attachment, &delivery.token_hash)
+                    .await
+                    .expect("rollback keeps active"),
+                Some(delivery.clone())
+            );
+            client
+                .execute("DROP TRIGGER delivery_ignore_update", hiqlite::params!())
+                .await
+                .expect("delivery trigger fixture");
+            client.execute("CREATE TRIGGER delivery_ignore_insert BEFORE INSERT ON sharing_delivery_grants BEGIN SELECT RAISE(IGNORE); END",hiqlite::params!()).await.expect("delivery trigger fixture");
+            let denied_delivery = plurx_core::sharing_receiver_delivery::ReceiverDeliveryGrant {
+                token_hash: "d".repeat(64),
+                deadline_ms: delivery.deadline_ms,
+            };
+            assert_eq!(
+                store
+                    .issue_receiver_delivery(&current, &attachment, &denied_delivery)
+                    .await
+                    .expect("ignored insert refuses"),
+                ReceiverDeliveryWrite::Refused
+            );
+            client
+                .execute("DROP TRIGGER delivery_ignore_insert", hiqlite::params!())
+                .await
+                .expect("delivery trigger fixture");
+            let delivery_renewal = plurx_core::sharing_receiver_sessions::ReceiverSourceRenewal {
+                attachment: attachment.clone(),
+                lease_expires_at_ms: std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .expect("clock")
+                    .as_millis() as i64
+                    + 30000,
+            };
+            client.execute("CREATE TRIGGER delivery_ignore_deadline BEFORE UPDATE ON sharing_delivery_grants BEGIN SELECT RAISE(IGNORE); END",hiqlite::params!()).await.expect("renewal trigger fixture");
+            assert_eq!(
+                store
+                    .renew_receiver_source_session(&current, &delivery_renewal)
+                    .await
+                    .expect("ignored deadline rolls lease back"),
+                ReceiverSourceWrite::Refused
+            );
+            assert_eq!(
+                store
+                    .receiver_delivery(&current, &attachment, &delivery.token_hash)
+                    .await
+                    .expect("whole renewal rollback"),
+                Some(delivery.clone())
+            );
+            client
+                .execute("DROP TRIGGER delivery_ignore_deadline", hiqlite::params!())
+                .await
+                .expect("renewal trigger fixture");
+            assert_eq!(
+                store
+                    .renew_receiver_source_session(&current, &delivery_renewal)
+                    .await
+                    .expect("owner renewal extends active verifier"),
+                ReceiverSourceWrite::Applied
+            );
+            attachment.owner.lease_expires_at_ms = delivery_renewal.lease_expires_at_ms;
+            attachment.owner.now_ms = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("clock")
+                .as_millis() as i64;
+            delivery.deadline_ms = delivery_renewal.lease_expires_at_ms;
+            assert_eq!(
+                store
+                    .receiver_delivery(&current, &attachment, &delivery.token_hash)
+                    .await
+                    .expect("extended verifier current"),
+                Some(delivery.clone())
+            );
+            assert!(store
+                .receiver_delivery(&current, &attachment, &"e".repeat(64))
+                .await
+                .expect("revoked verifier never resurrects")
+                .is_none());
+            assert_eq!(
+                store
+                    .renew_receiver_source_session(&current, &delivery_renewal)
+                    .await
+                    .expect("exact renewed verifier replay"),
+                ReceiverSourceWrite::Replay
+            );
             let mut progress = ReceiverProgress {
                 attachment: attachment.clone(),
                 sequence: 10,
@@ -823,7 +926,10 @@ async fn sharing_receiver_three_voters_atomic_admission_replay_scope_and_unresol
             ] {
                 client.execute(change,hiqlite::params!()).await.expect("current progress authority loss");
                 client.execute("CREATE TRIGGER receiver_ignored_progress_assertion BEFORE INSERT ON sharing_relay_upstream BEGIN SELECT RAISE(IGNORE); END",hiqlite::params!()).await.expect("ignored assertion fixture");
-                assert_eq!(store.save_receiver_progress(&current,&progress).await.expect("actual same-write refusal"),ReceiverProgressOutcome::Refused);
+                assert!(store.receiver_delivery(&current,&attachment,&delivery.token_hash).await.expect("scope reader refusal").is_none());
+                    assert_eq!(store.issue_receiver_delivery(&current,&attachment,&denied_delivery).await.expect("same-write grant refusal"),ReceiverDeliveryWrite::Refused);
+                    assert_eq!(store.revoke_receiver_delivery(&current,&attachment,&delivery.token_hash).await.expect("same-write revoke refusal"),ReceiverDeliveryWrite::Refused);
+                    assert_eq!(store.save_receiver_progress(&current,&progress).await.expect("actual same-write refusal"),ReceiverProgressOutcome::Refused);
                 assert_eq!(watch_read().await.expect("history preserved").pop().expect("row").value,before);
                 client.execute("DROP TRIGGER receiver_ignored_progress_assertion",hiqlite::params!()).await.expect("remove trigger");
                 client.execute(restore,hiqlite::params!()).await.expect("restore authority");
@@ -904,6 +1010,19 @@ async fn sharing_receiver_three_voters_atomic_admission_replay_scope_and_unresol
                 attachment: attachment.clone(),
                 confirmation: "a".repeat(64),
             };
+            client.execute("UPDATE sharing_delivery_grants SET state='active' WHERE token_hash=? AND incarnation_id=?",hiqlite::params![delivery.token_hash.clone(),attachment.owner.incarnation_id]).await.expect("retained grant corruption fixture");
+            client.execute("CREATE TRIGGER retirement_ignore_grant BEFORE UPDATE ON sharing_delivery_grants BEGIN SELECT RAISE(IGNORE); END",hiqlite::params!()).await.expect("ignored grant revocation");
+            assert_eq!(
+                store
+                    .retire_receiver_session(&witness)
+                    .await
+                    .expect("actual ignored grant refuses"),
+                ReceiverRetirementOutcome::Refused
+            );
+            client
+                .execute("DROP TRIGGER retirement_ignore_grant", hiqlite::params!())
+                .await
+                .expect("restore grant writer");
             let node = witness.attachment.owner.owner_node_id.clone();
             witness.attachment.owner.owner_node_id = "foreign-retirement-owner".into();
             assert_eq!(
