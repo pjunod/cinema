@@ -1567,6 +1567,21 @@ impl MediaSessionStore for SqliteStore {
         let incarnation_id = incarnation_id.to_owned();
         self.with_conn(move |conn| {
             let tx = conn.unchecked_transaction()?;
+            if request_id.starts_with("jellyfin:") {
+                let nonce = uuid::Uuid::new_v4().to_string();
+                let changed = tx.execute(
+                    crate::store::jellyfin_play::BIND_NATIVE_PUBLICATION,
+                    params![user_id, request_id, incarnation_id, now_ms, nonce],
+                )?;
+                if changed != 1 {
+                    tx.commit()?;
+                    return Ok(None);
+                }
+                tx.execute(
+                    crate::store::jellyfin_play::SUPERSEDE_NATIVE_PUBLICATION,
+                    params![user_id, request_id, incarnation_id, now_ms, nonce],
+                )?;
+            }
             let route = tx
                 .query_row(
                     &format!(

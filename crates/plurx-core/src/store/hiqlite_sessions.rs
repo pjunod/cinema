@@ -3002,8 +3002,11 @@ impl MediaSessionStore for HiqliteAuthStore {
                 "invalid media-session activation publication".to_owned(),
             ));
         }
-        self.client()
-            .txn([(
+        let nonce = uuid::Uuid::new_v4().to_string();
+        let results = self.client()
+            .txn([
+                (super::jellyfin_play::BIND_NATIVE_PUBLICATION, params!(user_id, request_id, incarnation_id, now_ms, nonce.as_str())),
+                (
                 "UPDATE media_session_requests SET state = 'resolved',
                         response_json = (SELECT route.response_json FROM media_sessions route
                           WHERE route.user_id = $1 AND $2 != '' AND route.incarnation_id = $3
@@ -3028,13 +3031,28 @@ impl MediaSessionStore for HiqliteAuthStore {
                         AND route.lease_expires_at_ms > $4
                         AND route.request_fingerprint = media_session_requests.request_fingerprint
                         AND route.playback_id = media_session_requests.playback_id
-                        AND route.owner_node_id = media_session_requests.owner_node_id)",
+                        AND route.owner_node_id = media_session_requests.owner_node_id)
+                    AND (substr($2,1,9)!='jellyfin:' OR EXISTS(
+                      SELECT 1 FROM jellyfin_plays j JOIN jellyfin_login_tokens l
+                        ON l.user_id=j.user_id AND l.token_hash=j.token_digest
+                        AND l.device_digest=j.device_digest AND l.client_family=j.client_family
+                      JOIN tokens t ON t.user_id=l.user_id AND t.token_hash=l.token_hash
+                      WHERE j.user_id=$1 AND j.play_id=substr($2,10) AND substr($2,1,9)='jellyfin:' AND j.state='active'
+                        AND j.native_incarnation_id=$3 AND j.playback_id=media_session_requests.playback_id
+                        AND json_extract(j.payload,'$.native_request_fingerprint')=media_session_requests.request_fingerprint
+                        AND EXISTS(SELECT 1 FROM jellyfin_entity_ids WHERE wire_id=j.item_wire_id AND retired=0)
+                        AND EXISTS(SELECT 1 FROM jellyfin_entity_ids WHERE wire_id=j.file_wire_id AND retired=0)))",
                 params!(user_id, request_id, incarnation_id, now_ms),
-            )])
+                ),
+                (super::jellyfin_play::SUPERSEDE_NATIVE_PUBLICATION, params!(user_id, request_id, incarnation_id, now_ms, nonce.as_str())),
+            ])
             .await?
             .into_iter()
             .collect::<Result<Vec<_>, _>>()
             .map_err(database_error)?;
+        if request_id.starts_with("jellyfin:") && results.first().copied() != Some(1) {
+            return Ok(None);
+        }
         let route = route_by(self, "incarnation_id", incarnation_id)
             .await?
             .filter(|route| {

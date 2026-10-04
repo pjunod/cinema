@@ -714,3 +714,31 @@ one live/preparing session, precise inline ranges, original-clock watch
 progress and Stop cleanup. Cancellation between native publication and
 compatibility binding, no-signal cleanup, encoded/HEVC service qualification
 and the physical client matrix remain open. Apple TV testing stays deferred.
+
+
+The shared-start slice landed in PR #786 at `235e1c44d`, with exact parents
+`d373716f4` and `111c24b8d` and the same tree as the tested head. All eight
+jobs passed in [effort run 4034](http://192.168.4.7:3000/noirr/plurx/actions/runs/4034);
+the landing preserves all three checked regression references. All 28 local
+Jellyfin service tests, 17 documentation/API/identity/ownership contracts,
+workspace/all-target Clippy and the normal commit hooks passed on Rust 1.97.1.
+
+The next lifecycle slice saves the exact compatibility cleanup reference
+inside the native publication transaction. Publication rechecks its reserved
+request, current native pointer, fingerprint, original clock, scoped login/token
+and mapped IDs. A play cancelled before publication cannot publish; a response
+lost after committed publication still leaves Stop its exact native reference.
+Exact replay retains the first activation nonce and cannot fence a newer
+pending ask. Existing native publication/release and unknown-commit owners
+remain responsible for cleanup; no additional media owner, task or consistent
+read is introduced.
+
+The source-only regression first reproduced a published native route with a
+still-pending compatibility row. With atomic binding, all 17 compatibility
+storage contracts pass on SQLite and three voters, including publication,
+cancellation, replay and pending limits. The ordinary native activation/
+publication/replay contract, all 28 Jellyfin HTTP regressions, workspace Clippy
+and all 28 SQL/read/process censuses pass. The exact integrated branch is
+rechecked before pushing. No-signal/replacement cleanup, encoded/HEVC service
+qualification and the physical client matrix remain open; Apple TV stays
+deferred.
