@@ -209,6 +209,7 @@ impl CreateSession {
             candidate_context: None,
             vod_only: false,
             passive_vod: false,
+            finite_bitrate_limit_bps: None,
             file_id,
             playback_id: self.playback_id,
             request_id: self.request_id,
@@ -1476,7 +1477,16 @@ pub async fn create(
     Json(req): Json<CreateSession>,
 ) -> Result<Json<StartResponse>, ApiError> {
     let (user_id, start_attempts) = (user.id, Arc::clone(&state.start_attempts));
-    let created = create_with_purpose(user, state, id, headers, remote, req, None).await;
+    let created = create_with_purpose(
+        user,
+        state,
+        id,
+        headers,
+        remote,
+        req,
+        ServiceCreatePurpose::Native,
+    )
+    .await;
     // A start request the server refused (C-08 M5 row 4). The method is not
     // known until the create has decided it, so a refusal with no attempt in
     // flight is `unknown`. A "not yet" code keeps the attempt open for the
@@ -1500,9 +1510,178 @@ pub(crate) async fn create_for_library_channel(
     req: CreateSession,
     purpose: crate::http::library_channels::LibraryChannelPlaybackPurpose,
 ) -> Result<StartResponse, ApiError> {
-    create_with_purpose(user, state, file_id, headers, remote, req, Some(purpose))
+    create_with_purpose(
+        user,
+        state,
+        file_id,
+        headers,
+        remote,
+        req,
+        ServiceCreatePurpose::LibraryChannel(purpose),
+    )
+    .await
+    .map(|Json(response)| response)
+}
+
+// The service caller chooses policy; the public create body cannot request it.
+enum ServiceCreatePurpose {
+    Native,
+    LibraryChannel(crate::http::library_channels::LibraryChannelPlaybackPurpose),
+    PassiveCompatibility {
+        bitrate_limit_bps: Option<u32>,
+        expected_fingerprint: String,
+    },
+}
+impl ServiceCreatePurpose {
+    fn bind_policy(
+        &self,
+        request: &mut crate::transcode::SessionRequest,
+        fingerprint: String,
+    ) -> Result<String, ApiError> {
+        match self {
+            Self::Native => Ok(fingerprint),
+            Self::LibraryChannel(channel) => Ok(channel.bind_session_fingerprint(&fingerprint)),
+            Self::PassiveCompatibility {
+                bitrate_limit_bps,
+                expected_fingerprint,
+            } => {
+                let fingerprint =
+                    bind_compatibility_vod_policy(request, fingerprint, *bitrate_limit_bps)?;
+                if &fingerprint != expected_fingerprint {
+                    return Err(ApiError::Conflict(
+                        "native request changed; renegotiate".into(),
+                    ));
+                }
+                Ok(fingerprint)
+            }
+        }
+    }
+}
+/// Shared by prerequisite resolution and activation; only the service can set
+/// finite-output policy, and its limits participate in the durable claim.
+pub(crate) fn bind_compatibility_vod_policy(
+    request: &mut crate::transcode::SessionRequest,
+    fingerprint: String,
+    bitrate_limit_bps: Option<u32>,
+) -> Result<String, ApiError> {
+    if request
+        .request_id
+        .as_deref()
+        .is_none_or(|id| id.trim().is_empty())
+        || bitrate_limit_bps.is_some_and(|limit| !(64_000..=1_000_000_000).contains(&limit))
+    {
+        return Err(ApiError::BadRequest(
+            "invalid compatibility activation policy".into(),
+        ));
+    }
+    request.presentation = crate::transcode::Presentation::Vod;
+    request.vod_only = true;
+    request.passive_vod = true;
+    request.finite_bitrate_limit_bps = bitrate_limit_bps;
+    let fingerprint = match bitrate_limit_bps {
+        Some(limit) => format!("{fingerprint}:finite-bitrate-v1:{limit}"),
+        None => fingerprint,
+    };
+    Ok(plurx_core::auth::hash_token(&format!(
+        "plurx/jellyfin/vod-only/passive/v1:{fingerprint}"
+    )))
+}
+/// Resolve compatibility negotiation through the same native plan and prerequisites as create.
+/// This does not claim a session, attach a reader, or reserve a producer.
+pub(crate) async fn preview_for_compatibility(
+    state: &AppState,
+    user_id: i64,
+    snapshot: &plurx_core::store::PlaybackPlanningSnapshot,
+    body: CreateSession,
+    bitrate_limit_bps: Option<u32>,
+) -> Result<
+    (
+        ResolvedPlan,
+        Option<std::sync::Arc<crate::vodencode::Encoding>>,
+    ),
+    ApiError,
+> {
+    let file = &snapshot.file;
+    let caps = body.caps.as_ref().ok_or(ApiError::BadRequest(
+        "compatibility capabilities missing".into(),
+    ))?;
+    super::super::stream::validate_device_caps(caps)?;
+    let caps = caps.clone();
+    let review = review_client_plan(
+        &caps,
+        None,
+        file,
+        &super::super::stream::render_caps_from_snapshot(state, snapshot),
+        false,
+        false,
+        unix_ms(),
+    );
+    let mut resolved = resolve_plan(
+        PlanInputs {
+            snapshot: Some(snapshot),
+            state,
+            user_id,
+            file_id: file.id,
+            source: Some(file),
+            network_prior: None,
+        },
+        Some(review),
+        body,
+    )
+    .await?;
+    validate_hevc_copy_transport(state, file, &caps, &resolved.request).await?;
+    if burn_would_discard_this_session_hdr(
+        state,
+        Some(file),
+        &resolved.request,
+        false,
+        resolved.height,
+    )
+    .await
+    {
+        return Err(ApiError::Unprocessable(
+            serde_json::json!({"code":"hdr_subtitle_burn_refused","error":HDR_SUBTITLE_BURN_REFUSAL}),
+        ));
+    }
+    resolved.intent_fingerprint = bind_compatibility_vod_policy(
+        &mut resolved.request,
+        resolved.intent_fingerprint,
+        bitrate_limit_bps,
+    )?;
+    let encoding = state
+        .transcode
+        .preview_compatibility_vod(&resolved.request, file)
         .await
-        .map(|Json(response)| response)
+        .map_err(|_| ApiError::BadRequest("native VOD prerequisites unavailable".into()))?;
+    Ok((resolved, encoding))
+}
+pub(crate) struct CompatibilityVodPolicy {
+    pub bitrate_limit_bps: Option<u32>,
+    pub expected_fingerprint: String,
+}
+pub(crate) async fn create_for_compatibility(
+    user: plurx_core::domain::User,
+    state: AppState,
+    file_id: i64,
+    headers: HeaderMap,
+    remote: Option<std::net::SocketAddr>,
+    req: CreateSession,
+    policy: CompatibilityVodPolicy,
+) -> Result<StartResponse, ApiError> {
+    Box::pin(create_with_purpose(
+        user,
+        state,
+        file_id,
+        headers,
+        remote,
+        req,
+        ServiceCreatePurpose::PassiveCompatibility {
+            bitrate_limit_bps: policy.bitrate_limit_bps,
+            expected_fingerprint: policy.expected_fingerprint,
+        },
+    ))
+    .await
+    .map(|Json(response)| response)
 }
 
 async fn create_with_purpose(
@@ -1512,7 +1691,7 @@ async fn create_with_purpose(
     headers: HeaderMap,
     remote: Option<std::net::SocketAddr>,
     req: CreateSession,
-    library_channel: Option<crate::http::library_channels::LibraryChannelPlaybackPurpose>,
+    purpose: ServiceCreatePurpose,
 ) -> Result<Json<StartResponse>, ApiError> {
     let remaining = headers
         .get("x-plurx-startup-remaining-ms")
@@ -1535,7 +1714,7 @@ async fn create_with_purpose(
             counts.clone(),
             tokio::time::timeout_at(
                 budget.deadline,
-                create_with_purpose_inner(user, state, id, headers, remote, req, library_channel),
+                create_with_purpose_inner(user, state, id, headers, remote, req, purpose),
             ),
         ))
         .await;
@@ -1565,8 +1744,12 @@ async fn create_with_purpose_inner(
     headers: HeaderMap,
     remote: Option<std::net::SocketAddr>,
     req: CreateSession,
-    library_channel: Option<crate::http::library_channels::LibraryChannelPlaybackPurpose>,
+    purpose: ServiceCreatePurpose,
 ) -> Result<Json<StartResponse>, ApiError> {
+    let library_channel = match &purpose {
+        ServiceCreatePurpose::LibraryChannel(channel) => Some(channel),
+        _ => None,
+    };
     if let Some(caps) = req.caps.as_ref() {
         super::super::stream::validate_device_caps(caps)?;
     }
@@ -1808,10 +1991,7 @@ async fn create_with_purpose_inner(
             "error": HDR_SUBTITLE_BURN_REFUSAL,
         })));
     }
-    let fingerprint = match library_channel.as_ref() {
-        Some(purpose) => purpose.bind_session_fingerprint(&resolved.intent_fingerprint),
-        None => resolved.intent_fingerprint,
-    };
+    let fingerprint = purpose.bind_policy(&mut request, resolved.intent_fingerprint)?;
     let plan_notes = resolved.plan_notes;
     let native_subtitles = resolved.native_subtitles;
     let native_subtitle = resolved.native_subtitle;
@@ -4044,5 +4224,71 @@ mod quorum_candidate_tests {
             candidate_refusal_reason(&[row], Some(CandidateId([2; 16])), Some(1080), true),
             "catalogue_authority_unavailable"
         );
+    }
+}
+
+#[cfg(test)]
+mod compatibility_service_policy_tests {
+    use super::*;
+    #[test]
+    fn compatibility_bitrate_policy_is_server_owned_and_changes_exact_claim_identity() {
+        let body: CreateSession = serde_json::from_value(serde_json::json!({"playback_id":"compatibility-player", "request_id":"compatibility-request", "finite_bitrate_limit_bps":750000})).expect("native create body");
+        let mut request = body.into_request(1, 720);
+        assert_eq!(
+            request.finite_bitrate_limit_bps, None,
+            "ordinary HTTP cannot set the trusted policy"
+        );
+        let first =
+            bind_compatibility_vod_policy(&mut request, "native-intent".into(), Some(750_000))
+                .expect("service policy");
+        assert_eq!(request.finite_bitrate_limit_bps, Some(750_000));
+        assert_eq!(
+            first,
+            bind_compatibility_vod_policy(&mut request, "native-intent".into(), Some(750_000))
+                .expect("same attempt")
+        );
+        assert_ne!(
+            first,
+            bind_compatibility_vod_policy(&mut request, "native-intent".into(), Some(500_000))
+                .expect("changed ceiling")
+        );
+        assert!(bind_compatibility_vod_policy(&mut request, "intent".into(), Some(0)).is_err());
+    }
+    #[test]
+    fn compatibility_service_policy_binds_vod_only_and_passive_flags_before_native_claim() {
+        let body: CreateSession = serde_json::from_value(serde_json::json!({"playback_id":"compatibility-player", "request_id":"compatibility-request"})).expect("create");
+        let mut request = body.into_request(1, 1080);
+        let native = ServiceCreatePurpose::Native
+            .bind_policy(&mut request, "native-intent".into())
+            .expect("native");
+        assert_eq!(native, "native-intent");
+        assert!(!request.vod_only);
+        assert!(!request.passive_vod);
+        let expected_fingerprint =
+            bind_compatibility_vod_policy(&mut request, native.clone(), None)
+                .expect("negotiated policy");
+        let policy = ServiceCreatePurpose::PassiveCompatibility {
+            bitrate_limit_bps: None,
+            expected_fingerprint,
+        };
+        let first = policy
+            .bind_policy(&mut request, native.clone())
+            .expect("compatibility");
+        assert_ne!(first, native);
+        assert_eq!(
+            first,
+            policy
+                .bind_policy(&mut request, native)
+                .expect("stable retry")
+        );
+        assert!(
+            policy
+                .bind_policy(&mut request, "changed-native-intent".into())
+                .is_err(),
+            "changed normalized body is refused before a claim"
+        );
+        assert!(request.vod_only && request.passive_vod);
+        request.request_id = None;
+        assert!(policy.bind_policy(&mut request, "intent".into()).is_err());
     }
 }

@@ -1,6 +1,9 @@
 //! Jellyfin connection and catalog facade over native authentication and Store.
 mod ancillary;
 mod playback;
+mod representation;
+mod transport;
+mod vod;
 use super::{auth, error::ApiError};
 use crate::state::AppState;
 use axum::{
@@ -38,6 +41,10 @@ pub(super) fn router() -> Router<AppState> {
                 .layer(DefaultBodyLimit::max(64 * 1024)),
         )
         .route("/Videos/{item_id}/stream", get(playback::direct))
+        .route(
+            "/Videos/{item_id}/{play_id}/hls/{*resource}",
+            get(transport::resource),
+        )
         .route(
             "/Videos/{item_id}/{filename}",
             get(playback::direct_extension),
@@ -1117,6 +1124,302 @@ mod tests {
             body["User"]["Id"].as_str().expect("user wire").into(),
         )
     }
+    #[tokio::test]
+    async fn jellyfin_hls_requires_login_and_rejects_a_direct_binding_before_activation() {
+        let f = playback_fixture().await;
+        let (status, body) = json_call(&f.app, request("POST", &format!("/jellyfin/Items/{}/PlaybackInfo", f.item), Some(&f.token), json!({"DeviceProfile":{"DirectPlayProfiles":[{"Type":"Video","Container":"mp4","VideoCodec":"h264","AudioCodec":"aac"}]}}))).await;
+        assert_eq!(status, StatusCode::OK);
+        let play = body["PlaySessionId"].as_str().expect("direct binding");
+        let root = format!(
+            "/jellyfin/Videos/{}/master.m3u8?MediaSourceId={}&PlaySessionId={play}",
+            f.item, f.source
+        );
+        let (status, _) = json_call(&f.app, request("GET", &root, None, Value::Null)).await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+        let (status, _) =
+            json_call(&f.app, request("GET", &root, Some(&f.token), Value::Null)).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        let client_scope = f
+            .state
+            .store
+            .jellyfin_login_scope(plurx_core::auth::hash_token(&f.token))
+            .await
+            .expect("scope")
+            .expect("login");
+        let unchanged = f
+            .state
+            .store
+            .jellyfin_play(play, &client_scope)
+            .await
+            .expect("read")
+            .expect("play");
+        assert_eq!(unchanged.state, "pending");
+        assert!(unchanged.direct_grant_id.is_none() && unchanged.native_incarnation_id.is_none());
+        let path = format!("/jellyfin/Videos/{}/{play}/hls/seg00001.ts", f.item);
+        let (status, _) = json_call(&f.app, request("GET", &path, None, Value::Null)).await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+        let (status, _) =
+            json_call(&f.app, request("GET", &path, Some(&f.token), Value::Null)).await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn jellyfin_hls_prerequisite_refusals_allocate_no_native_reader_or_producer() {
+        let f = playback_fixture().await;
+        f.state
+            .store
+            .put_setting(plurx_core::store::keys::VOD_PRESENTATION, "0")
+            .await
+            .expect("disable native VOD");
+        let path = format!("/jellyfin/Items/{}/PlaybackInfo", f.item);
+        let (status, body) = json_call(&f.app, request("POST", &path, Some(&f.token), json!({"EnableDirectPlay":false,"MaxStreamingBitrate":750000,"DeviceProfile":{"TranscodingProfiles":[{"Type":"Video","Container":"ts","VideoCodec":"h264","AudioCodec":"aac","Protocol":"hls","MaxAudioChannels":"2","ManifestSubtitles":"vtt"}]}}))).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["ErrorCode"], "NotSupported");
+        assert!(body["MediaSources"].as_array().expect("sources").is_empty());
+        assert!(body.get("PlaySessionId").is_none());
+        assert!(f.state.transcode.active_session_ids().await.is_empty());
+        assert!(f
+            .state
+            .transcode
+            .vod_live_or_preparing_session_ids()
+            .await
+            .is_empty());
+    }
+
+    #[tokio::test]
+    async fn jellyfin_native_hls_copy_preserves_original_time_auth_and_inline_fragment_ranges() {
+        let f = playback_fixture().await;
+        let path = f
+            .root
+            .path()
+            .canonicalize()
+            .expect("canonical media")
+            .join("movie.mp4");
+        std::fs::copy(plurx_core::testfixtures::source("h264"), &path).expect("real native source");
+        let metadata = std::fs::metadata(&path).expect("source metadata");
+        let mtime = metadata
+            .modified()
+            .expect("mtime")
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("epoch")
+            .as_secs() as i64;
+        let file_id = f.state.store.upsert_file(f.native_item, path.to_str().expect("path"), metadata.len() as i64, mtime,
+            &plurx_core::domain::ProbeResult {
+                duration_ms: Some(12_000), container: Some("mkv".into()), video_codec: Some("h264".into()),
+                video_profile: Some("Main".into()), width: Some(640), height: Some(360), bit_depth: Some(8), bitrate: Some(1_000_000),
+                audio_streams: vec![plurx_core::domain::AudioStream { index: 0, codec: "aac".into(), channels: Some(2), sample_rate: Some(48000), default: true, ..Default::default() }],
+                raw_json: Some(json!({"streams":[{"index":0,"codec_type":"video","codec_name":"h264","width":640,"height":360,"profile":"Main","avg_frame_rate":"24/1"},{"index":1,"codec_type":"audio","codec_name":"aac","channels":2,"sample_rate":"48000"}]}).to_string()), ..Default::default()
+            }).await.expect("native source probe");
+        let file = f
+            .state
+            .store
+            .get_file(file_id)
+            .await
+            .expect("source")
+            .expect("file");
+        let indexed = Box::pin(crate::fragindex::build(
+            &file,
+            plurx_core::transcode::CopyVideoOptions::new(
+                crate::ffmpeg::has_dovi_rpu().await,
+                false,
+            ),
+            &f.root.path().join("native-index"),
+            std::time::Duration::from_secs(120),
+        ))
+        .await;
+        let crate::fragindex::IndexOutcome::Built(index) = indexed else {
+            panic!("native index: {indexed:?}");
+        };
+        f.state
+            .store
+            .put_fragment_index(file_id, &index)
+            .await
+            .expect("index");
+        let (status, info) = json_call(&f.app, request("POST", &format!("/jellyfin/Items/{}/PlaybackInfo", f.item), Some(&f.token), json!({"EnableDirectPlay":false,"StartTimeTicks":20_000_000,"MaxStreamingBitrate":2_000_000,"DeviceProfile":{"TranscodingProfiles":[{"Type":"Video","Container":"ts","VideoCodec":"h264","AudioCodec":"aac","Protocol":"hls","MaxAudioChannels":"2","ManifestSubtitles":"vtt"}]}}))).await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(
+            info["ErrorCode"].is_null(),
+            "native prerequisites refused: {info}"
+        );
+        let play_id = info["PlaySessionId"].as_str().expect("play");
+        let url = info["MediaSources"][0]["TranscodingUrl"]
+            .as_str()
+            .expect("native HLS URL");
+        assert!(!url.contains(&f.token));
+        let response = f
+            .app
+            .clone()
+            .oneshot(request("GET", url, None, Value::Null))
+            .await
+            .expect("unauthenticated root");
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        let response = f
+            .app
+            .clone()
+            .oneshot(request("GET", url, Some(&f.token), Value::Null))
+            .await
+            .expect("root");
+        let status = response.status();
+        let bytes = response
+            .into_body()
+            .collect()
+            .await
+            .expect("root body")
+            .to_bytes();
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "{}",
+            String::from_utf8_lossy(&bytes)
+        );
+        let master = String::from_utf8(bytes.to_vec()).expect("manifest");
+        let scope = f
+            .state
+            .store
+            .jellyfin_login_scope(plurx_core::auth::hash_token(&f.token))
+            .await
+            .expect("scope")
+            .expect("login");
+        let play = f
+            .state
+            .store
+            .jellyfin_play(play_id, &scope)
+            .await
+            .expect("binding")
+            .expect("play");
+        assert_eq!(play.negotiation.source_origin_ms, 0);
+        let route = f
+            .state
+            .store
+            .media_session_route_by_incarnation(
+                play.native_incarnation_id
+                    .as_deref()
+                    .expect("native binding"),
+            )
+            .await
+            .expect("route")
+            .expect("native");
+        assert!(!master.contains(&route.session_id) && !master.contains("/api/v1/hls/"));
+        let media_url = master
+            .lines()
+            .find(|line| line.ends_with("index.m3u8") && !line.starts_with('#'))
+            .expect("media child");
+        let response = f
+            .app
+            .clone()
+            .oneshot(request("GET", media_url, Some(&f.token), Value::Null))
+            .await
+            .expect("media playlist");
+        assert_eq!(response.status(), StatusCode::OK);
+        let bytes = response
+            .into_body()
+            .collect()
+            .await
+            .expect("media body")
+            .to_bytes();
+        let media = String::from_utf8(bytes.to_vec()).expect("media manifest");
+        assert!(!media.contains("#EXT-X-MAP"));
+        assert!(media.contains("#EXT-X-ENDLIST"));
+        let segment_url = media
+            .lines()
+            .find(|line| line.ends_with(".ts"))
+            .expect("inline child");
+        let init = Box::pin(super::super::hls::segment(
+            State(f.state.clone()),
+            Path((route.session_id.clone(), "init.mp4".into())),
+            HeaderMap::new(),
+        ))
+        .await
+        .expect("native init");
+        let init = init
+            .into_body()
+            .collect()
+            .await
+            .expect("init bytes")
+            .to_bytes();
+        let mut range = request("GET", segment_url, Some(&f.token), Value::Null);
+        range.headers_mut().insert(
+            "range",
+            format!("bytes={}-{}", init.len() - 3, init.len() + 4)
+                .parse()
+                .expect("range"),
+        );
+        let response = f.app.clone().oneshot(range).await.expect("crossing range");
+        let status = response.status();
+        let bytes = response
+            .into_body()
+            .collect()
+            .await
+            .expect("range bytes")
+            .to_bytes();
+        assert_eq!(
+            status,
+            StatusCode::PARTIAL_CONTENT,
+            "{}",
+            String::from_utf8_lossy(&bytes)
+        );
+        assert_eq!(bytes.len(), 8);
+        assert_eq!(&bytes[..3], &init[init.len() - 3..]);
+        let fresh = f
+            .state
+            .store
+            .media_session_route_by_incarnation(&route.incarnation_id)
+            .await
+            .expect("frontier")
+            .expect("route");
+        assert_eq!(
+            fresh.fetched_through_ms, 0,
+            "a partial composite read cannot mark a full native fragment fetched"
+        );
+        let response = f
+            .app
+            .clone()
+            .oneshot(request("GET", segment_url, None, Value::Null))
+            .await
+            .expect("anonymous child");
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        for (endpoint, position) in [
+            ("/jellyfin/Sessions/Playing/Progress", 5000),
+            ("/jellyfin/Sessions/Playing/Stopped", 7000),
+        ] {
+            let response = f.app.clone().oneshot(request("POST", endpoint, Some(&f.token), json!({"UserId":f.user,"ItemId":f.item,"MediaSourceId":f.source,"PlaySessionId":play_id,"PlayMethod":"Transcode","PositionTicks":position*10_000}))).await.expect("native watch event");
+            assert_eq!(response.status(), StatusCode::NO_CONTENT);
+        }
+        let watch = f
+            .state
+            .store
+            .watch_state(1, f.native_item)
+            .await
+            .expect("watch")
+            .expect("saved");
+        assert_eq!(
+            watch.position_ms, 7000,
+            "progress remains on the original movie timeline"
+        );
+        let ended = f
+            .state
+            .store
+            .media_session_route_by_incarnation(&route.incarnation_id)
+            .await
+            .expect("ended")
+            .expect("native row");
+        assert_eq!(ended.state, "ended");
+        assert!(f.state.transcode.active_session_ids().await.is_empty());
+        assert!(f
+            .state
+            .transcode
+            .vod_live_or_preparing_session_ids()
+            .await
+            .is_empty());
+        let response = f
+            .app
+            .clone()
+            .oneshot(request("GET", segment_url, Some(&f.token), Value::Null))
+            .await
+            .expect("late child");
+        assert_ne!(response.status(), StatusCode::OK);
+    }
+
     struct PlaybackFixture {
         app: Router,
         state: AppState,

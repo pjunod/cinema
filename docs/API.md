@@ -14,7 +14,7 @@ This file is the specification in the meantime, written by reading the routers
 and the handlers on 2026-09-07. Where a plan document and the code disagreed,
 the code won and the disagreement is recorded in §23.
 
-One binary serves everything on one port (`:32400` by default). plurx has 282
+One binary serves everything on one port (`:32400` by default). plurx has 283
 routes across the five surfaces below. Every path here is absolute; the native
 API is the only one under a version prefix, and §7-§18 state that prefix once
 per section rather than repeating it in every row.
@@ -3231,11 +3231,12 @@ mint. Media resource cleanup belongs to the later playback adapter.
 | GET | `/jellyfin/Shows/{item_id}/Seasons` | Compatibility token; direct season children |
 | GET | `/jellyfin/Shows/{item_id}/Episodes` | Compatibility token; descendant episodes; optional season parent |
 
-| GET, POST | `/jellyfin/Items/{item_id}/PlaybackInfo` | Compatibility token; live source membership, checked times and one independently eligible direct profile; unsupported constraints refuse before allocation |
+| GET, POST | `/jellyfin/Items/{item_id}/PlaybackInfo` | Compatibility token; live source membership, checked times and independently eligible direct or finite native VOD profile; native prerequisite and output validation precede advertisement |
 | GET, HEAD | `/jellyfin/Videos/{item_id}/stream` | Compatibility token and exact play/source binding; native direct bytes, Range and HEAD; live native grant and source fingerprint |
-| GET, HEAD | `/jellyfin/Videos/{item_id}/{filename}` | Same authenticated direct adapter; only the supported `stream` filename aliases |
+| GET, HEAD | `/jellyfin/Videos/{item_id}/{filename}` | Authenticated direct aliases or negotiated `master.m3u8` / `main.m3u8` entry; exact play/source binding |
+| GET, HEAD | `/jellyfin/Videos/{item_id}/{play_id}/hls/{*resource}` | Fresh compatibility login and exact current native incarnation; closed manifest/init/fragment/subtitle names; native reader and publication authority |
 | POST | `/jellyfin/Sessions/Logout` | Presented compatibility login only; native token exclusion, exact play release, other devices retained. |
-| POST | `/jellyfin/Sessions/Playing` | Compatibility token; exact own play/item/source; activates its native direct reference |
+| POST | `/jellyfin/Sessions/Playing` | Compatibility token; exact own play/item/source; activates its negotiated native direct or VOD reference |
 | POST | `/jellyfin/Sessions/Playing/Progress` | Exact active play; checked position ticks, original manual revision and shared native watch effects |
 | POST | `/jellyfin/Sessions/Playing/Stopped` | Forced durable final when supplied; no-position stop does not write zero; exact resource release and retry on storage failure |
 | POST, DELETE | `/jellyfin/Users/{user_id}/PlayedItems/{item_id}` | Own user and supported item; shared cascading watched/unwatched marks with trusted login origin |
@@ -3245,7 +3246,24 @@ including login replacement. Negotiation leaves an active play running.
 Activating a replacement fences earlier bindings atomically; a delayed old
 Stop cannot update watch progress or remove the replacement's direct presence.
 Each direct presence/release key remains specific to its play UUID. Native
-VOD negotiation and HLS aliases are not advertised by this slice.
+VOD normalization reserves `jellyfin:<PlaySessionId>` native request IDs; stale,
+cancelled and revoked negotiation cannot replace the current native pointer.
+A finite VOD candidate must pass the same native planner and source/index/engine
+prerequisites before its URL is returned. Its private recipe identity includes
+the trusted passive/VOD-only policy and optional bitrate ceiling. Older worker
+request schemas refuse unknown policy fields rather than dropping the ceiling.
+
+Every mapped HLS request requires a fresh login; generated URLs contain no
+credential. Native manifests retain the movie's original clock, with closed
+resource names rewritten to this mount and private native session IDs removed.
+The observed MPEG-TS declaration uses the measured init-prefix fMP4 transport:
+each fragment includes the exact native init bytes. Composite byte ranges map
+to native object ranges, with both native validators rechecked; an adapter
+cannot credit a partial fragment as fully fetched. Native buffered bodies
+preserve their known Content-Length through the admitted lifetime wrapper.
+HEAD keeps representation headers and returns no body. Stop and logout use
+the existing exact native release path. Bounded startup retry sharing and
+no-signal/client qualification remain open in the compatibility build record.
 
 Disabled requests, including unsupported mutations, answer JSON 404. Enabled
 unsupported methods answer JSON 405; unknown paths answer JSON 404. The

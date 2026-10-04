@@ -2147,3 +2147,43 @@
             drop(viewer);
         }
     }
+
+    #[test]
+    fn compatibility_finite_budget_contains_native_audio_and_video_peak_and_changes_identity() {
+        let mut file = profile7_file();
+        file.bitrate = Some(1_000_000);
+        file.audio_streams = vec![plurx_core::domain::AudioStream { codec: "aac".into(), channels: Some(2), ..Default::default() }];
+        let mut request = reopen_request(file.id, "compat-player", "jellyfin:compat-play", "unused");
+        request.previous_session_id = None;
+        request.reopen_reason = None;
+        request.vod_only = true;
+        request.passive_vod = true;
+        let native = request.durable_intent_fingerprint(1);
+        let json = serde_json::to_value(&request).expect("native wire");
+        assert!(json.get("finite_bitrate_limit_bps").is_none());
+        request.finite_bitrate_limit_bps = Some(750_000);
+        assert_ne!(native, request.durable_intent_fingerprint(1));
+        let mut options = plurx_core::transcode::TranscodeOptions {
+            audio_bitrate_kbps: 256, video_bitrate_kbps: 8000, ..Default::default()
+        };
+        // The fixture has audio; the real native audio options set its rate.
+        assert!(!file.audio_streams.is_empty());
+        super::manager_create::constrain_finite_vod_rate(&request, &file, &mut options).expect("bounded native recipe");
+        assert!(u64::from(options.video_bitrate_kbps) * 1500 + u64::from(options.audio_bitrate_kbps) * 1000 <= 750_000);
+        assert_eq!(options.effective_rate_control, plurx_core::transcode::EffectiveRateControl::Vbr);
+        let first = request.durable_intent_fingerprint(1);
+        request.finite_bitrate_limit_bps = Some(500_000);
+        assert_ne!(first, request.durable_intent_fingerprint(1));
+        request.finite_bitrate_limit_bps = Some(256_000);
+        assert!(super::manager_create::constrain_finite_vod_rate(&request, &file, &mut options).is_err());
+        request.kind = SessionKind::Copy { aac: true, preserve_dolby_vision: false, convert_dolby_vision: false };
+        request.finite_bitrate_limit_bps = Some(750_000);
+        assert!(super::manager_create::validate_finite_copy_rate(&request, &file).is_err());
+        request.finite_bitrate_limit_bps = Some(1_320_000);
+        super::manager_create::validate_finite_copy_rate(&request, &file).expect("source plus conservative audio allowance fits");
+        file.bitrate = None;
+        assert!(super::manager_create::validate_finite_copy_rate(&request, &file).is_err());
+        let mut unexpected = serde_json::to_value(&request).expect("bounded wire");
+        unexpected["unknown_future_policy"] = serde_json::json!(true);
+        assert!(serde_json::from_value::<SessionRequest>(unexpected).is_err(), "worker request schemas refuse unknown policy fields before startup");
+    }

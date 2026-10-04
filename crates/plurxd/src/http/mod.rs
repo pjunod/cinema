@@ -362,6 +362,7 @@ fn http_route_group(path: &str) -> usize {
         "/jellyfin/Items/{item_id}/PlaybackInfo"
         | "/jellyfin/Videos/{item_id}/{source_id}/Subtitles/{index}/{filename}"
         | "/jellyfin/Videos/{item_id}/stream"
+        | "/jellyfin/Videos/{item_id}/{play_id}/hls/{*resource}"
         | "/jellyfin/Videos/{item_id}/{filename}"
         | "/jellyfin/Sessions/Logout"
         | "/jellyfin/Sessions/Playing"
@@ -2391,6 +2392,13 @@ async fn cluster_capacity_gate(
 
 fn safe_trace_target(uri: &Uri) -> String {
     let mut segments = uri.path().split('/').collect::<Vec<_>>();
+    if segments.len() >= 7
+        && segments[1].eq_ignore_ascii_case("jellyfin")
+        && segments[2].eq_ignore_ascii_case("videos")
+        && segments[5].eq_ignore_ascii_case("hls")
+    {
+        segments[4] = "[REDACTED]";
+    }
     for marker in ["media", "hls", "publication", "sessions", "starts"] {
         if let Some(index) = segments.iter().position(|segment| *segment == marker) {
             let is_capability_route = match marker {
@@ -4269,6 +4277,15 @@ mod tests {
             safe_trace_target(&hls),
             "/api/v1/hls/[REDACTED]/seg00001.ts"
         );
+
+        for path in [
+            "/jellyfin/Videos/item/play-secret/hls/seg00001.ts?ApiKey=credential",
+            "/JELLYFIN/VIDEOS/item/play-secret/HLS/seg00001.ts?apikey=credential",
+        ] {
+            let uri: Uri = path.parse().expect("compatibility HLS URI");
+            let target = safe_trace_target(&uri);
+            assert!(!target.contains("play-secret") && !target.contains("credential"));
+        }
 
         let publication: Uri = "/api/v1/publication/session-secret/OEBPS/chapter.xhtml"
             .parse()

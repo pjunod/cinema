@@ -1946,6 +1946,7 @@
             candidate_context: None,
             vod_only: false,
             passive_vod: false,
+            finite_bitrate_limit_bps: None,
             previous_session_id: Some(uuid::Uuid::new_v4().to_string()),
             reopen_reason: Some(crate::transcode::ReopenReason::Stall),
             ..staged_candidate_request()

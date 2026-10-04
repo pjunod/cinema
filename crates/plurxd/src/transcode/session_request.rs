@@ -507,6 +507,10 @@ pub struct SessionRequest {
     /// Trusted passive route retention, independently selected by service ingress.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub(crate) passive_vod: bool,
+    /// Service-owned finite delivery ceiling. The ordinary native HTTP body
+    /// cannot set this. Worker envelopes retain it and require passive VOD.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) finite_bitrate_limit_bps: Option<u32>,
     pub file_id: i64,
     /// Stable for one player instance; the supersession key.
     pub playback_id: String,
@@ -884,6 +888,11 @@ impl SessionRequest {
         };
         let kind = if self.passive_vod {
             format!("{kind}+passive-vod-600-64-4096")
+        } else {
+            kind
+        };
+        let kind = if let Some(limit) = self.finite_bitrate_limit_bps {
+            format!("{kind}+finite-bitrate-v1:{limit}")
         } else {
             kind
         };

@@ -8,7 +8,7 @@ use plurx_core::store::{
     JellyfinProgressWrite, NewFileGrant, NewJellyfinPlay,
 };
 
-fn now_ms() -> Result<i64, ApiError> {
+pub(super) fn now_ms() -> Result<i64, ApiError> {
     let ms = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_err(|_| ApiError::ServiceUnavailable("server clock unavailable".into()))?
@@ -31,7 +31,7 @@ fn fingerprint(file: &MediaFile) -> Result<String, ApiError> {
         .map(|json| plurx_core::auth::hash_token(&json))
         .map_err(|_| ApiError::ServiceUnavailable("source identity unavailable".into()))
 }
-async fn live_item(
+pub(super) async fn live_item(
     client: &ClientUser,
     state: &AppState,
     id: &str,
@@ -46,7 +46,10 @@ async fn live_item(
         .next()
         .ok_or(ApiError::NotFound("catalog item"))
 }
-async fn current_file(state: &AppState, play: &JellyfinPlay) -> Result<MediaFile, ApiError> {
+pub(super) async fn current_file(
+    state: &AppState,
+    play: &JellyfinPlay,
+) -> Result<MediaFile, ApiError> {
     let snapshot = state
         .store
         .playback_planning_snapshot(play.negotiation.file_id, &[])
@@ -69,7 +72,7 @@ async fn current_file(state: &AppState, play: &JellyfinPlay) -> Result<MediaFile
     }
     Ok(file)
 }
-async fn binding(
+pub(super) async fn binding(
     client: &ClientUser,
     state: &AppState,
     play_id: &str,
@@ -115,6 +118,26 @@ fn direct_key(play: &JellyfinPlay) -> crate::delivery::Key {
     )
 }
 async fn release(state: &AppState, play: &JellyfinPlay) -> Result<(), ApiError> {
+    if let Some(id) = play.native_incarnation_id.as_deref() {
+        if let Some(route) = state.store.media_session_route_by_incarnation(id).await? {
+            if route.user_id == play.negotiation.scope.user_id
+                && route.playback_id == play.negotiation.playback_id
+            {
+                let status = super::super::hls::release_with_terminal(
+                    state.clone(),
+                    route.session_id,
+                    crate::vodserve::Terminal::Deleted,
+                    "compatibility playback stopped",
+                )
+                .await;
+                if !status.is_success() {
+                    return Err(ApiError::ServiceUnavailable(
+                        "native release pending".into(),
+                    ));
+                }
+            }
+        }
+    }
     state.direct_plays.remove_key(&direct_key(play));
     if let Some(id) = play.direct_grant_id.as_deref() {
         state
@@ -124,13 +147,82 @@ async fn release(state: &AppState, play: &JellyfinPlay) -> Result<(), ApiError> 
     }
     Ok(())
 }
-async fn activate(state: &AppState, mut play: JellyfinPlay) -> Result<JellyfinPlay, ApiError> {
+pub(super) async fn activate(
+    state: &AppState,
+    mut play: JellyfinPlay,
+) -> Result<JellyfinPlay, ApiError> {
     current_file(state, &play).await?;
     if play.state == "active" {
         return Ok(play);
     }
     if play.state != "pending" || play.expires_at_ms <= now_ms()? {
         return Err(ApiError::Conflict("play is terminal or expired".into()));
+    }
+    let selection: Value = serde_json::from_str(&play.negotiation.selection_json)
+        .map_err(|_| ApiError::Conflict("play selection changed; renegotiate".into()))?;
+    if let Some(vod) = selection.get("vod").filter(|v| !v.is_null()) {
+        let user = state
+            .store
+            .get_user(play.negotiation.scope.user_id)
+            .await?
+            .ok_or(ApiError::Unauthorized)?;
+        let body = serde_json::from_value(vod["body"].clone())
+            .map_err(|_| ApiError::Conflict("native play selection changed; renegotiate".into()))?;
+        let policy = super::super::hls::CompatibilityVodPolicy {
+            bitrate_limit_bps: serde_json::from_value(vod["bitrate"].clone())?,
+            expected_fingerprint: play.negotiation.native_request_fingerprint.clone(),
+        };
+        let started = tokio::time::timeout(
+            std::time::Duration::from_secs(15),
+            super::super::hls::create_for_compatibility(
+                user,
+                state.clone(),
+                play.negotiation.file_id,
+                HeaderMap::new(),
+                None,
+                body,
+                policy,
+            ),
+        )
+        .await
+        .map_err(|_| ApiError::ServiceUnavailable("native playback startup timeout".into()))??;
+        let route = state
+            .store
+            .media_session_route(&started.session_id)
+            .await?
+            .ok_or(ApiError::Conflict(
+                "native play activation unavailable".into(),
+            ))?;
+        if route.user_id != play.negotiation.scope.user_id
+            || route.playback_id != play.negotiation.playback_id
+        {
+            return Err(ApiError::Conflict("native play owner changed".into()));
+        }
+        if !state
+            .store
+            .activate_jellyfin_play(
+                &play.negotiation.play_id,
+                &play.negotiation.scope,
+                JellyfinPlayActivation::MediaIncarnation(route.incarnation_id.clone()),
+                now_ms()?,
+            )
+            .await?
+        {
+            // Release only the exact native incarnation created for this request.
+            super::super::hls::release_with_terminal(
+                state.clone(),
+                started.session_id,
+                crate::vodserve::Terminal::Deleted,
+                "compatibility activation refused",
+            )
+            .await;
+            return Err(ApiError::Conflict("native play activation refused".into()));
+        }
+        return state
+            .store
+            .jellyfin_play(&play.negotiation.play_id, &play.negotiation.scope)
+            .await?
+            .ok_or(ApiError::NotFound("play binding"));
     }
     let now = now_ms()?;
     let id = uuid::Uuid::new_v4().to_string();
@@ -191,6 +283,10 @@ pub(super) struct InfoRequest {
     media_source_id: Option<String>,
     start_time_ticks: Option<Ticks>,
     enable_direct_play: Option<bool>,
+    enable_direct_stream: Option<bool>,
+    enable_transcoding: Option<bool>,
+    allow_video_stream_copy: Option<bool>,
+    allow_audio_stream_copy: Option<bool>,
     audio_stream_index: Option<i64>,
     subtitle_stream_index: Option<i64>,
     device_profile: Option<Value>,
@@ -513,6 +609,22 @@ fn merge_info_query(
                     _ => return Err(ApiError::BadRequest("invalid direct flag".into())),
                 },
             )?,
+            "enabledirectstream"
+            | "enabletranscoding"
+            | "allowvideostreamcopy"
+            | "allowaudiostreamcopy" => {
+                let flag = match value.to_ascii_lowercase().as_str() {
+                    "true" => true,
+                    "false" => false,
+                    _ => return Err(ApiError::BadRequest("invalid playback flag".into())),
+                };
+                match key.to_ascii_lowercase().as_str() {
+                    "enabledirectstream" => assign(&mut request.enable_direct_stream, flag)?,
+                    "enabletranscoding" => assign(&mut request.enable_transcoding, flag)?,
+                    "allowvideostreamcopy" => assign(&mut request.allow_video_stream_copy, flag)?,
+                    _ => assign(&mut request.allow_audio_stream_copy, flag)?,
+                }
+            }
             "maxstreamingbitrate" => assign(&mut request.max_streaming_bitrate, integer(&value)?)?,
             "audiostreamindex" => assign(&mut request.audio_stream_index, integer(&value)?)?,
             "subtitlestreamindex" => assign(&mut request.subtitle_stream_index, integer(&value)?)?,
@@ -525,14 +637,7 @@ fn merge_info_query(
                 &mut request.current_play_session_id,
                 wire_id(&value)?.to_hex(),
             )?,
-            "api_key"
-            | "apikey"
-            | "isplayback"
-            | "autoopenlivestream"
-            | "enabledirectstream"
-            | "enabletranscoding"
-            | "allowvideostreamcopy"
-            | "allowaudiostreamcopy" => {}
+            "api_key" | "apikey" | "isplayback" | "autoopenlivestream" => {}
             _ => return Err(ApiError::BadRequest("unsupported playback query".into())),
         }
     }
@@ -584,10 +689,10 @@ async fn info(
         .ok_or(ApiError::NotFound("source"))?;
     let snapshot = state
         .store
-        .playback_planning_snapshot(file_id, &[])
+        .playback_planning_snapshot(file_id, &crate::transcode::QUALITY_PLANNING_KEYS)
         .await?
         .ok_or(ApiError::NotFound("source"))?;
-    let file = snapshot.file;
+    let file = snapshot.file.clone();
     if request.audio_stream_index.is_none() {
         request.audio_stream_index = source
             .media_streams
@@ -627,15 +732,12 @@ async fn info(
         snapshot.probe_json.as_deref(),
         request.audio_stream_index,
     );
-    if !profiles(&request, &selected_file, &facts)
+    let direct = profiles(&request, &selected_file, &facts)
         .iter()
         .any(|profile| {
             plurx_core::playback::decide(&selected_file, profile, &node).method
                 == plurx_core::playback::PlaybackMethod::DirectPlay
-        })
-    {
-        return Ok(Json(json!({"MediaSources":[],"ErrorCode":"NotSupported"})));
-    }
+        });
     if let Some(index) = request.audio_stream_index {
         if index < 0
             || !source
@@ -671,23 +773,92 @@ async fn info(
     if file.item_id != item_id {
         return Err(ApiError::BadRequest("source membership changed".into()));
     }
-    let selection=json!({"audio":request.audio_stream_index,"subtitle":request.subtitle_stream_index,"source":{"size":file.size,"mtime":file.mtime,"probe":snapshot.probe_json}}).to_string();
+    let play_id = uuid::Uuid::new_v4().simple().to_string();
+    let playback_id = player_id(&scope);
+    let native_audio = request
+        .audio_stream_index
+        .and_then(|index| {
+            source
+                .media_streams
+                .iter()
+                .filter(|s| s.stream_type == wire::StreamType::Audio)
+                .position(|s| s.index == index)
+        })
+        .map(|i| i as i64);
+    let native_subtitle = request
+        .subtitle_stream_index
+        .filter(|i| *i >= 0)
+        .and_then(|index| {
+            source
+                .media_streams
+                .iter()
+                .filter(|s| s.stream_type == wire::StreamType::Subtitle)
+                .position(|s| s.index == index)
+        })
+        .map(|i| i as i64);
+    let vod = if direct {
+        None
+    } else {
+        let Some(profile) = request.device_profile.as_ref() else {
+            return Ok(Json(json!({"MediaSources":[],"ErrorCode":"NotSupported"})));
+        };
+        Box::pin(super::vod::negotiate(
+            state,
+            client.identity.native_id,
+            &snapshot,
+            super::vod::Requested {
+                profile,
+                playback_id: &playback_id,
+                play_id: &play_id,
+                start_ms: request.start_time_ticks.map_or(0, Ticks::milliseconds),
+                audio: native_audio,
+                subtitle: native_subtitle,
+                bitrate: request.max_streaming_bitrate,
+                allow_copy: request.enable_direct_stream != Some(false)
+                    && request.allow_video_stream_copy != Some(false),
+                allow_encode: request.enable_transcoding != Some(false),
+                allow_audio_copy: request.allow_audio_stream_copy != Some(false),
+                source_facts: &facts,
+            },
+        ))
+        .await?
+    };
+    if !direct && vod.is_none() {
+        return Ok(Json(json!({"MediaSources":[],"ErrorCode":"NotSupported"})));
+    }
+    let selection=json!({"audio":request.audio_stream_index,"subtitle":request.subtitle_stream_index,"source":{"size":file.size,"mtime":file.mtime,"probe":snapshot.probe_json},"vod":vod.as_ref().map(|v| json!({"body":v.body,"bitrate":v.bitrate,"inline_init":v.inline_init}))}).to_string();
     let profile_json = serde_json::to_string(&request.device_profile)
         .map_err(|_| ApiError::BadRequest("invalid device profile".into()))?;
-    let play_id = uuid::Uuid::new_v4().simple().to_string();
+    let fresh = state
+        .store
+        .playback_planning_snapshot(file_id, &crate::transcode::QUALITY_PLANNING_KEYS)
+        .await?
+        .ok_or(ApiError::NotFound("play source"))?;
+    if fingerprint(&fresh.file)? != fingerprint(&file)? || fresh.probe_json != snapshot.probe_json {
+        return Err(ApiError::Conflict(
+            "source changed during negotiation; retry".into(),
+        ));
+    }
     let play = NewJellyfinPlay {
         play_id: play_id.clone(),
         scope: scope.clone(),
-        playback_id: player_id(&scope),
+        playback_id,
         item_id,
         file_id,
         item_wire_id: item.id.to_hex(),
         file_wire_id: source.id.to_hex(),
         source_fingerprint: fingerprint(&file)?,
         profile_fingerprint: plurx_core::auth::hash_token(&profile_json),
-        native_request_fingerprint: plurx_core::auth::hash_token(&selection),
+        native_request_fingerprint: vod.as_ref().map_or_else(
+            || plurx_core::auth::hash_token(&selection),
+            |v| v.fingerprint.clone(),
+        ),
         selection_json: selection,
-        source_origin_ms: request.start_time_ticks.map_or(0, Ticks::milliseconds),
+        source_origin_ms: if vod.is_some() {
+            0
+        } else {
+            request.start_time_ticks.map_or(0, Ticks::milliseconds)
+        },
         created_at_ms: now_ms()?,
     };
     if !state.store.create_jellyfin_play(play).await? {
@@ -711,18 +882,33 @@ async fn info(
     }
     let mut source = serde_json::to_value(source)
         .map_err(|_| ApiError::ServiceUnavailable("source DTO unavailable".into()))?;
-    source["SupportsDirectPlay"] = json!(true);
+    source["SupportsDirectPlay"] = json!(direct);
+    source["SupportsTranscoding"] = json!(vod.is_some());
     if let Some(index) = request.audio_stream_index {
         source["DefaultAudioStreamIndex"] = json!(index);
     }
     if let Some(index) = request.subtitle_stream_index {
         source["DefaultSubtitleStreamIndex"] = json!(index);
     }
-    source["DirectStreamUrl"] = json!(format!(
-        "/jellyfin/Videos/{}/stream?MediaSourceId={}&PlaySessionId={play_id}&Static=true",
-        item.id.to_hex(),
-        source["Id"].as_str().unwrap_or_default()
-    ));
+    if vod.is_some() {
+        source["TranscodingUrl"] = json!(format!(
+            "/jellyfin/Videos/{}/master.m3u8?MediaSourceId={}&PlaySessionId={play_id}",
+            item.id.to_hex(),
+            source["Id"].as_str().unwrap_or_default()
+        ));
+        source["TranscodingContainer"] = json!(if vod.as_ref().is_some_and(|v| v.inline_init) {
+            "ts"
+        } else {
+            "mp4"
+        });
+        source["TranscodingSubProtocol"] = json!("hls");
+    } else {
+        source["DirectStreamUrl"] = json!(format!(
+            "/jellyfin/Videos/{}/stream?MediaSourceId={}&PlaySessionId={play_id}&Static=true",
+            item.id.to_hex(),
+            source["Id"].as_str().unwrap_or_default()
+        ));
+    }
     Ok(Json(
         json!({"MediaSources":[source],"PlaySessionId":play_id}),
     ))
@@ -747,24 +933,28 @@ async fn resolve_event(
     if let Some(uid) = event.user_id.as_deref() {
         check_user(client, uid)?;
     }
-    if event
-        .play_method
-        .as_deref()
-        .is_some_and(|m| m != "DirectPlay")
-    {
-        return Err(ApiError::BadRequest(
-            "play method does not match negotiation".into(),
-        ));
-    }
-    binding(
+    let play = binding(
         client,
         state,
         &event.play_session_id,
         &event.item_id,
         &event.media_source_id,
     )
-    .await
+    .await?;
+    let selection: Value = serde_json::from_str(&play.negotiation.selection_json)?;
+    let expected = if selection.get("vod").is_some_and(|v| !v.is_null()) {
+        "Transcode"
+    } else {
+        "DirectPlay"
+    };
+    if event.play_method.as_deref().is_some_and(|m| m != expected) {
+        return Err(ApiError::BadRequest(
+            "play method does not match negotiation".into(),
+        ));
+    }
+    Ok(play)
 }
+
 fn progress_write(
     play: &JellyfinPlay,
     event: &PlayingEvent,
@@ -789,7 +979,17 @@ pub(super) async fn playing(
 ) -> Result<StatusCode, ApiError> {
     let play = activate(&state, resolve_event(&client, &state, &event).await?).await?;
     if let Some(write) = progress_write(&play, &event, false) {
-        super::super::watch::apply_jellyfin_progress(&state, write, &direct_key(&play)).await?;
+        super::super::watch::apply_jellyfin_progress(
+            &state,
+            write,
+            if play.native_incarnation_id.is_some() {
+                "transcode"
+            } else {
+                "direct_play"
+            },
+            &direct_key(&play),
+        )
+        .await?;
     }
     Ok(StatusCode::NO_CONTENT)
 }
@@ -803,9 +1003,22 @@ pub(super) async fn progress(
         return Err(ApiError::Conflict("play is not active".into()));
     }
     current_file(&state, &play).await?;
+    if play.native_incarnation_id.is_some() {
+        super::transport::route(&state, &play).await?;
+    }
     if let Some(write) = progress_write(&play, &report, false) {
-        super::super::watch::apply_jellyfin_progress(&state, write, &direct_key(&play)).await?;
-    } else {
+        super::super::watch::apply_jellyfin_progress(
+            &state,
+            write,
+            if play.native_incarnation_id.is_some() {
+                "transcode"
+            } else {
+                "direct_play"
+            },
+            &direct_key(&play),
+        )
+        .await?;
+    } else if play.native_incarnation_id.is_none() {
         state.direct_plays.touch_key(&direct_key(&play));
     }
     Ok(StatusCode::NO_CONTENT)
@@ -825,8 +1038,17 @@ pub(super) async fn stopped(
     let result = async {
         if play.state == "active" {
             if let Some(write) = progress_write(&play, &report, true) {
-                super::super::watch::apply_jellyfin_progress(&state, write, &direct_key(&play))
-                    .await?;
+                super::super::watch::apply_jellyfin_progress(
+                    &state,
+                    write,
+                    if play.native_incarnation_id.is_some() {
+                        "transcode"
+                    } else {
+                        "direct_play"
+                    },
+                    &direct_key(&play),
+                )
+                .await?;
             }
         }
         state
@@ -848,9 +1070,9 @@ pub(super) async fn stopped(
 #[derive(Deserialize)]
 pub(super) struct DirectRequest {
     #[serde(rename = "MediaSourceId")]
-    media_source_id: String,
+    pub(super) media_source_id: String,
     #[serde(rename = "PlaySessionId")]
-    play_session_id: String,
+    pub(super) play_session_id: String,
 }
 async fn serve_direct(
     client: ClientUser,
@@ -922,9 +1144,26 @@ pub(super) async fn direct_extension(
     State(state): State<AppState>,
     Path((item_id, filename)): Path<(String, String)>,
     Query(request): Query<DirectRequest>,
+    RawQuery(raw): RawQuery,
     method: Method,
     headers: HeaderMap,
 ) -> Result<Response, ApiError> {
+    if matches!(filename.as_str(), "master.m3u8" | "main.m3u8") {
+        for (key, _) in query_pairs(raw.as_deref())? {
+            if !matches!(
+                key.to_ascii_lowercase().as_str(),
+                "mediasourceid" | "playsessionid" | "api_key" | "apikey"
+            ) {
+                return Err(ApiError::BadRequest(
+                    "HLS parameters must match the negotiated play".into(),
+                ));
+            }
+        }
+        return Box::pin(super::transport::root(
+            client, state, item_id, request, filename, method, headers,
+        ))
+        .await;
+    }
     if !matches!(
         filename.as_str(),
         "stream.mp4" | "stream.mkv" | "stream.webm" | "stream.ts" | "stream.avi"
