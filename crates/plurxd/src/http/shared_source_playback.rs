@@ -1661,6 +1661,28 @@ pub(crate) struct RealSourceStartFixture {
     _directory: tempfile::TempDir,
 }
 #[cfg(test)]
+impl RealSourceStartFixture {
+    /// Diagnostic count of Source media sessions still holding a slot. Row
+    /// presence is not physical evidence; the B End receipt is.
+    pub(crate) async fn active_source_sessions(&self) -> i64 {
+        let client = self
+            .selected
+            .local_client()
+            .expect("actual Source selected voter client");
+        let rows = client
+            .query_consistent(
+                "SELECT CAST(COUNT(*) AS TEXT) AS payload FROM media_sessions WHERE state=$1",
+                hiqlite::params!("active"),
+            )
+            .await
+            .expect("actual Source read-only session count");
+        assert_eq!(rows.len(), 1);
+        let mut rows = rows;
+        let count: String = rows[0].get("payload");
+        count.parse().expect("decimal count")
+    }
+}
+#[cfg(test)]
 struct SourceFixtureInvitation {
     identity: plurx_core::sharing::SharingIdentity,
     id: Uuid,
