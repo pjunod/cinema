@@ -306,7 +306,7 @@ async fn sharing_receiver_fixture_uses_actual_factories_login_and_genuine_source
     .await;
     assert_eq!(
         serde_json::from_str::<Value>(&observation).expect("bounded counts"),
-        json!({"claims":0,"assigned":0,"sessions":0,"upstream":0})
+        json!({"claims":0,"assigned":0,"sessions":0,"upstream":0,"source_bound":0,"published":0,"resolved":0,"delivery":0})
     );
     fixture.shutdown().await;
 }
@@ -318,7 +318,7 @@ async fn receiver_claim_observation(fixture: &RealReceiverFixture, request: &str
         .local_client()
         .expect("actual B selected voter client");
     let mut rows = client.query_consistent(
-        "SELECT json_object('claims',COUNT(*),'assigned',COALESCE(SUM(owner_node_id IS NOT NULL),0),'sessions',(SELECT COUNT(*) FROM media_sessions m WHERE m.incarnation_id IN (SELECT incarnation_id FROM media_session_requests WHERE request_id=$1 AND user_id=$2)),'upstream',(SELECT COUNT(*) FROM sharing_relay_upstream b WHERE b.incarnation_id IN (SELECT incarnation_id FROM media_session_requests WHERE request_id=$1 AND user_id=$2))) AS payload FROM media_session_requests WHERE request_id=$1 AND user_id=$2",
+        "SELECT json_object('claims',COUNT(*),'assigned',COALESCE(SUM(owner_node_id IS NOT NULL),0),'sessions',(SELECT COUNT(*) FROM media_sessions m WHERE m.incarnation_id IN (SELECT incarnation_id FROM media_session_requests WHERE request_id=$1 AND user_id=$2)),'upstream',(SELECT COUNT(*) FROM sharing_relay_upstream b WHERE b.incarnation_id IN (SELECT incarnation_id FROM media_session_requests WHERE request_id=$1 AND user_id=$2)),'source_bound',(SELECT COUNT(*) FROM sharing_relay_upstream b WHERE b.source_session_id IS NOT NULL AND b.source_incarnation_id IS NOT NULL AND b.capability_envelope IS NOT NULL AND b.incarnation_id IN (SELECT incarnation_id FROM media_session_requests WHERE request_id=$1 AND user_id=$2)),'published',(SELECT COUNT(*) FROM media_sessions m WHERE m.publication_ready_at_ms=0 AND m.incarnation_id IN (SELECT incarnation_id FROM media_session_requests WHERE request_id=$1 AND user_id=$2)),'resolved',COALESCE(SUM(state='resolved'),0),'delivery',(SELECT COUNT(*) FROM sharing_delivery_grants d WHERE d.incarnation_id IN (SELECT incarnation_id FROM media_session_requests WHERE request_id=$1 AND user_id=$2))) AS payload FROM media_session_requests WHERE request_id=$1 AND user_id=$2",
         hiqlite::params!(request.to_owned(), fixture.viewer_id),
     ).await.expect("actual B read-only claim-stage observation");
     assert_eq!(rows.len(), 1);
@@ -378,10 +378,38 @@ async fn actual_pinned_playback(address: IpAddr, h2: bool) {
         port: source_listener.local_addr().expect("Source bind").port(),
         spki_sha256: pin,
     };
+    // Actual HTTP-arrival diagnostics only, never no-admission/settlement proof.
+    let source_starts = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let source_start_status = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let observed_starts = source_starts.clone();
+    let observed_status = source_start_status.clone();
+    let source_app = super::sharing::peer_router((*fixture.source.state).clone()).layer(
+        axum::middleware::from_fn(
+            move |request: Request<Body>, next: axum::middleware::Next| {
+                let starts = observed_starts.clone();
+                let status = observed_status.clone();
+                async move {
+                    let is_start = request.method() == axum::http::Method::POST
+                        && request.uri().path().ends_with("/sessions");
+                    if is_start {
+                        starts.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    }
+                    let response = next.run(request).await;
+                    if is_start {
+                        status.store(
+                            usize::from(response.status().as_u16()),
+                            std::sync::atomic::Ordering::Relaxed,
+                        );
+                    }
+                    response
+                }
+            },
+        ),
+    );
     let (source_stop, source_stopped) = tokio::sync::oneshot::channel();
     let source_task = tokio::spawn(crate::serve_http(
         SharingTlsListener::new(source_listener, tls),
-        super::sharing::peer_router((*fixture.source.state).clone()),
+        source_app,
         async move {
             let _ = source_stopped.await;
         },
@@ -503,6 +531,11 @@ async fn actual_pinned_playback(address: IpAddr, h2: bool) {
     )
     .await;
     if status != StatusCode::OK {
+        eprintln!(
+            "actual Source HTTP diagnostic starts={}, last_status={}",
+            source_starts.load(std::sync::atomic::Ordering::Relaxed),
+            source_start_status.load(std::sync::atomic::Ordering::Relaxed)
+        );
         eprintln!(
             "actual B diagnostic claim-stage counts: {}",
             receiver_claim_observation(
