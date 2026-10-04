@@ -582,33 +582,42 @@ pub(super) fn bridge_plan(
     let main_end = threshold + 3;
     let effort_end = if backend == Backend::Sqlite { 6 } else { 4 };
     let canonical_end = main_end + effort_end;
-    if marker <= canonical_end {
-        let main = (marker - threshold + 1).min(4) as usize;
-        let effort = (marker - main_end).max(0) as usize;
-        if matches(&objects, backend, main, effort, false) {
-            return Ok(None);
-        }
-        // Preserve the explicitly known published replay boundaries. The
-        // published SQLite runner committed each main step before its
-        // separate user_version update, so a database it tore can sit one
-        // marker behind its shape; the existing v90 guard handles an
-        // already-present exact column. The current runner stamps the marker
-        // inside each step's transaction, so no effort step (v92+) can tear.
-        // Hiqlite's published playback batch can leave its exact ordered
-        // object prefix before the v69 marker transaction. No effort object
-        // or arbitrary partial/mixed schema is admitted by these cases.
-        if backend == Backend::Sqlite
-            && marker < main_end
-            && matches(&objects, backend, main + 1, 0, false)
-        {
-            return Ok(None);
-        }
-        if backend == Backend::Hiqlite
-            && marker == 68
-            && (1..=4).any(|count| matches_with_playback(&objects, backend, 3, 0, false, count))
-        {
-            return Ok(None);
-        }
+    // The collision only spans markers both lineages wrote: private effort
+    // markers stop at `threshold + effort_end - 1` and published markers at
+    // `canonical_end`. A marker past `canonical_end` was stamped by a binary
+    // that already reached the canonical union (the bridge itself stamps
+    // `canonical_end`) and then applied later ordinary steps, which may
+    // legitimately reshape these objects. It is not an ambiguous ordinal, so
+    // the ordinary dispatcher owns it; the caller's newer-than-binary refusal
+    // still applies.
+    if marker > canonical_end {
+        return Ok(None);
+    }
+    let main = (marker - threshold + 1).min(4) as usize;
+    let effort = (marker - main_end).max(0) as usize;
+    if matches(&objects, backend, main, effort, false) {
+        return Ok(None);
+    }
+    // Preserve the explicitly known published replay boundaries. The
+    // published SQLite runner committed each main step before its
+    // separate user_version update, so a database it tore can sit one
+    // marker behind its shape; the existing v90 guard handles an
+    // already-present exact column. The current runner stamps the marker
+    // inside each step's transaction, so no effort step (v92+) can tear.
+    // Hiqlite's published playback batch can leave its exact ordered
+    // object prefix before the v69 marker transaction. No effort object
+    // or arbitrary partial/mixed schema is admitted by these cases.
+    if backend == Backend::Sqlite
+        && marker < main_end
+        && matches(&objects, backend, main + 1, 0, false)
+    {
+        return Ok(None);
+    }
+    if backend == Backend::Hiqlite
+        && marker == 68
+        && (1..=4).any(|count| matches_with_playback(&objects, backend, 3, 0, false, count))
+    {
+        return Ok(None);
     }
     let effort = (marker - threshold + 1) as usize;
     let known_private =
@@ -826,6 +835,17 @@ pub fn validation_sqlite_union_fingerprint(conn: &Connection) -> Result<String, 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn markers_past_canonical_end_belong_to_the_ordinary_dispatcher() {
+        // The next ordinary step (SQLite v98, hiqlite v74) reshapes objects
+        // freely; it is not a collision ordinal and needs no bridge.
+        assert!(matches!(bridge_plan(Backend::Sqlite, 98, &[]), Ok(None)));
+        assert!(matches!(bridge_plan(Backend::Hiqlite, 74, &[]), Ok(None)));
+        // Inside the collision range an unrecognized schema still refuses.
+        assert!(bridge_plan(Backend::Sqlite, 97, &[]).is_err());
+        assert!(bridge_plan(Backend::Hiqlite, 73, &[]).is_err());
+    }
 
     #[test]
     fn quoted_literals_are_exact_and_foreign_defaults_refuse() {
