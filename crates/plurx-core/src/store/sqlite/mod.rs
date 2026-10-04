@@ -92,6 +92,13 @@ const _: () = assert!(
     ),
     "candidate_recovery::SQLITE_INTRODUCED_SCHEMA does not name its migration"
 );
+const _: () = assert!(
+    migration_is(
+        super::background_jobs::ENCODED_OUTPUT_SQLITE_SCHEMA,
+        super::background_jobs::ENCODED_OUTPUT_SCHEMA
+    ),
+    "background_jobs::ENCODED_OUTPUT_SQLITE_SCHEMA does not name its migration"
+);
 
 /// Ordered, append-only migration list. `PRAGMA user_version` tracks the last
 /// applied index + 1. Never edit an entry that has shipped — append instead.

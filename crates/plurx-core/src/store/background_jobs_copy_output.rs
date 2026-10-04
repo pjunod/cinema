@@ -98,7 +98,12 @@ mod tests {
     use super::*;
 
     #[test]
-    fn encoded_v93_upgrade_preserves_copy_publication_and_adds_exact_source_guards() {
+    fn encoded_output_upgrade_preserves_copy_publication_and_adds_exact_source_guards() {
+        // The encoded-output step and its predecessor on the composed chain
+        // (v96 candidate recovery -> v97 encoded output).
+        let encoded = super::super::background_jobs::ENCODED_OUTPUT_SQLITE_SCHEMA;
+        assert_eq!(encoded, 97);
+        let predecessor = encoded - 1;
         let base = tempfile::tempdir().expect("owned upgrade");
         let path = base.path().join("store.sqlite");
         let store = crate::store::SqliteStore::open(&path).expect("fresh schema");
@@ -107,21 +112,22 @@ mod tests {
         let publication: String = connection.query_row("SELECT sql FROM sqlite_master WHERE name='background_job_publish_copy_output_command'", [], |row| row.get(0)).expect("incumbent publication");
         connection
             .execute_batch(super::super::background_jobs::COPY_OUTPUT_SCHEMA)
-            .expect("exact v92 source guards");
+            .expect("exact predecessor source guards");
         connection
-            .execute_batch(
-                "DROP TRIGGER background_job_encoded_output_target; PRAGMA user_version=92;",
-            )
+            .execute_batch(&format!(
+                "DROP TRIGGER background_job_encoded_output_target; PRAGMA user_version={predecessor};"
+            ))
             .expect("predecessor checkpoint");
         drop(connection);
-        let upgraded = crate::store::SqliteStore::open(&path).expect("real v92 to v93 migration");
+        let upgraded =
+            crate::store::SqliteStore::open(&path).expect("real predecessor to encoded migration");
         drop(upgraded);
         let connection = rusqlite::Connection::open(&path).expect("upgraded connection");
         assert_eq!(
             connection
                 .query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0))
                 .expect("version"),
-            93
+            encoded
         );
         assert_eq!(connection.query_row("SELECT sql FROM sqlite_master WHERE name='background_job_publish_copy_output_command'", [], |row| row.get::<_,String>(0)).expect("publication unchanged"), publication);
         for name in [

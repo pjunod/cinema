@@ -78,10 +78,13 @@ pub(crate) const RECEIPT_PRESSURE_SCHEMA: &str =
     include_str!("background_jobs_receipt_pressure.sql");
 /// Replicated v65 / SQLite v87: exact viewer interest and source reservations.
 pub(crate) const VIEWER_ANALYSIS_SCHEMA: &str = include_str!("background_jobs_viewer_analysis.sql");
-/// Replicated v67 / SQLite v91: source cancellation for full copy preparation.
+/// Replicated v71 / SQLite v95: source cancellation for full copy preparation.
 pub(crate) const COPY_OUTPUT_SCHEMA: &str = include_str!("background_jobs_copy_output.sql");
-/// Replicated v69 / SQLite v93, following candidate-recovery v68/v92.
+/// Replicated v73 / SQLite v97, following candidate-recovery v72/v96.
 pub(crate) const ENCODED_OUTPUT_SCHEMA: &str = include_str!("background_jobs_encoded_output.sql");
+/// The SQLite schema [`ENCODED_OUTPUT_SCHEMA`] lands at; `sqlite::MIGRATIONS`
+/// asserts at compile time that this entry is exactly that schema.
+pub(crate) const ENCODED_OUTPUT_SQLITE_SCHEMA: i64 = 97;
 
 // Scheduled full-library ticks reuse an equivalent pending request inside this
 // same admission statement. Reads on individual schedulers cannot deduplicate
