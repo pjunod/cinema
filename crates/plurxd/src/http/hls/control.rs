@@ -911,6 +911,11 @@ async fn settle_committed_preparation(
         .transcode
         .promote_prepared_session(&successor.session_id)
         .await;
+    // The staged link proof ends with the stage: the committed successor is
+    // an ordinary binding, not a staged one waiting out its deadline.
+    state
+        .link_receipts
+        .settle_committed(&successor, &state.node_id);
     state.media_sessions.cache_route(successor.clone()).await;
     if successor.owner_node_id == state.node_id {
         state.media_sessions.seed_owned_lease(&successor).await;

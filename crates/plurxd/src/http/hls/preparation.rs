@@ -337,6 +337,10 @@ pub(super) async fn settle_cancelled_preparation(
     let _ = take_active_preparation(&active.preparation.incarnation_id);
     crate::playback_control::record_preparation_cancelled(reason);
     active.cancelled.cancel();
+    active.state.link_receipts.retire_staged(
+        &active.preparation.session_id,
+        &active.preparation.incarnation_id,
+    );
     let deadline = tokio::time::Instant::now() + PREPARATION_SETTLEMENT_RETRY_BUDGET;
     let mut delay = PREPARATION_SETTLEMENT_RETRY_MIN;
     loop {

@@ -3331,6 +3331,16 @@
         a05_staged_intake_fixture(2).await;
     }
 
+    #[tokio::test]
+    async fn a05_committed_preparation_drops_staged_proof_and_binds_as_ordinary() {
+        a05_staged_intake_fixture(3).await;
+    }
+
+    #[tokio::test]
+    async fn a05_aborted_preparation_retires_staged_proof_and_binding() {
+        a05_staged_intake_fixture(4).await;
+    }
+
     async fn a05_staged_intake_fixture(mode: u8) {
         use plurx_core::domain::{MediaSessionActivation, NetworkPriorCause, CredentialGeneration};
         use super::link_receipts::ClientLinkSample;
@@ -3394,6 +3404,32 @@
                 -> crate::playback_control::GateAnswer<'a> {
                 Box::pin(std::future::pending())
             }
+        }
+        if mode == 3 {
+            fixture.store.put_setting(plurx_core::store::keys::PLAYBACK_NETWORK_PRIORS, "1").await.expect("setting");
+            fixture.store.settle_media_session_activation(&activation,
+                plurx_core::domain::MediaSessionActivationSettlement::Confirm { publication_ready_at_ms: 0 }, now)
+                .await.expect("commit").expect("published successor");
+            let committed = fixture.store.media_session_route(&staged).await.expect("route query").expect("committed route");
+            assert!(fixture.state.link_receipts.accept(&fixture.state, &network, Some(&staged), &sample).await.is_none(),
+                "a staged row outliving its commit refuses the committed route");
+            fixture.state.link_receipts.settle_committed(&committed, &fixture.state.node_id);
+            assert!(fixture.state.link_receipts.accept(&fixture.state, &network, Some(&staged), &sample).await.is_some(),
+                "the committed successor accepts its completed body as an ordinary binding");
+            assert!(fixture.state.link_receipts.current_positive(&fixture.state, &network, &file, Some(&sample.receipt),
+                Some(&playback), Some(&fixture.state.node_id)).await.is_some(),
+                "the committed successor proves like any registered session");
+            assert!(fixture.state.link_receipts.mint(&staged, "seg00002.m4s", "etag2", 4096, Some(4000), true).is_some(),
+                "the committed successor keeps minting after its stage ends");
+            return;
+        }
+        if mode == 4 {
+            fixture.state.link_receipts.retire_staged(&staged, &incarnation);
+            assert!(fixture.state.link_receipts.mint(&staged, "seg00002.m4s", "etag2", 4096, Some(4000), true).is_none(),
+                "a retired stage mints nothing");
+            assert!(fixture.state.link_receipts.accept(&fixture.state, &network, Some(&staged), &sample).await.is_none(),
+                "a retired stage accepts nothing");
+            return;
         }
         if mode == 2 {
             let pause = fixture.state.link_receipts.pause_final_stage_route_for_test();

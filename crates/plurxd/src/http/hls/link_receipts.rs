@@ -530,6 +530,58 @@ impl LinkReceipts {
             },
         );
     }
+    /// A committed preparation is an ordinary session from here on. Drop its
+    /// staged proof and rebind its row to the committed route's identity, so
+    /// the successor mints, accepts and proves exactly like a session the
+    /// create path registered. A row that does not describe the committed
+    /// route (another owner, user or incarnation) is dropped instead.
+    pub(super) fn settle_committed(&self, route: &MediaSessionRoute, node: &str) {
+        let Ok(mut guard) = self.0.lock() else {
+            return;
+        };
+        let rows = &mut *guard;
+        let staged = rows.staged.remove(&route.session_id);
+        let Some(row) = rows.sessions.get_mut(&route.session_id) else {
+            return;
+        };
+        if route.owner_node_id != node
+            || route.state != "active"
+            || route.user_id != row.binding.source.user_id
+            || route.incarnation_id != row.binding.incarnation
+            || staged
+                .as_ref()
+                .is_some_and(|proof| proof.incarnation != route.incarnation_id)
+        {
+            rows.sessions.remove(&route.session_id);
+            return;
+        }
+        row.binding.owner_epoch = route.owner_epoch;
+        row.touched = Instant::now();
+    }
+
+    /// An aborted or expired preparation never served a viewer: its staged
+    /// proof and its binding both go, and no receipt can mint against it.
+    pub(super) fn retire_staged(&self, session: &str, incarnation: &str) {
+        let Ok(mut guard) = self.0.lock() else {
+            return;
+        };
+        let rows = &mut *guard;
+        if rows
+            .staged
+            .get(session)
+            .is_some_and(|proof| proof.incarnation == incarnation)
+        {
+            rows.staged.remove(session);
+            if rows
+                .sessions
+                .get(session)
+                .is_some_and(|row| row.binding.incarnation == incarnation)
+            {
+                rows.sessions.remove(session);
+            }
+        }
+    }
+
     #[cfg(test)]
     pub(super) fn replace_staged_gate_for_test(
         &self,
