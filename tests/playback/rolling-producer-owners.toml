@@ -4383,7 +4383,9 @@ pattern = "\\.(?:spawn|output|status)\\s*\\("
 # PlayMethod labels, direct range matrix). None launches a process.
 # 463 -> 464 with the review fixes: one test `Response::status()` assertion
 # that a facade login is refused on the native API. No process.
-expected_occurrences = 464
+# 464 -> 465: one test `Response::status()` read of the facade segment
+# resumed after the native reader was idle-reaped. No process.
+expected_occurrences = 465
 # +2 native-startup delayed-init fixture: Axum Response::status() reads
 # assert the master and legacy bridge responses. Neither launches a process.
 
