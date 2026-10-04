@@ -735,6 +735,9 @@ class Controller internal constructor(
     private var autoBoundaryAttempt: AutoBoundaryAttempt? = null
     /** The viewer boundary the next ordinary Auto evaluation owes a re-plan. */
     private val autoBoundaryReplan = AutoBoundaryReplan()
+
+    /** The viewer seek that ended its coalesce behind a switched, frameless successor. */
+    private val seekDeferredBehindSwitch = SeekDeferredBehindSwitch()
     private var viewerTransportLifetime: Any = Any()
     private data class ExplicitViewerPause(val player: ExoPlayer, val session: String?,
         val epoch: Long, val atMs: Long)
@@ -1520,8 +1523,23 @@ class Controller internal constructor(
                 delay(SEEK_COALESCE_MS)
                 if (!playbackControlBootstrapFence.isActive() ||
                     mediaMutationEpoch != publicationEpoch ||
-                    !playbackIntent.isCurrent(pending.sequence) || preparedLedger.isSwitched
+                    !playbackIntent.isCurrent(pending.sequence)
                 ) return@launch
+                // A successor that has taken the surface but not yet rendered
+                // cannot be abandoned (that publishes `failed` and then seeks
+                // the session the server was just told failed), and returning
+                // here used to drop the seek: the scrubber showed the target
+                // while the successor played on from the old position until
+                // the 8 s target deadline forced a reopen. The seek is held
+                // instead, and runs exactly once when the switch settles on a
+                // first frame or rolls back onto a restored predecessor. Held
+                // here, after the coalesce, and nowhere earlier: a seek
+                // pressed just before the commit is still coalescing when the
+                // switch happens.
+                if (preparedLedger.isSwitched) {
+                    seekDeferredBehindSwitch.hold(pending.targetMs, pending.sequence, publicationEpoch)
+                    return@launch
+                }
                 executeSeek(pending.targetMs, pending.sequence)
             }
         }
@@ -1870,6 +1888,7 @@ class Controller internal constructor(
         playbackControlBootstrapFence.release()
         displayModeOwner?.let { owner -> displayModeMatcher?.reset(owner) }
         seekJob?.cancel()
+        seekDeferredBehindSwitch.clear()
         stallWatchdogJob.cancel()
         targetPresentationWatchdogJob.cancel()
         targetPresentationDeadline.suspendOwner(targetPresentationOwner, monotonicNowMs())
@@ -2802,13 +2821,33 @@ class Controller internal constructor(
         val next = Session.nextMediaFailoverUrl(path) ?: return false
         val recipe = recipeOwnership.attached ?: currentRecipe()
         val transport = recipeOwnership.attachedTransport ?: recipe.recipe.desiredTransport
-        val presentationSequence = playbackIntent.executedSequence()
+        // A seek [enqueueSeek] held behind a switched, frameless successor is
+        // taken here, before the abandon below settles that switch as failed.
+        // This re-attach is the stream mutation that carries it: nothing else
+        // will (the settle that would have drained it never comes), and the
+        // successor's own playhead is not where the viewer asked to be. Taken,
+        // so it runs exactly once; null when stale or superseded. A prepared
+        // successor is always HLS, so the progressive arm never holds one.
+        val heldSeek = if (preparedLedger.isSwitched && !progressiveTransport) {
+            seekDeferredBehindSwitch.take(
+                isCurrent = { sequence -> playbackIntent.isCurrent(sequence) },
+                epoch = mediaMutationEpoch,
+            )
+        } else {
+            null
+        }
+        val presentationSequence = heldSeek?.sequence ?: playbackIntent.executedSequence()
         // Same session, different ingress — but the incumbent is about to be
         // re-attached and the successor was primed against the playhead the
         // failure interrupted, so it is abandoned rather than left to commit
         // over the recovery.
         abandonPreparedReplacement(failed = false)
-        val attachPosition = if (progressiveTransport) 0L else player.currentPosition.coerceAtLeast(0)
+        val attachPosition = when {
+            progressiveTransport -> 0L
+            // The viewer's destination, on this item's own timeline.
+            heldSeek != null -> playerTimelinePositionMs(positionForPlaybackIntent()).coerceAtLeast(0)
+            else -> player.currentPosition.coerceAtLeast(0)
+        }
         playbackTelemetry.report(
             event = "playback_transport_failover",
             level = "warn",
@@ -4351,7 +4390,11 @@ class Controller internal constructor(
         retired.release()
         val reopen = preparedRollbackReopen ?: return
         preparedRollbackReopen = null
-        restartAt(reopen.first, reopen.second)
+        // The predecessor's commit position is only the fallback. A viewer
+        // seek held behind the switch is still the pending destination, and
+        // `restartAt` marks the pending sequence executed — so reopening at the
+        // commit position would settle that seek at the wrong place.
+        restartAt(playbackIntent.positionForPlaybackIntent(reopen.first), reopen.second)
     }
 
     /**
@@ -4500,14 +4543,30 @@ class Controller internal constructor(
         }
         awaitingCommitFrameSinceMs?.let { since ->
             if (monotonicNowMs() - since > PREPARED_COMMIT_FRAME_BOUND_MS) {
+                // Read before the failure below, which ends the Auto attempt.
+                // An Auto preparation "routes" by giving up and reopens
+                // nothing, so only a directed change's route is a reopen.
+                val autoOwned = autoPreparing
                 val restored = rollbackSwitchedReplacement()
                 // The directed change takes its one reopen here, and it carries
                 // the viewer's rung. The deferred rollback reopen would only
                 // repeat it at the rung they changed away from.
                 val routed = failSwitchedReplacement()
                 if (routed) preparedRollbackReopen = null
-                if (!restored && !routed) {
-                    restartAt(realPosition(), "prepared successor rendered no frame")
+                val reopened = routed && !autoOwned
+                if (!restored && !reopened) {
+                    // Nothing put a picture back, so this reopen is the only
+                    // one — at the viewer's destination, not the playhead.
+                    seekDeferredBehindSwitch.clear()
+                    restartAt(positionForPlaybackIntent(), "prepared successor rendered no frame")
+                } else if (restored && autoOwned) {
+                    // The predecessor is back on screen and nothing reopens
+                    // it, so a seek held behind the switch runs on it now.
+                    drainSeekDeferredBehindSwitch()
+                } else {
+                    // A reopen (the directed change's route, or the deferred
+                    // rollback reopen) carries the pending destination itself.
+                    seekDeferredBehindSwitch.clear()
                 }
                 return
             }
@@ -4731,10 +4790,13 @@ class Controller internal constructor(
             !successorIsBuffered(bufferedThrough, commitFilmMs)
         ) return
         // The ledger enters its unabortable state before anything moves. From
-        // here the viewer is looking at this pipeline, so a Back press or a
-        // seek in the seconds before its first frame must settle the commit
-        // rather than publish an `aborted` for the staging the server is about
-        // to move its pointer to.
+        // here the viewer is looking at this pipeline, so a Back press in the
+        // seconds before its first frame must settle the commit rather than
+        // publish an `aborted` for the staging the server is about to move its
+        // pointer to. A seek in that window neither aborts nor is dropped:
+        // [enqueueSeek] holds it, and it runs once on the first frame (or on
+        // the predecessor an Auto rollback restored), while a rollback reopen
+        // goes to its destination.
         if (!preparedLedger.switched()) return
         // Armed here rather than at the end of this function. `switched()` is
         // what makes an abandon settle instead of abort, and the settle is
@@ -4908,6 +4970,34 @@ class Controller internal constructor(
         // predecessor is no longer rollback authority and may release.
         preparedPredecessor = null
         collectRetiredPlayer()
+        // Last: the commit is settled, so a seek the viewer pressed during the
+        // switch now moves the successor they are watching.
+        drainSeekDeferredBehindSwitch()
+    }
+
+    /**
+     * Run the seek [enqueueSeek] held behind a switched successor, once.
+     *
+     * Posted, not called. The settle runs inside `onRenderedFirstFrame`, and
+     * `executeSeek` can replace or release the very player whose `ListenerSet`
+     * is dispatching (a reopen, a progressive remux, a route to a new
+     * controller). Only two callers: the first-frame settle, and an Auto
+     * rollback that restored the predecessor. A rollback that did not restore
+     * it reopens instead, and the held seek is never run on that successor.
+     */
+    private fun drainSeekDeferredBehindSwitch() {
+        if (!seekDeferredBehindSwitch.isHolding) return
+        scope.launch {
+            if (!playbackControlBootstrapFence.isActive()) return@launch
+            // A newer switch in the same tick keeps it held for that one's
+            // settle; executing now would fail the successor on screen.
+            if (preparedLedger.isSwitched) return@launch
+            val held = seekDeferredBehindSwitch.take(
+                isCurrent = { sequence -> playbackIntent.isCurrent(sequence) },
+                epoch = mediaMutationEpoch,
+            ) ?: return@launch
+            executeSeek(held.targetMs, held.sequence)
+        }
     }
 
     /**
@@ -5011,6 +5101,13 @@ class Controller internal constructor(
         // fabricate a rendered frame. Settle it as failed; the caller's normal
         // reopen/end path replaces the black successor immediately afterward.
         if (preparedLedger.isSwitched) {
+            // No settle follows this one, so a seek still held behind the
+            // switch would never be drained: it is cleared, never left
+            // stranded. Every caller's replacement carries the destination —
+            // a reopen or seek has already moved the media epoch or begun a
+            // newer seek, and [retryMediaOnNextNode] takes the held seek
+            // before calling this and re-attaches at it.
+            seekDeferredBehindSwitch.clear()
             failSwitchedReplacement()
             return
         }
@@ -5981,3 +6078,51 @@ internal class AutoBoundaryReplan {
  */
 internal fun autoBoundaryOfferBuiltNothing(boundaryStillOwns: Boolean, built: Boolean, switched: Boolean): Boolean =
     boundaryStillOwns && !built && !switched
+
+/**
+ * The one viewer seek whose coalesce ended while a prepared successor was
+ * switched onto the surface but had not yet rendered its first frame.
+ *
+ * Such a seek can be neither executed (executing abandons the preparation,
+ * and a switched one can only be settled as `failed` — after which the seek
+ * would land on the session the server was just told failed) nor dropped (the
+ * scrubber would show the target while the successor plays on from the old
+ * position until the target deadline forces a reopen). So it is held, and
+ * taken exactly once when the switch settles.
+ *
+ * Fenced by the media mutation epoch the seek was published under: only a
+ * stream mutation (an executed seek, a reopen, the target deadline) moves it,
+ * and a commit, its settle and its rollback do not. A newer seek either
+ * replaces the held one or is current in its place, so [take] answers null for
+ * a seek that has been superseded. No timer: an outstanding hold ends with the
+ * first frame, the rollback, a newer mutation, or [clear].
+ */
+internal class SeekDeferredBehindSwitch {
+    data class Held(val targetMs: Long, val sequence: Long, val epoch: Long)
+
+    private var held: Held? = null
+
+    val isHolding: Boolean get() = held != null
+
+    /** The newest coalesced seek replaces any earlier one still held. */
+    fun hold(targetMs: Long, sequence: Long, epoch: Long) {
+        held = Held(targetMs, sequence, epoch)
+    }
+
+    fun clear() {
+        held = null
+    }
+
+    /**
+     * The held seek, exactly once, when it is still the viewer's current
+     * destination ([isCurrent] for its sequence) on the stream it was
+     * published against ([epoch] unchanged). Taking always empties the slot,
+     * so a stale seek is discarded rather than retried.
+     */
+    fun take(isCurrent: (Long) -> Boolean, epoch: Long): Held? {
+        val seek = held ?: return null
+        held = null
+        if (seek.epoch != epoch || !isCurrent(seek.sequence)) return null
+        return seek
+    }
+}

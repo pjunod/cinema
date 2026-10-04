@@ -545,7 +545,13 @@ class EvidenceWorkflowCase(unittest.TestCase):
         self.assertIn("successor.seekTo(successorAttachPositionMs", android_poll)
         self.assertIn("val restored = rollbackSwitchedReplacement()", android_poll)
         self.assertIn("failSwitchedReplacement()", android_poll)
-        self.assertIn('restartAt(realPosition(), "prepared successor rendered no frame")', android_poll)
+        # The rollback reopens at the viewer's destination, not where the
+        # successor that never rendered happened to be: a seek held behind the
+        # switch is the target (D5, main-merge defects 2026-10-04).
+        self.assertIn(
+            'restartAt(positionForPlaybackIntent(), "prepared successor rendered no frame")',
+            android_poll,
+        )
         self.assertNotIn("settleCommitOnFirstFrame(System.currentTimeMillis())", android_poll)
         self.assertEqual(
             android.count("settleCommitOnFirstFrame(System.currentTimeMillis())"),
