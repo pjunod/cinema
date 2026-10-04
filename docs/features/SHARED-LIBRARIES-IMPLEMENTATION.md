@@ -4655,3 +4655,51 @@ all-target check in 62 seconds, denied feature Clippy in 83 seconds, and nine
 receiver ownership tests with zero ignored. The final Start-writer tree passed
 denied feature Clippy in 77 seconds; its focused regression and normal tracked
 hook remain required before committing this candidate.
+
+Receiver End and progress candidate after `61820efe8`
+---------------------------------------------------
+
+The accepted-writer checkpoint completed thirteen focused receiver/ingress
+regressions with zero ignored in 0.42 seconds, documentation checks, and the
+normal tracked hook (workspace Clippy 74 seconds, catalog and 75 served scripts).
+
+B End now waits for a private completion receipt. Its only factory consumes
+the existing actual joined Start/body proof and physical Source End receipt,
+then records the exact Store retirement Applied/Replay. The mutable `retired`
+flag and an absent/terminal SQL row cannot acknowledge End. The bounded retry
+tombstone may retain this already-created receipt; it retains no actor or
+registry Arc and cannot reopen delivery. End is a cleanup operation on the
+original opaque B session capability even after original authorization loss.
+An unknown or unfinished cleanup returns unavailable after 35 seconds rather
+than an acknowledgement. The same connection may close before its End reply;
+a retry on another connection can observe the actual completion receipt.
+
+Ordered progress derives Source identity and original login from the actual
+retained B actor. It accepts only the closed 1 KiB client beat, validates safe
+integer positions and sequence, verifies the exact B session/import/item/user
+and original login, observes current Source/B authority, then uses the guarded
+production progress writer. Replay preserves the original payload. Stale or
+conflicting progress returns 409 with a freshly fenced current sequence; it
+does not renumber the client's old position or send history to Source.
+
+B resource opening now runs in a bounded independently owned task. Cancellation
+of its HTTP waiter does not abandon a sent Source request or its nested dial
+and body jobs. The actual upstream driver retains the same counted custody
+through socket closure. Capacity refusal returns 429 without retiring an
+otherwise authorized actor. Source filesystem job custody is a separate audit
+being repaired and tested before whole-resource qualification.
+
+The pinned all-target compiler passed the End/progress/owned-open candidate in
+58.83 seconds. Focused regressions, denied Clippy and the normal hook remain
+required, and positive physical B playback, queued writers and End/progress
+integration still require the genuine paired-server fixture.
+
+The exact End/progress/owned-open tree passed fifteen focused receiver/ingress
+regressions with zero ignored in 0.46 seconds and denied all-target feature
+Clippy in 79 seconds. The End refusal regression uses a paused clock and proves
+that marking/pruning a metadata-only tombstone cannot create the private
+completion receipt. The progress wire regression rejects duplicate/foreign
+fields, noncanonical session identity, fractional or unsafe numbers. These are
+finite refusal/ownership tests, not positive paired playback evidence. The
+existing guarded Store publication/renewal/progress matrix and normal tracked
+hook are the remaining pre-commit checks for this checkpoint.
