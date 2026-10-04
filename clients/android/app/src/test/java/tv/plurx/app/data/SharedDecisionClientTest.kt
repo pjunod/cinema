@@ -174,7 +174,7 @@ class SharedDecisionClientTest {
         assertEquals(720, autoPlan.frozenControlSelection().getValue("quality").jsonObject.getValue("height").jsonPrimitive.int)
         assertEquals(0, autoPlan.frozenControlSelection().getValue("subtitle").jsonObject.getValue("track").jsonPrimitive.int)
         assertEquals(250L, autoPlan.frozenControlSelection().getValue("audio_offset_ms").jsonPrimitive.long)
-        val encodedDecision = SharedDecision.decode(wire("9223372036854775807") { JsonObject(it + mapOf("method" to JsonPrimitive("transcode"), "delivered_dynamic_range" to JsonPrimitive("sdr"), "height" to JsonPrimitive(72))) })
+        val encodedDecision = SharedDecision.decode(wire("9223372036854775807") { JsonObject(it + mapOf("method" to JsonPrimitive("transcode"), "delivered_dynamic_range" to JsonPrimitive("sdr"), "height" to JsonPrimitive(72), "delivery" to JsonObject(it.getValue("delivery").jsonObject + ("mode" to JsonPrimitive("transcode"))))) })
         val manualPlan = SharedPlaybackPlan(subject, encodedDecision, request.caps, request.copy(height = 144, quality_auto = false, copy = false))
         assertEquals(144, manualPlan.frozenControlSelection().getValue("quality").jsonObject.getValue("height").jsonPrimitive.int)
         assertTrue(runCatching { SharedPlaybackPlan(subject, sdrDecision, request.caps, request.copy(copy = false)) }.isFailure)

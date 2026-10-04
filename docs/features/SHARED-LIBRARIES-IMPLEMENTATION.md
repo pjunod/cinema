@@ -4788,3 +4788,15 @@ all-target check in 62 seconds, denied feature Clippy in 83 seconds, and nine
 receiver ownership tests with zero ignored. The final Start-writer tree passed
 denied feature Clippy in 77 seconds; its focused regression and normal tracked
 hook remain required before committing this candidate.
+
+Native player qualification update: committed `03b77807a` passed the source-only
+Android main/unit Kotlin compilation, 43 focused Shared/context tests (zero
+failures, errors or skipped), and lint in 6m54 using the bounded owned compiler
+container. On full Root `61820efe8`, iOS Shared client/model/catalogue tests passed
+17/17 and the isolated Local/Shared context class passed 7/7. The broader Apple
+client class passed 335 tests. One combined run also exposed an inconsistent
+synthetic transcode fixture (method changed without delivery mode); that fixture
+was corrected before the 17-test pass. The combined context failure did not
+reproduce in its complete isolated seven-test class, so the combined run is not
+reported as a pass. Exact Android qualification of the additional frozen-control
+projection and current base remains required.

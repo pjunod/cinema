@@ -141,7 +141,7 @@ final class SharedDecisionClientTests: XCTestCase {
         let autoPlan = try SharedPlaybackPlan(subject: subject, decision: sdrDecision, caps: request.caps!, request: frozen)
         XCTAssertEqual(try autoPlan.frozenControlSelection().object?["quality"], .object(["mode": .string("auto"), "height": .integer(720)]))
         XCTAssertEqual(try autoPlan.frozenControlSelection().object?["subtitle"], .object(["mode": .string("native"), "track": .integer(0)]))
-        let encodedDecision = try SharedDecision.decode(wire("9223372036854775807") { $0["method"] = "transcode"; $0["delivered_dynamic_range"] = "sdr"; $0["height"] = 72 })
+        let encodedDecision = try SharedDecision.decode(wire("9223372036854775807") { $0["method"] = "transcode"; $0["delivered_dynamic_range"] = "sdr"; $0["height"] = 72; var delivery = $0["delivery"] as! [String: Any]; delivery["mode"] = "transcode"; $0["delivery"] = delivery })
         frozen = request; frozen.height = 144; frozen.qualityAuto = false; frozen.copy = false
         let manualPlan = try SharedPlaybackPlan(subject: subject, decision: encodedDecision, caps: request.caps!, request: frozen)
         XCTAssertEqual(try manualPlan.frozenControlSelection().object?["quality"], .object(["mode": .string("manual"), "height": .integer(144)]))
