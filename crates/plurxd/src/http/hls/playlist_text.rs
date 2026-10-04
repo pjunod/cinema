@@ -49,6 +49,7 @@ pub(super) fn master_playlist(
         context,
         MasterRungs::active(),
         MasterShape::default(),
+        None,
     )
 }
 
@@ -98,7 +99,7 @@ pub(super) fn master_playlist_diagnostic(
         },
         _ => MasterShape::default(),
     };
-    master_playlist_with_shape(file, selected, context, MasterRungs::active(), shape)
+    master_playlist_with_shape(file, selected, context, MasterRungs::active(), shape, None)
 }
 
 #[cfg(test)]
@@ -108,7 +109,7 @@ pub(super) fn master_playlist_with(
     context: &crate::transcode::HlsContext,
     rungs: MasterRungs,
 ) -> String {
-    master_playlist_with_shape(file, selected, context, rungs, MasterShape::default())
+    master_playlist_with_shape(file, selected, context, rungs, MasterShape::default(), None)
 }
 
 fn master_playlist_with_shape(
@@ -117,12 +118,17 @@ fn master_playlist_with_shape(
     context: &crate::transcode::HlsContext,
     rungs: MasterRungs,
     shape: MasterShape,
+    admitted: Option<&std::collections::BTreeSet<u16>>,
 ) -> String {
     let native: Vec<(usize, &SubtitleStream)> = file
         .subtitle_streams
         .iter()
         .enumerate()
-        .filter(|(_, track)| is_native_text_subtitle(&track.codec))
+        .filter(|(index, track)| {
+            is_native_text_subtitle(&track.codec)
+                && admitted
+                    .is_none_or(|set| u16::try_from(*index).is_ok_and(|index| set.contains(&index)))
+        })
         .collect();
     let names = unique_subtitle_names(&native);
     // Copy/remux sessions can contain open GOPs, so the video rendition does
@@ -465,4 +471,53 @@ pub(super) fn slice_webvtt(
     let mut out = shifted.join("\n\n");
     out.push_str("\n\n");
     out.into_bytes()
+}
+
+/// Pure projection for already admitted Source artifacts; no authority or
+/// extraction is minted here. Local callers retain their original track set.
+pub(crate) fn source_native_master(
+    file: &MediaFile,
+    selected: Option<i64>,
+    context: &crate::transcode::HlsContext,
+    admitted: &std::collections::BTreeSet<u16>,
+) -> Vec<u8> {
+    master_playlist_with_shape(
+        file,
+        selected,
+        context,
+        MasterRungs::active(),
+        MasterShape::default(),
+        Some(admitted),
+    )
+    .into_bytes()
+}
+pub(crate) fn source_native_playlist(video: &[u8]) -> Vec<u8> {
+    subtitle_media_playlist(video).into_bytes()
+}
+pub(crate) fn source_native_segment(
+    video: &[u8],
+    track: &[u8],
+    sequence: u64,
+    origin: f64,
+) -> Option<Vec<u8>> {
+    if !origin.is_finite() || origin < 0.0 {
+        return None;
+    }
+    let timeline = subtitle_timeline(video);
+    let window = timeline
+        .segments
+        .iter()
+        .find(|window| window.sequence == sequence)?;
+    if !window.start_seconds.is_finite()
+        || !window.end_seconds.is_finite()
+        || window.end_seconds <= window.start_seconds
+    {
+        return None;
+    }
+    Some(slice_webvtt(
+        track,
+        origin,
+        window.start_seconds,
+        window.end_seconds,
+    ))
 }

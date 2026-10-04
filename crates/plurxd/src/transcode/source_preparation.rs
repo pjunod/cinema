@@ -360,7 +360,7 @@ async fn run_probe(
     })
 }
 #[allow(clippy::too_many_arguments)]
-async fn run_child(
+pub(super) async fn run_child(
     file: &MediaFile,
     source: &crate::fragment_index_cluster::SourceFence,
     proof: &SourceSessionWriteAuthority,
