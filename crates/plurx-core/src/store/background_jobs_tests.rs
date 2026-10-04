@@ -55,6 +55,59 @@ async fn claimed(store: &SqliteStore, request: ClaimJob) -> BackgroundJob {
 }
 
 #[tokio::test]
+async fn background_job_claim_resource_lookup_does_not_scan_settled_history() {
+    let directory = tempfile::tempdir().expect("directory");
+    let path = directory.path().join("claim-cost.db");
+    let store = SqliteStore::open(&path).expect("store");
+    let request = enqueue(1_000);
+    store.enqueue_job(request.clone()).await.expect("enqueue");
+    let connection = rusqlite::Connection::open(&path).expect("fixture connection");
+    // The incident had almost 9,000 retained jobs. A point claim must not
+    // materialize the whole resource view twice while holding the Raft writer.
+    connection
+        .execute(
+            "WITH RECURSIVE n(i) AS (VALUES(1) UNION ALL SELECT i+1 FROM n WHERE i<9000)
+             INSERT INTO background_jobs (id, kind, payload_version, payload_json,
+                 dedupe_key, priority, state, fence, revision, not_before_ms,
+                 created_at_ms, updated_at_ms)
+             SELECT 'history-'||i, kind, payload_version, payload_json,
+                 'history-'||i, priority, 'succeeded', 1, 1, 1000, 1000, 1000
+             FROM n, background_jobs WHERE id=?1",
+            [&request.id],
+        )
+        .expect("retained history");
+    let attempt = claim(&request.id, 0, 1_001);
+    let mut statement = connection
+        .prepare(&format!("{CLAIM_SQL} RETURNING {JOB_JSON}"))
+        .expect("claim statement");
+    let body = serde_json::to_string(&attempt).expect("claim body");
+    let rows = statement
+        .query_map([body], |row| row.get::<_, String>(0))
+        .expect("execute claim")
+        .collect::<Result<Vec<_>, _>>()
+        .expect("claim rows");
+    assert_eq!(rows.len(), 1, "the claim must still acquire its resources");
+    let fullscan_steps = statement.get_status(rusqlite::StatementStatus::FullscanStep);
+    assert!(
+        fullscan_steps < 512,
+        "a single claim scanned unrelated history: {fullscan_steps} steps"
+    );
+    let job: BackgroundJob = serde_json::from_str(&rows[0]).expect("claimed job");
+    assert_eq!(job.id, request.id);
+    assert_eq!(job.state, JobState::Running);
+    assert_eq!(
+        connection
+            .query_row(
+                "SELECT COUNT(*) FROM background_job_reservations WHERE job_id=?1",
+                [&request.id],
+                |row| row.get::<_, i64>(0),
+            )
+            .expect("reserved resources"),
+        1
+    );
+}
+
+#[tokio::test]
 async fn background_jobs_dedupe_and_request_identity_are_distinct() {
     let store = SqliteStore::open_in_memory().expect("store");
     let request = enqueue(1_000);

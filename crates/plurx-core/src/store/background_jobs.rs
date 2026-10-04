@@ -446,8 +446,11 @@ WHERE id = json_extract($1, '$.job_id')
   AND fence < 9223372036854775807 AND revision < 9223372036854775807
   AND NOT EXISTS (SELECT 1 FROM background_job_attempts WHERE claim_id = json_extract($1, '$.claim_id'))
   AND (SELECT COUNT(*) FROM background_job_attempts) < 40000
+  -- The outer CAS already fixes id to this request. Bind resource lookup to
+  -- that same value so SQLite pushes the identity into every UNION branch
+  -- of the resource view instead of scanning all jobs under the Raft writer.
   AND NOT EXISTS (SELECT 1 FROM background_job_required_resources required
-    WHERE required.job_id = background_jobs.id AND ((SELECT COUNT(*) FROM background_job_reservations held
+    WHERE required.job_id = json_extract($1, '$.job_id') AND ((SELECT COUNT(*) FROM background_job_reservations held
       WHERE held.resource_key = required.resource_key AND held.expires_at_ms > json_extract($1, '$.now_ms')
         AND held.job_id != json_extract($1, '$.job_id'))
       + (SELECT COUNT(*) FROM analysis_source_reservations held
@@ -457,7 +460,7 @@ WHERE id = json_extract($1, '$.job_id')
   -- A second source reader is reserved for live demand. Classification uses
   -- durable consumer ownership, never the job's caller-supplied priority.
   AND NOT EXISTS (SELECT 1 FROM background_job_required_resources required
-    WHERE required.job_id = background_jobs.id
+    WHERE required.job_id = json_extract($1, '$.job_id')
       AND required.resource_key LIKE 'source_io%'
       AND NOT EXISTS (SELECT 1 FROM background_job_waiters interest
           WHERE interest.job_id = background_jobs.id
@@ -1765,7 +1768,7 @@ pub(super) trait QueueSql: Send + Sync {
 // verdict from one authoritative snapshot, not two independently timed reads.
 const CLAIM_RESOURCE_SNAPSHOT: &str = r#"NOT EXISTS (
     SELECT 1 FROM background_job_required_resources required
-    WHERE required.job_id = background_jobs.id AND NOT EXISTS (
+    WHERE required.job_id = json_extract($1, '$.job_id') AND NOT EXISTS (
         SELECT 1 FROM background_job_reservations held
         WHERE held.job_id = background_jobs.id AND held.fence = background_jobs.fence
             AND held.resource_key = required.resource_key

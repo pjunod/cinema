@@ -5102,7 +5102,11 @@ async fn media_session_activation_prepare_settle_contract_runs_through_dyn_store
                     &activation.playback_id,
                     incarnation_id,
                     100,
-                    200,
+                    // Production admits creates for 60s but activates with a 12s
+                    // lease. Equal deadlines hid the prepare -> confirm race:
+                    // inventory admitted prepare, then the confirmation trigger
+                    // shortened the claim and renewal fenced that same worker.
+                    60_100,
                 )
                 .await
                 .unwrap_or_else(|error| panic!(
@@ -5248,6 +5252,25 @@ async fn media_session_activation_prepare_settle_contract_runs_through_dyn_store
                 .len(),
             1,
             "{backend}: published route enters owned inventory"
+        );
+        assert_eq!(
+            store
+                .renew_media_sessions(
+                    &activation.owner_node_id,
+                    &[MediaSessionRenewal {
+                        incarnation_id: incarnation_id.to_owned(),
+                        owner_epoch: 1,
+                        produced_playable_through_ms: 10,
+                        fetched_through_ms: 10,
+                        media_sequence: 1,
+                    }],
+                    152,
+                    240,
+                )
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: renew published route: {error}")),
+            vec![incarnation_id.to_owned()],
+            "{backend}: publication hands the worker to renewal"
         );
         let taken = store
             .claim_media_session_takeover(&MediaSessionTakeover {
