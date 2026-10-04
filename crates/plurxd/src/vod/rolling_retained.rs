@@ -372,7 +372,8 @@ impl VodServe {
     pub(crate) async fn begin_rolling_collection(
         &self,
         production: Arc<crate::rolling_provenance::RollingProduction>,
-        cap: u64,
+        budget: u64,
+        estimate: u64,
         deadline: Instant,
     ) -> Option<Arc<RollingCollection>> {
         let shared = &self.shared;
@@ -386,7 +387,8 @@ impl VodServe {
             }
             _ => return None,
         }
-        if cap == 0
+        if estimate == 0
+            || estimate > budget
             || deadline <= Instant::now()
             || !shared.retained_artifacts.own_namespace(&shared.base).await
         {
@@ -403,17 +405,18 @@ impl VodServe {
                 .preparations
                 .values()
                 .try_fold(0_u64, |sum, bytes| sum.checked_add(*bytes))?;
+            // Reserve only this collection's bounded estimate; refuse when it
+            // does not fit beside retained bytes and other reservations.
             if !state.startup_done
                 || !state.orphans.is_empty()
                 || state.artifact_count() >= MAX_ARTIFACTS
-                || state.bytes.checked_add(reserved)? >= cap
+                || state.bytes.checked_add(reserved)?.checked_add(estimate)? > budget
             {
                 return None;
             }
             let nonce = uuid::Uuid::new_v4();
             let directory = state.namespace.as_ref()?.join(nonce.to_string());
-            let available = cap.checked_sub(state.bytes.checked_add(reserved)?)?;
-            state.preparations.insert(nonce, available);
+            state.preparations.insert(nonce, estimate);
             (nonce, directory)
         };
         let cap = shared

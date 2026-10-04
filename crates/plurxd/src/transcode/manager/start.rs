@@ -964,7 +964,7 @@ impl TranscodeManager {
         );
         let presentation_contract_fingerprint = frozen_presentation.contract_fingerprint.clone();
         let rolling_collection = self
-            .begin_rolling_retention(rolling_provenance.as_ref(), file.duration_ms)
+            .begin_rolling_retention(rolling_provenance.as_ref(), file.duration_ms, file.size)
             .await;
         if let Some(collection) = &rolling_collection {
             upload.bind_retained(Arc::clone(collection));
@@ -1849,7 +1849,7 @@ impl TranscodeManager {
             ffmpeg_args_log_message("copy-video HLS ffmpeg args", &initial_args, &session_id)
         );
         let rolling_collection = self
-            .begin_rolling_retention(rolling_provenance.as_ref(), file.duration_ms)
+            .begin_rolling_retention(rolling_provenance.as_ref(), file.duration_ms, file.size)
             .await;
         if let Some(collection) = &rolling_collection {
             upload.bind_retained(Arc::clone(collection));

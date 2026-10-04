@@ -6,6 +6,7 @@ impl TranscodeManager {
         &self,
         production: Option<&Arc<crate::rolling_provenance::RollingProduction>>,
         duration_ms: Option<i64>,
+        source_bytes: i64,
     ) -> Option<Arc<crate::vodserve::retained::RollingCollection>> {
         let duration_ms = u64::try_from(duration_ms?).ok()?;
         if duration_ms == 0 {
@@ -17,10 +18,22 @@ impl TranscodeManager {
         if lifetime_ms > 24 * 60 * 60 * 1000 {
             return None;
         }
+        let budget = self.rolling_retained_budget().await?;
+        // Reserve the same bounded allocation the complete-output VOD path
+        // queues with (twice the source plus 64 MiB generation headroom), not
+        // the whole remaining budget: a collection lives as long as its
+        // session, and an unbounded hold starves preparations and any second
+        // collection. A capture that outgrows it refuses retention.
+        let estimate = u64::try_from(source_bytes)
+            .ok()?
+            .checked_mul(2)?
+            .checked_add(64 * 1024 * 1024)?
+            .min(budget);
         self.vod
             .begin_rolling_collection(
                 Arc::clone(production?),
-                self.rolling_retained_budget().await?,
+                budget,
+                estimate,
                 Instant::now().checked_add(Duration::from_millis(lifetime_ms))?,
             )
             .await
