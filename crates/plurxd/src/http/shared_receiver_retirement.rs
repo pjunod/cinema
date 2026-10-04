@@ -294,13 +294,9 @@ impl ReceiverStartActor {
                 return Err(ReceiverStartError::Unresolved);
             }
         }
-        let original: serde_json::Value = serde_json::from_str(&self.0.intent.recipe.request_json)
-            .map_err(|_| ReceiverStartError::Unresolved)?;
-        let playback = original
-            .get("playback_id")
-            .and_then(serde_json::Value::as_str)
-            .ok_or(ReceiverStartError::Unresolved)?
-            .to_owned();
+        // The playback the pending route was claimed under: B's own
+        // per-session identity, never the viewer's.
+        let playback = crate::sharing::receiver_playback_id(&self.0.intent.recipe);
         let node = match &owner {
             ReceiverPendingOwner::Unassigned => None,
             ReceiverPendingOwner::Assigned(node) => Some(node.as_str()),

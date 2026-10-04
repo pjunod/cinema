@@ -1300,7 +1300,7 @@ async fn source_actual_actor(
             .expect("actual raced status retirement");
         return;
     }
-    if (30..=35).contains(&mode) {
+    if (30..=35).contains(&mode) || matches!(mode, 46 | 47) {
         use crate::playback_control::*;
         let bootstrap = response
             .control
@@ -1423,12 +1423,103 @@ async fn source_actual_actor(
             actor.control(wrong, control_deadline()).await,
             Err(SourceWorkerError::Conflict)
         ));
+        // A changed ask cannot reuse an accepted sequence: that is a stale
+        // fence, never a second answer for sequence 1.
         let mut directed = request.clone();
         directed.selection.audio_track = Some(0);
-        assert!(matches!(
-            actor.control(directed, control_deadline()).await,
-            Err(SourceWorkerError::Unsupported)
-        ));
+        let (result, stale_guard) = actor
+            .control(directed, control_deadline())
+            .await
+            .expect("owned stale directed exchange")
+            .into_parts();
+        assert!(matches!(result, Err(ControlStateError::StaleSequence)));
+        drop(stale_guard);
+        if mode == 46 {
+            // A directed change on a new sequence: accepted and recorded like
+            // any other ask, answered `preparation: none` with the current
+            // rendition unchanged, so the client reopens with a fresh Start.
+            let mut directed = request.clone();
+            directed.sequence = 2;
+            directed.render_state = RenderState::Rendering;
+            directed.seek_target_ms = None;
+            directed.selection.quality = QualitySelection::Manual { height: 144 };
+            directed.supported_actions = Some(vec![PREPARE_REPLACEMENT_ACTION.to_owned()]);
+            let (answer, guard) = loop {
+                let (answer, guard) = actor
+                    .control(directed.clone(), control_deadline())
+                    .await
+                    .expect("owned Source directed change")
+                    .into_response(&directed);
+                match answer {
+                    Err(ControlStateError::RateLimited(ms)) => {
+                        drop(guard);
+                        tokio::time::sleep(Duration::from_millis(u64::from(ms) + 1)).await;
+                    }
+                    answer => break (answer, guard),
+                }
+            };
+            let answer = answer.expect("accepted directed change");
+            assert_eq!(answer.accepted_sequence, 2);
+            assert_eq!(answer.delivery.preparation.as_deref(), Some("none"));
+            assert_eq!(answer.action, ControlAction::None);
+            assert_ne!(
+                answer.effective_selection.height, 144,
+                "the current rendition is not replaced in place"
+            );
+            drop(guard);
+            let (snapshot, _) = manager
+                .vod
+                .source_control_observation_for_test(&response.session_id)
+                .await
+                .expect("recorded directed ask");
+            assert_eq!(
+                snapshot.expect("accepted snapshot").selection.desired(),
+                directed.selection.desired(),
+                "the Source recorded the viewer's new ask"
+            );
+            drop(held);
+            actor.retire().await.expect("retire after directed change");
+            return;
+        }
+        if mode == 47 {
+            // The Source never offers a successor, so an acknowledgement can
+            // name no slot here. Refused before any sequence or activity.
+            let baseline = manager
+                .vod
+                .source_control_observation_for_test(&response.session_id)
+                .await
+                .expect("before acknowledgement");
+            let mut acknowledged = request.clone();
+            acknowledged.sequence = 2;
+            acknowledged.render_state = RenderState::Rendering;
+            acknowledged.seek_target_ms = None;
+            acknowledged.acknowledgement = Some(ActionAcknowledgement {
+                action_id: uuid::Uuid::new_v4().to_string(),
+                state: AcknowledgementState::MetadataReady,
+                buffered_through_ms: None,
+                committed_media_origin_ms: None,
+                first_frame_unix_ms: None,
+            });
+            assert!(matches!(
+                actor.control(acknowledged, control_deadline()).await,
+                Err(SourceWorkerError::Unsupported)
+            ));
+            assert_eq!(
+                manager
+                    .vod
+                    .source_control_observation_for_test(&response.session_id)
+                    .await
+                    .expect("after refused acknowledgement"),
+                baseline,
+                "a refused acknowledgement accepts no sequence or activity"
+            );
+            drop(held);
+            actor
+                .retire()
+                .await
+                .expect("retire after refused acknowledgement");
+            return;
+        }
         let mut pause = request.clone();
         pause.sequence = 2;
         pause.demand = PlaybackDemand::Hold;
@@ -1815,6 +1906,15 @@ async fn source_control_legacy_copy_seek_replay_pause_and_counted_body() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn source_control_legacy_encoded_seek_replay_pause_and_counted_body() {
     Box::pin(source_copy_preadmission_fixture(31)).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn source_control_changed_selection_declines_preparation() {
+    Box::pin(source_copy_preadmission_fixture(46)).await;
+}
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn source_control_ack_refused_without_slot() {
+    Box::pin(source_copy_preadmission_fixture(47)).await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

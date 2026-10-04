@@ -533,15 +533,7 @@ pub(crate) fn receiver_source_request(
         .map_err(|_| PeerError::InvalidResponse)?;
     let wrapper: serde_json::Value =
         serde_json::from_str(request_json).map_err(|_| PeerError::InvalidResponse)?;
-    let mut retained: serde_json::Value =
-        serde_json::from_str(&recipe.request_json).map_err(|_| PeerError::InvalidResponse)?;
-    retained
-        .as_object_mut()
-        .ok_or(PeerError::InvalidResponse)?
-        .insert(
-            "request_id".into(),
-            recipe.source_request_id.to_string().into(),
-        );
+    let retained = receiver_private_session(recipe)?;
     if wrapper.get("session") != Some(&retained)
         || recipe.parent_login_hash != intent.login_hash
         || recipe.reference.import_id != intent.scope.import_id
@@ -556,13 +548,12 @@ pub(crate) fn receiver_source_request(
 }
 
 /// The canonical private Source Start wrapper for a retained recipe: the
-/// original complete client request with only `request_id` replaced by the
-/// retained Source request UUID. Ingress and crash recovery share it, so the
+/// original complete client request with only `request_id` and `playback_id`
+/// replaced by B's private identities for this session. Ingress and crash recovery share it, so the
 /// End a recovered owner sends names exactly the Start that was dispatched.
 pub(crate) fn receiver_source_wrapper(
     recipe: &plurx_core::sharing_receiver_sessions::RemoteSourceRecipe,
 ) -> Result<String, crate::sharing_client::PeerError> {
-    use crate::sharing_client::PeerError;
     let target = crate::http::hls::SourcePlaybackTarget {
         server_id: recipe.reference.server_id,
         catalogue_epoch: recipe.reference.catalogue_epoch,
@@ -571,16 +562,41 @@ pub(crate) fn receiver_source_wrapper(
         file_id: recipe.file_id.clone(),
         revision: recipe.file_revision.clone(),
     };
+    let session = receiver_private_session(recipe)?;
+    Ok(serde_json::json!({"reference":target,"session":session}).to_string())
+}
+
+/// B's own playback identity for one shared session: the playback its Store
+/// route belongs to and the playback of the Source session it dispatches.
+///
+/// Each B session is its own playback on both sides. A reopen (a quality,
+/// audio or subtitle change, or a direct play moving to HLS) is a fresh Start
+/// that must be published while the session it replaces still serves, and
+/// both the B and the Source activation refuse a second current session for
+/// one playback. The viewer's own playback id stays in the retained request:
+/// it is what B groups one player's sessions by when the successor publishes
+/// and supersedes its predecessor.
+pub(crate) fn receiver_playback_id(
+    recipe: &plurx_core::sharing_receiver_sessions::RemoteSourceRecipe,
+) -> String {
+    format!("shared-{}", recipe.source_request_id)
+}
+
+/// The complete retained request as the Source receives it: B's private
+/// request and playback identities replace the viewer's.
+fn receiver_private_session(
+    recipe: &plurx_core::sharing_receiver_sessions::RemoteSourceRecipe,
+) -> Result<serde_json::Value, crate::sharing_client::PeerError> {
+    use crate::sharing_client::PeerError;
     let mut session: serde_json::Value =
         serde_json::from_str(&recipe.request_json).map_err(|_| PeerError::InvalidResponse)?;
-    session
-        .as_object_mut()
-        .ok_or(PeerError::InvalidResponse)?
-        .insert(
-            "request_id".into(),
-            recipe.source_request_id.to_string().into(),
-        );
-    Ok(serde_json::json!({"reference":target,"session":session}).to_string())
+    let object = session.as_object_mut().ok_or(PeerError::InvalidResponse)?;
+    object.insert(
+        "request_id".into(),
+        recipe.source_request_id.to_string().into(),
+    );
+    object.insert("playback_id".into(), receiver_playback_id(recipe).into());
+    Ok(session)
 }
 
 /// Versioned ciphertext payload retains the non-secret pairing identity after
@@ -2266,6 +2282,7 @@ mod tests {
         };
         let mut private = original.clone();
         private["request_id"] = recipe.source_request_id.to_string().into();
+        private["playback_id"] = receiver_playback_id(recipe).into();
         let mut wrapper = serde_json::json!({"reference":target,"session":private});
         let encode = |value: &serde_json::Value| {
             serde_json::to_string(value).expect("receiver request fixture")
@@ -2281,6 +2298,10 @@ mod tests {
             );
             wrapper["session"][field] = saved;
         }
+        // The viewer's own playback id never reaches the Source.
+        wrapper["session"]["playback_id"] = original["playback_id"].clone();
+        assert!(receiver_source_request(&intent, &encode(&wrapper)).is_err());
+        wrapper["session"]["playback_id"] = receiver_playback_id(recipe).into();
         wrapper["session"]["request_id"] = uuid::Uuid::new_v4().to_string().into();
         assert!(receiver_source_request(&intent, &encode(&wrapper)).is_err());
         let mut different_login = intent.clone();

@@ -345,6 +345,7 @@ mod tests {
         let source: Value = serde_json::from_str(&wrapper).expect("wrapper");
         let mut expected = value.clone();
         expected["request_id"] = intent.recipe.source_request_id.to_string().into();
+        expected["playback_id"] = crate::sharing::receiver_playback_id(&intent.recipe).into();
         assert_eq!(source["session"], expected);
         assert_eq!(source["reference"]["library_id"], "0");
         assert_eq!(source["reference"]["file_id"], "9223372036854775807");
@@ -403,6 +404,7 @@ mod tests {
         };
         let mut session = request.value.clone();
         session["request_id"] = intent.recipe.source_request_id.to_string().into();
+        session["playback_id"] = crate::sharing::receiver_playback_id(&intent.recipe).into();
         let original = serde_json::json!({"reference":target,"session":session}).to_string();
         assert_eq!(wrapper, original);
         // Recovery has only the durable recipe; it rebuilds the same bytes.

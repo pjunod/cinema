@@ -212,6 +212,12 @@ fn local_control_response(
 
 /// Pure bounded projection from an actual Source route and its retained recipe.
 /// This helper constructs no worker, account, admission or physical evidence.
+///
+/// Every composed Source answer says `preparation: none`. A Source owner has
+/// no preparation slot, so nothing is ever being built for the current ask,
+/// and a client waiting on a directed change must stop waiting and reopen.
+/// That is the same tri-state Local composes, and never the "not evaluated"
+/// absence an older relay peer sends.
 pub(crate) fn source_control_response(
     route: &MediaSessionRoute,
     start: &StartResponse,
@@ -220,7 +226,7 @@ pub(crate) fn source_control_response(
     result: &crate::playback_control::LocalControlResult,
     server_time_unix_ms: i64,
 ) -> crate::playback_control::ControlResponseV1 {
-    control_response_with_selection(
+    let mut response = control_response_with_selection(
         route,
         crate::playback_control::EffectiveSelection::from_request(
             recipe,
@@ -231,7 +237,9 @@ pub(crate) fn source_control_response(
         result,
         server_time_unix_ms,
         None,
-    )
+    );
+    response.delivery.preparation = Some("none".to_owned());
+    response
 }
 
 fn control_response_with_selection(

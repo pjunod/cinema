@@ -2,7 +2,7 @@
 // Decisions describe delivery; they never acquire a B session or start media.
 const SHARED_DECISION=(()=>{
   const MAX=4*1024*1024,REQUEST_MAX=128*1024;
-  let contexts=new WeakMap();const accepted=new WeakMap(),directs=new WeakMap(),watches=new Map(),jobs=new Set();let watchAuth=AUTH_GENERATION;
+  let contexts=new WeakMap();const accepted=new WeakMap(),bases=new WeakMap(),watches=new Map(),jobs=new Set();let watchAuth=AUTH_GENERATION;
   const fail=()=>{throw new Error("Shared decision unavailable");};
   function authorized(c){return c.auth===AUTH_GENERATION&&c.token===TOKEN&&c.origin===API;}
   function current(c){return c.auth===AUTH_GENERATION&&c.token===TOKEN&&c.origin===API&&c.generation===PAGE_RENDER_GENERATION&&c.route===location.hash;}
@@ -47,12 +47,17 @@ const SHARED_DECISION=(()=>{
     if(watch!=null)state.sequence=Math.max(state.sequence,integer(watch.sequence));return state;
   }
   function unsupported(){throw Object.assign(new Error("This shared playback change is not available yet."),{code:"sharing_start_unsupported"});}
-  // A direct session has no Source producer to replace, so a fresh start from
-  // one (an expired direct play resumed, or a compatibility move to HLS) is a
-  // new initial Start of the file it was bound to, under the accepted login.
-  // Like progress, it outlives browsing but not an account change.
+  // A started session is never replaced in place: the Source stages no
+  // successor. A fresh Start from a bound context -- a directed quality, audio
+  // or subtitle change B declined with `preparation: none`, an expired direct
+  // play resumed, a compatibility move to HLS -- is a new initial Start of the
+  // file it was bound to, under the accepted login, with no lineage fields. B
+  // supersedes the old session only once the new one is published. The new
+  // context keeps the same accepted record, so its ordered watch state (the
+  // progress sequence) carries on instead of being re-seeded. Like progress,
+  // it outlives browsing but not an account change.
   async function start(context,body,signal=null){
-    const restart=!!context?.session_id,base=restart?directs.get(context):context,c=restart?accepted.get(context):contexts.get(base);
+    const restart=!!context?.session_id,base=restart?bases.get(context):context,c=restart?accepted.get(context):contexts.get(base);
     if(!c||!base||base.session_id||(restart?!authorized(c):!current(c)))fail();playbackFileContext(base);
     if(!body||typeof body!=="object"||Array.isArray(body))fail();
     for(const field of ["previous_session_id","control_sequence","reopen_reason","intent","candidate_id"])if(body[field]!=null)unsupported();
@@ -64,7 +69,7 @@ const SHARED_DECISION=(()=>{
     const text=JSON.stringify(body);if(new TextEncoder().encode(text).length>24*1024)fail();
     const raw=await read(playbackFileUrl(base,"hls/sessions"),c,text,signal,restart?"restart":"start"),response=engine(raw);
     if(restart?!authorized(c):!current(c))fail();
-    const bound=direct?sharedPlaybackDirectStartContext(base,response):sharedPlaybackStartContext(base,response);accepted.set(bound,c);if(direct)directs.set(bound,base);
+    const bound=direct?sharedPlaybackDirectStartContext(base,response):sharedPlaybackStartContext(base,response);accepted.set(bound,c);bases.set(bound,base);
     if(c.watch.pending&&c.watch.pending.session_id!==bound.session_id)c.watch.pending=null;
     Object.defineProperty(response,"_sharedContext",{value:bound,enumerable:false});return response;
   }
@@ -113,11 +118,14 @@ const SHARED_DECISION=(()=>{
     for(const k of ["url","sessions_url"]){if(raw.delivery[k]!=null){descriptive(raw.delivery[k],context);if(k==="sessions_url"&&raw.delivery[k]!==context.file_base+"/hls/sessions")fail();}}
     const decision=engine(raw);decision.reference.lifecycle_generation=ref.lifecycle_generation;return decision;
   }
+  // A bound context (a reopen of a started session) asks about its base file
+  // under the accepted login, the same rule its fresh Start follows.
   async function decision(context,selection={force:"auto"},signal=null){
-    const c=contexts.get(context);if(!c||!current(c))fail();playbackFileContext(context);const q=query(selection);
+    const bound=!!context?.session_id,base=bound?bases.get(context):context,c=bound?accepted.get(context):contexts.get(context),valid=()=>bound?authorized(c):current(c);
+    if(!c||!base||!valid())fail();playbackFileContext(base);const q=query(selection);
     const caps=currentCapsDocument();if(caps?.v!==2)fail();const body=JSON.stringify({caps});if(new TextEncoder().encode(body).length>REQUEST_MAX)fail();
-    const snapshot=copy(JSON.parse(body).caps),raw=await read(playbackFileUrl(context,"decision",q),c,body,signal);
-    if(contexts.get(context)!==c||!current(c))fail();const result=validate(raw,context);
+    const snapshot=copy(JSON.parse(body).caps),raw=await read(playbackFileUrl(base,"decision",q),c,body,signal,bound?"session":"page");
+    if((bound?accepted.get(context):contexts.get(context))!==c||!valid())fail();const result=validate(raw,base);
     Object.defineProperty(result,"_capsSnapshot",{value:snapshot,enumerable:false});return result;
   }
   return Object.freeze({details,decision,start,progress,retire});
