@@ -92,6 +92,41 @@ function test(name, run) {
   }
 }
 
+test("future callback metadata cannot seed false backward hitches or erase real holds", () => {
+  assert.equal(policy.frameMetadataAheadOfClock({mediaTime:769.125,expectedDisplayTime:1000},
+    {nowMs:1000,currentTime:768.709,nominalSeconds:1/24}),true);
+  assert.equal(policy.frameMetadataAheadOfClock({mediaTime:1.4,expectedDisplayTime:1400},
+    {nowMs:1000,currentTime:1,playbackRate:1,nominalSeconds:1/24}),false);
+  assert.equal(policy.frameMetadataAheadOfClock({mediaTime:0.8,expectedDisplayTime:1000},
+    {nowMs:1000,currentTime:1,nominalSeconds:1/24}),false);
+  const p={},v={requestVideoFrameCallback(){},paused:false,seeking:false,playbackRate:1,currentTime:0,dataset:{}};
+  let next,settled=0;
+  const run=new Function('PLAYER','PlaybackPolicy','document','performance','queuePlaybackFrame',
+    'playbackOwnsAttachedMedia','settlePlaybackControlSeek','reportRateChase',
+    `let PLAYBACK_LIFETIME_HITCHES=0;
+     const HITCH_WARMUP=12,HITCH_WINDOW=120,HITCH_NEAR_MS=150,HITCH_GAP_FRAMES=2.5,
+       HITCH_SLOW_FACTOR=3,HITCH_LATE_FLOOR_MS=25,HITCH_LATE_FRACTION=0.75;
+     ${shippedSource('armHitchDetector')};armHitchDetector(arguments[8]);`);
+  run(p,policy,{getElementById:()=>v},{now:()=>0},(_v,_p,callback)=>{next=callback;},
+    ()=>true,()=>{settled++;},()=>{},v);
+  function frame(now,mediaTime,currentTime,count){v.currentTime=currentTime;next(now,
+    {mediaTime,presentedFrames:count,expectedDisplayTime:now},0,{});}
+  for(let i=0;i<24;i++)frame(i*1000/24,i/24,i/24,i+1);
+  const lastSettled=settled;
+  frame(1000,1.4,1,25);
+  assert.equal(p.hitches.metadataAnomalies,1);
+  assert.equal(p.hitches.metadataFaults[0].media_time,1.4);
+  assert.equal(settled,lastSettled,'uncertain metadata cannot settle presentation');
+  frame(1041.667,25/24,25/24,26);
+  assert.equal(p.hitches.back,0,'future outlier cannot seed a false backward step');
+  frame(1083.333,1,26/24,27);
+  assert.equal(p.hitches.back,1,'a real backward timestamp remains classified');
+  // A future metadata row does not reset the display-clock interval.
+  frame(1300,1.5,1.125,28);
+  frame(1400,26/24,1.125,29);
+  assert.equal(p.hitches.late,1,'a real hold across uncertain metadata stays visible');
+});
+
 function heldKeyFixture() {
   let now = 0;
   let nextTimer = 1;

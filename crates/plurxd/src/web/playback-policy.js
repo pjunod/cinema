@@ -5,6 +5,20 @@
 })(typeof globalThis !== "undefined" ? globalThis : this, function () {
   "use strict";
 
+  // A callback submitted for an expected future display can legitimately
+  // lead the element clock by that interval. Larger unexplained future PTS
+  // is uncertain metadata, not a new baseline for backward/skip counters.
+  function frameMetadataAheadOfClock(meta, {nowMs, currentTime, playbackRate = 1, nominalSeconds = 0} = {}) {
+    if (!Number.isFinite(meta?.mediaTime) || !Number.isFinite(nowMs)
+        || !Number.isFinite(currentTime) || currentTime < 0
+        || !Number.isFinite(playbackRate) || playbackRate <= 0) return false;
+    const futureMs = Number.isFinite(meta.expectedDisplayTime)
+      ? Math.max(0, meta.expectedDisplayTime - nowMs) : 0;
+    // Retain coarse 100ms clock rounding and low-frame-rate presentation.
+    const tolerance = Math.max(0.2, Number.isFinite(nominalSeconds) && nominalSeconds > 0 ? 2 * nominalSeconds : 0);
+    return meta.mediaTime - currentTime > tolerance + futureMs * playbackRate / 1000;
+  }
+
   const DEFAULTS = Object.freeze({
     lostPerMinute: 6,
     minimumSeconds: 150,
@@ -2345,6 +2359,7 @@
     nativeHlsAvailable,
     hlsTransport,
     copyAudioNeedsTranscode,
+    frameMetadataAheadOfClock,
     initialRoute,
     indexPendingFallback,
     fallbackAction,

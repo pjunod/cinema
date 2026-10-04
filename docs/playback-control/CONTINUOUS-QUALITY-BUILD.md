@@ -6019,7 +6019,7 @@ helper; it is not evidence that a compatible family switched successfully.
 Independent capture was complete over 21,630 measured samples, with zero
 unknown pixels, capture holes, backward counters or skipped counter values;
 its picture-hold lower/upper bounds were 71.11/79.75ms. Those pixel results
-do not make the session-changing run pass. End counts were 0/0/0/0; helper
+do not make the extra-session-create run pass. End counts were 0/0/0/0; helper
 exit 1 and owned display/runtime cleanup confirmed.
 
 The corrected `optical-late-switch2` starts at 1080p and requests 720p then
@@ -6027,3 +6027,92 @@ The corrected `optical-late-switch2` starts at 1080p and requests 720p then
 240Hz capture, strict completeness limit and existing browser thresholds
 are unchanged. It is a focused diagnostic, not the full success series.
 No units or final adversarial review ran.
+
+### 10.207 In-family browser pass; full capture remains incomplete
+
+`optical-late-switch2` passed browser checks: initial 1080p, 720p at film
+764.083333s (12.671s request-to-presentation), then 1080p at 826.083333s
+(61.643s at the existing append frontier). One durable session/player,
+85.62ms maximum quality-cycle gap, zero hitches/stalls and two browser
+reported drops. End counts 2/0/0/0, helper exit 0, owned cleanup confirmed.
+
+The optical helper initially used `result.start`, which the quality-cycle
+harness replaces with its final observation baseline. Consequently its
+first analysis covered only the last eight seconds. Reanalysis of the
+existing checksum-paired raw capture, from the fixed warmup end through
+final observation, preserves the original analysis separately and does
+not rerun playback. The corrected 83.024-second window has 19,925 samples,
+zero unreadable/backward counters, one 12.878ms capture hole at +13.321s
+and two skipped counter values at film 765.458333→765.541667s and
+765.666667→765.750000s. Those skips coincide with the two reported browser
+drops shortly after 720p presentation. Picture-hold lower/upper bounds
+82.41/93.72ms. Independent capture remains **INCOMPLETE**, and these
+results do not establish the required zero-skip switch series.
+
+`optical-late-switch3` now records the correct full window directly and
+adds bounded 25ms browser event-loop lag diagnostics to investigate the
+observed skips. Thresholds, fixed warmup and playback behavior remain
+unchanged. No blind full campaign was launched. Evidence/status commit
+`77bbe1af3` passed the normal hook (Clippy 35.47s, 72 served script syntax)
+and is pushed; running binary/source remains exactly `65b068f77`.
+No units or final adversarial review ran.
+
+### 10.208 Captured startup freeze precedes quality requests
+
+`optical-late-switch3` passed browser checks: two in-family changes, one
+session/player, 85.46ms maximum gap, zero hitches/stalls, four reported
+drops; End 2/0/0/0 and owned cleanup passed. Full independent capture was
+complete (19,450 samples, no unknown pixels or capture holes), but recorded
+four skipped counter values and a 215.65ms lower/229.54ms upper picture
+hold. Event-loop lag peaked at 25ms, giving no evidence of a comparable
+main-thread stall.
+
+The long hold and all four skips were at film 751.291667→751.583333s,
+before the first quality request's recorded outgoing position 751.625s.
+Both quality transitions subsequently had no captured skips. An 83.42ms
+lower hold was observed shortly after 720p presentation at 762s. This does
+not turn the full post-warmup capture into a healthy startup result or
+resolve the older full Firefox failure.
+
+`optical-late-switch4` now records exact browser Unix timestamps immediately
+before each actual `setQuality` call. It analyzes first quality request
+through final observation, and separately retains the entire post-warmup
+capture and raw startup prefix. Independent switch-window failures now
+fail the new helper's run: incomplete capture, backward/skipped counters,
+or a conservative held-picture bound over the unchanged 100ms limit.
+This is an explicitly scoped switch measurement, not retrospective removal
+of failing startup samples. No units or final adversarial review ran.
+
+### 10.209 Independent pixels identify a false backward-hitch baseline
+
+`optical-late-switch4` **FAILED** its existing browser hitch rule (one
+backward-frame hitch), although both its full post-warmup and exact request
+windows independently captured zero unknown/missing/backward/skipped counters
+and an 83.29ms maximum conservative picture hold. Browser drops were zero;
+event-loop lag peaked at 8ms. End 1/0/0/0, helper exit 1 and owned cleanup
+confirmed. The failure remains failed.
+
+Binding the offending callbacks to timestamp/checksum-paired optical pixels
+shows reported 769.125→768.791666s while captured counters show
+768.666667→768.750000s, within 1.83/1.44ms of the expected display timestamps.
+Nearby element-clock samples were 768.709/768.750s. The earlier callback
+reported a future PTS more than 400ms ahead of the clock and captured video;
+its next ordinary callback became a false backward-hitch baseline.
+[The API definition](https://developer.mozilla.org/en-US/docs/Web/API/HTMLVideoElement/requestVideoFrameCallback)
+distinguishes compositor submission, expected display and media PTS; these
+independent pixels demonstrate the mismatch for this receipt. An older
+[Mozilla issue](https://bugzilla.mozilla.org/show_bug.cgi?id=1935253) concerns
+cached old frames, but is not claimed to diagnose this current mismatch.
+
+The hitch detector now preserves implausibly future media timestamps as
+bounded anomaly receipts rather than updating its valid baseline or settling
+presentation from them. It allows expected future display time, playback
+rate, two nominal intervals and coarse 100ms clock rounding. The last valid
+frame remains intact so the next callback still spans any real hold or back
+step; existing hitch/continuity thresholds are unchanged. The lab exports
+anomaly count/receipts alongside ordinary faults. One authored, **UNRUN**
+behavioral regression covers future metadata, expected future submission,
+false-back prevention, genuine backward frames, unsettled uncertain frames,
+and a real late frame across a rejected outlier. Script syntax and diff
+whitespace checks pass. Runtime qualification is pending; no units or final
+adversarial review ran.

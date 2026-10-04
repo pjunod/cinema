@@ -2284,6 +2284,8 @@ function playerSnapshotExpression() {
         target_height:p.recoveringStall.targetHeight??null}:null,
       hitches:{back:h.back||0,held:h.held||0,late:h.late||0,drop:h.drop||0,gap:h.gap||0,slow:h.slow||0,rate:h.rate==null?null:h.rate},
       hitch_faults:(h.faults||[]).slice(-16).map(fault=>({...fault})),
+      frame_metadata_anomalies:Number(h.metadataAnomalies||0),
+      frame_metadata_faults:(h.metadataFaults||[]).slice(-16).map(fault=>({...fault})),
       decode:p.decodeInfo||null, health:p.health||null,
       source:p.source||null, audio_count:(p.audio||[]).length, subtitle_count:(p.subs||[]).length,
       current_audio:p.curAudio==null?null:p.curAudio, current_subtitle:p.curSub==null?null:p.curSub,
