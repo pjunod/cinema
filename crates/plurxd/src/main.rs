@@ -58,6 +58,8 @@ mod scratch_put;
 mod seam_hooks;
 mod serving_fence;
 mod shared_cache;
+mod sharing;
+mod sharing_client;
 mod source_probe;
 mod state;
 mod store_result;
@@ -296,6 +298,11 @@ struct Cli {
 enum Command {
     /// Run the server (the default when no subcommand is given).
     Run,
+    /// Provision the node-local TLS identity used by the private sharing listener.
+    Sharing {
+        #[command(subcommand)]
+        command: SharingCommand,
+    },
     /// Install, remove, or enter the native Windows service.
     #[cfg(windows)]
     Service {
@@ -379,6 +386,15 @@ enum Command {
     /// diagnostic-panic`. It touches no storage and no network.
     #[command(hide = true)]
     DiagnosticPanic,
+}
+
+#[derive(Subcommand)]
+enum SharingCommand {
+    /// Create an owner-only node key and certificate; refuse existing identity files.
+    InitTls {
+        #[arg(long)]
+        key_directory: PathBuf,
+    },
 }
 
 #[cfg(windows)]
@@ -526,10 +542,23 @@ async fn dispatch(
         | Command::Cluster { .. }
         | Command::Restore { .. }
         | Command::Wal { .. }
+        | Command::Sharing { .. }
         | Command::DiagnosticPanic => {}
     }
     match command {
         Command::Run => run(config).await,
+        Command::Sharing {
+            command: SharingCommand::InitTls { key_directory },
+        } => {
+            let now = crate::state::clock_ms() / 1000;
+            let node = plurx_core::sharing_tls::NodeTls::initialize(&key_directory, now)?;
+            println!("SPKI SHA-256: {}", node.spki_sha256);
+            println!(
+                "Certificate expires at Unix second {}",
+                node.expires_at_seconds
+            );
+            Ok(())
+        }
         #[cfg(windows)]
         Command::Service { command } => match command {
             WindowsServiceCommand::Install => {
@@ -1693,7 +1722,7 @@ async fn run(config: Config) -> anyhow::Result<()> {
     // one of them first.
     let shutdown = ShutdownWatch::observing(shutdown_signal());
 
-    let selected = select_daemon_store(&config)
+    let mut selected = select_daemon_store(&config)
         .await
         .with_context(|| format!("selecting store in {}", config.storage.data_dir.display()))?;
     // Which backend is serving is not otherwise observable. A recovery boot
@@ -1720,6 +1749,12 @@ async fn run(config: Config) -> anyhow::Result<()> {
         if shutdown.is_signalled() {
             tracing::info!("shutdown signal received during store activation; not serving");
             return Ok(());
+        }
+        let source_layout_ready = Box::pin(selected.prepare_source_schema_before_serving())
+            .await
+            .context("qualifying Source schema before serving")?;
+        if !source_layout_ready {
+            tracing::info!(target:"plurx::sharing","Source schema readiness pending; Local serving continues");
         }
         let store = Arc::clone(&selected.store);
         let replication = selected.replication_monitor();
@@ -1822,6 +1857,7 @@ async fn boot(
     tracing::debug!(expiry_since, "sign-in expiry clock");
     log_startup(&config, &identity);
 
+    let purpose_master = Arc::clone(&credential_key);
     let instance_id = identity.cluster_id;
     let node_id = identity.node_id;
     let state = build_state(
@@ -1839,6 +1875,22 @@ async fn boot(
         system,
         logs,
     );
+    state
+        .membership
+        .prepare_purpose_master(purpose_master)
+        .await
+        .context("qualifying coordinated sharing purpose master")?;
+    match tokio::time::timeout(
+        Duration::from_secs(5),
+        state.membership.coordinate_purpose_keys(),
+    )
+    .await
+    {
+        Ok(Ok(())) => {}
+        Ok(Err(error)) => tracing::warn!(code = error.code(), "sharing purpose factory is pending"),
+        Err(_) => tracing::warn!(code = "deadline", "sharing purpose factory is pending"),
+    }
+
     // The stored request is not an ffmpeg contract. Exercise the exact
     // production rate-control arguments against this boot's real drivers and
     // publish only the effective result before any session can start.
@@ -1884,6 +1936,10 @@ async fn boot(
                 tracing::info!("cluster leave committed, draining");
             }
         }
+        // One drain token for both causes: owners that must hand work back
+        // before exit (shared session retirement) observe `state.shutdown`,
+        // and a signal is as much a drain as a committed leave.
+        leave_shutdown.cancel();
         // Stop new media starts before waiting for tuner/FFmpeg ownership to
         // settle. The HTTP server remains alive during this short phase so
         // existing close/resource requests can finish normally.
@@ -2657,6 +2713,7 @@ fn build_state(
 ) -> AppState {
     AppState::new_configured(
         crate::state::AppConfig {
+            sharing_network: config.sharing.clone(),
             server_name: config.server.name.clone(),
             node_id,
             cluster_advertisement: !config.cluster.advertise_host.trim().is_empty(),
@@ -2750,6 +2807,8 @@ fn spawn_background_loops(
     state: &AppState,
     background_shutdown: tokio_util::sync::CancellationToken,
 ) {
+    tokio::spawn(Arc::clone(&state.sharing).run(state.clone(), background_shutdown.clone()));
+    tokio::spawn(Arc::clone(&state.sharing).claim_loop(state.clone(), background_shutdown.clone()));
     tokio::spawn(http::file_grants::prune_loop(
         state.clone(),
         background_shutdown.clone(),
@@ -3041,6 +3100,12 @@ impl HttpAcceptor for tokio::net::TcpListener {
         Ok((stream, remote))
     }
 }
+impl HttpAcceptor for plurx_core::sharing_tls::SharingTlsListener {
+    type Stream = plurx_core::sharing_tls::SharingTlsStream;
+    async fn accept(&self) -> std::io::Result<(Self::Stream, SocketAddr)> {
+        plurx_core::sharing_tls::SharingTlsListener::accept(self).await
+    }
+}
 
 /// Send every write as soon as it is made: set `TCP_NODELAY` on an accepted
 /// HTTP connection.
@@ -3072,6 +3137,67 @@ impl HttpAcceptor for tokio::net::TcpListener {
 fn disable_nagle(stream: &tokio::net::TcpStream, remote: SocketAddr) {
     if let Err(error) = stream.set_nodelay(true) {
         tracing::debug!(%error, %remote, "could not set TCP_NODELAY on an accepted connection");
+    }
+}
+
+/// Sharing content monitors may close this accepted transport even when Hyper
+/// is blocked writing a body. HTTP/2 cancellation closes all multiplexed streams
+/// on that connection; ordinary handlers never cancel this token.
+#[derive(Clone)]
+pub(crate) struct SharingConnectionCancellation(
+    pub(crate) tokio_util::sync::CancellationToken,
+    std::sync::Arc<SharingConnectionMonitors>,
+    tokio_util::sync::CancellationToken,
+);
+/// Read-only observer of actual accepted writer closure; it cannot request it.
+#[derive(Clone)]
+pub(crate) struct SharingConnectionClosure(tokio_util::sync::CancellationToken);
+impl SharingConnectionClosure {
+    pub(crate) async fn wait(&self) {
+        self.0.cancelled().await;
+    }
+    #[cfg(test)]
+    pub(crate) fn is_closed(&self) -> bool {
+        self.0.is_cancelled()
+    }
+}
+struct SharingConnectionMonitors(std::sync::Mutex<Vec<tokio::task::JoinHandle<()>>>);
+impl Drop for SharingConnectionMonitors {
+    fn drop(&mut self) {
+        for monitor in self.0.get_mut().expect("sharing monitor owner").drain(..) {
+            monitor.abort();
+        }
+    }
+}
+impl SharingConnectionCancellation {
+    fn new() -> Self {
+        Self(
+            tokio_util::sync::CancellationToken::new(),
+            std::sync::Arc::new(SharingConnectionMonitors(std::sync::Mutex::new(Vec::new()))),
+            tokio_util::sync::CancellationToken::new(),
+        )
+    }
+    /// Opaque weak ownership identity for deduplicating per-actor monitors.
+    /// Holding it cannot keep the connection or monitor owner alive.
+    pub(crate) fn ownership_key(&self) -> std::sync::Weak<dyn Send + Sync> {
+        let identity: std::sync::Arc<dyn Send + Sync> = self.1.clone();
+        std::sync::Arc::downgrade(&identity)
+    }
+    /// Completes only after the accepted Hyper connection future is dropped.
+    pub(crate) fn closed(&self) -> SharingConnectionClosure {
+        SharingConnectionClosure(self.2.clone())
+    }
+    pub(crate) fn monitor(
+        &self,
+        future: impl std::future::Future<Output = ()> + Send + 'static,
+    ) -> Result<(), ()> {
+        let mut monitors = self.1 .0.lock().expect("sharing monitor owner");
+        monitors.retain(|monitor| !monitor.is_finished());
+        if monitors.len() >= 32 || self.0.is_cancelled() {
+            return Err(());
+        }
+        monitors.push(tokio::spawn(future));
+        Ok(())
     }
 }
 
@@ -3123,9 +3249,12 @@ async fn serve_http<A: HttpAcceptor>(
         // `http::network`, which extract the peer address. The lower-level
         // hyper loop has to insert it explicitly because axum's IncomingStream
         // is private to `axum::serve`.
+        let connection_cancel = SharingConnectionCancellation::new();
+        let request_cancel = connection_cancel.clone();
         let service = tower::ServiceBuilder::new()
             .map_request(move |mut request: Request<Incoming>| {
                 request.extensions_mut().insert(ConnectInfo(remote));
+                request.extensions_mut().insert(request_cancel.clone());
                 request.map(axum::body::Body::new)
             })
             .service(app.clone());
@@ -3134,9 +3263,17 @@ async fn serve_http<A: HttpAcceptor>(
             .into_owned();
         let connection = graceful.watch(connection);
         tokio::spawn(async move {
-            if let Err(error) = connection.await {
-                tracing::debug!(%error, %remote, "HTTP connection closed with an error");
+            let _cancel_on_close = connection_cancel.0.clone().drop_guard();
+            // Declared before the owned connection so unwinding also drops the
+            // actual writer before signalling closure to capacity monitors.
+            let _closed_after_writer = connection_cancel.2.clone().drop_guard();
+            let mut connection = Box::pin(connection);
+            tokio::select! {
+                ()=connection_cancel.0.cancelled()=>{},
+                result=&mut connection=> {if let Err(error)=result {tracing::debug!(%error,%remote,"HTTP connection closed with an error");}},
             }
+            drop(connection);
+            connection_cancel.2.cancel();
         });
     }
 
@@ -7534,6 +7671,51 @@ mod startup_tests {
             cli.command,
             Some(Command::RefreshMetadata { library: Some(7) })
         ));
+    }
+
+    #[tokio::test]
+    async fn sharing_tls_command_refuses_to_replace_an_existing_node_key() {
+        let dir = tempfile::tempdir().expect("synthetic node key directory");
+        // NodeTls refuses a group- or world-writable key directory, and a
+        // temporary directory inherits the runner umask (002 on some hosts).
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o700))
+                .expect("private synthetic node key directory");
+        }
+        let command = || SharingCommand::InitTls {
+            key_directory: dir.path().to_path_buf(),
+        };
+        let cli = Cli::try_parse_from([
+            "plurxd",
+            "sharing",
+            "init-tls",
+            "--key-directory",
+            dir.path().to_str().expect("synthetic UTF-8 path"),
+        ])
+        .expect("sharing provisioning command");
+        assert!(matches!(cli.command, Some(Command::Sharing { .. })));
+        dispatch(
+            Command::Sharing { command: command() },
+            Config::default(),
+            None,
+        )
+        .await
+        .expect("provision synthetic TLS identity");
+        let original =
+            std::fs::read(dir.path().join("sharing-tls.der")).expect("synthetic certificate");
+        assert!(dispatch(
+            Command::Sharing { command: command() },
+            Config::default(),
+            None
+        )
+        .await
+        .is_err());
+        assert_eq!(
+            std::fs::read(dir.path().join("sharing-tls.der")).expect("retained certificate"),
+            original
+        );
     }
 
     #[test]

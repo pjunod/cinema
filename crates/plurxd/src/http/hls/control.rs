@@ -196,6 +196,52 @@ fn local_control_response(
     server_time_unix_ms: i64,
     subtitle_readiness: Option<String>,
 ) -> crate::playback_control::ControlResponseV1 {
+    control_response_with_selection(
+        route,
+        crate::playback_control::EffectiveSelection::from_recipe(
+            recipe,
+            start.height,
+            start.delivered_dynamic_range.clone(),
+        ),
+        request,
+        result,
+        server_time_unix_ms,
+        subtitle_readiness,
+    )
+}
+
+/// Pure bounded projection from an actual Source route and its retained recipe.
+/// This helper constructs no worker, account, admission or physical evidence.
+pub(crate) fn source_control_response(
+    route: &MediaSessionRoute,
+    start: &StartResponse,
+    recipe: &crate::transcode::SessionRequest,
+    request: &crate::playback_control::ControlRequestV1,
+    result: &crate::playback_control::LocalControlResult,
+    server_time_unix_ms: i64,
+) -> crate::playback_control::ControlResponseV1 {
+    control_response_with_selection(
+        route,
+        crate::playback_control::EffectiveSelection::from_request(
+            recipe,
+            start.height,
+            start.delivered_dynamic_range.clone(),
+        ),
+        request,
+        result,
+        server_time_unix_ms,
+        None,
+    )
+}
+
+fn control_response_with_selection(
+    route: &MediaSessionRoute,
+    effective_selection: crate::playback_control::EffectiveSelection,
+    request: &crate::playback_control::ControlRequestV1,
+    result: &crate::playback_control::LocalControlResult,
+    server_time_unix_ms: i64,
+    subtitle_readiness: Option<String>,
+) -> crate::playback_control::ControlResponseV1 {
     let owner_epoch = u64::try_from(route.owner_epoch).unwrap_or_default();
     let response = crate::playback_control::ControlResponseV1 {
         protocol: crate::playback_control::PROTOCOL_V1.to_owned(),
@@ -220,11 +266,7 @@ fn local_control_response(
             route.media_origin_ms,
             subtitle_readiness,
         ),
-        effective_selection: crate::playback_control::EffectiveSelection::from_recipe(
-            recipe,
-            start.height,
-            start.delivered_dynamic_range.clone(),
-        ),
+        effective_selection,
         action: crate::playback_control::ControlAction::None,
     };
     // The advisory hold is derived from the delivery this response is already
@@ -502,7 +544,7 @@ async fn settle_preparation_control(
     let executor = crate::playback_control::PreparationExecutor::new(
         Arc::clone(&state.store),
         gate,
-        route.user_id,
+        route.principal.clone(),
         route.playback_id.clone(),
         route.owner_node_id.clone(),
         route.owner_epoch,
@@ -1759,7 +1801,11 @@ async fn library_channel_control_refusal(
             None,
         ));
     }
-    let user = match state.store.get_user(route.user_id).await {
+    let user = match if let Some(user_id) = route.principal.local_user_id() {
+        state.store.get_user(user_id).await
+    } else {
+        Ok(None)
+    } {
         Ok(Some(user)) => user,
         Ok(None) => {
             return Some(control_error(
@@ -1913,7 +1959,7 @@ async fn staged_successor_action(
             );
         })?;
     if successor.incarnation_id != staged.staged_incarnation_id
-        || successor.user_id != predecessor.user_id
+        || successor.principal != predecessor.principal
         || successor.playback_id != predecessor.playback_id
         || successor.owner_node_id != state.node_id
         || successor.owner_epoch != 1
@@ -1939,7 +1985,7 @@ async fn staged_successor_action(
         })?;
     if !recipe.is_valid()
         || recipe.incarnation_id != successor.incarnation_id
-        || recipe.user_id != successor.user_id
+        || successor.principal != recipe.principal
         || recipe.request.playback_id != successor.playback_id
         || start.session_id != successor.session_id
         || start.media_origin_ms != Some(successor.media_origin_ms)
@@ -2315,7 +2361,7 @@ pub(super) async fn control_local_with_settlement_capacity(
     } else {
         let read = state
             .store
-            .staged_media_session_for_playback(route.user_id, &route.playback_id)
+            .staged_media_session_for_playback(&route.principal, &route.playback_id)
             .await;
         let read = if state
             .hls_route_hooks
@@ -2693,7 +2739,7 @@ pub(super) async fn control_local_with_settlement_capacity(
         match state
             .store
             .record_desired_selection(
-                route.user_id,
+                &route.principal,
                 &route.playback_id,
                 &desired.digest,
                 &desired.canonical_form,

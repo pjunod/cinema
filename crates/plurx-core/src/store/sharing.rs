@@ -65,6 +65,64 @@ pub(crate) fn ordered(sql: &str, values: Vec<Value>) -> Result<Statement, StoreE
 pub(crate) trait Backend: Send + Sync {
     async fn sharing_read(&self, sql: &str, values: Vec<Value>) -> Result<Vec<String>, StoreError>;
     async fn sharing_txn(&self, statements: Vec<Statement>) -> Result<Vec<usize>, StoreError>;
+    /// Optional candidate table. SQLite reads its shape and rows in one
+    /// snapshot; Hiqlite currently requires coordinated schema/rewrap quiescence.
+    async fn sharing_revision_key_rows(&self) -> Result<Vec<String>, StoreError>;
+    async fn sharing_file_locator_key_rows(&self) -> Result<Vec<String>, StoreError>;
+    async fn sharing_purpose_archive_rows(&self) -> Result<Vec<String>, StoreError>;
+}
+pub(super) const REVISION_KEY_COLUMNS_SQL: &str = "SELECT json_array(name,type,\"notnull\",pk) AS payload FROM pragma_table_info('sharing_catalogue_keys') ORDER BY cid";
+pub(super) const REVISION_KEY_ROWS_SQL: &str = "SELECT json_object('singleton',singleton,'server_id',substr(server_id,1,37),'catalogue_epoch',substr(catalogue_epoch,1,37),'envelope',CASE WHEN length(revision_envelope)<=4096 THEN revision_envelope ELSE NULL END,'source_matches',EXISTS(SELECT 1 FROM sharing_identity s WHERE s.singleton=1 AND s.server_id=sharing_catalogue_keys.server_id AND s.catalogue_epoch=sharing_catalogue_keys.catalogue_epoch)) AS payload FROM sharing_catalogue_keys LIMIT 2";
+pub(super) fn revision_key_columns(rows: Vec<String>) -> Result<(), StoreError> {
+    let columns: Vec<(String, String, i64, i64)> = rows
+        .into_iter()
+        .map(|r| decode(&r))
+        .collect::<Result<_, _>>()?;
+    if columns
+        != [
+            ("singleton".into(), "INTEGER".into(), 1, 1),
+            ("server_id".into(), "TEXT".into(), 1, 0),
+            ("catalogue_epoch".into(), "TEXT".into(), 1, 0),
+            ("revision_envelope".into(), "TEXT".into(), 1, 0),
+        ]
+    {
+        return Err(invalid());
+    }
+    Ok(())
+}
+pub(super) fn revision_key_envelopes(rows: Vec<String>) -> Result<Vec<SealedSecret>, StoreError> {
+    #[derive(serde::Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct Row {
+        singleton: i64,
+        server_id: String,
+        catalogue_epoch: String,
+        envelope: String,
+        source_matches: i64,
+    }
+    if rows.len() > 1 {
+        return Err(invalid());
+    }
+    rows.into_iter()
+        .map(|row| {
+            let row: Row = decode(&row)?;
+            if row.singleton != 1
+                || row.source_matches != 1
+                || [row.server_id, row.catalogue_epoch].iter().any(|id| {
+                    Uuid::parse_str(id)
+                        .ok()
+                        .is_none_or(|uuid| uuid.to_string() != *id)
+                })
+            {
+                return Err(invalid());
+            }
+            let envelope = SealedSecret::from_stored(row.envelope);
+            if !envelope.is_wrapped() {
+                return Err(invalid());
+            }
+            Ok(envelope)
+        })
+        .collect()
 }
 fn decode<T: DeserializeOwned>(s: &str) -> Result<T, StoreError> {
     serde_json::from_str(s).map_err(|_| invalid())
@@ -90,6 +148,31 @@ const GRANT_JSON: &str =
 /// Consistent authority reads and atomic mutations; no foreign account identity.
 #[async_trait]
 pub trait SharingStore: Send + Sync {
+    /// Canonical UUID keyset; at most 33 records (32 plus the next-page sentinel).
+    async fn sharing_exports(&self, after: Option<Uuid>) -> Result<Vec<ExportSummary>, StoreError>;
+    /// Credential-scoped status only, including terminal and expired pending grants.
+    async fn sharing_grant_status(&self, hash: &str) -> Result<Option<ExportSummary>, StoreError>;
+    async fn sharing_imports(&self) -> Result<Vec<ImportSummary>, StoreError>;
+    async fn sharing_import(&self, id: Uuid) -> Result<Option<StoredImport>, StoreError>;
+    /// One complete bounded database snapshot; overflow/corruption refuses.
+    async fn sharing_import_assignments(
+        &self,
+        id: Uuid,
+    ) -> Result<Option<ImportAssignmentSnapshot>, StoreError>;
+    async fn sharing_endpoint_manifest(&self) -> Result<Option<EndpointManifest>, StoreError>;
+    async fn set_sharing_endpoint_manifest(
+        &self,
+        generation: i64,
+        endpoints: Vec<Endpoint>,
+    ) -> Result<MutationOutcome, StoreError>;
+    async fn set_sharing_import_endpoints(
+        &self,
+        id: Uuid,
+        generation: i64,
+        endpoints: Vec<Endpoint>,
+        source_revision: Option<i64>,
+        now_ms: i64,
+    ) -> Result<MutationOutcome, StoreError>;
     async fn sharing_identity(&self, now_ms: i64) -> Result<SharingIdentity, StoreError>;
     async fn create_share_invitation(
         &self,
@@ -133,11 +216,32 @@ pub trait SharingStore: Send + Sync {
         now_ms: i64,
     ) -> Result<bool, StoreError>;
     async fn create_share_import(&self, import: NewImport) -> Result<ImportOutcome, StoreError>;
+    async fn re_pair_share_import(
+        &self,
+        import: NewImport,
+        expected_lifecycle: i64,
+    ) -> Result<MutationOutcome, StoreError>;
     async fn settle_share_claim(
         &self,
         id: Uuid,
         grant: Uuid,
         active: bool,
+        now_ms: i64,
+    ) -> Result<MutationOutcome, StoreError>;
+    async fn settle_current_share_claim(
+        &self,
+        id: Uuid,
+        claim: Uuid,
+        lifecycle: i64,
+        grant: Uuid,
+        active: bool,
+        now_ms: i64,
+    ) -> Result<MutationOutcome, StoreError>;
+    async fn fail_current_share_claim(
+        &self,
+        id: Uuid,
+        claim: Uuid,
+        lifecycle: i64,
         now_ms: i64,
     ) -> Result<MutationOutcome, StoreError>;
     async fn assign_share_viewers(
@@ -158,6 +262,14 @@ pub trait SharingStore: Send + Sync {
         &self,
         rotation: ImportRotation,
     ) -> Result<MutationOutcome, StoreError>;
+    async fn sharing_import_rotation(
+        &self,
+        id: Uuid,
+    ) -> Result<Option<StoredImportRotation>, StoreError>;
+    async fn settle_share_import_response(
+        &self,
+        receipt: ImportClaimReceipt,
+    ) -> Result<MutationOutcome, StoreError>;
     async fn commit_share_import_rotation(
         &self,
         id: Uuid,
@@ -172,6 +284,95 @@ pub trait SharingStore: Send + Sync {
 
 #[async_trait]
 impl<T: Backend> SharingStore for T {
+    async fn sharing_exports(&self, after: Option<Uuid>) -> Result<Vec<ExportSummary>, StoreError> {
+        let rows = self.sharing_read(&format!("SELECT {EXPORT_SUMMARY_JSON} AS payload FROM sharing_exports e JOIN sharing_invitations i ON i.id=e.invitation_id JOIN sharing_identity s ON s.singleton=1 WHERE e.id>$1 ORDER BY e.id LIMIT 33"), vec![after.map(|id| id.to_string()).unwrap_or_default().into()]).await?;
+        rows.iter().map(|row| export_summary(row)).collect()
+    }
+    async fn sharing_grant_status(&self, hash: &str) -> Result<Option<ExportSummary>, StoreError> {
+        if !is_hash(hash) {
+            return Ok(None);
+        }
+        let rows = self.sharing_read(&format!("SELECT {EXPORT_SUMMARY_JSON} AS payload FROM sharing_exports e JOIN sharing_invitations i ON i.id=e.invitation_id JOIN sharing_identity s ON s.singleton=1 WHERE e.token_hash=$1 LIMIT 1"), vec![hash.to_owned().into()]).await?;
+        rows.first().map(|row| export_summary(row)).transpose()
+    }
+    async fn sharing_imports(&self) -> Result<Vec<ImportSummary>, StoreError> {
+        let rows = self.sharing_read(&format!("SELECT {IMPORT_SUMMARY_JSON} AS payload FROM sharing_imports i ORDER BY i.id LIMIT 32"), vec![]).await?;
+        rows.iter().map(|row| decode(row)).collect()
+    }
+    async fn sharing_import_assignments(
+        &self,
+        id: Uuid,
+    ) -> Result<Option<ImportAssignmentSnapshot>, StoreError> {
+        let rows = self.sharing_read(
+            "SELECT json_object('import_id',substr(i.id,1,37),'server_id',substr(i.source_server_id,1,37),'catalogue_epoch',substr(i.catalogue_epoch,1,37),'lifecycle_generation',i.lifecycle_generation,'expected_assignment_generation',i.assignment_generation,'state',substr(i.state,1,17),'library_id',substr(a.remote_library_id,1,20),'user_id',a.user_id,'enabled',a.enabled,'user_exists',CASE WHEN u.id IS NULL THEN 0 ELSE 1 END) AS payload FROM sharing_imports i LEFT JOIN sharing_assignments a ON a.import_id=i.id LEFT JOIN users u ON u.id=a.user_id WHERE i.id=$1 ORDER BY a.remote_library_id COLLATE BINARY,a.user_id LIMIT 16385",
+            vec![id.into()],
+        ).await?;
+        assignment_snapshot(id, rows)
+    }
+    async fn sharing_import(&self, id: Uuid) -> Result<Option<StoredImport>, StoreError> {
+        #[derive(serde::Deserialize)]
+        struct Row {
+            summary: ImportSummary,
+            credential: String,
+            claim: Option<String>,
+        }
+        let rows = self.sharing_read(&format!("SELECT json_object('summary',{IMPORT_SUMMARY_JSON},'credential',i.credential_envelope,'claim',i.claim_envelope) AS payload FROM sharing_imports i WHERE i.id=$1"), vec![id.into()]).await?;
+        rows.first()
+            .map(|row| {
+                let row: Row = decode(row)?;
+                Ok(StoredImport {
+                    summary: row.summary,
+                    credential: SealedSecret::from_stored(row.credential),
+                    claim: row.claim.map(SealedSecret::from_stored),
+                })
+            })
+            .transpose()
+    }
+    async fn sharing_endpoint_manifest(&self) -> Result<Option<EndpointManifest>, StoreError> {
+        let rows = self.sharing_read("SELECT json_object('revision',revision,'endpoints',json(endpoints_json)) AS payload FROM sharing_endpoint_manifest WHERE singleton=1", vec![]).await?;
+        rows.first().map(|row| decode(row)).transpose()
+    }
+    async fn set_sharing_endpoint_manifest(
+        &self,
+        generation: i64,
+        endpoints: Vec<Endpoint>,
+    ) -> Result<MutationOutcome, StoreError> {
+        validate_endpoints(&endpoints)?;
+        if generation < 0 || generation == i64::MAX {
+            return Err(invalid());
+        }
+        let body = json(&endpoints)?;
+        let counts = if generation == 0 {
+            self.sharing_txn(vec![stmt("INSERT INTO sharing_endpoint_manifest(singleton,endpoints_json,revision) VALUES(1,$1,1) ON CONFLICT(singleton) DO NOTHING", vec![body.into()])]).await?
+        } else {
+            self.sharing_txn(vec![stmt("UPDATE sharing_endpoint_manifest SET endpoints_json=$1,revision=revision+1 WHERE singleton=1 AND revision=$2 AND revision<9223372036854775807", vec![body.into(), generation.into()])]).await?
+        };
+        Ok(if counts[0] == 1 {
+            MutationOutcome::Applied
+        } else {
+            MutationOutcome::Conflict
+        })
+    }
+    async fn set_sharing_import_endpoints(
+        &self,
+        id: Uuid,
+        generation: i64,
+        endpoints: Vec<Endpoint>,
+        source_revision: Option<i64>,
+        now_ms: i64,
+    ) -> Result<MutationOutcome, StoreError> {
+        validate_endpoints(&endpoints)?;
+        if generation < 1 || now_ms < 0 || source_revision.is_some_and(|r| r < 1) {
+            return Err(invalid());
+        }
+        let revision = json(&source_revision)?;
+        let counts = self.sharing_txn(vec![stmt("UPDATE sharing_imports SET endpoints_json=$1,endpoint_generation=endpoint_generation+1,observed_endpoint_revision=CASE WHEN json_extract($2,'$') IS NULL THEN observed_endpoint_revision ELSE json_extract($2,'$') END,updated_at_ms=$3 WHERE id=$4 AND endpoint_generation=$5 AND endpoint_generation<9223372036854775807 AND state IN ('claiming','pending','active') AND (json_extract($2,'$') IS NULL OR json_extract($2,'$')>coalesce(observed_endpoint_revision,0))", vec![json(&endpoints)?.into(), revision.into(), now_ms.into(), id.into(), generation.into()])]).await?;
+        Ok(if counts[0] == 1 {
+            MutationOutcome::Applied
+        } else {
+            MutationOutcome::Conflict
+        })
+    }
     async fn sharing_identity(&self, now_ms: i64) -> Result<SharingIdentity, StoreError> {
         if now_ms < 0 {
             return Err(invalid());
@@ -224,8 +425,17 @@ impl<T: Backend> SharingStore for T {
                 WHERE l.id IS NULL OR l.kind NOT IN ('movies','shows'))
             ON CONFLICT(id) DO NOTHING", vec![i.id.into(), i.token_hash.into(), json(&i.library_ids)?.into(),
                 i.created_at_ms.into(), i.expires_at_ms.into()])]).await?;
-        Ok(if counts[0] == 1 {
-            MutationOutcome::Applied
+        if counts[0] == 1 {
+            return Ok(MutationOutcome::Applied);
+        }
+        // The write itself enforces the limit atomically. This read only names
+        // the refusal; it never grants admission from a pre-count.
+        let full = !self.sharing_read(
+            "SELECT '{}' AS payload WHERE (SELECT count(*) FROM sharing_invitations WHERE state='open' AND expires_at_ms>$1)>=32 AND NOT EXISTS(SELECT 1 FROM sharing_invitations WHERE id=$2)",
+            vec![i.created_at_ms.into(), i.id.into()],
+        ).await?.is_empty();
+        Ok(if full {
+            MutationOutcome::Capacity
         } else {
             MutationOutcome::Conflict
         })
@@ -455,8 +665,37 @@ impl<T: Backend> SharingStore for T {
             vec![i.source.server_id.into(),i.source.catalogue_epoch.into()]).await?;
         match rows.first() {
             Some(row) => Ok(ImportOutcome::AlreadyImported(decode(row)?)),
-            None => Err(invalid()),
+            None => Ok(ImportOutcome::Capacity),
         }
+    }
+    async fn re_pair_share_import(
+        &self,
+        i: NewImport,
+        generation: i64,
+    ) -> Result<MutationOutcome, StoreError> {
+        validate_endpoints(&i.endpoints)?;
+        if generation < 1
+            || i.now_ms < 0
+            || i.source_name.len() > 128
+            || i.source_name.chars().any(char::is_control)
+        {
+            return Err(invalid());
+        }
+        let credential = i.credential.to_persist().map_err(|_| invalid())?.to_owned();
+        let claim = i
+            .claim_secret
+            .to_persist()
+            .map_err(|_| invalid())?
+            .to_owned();
+        let counts = self.sharing_txn(vec![
+            stmt("DELETE FROM sharing_import_rotations WHERE import_id=$1 AND EXISTS(SELECT 1 FROM sharing_imports WHERE id=$1 AND lifecycle_generation=$2 AND lifecycle_generation<9223372036854775807 AND endpoint_generation<9223372036854775807 AND assignment_generation<9223372036854775807 AND source_server_id=$3 AND catalogue_epoch=$4)", vec![i.id.into(), generation.into(), i.source.server_id.into(), i.source.catalogue_epoch.into()]),
+            stmt("UPDATE sharing_imports SET source_name=$1,claim_id=$2,credential_envelope=$3,claim_envelope=$4,endpoints_json=$5,remote_grant_id=NULL,state='claiming',lifecycle_generation=lifecycle_generation+1,endpoint_generation=endpoint_generation+1,assignment_generation=assignment_generation+1,observed_scope_generation=NULL,observed_credential_generation=NULL,observed_catalogue_generation=NULL,observed_endpoint_revision=NULL,updated_at_ms=$6 WHERE id=$7 AND lifecycle_generation=$8 AND lifecycle_generation<9223372036854775807 AND endpoint_generation<9223372036854775807 AND assignment_generation<9223372036854775807 AND source_server_id=$9 AND catalogue_epoch=$10", vec![i.source_name.into(), i.claim_id.into(), credential.into(), claim.into(), json(&i.endpoints)?.into(), i.now_ms.into(), i.id.into(), generation.into(), i.source.server_id.into(), i.source.catalogue_epoch.into()]),
+        ]).await?;
+        Ok(if counts[1] == 1 {
+            MutationOutcome::Applied
+        } else {
+            MutationOutcome::Conflict
+        })
     }
     async fn settle_share_claim(
         &self,
@@ -468,6 +707,48 @@ impl<T: Backend> SharingStore for T {
         let counts=self.sharing_txn(vec![stmt("UPDATE sharing_imports SET remote_grant_id=$1,state=$2,
             claim_envelope=NULL,updated_at_ms=$3 WHERE id=$4 AND state IN ('claiming','pending') AND (remote_grant_id IS NULL OR remote_grant_id=$1)",
             vec![grant.into(),if active { "active".to_owned() } else { "pending".to_owned() }.into(),now.into(),id.into()])]).await?;
+        Ok(if counts[0] == 1 {
+            MutationOutcome::Applied
+        } else {
+            MutationOutcome::Conflict
+        })
+    }
+    async fn settle_share_import_response(
+        &self,
+        r: ImportClaimReceipt,
+    ) -> Result<MutationOutcome, StoreError> {
+        let credential = r.credential.to_persist().map_err(|_| invalid())?.to_owned();
+        let counts=self.sharing_txn(vec![stmt("UPDATE sharing_imports SET remote_grant_id=$1,state=$2,claim_envelope=NULL,credential_envelope=$7,updated_at_ms=$3 WHERE id=$4 AND claim_id=$5 AND lifecycle_generation=$6 AND state IN ('claiming','pending') AND (remote_grant_id IS NULL OR remote_grant_id=$1)",vec![r.grant_id.into(),if r.active {"active".to_owned()}else{"pending".to_owned()}.into(),r.now_ms.into(),r.import_id.into(),r.claim_id.into(),r.lifecycle_generation.into(),credential.into()])]).await?;
+        Ok(if counts[0] == 1 {
+            MutationOutcome::Applied
+        } else {
+            MutationOutcome::Conflict
+        })
+    }
+    async fn settle_current_share_claim(
+        &self,
+        id: Uuid,
+        claim: Uuid,
+        lifecycle: i64,
+        grant: Uuid,
+        active: bool,
+        now: i64,
+    ) -> Result<MutationOutcome, StoreError> {
+        let counts = self.sharing_txn(vec![stmt("UPDATE sharing_imports SET remote_grant_id=$1,state=$2,claim_envelope=NULL,updated_at_ms=$3 WHERE id=$4 AND claim_id=$5 AND lifecycle_generation=$6 AND state IN ('claiming','pending') AND (remote_grant_id IS NULL OR remote_grant_id=$1)",vec![grant.into(),if active {"active".to_owned()}else{"pending".to_owned()}.into(),now.into(),id.into(),claim.into(),lifecycle.into()])]).await?;
+        Ok(if counts[0] == 1 {
+            MutationOutcome::Applied
+        } else {
+            MutationOutcome::Conflict
+        })
+    }
+    async fn fail_current_share_claim(
+        &self,
+        id: Uuid,
+        claim: Uuid,
+        lifecycle: i64,
+        now: i64,
+    ) -> Result<MutationOutcome, StoreError> {
+        let counts = self.sharing_txn(vec![stmt("UPDATE sharing_imports SET state='revoked',claim_envelope=NULL,lifecycle_generation=lifecycle_generation+1,updated_at_ms=$1 WHERE id=$2 AND claim_id=$3 AND lifecycle_generation=$4 AND lifecycle_generation<9223372036854775807 AND state IN ('claiming','pending')",vec![now.into(),id.into(),claim.into(),lifecycle.into()])]).await?;
         Ok(if counts[0] == 1 {
             MutationOutcome::Applied
         } else {
@@ -489,6 +770,14 @@ impl<T: Backend> SharingStore for T {
                 .collect::<std::collections::BTreeSet<_>>()
                 .len()
                 != assignments.len()
+            || assignments
+                .iter()
+                .fold(std::collections::BTreeMap::new(), |mut counts, a| {
+                    *counts.entry(&a.library_id).or_insert(0_usize) += 1;
+                    counts
+                })
+                .values()
+                .any(|count| *count > 256)
             || assignments
                 .iter()
                 .map(|a| &a.library_id)
@@ -542,6 +831,28 @@ impl<T: Backend> SharingStore for T {
         self.sharing_txn(vec![stmt("UPDATE sharing_imports SET state='disabled',lifecycle_generation=lifecycle_generation+1,
             updated_at_ms=$1 WHERE id=$2 AND state NOT IN ('disabled','revoked')",vec![now.into(),id.into()])]).await?;
         Ok(())
+    }
+    async fn sharing_import_rotation(
+        &self,
+        id: Uuid,
+    ) -> Result<Option<StoredImportRotation>, StoreError> {
+        #[derive(serde::Deserialize)]
+        struct Row {
+            request_id: Uuid,
+            credential: String,
+            expires_at_ms: i64,
+        }
+        let rows = self.sharing_read("SELECT json_object('request_id',r.request_id,'credential',r.credential_envelope,'expires_at_ms',r.expires_at_ms) AS payload FROM sharing_import_rotations r JOIN sharing_imports i ON i.id=r.import_id WHERE r.import_id=$1 AND i.state='active'",vec![id.into()]).await?;
+        rows.first()
+            .map(|row| {
+                let row: Row = decode(row)?;
+                Ok(StoredImportRotation {
+                    request_id: row.request_id,
+                    credential: SealedSecret::from_stored(row.credential),
+                    expires_at_ms: row.expires_at_ms,
+                })
+            })
+            .transpose()
     }
     async fn begin_share_import_rotation(
         &self,
@@ -621,8 +932,49 @@ impl<T: Backend> SharingStore for T {
                 &envelopes.iter().collect::<Vec<_>>(),
             );
         }
+        for envelope in revision_key_envelopes(self.sharing_revision_key_rows().await?)? {
+            census.observe_envelopes("catalogue-revision", &[&envelope]);
+        }
+        for envelope in revision_key_envelopes(self.sharing_file_locator_key_rows().await?)? {
+            census.observe_envelopes("file-locator", &[&envelope]);
+        }
+        for archived in
+            super::sharing_purpose_keys::archive_rows(self.sharing_purpose_archive_rows().await?)?
+        {
+            census.observe_envelopes("sharing-purpose-archive", &[&archived.sealed()]);
+        }
         Ok(census)
     }
+}
+
+const EXPORT_SUMMARY_JSON: &str = "json_object('grant',json_object('id',e.id,'recipient_server_id',e.recipient_server_id,'state',e.state,'scope_generation',e.scope_generation,'credential_generation',e.credential_generation,'catalogue_generation',e.catalogue_generation,'mutation_generation',e.mutation_generation,'pending_expires_at_ms',e.pending_expires_at_ms),'recipient_name',e.recipient_name,'invitation_id',e.invitation_id,'claim_id',i.claim_id,'library_ids',json((SELECT json_group_array(CAST(library_id AS TEXT)) FROM (SELECT library_id FROM sharing_export_libraries WHERE grant_id=e.id ORDER BY library_id))),'source_server_id',s.server_id,'verifier',e.token_hash)";
+const IMPORT_SUMMARY_JSON: &str = "json_object('id',i.id,'source_server_id',i.source_server_id,'catalogue_epoch',i.catalogue_epoch,'source_name',i.source_name,'claim_id',i.claim_id,'remote_grant_id',i.remote_grant_id,'state',i.state,'assignment_generation',i.assignment_generation,'lifecycle_generation',i.lifecycle_generation,'endpoint_generation',i.endpoint_generation,'observed_endpoint_revision',i.observed_endpoint_revision,'endpoints',json(i.endpoints_json))";
+fn export_summary(row: &str) -> Result<ExportSummary, StoreError> {
+    #[derive(serde::Deserialize)]
+    struct Row {
+        grant: ExportGrant,
+        recipient_name: String,
+        invitation_id: Uuid,
+        claim_id: Uuid,
+        library_ids: Vec<SourceId>,
+        source_server_id: Uuid,
+        verifier: String,
+    }
+    let row: Row = decode(row)?;
+    Ok(ExportSummary {
+        pairing_code: pairing_code(
+            row.source_server_id,
+            row.grant.recipient_server_id,
+            row.invitation_id,
+            row.claim_id,
+            &row.verifier,
+        ),
+        grant: row.grant,
+        recipient_name: row.recipient_name,
+        invitation_id: row.invitation_id,
+        claim_id: row.claim_id,
+        library_ids: row.library_ids,
+    })
 }
 
 /// A restored image can contain an older revocation state. Retain ciphertext
@@ -638,6 +990,7 @@ pub(crate) fn fence_restored_sharing(connection: &rusqlite::Connection) -> Resul
         return Ok(());
     }
     let tx = connection.unchecked_transaction()?;
+    super::sharing_purpose_keys::archive_for_restore(&tx)?;
     tx.execute("INSERT INTO settings(key,value) VALUES('sharing_enabled','false') ON CONFLICT(key) DO UPDATE SET value='false'",[])?;
     tx.execute("UPDATE sharing_exports SET state='revoked',scope_generation=scope_generation+1,mutation_generation=mutation_generation+1 WHERE state!='revoked'",[])?;
     tx.execute(
@@ -649,4 +1002,143 @@ pub(crate) fn fence_restored_sharing(connection: &rusqlite::Connection) -> Resul
     tx.execute("DELETE FROM sharing_identity", [])?;
     tx.commit()?;
     Ok(())
+}
+
+fn assignment_snapshot(
+    id: Uuid,
+    rows: Vec<String>,
+) -> Result<Option<ImportAssignmentSnapshot>, StoreError> {
+    #[derive(serde::Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct Row {
+        import_id: String,
+        server_id: String,
+        catalogue_epoch: String,
+        lifecycle_generation: i64,
+        expected_assignment_generation: i64,
+        state: String,
+        library_id: Option<SourceId>,
+        user_id: Option<i64>,
+        enabled: Option<i64>,
+        user_exists: i64,
+    }
+    fn canonical(value: &str) -> Result<Uuid, StoreError> {
+        let uuid = Uuid::parse_str(value).map_err(|_| invalid())?;
+        if uuid.is_nil() || uuid.to_string() != value {
+            return Err(invalid());
+        }
+        Ok(uuid)
+    }
+    if rows.len() > MAX_LIBRARIES * 256 {
+        return Err(invalid());
+    }
+    let mut snapshot = None;
+    let mut groups = std::collections::BTreeMap::<SourceId, std::collections::BTreeSet<i64>>::new();
+    let mut empty = false;
+    let row_count = rows.len();
+    for raw in rows {
+        let row: Row = decode(&raw)?;
+        let metadata = ImportAssignmentSnapshot {
+            import_id: canonical(&row.import_id)?,
+            server_id: canonical(&row.server_id)?,
+            catalogue_epoch: canonical(&row.catalogue_epoch)?,
+            lifecycle_generation: row.lifecycle_generation,
+            expected_assignment_generation: row.expected_assignment_generation,
+            state: row.state,
+            assignments: vec![],
+        };
+        if metadata.import_id != id
+            || metadata.lifecycle_generation < 1
+            || metadata.expected_assignment_generation < 1
+            || !matches!(
+                metadata.state.as_str(),
+                "claiming" | "pending" | "active" | "disabled" | "revoked"
+            )
+            || snapshot.as_ref().is_some_and(|old| old != &metadata)
+        {
+            return Err(invalid());
+        }
+        snapshot.get_or_insert(metadata);
+        match (row.library_id, row.user_id, row.enabled, row.user_exists) {
+            (None, None, None, 0) if row_count == 1 => empty = true,
+            (Some(library), Some(user), Some(1), 1) if user >= 0 && !empty => {
+                let users = groups.entry(library).or_default();
+                if !users.insert(user) || users.len() > 256 || groups.len() > MAX_LIBRARIES {
+                    return Err(invalid());
+                }
+            }
+            _ => return Err(invalid()),
+        }
+    }
+    if let Some(snapshot) = snapshot.as_mut() {
+        snapshot.assignments = groups
+            .into_iter()
+            .map(|(library_id, users)| ImportAssignmentGroup {
+                library_id,
+                user_ids: users.into_iter().collect(),
+            })
+            .collect();
+    }
+    Ok(snapshot)
+}
+
+#[cfg(test)]
+mod assignment_snapshot_tests {
+    use super::*;
+    #[test]
+    fn sharing_assignment_snapshot_refuses_corruption_and_incomplete_matrices() {
+        let id = Uuid::new_v4();
+        let row = serde_json::json!({"import_id":id,"server_id":Uuid::new_v4(),"catalogue_epoch":Uuid::new_v4(),"lifecycle_generation":1,"expected_assignment_generation":9007199254740993_i64,"state":"active","library_id":"9007199254740993","user_id":9007199254740993_i64,"enabled":1,"user_exists":1});
+        let snapshot = assignment_snapshot(id, vec![row.to_string()])
+            .expect("lossless snapshot")
+            .expect("import");
+        assert_eq!(snapshot.expected_assignment_generation, 9007199254740993);
+        assert_eq!(snapshot.assignments[0].user_ids, vec![9007199254740993]);
+        for (key, value) in [
+            ("library_id", serde_json::json!("01")),
+            ("enabled", serde_json::json!(0)),
+            ("user_exists", serde_json::json!(0)),
+            ("state", serde_json::json!("unknown")),
+            ("lifecycle_generation", serde_json::json!(0)),
+            ("server_id", serde_json::json!(Uuid::nil())),
+            ("user_id", serde_json::json!(-1)),
+        ] {
+            let mut bad = row.clone();
+            bad[key] = value;
+            assert!(
+                assignment_snapshot(id, vec![bad.to_string()]).is_err(),
+                "{key}"
+            );
+        }
+        assert!(assignment_snapshot(id, vec![row.to_string(); 2]).is_err());
+        let mut next = row.clone();
+        next["expected_assignment_generation"] = serde_json::json!(2);
+        assert!(assignment_snapshot(id, vec![row.to_string(), next.to_string()]).is_err());
+        let mut too_many_users = vec![];
+        for user in 0..257 {
+            let mut value = row.clone();
+            value["user_id"] = serde_json::json!(user);
+            too_many_users.push(value.to_string());
+        }
+        assert!(assignment_snapshot(id, too_many_users).is_err());
+        let mut too_many_libraries = vec![];
+        for library in 0..65 {
+            let mut value = row.clone();
+            value["library_id"] = serde_json::json!(library.to_string());
+            too_many_libraries.push(value.to_string());
+        }
+        assert!(assignment_snapshot(id, too_many_libraries).is_err());
+        assert!(assignment_snapshot(id, vec![row.to_string(); 16385]).is_err());
+        let mut empty = row;
+        empty["library_id"] = serde_json::Value::Null;
+        empty["user_id"] = serde_json::Value::Null;
+        empty["enabled"] = serde_json::Value::Null;
+        empty["user_exists"] = serde_json::json!(0);
+        assert!(assignment_snapshot(id, vec![empty.to_string()])
+            .expect("empty")
+            .expect("import")
+            .assignments
+            .is_empty());
+        assert!(assignment_snapshot(id, vec![empty.to_string(); 2]).is_err());
+    }
 }

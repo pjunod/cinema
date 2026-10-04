@@ -90,6 +90,7 @@ fun HomeScreen(
     onOpenLiveTv: () -> Unit = {},
     onOpenRecordings: () -> Unit = {},
     onOpenLibraryChannels: () -> Unit = {},
+    onOpenSharedLibraries: () -> Unit = {},
 ) {
     val state by vm.home.collectAsStateWithLifecycle()
     val preferences by vm.preferences.collectAsStateWithLifecycle()
@@ -112,6 +113,8 @@ fun HomeScreen(
             onOpenRecordings = onOpenRecordings,
             onOpenLibraryChannels = onOpenLibraryChannels,
         )
+
+        SharedLibrariesEntry(onOpenSharedLibraries)
 
         when {
             // Only a cold start gets a spinner. Once anything has arrived the

@@ -84,7 +84,7 @@ pub async fn open_store(config: &Config) -> Result<StoreHandle, StoreError> {
         );
     }
 
-    let credential_key = open_credential_key_for(config, &sqlite).await?;
+    let credential_key = open_credential_key_for(config, &sqlite, &identity).await?;
     sqlite.migrate_trakt_credentials(&credential_key).await?;
 
     Ok(StoreHandle {
@@ -109,12 +109,33 @@ pub async fn open_store(config: &Config) -> Result<StoreHandle, StoreError> {
 async fn open_credential_key_for(
     config: &Config,
     sqlite: &SqliteStore,
+    identity: &ClusterIdentity,
 ) -> Result<CredentialKey, StoreError> {
+    use crate::store::SharingPurposeKeyStore;
+    #[cfg(feature = "hiqlite-store")]
+    let claim = crate::store::sharing_purpose_keys::begin_local_census(
+        sqlite,
+        identity,
+        i64::try_from(
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_err(|_| crate::sharing::invalid())?
+                .as_millis(),
+        )
+        .map_err(|_| crate::sharing::invalid())?,
+    )
+    .await?;
+    #[cfg(not(feature = "hiqlite-store"))]
+    let _ = identity;
+    sqlite.inspect_sharing_purpose_material().await?;
     let path = config.cluster.credential_key_path(&config.storage.data_dir);
     let mut census = sqlite.sealed_trakt_row_census().await?;
     census.merge(sqlite.sharing_sealed_census().await?);
     let key = secrets::open_credential_key(&path, &census)
         .map_err(|error| StoreError::Identity(error.to_string()))?;
+    sqlite.verify_sharing_purpose_material(&key).await?;
+    #[cfg(feature = "hiqlite-store")]
+    crate::store::sharing_purpose_keys::finish_census(sqlite, claim).await?;
     tracing::debug!(
         key_id = %key.id(),
         wrapped_rows = census.sealed_rows(),
@@ -531,6 +552,162 @@ mod tests {
             .into_iter()
             .next()
             .expect("one linked account")
+    }
+
+    #[cfg(feature = "hiqlite-store")]
+    #[tokio::test]
+    async fn sharing_purpose_startup_preserves_keys_and_retains_failed_census_without_minting() {
+        use crate::store::{sharing::Backend, SharingStore};
+        let directory = tempfile::tempdir().expect("startup directory");
+        let config = config_for(directory.path());
+        let handle = open_store(&config).await.expect("real fresh startup");
+        let master = handle.credential_key.clone();
+        drop(handle);
+        let store =
+            SqliteStore::open(&directory.path().join("plurx.db")).expect("explicit fixture writer");
+        let identity = store.sharing_identity(1000).await.expect("Source identity");
+        let source = crate::sharing_catalogue_details::CatalogueRevisionKey::generate_sealed(
+            &master,
+            identity.clone(),
+        )
+        .expect("Source key");
+        let receiver =
+            crate::sharing_file_locators::FileLocatorKey::generate_sealed(&master, &identity)
+                .expect("B key");
+        let mut statements = Vec::new();
+        for schema in [
+            crate::store::sharing_purpose_keys::SHARING_PURPOSE_KEYS_SCHEMA,
+            crate::store::sharing_catalogue_source::CANDIDATE_REVISION_KEY_SCHEMA,
+            crate::store::sharing_file_locators::CANDIDATE_FILE_LOCATOR_KEY_SCHEMA,
+        ] {
+            let schema = schema
+                .lines()
+                .filter(|line| !line.trim_start().starts_with("--"))
+                .collect::<Vec<_>>()
+                .join("\n");
+            statements.extend(
+                schema
+                    .split(';')
+                    .map(str::trim)
+                    .filter(|line| !line.is_empty())
+                    .map(|sql| {
+                        (
+                            sql.replace("CREATE TABLE ", "CREATE TABLE IF NOT EXISTS "),
+                            vec![],
+                        )
+                    }),
+            );
+        }
+        statements.extend([
+            (
+                "INSERT INTO sharing_catalogue_keys VALUES(1,$1,$2,$3)".to_owned(),
+                vec![
+                    identity.server_id.into(),
+                    identity.catalogue_epoch.into(),
+                    source.as_stored().to_owned().into(),
+                ],
+            ),
+            (
+                "INSERT INTO sharing_file_locator_keys VALUES(1,$1,$2,$3)".to_owned(),
+                vec![
+                    identity.server_id.into(),
+                    identity.catalogue_epoch.into(),
+                    receiver.as_stored().to_owned().into(),
+                ],
+            ),
+            (
+                "INSERT INTO sharing_purpose_key_installation VALUES(1,$1,$2,$3,'ready',1,1000)"
+                    .to_owned(),
+                vec![
+                    identity.server_id.into(),
+                    identity.catalogue_epoch.into(),
+                    master.id().to_owned().into(),
+                ],
+            ),
+            (
+                "INSERT INTO sharing_purpose_transaction_guard VALUES(1,1)".to_owned(),
+                vec![],
+            ),
+        ]);
+        store
+            .sharing_txn(statements)
+            .await
+            .expect("candidate provision only");
+        assert!(
+            migration::prepare_sqlite_import(directory.path()).is_err(),
+            "legacy importer refuses installed purpose material"
+        );
+        assert!(store
+            .sharing_revision_key_rows()
+            .await
+            .expect("unmodified installed ciphertext")[0]
+            .contains(source.as_stored()));
+        let reopened = open_store(&config)
+            .await
+            .expect("actual restart opens all purpose material");
+        assert_eq!(reopened.credential_key.id(), master.id());
+        drop(reopened);
+        let path = config.cluster.credential_key_path(directory.path());
+        let retained = directory.path().join("retained-master");
+        std::fs::rename(&path, &retained).expect("simulate lost master file");
+        assert!(open_store(&config).await.is_err());
+        assert!(
+            !path.exists(),
+            "failed purpose census never creates a replacement master"
+        );
+        assert_eq!(
+            store
+                .sharing_read(
+                    "SELECT json_array(count(*)) AS payload FROM sharing_purpose_census_intents",
+                    vec![]
+                )
+                .await
+                .expect("durable failed ownership"),
+            ["[1]"]
+        );
+        std::fs::rename(&retained, &path).expect("restore exact selected master");
+        let restarted = open_store(&config)
+            .await
+            .expect("same real node replaces its failed boot attempt");
+        assert_eq!(restarted.credential_key.id(), master.id());
+        assert_eq!(
+            store
+                .sharing_read(
+                    "SELECT json_array(count(*)) AS payload FROM sharing_purpose_census_intents",
+                    vec![]
+                )
+                .await
+                .expect("exact successful release"),
+            ["[0]"]
+        );
+        assert!(store
+            .sharing_revision_key_rows()
+            .await
+            .expect("preserved Source row")[0]
+            .contains(source.as_stored()));
+        drop(restarted);
+        std::fs::rename(&path, &retained).expect("lost file plus partial purpose image");
+        store
+            .sharing_txn(vec![(
+                "DELETE FROM sharing_file_locator_keys".into(),
+                vec![],
+            )])
+            .await
+            .expect("partial fixture");
+        assert!(
+            migration::prepare_sqlite_import(directory.path()).is_err(),
+            "legacy importer also refuses partial purpose material"
+        );
+        assert!(store
+            .sharing_revision_key_rows()
+            .await
+            .expect("partial ciphertext retained")[0]
+            .contains(source.as_stored()));
+        assert!(open_store(&config).await.is_err());
+        assert!(
+            !path.exists(),
+            "layout refusal precedes possible file creation"
+        );
     }
 
     #[tokio::test]

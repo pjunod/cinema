@@ -307,7 +307,7 @@ async fn sharing_import_assignment_cas_and_user_lifetime() {
         };
         let i = NewImport {
             id: import,
-            source,
+            source: source.clone(),
             source_name: "Synthetic source".into(),
             claim_id: Uuid::new_v4(),
             credential: key
@@ -469,6 +469,29 @@ async fn sharing_import_assignment_cas_and_user_lifetime() {
                 .expect("synthetic sharing fixture"),
             MutationOutcome::Applied
         );
+        let snapshot = s
+            .sharing_import_assignments(import)
+            .await
+            .expect("complete assignments")
+            .expect("import");
+        assert_eq!(snapshot.import_id, import);
+        assert_eq!(snapshot.server_id, source.server_id);
+        assert_eq!(snapshot.catalogue_epoch, source.catalogue_epoch);
+        assert_eq!(snapshot.lifecycle_generation, 1);
+        assert_eq!(snapshot.expected_assignment_generation, 2);
+        assert_eq!(snapshot.state, "active");
+        assert_eq!(
+            snapshot.assignments,
+            vec![ImportAssignmentGroup {
+                library_id: library.clone(),
+                user_ids: vec![user.id]
+            }]
+        );
+        assert!(s
+            .sharing_import_assignments(Uuid::new_v4())
+            .await
+            .expect("missing snapshot")
+            .is_none());
         let original = s
             .authorize_share_viewer(import, library.clone(), user.id)
             .await
@@ -491,6 +514,13 @@ async fn sharing_import_assignment_cas_and_user_lifetime() {
             .await
             .expect("synthetic sharing fixture")
             .is_none());
+        let empty = s
+            .sharing_import_assignments(import)
+            .await
+            .expect("empty snapshot")
+            .expect("existing import");
+        assert_eq!(empty.expected_assignment_generation, 3);
+        assert!(empty.assignments.is_empty());
         s.assign_share_viewers(import, 3, assignments, 1005)
             .await
             .expect("synthetic sharing fixture");
@@ -717,4 +747,536 @@ async fn sharing_populated_sqlite_import_preserves_sealed_credentials_and_viewer
         census,
         source.sharing_sealed_census().await.expect("source census")
     );
+}
+
+#[tokio::test]
+async fn sharing_endpoint_cas_and_re_pair_preserve_private_viewer_identity() {
+    for_each_backend(|s, backend| async move {
+        let local = s.sharing_identity(1000).await.expect("local identity");
+        let lib = library(s.as_ref(), "Sharing status fixture").await;
+        let invite = invitation(s.as_ref(), vec![lib], 2000).await;
+        let claim = claim(&invite);
+        let grant = match s.claim_share(claim.clone()).await.expect("claim") {
+            ClaimOutcome::Created(grant) => grant,
+            other => panic!("{backend}: {other:?}"),
+        };
+        let exports = s.sharing_exports(None).await.expect("bounded export page");
+        assert_eq!(exports.len(), 1, "{backend}");
+        assert_eq!(exports[0].grant.id, grant.id);
+        assert_eq!(
+            exports[0].library_ids,
+            vec![SourceId::parse(&lib.to_string()).expect("library wire ID")]
+        );
+        assert_eq!(
+            exports[0].pairing_code,
+            pairing_code(
+                local.server_id,
+                claim.recipient_server_id,
+                invite.id,
+                claim.claim_id,
+                &claim.credential_hash
+            )
+        );
+        assert!(s
+            .sharing_exports(Some(grant.id))
+            .await
+            .expect("keyset continuation")
+            .is_empty());
+        let status = s
+            .sharing_grant_status(&claim.credential_hash)
+            .await
+            .expect("own grant status")
+            .expect("pending status");
+        assert_eq!(status.grant.id, grant.id);
+        assert!(s
+            .sharing_grant_status(&hash(9))
+            .await
+            .expect("wrong credential")
+            .is_none());
+        assert!(!serde_json::to_string(&status)
+            .expect("public grant DTO")
+            .contains(&claim.credential_hash));
+        let endpoint = Endpoint {
+            ipv4: "100.101.102.103".parse().expect("synthetic address"),
+            ipv6: None,
+            ts_fqdn: "source.example.ts.net".into(),
+            port: 32443,
+            spki_sha256: hash(7),
+        };
+        assert_eq!(
+            s.set_sharing_endpoint_manifest(0, vec![endpoint.clone()])
+                .await
+                .expect("first approval"),
+            MutationOutcome::Applied
+        );
+        assert_eq!(
+            s.set_sharing_endpoint_manifest(0, vec![endpoint.clone()])
+                .await
+                .expect("stale initial approval"),
+            MutationOutcome::Conflict
+        );
+        assert_eq!(
+            s.set_sharing_endpoint_manifest(1, vec![endpoint.clone()])
+                .await
+                .expect("next approval"),
+            MutationOutcome::Applied
+        );
+        assert_eq!(
+            s.sharing_endpoint_manifest()
+                .await
+                .expect("approved manifest")
+                .expect("manifest")
+                .revision,
+            2
+        );
+        let mut invalid_endpoint = endpoint.clone();
+        invalid_endpoint.ipv4 = "192.168.1.1".parse().expect("untrusted LAN address");
+        assert!(s
+            .set_sharing_endpoint_manifest(2, vec![invalid_endpoint])
+            .await
+            .is_err());
+        let key = plurx_core::secrets::CredentialKey::generate();
+        let source = SharingIdentity {
+            server_id: Uuid::new_v4(),
+            catalogue_epoch: Uuid::new_v4(),
+            created_at_ms: 1000,
+        };
+        let id = Uuid::new_v4();
+        let import = NewImport {
+            id,
+            source: source.clone(),
+            source_name: "Synthetic source".into(),
+            claim_id: Uuid::new_v4(),
+            credential: key
+                .seal_sharing(
+                    SharingSecretPurpose::Credential,
+                    local.server_id,
+                    id,
+                    "synthetic credential",
+                )
+                .expect("seal credential"),
+            claim_secret: key
+                .seal_sharing(
+                    SharingSecretPurpose::Claim,
+                    local.server_id,
+                    id,
+                    "synthetic invitation",
+                )
+                .expect("seal claim"),
+            endpoints: vec![endpoint.clone()],
+            now_ms: 1000,
+        };
+        assert_eq!(
+            s.create_share_import(import.clone()).await.expect("import"),
+            ImportOutcome::Created
+        );
+        let stored = s
+            .sharing_import(id)
+            .await
+            .expect("read import")
+            .expect("stored import");
+        assert_eq!(
+            key.open_sharing(
+                SharingSecretPurpose::Credential,
+                local.server_id,
+                id,
+                &stored.credential
+            )
+            .expect("open credential")
+            .expose(),
+            "synthetic credential"
+        );
+        assert!(stored.claim.is_some());
+        assert_eq!(s.sharing_imports().await.expect("status list").len(), 1);
+        assert_eq!(
+            s.set_sharing_import_endpoints(id, 1, vec![endpoint.clone()], Some(2), 1001)
+                .await
+                .expect("new manifest"),
+            MutationOutcome::Applied
+        );
+        assert_eq!(
+            s.set_sharing_import_endpoints(id, 2, vec![endpoint.clone()], Some(1), 1001)
+                .await
+                .expect("old source revision"),
+            MutationOutcome::Conflict
+        );
+        assert_eq!(
+            s.set_sharing_import_endpoints(id, 2, vec![endpoint.clone()], None, 1001)
+                .await
+                .expect("admin address edit"),
+            MutationOutcome::Applied
+        );
+        assert_eq!(
+            s.set_sharing_import_endpoints(id, 2, vec![endpoint.clone()], Some(3), 1001)
+                .await
+                .expect("stale local CAS"),
+            MutationOutcome::Conflict
+        );
+        assert_eq!(
+            s.set_sharing_import_endpoints(id, 3, vec![endpoint], Some(3), 1001)
+                .await
+                .expect("fresh local and source generations"),
+            MutationOutcome::Applied
+        );
+        let updated = s
+            .sharing_import(id)
+            .await
+            .expect("updated import")
+            .expect("import");
+        assert_eq!(updated.summary.endpoint_generation, 4);
+        assert_eq!(updated.summary.observed_endpoint_revision, Some(3));
+        s.settle_share_claim(id, Uuid::new_v4(), true, 1002)
+            .await
+            .expect("activate");
+        let user = s
+            .create_user("sharing-status-viewer", "synthetic password hash", false)
+            .await
+            .expect("viewer");
+        let remote_library = SourceId::parse("9007199254740993").expect("large source ID");
+        s.assign_share_viewers(
+            id,
+            1,
+            vec![Assignment {
+                library_id: remote_library.clone(),
+                user_id: user.id,
+            }],
+            1002,
+        )
+        .await
+        .expect("assign");
+        let original_viewer = s
+            .authorize_share_viewer(id, remote_library.clone(), user.id)
+            .await
+            .expect("viewer authority")
+            .expect("pseudonym");
+        s.disable_share_import(id, 1003).await.expect("disable");
+        let mut replacement = import;
+        replacement.claim_id = Uuid::new_v4();
+        replacement.now_ms = 1004;
+        let mut other_source = replacement.clone();
+        other_source.source.catalogue_epoch = Uuid::new_v4();
+        assert_eq!(
+            s.re_pair_share_import(other_source, 2)
+                .await
+                .expect("identity substitution"),
+            MutationOutcome::Conflict
+        );
+        let (one, two) = tokio::join!(
+            s.re_pair_share_import(replacement.clone(), 2),
+            s.re_pair_share_import(replacement, 2)
+        );
+        let outcomes = [one.expect("first retry"), two.expect("second retry")];
+        assert_eq!(
+            outcomes
+                .iter()
+                .filter(|o| **o == MutationOutcome::Applied)
+                .count(),
+            1
+        );
+        assert_eq!(
+            outcomes
+                .iter()
+                .filter(|o| **o == MutationOutcome::Conflict)
+                .count(),
+            1
+        );
+        let pending = s
+            .sharing_import(id)
+            .await
+            .expect("new lifecycle")
+            .expect("retained import");
+        assert_eq!(pending.summary.lifecycle_generation, 3);
+        assert_eq!(pending.summary.state, "claiming");
+        assert!(pending.summary.remote_grant_id.is_none());
+        assert_eq!(pending.summary.assignment_generation, 3);
+        assert!(s
+            .authorize_share_viewer(id, remote_library.clone(), user.id)
+            .await
+            .expect("claiming cannot deliver")
+            .is_none());
+        let grant = Uuid::new_v4();
+        assert_eq!(
+            s.settle_current_share_claim(id, Uuid::new_v4(), 3, grant, true, 1005)
+                .await
+                .expect("old claim response"),
+            MutationOutcome::Conflict
+        );
+        assert_eq!(
+            s.settle_current_share_claim(id, pending.summary.claim_id, 1, grant, true, 1005)
+                .await
+                .expect("old lifecycle response"),
+            MutationOutcome::Conflict
+        );
+        assert_eq!(
+            s.fail_current_share_claim(id, pending.summary.claim_id, 1, 1005)
+                .await
+                .expect("old lifecycle failure"),
+            MutationOutcome::Conflict
+        );
+        let confirmed = key
+            .seal_sharing(
+                SharingSecretPurpose::Credential,
+                local.server_id,
+                id,
+                "credential with confirmed immutable pending expiry",
+            )
+            .expect("seal confirmed receipt");
+        let receipt = ImportClaimReceipt {
+            import_id: id,
+            claim_id: pending.summary.claim_id,
+            lifecycle_generation: 3,
+            grant_id: grant,
+            active: true,
+            credential: confirmed.clone(),
+            now_ms: 1005,
+        };
+        let mut stale = receipt.clone();
+        stale.lifecycle_generation = 1;
+        assert_eq!(
+            s.settle_share_import_response(stale)
+                .await
+                .expect("stale receipt"),
+            MutationOutcome::Conflict
+        );
+        let unchanged = s
+            .sharing_import(id)
+            .await
+            .expect("unchanged import")
+            .expect("import");
+        assert_eq!(
+            unchanged.credential.to_persist().expect("ciphertext"),
+            pending
+                .credential
+                .to_persist()
+                .expect("original ciphertext")
+        );
+        assert_eq!(
+            s.settle_share_import_response(receipt.clone())
+                .await
+                .expect("activate repaired import"),
+            MutationOutcome::Applied
+        );
+        assert_eq!(
+            s.assign_share_viewers(id, 2, vec![], 1006)
+                .await
+                .expect("pre-repair stale matrix"),
+            MutationOutcome::Conflict
+        );
+        let repaired = s
+            .sharing_import_assignments(id)
+            .await
+            .expect("repaired matrix")
+            .expect("import");
+        assert_eq!(repaired.expected_assignment_generation, 3);
+        assert_eq!(repaired.lifecycle_generation, 3);
+        assert_eq!(
+            repaired.assignments,
+            vec![ImportAssignmentGroup {
+                library_id: remote_library.clone(),
+                user_ids: vec![user.id]
+            }]
+        );
+        let settled = s
+            .sharing_import(id)
+            .await
+            .expect("confirmed import")
+            .expect("import");
+        assert_eq!(
+            settled.credential.to_persist().expect("ciphertext"),
+            confirmed.to_persist().expect("confirmed ciphertext")
+        );
+        let mut delayed = receipt;
+        delayed.active = false;
+        assert_eq!(
+            s.settle_share_import_response(delayed)
+                .await
+                .expect("late pending response"),
+            MutationOutcome::Conflict
+        );
+        assert_eq!(
+            s.sharing_import(id)
+                .await
+                .expect("active import")
+                .expect("import")
+                .summary
+                .state,
+            "active"
+        );
+        assert_eq!(
+            s.authorize_share_viewer(id, remote_library, user.id)
+                .await
+                .expect("retained viewer identity")
+                .as_deref(),
+            Some(original_viewer.as_str())
+        );
+        assert!(s
+            .sharing_import(id)
+            .await
+            .expect("settled import")
+            .expect("import")
+            .claim
+            .is_none());
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn sharing_capacity_refusals_preserve_existing_authority_and_reopen_expired_slots() {
+    for_each_backend(|store, backend| async move {
+        let lib = library(store.as_ref(), "Capacity fixture").await;
+        let mut invitations = Vec::new();
+        for n in 0..32 {
+            let record = InvitationRecord {
+                id: Uuid::new_v4(),
+                token_hash: hash(n),
+                library_ids: vec![lib],
+                created_at_ms: 1000,
+                expires_at_ms: 2000,
+            };
+            assert_eq!(
+                store
+                    .create_share_invitation(record.clone())
+                    .await
+                    .expect("fill invitation slots"),
+                MutationOutcome::Applied,
+                "{backend}"
+            );
+            invitations.push(record);
+        }
+        let overflow = InvitationRecord {
+            id: Uuid::new_v4(),
+            token_hash: hash(40),
+            library_ids: vec![lib],
+            created_at_ms: 1001,
+            expires_at_ms: 3000,
+        };
+        assert_eq!(
+            store
+                .create_share_invitation(overflow.clone())
+                .await
+                .expect("bounded invitations"),
+            MutationOutcome::Capacity,
+            "{backend}"
+        );
+        assert_eq!(
+            store
+                .create_share_invitation(invitations[0].clone())
+                .await
+                .expect("duplicate remains conflict"),
+            MutationOutcome::Conflict
+        );
+        store
+            .cancel_share_invitation(invitations[0].id)
+            .await
+            .expect("cancel releases slot");
+        assert_eq!(
+            store
+                .create_share_invitation(overflow)
+                .await
+                .expect("reuse canceled slot"),
+            MutationOutcome::Applied
+        );
+        let after_expiry = InvitationRecord {
+            id: Uuid::new_v4(),
+            token_hash: hash(41),
+            library_ids: vec![lib],
+            created_at_ms: 2000,
+            expires_at_ms: 3000,
+        };
+        assert_eq!(
+            store
+                .create_share_invitation(after_expiry)
+                .await
+                .expect("expired invitations release slots"),
+            MutationOutcome::Applied
+        );
+        let local = store.sharing_identity(1000).await.expect("local identity");
+        let directory = tempfile::tempdir().expect("disposable key directory");
+        let key = plurx_core::secrets::open_credential_key(
+            &directory.path().join("key"),
+            &Default::default(),
+        )
+        .expect("fixture key");
+        let make_import = || {
+            let id = Uuid::new_v4();
+            NewImport {
+                id,
+                source: SharingIdentity {
+                    server_id: Uuid::new_v4(),
+                    catalogue_epoch: Uuid::new_v4(),
+                    created_at_ms: 1000,
+                },
+                source_name: "Capacity source".into(),
+                claim_id: Uuid::new_v4(),
+                credential: key
+                    .seal_sharing(
+                        SharingSecretPurpose::Credential,
+                        local.server_id,
+                        id,
+                        "fixture credential",
+                    )
+                    .expect("seal credential"),
+                claim_secret: key
+                    .seal_sharing(
+                        SharingSecretPurpose::Claim,
+                        local.server_id,
+                        id,
+                        "fixture invitation",
+                    )
+                    .expect("seal invitation"),
+                endpoints: vec![Endpoint {
+                    ipv4: "100.101.102.103".parse().expect("fixture address"),
+                    ipv6: None,
+                    ts_fqdn: "source.example.ts.net".into(),
+                    port: 32443,
+                    spki_sha256: hash(7),
+                }],
+                now_ms: 1000,
+            }
+        };
+        let first = make_import();
+        assert_eq!(
+            store
+                .create_share_import(first.clone())
+                .await
+                .expect("first import"),
+            ImportOutcome::Created
+        );
+        for _ in 1..32 {
+            assert_eq!(
+                store
+                    .create_share_import(make_import())
+                    .await
+                    .expect("fill import slots"),
+                ImportOutcome::Created
+            );
+        }
+        assert_eq!(
+            store
+                .create_share_import(make_import())
+                .await
+                .expect("bounded imports"),
+            ImportOutcome::Capacity,
+            "{backend}"
+        );
+        let mut duplicate = first.clone();
+        duplicate.id = Uuid::new_v4();
+        duplicate.claim_id = Uuid::new_v4();
+        assert_eq!(
+            store
+                .create_share_import(duplicate)
+                .await
+                .expect("duplicate at capacity"),
+            ImportOutcome::AlreadyImported(first.id)
+        );
+        assert_eq!(
+            store
+                .sharing_imports()
+                .await
+                .expect("retained authority")
+                .len(),
+            32
+        );
+    })
+    .await;
 }

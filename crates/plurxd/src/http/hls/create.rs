@@ -34,7 +34,7 @@ fn candidate_refusal_reason(
 /// is a trap: GET is idempotent by definition, so anything entitled to replay
 /// one — a retry, a prefetch, an intermediary — could spawn a second encoder
 /// and orphan the first.
-#[derive(Deserialize)]
+#[derive(Deserialize, Serialize)]
 pub struct CreateSession {
     /// Stable for one player instance. Supersession is keyed by it, so two
     /// devices on one account no longer kill each other's streams.
@@ -1106,12 +1106,58 @@ pub(crate) struct PlanInputs<'a> {
 pub(crate) async fn resolve_plan(
     inputs: PlanInputs<'_>,
     review: Option<PlanReview>,
-    mut body: CreateSession,
+    body: CreateSession,
 ) -> Result<ResolvedPlan, ApiError> {
     let PlanInputs {
         snapshot,
         state,
         user_id,
+        file_id,
+        source,
+        network_prior,
+    } = inputs;
+    resolve_plan_for_principal(
+        FilePlanInputs {
+            snapshot,
+            state,
+            file_id,
+            source,
+            network_prior,
+        },
+        &plurx_core::playback_principal::PlaybackPrincipal::LocalUser { user_id },
+        review,
+        body,
+    )
+    .await
+}
+
+/// File planning has no implicit local-user identity. The normalized intent
+/// fingerprint belongs to the actual principal that will own the session.
+pub(crate) struct FilePlanInputs<'a> {
+    pub snapshot: Option<&'a plurx_core::store::PlaybackPlanningSnapshot>,
+    pub state: &'a AppState,
+    pub file_id: i64,
+    pub source: Option<&'a MediaFile>,
+    pub network_prior: Option<&'a plurx_core::domain::NetworkPrior>,
+}
+
+pub(crate) async fn resolve_plan_for_principal(
+    inputs: FilePlanInputs<'_>,
+    principal: &plurx_core::playback_principal::PlaybackPrincipal,
+    review: Option<PlanReview>,
+    mut body: CreateSession,
+) -> Result<ResolvedPlan, ApiError> {
+    if !principal.valid_admission_shape()
+        || matches!(
+            principal,
+            plurx_core::playback_principal::PlaybackPrincipal::Sharing { .. }
+        ) && inputs.network_prior.is_some()
+    {
+        return Err(ApiError::BadRequest("invalid planning principal".into()));
+    }
+    let FilePlanInputs {
+        snapshot,
+        state,
         file_id,
         source,
         network_prior,
@@ -1384,7 +1430,15 @@ pub(crate) async fn resolve_plan(
             "request_id must contain 1 to 128 characters".to_owned(),
         ));
     }
-    if !worker_session_request_is_valid(&request) {
+    let request_valid = match principal {
+        plurx_core::playback_principal::PlaybackPrincipal::Sharing { .. } => {
+            crate::media_sessions::source_session_request_is_valid(&request, principal)
+        }
+        plurx_core::playback_principal::PlaybackPrincipal::LocalUser { .. } => {
+            worker_session_request_is_valid(&request)
+        }
+    };
+    if !request_valid {
         return Err(ApiError::BadRequest(
             "media session request exceeds the supported cluster contract".to_owned(),
         ));
@@ -1393,7 +1447,7 @@ pub(crate) async fn resolve_plan(
     // retry of the same body recover the same session no matter which binary
     // answers it. Only after it is taken does the server's reconciliation
     // apply to the request that will actually be built.
-    let fingerprint = request.durable_intent_fingerprint(user_id);
+    let fingerprint = request.durable_intent_fingerprint(principal);
     let plan_notes = match review {
         Some(review) => apply_plan_review(&mut request, review),
         None => Vec::new(),
@@ -1618,7 +1672,9 @@ async fn create_with_purpose_inner(
             state
                 .store
                 .record_desired_selection(
-                    user.id,
+                    &plurx_core::playback_principal::PlaybackPrincipal::LocalUser {
+                        user_id: user.id,
+                    },
                     &req.playback_id,
                     &intent.digest(),
                     &selection.canonical_form(),
@@ -1826,7 +1882,7 @@ async fn create_with_purpose_inner(
     match state
         .store
         .claim_media_session_request(
-            user.id,
+            &plurx_core::playback_principal::PlaybackPrincipal::LocalUser { user_id: user.id },
             &request_claim_id,
             &fingerprint,
             &request.playback_id,
@@ -1914,7 +1970,7 @@ async fn create_with_purpose_inner(
             .and_then(Result::ok)
             .flatten()
             .filter(|route| {
-                route.user_id == user.id
+                route.principal.local_user_id() == Some(user.id)
                     && route.playback_id == request.playback_id
                     && route.request_fingerprint == fingerprint
                     && route.state == "active"
@@ -1938,7 +1994,9 @@ async fn create_with_purpose_inner(
                 let route = tokio::time::timeout_at(
                     publication_deadline,
                     state.store.publish_media_session_activation(
-                        user.id,
+                        &plurx_core::playback_principal::PlaybackPrincipal::LocalUser {
+                            user_id: user.id,
+                        },
                         &request_claim_id,
                         &in_flight_incarnation,
                         unix_ms(),
@@ -1993,7 +2051,7 @@ async fn create_with_purpose_inner(
     // same responsibility together with exact worker ownership.
     let mut request_guard = MediaSessionRequestGuard::new(
         state.clone(),
-        user.id,
+        plurx_core::playback_principal::PlaybackPrincipal::LocalUser { user_id: user.id },
         request_claim_id.clone(),
         incarnation_id.clone(),
     );
@@ -2100,7 +2158,9 @@ async fn create_with_purpose_inner(
             .flatten(),
         protocol_version: crate::media_pool::PROTOCOL_VERSION,
         incarnation_id: incarnation_id.clone(),
-        user_id: user.id,
+        principal: plurx_core::playback_principal::PlaybackPrincipal::LocalUser {
+            user_id: user.id,
+        },
         // The source snapshot a later takeover must match exactly (§7.3). A
         // row we could not read records an impossible snapshot rather than a
         // plausible one, so takeover refuses instead of reproducing a session
@@ -2121,7 +2181,7 @@ async fn create_with_purpose_inner(
         && !state
             .store
             .record_library_channel_session_recipe(
-                user.id,
+                &plurx_core::playback_principal::PlaybackPrincipal::LocalUser { user_id: user.id },
                 &request_claim_id,
                 &incarnation_id,
                 &recipe_json,
@@ -2143,7 +2203,10 @@ async fn create_with_purpose_inner(
     // pointer moves to the successor.
     let activation_predecessor = state
         .store
-        .media_session_route_for_playback(user.id, &request.playback_id)
+        .media_session_route_for_playback(
+            &plurx_core::playback_principal::PlaybackPrincipal::LocalUser { user_id: user.id },
+            &request.playback_id,
+        )
         .await
         .map_err(|error| session_store_error("reading the predecessor route", error))?;
     // One mint for this start, bound here rather than called twice.
@@ -2213,7 +2276,7 @@ async fn create_with_purpose_inner(
     {
         if let Some(route) = activation_predecessor.as_ref() {
             if route.session_id != previous_session_id
-                || route.user_id != user.id
+                || route.principal.local_user_id() != Some(user.id)
                 || route.state != "active"
                 || route.lease_expires_at_ms <= unix_ms()
             {
@@ -2315,7 +2378,9 @@ async fn create_with_purpose_inner(
             let guard_request = request_claim_id.clone();
             let guard_user = user.id;
             let worker_recovery = crate::transcode::SessionRecoveryIdentity {
-                user_id: user.id,
+                principal: plurx_core::playback_principal::PlaybackPrincipal::LocalUser {
+                    user_id: user.id,
+                },
                 incarnation_id: incarnation_id.clone(),
                 recovery_epoch: recovery_epoch.clone(),
             };
@@ -2343,7 +2408,9 @@ async fn create_with_purpose_inner(
                         guard_owner,
                         guard_incarnation,
                         session_id,
-                        guard_user,
+                        plurx_core::playback_principal::PlaybackPrincipal::LocalUser {
+                            user_id: guard_user,
+                        },
                         guard_request,
                         Some(replacement),
                     )
@@ -2353,7 +2420,9 @@ async fn create_with_purpose_inner(
                         guard_owner,
                         guard_incarnation,
                         session_id,
-                        guard_user,
+                        plurx_core::playback_principal::PlaybackPrincipal::LocalUser {
+                            user_id: guard_user,
+                        },
                         guard_request,
                         Some(replacement),
                     )
@@ -2408,7 +2477,9 @@ async fn create_with_purpose_inner(
                                 candidate.clone(),
                                 incarnation_id.clone(),
                                 started.info.session_id.clone(),
-                                user.id,
+                                plurx_core::playback_principal::PlaybackPrincipal::LocalUser {
+                                    user_id: user.id,
+                                },
                                 request_claim_id.clone(),
                             ))
                         }
@@ -2502,7 +2573,7 @@ async fn create_with_purpose_inner(
     match tokio::time::timeout(
         OWNER_ASSIGNMENT_DEADLINE,
         state.store.assign_media_session_request_owner(
-            user.id,
+            &plurx_core::playback_principal::PlaybackPrincipal::LocalUser { user_id: user.id },
             &request_claim_id,
             &incarnation_id,
             &owner_node_id,
@@ -2665,7 +2736,9 @@ async fn create_with_purpose_inner(
         expected_desired_revision: recorded_ask_revision,
         incarnation_id: incarnation_id.clone(),
         session_id: info.session_id.clone(),
-        user_id: user.id,
+        principal: plurx_core::playback_principal::PlaybackPrincipal::LocalUser {
+            user_id: user.id,
+        },
         playback_id: request.playback_id.clone(),
         expected_predecessor_incarnation_id: expected_predecessor_incarnation_id.clone(),
         fence_predecessor,
@@ -2831,7 +2904,7 @@ async fn create_with_purpose_inner(
     let published_route = tokio::time::timeout_at(
         publication_deadline,
         state.store.publish_media_session_activation(
-            user.id,
+            &plurx_core::playback_principal::PlaybackPrincipal::LocalUser { user_id: user.id },
             &request_claim_id,
             &incarnation_id,
             unix_ms(),
@@ -2889,7 +2962,7 @@ pub(super) fn route_matches_activation(
 ) -> bool {
     route.incarnation_id == activation.incarnation_id
         && route.session_id == activation.session_id
-        && route.user_id == activation.user_id
+        && route.principal == activation.principal
         && route.playback_id == activation.playback_id
         && route.request_fingerprint == activation.request_fingerprint
         && route.owner_node_id == activation.owner_node_id
@@ -2916,7 +2989,7 @@ fn replay_route_identity_matches(
 ) -> bool {
     current.incarnation_id == observed.incarnation_id
         && current.session_id == observed.session_id
-        && current.user_id == observed.user_id
+        && current.principal == observed.principal
         && current.playback_id == observed.playback_id
         && current.request_fingerprint == observed.request_fingerprint
         && current.recipe_json == observed.recipe_json
@@ -3424,12 +3497,15 @@ pub(in crate::http) async fn prime_live_prepared_session(
     let Some(admitted_generation) = authority.admit() else {
         return false;
     };
-    let user = match state.store.get_user(recipe.user_id).await {
+    let Some(user_id) = recipe.principal.local_user_id() else {
+        return false;
+    };
+    let user = match state.store.get_user(user_id).await {
         Ok(Some(user)) => user,
         _ => return false,
     };
     let recovery = crate::transcode::SessionRecoveryIdentity {
-        user_id: recipe.user_id,
+        principal: recipe.principal.clone(),
         incarnation_id: recipe.incarnation_id.clone(),
         recovery_epoch: recovery_epoch.to_owned(),
     };
@@ -3464,7 +3540,7 @@ pub(in crate::http) async fn prime_live_prepared_session(
             state.node_id.clone(),
             recipe.incarnation_id.clone(),
             info.session_id.clone(),
-            recipe.user_id,
+            recipe.principal.clone(),
             recipe.incarnation_id.clone(),
             Some(replacement),
         )
@@ -3474,7 +3550,7 @@ pub(in crate::http) async fn prime_live_prepared_session(
             state.node_id.clone(),
             recipe.incarnation_id.clone(),
             info.session_id.clone(),
-            recipe.user_id,
+            recipe.principal.clone(),
             recipe.incarnation_id.clone(),
             Some(replacement),
         )
@@ -4042,5 +4118,446 @@ mod quorum_candidate_tests {
             candidate_refusal_reason(&[row], Some(CandidateId([2; 16])), Some(1080), true),
             "catalogue_authority_unavailable"
         );
+    }
+}
+
+/// Full expected Source file identity. Construction does not authorize a read.
+#[allow(dead_code)]
+#[derive(Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct SourcePlaybackTarget {
+    pub server_id: uuid::Uuid,
+    pub catalogue_epoch: uuid::Uuid,
+    pub library_id: plurx_core::sharing::SourceId,
+    pub item_id: plurx_core::sharing::SourceId,
+    pub file_id: plurx_core::sharing::SourceId,
+    pub revision: plurx_core::sharing_catalogue_details::FileRevision,
+}
+
+/// Prepared by current Source authority and the actual shared planning engine.
+/// No wire constructor, serialization, local account, physical readiness or
+/// replicated-write authority is carried by this observation.
+#[allow(dead_code)]
+pub(crate) struct PreparedSourcePlayback {
+    target: SourcePlaybackTarget,
+    principal: plurx_core::playback_principal::PlaybackPrincipal,
+    file: MediaFile,
+    resolved: ResolvedPlan,
+    source_fingerprint: String,
+    original_selection: Option<plurx_core::playback::DesiredSelection>,
+    decision: super::super::stream::DecisionResponse,
+}
+#[allow(dead_code)]
+impl PreparedSourcePlayback {
+    pub(crate) fn original_selection(&self) -> Option<&plurx_core::playback::DesiredSelection> {
+        self.original_selection.as_ref()
+    }
+    pub(crate) fn request(&self) -> &crate::transcode::SessionRequest {
+        &self.resolved.request
+    }
+    pub(crate) fn file(&self) -> &MediaFile {
+        &self.file
+    }
+    pub(crate) fn decision(&self) -> &super::super::stream::DecisionResponse {
+        &self.decision
+    }
+    pub(crate) fn principal(&self) -> &plurx_core::playback_principal::PlaybackPrincipal {
+        &self.principal
+    }
+    pub(crate) fn plan_notes(&self) -> &[String] {
+        &self.resolved.plan_notes
+    }
+    pub(crate) fn native_subtitles(&self) -> (bool, Option<i64>) {
+        (
+            self.resolved.native_subtitles,
+            self.resolved.native_subtitle,
+        )
+    }
+    pub(crate) fn fingerprint(&self) -> &str {
+        &self.source_fingerprint
+    }
+    /// Build the complete durable HLS response from the admitted engine facts.
+    /// This describes the pending session; it grants neither readiness nor
+    /// publication authority. The actor persists it before attaching a reader.
+    pub(crate) async fn start_response(
+        &self,
+        state: &AppState,
+        info: &crate::transcode::StartInfo,
+        incarnation_id: &str,
+        owner_epoch: i64,
+    ) -> Result<StartResponse, ApiError> {
+        let refused = || {
+            ApiError::typed(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "sharing_playback_response_unavailable",
+                "Shared playback response is unavailable",
+            )
+        };
+        let canonical_uuid = |value: &str| {
+            uuid::Uuid::parse_str(value).is_ok_and(|id| {
+                id.get_version_num() == 4
+                    && id.get_variant() == uuid::Variant::RFC4122
+                    && id.to_string() == value
+            })
+        };
+        if !canonical_uuid(&info.session_id)
+            || !canonical_uuid(incarnation_id)
+            || info.kind != self.resolved.request.kind
+            || !info.start_seconds.is_finite()
+            || info.start_seconds < 0.0
+            || !info.media_origin_seconds.is_finite()
+            || info.media_origin_seconds < 0.0
+            || info.media_origin_seconds * 1000.0 >= i64::MAX as f64
+            || info.duration_ms.is_some_and(|duration| duration < 0)
+            || info.playlist_url != format!("/api/v1/hls/{}/index.m3u8", info.session_id)
+        {
+            return Err(refused());
+        }
+        let control = crate::playback_control::ControlBootstrap::new(
+            &info.session_id,
+            incarnation_id,
+            owner_epoch,
+            info.control_lease_timeout_ms,
+        )
+        .ok_or_else(refused)?;
+        let ladder_ceiling = state
+            .transcode
+            .capability_height_ceiling_for_request(Some(&self.file), self.resolved.request.hdr10)
+            .await;
+        let quality_negotiated = self.resolved.request.candidate_context.is_some();
+        let playlist_url = if self.resolved.native_subtitles {
+            let master = format!("/api/v1/hls/{}/master.m3u8", info.session_id);
+            match self.resolved.native_subtitle {
+                Some(index) => format!("{master}?subtitle={index}"),
+                None => master,
+            }
+        } else {
+            info.playlist_url.clone()
+        };
+        Ok(StartResponse {
+            quality_catalog_status: self.resolved.quality_catalog.as_ref().map(
+                |catalog| serde_json::json!({"complete":catalog.complete,"causes":catalog.causes}),
+            ),
+            display_aware_auto_protocol: quality_negotiated.then(|| "route-v1".to_owned()),
+            quality_candidate_id: self
+                .resolved
+                .request
+                .candidate_context
+                .as_ref()
+                .map(|context| context.candidate_id),
+            quality_candidates: quality_negotiated.then(|| {
+                self.resolved
+                    .quality_catalog
+                    .as_ref()
+                    .into_iter()
+                    .flat_map(|catalog| catalog.candidates.iter())
+                    .filter(|entry| {
+                        entry.dispatch_supported
+                            && (!entry.partial || entry.node_id == state.node_id)
+                    })
+                    .map(|entry| entry.candidate.clone())
+                    .collect()
+            }),
+            session_id: info.session_id.clone(),
+            playlist_url,
+            duration_ms: info.duration_ms,
+            start_seconds: info.start_seconds,
+            media_origin_ms: Some((info.media_origin_seconds * 1000.0).round() as i64),
+            height: info.target_height,
+            encoder: info.encoder.to_owned(),
+            vod: info.vod,
+            ladder: crate::transcode::advertised_ladder(self.file.height, ladder_ceiling),
+            prior_kbps: None,
+            delivered_dynamic_range: session_delivered_dynamic_range(
+                Some(&self.file),
+                &info.kind,
+                info.grade,
+            )
+            .map(str::to_owned),
+            delivered_dolby_vision_profile: session_delivered_dolby_vision_profile(
+                Some(&self.file),
+                &info.kind,
+            ),
+            control: Some(control),
+            plan_notes: self.resolved.plan_notes.clone(),
+        })
+    }
+
+    pub(crate) fn matches_assignment(
+        &self,
+        assignment: &plurx_core::sharing_source_sessions::SourceDispatchAssignment,
+    ) -> bool {
+        let binding = assignment.binding();
+        binding.principal() == &self.principal
+            && binding.source_server_id() == self.target.server_id
+            && binding.catalogue_epoch() == self.target.catalogue_epoch
+            && binding.library_id() == &self.target.library_id
+            && binding.item_id() == &self.target.item_id
+            && binding.file_id() == &self.target.file_id
+            && binding.file_revision() == &self.target.revision
+            && binding.playback_id() == self.resolved.request.playback_id
+            && Some(binding.request_id()) == self.resolved.request.request_id.as_deref()
+            && binding.request_fingerprint() == self.source_fingerprint
+    }
+}
+
+#[allow(dead_code)]
+pub(crate) async fn prepare_source_playback(
+    state: &AppState,
+    headers: &HeaderMap,
+    target: SourcePlaybackTarget,
+    body: CreateSession,
+) -> Result<PreparedSourcePlayback, ApiError> {
+    use plurx_core::{
+        sharing_catalogue_details::CatalogueRevisionKey,
+        store::sharing_catalogue_details::SourceDetailsRead,
+    };
+    let refused = |_stage: &str| {
+        #[cfg(test)]
+        eprintln!("Source preparation refused at {_stage}");
+        ApiError::typed(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "sharing_playback_authority_unavailable",
+            "Shared playback authority is unavailable",
+        )
+    };
+    if !crate::sharing::enabled(state.store.as_ref()).await?
+        || target.server_id.is_nil()
+        || target.catalogue_epoch.is_nil()
+        || !valid_playback_id(&body.playback_id)
+        || body
+            .request_id
+            .as_deref()
+            .is_none_or(|id| id.is_empty() || id.len() > 128 || id.chars().any(char::is_control))
+        || body
+            .presentation
+            .as_deref()
+            .is_some_and(|value| value != "vod")
+    {
+        return Err(refused("initial_body_switch"));
+    }
+    if let Some(intent) = body.intent.as_ref() {
+        intent
+            .validate()
+            .map_err(|error| ApiError::BadRequest(format!("intent: {error}")))?;
+    }
+    let caps = body
+        .caps
+        .as_ref()
+        .filter(|caps| caps.v == plurx_core::playback::DeviceCaps::VERSION && !caps.is_empty())
+        .cloned()
+        .ok_or_else(|| refused("caps"))?;
+    super::super::stream::validate_device_caps(&caps)?;
+    let (hash, grant) = super::super::shared_library::authority(state, headers).await?;
+    let viewer = headers
+        .get("cinemashare-viewer")
+        .and_then(|value| value.to_str().ok())
+        .ok_or_else(|| refused("viewer_header"))?;
+    let principal = plurx_core::playback_principal::PlaybackPrincipal::sharing(grant, viewer)
+        .map_err(|_| refused("viewer_shape"))?;
+    let read_witness = || {
+        state.store.source_item_file_witness(
+            &hash,
+            grant,
+            target.item_id.clone(),
+            target.file_id.clone(),
+        )
+    };
+    let SourceDetailsRead::Authorized(witness) = read_witness().await? else {
+        return Err(refused("current_witness"));
+    };
+    if !witness.matches_source_file(
+        target.server_id,
+        target.catalogue_epoch,
+        &target.library_id,
+        &target.item_id,
+        &target.file_id,
+    ) {
+        return Err(refused("witness_tuple"));
+    }
+    let envelope = state
+        .store
+        .source_catalogue_revision_key(target.server_id, target.catalogue_epoch)
+        .await?
+        .ok_or_else(|| refused("key_absent"))?;
+    let key = CatalogueRevisionKey::open(
+        &state.sharing.key,
+        plurx_core::sharing::SharingIdentity {
+            server_id: target.server_id,
+            catalogue_epoch: target.catalogue_epoch,
+            created_at_ms: 0,
+        },
+        &envelope,
+    )?;
+    if key.file_revision(&witness)? != target.revision {
+        return Err(refused("revision"));
+    }
+    // The ordinary file/planning store is entered only after the current grant
+    // query produced this exact Source tuple. Foreign B IDs never reach it.
+    let file_id = target
+        .file_id
+        .as_str()
+        .parse::<i64>()
+        .map_err(|_| refused("file_id"))?;
+    let snapshot = state
+        .store
+        .playback_planning_snapshot(file_id, &crate::transcode::QUALITY_PLANNING_KEYS)
+        .await?
+        .ok_or_else(|| refused("planning_snapshot"))?;
+    let file = snapshot.file.clone();
+    let q = super::super::stream::Caps {
+        caps_v2: Some(caps.clone()),
+        audio: body.audio,
+        subtitle: body.subtitle_burn.or(body.subtitle),
+        audio_offset_ms: body.audio_offset_ms,
+        force: body.overrides.as_ref().and_then(|o| o.force.clone()),
+        ..Default::default()
+    };
+    let decision = super::super::stream::decision_for_source_file(state, file.clone(), q).await?;
+    let node = super::super::stream::render_caps_from_snapshot(state, &snapshot);
+    let review = review_client_plan(
+        &caps,
+        body.overrides.as_ref(),
+        &file,
+        &node,
+        body.preserve_dolby_vision == Some(true),
+        body.hdr10 == Some(true),
+        unix_ms(),
+    );
+    let hdr10_requested = review.hdr10;
+    let original_selection = source_original_selection(&body);
+    let resolved = resolve_plan_for_principal(
+        FilePlanInputs {
+            snapshot: Some(&snapshot),
+            state,
+            file_id,
+            source: Some(&file),
+            network_prior: None,
+        },
+        &principal,
+        Some(review),
+        body,
+    )
+    .await?;
+    validate_hevc_copy_transport(state, &file, &caps, &resolved.request).await?;
+    if burn_would_discard_this_session_hdr(
+        state,
+        Some(&file),
+        &resolved.request,
+        hdr10_requested,
+        resolved.height,
+    )
+    .await
+    {
+        return Err(ApiError::Unprocessable(
+            serde_json::json!({"code":"hdr_subtitle_burn_refused","error":HDR_SUBTITLE_BURN_REFUSAL}),
+        ));
+    }
+    let SourceDetailsRead::Authorized(current) = read_witness().await? else {
+        return Err(refused("final_witness"));
+    };
+    if !current.matches_source_file(
+        target.server_id,
+        target.catalogue_epoch,
+        &target.library_id,
+        &target.item_id,
+        &target.file_id,
+    ) || key.file_revision(&current)? != target.revision
+        || !crate::sharing::enabled(state.store.as_ref()).await?
+        || super::super::shared_library::authority(state, headers).await? != (hash.clone(), grant)
+    {
+        return Err(refused("final_tuple_revision_switch_grant"));
+    }
+    let source_fingerprint = source_playback_fingerprint(
+        &resolved.intent_fingerprint,
+        resolved.native_subtitles,
+        resolved.native_subtitle,
+    );
+    Ok(PreparedSourcePlayback {
+        source_fingerprint,
+        original_selection,
+        target,
+        principal,
+        file,
+        resolved,
+        decision,
+    })
+}
+
+// Legacy Source create has no directed codec/range policy: those absent
+// policies are Auto. Freeze the original ask before engine normalization.
+fn source_original_selection(
+    body: &CreateSession,
+) -> Option<plurx_core::playback::DesiredSelection> {
+    use plurx_core::playback::{
+        DesiredCodec, DesiredDynamicRange, DesiredQuality, DesiredSelection, DesiredSubtitles,
+    };
+    if let Some(intent) = &body.intent {
+        return Some(intent.selection);
+    }
+    let quality = if body.quality_auto.unwrap_or(body.height.is_none()) {
+        DesiredQuality::Auto {
+            height: body.height,
+            candidate_id: None,
+        }
+    } else if body.copy == Some(true) {
+        DesiredQuality::Original
+    } else {
+        DesiredQuality::Manual {
+            height: body.height?,
+        }
+    };
+    Some(DesiredSelection {
+        quality,
+        codec: DesiredCodec::Auto,
+        dynamic_range: DesiredDynamicRange::Auto,
+        audio_track: body.audio,
+        audio_offset_ms: body.audio_offset_ms.unwrap_or(0),
+        subtitles: if let Some(track) = body.subtitle_burn {
+            DesiredSubtitles::Burn { track }
+        } else if body.native_subtitles == Some(true) {
+            body.subtitle
+                .map_or(DesiredSubtitles::Off, |track| DesiredSubtitles::Native {
+                    track,
+                })
+        } else {
+            DesiredSubtitles::Off
+        },
+    })
+}
+
+// Source-only durable identity also freezes native presentation selection.
+// The Local planner and its durable fingerprints keep their existing contract.
+fn source_playback_fingerprint(base: &str, native: bool, selected: Option<i64>) -> String {
+    use sha2::{Digest, Sha256};
+    let mut digest = Sha256::new();
+    digest.update(b"plurx.sharing-source-playback.v2\0");
+    digest.update(base.as_bytes());
+    digest.update([u8::from(native)]);
+    match selected.filter(|_| native) {
+        Some(index) => {
+            digest.update([1]);
+            digest.update(index.to_be_bytes());
+        }
+        None => digest.update([0]),
+    }
+    format!("{:x}", digest.finalize())
+}
+
+#[cfg(test)]
+mod source_fingerprint_tests {
+    use super::source_playback_fingerprint;
+    #[test]
+    fn source_fingerprint_freezes_native_choice_and_normalizes_disabled_choice() {
+        let base = "a".repeat(64);
+        let copy = source_playback_fingerprint(&base, false, None);
+        assert_eq!(copy, source_playback_fingerprint(&base, false, Some(0)));
+        let native = source_playback_fingerprint(&base, true, None);
+        let first = source_playback_fingerprint(&base, true, Some(0));
+        let second = source_playback_fingerprint(&base, true, Some(1));
+        assert_ne!(copy, native);
+        assert_ne!(native, first);
+        assert_ne!(first, second);
+        assert!(first.len() == 64 && first.bytes().all(|b| b.is_ascii_hexdigit()));
     }
 }

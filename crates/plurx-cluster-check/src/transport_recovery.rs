@@ -1585,6 +1585,7 @@ async fn admit_learner(
                             protocol_version: AUTH_PROTOCOL_MIN,
                             protocol_min: AUTH_PROTOCOL_MIN,
                             protocol_max: AUTH_PROTOCOL_MAX,
+                            sharing: Default::default(),
                             live_tv_v1: true,
                         },
                     },

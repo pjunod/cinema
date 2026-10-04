@@ -174,6 +174,9 @@ enum SourceChunk {
 }
 
 enum SourceRequest {
+    ItemIdentityWatermark {
+        reply: oneshot::Sender<Result<Option<i64>, StoreError>>,
+    },
     Count {
         table: TablePlan,
         for_import: bool,
@@ -242,6 +245,9 @@ impl SourceReader {
 
             while let Some(request) = receiver.blocking_recv() {
                 match request {
+                    SourceRequest::ItemIdentityWatermark { reply } => {
+                        let _ = reply.send(source_item_identity_watermark(&source));
+                    }
                     SourceRequest::Count {
                         table,
                         for_import,
@@ -294,6 +300,12 @@ impl SourceReader {
         Ok((Self { requests }, metadata))
     }
 
+    async fn item_identity_watermark(&self) -> Result<Option<i64>, StoreError> {
+        let (reply, response) = oneshot::channel();
+        self.send(SourceRequest::ItemIdentityWatermark { reply })
+            .await?;
+        receive_source(response).await
+    }
     async fn count(&self, table: TablePlan, for_import: bool) -> Result<i64, StoreError> {
         let (reply, response) = oneshot::channel();
         self.send(SourceRequest::Count {
@@ -366,6 +378,19 @@ impl SourceReader {
             .await
             .map_err(|_| import_error("SQLite source worker stopped during validation pause"))
     }
+}
+
+fn source_item_identity_watermark(source: &Connection) -> Result<Option<i64>, StoreError> {
+    let present = source.query_row(
+        "SELECT count(*) FROM sqlite_master WHERE type='table' AND name='item_identity_watermark'",
+        [],
+        |r| r.get::<_, i64>(0),
+    )?;
+    if present == 0 {
+        return Ok(None);
+    }
+    let value=source.query_row("SELECT high_water FROM item_identity_watermark WHERE singleton=1 AND importing=0 AND high_water>=coalesce((SELECT max(id) FROM items),0)",[],|r|r.get::<_,i64>(0)).map_err(|_|import_error("invalid or interrupted source item identity allocator"))?;
+    Ok(Some(value))
 }
 
 async fn receive_source<T>(
@@ -2157,6 +2182,27 @@ impl HiqliteAuthStore {
         self.refuse_unsealed_source_credentials(&source, schema_version)
             .await?;
         self.verify_empty_import_target().await?;
+        let identity_allocator = self
+            .target_count(
+                "sqlite_master",
+                Some("type='table' AND name='item_identity_watermark'".into()),
+            )
+            .await?
+            == 1;
+        let source_watermark = source.item_identity_watermark().await?;
+        if source_watermark.is_some() && !identity_allocator {
+            return Err(import_error(
+                "source item identity allocator unavailable on import target",
+            ));
+        }
+        if identity_allocator {
+            let changed = self.client().execute("UPDATE item_identity_watermark SET importing=1 WHERE singleton=1 AND importing=0 AND high_water=0",params!()).await?;
+            if changed != 1 {
+                return Err(import_error(
+                    "item identity import target is not fresh; discard incoming target",
+                ));
+            }
+        }
         // A fresh queue schema has an empty seal marker. The backup supplies
         // its own marker; older backups are sealed only after parity is proved.
         self.client()
@@ -2243,6 +2289,11 @@ impl HiqliteAuthStore {
                 .await?;
         }
 
+        if identity_allocator {
+            self.client().execute("UPDATE item_identity_watermark SET high_water=max(high_water,$1) WHERE singleton=1 AND importing=1",params!(source_watermark.unwrap_or(0))).await?;
+            self.client().execute("INSERT INTO sharing_catalogue_revisions(library_id,order_revision) SELECT id,1 FROM libraries WHERE true ON CONFLICT(library_id) DO NOTHING",params!()).await?;
+            self.client().execute("UPDATE item_identity_watermark SET importing=0 WHERE singleton=1 AND importing=1",params!()).await?;
+        }
         Ok(SqliteImportReport {
             source_schema_version: schema_version,
             backup_sha256: metadata.backup_sha256,

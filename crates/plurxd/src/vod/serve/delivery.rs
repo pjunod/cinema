@@ -319,6 +319,34 @@ impl VodServe {
             })
     }
 
+    /// Read-only Source telemetry gate. The publication must still belong to
+    /// this exact live attachment and complete immutable Source assignment.
+    pub(crate) async fn source_status_owner_is_current(
+        &self,
+        session_id: &str,
+        owner: &ResponseOwner,
+        assignment: &plurx_core::sharing_source_sessions::SourceDispatchAssignment,
+    ) -> bool {
+        let _lifecycle = owner.lifecycle.lock().await;
+        let sessions = self.shared.sessions.lock().await;
+        let Some(session) = sessions.get(session_id) else {
+            return false;
+        };
+        session.tombstone.is_none()
+            && owner.tombstone.is_none()
+            && Arc::ptr_eq(&session.lifecycle, &owner.lifecycle)
+            && Arc::ptr_eq(&session.incarnation, &owner.incarnation)
+            && session.rendition_key == owner.rendition_key
+            && session.supersession_user == assignment.binding().principal().owner_key()
+            && session.rendition.as_ref().is_some_and(|rendition| {
+                owner
+                    .rendition
+                    .as_ref()
+                    .is_some_and(|owned| Arc::ptr_eq(rendition, owned))
+                    && rendition.source_owners.contains_live_assignment(assignment)
+            })
+    }
+
     /// Frozen source facts carried by this exact VOD response owner. HTTP may
     /// prepare a representation from them before final owner admission without
     /// consulting whichever attachment currently reuses the public id.
@@ -382,6 +410,28 @@ impl VodServe {
         name: &str,
         deadline: Option<Instant>,
     ) -> Option<VodPublication<Option<SegmentReady>>> {
+        self.segment_with_read_custody(session_id, name, deadline, None)
+            .await
+    }
+
+    pub(crate) async fn source_segment_before(
+        &self,
+        session_id: &str,
+        name: &str,
+        deadline: Option<Instant>,
+        custody: crate::transcode::source_actor::resource::SourceResourceReadCustody,
+    ) -> Option<VodPublication<Option<SegmentReady>>> {
+        self.segment_with_read_custody(session_id, name, deadline, Some(&custody))
+            .await
+    }
+
+    async fn segment_with_read_custody(
+        &self,
+        session_id: &str,
+        name: &str,
+        deadline: Option<Instant>,
+        custody: Option<&crate::transcode::source_actor::resource::SourceResourceReadCustody>,
+    ) -> Option<VodPublication<Option<SegmentReady>>> {
         let publication = self.session_rendition(session_id).await?;
         let (rendition, mut budget, delivery) = match publication.result {
             Ok(found) => found,
@@ -398,10 +448,19 @@ impl VodServe {
         let owner = publication.owner;
         if name == INIT_NAME {
             return Some(VodPublication {
-                result: self
-                    .serve_init(&rendition, budget, delivery)
-                    .await
-                    .map(Some),
+                result: match custody {
+                    Some(custody) => {
+                        self.serve_init_with_read_custody(
+                            &rendition,
+                            budget,
+                            delivery,
+                            Some(custody),
+                        )
+                        .await
+                    }
+                    None => self.serve_init(&rendition, budget, delivery).await,
+                }
+                .map(Some),
                 owner,
             });
         }
@@ -420,10 +479,24 @@ impl VodServe {
             });
         }
         Some(VodPublication {
-            result: self
-                .serve_segment(&rendition, session_id, index, budget, delivery)
-                .await
-                .map(Some),
+            result: match custody {
+                Some(custody) => {
+                    self.serve_segment_with_read_custody(
+                        &rendition,
+                        session_id,
+                        index,
+                        budget,
+                        delivery,
+                        Some(custody),
+                    )
+                    .await
+                }
+                None => {
+                    self.serve_segment(&rendition, session_id, index, budget, delivery)
+                        .await
+                }
+            }
+            .map(Some),
             owner,
         })
     }

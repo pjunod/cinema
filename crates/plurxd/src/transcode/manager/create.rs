@@ -27,19 +27,12 @@ impl TranscodeManager {
         user_name: &str,
     ) -> Result<StartInfo, String> {
         let supersession_user = serde_json::json!(["username", user_name]).to_string();
-        // A legacy process-local start has no cluster identity: no user id, no
-        // incarnation, and therefore no epoch. The ledger refuses an empty
-        // epoch, so this is "no budget" rather than "an unused one".
-        let recovery = SessionRecoveryIdentity {
-            user_id: 0,
-            incarnation_id: String::new(),
-            recovery_epoch: String::new(),
-        };
+        // A process-local start has no durable recovery identity.
         self.create_session_inner(
             req,
             user_name,
             &supersession_user,
-            &recovery,
+            None,
             None,
             None,
             None,
@@ -102,13 +95,12 @@ impl TranscodeManager {
         admitted_serving_generation: u64,
         priority: Priority,
     ) -> Result<ClusterSessionStart, String> {
-        let user_id = recovery.user_id;
         let serving_admission = ClusterServingAdmission {
             generation: admitted_serving_generation,
             deadline,
         };
         self.require_cluster_serving_authority(serving_admission)?;
-        let supersession_user = serde_json::json!(["user_id", user_id]).to_string();
+        let supersession_user = recovery.supersession_scope();
         let gate_key =
             serde_json::json!([supersession_user.as_str(), req.playback_id.as_str(),]).to_string();
         let replacement = self
@@ -129,7 +121,7 @@ impl TranscodeManager {
                 req,
                 user_name,
                 &supersession_user,
-                recovery,
+                Some(recovery),
                 Some(deadline),
                 None,
                 Some(serving_admission),
@@ -168,10 +160,10 @@ impl TranscodeManager {
     pub(crate) async fn acquire_cluster_takeover_replacement(
         &self,
         req: &SessionRequest,
-        user_id: i64,
+        principal: &plurx_core::playback_principal::PlaybackPrincipal,
         deadline: tokio::time::Instant,
     ) -> Result<ClusterReplacementGuard, String> {
-        let supersession_user = serde_json::json!(["user_id", user_id]).to_string();
+        let supersession_user = principal_supersession_scope(principal);
         let gate_key =
             serde_json::json!([supersession_user.as_str(), req.playback_id.as_str()]).to_string();
         self.acquire_cluster_replacement_gate(
@@ -193,7 +185,7 @@ impl TranscodeManager {
         deadline: tokio::time::Instant,
         takeover: SessionTakeoverStart,
     ) -> Result<StartInfo, String> {
-        let supersession_user = serde_json::json!(["user_id", recovery.user_id]).to_string();
+        let supersession_user = recovery.supersession_scope();
         // Same check the ordinary cluster start makes after its gate wait: a
         // start with no budget left cannot finish, and spawning ffmpeg only to
         // abandon it costs an admission slot for nothing.
@@ -206,7 +198,7 @@ impl TranscodeManager {
             req,
             user_name,
             &supersession_user,
-            recovery,
+            Some(recovery),
             Some(deadline),
             Some(takeover),
             None,
@@ -425,7 +417,7 @@ impl TranscodeManager {
         req: &SessionRequest,
         user_name: &str,
         supersession_user: &str,
-        recovery: &SessionRecoveryIdentity,
+        recovery: Option<&SessionRecoveryIdentity>,
         replacement_deadline: Option<tokio::time::Instant>,
         takeover: Option<SessionTakeoverStart>,
         serving_admission: Option<ClusterServingAdmission>,
@@ -503,7 +495,13 @@ impl TranscodeManager {
             let vod = self
                 .try_vod_session(
                     req,
-                    recovery.user_id,
+                    recovery
+                        .map(|identity| {
+                            identity.principal.local_user_id().ok_or_else(|| {
+                                "sharing VOD requires typed viewer demand".to_owned()
+                            })
+                        })
+                        .transpose()?,
                     user_name,
                     supersession_user,
                     replacement_deadline,
@@ -624,7 +622,7 @@ impl TranscodeManager {
         req: &SessionRequest,
         user_name: &str,
         supersession_user: &str,
-        recovery: &SessionRecoveryIdentity,
+        recovery: Option<&SessionRecoveryIdentity>,
         replacement_deadline: Option<tokio::time::Instant>,
         takeover: Option<SessionTakeoverStart>,
         priority: Priority,
@@ -713,6 +711,39 @@ impl TranscodeManager {
         req: &SessionRequest,
         file: &plurx_core::domain::MediaFile,
     ) -> Result<Option<Arc<crate::vodencode::Encoding>>, String> {
+        Box::pin(self.prepare_vod_encoding_with_source(req, file, None)).await
+    }
+
+    pub(in crate::transcode) async fn prepare_source_vod_encoding(
+        &self,
+        prepared: &crate::http::hls::PreparedSourcePlayback,
+        evidence: &crate::transcode::source_preparation::SourceHeldProbeEvidence,
+        proof: &plurx_core::sharing_source_sessions::SourceSessionWriteAuthority,
+    ) -> Result<Arc<crate::vodencode::Encoding>, String> {
+        if !prepared.matches_assignment(proof.assignment())
+            || prepared.request().subtitle_burn.is_some()
+            || !matches!(prepared.request().kind, SessionKind::Transcode { .. })
+        {
+            return Err("Source encoding requires exact unburned prepared assignment".into());
+        }
+        Box::pin(self.prepare_vod_encoding_with_source(
+            prepared.request(),
+            prepared.file(),
+            Some((evidence, proof)),
+        ))
+        .await?
+        .ok_or_else(|| "Source encoding recipe missing".to_owned())
+    }
+
+    async fn prepare_vod_encoding_with_source(
+        &self,
+        req: &SessionRequest,
+        file: &plurx_core::domain::MediaFile,
+        source_evidence: Option<(
+            &crate::transcode::source_preparation::SourceHeldProbeEvidence,
+            &plurx_core::sharing_source_sessions::SourceSessionWriteAuthority,
+        )>,
+    ) -> Result<Option<Arc<crate::vodencode::Encoding>>, String> {
         if matches!(req.kind, SessionKind::Copy { .. }) {
             match req.subtitle_burn {
                 None => return Ok(None),
@@ -731,14 +762,24 @@ impl TranscodeManager {
                 Some(_) => {}
             }
         }
-        let source = crate::fragment_index_cluster::open_source_fence(file, None)
-            .await
-            .map_err(|error| {
-                vod_refusal_error(
-                    "vod_source_rescan_required",
-                    format!("the source could not be held for encoded preparation: {error}"),
-                )
-            })?;
+        let source = if source_evidence.is_some() {
+            crate::fragment_index_cluster::open_source_playback_fence(file, None).await
+        } else {
+            crate::fragment_index_cluster::open_source_fence(file, None).await
+        }
+        .map_err(|error| {
+            vod_refusal_error(
+                "vod_source_rescan_required",
+                format!("the source could not be held for encoded preparation: {error}"),
+            )
+        })?;
+        if let Some((evidence, proof)) = source_evidence {
+            if !evidence.matches(proof.assignment(), source.object_version()) {
+                return Err(
+                    "Source held-probe evidence differs from actual file/assignment".into(),
+                );
+            }
+        }
         // Bind preparation, burn extraction, key construction, and the final
         // producer open to the same inspected object, not scanner seconds.
         let source_object_version = source.object_version().to_owned();
@@ -804,14 +845,17 @@ impl TranscodeManager {
                 return Err(unsupported_build_error(reason));
             }
         }
-        let probe = self
-            .store
-            .get_file_probe_json(file.id)
-            .await
-            .map_err(|error| {
-                start_infrastructure_error(format!("reading the stored source probe: {error}"))
-            })?;
-        let held_probe =
+        let probe = if let Some((_, proof)) = source_evidence {
+            self.store.source_index_probe_evidence(proof).await
+        } else {
+            self.store.get_file_probe_json(file.id).await
+        }
+        .map_err(|error| {
+            start_infrastructure_error(format!("reading the stored source probe: {error}"))
+        })?;
+        let held_probe = if let Some((evidence, _)) = source_evidence {
+            evidence.document().to_owned()
+        } else {
             crate::ffmpeg::held_source_probe_json(&source.handle, VOD_START_HELD_PROBE)
                 .await
                 .map_err(|error| {
@@ -819,7 +863,8 @@ impl TranscodeManager {
                         "vod_source_rescan_required",
                         format!("the held source could not be verified against its scan: {error}"),
                     )
-                })?;
+                })?
+        };
         let comparison = probe
             .as_deref()
             .map(|stored| crate::ffmpeg::compare_probe_documents(stored, &held_probe))
@@ -1033,15 +1078,19 @@ impl TranscodeManager {
         } else {
             None
         };
-        let engine = crate::ffmpeg::EncodedEngine::capture(
-            options
-                .subtitle_burn
-                .as_ref()
-                .is_some_and(|burn| !burn.bitmap)
-                .then_some(self.runtime_cache.as_path()),
-        )
-        .await
-        .map_err(|error| vod_refusal_error("vod_engine_unattested", error))?;
+        let engine = if let Some((evidence, _)) = source_evidence {
+            evidence.engine()
+        } else {
+            crate::ffmpeg::EncodedEngine::capture(
+                options
+                    .subtitle_burn
+                    .as_ref()
+                    .is_some_and(|burn| !burn.bitmap)
+                    .then_some(self.runtime_cache.as_path()),
+            )
+            .await
+            .map_err(|error| vod_refusal_error("vod_engine_unattested", error))?
+        };
         if !source.unchanged() {
             return Err(vod_refusal_error(
                 "vod_source_rescan_required",
@@ -1056,7 +1105,11 @@ impl TranscodeManager {
             grid,
             subtitle,
             subtitle_digest,
-            ffmpeg_build: crate::ffmpeg::ffmpeg_build().await,
+            ffmpeg_build: if let Some((evidence, _)) = source_evidence {
+                evidence.build().into()
+            } else {
+                crate::ffmpeg::ffmpeg_build().await
+            },
             executable: crate::ffmpeg::EncodedExecutable::capture()
                 .await
                 .map_err(|error| vod_refusal_error("vod_engine_unattested", error))?,
@@ -1088,7 +1141,7 @@ impl TranscodeManager {
     async fn try_vod_session(
         &self,
         req: &SessionRequest,
-        user_id: i64,
+        user_id: Option<i64>,
         user_name: &str,
         supersession_user: &str,
         replacement_deadline: Option<tokio::time::Instant>,
@@ -1193,10 +1246,12 @@ impl TranscodeManager {
                         admission.generation,
                         admission.deadline.into_std(),
                     ),
-                    crate::state::PlaybackViewerDemand {
-                        user_id,
+                    user_id.map(|user_id| crate::state::PlaybackViewerDemand {
+                        principal: plurx_core::playback_principal::PlaybackPrincipal::LocalUser {
+                            user_id,
+                        },
                         playback_id: req.playback_id.clone(),
-                    },
+                    }),
                 )
                 .await
                 .map_err(|error| {
@@ -1218,10 +1273,12 @@ impl TranscodeManager {
                     &settings,
                     attribution,
                     session_id,
-                    crate::state::PlaybackViewerDemand {
-                        user_id,
+                    user_id.map(|user_id| crate::state::PlaybackViewerDemand {
+                        principal: plurx_core::playback_principal::PlaybackPrincipal::LocalUser {
+                            user_id,
+                        },
                         playback_id: req.playback_id.clone(),
-                    },
+                    }),
                 )
                 .await?
         };

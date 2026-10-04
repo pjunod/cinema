@@ -14,8 +14,9 @@ This file is the specification in the meantime, written by reading the routers
 and the handlers on 2026-09-07. Where a plan document and the code disagreed,
 the code won and the disagreement is recorded in §23.
 
-One binary serves everything on one port (`:32400` by default). plurx has 243
-routes across the four surfaces below. Every path here is absolute; the native
+The ordinary listener (`:32400` by default) serves the four surfaces below.
+plurx has 274 routes on that listener. Sharing uses a separate loopback TLS
+listener with its own peer credentials (§24). Every path here is absolute; the native
 API is the only one under a version prefix, and §7-§18 state that prefix once
 per section rather than repeating it in every row.
 
@@ -3182,3 +3183,81 @@ commit. Nothing yet asserts that every route in the router appears in a table
 here — that is the obvious next test, and until it exists, treat
 `crates/plurxd/src/http/mod.rs` as the authority and this file as its
 description.
+
+
+---
+
+## 24. Sharing administration — local owners manage private peer authority
+
+The following ordinary-listener routes require `AdminUser`: a local owner's
+bearer session, never a scoped integration key or a sharing credential. The
+request bodies are closed JSON, at most 16 KiB. UUID path values must use
+canonical lower-case, hyphenated spelling. Every sharing management response,
+including errors, carries `Cache-Control: no-store`.
+
+| Method | Absolute path | Operation |
+|---|---|---|
+| GET / PUT | `/api/v1/sharing/settings` | Read or save the sharing enabled choice. Saving either choice succeeds independently of readiness. |
+| GET | `/api/v1/sharing/status` | Read this serving node's timestamped listener, certificate, egress and import observations. Unobserved host Serve and node-key state are `unknown`. |
+| GET / PUT | `/api/v1/sharing/endpoints` | Read or replace approved source endpoints with `expected_revision` CAS. |
+| POST | `/api/v1/sharing/invitations` | Issue an expiring invitation for selected local movie/show libraries. |
+| DELETE | `/api/v1/sharing/invitations/{id}` | Cancel the invitation. |
+| GET | `/api/v1/sharing/exports` | List source grants and their pending or active authority. |
+| POST | `/api/v1/sharing/exports/{id}/approve` | Approve the compared pairing code using the expected grant generation. |
+| PUT | `/api/v1/sharing/exports/{id}/libraries` | Replace the selected library scope using the expected generation. |
+| DELETE | `/api/v1/sharing/exports/{id}` | Revoke the source grant. |
+| GET / POST | `/api/v1/sharing/imports` | List imports or begin a pinned, identity-checked invitation claim. |
+| POST | `/api/v1/sharing/imports/{id}/re-pair` | Explicitly pair a replacement invitation into the selected import. |
+| POST | `/api/v1/sharing/imports/{id}/rotate` | Persist a replacement credential before the recoverable upstream rotation. |
+| GET / PUT | `/api/v1/sharing/imports/{id}/assignments` | Read the complete assignment snapshot or replace individually assigned local viewers using assignment-generation CAS. |
+| GET | `/api/v1/sharing/imports/{import}/libraries` | Read fresh Source library scope using the current administrator login and import authority, independently of viewer assignments. |
+| PUT | `/api/v1/sharing/imports/{id}/endpoints` | Update recipient-side numeric hints, retaining approved pins unless an owner explicitly confirms replacements. |
+| DELETE | `/api/v1/sharing/imports/{id}` | Disconnect the import and advance its lifecycle. |
+| ANY | `/sharing` | Refuse peer traffic on the ordinary listener with `404 sharing_not_found`. |
+| ANY | `/sharing/{*path}` | Refuse every peer path on the ordinary listener with the same typed 404. |
+
+The separate listener mounts only the peer router in
+[sharing.rs](../crates/plurxd/src/http/sharing.rs). It accepts the dedicated
+`CinemaShare` credential after pinned TLS, never household account tokens or
+cluster credentials. It serves no local login, web, metrics or cluster routes.
+Read the [sharing build contract](features/SHARED-LIBRARIES-IMPLEMENTATION.md)
+for the identity-before-secret claim flow, approval, endpoint manifests and
+rotation receipts. Viewer metadata and decision routes are listed below; live
+shared playback remains unfinished.
+
+Capacity refusals are `429 sharing_capacity`; conflicting generations are
+`409 sharing_generation_conflict`; expired authority is `410 sharing_expired`.
+A missing or unusable Store returns `503 sharing_authority_unavailable`.
+Readiness remains advisory and does not erase or override the saved switch.
+
+### Shared viewer metadata and decisions
+
+These ordinary-listener routes use the current recipient account login and
+its assigned import/library scope. Item and library IDs remain canonical
+Source decimal strings; they are never local catalogue IDs. A full item
+reference contains the import, Source server, catalogue epoch, library and
+item. File references add the Source file, revision and import lifecycle.
+
+| Method | Absolute path | Operation |
+|---|---|---|
+| GET | `/api/v1/shared/libraries` | List this viewer's assigned import/library identities and Source names. Availability is explicitly unverified until the Source is read. |
+| GET | `/api/v1/shared/imports/{import}/libraries` | Read current Source libraries visible through this viewer's assignments. |
+| GET | `/api/v1/shared/imports/{import}/libraries/{library}/items` | Read a bounded catalogue page with its Source cursor. |
+| GET | `/api/v1/shared/imports/{import}/items/{item}/children` | Read a bounded page of children after authorizing the current parent item. |
+| GET | `/api/v1/shared/imports/{import}/items/{item}` | Read current item/file facts, full references, signed file aliases when available and recipient watch state. `delivery_status` is `available` exactly when B issued a signed file alias for a file: launch capability, never producer readiness. |
+| POST | `/api/v1/shared/imports/{import}/items:batch` | Read a validated metadata batch from a body of at most 16 KiB. Missing items retain their own result identities. |
+| GET | `/api/v1/shared/continue-watching` | List per-Source watch-group summaries for this viewer. |
+| GET | `/api/v1/shared/imports/{import}/continue-watching` | Hydrate this Source's current watch items; an unavailable Source is reported without stale title fallback. |
+| POST | `/api/v1/shared/imports/{import}/items/{item}/progress` | Refuse writes with `503 sharing_progress_session_binding_unavailable` until an actual active Shared session can authorize progress. |
+| GET | `/api/v1/shared/imports/{import}/art/{resource}` | Fetch an advertised signed recipient art alias after current account, import and Source-scope checks; no arbitrary Source URL is accepted. |
+| POST | `/api/v1/shared/imports/{import}/files/{locator}/decision` | Negotiate the complete existing decision DTO from runtime v2 capabilities, a signed file locator and current account/import/Source authority. The request body is bounded to 128 KiB. |
+| POST | `/api/v1/shared/imports/{import}/files/{locator}/hls/sessions` | Start Shared HLS playback through B's receiver actor from the ordinary `CreateSession` body (at most 128 KiB, initial play/resume only). The answer is the ordinary Start envelope with B's own session, playlist and control URLs; the session then serves `/api/v1/hls/{session}/…`, `status` (the Shared grammar) and `control` (current rendition only). |
+| POST | `/api/v1/shared/imports/{import}/files/{locator}/playback` | The same Shared Start, at the typed playback alias. |
+
+Captured recipient scope is revalidated through accepted metadata and
+decision bodies; content fetched from a Source also retains its Source-scope
+checks. A file alias is not login or
+session authority: the decision route verifies its current import lifecycle
+and exact file/revision binding before contacting the pinned Source. Missing
+keys, revoked scope and unavailable Sources refuse delivery. No live Shared
+Start route is registered on this listener.

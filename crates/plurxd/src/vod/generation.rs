@@ -8,6 +8,33 @@ pub(super) async fn spawn_generation(
     at: u32,
     permit: Option<crate::vodencode::EncodePermit>,
 ) {
+    if rendition.closed.load(Relaxed) || rendition.failure().is_some() {
+        return;
+    }
+    let source_dispatch = match rendition.source_owners.begin_generation() {
+        Ok(dispatch) => dispatch,
+        Err(cause) => {
+            record_failure(
+                shared,
+                rendition,
+                crate::playback_control::ProducerDecisionReason::ProducerLaunchFailed,
+                cause.to_owned(),
+            );
+            return;
+        }
+    };
+    let source_authority = match source_dispatch.authorize_before_spawn().await {
+        Ok(authority) => authority,
+        Err(cause) => {
+            record_failure(
+                shared,
+                rendition,
+                crate::playback_control::ProducerDecisionReason::ProducerLaunchFailed,
+                cause,
+            );
+            return;
+        }
+    };
     if !recipe_engine_is_current(&rendition.recipe).await {
         record_failure(
             shared,
@@ -31,9 +58,54 @@ pub(super) async fn spawn_generation(
     };
     let start_seconds = entry.start_ticks as f64 / f64::from(rendition.timescale);
     let recipe = &rendition.recipe;
-    debug_assert_eq!(recipe.encoding.is_some(), permit.is_some());
+    debug_assert_eq!(
+        recipe.encoding.is_some() || rendition.key.starts_with("source-"),
+        permit.is_some(),
+    );
     let attested = attested_source_setup(rendition);
-    let audio_source = match reopen_encoded_audio(rendition.source.as_ref(), recipe).await {
+    let source_current = if rendition.key.starts_with("source-") {
+        let Some(held) = rendition
+            .source
+            .as_ref()
+            .filter(|source| source.unchanged())
+        else {
+            record_failure(
+                shared,
+                rendition,
+                crate::playback_control::ProducerDecisionReason::SourceChanged,
+                "Source held descriptor changed before spawn".to_owned(),
+            );
+            return;
+        };
+        match crate::fragment_index_cluster::open_source_playback_fence(
+            &recipe.file,
+            Some(held.object_version()),
+        )
+        .await
+        {
+            Ok(current) => Some(current),
+            Err(cause) => {
+                record_failure(
+                    shared,
+                    rendition,
+                    crate::playback_control::ProducerDecisionReason::SourceChanged,
+                    cause,
+                );
+                return;
+            }
+        }
+    } else {
+        None
+    };
+    let audio_open = if source_current.is_some()
+        && recipe.encoding.is_some()
+        && !recipe.file.audio_streams.is_empty()
+    {
+        Ok(source_current)
+    } else {
+        reopen_encoded_audio(rendition.source.as_ref(), recipe).await
+    };
+    let audio_source = match audio_open {
         Ok(source) => source,
         Err(cause) => {
             record_failure(
@@ -48,8 +120,11 @@ pub(super) async fn spawn_generation(
     // One ffmpeg, converting or not. The conversion happens on the far side of
     // the muxer now — `dvpipe` rewrites the RPUs inside the fragments this
     // process writes — so the producer is the producer it always was.
-    let (mut child, child_job, stdout, stderr) = {
-        let args = recipe_pipe_args(recipe, start_seconds, attested);
+    let (child, child_job, stdout, stderr) = {
+        let mut args = recipe_pipe_args(recipe, start_seconds, attested);
+        if rendition.key.starts_with("source-") && recipe.encoding.is_none() {
+            bound_source_copy_threads(&mut args);
+        }
         #[cfg(unix)]
         let descriptors = crate::producer_spawn::Descriptors::from_files(
             rendition.source.as_ref().map(|source| &source.handle),
@@ -64,6 +139,17 @@ pub(super) async fn spawn_generation(
         let descriptors = crate::producer_spawn::Descriptors::default();
         let program = recipe_program(recipe);
         let env = recipe_child_env(recipe);
+        if let Some(authority) = &source_authority {
+            if let Err(cause) = authority.validate_before_spawn() {
+                record_failure(
+                    shared,
+                    rendition,
+                    crate::playback_control::ProducerDecisionReason::ProducerLaunchFailed,
+                    cause,
+                );
+                return;
+            }
+        }
         let spawned = match crate::producer_spawn::spawn(
             &program,
             &args,
@@ -94,34 +180,65 @@ pub(super) async fn spawn_generation(
             spawned.stderr,
         )
     };
-    // The rendition can be closed between the spawn above and the attach
-    // below (a purge committing on the maintain task). Attaching would leave
-    // a live ffmpeg in a slot whose driver has already exited — a child
-    // nothing reaps until the Arc drops.
-    //
-    // A failure recorded in that same gap is the other half of the same
-    // hazard, and it was not guarded. The driver does not exit on a failure,
-    // it switches to reclaiming, and a reclaiming pass that has already read
-    // an absent belief will not look again until something kicks it — so an
-    // attach landing just behind it puts a live child in a slot whose only
-    // remaining reader answers `ProducerFailed`. Refuse the attach instead,
-    // here, where the child is still ours to kill.
-    if rendition.closed.load(Relaxed) || rendition.failure().is_some() {
-        let _ = child.kill().await;
-        return;
-    }
     rendition
         .last_child_pid
         .store(child.id().unwrap_or(0), Relaxed);
-    rendition
-        .slot
-        .attach_job_owned(
-            child,
-            child_job,
-            at,
-            permit.map(|permit| Box::new(permit) as Box<dyn Send>),
-        )
-        .await;
+    // Transfer the raw child and physical resources synchronously before the
+    // first registration await. Losing this caller can only lose its waiter.
+    let (registration_tx, registration_rx) = tokio::sync::oneshot::channel();
+    tokio::spawn({
+        let rendition = Arc::clone(rendition);
+        async move {
+            rendition.hooks.before_producer_registration().await;
+            let (registration, writers) = rendition
+                .slot
+                .attach_registered_job_owned(
+                    child,
+                    child_job,
+                    at,
+                    permit.map(|permit| Box::new(permit) as Box<dyn Send>),
+                )
+                .await;
+            rendition
+                .source_owners
+                .registered(&source_dispatch, &registration);
+            drop(source_dispatch);
+            if let Err((registration, writers, stdout, stderr)) =
+                registration_tx.send((registration, writers, stdout, stderr))
+            {
+                drop(stdout);
+                drop(stderr);
+                writers.settled();
+                let _ = rendition
+                    .slot
+                    .request_registered_retirement(&registration)
+                    .await;
+                let _ = registration.wait_confirmed_reap().await;
+            }
+        }
+    });
+    let Ok((registration, writers, stdout, stderr)) = registration_rx.await else {
+        record_failure(
+            shared,
+            rendition,
+            crate::playback_control::ProducerDecisionReason::ProducerLaunchFailed,
+            "owned producer registration did not complete".to_owned(),
+        );
+        return;
+    };
+    // A child launched before a close/failure still belongs to the actual
+    // registered reaper. Wait errors retain its permit and descendant job.
+    if rendition.closed.load(Relaxed) || rendition.failure().is_some() {
+        drop(stdout);
+        drop(stderr);
+        writers.settled();
+        let _ = rendition
+            .slot
+            .request_registered_retirement(&registration)
+            .await;
+        let _ = registration.wait_confirmed_reap().await;
+        return;
+    }
     shared.pool.metrics_handle().count_producer_generation(
         if rendition.recipe.encoding.is_some() {
             VodProducerKind::Encoded
@@ -132,20 +249,88 @@ pub(super) async fn spawn_generation(
     let epoch = rendition.gen_epoch.load(Relaxed);
     let shared = Arc::clone(shared);
     let rendition = Arc::clone(rendition);
-    tokio::spawn(async move {
+    let (supervised_shared, supervised) = (Arc::clone(&shared), Arc::clone(&rendition));
+    let writer = tokio::spawn(async move {
         let key = rendition.key.clone();
-        let (_, diagnostic) = tokio::join!(
-            run_generation(shared, rendition, stdout, at, epoch),
-            crate::ffmpeg::drain_diagnostics(stderr),
+        let (retiring, retired) = tokio::sync::oneshot::channel();
+        let (outcome, diagnostic) = tokio::join!(
+            async {
+                let outcome = run_generation(
+                    Arc::clone(&shared),
+                    Arc::clone(&rendition),
+                    stdout,
+                    at,
+                    epoch,
+                )
+                .await;
+                // Killing starts before diagnostic drain is joined, while the
+                // owned reaper waits for this task's actual writer settlement.
+                let _ = super::driver::request_registered_driver_retirement(
+                    &shared,
+                    &rendition,
+                    &registration,
+                )
+                .await;
+                let _ = retiring.send(());
+                outcome
+            },
+            async {
+                let diagnostic = crate::ffmpeg::drain_diagnostics(stderr);
+                tokio::pin!(diagnostic);
+                tokio::select! {
+                    text=&mut diagnostic=>text,
+                    _=retired=>match tokio::time::timeout(Duration::from_secs(5),&mut diagnostic).await{
+                        Ok(text)=>text,
+                        Err(_)=>"producer diagnostic drain exceeded its retirement deadline".to_owned(),
+                    },
+                }
+            }
         );
+        writers.settled();
+        match rendition
+            .slot
+            .wait_registered_retirement(&registration)
+            .await
+        {
+            Ok(receipt) => {
+                debug_assert!(receipt.matches(&registration));
+            }
+            Err(error) => {
+                tracing::warn!(target:"plurxd::vodserve",%error,"generation retirement was superseded")
+            }
+        }
         if !diagnostic.trim().is_empty() {
-            tracing::warn!(target: "plurxd::vodserve", rendition = %key, generation = epoch, %diagnostic, "VOD producer diagnostic");
+            tracing::warn!(target:"plurxd::vodserve",rendition=%key,generation=epoch,%diagnostic,"VOD producer diagnostic");
+        }
+        if let Some(outcome) = outcome {
+            on_generation_end(&shared, &rendition, outcome, epoch).await;
         }
     });
+    // The writer task owns this generation's segment writes and its end. A
+    // panic unwinds past `on_generation_end` and drops the writer barrier, so
+    // the reaper releases the slot but nothing tells the rendition. Only the
+    // join can: record the failure, which wakes waiters with a terminal class
+    // and kicks the driver to reclaim the producer.
+    tokio::spawn(on_writer_panic(writer, move || {
+        record_failure(
+            &supervised_shared,
+            &supervised,
+            crate::playback_control::ProducerDecisionReason::ReaderFailed,
+            "producer writer task panicked".to_owned(),
+        );
+    }));
     tracing::info!(
         target: "plurxd::vodserve",
         rendition = %rendition_key_field(at), "spawned a producer generation"
     );
+}
+
+/// Join a generation writer and report only a panic. Every other end is the
+/// writer's own to report through `on_generation_end`.
+async fn on_writer_panic(writer: tokio::task::JoinHandle<()>, on_panic: impl FnOnce()) {
+    if writer.await.is_err_and(|error| error.is_panic()) {
+        on_panic();
+    }
 }
 
 pub(super) async fn recipe_engine_is_current(recipe: &Recipe) -> bool {
@@ -227,6 +412,31 @@ pub(super) fn recipe_pipe_args(recipe: &Recipe, start_seconds: f64, attested: bo
     }
 }
 
+/// Input options apply to each opened demuxer; output audio and filter bounds
+/// prevent automatic parallelism. Ordinary Local copy argv is unchanged.
+pub(super) fn bound_source_copy_threads(args: &mut Vec<String>) {
+    let mut index = 0;
+    while index < args.len() {
+        if args[index] == "-i" {
+            args.splice(index..index, ["-threads".to_owned(), "1".to_owned()]);
+            index += 2;
+        }
+        index += 1;
+    }
+    args.splice(
+        0..0,
+        [
+            "-filter_threads".to_owned(),
+            "1".to_owned(),
+            "-filter_complex_threads".to_owned(),
+            "1".to_owned(),
+        ],
+    );
+    // These are output options and must precede the existing output target.
+    let output = args.len().saturating_sub(1);
+    args.splice(output..output, ["-threads:a".to_owned(), "1".to_owned()]);
+}
+
 pub(super) async fn reopen_encoded_audio(
     source: Option<&crate::fragment_index_cluster::SourceFence>,
     recipe: &Recipe,
@@ -296,7 +506,7 @@ async fn run_generation(
     stdout: tokio::process::ChildStdout,
     at: u32,
     epoch: u64,
-) {
+) -> Option<Outcome> {
     let mut stdout = stdout;
     let need_pre_read = {
         let identity = rendition.identity.lock().await;
@@ -309,20 +519,13 @@ async fn run_generation(
         // stream (it verifies the init itself before a single write).
         match read_muxer_init(&mut stdout).await {
             Err(error) => {
-                on_generation_end(
-                    &shared,
-                    &rendition,
-                    Outcome::Failed(Failure::Stream(format!(
-                        "reading the generation's init: {error}"
-                    ))),
-                    epoch,
-                )
-                .await;
-                return;
+                return Some(Outcome::Failed(Failure::Stream(format!(
+                    "reading the generation's init: {error}"
+                ))));
             }
             Ok((consumed, muxer)) => {
-                if !establish_or_verify(&shared, &rendition, &muxer, epoch).await {
-                    return;
+                if let Err(outcome) = establish_or_verify(&rendition, &muxer).await {
+                    return Some(outcome);
                 }
                 Box::new(std::io::Cursor::new(consumed).chain(stdout))
             }
@@ -337,7 +540,7 @@ async fn run_generation(
             // The pre-read established it, or the rendition already had it;
             // reaching here without one is the pre-read having purged and
             // bailed, which returns above.
-            None => return,
+            None => return None,
         }
     };
     let generation = Generation {
@@ -363,28 +566,16 @@ async fn run_generation(
         epoch,
     };
     let outcome = vodgen::run(src, generation, &sink, &rendition.key).await;
-    on_generation_end(&shared, &rendition, outcome, epoch).await;
+    Some(outcome)
 }
 
 /// The identity half of a pre-read generation. `false` means the generation
 /// is over (drift handled or failure recorded) and the caller must return.
-async fn establish_or_verify(
-    shared: &Arc<Shared>,
-    rendition: &Arc<Rendition>,
-    muxer: &Init,
-    epoch: u64,
-) -> bool {
+async fn establish_or_verify(rendition: &Arc<Rendition>, muxer: &Init) -> Result<(), Outcome> {
     if !recipe_engine_is_current(&rendition.recipe).await {
-        on_generation_end(
-            shared,
-            rendition,
-            Outcome::Failed(Failure::EngineChanged(
-                "the immutable media engine changed before init publication".to_owned(),
-            )),
-            epoch,
-        )
-        .await;
-        return false;
+        return Err(Outcome::Failed(Failure::EngineChanged(
+            "the immutable media engine changed before init publication".to_owned(),
+        )));
     }
     let served = {
         let mut state = rendition.identity.lock().await;
@@ -400,14 +591,7 @@ async fn establish_or_verify(
                         );
                     }
                     drop(state);
-                    on_generation_end(
-                        shared,
-                        rendition,
-                        Outcome::Failed(Failure::InitDrift(refused.to_string())),
-                        epoch,
-                    )
-                    .await;
-                    return false;
+                    return Err(Outcome::Failed(Failure::InitDrift(refused.to_string())));
                 }
             },
             None => {
@@ -422,16 +606,9 @@ async fn establish_or_verify(
                     Ok(identity) => identity,
                     Err(error) => {
                         drop(state);
-                        on_generation_end(
-                            shared,
-                            rendition,
-                            Outcome::Failed(Failure::Stream(format!(
-                                "establishing the init identity: {error}"
-                            ))),
-                            epoch,
-                        )
-                        .await;
-                        return false;
+                        return Err(Outcome::Failed(Failure::Stream(format!(
+                            "establishing the init identity: {error}"
+                        ))));
                     }
                 };
                 let served = identity
@@ -453,18 +630,11 @@ async fn establish_or_verify(
         }
     };
     if let Err(error) = rendition.dir.write_init(&served.bytes).await {
-        on_generation_end(
-            shared,
-            rendition,
-            Outcome::Failed(Failure::Sink(error)),
-            epoch,
-        )
-        .await;
-        return false;
+        return Err(Outcome::Failed(Failure::Sink(error)));
     }
     rendition.clear_demand(INIT_DEMAND_INDEX);
     rendition.init_notify.notify_waiters();
-    true
+    Ok(())
 }
 
 /// What a generation's ending means for the rendition.
@@ -488,15 +658,6 @@ async fn on_generation_end(
         AcqRel,
         Acquire,
     );
-    // Reap the child so the belief goes honestly absent, keeping its progress.
-    let _ = perform_driver_step(
-        shared,
-        rendition,
-        Step::Terminate {
-            why: Termination::Idle,
-        },
-    )
-    .await;
     match outcome {
         Outcome::Failed(Failure::InitDrift(cause)) => {
             on_init_drift(shared, rendition, cause).await;
@@ -832,3 +993,25 @@ impl vodgen::Sink for RenditionSink {
 // ---------------------------------------------------------------------------
 // helpers
 // ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod writer_supervision_tests {
+    #[tokio::test]
+    async fn a_panicked_generation_writer_is_reported_and_a_clean_end_is_not() {
+        let reported = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let panicked = tokio::spawn(async { panic!("writer fixture panics") });
+        let seen = std::sync::Arc::clone(&reported);
+        super::on_writer_panic(panicked, move || {
+            seen.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        })
+        .await;
+        assert_eq!(reported.load(std::sync::atomic::Ordering::SeqCst), 1);
+        let clean = tokio::spawn(async {});
+        let seen = std::sync::Arc::clone(&reported);
+        super::on_writer_panic(clean, move || {
+            seen.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        })
+        .await;
+        assert_eq!(reported.load(std::sync::atomic::Ordering::SeqCst), 1);
+    }
+}

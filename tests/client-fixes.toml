@@ -1708,7 +1708,7 @@ test_anchor = "testACreateThatLandsAfterTheDeadlineIsReleasedAndNeverAttached"
 id = "apple.create-sequence-stops-shadowing-started"
 commits = ["1f75e593"]
 source = "clients/apple/Sources/PlayerController.swift"
-source_anchor = "let opened = try await requestHlsSession(model, file, request)"
+source_anchor = "let opened = try await requestHlsSession(model, try contextForFile(file), request)"
 test = "clients/apple/Tests/PlayerOperationOwnershipTests.swift"
 test_anchor = "testAChangeContextCreateIsNotRetriedAndArmsNoDeadline"
 
@@ -3314,3 +3314,188 @@ source = "clients/apple/Sources/PlayerController.swift"
 source_anchor = '"quality_catalog_unavailable",'
 test = "clients/apple/Tests/AppleClientTests.swift"
 test_anchor = "func testOnlyTheContractsNotYetCodesAreRetried() throws"
+
+# Shared Libraries native client corrections (integrated 2026-10-04).
+[[fixes]]
+id = "sharing.bind-native-telemetry-to-retained-shared-session-lineage"
+commits = ["1e4b05b3"]
+source = "clients/android/app/src/main/java/tv/plurx/app/data/SharedDecisionClient.kt"
+source_anchor = 'suspend fun status(playback: SharedStartedPlayback): SharedPlaybackStatus {'
+test = "clients/android/app/src/test/java/tv/plurx/app/data/SharedDecisionClientTest.kt"
+test_anchor = "refuses"
+
+[[fixes]]
+id = "sharing.isolate-presenter-fixtures-from-account-bootstrap"
+commits = ["741f8764"]
+source = "clients/apple/Sources/AppModel.swift"
+source_anchor = 'init(startServices: Bool = true) {'
+test = "clients/apple/Tests/AppleClientTests.swift"
+test_anchor = "testTheRowEighteenSitesLogOnceAndDrawNothing"
+
+[[fixes]]
+id = "sharing.keep-synthetic-native-selection-fixtures-internally-consiste"
+commits = ["ffc3b7fc"]
+source = "clients/android/app/src/test/java/tv/plurx/app/data/SharedDecisionClientTest.kt"
+source_anchor = 'val encodedDecision = SharedDecision.decode(wire("9223372036854775807") { JsonObject(it + mapOf("method" to JsonPrimitive("transcode"), "delivered_dynamic_range" to JsonPrimitive("sdr"), "height" to JsonPrimitive(72), "delivery" to JsonObject(it.getValue("delivery").jsonObject + ("mode" to JsonPrimitive("transcode"))))) })'
+test = "clients/android/app/src/test/java/tv/plurx/app/data/SharedDecisionClientTest.kt"
+test_anchor = "initialStartRetainsWholeRequestAndBoundBContext"
+
+[[fixes]]
+id = "sharing.retain-original-native-control-selection-projection"
+commits = ["65cf1a1d"]
+source = "clients/android/app/src/main/java/tv/plurx/app/data/SharedPlaybackModels.kt"
+source_anchor = '/** Exact original current-rendition selection, without Local candidate coercion. */'
+test = "clients/android/app/src/test/java/tv/plurx/app/data/SharedDecisionClientTest.kt"
+test_anchor = "initialStartRetainsWholeRequestAndBoundBContext"
+
+[[fixes]]
+id = "sharing.dispatch-native-players-through-retained-shared-subjects"
+commits = ["03b77807"]
+source = "clients/android/app/src/main/java/tv/plurx/app/data/SharedDecisionClient.kt"
+source_anchor = 'fun playlistUrl(playback: SharedStartedPlayback): String {'
+test = "clients/android/app/src/test/java/tv/plurx/app/data/SharedDecisionClientTest.kt"
+test_anchor = "initialStartRetainsWholeRequestAndBoundBContext"
+
+[[fixes]]
+id = "sharing.retain-tagged-native-hls-initial-plans"
+commits = ["091415fb"]
+source = "clients/android/app/src/main/java/tv/plurx/app/data/SharedPlaybackModels.kt"
+source_anchor = '/** Initial Shared subject carries full strings/opaque B context, never a Local ID. */'
+test = "clients/android/app/src/test/java/tv/plurx/app/data/SharedDecisionClientTest.kt"
+test_anchor = "initialStartRetainsWholeRequestAndBoundBContext"
+
+[[fixes]]
+id = "sharing.serialize-native-progress-across-imports"
+commits = ["7d95cd90"]
+source = "clients/android/app/src/main/java/tv/plurx/app/data/SharedDecisionClient.kt"
+source_anchor = 'import kotlinx.coroutines.NonCancellable'
+test = "clients/android/app/src/test/java/tv/plurx/app/data/SharedDecisionClientTest.kt"
+test_anchor = "initialStartRetainsWholeRequestAndBoundBContext"
+
+[[fixes]]
+id = "sharing.retain-ordered-native-progress-beats"
+commits = ["080e283b"]
+source = "clients/android/app/src/main/java/tv/plurx/app/data/SharedDecisionClient.kt"
+source_anchor = 'import kotlinx.serialization.json.*'
+test = "clients/apple/Tests/SharedPlaybackModelsTests.swift"
+test_anchor = "testProgressOrderRetainsUncertainBeatAndRequiresFreshResync"
+
+[[fixes]]
+id = "sharing.prepare-authenticated-native-initial-start-adapters"
+commits = ["dce1989b"]
+source = "clients/android/app/src/main/java/tv/plurx/app/data/PlaybackFileContext.kt"
+source_anchor = '"subtitle" -> text.toLongOrNull()?.let { it.toString() == text && it in -1..4095 } == true'
+test = "clients/apple/Tests/SharedDecisionClientTests.swift"
+test_anchor = "testAuthenticatedInitialStartRetainsWholeRequestAndBContext"
+
+[[fixes]]
+id = "sharing.add-authenticated-native-shared-decision-adapters"
+commits = ["b77d14a9"]
+source = "clients/android/app/src/main/java/tv/plurx/app/data/PlaybackFileContext.kt"
+source_anchor = 'require(listOf(import_id, server_id, catalogue_epoch).all { PlaybackFileContext.canonicalUuid(it) && it != "00000000-0000-0000-0000-000000000000" })'
+test = "clients/apple/Tests/SharedDecisionClientTests.swift"
+test_anchor = "testActualV2BuilderExactSourceStringsAndTypedNegotiation"
+
+[[fixes]]
+id = "sharing.render-bounded-authenticated-shared-artwork-in-native-client"
+commits = ["1c7cff40"]
+source = "clients/android/app/src/main/java/tv/plurx/app/data/SharedArtwork.kt"
+source_anchor = 'import android.graphics.BitmapFactory'
+test = "clients/apple/Tests/SharedArtworkTests.swift"
+test_anchor = "testClosedArtworkGrammarAliasesAndSourceContainment"
+
+[[fixes]]
+id = "sharing.edit-native-endpoints-with-exact-authority-and-retire-refuse"
+commits = ["03743ef3"]
+source = "clients/android/app/src/main/java/tv/plurx/app/data/SharedSharingManagementClient.kt"
+source_anchor = 'if (response.code == 401 || response.code == 403) SharedSharingSecretDraft.retireAuthorization(auth.generation)'
+test = "clients/apple/Tests/SharedSharingManagementTests.swift"
+test_anchor = "testEndpointMutationsPreserveExactGenerationsAndRequireExplicitNewPins"
+
+[[fixes]]
+id = "sharing.preserve-complete-native-viewer-assignment-matrices"
+commits = ["b5de42d1"]
+source = "clients/android/app/src/main/java/tv/plurx/app/data/SharedSharingManagementClient.kt"
+source_anchor = 'suspend fun sourceLibraries(row: SharedSharingImportSummary): SharedSharingSourceLibrariesSnapshot {'
+test = "clients/android/app/src/test/java/tv/plurx/app/data/SharedSharingManagementTest.kt"
+test_anchor = "wire"
+
+[[fixes]]
+id = "sharing.manage-native-invitations-and-source-access"
+commits = ["b51db84c"]
+source = "clients/android/app/src/main/java/tv/plurx/app/data/Session.kt"
+source_anchor = 'private var authorizationObserverId = 0L'
+test = "clients/apple/Tests/SharedSharingManagementTests.swift"
+test_anchor = "testActualApprovalAndScopeBodiesPreserveExactIdsAndRequireEnteredCode"
+
+[[fixes]]
+id = "sharing.integrate-source-renewal-and-shared-browsing"
+commits = ["4ebb8522"]
+source = "clients/android/app/src/main/java/tv/plurx/app/MainActivity.kt"
+source_anchor = 'import tv.plurx.app.ui.SharedLibrariesScreen'
+test = "clients/apple/Tests/PlaybackFileContextTests.swift"
+test_anchor = "testAuthenticatedDetailHonorsFourMiBBoundWithoutGrantingMissingLocator"
+
+[[fixes]]
+id = "sharing.add-source-labelled-native-browsing-and-advisory-settings"
+commits = ["cee083a8"]
+source = "clients/android/app/src/main/java/tv/plurx/app/MainActivity.kt"
+source_anchor = 'import tv.plurx.app.ui.SharedLibrariesScreen'
+test = "clients/apple/Tests/SharedLibraryTests.swift"
+test_anchor = "testActualBOnlyBrowsePreservesPreciseIdsAndPerSourceFailure"
+
+[[fixes]]
+id = "sharing.preserve-complete-playback-envelopes-across-receiver-project"
+commits = ["ca879be5"]
+source = "clients/android/app/src/main/java/tv/plurx/app/data/PlaybackFileContext.kt"
+source_anchor = 'internal fun validateSharedReference(item: SharedPlaybackReference, file: String, revision: String) {'
+test = "clients/apple/Tests/SharedPlaybackModelsTests.swift"
+test_anchor = "testDistinctDecisionPreservesWireAndCannotAcquireMediaAuthority"
+
+[[fixes]]
+id = "sharing.validate-distinct-native-shared-playback-wire-subjects"
+commits = ["5d42f292"]
+source = "clients/android/app/src/main/java/tv/plurx/app/data/PlaybackFileContext.kt"
+source_anchor = 'internal fun validateSharedReference(item: SharedPlaybackReference, file: String, revision: String) {'
+test = "clients/apple/Tests/SharedPlaybackModelsTests.swift"
+test_anchor = "testDistinctDecisionPreservesWireAndCannotAcquireMediaAuthority"
+
+[[fixes]]
+id = "sharing.integrate-source-reservations-and-receiver-body-authority"
+commits = ["352b5644"]
+source = "clients/android/app/src/main/java/tv/plurx/app/data/PlaybackFileContext.kt"
+source_anchor = 'import java.nio.charset.StandardCharsets'
+test = "clients/apple/Tests/PlaybackFileContextTests.swift"
+test_anchor = "testSharedFullQueryVocabularyAndTranslatedMediaCannotAcquireAuthority"
+
+[[fixes]]
+id = "sharing.retain-native-context-through-playback-file-calls"
+commits = ["8d7845b7"]
+source = "clients/android/app/src/main/java/tv/plurx/app/data/PlaybackFileContext.kt"
+source_anchor = 'import java.nio.charset.StandardCharsets'
+test = "clients/apple/Tests/PlaybackFileContextTests.swift"
+test_anchor = "testSharedFullQueryVocabularyAndTranslatedMediaCannotAcquireAuthority"
+
+[[fixes]]
+id = "sharing.bind-native-file-contexts-to-authenticated-b-details"
+commits = ["52b27c2b"]
+source = "clients/android/app/src/main/java/tv/plurx/app/data/PlaybackFileContext.kt"
+source_anchor = 'import kotlinx.serialization.Serializable'
+test = "clients/apple/Tests/PlaybackFileContextTests.swift"
+test_anchor = "testAuthenticatedBContextPreservesExactReferenceAndSessionAuthority"
+
+[[fixes]]
+id = "sharing.align-native-authenticated-detail-with-the-b-response-bound"
+commits = ["b41e3f8e"]
+source = "clients/apple/Sources/PlaybackFileContext.swift"
+source_anchor = 'current.token == auth.token, data.count <= 4_194_304,'
+test = "clients/apple/Tests/PlaybackFileContextTests.swift"
+test_anchor = "testAuthenticatedDetailHonorsFourMiBBoundWithoutGrantingMissingLocator"
+
+[[fixes]]
+id = "sharing.pass-captured-auth-to-native-watch-resync"
+commits = ["d037cf4c"]
+source = "clients/android/app/src/main/java/tv/plurx/app/data/SharedDecisionClient.kt"
+source_anchor = 'val text = detail(reference, auth, transport); requireCurrent()'
+test = "clients/android/app/src/test/java/tv/plurx/app/data/SharedDecisionClientTest.kt"
+test_anchor = "initialStartRetainsWholeRequestAndBoundBContext"

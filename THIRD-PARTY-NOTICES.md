@@ -15,7 +15,7 @@ and never reaches a shipped artifact (§5).
 Dependency licenses come from `cargo metadata` over the resolved graph, not
 from `Cargo.lock` — the lockfile records versions and sources, never license
 fields, so an audit claiming to read licenses "from Cargo.lock" has not done
-the work. 494 source-bearing crates in the root workspace · license fields
+the work. 497 source-bearing crates in the root workspace · license fields
 verified 2026-09-17; the graph itself re-checked against `Cargo.lock`
 on 2026-09-22, when the vendored Hiqlite `backup` feature stopped
 enabling S3 and fourteen crates reached only through it left the
@@ -23,7 +23,9 @@ resolution, and on 2026-09-24, when `ring` became the only rustls provider
 and the six crates reached only through `aws-lc-rs` (`aws-lc-rs`,
 `aws-lc-sys`, `cmake`, `dunce`, `fs_extra`, `jobserver`) left it. The
 crate counts and the §4 license summary were recomputed from `cargo metadata`
-on 2026-09-25; `tests/operations/test_license_notices.py` holds the summary,
+on 2026-09-25 and 2026-10-03, when the sharing transport added
+`hickory-proto` and its `critical-section` / `portable-atomic` dependencies;
+`tests/operations/test_license_notices.py` holds the summary,
 the counts and the full list to one another.
 
 ---
@@ -144,15 +146,15 @@ such requirement applies.
 
 ## 4. Rust dependencies
 
-494 source-bearing crates resolve into a plurx build, excluding the five
+497 source-bearing crates resolve into a plurx build, excluding the five
 first-party crates and the vendored ones above (`s3-simple` resolves only in
 the fork's optional backup graph, never in this one). Every one is permissive:
 
 | License expression | Crates |
 |---|---:|
-| `MIT OR Apache-2.0` | 261 |
+| `MIT OR Apache-2.0` | 263 |
 | `MIT` | 115 |
-| `Apache-2.0 OR MIT` | 25 |
+| `Apache-2.0 OR MIT` | 26 |
 | `Unicode-3.0` | 18 |
 | `MIT/Apache-2.0` | 16 |
 | `Apache-2.0` | 11 |
@@ -204,7 +206,7 @@ workspaces ships in any artifact, so they are out of scope for distribution,
 but they are not covered by the table above.
 
 <details>
-<summary>Full crate list (494)</summary>
+<summary>Full crate list (497)</summary>
 
 | Crate | Version | License |
 |---|---|---|
@@ -287,6 +289,7 @@ but they are not covered by the table above.
 | `crc` | 3.4.0 | MIT OR Apache-2.0 |
 | `crc-catalog` | 2.5.0 | MIT OR Apache-2.0 |
 | `crc32fast` | 1.5.0 | MIT OR Apache-2.0 |
+| `critical-section` | 1.2.0 | MIT OR Apache-2.0 |
 | `crossbeam` | 0.8.4 | MIT OR Apache-2.0 |
 | `crossbeam-channel` | 0.5.16 | MIT OR Apache-2.0 |
 | `crossbeam-deque` | 0.8.7 | MIT OR Apache-2.0 |
@@ -373,6 +376,7 @@ but they are not covered by the table above.
 | `heck` | 0.5.0 | MIT OR Apache-2.0 |
 | `hermit-abi` | 0.5.2 | MIT OR Apache-2.0 |
 | `hex` | 0.4.3 | MIT OR Apache-2.0 |
+| `hickory-proto` | 0.26.3 | MIT OR Apache-2.0 |
 | `hiqlite-derive` | 0.14.0 | Apache-2.0 |
 | `hmac` | 0.12.1 | MIT OR Apache-2.0 |
 | `hostname` | 0.4.2 | MIT |
@@ -477,6 +481,7 @@ but they are not covered by the table above.
 | `pin-project-lite` | 0.2.17 | Apache-2.0 OR MIT |
 | `pkg-config` | 0.3.33 | MIT OR Apache-2.0 |
 | `poly1305` | 0.8.0 | Apache-2.0 OR MIT |
+| `portable-atomic` | 1.15.0 | Apache-2.0 OR MIT |
 | `potential_utf` | 0.1.5 | Unicode-3.0 |
 | `powerfmt` | 0.2.0 | MIT OR Apache-2.0 |
 | `ppv-lite86` | 0.2.21 | MIT OR Apache-2.0 |

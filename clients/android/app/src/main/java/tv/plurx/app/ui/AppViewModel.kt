@@ -42,6 +42,12 @@ import tv.plurx.app.data.ItemDetail
 import tv.plurx.app.data.Library
 import tv.plurx.app.data.LoginReq
 import tv.plurx.app.data.Net
+import tv.plurx.app.data.PlaybackFileContext
+import tv.plurx.app.data.SharedPlaybackReference
+import tv.plurx.app.data.SharedPlaybackPlan
+import tv.plurx.app.data.SharedLibraryClient
+import tv.plurx.app.data.SharedDecisionClient
+import tv.plurx.app.data.SharedPlaybackSubject
 import tv.plurx.app.data.PlurxApi
 import tv.plurx.app.data.parseRefusal
 import tv.plurx.app.player.PlaybackClientLog
@@ -788,7 +794,9 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
         quality: PlaybackQuality = _preferences.value.playbackQuality,
         presentationTarget: PresentationTarget? = null,
         audioOffsetMs: Long = 0,
+        fileContext: PlaybackFileContext = PlaybackFileContext.local(fileId),
     ): PlaybackDecision {
+        fileContext.localId(fileId)
         val measured = Caps.snapshot(getApplication<Application>())
         val snapshot = measured.copy(document = measured.document.copy(
             display = measured.document.display.copy(
@@ -802,10 +810,10 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
             preplayQueryParams(tracks) + if (Session.displayAwareAuto && Session.displayAwareAutoProtocol == "route-v1")
                 mapOf("audio_offset_ms" to audioOffsetMs.toString()) else emptyMap()
         val decision = try {
-            api().decisionV2(fileId, request, DecisionCapsReq(snapshot.document))
+            api().decisionV2ForContext(fileContext, request, DecisionCapsReq(snapshot.document))
         } catch (error: HttpException) {
             if (!shouldFallBackToLegacyDecision(error.code())) throw error
-            api().decision(fileId, snapshot.legacyQuery + request)
+            api().decisionForContext(fileContext, snapshot.legacyQuery + request)
         }
         return PlaybackDecision(decision, snapshot)
     }
@@ -882,12 +890,30 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
         return null
     }
 
-    suspend fun createHlsSession(fileId: Long, body: CreateSessionReq): HlsStart {
+    internal suspend fun prepareSharedPlayback(reference: SharedPlaybackReference, fileId: String): SharedPlaybackPlan {
+        val catalogue = SharedLibraryClient.create()
+        val detail = catalogue.detail(reference); catalogue.requireCurrent()
+        require(detail.delivery_status == "available" && detail.files.any { it.file_id == fileId && it.file_base != null }) { "Playback is unavailable for this Shared title." }
+        val context = PlaybackFileContext.authenticatedDetail(reference, fileId)
+        require(context.lifecycleGeneration == detail.lifecycle_generation)
+        val quality = _preferences.value.playbackQuality
+        val query = when (quality) { PlaybackQuality.Auto -> emptyMap(); PlaybackQuality.Original -> mapOf("force" to "original"); else -> mapOf("force" to "transcode") }
+        val result = SharedDecisionClient.create().decision(context, getApplication<Application>(), query)
+        val position = detail.watch?.let { if (it.watched) 0 else it.position_ms } ?: 0
+        val subject = SharedPlaybackSubject(context, detail.item.title, position, detail.watch?.sequence ?: 0)
+        val body = CreateSessionReq(playback_id = java.util.UUID.randomUUID().toString(), request_id = java.util.UUID.randomUUID().toString(),
+            height = quality.rungHeight, quality_auto = quality == PlaybackQuality.Auto, start = position.toDouble() / 1000,
+            copy = result.decision.method != "transcode", aac = result.decision.presentation.transcode_audio, caps = result.caps)
+        return SharedPlaybackPlan(subject, result.decision, result.caps, body)
+    }
+
+    suspend fun createHlsSession(fileId: Long, body: CreateSessionReq, fileContext: PlaybackFileContext = PlaybackFileContext.local(fileId)): HlsStart {
+        fileContext.localId(fileId)
         requireNotNull(body.caps) {
             "Playback session is missing its decision capabilities."
         }
         val started = try {
-            api().createHlsSession(fileId, body)
+            api().createHlsSessionForContext(fileContext, body)
         } catch (error: HttpException) {
             // The surface adapter (PLAYBACK-SURFACE-CONTRACT.md §3.5): a
             // refusal the server explained reaches the presenter as its own

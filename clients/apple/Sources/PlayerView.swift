@@ -1,4 +1,5 @@
 import SwiftUI
+import AVKit
 
 #if os(iOS)
 import UIKit
@@ -3517,4 +3518,26 @@ struct PlaybackStatsView: View {
         ByteCountFormatter.string(fromByteCount: Int64(bytes), countStyle: .file)
     }
 
+}
+
+
+/// Typed Shared dispatch never supplies sentinel numeric IDs to PlayerView.
+struct SharedPlayerView: View {
+    let plan: SharedPlaybackPlan
+    @StateObject private var controller = SharedPlayerController()
+    @Environment(\.dismiss) private var dismiss
+    var body: some View {
+        VStack(spacing: 12) {
+            Text(plan.subject.title).font(.headline)
+            VideoPlayer(player: controller.player).allowsHitTesting(false)
+            if controller.starting { ProgressView("Starting Shared playback") }
+            if let summary = controller.statusSummary { Text(summary).font(.caption).foregroundStyle(.secondary) }
+            if let failure = controller.failure { Text(failure).foregroundStyle(.secondary) }
+            Text("Playback controls, quality, audio, subtitles and recovery changes are unavailable for Shared playback.")
+                .font(.caption).foregroundStyle(.secondary)
+            Button("Close") { Task { await controller.stop(); dismiss() } }
+        }
+        .task { await controller.start(plan) }
+        .onDisappear { Task { await controller.stop() } }
+    }
 }

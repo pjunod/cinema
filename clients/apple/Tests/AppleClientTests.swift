@@ -3542,7 +3542,7 @@ final class AppleClientTests: XCTestCase {
     @MainActor
     func testTheRowEighteenSitesLogOnceAndDrawNothing() {
         let controller = PlayerController()
-        let model = AppModel()
+        let model = AppModel(startServices: false)
         defer { controller.stop() }
         XCTAssertFalse(
             controller.noteSurfaceLogOnly("prepared_successor_abandoned:failed"),

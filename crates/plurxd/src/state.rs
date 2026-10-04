@@ -698,6 +698,7 @@ impl StoreMetricsCache {
 #[derive(Clone)]
 pub struct AppState {
     pub store: Arc<dyn Store>,
+    pub(crate) sharing: Arc<crate::sharing::SharingManager>,
     /// Fixed-lifetime, digest-only admin proofs for cluster recovery reads.
     /// Ordinary authentication populates it; cache-only routes never reach
     /// Store on a miss.
@@ -817,9 +818,9 @@ pub struct AppState {
     pub watch_ledger: Arc<crate::telemetry::WatchLedger>,
     /// Store-backed gauges sampled away from the Prometheus request path.
     pub store_metrics: StoreMetricsCache,
-    /// Application-initiated graceful drain. Signals still use the process
-    /// watcher in `main`; the cluster leave endpoint cancels this only after
-    /// its own voter removal has committed.
+    /// Graceful drain. The cluster leave endpoint cancels this only after its
+    /// own voter removal has committed; `main` cancels it when a process
+    /// signal starts the drain, so owners see one token for either cause.
     pub shutdown: tokio_util::sync::CancellationToken,
     /// Test-only rendezvous inside the real cache-admin revocation fence.
     /// Production has no hook or alternate path.
@@ -967,6 +968,7 @@ impl AppState {
         let catalogue = CatalogueReader::authority(Arc::clone(&store));
         Self::new_configured(
             AppConfig {
+                sharing_network: Default::default(),
                 server_name,
                 node_id,
                 cluster_advertisement: false,
@@ -1008,6 +1010,7 @@ impl AppState {
         logs: LogBuffers,
     ) -> Self {
         let AppConfig {
+            sharing_network,
             server_name,
             node_id,
             cluster_advertisement,
@@ -1049,6 +1052,11 @@ impl AppState {
             .with_dv_disk_capabilities(system.dv_disk.clone())
             .with_membership(membership.clone()),
         );
+        let sharing = Arc::new(crate::sharing::SharingManager::new(
+            Arc::clone(&credential_key),
+            data_dir.join("sharing-tls"),
+            sharing_network,
+        ));
         let backup = crate::backup::BackupManager::new(
             Arc::clone(&store),
             Arc::clone(&jobs),
@@ -1143,6 +1151,7 @@ impl AppState {
         );
         AppState {
             store,
+            sharing,
             cache_only_admin_proofs,
             login_throttle: Default::default(),
             password_capacity: Default::default(),
@@ -1312,6 +1321,7 @@ pub struct SnapshotRecoveryBudgets {
 }
 
 pub struct AppConfig {
+    pub sharing_network: plurx_core::config::SharingNetworkConfig,
     pub server_name: String,
     pub node_id: String,
     pub cluster_advertisement: bool,
@@ -2735,8 +2745,28 @@ pub(crate) async fn enqueue_copy_preparation_for_object(
 
 #[derive(Clone, Debug)]
 pub(crate) struct PlaybackViewerDemand {
-    pub user_id: i64,
+    pub principal: plurx_core::playback_principal::PlaybackPrincipal,
     pub playback_id: String,
+}
+
+impl PlaybackViewerDemand {
+    /// Shared source admission is not installed. Refuse explicitly rather
+    /// than dropping typed viewer ownership from background or VOD work.
+    pub(crate) fn require_local_authority(&self) -> Result<(), &'static str> {
+        match &self.principal {
+            plurx_core::playback_principal::PlaybackPrincipal::LocalUser { user_id }
+                if *user_id > 0 =>
+            {
+                Ok(())
+            }
+            plurx_core::playback_principal::PlaybackPrincipal::LocalUser { .. } => {
+                Err("invalid local playback demand")
+            }
+            plurx_core::playback_principal::PlaybackPrincipal::Sharing { .. } => {
+                Err("sharing playback demand requires typed source authority")
+            }
+        }
+    }
 }
 
 pub(crate) async fn enqueue_copy_preparation_for_object_with_viewer(
@@ -2747,6 +2777,11 @@ pub(crate) async fn enqueue_copy_preparation_for_object_with_viewer(
     object_version: Option<&str>,
     viewer: Option<&PlaybackViewerDemand>,
 ) -> Result<AnalysisRequest, StoreError> {
+    if let Some(viewer) = viewer {
+        viewer
+            .require_local_authority()
+            .map_err(|error| StoreError::Task(error.to_owned()))?;
+    }
     let pipeline_version = crate::ffmpeg::fragment_index_engine_digest().await;
     let video_identity = crate::fragindex::identity_for(file, video).argv_fingerprint;
     let base = analysis_request_generation(
@@ -2779,7 +2814,7 @@ pub(crate) async fn enqueue_copy_preparation_for_object_with_viewer(
             created_at_ms: now,
         })
         .await?;
-    if let Some(viewer) = viewer.filter(|viewer| viewer.user_id > 0) {
+    if let Some(viewer) = viewer {
         store
             .join_analysis_viewer(plurx_core::store::AnalysisViewerInterest {
                 analysis_request_id: request.request_id.clone(),
@@ -2787,7 +2822,7 @@ pub(crate) async fn enqueue_copy_preparation_for_object_with_viewer(
                 pipeline_version: request.pipeline_version.clone(),
                 video_identity: request.video_identity.clone(),
                 target_node_id: request.target_node_id.clone(),
-                user_id: viewer.user_id,
+                principal: viewer.principal.clone(),
                 playback_id: viewer.playback_id.clone(),
                 now_ms: clock_ms(),
             })
@@ -10584,6 +10619,35 @@ mod tests {
         let file = store.get_file(id).await.expect("read").expect("file");
         let strip = CopyVideoOptions::new(true, false);
         let convert = strip.with_dolby_vision_conversion(true);
+        for principal in [
+            plurx_core::playback_principal::PlaybackPrincipal::sharing(
+                uuid::Uuid::new_v4(),
+                &"a".repeat(64),
+            )
+            .expect("shared demand"),
+            plurx_core::playback_principal::PlaybackPrincipal::LocalUser { user_id: 0 },
+            plurx_core::playback_principal::PlaybackPrincipal::LocalUser { user_id: -1 },
+        ] {
+            let viewer = PlaybackViewerDemand {
+                principal,
+                playback_id: "refused-demand".to_owned(),
+            };
+            assert!(enqueue_copy_preparation_for_object_with_viewer(
+                &store,
+                "node-a",
+                &file,
+                convert,
+                None,
+                Some(&viewer)
+            )
+            .await
+            .is_err());
+            assert!(store
+                .analysis_requests(10)
+                .await
+                .expect("no anonymous queue write")
+                .is_empty());
+        }
         let first = enqueue_copy_preparation(&store, "node-a", &file, convert)
             .await
             .expect("first request");
@@ -10631,7 +10695,9 @@ mod tests {
             convert,
             None,
             Some(&PlaybackViewerDemand {
-                user_id: viewer.id,
+                principal: plurx_core::playback_principal::PlaybackPrincipal::LocalUser {
+                    user_id: viewer.id,
+                },
                 playback_id: "first-play".into(),
             }),
         )

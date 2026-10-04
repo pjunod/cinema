@@ -77,7 +77,7 @@
         let moved = state
             .store
             .record_desired_selection(
-                user.id,
+                &plurx_core::playback_principal::PlaybackPrincipal::LocalUser { user_id: user.id },
                 playback,
                 &"9".repeat(64),
                 "v1;quality=manual:720",
@@ -103,7 +103,7 @@
         assert!(
             state
                 .store
-                .media_session_route_for_playback(user.id, playback)
+                .media_session_route_for_playback(&plurx_core::playback_principal::PlaybackPrincipal::LocalUser { user_id: user.id }, playback)
                 .await
                 .expect("route")
                 .is_none(),
@@ -133,7 +133,7 @@
 
         let recorded = state
             .store
-            .desired_selection(7, "player-a")
+            .desired_selection(&plurx_core::playback_principal::PlaybackPrincipal::LocalUser { user_id: 7 }, "player-a")
             .await
             .expect("reading the desired row");
         let recorded = recorded.expect("the ask is recorded even though the create failed");
@@ -192,7 +192,7 @@
 
         let recorded = state
             .store
-            .desired_selection(user.id, "chain-player")
+            .desired_selection(&plurx_core::playback_principal::PlaybackPrincipal::LocalUser { user_id: user.id }, "chain-player")
             .await
             .expect("reading the ask")
             .expect("the create recorded its viewer's ask");
@@ -204,7 +204,7 @@
         // binary — the guard turned against the thing it protects.
         let carried = state
             .store
-            .validation_playback_pointer_desired_revision(user.id, "chain-player")
+            .validation_playback_pointer_desired_revision(&plurx_core::playback_principal::PlaybackPrincipal::LocalUser { user_id: user.id }, "chain-player")
             .await
             .expect("reading the pointer revision");
         assert_eq!(
@@ -285,13 +285,13 @@
         // session serving a selection nothing says the viewer wants.
         let recorded = state
             .store
-            .desired_selection(user.id, playback)
+            .desired_selection(&plurx_core::playback_principal::PlaybackPrincipal::LocalUser { user_id: user.id }, playback)
             .await
             .expect("reading the ask")
             .expect("two creates recorded an ask between them");
         let carried = state
             .store
-            .validation_playback_pointer_desired_revision(user.id, playback)
+            .validation_playback_pointer_desired_revision(&plurx_core::playback_principal::PlaybackPrincipal::LocalUser { user_id: user.id }, playback)
             .await
             .expect("reading the pointer revision");
         if let Some(carried) = carried {
@@ -330,7 +330,7 @@
         assert!(
             state
                 .store
-                .desired_selection(7, "player-bad")
+                .desired_selection(&plurx_core::playback_principal::PlaybackPrincipal::LocalUser { user_id: 7 }, "player-bad")
                 .await
                 .expect("reading the desired row")
                 .is_none(),
@@ -354,7 +354,7 @@
         assert!(
             state
                 .store
-                .desired_selection(7, "player-legacy")
+                .desired_selection(&plurx_core::playback_principal::PlaybackPrincipal::LocalUser { user_id: 7 }, "player-legacy")
                 .await
                 .expect("reading the desired row")
                 .is_none(),
@@ -2538,7 +2538,7 @@
                 expected_desired_revision: None,
                 incarnation_id: uuid::Uuid::new_v4().to_string(),
                 session_id: session_id.clone(),
-                user_id: user.id,
+                principal: plurx_core::playback_principal::PlaybackPrincipal::LocalUser { user_id: user.id },
                 playback_id: "shipped-release".to_owned(),
                 expected_predecessor_incarnation_id: None,
                 fence_predecessor: false,
@@ -2578,7 +2578,7 @@
         assert!(
             fixture
                 .store
-                .media_session_route_for_playback(route.user_id, &route.playback_id)
+                .media_session_route_for_playback(&route.principal, &route.playback_id)
                 .await
                 .expect("pointer after release")
                 .is_none(),
@@ -2666,7 +2666,7 @@
                     decoder_caps: None,
                     protocol_version: crate::media_pool::PROTOCOL_VERSION,
                     incarnation_id: route.incarnation_id.clone(),
-                    user_id: route.user_id,
+                    principal: plurx_core::playback_principal::PlaybackPrincipal::LocalUser { user_id: route.principal.local_user_id().expect("local test principal") },
                     source_size: 0,
                     source_mtime: 0,
                     typeless_playlist: false,
@@ -2697,7 +2697,7 @@
         assert!(
             fixture
                 .store
-                .staged_media_session_for_playback(route.user_id, &playback_id)
+                .staged_media_session_for_playback(&route.principal, &playback_id)
                 .await
                 .expect("ledger read at the registration point")
                 .is_none(),
@@ -2851,7 +2851,7 @@
             fixture
                 .state
                 .store
-                .media_session_route_for_playback(route.user_id, &route.playback_id)
+                .media_session_route_for_playback(&route.principal, &route.playback_id)
                 .await
                 .expect("pointer after the expired settlement")
                 .expect("the predecessor stays current")
@@ -2882,7 +2882,7 @@
                 expected_desired_revision: None,
                 incarnation_id: uuid::Uuid::new_v4().to_string(),
                 session_id: session_id.clone(),
-                user_id: user.id,
+                principal: plurx_core::playback_principal::PlaybackPrincipal::LocalUser { user_id: user.id },
                 playback_id: "release-fence".to_owned(),
                 expected_predecessor_incarnation_id: None,
                 fence_predecessor: false,
@@ -2963,7 +2963,7 @@
                 expected_desired_revision: None,
                 incarnation_id: uuid::Uuid::new_v4().to_string(),
                 session_id: session_id.clone(),
-                user_id: user.id,
+                principal: plurx_core::playback_principal::PlaybackPrincipal::LocalUser { user_id: user.id },
                 playback_id: "release-tombstone".to_owned(),
                 expected_predecessor_incarnation_id: None,
                 fence_predecessor: false,
@@ -3126,4 +3126,40 @@
             let catalog = request.quality_catalog.as_ref().expect("optional canonical ladder is retained independently");
             assert!(!catalog.complete, "missing source is incomplete, not proof of an empty ladder");
         }
+    }
+
+
+    #[test]
+    fn sharing_resource_validator_accepts_actual_master_and_subtitle_generators() {
+        use plurx_core::sharing_resources::{SharingHlsResource,validate_sharing_playlist};
+        let mut file=hls_file(vec![SubtitleStream {
+            index:0,codec:"subrip".into(),language:Some("eng".into()),
+            title:Some("English \\ commentary, \"quoted\"".into()),default:true,
+            forced:false,hearing_impaired:true,
+        },SubtitleStream {
+            index:1,codec:"webvtt".into(),language:Some("jpn".into()),
+            title:Some("日本語".into()),default:false,forced:true,hearing_impaired:false,
+        }]);
+        let master_resource=SharingHlsResource::parse("master.m3u8").expect("master resource");
+        for range in [None,Some("hdr10"),Some("hlg"),Some("dolby_vision")] {
+            file.hdr=range.map(str::to_owned);
+            for context in [sdr_context(),hls_context("hvc1.2.4.L153.B0,mp4a.40.2",Some("dvh1.08.06/db1p"))] {
+                for selected in [None,Some(0),Some(1)] {
+                    let master=master_playlist_with(&file,selected,&context,MasterRungs::default());
+                    validate_sharing_playlist(&master_resource,master.as_bytes()).expect("actual master keeps supported metadata and relative resource URIs");
+                    for diagnostic in ["video-only","video-only-codecs","video-only-range","video-only-hdr"] {
+                        let master=master_playlist_diagnostic(&file,selected,&context,Some(diagnostic));
+                        validate_sharing_playlist(&master_resource,master.as_bytes()).expect("actual diagnostic master");
+                    }
+                }
+            }
+        }
+        let subtitle_resource=SharingHlsResource::parse("subs/1/index.m3u8").expect("captured subtitle track");
+        for video in ["#EXTM3U\n#EXT-X-TARGETDURATION:6\n#EXT-X-MEDIA-SEQUENCE:100000\n#EXT-X-PLAYLIST-TYPE:EVENT\n#EXTINF:5.125,\nseg100000.ts\n",
+            "#EXTM3U\n#EXT-X-TARGETDURATION:6\n#EXT-X-MEDIA-SEQUENCE:5\n#EXT-X-PLAYLIST-TYPE:VOD\n#EXTINF:5.125,\nseg00005.m4s\n#EXT-X-ENDLIST\n"] {
+            let subtitles=subtitle_media_playlist(video.as_bytes());
+            validate_sharing_playlist(&subtitle_resource,subtitles.as_bytes()).expect("actual subtitle timeline generator");
+        }
+        let unsafe_uri="#EXTM3U\n#EXT-X-VERSION:7\n#EXT-X-MEDIA:TYPE=SUBTITLES,GROUP-ID=\"subs\",NAME=\"safe literal \\ metadata\",URI=\"subs\\0\\index.m3u8\"\n#EXT-X-STREAM-INF:BANDWIDTH=1000\nindex.m3u8\n";
+        assert!(validate_sharing_playlist(&master_resource,unsafe_uri.as_bytes()).is_err(),"metadata backslashes never admit a URI separator");
     }

@@ -592,6 +592,18 @@ async function openSession(fileId, opts, signal=null, requestId=null){
     const force=(typeof qualityForce==="function")?qualityForce():"auto";
     if(force && force!=="auto") body.overrides=Object.assign({force},body.overrides||{});
   }
+  const fileContext=playbackFileContext(fileId);
+  if(fileContext.source_ref.kind!=="local"){
+    // Shared initial Start never inherits a Local control/recovery envelope.
+    // Actual supplied unsupported fields are refused by the typed adapter.
+    const player=typeof PLAYER!=="undefined"?PLAYER:null;
+    const natives=(player&&player.subs||[]).filter(sub=>sub.native===true);
+    if(natives.length){body.native_subtitles=true;if(natives.some(sub=>sub.index===player.curSub))body.subtitle=player.curSub;}
+    const hevcCopy=!!body.copy&&["hevc","h265","hevc10"].includes(String(player&&player.source&&player.source.video_codec||"").toLowerCase());
+    const transport=typeof plannedHlsTransport==="function"?plannedHlsTransport(hevcCopy):null;if(transport)body.transport=transport;
+    if(body.height==null&&!Object.hasOwn(opts||{},"height"))delete body.height;
+    return SHARED_DECISION.start(fileContext,body,signal);
+  }
   // HLS sessions carry native WebVTT renditions whenever this server says a
   // track can become one. Publishing the group up front lets a later subtitle
   // selection and a readiness-directed re-fetch stay inside the current video
@@ -655,7 +667,7 @@ async function openSession(fileId, opts, signal=null, requestId=null){
     PLAYER.libraryChannel=Object.assign({},following,result.library_channel);
     return result.playback;
   }
-  return api(`/files/${fileId}/hls/sessions`,{method:"POST",body,signal});
+  return api(playbackFileApiPath(fileId,"hls/sessions"),{method:"POST",body,signal});
 }
 // A cancellable wait. The newer intent's abort is the same signal the create
 // itself is carrying, so a retry sleeping between attempts is cancelled by the
@@ -821,12 +833,20 @@ async function openSessionRetryingNotYet(fileId, opts, signal, options){
 // is now the whole immutable title, so the media element seeks there directly.
 // The returned absolute position is also what the stall watchdog is armed with.
 function attachSession(v, t, info, wantSec){
+  if(t.fileContext&&playbackFileContext(t.fileContext).source_ref.kind!=="local"){
+    const context=playbackFileContext(t.fileContext),bound=info&&info._sharedContext;
+    if(!bound||playbackFileKey(bound)!==playbackFileKey(context)||bound.session_id!==info.session_id)playbackFileReject();
+  }
   stopPlaybackControl(t);
   t.controlRenderOverride=null;
   t.controlObservationOverride=null;
   t.offset=info.start_seconds||0;
   t.encoder=info.encoder||null;
   t.sessionId=info.session_id||null;
+  if(t.fileContext&&playbackFileContext(t.fileContext).source_ref.kind!=="local"){
+    t.fileContext=info._sharedContext;
+    t.meta={...(t.meta||{}),fileContext:t.fileContext};
+  }
   t.streamId=null;
   t.vod=!!info.vod;
   if(Array.isArray(info.ladder)&&info.ladder.length) t.ladder=info.ladder;

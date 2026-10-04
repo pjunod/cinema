@@ -47,6 +47,31 @@ pub(crate) mod publication;
 mod reading;
 mod scan;
 pub(crate) mod scan_identity;
+pub(crate) mod shared_artwork;
+pub(crate) mod shared_library;
+pub(crate) mod shared_playback;
+#[cfg(test)]
+mod shared_receiver_fixture;
+#[allow(
+    dead_code,
+    reason = "candidate Shared Start router remains unregistered pending actual relay qualification"
+)]
+pub(crate) mod shared_receiver_ingress;
+#[allow(dead_code)] // Owner remains unregistered until relay/control qualify.
+pub(crate) mod shared_receiver_playback;
+pub(crate) mod shared_source_playback;
+// Candidate projection helpers remain unregistered until Source/B lifecycle
+// authority and actual delivery binding are qualified.
+pub(crate) mod sharing;
+mod sharing_decision_decode;
+pub(crate) use sharing_decision_decode::bounded_decision_value;
+#[allow(dead_code)]
+pub(crate) mod sharing_playback_wire;
+#[allow(dead_code)]
+mod sharing_start_decode;
+pub(crate) use sharing_start_decode::{
+    decode_source_start_response, validate_source_start_request, DecodedSourceHlsStart,
+};
 pub(crate) mod stream;
 pub(crate) mod subtitle_downloads;
 pub(crate) mod system;
@@ -321,7 +346,9 @@ fn http_route_group(path: &str) -> usize {
         | "/library/metadata/{key}/children"
         | "/library/metadata/{key}/{kind}"
         | "/api/v1/images/{filename}"
-        | "/api/v1/files/{id}/chapters/{index}/thumb" => 3,
+        | "/api/v1/files/{id}/chapters/{index}/thumb"
+        | "/api/v1/shared/imports/{import}/files/{locator}/hls/sessions"
+        | "/api/v1/shared/imports/{import}/files/{locator}/playback" => 3,
 
         // Search only; maintenance of the search index is a settings action.
         "/api/v1/search" | "/api/v1/search/related" | "/api/v1/search/settings" | "/search" => 4,
@@ -1317,6 +1344,9 @@ pub fn router(state: AppState) -> Router {
     // before the shared serving gate so media bodies and blocked GETs remain
     // unlimited while JSON work cannot occupy a request slot forever.
     let json_short = Router::new()
+        .merge(sharing::admin_router(state.clone()))
+        .merge(shared_library::viewer_router(state.clone()))
+        .merge(shared_playback::viewer_router(state.clone()))
         .route("/server", get(system::server_info))
         .route("/me", get(auth::me))
         .route("/settings", get(system::get_settings))
@@ -1719,12 +1749,19 @@ pub fn router(state: AppState) -> Router {
         // can send this with `keepalive`, which cannot set headers.
         .route("/hls/{session}", delete(hls::delete))
         .route("/hls/{session}/{segment}", get(hls::segment))
-        .route("/images/{filename}", get(images::serve));
+        .route("/images/{filename}", get(images::serve))
+        // Shared Start: the receiver actor owns dispatch, persistence and
+        // physical cleanup; the request is deadline-free like a local create.
+        .merge(shared_receiver_ingress::start_router());
 
     let api = Router::new()
         .merge(json_short)
         .merge(json_long)
         .merge(media)
+        .layer(axum::middleware::from_fn_with_state(
+            state.clone(),
+            shared_receiver_playback::receiver_media,
+        ))
         .layer(axum::middleware::from_fn_with_state(
             state.clone(),
             mutable_media_serving_gate,
@@ -1795,6 +1832,11 @@ pub fn router(state: AppState) -> Router {
         .route("/healthz", get(healthz))
         .route("/readyz", get(readyz))
         .route("/metrics", get(system::metrics))
+        .route("/sharing", axum::routing::any(sharing::local_peer_refusal))
+        .route(
+            "/sharing/{*path}",
+            axum::routing::any(sharing::local_peer_refusal),
+        )
         .fallback(web::fallback)
         .layer(axum::middleware::from_fn(json_short_deadline));
 
@@ -2502,6 +2544,11 @@ async fn mutable_media_serving_gate(
             .insert(header::RETRY_AFTER, HeaderValue::from_static("1"));
     }
     response
+}
+
+#[cfg(test)]
+pub(crate) fn source_actor_test_state() -> AppState {
+    tests::test_state_without_router()
 }
 
 #[cfg(test)]
@@ -4746,9 +4793,14 @@ mod tests {
     /// server into a condition a request cannot create, like a pre-transcode
     /// pass already running.
     pub(super) fn test_app_with_state() -> (Router, AppState) {
+        let state = test_state_without_router();
+        (router(state.clone()), state)
+    }
+
+    pub(super) fn test_state_without_router() -> AppState {
         let store = SqliteStore::open_in_memory().expect("store");
         let base = crate::test_temp_path(format!("plurx-test-{}", uuid::Uuid::new_v4()));
-        let state = AppState::new(
+        AppState::new(
             "test".into(),
             Arc::new(store),
             test_dirs(&base),
@@ -4756,8 +4808,7 @@ mod tests {
             Default::default(),
             Default::default(),
             Arc::new(crate::logbuf::LogBuffer::new(64)),
-        );
-        (router(state.clone()), state)
+        )
     }
 
     // HTTP scan fixtures run the production durable consumer independently.
@@ -11959,6 +12010,761 @@ mod tests {
             StatusCode::UNAUTHORIZED,
             "token revocation must apply to the next preview request"
         );
+    }
+
+    /// Runs only in a disposable namespace with an assigned CGNAT fixture IP.
+    /// The production endpoint validator, DNS, pinned dialer and both routers
+    /// remain in the path. This proves protocol recovery, not Tailscale topology.
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    #[ignore = "requires an isolated CGNAT network; run explicitly with PLURX_SHARING_FIXTURE_IP"]
+    async fn sharing_pinned_transport_recovers_committed_claim_and_rotation_after_restart() {
+        use plurx_core::{
+            config::{SharingEgressConfig, SharingNetworkConfig},
+            sharing::{MutationOutcome, StoredImport},
+            sharing_tls::{LiveNodeTls, SharingTlsListener},
+        };
+        use std::sync::atomic::{AtomicBool, Ordering};
+        let address: std::net::IpAddr = std::env::var("PLURX_SHARING_FIXTURE_IP")
+            .expect("explicit disposable fixture address")
+            .parse()
+            .expect("numeric fixture address");
+        assert!(plurx_core::sharing::is_tailnet_address(address));
+        let temporary = tempfile::tempdir().expect("fixture TLS directory");
+        let tls = Arc::new(
+            LiveNodeTls::open(temporary.path(), crate::state::clock_ms() / 1000)
+                .expect("generated source TLS"),
+        );
+        let (pin, _) = tls.status().expect("public source pin");
+        let socket = tokio::net::TcpListener::bind((address, 0))
+            .await
+            .expect("isolated source listener");
+        let port = socket.local_addr().expect("fixture port").port();
+        let acceptor = SharingTlsListener::new(socket, tls);
+        let (source_app, source) = test_app_with_state();
+        let source_admin = setup_admin(&source_app).await;
+        let seeded = seed_content(&source).await;
+        source
+            .store
+            .put_setting(plurx_core::store::keys::SHARING_ENABLED, "1")
+            .await
+            .expect("enable source");
+        let endpoints = json!([{"ipv4":address.to_string(),"ipv6":null,
+            "ts_fqdn":"source.fixture.ts.net","port":port,"spki_sha256":pin}]);
+        assert_eq!(
+            call(
+                &source_app,
+                put(
+                    "/api/v1/sharing/endpoints",
+                    Some(&source_admin),
+                    json!({"expected_revision":0,"endpoints":endpoints})
+                )
+            )
+            .await
+            .0,
+            StatusCode::OK
+        );
+        let invitation = call(
+            &source_app,
+            post(
+                "/api/v1/sharing/invitations",
+                Some(&source_admin),
+                json!({"library_ids":[seeded.lib.to_string()]}),
+            ),
+        )
+        .await;
+        assert_eq!(invitation.0, StatusCode::OK);
+        let peer_router = sharing::peer_router(source.clone());
+        let lose_claim = Arc::new(AtomicBool::new(true));
+        let lose_rotation = Arc::new(AtomicBool::new(true));
+        let server = ScanWorker(tokio::spawn(async move {
+            let mut connections = tokio::task::JoinSet::new();
+            loop {
+                let (stream, _) = tokio::select! {
+                    accepted = acceptor.accept() => accepted.expect("fixture TLS acceptance"),
+                    _ = connections.join_next(), if !connections.is_empty() => continue,
+                };
+                let router = peer_router.clone();
+                let claim = lose_claim.clone();
+                let rotation = lose_rotation.clone();
+                connections.spawn(async move {
+                    let service = hyper::service::service_fn(
+                        move |request: Request<hyper::body::Incoming>| {
+                            let router = router.clone();
+                            let claim = claim.clone();
+                            let rotation = rotation.clone();
+                            async move {
+                                let drop_response = request.method() == "POST"
+                                    && match request.uri().path() {
+                                        "/sharing/v1/claims" => claim.swap(false, Ordering::SeqCst),
+                                        "/sharing/v1/grant/rotation" => {
+                                            rotation.swap(false, Ordering::SeqCst)
+                                        }
+                                        _ => false,
+                                    };
+                                let response = router
+                                    .oneshot(request.map(Body::new))
+                                    .await
+                                    .expect("source router");
+                                if drop_response && response.status().is_success() {
+                                    // The router has committed, but Hyper sends no response.
+                                    return Err(std::io::Error::new(
+                                        std::io::ErrorKind::ConnectionReset,
+                                        "synthetic committed response loss",
+                                    ));
+                                }
+                                Ok::<_, std::io::Error>(response)
+                            }
+                        },
+                    );
+                    let _ = hyper::server::conn::http1::Builder::new()
+                        .serve_connection(hyper_util::rt::TokioIo::new(stream), service)
+                        .await;
+                });
+            }
+        }));
+        let (_, mut recipient) = test_app_with_state();
+        let network = SharingNetworkConfig {
+            bind: "127.0.0.1:32444".parse().expect("unused listener config"),
+            egress: SharingEgressConfig::LocalAddress { address },
+        };
+        let restart = |state: &AppState| {
+            Arc::new(crate::sharing::SharingManager::new(
+                state.sharing.key.clone(),
+                temporary.path().join("recipient-unused-tls"),
+                network.clone(),
+            ))
+        };
+        recipient.sharing = restart(&recipient);
+        let recipient_app = router(recipient.clone());
+        let recipient_admin = setup_admin(&recipient_app).await;
+        recipient
+            .store
+            .put_setting(plurx_core::store::keys::SHARING_ENABLED, "1")
+            .await
+            .expect("enable recipient");
+        let response = call(
+            &recipient_app,
+            post(
+                "/api/v1/sharing/imports",
+                Some(&recipient_admin),
+                json!({"invitation":invitation.1["invitation"]}),
+            ),
+        )
+        .await;
+        assert_eq!(response.0, StatusCode::OK, "{response:?}");
+        let id: uuid::Uuid = response.1["import"]["id"]
+            .as_str()
+            .expect("import ID")
+            .parse()
+            .expect("UUID");
+        let load = |state: AppState| async move {
+            state
+                .store
+                .sharing_import(id)
+                .await
+                .expect("durable read")
+                .expect("retained import")
+        };
+        let claiming: StoredImport = load(recipient.clone()).await;
+        assert_eq!(claiming.summary.state, "claiming");
+        assert!(claiming.claim.is_some());
+        assert_eq!(
+            source
+                .store
+                .sharing_exports(None)
+                .await
+                .expect("committed claim")
+                .len(),
+            1
+        );
+        recipient
+            .store
+            .put_setting(
+                plurx_core::store::keys::SERVER_NAME,
+                "Recipient renamed after the ambiguous claim",
+            )
+            .await
+            .expect("rename recipient");
+        recipient.sharing = restart(&recipient);
+        recipient
+            .sharing
+            .resume_import(&recipient, claiming)
+            .await
+            .expect("recover claim after restart");
+        let pending = load(recipient.clone()).await;
+        assert_eq!(pending.summary.state, "pending");
+        assert!(pending.claim.is_none());
+        let local = recipient
+            .store
+            .sharing_identity(crate::state::clock_ms())
+            .await
+            .expect("recipient identity");
+        let before =
+            crate::sharing::ImportCredential::open(&recipient.sharing, local.server_id, &pending)
+                .expect("confirmed pending metadata");
+        assert!(before.pending_expires_at_ms.is_some());
+        let grants = source
+            .store
+            .sharing_exports(None)
+            .await
+            .expect("exact replay");
+        assert_eq!(grants.len(), 1);
+        assert_eq!(
+            source
+                .store
+                .approve_share(grants[0].grant.id, 1, crate::state::clock_ms())
+                .await
+                .expect("source approval"),
+            MutationOutcome::Applied
+        );
+        recipient.sharing = restart(&recipient);
+        recipient
+            .sharing
+            .resume_import(&recipient, pending)
+            .await
+            .expect("recover approval");
+        let active = load(recipient.clone()).await;
+        assert_eq!(active.summary.state, "active");
+        assert!(
+            recipient
+                .sharing
+                .resume_rotation(&recipient, active, true)
+                .await
+                .is_err(),
+            "source commits the rotation and loses its response"
+        );
+        assert!(recipient
+            .store
+            .sharing_import_rotation(id)
+            .await
+            .expect("pending replacement")
+            .is_some());
+        assert_eq!(
+            source
+                .store
+                .sharing_exports(None)
+                .await
+                .expect("source generation")[0]
+                .grant
+                .credential_generation,
+            2
+        );
+        recipient.sharing = restart(&recipient);
+        recipient
+            .sharing
+            .resume_rotation(&recipient, load(recipient.clone()).await, false)
+            .await
+            .expect("recover rotation through old status-only authority");
+        assert!(recipient
+            .store
+            .sharing_import_rotation(id)
+            .await
+            .expect("settled replacement")
+            .is_none());
+        let recovered = crate::sharing::ImportCredential::open(
+            &recipient.sharing,
+            local.server_id,
+            &load(recipient.clone()).await,
+        )
+        .expect("recovered credential");
+        assert_ne!(recovered.credential.expose(), before.credential.expose());
+        assert_eq!(
+            recovered.pending_expires_at_ms,
+            before.pending_expires_at_ms
+        );
+        assert_eq!(
+            source
+                .store
+                .sharing_exports(None)
+                .await
+                .expect("no duplicate grant")
+                .len(),
+            1
+        );
+        drop(server);
+    }
+
+    #[tokio::test]
+    async fn sharing_http_isolates_peer_routes_and_saves_without_readiness() {
+        let (app, state) = test_app_with_state();
+        let admin = setup_admin(&app).await;
+        let peer = sharing::peer_router(state.clone());
+        for path in [
+            "/sharing/v1/identity",
+            "/sharing/v2/identity",
+            "/api/v1/users",
+        ] {
+            let response = peer
+                .clone()
+                .oneshot(get(path, None))
+                .await
+                .expect("private response");
+            assert_eq!(response.headers()["cache-control"], "no-store", "{path}");
+        }
+        let response = app
+            .clone()
+            .oneshot(get("/api/v1/sharing/settings", None))
+            .await
+            .expect("private admin response");
+        assert_eq!(response.headers()["cache-control"], "no-store");
+        assert_eq!(
+            call(&app, get("/sharing/v1/identity", None)).await.0,
+            StatusCode::NOT_FOUND
+        );
+        for path in ["/api/v1/settings", "/api/v1/users", "/healthz", "/"] {
+            assert_eq!(
+                call(&peer, get(path, None)).await.0,
+                StatusCode::NOT_FOUND,
+                "{path}"
+            );
+        }
+        let (status, body) = call(&peer, get("/sharing/v2/identity", None)).await;
+        assert_eq!(status, StatusCode::UPGRADE_REQUIRED);
+        assert_eq!(body["code"], "sharing_protocol_unsupported");
+        assert_eq!(
+            call(&peer, get("/sharing/v1/identity", None)).await.1["code"],
+            "sharing_disabled"
+        );
+        let invitation = plurx_core::sharing::Invitation {
+            identity: plurx_core::sharing::SharingIdentity {
+                server_id: uuid::Uuid::new_v4(),
+                catalogue_epoch: uuid::Uuid::new_v4(),
+                created_at_ms: crate::state::clock_ms(),
+            },
+            name: "Unreachable synthetic source".into(),
+            endpoints: vec![plurx_core::sharing::Endpoint {
+                ipv4: "100.101.102.103"
+                    .parse()
+                    .expect("synthetic tailnet address"),
+                ipv6: None,
+                ts_fqdn: "source.fixture.ts.net".into(),
+                port: 32443,
+                spki_sha256: "a".repeat(64),
+            }],
+            id: uuid::Uuid::new_v4(),
+            secret: plurx_core::sharing::new_secret().expect("synthetic invitation"),
+            expires_at_ms: crate::state::clock_ms() + 60_000,
+        }
+        .encode()
+        .expect("bounded invitation");
+        let refused = call(
+            &app,
+            post(
+                "/api/v1/sharing/imports",
+                Some(&admin),
+                json!({"invitation":invitation.expose()}),
+            ),
+        )
+        .await;
+        assert_eq!(refused.0, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(refused.1["code"], "sharing_disabled");
+        assert!(state
+            .store
+            .sharing_imports()
+            .await
+            .expect("off cannot reserve an import")
+            .is_empty());
+        assert_eq!(
+            call(
+                &app,
+                put("/api/v1/sharing/settings", None, json!({"enabled":true}))
+            )
+            .await
+            .0,
+            StatusCode::UNAUTHORIZED
+        );
+        let (status, saved) = call(
+            &app,
+            put(
+                "/api/v1/sharing/settings",
+                Some(&admin),
+                json!({"enabled":true}),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(saved["enabled"], true);
+        assert_eq!(state.sharing.status().topology_qualification, "pending");
+        let transport = call(&app, get("/api/v1/sharing/status", Some(&admin))).await;
+        assert_eq!(transport.0, StatusCode::OK);
+        assert_eq!(transport.1["node_id"], state.node_id);
+        assert_eq!(transport.1["observation_scope"], "local_node");
+        assert!(transport.1["observed_at_ms"]
+            .as_i64()
+            .is_some_and(|at| at > 0));
+        assert_eq!(transport.1["serve"], "unknown");
+        assert_eq!(transport.1["tailscale_node_key_expiry"], "unknown");
+        let readiness = call(&app, get("/api/v1/developer/readiness", Some(&admin)))
+            .await
+            .1;
+        let sharing = readiness["items"]
+            .as_array()
+            .expect("readiness items")
+            .iter()
+            .find(|item| item["id"] == "cinema_sharing")
+            .expect("sharing advisory card");
+        assert_eq!(sharing["setting"], "sharing_enabled");
+        assert_eq!(sharing["requirements"][2]["status"], "unknown");
+        for enabled in [false, true] {
+            let saved = call(
+                &app,
+                put(
+                    "/api/v1/settings",
+                    Some(&admin),
+                    json!({"sharing_enabled":enabled}),
+                ),
+            )
+            .await;
+            assert_eq!(saved.0, StatusCode::OK);
+            assert_eq!(saved.1["sharing_enabled"], enabled);
+            assert_eq!(
+                call(&app, get("/api/v1/sharing/settings", Some(&admin)))
+                    .await
+                    .1["enabled"],
+                enabled
+            );
+        }
+        let identity = call(&peer, get("/sharing/v1/identity", None)).await;
+        assert_eq!(identity.0, StatusCode::OK);
+        assert!(identity.1.get("libraries").is_none());
+        assert_eq!(
+            call(&peer, get("/sharing/v1/grant", Some(&admin))).await.0,
+            StatusCode::UNAUTHORIZED
+        );
+        assert_eq!(
+            call(
+                &app,
+                put(
+                    "/api/v1/sharing/settings",
+                    Some(&admin),
+                    json!({"enabled":false})
+                )
+            )
+            .await
+            .0,
+            StatusCode::OK
+        );
+        assert_eq!(
+            call(&peer, get("/sharing/v1/identity", None)).await.1["code"],
+            "sharing_disabled"
+        );
+    }
+
+    #[tokio::test]
+    async fn sharing_http_assignment_snapshot_is_complete_private_and_admin_only() {
+        use plurx_core::{secrets::SharingSecretPurpose, sharing::*};
+        let (app, state) = test_app_with_state();
+        let admin = setup_admin(&app).await;
+        let identity = state.store.sharing_identity(1000).await.expect("identity");
+        let id = uuid::Uuid::new_v4();
+        let source = SharingIdentity {
+            server_id: uuid::Uuid::new_v4(),
+            catalogue_epoch: uuid::Uuid::new_v4(),
+            created_at_ms: 1000,
+        };
+        let envelope = state
+            .sharing
+            .key
+            .seal_sharing(
+                SharingSecretPurpose::Credential,
+                identity.server_id,
+                id,
+                "assignment fixture secret",
+            )
+            .expect("sealed");
+        state
+            .store
+            .create_share_import(NewImport {
+                id,
+                source: source.clone(),
+                source_name: "Assignment Source".into(),
+                claim_id: uuid::Uuid::new_v4(),
+                credential: envelope.clone(),
+                claim_secret: state
+                    .sharing
+                    .key
+                    .seal_sharing(
+                        SharingSecretPurpose::Claim,
+                        identity.server_id,
+                        id,
+                        "assignment fixture invitation",
+                    )
+                    .expect("sealed claim"),
+                endpoints: vec![Endpoint {
+                    ipv4: "100.101.102.103".parse().expect("address"),
+                    ipv6: None,
+                    ts_fqdn: "source.fixture.ts.net".into(),
+                    port: 32443,
+                    spki_sha256: "a".repeat(64),
+                }],
+                now_ms: 1000,
+            })
+            .await
+            .expect("import");
+        let path = format!("/api/v1/sharing/imports/{id}/assignments");
+        let libraries_path = format!("/api/v1/sharing/imports/{id}/libraries");
+        assert_eq!(
+            call(&app, get(&libraries_path, None)).await.0,
+            StatusCode::UNAUTHORIZED
+        );
+        assert_eq!(
+            call(&app, get(&path, None)).await.0,
+            StatusCode::UNAUTHORIZED
+        );
+        let user = state
+            .store
+            .create_user("assignment-reader", "synthetic hash", false)
+            .await
+            .expect("user");
+        let reader = "assignment-reader-token";
+        state
+            .store
+            .create_token(&plurx_core::auth::hash_token(reader), user.id, None)
+            .await
+            .expect("reader token");
+        assert_eq!(
+            call(&app, get(&path, Some(reader))).await.0,
+            StatusCode::FORBIDDEN
+        );
+        assert_eq!(
+            call(&app, get(&libraries_path, Some(reader))).await.0,
+            StatusCode::FORBIDDEN
+        );
+        assert_eq!(
+            call(&app, get(&libraries_path, Some(&admin))).await.0,
+            StatusCode::SERVICE_UNAVAILABLE
+        );
+        let (status, empty) = call(&app, get(&path, Some(&admin))).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(empty["state"], "claiming");
+        assert_eq!(empty["assignments"], json!([]));
+        state
+            .store
+            .settle_share_claim(id, uuid::Uuid::new_v4(), true, 1001)
+            .await
+            .expect("active");
+        state
+            .store
+            .assign_share_viewers(
+                id,
+                1,
+                vec![Assignment {
+                    library_id: SourceId::parse("9007199254740993").expect("lossless"),
+                    user_id: user.id,
+                }],
+                1002,
+            )
+            .await
+            .expect("assign");
+        let response = app
+            .clone()
+            .oneshot(get(&path, Some(&admin)))
+            .await
+            .expect("response");
+        assert_eq!(response.headers()["cache-control"], "no-store");
+        let bytes = axum::body::to_bytes(response.into_body(), 4 * 1024 * 1024)
+            .await
+            .expect("body");
+        let value: Value = serde_json::from_slice(&bytes).expect("snapshot");
+        assert_eq!(
+            value,
+            json!({"import_id":id,"server_id":source.server_id,"catalogue_epoch":source.catalogue_epoch,"lifecycle_generation":1,"expected_assignment_generation":2,"state":"active","assignments":[{"library_id":"9007199254740993","user_ids":[user.id]}]})
+        );
+        assert!(!String::from_utf8_lossy(&bytes).contains("assignment fixture"));
+        assert_eq!(
+            call(
+                &app,
+                get(
+                    &format!(
+                        "/api/v1/sharing/imports/{}/assignments",
+                        uuid::Uuid::new_v4()
+                    ),
+                    Some(&admin)
+                )
+            )
+            .await
+            .0,
+            StatusCode::NOT_FOUND
+        );
+    }
+
+    #[tokio::test]
+    async fn sharing_http_rejects_secret_bearing_unknown_fields_and_oversized_claims() {
+        let (_, state) = test_app_with_state();
+        state
+            .store
+            .put_setting(plurx_core::store::keys::SHARING_ENABLED, "1")
+            .await
+            .expect("enable sharing");
+        let peer = sharing::peer_router(state.clone());
+        let secret = plurx_core::sharing::new_secret().expect("synthetic secret");
+        let mut payload = json!({"invitation_id":uuid::Uuid::new_v4(),"invitation_secret":secret.expose(),"claim_id":uuid::Uuid::new_v4(),"recipient_server_id":uuid::Uuid::new_v4(),"recipient_name":"Fixture","grant_credential":secret.expose()});
+        payload[secret.expose()] = json!("unknown secret authorization field");
+        let response = call_text(&peer, post("/sharing/v1/claims", None, payload)).await;
+        assert_eq!(response.0, StatusCode::BAD_REQUEST);
+        assert!(!response.1.contains(secret.expose()));
+        let request = Request::builder()
+            .method("POST")
+            .uri("/sharing/v1/claims")
+            .body(Body::from("x".repeat(16 * 1024 + 1)))
+            .expect("bounded request");
+        assert_eq!(call(&peer, request).await.0, StatusCode::BAD_REQUEST);
+        assert!(state
+            .store
+            .sharing_exports(None)
+            .await
+            .expect("no claims created")
+            .is_empty());
+    }
+
+    #[tokio::test]
+    async fn sharing_http_claim_approval_rotation_and_pending_catalogue_denial() {
+        use plurx_core::{secrets::Secret, sharing::Invitation};
+        let (app, state) = test_app_with_state();
+        let admin = setup_admin(&app).await;
+        let seeded = seed_content(&state).await;
+        let endpoints = json!([{"ipv4":"100.101.102.103","ipv6":null,"ts_fqdn":"source.fixture.ts.net","port":32443,"spki_sha256":"a".repeat(64)}]);
+        assert_eq!(
+            call(
+                &app,
+                put(
+                    "/api/v1/sharing/endpoints",
+                    Some(&admin),
+                    json!({"expected_revision":0,"endpoints":endpoints})
+                )
+            )
+            .await
+            .0,
+            StatusCode::OK
+        );
+        for libraries in [
+            json!([]),
+            json!(["-1"]),
+            json!([seeded.lib.to_string(), seeded.lib.to_string()]),
+            json!(["9223372036854775807"]),
+        ] {
+            let response = call(
+                &app,
+                post(
+                    "/api/v1/sharing/invitations",
+                    Some(&admin),
+                    json!({"library_ids":libraries}),
+                ),
+            )
+            .await;
+            assert_eq!(response.0, StatusCode::BAD_REQUEST);
+            assert_eq!(response.1["code"], "sharing_invalid_request");
+        }
+        let (status, created) = call(
+            &app,
+            post(
+                "/api/v1/sharing/invitations",
+                Some(&admin),
+                json!({"library_ids":[seeded.lib.to_string()]}),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let invitation = Invitation::parse(&Secret::from_cleartext(
+            created["invitation"]
+                .as_str()
+                .expect("once-only invitation"),
+        ))
+        .expect("bounded invitation");
+        call(
+            &app,
+            put(
+                "/api/v1/sharing/settings",
+                Some(&admin),
+                json!({"enabled":true}),
+            ),
+        )
+        .await;
+        let peer = sharing::peer_router(state.clone());
+        let credential = plurx_core::sharing::new_secret().expect("fixture grant");
+        let request = json!({"invitation_id":invitation.id,"invitation_secret":invitation.secret.expose(),"claim_id":uuid::Uuid::new_v4(),"recipient_server_id":uuid::Uuid::new_v4(),"recipient_name":"Unverified fixture","grant_credential":credential.expose()});
+        let first = call(&peer, post("/sharing/v1/claims", None, request.clone())).await;
+        assert_eq!(first.0, StatusCode::OK);
+        let replay = call(&peer, post("/sharing/v1/claims", None, request)).await;
+        assert_eq!(first.1, replay.1);
+        let grant_id = first.1["grant_id"].as_str().expect("grant ID");
+        let peer_get = |path: &str, credential: &Secret| {
+            Request::builder()
+                .uri(path)
+                .header(
+                    "authorization",
+                    format!("CinemaShare {}", credential.expose()),
+                )
+                .body(Body::empty())
+                .expect("fixture peer request")
+        };
+        let pending = call(&peer, peer_get("/sharing/v1/grant", &credential)).await;
+        assert_eq!(pending.1["state"], "pending");
+        assert!(pending.1.get("library_ids").is_none());
+        assert_eq!(
+            call(&peer, peer_get("/sharing/v1/endpoints", &credential))
+                .await
+                .0,
+            StatusCode::UNAUTHORIZED
+        );
+        let approval_path = format!("/api/v1/sharing/exports/{grant_id}/approve");
+        assert_eq!(
+            call(
+                &app,
+                post(
+                    &approval_path,
+                    Some(&admin),
+                    json!({"expected_mutation_generation":1,"pairing_code":"0".repeat(16)})
+                )
+            )
+            .await
+            .0,
+            StatusCode::CONFLICT
+        );
+        assert_eq!(call(&app,post(&approval_path,Some(&admin),json!({"expected_mutation_generation":1,"pairing_code":pending.1["pairing_code"]}))).await.0,StatusCode::OK);
+        assert_eq!(
+            call(&peer, peer_get("/sharing/v1/endpoints", &credential))
+                .await
+                .0,
+            StatusCode::OK
+        );
+        let replacement = plurx_core::sharing::new_secret().expect("replacement credential");
+        let rotation = uuid::Uuid::new_v4();
+        let request = Request::builder()
+            .method("POST")
+            .uri("/sharing/v1/grant/rotation")
+            .header(
+                "authorization",
+                format!("CinemaShare {}", credential.expose()),
+            )
+            .body(Body::from(
+                serde_json::to_vec(
+                    &json!({"request_id":rotation,"grant_credential":replacement.expose()}),
+                )
+                .expect("synthetic body"),
+            ))
+            .expect("rotation");
+        assert_eq!(call(&peer, request).await.0, StatusCode::OK);
+        assert_eq!(
+            call(&peer, peer_get("/sharing/v1/grant", &credential))
+                .await
+                .0,
+            StatusCode::UNAUTHORIZED
+        );
+        let status_path = format!("/sharing/v1/grant/rotation/{rotation}?grant_id={grant_id}");
+        assert_eq!(
+            call(&peer, peer_get(&status_path, &credential)).await.1["confirmed"],
+            true
+        );
+        assert_eq!(
+            call(&peer, peer_get(&status_path, &replacement)).await.1["confirmed"],
+            true
+        );
+        let active = call(&peer, peer_get("/sharing/v1/grant", &replacement)).await;
+        assert_eq!(active.1["state"], "active");
+        assert_eq!(active.1["credential_generation"], 2);
+        assert_eq!(active.1["scope_generation"], 1);
     }
 
     // ---- seeded integration surface -----------------------------------------

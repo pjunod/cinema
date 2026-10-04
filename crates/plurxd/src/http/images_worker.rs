@@ -198,6 +198,25 @@ pub(super) async fn serve_local_variant(
     };
     serve_location(state, &location, headers).await
 }
+/// Sharing reads a fresh publication selection rather than the disposable
+/// twenty-four-hour node-local proof cache. The same closed spec/name grammar
+/// applies; no worker or scheduler is started by this read.
+pub(super) async fn shared_local_variant(
+    state: &AppState,
+    spec: &ArtworkVariantSpec,
+) -> Option<ArtworkLocation> {
+    state
+        .store
+        .artwork_locations(&spec.artifact_key(), now_ms())
+        .await
+        .ok()?
+        .into_iter()
+        .find(|location| {
+            location.node_id == state.node_id
+                && location.spec.artifact_key() == spec.artifact_key()
+                && location_filename(location).is_some()
+        })
+}
 pub(super) async fn serve_peer_variant(
     state: &AppState,
     key: &str,

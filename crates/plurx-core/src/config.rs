@@ -42,9 +42,34 @@ const DEFAULT_CONFIG_PATHS: &[&str] = &["plurx.toml", "/etc/plurx/plurx.toml"];
 pub struct Config {
     pub server: ServerConfig,
     pub storage: StorageConfig,
+    pub sharing: SharingNetworkConfig,
     /// Forward-compatible cluster settings. M0 reads these without changing
     /// the production SQLite backend; later clustering releases activate them.
     pub cluster: ClusterConfig,
+}
+
+/// Node-local transport configuration; enabled is stored in replicated Settings.
+#[derive(Debug, Clone, Deserialize, PartialEq)]
+#[serde(default, deny_unknown_fields)]
+pub struct SharingNetworkConfig {
+    pub bind: SocketAddr,
+    pub egress: SharingEgressConfig,
+}
+impl Default for SharingNetworkConfig {
+    fn default() -> Self {
+        Self {
+            bind: SocketAddr::from(([127, 0, 0, 1], 32444)),
+            egress: SharingEgressConfig::Interface {
+                name: "tailscale0".into(),
+            },
+        }
+    }
+}
+#[derive(Debug, Clone, Deserialize, PartialEq)]
+#[serde(tag = "mode", rename_all = "snake_case", deny_unknown_fields)]
+pub enum SharingEgressConfig {
+    Interface { name: String },
+    LocalAddress { address: std::net::IpAddr },
 }
 
 #[derive(Debug, Clone, Deserialize, PartialEq)]

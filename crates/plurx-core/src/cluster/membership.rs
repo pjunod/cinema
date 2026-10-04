@@ -37,6 +37,7 @@ use super::migration::ActivationMarker;
 use super::ClusterIdentity;
 
 pub mod lifecycle;
+mod sharing_source_schema;
 
 /// What a node is called when nothing usable could be derived for it: no
 /// reported hostname, no advertised name, and no reverse lookup. It is a
@@ -139,6 +140,48 @@ const LEGACY_CACHE_ADMIN_REVOCATION_V2_CAPABILITY: &str = "cache_admin_revocatio
 /// proves the running process understands the v1 owner/snapshot protocol;
 /// runtime enablement remains off until every active node proves it.
 pub const LIVE_TV_CAPABILITY: &str = "live_tv_v1";
+/// Proof that a running member implements the rebuilt, complete-principal
+/// media-session family. This declaration does not advertise support: the
+/// heartbeat must publish it only after every reader/writer and migration is
+/// implemented. Sharing admission also needs the installed schema marker.
+pub const SHARING_SESSION_PRINCIPAL_CAPABILITY: &str = "sharing_session_principal_v1";
+
+/// Allocator writers and import semantics must be complete before advertising.
+pub const SHARING_CATALOGUE_ITEM_IDENTITY_CAPABILITY: &str = "sharing_catalogue_item_identity_v1";
+
+/// Census, factory, restore archive and rewrap support must all be qualified
+/// before a heartbeat may advertise this separate purpose-material capability.
+pub const SHARING_PURPOSE_KEYS_CAPABILITY: &str = "sharing_purpose_keys_v1";
+
+/// Closed, bounded capability requirements. No caller-supplied identifier can
+/// become SQL, and an empty capability set cannot authorize a new writer.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SharingMemberFloor {
+    SessionPrincipal,
+    CatalogueItemIdentity,
+    PrincipalAndCatalogue,
+    PurposeKeys,
+    AllSharing,
+}
+
+impl SharingMemberFloor {
+    fn capabilities(self) -> &'static [&'static str] {
+        match self {
+            Self::PurposeKeys => &[SHARING_PURPOSE_KEYS_CAPABILITY],
+            Self::AllSharing => &[
+                SHARING_SESSION_PRINCIPAL_CAPABILITY,
+                SHARING_CATALOGUE_ITEM_IDENTITY_CAPABILITY,
+                SHARING_PURPOSE_KEYS_CAPABILITY,
+            ],
+            Self::SessionPrincipal => &[SHARING_SESSION_PRINCIPAL_CAPABILITY],
+            Self::CatalogueItemIdentity => &[SHARING_CATALOGUE_ITEM_IDENTITY_CAPABILITY],
+            Self::PrincipalAndCatalogue => &[
+                SHARING_SESSION_PRINCIPAL_CAPABILITY,
+                SHARING_CATALOGUE_ITEM_IDENTITY_CAPABILITY,
+            ],
+        }
+    }
+}
 /// Minimum unreserved capacity required before a learner may be promoted.
 /// This is deliberately independent of media-cache headroom: a voter must
 /// always retain room for Raft WAL growth, a received snapshot, and SQLite's
@@ -1392,6 +1435,471 @@ pub fn local_membership_version_matches_role(version: u32, role: ClusterRole) ->
     version == local_membership_version(role)
 }
 
+/// Wire declarations stay closed and bounded. Production defaults remain
+/// unadvertised until both writer implementations have been qualified.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SharingJoinCapabilities {
+    #[serde(default)]
+    pub session_principal: bool,
+    #[serde(default)]
+    pub catalogue_item_identity: bool,
+    #[serde(default)]
+    pub purpose_keys: bool,
+}
+
+impl SharingJoinCapabilities {
+    /// Binary protocol support only. Installed key readiness is a separate
+    /// same-write factory result, and old requests with absent fields refuse.
+    pub fn for_current_binary() -> Self {
+        Self {
+            session_principal: true,
+            catalogue_item_identity: true,
+            purpose_keys: true,
+        }
+    }
+    fn proves(self, required: Self) -> bool {
+        (!required.session_principal || self.session_principal)
+            && (!required.catalogue_item_identity || self.catalogue_item_identity)
+            && (!required.purpose_keys || self.purpose_keys)
+    }
+
+    fn supports(self, capability: &str) -> bool {
+        match capability {
+            SHARING_SESSION_PRINCIPAL_CAPABILITY => self.session_principal,
+            SHARING_CATALOGUE_ITEM_IDENTITY_CAPABILITY => self.catalogue_item_identity,
+            SHARING_PURPOSE_KEYS_CAPABILITY => self.purpose_keys,
+            _ => false,
+        }
+    }
+}
+
+fn sharing_installed_marker_predicate(capability: &str) -> String {
+    match capability {
+        SHARING_PURPOSE_KEYS_CAPABILITY =>
+            "EXISTS (SELECT 1 FROM sqlite_master WHERE name IN ('sharing_catalogue_keys','sharing_file_locator_keys','sharing_purpose_key_archive','sharing_purpose_key_installation','sharing_purpose_census_intents'))".to_owned(),
+        SHARING_CATALOGUE_ITEM_IDENTITY_CAPABILITY =>
+            "EXISTS (SELECT 1 FROM sqlite_master WHERE name='item_identity_watermark')".to_owned(),
+        SHARING_SESSION_PRINCIPAL_CAPABILITY =>
+            "EXISTS (SELECT 1 FROM sqlite_master schema JOIN pragma_table_info(schema.name) info \
+             WHERE schema.type='table' AND schema.name IN \
+               ('media_session_requests','media_playback_pointers','media_sessions',\
+                'media_session_preparations','media_playback_desired','media_session_producer_recovery',\
+                'library_channel_session_recipes','media_session_requests_principal_new',\
+                'media_playback_pointers_principal_new','media_sessions_principal_new',\
+                'media_session_preparations_principal_new','media_playback_desired_principal_new',\
+                'media_session_producer_recovery_principal_new','library_channel_session_recipes_principal_new') \
+             AND info.name IN ('owner_key','principal_kind','share_grant_id','share_viewer_key'))".to_owned(),
+        _ => "1".to_owned(),
+    }
+}
+
+struct SharingAdmissionMarkers {
+    required: SharingJoinCapabilities,
+    intents_installed: bool,
+}
+
+impl From<&mut Row<'_>> for SharingAdmissionMarkers {
+    fn from(row: &mut Row<'_>) -> Self {
+        Self {
+            required: SharingJoinCapabilities {
+                session_principal: row.get::<i64>("principal") != 0,
+                catalogue_item_identity: row.get::<i64>("catalogue") != 0,
+                purpose_keys: row.get::<i64>("purpose_keys") != 0,
+            },
+            intents_installed: row.get::<i64>("intents") != 0,
+        }
+    }
+}
+
+async fn sharing_admission_markers(
+    client: &Client,
+) -> Result<SharingAdmissionMarkers, MembershipError> {
+    let rows = client.query_consistent_map::<SharingAdmissionMarkers,_>(format!(
+        "SELECT {} AS principal, {} AS catalogue, {} AS purpose_keys, EXISTS (SELECT 1 FROM sqlite_master WHERE type='table' AND name='cluster_sharing_join_intents') AS intents",
+        sharing_installed_marker_predicate(SHARING_SESSION_PRINCIPAL_CAPABILITY),
+        sharing_installed_marker_predicate(SHARING_CATALOGUE_ITEM_IDENTITY_CAPABILITY),sharing_installed_marker_predicate(SHARING_PURPOSE_KEYS_CAPABILITY)),params!()).await?;
+    let [row] = rows.as_slice() else {
+        return Err(MembershipError::Incompatible);
+    };
+    Ok(SharingAdmissionMarkers {
+        required: row.required,
+        intents_installed: row.intents_installed,
+    })
+}
+
+/// Closed transition guard for coordinated activation and Shared writes.
+/// The candidate factory must already be installed; absent/partial tables are
+/// errors, never admission. Compose this with the exact roster predicate in the
+/// same conditional write. Readiness checks alone cannot make a roster atomic.
+#[must_use]
+pub const fn sharing_member_transition_absence_predicate() -> &'static str {
+    "NOT EXISTS (SELECT 1 FROM cluster_sharing_membership_intents) AND NOT EXISTS (SELECT 1 FROM cluster_sharing_join_declarations proof JOIN cluster_join_tokens token ON token.token_hash=proof.token_hash WHERE token.state='redeeming')"
+}
+
+/// Candidate durable lineage for observations which may outlive a completed
+/// membership operation. It cannot be reset or pruned. Ordinary heartbeats do
+/// not advance it; membership intents and identity changes do.
+fn sharing_membership_generation_schema() -> Vec<String> {
+    let mut statements = vec![
+        "CREATE TABLE IF NOT EXISTS cluster_sharing_membership_generation (singleton INTEGER NOT NULL PRIMARY KEY CHECK(singleton=1),generation INTEGER NOT NULL CHECK(generation>=0)) STRICT".to_owned(),
+        "INSERT INTO cluster_sharing_membership_generation SELECT 1,0 WHERE NOT EXISTS(SELECT 1 FROM cluster_sharing_membership_generation)".to_owned(),
+        "CREATE TRIGGER IF NOT EXISTS cluster_sharing_generation_no_delete BEFORE DELETE ON cluster_sharing_membership_generation BEGIN SELECT RAISE(ABORT,'sharing membership generation cannot be deleted'); END".to_owned(),
+        "CREATE TRIGGER IF NOT EXISTS cluster_sharing_generation_no_replace BEFORE INSERT ON cluster_sharing_membership_generation WHEN EXISTS(SELECT 1 FROM cluster_sharing_membership_generation) BEGIN SELECT RAISE(ABORT,'sharing membership generation cannot be replaced'); END".to_owned(),
+        "CREATE TRIGGER IF NOT EXISTS cluster_sharing_generation_monotonic BEFORE UPDATE ON cluster_sharing_membership_generation WHEN NEW.singleton<>OLD.singleton OR NEW.generation<>OLD.generation+1 BEGIN SELECT RAISE(ABORT,'sharing membership generation must advance exactly once'); END".to_owned(),
+    ];
+    for table in ["cluster_sharing_membership_intents", "cluster_nodes"] {
+        for event in ["INSERT", "DELETE"] {
+            statements.push(format!("CREATE TRIGGER IF NOT EXISTS cluster_sharing_generation_{table}_{} AFTER {event} ON {table} BEGIN UPDATE cluster_sharing_membership_generation SET generation=generation+1 WHERE singleton=1; END",event.to_ascii_lowercase()));
+        }
+    }
+    statements.push("CREATE TRIGGER IF NOT EXISTS cluster_sharing_generation_intent_update AFTER UPDATE ON cluster_sharing_membership_intents BEGIN UPDATE cluster_sharing_membership_generation SET generation=generation+1 WHERE singleton=1; END".to_owned());
+    statements.push("CREATE TRIGGER IF NOT EXISTS cluster_sharing_generation_identity_update AFTER UPDATE OF node_id,raft_id,removed_at ON cluster_nodes WHEN NEW.node_id IS NOT OLD.node_id OR NEW.raft_id IS NOT OLD.raft_id OR NEW.removed_at IS NOT OLD.removed_at BEGIN UPDATE cluster_sharing_membership_generation SET generation=generation+1 WHERE singleton=1; END".to_owned());
+    statements
+}
+
+fn sharing_membership_generation_shape_predicate() -> String {
+    let mut guards = sharing_membership_generation_schema()
+        .into_iter()
+        .filter(|sql| sql.starts_with("CREATE "))
+        .map(|sql| {
+            let canonical = sql.replace(" IF NOT EXISTS", "");
+            let words = canonical.split_whitespace().collect::<Vec<_>>();
+            format!(
+                "EXISTS(SELECT 1 FROM sqlite_master WHERE type='{}' AND name='{}' AND sql='{}')",
+                words[1].to_ascii_lowercase(),
+                words[2],
+                canonical.replace('\'', "''")
+            )
+        })
+        .collect::<Vec<_>>();
+    guards.push("(SELECT count(*) FROM cluster_sharing_membership_generation)=1".to_owned());
+    guards.join(" AND ")
+}
+
+const PURPOSE_BOOTSTRAP_GUARD_SCHEMA: &str = "CREATE TABLE cluster_sharing_purpose_bootstrap_guard(singleton INTEGER NOT NULL PRIMARY KEY CHECK(singleton=1),passed INTEGER NOT NULL CHECK(passed=1)) STRICT";
+fn sharing_admission_schema_shape_predicate() -> String {
+    sharing_member_admission_guard_schema()
+        .into_iter()
+        .filter(|sql| sql.starts_with("CREATE "))
+        .map(|sql| {
+            let canonical = sql.replace(" IF NOT EXISTS", "");
+            let words = canonical.split_whitespace().collect::<Vec<_>>();
+            format!(
+                "EXISTS(SELECT 1 FROM sqlite_master WHERE type='{}' AND name='{}' AND sql='{}')",
+                words[1].to_ascii_lowercase(),
+                words[2].split('(').next().expect("fixed DDL name"),
+                canonical.replace('\'', "''")
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(" AND ")
+}
+fn sharing_admission_schema_names() -> Vec<String> {
+    sharing_member_admission_guard_schema()
+        .into_iter()
+        .filter(|sql| sql.starts_with("CREATE "))
+        .map(|sql| {
+            sql.replace(" IF NOT EXISTS", "")
+                .split_whitespace()
+                .nth(2)
+                .expect("fixed DDL name")
+                .split('(')
+                .next()
+                .expect("fixed DDL name")
+                .to_owned()
+        })
+        .collect()
+}
+async fn bootstrap_purpose_admission_schema(
+    client: &Client,
+    local_raft_id: u64,
+    master: &crate::secrets::CredentialKey,
+) -> Result<(), MembershipError> {
+    if !client
+        .metrics_db()
+        .await?
+        .membership_config
+        .voter_ids()
+        .any(|id| id == local_raft_id)
+    {
+        return Ok(());
+    }
+    let shape = format!("({}) AND (NOT EXISTS(SELECT 1 FROM sqlite_master WHERE name='cluster_sharing_purpose_bootstrap_guard') OR EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='cluster_sharing_purpose_bootstrap_guard' AND sql='{}')) AND NOT EXISTS(SELECT 1 FROM sqlite_master WHERE type='trigger' AND tbl_name='cluster_sharing_purpose_bootstrap_guard')",sharing_admission_schema_shape_predicate(),PURPOSE_BOOTSTRAP_GUARD_SCHEMA.replace('\'', "''"));
+    let names = sharing_admission_schema_names()
+        .into_iter()
+        .chain(["cluster_sharing_purpose_bootstrap_guard".to_owned()])
+        .map(|name| format!("'{name}'"))
+        .collect::<Vec<_>>()
+        .join(",");
+    let existing = client
+        .query_consistent_map::<CountRow, _>(
+            format!("SELECT count(*) AS count FROM sqlite_master WHERE name IN ({names})"),
+            params!(),
+        )
+        .await?;
+    if !matches!(existing.as_slice(),[row] if row.count==0) {
+        let generation = client.query_consistent_map::<CountRow, _>(
+            "SELECT count(*) AS count FROM sqlite_master WHERE type='table' AND name='cluster_sharing_membership_generation'", params!(),
+        ).await?;
+        if !matches!(generation.as_slice(), [row] if row.count == 1) {
+            return Err(MembershipError::Incompatible);
+        }
+        let valid = client
+            .query_consistent_map::<CountRow, _>(
+                format!(
+                    "SELECT CASE WHEN ({shape}) AND ({}) THEN 1 ELSE 0 END AS count",
+                    sharing_membership_generation_shape_predicate()
+                ),
+                params!(),
+            )
+            .await?;
+        return if matches!(valid.as_slice(),[row] if row.count==1) {
+            Ok(())
+        } else {
+            Err(MembershipError::Incompatible)
+        };
+    }
+    // Generation is absent, so this distinct bootstrap observation captures
+    // only the real current Raft roster. It never escapes as key authority.
+    let Some(observation) = sharing_member_floor_observation(
+        client,
+        local_raft_id,
+        SharingMemberFloor::PurposeKeys,
+        false,
+    )
+    .await?
+    else {
+        return Ok(());
+    };
+    let now = unix_ms()?;
+    let (guard, roster, cutoff, observed) =
+        observation.write_guard_for(SharingMemberFloor::PurposeKeys, now, 1, 2, 3)?;
+    let fingerprint = master.sharing_purpose_master_fingerprint();
+    let master_guard = purpose_master_proof_predicate(&fingerprint)?;
+    let exact_roster = purpose_roster_predicate(1);
+    let floor = format!("({}) AND EXISTS(SELECT 1 FROM cluster_nodes WHERE raft_id={local_raft_id} AND role IS NOT 'learner' AND removed_at IS NULL)",sharing_member_guard_predicate(SharingMemberFloor::PurposeKeys,1,2,3));
+    let mut statements=vec![(PURPOSE_BOOTSTRAP_GUARD_SCHEMA.to_owned(),params!()),(format!("INSERT INTO cluster_sharing_purpose_bootstrap_guard VALUES(1,CASE WHEN NOT EXISTS(SELECT 1 FROM sqlite_master WHERE name IN ({names}) AND name!='cluster_sharing_purpose_bootstrap_guard') AND ({floor}) AND ({exact_roster}) AND ({master_guard}) AND NOT EXISTS(SELECT 1 FROM cluster_join_tokens WHERE state='redeeming') AND NOT EXISTS(SELECT 1 FROM sharing_purpose_census_intents) THEN 1 ELSE 0 END)"),params!(roster.as_str(),cutoff,observed))];
+    statements.extend(
+        sharing_member_admission_guard_schema()
+            .into_iter()
+            .map(|sql| (sql.replace(" IF NOT EXISTS", ""), params!())),
+    );
+    statements.push((format!("UPDATE cluster_sharing_purpose_bootstrap_guard SET passed=CASE WHEN ({shape}) AND ({guard}) AND ({exact_roster}) AND ({master_guard}) AND NOT EXISTS(SELECT 1 FROM sharing_purpose_census_intents) THEN 1 ELSE 0 END WHERE singleton=1"),params!(roster,cutoff,observed)));
+    let result = client
+        .txn(statements)
+        .await
+        .and_then(|rows| rows.into_iter().collect::<Result<Vec<_>, _>>());
+    if result.is_err() {
+        let generation = client.query_consistent_map::<CountRow, _>(
+            "SELECT count(*) AS count FROM sqlite_master WHERE type='table' AND name='cluster_sharing_membership_generation'", params!(),
+        ).await?;
+        if !matches!(generation.as_slice(), [row] if row.count == 1) {
+            return Err(MembershipError::Incompatible);
+        }
+        // A competing complete winner can be adopted; a partial loser cannot
+        // be repaired. The caller still obtains a fresh normal key witness.
+        let valid = client
+            .query_consistent_map::<CountRow, _>(
+                format!(
+                    "SELECT CASE WHEN ({shape}) AND ({}) THEN 1 ELSE 0 END AS count",
+                    sharing_membership_generation_shape_predicate()
+                ),
+                params!(),
+            )
+            .await?;
+        if !matches!(valid.as_slice(),[row] if row.count==1) {
+            return Err(MembershipError::Incompatible);
+        }
+    }
+    Ok(())
+}
+#[cfg(feature = "hiqlite-contract-tests")]
+#[doc(hidden)]
+pub async fn bootstrap_purpose_admission_schema_for_contract(
+    client: &Client,
+    actual_local_raft_id: u64,
+    master: &crate::secrets::CredentialKey,
+) -> Result<(), MembershipError> {
+    bootstrap_purpose_admission_schema(client, actual_local_raft_id, master).await
+}
+
+/// Candidate membership guards. Installation is deliberately unconfigured:
+/// install these in the coordinated schema-activation transaction before any
+/// principal owner columns or allocator marker become visible. Every guard
+/// introspects schema rather than naming an absent application table, so a
+/// joining node can replay cluster DDL before its application store exists.
+/// Activation first drains old daemons and membership operations. A request
+/// that began before factory installation cannot be fenced retroactively;
+/// this candidate does not qualify a rolling activation path.
+#[must_use]
+pub fn sharing_member_admission_guard_schema() -> Vec<String> {
+    let mut statements = vec![format!(
+        "CREATE TABLE IF NOT EXISTS cluster_sharing_join_intents (\
+         token_hash TEXT NOT NULL CHECK(length(token_hash)=64), \
+         capability TEXT NOT NULL CHECK(capability IN ('{SHARING_SESSION_PRINCIPAL_CAPABILITY}','{SHARING_CATALOGUE_ITEM_IDENTITY_CAPABILITY}','{SHARING_PURPOSE_KEYS_CAPABILITY}')), \
+         last_seen_at INTEGER NOT NULL CHECK(last_seen_at>0), \
+         PRIMARY KEY(token_hash,capability)) STRICT")];
+    statements.extend([
+        format!("CREATE TABLE IF NOT EXISTS cluster_sharing_join_declarations (token_hash TEXT NOT NULL CHECK(length(token_hash)=64),node_id TEXT NOT NULL CHECK(length(node_id) BETWEEN 1 AND 256),raft_id INTEGER NOT NULL CHECK(raft_id>0),api_address TEXT NOT NULL CHECK(length(api_address) BETWEEN 1 AND 512),raft_address TEXT NOT NULL CHECK(length(raft_address) BETWEEN 1 AND 512),capability TEXT NOT NULL CHECK(capability IN ('{SHARING_SESSION_PRINCIPAL_CAPABILITY}','{SHARING_CATALOGUE_ITEM_IDENTITY_CAPABILITY}','{SHARING_PURPOSE_KEYS_CAPABILITY}')),last_seen_at INTEGER NOT NULL CHECK(last_seen_at>0),PRIMARY KEY(token_hash,capability)) STRICT"),
+        "CREATE TABLE IF NOT EXISTS cluster_sharing_membership_intents (raft_id INTEGER PRIMARY KEY CHECK(raft_id>0),node_id TEXT NOT NULL UNIQUE CHECK(length(node_id) BETWEEN 1 AND 256),attempt_id TEXT NOT NULL CHECK(length(attempt_id) BETWEEN 1 AND 64),operation TEXT NOT NULL CHECK(operation IN ('learner','voter')),api_address TEXT NOT NULL CHECK(length(api_address) BETWEEN 1 AND 512),raft_address TEXT NOT NULL CHECK(length(raft_address) BETWEEN 1 AND 512),claimed_at INTEGER NOT NULL CHECK(claimed_at>0)) STRICT".to_owned(),
+    ]);
+    for (label, capability) in [
+        ("principal", SHARING_SESSION_PRINCIPAL_CAPABILITY),
+        ("catalogue", SHARING_CATALOGUE_ITEM_IDENTITY_CAPABILITY),
+        ("purpose_keys", SHARING_PURPOSE_KEYS_CAPABILITY),
+    ] {
+        let installed = sharing_installed_marker_predicate(capability);
+        statements.push(format!(
+            "CREATE TRIGGER IF NOT EXISTS cluster_sharing_{label}_membership_claim_guard BEFORE INSERT ON cluster_sharing_membership_intents WHEN ({installed}) AND NOT EXISTS (SELECT 1 FROM cluster_nodes node WHERE node.node_id=NEW.node_id AND node.raft_id=NEW.raft_id AND node.removed_at IS NULL AND node.api_address=NEW.api_address AND node.raft_address=NEW.raft_address AND node.last_seen_at BETWEEN NEW.claimed_at-120000 AND NEW.claimed_at AND ((EXISTS (SELECT 1 FROM cluster_sharing_join_declarations proof JOIN cluster_join_tokens token ON token.token_hash=proof.token_hash WHERE token.state='redeeming' AND token.node_id=node.node_id AND token.raft_id=node.raft_id AND proof.node_id=node.node_id AND proof.raft_id=node.raft_id AND proof.api_address=NEW.api_address AND proof.raft_address=NEW.raft_address AND proof.capability='{capability}' AND proof.last_seen_at=node.last_seen_at) AND (NEW.operation='learner' OR node.role='voter')) OR (NEW.operation='voter' AND node.role='learner' AND EXISTS (SELECT 1 FROM cluster_node_promotions promotion WHERE promotion.node_id=node.node_id) AND EXISTS (SELECT 1 FROM cluster_node_capabilities cap WHERE cap.node_id=node.node_id AND cap.capability='{capability}' AND cap.last_seen_at=node.last_seen_at)))) BEGIN SELECT RAISE(ABORT,'installed sharing schema requires exact fresh membership admission'); END"));
+        let reservation_proof = format!(
+            "EXISTS (SELECT 1 FROM cluster_sharing_join_intents intent \
+             JOIN cluster_node_heartbeat_intents heartbeat ON heartbeat.node_id=NEW.node_id \
+               AND heartbeat.last_seen_at=intent.last_seen_at \
+             WHERE intent.token_hash=NEW.token_hash AND intent.capability='{capability}')"
+        );
+        statements.push(format!(
+            "CREATE TRIGGER IF NOT EXISTS cluster_sharing_{label}_join_reservation_guard \
+             BEFORE UPDATE OF state ON cluster_join_tokens \
+             WHEN NEW.state='redeeming' AND OLD.state='issued' AND ({installed}) AND NOT ({reservation_proof}) \
+             BEGIN SELECT RAISE(ABORT,'installed sharing schema requires compatible token-bound join proof'); END"));
+        let node_proof = format!(
+            "EXISTS (SELECT 1 FROM cluster_join_tokens token \
+             JOIN cluster_sharing_join_intents intent ON intent.token_hash=token.token_hash \
+             JOIN cluster_node_heartbeat_intents heartbeat ON heartbeat.node_id=token.node_id \
+               AND heartbeat.last_seen_at=intent.last_seen_at \
+             WHERE token.node_id=NEW.node_id AND token.state='redeeming' \
+               AND intent.capability='{capability}')"
+        );
+        statements.push(format!(
+            "CREATE TRIGGER IF NOT EXISTS cluster_sharing_{label}_join_staging_guard \
+             BEFORE INSERT ON cluster_node_join_staging WHEN ({installed}) AND NOT ({node_proof}) \
+             BEGIN SELECT RAISE(ABORT,'installed sharing schema requires compatible token-bound staged join'); END"));
+        let fresh_node_proof = format!(
+            "EXISTS (SELECT 1 FROM cluster_join_tokens token \
+             JOIN cluster_sharing_join_intents intent ON intent.token_hash=token.token_hash \
+             WHERE token.node_id=NEW.node_id AND token.state='redeeming' \
+               AND intent.capability='{capability}' AND intent.last_seen_at=NEW.last_seen_at)"
+        );
+        statements.push(format!(
+            "CREATE TRIGGER IF NOT EXISTS cluster_sharing_{label}_node_insert_guard \
+             BEFORE INSERT ON cluster_nodes WHEN ({installed}) \
+               AND NOT EXISTS(SELECT 1 FROM cluster_nodes WHERE node_id=NEW.node_id) \
+               AND NOT ({fresh_node_proof}) \
+             BEGIN SELECT RAISE(ABORT,'installed sharing schema requires a fresh compatible new member'); END"));
+        statements.push(format!(
+            "CREATE TRIGGER IF NOT EXISTS cluster_sharing_{label}_node_rejoin_guard \
+             BEFORE UPDATE OF removed_at ON cluster_nodes \
+             WHEN OLD.removed_at IS NOT NULL AND NEW.removed_at IS NULL AND ({installed}) AND NOT ({fresh_node_proof}) \
+             BEGIN SELECT RAISE(ABORT,'installed sharing schema requires a fresh compatible rejoining member'); END"));
+        let target = format!(
+            "EXISTS (SELECT 1 FROM cluster_nodes node JOIN cluster_node_capabilities cap \
+             ON cap.node_id=node.node_id AND cap.last_seen_at=node.last_seen_at \
+             WHERE node.node_id=NEW.node_id AND node.removed_at IS NULL \
+               AND cap.capability='{capability}')"
+        );
+        for (event,suffix,freshness) in [
+            ("INSERT","insert"," AND node.last_seen_at>=NEW.started_at-120000 AND node.last_seen_at<=NEW.started_at"),
+            ("UPDATE","update"," AND node.last_seen_at>=NEW.started_at-120000"),
+        ] {
+            let fresh_target = target.replace("AND cap.capability",&format!("{freshness} AND cap.capability"));
+            statements.push(format!(
+                "CREATE TRIGGER IF NOT EXISTS cluster_sharing_{label}_promotion_{suffix}_guard \
+                 BEFORE {event} ON cluster_node_promotions WHEN ({installed}) AND NOT ({fresh_target}) \
+                 BEGIN SELECT RAISE(ABORT,'installed sharing schema requires a compatible promotion target'); END"));
+        }
+        statements.push(format!(
+            "CREATE TRIGGER IF NOT EXISTS cluster_sharing_{label}_promotion_role_guard \
+             BEFORE UPDATE OF role ON cluster_nodes WHEN OLD.role='learner' AND NEW.role='voter' AND ({installed}) \
+               AND NOT EXISTS(SELECT 1 FROM cluster_node_capabilities cap WHERE cap.node_id=NEW.node_id \
+                 AND cap.last_seen_at=NEW.last_seen_at AND cap.capability='{capability}') \
+             BEGIN SELECT RAISE(ABORT,'installed sharing schema requires a compatible promoted voter'); END"));
+        statements.push(format!(
+            "CREATE TRIGGER IF NOT EXISTS cluster_sharing_{label}_join_finalize_guard \
+             BEFORE UPDATE OF state ON cluster_join_tokens WHEN OLD.state='redeeming' AND NEW.state='redeemed' \
+               AND ({installed}) AND NOT ({target}) \
+             BEGIN SELECT RAISE(ABORT,'installed sharing schema requires a compatible admitted member'); END"));
+    }
+    // The durable intent spans the SQL proof and the distinct Raft membership
+    // entry. No timeout can remove it: only a leader that proves the requested
+    // membership outcome may release it. Ordinary heartbeats and capability
+    // replacement cannot change the admitted binary while that entry is pending.
+    for (table, identity) in [
+        ("cluster_nodes", "node_id"),
+        ("cluster_node_capabilities", "node_id"),
+        ("cluster_sharing_join_declarations", "node_id"),
+        ("cluster_join_tokens", "node_id"),
+    ] {
+        for (event, row) in [("INSERT", "NEW"), ("UPDATE", "OLD"), ("DELETE", "OLD")] {
+            let extra = if event == "UPDATE" {
+                format!(" OR intent.node_id=NEW.{identity}")
+            } else {
+                String::new()
+            };
+            statements.push(format!("CREATE TRIGGER IF NOT EXISTS cluster_sharing_freeze_{table}_{} BEFORE {event} ON {table} WHEN EXISTS (SELECT 1 FROM cluster_sharing_membership_intents intent WHERE intent.node_id={row}.{identity}{extra}) BEGIN SELECT RAISE(ABORT,'sharing membership admission is in flight'); END",event.to_ascii_lowercase()));
+        }
+    }
+    statements.push("CREATE TRIGGER IF NOT EXISTS cluster_sharing_join_declaration_finalize AFTER UPDATE OF state ON cluster_join_tokens WHEN NEW.state<>'redeeming' BEGIN DELETE FROM cluster_sharing_join_declarations WHERE token_hash=NEW.token_hash; END".to_owned());
+    statements.push("CREATE TRIGGER IF NOT EXISTS cluster_sharing_join_declaration_delete AFTER DELETE ON cluster_join_tokens BEGIN DELETE FROM cluster_sharing_join_declarations WHERE token_hash=OLD.token_hash; END".to_owned());
+    statements.push("CREATE TRIGGER IF NOT EXISTS cluster_sharing_membership_intent_update_guard BEFORE UPDATE ON cluster_sharing_membership_intents BEGIN SELECT RAISE(ABORT,'sharing membership intent is immutable'); END".to_owned());
+    statements.extend(sharing_membership_generation_schema());
+    statements
+}
+
+/// These statements precede token reservation in the same admission
+/// transaction. Clearing token-bound proofs prevents an earlier capability
+/// declaration from being inherited by a request that omits it. Heartbeat
+/// intents and capability intents are removed in that transaction's tail.
+#[must_use]
+pub fn sharing_join_intent_statements(
+    request: &RedeemJoinRequest,
+    now: i64,
+) -> Vec<(String, hiqlite::Params)> {
+    let mut statements = vec![
+        ("DELETE FROM cluster_sharing_join_intents WHERE token_hash=$1".to_owned(),params!(request.token_digest.as_str())),
+        ("DELETE FROM cluster_sharing_join_declarations WHERE token_hash=$1".to_owned(),params!(request.token_digest.as_str())),
+        ("INSERT INTO cluster_node_heartbeat_intents(node_id,last_seen_at) SELECT $1,$2 FROM cluster_join_tokens WHERE token_hash=$3 AND raft_id=$4 AND ((state='issued' AND expires_at>$2) OR (state='redeeming' AND node_id=$1)) ON CONFLICT(node_id) DO UPDATE SET last_seen_at=excluded.last_seen_at".to_owned(),params!(request.node_id.as_str(),now,request.token_digest.as_str(),request.raft_id as i64)),
+    ];
+    for capability in SharingMemberFloor::AllSharing.capabilities() {
+        if request.sharing.supports(capability) {
+            statements.push((
+                "INSERT INTO cluster_sharing_join_declarations(token_hash,node_id,raft_id,api_address,raft_address,capability,last_seen_at) SELECT $1,$2,$3,$4,$5,$6,$7 FROM cluster_join_tokens WHERE token_hash=$1 AND raft_id=$3 AND ((state='issued' AND expires_at>$7) OR (state='redeeming' AND node_id=$2))".to_owned(),
+                params!(request.token_digest.as_str(),request.node_id.as_str(),request.raft_id as i64,request.api_address.as_str(),request.raft_address.as_str(),*capability,now),
+            ));
+            statements.push((
+                "INSERT INTO cluster_sharing_join_intents(token_hash,capability,last_seen_at) SELECT $1,$2,$3 FROM cluster_join_tokens WHERE token_hash=$1 AND raft_id=$4 AND ((state='issued' AND expires_at>$3) OR (state='redeeming' AND node_id=$5)) ON CONFLICT(token_hash,capability) DO UPDATE SET last_seen_at=excluded.last_seen_at".to_owned(),
+                params!(request.token_digest.as_str(),*capability,now,request.raft_id as i64,request.node_id.as_str()),
+            ));
+        }
+    }
+    statements
+}
+
+async fn require_installed_sharing_promotion_floor(
+    client: &Client,
+    node_id: &str,
+) -> Result<(), MembershipError> {
+    let now = unix_ms()?;
+    let guard=SharingMemberFloor::AllSharing.capabilities().iter().map(|capability|format!(
+        "(NOT ({}) OR EXISTS (SELECT 1 FROM cluster_nodes node JOIN cluster_node_capabilities cap ON cap.node_id=node.node_id AND cap.last_seen_at=node.last_seen_at WHERE node.node_id=$1 AND node.removed_at IS NULL AND cap.capability='{capability}' AND node.last_seen_at>=$2 AND node.last_seen_at<=$3))",
+        sharing_installed_marker_predicate(capability))).collect::<Vec<_>>().join(" AND ");
+    let rows = client
+        .query_consistent_map::<CountRow, _>(
+            format!("SELECT CASE WHEN {guard} THEN 1 ELSE 0 END AS count"),
+            params!(
+                node_id,
+                now.saturating_sub(PROTOCOL_CHANGE_ABSENCE_WINDOW_MS),
+                now
+            ),
+        )
+        .await?;
+    if rows.first().is_some_and(|row| row.count == 1) {
+        Ok(())
+    } else {
+        Err(MembershipError::Incompatible)
+    }
+}
+
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RedeemJoinRequest {
     /// SHA-256 of the bearer held by the joining node. The coordinator needs
@@ -1427,6 +1935,9 @@ pub struct RedeemJoinRequest {
     /// replicated triggers before they can become a serving member.
     #[serde(default)]
     pub live_tv_v1: bool,
+    /// Additive closed declarations. Missing fields prove neither capability.
+    #[serde(default)]
+    pub sharing: SharingJoinCapabilities,
 }
 
 impl RedeemJoinRequest {
@@ -1450,6 +1961,7 @@ fn validate_redeem_join_request(
 ) -> Result<Option<String>, MembershipError> {
     let invalid_identity = !is_join_token_digest(&request.token_digest)
         || request.raft_id == 0
+        || i64::try_from(request.raft_id).is_err()
         || request.node_id.is_empty()
         || request.node_id.len() > MAX_PEER_NODE_ID_BYTES
         || request.node_id.chars().any(char::is_control)
@@ -1510,6 +2022,7 @@ impl std::fmt::Debug for RedeemJoinRequest {
             .field("protocol_version", &self.protocol_version)
             .field("protocol_range", &self.declared_protocol_range())
             .field("live_tv_v1", &self.live_tv_v1)
+            .field("sharing", &self.sharing)
             .finish()
     }
 }
@@ -2138,6 +2651,525 @@ fn capability_ready_predicate(capability: &str) -> String {
        WHERE {})",
         capability_unready_node_predicate(capability)
     )
+}
+
+/// Replicated precondition for admitting a sharing principal. Parameters are
+/// SQL binding indexes for the bounded committed Raft-id JSON, oldest accepted
+/// heartbeat, and observation time, respectively. Embed this in the admission
+/// transaction; a successful read-only preflight cannot close a heartbeat or
+/// join race on its own. This never reads or changes the saved Developer choice.
+#[must_use]
+pub fn sharing_session_principal_guard_predicate(
+    members_parameter: usize,
+    cutoff_parameter: usize,
+    observed_at_parameter: usize,
+) -> String {
+    sharing_member_guard_predicate(
+        SharingMemberFloor::SessionPrincipal,
+        members_parameter,
+        cutoff_parameter,
+        observed_at_parameter,
+    )
+}
+
+/// Allocator-specific admission guard; the principal capability is independent.
+#[must_use]
+pub fn sharing_catalogue_item_identity_guard_predicate(
+    members_parameter: usize,
+    cutoff_parameter: usize,
+    observed_at_parameter: usize,
+) -> String {
+    sharing_member_guard_predicate(
+        SharingMemberFloor::CatalogueItemIdentity,
+        members_parameter,
+        cutoff_parameter,
+        observed_at_parameter,
+    )
+}
+
+/// Embed this closed capability floor in the same replicated admission write.
+#[must_use]
+pub fn sharing_member_guard_predicate(
+    required: SharingMemberFloor,
+    members_parameter: usize,
+    cutoff_parameter: usize,
+    observed_at_parameter: usize,
+) -> String {
+    let committed = format!("${members_parameter}");
+    let cutoff = format!("${cutoff_parameter}");
+    let observed_at = format!("${observed_at_parameter}");
+    format!(
+        "EXISTS (SELECT 1 FROM json_each({committed})) \
+         AND NOT EXISTS (SELECT 1 FROM json_each({committed}) AS committed \
+           WHERE NOT EXISTS (SELECT 1 FROM cluster_nodes AS member \
+             WHERE member.raft_id = CAST(committed.value AS INTEGER) \
+               AND member.removed_at IS NULL)) \
+         AND {} AND {} \
+         AND NOT EXISTS (SELECT 1 FROM cluster_nodes AS present \
+           WHERE present.removed_at IS NULL \
+             AND (present.last_seen_at < {cutoff} \
+               OR present.last_seen_at > {observed_at})) \
+         AND {}",
+        required
+            .capabilities()
+            .iter()
+            .map(|capability| capability_ready_predicate(capability))
+            .collect::<Vec<_>>()
+            .join(" AND "),
+        no_join_in_flight_predicate(),
+        no_removal_in_flight_predicates(),
+    )
+}
+
+/// Quorum observation used by the membership manager. `local_raft_id` must
+/// identify the serving member; identities outside the committed roster refuse.
+/// This is advisory evidence only; admission must still embed the SQL guard.
+pub async fn sharing_session_principal_floor_ready(
+    client: &Client,
+    local_raft_id: u64,
+) -> Result<bool, MembershipError> {
+    sharing_member_floor_ready(client, local_raft_id, SharingMemberFloor::SessionPrincipal).await
+}
+
+/// Quorum observation of the allocator-specific writer floor.
+pub async fn sharing_catalogue_item_identity_floor_ready(
+    client: &Client,
+    local_raft_id: u64,
+) -> Result<bool, MembershipError> {
+    sharing_member_floor_ready(
+        client,
+        local_raft_id,
+        SharingMemberFloor::CatalogueItemIdentity,
+    )
+    .await
+}
+
+/// Quorum observation for a bounded required capability set. This does not
+/// advertise capabilities, install schemas, or override a saved Developer switch.
+pub async fn sharing_member_floor_ready(
+    client: &Client,
+    local_raft_id: u64,
+    required: SharingMemberFloor,
+) -> Result<bool, MembershipError> {
+    Ok(
+        sharing_member_floor_observation(client, local_raft_id, required, false)
+            .await?
+            .is_some(),
+    )
+}
+
+const SOURCE_MEMBER_OBSERVATION_MAX_AGE_MS: i64 = 5_000;
+
+/// Server-derived membership inputs for a Source admission write. There is no
+/// wire decoder or caller-supplied roster constructor. This observation alone
+/// never authorizes allocation: its closed guard must run in the mutation.
+#[derive(Clone)]
+pub struct SourceAdmissionMembers {
+    members_json: String,
+    local_raft_id: u64,
+    membership_log_json: String,
+    query_at_ms: i64,
+    completed_at_ms: i64,
+    membership_generation: i64,
+    purpose_master_fingerprint: Option<String>,
+}
+
+impl SourceAdmissionMembers {
+    /// Actual identity captured by the production membership observation.
+    /// Source assignment still correlates this identity in its committing SQL.
+    pub(crate) fn actual_local_raft_id(&self) -> u64 {
+        self.local_raft_id
+    }
+
+    /// Return the closed SQL predicate and its three numbered bindings. The
+    /// caller composes these with installed-schema and current file authority
+    /// in the same write. A delayed observation must be reacquired.
+    pub fn write_guard(
+        &self,
+        now_ms: i64,
+        members_parameter: usize,
+        cutoff_parameter: usize,
+        observed_at_parameter: usize,
+    ) -> Result<(String, String, i64, i64), MembershipError> {
+        let required = if self.purpose_master_fingerprint.is_some() {
+            SharingMemberFloor::AllSharing
+        } else {
+            SharingMemberFloor::PrincipalAndCatalogue
+        };
+        let (guard, roster, cutoff, observed) = self.write_guard_for(
+            required,
+            now_ms,
+            members_parameter,
+            cutoff_parameter,
+            observed_at_parameter,
+        )?;
+        let purpose = match &self.purpose_master_fingerprint {
+            Some(fingerprint) => format!(
+                "({}) AND ({})",
+                purpose_master_proof_predicate(fingerprint)?,
+                purpose_roster_predicate(members_parameter)
+            ),
+            None => format!("NOT ({})", source_purpose_material_marker()),
+        };
+        Ok((
+            format!("({guard}) AND ({purpose})"),
+            roster,
+            cutoff,
+            observed,
+        ))
+    }
+
+    fn write_guard_for(
+        &self,
+        required: SharingMemberFloor,
+        now_ms: i64,
+        members_parameter: usize,
+        cutoff_parameter: usize,
+        observed_at_parameter: usize,
+    ) -> Result<(String, String, i64, i64), MembershipError> {
+        let indices = [members_parameter, cutoff_parameter, observed_at_parameter];
+        if self.local_raft_id == 0
+            || self.membership_generation < 0
+            || self.membership_log_json == "null"
+            || self.query_at_ms <= 0
+            || self.completed_at_ms < self.query_at_ms
+            || now_ms < self.completed_at_ms
+            || now_ms.saturating_sub(self.query_at_ms) > SOURCE_MEMBER_OBSERVATION_MAX_AGE_MS
+            || indices.iter().any(|index| *index == 0 || *index > 256)
+            || indices.iter().collect::<BTreeSet<_>>().len() != 3
+        {
+            return Err(MembershipError::Incompatible);
+        }
+        Ok((
+            format!(
+                "({}) AND ({}) AND ({}) AND EXISTS(SELECT 1 FROM cluster_sharing_membership_generation WHERE singleton=1 AND generation={})",
+                sharing_member_guard_predicate(
+                    required,
+                    members_parameter,
+                    cutoff_parameter,
+                    observed_at_parameter,
+                ),
+                sharing_member_transition_absence_predicate(),
+                sharing_membership_generation_shape_predicate(),
+                self.membership_generation,
+            ),
+            self.members_json.clone(),
+            now_ms.saturating_sub(PROTOCOL_CHANGE_ABSENCE_WINDOW_MS),
+            now_ms,
+        ))
+    }
+}
+
+/// Actual current-roster witness exclusively for purpose-key factory writes.
+/// It cannot be substituted for the Source session observation.
+#[derive(Clone)]
+pub struct PurposeKeyMembers {
+    members: SourceAdmissionMembers,
+    master_key_id: String,
+    master_fingerprint: String,
+}
+impl PurposeKeyMembers {
+    pub(crate) fn actual_local_raft_id(&self) -> u64 {
+        self.members.actual_local_raft_id()
+    }
+    pub(crate) fn matches_master(&self, master: &crate::secrets::CredentialKey) -> bool {
+        self.master_key_id == master.id()
+            && self.master_fingerprint == master.sharing_purpose_master_fingerprint()
+    }
+    pub fn write_guard(
+        &self,
+        now_ms: i64,
+        members_parameter: usize,
+        cutoff_parameter: usize,
+        observed_at_parameter: usize,
+    ) -> Result<(String, String, i64, i64), MembershipError> {
+        let (guard, members, cutoff, observed) = self.members.write_guard_for(
+            SharingMemberFloor::PurposeKeys,
+            now_ms,
+            members_parameter,
+            cutoff_parameter,
+            observed_at_parameter,
+        )?;
+        Ok((
+            format!(
+                "({guard}) AND ({}) AND ({}) AND ({}) AND EXISTS(SELECT 1 FROM cluster_nodes WHERE raft_id={} AND role IS NOT 'learner' AND removed_at IS NULL)",
+                purpose_master_proof_predicate(&self.master_fingerprint)?,
+                sharing_admission_schema_shape_predicate(),
+                purpose_roster_predicate(members_parameter),
+                self.members.actual_local_raft_id()
+            ),
+            members,
+            cutoff,
+            observed,
+        ))
+    }
+}
+fn purpose_roster_predicate(parameter: usize) -> String {
+    format!("(SELECT count(*) FROM cluster_nodes WHERE removed_at IS NULL)=(SELECT count(*) FROM json_each(${parameter})) AND NOT EXISTS(SELECT 1 FROM cluster_nodes node WHERE node.removed_at IS NULL AND NOT EXISTS(SELECT 1 FROM json_each(${parameter}) member WHERE CAST(member.value AS INTEGER)=node.raft_id))")
+}
+fn purpose_master_proof_predicate(id: &str) -> Result<String, MembershipError> {
+    if id.len() != 64
+        || !id
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    {
+        return Err(MembershipError::Incompatible);
+    }
+    Ok(format!("NOT EXISTS(SELECT 1 FROM cluster_nodes node WHERE node.removed_at IS NULL AND NOT EXISTS(SELECT 1 FROM cluster_node_capabilities proof WHERE proof.node_id=node.node_id AND proof.last_seen_at=node.last_seen_at AND proof.capability='sharing_purpose_master_v1:{id}'))"))
+}
+
+async fn sharing_member_floor_observation(
+    client: &Client,
+    local_raft_id: u64,
+    required: SharingMemberFloor,
+    require_transition_absence: bool,
+) -> Result<Option<SourceAdmissionMembers>, MembershipError> {
+    let before = client.metrics_db().await?;
+    let members = before
+        .membership_config
+        .nodes()
+        .map(|(id, _)| *id)
+        .collect::<BTreeSet<_>>();
+    if before.current_leader.is_none() || !members.contains(&local_raft_id) {
+        return Ok(None);
+    }
+    if require_transition_absence && before.membership_config.log_id().is_none() {
+        return Ok(None);
+    }
+    let members_json = bounded_committed_raft_ids_json(&members)?;
+    let now = unix_ms()?;
+    let cutoff = now.saturating_sub(PROTOCOL_CHANGE_ABSENCE_WINDOW_MS);
+    let mut guard = sharing_member_guard_predicate(required, 1, 2, 3);
+    let generation_projection = if require_transition_absence {
+        let present = client.query_consistent_map::<CountRow,_>(
+            "SELECT count(*) AS count FROM sqlite_master WHERE type='table' AND name='cluster_sharing_membership_generation'",params!()).await?;
+        if present.first().is_none_or(|row| row.count != 1) {
+            return Ok(None);
+        }
+        guard = format!(
+            "({guard}) AND ({})",
+            sharing_membership_generation_shape_predicate()
+        );
+        "(SELECT generation FROM cluster_sharing_membership_generation WHERE singleton=1)"
+    } else {
+        "0"
+    };
+    if require_transition_absence {
+        guard = format!(
+            "({guard}) AND ({})",
+            sharing_member_transition_absence_predicate()
+        );
+    }
+    let rows = client
+        .query_consistent_map::<SourceFloorGenerationRow, _>(
+            format!(
+                "SELECT CASE WHEN {} THEN 1 ELSE 0 END AS ready, \
+                 MIN(node.last_seen_at) AS oldest_heartbeat, {generation_projection} AS generation \
+                 FROM cluster_nodes AS node WHERE node.removed_at IS NULL",
+                guard,
+            ),
+            params!(members_json.as_str(), cutoff, now),
+        )
+        .await?;
+    let after = client.metrics_db().await?;
+    if after.current_leader.is_none()
+        || before.membership_config.log_id() != after.membership_config.log_id()
+        || members
+            != after
+                .membership_config
+                .nodes()
+                .map(|(id, _)| *id)
+                .collect::<BTreeSet<_>>()
+    {
+        return Ok(None);
+    }
+    let [row] = rows.as_slice() else {
+        return Ok(None);
+    };
+    let completed_at_ms = unix_ms()?;
+    if !sharing_principal_floor_observation_ready(&row.floor, completed_at_ms)
+        || row.generation.is_none_or(|generation| generation < 0)
+        || (require_transition_absence
+            && (completed_at_ms < now
+                || completed_at_ms.saturating_sub(now) > SOURCE_MEMBER_OBSERVATION_MAX_AGE_MS))
+    {
+        return Ok(None);
+    }
+    Ok(Some(SourceAdmissionMembers {
+        members_json,
+        local_raft_id,
+        membership_log_json: serde_json::to_string(&before.membership_config.log_id())
+            .map_err(|_| MembershipError::Incompatible)?,
+        query_at_ms: now,
+        completed_at_ms,
+        membership_generation: row.generation.ok_or(MembershipError::Incompatible)?,
+        purpose_master_fingerprint: None,
+    }))
+}
+
+async fn purpose_key_member_observation(
+    client: &Client,
+    local_raft_id: u64,
+    master: &crate::secrets::CredentialKey,
+) -> Result<Option<PurposeKeyMembers>, MembershipError> {
+    if !client
+        .metrics_db()
+        .await?
+        .membership_config
+        .voter_ids()
+        .any(|id| id == local_raft_id)
+    {
+        return Ok(None);
+    }
+    let fingerprint = master.sharing_purpose_master_fingerprint();
+    purpose_master_proof_predicate(&fingerprint)?;
+    let Some(members) = sharing_member_floor_observation(
+        client,
+        local_raft_id,
+        SharingMemberFloor::PurposeKeys,
+        true,
+    )
+    .await?
+    else {
+        return Ok(None);
+    };
+    let result = PurposeKeyMembers {
+        members,
+        master_key_id: master.id().to_owned(),
+        master_fingerprint: fingerprint,
+    };
+    let now = unix_ms()?;
+    let (guard, roster, cutoff, observed) = result.write_guard(now, 1, 2, 3)?;
+    let rows = client
+        .query_consistent_map::<CountRow, _>(
+            format!("SELECT CASE WHEN {guard} THEN 1 ELSE 0 END AS count"),
+            params!(roster, cutoff, observed),
+        )
+        .await?;
+    if !matches!(rows.as_slice(),[row] if row.count==1) {
+        return Ok(None);
+    }
+    result.write_guard(unix_ms()?, 1, 2, 3)?;
+    Ok(Some(result))
+}
+
+#[cfg(feature = "hiqlite-contract-tests")]
+#[doc(hidden)]
+pub async fn observe_purpose_key_members_for_contract(
+    client: &Client,
+    actual_local_raft_id: u64,
+    master: &crate::secrets::CredentialKey,
+) -> Result<Option<PurposeKeyMembers>, MembershipError> {
+    purpose_key_member_observation(client, actual_local_raft_id, master).await
+}
+
+fn source_purpose_material_marker() -> &'static str {
+    "EXISTS(SELECT 1 FROM sqlite_master WHERE name IN ('sharing_catalogue_keys','sharing_file_locator_keys','sharing_purpose_key_installation','sharing_purpose_key_archive','sharing_purpose_transaction_guard'))"
+}
+async fn source_member_observation(
+    client: &Client,
+    local_raft_id: u64,
+    master: Option<&crate::secrets::CredentialKey>,
+) -> Result<Option<SourceAdmissionMembers>, MembershipError> {
+    let rows = client
+        .query_consistent_map::<CountRow, _>(
+            format!(
+                "SELECT CASE WHEN {} THEN 1 ELSE 0 END AS count",
+                source_purpose_material_marker()
+            ),
+            params!(),
+        )
+        .await?;
+    let installed = matches!(rows.as_slice(),[row] if row.count==1);
+    if installed && master.is_none() {
+        return Ok(None);
+    }
+    let required = if installed {
+        SharingMemberFloor::AllSharing
+    } else {
+        SharingMemberFloor::PrincipalAndCatalogue
+    };
+    let Some(mut observation) =
+        sharing_member_floor_observation(client, local_raft_id, required, true).await?
+    else {
+        return Ok(None);
+    };
+    if installed {
+        observation.purpose_master_fingerprint = Some(
+            master
+                .ok_or(MembershipError::Incompatible)?
+                .sharing_purpose_master_fingerprint(),
+        );
+    }
+    let (guard, roster, cutoff, observed) = observation.write_guard(unix_ms()?, 1, 2, 3)?;
+    let rows = client
+        .query_consistent_map::<CountRow, _>(
+            format!("SELECT CASE WHEN {guard} THEN 1 ELSE 0 END AS count"),
+            params!(roster, cutoff, observed),
+        )
+        .await?;
+    Ok(if matches!(rows.as_slice(),[row] if row.count==1) {
+        Some(observation)
+    } else {
+        None
+    })
+}
+
+/// Contract fixtures use the actual quorum observation path. This test-only
+/// wrapper is absent from production builds; production obtains the serving
+/// Raft identity exclusively from MembershipManager.
+#[cfg(feature = "hiqlite-contract-tests")]
+#[doc(hidden)]
+pub async fn observe_source_admission_members_for_contract(
+    client: &Client,
+    actual_local_raft_id: u64,
+    master: &crate::secrets::CredentialKey,
+) -> Result<Option<SourceAdmissionMembers>, MembershipError> {
+    source_member_observation(client, actual_local_raft_id, Some(master)).await
+}
+
+/// SQLite unit fixtures still execute every SQL authority fence, but have no
+/// serving Raft process. This constructor is never compiled in production.
+#[cfg(test)]
+pub(crate) fn source_admission_members_for_unit_test(
+    local_raft_id: u64,
+    members: &BTreeSet<u64>,
+    now_ms: i64,
+) -> Result<SourceAdmissionMembers, MembershipError> {
+    if local_raft_id == 0 || !members.contains(&local_raft_id) || now_ms <= 0 {
+        return Err(MembershipError::Incompatible);
+    }
+    Ok(SourceAdmissionMembers {
+        members_json: bounded_committed_raft_ids_json(members)?,
+        local_raft_id,
+        membership_log_json: "{\"unit_fixture\":true}".into(),
+        query_at_ms: now_ms,
+        completed_at_ms: now_ms,
+        membership_generation: 0,
+        purpose_master_fingerprint: None,
+    })
+}
+#[cfg(test)]
+pub(crate) fn source_admission_members_with_purpose_for_unit_test(
+    local_raft_id: u64,
+    members: &BTreeSet<u64>,
+    now_ms: i64,
+    master: &crate::secrets::CredentialKey,
+) -> Result<SourceAdmissionMembers, MembershipError> {
+    let mut observation = source_admission_members_for_unit_test(local_raft_id, members, now_ms)?;
+    observation.purpose_master_fingerprint = Some(master.sharing_purpose_master_fingerprint());
+    Ok(observation)
+}
+
+fn sharing_principal_floor_observation_ready(
+    row: &SharingPrincipalFloorRow,
+    observed_at: i64,
+) -> bool {
+    row.ready == 1
+        && row.oldest_heartbeat.is_some_and(|heartbeat| {
+            heartbeat >= observed_at.saturating_sub(PROTOCOL_CHANGE_ABSENCE_WINDOW_MS)
+                && heartbeat <= observed_at
+        })
 }
 
 /// Exact replicated precondition for enabling Live TV. Parameter 4 is the
@@ -2891,6 +3923,8 @@ struct ReplicatedMembership {
     bootstrap_http: String,
     artwork_http: String,
     secrets: JoinSecrets,
+    purpose_master: Mutex<Option<Arc<crate::secrets::CredentialKey>>>,
+    source_boot_attempt: Mutex<Option<String>>,
     activity_signing_key: ActivitySigningKey,
     activity_public_keys: Mutex<BTreeMap<String, Vec<u8>>>,
     activity_auth_admission: Mutex<BTreeMap<String, ActivityAuthAdmission>>,
@@ -3294,6 +4328,8 @@ impl MembershipManager {
                 bootstrap_http,
                 artwork_http,
                 secrets,
+                purpose_master: Mutex::new(None),
+                source_boot_attempt: Mutex::new(None),
                 activity_signing_key,
                 activity_public_keys: Mutex::new(BTreeMap::new()),
                 activity_auth_admission: Mutex::new(BTreeMap::new()),
@@ -3734,6 +4770,10 @@ impl MembershipManager {
         if role != expected_role {
             return Err(MembershipError::InvalidToken);
         }
+        let sharing_markers = sharing_admission_markers(&inner.client).await?;
+        if !request.sharing.proves(sharing_markers.required) {
+            return Err(MembershipError::Incompatible);
+        }
         if !request.live_tv_v1 && self.live_tv_enabled().await? {
             tracing::warn!(
                 node_id = %request.node_id,
@@ -3832,7 +4872,15 @@ impl MembershipManager {
         // is a compare-and-swap on both values, so a widening is caught too: a
         // protocol-4-only binary must not be admitted into a cluster that
         // activated while its request was in flight.
-        let mut statements = Vec::new();
+        let sharing_intents = sharing_markers.intents_installed
+            && (sharing_markers.required.session_principal
+                || sharing_markers.required.catalogue_item_identity
+                || sharing_markers.required.purpose_keys);
+        let mut statements = if sharing_intents {
+            sharing_join_intent_statements(request, now)
+        } else {
+            Vec::new()
+        };
         if request.live_tv_v1 {
             statements.push((
                 "INSERT INTO cluster_live_tv_join_intents (token_hash) \
@@ -4036,6 +5084,12 @@ impl MembershipManager {
         if request.live_tv_v1 {
             statements.push((
                 "DELETE FROM cluster_live_tv_join_intents WHERE token_hash = $1".to_owned(),
+                params!(request.token_digest.as_str()),
+            ));
+        }
+        if sharing_intents {
+            statements.push((
+                "DELETE FROM cluster_sharing_join_intents WHERE token_hash=$1".to_owned(),
                 params!(request.token_digest.as_str()),
             ));
         }
@@ -4552,6 +5606,35 @@ impl MembershipManager {
                 .to_owned(),
             params!(inner.identity.node_id.as_str(), now),
         ));
+        let purpose_master = inner
+            .purpose_master
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .clone();
+        if let Some(master) = purpose_master {
+            for proof in [
+                SHARING_SESSION_PRINCIPAL_CAPABILITY.to_owned(),
+                SHARING_CATALOGUE_ITEM_IDENTITY_CAPABILITY.to_owned(),
+                SHARING_PURPOSE_KEYS_CAPABILITY.to_owned(),
+                format!(
+                    "sharing_purpose_master_v1:{}",
+                    master.sharing_purpose_master_fingerprint()
+                ),
+            ] {
+                statements.push(("INSERT INTO cluster_node_capabilities(node_id,capability,last_seen_at) SELECT $1,$2,$3 WHERE NOT EXISTS(SELECT 1 FROM sharing_purpose_census_intents WHERE node_id=$1) ON CONFLICT(node_id,capability) DO UPDATE SET last_seen_at=excluded.last_seen_at".to_owned(),params!(inner.identity.node_id.as_str(),proof,now)));
+            }
+        }
+        // One bounded current attempt per node; previous boot capability rows
+        // cannot accumulate across restarts or survive a serving heartbeat.
+        statements.push(("DELETE FROM cluster_node_capabilities WHERE node_id=$1 AND capability GLOB 'sharing_source_boot_v1:*'".to_owned(),params!(inner.identity.node_id.as_str())));
+        let source_boot_attempt = inner
+            .source_boot_attempt
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .clone();
+        if let Some(attempt) = source_boot_attempt {
+            statements.push(("INSERT INTO cluster_node_capabilities(node_id,capability,last_seen_at) SELECT $1,$2,$3 WHERE EXISTS(SELECT 1 FROM sharing_source_boot_intents WHERE node_id=$1 AND attempt_id=$4) ON CONFLICT(node_id,capability) DO UPDATE SET last_seen_at=excluded.last_seen_at".to_owned(),params!(inner.identity.node_id.as_str(),format!("sharing_source_boot_v1:{attempt}"),now,attempt)));
+        }
         statements.push((
             "DELETE FROM cluster_node_maintenance_heartbeat_intents WHERE node_id = $1 \
                      AND last_seen_at = $2"
@@ -7036,6 +8119,19 @@ impl MembershipManager {
                     tracing::warn!(code = error.code(), "cluster node heartbeat failed");
                 }
                 Ok(()) => {
+                    match tokio::time::timeout(
+                        Duration::from_secs(5),
+                        self.coordinate_purpose_keys(),
+                    )
+                    .await
+                    {
+                        Err(_) => tracing::warn!("sharing purpose factory deadline expired"),
+                        Ok(Err(error)) => tracing::warn!(
+                            code = error.code(),
+                            "sharing purpose factory is pending"
+                        ),
+                        Ok(Ok(())) => {}
+                    }
                     if let Err(error) = self.refresh_membership_metrics().await {
                         tracing::warn!(
                             code = error.code(),
@@ -7390,6 +8486,7 @@ impl MembershipManager {
         node_id: &str,
     ) -> Result<MembershipStatus, MembershipError> {
         let inner = self.replicated_inner()?;
+        require_installed_sharing_promotion_floor(&inner.client, node_id).await?;
         self.require_learner_lifecycle_capability().await?;
         if self.maintenance_operation_pending().await? {
             return Err(MembershipError::MaintenanceConflict(node_id.to_owned()));
@@ -7541,6 +8638,7 @@ impl MembershipManager {
             .nodes()
             .map(|(raft_id, node)| (*raft_id, node.addr_api.clone()))
             .collect::<Vec<_>>();
+        require_installed_sharing_promotion_floor(&inner.client, node_id).await?;
         match request_learner_promotion(&leader.addr_api, &inner.secrets.api, &target_node).await {
             Ok(()) => {}
             Err(MembershipChangeFailure::Rejected(error)) => {
@@ -8438,6 +9536,151 @@ impl MembershipManager {
         capability: &str,
     ) -> Result<Vec<String>, MembershipError> {
         self.unready_nodes(capability, Read::Quorum).await
+    }
+
+    /// Quorum-confirm the complete-principal binary floor for every committed
+    /// voter and learner, plus joining members. Missing SQL identities, stale
+    /// proofs, in-flight membership changes and unavailable quorum all refuse.
+    /// No member capability is published by this method. The schema marker and
+    /// the same guard in the Store admission write remain required separately.
+    pub async fn sharing_session_principal_floor_ready(&self) -> Result<bool, MembershipError> {
+        let inner = self.replicated_inner()?;
+        sharing_session_principal_floor_ready(&inner.client, inner.identity.raft_id).await
+    }
+
+    /// Quorum-confirm the allocator-specific floor without advertising it.
+    pub async fn sharing_catalogue_item_identity_floor_ready(
+        &self,
+    ) -> Result<bool, MembershipError> {
+        self.sharing_member_floor_ready(SharingMemberFloor::CatalogueItemIdentity)
+            .await
+    }
+
+    /// Quorum-confirm a closed set of requirements for a shared admission.
+    pub async fn sharing_member_floor_ready(
+        &self,
+        required: SharingMemberFloor,
+    ) -> Result<bool, MembershipError> {
+        let inner = self.replicated_inner()?;
+        sharing_member_floor_ready(&inner.client, inner.identity.raft_id, required).await
+    }
+
+    /// Observe the actual serving member and both Source writer capabilities.
+    /// The opaque result can supply guarded write inputs, never a cached
+    /// readiness permission. Missing factories and unresolved intents refuse.
+    pub async fn observe_source_admission_members(
+        &self,
+    ) -> Result<Option<SourceAdmissionMembers>, MembershipError> {
+        let inner = self.replicated_inner()?;
+        let master = inner
+            .purpose_master
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .clone();
+        source_member_observation(&inner.client, inner.identity.raft_id, master.as_deref()).await
+    }
+
+    pub(crate) fn active_storage_root_for_startup(
+        &self,
+    ) -> Result<PathBuf, crate::error::StoreError> {
+        self.inner
+            .as_ref()
+            .map(|inner| inner.storage_root.clone())
+            .ok_or_else(|| {
+                crate::error::StoreError::Migration(
+                    "Source startup has no admitted replicated member".to_owned(),
+                )
+            })
+    }
+
+    /// Explicit boot qualification. The actual master has passed startup
+    /// census; open all current purpose material again before publishing its
+    /// fingerprint and binary protocol support. Installed schemas and worker
+    /// readiness require their separate guarded coordinators.
+    pub async fn prepare_purpose_master(
+        &self,
+        master: Arc<crate::secrets::CredentialKey>,
+    ) -> Result<(), MembershipError> {
+        let Some(inner) = &self.inner else {
+            return Ok(());
+        };
+        if !master.matches_purpose_master_encoding(&inner.secrets.credential_key) {
+            return Err(MembershipError::Incompatible);
+        }
+        inner
+            .store
+            .inspect_sharing_purpose_material()
+            .await
+            .map_err(|_| MembershipError::Incompatible)?;
+        inner
+            .store
+            .verify_sharing_purpose_material(&master)
+            .await
+            .map_err(|_| MembershipError::Incompatible)?;
+        let rows=inner.client.query_consistent_map::<CountRow,_>("SELECT count(*) AS count FROM cluster_nodes WHERE node_id=$1 AND raft_id=$2 AND removed_at IS NULL AND NOT EXISTS(SELECT 1 FROM sharing_purpose_census_intents WHERE node_id=$1)",params!(inner.identity.node_id.as_str(),inner.identity.raft_id as i64)).await?;
+        if !matches!(rows.as_slice(),[row] if row.count==1) {
+            return Err(MembershipError::Incompatible);
+        }
+        *inner
+            .purpose_master
+            .lock()
+            .unwrap_or_else(|error| error.into_inner()) = Some(master);
+        // A newly verified boot master changes the heartbeat proof. Serialize
+        // with ordinary commits, but never coalesce it with the prior heartbeat
+        // that did not carry this proof.
+        let mut committed = inner.heartbeat_writes.last_committed.lock().await;
+        self.commit_heartbeat(inner).await?;
+        *committed = Some(tokio::time::Instant::now());
+        Ok(())
+    }
+
+    /// Bounded explicit startup/heartbeat factory. A member completing a later
+    /// upgrade can make the exact current floor ready without a read handler
+    /// repairing key state. The saved sharing choice is never overridden.
+    pub async fn coordinate_purpose_keys(&self) -> Result<(), MembershipError> {
+        let Some(inner) = &self.inner else {
+            return Ok(());
+        };
+        if inner
+            .store
+            .get_setting("sharing_enabled")
+            .await
+            .map_err(|_| MembershipError::Incompatible)?
+            .as_deref()
+            != Some("true")
+        {
+            return Ok(());
+        }
+        let master = inner
+            .purpose_master
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .clone();
+        let Some(master) = master else {
+            return Ok(());
+        };
+        bootstrap_purpose_admission_schema(&inner.client, inner.identity.raft_id, &master).await?;
+        let Some(members) = self.observe_purpose_key_members(&master).await? else {
+            return Ok(());
+        };
+        inner
+            .store
+            .install_sharing_purpose_keys(&master, &members, unix_ms()?)
+            .await
+            .map_err(|_| MembershipError::Incompatible)?;
+        Ok(())
+    }
+
+    /// Current exact roster/master proof for key installation only. Source
+    /// admission continues to use its separate PrincipalAndCatalogue witness.
+    pub async fn observe_purpose_key_members(
+        &self,
+        master: &crate::secrets::CredentialKey,
+    ) -> Result<Option<PurposeKeyMembers>, MembershipError> {
+        let Some(inner) = &self.inner else {
+            return Ok(None);
+        };
+        purpose_key_member_observation(&inner.client, inner.identity.raft_id, master).await
     }
 
     /// Active nodes that cannot currently prove the always-compiled live-TV
@@ -10293,6 +11536,33 @@ impl From<&mut Row<'_>> for ProtocolRangeRow {
     }
 }
 
+struct SharingPrincipalFloorRow {
+    ready: i64,
+    oldest_heartbeat: Option<i64>,
+}
+
+struct SourceFloorGenerationRow {
+    floor: SharingPrincipalFloorRow,
+    generation: Option<i64>,
+}
+impl From<&mut Row<'_>> for SourceFloorGenerationRow {
+    fn from(row: &mut Row<'_>) -> Self {
+        Self {
+            floor: SharingPrincipalFloorRow::from(&mut *row),
+            generation: row.get("generation"),
+        }
+    }
+}
+
+impl From<&mut Row<'_>> for SharingPrincipalFloorRow {
+    fn from(row: &mut Row<'_>) -> Self {
+        Self {
+            ready: row.get("ready"),
+            oldest_heartbeat: row.get("oldest_heartbeat"),
+        }
+    }
+}
+
 struct NodeIdRow {
     node_id: String,
 }
@@ -10767,7 +12037,423 @@ pub(crate) fn system_short_hostname() -> Option<String> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn sharing_purpose_master_proof_requires_canonical_256_bit_fingerprint() {
+        for rejected in [
+            "".to_owned(),
+            "a".repeat(8),
+            "a".repeat(63),
+            "a".repeat(65),
+            "A".repeat(64),
+            "g".repeat(64),
+            format!("{}'", "a".repeat(63)),
+            "é".repeat(32),
+        ] {
+            assert!(super::purpose_master_proof_predicate(&rejected).is_err());
+        }
+        assert!(super::purpose_master_proof_predicate(&"a".repeat(64))
+            .expect("canonical")
+            .contains("sharing_purpose_master_v1:"));
+    }
+
     use super::*;
+
+    fn sharing_principal_floor_fixture() -> rusqlite::Connection {
+        let connection = rusqlite::Connection::open_in_memory().expect("floor fixture");
+        connection
+            .execute_batch(
+                "CREATE TABLE cluster_nodes (node_id TEXT PRIMARY KEY, raft_id INTEGER NOT NULL, \
+               last_seen_at INTEGER NOT NULL, removed_at INTEGER, role TEXT); \
+             CREATE TABLE cluster_node_capabilities (node_id TEXT NOT NULL, \
+               capability TEXT NOT NULL, last_seen_at INTEGER NOT NULL, \
+               PRIMARY KEY(node_id, capability)); \
+             CREATE TABLE cluster_node_join_staging (node_id TEXT PRIMARY KEY); \
+             CREATE TABLE cluster_node_removals (node_id TEXT PRIMARY KEY); \
+             CREATE TABLE cluster_node_removal_attempts (node_id TEXT NOT NULL, attempt_id TEXT); \
+             INSERT INTO cluster_nodes VALUES \
+               ('voter', 1, 1000000, NULL, NULL), \
+               ('learner', 2, 1000000, NULL, 'learner');",
+            )
+            .expect("floor schema and members");
+        connection.execute(
+            "INSERT INTO cluster_node_capabilities SELECT node_id, ?1, last_seen_at FROM cluster_nodes",
+            [SHARING_SESSION_PRINCIPAL_CAPABILITY],
+        ).expect("current binary proofs");
+        connection
+    }
+
+    fn sharing_principal_floor_allows(connection: &rusqlite::Connection, members: &str) -> bool {
+        connection
+            .query_row(
+                &format!(
+                    "SELECT {}",
+                    sharing_session_principal_guard_predicate(1, 2, 3)
+                ),
+                rusqlite::params![members, 880000_i64, 1000000_i64],
+                |row| row.get(0),
+            )
+            .expect("execute production floor predicate")
+    }
+
+    #[test]
+    fn sharing_principal_floor_requires_every_current_voter_and_learner() {
+        let connection = sharing_principal_floor_fixture();
+        assert!(sharing_principal_floor_allows(&connection, "[1,2]"));
+        assert!(!sharing_principal_floor_allows(&connection, "[]"));
+        assert!(!sharing_principal_floor_allows(&connection, "[1,2,3]"));
+        connection
+            .execute(
+                "DELETE FROM cluster_node_capabilities WHERE node_id = 'learner'",
+                [],
+            )
+            .expect("floor fixture mutation");
+        assert!(!sharing_principal_floor_allows(&connection, "[1,2]"));
+        connection
+            .execute(
+                "INSERT INTO cluster_node_capabilities VALUES ('learner', ?1, 999999)",
+                [SHARING_SESSION_PRINCIPAL_CAPABILITY],
+            )
+            .expect("floor fixture mutation");
+        assert!(!sharing_principal_floor_allows(&connection, "[1,2]"));
+        connection
+            .execute(
+                "UPDATE cluster_node_capabilities SET last_seen_at = 1000000",
+                [],
+            )
+            .expect("floor fixture mutation");
+        assert!(sharing_principal_floor_allows(&connection, "[1,2]"));
+        // The next heartbeat from an older rejoined binary must invalidate its
+        // former capability, even while all timestamps remain fresh.
+        connection
+            .execute(
+                "UPDATE cluster_nodes SET last_seen_at = 999999 WHERE node_id = 'learner'",
+                [],
+            )
+            .expect("floor fixture mutation");
+        assert!(!sharing_principal_floor_allows(&connection, "[1,2]"));
+    }
+
+    #[test]
+    fn sharing_principal_floor_refuses_stale_future_join_and_orphan_removal() {
+        for heartbeat in [879999_i64, 1000001] {
+            let connection = sharing_principal_floor_fixture();
+            connection
+                .execute(
+                    "UPDATE cluster_nodes SET last_seen_at = ?1 WHERE node_id = 'learner'",
+                    [heartbeat],
+                )
+                .expect("floor fixture mutation");
+            connection.execute("UPDATE cluster_node_capabilities SET last_seen_at = ?1 WHERE node_id = 'learner'", [heartbeat]).expect("floor fixture mutation");
+            assert!(!sharing_principal_floor_allows(&connection, "[1,2]"));
+        }
+        for mutation in [
+            "INSERT INTO cluster_node_join_staging VALUES ('learner')",
+            "INSERT INTO cluster_node_join_staging VALUES ('unknown-rejoin')",
+            "INSERT INTO cluster_node_removals VALUES ('learner')",
+            "INSERT INTO cluster_node_removals VALUES ('unknown-removed')",
+            "INSERT INTO cluster_node_removal_attempts VALUES ('unknown-removed', 'attempt')",
+        ] {
+            let connection = sharing_principal_floor_fixture();
+            connection
+                .execute(mutation, [])
+                .expect("floor fixture mutation");
+            assert!(
+                !sharing_principal_floor_allows(&connection, "[1,2]"),
+                "{mutation}"
+            );
+        }
+        let connection = sharing_principal_floor_fixture();
+        connection.execute_batch("UPDATE cluster_nodes SET removed_at = 1000000 WHERE node_id = 'learner'; INSERT INTO cluster_node_removals VALUES ('learner'); INSERT INTO cluster_node_removal_attempts VALUES ('learner', 'done'); INSERT INTO cluster_node_join_staging VALUES ('learner');").expect("floor fixture mutation");
+        assert!(
+            !sharing_principal_floor_allows(&connection, "[1,2]"),
+            "still a committed member"
+        );
+        assert!(
+            sharing_principal_floor_allows(&connection, "[1]"),
+            "completed removal is not permanent debt"
+        );
+    }
+
+    #[test]
+    fn sharing_principal_floor_guard_rechecks_the_write_after_a_legacy_heartbeat() {
+        let connection = sharing_principal_floor_fixture();
+        connection
+            .execute(
+                "CREATE TABLE sharing_admission_receipts (id INTEGER PRIMARY KEY)",
+                [],
+            )
+            .expect("floor fixture mutation");
+        assert!(sharing_principal_floor_allows(&connection, "[1,2]"));
+        connection
+            .execute(
+                "UPDATE cluster_nodes SET last_seen_at = 999999 WHERE node_id = 'learner'",
+                [],
+            )
+            .expect("floor fixture mutation");
+        let changed = connection
+            .execute(
+                &format!(
+                    "INSERT INTO sharing_admission_receipts SELECT 1 WHERE {}",
+                    sharing_session_principal_guard_predicate(1, 2, 3)
+                ),
+                rusqlite::params!["[1,2]", 880000_i64, 1000000_i64],
+            )
+            .expect("conditional admission");
+        assert_eq!(
+            changed, 0,
+            "a successful earlier preflight is not admission authority"
+        );
+        connection.execute("UPDATE cluster_node_capabilities SET last_seen_at = 999999 WHERE node_id = 'learner'", []).expect("floor fixture mutation");
+        assert_eq!(
+            connection
+                .execute(
+                    &format!(
+                        "INSERT INTO sharing_admission_receipts SELECT 1 WHERE {}",
+                        sharing_session_principal_guard_predicate(1, 2, 3)
+                    ),
+                    rusqlite::params!["[1,2]", 880000_i64, 1000000_i64],
+                )
+                .expect("floor fixture mutation"),
+            1
+        );
+    }
+
+    #[test]
+    fn sharing_principal_floor_observation_cannot_outlive_its_heartbeat() {
+        let row = SharingPrincipalFloorRow {
+            ready: 1,
+            oldest_heartbeat: Some(1000000),
+        };
+        assert!(sharing_principal_floor_observation_ready(&row, 1120000));
+        assert!(!sharing_principal_floor_observation_ready(&row, 1120001));
+        assert!(!sharing_principal_floor_observation_ready(&row, 999999));
+        assert!(!sharing_principal_floor_observation_ready(
+            &SharingPrincipalFloorRow {
+                ready: 1,
+                oldest_heartbeat: None
+            },
+            1000000
+        ));
+        assert!(!sharing_principal_floor_observation_ready(
+            &SharingPrincipalFloorRow {
+                ready: 0,
+                oldest_heartbeat: Some(1000000)
+            },
+            1000000
+        ));
+    }
+
+    #[tokio::test]
+    async fn sharing_principal_floor_missing_membership_is_unavailable() {
+        assert!(MembershipManager::unavailable()
+            .sharing_session_principal_floor_ready()
+            .await
+            .is_err());
+        assert!(MembershipManager::unavailable()
+            .observe_source_admission_members()
+            .await
+            .is_err());
+    }
+
+    #[test]
+    fn sharing_source_purpose_installation_invalidates_legacy_proof_and_requires_current_master() {
+        let connection = sharing_principal_floor_fixture();
+        connection.execute_batch("CREATE TABLE cluster_sharing_membership_intents(id TEXT); CREATE TABLE cluster_sharing_join_declarations(token_hash TEXT); CREATE TABLE cluster_join_tokens(token_hash TEXT,state TEXT); CREATE TABLE sharing_purpose_census_intents(boot_metadata TEXT)").expect("unit transition and census metadata");
+        for sql in sharing_membership_generation_schema() {
+            connection
+                .execute_batch(&sql)
+                .expect("durable generation fixture");
+        }
+        connection.execute("INSERT INTO cluster_node_capabilities SELECT node_id,?1,last_seen_at FROM cluster_nodes",[SHARING_CATALOGUE_ITEM_IDENTITY_CAPABILITY]).expect("catalogue proofs");
+        let legacy = source_admission_members_for_unit_test(1, &BTreeSet::from([1, 2]), 1000000)
+            .expect("legacy observation");
+        let allows = |observation: &SourceAdmissionMembers| {
+            let (guard, roster, cutoff, now) = observation
+                .write_guard(1000001, 1, 2, 3)
+                .expect("current private witness");
+            connection
+                .query_row(
+                    &format!("SELECT {guard}"),
+                    rusqlite::params![roster, cutoff, now],
+                    |row| row.get::<_, bool>(0),
+                )
+                .expect("same-write predicate")
+        };
+        assert!(
+            allows(&legacy),
+            "census-only metadata preserves legacy floor"
+        );
+        connection
+            .execute_batch("CREATE TABLE sharing_catalogue_keys(partial TEXT)")
+            .expect("purpose material appears after observation");
+        assert!(
+            !allows(&legacy),
+            "partial installation cannot inherit a cached Both proof"
+        );
+        let master = crate::secrets::CredentialKey::from_bytes([129; 32]);
+        let current = source_admission_members_with_purpose_for_unit_test(
+            1,
+            &BTreeSet::from([1, 2]),
+            1000000,
+            &master,
+        )
+        .expect("private fixture master witness");
+        assert!(!allows(&current), "missing purpose capability refuses");
+        connection.execute("INSERT INTO cluster_node_capabilities SELECT node_id,?1,last_seen_at FROM cluster_nodes",[SHARING_PURPOSE_KEYS_CAPABILITY]).expect("binary proofs");
+        assert!(
+            !allows(&current),
+            "capability alone cannot replace master proof"
+        );
+        let fingerprint = format!(
+            "sharing_purpose_master_v1:{}",
+            master.sharing_purpose_master_fingerprint()
+        );
+        connection.execute("INSERT INTO cluster_node_capabilities SELECT node_id,?1,last_seen_at FROM cluster_nodes",[fingerprint.as_str()]).expect("actual fixture master proof");
+        assert!(allows(&current));
+        connection
+            .execute(
+                "DELETE FROM cluster_node_capabilities WHERE node_id='learner' AND capability=?1",
+                [SHARING_PURPOSE_KEYS_CAPABILITY],
+            )
+            .expect("purpose proof disappears after observation");
+        assert!(!allows(&current));
+        connection.execute("INSERT INTO cluster_node_capabilities SELECT node_id,?1,last_seen_at FROM cluster_nodes WHERE node_id='learner'",[SHARING_PURPOSE_KEYS_CAPABILITY]).expect("purpose proof returns");
+        connection.execute("UPDATE cluster_node_capabilities SET last_seen_at=last_seen_at-1 WHERE node_id='learner' AND capability=?1",[fingerprint]).expect("master proof no longer coupled to heartbeat");
+        assert!(!allows(&current));
+    }
+
+    #[test]
+    fn sharing_source_member_observation_rechecks_both_floors_and_unresolved_intents() {
+        let connection = sharing_principal_floor_fixture();
+        connection.execute_batch("CREATE TABLE cluster_sharing_membership_intents (id TEXT); CREATE TABLE cluster_sharing_join_declarations (token_hash TEXT); CREATE TABLE cluster_join_tokens (token_hash TEXT, state TEXT); CREATE TABLE source_write_receipts (id INTEGER PRIMARY KEY)").expect("candidate transition fence fixture");
+        for sql in sharing_membership_generation_schema() {
+            connection
+                .execute_batch(&sql)
+                .expect("candidate generation factory");
+        }
+        let mut observation =
+            source_admission_members_for_unit_test(1, &BTreeSet::from([1, 2]), 1000000)
+                .expect("unit-only fixture observation");
+        observation.completed_at_ms = 1000001;
+        let (guard, members, cutoff, now) = observation
+            .write_guard(1000002, 1, 2, 3)
+            .expect("fresh server observation");
+        let write = |id: i64| {
+            connection
+                .execute(
+                    &format!("INSERT INTO source_write_receipts SELECT {id} WHERE {guard}"),
+                    rusqlite::params![members, cutoff, now],
+                )
+                .expect("same-mutation closed Source guard")
+        };
+        assert_eq!(write(1), 0, "principal capability alone is insufficient");
+        connection.execute("INSERT INTO cluster_node_capabilities SELECT node_id,?1,last_seen_at FROM cluster_nodes", [SHARING_CATALOGUE_ITEM_IDENTITY_CAPABILITY]).expect("allocator binary proofs");
+        assert_eq!(write(1), 1);
+        connection
+            .execute(
+                "INSERT INTO cluster_sharing_membership_intents VALUES('unresolved')",
+                [],
+            )
+            .expect("membership proposal starts after observation");
+        assert_eq!(
+            write(2),
+            0,
+            "an earlier observation cannot bypass an unresolved transition"
+        );
+        connection
+            .execute("DELETE FROM cluster_sharing_membership_intents", [])
+            .expect("authoritative fixture resolution");
+        assert_eq!(
+            write(2),
+            0,
+            "a completed transition also invalidates the old observation"
+        );
+        observation.membership_generation = 2;
+        let (guard, members, cutoff, now) = observation
+            .write_guard(1000002, 1, 2, 3)
+            .expect("new lineage observation");
+        let write = |id: i64| {
+            connection
+                .execute(
+                    &format!("INSERT INTO source_write_receipts SELECT {id} WHERE {guard}"),
+                    rusqlite::params![members, cutoff, now],
+                )
+                .expect("fresh lineage guard")
+        };
+        connection.execute_batch("INSERT INTO cluster_sharing_join_declarations VALUES('joining'); INSERT INTO cluster_join_tokens VALUES('joining','redeeming')").expect("joining member declaration");
+        assert_eq!(write(2), 0);
+        connection
+            .execute("UPDATE cluster_join_tokens SET state='joined'", [])
+            .expect("fixture join finishes");
+        assert_eq!(write(2), 1);
+        connection
+            .execute(
+                "UPDATE cluster_nodes SET last_seen_at=last_seen_at-1 WHERE node_id='learner'",
+                [],
+            )
+            .expect("legacy heartbeat races admission");
+        assert_eq!(write(3), 0);
+        assert!(connection
+            .execute(
+                "UPDATE cluster_sharing_membership_generation SET generation=0",
+                []
+            )
+            .is_err());
+        assert!(connection
+            .execute("DELETE FROM cluster_sharing_membership_generation", [])
+            .is_err());
+        assert!(connection
+            .execute(
+                "INSERT OR REPLACE INTO cluster_sharing_membership_generation VALUES(1,0)",
+                []
+            )
+            .is_err());
+        assert!(observation.write_guard(1000000, 1, 2, 3).is_err());
+        assert!(observation.write_guard(1005001, 1, 2, 3).is_err());
+        assert!(observation.write_guard(1000002, 1, 1, 3).is_err());
+        assert!(observation.write_guard(1000002, 0, 2, 3).is_err());
+    }
+
+    #[test]
+    fn sharing_source_member_observation_refuses_completed_identity_change_and_partial_generation()
+    {
+        let connection = sharing_principal_floor_fixture();
+        connection.execute_batch("CREATE TABLE cluster_sharing_membership_intents(id TEXT); CREATE TABLE cluster_sharing_join_declarations(token_hash TEXT); CREATE TABLE cluster_join_tokens(token_hash TEXT,state TEXT)").expect("transition fixture");
+        for sql in sharing_membership_generation_schema() {
+            connection.execute_batch(&sql).expect("generation factory");
+        }
+        connection.execute("INSERT INTO cluster_node_capabilities SELECT node_id,?1,last_seen_at FROM cluster_nodes",[SHARING_CATALOGUE_ITEM_IDENTITY_CAPABILITY]).expect("both current writer capabilities");
+        let mut observation =
+            source_admission_members_for_unit_test(1, &BTreeSet::from([1, 2]), 1000000)
+                .expect("actual fixture roster");
+        let allows = |observation: &SourceAdmissionMembers| {
+            let (guard, members, cutoff, now) = observation
+                .write_guard(1000001, 1, 2, 3)
+                .expect("fresh observation");
+            connection
+                .query_row(
+                    &format!("SELECT {guard}"),
+                    rusqlite::params![members, cutoff, now],
+                    |row| row.get::<_, bool>(0),
+                )
+                .expect("guarded mutation predicate")
+        };
+        assert!(allows(&observation));
+        connection.execute_batch("INSERT INTO cluster_nodes VALUES('transient',3,1000000,NULL,'learner'); DELETE FROM cluster_nodes WHERE node_id='transient'").expect("completed identity transition restores the original visible roster");
+        assert!(
+            !allows(&observation),
+            "restored roster and empty intent tables cannot revive the old observation"
+        );
+        observation.membership_generation = 2;
+        assert!(allows(&observation));
+        connection
+            .execute_batch("DROP TRIGGER cluster_sharing_generation_intent_update")
+            .expect("partial generation factory fixture");
+        assert!(
+            !allows(&observation),
+            "a matching number without the complete durable factory is unavailable"
+        );
+    }
 
     #[test]
     fn heartbeat_reconciles_addresses_only_for_the_same_live_identity() {
@@ -17004,6 +18690,7 @@ mod tests {
             protocol_version: AUTH_PROTOCOL_MIN,
             protocol_min: AUTH_PROTOCOL_MIN,
             protocol_max: AUTH_PROTOCOL_MAX,
+            sharing: Default::default(),
             live_tv_v1: true,
         };
         assert_eq!(
@@ -17110,6 +18797,7 @@ mod tests {
             protocol_version: payload.protocol_version,
             protocol_min: AUTH_PROTOCOL_MIN,
             protocol_max: AUTH_PROTOCOL_MAX,
+            sharing: Default::default(),
             live_tv_v1: true,
         };
         let finalize = FinalizeJoinRequest {

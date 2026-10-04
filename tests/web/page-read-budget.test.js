@@ -856,6 +856,7 @@ test("Settings loads only the active tab manifest", () => {
     users: { required: ["settings", "users"], secondary: [] },
     system: { required: ["sys"], secondary: ["playbackEvents"] },
     cluster: { required: ["cluster"], secondary: ["clusterOps", "developerReadiness"] },
+    sharing: { required: ["sharingStatus", "sharingImports", "sharingExports"], secondary: [] },
     integrations: { required: ["settings", "trakt"], secondary: [] },
     developer: { required: ["settings"], secondary: ["developerReadiness"] },
   });
@@ -1839,6 +1840,8 @@ test("local sign-out clears every protected page cache before rendering auth", (
      // clearLocalSession drops them, so they are stubbed as observable state
      // rather than as no-ops.
      function clearLibraryChannelDraft(){LIBRARY_CHANNEL_DRAFT=null;}
+     let SHARING_SECRET="secret";
+     function sharingRetire(){SHARING_SECRET=null;}
      const LIBRARY_CHANNEL_TUNE={stop(){LIBRARY_CHANNEL_TUNING=false;}};
      async function stopLiveTv(){}
      function paintDvrReminder(){}
@@ -1852,7 +1855,7 @@ test("local sign-out clears every protected page cache before rendering auth", (
      let REPORTER_TOKEN="token";
      function refreshClientErrorReporterAuth(){REPORTER_TOKEN=TOKEN;}
      ${shippedSource("clearLocalSession")};
-     return {logout:()=>clearLocalSession(AUTH_GENERATION,""),state:()=>({TOKEN,ME,REPORTER_TOKEN,PAGE_RENDER_GENERATION,PAGE_TIMER,ACTIVITY_SNAPSHOT,
+     return {logout:()=>clearLocalSession(AUTH_GENERATION,""),state:()=>({TOKEN,ME,REPORTER_TOKEN,SHARING_SECRET,PAGE_RENDER_GENERATION,PAGE_TIMER,ACTIVITY_SNAPSHOT,
        SETTINGS_DATA,loaded:SETTINGS_LOADED.size,loads:SETTINGS_LOADS.size,LOGS_RUN,CLUSTER_LOGS_RUN,
        CLUSTER_TOKEN,CLUSTER_REFUSAL,CLUSTER_LOADED,CLUSTER_LEAVING,rendered,DVR_REMINDER_TIMER,
        due:DVR_DUE.length,LIBRARY_CHANNEL_DRAFT,LIBRARY_CHANNEL_TUNING,
@@ -1861,7 +1864,7 @@ test("local sign-out clears every protected page cache before rendering auth", (
   harness.logout();
   // The due-reminder overlay is a protected page cache like any other: it
   // names what somebody is about to watch, and its timer outlives every route.
-  assert.deepEqual(harness.state(),{TOKEN:null,ME:null,REPORTER_TOKEN:null,PAGE_RENDER_GENERATION:8,PAGE_TIMER:null,
+  assert.deepEqual(harness.state(),{TOKEN:null,ME:null,REPORTER_TOKEN:null,SHARING_SECRET:null,PAGE_RENDER_GENERATION:8,PAGE_TIMER:null,
     ACTIVITY_SNAPSHOT:null,SETTINGS_DATA:{},loaded:0,loads:0,LOGS_RUN:null,CLUSTER_LOGS_RUN:null,
     CLUSTER_TOKEN:null,CLUSTER_REFUSAL:null,CLUSTER_LOADED:false,CLUSTER_LEAVING:false,rendered:1,
     DVR_REMINDER_TIMER:null,due:0,LIBRARY_CHANNEL_DRAFT:null,LIBRARY_CHANNEL_TUNING:false,main:""});

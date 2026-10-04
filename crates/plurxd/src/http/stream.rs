@@ -1859,6 +1859,33 @@ async fn pause_marker_fallback_for_test(path: &Path) {
     }
 }
 
+/// Shared planning reads evidence only. Missing scan-time chapters never launch
+/// an unadmitted probe or mutate the revision captured by the Source request.
+async fn stored_markers_for_source(state: &AppState, file: &MediaFile) -> Vec<Marker> {
+    let identity = annotation_source_identity(file);
+    match state
+        .store
+        .timeline_annotation_set(file.id, &identity)
+        .await
+    {
+        Ok(Some(set)) => markers_from_annotation_set(set),
+        Ok(None) => markers_from_chapters(
+            &stored_chapters(state, file.id).await.unwrap_or_default(),
+            file.duration_ms,
+        ),
+        Err(error) => {
+            tracing::warn!(file_id=file.id, %error, "could not read Source timeline annotations");
+            Vec::new()
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+enum MarkerReadPolicy {
+    LocalDerivation,
+    StoredSourceEvidence,
+}
+
 async fn markers_for(state: &AppState, file: &MediaFile) -> Vec<Marker> {
     let source_identity = annotation_source_identity(file);
     match state
@@ -2207,7 +2234,46 @@ pub async fn decision(
     }
     let network_prior =
         super::network::stored_prior(state.store.as_ref(), identity.as_ref()).await?;
-    let mut file = load_file(&state, id).await?;
+    let file = load_file(&state, id).await?;
+    decision_for_file(
+        &state,
+        file,
+        q,
+        network_prior,
+        Some(&user),
+        MarkerReadPolicy::LocalDerivation,
+    )
+    .await
+    .map(Json)
+}
+
+/// The actual engine for both local and authorized Source media. Source callers
+/// never supply a local account or its node-local network prior.
+pub(super) async fn decision_for_source_file(
+    state: &AppState,
+    file: MediaFile,
+    q: Caps,
+) -> Result<DecisionResponse, ApiError> {
+    decision_for_file(
+        state,
+        file,
+        q,
+        None,
+        None,
+        MarkerReadPolicy::StoredSourceEvidence,
+    )
+    .await
+}
+
+async fn decision_for_file(
+    state: &AppState,
+    mut file: MediaFile,
+    q: Caps,
+    network_prior: Option<plurx_core::domain::NetworkPrior>,
+    user: Option<&plurx_core::domain::User>,
+    marker_policy: MarkerReadPolicy,
+) -> Result<DecisionResponse, ApiError> {
+    let id = file.id;
     // Older builds stored this against the file. A fresh playback must never
     // inherit that historical value; its client starts at zero and carries
     // any adjustment on each stream request for this one playback only.
@@ -2264,7 +2330,7 @@ pub async fn decision(
     // therefore about whether `Auto` wants full subtitles at all.
     let container_audio_streams = file.audio_streams.clone();
     set_selected_audio_default(&mut file.audio_streams, selected_audio);
-    let node = decision_render_caps(render_caps(&state).await, q.caps_v2.as_ref());
+    let node = decision_render_caps(render_caps(state).await, q.caps_v2.as_ref());
     let decision_now_ms = crate::media_sessions::unix_ms();
     let mut decision = q.decide(&file, &node, decision_now_ms);
     if let Some(caps) = q.caps_v2.as_ref().filter(|caps| {
@@ -2407,8 +2473,8 @@ pub async fn decision(
         })
         .unwrap_or_default();
     tracing::info!(
-        user_id = user.id,
-        username = %user.username,
+        user_id = user.map(|user| user.id),
+        username = user.map(|user| user.username.as_str()),
         file_id = id,
         client = q.client.as_deref().unwrap_or("unknown"),
         device = q.device.as_deref().unwrap_or("unknown"),
@@ -2457,7 +2523,10 @@ pub async fn decision(
     } else {
         None
     };
-    let markers = markers_for(&state, &file).await;
+    let markers = match marker_policy {
+        MarkerReadPolicy::LocalDerivation => markers_for(state, &file).await,
+        MarkerReadPolicy::StoredSourceEvidence => stored_markers_for_source(state, &file).await,
+    };
 
     // DTO defaults and the verdict now come from the same selection above.
     let audio = audio_tracks(&file);
@@ -2490,7 +2559,7 @@ pub async fn decision(
                 state
                     .media_pool
                     .quality_candidates(
-                        &state,
+                        state,
                         crate::media_pool::QualityCatalogRequest {
                             copy_contract: None,
                             file_id: file.id,
@@ -2563,7 +2632,7 @@ pub async fn decision(
                 })
         }
     });
-    Ok(Json(DecisionResponse {
+    Ok(DecisionResponse {
         display_aware_auto_protocol: Some("route-v1".to_owned()),
         quality_candidate_id,
         quality_candidates,
@@ -2584,11 +2653,11 @@ pub async fn decision(
         }),
         markers,
         audio_offset_ms: file.audio_offset_ms,
-        declared_offset_ms: declared_av_offset(&state, id).await,
+        declared_offset_ms: declared_av_offset(state, id).await,
         ladder: crate::transcode::ladder(file.height),
         prior_kbps: network_prior.and_then(|prior| prior.sustained_kbps),
         prefer_segmented,
-    }))
+    })
 }
 
 /// The container's own per-stream start-time story: audio start minus video
@@ -6193,6 +6262,147 @@ mod tests {
     /// what else is in it — and refuses to invent a document for a file whose
     /// probe never succeeded, because `probe_json IS NULL` is the fingerprint
     /// the repair job keys on.
+    #[tokio::test]
+    async fn sharing_source_decision_reads_stored_markers_without_live_probe_or_backfill() {
+        use plurx_core::domain::{ItemKind, LibraryKind, NewItem, NewLibrary, ProbeResult};
+        let (_, state) = super::super::tests::test_app_with_state();
+        let directory = tempfile::tempdir().expect("Source marker fixture");
+        let path = directory.path().join("legacy-source.mp4");
+        std::fs::write(&path, b"Source marker presence fixture").expect("actual presence");
+        let library = state
+            .store
+            .create_library(&NewLibrary {
+                name: "Source markers".into(),
+                kind: LibraryKind::Movies,
+                paths: vec![],
+                anime: false,
+            })
+            .await
+            .expect("library");
+        let item = state
+            .store
+            .insert_item(&NewItem {
+                library_id: library.id,
+                kind: ItemKind::Movie,
+                parent_id: None,
+                title: "Source".into(),
+                year: None,
+                season_number: None,
+                episode_number: None,
+            })
+            .await
+            .expect("item");
+        let raw = r#"{"format":{"duration":"600.0"},"streams":[]}"#;
+        let id = state
+            .store
+            .upsert_file(
+                item,
+                path.to_str().expect("path"),
+                30,
+                1000,
+                &ProbeResult {
+                    duration_ms: Some(600_000),
+                    container: Some("mp4".into()),
+                    video_codec: Some("h264".into()),
+                    width: Some(1920),
+                    height: Some(1080),
+                    bit_depth: Some(8),
+                    raw_json: Some(raw.into()),
+                    ..Default::default()
+                },
+            )
+            .await
+            .expect("scan without chapter capture");
+        let file = state
+            .store
+            .get_file(id)
+            .await
+            .expect("file read")
+            .expect("file");
+        let pause = pause_next_marker_fallback_for_test(&path);
+        let caps = serde_json::from_value(serde_json::json!({"v":2,"video":[{"codec":"h264","max_height":2160,"present":["sdr"]}],"audio":["aac"],"containers":["mp4"],"transports":["hls","progressive"]})).expect("actual v2 caps");
+        let decision = tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            decision_for_source_file(
+                &state,
+                file.clone(),
+                Caps {
+                    caps_v2: Some(caps),
+                    ..Default::default()
+                },
+            ),
+        )
+        .await
+        .expect("Source never enters the paused live-probe fallback")
+        .expect("actual Source engine");
+        assert_eq!(
+            serde_json::to_value(&decision.markers).expect("markers"),
+            serde_json::to_value(markers_from_chapters(&[], file.duration_ms))
+                .expect("stored evidence only")
+        );
+        assert_eq!(
+            state
+                .store
+                .get_file_probe_json(id)
+                .await
+                .expect("unchanged scan"),
+            Some(raw.into())
+        );
+        assert!(
+            state
+                .store
+                .timeline_annotation_set(id, &annotation_source_identity(&file))
+                .await
+                .expect("annotation read")
+                .is_none(),
+            "decision must not backfill an annotation set"
+        );
+        // The ordinary Local fallback still enters its existing owned seam.
+        let local_state = state.clone();
+        let local_file = file.clone();
+        let local = tokio::spawn(async move { markers_for(&local_state, &local_file).await });
+        tokio::time::timeout(std::time::Duration::from_secs(2), pause.wait())
+            .await
+            .expect("Local fallback retained");
+        local.abort();
+        let _ = local.await;
+        marker_fallback_pauses()
+            .lock()
+            .expect("pause registry")
+            .remove(path.to_str().expect("path"));
+        let chapters =
+            serde_json::to_string(&vec![chapter("Intro", "0.0", "60.0")]).expect("scan chapters");
+        state
+            .store
+            .merge_file_probe_chapters(id, &chapters)
+            .await
+            .expect("scanner evidence fixture");
+        assert_eq!(
+            serde_json::to_value(stored_markers_for_source(&state, &file).await)
+                .expect("stored markers"),
+            serde_json::to_value(markers_from_chapters(
+                &[chapter("Intro", "0.0", "60.0")],
+                file.duration_ms
+            ))
+            .expect("same common marker engine")
+        );
+        let manual = annotation_set_from_markers(
+            annotation_source_identity(&file),
+            &markers_from_chapters(&[chapter("Opening", "0", "90")], file.duration_ms),
+        );
+        state
+            .store
+            .put_timeline_annotation_set_if_missing(id, 600_000, &manual)
+            .await
+            .expect("persisted annotation fixture");
+        assert_eq!(
+            serde_json::to_value(stored_markers_for_source(&state, &file).await)
+                .expect("persisted markers"),
+            serde_json::to_value(markers_from_annotation_set(manual))
+                .expect("persisted evidence wins")
+        );
+    }
+
     #[tokio::test]
     async fn chapters_backfill_into_the_stored_probe() {
         use plurx_core::domain::{ItemKind, LibraryKind, NewItem, NewLibrary, ProbeResult};

@@ -1858,8 +1858,8 @@ final class PlayerController: ObservableObject {
         recipeRevision.change()
     }
 
-    private let requestPlaybackDecision: @MainActor (AppModel, Int, PrePlaySelection, PlaybackQuality) async throws -> (decision: Decision, caps: DeviceCaps)
-    private let requestHlsSession: @MainActor (AppModel, Int, CreateSessionRequest) async throws -> HlsStart
+    private let requestPlaybackDecision: @MainActor (AppModel, PlaybackFileContext, PrePlaySelection, PlaybackQuality) async throws -> (decision: Decision, caps: DeviceCaps)
+    private let requestHlsSession: @MainActor (AppModel, PlaybackFileContext, CreateSessionRequest) async throws -> HlsStart
     private let readControlSequence: @MainActor (PlaybackControlSession) async -> UInt64?
     private let reportPlaybackIntent: @MainActor (PlaybackControlSession) async -> UInt64?
     private let mediaSelectionPreparation: MediaSelectionPreparation
@@ -1882,9 +1882,7 @@ final class PlayerController: ObservableObject {
 
     init(
         player: AVPlayer = AVPlayer(),
-        requestPlaybackDecision: @escaping @MainActor (AppModel, Int, PrePlaySelection, PlaybackQuality) async throws -> (decision: Decision, caps: DeviceCaps) = {
-            try await $0.playbackDecision(fileId: $1, selection: $2, quality: $3)
-        },
+        requestPlaybackDecision: (@MainActor (AppModel, Int, PrePlaySelection, PlaybackQuality) async throws -> (decision: Decision, caps: DeviceCaps))? = nil,
         mediaSelectionPreparation: MediaSelectionPreparation = MediaSelectionPreparation(),
         itemPreparation: ItemPreparation = ItemPreparation(),
         nativeSeek: @escaping @MainActor (AVPlayer, Int) async -> Bool = { player, ms in
@@ -1906,9 +1904,7 @@ final class PlayerController: ObservableObject {
         releaseHlsSession: @escaping @MainActor (AppModel, String) async -> Void = {
             await $0.endHlsSession($1)
         },
-        requestHlsSession: @escaping @MainActor (AppModel, Int, CreateSessionRequest) async throws -> HlsStart = {
-            try await $0.createHlsSession(fileId: $1, body: $2)
-        },
+        requestHlsSession: (@MainActor (AppModel, Int, CreateSessionRequest) async throws -> HlsStart)? = nil,
         readControlSequence: @escaping @MainActor (PlaybackControlSession) async -> UInt64? = {
             await $0.controlSequence
         },
@@ -1923,7 +1919,11 @@ final class PlayerController: ObservableObject {
         }
     ) {
         self.player = player
-        self.requestPlaybackDecision = requestPlaybackDecision
+        self.requestPlaybackDecision = { model, context, selection, quality in
+            let id = try context.localID()
+            if let requestPlaybackDecision { return try await requestPlaybackDecision(model, id, selection, quality) }
+            return try await model.playbackDecision(fileId: id, selection: selection, quality: quality, fileContext: context)
+        }
         self.mediaSelectionPreparation = mediaSelectionPreparation
         self.itemPreparation = itemPreparation
         self.nativeSeek = nativeSeek
@@ -1932,7 +1932,11 @@ final class PlayerController: ObservableObject {
         self.waitInitialDecisionDeadline = waitInitialDecisionDeadline
         self.waitCreateRetry = waitCreateRetry
         self.releaseHlsSession = releaseHlsSession
-        self.requestHlsSession = requestHlsSession
+        self.requestHlsSession = { model, context, body in
+            let id = try context.localID()
+            if let requestHlsSession { return try await requestHlsSession(model, id, body) }
+            return try await model.createHlsSession(fileId: id, body: body, fileContext: context)
+        }
         self.readControlSequence = readControlSequence
         self.reportPlaybackIntent = reportPlaybackIntent
         self.resumeNow = resumeNow
@@ -2248,6 +2252,12 @@ final class PlayerController: ObservableObject {
     private var baseMs = 0
     private var itemId = 0
     private var fileId = 0
+    private var fileContext: PlaybackFileContext?
+    private func contextForFile(_ id: Int) throws -> PlaybackFileContext {
+        guard let fileContext else { throw APIError.badURL }
+        _ = try fileContext.localID(expected: id)
+        return fileContext
+    }
     private var progressOffsetMs = 0
     private var itemDurationMs: Int?
     private var title = ""
@@ -2980,6 +2990,7 @@ final class PlayerController: ObservableObject {
         self.model = model
         self.itemId = itemId
         self.fileId = fileId
+        self.fileContext = try? PlaybackFileContext.local(fileId)
         self.progressOffsetMs = max(0, progressOffsetMs)
         self.itemDurationMs = itemDurationMs
         self.knownDurationMs = durationMs
@@ -3070,6 +3081,7 @@ final class PlayerController: ObservableObject {
         offlineAssetURL = OfflineCatalog.localURL(for: path)
         itemId = offline.itemId
         fileId = offline.fileId
+        fileContext = try? PlaybackFileContext.local(offline.fileId)
         knownDurationMs = offline.durationMs ?? 0
         currentMs = max(0, offline.positionMs)
         title = offline.title
@@ -4792,7 +4804,7 @@ final class PlayerController: ObservableObject {
                   attemptStillCurrent(layoutAttempt, fence: .autoInitialLayout) else { return }
             let target = presentationTarget
             let playbackDecision = try await Caps.PresentationContext.$target.withValue(target) {
-                try await requestPlaybackDecision(model, file, request.selection, request.quality)
+                try await requestPlaybackDecision(model, try contextForFile(file), request.selection, request.quality)
             }
             let decision = playbackDecision.decision
             guard !Task.isCancelled, isCurrentLifecycle(lifecycle),
@@ -5052,7 +5064,7 @@ final class PlayerController: ObservableObject {
             // it, for the reason `adoptSessionDelivery` gives.
             deliveredRange = decision.deliveredDynamicRange
             deliveredDolbyVisionProfile = decision.deliveredDolbyVisionProfile
-            let deliveryPath = decision.delivery?.url ?? decision.playUrl
+            let deliveryPath = try contextForFile(fileId).translatedDeliveryPath(decision.delivery?.url ?? decision.playUrl)
             activeMediaPath = clusterRelativeMediaPath(deliveryPath)
             activeMediaAuthenticated = true
             activeNativeSubtitle = nativeSubtitle
@@ -5735,7 +5747,7 @@ final class PlayerController: ObservableObject {
     private func pgsOverlayFetcher() -> PGSOverlayFetcher? {
         if let pgsOverlayFetcherForTesting { return pgsOverlayFetcherForTesting }
         guard let model else { return nil }
-        return PGSOverlayFetcher(model: model)
+        return PGSOverlayFetcher(model: model, fileContext: fileContext)
     }
 
     private func cachedPGSOverlayImage(_ key: String) -> CGImage? {
@@ -6675,7 +6687,7 @@ final class PlayerController: ObservableObject {
         generation: Int
     ) async throws -> HlsStart {
         guard surfaceContext == .start else {
-            return try await requestHlsSession(model, file, body)
+            return try await requestHlsSession(model, try contextForFile(file), body)
         }
         // ONE identity for the whole sequence. The server persists a create's
         // answer under `request_id`, so replaying one recovers the session it
@@ -6726,7 +6738,7 @@ final class PlayerController: ObservableObject {
                 // Not `started`: that is the controller's own "is this player
                 // running" flag, and shadowing it inside a recovery sequence is
                 // the kind of thing a reader has to stop and check.
-                let opened = try await requestHlsSession(model, file, request)
+                let opened = try await requestHlsSession(model, try contextForFile(file), request)
                 guard createRetryExpiredEpoch != epoch else {
                     await release(session: opened.sessionId)
                     throw PlaybackCreateRetryError.exhausted(reason: "deadline")
@@ -8827,6 +8839,7 @@ final class PlayerController: ObservableObject {
             return
         }
         #endif
+        guard let fileContext, (try? fileContext.localID(expected: fileId)) != nil else { return }
         let itemId = itemId
         let model = model
         let method = clientLogMethod
@@ -10017,7 +10030,8 @@ extension PlayerController {
         autoPreparing = false
         autoUpgradeSinceMs = nil
         guard let model, model.displayAwareAuto, model.displayAwareAutoProtocol == "route-v1",
-              let fileId = decision?.fileId else { return }
+              let fileId = decision?.fileId, let fileContext,
+              (try? fileContext.localID(expected: fileId)) != nil else { return }
         decision?.qualityCandidates = nil
         let selection = PrePlaySelection(audioIndex: selectedAudio,
                                         subtitleIndex: selectedSubtitle ?? PrePlaySelection.subtitleOff)
@@ -10025,9 +10039,10 @@ extension PlayerController {
         let target = presentationTarget
         Task { @MainActor [weak self] in
             let fresh = try? await Caps.PresentationContext.$target.withValue(target) {
-                try await model.playbackDecision(fileId: fileId, selection: selection, quality: .auto, audioOffsetMs: 0)
+                try await model.playbackDecision(fileId: fileId, selection: selection, quality: .auto, audioOffsetMs: 0, fileContext: fileContext)
             }
             guard let self, self.started,
+                  self.fileContext?.sourceKey == fileContext.sourceKey,
                   self.attemptStillCurrent(catalogAttempt, fence: .autoCatalogRefresh),
                   self.decision?.fileId == fileId else { return }
             if fresh?.decision.displayAwareAutoProtocol == "route-v1" {
@@ -10867,5 +10882,99 @@ extension PlayerController: PreparedSuccessorHost {
     /// turns the first device that takes this path into the measurement.
     func recordPreparedFallbackInterruption(ms: Int) {
         preparedFallbackInterruptionMs = ms
+    }
+}
+
+
+/// Separate fixed Shared owner: no Local file/history/recovery dispatch is
+/// reachable from this controller. The server retains physical ownership.
+@MainActor
+final class SharedPlayerController: ObservableObject {
+    let player = AVPlayer()
+    @Published private(set) var playback: SharedStartedPlayback?
+    @Published private(set) var failure: String?
+    @Published private(set) var starting = false
+    @Published private(set) var statusSummary: String?
+    private var client: SharedDecisionClient?
+    private var plan: SharedPlaybackPlan?
+    private var startTask: Task<Void, Never>?
+    private var progressTask: Task<Void, Never>?
+    private var timeObserver: Any?
+    private var authorizationObserver: UUID?
+    private var completionObserver: NSObjectProtocol?
+    private var closing = false
+    func start(_ plan: SharedPlaybackPlan) async {
+        guard self.plan == nil else { return }
+        self.plan = plan; starting = true; closing = false
+        let task = Task { await performStart(plan) }
+        startTask = task
+        await task.value
+        startTask = nil
+    }
+    private func performStart(_ plan: SharedPlaybackPlan) async {
+        do {
+            let client = try SharedDecisionClient(); self.client = client
+            let started = try await client.start(context: plan.subject.context, request: plan.request)
+            starting = false
+            playback = started
+            if closing { try? await client.end(playback: started); playback = nil; return }
+            let url = try client.playlistURL(playback: started)
+            let item = AVPlayerItem(url: url)
+            player.replaceCurrentItem(with: item)
+            completionObserver = NotificationCenter.default.addObserver(forName: .AVPlayerItemDidPlayToEndTime, object: item, queue: .main) { [weak self] _ in
+                Task { @MainActor in await self?.stop(watched: true) }
+            }
+            authorizationObserver = Session.shared.observeAuthorizationChanges { [weak self] _ in
+                Task { @MainActor in await self?.stop() }
+            }.id
+            if plan.subject.resumeMs > 0 {
+                await player.seek(to: CMTime(seconds: Double(plan.subject.resumeMs) / 1000, preferredTimescale: 1000), toleranceBefore: .zero, toleranceAfter: .zero)
+            }
+            guard !closing else { return }
+            player.play()
+            timeObserver = player.addPeriodicTimeObserver(forInterval: CMTime(seconds: 10, preferredTimescale: 1000), queue: .main) { [weak self] _ in
+                Task { @MainActor in self?.reportProgress() }
+            }
+        } catch {
+            starting = false
+            if !closing { failure = error.localizedDescription }
+        }
+    }
+    private func positionMs() -> Int64? {
+        let value = player.currentTime().seconds * 1000
+        guard value.isFinite, value >= 0, value <= 9_007_199_254_740_991 else { return nil }
+        return Int64(value.rounded(.down))
+    }
+    private func reportProgress() {
+        guard !closing, progressTask == nil, let client, let playback, let plan,
+              let position = positionMs() else { return }
+        progressTask = Task { [weak self] in
+            _ = try? await client.orderedProgress(playback: playback, initialWatchSequence: plan.subject.watchSequence,
+                positionMs: position, durationMs: playback.start.response.durationMs.map(Int64.init))
+            if self?.closing == false { self?.statusSummary = (try? await client.status(playback: playback))?.summary }
+            self?.progressTask = nil
+        }
+    }
+    func stop(watched: Bool = false) async {
+        guard !closing else { return }; closing = true
+        player.pause()
+        if let timeObserver { player.removeTimeObserver(timeObserver); self.timeObserver = nil }
+        if let completionObserver { NotificationCenter.default.removeObserver(completionObserver); self.completionObserver = nil }
+        if let authorizationObserver { Session.shared.removeAuthorizationObserver(authorizationObserver); self.authorizationObserver = nil }
+        startTask?.cancel(); await startTask?.value
+        await progressTask?.value
+        if let client, let playback, let plan {
+            if let position = positionMs() {
+                let result = try? await client.orderedProgress(playback: playback, initialWatchSequence: plan.subject.watchSequence,
+                    positionMs: position, durationMs: playback.start.response.durationMs.map(Int64.init), watched: watched)
+                if result == .previousBeatAcknowledged {
+                    _ = try? await client.orderedProgress(playback: playback, initialWatchSequence: plan.subject.watchSequence,
+                        positionMs: position, durationMs: playback.start.response.durationMs.map(Int64.init), watched: watched)
+                }
+            }
+            player.replaceCurrentItem(with: nil)
+            try? await client.end(playback: playback)
+        }
+        player.replaceCurrentItem(with: nil); playback = nil; statusSummary = nil
     }
 }

@@ -66,6 +66,7 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
+import tv.plurx.app.data.PlaybackFileContext
 import tv.plurx.app.data.Caps
 import tv.plurx.app.data.HlsStart
 import tv.plurx.app.data.CreateSessionReq
@@ -138,6 +139,8 @@ class Controller internal constructor(
     retainedSubtitle: SubtitleChoice? = null,
     private val replan: (Long, String, PlaybackQuality) -> Unit,
 ) {
+    private val fileContext = plan.fileContext.also { it.localId(plan.fileId) }
+
     /**
      * The authoritative player — the one on the surface, with the volume up.
      *
@@ -309,7 +312,7 @@ class Controller internal constructor(
      * the user request the server's final replacement as well as the UI's.
      */
     private val sessionCreateCoordinator = SessionCreateCoordinator(
-        createSession = { body -> vm.createHlsSession(plan.fileId, body) },
+        createSession = { body -> vm.createHlsSession(plan.fileId, body, fileContext) },
         // A refusal the server explained now arrives as RefusalException,
         // so "is this a 400" has to ask for the status rather than for one of
         // the two exception types that can carry it.
@@ -749,6 +752,7 @@ class Controller internal constructor(
         api = { vm.api() },
         scope = scope,
         fileId = plan.fileId,
+        fileContext = fileContext,
         sourcePositionMs = ::realPosition,
         isPlaying = { player.isPlaying },
         playbackSpeed = { player.playbackParameters.speed },
@@ -1906,8 +1910,8 @@ class Controller internal constructor(
         when (recipe.recipe.desiredTransport) {
             PlaybackMediaTransport.Direct -> {
                 leaveSessionPlayback()
-                activeMediaPath = relativeMediaPath(plan.playUrl)
-                player.setMediaItem(MediaItem.fromUri(plan.playUrl), positionMs)
+                activeMediaPath = relativeMediaPath(fileContext.translatedDeliveryPath(plan.playUrl))
+                player.setMediaItem(MediaItem.fromUri(fileContext.translatedDeliveryPath(plan.playUrl)), positionMs)
                 attachRecipe(recipe)
                 executionSequence?.let { sequence ->
                     markIntentExecuted(sequence, recipe)
@@ -2599,9 +2603,9 @@ class Controller internal constructor(
 
     private fun remuxUri(ms: Long): String = progressiveRemuxUri(
         plannedUrl = if (plan.mode == "direct") {
-            Session.url("/api/v1/files/${plan.fileId}/stream.mp4")
+            Session.url(fileContext.path("stream.mp4"))
         } else {
-            plan.playUrl
+            fileContext.translatedDeliveryPath(plan.playUrl)
         },
         startSeconds = ms / 1000.0,
         audioIndex = selectedAudio,
@@ -2994,7 +2998,7 @@ class Controller internal constructor(
         scope.launch {
             val fresh = try {
                 vm.playbackDecision(plan.fileId, PreplayTracks(selectedAudio, SubtitleChoice(selectedSubtitle)),
-                    PlaybackQuality.Auto, target, selectionKey.third).decision
+                    PlaybackQuality.Auto, target, selectionKey.third, fileContext = fileContext).decision
             } catch (_: Exception) { return@launch }
             if (controlObservationIsClosed || selectionKey != Triple(selectedAudio, selectedSubtitle, audioOffsetMs)) return@launch
             if (fresh.display_aware_auto_protocol == "route-v1") autoCatalog = fresh.quality_candidates
@@ -4589,6 +4593,7 @@ interface PlanLike {
     val title: String
     val isAudioOnly: Boolean get() = false
     val fileId: Long
+    val fileContext: PlaybackFileContext get() = PlaybackFileContext.local(fileId)
     val playUrl: String
     val mode: String // "direct" | "remux" | "transcode"
     /** `delivery.requires_hls`: this remux needs the copy-HLS producer. */
@@ -5087,3 +5092,73 @@ internal fun codecShort(mime: String?): String? = when {
 
 /** A hidden status panel cannot justify two-second network polling. */
 internal fun statusPollIntervalMs(visible: Boolean): Long = if (visible) 2_000L else 10_000L
+
+
+/** Fixed Shared player owner; numeric Local PlanLike/history/recovery are unreachable. */
+internal class SharedPlayerController(context: android.content.Context, vm: AppViewModel) {
+    val player = buildPlayer(context, vm).player
+    val failure = kotlinx.coroutines.flow.MutableStateFlow<String?>(null)
+    val starting = kotlinx.coroutines.flow.MutableStateFlow(false)
+    val statusSummary = kotlinx.coroutines.flow.MutableStateFlow<String?>(null)
+    private val scope = kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.SupervisorJob() + kotlinx.coroutines.Dispatchers.Main.immediate)
+    private var client: tv.plurx.app.data.SharedDecisionClient? = null
+    private var plan: tv.plurx.app.data.SharedPlaybackPlan? = null
+    private var playback: tv.plurx.app.data.SharedStartedPlayback? = null
+    private var startJob: kotlinx.coroutines.Job? = null
+    private var progressJob: kotlinx.coroutines.Job? = null
+    private var authorizationObserver: Long? = null
+    private var closing = false
+    init {
+        player.addListener(object : androidx.media3.common.Player.Listener {
+            override fun onPlaybackStateChanged(state: Int) {
+                if (state == androidx.media3.common.Player.STATE_ENDED) scope.launch { stop(watched = true) }
+            }
+            override fun onPlayerError(error: androidx.media3.common.PlaybackException) { failure.value = error.message ?: "Shared playback failed" }
+        })
+    }
+    fun start(plan: tv.plurx.app.data.SharedPlaybackPlan) {
+        if (this.plan != null) return
+        this.plan = plan; starting.value = true
+        startJob = scope.launch {
+            try {
+                val client = tv.plurx.app.data.SharedDecisionClient.create(); this@SharedPlayerController.client = client
+                val started = client.start(plan.subject.context, plan.request); playback = started; starting.value = false
+                if (closing) { runCatching { client.end(started) }; playback = null; return@launch }
+                val media = androidx.media3.common.MediaItem.Builder().setUri(client.playlistUrl(started))
+                    .setMimeType(androidx.media3.common.MimeTypes.APPLICATION_M3U8).build()
+                player.setMediaItem(media); player.prepare(); player.seekTo(plan.subject.resumeMs); player.play()
+                authorizationObserver = tv.plurx.app.data.Session.observeAuthorizationChanges { scope.launch { stop() } }.id
+                progressJob = scope.launch {
+                    while (!closing) {
+                        kotlinx.coroutines.delay(10_000)
+                        if (!closing) {
+                            runCatching { client.orderedProgress(started, plan.subject.watchSequence, player.currentPosition.coerceAtLeast(0), started.start.response.duration_ms) }
+                            statusSummary.value = runCatching { client.status(started).summary }.getOrNull()
+                        }
+                    }
+                }
+            } catch (error: Exception) {
+                starting.value = false
+                if (!closing && error !is kotlinx.coroutines.CancellationException) failure.value = error.message ?: "Shared playback failed"
+            }
+        }
+    }
+    suspend fun stop(watched: Boolean = false) {
+        if (closing) return
+        closing = true; player.pause()
+        authorizationObserver?.let { tv.plurx.app.data.Session.removeAuthorizationObserver(it) }; authorizationObserver = null
+        val currentJob = kotlinx.coroutines.currentCoroutineContext()[kotlinx.coroutines.Job]
+        if (startJob != currentJob) { startJob?.cancel(); startJob?.join() }
+        progressJob?.cancel(); progressJob?.join()
+        val client = client; val started = playback; val plan = plan
+        if (client != null && started != null && plan != null) {
+            val position = player.currentPosition.coerceAtLeast(0)
+            val result = runCatching { client.orderedProgress(started, plan.subject.watchSequence, position, started.start.response.duration_ms, watched) }.getOrNull()
+            if (result == tv.plurx.app.data.SharedProgressResult.PreviousBeatAcknowledged) runCatching { client.orderedProgress(started, plan.subject.watchSequence, position, started.start.response.duration_ms, watched) }
+            player.stop(); player.release()
+            runCatching { client.end(started) }
+        } else { player.stop(); player.release() }
+        playback = null; statusSummary.value = null
+    }
+    fun close() { scope.launch { stop() } }
+}

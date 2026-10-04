@@ -48,6 +48,30 @@ pub(super) fn rendition_key(recipe: &Recipe, identity: &SourceIdentity) -> Strin
     hex::encode(hasher.finalize())
 }
 
+/// Source-only cache namespace binds the full current Source file revision to
+/// the actual existing recipe. Local and anonymous recipe keys stay unchanged.
+pub(super) fn source_rendition_key(
+    binding: &plurx_core::sharing_source_sessions::SourceBindingHandle,
+    recipe: &Recipe,
+    identity: &SourceIdentity,
+) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(b"source-rendition-v1\0");
+    hasher.update(binding.source_server_id().as_bytes());
+    hasher.update(binding.catalogue_epoch().as_bytes());
+    for component in [
+        binding.library_id().as_str(),
+        binding.item_id().as_str(),
+        binding.file_id().as_str(),
+        binding.file_revision().as_str(),
+    ] {
+        hasher.update((component.len() as u64).to_le_bytes());
+        hasher.update(component.as_bytes());
+    }
+    hasher.update(rendition_key(recipe, identity).as_bytes());
+    format!("source-{}", hex::encode(hasher.finalize()))
+}
+
 /// The per-track durations `plan_copy`'s audio tail (the c58a4307 rule) is
 /// computed from — and the split matters more than either number:
 ///

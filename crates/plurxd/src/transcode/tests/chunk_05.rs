@@ -55,7 +55,7 @@
         .with_recovery(DecodeRecoveryReservation {
             ledger: crate::playback_control::ProducerRecoveryLedger::new(
                 Arc::clone(&store),
-                7,
+                plurx_core::playback_principal::PlaybackPrincipal::LocalUser { user_id: 7 },
                 "playback-failing",
                 "epoch-failing",
                 "incarnation-1",
@@ -92,7 +92,7 @@
         );
 
         let row = store
-            .producer_recovery_for_epoch(7, "playback-failing", "epoch-failing")
+            .producer_recovery_for_epoch(&plurx_core::playback_principal::PlaybackPrincipal::LocalUser { user_id: 7 }, "playback-failing", "epoch-failing")
             .await
             .expect("read the row")
             .expect("the executor reserved before it installed");
@@ -2501,7 +2501,7 @@
         );
 
         session.recovery = Some(SessionRecoveryIdentity {
-            user_id: 7,
+            principal: plurx_core::playback_principal::PlaybackPrincipal::LocalUser { user_id: 7 },
             incarnation_id: "incarnation".to_owned(),
             recovery_epoch: String::new(),
         });
@@ -2516,7 +2516,7 @@
         // moment it is needed, and this method is the one place a caller is
         // entitled to trust.
         session.recovery = Some(SessionRecoveryIdentity {
-            user_id: 0,
+            principal: plurx_core::playback_principal::PlaybackPrincipal::LocalUser { user_id: 0 },
             incarnation_id: "incarnation".to_owned(),
             recovery_epoch: "epoch-1".to_owned(),
         });
@@ -2525,7 +2525,7 @@
             "the store refuses a non-positive user id"
         );
         session.recovery = Some(SessionRecoveryIdentity {
-            user_id: 7,
+            principal: plurx_core::playback_principal::PlaybackPrincipal::LocalUser { user_id: 7 },
             incarnation_id: String::new(),
             recovery_epoch: "epoch-1".to_owned(),
         });
@@ -2535,14 +2535,14 @@
         );
 
         session.recovery = Some(SessionRecoveryIdentity {
-            user_id: 7,
+            principal: plurx_core::playback_principal::PlaybackPrincipal::LocalUser { user_id: 7 },
             incarnation_id: "incarnation".to_owned(),
             recovery_epoch: "epoch-1".to_owned(),
         });
         let identity = session
             .recovery_identity()
             .expect("a server-minted epoch is a budget");
-        assert_eq!(identity.user_id, 7);
+        assert_eq!(identity.principal.local_user_id().expect("local test principal"), 7);
         assert_eq!(identity.incarnation_id, "incarnation");
         assert_eq!(identity.recovery_epoch, "epoch-1");
     }

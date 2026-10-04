@@ -35,6 +35,7 @@ pub(super) struct Rendition {
     pub(super) manifest: Mutex<Manifest>,
     pub(super) identity: Mutex<IdentityState>,
     pub(super) slot: ProducerSlot,
+    pub(super) source_owners: SourceRenditionOwners,
     pub(super) readers: Mutex<HashMap<String, Reader>>,
     /// Monotonic identity of each successful segment publication. The ledger
     /// stores this beside an entry index so eviction followed by ordinary
@@ -121,13 +122,19 @@ pub(super) struct Rendition {
 /// direct `driver_pass`, caused work install [`RenditionTestHooks`]. `Any` is
 /// a supertrait only so a test can reach the test hooks behind a rendition.
 pub(super) trait RenditionHooks: std::any::Any + Send + Sync {
+    /// The actual child is already held by a cancellation-independent owner.
+    /// Production is immediately ready; tests pause the registration race.
+    fn before_producer_registration(&self) -> HookFuture<'_> {
+        Box::pin(HookReady)
+    }
+
     /// The driver chose the stopped-encoder poll and is about to wait on it.
     fn stopped_poll_armed(&self);
     /// The driver's stopped-encoder wait ended, by the poll or by a kick.
     fn stopped_poll_fired(&self);
 }
 
-/// What production installs: both points do nothing.
+/// What production installs: each hook does nothing.
 pub(super) struct NoopRenditionHooks;
 
 impl RenditionHooks for NoopRenditionHooks {

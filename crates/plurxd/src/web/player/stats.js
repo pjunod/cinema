@@ -512,7 +512,10 @@ async function pollSessionHealth(force){
   try{
     const h=await api(url);
     if(current()) {
-      p.health=h;
+      // A shared session answers in the Shared grammar: its metrics are nested
+      // and bound to this session, so read them through the file context.
+      const fileContext=playbackFileContextForPlayer(p);
+      p.health=fileContext.source_ref.kind==="local"? h : sharedPlaybackStatusMetrics(fileContext,h);
       p.healthObservedAt=performance.now();
       // No surface is raised or restated here: a fault is raised by the event
       // that caused it. A live media wait reads this sample through the
@@ -549,6 +552,8 @@ async function reportProgress(fileId, ended, attachedOwner){
   const p=attachedOwner||PLAYER;
   if(!p||p.fileId!==fileId||(!attachedOwner&&!playbackOwnsAttachedMedia(p)))return;
   if(p.libraryChannel)return;
+  const fileContext=playbackFileContextForPlayer(p),shared=fileContext.source_ref.kind!=="local";
+  if(shared&&!fileContext.session_id)return;
   const video=document.getElementById("video");
   const posMs=Math.round((p.bookOffset||0)+((p.offset||0)+ (video.currentTime||0))*1000);
   // A zero beat needs a witness; a beat with a position in it does not.
@@ -580,7 +585,7 @@ async function reportProgress(fileId, ended, attachedOwner){
   const durMs = p.bookDuration || p.knownDur
     || ((p.method==='direct_play' && video.duration && isFinite(video.duration))
         ? Math.round(video.duration*1000) : null);
-  if(!ITEM_FOR_FILE[fileId]) return;
+  if(!shared&&!ITEM_FOR_FILE[playbackFileKey(fileContext)]) return;
   // F-web-12. A paused player beats every five seconds for as long as it is
   // left open, repeating one position nobody has moved. What is dropped here is
   // the REPEAT, not the beat, because three readers of this route care about
@@ -612,7 +617,11 @@ async function reportProgress(fileId, ended, attachedOwner){
   p.lastBeatMs=posMs; p.lastBeatAt=beatAt; p.lastBeatAttachment=attachment;
   // `method` labels the server's watched-seconds denominator (C-08 M5); the
   // server takes only the playback vocabulary and stores none of it.
-  try{ await api(`/items/${ITEM_FOR_FILE[fileId]}/progress`,{method:"POST",body:{position_ms:ended?(durMs||posMs):posMs,duration_ms:durMs,method:p.method}}); }
+  if(shared){
+    try{if(!await SHARED_DECISION.progress(fileContext,ended?(durMs||posMs):posMs,durMs,!!ended)){p.lastBeatMs=null;p.lastBeatAt=null;}}
+    catch(e){p.lastBeatMs=null;p.lastBeatAt=null;}return;
+  }
+  try{ await api(`/items/${ITEM_FOR_FILE[playbackFileKey(playbackFileContextForPlayer(p))]}/progress`,{method:"POST",body:{position_ms:ended?(durMs||posMs):posMs,duration_ms:durMs,method:p.method}}); }
   catch(e){ p.lastBeatMs=null; p.lastBeatAt=null; }
 }
 function closePlayer(options={}){

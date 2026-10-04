@@ -15,6 +15,51 @@ fn values(values: Vec<Value>) -> Vec<rusqlite::types::Value> {
 }
 #[async_trait]
 impl Backend for SqliteStore {
+    async fn sharing_purpose_archive_rows(&self) -> Result<Vec<String>, StoreError> {
+        self.with_read(|connection| {
+            let snapshot=connection.unchecked_transaction()?;
+            let present:i64=snapshot.query_row("SELECT CASE WHEN count(*)=0 THEN 0 WHEN count(*)=1 AND max(type)='table' THEN 1 ELSE 2 END FROM sqlite_master WHERE name='sharing_purpose_key_archive'",[],|row| row.get(0))?;
+            if present==0 {return Ok(Vec::new());}
+            if present!=1 {return Err(crate::sharing::invalid());}
+            let read=|sql:&str| -> Result<Vec<String>,StoreError> {
+                Ok(snapshot.prepare(sql)?.query_map([],|row| row.get(0))?.collect::<Result<_,_>>()?)
+            };
+            crate::store::sharing_purpose_keys::archive_columns(read(crate::store::sharing_purpose_keys::ARCHIVE_COLUMNS_SQL)?)?;
+            let rows=read(crate::store::sharing_purpose_keys::ARCHIVE_ROWS_SQL)?;
+            snapshot.commit()?;
+            Ok(rows)
+        }).await
+    }
+    async fn sharing_revision_key_rows(&self) -> Result<Vec<String>, StoreError> {
+        self.with_read(|connection| {
+            let snapshot=connection.unchecked_transaction()?;
+            let present:i64=snapshot.query_row("SELECT CASE WHEN count(*)=0 THEN 0 WHEN count(*)=1 AND max(type)='table' THEN 1 ELSE 2 END FROM sqlite_master WHERE name='sharing_catalogue_keys'",[],|row| row.get(0))?;
+            if present==0 {return Ok(Vec::new());}
+            if present!=1 {return Err(crate::sharing::invalid());}
+            let read=|sql:&str| -> Result<Vec<String>,StoreError> {
+                Ok(snapshot.prepare(sql)?.query_map([],|row| row.get(0))?.collect::<Result<_,_>>()?)
+            };
+            crate::store::sharing::revision_key_columns(read(crate::store::sharing::REVISION_KEY_COLUMNS_SQL)?)?;
+            let rows=read(crate::store::sharing::REVISION_KEY_ROWS_SQL)?;
+            snapshot.commit()?;
+            Ok(rows)
+        }).await
+    }
+    async fn sharing_file_locator_key_rows(&self) -> Result<Vec<String>, StoreError> {
+        self.with_read(|connection| {
+            let snapshot=connection.unchecked_transaction()?;
+            let present:i64=snapshot.query_row("SELECT CASE WHEN count(*)=0 THEN 0 WHEN count(*)=1 AND max(type)='table' THEN 1 ELSE 2 END FROM sqlite_master WHERE name='sharing_file_locator_keys'",[],|row| row.get(0))?;
+            if present==0 {return Ok(Vec::new());}
+            if present!=1 {return Err(crate::sharing::invalid());}
+            let read=|sql:&str| -> Result<Vec<String>,StoreError> {
+                Ok(snapshot.prepare(sql)?.query_map([],|row| row.get(0))?.collect::<Result<_,_>>()?)
+            };
+            crate::store::sharing_file_locators::columns(read(crate::store::sharing_file_locators::COLUMNS_SQL)?)?;
+            let rows=read(crate::store::sharing_file_locators::ROWS_SQL)?;
+            snapshot.commit()?;
+            Ok(rows)
+        }).await
+    }
     async fn sharing_read(&self, sql: &str, params: Vec<Value>) -> Result<Vec<String>, StoreError> {
         let (sql, params) = crate::store::sharing::ordered(sql, params)?;
         let params = values(params);
@@ -52,6 +97,81 @@ mod tests {
         store::{LibraryStore, SharingStore, UserStore},
     };
     use uuid::Uuid;
+    #[tokio::test]
+    async fn sharing_catalogue_revision_census_refuses_partial_foreign_and_oversized_rows() {
+        let directory = tempfile::tempdir().expect("key census fixtures");
+        for s in [
+            SqliteStore::open_in_memory().expect("memory"),
+            SqliteStore::open(&directory.path().join("keys.sqlite")).expect("pooled"),
+        ] {
+            assert_eq!(
+                s.sharing_sealed_census()
+                    .await
+                    .expect("legacy absent table")
+                    .sealed_rows(),
+                0
+            );
+            let identity = s.sharing_identity(1000).await.expect("identity");
+            let key = crate::secrets::CredentialKey::from_bytes([31; 32]);
+            let envelope = key
+                .seal_sharing(
+                    SharingSecretPurpose::CatalogueRevision,
+                    identity.server_id,
+                    identity.catalogue_epoch,
+                    "synthetic-purpose-key",
+                )
+                .expect("purpose key");
+            s.sharing_txn(vec![
+                (
+                    crate::store::sharing_catalogue_source::CANDIDATE_REVISION_KEY_SCHEMA.into(),
+                    vec![],
+                ),
+                (
+                    "INSERT INTO sharing_catalogue_keys VALUES(1,$1,$2,$3)".into(),
+                    vec![
+                        identity.server_id.into(),
+                        identity.catalogue_epoch.into(),
+                        envelope.as_stored().to_owned().into(),
+                    ],
+                ),
+            ])
+            .await
+            .expect("candidate key fixture only");
+            assert_eq!(
+                s.sharing_sealed_census()
+                    .await
+                    .expect("key included")
+                    .sealed_rows(),
+                1
+            );
+            for invalid in ["unwrapped".to_owned(), "x".repeat(4097)] {
+                s.sharing_txn(vec![(
+                    "UPDATE sharing_catalogue_keys SET revision_envelope=$1".into(),
+                    vec![invalid.into()],
+                )])
+                .await
+                .expect("corruption fixture");
+                assert!(s.sharing_sealed_census().await.is_err());
+            }
+            s.sharing_txn(vec![(
+                "UPDATE sharing_catalogue_keys SET revision_envelope=$1,server_id=$2".into(),
+                vec![
+                    envelope.as_stored().to_owned().into(),
+                    Uuid::new_v4().into(),
+                ],
+            )])
+            .await
+            .expect("foreign source fixture");
+            assert!(s.sharing_sealed_census().await.is_err());
+            s.sharing_txn(vec![("DROP TABLE sharing_catalogue_keys".into(),vec![]),("CREATE TABLE sharing_catalogue_keys(singleton INTEGER,server_id TEXT,catalogue_epoch TEXT)".into(),vec![])]).await.expect("partial shape fixture");
+            assert!(
+                s.sharing_sealed_census().await.is_err(),
+                "empty partial table is not legacy absence"
+            );
+            s.sharing_txn(vec![("DROP TABLE sharing_catalogue_keys".into(),vec![]),("CREATE TABLE sharing_catalogue_keys(singleton INTEGER NOT NULL PRIMARY KEY,server_id TEXT NOT NULL,catalogue_epoch TEXT NOT NULL,revision_envelope TEXT NOT NULL)".into(),vec![]),("INSERT INTO sharing_catalogue_keys VALUES(1,$1,$2,$3),(2,$1,$2,$3)".into(),vec![identity.server_id.into(),identity.catalogue_epoch.into(),envelope.as_stored().to_owned().into()])]).await.expect("excess rows fixture");
+            assert!(s.sharing_sealed_census().await.is_err());
+        }
+    }
     #[tokio::test]
     async fn sharing_deleted_numeric_user_id_cannot_inherit_viewer_assignment() {
         let s = SqliteStore::open_in_memory().expect("store");

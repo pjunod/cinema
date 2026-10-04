@@ -475,7 +475,7 @@ impl TakeoverSettlementIo<SessionAdoptionToken, TakeoverWorkerGuard> for AppStat
         Box::pin(async move {
             let Some(staged) = self
                 .store
-                .staged_media_session_for_playback(route.user_id, &route.playback_id)
+                .staged_media_session_for_playback(&route.principal, &route.playback_id)
                 .await?
             else {
                 return Ok(());
@@ -488,7 +488,7 @@ impl TakeoverSettlementIo<SessionAdoptionToken, TakeoverWorkerGuard> for AppStat
             let aborted = self
                 .store
                 .abort_media_session_preparation(
-                    route.user_id,
+                    &route.principal,
                     &route.playback_id,
                     &plurx_core::domain::MediaSessionPreparationAbortRequest {
                         staged_incarnation_id: staged.staged_incarnation_id.clone(),
@@ -503,7 +503,7 @@ impl TakeoverSettlementIo<SessionAdoptionToken, TakeoverWorkerGuard> for AppStat
             }
             let retained = self
                 .store
-                .staged_media_session_for_playback(route.user_id, &route.playback_id)
+                .staged_media_session_for_playback(&route.principal, &route.playback_id)
                 .await?;
             if retained.as_ref().is_some_and(|retained| {
                 retained.staged_incarnation_id == staged.staged_incarnation_id
@@ -1185,7 +1185,7 @@ pub(crate) struct CandidateCatalogContext {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
+#[serde(try_from = "RemoteStartRequestWire", into = "RemoteStartRequestWire")]
 pub(crate) struct RemoteStartRequest {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub candidate_catalog: Option<CandidateCatalogContext>,
@@ -1199,7 +1199,7 @@ pub(crate) struct RemoteStartRequest {
     pub decoder_caps: Option<crate::playback_control::DecoderCapsSnapshot>,
     pub protocol_version: i64,
     pub incarnation_id: String,
-    pub user_id: i64,
+    pub principal: plurx_core::playback_principal::PlaybackPrincipal,
     pub source_size: i64,
     pub source_mtime: i64,
     /// Whether this session serves the typeless sliding playlist shape.
@@ -1218,6 +1218,91 @@ pub(crate) struct RemoteStartRequest {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub library_channel: Option<serde_json::Value>,
     pub request: SessionRequest,
+}
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RemoteStartRequestWire {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub candidate_catalog: Option<CandidateCatalogContext>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub candidate_id: Option<plurx_core::playback::candidate::CandidateId>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub presentation_target: Option<plurx_core::playback::candidate::PresentationTarget>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub decoder_caps: Option<crate::playback_control::DecoderCapsSnapshot>,
+    pub protocol_version: i64,
+    pub incarnation_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub principal: Option<plurx_core::playback_principal::PlaybackPrincipal>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub user_id: Option<i64>,
+    pub source_size: i64,
+    pub source_mtime: i64,
+    #[serde(default)]
+    pub typeless_playlist: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub library_channel: Option<serde_json::Value>,
+    pub request: SessionRequest,
+}
+impl TryFrom<RemoteStartRequestWire> for RemoteStartRequest {
+    type Error = &'static str;
+    fn try_from(wire: RemoteStartRequestWire) -> Result<Self, Self::Error> {
+        let principal = remote_wire_principal(wire.principal, wire.user_id)?;
+        Ok(Self {
+            principal,
+            candidate_catalog: wire.candidate_catalog,
+            candidate_id: wire.candidate_id,
+            presentation_target: wire.presentation_target,
+            decoder_caps: wire.decoder_caps,
+            protocol_version: wire.protocol_version,
+            incarnation_id: wire.incarnation_id,
+            source_size: wire.source_size,
+            source_mtime: wire.source_mtime,
+            typeless_playlist: wire.typeless_playlist,
+            library_channel: wire.library_channel,
+            request: wire.request,
+        })
+    }
+}
+impl From<RemoteStartRequest> for RemoteStartRequestWire {
+    fn from(request: RemoteStartRequest) -> Self {
+        let (principal, user_id) = match request.principal {
+            plurx_core::playback_principal::PlaybackPrincipal::LocalUser { user_id } => {
+                (None, Some(user_id))
+            }
+            principal => (Some(principal), None),
+        };
+        Self {
+            principal,
+            user_id,
+            candidate_catalog: request.candidate_catalog,
+            candidate_id: request.candidate_id,
+            presentation_target: request.presentation_target,
+            decoder_caps: request.decoder_caps,
+            protocol_version: request.protocol_version,
+            incarnation_id: request.incarnation_id,
+            source_size: request.source_size,
+            source_mtime: request.source_mtime,
+            typeless_playlist: request.typeless_playlist,
+            library_channel: request.library_channel,
+            request: request.request,
+        }
+    }
+}
+
+/// Current ownership is typed; retained local recipes keep their old wire shape.
+/// A wire envelope must choose exactly one namespace, never supply both.
+fn remote_wire_principal(
+    principal: Option<plurx_core::playback_principal::PlaybackPrincipal>,
+    user_id: Option<i64>,
+) -> Result<plurx_core::playback_principal::PlaybackPrincipal, &'static str> {
+    match (principal, user_id) {
+        (Some(principal), None) if principal.valid_admission_shape() => Ok(principal),
+        (None, Some(user_id)) if user_id > 0 => {
+            Ok(plurx_core::playback_principal::PlaybackPrincipal::LocalUser { user_id })
+        }
+        _ => Err("invalid remote playback ownership"),
+    }
 }
 
 impl RemoteStartRequest {
@@ -1246,7 +1331,7 @@ fn remote_start_envelope_is_valid(request: &RemoteStartRequest) -> bool {
         })
         && request.protocol_version == crate::media_pool::PROTOCOL_VERSION
         && uuid::Uuid::parse_str(&request.incarnation_id).is_ok()
-        && request.user_id > 0
+        && request.principal.valid_admission_shape()
         && request.source_size >= 0
         && request.source_mtime >= 0
         && request.request.request_id.as_deref() == Some(request.incarnation_id.as_str())
@@ -1273,8 +1358,26 @@ pub(crate) fn worker_session_request_is_valid(request: &SessionRequest) -> bool 
         && request.presentation == crate::transcode::Presentation::Vod
 }
 
+/// Source catalogue IDs are canonical nonnegative IDs. This validates only
+/// request shape; a complete current Source witness must authorize admission.
+pub(crate) fn source_session_request_is_valid(
+    request: &SessionRequest,
+    principal: &plurx_core::playback_principal::PlaybackPrincipal,
+) -> bool {
+    matches!(
+        principal,
+        plurx_core::playback_principal::PlaybackPrincipal::Sharing { .. }
+    ) && principal.valid_admission_shape()
+        && session_request_fields_are_valid(request, true)
+        && request.presentation == crate::transcode::Presentation::Vod
+}
+
 fn worker_session_request_fields_are_valid(request: &SessionRequest) -> bool {
-    request.file_id > 0
+    session_request_fields_are_valid(request, false)
+}
+
+fn session_request_fields_are_valid(request: &SessionRequest, source_ids: bool) -> bool {
+    (request.file_id > 0 || (source_ids && request.file_id == 0))
         && !request.playback_id.trim().is_empty()
         && request.playback_id.len() <= 128
         && !request
@@ -1340,13 +1443,59 @@ pub(crate) struct RemoteStartResponse {
 /// carries only exact identity, so a peer cannot ask the target to prime bytes
 /// that Store did not authorize first.
 #[derive(Clone, Debug, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
+#[serde(
+    try_from = "RemotePrepareRequestWire",
+    into = "RemotePrepareRequestWire"
+)]
 pub(crate) struct RemotePrepareRequest {
     pub protocol_version: i64,
     pub incarnation_id: String,
     pub session_id: String,
-    pub user_id: i64,
+    pub principal: plurx_core::playback_principal::PlaybackPrincipal,
     pub expected_owner_epoch: i64,
+}
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RemotePrepareRequestWire {
+    pub protocol_version: i64,
+    pub incarnation_id: String,
+    pub session_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub principal: Option<plurx_core::playback_principal::PlaybackPrincipal>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub user_id: Option<i64>,
+    pub expected_owner_epoch: i64,
+}
+impl TryFrom<RemotePrepareRequestWire> for RemotePrepareRequest {
+    type Error = &'static str;
+    fn try_from(wire: RemotePrepareRequestWire) -> Result<Self, Self::Error> {
+        let principal = remote_wire_principal(wire.principal, wire.user_id)?;
+        Ok(Self {
+            principal,
+            protocol_version: wire.protocol_version,
+            incarnation_id: wire.incarnation_id,
+            session_id: wire.session_id,
+            expected_owner_epoch: wire.expected_owner_epoch,
+        })
+    }
+}
+impl From<RemotePrepareRequest> for RemotePrepareRequestWire {
+    fn from(request: RemotePrepareRequest) -> Self {
+        let (principal, user_id) = match request.principal {
+            plurx_core::playback_principal::PlaybackPrincipal::LocalUser { user_id } => {
+                (None, Some(user_id))
+            }
+            principal => (Some(principal), None),
+        };
+        Self {
+            principal,
+            user_id,
+            protocol_version: request.protocol_version,
+            incarnation_id: request.incarnation_id,
+            session_id: request.session_id,
+            expected_owner_epoch: request.expected_owner_epoch,
+        }
+    }
 }
 
 impl RemotePrepareRequest {
@@ -1354,7 +1503,7 @@ impl RemotePrepareRequest {
         self.protocol_version == crate::media_pool::PROTOCOL_VERSION
             && uuid::Uuid::parse_str(&self.incarnation_id).is_ok()
             && uuid::Uuid::parse_str(&self.session_id).is_ok()
-            && self.user_id > 0
+            && self.principal.valid_admission_shape()
             && self.expected_owner_epoch == 1
     }
 }
@@ -2060,7 +2209,7 @@ impl MediaSessionCoordinator {
             tokio::time::timeout_at(
                 tokio::time::Instant::from_std(request_deadline),
                 self.store
-                    .staged_media_session_for_playback(route.user_id, &route.playback_id),
+                    .staged_media_session_for_playback(&route.principal, &route.playback_id),
             )
             .await
             .map_err(|_| {
@@ -2076,7 +2225,7 @@ impl MediaSessionCoordinator {
             let current = tokio::time::timeout_at(
                 tokio::time::Instant::from_std(request_deadline),
                 self.store
-                    .media_session_route_for_playback(route.user_id, &route.playback_id),
+                    .media_session_route_for_playback(&route.principal, &route.playback_id),
             )
             .await
             .map_err(|_| {
@@ -2903,7 +3052,7 @@ fn prepared_successor_route(route: &MediaSessionRoute) -> bool {
 fn same_media_route(left: &MediaSessionRoute, right: &MediaSessionRoute) -> bool {
     left.incarnation_id == right.incarnation_id
         && left.session_id == right.session_id
-        && left.user_id == right.user_id
+        && left.principal == right.principal
         && left.playback_id == right.playback_id
         && left.owner_node_id == right.owner_node_id
         && left.owner_epoch == right.owner_epoch
@@ -5365,7 +5514,7 @@ async fn supervise_takeover_settlement(
     let provisional_id = start.provisional_session_id.clone();
     let replacement = state
         .transcode
-        .acquire_cluster_takeover_replacement(&request, original.user_id, creation_deadline)
+        .acquire_cluster_takeover_replacement(&request, &original.principal, creation_deadline)
         .await?;
     // The takeover id is predetermined, so it can be fenced from the moment the
     // gate is held — including by a later open that has to reclaim the key
@@ -5388,7 +5537,7 @@ async fn supervise_takeover_settlement(
     let creation_user = user_name.clone();
     let creation_start = start.clone();
     let creation_recovery = crate::transcode::SessionRecoveryIdentity {
-        user_id: original.user_id,
+        principal: original.principal.clone(),
         incarnation_id: original.incarnation_id.clone(),
         recovery_epoch: original.recovery_epoch.clone(),
     };
@@ -5450,7 +5599,12 @@ pub(crate) fn takeover_eligible_route(session_id: &str, incarnation_id: &str) ->
     let base = tests::valid_start_request();
     let recipe = RemoteStartRequest {
         incarnation_id: incarnation_id.to_owned(),
-        user_id: route.user_id,
+        principal: plurx_core::playback_principal::PlaybackPrincipal::LocalUser {
+            user_id: route
+                .principal
+                .local_user_id()
+                .expect("local test principal"),
+        },
         typeless_playlist: true,
         request: SessionRequest {
             quality_catalog: None,
@@ -5623,11 +5777,19 @@ async fn attempt_takeover(state: &AppState, route: MediaSessionRoute) -> Result<
     )
     .await
     .map_err(|_| "candidate takeover validation timed out".to_owned())??;
-    let user = tokio::time::timeout_at(deadline, state.store.get_user(route.user_id))
-        .await
-        .map_err(|_| "media-session takeover timed out".to_owned())?
-        .map_err(|error| error.to_string())?
-        .ok_or_else(|| "takeover user is missing".to_owned())?;
+    let user = tokio::time::timeout_at(
+        deadline,
+        state.store.get_user(
+            route
+                .principal
+                .local_user_id()
+                .ok_or_else(|| "sharing takeover requires typed source authority".to_owned())?,
+        ),
+    )
+    .await
+    .map_err(|_| "media-session takeover timed out".to_owned())?
+    .map_err(|error| error.to_string())?
+    .ok_or_else(|| "takeover user is missing".to_owned())?;
     let provisional_id = uuid::Uuid::new_v4().to_string();
     let start = SessionTakeoverStart {
         provisional_session_id: provisional_id,
@@ -5716,7 +5878,7 @@ fn takeover_source_matches(envelope: &RemoteStartRequest, size: i64, mtime: i64)
 fn takeover_recipe_matches_route(envelope: &RemoteStartRequest, route: &MediaSessionRoute) -> bool {
     takeover_recipe_is_valid(envelope)
         && envelope.incarnation_id == route.incarnation_id
-        && envelope.user_id == route.user_id
+        && route.principal == envelope.principal
 }
 
 /// What one lease tick may touch.
@@ -5888,7 +6050,7 @@ mod tests {
             decoder_caps: None,
             protocol_version: crate::media_pool::PROTOCOL_VERSION,
             incarnation_id: incarnation_id.clone(),
-            user_id: 7,
+            principal: plurx_core::playback_principal::PlaybackPrincipal::LocalUser { user_id: 7 },
             source_size: 123_456,
             source_mtime: 1_700_000_000,
             typeless_playlist: true,
@@ -5916,12 +6078,93 @@ mod tests {
         }
     }
 
+    #[test]
+    fn sharing_forwarded_principal_preserves_local_wire_and_refuses_mixed_ownership() {
+        use plurx_core::playback_principal::PlaybackPrincipal;
+        let start = valid_start_request();
+        let prepare = valid_prepare_request();
+        let shared = PlaybackPrincipal::sharing(uuid::Uuid::new_v4(), &"a".repeat(64))
+            .expect("valid grant/viewer namespace");
+        for (is_start, local) in [
+            (true, serde_json::to_value(&start).expect("local start")),
+            (
+                false,
+                serde_json::to_value(&prepare).expect("local preparation"),
+            ),
+        ] {
+            let decode = |value: serde_json::Value| -> Option<PlaybackPrincipal> {
+                if is_start {
+                    serde_json::from_value::<RemoteStartRequest>(value)
+                        .ok()
+                        .map(|r| r.principal)
+                } else {
+                    serde_json::from_value::<RemotePrepareRequest>(value)
+                        .ok()
+                        .map(|r| r.principal)
+                }
+            };
+            assert!(local["user_id"].is_i64());
+            assert!(
+                local.get("principal").is_none(),
+                "legacy local envelope is unchanged"
+            );
+            assert_eq!(
+                decode(local.clone()),
+                Some(PlaybackPrincipal::LocalUser {
+                    user_id: local["user_id"].as_i64().expect("real local user")
+                })
+            );
+            let mut mixed = local.clone();
+            mixed["principal"] = serde_json::to_value(&shared).expect("shared principal");
+            assert!(
+                decode(mixed.clone()).is_none(),
+                "two namespaces cannot authorize one worker"
+            );
+            mixed
+                .as_object_mut()
+                .expect("wire object")
+                .remove("user_id");
+            assert_eq!(decode(mixed.clone()), Some(shared.clone()));
+            mixed["principal"]["viewer_key"] = serde_json::json!("A".repeat(64));
+            assert!(
+                decode(mixed).is_none(),
+                "malformed viewer key is not accepted"
+            );
+            let mut absent = local.clone();
+            absent
+                .as_object_mut()
+                .expect("wire object")
+                .remove("user_id");
+            assert!(decode(absent).is_none());
+            let mut invalid = local.clone();
+            invalid["user_id"] = serde_json::json!(0);
+            assert!(
+                decode(invalid).is_none(),
+                "no zero user stands for an absent principal"
+            );
+            let mut unknown = local;
+            unknown["foreign_owner_key"] = serde_json::json!(shared.owner_key());
+            assert!(decode(unknown).is_none(), "wire fields remain closed");
+        }
+        let mut shared_start = start;
+        shared_start.principal = shared.clone();
+        let wire = serde_json::to_value(&shared_start).expect("shared wire");
+        assert!(wire.get("user_id").is_none());
+        assert_eq!(
+            wire["principal"],
+            serde_json::to_value(&shared).expect("typed ownership")
+        );
+        let recovered: RemoteStartRequest =
+            serde_json::from_value(wire).expect("shared recovery recipe");
+        assert_eq!(recovered.principal, shared);
+    }
+
     fn valid_prepare_request() -> RemotePrepareRequest {
         RemotePrepareRequest {
             protocol_version: crate::media_pool::PROTOCOL_VERSION,
             incarnation_id: "00000000-0000-4000-8000-0000000000a1".to_owned(),
             session_id: "00000000-0000-4000-8000-0000000000b1".to_owned(),
-            user_id: 7,
+            principal: plurx_core::playback_principal::PlaybackPrincipal::LocalUser { user_id: 7 },
             expected_owner_epoch: 1,
         }
     }
@@ -6016,7 +6259,9 @@ mod tests {
                 expected_desired_revision: None,
                 incarnation_id: "00000000-0000-4000-8000-0000000000a1".to_owned(),
                 session_id: "00000000-0000-4000-8000-0000000000b1".to_owned(),
-                user_id: 7,
+                principal: plurx_core::playback_principal::PlaybackPrincipal::LocalUser {
+                    user_id: 7,
+                },
                 playback_id: "player-a".to_owned(),
                 expected_predecessor_incarnation_id: None,
                 fence_predecessor: false,
@@ -6132,7 +6377,7 @@ mod tests {
             recovery_epoch: String::new(),
             incarnation_id: format!("incarnation-{session_id}"),
             session_id: session_id.to_owned(),
-            user_id: 7,
+            principal: plurx_core::playback_principal::PlaybackPrincipal::LocalUser { user_id: 7 },
             playback_id: "player-c".to_owned(),
             request_fingerprint: "c".repeat(64),
             owner_node_id: "node-c".to_owned(),
@@ -6155,6 +6400,7 @@ mod tests {
 
     fn owned_lease(session_id: &str) -> OwnedMediaSessionLease {
         OwnedMediaSessionLease {
+            principal: plurx_core::playback_principal::PlaybackPrincipal::LocalUser { user_id: 7 },
             incarnation_id: format!("incarnation-{session_id}"),
             session_id: session_id.to_owned(),
             owner_epoch: 1,
@@ -6971,7 +7217,13 @@ mod tests {
 
         let mut foreign = base.clone();
         foreign.recipe_json = serde_json::to_string(&RemoteStartRequest {
-            user_id: eligible.user_id + 1,
+            principal: plurx_core::playback_principal::PlaybackPrincipal::LocalUser {
+                user_id: eligible
+                    .principal
+                    .local_user_id()
+                    .expect("local fixture principal")
+                    + 1,
+            },
             ..eligible.clone()
         })
         .expect("serialize foreign recipe");
@@ -7080,7 +7332,7 @@ mod tests {
         let legacy: RemoteStartRequest = serde_json::from_value(serde_json::json!({
             "protocol_version": crate::media_pool::PROTOCOL_VERSION,
             "incarnation_id": eligible.incarnation_id,
-            "user_id": eligible.user_id,
+            "user_id": eligible.principal.local_user_id().expect("local fixture principal"),
             "source_size": eligible.source_size,
             "source_mtime": eligible.source_mtime,
             "request": serde_json::to_value(&eligible.request).expect("request"),
@@ -7149,7 +7401,12 @@ mod tests {
         .to_string();
         assert!(prepared_successor_route(&route));
         let staged = plurx_core::domain::MediaSessionStagedGeneration {
-            user_id: route.user_id,
+            principal: plurx_core::playback_principal::PlaybackPrincipal::LocalUser {
+                user_id: route
+                    .principal
+                    .local_user_id()
+                    .expect("local test principal"),
+            },
             playback_id: route.playback_id.clone(),
             staged_incarnation_id: route.incarnation_id.clone(),
             expected_predecessor_incarnation_id: "predecessor".to_owned(),

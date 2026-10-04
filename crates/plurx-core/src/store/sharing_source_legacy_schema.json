@@ -1,0 +1,246 @@
+[
+  [
+    "index",
+    "media_session_requests_expiry",
+    "media_session_requests",
+    [
+      "CREATE INDEX media_session_requests_expiry\n        ON media_session_requests(state, claim_expires_at_ms)"
+    ]
+  ],
+  [
+    "index",
+    "media_sessions_expiry",
+    "media_sessions",
+    [
+      "CREATE INDEX media_sessions_expiry\n        ON media_sessions(state, lease_expires_at_ms, incarnation_id)"
+    ]
+  ],
+  [
+    "index",
+    "media_sessions_owner",
+    "media_sessions",
+    [
+      "CREATE INDEX media_sessions_owner\n        ON media_sessions(owner_node_id, state, lease_expires_at_ms)"
+    ]
+  ],
+  [
+    "index",
+    "media_sessions_retention",
+    "media_sessions",
+    [
+      "CREATE INDEX media_sessions_retention\n        ON media_sessions(state, updated_at_ms, incarnation_id)"
+    ]
+  ],
+  [
+    "index",
+    "media_sessions_user",
+    "media_sessions",
+    [
+      "CREATE INDEX media_sessions_user\n        ON media_sessions(user_id, state, lease_expires_at_ms)"
+    ]
+  ],
+  [
+    "index",
+    "sqlite_autoindex_library_channel_session_recipes_1",
+    "library_channel_session_recipes",
+    [
+      null
+    ]
+  ],
+  [
+    "index",
+    "sqlite_autoindex_library_channel_session_recipes_2",
+    "library_channel_session_recipes",
+    [
+      null
+    ]
+  ],
+  [
+    "index",
+    "sqlite_autoindex_media_playback_desired_1",
+    "media_playback_desired",
+    [
+      null
+    ]
+  ],
+  [
+    "index",
+    "sqlite_autoindex_media_playback_pointers_1",
+    "media_playback_pointers",
+    [
+      null
+    ]
+  ],
+  [
+    "index",
+    "sqlite_autoindex_media_playback_pointers_2",
+    "media_playback_pointers",
+    [
+      null
+    ]
+  ],
+  [
+    "index",
+    "sqlite_autoindex_media_session_preparations_1",
+    "media_session_preparations",
+    [
+      null
+    ]
+  ],
+  [
+    "index",
+    "sqlite_autoindex_media_session_preparations_2",
+    "media_session_preparations",
+    [
+      null
+    ]
+  ],
+  [
+    "index",
+    "sqlite_autoindex_media_session_producer_recovery_1",
+    "media_session_producer_recovery",
+    [
+      null
+    ]
+  ],
+  [
+    "index",
+    "sqlite_autoindex_media_session_requests_1",
+    "media_session_requests",
+    [
+      null
+    ]
+  ],
+  [
+    "index",
+    "sqlite_autoindex_media_sessions_1",
+    "media_sessions",
+    [
+      null
+    ]
+  ],
+  [
+    "index",
+    "sqlite_autoindex_media_sessions_2",
+    "media_sessions",
+    [
+      null
+    ]
+  ],
+  [
+    "table",
+    "library_channel_session_recipes",
+    "library_channel_session_recipes",
+    [
+      "CREATE TABLE library_channel_session_recipes (\n    user_id         INTEGER NOT NULL,\n    request_id      TEXT NOT NULL,\n    incarnation_id  TEXT NOT NULL UNIQUE,\n    recipe_json     TEXT NOT NULL CHECK (length(recipe_json) BETWEEN 2 AND 32768),\n    created_at_ms   INTEGER NOT NULL,\n    PRIMARY KEY (user_id, request_id)\n) STRICT"
+    ]
+  ],
+  [
+    "table",
+    "media_playback_desired",
+    "media_playback_desired",
+    [
+      "CREATE TABLE media_playback_desired (\n        user_id        INTEGER NOT NULL,\n        playback_id    TEXT NOT NULL\n            CHECK (length(playback_id) BETWEEN 1 AND 128),\n        revision       INTEGER NOT NULL CHECK (revision > 0),\n        digest         TEXT NOT NULL CHECK (length(digest) = 64),\n        canonical_form TEXT NOT NULL\n            CHECK (length(canonical_form) BETWEEN 1 AND 512),\n        updated_at_ms  INTEGER NOT NULL,\n        PRIMARY KEY (user_id, playback_id)\n    ) STRICT"
+    ]
+  ],
+  [
+    "table",
+    "media_playback_pointers",
+    "media_playback_pointers",
+    [
+      "CREATE TABLE media_playback_pointers (\n        user_id                INTEGER NOT NULL,\n        playback_id            TEXT NOT NULL CHECK (length(playback_id) BETWEEN 1 AND 128),\n        current_incarnation_id TEXT NOT NULL UNIQUE,\n        updated_at_ms           INTEGER NOT NULL, desired_revision INTEGER,\n        PRIMARY KEY (user_id, playback_id)\n    ) STRICT",
+      "CREATE TABLE media_playback_pointers (\n    user_id                INTEGER NOT NULL,\n    playback_id            TEXT NOT NULL CHECK (length(playback_id) BETWEEN 1 AND 128),\n    current_incarnation_id TEXT NOT NULL UNIQUE,\n    updated_at_ms          INTEGER NOT NULL,\n    -- The ask this pointer was written against. Nullable, and the null means\n    -- the playback had no recorded ask -- see the fence triggers, which read a\n    -- null on a playback that *does* have one as a writer from before this\n    -- column. A fresh install declares it here; an upgrade adds it by `ALTER`,\n    -- and the two have to end in the same shape.\n    desired_revision       INTEGER,\n    PRIMARY KEY (user_id, playback_id)\n) STRICT"
+    ]
+  ],
+  [
+    "table",
+    "media_session_preparations",
+    "media_session_preparations",
+    [
+      "CREATE TABLE media_session_preparations (\n        user_id                            INTEGER NOT NULL,\n        playback_id                        TEXT NOT NULL\n            CHECK (length(playback_id) BETWEEN 1 AND 128),\n        staged_incarnation_id              TEXT NOT NULL UNIQUE,\n        expected_predecessor_incarnation_id TEXT NOT NULL\n            CHECK (length(expected_predecessor_incarnation_id) BETWEEN 1 AND 128),\n        deadline_ms                        INTEGER NOT NULL,\n        created_at_ms                      INTEGER NOT NULL,\n        updated_at_ms                      INTEGER NOT NULL,\n        PRIMARY KEY (user_id, playback_id)\n    ) STRICT"
+    ]
+  ],
+  [
+    "table",
+    "media_session_producer_recovery",
+    "media_session_producer_recovery",
+    [
+      "CREATE TABLE media_session_producer_recovery (\n        user_id                 INTEGER NOT NULL,\n        playback_id             TEXT NOT NULL\n            CHECK (length(playback_id) BETWEEN 1 AND 128),\n        recovery_epoch          TEXT NOT NULL\n            CHECK (length(recovery_epoch) BETWEEN 1 AND 128),\n        failed_incarnation_id   TEXT NOT NULL,\n        failed_producer_attempt INTEGER NOT NULL CHECK (failed_producer_attempt > 0),\n        decision_sequence       INTEGER NOT NULL CHECK (decision_sequence > 0),\n        failed_plan_digest      TEXT NOT NULL CHECK (length(failed_plan_digest) = 64),\n        alternate_plan_digest   TEXT NOT NULL CHECK (length(alternate_plan_digest) = 64),\n        decode_restriction      TEXT\n            CHECK (decode_restriction IS NULL OR\n                   length(CAST(decode_restriction AS BLOB)) <= 4096),\n        state                   TEXT NOT NULL\n            CHECK (state IN ('reserved', 'installed', 'exhausted')),\n        created_at_ms           INTEGER NOT NULL,\n        updated_at_ms           INTEGER NOT NULL,\n        PRIMARY KEY (user_id, playback_id, recovery_epoch)\n    ) STRICT"
+    ]
+  ],
+  [
+    "table",
+    "media_session_requests",
+    "media_session_requests",
+    [
+      "CREATE TABLE media_session_requests (\n        user_id             INTEGER NOT NULL,\n        request_id          TEXT NOT NULL CHECK (length(request_id) BETWEEN 1 AND 128),\n        request_fingerprint TEXT NOT NULL,\n        playback_id         TEXT NOT NULL CHECK (length(playback_id) BETWEEN 1 AND 128),\n        state               TEXT NOT NULL CHECK (state IN ('starting', 'resolved', 'failed')),\n        claim_expires_at_ms INTEGER NOT NULL,\n        incarnation_id      TEXT NOT NULL,\n        owner_node_id       TEXT,\n        response_json       TEXT,\n        updated_at_ms       INTEGER NOT NULL,\n        PRIMARY KEY (user_id, request_id)\n    ) STRICT",
+      "CREATE TABLE media_session_requests (\n    user_id             INTEGER NOT NULL,\n    request_id          TEXT NOT NULL CHECK (length(request_id) BETWEEN 1 AND 128),\n    request_fingerprint TEXT NOT NULL,\n    playback_id         TEXT NOT NULL CHECK (length(playback_id) BETWEEN 1 AND 128),\n    state               TEXT NOT NULL CHECK (state IN ('starting', 'resolved', 'failed')),\n    claim_expires_at_ms INTEGER NOT NULL,\n    incarnation_id      TEXT NOT NULL,\n    owner_node_id       TEXT,\n    response_json       TEXT,\n    updated_at_ms       INTEGER NOT NULL,\n    PRIMARY KEY (user_id, request_id)\n) STRICT"
+    ]
+  ],
+  [
+    "table",
+    "media_sessions",
+    "media_sessions",
+    [
+      "CREATE TABLE media_sessions (\n        incarnation_id                TEXT PRIMARY KEY,\n        session_id                    TEXT NOT NULL UNIQUE,\n        user_id                       INTEGER NOT NULL,\n        playback_id                   TEXT NOT NULL,\n        request_fingerprint           TEXT NOT NULL,\n        owner_node_id                 TEXT NOT NULL,\n        owner_epoch                   INTEGER NOT NULL CHECK (owner_epoch > 0),\n        lease_expires_at_ms           INTEGER NOT NULL,\n        state                         TEXT NOT NULL CHECK (state IN ('starting', 'active', 'ended')),\n        recipe_json                   TEXT NOT NULL,\n        response_json                 TEXT NOT NULL,\n        produced_playable_through_ms  INTEGER NOT NULL DEFAULT 0,\n        fetched_through_ms            INTEGER NOT NULL DEFAULT 0,\n        media_origin_ms               INTEGER NOT NULL DEFAULT 0,\n        media_sequence                INTEGER NOT NULL DEFAULT 0,\n        discontinuity_sequence        INTEGER NOT NULL DEFAULT 0,\n        updated_at_ms                 INTEGER NOT NULL\n    , terminal_reason TEXT\n        CHECK (terminal_reason IN\n          ('deleted', 'superseded', 'admin_stop', 'revoked', 'replaced')), publication_ready_at_ms INTEGER NOT NULL DEFAULT 0\n        CHECK (publication_ready_at_ms >= 0), drain_deadline_ms INTEGER, recovery_epoch TEXT NOT NULL DEFAULT '') STRICT",
+      "CREATE TABLE media_sessions (\n    incarnation_id                TEXT PRIMARY KEY,\n    session_id                    TEXT NOT NULL UNIQUE,\n    user_id                       INTEGER NOT NULL,\n    playback_id                   TEXT NOT NULL,\n    request_fingerprint           TEXT NOT NULL,\n    owner_node_id                 TEXT NOT NULL,\n    owner_epoch                   INTEGER NOT NULL CHECK (owner_epoch > 0),\n    lease_expires_at_ms           INTEGER NOT NULL,\n    state                         TEXT NOT NULL CHECK (state IN ('starting', 'active', 'ended')),\n    terminal_reason               TEXT CHECK (terminal_reason IN\n                                      ('deleted', 'superseded', 'admin_stop', 'revoked', 'replaced')),\n    publication_ready_at_ms       INTEGER NOT NULL DEFAULT 0 CHECK (publication_ready_at_ms >= 0),\n    recipe_json                   TEXT NOT NULL,\n    response_json                 TEXT NOT NULL,\n    produced_playable_through_ms  INTEGER NOT NULL DEFAULT 0,\n    fetched_through_ms            INTEGER NOT NULL DEFAULT 0,\n    media_origin_ms               INTEGER NOT NULL DEFAULT 0,\n    media_sequence                INTEGER NOT NULL DEFAULT 0,\n    discontinuity_sequence        INTEGER NOT NULL DEFAULT 0,\n    updated_at_ms                 INTEGER NOT NULL,\n    recovery_epoch                TEXT NOT NULL DEFAULT '',\n    -- When a predecessor being drained on purpose stops being kept. Null means\n    -- not draining, which is what every session starts as. A fresh cluster\n    -- declares it here; an upgrade adds it by `ALTER`, and the migration has\n    -- to ask which of the two it is looking at before it tries.\n    drain_deadline_ms             INTEGER\n) STRICT",
+      "CREATE TABLE media_sessions (\n    incarnation_id                TEXT PRIMARY KEY,\n    session_id                    TEXT NOT NULL UNIQUE,\n    user_id                       INTEGER NOT NULL,\n    playback_id                   TEXT NOT NULL,\n    request_fingerprint           TEXT NOT NULL,\n    owner_node_id                 TEXT NOT NULL,\n    owner_epoch                   INTEGER NOT NULL CHECK (owner_epoch > 0),\n    lease_expires_at_ms           INTEGER NOT NULL,\n    state                         TEXT NOT NULL CHECK (state IN ('starting', 'active', 'ended')),\n    recipe_json                   TEXT NOT NULL,\n    response_json                 TEXT NOT NULL,\n    produced_playable_through_ms  INTEGER NOT NULL DEFAULT 0,\n    fetched_through_ms            INTEGER NOT NULL DEFAULT 0,\n    media_origin_ms               INTEGER NOT NULL DEFAULT 0,\n    media_sequence                INTEGER NOT NULL DEFAULT 0,\n    discontinuity_sequence        INTEGER NOT NULL DEFAULT 0,\n    updated_at_ms                 INTEGER NOT NULL\n, terminal_reason TEXT\n        CHECK (terminal_reason IN\n          ('deleted', 'superseded', 'admin_stop', 'revoked', 'replaced')), publication_ready_at_ms INTEGER NOT NULL DEFAULT 0\n        CHECK (publication_ready_at_ms >= 0), drain_deadline_ms INTEGER, recovery_epoch TEXT NOT NULL DEFAULT '') STRICT"
+    ]
+  ],
+  [
+    "trigger",
+    "background_analysis_viewer_refresh",
+    "background_job_commands",
+    [
+      "CREATE TRIGGER background_analysis_viewer_refresh\nAFTER INSERT ON background_job_commands WHEN NEW.operation = 'refresh_analysis_viewers'\nBEGIN\n    UPDATE background_job_waiters SET\n        deadline_ms = json_extract(NEW.request_json, '$.now_ms') + 120000,\n        updated_at_ms = json_extract(NEW.request_json, '$.now_ms')\n    WHERE request_scope IN ('playback-analysis','playback-artifact')\n      AND state IN ('pending','awaiting_hydration')\n      AND updated_at_ms <= json_extract(NEW.request_json, '$.now_ms') - 30000\n      AND deadline_ms > json_extract(NEW.request_json, '$.now_ms')\n      AND (request_scope, request_id) IN (\n          SELECT waiter.request_scope, waiter.request_id\n          FROM background_job_waiters waiter\n          JOIN media_sessions session ON session.user_id = json_extract(waiter.consumer_ref, '$.user_id')\n            AND session.playback_id = json_extract(waiter.consumer_ref, '$.playback_id')\n            AND json_extract(session.recipe_json, '$.request.file_id') = json_extract(waiter.consumer_ref, '$.file_id')\n          JOIN media_playback_pointers pointer ON pointer.user_id = session.user_id\n            AND pointer.playback_id = session.playback_id\n            AND pointer.current_incarnation_id = session.incarnation_id\n          WHERE waiter.request_scope IN ('playback-analysis','playback-artifact')\n            AND waiter.state IN ('pending','awaiting_hydration')\n            AND session.state = 'active'\n            AND session.lease_expires_at_ms > json_extract(NEW.request_json, '$.now_ms')\n          ORDER BY waiter.deadline_ms, waiter.request_id LIMIT 128);\n    UPDATE background_jobs SET priority = 3\n    WHERE kind = 'artifact_hydrate' AND state IN ('queued','running')\n      AND EXISTS (SELECT 1 FROM background_job_waiters delivery\n          JOIN background_job_waiters viewer ON viewer.job_id = delivery.consumer_ref\n            AND viewer.target_node_id = delivery.target_node_id\n          WHERE delivery.job_id = background_jobs.id\n            AND delivery.consumer_kind = 'background_delivery'\n            AND viewer.consumer_kind = 'playback_fragment'\n            AND viewer.state IN ('pending','awaiting_hydration')\n            AND viewer.deadline_ms > json_extract(NEW.request_json, '$.now_ms'));\n    DELETE FROM background_job_commands WHERE id = NEW.id;\nEND"
+    ]
+  ],
+  [
+    "trigger",
+    "background_analysis_viewer_session_ended",
+    "media_sessions",
+    [
+      "CREATE TRIGGER background_analysis_viewer_session_ended\nAFTER UPDATE OF state ON media_sessions WHEN NEW.state = 'ended' AND OLD.state != 'ended'\nBEGIN\n    UPDATE background_job_waiters SET state = 'cancelled', updated_at_ms = NEW.updated_at_ms\n    WHERE request_scope IN ('playback-analysis','playback-artifact')\n      AND state IN ('pending','awaiting_hydration')\n      AND json_extract(consumer_ref, '$.user_id') = NEW.user_id\n      AND json_extract(consumer_ref, '$.playback_id') = NEW.playback_id\n      AND json_extract(consumer_ref, '$.file_id') = json_extract(NEW.recipe_json, '$.request.file_id')\n      AND NOT EXISTS (SELECT 1 FROM media_sessions live\n          WHERE live.user_id = NEW.user_id AND live.playback_id = NEW.playback_id\n            AND live.incarnation_id != NEW.incarnation_id\n            AND live.state = 'active'\n            AND live.lease_expires_at_ms > NEW.updated_at_ms\n            AND json_extract(live.recipe_json, '$.request.file_id') = json_extract(NEW.recipe_json, '$.request.file_id'));\nEND"
+    ]
+  ],
+  [
+    "trigger",
+    "library_channel_session_recipes_request_delete",
+    "media_session_requests",
+    [
+      "CREATE TRIGGER library_channel_session_recipes_request_delete\n    AFTER DELETE ON media_session_requests\nBEGIN\n    DELETE FROM library_channel_session_recipes\n     WHERE user_id = OLD.user_id AND request_id = OLD.request_id;\nEND"
+    ]
+  ],
+  [
+    "trigger",
+    "media_playback_pointers_desired_fence_ai",
+    "media_playback_pointers",
+    [
+      "CREATE TRIGGER media_playback_pointers_desired_fence_ai\n    BEFORE INSERT ON media_playback_pointers\n    WHEN EXISTS (SELECT 1 FROM media_playback_desired\n                  WHERE user_id = NEW.user_id AND playback_id = NEW.playback_id\n                    AND revision IS NOT NEW.desired_revision)\n    BEGIN\n      SELECT RAISE(ABORT, 'playback pointer written against an ask that is not current');\n    END"
+    ]
+  ],
+  [
+    "trigger",
+    "media_playback_pointers_desired_fence_au",
+    "media_playback_pointers",
+    [
+      "CREATE TRIGGER media_playback_pointers_desired_fence_au\n    BEFORE UPDATE ON media_playback_pointers\n    WHEN EXISTS (SELECT 1 FROM media_playback_desired\n                  WHERE user_id = NEW.user_id AND playback_id = NEW.playback_id\n                    AND revision IS NOT NEW.desired_revision)\n    BEGIN\n      SELECT RAISE(ABORT, 'playback pointer written against an ask that is not current');\n    END"
+    ]
+  ],
+  [
+    "trigger",
+    "media_session_publication_claim_au",
+    "media_sessions",
+    [
+      "CREATE TRIGGER media_session_publication_claim_au\n    AFTER UPDATE OF publication_ready_at_ms ON media_sessions\n    WHEN NEW.state = 'active' AND (\n      (OLD.publication_ready_at_ms = 9223372036854775807\n        AND NEW.publication_ready_at_ms != 9223372036854775807)\n      OR (OLD.publication_ready_at_ms > 0\n        AND OLD.publication_ready_at_ms < 9223372036854775807\n        AND NEW.publication_ready_at_ms = 0)\n    ) BEGIN\n      UPDATE media_session_requests\n         SET claim_expires_at_ms = CASE\n               WHEN OLD.publication_ready_at_ms = 9223372036854775807\n                    AND NEW.publication_ready_at_ms = 0\n                 THEN NEW.lease_expires_at_ms\n               WHEN OLD.publication_ready_at_ms = 9223372036854775807\n                 THEN MIN(9223372036854775806,\n                   NEW.publication_ready_at_ms\n                     + (NEW.lease_expires_at_ms - OLD.updated_at_ms) + 1)\n               ELSE MIN(9223372036854775806, NEW.lease_expires_at_ms + 1)\n             END,\n             updated_at_ms = NEW.updated_at_ms\n       WHERE incarnation_id = NEW.incarnation_id\n         AND request_fingerprint = NEW.request_fingerprint\n         AND playback_id = NEW.playback_id\n         AND owner_node_id = NEW.owner_node_id\n         AND state = 'starting';\n    END"
+    ]
+  ],
+  [
+    "trigger",
+    "media_sessions_drain_ownership_fence_au",
+    "media_sessions",
+    [
+      "CREATE TRIGGER media_sessions_drain_ownership_fence_au\n    BEFORE UPDATE OF owner_node_id, owner_epoch ON media_sessions\n    WHEN OLD.drain_deadline_ms IS NOT NULL\n     AND (NEW.owner_node_id IS NOT OLD.owner_node_id\n          OR NEW.owner_epoch IS NOT OLD.owner_epoch)\n    BEGIN\n      SELECT RAISE(IGNORE);\n    END"
+    ]
+  ]
+]

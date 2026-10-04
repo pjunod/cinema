@@ -134,12 +134,17 @@ pub(in crate::http) struct StartedSessionGuard {
 }
 
 pub(super) struct MediaSessionRequestGuard {
-    cleanup: Option<(AppState, i64, String, String)>,
+    cleanup: Option<(
+        AppState,
+        plurx_core::playback_principal::PlaybackPrincipal,
+        String,
+        String,
+    )>,
 }
 
 async fn settle_media_session_request_claim(
     state: &AppState,
-    user_id: i64,
+    principal: &plurx_core::playback_principal::PlaybackPrincipal,
     request_id: &str,
     incarnation_id: &str,
 ) {
@@ -147,9 +152,12 @@ async fn settle_media_session_request_claim(
     loop {
         match tokio::time::timeout_at(
             deadline,
-            state
-                .store
-                .fail_media_session_request(user_id, request_id, incarnation_id, unix_ms()),
+            state.store.fail_media_session_request(
+                principal,
+                request_id,
+                incarnation_id,
+                unix_ms(),
+            ),
         )
         .await
         {
@@ -160,7 +168,7 @@ async fn settle_media_session_request_claim(
                 tracing::warn!(
                     target: "plurxd::http::hls",
                     %error,
-                    user_id,
+                    principal = ?principal,
                     "media-session request cleanup is retrying"
                 );
             }
@@ -174,7 +182,7 @@ async fn settle_media_session_request_claim(
     }
     tracing::error!(
         target: "plurxd::http::hls",
-        user_id,
+        principal = ?principal,
         retry_after_ms = 60_000,
         "media-session request cleanup exhausted its bound; claim expiry remains the durable fallback"
     );
@@ -183,12 +191,12 @@ async fn settle_media_session_request_claim(
 impl MediaSessionRequestGuard {
     pub(super) fn new(
         state: AppState,
-        user_id: i64,
+        principal: plurx_core::playback_principal::PlaybackPrincipal,
         request_id: String,
         incarnation_id: String,
     ) -> Self {
         Self {
-            cleanup: Some((state, user_id, request_id, incarnation_id)),
+            cleanup: Some((state, principal, request_id, incarnation_id)),
         }
     }
 
@@ -199,14 +207,15 @@ impl MediaSessionRequestGuard {
 
 impl Drop for MediaSessionRequestGuard {
     fn drop(&mut self) {
-        let Some((state, user_id, request_id, incarnation_id)) = self.cleanup.take() else {
+        let Some((state, principal, request_id, incarnation_id)) = self.cleanup.take() else {
             return;
         };
         let Ok(runtime) = tokio::runtime::Handle::try_current() else {
             return;
         };
         std::mem::drop(runtime.spawn(async move {
-            settle_media_session_request_claim(&state, user_id, &request_id, &incarnation_id).await;
+            settle_media_session_request_claim(&state, &principal, &request_id, &incarnation_id)
+                .await;
         }));
     }
 }
@@ -270,7 +279,7 @@ struct StartedSessionCleanup {
     owner_node_id: String,
     incarnation_id: String,
     session_id: String,
-    user_id: i64,
+    principal: plurx_core::playback_principal::PlaybackPrincipal,
     request_id: String,
     owns_worker: bool,
     owns_request_claim: bool,
@@ -284,7 +293,7 @@ impl StartedSessionGuard {
         owner_node_id: String,
         incarnation_id: String,
         session_id: String,
-        user_id: i64,
+        principal: plurx_core::playback_principal::PlaybackPrincipal,
         request_id: String,
         replacement: Option<ClusterReplacementGuard>,
     ) -> Self {
@@ -293,7 +302,7 @@ impl StartedSessionGuard {
             owner_node_id,
             incarnation_id,
             session_id,
-            user_id,
+            principal,
             request_id,
             replacement,
             true,
@@ -306,7 +315,7 @@ impl StartedSessionGuard {
         owner_node_id: String,
         incarnation_id: String,
         session_id: String,
-        user_id: i64,
+        principal: plurx_core::playback_principal::PlaybackPrincipal,
         request_id: String,
         replacement: Option<ClusterReplacementGuard>,
     ) -> Self {
@@ -315,7 +324,7 @@ impl StartedSessionGuard {
             owner_node_id,
             incarnation_id,
             session_id,
-            user_id,
+            principal,
             request_id,
             replacement,
             false,
@@ -330,7 +339,7 @@ impl StartedSessionGuard {
         owner_node_id: String,
         incarnation_id: String,
         session_id: String,
-        user_id: i64,
+        principal: plurx_core::playback_principal::PlaybackPrincipal,
         request_id: String,
         replacement: Option<ClusterReplacementGuard>,
     ) -> Self {
@@ -339,7 +348,7 @@ impl StartedSessionGuard {
             owner_node_id,
             incarnation_id,
             session_id,
-            user_id,
+            principal,
             request_id,
             replacement,
             false,
@@ -353,7 +362,7 @@ impl StartedSessionGuard {
         owner_node_id: String,
         incarnation_id: String,
         session_id: String,
-        user_id: i64,
+        principal: plurx_core::playback_principal::PlaybackPrincipal,
         request_id: String,
         replacement: Option<ClusterReplacementGuard>,
     ) -> Self {
@@ -362,7 +371,7 @@ impl StartedSessionGuard {
             owner_node_id,
             incarnation_id,
             session_id,
-            user_id,
+            principal,
             request_id,
             replacement,
             true,
@@ -376,7 +385,7 @@ impl StartedSessionGuard {
         owner_node_id: String,
         incarnation_id: String,
         session_id: String,
-        user_id: i64,
+        principal: plurx_core::playback_principal::PlaybackPrincipal,
         request_id: String,
     ) -> Self {
         Self::with_ownership(
@@ -384,7 +393,7 @@ impl StartedSessionGuard {
             owner_node_id,
             incarnation_id,
             session_id,
-            user_id,
+            principal,
             request_id,
             None,
             false,
@@ -398,7 +407,7 @@ impl StartedSessionGuard {
         owner_node_id: String,
         incarnation_id: String,
         session_id: String,
-        user_id: i64,
+        principal: plurx_core::playback_principal::PlaybackPrincipal,
         request_id: String,
         replacement: Option<ClusterReplacementGuard>,
         owns_worker: bool,
@@ -410,7 +419,7 @@ impl StartedSessionGuard {
                 owner_node_id,
                 incarnation_id,
                 session_id,
-                user_id,
+                principal,
                 request_id,
                 owns_worker,
                 owns_request_claim,
@@ -461,7 +470,7 @@ impl Drop for StartedSessionGuard {
             owner_node_id,
             incarnation_id,
             session_id,
-            user_id,
+            principal,
             request_id,
             owns_worker,
             owns_request_claim,
@@ -481,8 +490,13 @@ impl Drop for StartedSessionGuard {
                 abort_started_session(&state, &owner_node_id, &incarnation_id, &session_id).await;
             }
             if owns_request_claim {
-                settle_media_session_request_claim(&state, user_id, &request_id, &incarnation_id)
-                    .await;
+                settle_media_session_request_claim(
+                    &state,
+                    &principal,
+                    &request_id,
+                    &incarnation_id,
+                )
+                .await;
             }
             hooks.after_cleanup_settled().await;
             drop(_replacement);

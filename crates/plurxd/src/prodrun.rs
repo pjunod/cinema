@@ -17,7 +17,10 @@
 //!   that is no longer ours; the lock is the second, and there is no third. A
 //!   pid is only certainly ours while the locked slot still holds the
 //!   [`tokio::process::Child`] un-reaped — the kernel keeps the pid reserved
-//!   until `wait`, and the only `wait` is in here, under the same lock.
+//!   until `wait`. Retirement transfers it under that lock to one detached
+//!   owner, then keeps the slot reserved until successful wait and registered
+//!   writer settlement, or the writer task ending without it. Waiters never
+//!   hold the slot lock across that barrier.
 //! - **Belief is recorded only after the operation succeeds.** A failed
 //!   `kill(2)` returns the error and changes nothing — a producer recorded as
 //!   stopped that is actually running produces past every horizon; one
@@ -34,20 +37,207 @@
 //! exists. The hook is a closure so the caller can pass its own clock in
 //! without this module learning anything about session internals.
 //!
-//! [`Step::Terminate`] and [`Step::Restart`] are `Child::kill`, which is
-//! SIGKILL and a reap. Not a graceful signal: a stopped process does not run a
+//! [`Step::Terminate`] and [`Step::Restart`] send SIGKILL and await the owned
+//! child reaper and registered writer barrier. A stopped process does not run a
 //! `SIGTERM` handler until something continues it, so terminating a suspended
 //! producer politely is a wait that never ends. What this layer cannot do is
 //! spawn — the command line belongs to the caller — so [`Step::Start`] and the
 //! respawn half of [`Step::Restart`] come back as [`Performed::NeedsSpawn`],
 //! and [`ProducerSlot::attach`] records the spawn once it has happened.
 
-use std::io;
+use std::{
+    future::Future,
+    io,
+    pin::Pin,
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc, Mutex as StdMutex, Weak,
+    },
+};
 
 use tokio::process::Child;
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, Notify};
 
 use crate::prodexec::{after, Producer, Step, Termination};
+
+/// Identity minted only while attaching an actual job-owned producer.
+/// It has no wire representation and cannot be constructed from an epoch.
+#[derive(Clone)]
+pub(crate) struct ProducerRegistration(Arc<GenerationLifetime>);
+
+struct GenerationLifetime {
+    identity: Arc<()>,
+    writers: Mutex<Option<tokio::sync::oneshot::Receiver<()>>>,
+    receipt: StdMutex<Option<ConfirmedProducerReap>>,
+    settled: Notify,
+}
+
+/// Owned only by the actual stdout/diagnostic task, so it lives and dies with
+/// that task and the pipes it writes from. Dropping without settlement means
+/// the task panicked or returned early: nothing of it can still be writing, so
+/// the reaper records the abandonment on the receipt and releases as usual.
+pub(crate) struct ProducerWriters(tokio::sync::oneshot::Sender<()>);
+impl ProducerWriters {
+    pub(crate) fn settled(self) {
+        let _ = self.0.send(());
+    }
+}
+
+/// How a registered generation's writer barrier ended. Either way the writer
+/// is gone; the difference is a failure of that writer, never a reason to keep
+/// holding the child's job or admission for an owner that no longer exists.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum WriterSettlement {
+    /// The writer task called [`ProducerWriters::settled`].
+    Settled,
+    /// The writer task dropped its barrier without settling.
+    Abandoned,
+}
+
+/// Minted inside the detached process owner after successful wait and ended
+/// writers. It proves one producer generation, not viewer or DB retirement.
+#[derive(Clone)]
+pub(crate) struct ConfirmedProducerReap {
+    identity: Arc<()>,
+    writers: WriterSettlement,
+}
+impl ConfirmedProducerReap {
+    pub(crate) fn matches(&self, generation: &ProducerRegistration) -> bool {
+        Arc::ptr_eq(&self.identity, &generation.0.identity)
+    }
+    /// Whether this generation's writer settled or was abandoned.
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(crate) fn writers(&self) -> WriterSettlement {
+        self.writers
+    }
+}
+impl ProducerRegistration {
+    pub(crate) fn same_generation(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.0, &other.0)
+    }
+    /// A detached viewer can retain its exact old generation even after the
+    /// slot moves on. Cancellation drops only the waiter, never the reaper.
+    pub(crate) async fn wait_confirmed_reap(&self) -> ConfirmedProducerReap {
+        loop {
+            let changed = self.0.settled.notified();
+            if let Some(receipt) = self.confirmed_reap() {
+                return receipt;
+            }
+            changed.await;
+        }
+    }
+    pub(crate) fn confirmed_reap(&self) -> Option<ConfirmedProducerReap> {
+        self.0
+            .receipt
+            .lock()
+            .expect("producer receipt lock")
+            .clone()
+    }
+}
+
+struct ReapOperation {
+    finished: AtomicBool,
+    changed: Notify,
+}
+impl ReapOperation {
+    async fn wait(&self) {
+        loop {
+            let changed = self.changed.notified();
+            if self.finished.load(Ordering::Acquire) {
+                return;
+            }
+            changed.await;
+        }
+    }
+}
+
+/// The fault/await seam uses the same owned child in production and tests.
+pub(crate) trait ProducerReapHooks: Send + Sync {
+    fn wait<'a>(
+        &'a self,
+        child: &'a mut Child,
+    ) -> Pin<Box<dyn Future<Output = io::Result<std::process::ExitStatus>> + Send + 'a>>;
+}
+struct ActualProducerWait;
+impl ProducerReapHooks for ActualProducerWait {
+    fn wait<'a>(
+        &'a self,
+        child: &'a mut Child,
+    ) -> Pin<Box<dyn Future<Output = io::Result<std::process::ExitStatus>> + Send + 'a>> {
+        Box::pin(child.wait())
+    }
+}
+
+fn owned_reap(
+    mut child: Child,
+    child_job: Option<crate::process_control::ChildJob>,
+    resources: Option<Box<dyn Send>>,
+    generation: Option<ProducerRegistration>,
+    hooks: Arc<dyn ProducerReapHooks>,
+    inner: Weak<Mutex<Inner>>,
+    next: Producer,
+) -> Arc<ReapOperation> {
+    let operation = Arc::new(ReapOperation {
+        finished: AtomicBool::new(false),
+        changed: Notify::new(),
+    });
+    let completed = Arc::clone(&operation);
+    let _ = child.start_kill();
+    if let Ok(runtime) = tokio::runtime::Handle::try_current() {
+        runtime.spawn(async move{
+            // One owned task retains admission and descendant ownership across
+            // retries and cancellation. Errors never mint a reap receipt.
+            let mut failures=0u64;
+            loop {
+                match hooks.wait(&mut child).await {
+                    Ok(_)=>break,
+                    Err(error)=>{
+                        if failures==0 {tracing::warn!(target:"plurxd::prodrun",%error,"producer wait failed; admission retained");}
+                        failures=failures.saturating_add(1);
+                        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                        let _=child.start_kill();
+                    }
+                }
+            }
+            let mut writers=WriterSettlement::Settled;
+            if let Some(generation)=generation.as_ref(){
+                let receiver=generation.0.writers.lock().await.take();
+                if let Some(receiver)=receiver {
+                    // A closed barrier is the writer task ending without
+                    // settling. Its sender went down with the task, so the
+                    // writer is as finished as a settled one; parking here
+                    // would hold the job, the admission and the slot for the
+                    // life of the process on behalf of nothing.
+                    if receiver.await.is_err(){
+                        tracing::error!(target:"plurxd::prodrun","producer writer task ended without confirming settlement; releasing its reaped generation");
+                        writers=WriterSettlement::Abandoned;
+                    }
+                }
+            }
+            drop(child_job);
+            drop(resources);
+            if let Some(generation)=generation {
+                *generation.0.receipt.lock().expect("producer receipt lock")=Some(ConfirmedProducerReap{identity:Arc::clone(&generation.0.identity),writers});
+                generation.0.settled.notify_waiters();
+            }
+            if let Some(inner)=inner.upgrade(){
+                let mut state=inner.lock().await;
+                if state.reaping.as_ref().is_some_and(|active|Arc::ptr_eq(active,&completed)){
+                    state.reaping=None;
+                    state.registration=None;
+                    state.belief=next;
+                }
+            }
+            completed.finished.store(true,Ordering::Release);
+            completed.changed.notify_waiters();
+        });
+    } else {
+        // Runtime shutdown cannot confirm a wait. Retain the bounded owner's
+        // resources until process exit; never advertise an unproven release.
+        std::mem::forget((child, child_job, resources, generation));
+    }
+    operation
+}
 
 /// One producer slot: the child (if any) and the recorded belief about it.
 ///
@@ -55,7 +245,7 @@ use crate::prodexec::{after, Producer, Step, Termination};
 /// across the whole signal-then-record sequence, so no step can act on a
 /// child another step is in the middle of reaping.
 pub struct ProducerSlot {
-    inner: Mutex<Inner>,
+    inner: Arc<Mutex<Inner>>,
 }
 
 struct Inner {
@@ -66,21 +256,23 @@ struct Inner {
     /// Capacity follows the exact child, not its pipe reader or epoch.
     resources: Option<Box<dyn Send>>,
     belief: Producer,
+    registration: Option<ProducerRegistration>,
+    reaping: Option<Arc<ReapOperation>>,
+    hooks: Arc<dyn ProducerReapHooks>,
 }
 
 impl Drop for Inner {
     fn drop(&mut self) {
-        if let Some(mut child) = self.child.take() {
-            let _ = child.start_kill();
-            let child_job = self.child_job.take();
-            let resources = self.resources.take();
-            if let Ok(runtime) = tokio::runtime::Handle::try_current() {
-                runtime.spawn(async move {
-                    let _child_job = child_job;
-                    let _resources = resources;
-                    let _ = child.wait().await;
-                });
-            }
+        if let Some(child) = self.child.take() {
+            owned_reap(
+                child,
+                self.child_job.take(),
+                self.resources.take(),
+                self.registration.take(),
+                Arc::clone(&self.hooks),
+                Weak::new(),
+                self.belief,
+            );
         }
     }
 }
@@ -102,14 +294,17 @@ impl ProducerSlot {
     /// starts from — absent, having produced nothing.
     pub fn new() -> ProducerSlot {
         ProducerSlot {
-            inner: Mutex::new(Inner {
+            inner: Arc::new(Mutex::new(Inner {
                 child: None,
                 child_job: None,
                 resources: None,
+                registration: None,
+                reaping: None,
+                hooks: Arc::new(ActualProducerWait),
                 belief: Producer::Absent {
                     produced_through: None,
                 },
-            }),
+            })),
         }
     }
 
@@ -143,6 +338,7 @@ impl ProducerSlot {
     }
 
     /// Attach a child together with its descendant-lifetime guard.
+    #[cfg(test)]
     pub async fn attach_job_owned(
         &self,
         child: Child,
@@ -154,6 +350,35 @@ impl ProducerSlot {
             .await;
     }
 
+    pub(crate) async fn attach_registered_job_owned(
+        &self,
+        child: Child,
+        child_job: crate::process_control::ChildJob,
+        at: u32,
+        resources: Option<Box<dyn Send>>,
+    ) -> (ProducerRegistration, ProducerWriters) {
+        let (sender, receiver) = tokio::sync::oneshot::channel();
+        let registration = ProducerRegistration(Arc::new(GenerationLifetime {
+            identity: Arc::new(()),
+            writers: Mutex::new(Some(receiver)),
+            receipt: StdMutex::new(None),
+            settled: Notify::new(),
+        }));
+        self.attach_resources_registered(
+            child,
+            Some(child_job),
+            at,
+            resources,
+            Some(registration.clone()),
+        )
+        .await;
+        (registration, ProducerWriters(sender))
+    }
+    #[cfg(test)]
+    pub(crate) async fn set_reap_hooks(&self, hooks: Arc<dyn ProducerReapHooks>) {
+        self.inner.lock().await.hooks = hooks;
+    }
+
     async fn attach_resources(
         &self,
         child: Child,
@@ -161,15 +386,35 @@ impl ProducerSlot {
         at: u32,
         resources: Option<Box<dyn Send>>,
     ) {
-        let mut inner = self.inner.lock().await;
-        debug_assert!(
-            inner.child.is_none(),
-            "attach expects the empty slot NeedsSpawn left behind"
-        );
-        inner.child = Some(child);
-        inner.child_job = child_job;
-        inner.resources = resources;
-        inner.belief = after(inner.belief, Step::Start { at });
+        self.attach_resources_registered(child, child_job, at, resources, None)
+            .await;
+    }
+    async fn attach_resources_registered(
+        &self,
+        child: Child,
+        child_job: Option<crate::process_control::ChildJob>,
+        at: u32,
+        resources: Option<Box<dyn Send>>,
+        registration: Option<ProducerRegistration>,
+    ) {
+        loop {
+            let mut inner = self.inner.lock().await;
+            if let Some(reaping) = inner.reaping.clone() {
+                drop(inner);
+                reaping.wait().await;
+                continue;
+            }
+            assert!(
+                inner.child.is_none(),
+                "attach expects the empty slot NeedsSpawn left behind"
+            );
+            inner.child = Some(child);
+            inner.child_job = child_job;
+            inner.resources = resources;
+            inner.registration = registration;
+            inner.belief = after(inner.belief, Step::Start { at });
+            return;
+        }
     }
 
     /// Record produced-through progress from a running generation's sink.
@@ -204,7 +449,93 @@ impl ProducerSlot {
     /// caller's bug, and recording an operation that did not happen would
     /// paper over it in the worst possible way.
     pub async fn perform(&self, step: Step, touch: impl FnOnce()) -> io::Result<Performed> {
-        let mut inner = self.inner.lock().await;
+        self.perform_for_generation(None, step, touch).await
+    }
+    /// Start exact-generation retirement without waiting for its own writers.
+    /// Returns whether this call acquired the actual process for retirement.
+    pub(crate) async fn request_registered_retirement(
+        &self,
+        generation: &ProducerRegistration,
+    ) -> io::Result<bool> {
+        let mut state = self.inner.lock().await;
+        if !state
+            .registration
+            .as_ref()
+            .is_some_and(|current| Arc::ptr_eq(&current.0, &generation.0))
+        {
+            return if generation.confirmed_reap().is_some() {
+                Ok(false)
+            } else {
+                Err(no_child())
+            };
+        }
+        if state.reaping.is_some() {
+            return Ok(false);
+        }
+        let child = state.child.take().ok_or_else(no_child)?;
+        let next = after(
+            state.belief,
+            Step::Terminate {
+                why: Termination::Idle,
+            },
+        );
+        let operation = owned_reap(
+            child,
+            state.child_job.take(),
+            state.resources.take(),
+            state.registration.clone(),
+            Arc::clone(&state.hooks),
+            Arc::downgrade(&self.inner),
+            next,
+        );
+        state.reaping = Some(operation);
+        Ok(true)
+    }
+    pub(crate) async fn wait_registered_retirement(
+        &self,
+        generation: &ProducerRegistration,
+    ) -> io::Result<ConfirmedProducerReap> {
+        loop {
+            if let Some(receipt) = generation.confirmed_reap() {
+                return Ok(receipt);
+            }
+            let state = self.inner.lock().await;
+            if !state
+                .registration
+                .as_ref()
+                .is_some_and(|current| Arc::ptr_eq(&current.0, &generation.0))
+            {
+                return Err(no_child());
+            }
+            let operation = state.reaping.clone().ok_or_else(no_child)?;
+            drop(state);
+            operation.wait().await;
+        }
+    }
+    async fn perform_for_generation(
+        &self,
+        generation: Option<&ProducerRegistration>,
+        step: Step,
+        touch: impl FnOnce(),
+    ) -> io::Result<Performed> {
+        let mut inner = loop {
+            let state = self.inner.lock().await;
+            if let Some(generation) = generation {
+                if !state
+                    .registration
+                    .as_ref()
+                    .is_some_and(|current| Arc::ptr_eq(&current.0, &generation.0))
+                {
+                    return Err(no_child());
+                }
+            }
+            if let Some(reaping) = state.reaping.clone() {
+                drop(state);
+                reaping.wait().await;
+                continue;
+            }
+            break state;
+        };
         match step {
             // Nothing about the process changes; the belief routing still
             // goes through `after` so this file decides nothing.
@@ -260,39 +591,38 @@ impl ProducerSlot {
                 Ok(Performed::Done)
             }
 
-            Step::Terminate { .. } => {
-                let child = inner.child.as_mut().ok_or_else(no_child)?;
-                // SIGKILL and a reap. `Child::kill` is `start_kill` then
-                // `wait`, and SIGKILL still works on a stopped process.
-                child.kill().await?;
-                inner.child = None;
-                inner.child_job = None;
-                inner.resources = None;
-                inner.belief = after(inner.belief, step);
-                Ok(Performed::Done)
-            }
-
-            Step::Restart { at } => {
-                if let Some(child) = inner.child.as_mut() {
-                    child.kill().await?;
-                    inner.child = None;
-                    inner.child_job = None;
-                    inner.resources = None;
-                }
-                // This layer performs only the terminate half of a restart;
-                // the start half is the caller's spawn, recorded by `attach`.
-                // `after` reads nothing from the `why`, so `Idle` here records
-                // exactly what happened either way: the process is gone, its
-                // progress remembered. Composed with `attach`'s `Start { at }`
-                // this lands on the same belief `after(_, Restart { at })`
-                // answers — but only once the spawn is real.
-                inner.belief = after(
-                    inner.belief,
-                    Step::Terminate {
-                        why: Termination::Idle,
-                    },
+            Step::Terminate { .. } | Step::Restart { .. } => {
+                let next = match step {
+                    Step::Restart { .. } => after(
+                        inner.belief,
+                        Step::Terminate {
+                            why: Termination::Idle,
+                        },
+                    ),
+                    _ => after(inner.belief, step),
+                };
+                let Some(child) = inner.child.take() else {
+                    return match step {
+                        Step::Restart { at } => Ok(Performed::NeedsSpawn { at }),
+                        _ => Err(no_child()),
+                    };
+                };
+                let operation = owned_reap(
+                    child,
+                    inner.child_job.take(),
+                    inner.resources.take(),
+                    inner.registration.clone(),
+                    Arc::clone(&inner.hooks),
+                    Arc::downgrade(&self.inner),
+                    next,
                 );
-                Ok(Performed::NeedsSpawn { at })
+                inner.reaping = Some(Arc::clone(&operation));
+                drop(inner);
+                operation.wait().await;
+                Ok(match step {
+                    Step::Restart { at } => Performed::NeedsSpawn { at },
+                    _ => Performed::Done,
+                })
             }
         }
     }
@@ -386,6 +716,63 @@ mod tests {
         .await
         .expect("owned reaper releases capacity");
         assert!(is_reaped(pid).await);
+    }
+
+    #[tokio::test]
+    async fn an_abandoned_writer_barrier_still_releases_the_reaped_generation() {
+        let admissions = crate::admission::Admissions::new();
+        let slot = super::ProducerSlot::new();
+        let child = sleeper();
+        let pid = child.id().expect("child pid");
+        let child_job = crate::process_control::ChildJob::attach(&child).expect("child job");
+        let permit = admissions
+            .try_admit_software(2, 2, crate::admission::Priority::Live)
+            .expect("encoder permit");
+        let (generation, writers) = slot
+            .attach_registered_job_owned(child, child_job, 0, Some(Box::new(permit)))
+            .await;
+        // The writer task is gone without settling: a panic drops its barrier.
+        drop(writers);
+        assert!(slot
+            .request_registered_retirement(&generation)
+            .await
+            .expect("owned retirement"));
+        let receipt = tokio::time::timeout(
+            Duration::from_secs(5),
+            slot.wait_registered_retirement(&generation),
+        )
+        .await
+        .expect("an abandoned writer never parks the reaper")
+        .expect("reaped generation");
+        assert!(receipt.matches(&generation));
+        assert_eq!(receipt.writers(), super::WriterSettlement::Abandoned);
+        assert_eq!(admissions.software_in_use(), 0);
+        assert!(is_reaped(pid).await);
+        // The slot itself is free again: a respawn attaches instead of
+        // waiting on a reaper parked for an owner that no longer exists.
+        tokio::time::timeout(Duration::from_secs(5), slot.attach(sleeper(), 0))
+            .await
+            .expect("the slot is released for the next generation");
+        slot.perform(terminate(), || {}).await.expect("cleanup");
+    }
+
+    #[tokio::test]
+    async fn a_settled_writer_barrier_is_recorded_as_settled() {
+        let slot = super::ProducerSlot::new();
+        let child = sleeper();
+        let child_job = crate::process_control::ChildJob::attach(&child).expect("child job");
+        let (generation, writers) = slot
+            .attach_registered_job_owned(child, child_job, 0, None)
+            .await;
+        writers.settled();
+        slot.request_registered_retirement(&generation)
+            .await
+            .expect("owned retirement");
+        let receipt = slot
+            .wait_registered_retirement(&generation)
+            .await
+            .expect("reaped generation");
+        assert_eq!(receipt.writers(), super::WriterSettlement::Settled);
     }
 
     use super::*;
