@@ -1006,6 +1006,60 @@ const TABLES: &[TablePlan] = &[
         sealed_columns: &[],
         parent_first: false,
     },
+    // The three continuous-quality tables travel with `media_sessions`: an
+    // imported active parent without its ledger would lose the reserved
+    // intervals that keep scheduled media from eviction, and without its
+    // cancellation receipts and preparation owners a cancelled quality intent
+    // could be restaged or committed by the rebuilt cluster. All three are
+    // brand-new tables, so `minimum_schema` is the whole story.
+    TablePlan {
+        name: "quality_cancellation_receipts",
+        columns: &[
+            "receipt_key",
+            "generation",
+            "session_id",
+            "owner_node_id",
+            "owner_epoch",
+            "client_instance_id",
+            "lifetime_id",
+            "recipe_revision",
+            "accepted_sequence",
+            "state",
+            "created_at_ms",
+            "updated_at_ms",
+        ],
+        order_by: "receipt_key",
+        minimum_schema: super::sqlite::QUALITY_CANCELLATION_SQLITE_SCHEMA,
+        import_filter: None,
+        sealed_columns: &[],
+        parent_first: false,
+    },
+    TablePlan {
+        name: "quality_preparation_owners",
+        columns: &["staged_incarnation_id", "cancellation_key"],
+        order_by: "staged_incarnation_id",
+        minimum_schema: super::sqlite::QUALITY_CANCELLATION_SQLITE_SCHEMA,
+        import_filter: None,
+        sealed_columns: &[],
+        parent_first: false,
+    },
+    TablePlan {
+        name: "continuous_quality_ledgers",
+        columns: &[
+            "generation",
+            "owner_node_id",
+            "owner_epoch",
+            "revision",
+            "attachment_id",
+            "ledger_json",
+            "updated_at_ms",
+        ],
+        order_by: "generation",
+        minimum_schema: super::sqlite::QUALITY_LEDGER_SQLITE_SCHEMA,
+        import_filter: None,
+        sealed_columns: &[],
+        parent_first: false,
+    },
     TablePlan {
         name: "pretranscode_jobs",
         columns: &[
@@ -3505,6 +3559,9 @@ mod tests {
         assert!(names.contains(&"media_playback_pointers"));
         assert!(names.contains(&"media_sessions"));
         assert!(names.contains(&"media_session_terminal_acks"));
+        assert!(names.contains(&"quality_cancellation_receipts"));
+        assert!(names.contains(&"quality_preparation_owners"));
+        assert!(names.contains(&"continuous_quality_ledgers"));
         assert!(names.contains(&"cache_storage_members"));
         assert!(names.contains(&"cache_consumer_pins"));
         assert!(names.contains(&"cluster_fragment_index_sources"));
@@ -3551,7 +3608,7 @@ mod tests {
         assert!(names.contains(&"jellyfin_login_tokens"));
         assert!(names.contains(&"jellyfin_entity_ids"));
         assert!(names.contains(&"jellyfin_plays"));
-        assert_eq!(names.len(), 74, "review every imported durable table");
+        assert_eq!(names.len(), 77, "review every imported durable table");
     }
 
     /// A source from before the pointer fence has no revision to attribute its

@@ -479,6 +479,8 @@ function rememberPlaybackTransportIntent(v,p){
 function applyPlaybackTransportIntent(v,p){
   if(!v||!p||PLAYER!==p) return;
   rememberPlaybackTransportIntent(v,p);
+  const proof=p.preparedCommitting;
+  if(proof&&typeof proof.frameBudgetUpdate==="function") proof.frameBudgetUpdate();
   if(p.wantsPlayback){
     const events=playbackTransportEvents(v), token=playbackTransportMarker(v,p,"play","attach_or_resume");
     if(v.paused) events.play.push(token);
@@ -497,9 +499,13 @@ function handlePlaybackTransportEvent(v,p,event){
     if(!v.paused) return; // queued native edge superseded by a newer Play
     if(v.ended||v.error) return;
     p.wantsPlayback=false;
+    const proof=p.preparedCommitting;
+    if(proof&&typeof proof.frameBudgetUpdate==="function") proof.frameBudgetUpdate();
     if(typeof play==='function'&&play.pendingIntent&&PLAY_OPEN_GATE.current(play.pendingIntent.attempt))
       play.pendingIntent.wantsPlayback=false;
-    supersedePlaybackControlIntent(p);
+    // OS media keys, PiP and headset controls are viewer Pause too. Pause is
+    // not a reason to abandon a pending manual quality choice (§4.2).
+    supersedePlaybackControlIntent(p,{preserveContinuousManualQuality:true});
     pauseHlsStartup(p);
     endWait(false);
     // §3.1: a `buffering` fault is about a player that WANTS media, and this
@@ -517,9 +523,11 @@ function handlePlaybackTransportEvent(v,p,event){
     logPlaybackTransportRecord(playbackTransportRecord(v,p,"play","native_unknown","unmatched_media_event"),true,v);
     if(v.paused) return; // queued native edge superseded by a newer Pause
     p.wantsPlayback=true;
+    const proof=p.preparedCommitting;
+    if(proof&&typeof proof.frameBudgetUpdate==="function") proof.frameBudgetUpdate();
     if(typeof play==='function'&&play.pendingIntent&&PLAY_OPEN_GATE.current(play.pendingIntent.attempt))
       play.pendingIntent.wantsPlayback=true;
-    supersedePlaybackControlIntent(p);
+    supersedePlaybackControlIntent(p,{preserveContinuousManualQuality:true});
     resumeHlsStartup(v,p);
     // Symmetry, and nothing more: resuming raises no fault back. If the buffer
     // is still empty the element fires `waiting` again and THAT is the raise.

@@ -16,7 +16,8 @@
             Pipeline::Cpu,
         );
         let request = SessionRequest {
-            quality_catalog: None,
+            continuous_media: None,
+quality_catalog: None,
             candidate_context: None,
             vod_only: false,
             passive_vod: false,
@@ -44,7 +45,8 @@
         // these guards have to name. Asserting against anything else lets a
         // field silently leave the real key while the test stays green.
         let shifted = SessionRequest {
-            quality_catalog: None,
+            continuous_media: None,
+quality_catalog: None,
             candidate_context: None,
             vod_only: false,
             passive_vod: false,
@@ -66,7 +68,8 @@
             "one request id reused by two users must not collide"
         );
         let other_player = SessionRequest {
-            quality_catalog: None,
+            continuous_media: None,
+quality_catalog: None,
             candidate_context: None,
             vod_only: false,
             passive_vod: false,
@@ -126,7 +129,8 @@
         // The same key asking for something else is a mistake worth naming,
         // not a quiet second stream.
         let different = SessionRequest {
-            quality_catalog: None,
+            continuous_media: None,
+quality_catalog: None,
             candidate_context: None,
             vod_only: false,
             passive_vod: false,
@@ -142,7 +146,8 @@
 
         // A fresh key from the same player supersedes, as any restart does.
         let next = SessionRequest {
-            quality_catalog: None,
+            continuous_media: None,
+quality_catalog: None,
             candidate_context: None,
             vod_only: false,
             passive_vod: false,
@@ -185,7 +190,8 @@
             Pipeline::Cpu,
         );
         let request = SessionRequest {
-            quality_catalog: None,
+            continuous_media: None,
+quality_catalog: None,
             candidate_context: None,
             vod_only: false,
             passive_vod: false,
@@ -266,7 +272,8 @@
             Pipeline::Cpu,
         );
         let request = SessionRequest {
-            quality_catalog: None,
+            continuous_media: None,
+quality_catalog: None,
             candidate_context: None,
             vod_only: false,
             passive_vod: false,
@@ -293,7 +300,8 @@
         assert!(mgr.create_session(&request, "paul").await.is_err());
 
         let retry = SessionRequest {
-            quality_catalog: None,
+            continuous_media: None,
+quality_catalog: None,
             candidate_context: None,
             vod_only: false,
             passive_vod: false,
@@ -330,7 +338,8 @@
             Pipeline::Cpu,
         );
         let original = SessionRequest {
-            quality_catalog: None,
+            continuous_media: None,
+quality_catalog: None,
             candidate_context: None,
             vod_only: false,
             passive_vod: false,
@@ -376,7 +385,8 @@
         // body is still Auto, so its initial pre-claim numeric answer is not
         // allowed to create a conflict or become a second ladder step.
         let replay = SessionRequest {
-            quality_catalog: None,
+            continuous_media: None,
+quality_catalog: None,
             candidate_context: None,
             vod_only: false,
             passive_vod: false,
@@ -494,7 +504,8 @@
         .await;
 
         let lower = SessionRequest {
-            quality_catalog: None,
+            continuous_media: None,
+quality_catalog: None,
             candidate_context: None,
             vod_only: false,
             passive_vod: false,
@@ -836,7 +847,8 @@
         drop(claim);
 
         let foreign = SessionRequest {
-            quality_catalog: None,
+            continuous_media: None,
+quality_catalog: None,
             candidate_context: None,
             vod_only: false,
             passive_vod: false,
@@ -1253,7 +1265,8 @@
         .await;
 
         let request = SessionRequest {
-            quality_catalog: None,
+            continuous_media: None,
+quality_catalog: None,
             candidate_context: None,
             vod_only: false,
             passive_vod: false,
@@ -1275,7 +1288,8 @@
         drop(stall_claim);
 
         let track_change = SessionRequest {
-            quality_catalog: None,
+            continuous_media: None,
+quality_catalog: None,
             candidate_context: None,
             vod_only: false,
             passive_vod: false,
@@ -1502,7 +1516,8 @@
         drop(claim);
 
         let device_b = SessionRequest {
-            quality_catalog: None,
+            continuous_media: None,
+quality_catalog: None,
             candidate_context: None,
             vod_only: false,
             passive_vod: false,
@@ -1526,7 +1541,8 @@
         drop(device_b_claim);
 
         let foreign_user = SessionRequest {
-            quality_catalog: None,
+            continuous_media: None,
+quality_catalog: None,
             candidate_context: None,
             vod_only: false,
             passive_vod: false,
@@ -2705,4 +2721,130 @@ scope = "test"
             .await
             .expect("resolve plan");
         (plan, mgr, work, cache)
+    }
+
+    #[test]
+    fn continuous_media_roles_have_strict_wire_and_distinct_request_identity() {
+        let mut request = SessionRequest {
+            quality_catalog: None,
+            continuous_media: None,
+            candidate_context: None,
+            vod_only: false,
+            passive_vod: false,
+            finite_bitrate_limit_bps: None,
+            file_id: 1,
+            playback_id: "continuous-role".into(),
+            request_id: None,
+            control_sequence: None,
+            automatic: false,
+            previous_session_id: None,
+            reopen_reason: None,
+            kind: SessionKind::Transcode { height: 360 },
+            start_seconds: 0.0,
+            audio_index: None,
+            audio_delivery: None,
+            audio_claim: None,
+            subtitle_burn: None,
+            audio_offset_ms: 0,
+            hdr10: false,
+            presentation: Presentation::Vod,
+            transport: None,
+            block_budget_secs: None,
+        };
+        let legacy = serde_json::to_value(&request).expect("legacy request");
+        assert!(legacy.get("continuous_media").is_none());
+        let legacy_identity = request.intent_fingerprint("viewer");
+        request.continuous_media = Some(Box::new(ContinuousMediaRequest {
+            controlled: false,
+            autonomous_companion: None,
+            companion_catalog: None,
+            family_descriptor: None,
+            companion_context: None,
+            version: 1,
+            family_generation: uuid::Uuid::new_v4().to_string(),
+            role: ContinuousMediaRole::Video,
+        }));
+        assert!(request.continuous_media.as_ref().expect("continuous media role").valid_for(&request));
+        assert!(crate::media_sessions::worker_session_request_is_valid(&request));
+        request.candidate_context = Some(Box::new(crate::transcode::continuous_test_candidate_context(plurx_core::playback::candidate::CandidateId([7; 16]), [8; 32], 72)));
+        assert!(crate::media_sessions::worker_session_request_is_valid(&request));
+        let trusted_wire = serde_json::to_value(&request).expect("trusted context stays local");
+        assert!(trusted_wire.get("candidate_context").is_none());
+        let decoded: SessionRequest = serde_json::from_value(trusted_wire).expect("worker wire");
+        assert!(decoded.candidate_context.is_none());
+        request.candidate_context.as_mut().expect("context").normalized_geometry = false;
+        assert!(!crate::media_sessions::worker_session_request_is_valid(&request));
+        request.candidate_context.as_mut().expect("context").normalized_geometry = true;
+        request.candidate_context.as_mut().expect("context").grade = OutputGrade::Hdr10;
+        assert!(!crate::media_sessions::worker_session_request_is_valid(&request));
+        request.candidate_context.as_mut().expect("context").grade = OutputGrade::Sdr;
+        request.candidate_context.as_mut().expect("context").profile = Some(transcode::AutoQualityRateProfile::H264Sdr1440P30V1);
+        assert!(!crate::media_sessions::worker_session_request_is_valid(&request));
+        request.kind = SessionKind::Transcode { height: 1440 };
+        assert!(crate::media_sessions::worker_session_request_is_valid(&request));
+        request.kind = SessionKind::Transcode { height: 360 };
+        request.candidate_context = None;
+        let video_identity = request.intent_fingerprint("viewer");
+        assert_ne!(video_identity, legacy_identity);
+        let plain_role_wire = serde_json::to_value(&request).expect("plain role wire");
+        assert!(plain_role_wire["continuous_media"].get("autonomous_companion").is_none());
+        let companion_id = plurx_core::playback::candidate::CandidateId([9; 16]);
+        let media = request.continuous_media.as_mut().expect("continuous role");
+        media.autonomous_companion = Some(companion_id);
+        media.companion_context = Some(Box::new(ContinuousCompanionContext {
+            height: 720,
+            candidate: crate::transcode::continuous_test_candidate_context(companion_id, [10; 32], 72),
+        }));
+        assert!(crate::media_sessions::worker_session_request_is_valid(&request));
+        assert_ne!(request.intent_fingerprint("viewer"), video_identity);
+        let companion_wire = serde_json::to_value(&request).expect("companion wire");
+        assert!(companion_wire["continuous_media"].get("companion_context").is_none());
+        let decoded: SessionRequest = serde_json::from_value(companion_wire).expect("companion worker wire");
+        assert_eq!(decoded.continuous_media.as_ref().expect("role").autonomous_companion, Some(companion_id));
+        assert!(decoded.continuous_media.as_ref().expect("role").companion_context.is_none());
+        let mut canonical = crate::transcode::continuous_test_candidate_context(companion_id, [10;32], 72).selected_candidate;
+        canonical.id = plurx_core::playback::candidate::CandidateId::for_recipe_digest(canonical.recipe_digest);
+        let media = request.continuous_media.as_mut().expect("role");
+        media.autonomous_companion = Some(canonical.id);
+        media.companion_context = None;
+        media.companion_catalog = Some(Box::new(canonical));
+        assert!(crate::media_sessions::worker_session_request_is_valid(&request));
+        let wire = serde_json::to_value(&request).expect("canonical companion wire");
+        let decoded: SessionRequest = serde_json::from_value(wire).expect("canonical companion parse");
+        assert!(decoded.continuous_media.as_ref().expect("role").companion_catalog.is_some());
+        request.continuous_media.as_mut().expect("role").companion_catalog.as_mut().expect("catalog").recipe_digest = [11;32];
+        assert!(!crate::media_sessions::worker_session_request_is_valid(&request));
+        let media = request.continuous_media.as_mut().expect("role");
+        media.companion_catalog = None;
+        media.autonomous_companion = Some(companion_id);
+        media.companion_context = Some(Box::new(ContinuousCompanionContext {
+            height: 72,
+            candidate: crate::transcode::continuous_test_candidate_context(companion_id, [10;32], 72),
+        }));
+        request.continuous_media.as_mut().expect("role").role = ContinuousMediaRole::SharedAudio;
+        assert!(!crate::media_sessions::worker_session_request_is_valid(&request));
+        let media = request.continuous_media.as_mut().expect("role");
+        media.role = ContinuousMediaRole::Video;
+        media.autonomous_companion = None;
+        assert!(!crate::media_sessions::worker_session_request_is_valid(&request));
+        request.continuous_media.as_mut().expect("role").companion_context = None;
+        assert_eq!(request.intent_fingerprint("viewer"), video_identity);
+        let mut wire = serde_json::to_value(&request).expect("continuous request");
+        wire["continuous_media"]["ignored_role"] = true.into();
+        assert!(serde_json::from_value::<SessionRequest>(wire).is_err());
+        request.automatic = true;
+        let fixed_rung_identity = request.intent_fingerprint("viewer");
+        request.kind = SessionKind::Transcode { height: 720 };
+        assert_ne!(request.intent_fingerprint("viewer"), fixed_rung_identity);
+        request.kind = SessionKind::Transcode { height: 360 };
+        request.continuous_media.as_mut().expect("continuous media role").role = ContinuousMediaRole::SharedAudio;
+        assert_ne!(request.intent_fingerprint("viewer"), video_identity);
+        request.continuous_media.as_mut().expect("continuous media role").version = 2;
+        assert!(!crate::media_sessions::worker_session_request_is_valid(&request));
+        request.continuous_media.as_mut().expect("continuous media role").version = 1;
+        request.hdr10 = true;
+        assert!(!crate::media_sessions::worker_session_request_is_valid(&request));
+        request.hdr10 = false;
+        request.presentation = Presentation::Live;
+        assert!(!request.continuous_media.as_ref().expect("continuous media role").valid_for(&request));
     }

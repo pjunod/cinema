@@ -159,7 +159,7 @@
     /// added to `http/hls/` without being listed here fails each scan instead
     /// of going unread by it. Test children (`tests.rs`, `tests/`) quote
     /// production code as literals and are not product sources.
-    const HLS_PRODUCT_SOURCES: [(&str, &str); 19] = [
+    const HLS_PRODUCT_SOURCES: [(&str, &str); 21] = [
         ("../hls.rs", include_str!("../../hls.rs")),
         ("hooks.rs", include_str!("../hooks.rs")),
         ("session_guard.rs", include_str!("../session_guard.rs")),
@@ -179,6 +179,8 @@
         ("subtitle_names.rs", include_str!("../subtitle_names.rs")),
         ("playlist_text.rs", include_str!("../playlist_text.rs")),
         ("segment.rs", include_str!("../segment.rs")),
+        ("quality_control.rs", include_str!("../quality_control.rs")),
+        ("quality_schedule.rs", include_str!("../quality_schedule.rs")),
         (
             "candidate_recovery.rs",
             include_str!("../candidate_recovery.rs"),
@@ -923,11 +925,12 @@
             typeless_playlist: true,
             library_channel: None,
             request: crate::transcode::SessionRequest {
+                continuous_media: None,
                 quality_catalog: None,
-            candidate_context: None,
-            vod_only: false,
-            passive_vod: false,
-            finite_bitrate_limit_bps: None,
+                candidate_context: None,
+                vod_only: false,
+                passive_vod: false,
+                finite_bitrate_limit_bps: None,
                 control_sequence: None,
                 file_id: 1,
                 playback_id: "control-transition".to_owned(),
@@ -1867,6 +1870,7 @@
         fixture
             .store
             .prepare_media_session(&plurx_core::domain::MediaSessionPreparation {
+                quality_cancellation_key: None,
                 expected_desired_revision: None,
                 incarnation_id: successor_incarnation.clone(),
                 session_id: successor_session.clone(),
@@ -2102,11 +2106,12 @@
             typeless_playlist: true,
             library_channel: None,
             request: crate::transcode::SessionRequest {
+                continuous_media: None,
                 quality_catalog: None,
-            candidate_context: None,
-            vod_only: false,
-            passive_vod: false,
-            finite_bitrate_limit_bps: None,
+                candidate_context: None,
+                vod_only: false,
+                passive_vod: false,
+                finite_bitrate_limit_bps: None,
                 control_sequence: None,
                 file_id: fixture.file_id(),
                 playback_id: "terminal-cancellation".to_owned(),
@@ -2378,11 +2383,12 @@
                 typeless_playlist: true,
                 library_channel: None,
                 request: crate::transcode::SessionRequest {
+                    continuous_media: None,
                     quality_catalog: None,
-            candidate_context: None,
-            vod_only: false,
-            passive_vod: false,
-            finite_bitrate_limit_bps: None,
+                    candidate_context: None,
+                    vod_only: false,
+                    passive_vod: false,
+                    finite_bitrate_limit_bps: None,
                     control_sequence: None,
                     file_id: fixture.file_id(),
                     playback_id: format!("terminal-{label}"),

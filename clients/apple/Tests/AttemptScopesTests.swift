@@ -116,7 +116,13 @@ final class AttemptScopesTests: XCTestCase {
         .autoInitialLayout: [.initialDecision],
         .autoCatalogRefresh: [.lifecycle, .viewerAction],
         .autoQualityOffer: [.lifecycle, .viewerAction],
-        .autoQualityRollback: [.lifecycle, .open, .viewerAction],
+        // Rollback keeps the viewer's newer transport intent, so it answers
+        // to the title, the attachment and a seek, never to a Pause.
+        .preparedPipelineRollback: [.lifecycle, .open, .seek],
+        // `viewerActionEpoch == commitViewerEpoch`, at every commit suspension.
+        .preparedCommit: [.viewerAction],
+        // `self.viewerActionEpoch == actionEpoch` after the intent report.
+        .retainedQualityRestart: [.viewerAction],
     ]
 
     func testEachMigratedFenceComparesExactlyTheFieldsItsConjunctionDid() {
@@ -138,7 +144,8 @@ final class AttemptScopesTests: XCTestCase {
 
     /// A viewer Pause moves only `viewerActionEpoch`. Action continuations
     /// refuse it, while the attachment-scoped status poll keeps collecting
-    /// recovery evidence through Pause.
+    /// recovery evidence through Pause and a prepared-pipeline rollback keeps
+    /// the viewer's newer transport intent.
     @MainActor
     func testEveryMigratedFenceRefusesAContinuationAcrossAViewerPause() {
         for fence in AttemptFence.allCases {
@@ -155,9 +162,10 @@ final class AttemptScopesTests: XCTestCase {
                 [.viewerAction],
                 "a Pause is expected to move the viewer-action epoch and nothing else"
             )
-            if fence == .recoveryEvidencePoll || fence == .seekTelemetrySupersession || fence == .autoInitialLayout {
+            if fence == .recoveryEvidencePoll || fence == .seekTelemetrySupersession || fence == .autoInitialLayout
+                || fence == .preparedPipelineRollback {
                 XCTAssertTrue(controller.attemptStillCurrent(captured, fence: fence),
-                              "status sampling and seek telemetry must survive a viewer Pause")
+                              "status sampling, seek telemetry and prepared rollback must survive a viewer Pause")
                 XCTAssertNil(controller.lastAttemptStaleDetail)
             } else {
                 XCTAssertFalse(
@@ -199,7 +207,9 @@ final class AttemptScopesTests: XCTestCase {
             .autoInitialLayout: .initialDecision,
             .autoCatalogRefresh: .lifecycle,
             .autoQualityOffer: .lifecycle,
-            .autoQualityRollback: .lifecycle,
+            .preparedPipelineRollback: .lifecycle,
+            .preparedCommit: .viewerAction,
+            .retainedQualityRestart: .viewerAction,
         ]
         for fence in AttemptFence.allCases {
             // The intent fences are intentionally scoped to the seek and

@@ -428,6 +428,10 @@ async function switchAutoRung(currentHeight,decision){
     }
     const outcome=await requestQualityChange(p,"auto-quality",reopen,
       {from:currentHeight,to:decision.height,switchReason:decision.reason});
+    if(outcome==="continuous"&&p.directedChange&&!p.directedChange.settled){
+      retainClaim=true;
+      return;
+    }
     if(outcome==="prepared"&&p.directedChange&&!p.directedChange.settled){
       const change=p.directedChange;
       change.commitTimer=setTimeout(()=>fallBackDirectedChange(p,change,"commit_timeout"),
@@ -607,7 +611,8 @@ async function refreshQualityCandidates(p){
       {audio:selectedAudioIndex(p),subtitle:p.curSub>=0?p.curSub:-1,audio_offset_ms:p.aoffset||0},null,p);
     if(PLAYER!==p||p.mediaAttachment!==attachment||p.controlIntentGeneration!==intent
       ||candidateQualityContext(p)!==key) return false;
-    p.qualityCandidates=Array.isArray(decision.quality_candidates)?decision.quality_candidates:null;
+    p.qualityCandidates=Array.isArray(decision.quality_candidates)
+      ?continuousQualityBoundCatalog(decision.quality_candidates,p.continuousQuality&&!p.continuousQuality.closed?p.continuousQuality.family:null):null;
     p.measuredCandidateOutputs=Array.isArray(decision.measured_candidate_outputs)?decision.measured_candidate_outputs:null;
     p.capsSnapshot=decision._capsSnapshot||currentCapsDocument();
     p.abr.candidateContext=key;
@@ -655,16 +660,37 @@ function measuredCandidateOutput(p,candidate){
   return matches.length===1?matches[0]:null;
 }
 function measuredCandidateCatalog(p,candidates){
+  // A member of the open continuous family is costed by the family's own
+  // declared delivery budget, which continuousQualityBoundCatalog already
+  // bound onto the row; every other unmeasured advertised peak is discarded.
+  const family=p.continuousQuality&&!p.continuousQuality.closed?p.continuousQuality.family:null;
+  const members=new Set(family&&Array.isArray(family.video)?family.video.map(row=>row.candidate_id):[]);
   return (candidates||[]).map(candidate=>{
     const output=measuredCandidateOutput(p,candidate);
+    if(!output&&members.has(candidate.id)) return {...candidate,average_bps:null};
     return {...candidate,average_bps:output?.average_bps??null,peak_bps:output?.peak_bps??null};
   });
 }
+function continuousFamilyPeak(p,candidateId){
+  // The open family's declared, server-enforced container-inclusive budget
+  // (video plus shared audio): an object over it is refused, never served.
+  const family=p.continuousQuality&&!p.continuousQuality.closed?p.continuousQuality.family:null;
+  const row=family&&Array.isArray(family.video)?family.video.find(member=>member.candidate_id===candidateId):null;
+  const peak=row?row.peak_bps+(family.audio?.peak_bps||0):null;
+  return Number.isSafeInteger(peak)&&peak>0?peak:null;
+}
 function candidatePositiveMargin(p,candidate,transfer){
-  const output=measuredCandidateOutput(p,candidate),link=PlaybackPolicy.qualityTransferBps(transfer);
-  return !!(output&&candidateTransferOriginCurrent(transfer)&&transfer?.receipt&&transfer.etag&&transfer.attachment===p.mediaAttachment
-    &&transfer.session_id===p.sessionId&&transfer.candidate_id===p.qualityCandidateId
-    &&link>0&&link>=output.peak_bps*1.8);
+  const link=PlaybackPolicy.qualityTransferBps(transfer);
+  const own=!!(candidateTransferOriginCurrent(transfer)&&transfer.etag&&transfer.attachment===p.mediaAttachment
+    &&transfer.session_id===p.sessionId&&transfer.candidate_id===p.qualityCandidateId&&link>0);
+  // Between members of the open continuous family, cost is the family's
+  // enforced budget and the evidence is a completed family object of this
+  // session. Those role-split objects are not a muxed candidate's output, so
+  // they carry no candidate link receipt and are never reported as one.
+  const family=continuousFamilyPeak(p,candidate?.id);
+  if(family!=null&&continuousFamilyPeak(p,p.qualityCandidateId)!=null) return own&&link>=family*1.8;
+  const output=measuredCandidateOutput(p,candidate);
+  return !!(output&&own&&transfer.receipt&&link>=output.peak_bps*1.8);
 }
 function unknownStageableOriginal(p,candidate){
   if(!candidate||candidate.route!=='remux'||candidate.decoder_compatible!==true
@@ -695,7 +721,8 @@ async function naturalBoundaryQualityCandidate(p,seekIntent){
       {audio:selectedAudioIndex(p),subtitle:p.curSub>=0?p.curSub:-1,audio_offset_ms:p.aoffset||0},controller.signal,p);
     if(PLAYER!==p||p.controlSeek!==seekIntent||p.controlIntentGeneration!==generation
       ||qualityForce()!=='auto'||!Array.isArray(decision.quality_candidates)) return null;
-    const candidates=decision.quality_candidates;
+    const candidates=continuousQualityBoundCatalog(decision.quality_candidates,
+      p.continuousQuality&&!p.continuousQuality.closed?p.continuousQuality.family:null);
     p.measuredCandidateOutputs=Array.isArray(decision.measured_candidate_outputs)?decision.measured_candidate_outputs:null;
     const current=(p.qualityCandidates||[]).find(candidate=>candidate.id===p.qualityCandidateId);
     const progress=p.abr.qualityPressureTransfer, now=performance.now();
@@ -779,6 +806,7 @@ function reportCandidateLinkSample(p,v,cause,now){
 }
 async function switchAutoCandidate(p,v,current,decision){
   if(PLAYER!==p||!decision.candidate||!claimAutoFallback(p)) return false;
+  const standingSelection=playbackControlSelection(p);
   const chosen=decision.candidate, previousCandidateId=p.abr.requestedCandidateId||current.id;
   const copy=chosen.route!=='encode';
   const recovery=decision.emergency||decision.transition==='recover';
@@ -803,14 +831,18 @@ async function switchAutoCandidate(p,v,current,decision){
     p.abr.requestedCandidateId=chosen.id;
     p.autoRequestedHeight=null;
     p.abr.switching=true;
-    const outcome=await requestQualityChange(p,'auto-quality',reopen,move);
+    const outcome=await requestQualityChange(p,'auto-quality',reopen,move,standingSelection);
+    if(outcome==='continuous'&&p.directedChange&&!p.directedChange.settled){
+      retained=true;
+      return true;
+    }
     if(outcome==='prepared'&&p.directedChange&&!p.directedChange.settled){
       const change=p.directedChange;
       change.commitTimer=setTimeout(()=>fallBackDirectedChange(p,change,'commit_timeout'),
         Math.max(0,10000-(performance.now()-change.tappedAt)));
       retained=true;
     }
-    return outcome==='prepared';
+    return outcome==='prepared'||outcome==='continuous';
   }finally{
     if(!retained){p.abr.switching=false;releaseAutoFallback(p);}
   }

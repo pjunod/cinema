@@ -84,6 +84,37 @@ impl PeerTransport {
             None,
         )
         .await
+        .map(|(response, _)| response)
+    }
+
+    /// `request`, plus the peer's `Retry-After` when it is a small
+    /// delay-seconds value, so a relay can hand the owner's hint to the
+    /// client instead of inventing one.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) async fn request_with_retry_after(
+        &self,
+        expected_node_id: &str,
+        base: &str,
+        method: reqwest::Method,
+        path: &str,
+        body: Vec<u8>,
+        deadline: tokio::time::Instant,
+        max_response_bytes: usize,
+        auth_mode: PeerAuthMode,
+    ) -> Result<(PeerResponse, Option<u32>), PeerTransportError> {
+        self.request_with_optional_header(
+            expected_node_id,
+            base,
+            method,
+            path,
+            body,
+            deadline,
+            max_response_bytes,
+            auth_mode,
+            None,
+            None,
+        )
+        .await
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -112,6 +143,7 @@ impl PeerTransport {
             None,
         )
         .await
+        .map(|(response, _)| response)
     }
 
     pub(crate) async fn clock_request(
@@ -133,6 +165,7 @@ impl PeerTransport {
             Some(&guard),
         )
         .await
+        .map(|(response, _)| response)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -148,7 +181,7 @@ impl PeerTransport {
         auth_mode: PeerAuthMode,
         extra_header: Option<(&'static str, &'static str)>,
         clock_guard: Option<&plurx_core::cluster::clock::ClusterClockGuard>,
-    ) -> Result<PeerResponse, PeerTransportError> {
+    ) -> Result<(PeerResponse, Option<u32>), PeerTransportError> {
         let Some(url) = peer_url(base, path) else {
             return Err(PeerTransportError::Unreachable);
         };
@@ -218,6 +251,7 @@ impl PeerTransport {
             .get(RESPONSE_SIGNATURE_HEADER)
             .and_then(|value| value.to_str().ok())
             .map(str::to_owned);
+        let retry_after = retry_after_seconds(response.headers());
         read_then_verify(
             response,
             deadline,
@@ -267,6 +301,7 @@ impl PeerTransport {
             },
         )
         .await
+        .map(|response| (response, retry_after))
     }
 
     /// Send an authenticated peer request but leave the response body as a
@@ -334,6 +369,19 @@ impl PeerTransport {
                 }
             })
     }
+}
+
+/// A peer's `Retry-After` in delay-seconds form, bounded to one minute. An
+/// HTTP-date or anything larger is dropped rather than relayed verbatim.
+pub(crate) fn retry_after_seconds(headers: &reqwest::header::HeaderMap) -> Option<u32> {
+    headers
+        .get(reqwest::header::RETRY_AFTER)?
+        .to_str()
+        .ok()?
+        .trim()
+        .parse::<u32>()
+        .ok()
+        .filter(|seconds| *seconds <= 60)
 }
 
 pub(crate) fn signed_response_payload(status: u16, body: &[u8]) -> Vec<u8> {
@@ -547,6 +595,28 @@ mod tests {
     use axum::Router;
     use bytes::Bytes;
     use futures_util::{stream, StreamExt};
+
+    #[test]
+    fn peer_retry_after_is_bounded_delay_seconds_only() {
+        let header = |value: &str| {
+            let mut headers = reqwest::header::HeaderMap::new();
+            headers.insert(
+                reqwest::header::RETRY_AFTER,
+                value.parse().expect("header value"),
+            );
+            headers
+        };
+        assert_eq!(retry_after_seconds(&header("2")), Some(2));
+        assert_eq!(retry_after_seconds(&header("61")), None);
+        assert_eq!(
+            retry_after_seconds(&header("Wed, 21 Oct 2015 07:28:00 GMT")),
+            None
+        );
+        assert_eq!(
+            retry_after_seconds(&reqwest::header::HeaderMap::new()),
+            None
+        );
+    }
 
     #[test]
     fn exact_header_parser_requires_a_canonical_signed_nonce() {

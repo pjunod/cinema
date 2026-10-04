@@ -350,8 +350,9 @@ function preparedSelectionText(selection){
   return `${selection.height||0}p${grade} ${delivery}${selection.quality_auto?" auto":""}`;
 }
 function preparedHlsAttach(p,state,spare){
+  observeQualityResourceTimings();
   const tgt=bufferTargets(p&&p.bufSegSecs);
-  const voluntary=!!(p.directedChange&&p.directedChange.autoMove&&p.directedChange.autoMove.retainIncumbent);
+  const voluntary=!!(p.directedChange&&(p.directedChange.retainIncumbent||p.directedChange.autoMove?.retainIncumbent));
   const StockLoader=Hls.DefaultConfig&&Hls.DefaultConfig.loader;
   const hls=new Hls({preferManagedMediaSource:false,
     maxBufferLength:voluntary?Math.min(12,tgt.fwd):tgt.fwd,
@@ -653,8 +654,8 @@ async function pollPreparedQualityHealth(p){
 function notePreparedBuffer(p,state){
   const v=/** @type {HTMLVideoElement|null} */ (document.getElementById("video")), spare=preparedVideoElement();
   if(!v||!spare) return;
-  if(p.directedChange&&p.directedChange.autoMove&&p.directedChange.autoMove.retainIncumbent
-    &&(p.waitAt||v.paused||v.seeking||bufferRunway(v)<10)){
+  if(p.directedChange&&(p.directedChange.retainIncumbent||p.directedChange.autoMove?.retainIncumbent)
+    &&(p.waitAt||v.seeking||(!v.paused&&bufferRunway(v)<10))){
     failPreparedReplacement(p,state,"incumbent pressure during voluntary trial");
     return;
   }
@@ -792,8 +793,26 @@ function preparedAlignedBuffered(spare){
 // presenting. Require increasing media-time steps after any alignment seek:
 // a queued pre-seek frame can otherwise step the visible picture backward.
 // Keep the incumbent's audio with its visible picture through this proof.
+// Compare the two decoded pictures at one display instant. Frame cadence
+// comes from adjacent callbacks, including dropped callback frame counts.
+function preparedFrameCadence(previous,current){
+  if(!previous||!current) return null;
+  const frames=current.presentedFrames-previous.presentedFrames;
+  const seconds=current.mediaTime-previous.mediaTime;
+  const interval=seconds/frames;
+  return Number.isInteger(frames)&&frames>0&&Number.isFinite(interval)
+    &&interval>0&&interval<=1?interval:null;
+}
+function preparedFramesMeet(incumbent,target,frameSeconds,rate){
+  if(!incumbent||!target||!Number.isFinite(frameSeconds)||frameSeconds<=0
+    ||!Number.isFinite(rate)||rate<=0) return false;
+  const values=[incumbent.filmSeconds,target.filmSeconds,incumbent.displayMs,target.displayMs];
+  if(!values.every(Number.isFinite)) return false;
+  const projected=target.filmSeconds+(incumbent.displayMs-target.displayMs)*rate/1000;
+  return Math.abs(projected-incumbent.filmSeconds)<=frameSeconds+1e-9;
+}
 function exposePreparedReplacementAtFrame(p,state,v,spare){
-  const voluntary=!!(p.directedChange&&p.directedChange.autoMove&&p.directedChange.autoMove.retainIncumbent);
+  const voluntary=!!(p.directedChange&&(p.directedChange.retainIncumbent||p.directedChange.autoMove?.retainIncumbent));
   if(voluntary&&streamHasVideo(p,spare)&&typeof spare.requestVideoFrameCallback!=="function"){
     failPreparedReplacement(p,state,"no parallel video presentation proof");
     return false;
@@ -804,6 +823,7 @@ function exposePreparedReplacementAtFrame(p,state,v,spare){
   // advancing frame proof below is the actual presentation evidence; rejecting
   // the handoff here would reopen an otherwise ready successor at the cliff.
   let settled=false,priorMediaTime=null,advancingSteps=0;
+  let priorFrame=null,targetFrame=null,frameSeconds=null;
   let videoCallbacks=0,badFrames=0,lastFrameAt=null,lastAdvancingFrameAt=null;
   state.overlapPhase="video";
   const live=()=>PLAYER===p&&preparedState(p)===state
@@ -823,7 +843,8 @@ function exposePreparedReplacementAtFrame(p,state,v,spare){
       try{ v.cancelVideoFrameCallback(state.handoffFrameCallbackId); }catch(e){}
     state.handoffFrameCallbackId=null;
     if(!live()) return;
-    if(voluntary&&(p.waitAt||v.paused||v.seeking||bufferRunway(v)<10||!preparedQualityProofReady(p,state))){
+    if(voluntary&&(p.waitAt||v.paused||v.seeking||bufferRunway(v)<10
+      ||(p.directedChange?.autoMove?.retainIncumbent&&!preparedQualityProofReady(p,state)))){
       failPreparedReplacement(p,state,"quality proof expired or incumbent pressure before voluntary commit");
       return;
     }
@@ -867,16 +888,20 @@ function exposePreparedReplacementAtFrame(p,state,v,spare){
   const requestIncumbentFrame=()=>{
     if(settled) return;
     try{
-      state.handoffFrameCallbackId=v.requestVideoFrameCallback(()=>{
+      state.handoffFrameCallbackId=v.requestVideoFrameCallback((now,meta)=>{
         state.handoffFrameCallbackId=null;
         if(settled) return;
         if(!live()){ finish(false,"stale-owner"); return; }
         if(v.paused||v.seeking||spare.paused||spare.seeking||p.wantsPlayback===false){
           finish(false,"viewer-intent"); return;
         }
-        const wanted=preparedLocalPositionMs(playbackFilmPositionMs(v,p),state.mediaOriginMs)/1000;
-        if(!preparedAlignedBuffered(spare)
-          ||Math.abs((spare.currentTime||0)-wanted)*1000>PREPARED_ALIGN_SLACK_MS){
+        const incumbentFrame={
+          filmSeconds:realMediaPositionMs(Number(meta?.mediaTime)*1000,(p.offset||0)*1000,!!p.vod)/1000,
+          displayMs:Number.isFinite(meta?.expectedDisplayTime)?meta.expectedDisplayTime:now
+        };
+        if(Number(spare.playbackRate)!==Number(v.playbackRate)
+          ||!Number.isFinite(meta?.mediaTime)||!preparedAlignedBuffered(spare)
+          ||!preparedFramesMeet(incumbentFrame,targetFrame,frameSeconds,Number(v.playbackRate))){
           finish(false,"lost-alignment"); return;
         }
         if(lastAdvancingFrameAt==null
@@ -898,9 +923,13 @@ function exposePreparedReplacementAtFrame(p,state,v,spare){
     // A seek may leave old-position frames queued after `seeked`. Increasing
     // timestamps alone can then prove the wrong position. Keep the incumbent
     // visible until each proof frame is also on its current film second.
-    const target=preparedLocalPositionMs(playbackFilmPositionMs(v,p),state.mediaOriginMs)/1000;
-    if(Number.isFinite(mediaTime)
-       &&Math.abs(mediaTime-target)*1000<=PREPARED_ALIGN_SLACK_MS){
+    const frame={mediaTime,presentedFrames:Number(meta?.presentedFrames),
+      filmSeconds:mediaTime+state.mediaOriginMs/1000,
+      displayMs:Number.isFinite(meta?.expectedDisplayTime)?meta.expectedDisplayTime:now};
+    if(Number.isFinite(mediaTime)&&mediaTime>=0){
+      frameSeconds=preparedFrameCadence(priorFrame,frame);
+      priorFrame=frame;
+      targetFrame=frame;
       if(priorMediaTime!=null&&mediaTime<=priorMediaTime) badFrames++;
       advancingSteps=priorMediaTime!=null&&mediaTime>priorMediaTime
         ?advancingSteps+1:0;
@@ -919,6 +948,7 @@ function exposePreparedReplacementAtFrame(p,state,v,spare){
       }
     }else{
       badFrames++;
+      priorFrame=null;targetFrame=null;frameSeconds=null;
       priorMediaTime=null;
       advancingSteps=0;
       lastAdvancingFrameAt=null;

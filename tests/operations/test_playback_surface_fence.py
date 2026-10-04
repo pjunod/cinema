@@ -313,9 +313,21 @@ class PlaybackSurfaceFenceTest(unittest.TestCase):
             "currentMs", "decision", "deliveredDolbyVisionProfile", "deliveredRange",
             "encoder", "finished", "isChangingStream", "isPlaying", "isVOD",
             "knownDurationMs", "lastTTFFMs", "pgsOverlayStatus", "pgsOverlayWindow",
-            "playbackControlSummary", "preparedFallbackInterruptionMs",
+            "playbackControlSummary",
+            # Not surfaces: the AVPlayer the view's layer draws, and the warm
+            # prepared player whose own layer is staged beside it for inline
+            # promotion (commit 11ad88cc1). Both are pictures, never fault prose;
+            # the promotion swaps which player is `player`, so it is published
+            # rather than `let`.
+            "player",
+            "preparedFallbackInterruptionMs",
+            # Not a second surface: whether the Quality menu offers Retry and
+            # Apply with restart after a failed manual change. The failure's
+            # sentence is raised through `showPlaybackNotice`, i.e. the one
+            # surface; this flag only chooses menu rows.
+            "qualityChangeRetained",
             "selectedAudio", "selectedHeight", "selectedQualityIsOriginal",
-            "selectedSubtitle", "sessionStatus", "surface",
+            "selectedSubtitle", "sessionStatus", "stagedSurfacePlayer", "surface",
             # Not a second surface: the live wait sentence the view draws
             # INSIDE the one surface, for a wait only (#444). It raises,
             # retires and routes nothing; `PlaybackWaitPresentation.detail`

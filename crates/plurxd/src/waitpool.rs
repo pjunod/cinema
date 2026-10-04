@@ -312,6 +312,7 @@ fn render_blocked_gets(snapshot: BlockedGets) -> String {
 struct Waiter {
     id: u64,
     session: String,
+    parent: String,
     started: Instant,
     tx: oneshot::Sender<WaitOutcome>,
 }
@@ -498,7 +499,7 @@ impl WaitPool {
         let mut count = 0usize;
         let mut oldest: Option<(Duration, u32)> = None;
         for (key, waiters) in &state.waiters {
-            for waiter in waiters.iter().filter(|waiter| waiter.session == session) {
+            for waiter in waiters.iter().filter(|waiter| waiter.parent == session) {
                 count += 1;
                 let age = now.saturating_duration_since(waiter.started);
                 if oldest.is_none_or(|(current, _)| age > current) {
@@ -560,7 +561,19 @@ impl WaitPool {
         Ok(self.register(key, session)?.wait(deadline).await)
     }
 
+    #[cfg(test)]
     pub fn register(&self, key: WaitKey, session: &str) -> Result<RegisteredWait, WaitRefused> {
+        self.register_reader(key, session, session)
+    }
+
+    /// Demand and retirement follow the exact private reader; all children
+    /// spend the public parent's single admission and fairness allowance.
+    pub(crate) fn register_reader(
+        &self,
+        key: WaitKey,
+        session: &str,
+        parent: &str,
+    ) -> Result<RegisteredWait, WaitRefused> {
         let mut state = self.lock();
         // Counted at the door, where the answer is exact: a refused wait
         // touches no state, so there is no later path on which the refusal
@@ -570,7 +583,7 @@ impl WaitPool {
         // the per-session refusal deliberately wins even on a full node, so
         // conflating them would inflate the very number an operator sizes the
         // node cap from.
-        let held = state.per_session.get(session).copied().unwrap_or(0);
+        let held = state.per_session.get(parent).copied().unwrap_or(0);
         if held >= self.per_session_cap {
             self.metrics.refused[WaitRefused::SessionBusy.index()].fetch_add(1, Relaxed);
             return Err(WaitRefused::SessionBusy);
@@ -606,11 +619,12 @@ impl WaitPool {
         state.waiters.entry(key.clone()).or_default().push(Waiter {
             id,
             session: session.to_string(),
+            parent: parent.to_string(),
             started: Instant::now(),
             tx,
         });
         state.retained.insert(id, key.clone());
-        *state.per_session.entry(session.to_string()).or_insert(0) += 1;
+        *state.per_session.entry(parent.to_string()).or_insert(0) += 1;
         state.total += 1;
         // Mirrored under the same lock that owns `total`, so the gauge cannot
         // drift from it: every increment here is matched by the release in
@@ -624,7 +638,7 @@ impl WaitPool {
             metrics: Arc::clone(&self.metrics),
             key,
             id,
-            session: session.to_string(),
+            session: parent.to_string(),
         };
         Ok(RegisteredWait {
             _guard: guard,
@@ -828,6 +842,61 @@ mod tests {
         F: Future + Unpin,
     {
         std::future::poll_fn(|cx| Poll::Ready(Pin::new(&mut *fut).poll(cx))).await
+    }
+
+    #[tokio::test]
+    async fn private_readers_share_parent_caps_but_retire_independently() {
+        let pool = WaitPool::new(16, 2);
+        let mut video = pool
+            .register_reader(key(1), "private-video", "parent")
+            .expect("video");
+        let audio_key = WaitKey {
+            rendition: "soundtrack".into(),
+            index: 2,
+        };
+        let mut audio = pool
+            .register_reader(audio_key.clone(), "private-audio", "parent")
+            .expect("audio");
+        assert!(matches!(
+            pool.register(key(3), "parent"),
+            Err(WaitRefused::SessionBusy)
+        ));
+        assert!(matches!(
+            pool.register_reader(key(4), "private-second-video", "parent"),
+            Err(WaitRefused::SessionBusy)
+        ));
+        assert_eq!(pool.session_snapshot("parent").count, 2);
+        assert_eq!(pool.demands("abcd1234")[0].session, "private-video");
+        let other = pool
+            .register_reader(key(5), "other-video", "other-parent")
+            .expect("another parent");
+        pool.retire_session("abcd1234", "private-video");
+        assert_eq!(video.wait(secs(1)).await, WaitOutcome::Gone);
+        assert_eq!(pool.demands("soundtrack")[0].session, "private-audio");
+        assert!(
+            matches!(
+                pool.register(key(6), "parent"),
+                Err(WaitRefused::SessionBusy)
+            ),
+            "retention keeps admission until the response drops its guard"
+        );
+        drop(video);
+        let root = pool
+            .register(key(6), "parent")
+            .expect("retired reader released parent slot");
+        pool.satisfy("soundtrack", 2);
+        assert_eq!(audio.wait(secs(1)).await, WaitOutcome::Ready);
+        assert!(matches!(
+            pool.register(key(7), "parent"),
+            Err(WaitRefused::SessionBusy)
+        ));
+        drop(audio);
+        let next = pool
+            .register_reader(audio_key, "new-audio", "parent")
+            .expect("completed body released parent slot");
+        drop((root, next, other));
+        assert!(pool.is_empty());
+        assert_eq!(pool.metrics_handle().snapshot().waiting, 0);
     }
 
     /// Every admitted wait is timed, whether it was satisfied or ran out.
