@@ -156,15 +156,43 @@ pub async fn serve(
     Path((file_id, index)): Path<(i64, usize)>,
     headers: HeaderMap,
 ) -> Result<Response, ApiError> {
-    if !enabled(&state).await {
-        REFUSED_OFF.fetch_add(1, Ordering::Relaxed);
-        return Err(ApiError::NotFound("chapter thumbnails are off"));
-    }
+    refuse_when_off(&state).await?;
     let file = state
         .store
         .get_file(file_id)
         .await?
         .ok_or(ApiError::NotFound("file"))?;
+    thumb_for_file(&state, &file, index, &headers).await
+}
+
+async fn refuse_when_off(state: &AppState) -> Result<(), ApiError> {
+    if !enabled(state).await {
+        REFUSED_OFF.fetch_add(1, Ordering::Relaxed);
+        return Err(ApiError::NotFound("chapter thumbnails are off"));
+    }
+    Ok(())
+}
+
+/// One chapter thumbnail of a shared Source file already resolved under
+/// current grant authority. The switch, cache, failure memo, permits and
+/// extraction bound are the Local ones; the Source never sends a validator,
+/// so this always answers the body.
+pub(crate) async fn serve_for_file(
+    state: &AppState,
+    file: &plurx_core::domain::MediaFile,
+    index: usize,
+) -> Result<Response, ApiError> {
+    refuse_when_off(state).await?;
+    thumb_for_file(state, file, index, &HeaderMap::new()).await
+}
+
+async fn thumb_for_file(
+    state: &AppState,
+    file: &plurx_core::domain::MediaFile,
+    index: usize,
+    headers: &HeaderMap,
+) -> Result<Response, ApiError> {
+    let file_id = file.id;
     let probe = state.catalogue.get_file_probe_json(file_id).await?;
     let chapters = chapters_from_probe_json(probe.as_deref());
     let chapter = chapters.get(index).ok_or(ApiError::NotFound("chapter"))?;

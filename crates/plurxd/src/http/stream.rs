@@ -2738,6 +2738,18 @@ pub async fn subtitles_vtt(
         .parse::<i64>()
         .map_err(|_| ApiError::NotFound("subtitle track"))?;
     let file = load_file(&state, id).await?;
+    subtitle_vtt_for_file(&state, &file, index).await
+}
+
+/// One text track of an already-resolved file as WebVTT. Local callers resolve
+/// the file by ID after login; the shared Source resolves it only after its
+/// grant/item/file/revision witness.
+pub(crate) async fn subtitle_vtt_for_file(
+    state: &AppState,
+    file: &MediaFile,
+    index: i64,
+) -> Result<Response, ApiError> {
+    let id = file.id;
     let stream = file
         .subtitle_streams
         .get(index as usize)
@@ -2752,7 +2764,7 @@ pub async fn subtitles_vtt(
 
     let bytes = crate::subtitles::ensure_vtt_bytes_with_store(
         &state.subs_dir,
-        &file,
+        file,
         index,
         &state.subtitle_source_access(),
         SUBTITLE_TRACK_FOR_A_VIEWER,
