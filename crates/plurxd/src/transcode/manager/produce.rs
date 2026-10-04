@@ -1,6 +1,923 @@
 use super::*;
 
 impl TranscodeManager {
+    /// The claimed worker distinguishes a proved missing/changed row from a
+    /// Store failure. The latter must remain retryable, not terminal authority.
+    pub(crate) async fn claimed_preparation_file(
+        store: &dyn Store,
+        file_id: i64,
+        source_size: i64,
+        source_mtime: i64,
+        fence: &crate::background_jobs::JobFence,
+    ) -> Result<Option<plurx_core::domain::MediaFile>, String> {
+        match store
+            .get_file(file_id)
+            .await
+            .map_err(|error| error.to_string())?
+        {
+            Some(file) if file.size == source_size && file.mtime == source_mtime => Ok(Some(file)),
+            _ => {
+                fence
+                    .settle(plurx_core::store::background_jobs::JobSettlement::Stop {
+                        error_code: "source_changed".into(),
+                    })
+                    .await
+                    .map_err(|error| error.to_string())?;
+                Ok(None)
+            }
+        }
+    }
+
+    /// Only an already accepted canonical context can become a queued carrier.
+    /// Absence remains byte-for-byte legacy/manual serialization, not authority.
+    pub(crate) async fn queued_candidate_catalog(
+        &self,
+        request: &SessionRequest,
+        file: &plurx_core::domain::MediaFile,
+        node: &str,
+    ) -> Result<Option<serde_json::Value>, String> {
+        let Some(context) = request.candidate_context.as_ref() else {
+            return Ok(None);
+        };
+        let catalog = crate::media_sessions::CandidateCatalogContext {
+            caps: context
+                .canonical_caps
+                .clone()
+                .ok_or("queued candidate caps missing")?,
+            candidate: context.selected_candidate.clone(),
+            binding: context
+                .planning_binding
+                .clone()
+                .ok_or("queued candidate binding missing")?,
+        };
+        if context.owner_node_id.as_deref() != Some(node)
+            || self.cache_location().map(|(_, owner)| owner) != Some(node)
+            || catalog.candidate.id != context.candidate_id
+            || catalog.candidate.recipe_digest != context.recipe_digest
+            || catalog.candidate.grade != context.grade
+            || catalog.candidate.normalized_geometry != context.normalized_geometry
+            || context.planning_snapshot.as_ref().is_some_and(|snapshot| {
+                snapshot.file.id != file.id
+                    || snapshot.file.size != file.size
+                    || snapshot.file.mtime != file.mtime
+                    || crate::media_pool::PlanningBinding::from_snapshot(snapshot)
+                        != catalog.binding
+            })
+        {
+            return Err("queued candidate authority mismatch".into());
+        }
+        let restored = self
+            .restore_catalog_context(
+                request,
+                &catalog,
+                context.candidate_id,
+                file.size,
+                file.mtime,
+                None,
+                crate::media_pool::create_stage_deadline(Duration::from_secs(2)),
+            )
+            .await
+            .map_err(|error| error.to_string())?;
+        if restored.profile != context.profile {
+            return Err("queued candidate profile changed".into());
+        }
+        serde_json::to_value(catalog)
+            .map(Some)
+            .map_err(|error| error.to_string())
+    }
+
+    async fn stop_unverifiable_candidate(
+        fence: &crate::background_jobs::JobFence,
+    ) -> Result<bool, String> {
+        fence
+            .settle(plurx_core::store::background_jobs::JobSettlement::Stop {
+                error_code: "candidate_authority_stale_or_missing".into(),
+            })
+            .await
+            .map_err(|error| error.to_string())?;
+        Ok(false)
+    }
+
+    /// Reconstruct real process-local authority from the strict persisted
+    /// carrier. A backend failure retries; incompatible evidence stops only
+    /// this fenced task and never enters the producer.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) async fn restore_queued_candidate(
+        &self,
+        request: &mut SessionRequest,
+        file: &plurx_core::domain::MediaFile,
+        catalog: Option<&serde_json::Value>,
+        expected: Option<(plurx_core::playback::candidate::CandidateId, [u8; 32])>,
+        node: &str,
+        fence: &crate::background_jobs::JobFence,
+        deadline: Instant,
+    ) -> Result<bool, String> {
+        let Some(encoded) = catalog else {
+            return Self::stop_unverifiable_candidate(fence).await;
+        };
+        let Ok(catalog) = serde_json::from_value::<crate::media_sessions::CandidateCatalogContext>(
+            encoded.clone(),
+        ) else {
+            return Self::stop_unverifiable_candidate(fence).await;
+        };
+        if self.cache_location().map(|(_, owner)| owner) != Some(node)
+            || expected.is_some_and(|(id, digest)| {
+                catalog.candidate.id != id || catalog.candidate.recipe_digest != digest
+            })
+        {
+            return Self::stop_unverifiable_candidate(fence).await;
+        }
+        match self
+            .restore_catalog_context(
+                request,
+                &catalog,
+                catalog.candidate.id,
+                file.size,
+                file.mtime,
+                None,
+                tokio::time::Instant::from_std(deadline).min(
+                    crate::media_pool::create_stage_deadline(Duration::from_secs(2)),
+                ),
+            )
+            .await
+        {
+            Ok(mut context) => {
+                context.owner_node_id = Some(node.to_owned());
+                request.candidate_context = Some(Box::new(context));
+                Ok(true)
+            }
+            Err(error) if error.is_incompatible() => Self::stop_unverifiable_candidate(fence).await,
+            Err(error) => Err(error.to_string()),
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn resolve_encoded_output_test(
+        &self,
+        request: &SessionRequest,
+        file: &plurx_core::domain::MediaFile,
+    ) -> Result<Arc<crate::vodencode::Encoding>, String> {
+        self.prepare_vod_encoding(request, file)
+            .await?
+            .ok_or("encoded plan unavailable".to_owned())
+    }
+    fn encoded_output_intent(
+        &self,
+        request: &SessionRequest,
+        encoding: &crate::vodencode::Encoding,
+        node: &str,
+    ) -> Result<plurx_core::store::background_jobs::EncodedOutputIntent, String> {
+        use plurx_core::store::background_jobs::{CopyOutputProfile, EncodedOutputIntent};
+        let output = encoding.plan.output_contract();
+        let context = request.candidate_context.as_ref();
+        Ok(EncodedOutputIntent {
+            target_node_id: node.to_owned(),
+            target_height: u32::try_from(encoding.options.target_height)
+                .map_err(|_| "encoded height unavailable")?,
+            requested_height: match request.kind {
+                SessionKind::Transcode { height } => {
+                    Some(u32::try_from(height).map_err(|_| "requested height unavailable")?)
+                }
+                _ => None,
+            },
+            copy_for_burn: match request.kind {
+                SessionKind::Copy {
+                    aac,
+                    preserve_dolby_vision,
+                    convert_dolby_vision,
+                } => Some((aac, preserve_dolby_vision, convert_dolby_vision)),
+                _ => None,
+            },
+            audio_index: request.audio_index,
+            audio_offset_ms: request.audio_offset_ms,
+            audio_claim: request
+                .audio_claim
+                .clone()
+                .ok_or("encoded audio claim unavailable")?,
+            audio_delivery: encoding
+                .options
+                .audio
+                .clone()
+                .ok_or("encoded audio delivery unavailable")?,
+            subtitle_burn: request.subtitle_burn,
+            subtitle_digest: encoding.subtitle_digest.clone(),
+            hdr10_requested: request.hdr10,
+            grade: encoding.options.pipeline.output_grade(),
+            normalized_geometry: context.is_some_and(|context| context.normalized_geometry),
+            profile: context
+                .and_then(|context| context.profile)
+                .map(|profile| match profile {
+                    plurx_core::transcode::AutoQualityRateProfile::H264Sdr1440P30V1 => {
+                        CopyOutputProfile::H264Sdr1440P30V1
+                    }
+                }),
+            width: output
+                .effective_width()
+                .ok_or("encoded output width unavailable")?,
+            height: output
+                .effective_height()
+                .ok_or("encoded output height unavailable")?,
+            plan_digest: encoding.plan.plan_digest().to_owned(),
+            executable_digest: encoding.executable.digest.clone(),
+            engine_digest: encoding.engine.digest.clone(),
+            candidate_id: context.map(|context| context.candidate_id),
+            candidate_digest: context.map(|context| context.recipe_digest),
+        })
+    }
+
+    pub(crate) async fn enqueue_encoded_output(
+        &self,
+        request: &SessionRequest,
+        file: &plurx_core::domain::MediaFile,
+        settings: &crate::vodserve::VodSettings,
+        encoding: &crate::vodencode::Encoding,
+    ) -> Result<(), String> {
+        use plurx_core::store::background_jobs::{EnqueueJob, JobPayload, JobRequest};
+        let node = request
+            .candidate_context
+            .as_ref()
+            .and_then(|context| context.owner_node_id.as_deref())
+            .or_else(|| self.cache_location().map(|(_, node)| node))
+            .ok_or("encoded owner unavailable")?;
+        let intent = self.encoded_output_intent(request, encoding, node)?;
+        if !intent.valid() {
+            return Err("encoded intent unavailable".to_owned());
+        }
+        let source = crate::fragment_index_cluster::open_source_fence(file, None).await?;
+        if !source.unchanged() || source.object_version() != encoding.source_object_version {
+            return Err("encoded source changed before queue publication".to_owned());
+        }
+        // Allocation budget, never measured wire cost. Actual writes remain
+        // bounded by the same full-footprint preparation reservation.
+        let cap = u64::try_from(file.size)
+            .ok()
+            .and_then(|bytes| bytes.checked_mul(2))
+            .and_then(|bytes| bytes.checked_add(64 * 1024 * 1024))
+            .map(|bytes| bytes.min(settings.completed_cache_bytes))
+            .filter(|bytes| *bytes > 0)
+            .ok_or("encoded retention cap unavailable")?;
+        let payload = JobPayload::EncodedOutputPrepare {
+            encoded_output_version: 1,
+            file_id: file.id,
+            source_generation: source.object_version().to_owned(),
+            source_size: file.size,
+            source_mtime: file.mtime,
+            source_object_version: source.object_version().to_owned(),
+            policy_generation: crate::vodserve::retained::encoded_policy_generation(file, &intent)
+                .ok_or("encoded source metadata unavailable")?,
+            candidate_catalog: self.queued_candidate_catalog(request, file, node).await?,
+            intent,
+            scratch_bytes: i64::try_from(cap).map_err(|_| "encoded cap overflow")?,
+            reason: "recent_demand".to_owned(),
+        };
+        let digest = hex::encode(Sha256::digest(
+            serde_json::to_vec(&payload).map_err(|error| error.to_string())?,
+        ));
+        let now = crate::media_sessions::unix_ms();
+        self.store
+            .enqueue_job(EnqueueJob {
+                id: uuid::Uuid::new_v4().to_string(),
+                payload,
+                dedupe_key: digest.clone(),
+                priority: 1,
+                not_before_ms: now,
+                now_ms: now,
+                request: JobRequest {
+                    scope: "encoded_output_prepare".to_owned(),
+                    request_id: digest.clone(),
+                    request_digest: digest,
+                    consumer_kind: "encoded_output".to_owned(),
+                    consumer_ref: file.id.to_string(),
+                    target_node_id: Some(node.to_owned()),
+                    deadline_ms: None,
+                    retain_identity: false,
+                },
+            })
+            .await
+            .map_err(|error| error.to_string())?;
+        Ok(())
+    }
+
+    pub(crate) async fn produce_encoded_output_job(
+        &self,
+        file: &plurx_core::domain::MediaFile,
+        job: &plurx_core::store::background_jobs::BackgroundJob,
+        fence: crate::background_jobs::JobFence,
+        deadline: Instant,
+        observation: u64,
+    ) -> Result<bool, crate::background_jobs::PreparationError> {
+        use crate::background_jobs::PreparationError;
+        use plurx_core::store::background_jobs::JobPayload;
+        let payload = job
+            .supported_payload()
+            .map_err(|_| PreparationError::Fail("encoded_payload_unsupported"))?;
+        let JobPayload::EncodedOutputPrepare {
+            file_id,
+            source_size,
+            source_mtime,
+            source_object_version,
+            policy_generation,
+            intent,
+            candidate_catalog,
+            scratch_bytes,
+            ..
+        } = payload
+        else {
+            return Err(PreparationError::Fail("encoded_payload_unsupported"));
+        };
+        let automatic_candidate = intent.candidate_id.is_some();
+        if automatic_candidate && candidate_catalog.is_none()
+            || !automatic_candidate && candidate_catalog.is_some()
+        {
+            return Ok(Self::stop_unverifiable_candidate(&fence).await?);
+        }
+        if file.id != file_id
+            || file.size != source_size
+            || file.mtime != source_mtime
+            || crate::vodserve::retained::encoded_policy_generation(file, &intent).as_ref()
+                != Some(&policy_generation)
+        {
+            if automatic_candidate {
+                return Ok(Self::stop_unverifiable_candidate(&fence).await?);
+            }
+            return Err(PreparationError::Fail("encoded_policy_changed"));
+        }
+        if !self.encoded_preparation_still_idle(observation) {
+            return Err(PreparationError::Yield("owner_busy"));
+        }
+        // Match foreground's selected offset without rewriting the stored
+        // scanner row. The closed intent owns this delivery fact.
+        let mut resolved_file = file.clone();
+        resolved_file.audio_offset_ms = if file.audio_streams.is_empty() {
+            0
+        } else {
+            intent.audio_offset_ms
+        };
+        let file = &resolved_file;
+        let mut request = SessionRequest {
+            quality_catalog: None,
+            candidate_context: None,
+            file_id,
+            playback_id: String::new(),
+            request_id: None,
+            control_sequence: None,
+            automatic: false,
+            previous_session_id: None,
+            reopen_reason: None,
+            kind: match intent.copy_for_burn {
+                Some((aac, preserve_dolby_vision, convert_dolby_vision)) => SessionKind::Copy {
+                    aac,
+                    preserve_dolby_vision,
+                    convert_dolby_vision,
+                },
+                None => SessionKind::Transcode {
+                    height: i64::from(
+                        intent
+                            .requested_height
+                            .ok_or(PreparationError::Fail("encoded_request_height_unavailable"))?,
+                    ),
+                },
+            },
+            start_seconds: 0.0,
+            audio_index: intent.audio_index,
+            audio_claim: Some(intent.audio_claim.clone()),
+            audio_delivery: Some(intent.audio_delivery.clone()),
+            subtitle_burn: intent.subtitle_burn,
+            audio_offset_ms: intent.audio_offset_ms,
+            hdr10: intent.hdr10_requested,
+            presentation: Presentation::Vod,
+            block_budget_secs: None,
+            transport: None,
+        };
+        let expected = intent.candidate_id.zip(intent.candidate_digest);
+        if job.token.as_ref().map(|token| token.node_id.as_str())
+            != Some(intent.target_node_id.as_str())
+        {
+            return Err(PreparationError::Fail("claimed_target_mismatch"));
+        }
+        if expected.is_some() {
+            if !self
+                .restore_queued_candidate(
+                    &mut request,
+                    file,
+                    candidate_catalog.as_ref(),
+                    expected,
+                    &intent.target_node_id,
+                    &fence,
+                    deadline,
+                )
+                .await?
+            {
+                return Ok(false);
+            }
+        } else if candidate_catalog.is_some() {
+            return Ok(Self::stop_unverifiable_candidate(&fence).await?);
+        }
+        let encoding = self
+            .prepare_vod_encoding(&request, file)
+            .await?
+            .ok_or(PreparationError::Fail("encoded_plan_unavailable"))?;
+        if encoding.source_object_version != source_object_version
+            || self.encoded_output_intent(&request, &encoding, &intent.target_node_id)? != intent
+        {
+            if expected.is_some() {
+                return Ok(Self::stop_unverifiable_candidate(&fence).await?);
+            }
+            if encoding.source_object_version != source_object_version {
+                return Err(PreparationError::Stop("source_changed"));
+            }
+            return Err(PreparationError::Fail("encoded_delivery_changed"));
+        }
+        let settings = self
+            .vod_settings(&request)
+            .await?
+            .ok_or(PreparationError::Fail("vod_policy_unavailable"))?;
+        let executable = crate::ffmpeg::EncodedExecutable::capture().await?;
+        if executable.digest != intent.executable_digest {
+            return Err(PreparationError::Fail("encoded_executable_changed"));
+        }
+        let engine = encoding.engine.clone();
+        let prepared = self
+            .vod
+            .prepare_encoded_output(
+                crate::vodserve::VodRecipeRequest {
+                    soundtrack: None,
+                    companion: None,
+                    request: &request,
+                    encoding: Some(encoding),
+                    retained_capture: crate::vodserve::RetainedOutputCapture::New,
+                    measured_candidate: request.candidate_context.as_ref().map(|binding| {
+                        crate::vodserve::RetainedCandidateBinding {
+                            kind: request.kind,
+                            normalized_geometry: binding.normalized_geometry,
+                            profile: binding.profile,
+                            candidate_id: binding.candidate_id,
+                            recipe_digest: binding.recipe_digest,
+                            file_id,
+                            audio_index: request.audio_index,
+                            audio_offset_ms: request.audio_offset_ms,
+                            subtitle_burn: request.subtitle_burn,
+                            grade: binding.grade,
+                            route: plurx_core::playback::candidate::CandidateRoute::Encode,
+                        }
+                    }),
+                },
+                file,
+                &settings,
+                &source_object_version,
+                u64::try_from(scratch_bytes)
+                    .map_err(|_| PreparationError::Fail("encoded_cap_invalid"))?,
+                fence,
+                deadline,
+                self.admissions.clone(),
+                (Arc::new(executable), engine),
+                || self.encoded_preparation_still_idle(observation),
+            )
+            .await?;
+        Ok(prepared.settle_encoded_and_expose(&intent).await?)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn with_copy_test_vod(mut self, vod: Arc<crate::vodserve::VodServe>) -> Self {
+        self.vod = vod;
+        self
+    }
+    /// Queue exact complete-copy work without waiting for its full body in
+    /// the foreground. This budget is a hard allocation cap, not wire cost.
+    pub(crate) async fn enqueue_copy_output(
+        &self,
+        request: &SessionRequest,
+        file: &plurx_core::domain::MediaFile,
+        settings: &crate::vodserve::VodSettings,
+    ) -> Result<(), String> {
+        use plurx_core::store::background_jobs::{
+            CopyOutputIntent, CopyOutputProfile, EnqueueJob, JobPayload, JobRequest,
+        };
+        let SessionKind::Copy {
+            aac,
+            preserve_dolby_vision,
+            convert_dolby_vision,
+        } = request.kind
+        else {
+            return Ok(());
+        };
+        let context = request.candidate_context.as_ref();
+        if context.is_some_and(|context| !context.normalized_geometry) {
+            return Ok(());
+        }
+        let Some(node) = (match context {
+            Some(context) => context.owner_node_id.as_deref(),
+            None => self.cache_location().map(|(_, node)| node),
+        }) else {
+            return Ok(());
+        };
+        let Some(audio_delivery) = request.audio_delivery.clone() else {
+            return Ok(());
+        };
+        if request.subtitle_burn.is_some() || request.audio_claim.is_none() {
+            return Ok(());
+        }
+        if request.audio_offset_ms != file.audio_offset_ms {
+            return Ok(());
+        }
+        let selected_audio = request.audio_index.map_or_else(
+            || file.audio_streams.first(),
+            |index| {
+                file.audio_streams
+                    .iter()
+                    .find(|stream| stream.index == index)
+            },
+        );
+        let claim = request.audio_claim.as_ref().expect("checked audio claim");
+        if !claim.valid_snapshot()
+            || audio_delivery
+                != plurx_core::playback::audio::resolve_audio(
+                    selected_audio,
+                    &claim.profile(),
+                    plurx_core::playback::audio::AudioRoute::Progressive,
+                    file.audio_offset_ms,
+                )
+        {
+            return Ok(());
+        }
+        let source = crate::fragment_index_cluster::open_source_fence(file, None).await?;
+        let probe = self
+            .store
+            .get_file_probe_json(file.id)
+            .await
+            .map_err(|error| error.to_string())?;
+        let video = plurx_core::transcode::CopyVideoOptions::from_probe(
+            file,
+            probe.as_deref(),
+            crate::ffmpeg::has_dovi_rpu().await,
+            preserve_dolby_vision,
+        )
+        .with_dolby_vision_conversion(convert_dolby_vision);
+        let identity = crate::fragindex::identity_for(file, video).argv_fingerprint;
+        let executable = crate::ffmpeg::EncodedExecutable::capture().await?;
+        let engine = crate::ffmpeg::EncodedEngine::capture(None).await?;
+        let width = file
+            .width
+            .and_then(|value| u32::try_from(value).ok())
+            .ok_or("copy width unavailable")?;
+        let height = file
+            .height
+            .and_then(|value| u32::try_from(value).ok())
+            .ok_or("copy height unavailable")?;
+        let actual = super::manager_candidates::copy_candidate_recipe_digest(
+            file,
+            request.audio_index,
+            request.audio_offset_ms,
+            None,
+            (aac, preserve_dolby_vision, convert_dolby_vision),
+            Some(source.object_version()),
+            Some(&executable.digest),
+            Some(&engine.digest),
+            (width, height),
+        );
+        if context.is_some_and(|context| {
+            actual != context.recipe_digest
+                || plurx_core::playback::candidate::CandidateId::for_recipe_digest(actual)
+                    != context.candidate_id
+                || super::manager_candidates::copy_candidate_grade(file) != context.grade
+        }) {
+            return Ok(());
+        }
+        if !source.unchanged() {
+            return Ok(());
+        }
+        let cap = u64::try_from(file.size)
+            .ok()
+            .and_then(|bytes| bytes.checked_mul(2))
+            .and_then(|bytes| bytes.checked_add(64 * 1024 * 1024))
+            .map(|bytes| bytes.min(settings.completed_cache_bytes))
+            .filter(|bytes| *bytes > 0)
+            .ok_or("copy preparation allocation cap unavailable")?;
+        let intent = CopyOutputIntent {
+            target_node_id: node.to_owned(),
+            audio_index: request.audio_index,
+            audio_offset_ms: request.audio_offset_ms,
+            audio_claim: request.audio_claim.clone(),
+            audio_delivery,
+            aac,
+            preserve_dolby_vision,
+            convert_dolby_vision,
+            grade: super::manager_candidates::copy_candidate_grade(file),
+            hdr10_requested: request.hdr10,
+            normalized_geometry: context.is_some(),
+            profile: context
+                .and_then(|context| context.profile)
+                .map(|profile| match profile {
+                    plurx_core::transcode::AutoQualityRateProfile::H264Sdr1440P30V1 => {
+                        CopyOutputProfile::H264Sdr1440P30V1
+                    }
+                }),
+            width: file
+                .width
+                .and_then(|width| u32::try_from(width).ok())
+                .ok_or("copy width unavailable")?,
+            height: file
+                .height
+                .and_then(|height| u32::try_from(height).ok())
+                .ok_or("copy height unavailable")?,
+            video_identity: identity,
+            pipeline_identity: crate::ffmpeg::fragment_index_engine_digest().await,
+        };
+        let payload = JobPayload::CopyOutputPrepare {
+            copy_output_version: if context.is_some() { 1 } else { 2 },
+            file_id: file.id,
+            source_generation: source.object_version().to_owned(),
+            source_size: file.size,
+            source_mtime: file.mtime,
+            source_object_version: source.object_version().to_owned(),
+            policy_generation: if context.is_some() {
+                "copy_output_v1".to_owned()
+            } else {
+                crate::vodserve::retained::manual_copy_policy_generation(file, &intent)
+                    .ok_or("manual source metadata unavailable")?
+            },
+            intent,
+            candidate_catalog: self.queued_candidate_catalog(request, file, node).await?,
+            scratch_bytes: i64::try_from(cap).map_err(|_| "copy cap overflow")?,
+            reason: "recent_demand".to_owned(),
+        };
+        let digest = hex::encode(Sha256::digest(
+            serde_json::to_vec(&payload).map_err(|error| error.to_string())?,
+        ));
+        let now = crate::media_sessions::unix_ms();
+        self.store
+            .enqueue_job(EnqueueJob {
+                id: uuid::Uuid::new_v4().to_string(),
+                payload,
+                dedupe_key: digest.clone(),
+                priority: 1,
+                not_before_ms: now,
+                now_ms: now,
+                request: JobRequest {
+                    scope: "copy_output_prepare".to_owned(),
+                    request_id: digest.clone(),
+                    request_digest: digest,
+                    consumer_kind: "copy_output".to_owned(),
+                    consumer_ref: file.id.to_string(),
+                    target_node_id: Some(node.to_owned()),
+                    deadline_ms: None,
+                    retain_identity: false,
+                },
+            })
+            .await
+            .map_err(|error| error.to_string())?;
+        Ok(())
+    }
+
+    /// Actual copy preparation uses the existing claimed/admitted worker lane
+    /// and VOD driver, not a playback session or a second producer scheduler.
+    pub(crate) async fn produce_copy_output_job(
+        &self,
+        file: &plurx_core::domain::MediaFile,
+        job: &plurx_core::store::background_jobs::BackgroundJob,
+        fence: crate::background_jobs::JobFence,
+        admission: &FragmentAdmission,
+        deadline: Instant,
+    ) -> Result<bool, crate::background_jobs::PreparationError> {
+        use crate::background_jobs::PreparationError;
+        use plurx_core::store::background_jobs::JobPayload;
+        let payload = job
+            .supported_payload()
+            .map_err(|_| PreparationError::Fail("copy_payload_unsupported"))?;
+        let JobPayload::CopyOutputPrepare {
+            copy_output_version,
+            file_id,
+            source_size,
+            source_mtime,
+            source_object_version,
+            policy_generation,
+            intent,
+            candidate_catalog,
+            scratch_bytes,
+            ..
+        } = &payload
+        else {
+            return Err(PreparationError::Fail("copy_payload_unsupported"));
+        };
+        let manual = *copy_output_version == 2;
+        if !manual && candidate_catalog.is_none() || manual && candidate_catalog.is_some() {
+            return Ok(Self::stop_unverifiable_candidate(&fence).await?);
+        }
+        if manual
+            && *policy_generation
+                != crate::vodserve::retained::manual_copy_policy_generation(file, intent)
+                    .ok_or(PreparationError::Fail("manual_source_metadata_unavailable"))?
+        {
+            return Err(PreparationError::Fail(
+                "manual_copy_source_metadata_changed",
+            ));
+        }
+        if file.id != *file_id
+            || file.size != *source_size
+            || file.mtime != *source_mtime
+            || !intent.valid()
+            || file.width.and_then(|v| u32::try_from(v).ok()) != Some(intent.width)
+            || file.height.and_then(|v| u32::try_from(v).ok()) != Some(intent.height)
+            || super::manager_candidates::copy_candidate_grade(file) != intent.grade
+            || crate::ffmpeg::fragment_index_engine_digest().await != intent.pipeline_identity
+        {
+            if !manual {
+                return Ok(Self::stop_unverifiable_candidate(&fence).await?);
+            }
+            return Err(PreparationError::Fail("copy_output_facts_changed"));
+        }
+        if !self.fragment_worker_idle(admission) {
+            return Err(PreparationError::Yield("owner_busy"));
+        }
+        let source = crate::fragment_index_cluster::open_source_fence(file, None).await?;
+        if !source.unchanged() || source.object_version() != source_object_version {
+            if !manual {
+                return Ok(Self::stop_unverifiable_candidate(&fence).await?);
+            }
+            return Err(PreparationError::Stop("source_changed"));
+        }
+        let selected_audio = intent.audio_index.map_or_else(
+            || file.audio_streams.first(),
+            |index| {
+                file.audio_streams
+                    .iter()
+                    .find(|stream| stream.index == index)
+            },
+        );
+        let claim = intent
+            .audio_claim
+            .as_ref()
+            .ok_or(PreparationError::Fail("copy_audio_claim_unavailable"))?;
+        let audio = plurx_core::playback::audio::resolve_audio(
+            selected_audio,
+            &claim.profile(),
+            plurx_core::playback::audio::AudioRoute::Progressive,
+            intent.audio_offset_ms,
+        );
+        if audio != intent.audio_delivery {
+            if !manual {
+                return Ok(Self::stop_unverifiable_candidate(&fence).await?);
+            }
+            return Err(PreparationError::Fail("copy_audio_delivery_changed"));
+        }
+        // The stored row has its default offset; this exact claimed intent
+        // owns the resolved delivery offset, just as foreground create does.
+        let mut resolved_file = file.clone();
+        resolved_file.audio_offset_ms = intent.audio_offset_ms;
+        let file = &resolved_file;
+        let probe = self
+            .store
+            .get_file_probe_json(file.id)
+            .await
+            .map_err(|error| error.to_string())?;
+        let video = plurx_core::transcode::CopyVideoOptions::from_probe(
+            file,
+            probe.as_deref(),
+            crate::ffmpeg::has_dovi_rpu().await,
+            intent.preserve_dolby_vision,
+        )
+        .with_dolby_vision_conversion(intent.convert_dolby_vision);
+        if crate::fragindex::identity_for(file, video).argv_fingerprint != intent.video_identity {
+            if !manual {
+                return Ok(Self::stop_unverifiable_candidate(&fence).await?);
+            }
+            return Err(PreparationError::Fail("copy_video_identity_changed"));
+        }
+        let executable = crate::ffmpeg::EncodedExecutable::capture().await?;
+        let engine = crate::ffmpeg::EncodedEngine::capture(None).await?;
+        let digest = super::manager_candidates::copy_candidate_recipe_digest(
+            file,
+            intent.audio_index,
+            intent.audio_offset_ms,
+            None,
+            (
+                intent.aac,
+                intent.preserve_dolby_vision,
+                intent.convert_dolby_vision,
+            ),
+            Some(source.object_version()),
+            Some(&executable.digest),
+            Some(&engine.digest),
+            (intent.width, intent.height),
+        );
+        let mut request = SessionRequest {
+            quality_catalog: None,
+            candidate_context: None,
+            file_id: file.id,
+            playback_id: String::new(),
+            request_id: None,
+            control_sequence: None,
+            automatic: false,
+            previous_session_id: None,
+            reopen_reason: None,
+            kind: SessionKind::Copy {
+                aac: intent.aac,
+                preserve_dolby_vision: intent.preserve_dolby_vision,
+                convert_dolby_vision: intent.convert_dolby_vision,
+            },
+            start_seconds: 0.0,
+            audio_index: intent.audio_index,
+            audio_claim: Some(claim.clone()),
+            audio_delivery: Some(audio),
+            subtitle_burn: None,
+            audio_offset_ms: intent.audio_offset_ms,
+            hdr10: intent.hdr10_requested,
+            presentation: Presentation::Vod,
+            block_budget_secs: None,
+            transport: None,
+        };
+        if job.token.as_ref().map(|token| token.node_id.as_str())
+            != Some(intent.target_node_id.as_str())
+        {
+            return Err(PreparationError::Fail("claimed_target_mismatch"));
+        }
+        if !manual {
+            let id = plurx_core::playback::candidate::CandidateId::for_recipe_digest(digest);
+            if !self
+                .restore_queued_candidate(
+                    &mut request,
+                    file,
+                    candidate_catalog.as_ref(),
+                    Some((id, digest)),
+                    &intent.target_node_id,
+                    &fence,
+                    deadline,
+                )
+                .await?
+            {
+                return Ok(false);
+            }
+            let context = request
+                .candidate_context
+                .as_ref()
+                .expect("restored context");
+            let profile = context.profile.map(|profile| match profile {
+                plurx_core::transcode::AutoQualityRateProfile::H264Sdr1440P30V1 => {
+                    plurx_core::store::background_jobs::CopyOutputProfile::H264Sdr1440P30V1
+                }
+            });
+            if context.grade != intent.grade
+                || context.normalized_geometry != intent.normalized_geometry
+                || profile != intent.profile
+                || context.selected_candidate.width != intent.width
+                || context.selected_candidate.height != intent.height
+            {
+                return Ok(Self::stop_unverifiable_candidate(&fence).await?);
+            }
+        } else if candidate_catalog.is_some() {
+            return Ok(Self::stop_unverifiable_candidate(&fence).await?);
+        }
+        let settings = self
+            .vod_settings(&request)
+            .await?
+            .ok_or(PreparationError::Fail("vod_policy_unavailable"))?;
+        let prepared_request = crate::vodserve::VodRecipeRequest {
+            soundtrack: None,
+            companion: None,
+            request: &request,
+            encoding: None,
+            retained_capture: crate::vodserve::RetainedOutputCapture::New,
+            measured_candidate: request.candidate_context.as_ref().map(|binding| {
+                crate::vodserve::RetainedCandidateBinding {
+                    kind: request.kind,
+                    normalized_geometry: binding.normalized_geometry,
+                    profile: binding.profile,
+                    candidate_id: binding.candidate_id,
+                    recipe_digest: binding.recipe_digest,
+                    file_id: file.id,
+                    audio_index: request.audio_index,
+                    audio_offset_ms: request.audio_offset_ms,
+                    subtitle_burn: None,
+                    grade: binding.grade,
+                    route: plurx_core::playback::candidate::CandidateRoute::Remux,
+                }
+            }),
+        };
+        let prepared = self
+            .vod
+            .prepare_copy_output(
+                prepared_request,
+                file,
+                &settings,
+                source_object_version,
+                u64::try_from(*scratch_bytes)
+                    .map_err(|_| PreparationError::Fail("copy_cap_invalid"))?,
+                fence,
+                deadline,
+                self.admissions.clone(),
+                (Arc::new(executable), engine),
+                || self.fragment_worker_idle(admission),
+            )
+            .await?;
+        if !source.unchanged() {
+            return Err(PreparationError::Stop("source_changed"));
+        }
+        if !self.fragment_worker_idle(admission) {
+            return Err(PreparationError::Yield("preempted"));
+        }
+        Ok(prepared.settle_and_expose(intent).await?)
+    }
+
     /// Pre-transcode one file at one rung, so the next viewer gets a cache hit.
     ///
     /// Runs at background priority and is expected to be interrupted: an encode

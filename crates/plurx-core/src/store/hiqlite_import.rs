@@ -907,9 +907,29 @@ const TABLES: &[TablePlan] = &[
             "discontinuity_sequence",
             "updated_at_ms",
             "drain_deadline_ms",
+            "recovery_epoch",
         ],
         order_by: "incarnation_id",
         minimum_schema: 25,
+        import_filter: None,
+        sealed_columns: &[],
+        parent_first: false,
+    },
+    TablePlan {
+        name: "candidate_recovery",
+        columns: &[
+            "scope",
+            "recipe",
+            "cause",
+            "event_id",
+            "user_id",
+            "playback_id",
+            "recovery_epoch",
+            "created_ms",
+            "quality_step",
+        ],
+        order_by: "scope, recipe, cause",
+        minimum_schema: super::candidate_recovery::SQLITE_INTRODUCED_SCHEMA,
         import_filter: None,
         sealed_columns: &[],
         parent_first: false,
@@ -957,7 +977,7 @@ const TABLES: &[TablePlan] = &[
             "updated_at_ms",
         ],
         order_by: "receipt_key",
-        minimum_schema: 92,
+        minimum_schema: super::sqlite::QUALITY_CANCELLATION_SQLITE_SCHEMA,
         import_filter: None,
         sealed_columns: &[],
         parent_first: false,
@@ -966,7 +986,7 @@ const TABLES: &[TablePlan] = &[
         name: "quality_preparation_owners",
         columns: &["staged_incarnation_id", "cancellation_key"],
         order_by: "staged_incarnation_id",
-        minimum_schema: 92,
+        minimum_schema: super::sqlite::QUALITY_CANCELLATION_SQLITE_SCHEMA,
         import_filter: None,
         sealed_columns: &[],
         parent_first: false,
@@ -983,7 +1003,7 @@ const TABLES: &[TablePlan] = &[
             "updated_at_ms",
         ],
         order_by: "generation",
-        minimum_schema: 93,
+        minimum_schema: super::sqlite::QUALITY_LEDGER_SQLITE_SCHEMA,
         import_filter: None,
         sealed_columns: &[],
         parent_first: false,
@@ -1340,6 +1360,7 @@ const TABLES: &[TablePlan] = &[
             "updated_at",
             "last_access_at",
             "expires_at",
+            "audio_recipe",
         ],
         order_by: "id",
         minimum_schema: 14,
@@ -2900,6 +2921,11 @@ fn value_projection(table: TablePlan, schema_version: i64, qualify: bool) -> Str
             {
                 "0".to_owned()
             } else if table.name == "media_sessions"
+                && *column == "recovery_epoch"
+                && schema_version < 53
+            {
+                "''".to_owned()
+            } else if table.name == "media_sessions"
                 && *column == "drain_deadline_ms"
                 && schema_version < 51
             {
@@ -2969,6 +2995,9 @@ fn value_projection(table: TablePlan, schema_version: i64, qualify: bool) -> Str
                         "author" | "book_work_id" | "book_edition_id" | "book_metadata_source"
                     )
                     && schema_version < 21)
+                || (table.name == "offline_packages"
+                    && *column == "audio_recipe"
+                    && schema_version < super::sqlite::OFFLINE_AUDIO_RECIPE_SCHEMA)
             {
                 "NULL".to_owned()
             } else if table.name == "offline_packages"
@@ -3252,6 +3281,32 @@ mod tests {
     }
 
     #[test]
+    fn pre_audio_recipe_offline_projection_preserves_legacy_audio_and_current_snapshot() {
+        use crate::store::sqlite::{MIGRATIONS, OFFLINE_AUDIO_RECIPE_SCHEMA};
+        let table = TABLES
+            .iter()
+            .find(|table| table.name == "offline_packages")
+            .copied()
+            .expect("offline table import contract");
+        // The column lands at v92 on the composed chain; the effort's private
+        // numbering (v88) is a different migration on main.
+        assert_eq!(OFFLINE_AUDIO_RECIPE_SCHEMA, 92);
+        assert_eq!(
+            MIGRATIONS[OFFLINE_AUDIO_RECIPE_SCHEMA as usize - 1],
+            "ALTER TABLE offline_packages ADD COLUMN audio_recipe TEXT;"
+        );
+        assert!(value_projection(table, 88, false).ends_with("expires_at, NULL"));
+        assert!(
+            value_projection(table, OFFLINE_AUDIO_RECIPE_SCHEMA - 1, false)
+                .ends_with("expires_at, NULL")
+        );
+        assert!(value_projection(table, OFFLINE_AUDIO_RECIPE_SCHEMA, false)
+            .ends_with("expires_at, audio_recipe"));
+        assert!(value_projection(table, SQLITE_SCHEMA_VERSION, false)
+            .ends_with("expires_at, audio_recipe"));
+    }
+
+    #[test]
     fn pre_v54_offline_projection_supplies_unspent_recovery_claim() {
         let table = TABLES
             .iter()
@@ -3486,7 +3541,13 @@ mod tests {
         assert!(names.contains(&"live_tv_resource_records"));
         // The revision/nonce is reconstructed above the greatest restored epoch.
         assert!(!names.contains(&"live_tv_resource_revision"));
-        assert_eq!(names.len(), 73, "review every imported durable table");
+        // Authenticated candidate failures are replicated: any node may serve
+        // the next attempt, and each must refuse the recipe that failed. The
+        // Link samples beside them are one node's measurements and never
+        // reach Raft.
+        assert!(names.contains(&"candidate_recovery"));
+        assert!(!names.contains(&"candidate_link_priors"));
+        assert_eq!(names.len(), 74, "review every imported durable table");
     }
 
     /// A source from before the pointer fence has no revision to attribute its
@@ -3575,6 +3636,132 @@ mod tests {
             current.ends_with("storage_id, generation_id, publication_generation"),
             "{current}"
         );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn a05_recovery_import_preserves_spent_scope_and_legacy_epoch_projection() {
+        let sessions = TABLES
+            .iter()
+            .find(|t| t.name == "media_sessions")
+            .copied()
+            .expect("recovery import fixture");
+        let memory = TABLES
+            .iter()
+            .find(|t| t.name == "candidate_recovery")
+            .copied()
+            .expect("recovery import fixture");
+        let introduced = crate::store::candidate_recovery::SQLITE_INTRODUCED_SCHEMA;
+        assert_eq!(
+            introduced, 96,
+            "candidate_recovery lands at v96 on the composed chain"
+        );
+        assert_eq!(memory.minimum_schema, introduced);
+        for version in [51_i64, 53, introduced - 1, introduced] {
+            let dir = tempfile::tempdir().expect("recovery import fixture");
+            let path = dir.path().join("source.db");
+            let source = Connection::open(&path).expect("recovery import fixture");
+            crate::store::sqlite::SqliteStore::apply_migrations_for_test(&source, version)
+                .expect("recovery import fixture");
+            source
+                .execute(
+                    "INSERT INTO settings(key,value,updated_at) VALUES(?1,?2,1)",
+                    rusqlite::params![keys::INSTANCE_ID, "a05-import"],
+                )
+                .expect("recovery import fixture");
+            source.execute("INSERT INTO media_sessions(incarnation_id,session_id,user_id,playback_id,request_fingerprint,owner_node_id,owner_epoch,lease_expires_at_ms,state,recipe_json,response_json,updated_at_ms) VALUES('incarnation','session',42,'player','request','owner',7,9000,'active','{}','{}',1)", []).expect("recovery import fixture");
+            if version >= 53 {
+                source.execute("UPDATE media_sessions SET recovery_epoch='d23b2032-2910-469a-bf76-3c0b12735028'", []).expect("recovery import fixture");
+            }
+            if version >= memory.minimum_schema {
+                for (recipe, step) in [("11".repeat(32), 1_i64), ("22".repeat(32), 0)] {
+                    source.execute("INSERT INTO candidate_recovery(scope,recipe,cause,event_id,user_id,playback_id,recovery_epoch,created_ms,quality_step) VALUES('exact-authenticated-scope',?1,'decode','original-event',42,'player','d23b2032-2910-469a-bf76-3c0b12735028',1234,?2)", rusqlite::params![recipe,step]).expect("recovery import fixture");
+                }
+            }
+            drop(source);
+            let hash = sha256_file(&path).expect("recovery import fixture");
+            let (reader, _) = SourceReader::open(&path, &hash, version)
+                .await
+                .expect("recovery import fixture");
+            let rows = reader
+                .import_chunk(sessions, version, SourceChunk::Offset(0))
+                .await
+                .expect("recovery import fixture");
+            assert_eq!(rows.len(), 1);
+            assert_eq!(
+                rows[0].last(),
+                Some(&Param::Text(if version < 53 {
+                    String::new()
+                } else {
+                    "d23b2032-2910-469a-bf76-3c0b12735028".to_owned()
+                }))
+            );
+            if version < memory.minimum_schema {
+                // Production import_table skips before asking an older source
+                // for a table it cannot contain; parity uses an empty digest.
+                let source = Connection::open(&path).expect("recovery import fixture");
+                assert_eq!(
+                    source_digest(&source, version, memory).expect("recovery import fixture"),
+                    OrderedRowsHasher::new().finish()
+                );
+                continue;
+            }
+            assert_eq!(
+                reader
+                    .count(memory, true)
+                    .await
+                    .expect("recovery import fixture"),
+                2
+            );
+            let recovered = reader
+                .import_chunk(memory, version, SourceChunk::Offset(0))
+                .await
+                .expect("recovery import fixture");
+            assert_eq!(recovered.len(), 2);
+            let target = Connection::open_in_memory().expect("recovery import fixture");
+            target
+                .execute_batch(crate::store::candidate_recovery::SCHEMA)
+                .expect("recovery import fixture");
+            for row in recovered {
+                let values: Vec<rusqlite::types::Value> = row
+                    .into_iter()
+                    .map(|value| match value {
+                        Param::Text(text) => rusqlite::types::Value::Text(text),
+                        Param::Integer(number) => rusqlite::types::Value::Integer(number),
+                        _ => panic!("unexpected recovery import type"),
+                    })
+                    .collect();
+                let sql = format!(
+                    "INSERT INTO candidate_recovery({}) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9)",
+                    memory.columns.join(",")
+                );
+                target
+                    .execute(&sql, rusqlite::params_from_iter(values))
+                    .expect("recovery import fixture");
+            }
+            let original = Connection::open(&path).expect("recovery import fixture");
+            assert_eq!(
+                source_digest(&original, version, memory).expect("recovery import fixture"),
+                source_digest(&target, version, memory).expect("recovery import fixture")
+            );
+            let spent: i64 = target.query_row("SELECT SUM(quality_step) FROM candidate_recovery WHERE recovery_epoch='d23b2032-2910-469a-bf76-3c0b12735028' AND created_ms=1234 AND event_id='original-event'", [], |row| row.get(0)).expect("recovery import fixture");
+            assert_eq!(
+                spent, 1,
+                "import preserves original spent admission without replay or timestamp refresh"
+            );
+            let mut statement = target
+                .prepare("SELECT recipe FROM candidate_recovery ORDER BY recipe")
+                .expect("recovery import fixture");
+            let recipes = statement
+                .query_map([], |row| row.get::<_, String>(0))
+                .expect("recovery import fixture")
+                .collect::<Result<Vec<_>, _>>()
+                .expect("recovery import fixture");
+            assert_eq!(
+                recipes,
+                vec!["11".repeat(32), "22".repeat(32)],
+                "full recipe identities survive import"
+            );
+        }
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -3781,7 +3968,7 @@ mod tests {
                 .await
                 .expect("read source import chunk");
             assert_eq!(rows.len(), 1);
-            assert_eq!(rows[0].len(), 20, "media session import parameter count");
+            assert_eq!(rows[0].len(), 21, "media session import parameter count");
             let expected_terminal = if schema_version < 34 {
                 Param::Null
             } else {
@@ -3819,6 +4006,7 @@ mod tests {
                     } else {
                         Param::Integer(9_876)
                     },
+                    Param::Text(String::new()),
                 ],
                 "schema v{schema_version} import row",
             );

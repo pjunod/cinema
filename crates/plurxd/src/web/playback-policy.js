@@ -354,6 +354,8 @@
     recentSpeed = null,
     activeSupplyStall = false,
     supplyStalls = 0,
+    decodeStalls = 0,
+    decodeStepConsumed = false,
     lastStallAtMs = null,
     nowMs = 0,
     lastSwitchAtMs = null,
@@ -433,7 +435,8 @@
 
     if (
       namedSuppression ||
-      (starvation && !freshBandwidthCliff && causeKind !== "capacity-shortfall")
+      (starvation && !freshBandwidthCliff &&
+        causeKind !== "capacity-shortfall" && causeKind !== "decode-failed")
     ) {
       return {
         height: current.height,
@@ -455,6 +458,23 @@
       return {height: current.height, reason: "switch-budget", action: "suppressed",
         emergency: false, mildSamples: 0, upgradeSinceMs: null,
         evidence: {kind: causeKind, budget_left: 0}};
+    }
+
+    // A named decoder failure belongs to one rung. Report the height for the
+    // adapter to retain; another failure on that height is for compatibility
+    // recovery, not another quality step.
+    const blocked = blockedHeights instanceof Set
+      ? blockedHeights
+      : new Set(Array.isArray(blockedHeights) ? blockedHeights : []);
+    if (causeFresh && causeKind === "decode-failed" && decodeStalls > 0) {
+      const target = available[currentIndex - 1];
+      if (decodeStepConsumed || !target) {
+        return {height: current.height, reason: "decode", action: "suppressed",
+          emergency: false, mildSamples: 0, upgradeSinceMs: null};
+      }
+      return {height: target.height, reason: "decode", action: "switch",
+        blockedHeights: [current.height], emergency: false,
+        mildSamples: 0, upgradeSinceMs: null};
     }
 
     const severe = freshBandwidthCliff;
@@ -544,9 +564,6 @@
     // A rung that already failed this playback is not a candidate. The
     // dwell/hold timers alone cannot end a loop whose every cycle looks new:
     // a rung that fails and is re-entered on schedule oscillates forever.
-    const blocked = blockedHeights instanceof Set
-      ? blockedHeights
-      : new Set(Array.isArray(blockedHeights) ? blockedHeights : []);
     const next = nextCandidate
       && nextCandidate.height <= playerCeiling
       && !blocked.has(nextCandidate.height)

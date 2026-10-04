@@ -2651,6 +2651,9 @@ async function main() {
         shippedSource("stallRecoverySnapshot"),
         shippedSource("persistentWait"),
         "function settlePlaybackControlSeek(){} function completeHlsStartup(){} function clearStall(){} function finishStallRecovery(){return false;}",
+        // The control send now attaches the Auto link receipt. Auto's link
+        // evidence is not what this harness drives, so the stalled player has none.
+        "function candidateLinkReceipt(){return null;}",
         "function playbackExhaustedActions(){return ['keep_waiting','retry','close'];}",
         shippedSource("streamHasVideo"),
         shippedSource("samplePlaybackPresentationClock"),
@@ -3224,6 +3227,8 @@ async function main() {
   // fixture began its wait with 1s buffered, under the shipped threshold.
   {
     const { h, player } = await askWith({ type: "hold", reason: "no_room" });
+    assert.equal(player.abr?.controlStallVerdict, undefined,
+      "a hold that falls through to recovery is not a live deferral");
     assert.equal(h.reopened.length, 1, "a supply-starved stall reopens through a hold");
     assert.equal(h.reopened[0].kind, "seek");
     assert.equal(player.stallRecoveries, 1, "and spends the legacy attempt, exactly once");
@@ -3245,12 +3250,15 @@ async function main() {
     let nudges=0;
     const video=bufferedVideo(22,{play(){nudges++;return Promise.resolve();}});
     const { h, player } = await askWith({ type: "hold", reason: "no_room" },
-      { player: { waitStartedRunway: 22 }, video });
+      { player: { waitStartedRunway: 22, abr: {} }, video });
     assert.equal(nudges,1,"loaded media receives one native reevaluation before repair");
     assert.notEqual(h.log.find((entry)=>entry.detail==="native_reevaluation:wait"),undefined);
     assert.deepEqual(h.reopened,[],"loaded media is not reopened before the deadline");
     assert.equal(player.stallRecoveries,0,"observation spends no automatic attempt");
     assert.notEqual(player.waitTimer,null,"the same wait remains under observation");
+    assert.deepEqual(player.abr.controlStallVerdict,
+      {waitAt:100,atMs:100,untilMs:20_100},
+      "only this stalled ask's bounded hold is visible to Auto");
     assert.equal(h.stops,0,"the bounded repair keeps the owner active");
     assert.equal(h.stalls.length, 1,
       "the stall is recorded once, not once per control response");
@@ -3327,10 +3335,13 @@ async function main() {
   ]) {
     const { h, player } = await askWith({
       type: "retry_resource", reason: "reader_failed", after_ms: afterMs,
-    });
+    }, {player: {abr: {}}});
     assert.equal(h.reopened.length, 0, label);
     assert.equal(h.timers.get(player.waitTimer).ms, expected, label);
     assert.equal(player.stallDeferrals, 1, label);
+    assert.deepEqual(player.abr.controlStallVerdict,
+      {waitAt:100,atMs:100,untilMs:20_100},
+      "the paced verdict is scoped to this stalled ask");
   }
   {
     const { h, player } = await askWith({
@@ -3628,6 +3639,9 @@ async function main() {
         shippedSource("clearPlaybackControlWaiters"),
         shippedSource("stopPlaybackControl"),
         shippedSource("startPlaybackControl"),
+        // The control send attaches the Auto link receipt; the ended-stream
+        // verdicts this harness drives carry none.
+        "function candidateLinkReceipt(){return null;}",
         shippedSource("endedStillOurs"),
         shippedSource("handleEnded"),
         shippedSource("hasPendingPlaybackOpen"),shippedSource("playbackOwnsAttachedMedia"),

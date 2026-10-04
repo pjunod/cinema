@@ -101,6 +101,7 @@ operations! {
     RecordAnalysisFailedPhase => "record_analysis_failed_phase",
     TouchSharedOfflineCacheEntry => "touch_shared_offline_cache_entry",
     SettleQualityCancellation => "settle_quality_cancellation",
+    ObserveCandidateLink => "observe_candidate_link",
 }
 
 const OUTCOMES: [&str; 2] = ["ok", "error"];
@@ -418,7 +419,7 @@ mod tests {
 
     #[test]
     fn every_classified_failure_has_a_bounded_metric_row() {
-        assert_eq!(Operation::ALL.len(), 45, "one fixed label per audited site");
+        assert_eq!(Operation::ALL.len(), 47, "one fixed label per audited site");
         let metrics = Metrics::default();
         for operation in Operation::ALL {
             for severity in Discard::ALL {

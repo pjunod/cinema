@@ -149,7 +149,9 @@ class DecoderRecoveryStatusContract(unittest.TestCase):
 
     def test_frozen_inventory_and_argument_claims_match_retained_artifacts(self) -> None:
         surfaces = self.inventory["surfaces"]
-        self.assertEqual(len(surfaces), 74)
+        # 74 plus the two retained-identity projections S-10 inventoried in
+        # eedac8509; neither launches a producer.
+        self.assertEqual(len(surfaces), 76)
         self.assertIn("bring the inventory to 73", self.status)
 
         names = [case["name"] for case in self.arguments]
@@ -392,7 +394,15 @@ class DecoderRecoveryStatusContract(unittest.TestCase):
             "pub fn hls_args(plan: &ResolvedTranscode, execution: &TranscodeExecution)",
             normalized(self.core_transcode),
         )
-        self.assertEqual(self.daemon_transcode.count("transcode::hls_args("), 3)
+        # Three producer builders and two non-launching canonical identity
+        # projections retain the same resolved plan/argument contract.
+        projections = (
+            "transcode::hls_args(&retained_plan, &execution)",
+            "transcode::hls_args(&plan, &canonical_execution)",
+        )
+        for projection in projections:
+            self.assertEqual(self.daemon_transcode.count(projection), 1)
+        self.assertEqual(self.daemon_transcode.count("transcode::hls_args("), 3 + len(projections))
         self.assertNotIn("transcode::hls_args(&file", self.daemon_transcode)
         self.assertIn("plan: &'a ResolvedTranscode", self.daemon_transcode)
         self.assertEqual(

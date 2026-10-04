@@ -52,6 +52,72 @@ use crate::domain::{DolbyVisionFacts, Item, ItemKind, MediaFile, OfflinePackageS
 use crate::error::StoreError;
 use crate::store::telemetry::{NETWORK_PRIORS_V2_SCHEMA, PLAYBACK_EVENTS_SCHEMA};
 
+/// The SQLite migration that adds `offline_packages.audio_recipe`, and the
+/// schema version it lands at. A source below that version has no resolved
+/// audio snapshot, which the Hiqlite import projects as NULL.
+pub(crate) const OFFLINE_AUDIO_RECIPE_COLUMN: &str =
+    "ALTER TABLE offline_packages ADD COLUMN audio_recipe TEXT;";
+pub(crate) const OFFLINE_AUDIO_RECIPE_SCHEMA: i64 = 92;
+
+/// Whether migration `version` (1-based, as stored in `user_version`) is
+/// exactly `sql`. Used by the compile-time assertions below so a schema
+/// version named elsewhere cannot drift from its entry in [`MIGRATIONS`].
+const fn migration_is(version: i64, sql: &str) -> bool {
+    if version < 1 || version as usize > MIGRATIONS.len() {
+        return false;
+    }
+    let actual = MIGRATIONS[version as usize - 1].as_bytes();
+    let expected = sql.as_bytes();
+    if actual.len() != expected.len() {
+        return false;
+    }
+    let mut index = 0;
+    while index < actual.len() {
+        if actual[index] != expected[index] {
+            return false;
+        }
+        index += 1;
+    }
+    true
+}
+
+const _: () = assert!(
+    migration_is(OFFLINE_AUDIO_RECIPE_SCHEMA, OFFLINE_AUDIO_RECIPE_COLUMN),
+    "OFFLINE_AUDIO_RECIPE_SCHEMA does not name the audio_recipe migration"
+);
+const _: () = assert!(
+    migration_is(
+        super::candidate_recovery::SQLITE_INTRODUCED_SCHEMA,
+        super::candidate_recovery::SCHEMA
+    ),
+    "candidate_recovery::SQLITE_INTRODUCED_SCHEMA does not name its migration"
+);
+const _: () = assert!(
+    migration_is(
+        super::background_jobs::ENCODED_OUTPUT_SQLITE_SCHEMA,
+        super::background_jobs::ENCODED_OUTPUT_SCHEMA
+    ),
+    "background_jobs::ENCODED_OUTPUT_SQLITE_SCHEMA does not name its migration"
+);
+
+/// First SQLite schemas containing the continuous-quality tables: the
+/// cancellation receipts and preparation owners, then the parent-fenced
+/// ledger. The Hiqlite import gates those tables on these, and the
+/// assertions below keep them naming their entries in [`MIGRATIONS`].
+pub(crate) const QUALITY_CANCELLATION_SQLITE_SCHEMA: i64 = 98;
+pub(crate) const QUALITY_LEDGER_SQLITE_SCHEMA: i64 = 99;
+const _: () = assert!(
+    migration_is(
+        QUALITY_CANCELLATION_SQLITE_SCHEMA,
+        super::quality_cancellation::QUALITY_CANCELLATION_SCHEMA
+    ),
+    "QUALITY_CANCELLATION_SQLITE_SCHEMA does not name its migration"
+);
+const _: () = assert!(
+    migration_is(QUALITY_LEDGER_SQLITE_SCHEMA, super::quality_ledger::SCHEMA),
+    "QUALITY_LEDGER_SQLITE_SCHEMA does not name its migration"
+);
+
 /// Ordered, append-only migration list. `PRAGMA user_version` tracks the last
 /// applied index + 1. Never edit an entry that has shipped — append instead.
 /// Visible to the import inventory guard, which needs to know which migration
@@ -1191,9 +1257,24 @@ pub(crate) const MIGRATIONS: &[&str] = &[
     super::dv_conversion::DV_REQUEST_PROVENANCE_COLUMN,
     // v91: transactional playback planning settings generation.
     super::PLAYBACK_INPUT_SCHEMA,
-    // v92: independent quality cancellation, without ending the incumbent.
+    // v92: preserve the resolved audio recipe across offline queue retries.
+    OFFLINE_AUDIO_RECIPE_COLUMN,
+    // v93: independently attributed completed-transfer Link negatives.
+    super::telemetry::NETWORK_PRIOR_LINK_COLUMNS,
+    // v94: exact candidate-bound node-local Link samples, never legacy inference.
+    super::candidate_link::SCHEMA,
+    // v95: copy preparation follows the same exact source cancellation guards.
+    super::background_jobs::COPY_OUTPUT_SCHEMA,
+    // v96: authenticated candidate failures, independent of network priors.
+    super::candidate_recovery::SCHEMA,
+    // v97: exact encoded preparation shares source-revision cancellation.
+    super::background_jobs::ENCODED_OUTPUT_SCHEMA,
+    // v98: independent quality cancellation, without ending the incumbent.
+    // The continuous-quality effort drafted this as v92; main's v92–v97
+    // reached main first, so it appends after them.
     super::quality_cancellation::QUALITY_CANCELLATION_SCHEMA,
-    // v93: parent-fenced continuous media facts and dependency reservations.
+    // v99: parent-fenced continuous media facts and dependency reservations
+    // (drafted as v93).
     super::quality_ledger::SCHEMA,
 ];
 
@@ -1596,15 +1677,49 @@ impl SqliteStore {
         }
     }
 
+    /// Apply one migration step and stamp its `user_version` in the same
+    /// transaction. Dropping the uncommitted transaction on any error rolls
+    /// the DDL and the marker back together. A step whose shape a published
+    /// build already committed (`already_applied`) only advances the marker.
+    fn apply_migration_step(
+        conn: &Connection,
+        version: i64,
+        sql: &str,
+        already_applied: bool,
+    ) -> Result<(), StoreError> {
+        let tx = conn.unchecked_transaction()?;
+        if !already_applied {
+            tx.execute_batch(sql)
+                .map_err(|e| StoreError::Migration(format!("migrating to v{version}: {e}")))?;
+        }
+        // Foreign keys are OFF for the step (see the caller), so integrity is
+        // checked here, before the step can commit.
+        let dangling: i64 =
+            tx.query_row("SELECT COUNT(*) FROM pragma_foreign_key_check", [], |row| {
+                row.get(0)
+            })?;
+        if dangling > 0 {
+            return Err(StoreError::Migration(format!(
+                "migrating to v{version} left {dangling} dangling foreign key \
+                 reference(s) — refusing to continue"
+            )));
+        }
+        tx.pragma_update(None, "user_version", version)?;
+        tx.commit()?;
+        Ok(())
+    }
+
     fn migrate(conn: &Connection) -> Result<(), StoreError> {
         let current: i64 = conn.query_row("PRAGMA user_version", [], |row| row.get(0))?;
         let target = SQLITE_SCHEMA_VERSION;
         if current > target {
             return Err(StoreError::Migration(format!(
                 "database schema is v{current}, but this binary only knows v{target} — \
-                 refusing to open a database from a newer plurx"
+                refusing to open a database from a newer plurx"
             )));
         }
+        super::schema_lineage::bridge_sqlite(conn, current)?;
+        let current: i64 = conn.query_row("PRAGMA user_version", [], |row| row.get(0))?;
         // A database written by a pre-merge effort build sits at v45 with the
         // attempt-history column and without the negative fragment index,
         // because those two migrations swapped numbers when they met. Rewind
@@ -1625,36 +1740,29 @@ impl SqliteStore {
             // out here. Integrity is re-checked below instead of enforced
             // statement by statement.
             conn.pragma_update(None, "foreign_keys", "OFF")?;
-            // A migration commits its own transaction and only then bumps
-            // `user_version`, so a crash in that window leaves the shape
-            // applied and the version behind. `ADD COLUMN` is not idempotent,
-            // so the replay would fail on a column that is already there —
-            // permanently. v41 has carried this guard since it landed.
-            let applied = if (version == 41 && Self::analysis_component_schema_is_current(conn)?)
+            // The DDL, the integrity check and the `user_version` bump commit
+            // as one transaction. `PRAGMA user_version` writes the database
+            // header through the pager, so it rolls back with the DDL when it
+            // shares the transaction (the telemetry sidecar relies on the same
+            // property). A crash can therefore never leave a step's shape
+            // applied with the marker behind it, which matters because
+            // `ADD COLUMN` is not idempotent and the schema-lineage bridge
+            // refuses a marker whose objects belong to a later step.
+            //
+            // Published builds committed the DDL first and bumped the marker
+            // separately, so databases they tore in that window still exist;
+            // the shape guards below keep those replays a no-op (v41 has
+            // carried its guard since it landed).
+            let already_applied = (version == 41
+                && Self::analysis_component_schema_is_current(conn)?)
                 || (version == 45 && Self::fragment_index_outcomes_table_exists(conn)?)
                 || (version == 46 && Self::attempt_errors_column_exists(conn)?)
                 || (version == 47 && Self::video_identity_column_exists(conn)?)
                 || (version == 51 && Self::drain_deadline_column_exists(conn)?)
-                || (version == 90 && Self::dv_request_provenance_column_exists(conn)?)
-            {
-                Ok(())
-            } else {
-                conn.execute_batch(&format!("BEGIN;\n{sql}\nCOMMIT;"))
-                    .map_err(|e| StoreError::Migration(format!("migrating to v{version}: {e}")))
-            };
+                || (version == 90 && Self::dv_request_provenance_column_exists(conn)?);
+            let applied = Self::apply_migration_step(conn, version, sql, already_applied);
             conn.pragma_update(None, "foreign_keys", "ON")?;
             applied?;
-            let dangling: i64 =
-                conn.query_row("SELECT COUNT(*) FROM pragma_foreign_key_check", [], |row| {
-                    row.get(0)
-                })?;
-            if dangling > 0 {
-                return Err(StoreError::Migration(format!(
-                    "migrating to v{version} left {dangling} dangling foreign key \
-                     reference(s) — refusing to continue"
-                )));
-            }
-            conn.pragma_update(None, "user_version", version)?;
             tracing::info!(version, "applied schema migration");
         }
 
@@ -1674,6 +1782,43 @@ impl SqliteStore {
             )?;
             tracing::info!(instance_id = %id, "generated new instance id");
         }
+        Ok(())
+    }
+
+    /// Synthetic source-bound old lineage, never a historical capture.
+    #[cfg(feature = "hiqlite-contract-tests")]
+    #[doc(hidden)]
+    pub fn validation_seed_schema_lineage(
+        path: &Path,
+        marker: i64,
+        private: bool,
+    ) -> Result<(), StoreError> {
+        let conn = Connection::open(path)?;
+        conn.pragma_update(None, "foreign_keys", "ON")?;
+        if private {
+            if !(88..=93).contains(&marker) {
+                return Err(StoreError::Migration(
+                    "invalid synthetic private SQLite marker".to_owned(),
+                ));
+            }
+            for sql in MIGRATIONS
+                .iter()
+                .take(87)
+                .chain(MIGRATIONS.iter().skip(91).take((marker - 87) as usize))
+            {
+                conn.execute_batch(sql)?;
+            }
+        } else {
+            if !(88..=91).contains(&marker) {
+                return Err(StoreError::Migration(
+                    "invalid synthetic published SQLite marker".to_owned(),
+                ));
+            }
+            for sql in MIGRATIONS.iter().take(marker as usize) {
+                conn.execute_batch(sql)?;
+            }
+        }
+        conn.pragma_update(None, "user_version", marker)?;
         Ok(())
     }
 
@@ -2331,6 +2476,161 @@ impl SqliteStore {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn migration_step_commits_its_marker_with_its_shape_or_neither() {
+        let conn = Connection::open_in_memory().expect("step fixture");
+        let version = |conn: &Connection| -> i64 {
+            conn.query_row("PRAGMA user_version", [], |row| row.get(0))
+                .expect("user_version")
+        };
+        let table_exists = |conn: &Connection, name: &str| -> bool {
+            conn.query_row(
+                "SELECT COUNT(*) FROM sqlite_schema WHERE type = 'table' AND name = ?1",
+                [name],
+                |row| row.get::<_, i64>(0),
+            )
+            .expect("schema read")
+                == 1
+        };
+
+        // A step that fails after its first DDL statement leaves neither the
+        // shape nor the marker behind.
+        let failed = SqliteStore::apply_migration_step(
+            &conn,
+            1,
+            "CREATE TABLE torn (x INTEGER); CREATE TABLE torn (y INTEGER);",
+            false,
+        );
+        assert!(failed.is_err(), "duplicate table must fail the step");
+        assert!(
+            conn.is_autocommit(),
+            "failed step leaves no open transaction"
+        );
+        assert_eq!(version(&conn), 0);
+        assert!(!table_exists(&conn, "torn"));
+
+        // A step whose DDL leaves a dangling reference rolls back too.
+        conn.pragma_update(None, "foreign_keys", "OFF")
+            .expect("foreign keys off");
+        let dangling = SqliteStore::apply_migration_step(
+            &conn,
+            1,
+            "CREATE TABLE parent (id INTEGER PRIMARY KEY);
+             CREATE TABLE child (parent_id INTEGER REFERENCES parent(id));
+             INSERT INTO child VALUES (7);",
+            false,
+        );
+        assert!(dangling.is_err(), "dangling reference must fail the step");
+        assert_eq!(version(&conn), 0);
+        assert!(!table_exists(&conn, "child"));
+
+        // A successful step commits the shape and the marker together.
+        SqliteStore::apply_migration_step(&conn, 1, "CREATE TABLE applied (x INTEGER);", false)
+            .expect("successful step");
+        assert_eq!(version(&conn), 1);
+        assert!(table_exists(&conn, "applied"));
+
+        // A shape a published build already committed only advances the marker.
+        SqliteStore::apply_migration_step(&conn, 2, "CREATE TABLE applied (x INTEGER);", true)
+            .expect("already-applied step");
+        assert_eq!(version(&conn), 2);
+    }
+
+    #[test]
+    fn copy_output_source_guards_upgrade_active_rows_without_touching_unrelated_work() {
+        let conn = Connection::open_in_memory().expect("source guard fixture");
+        conn.execute_batch("CREATE TABLE files(id INTEGER PRIMARY KEY,size INTEGER,mtime INTEGER);
+            CREATE TABLE background_jobs(id TEXT PRIMARY KEY,kind TEXT,state TEXT,last_error_code TEXT,revision INTEGER,payload_json TEXT,target_node_id TEXT);
+            CREATE TABLE background_job_commands(id TEXT,operation TEXT,request_json TEXT,result_json TEXT);
+            CREATE TABLE background_job_waiters(job_id TEXT,state TEXT,deadline_ms INTEGER,target_node_id TEXT,result_ref TEXT,updated_at_ms INTEGER);
+            INSERT INTO files VALUES(1,100,1),(2,100,1);").expect("fixture tables");
+        // Load the actual original two guards, not a simulated predecessor.
+        for statement in super::super::background_jobs::SCHEMA.split("-- next statement\n") {
+            if statement.contains("CREATE TRIGGER IF NOT EXISTS background_job_source_changed\n")
+                || statement
+                    .contains("CREATE TRIGGER IF NOT EXISTS background_job_source_deleted\n")
+            {
+                conn.execute_batch(statement)
+                    .expect("original source guard");
+            }
+        }
+        for (id, kind, state, file) in [
+            ("copy", "copy_output_prepare", "queued", 1),
+            ("copy-running", "copy_output_prepare", "running", 2),
+            ("transcode", "transcode_prepare", "queued", 1),
+            ("fragment", "fragment_index_build", "running", 2),
+            ("unrelated", "provider_refresh", "queued", 1),
+            ("complete", "copy_output_prepare", "succeeded", 1),
+        ] {
+            conn.execute(
+                "INSERT INTO background_jobs(id,kind,state,last_error_code,revision,payload_json) VALUES(?1,?2,?3,NULL,7,?4)",
+                params![
+                    id,
+                    kind,
+                    state,
+                    format!("{{\"file_id\":{file},\"source_size\":100,\"source_mtime\":1}}")
+                ],
+            )
+            .expect("seed job");
+        }
+        conn.execute("UPDATE files SET size=101 WHERE id=1", [])
+            .expect("old update");
+        let state = |id: &str| {
+            conn.query_row(
+                "SELECT state,revision FROM background_jobs WHERE id=?1",
+                [id],
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?)),
+            )
+            .expect("job state")
+        };
+        assert_eq!(state("copy"), ("queued".into(), 7));
+        assert_eq!(state("transcode"), ("cancelled".into(), 8));
+        conn.execute_batch(&format!(
+            "BEGIN;\n{}\nCOMMIT;",
+            super::super::background_jobs::COPY_OUTPUT_SCHEMA
+        ))
+        .expect("atomic source guard upgrade");
+        conn.execute("UPDATE files SET size=102 WHERE id=1", [])
+            .expect("new update");
+        conn.execute("DELETE FROM files WHERE id=2", [])
+            .expect("source deletion");
+        assert_eq!(state("copy"), ("cancelled".into(), 8));
+        assert_eq!(state("copy-running"), ("cancelling".into(), 8));
+        assert_eq!(state("fragment"), ("cancelling".into(), 8));
+        assert_eq!(state("unrelated"), ("queued".into(), 7));
+        assert_eq!(state("complete"), ("succeeded".into(), 7));
+        assert_eq!(state("transcode"), ("cancelled".into(), 8));
+    }
+
+    #[test]
+    fn a05_v89_sqlite_prior_migration_preserves_unattributed_history() {
+        let dir = tempfile::tempdir().expect("prior root");
+        let db = dir.path().join("prior.db");
+        {
+            let conn = Connection::open(&db).expect("legacy database");
+            for sql in MIGRATIONS.iter().take(88) {
+                conn.execute_batch(sql).expect("legacy migration");
+            }
+            conn.execute("INSERT INTO network_priors VALUES (42, 'test-gen', 'safari', 'network', 8000, 720, 100000, 1, 100000)", []).expect("seed legacy negative");
+            conn.pragma_update(None, "user_version", 88)
+                .expect("legacy version");
+        }
+        let store = SqliteStore::open(&db).expect("migrate database");
+        drop(store);
+        let conn = Connection::open(&db).expect("reopen database");
+        let prior = crate::store::telemetry::get_prior(&conn, "test-gen", "safari", "network")
+            .expect("read migrated prior")
+            .expect("preserved legacy prior");
+        assert_eq!(prior.active_starved_rung(100_000), Some(720));
+        assert_eq!(prior.active_link_starved_rung(100_000), None);
+        assert_eq!(prior.sustained_kbps, Some(8000));
+        assert_eq!(
+            conn.query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0))
+                .expect("schema version"),
+            SQLITE_SCHEMA_VERSION
+        );
+    }
     use crate::domain::{MetadataPatch, ReadingStateWrite};
     use crate::store::{
         MediaStore, PlaybackTelemetryStore, ReadingStore, SettingsStore, WatchStore,
@@ -2949,10 +3249,13 @@ mod tests {
         // v86 compacts settled receipts under waiter pressure; v87 adds
         // expiring viewer interests through analysis and artifacts; v88 adds the
         // unconditional result-key/target/force index for bounded cleanup.
-        // v89 indexes preparation history; v90 records explicit DV requests.
-        // v91 adds planning generation; v92 cancellation; v93 continuous dependencies.
+        // v89 indexes preparation history; v90 records explicit DV requests;
+        // v91 records transactional planning generation.
+        // v92–v97 append offline audio, independent Link columns/table,
+        // copy preparation, candidate recovery and encoded preparation;
+        // v98 adds quality cancellation and v99 continuous dependencies.
         assert_eq!(
-            version, 93,
+            version, 99,
             "a new migration must be a deliberate bump, not a surprise — \
              the list is append-only and every entry is one somebody shipped"
         );
@@ -4693,5 +4996,38 @@ mod tests {
             .collect::<rusqlite::Result<Vec<_>>>()
             .expect("collect files columns");
         assert!(columns.iter().any(|column| column == "field_order"));
+    }
+
+    #[test]
+    fn v88_offline_audio_snapshot_upgrade_preserves_legacy_package() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let db = dir.path().join("plurx.db");
+        {
+            let conn = Connection::open(&db).expect("raw open");
+            for (index, sql) in MIGRATIONS.iter().enumerate().take(87) {
+                conn.execute_batch(&format!("BEGIN;\n{sql}\nCOMMIT;"))
+                    .unwrap_or_else(|error| panic!("v{}: {error}", index + 1));
+            }
+            conn.execute("INSERT INTO users (id, username, password_hash) VALUES (1, 'synthetic-audio', 'unused-test-hash')", []).expect("owned test user");
+            conn.execute("INSERT INTO offline_packages (id, request_id, user_id, file_id, node_id, source_path, source_size, source_mtime, target_height, subtitle_mode, state, phase, expires_at) VALUES ('legacy-audio', 'legacy-request', 1, 1, 'owned-node', '/synthetic/source.mkv', 4096, 1, 720, 'none', 'queued', 'queued', 10000)", []).expect("legacy package");
+            conn.pragma_update(None, "user_version", 87)
+                .expect("v87 marker");
+        }
+        SqliteStore::open(&db).expect("migrate legacy snapshot");
+        let conn = Connection::open(&db).expect("raw reopen");
+        let (path, audio) = conn
+            .query_row(
+                "SELECT source_path, audio_recipe FROM offline_packages WHERE id = 'legacy-audio'",
+                [],
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?)),
+            )
+            .expect("retained package");
+        assert_eq!(path, "/synthetic/source.mkv");
+        assert_eq!(audio, None, "upgrade must not invent a new audio recipe");
+        assert_eq!(
+            conn.query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0))
+                .expect("upgraded version"),
+            SQLITE_SCHEMA_VERSION
+        );
     }
 }

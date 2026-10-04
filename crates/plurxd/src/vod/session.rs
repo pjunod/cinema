@@ -33,6 +33,13 @@ pub(super) struct Rendition {
     pub(super) completed_cache_budget: u64,
     pub(super) materialize_budget: Duration,
     pub(super) manifest: Mutex<Manifest>,
+    pub(super) output_measurement: StdMutex<PublishedOutputMeasurement>,
+    pub(super) copy_preparation: StdMutex<Option<Arc<super::copy_preparation::CopyPreparation>>>,
+    pub(super) preparation_epoch: AtomicU64,
+    /// Identity of the complete output already handed to retained assembly
+    /// (in flight or assembled). Maintenance never re-offers it.
+    pub(super) retained_offer: StdMutex<Option<[u8; 32]>>,
+    pub(super) cancelled_preparation_epoch: AtomicU64,
     pub(super) identity: Mutex<IdentityState>,
     pub(super) slot: ProducerSlot,
     /// Capacity can be shared by parents of this exact immutable rendition,
@@ -624,6 +631,7 @@ pub(super) struct Session {
     /// They never allocate additional public playback sessions or captions.
     pub(super) children: Vec<ParentMediaReader>,
     pub(super) rendition: Option<Arc<Rendition>>,
+    pub(super) retained_output: Option<Arc<retained::RetainedVodArtifact>>,
     pub(super) rendition_key: String,
     pub(super) file: Arc<MediaFile>,
     pub(super) playback_id: String,
@@ -687,6 +695,12 @@ pub(super) struct Session {
 }
 
 impl Session {
+    pub(super) fn invalidate_observational_attachment(&self) {
+        self.control
+            .lock()
+            .expect("control lock")
+            .invalidate_observational_attachment();
+    }
     /// Release this session's rendition from any handoff its preparation no
     /// longer backs (abort, rejection, settlement, tombstone, or a newer
     /// successor staged in its place).
@@ -719,6 +733,7 @@ impl Session {
     pub(super) fn abort_staged_preparation(&self) {
         {
             let mut control = self.control.lock().expect("control lock");
+            control.invalidate_observational_attachment();
             if let Some(staged) = control.staged_incarnation_id().map(str::to_owned) {
                 control.abort_preparation(&staged);
             }
@@ -743,6 +758,11 @@ impl Session {
         ResponseOwner {
             lifecycle: Arc::clone(&self.lifecycle),
             incarnation: Arc::clone(&self.incarnation),
+            retained_output: self
+                .retained_output
+                .as_ref()
+                .filter(|_| self.tombstone.is_none())
+                .map(Arc::clone),
             rendition: self.rendition.as_ref().map(Arc::clone),
             media_child: None,
             rendition_key: self.rendition_key.clone(),
@@ -810,6 +830,59 @@ impl VodPreparationGate {
 }
 
 impl crate::playback_control::PreparationGate for VodPreparationGate {
+    fn staged_observation_is_current<'a>(
+        &'a self,
+        fence: crate::playback_control::AcceptedControlFence,
+        incarnation: String,
+        deadline: i64,
+    ) -> crate::playback_control::StagedObservationAnswer<'a> {
+        Box::pin(async move {
+            let mut sessions = self.shared.sessions.lock().await;
+            let session = self.bound(&mut sessions)?;
+            if session.tombstone.is_some() {
+                return None;
+            }
+            session
+                .control
+                .lock()
+                .ok()
+                .and_then(|state| state.staged_observation_token(&fence, &incarnation, deadline))
+        })
+    }
+    fn accepted_observation<'a>(
+        &'a self,
+        identity: crate::playback_control::AcceptedControlIdentity,
+    ) -> crate::playback_control::ObservationAnswer<'a> {
+        Box::pin(async move {
+            let mut sessions = self.shared.sessions.lock().await;
+            let session = self.bound(&mut sessions)?;
+            if session.tombstone.is_some() {
+                return None;
+            }
+            let answer = session.control.lock().ok()?.accepted_observation(identity);
+            answer
+        })
+    }
+
+    fn observation_is_current<'a>(
+        &'a self,
+        fence: crate::playback_control::AcceptedControlFence,
+    ) -> crate::playback_control::GateAnswer<'a> {
+        Box::pin(async move {
+            let mut sessions = self.shared.sessions.lock().await;
+            let Some(session) = self.bound(&mut sessions) else {
+                return false;
+            };
+            if session.tombstone.is_some() {
+                return false;
+            }
+            session
+                .control
+                .lock()
+                .map(|state| state.observation_is_current(&fence))
+                .unwrap_or(false)
+        })
+    }
     fn stage_preparation_for_owner<'a>(
         &'a self,
         staged_incarnation_id: String,

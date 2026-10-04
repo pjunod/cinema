@@ -24,11 +24,17 @@ recomputed on every decision, because unplugging HDMI changes the answer.
 > quality changes adapt inside the one player, with owned outputs and release
 > fences around a prepared replacement. Production and test sources compile;
 > physical-device transitions remain unmeasured.
-> Build 143 — decoder envelopes compact conservatively
+> The same build carries current main's decoder envelopes, which compact conservatively
 > while preserving crossing limits, profiles and display grades. The bounded
 > contract is negotiated with the server; no evidence is truncated. Physical
 > TCL/Streamer acceptance remains outstanding.
-> Build 142 — a paused transcoding session the server
+> Build `142` — newer 10/30-second directional seek controls
+> are preserved from current main; no physical production install is claimed.
+> Build `141` — buffer roles retain their existing ceilings
+> and clamp to the actual process heap; local diagnostics name the actual Coil
+> cache bound. Larger incumbent allocation and three-device memory/HDMI
+> qualification remain open. No physical production install is claimed.
+> A paused transcoding session the server
 > retires after its three-minute pause grace no longer surfaces "Playback
 > stopped"; Play reopens at the saved position (not yet on a device). Build
 > 138's per-box Live TV player view (fullscreen fills tablets) was accepted

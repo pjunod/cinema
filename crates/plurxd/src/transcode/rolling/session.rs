@@ -8,6 +8,13 @@ pub(super) struct Session {
     /// additional immutable coordinate.
     pub(super) response_incarnation: uuid::Uuid,
     pub(super) frozen_presentation: Option<FrozenHlsPresentation>,
+    /// Actual held producer input and execution identity, never wire metadata.
+    pub(super) rolling_provenance: Option<Arc<crate::rolling_provenance::RollingProduction>>,
+    pub(super) rolling_collection: Option<Arc<crate::vodserve::retained::RollingCollection>>,
+    pub(super) rolling_artifact: Option<Arc<crate::vodserve::retained::RollingArtifact>>,
+    pub(super) copy_output_measurement: std::sync::Mutex<
+        Option<Arc<std::sync::Mutex<crate::rolling_output::RollingOutputMeasurement>>>,
+    >,
     /// True for every rolling generation whose response publication is
     /// admitted by the actor. Producer recovery may still remain compatibility
     /// owned; response ownership does not imply prepublication retry policy.
@@ -152,6 +159,7 @@ pub(super) struct Session {
     /// bound to a manual session repeats this exact route instead of silently
     /// turning an Original/copy delivery into a transcode.
     pub(super) kind: SessionKind,
+    pub(super) audio_delivery: Option<plurx_core::playback::audio::AudioDelivery>,
     /// Re-encoding the picture, or only repackaging it. Immutable, unlike
     /// `encoder_label`: what this session *is* does not change when the
     /// encoder behind it does, and the activity page must not relabel a copy

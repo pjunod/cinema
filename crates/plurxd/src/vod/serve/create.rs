@@ -1,6 +1,204 @@
 use super::*;
 
 impl VodServe {
+    /// Finite background obligation in the existing rendition driver. This
+    /// never registers a session, reader, wait-pool demand or synthetic GET.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) async fn prepare_copy_output(
+        &self,
+        prepared: VodRecipeRequest<'_>,
+        file: &MediaFile,
+        settings: &VodSettings,
+        source_version: &str,
+        cap: u64,
+        fence: crate::background_jobs::JobFence,
+        deadline: Instant,
+        admissions: crate::admission::Admissions,
+        media_engine: (
+            Arc<crate::ffmpeg::EncodedExecutable>,
+            crate::ffmpeg::EncodedEngine,
+        ),
+        still_idle: impl Fn() -> bool,
+    ) -> Result<super::copy_preparation::PreparedCopyOutput, crate::background_jobs::PreparationError>
+    {
+        if prepared.encoding.is_some() {
+            return Err(crate::background_jobs::PreparationError::Fail(
+                "copy_preparation_with_encoding",
+            ));
+        }
+        self.prepare_complete_output(
+            prepared,
+            file,
+            settings,
+            source_version,
+            cap,
+            fence,
+            deadline,
+            admissions,
+            media_engine,
+            still_idle,
+        )
+        .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) async fn prepare_encoded_output(
+        &self,
+        prepared: VodRecipeRequest<'_>,
+        file: &MediaFile,
+        settings: &VodSettings,
+        source_version: &str,
+        cap: u64,
+        fence: crate::background_jobs::JobFence,
+        deadline: Instant,
+        admissions: crate::admission::Admissions,
+        media_engine: (
+            Arc<crate::ffmpeg::EncodedExecutable>,
+            crate::ffmpeg::EncodedEngine,
+        ),
+        still_idle: impl Fn() -> bool,
+    ) -> Result<super::copy_preparation::PreparedCopyOutput, crate::background_jobs::PreparationError>
+    {
+        if prepared.encoding.is_none() {
+            return Err(crate::background_jobs::PreparationError::Fail(
+                "encoded_preparation_without_plan",
+            ));
+        }
+        self.prepare_complete_output(
+            prepared,
+            file,
+            settings,
+            source_version,
+            cap,
+            fence,
+            deadline,
+            admissions,
+            media_engine,
+            still_idle,
+        )
+        .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn prepare_complete_output(
+        &self,
+        mut prepared: VodRecipeRequest<'_>,
+        file: &MediaFile,
+        settings: &VodSettings,
+        source_version: &str,
+        cap: u64,
+        fence: crate::background_jobs::JobFence,
+        deadline: Instant,
+        admissions: crate::admission::Admissions,
+        media_engine: (
+            Arc<crate::ffmpeg::EncodedExecutable>,
+            crate::ffmpeg::EncodedEngine,
+        ),
+        still_idle: impl Fn() -> bool,
+    ) -> Result<super::copy_preparation::PreparedCopyOutput, crate::background_jobs::PreparationError>
+    {
+        use crate::background_jobs::PreparationError;
+        let expected_encoded_plan = prepared
+            .encoding
+            .as_ref()
+            .map(|encoding| encoding.plan.plan_digest().to_owned());
+        let attachment_observation = *self
+            .shared
+            .preparation_attachment
+            .lock()
+            .expect("attachment observation");
+        if !still_idle() {
+            return Err(PreparationError::Yield("preempted"));
+        }
+        if Instant::now() >= deadline {
+            return Err(PreparationError::Yield("pass_deadline"));
+        }
+        // A full retained budget is refused before any media work starts, so
+        // queueing again costs one reservation check, never a remux/encode.
+        let allowance = super::retained::RetainedArtifactRegistry::reserve_preparation(
+            &self.shared,
+            cap,
+            settings.completed_cache_bytes,
+        )
+        .await
+        .ok_or(PreparationError::Yield("retention_capacity"))?;
+        let (attachment, logical) = self
+            .resolve_rendition(&mut prepared, file, settings, None, Some(allowance.nonce))
+            .await?;
+        let rendition = Arc::clone(&attachment.rendition);
+        let logical = logical.ok_or("copy preparation logical facts unavailable")?;
+        let token = fence
+            .snapshot()
+            .await
+            .ok_or(PreparationError::Yield("lease_lost"))?;
+        let readers = rendition.readers.lock().await;
+        let manifest = rendition.manifest.lock().await;
+        if !rendition
+            .source
+            .as_ref()
+            .is_some_and(|source| source.unchanged() && source.object_version() == source_version)
+        {
+            return Err(PreparationError::Stop("source_changed"));
+        }
+        if rendition.recipe.retained_logical.as_ref() != Some(&logical) {
+            return Err(PreparationError::Fail("retained_logical_changed"));
+        }
+        if !still_idle()
+            || Instant::now() >= deadline
+            || !readers.is_empty()
+            || manifest.materialized_count() != 0
+            || rendition.preparation().is_some()
+        {
+            // A viewer or another preparation already owns this rendition.
+            return Err(PreparationError::Yield("rendition_busy"));
+        }
+        let preparation = Arc::new(super::copy_preparation::CopyPreparation::new(
+            allowance,
+            fence,
+            token,
+            deadline,
+            logical,
+            source_version.to_owned(),
+            expected_encoded_plan,
+            admissions,
+            media_engine,
+            attachment_observation,
+        ));
+        // Reserve metadata separately from media's RFC numerator and horizon
+        // charge. The manifest writer itself is bounded by MAX_MANIFEST.
+        let metadata = preparation
+            .allowance
+            .begin(
+                super::retained_manifest::MAX_MANIFEST
+                    .checked_add(rendition.playlist.len() as u64)
+                    .ok_or(PreparationError::Fail("preparation_metadata_overflow"))?,
+            )
+            .ok_or(PreparationError::Fail("preparation_metadata_exceeds_cap"))?;
+        metadata.commit(false);
+        {
+            let observation = self
+                .shared
+                .preparation_attachment
+                .lock()
+                .expect("attachment observation");
+            if *observation != attachment_observation || *observation == u64::MAX {
+                return Err(PreparationError::Yield("preempted"));
+            }
+            *rendition.copy_preparation.lock().expect("copy preparation") =
+                Some(Arc::clone(&preparation));
+        }
+        let run = super::copy_preparation::PreparationRun {
+            rendition: Arc::clone(&rendition),
+            preparation,
+            armed: true,
+        };
+        drop(manifest);
+        drop(readers);
+        drop(attachment); // Never hold the attachment gate for full-film work.
+        rendition.kick();
+        self.wait_prepared_copy(run, still_idle).await
+    }
+
     /// The VOD arm of session create, called by the manager AFTER it has
     /// decided the request opts in (`presentation=="vod" && settings.enabled`).
     ///
@@ -193,20 +391,20 @@ impl VodServe {
     /// Resolve immutable media without attaching a public playback handle.
     /// The returned build guard protects the lookup/reader-attachment gap;
     /// callers must commit their parent-owned reader graph before dropping it.
-    async fn prepare_rendition(
+    async fn resolve_rendition(
         &self,
-        prepared: VodRecipeRequest<'_>,
+        prepared: &mut VodRecipeRequest<'_>,
         file: &MediaFile,
         settings: &VodSettings,
         viewer: Option<&crate::state::PlaybackViewerDemand>,
-    ) -> Result<RenditionAttachment, String> {
-        // The one funnel every create passes through: the plain entry point,
-        // the cluster one that every shipped caller actually uses, and the
-        // resurrection of a session from its durable route. Applying the
-        // ceiling here rather than at construction is what lets an operator
-        // change it without a restart — a cap set only in `WaitPool::new`
-        // would be frozen at whatever the node booted with — and applying it
-        // at `try_create` alone reached no production path at all.
+        private_preparation: Option<uuid::Uuid>,
+    ) -> Result<
+        (
+            RenditionAttachment,
+            Option<crate::vodserve::retained_manifest::LogicalOutput>,
+        ),
+        String,
+    > {
         self.shared.pool.set_global_cap(settings.blocked_get_cap);
         let req = prepared.request;
         let (aac, preserve_dolby_vision, convert_dolby_vision) = match req.kind {
@@ -447,17 +645,43 @@ impl VodServe {
                 "its parameter sets vary mid-film (the §2 ruling)",
             ));
         }
+        // Sharing may return an existing rendition and discard this Recipe.
+        // Issued proof compatibility belongs to this incoming resolved request.
+        let incoming_logical = Some(crate::vodserve::retained_manifest::LogicalOutput::resolve(
+            req,
+            prepared.encoding.as_deref(),
+            file,
+            video,
+        ));
         let recipe = Recipe {
+            retained_logical: incoming_logical.clone(),
+            measured_candidate: prepared.measured_candidate.take(),
             file: file.clone(),
             audio_index: req.audio_index,
             aac,
+            audio_delivery: prepared
+                .encoding
+                .as_ref()
+                .and_then(|encoding| encoding.options.audio.clone())
+                .or_else(|| req.audio_delivery.clone()),
             video,
             source_object_version,
             cluster_cache_key,
-            encoding: prepared.encoding,
+            encoding: prepared.encoding.take(),
         };
-        let key = rendition_key(&recipe, &identity);
-        self.shared
+        let canonical_key = rendition_key(&recipe, &identity);
+        let key = private_preparation.map_or_else(
+            || canonical_key.clone(),
+            |nonce| {
+                let mut hash = Sha256::new();
+                hash.update(b"plurx:private-copy-preparation-incarnation:v1\0");
+                hash.update(canonical_key.as_bytes());
+                hash.update(nonce.as_bytes());
+                hex::encode(hash.finalize())
+            },
+        );
+        let attachment = self
+            .shared
             .attach_rendition(&key, &identity, index, recipe, duration_ms, settings)
             .await?
             .ok_or_else(|| {
@@ -465,7 +689,8 @@ impl VodServe {
                     "vod_source_unsupported",
                     "the fragment index produced an empty VOD plan",
                 )
-            })
+            })?;
+        Ok((attachment, incoming_logical))
     }
 
     pub(super) async fn reserve_media_group(
@@ -576,13 +801,20 @@ impl VodServe {
 
     async fn try_create_with_release_fence(
         &self,
-        prepared: VodRecipeRequest<'_>,
+        mut prepared: VodRecipeRequest<'_>,
         file: &MediaFile,
         settings: &VodSettings,
         attribution: VodAttribution<'_>,
         session_id: String,
         fences: VodCreateFences<'_>,
     ) -> Result<VodStart, String> {
+        // The one funnel every create passes through: the plain entry point,
+        // the cluster one that every shipped caller actually uses, and the
+        // resurrection of a session from its durable route. Applying the
+        // ceiling here rather than at construction is what lets an operator
+        // change it without a restart — a cap set only in `WaitPool::new`
+        // would be frozen at whatever the node booted with — and applying it
+        // at `try_create` alone reached no production path at all.
         let req = prepared.request;
         let continuous = req
             .continuous_media
@@ -670,8 +902,10 @@ impl VodServe {
         let companion_rendition = match prepared.companion.as_ref() {
             Some((request, encoding)) => {
                 let attachment = self
-                    .prepare_rendition(
-                        VodRecipeRequest {
+                    .resolve_rendition(
+                        &mut VodRecipeRequest {
+                            measured_candidate: None,
+                            retained_capture: RetainedOutputCapture::New,
                             request,
                             encoding: Some(Arc::clone(encoding)),
                             soundtrack: None,
@@ -680,8 +914,10 @@ impl VodServe {
                         file,
                         settings,
                         fences.viewer.as_ref(),
+                        None,
                     )
-                    .await?;
+                    .await?
+                    .0;
                 let rendition = Arc::clone(&attachment.rendition);
                 drop(attachment);
                 Some(rendition)
@@ -702,8 +938,10 @@ impl VodServe {
         let audio_rendition = match prepared.soundtrack.as_ref() {
             Some(soundtrack) => {
                 let attachment = self
-                    .prepare_rendition(
-                        VodRecipeRequest {
+                    .resolve_rendition(
+                        &mut VodRecipeRequest {
+                            measured_candidate: None,
+                            retained_capture: RetainedOutputCapture::New,
                             companion: None,
                             request: &audio_request,
                             encoding: Some(Arc::clone(soundtrack)),
@@ -712,16 +950,18 @@ impl VodServe {
                         file,
                         settings,
                         fences.viewer.as_ref(),
+                        None,
                     )
-                    .await?;
+                    .await?
+                    .0;
                 let rendition = Arc::clone(&attachment.rendition);
                 drop(attachment);
                 Some(rendition)
             }
             None => None,
         };
-        let attachment = self
-            .prepare_rendition(prepared, file, settings, fences.viewer.as_ref())
+        let (attachment, incoming_logical) = self
+            .resolve_rendition(&mut prepared, file, settings, fences.viewer.as_ref(), None)
             .await?;
         let rendition = Arc::clone(&attachment.rendition);
         drop(attachment);
@@ -805,6 +1045,54 @@ impl VodServe {
         };
 
         let start_entry = entry_containing(&rendition.plan, req.start_seconds);
+        let retained_output = match prepared.retained_capture {
+            RetainedOutputCapture::Restore(Some(ref expected)) => Some(
+                self.shared
+                    .retained_artifacts
+                    .reacquire_expected_for_request(
+                        expected,
+                        &self.shared,
+                        &rendition,
+                        &incoming_logical,
+                        rendition.materialize_budget,
+                    )
+                    .await
+                    .ok_or_else(|| {
+                        crate::transcode::vod_refusal_error(
+                            "retained_artifact_unavailable",
+                            "the issued output artifact cannot be exactly reacquired",
+                        )
+                    })?,
+            ),
+            RetainedOutputCapture::Restore(None) | RetainedOutputCapture::ReceiverUnavailable => {
+                None
+            }
+            // A continuous parent serves role-split private children; no
+            // complete retained output can stand in for that reader graph.
+            RetainedOutputCapture::New if continuous => None,
+            RetainedOutputCapture::New => {
+                let existing = rendition
+                    .output_measurement
+                    .lock()
+                    .expect("output measurement lock")
+                    .complete_rates()
+                    .and_then(|rates| self.shared.retained_artifacts.acquire(&rates.identity))
+                    .filter(|artifact| artifact.logical == incoming_logical);
+                if existing.is_some() {
+                    existing
+                } else if req.candidate_context.is_some() {
+                    self.shared
+                        .retained_artifacts
+                        .acquire_prepared_candidate(&rendition, &incoming_logical, file, req)
+                        .await
+                } else {
+                    self.shared
+                        .retained_artifacts
+                        .acquire_prepared_manual(&rendition, &incoming_logical, file)
+                        .await
+                }
+            }
+        };
         let marker_destinations = stored_marker_destinations(
             self.shared.store.as_ref(),
             file,
@@ -827,8 +1115,20 @@ impl VodServe {
         let lifecycle = self.shared.session_lifecycle(&session_id);
         let lifecycle_guard = Arc::clone(&lifecycle).lock_owned().await;
         let duration_ms = plan_duration_ms(&rendition.plan);
+        if retained_output.as_ref().is_some_and(|artifact| {
+            self.shared
+                .retained_artifacts
+                .acquire_expected_for_request(&artifact.facts(), &rendition, &incoming_logical)
+                .is_none()
+        }) {
+            return Err(crate::transcode::vod_refusal_error(
+                "retained_artifact_unavailable",
+                "the exact artifact changed before attachment",
+            ));
+        }
         let mut replacement = Session {
             children: Vec::new(),
+            retained_output,
             rendition: Some(Arc::clone(&rendition)),
             rendition_key: rendition.key.clone(),
             file: Arc::new(rendition.recipe.file.clone()),
@@ -973,6 +1273,7 @@ impl VodServe {
             // and the stop is left alone.
             obsolete_window_flight = crate::subtitles::session_window_flight(&session_id);
         }
+        rendition.revoke_preparation();
         for child in &private_media {
             let entry = media_entry_containing_ms(
                 &child.rendition.plan,
@@ -1014,6 +1315,14 @@ impl VodServe {
             .map(|session| std::mem::take(&mut session.children))
             .unwrap_or_default();
         sessions.insert(session_id.clone(), replacement);
+        {
+            let mut observation = self
+                .shared
+                .preparation_attachment
+                .lock()
+                .expect("attachment observation");
+            *observation = observation.saturating_add(1);
+        }
         // Both reader graphs are committed, so the rendition-wide guards have
         // no further work. They used to live to the end of the function, which
         // was free while nothing here awaited; the window stop below does, and

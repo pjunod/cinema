@@ -2879,7 +2879,7 @@ impl MediaStore for HiqliteAuthStore {
                     probe.dolby_vision.el_present.map(i64::from),
                     probe.dolby_vision.rpu_present.map(i64::from),
                     probe.video_codec_tag.as_deref(),
-                    probe.field_order.as_deref(),
+                    probe.stored_field_order(),
                     probe.max_cll,
                     probe.max_fall,
                     probe.mastering_max_luminance,
@@ -3371,6 +3371,84 @@ impl MediaStore for HiqliteAuthStore {
                     max_fall,
                     mastering_max_luminance,
                     source,
+                    candidate.id,
+                    candidate.path.as_str(),
+                    candidate.size,
+                    candidate.mtime,
+                    candidate.probe_json.as_str()
+                ),
+            )
+            .await
+            .map_err(database_error)?;
+        Ok(changed == 1)
+    }
+
+    async fn files_without_luminance_facts(
+        &self,
+        after_id: i64,
+        limit: i64,
+    ) -> Result<Vec<MissingVideoCodecTag>, StoreError> {
+        #[derive(Debug)]
+        struct UnobservedRow {
+            id: i64,
+            path: String,
+            size: i64,
+            mtime: i64,
+            probe_json: String,
+        }
+        impl From<&mut Row<'_>> for UnobservedRow {
+            fn from(row: &mut Row<'_>) -> Self {
+                Self {
+                    id: row.get("id"),
+                    path: row.get("path"),
+                    size: row.get("size"),
+                    mtime: row.get("mtime"),
+                    probe_json: row.get("probe_json"),
+                }
+            }
+        }
+        // The frame walk's cursor passes ids for good, so a page read from a
+        // lagging replica could skip a committed `none` row forever.
+        Ok(self
+            .client()
+            // authority: the cursor never revisits an id it has passed.
+            .query_consistent_map::<UnobservedRow, _>(
+                "SELECT id, path, size, mtime, probe_json FROM files \
+                  WHERE hdr IS NOT NULL AND luminance_source = 'none' \
+                    AND probe_json IS NOT NULL AND id > $1 ORDER BY id LIMIT $2",
+                params!(after_id, limit.max(0)),
+            )
+            .await
+            .map_err(database_error)?
+            .into_iter()
+            .map(|row| MissingVideoCodecTag {
+                id: row.id,
+                path: row.path,
+                size: row.size,
+                mtime: row.mtime,
+                probe_json: row.probe_json,
+            })
+            .collect())
+    }
+
+    async fn set_file_frame_luminance(
+        &self,
+        candidate: &MissingVideoCodecTag,
+        max_cll: Option<i64>,
+        max_fall: Option<i64>,
+        mastering_max_luminance: Option<i64>,
+    ) -> Result<bool, StoreError> {
+        let changed = self
+            .client()
+            .execute(
+                "UPDATE files SET max_cll = $1, max_fall = $2, \
+                  mastering_max_luminance = $3, luminance_source = 'frame' \
+                  WHERE id = $4 AND path = $5 AND size = $6 AND mtime = $7 \
+                    AND probe_json = $8 AND luminance_source = 'none'",
+                params!(
+                    max_cll,
+                    max_fall,
+                    mastering_max_luminance,
                     candidate.id,
                     candidate.path.as_str(),
                     candidate.size,

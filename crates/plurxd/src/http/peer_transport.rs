@@ -4,6 +4,7 @@
 //! every response is read under the caller's common deadline and byte budget,
 //! and exact requests bind their raw body and route into the node signature.
 
+use std::future::Future;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use plurx_core::cluster::membership::{
@@ -31,6 +32,7 @@ pub(crate) enum PeerAuthMode {
 pub(crate) struct PeerResponse {
     pub(crate) status: reqwest::StatusCode,
     pub(crate) body: Vec<u8>,
+    pub(crate) clock_timing: Option<(i64, i64, plurx_core::cluster::clock::ClockDecisionTicket)>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -79,6 +81,7 @@ impl PeerTransport {
             max_response_bytes,
             auth_mode,
             None,
+            None,
         )
         .await
         .map(|(response, _)| response)
@@ -109,6 +112,7 @@ impl PeerTransport {
             max_response_bytes,
             auth_mode,
             None,
+            None,
         )
         .await
     }
@@ -136,6 +140,29 @@ impl PeerTransport {
             max_response_bytes,
             auth_mode,
             Some(header),
+            None,
+        )
+        .await
+        .map(|(response, _)| response)
+    }
+
+    pub(crate) async fn clock_request(
+        &self,
+        expected_node_id: &str,
+        base: &str,
+    ) -> Result<PeerResponse, PeerTransportError> {
+        let guard = self.membership.clock_guard();
+        self.request_with_optional_header(
+            expected_node_id,
+            base,
+            reqwest::Method::GET,
+            super::internal_clock::PATH,
+            Vec::new(),
+            deadline_after(Duration::from_secs(2)),
+            1024,
+            PeerAuthMode::ExactRequestAndMemberResponse,
+            None,
+            Some(&guard),
         )
         .await
         .map(|(response, _)| response)
@@ -153,6 +180,7 @@ impl PeerTransport {
         max_response_bytes: usize,
         auth_mode: PeerAuthMode,
         extra_header: Option<(&'static str, &'static str)>,
+        clock_guard: Option<&plurx_core::cluster::clock::ClusterClockGuard>,
     ) -> Result<(PeerResponse, Option<u32>), PeerTransportError> {
         let Some(url) = peer_url(base, path) else {
             return Err(PeerTransportError::Unreachable);
@@ -160,6 +188,7 @@ impl PeerTransport {
         let Some(client) = self.client.as_ref().ok() else {
             return Err(PeerTransportError::Unreachable);
         };
+        let clock_ticket = clock_guard.map(|guard| guard.ticket());
         let timestamp_ms = unix_ms();
         let method_name = method.as_str();
         let auth = match auth_mode {
@@ -223,46 +252,56 @@ impl PeerTransport {
             .and_then(|value| value.to_str().ok())
             .map(str::to_owned);
         let retry_after = retry_after_seconds(response.headers());
-        let response = read_bounded(response, deadline, max_response_bytes).await?;
-        if let Some((target, nonce, member_scoped)) = response_binding {
-            let signature = signature.ok_or(PeerTransportError::InvalidResponse)?;
-            let payload = signed_response_payload(response.status.as_u16(), &response.body);
-            let verified = if member_scoped {
-                tokio::time::timeout_at(
-                    deadline,
-                    self.membership.authorize_internal_peer_member_response(
-                        expected_node_id,
-                        &target,
-                        &nonce,
-                        path,
-                        &payload,
-                        &signature,
-                    ),
-                )
-                .await
-                .map_err(|_| PeerTransportError::TimedOut)?
-                .map_err(|_| PeerTransportError::InvalidResponse)?
-            } else {
-                tokio::time::timeout_at(
-                    deadline,
-                    self.membership.authorize_internal_peer_response(
-                        expected_node_id,
-                        &target,
-                        &nonce,
-                        path,
-                        &payload,
-                        &signature,
-                    ),
-                )
-                .await
-                .map_err(|_| PeerTransportError::TimedOut)?
-                .map_err(|_| PeerTransportError::InvalidResponse)?
-            };
-            if !verified {
-                return Err(PeerTransportError::InvalidResponse);
-            }
-        }
-        Ok((response, retry_after))
+        read_then_verify(
+            response,
+            deadline,
+            max_response_bytes,
+            timestamp_ms,
+            clock_guard.zip(clock_ticket),
+            |response| async move {
+                if let Some((target, nonce, member_scoped)) = response_binding {
+                    let signature = signature.ok_or(PeerTransportError::InvalidResponse)?;
+                    let payload = signed_response_payload(response.status.as_u16(), &response.body);
+                    let verified = if member_scoped {
+                        tokio::time::timeout_at(
+                            deadline,
+                            self.membership.authorize_internal_peer_member_response(
+                                expected_node_id,
+                                &target,
+                                &nonce,
+                                path,
+                                &payload,
+                                &signature,
+                            ),
+                        )
+                        .await
+                        .map_err(|_| PeerTransportError::TimedOut)?
+                        .map_err(|_| PeerTransportError::InvalidResponse)?
+                    } else {
+                        tokio::time::timeout_at(
+                            deadline,
+                            self.membership.authorize_internal_peer_response(
+                                expected_node_id,
+                                &target,
+                                &nonce,
+                                path,
+                                &payload,
+                                &signature,
+                            ),
+                        )
+                        .await
+                        .map_err(|_| PeerTransportError::TimedOut)?
+                        .map_err(|_| PeerTransportError::InvalidResponse)?
+                    };
+                    if !verified {
+                        return Err(PeerTransportError::InvalidResponse);
+                    }
+                }
+                Ok(response)
+            },
+        )
+        .await
+        .map(|response| (response, retry_after))
     }
 
     /// Send an authenticated peer request but leave the response body as a
@@ -459,6 +498,38 @@ pub(crate) fn peer_url(base: &str, path: &str) -> Option<reqwest::Url> {
     Some(url)
 }
 
+async fn read_then_verify<F, Fut>(
+    response: reqwest::Response,
+    deadline: tokio::time::Instant,
+    max_response_bytes: usize,
+    timestamp_ms: i64,
+    clock: Option<(
+        &plurx_core::cluster::clock::ClusterClockGuard,
+        plurx_core::cluster::clock::ClockDecisionTicket,
+    )>,
+    verify: F,
+) -> Result<PeerResponse, PeerTransportError>
+where
+    F: FnOnce(PeerResponse) -> Fut,
+    Fut: Future<Output = Result<PeerResponse, PeerTransportError>>,
+{
+    let mut response = read_bounded(response, deadline, max_response_bytes).await?;
+    // Capture t4 before even constructing the verification future.
+    let received_ms = unix_ms();
+    if let Some((guard, ticket)) = clock {
+        let current = guard.ticket();
+        if current.clock_generation != ticket.clock_generation
+            || current.state_generation != ticket.state_generation
+        {
+            return Err(PeerTransportError::InvalidResponse);
+        }
+        response.clock_timing = Some((timestamp_ms, received_ms, ticket));
+    }
+    tokio::time::timeout_at(deadline, verify(response))
+        .await
+        .map_err(|_| PeerTransportError::TimedOut)?
+}
+
 pub(crate) async fn read_bounded(
     mut response: reqwest::Response,
     deadline: tokio::time::Instant,
@@ -491,7 +562,11 @@ pub(crate) async fn read_bounded(
         }
         body.extend_from_slice(&chunk);
     }
-    Ok(PeerResponse { status, body })
+    Ok(PeerResponse {
+        status,
+        body,
+        clock_timing: None,
+    })
 }
 
 pub(crate) fn deadline_after(timeout: Duration) -> tokio::time::Instant {
@@ -575,6 +650,71 @@ mod tests {
 
         headers.insert(NONCE_HEADER, "not-a-uuid".parse().expect("invalid nonce"));
         assert!(exact_auth_from_headers(&headers).is_none());
+    }
+
+    #[tokio::test]
+    async fn clock_t4_excludes_verification_delay_and_failed_proof_discards_metadata() {
+        let app = Router::new().route("/clock", get(|| async { "clock body" }));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("clock timing listener");
+        let address = listener.local_addr().expect("clock timing address");
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app)
+                .await
+                .expect("clock timing server");
+        });
+        let client = reqwest::Client::new();
+        let guard = plurx_core::cluster::clock::ClusterClockGuard::new(false);
+        let stamp = guard.ticket();
+        let signed_t1 = unix_ms();
+        let response = client
+            .get(format!("http://{address}/clock"))
+            .send()
+            .await
+            .expect("clock response");
+        let response = read_then_verify(
+            response,
+            deadline_after(Duration::from_secs(2)),
+            1024,
+            signed_t1,
+            Some((&guard, stamp)),
+            |response| async move {
+                let (_, t4, _) = response
+                    .clock_timing
+                    .expect("timing captured before verification");
+                tokio::time::sleep(Duration::from_millis(60)).await;
+                assert!(
+                    unix_ms() - t4 >= 50,
+                    "verification delay does not become t4"
+                );
+                Ok(response)
+            },
+        )
+        .await
+        .expect("verified clock response");
+        let (t1, _, returned_stamp) = response.clock_timing.expect("verified timing");
+        assert_eq!(t1, signed_t1);
+        assert_eq!(returned_stamp, stamp);
+        let response = client
+            .get(format!("http://{address}/clock"))
+            .send()
+            .await
+            .expect("bad proof response");
+        assert_eq!(
+            read_then_verify(
+                response,
+                deadline_after(Duration::from_secs(2)),
+                1024,
+                signed_t1,
+                Some((&guard, stamp)),
+                |_| async { Err(PeerTransportError::InvalidResponse) }
+            )
+            .await
+            .expect_err("failed proof discards timing"),
+            PeerTransportError::InvalidResponse
+        );
+        server.abort();
     }
 
     #[tokio::test]

@@ -376,10 +376,15 @@
         producer_attempt: u64,
     ) -> Arc<Session> {
         Arc::new(Session {
+            audio_delivery: None,
             dir: dir.to_path_buf(),
             recovery: None,
             response_incarnation: uuid::Uuid::new_v4(),
             frozen_presentation: None,
+            rolling_provenance: None,
+            rolling_collection: None,
+            rolling_artifact: None,
+            copy_output_measurement: std::sync::Mutex::new(None),
             actor_managed_response_publication: actor_managed_prepublication,
             actor_managed_prepublication_process: actor_managed_prepublication,
             actor_prepublication_producer: Arc::new(AtomicBool::new(actor_managed_prepublication)),

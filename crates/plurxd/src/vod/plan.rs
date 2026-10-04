@@ -38,6 +38,10 @@ pub(super) fn rendition_key(recipe: &Recipe, identity: &SourceIdentity) -> Strin
         u8::from(recipe.video.promotes_parameter_sets()),
     ]);
     hasher.update(recipe.file.audio_offset_ms.to_le_bytes());
+    if let Some(audio) = &recipe.audio_delivery {
+        hasher.update(b"audio-delivery-v1\0");
+        hasher.update(audio.byte_identity().as_bytes());
+    }
     match recipe.cluster_cache_key.as_deref() {
         Some(cache_key) => {
             hasher.update(b"cluster-v2\0");
@@ -89,6 +93,13 @@ pub(super) fn ticks_to_ms(ticks: u64, timescale: u32) -> i64 {
 /// is copied — `MediaFile` carries no per-stream audio rate, and `est_bytes`
 /// feeds admission, never a refusal.
 fn audio_rate(recipe: &Recipe) -> u32 {
+    if let Some(rate) = recipe
+        .audio_delivery
+        .as_ref()
+        .and_then(|audio| audio.bitrate_kbps())
+    {
+        return rate.saturating_mul(1000);
+    }
     if recipe.aac {
         let channels = match recipe.audio_index {
             Some(index) => recipe
@@ -328,11 +339,25 @@ pub(super) async fn open_ready(
     let file = tokio::fs::File::open(path).await?;
     let len = file.metadata().await?.len();
     Ok(SegmentReady {
+        observed_media_duration_ms: None,
         file,
         len,
         etag: format!("{etag_stem}-{len}"),
         delivery: Arc::clone(delivery),
+        retained_lease: None,
     })
+}
+
+pub(super) fn plan_media_duration_ms(rendition: &Rendition, index: u32) -> Option<u32> {
+    let timescale = u64::from(rendition.timescale);
+    if timescale == 0 {
+        return None;
+    }
+    let ticks = rendition.plan.entry(index)?.duration_ticks;
+    let milliseconds = ticks.checked_mul(1000)?.checked_add(timescale - 1)? / timescale;
+    u32::try_from(milliseconds)
+        .ok()
+        .filter(|duration| *duration > 0)
 }
 
 pub(super) fn now_ms() -> i64 {

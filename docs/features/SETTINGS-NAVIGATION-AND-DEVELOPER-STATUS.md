@@ -160,6 +160,16 @@ It sits beside the standing rule that there are no feature gates: Developer
 entries carry advisory readiness and safety information that never gates
 enablement.
 
+**Clarification, Paul, 2026-09-30:** an explicit Developer switch belongs
+only where manual enable/disable has a meaningful purpose. Unfinished
+implementation or acceptance alone is not a reason to add one. Internal
+correctness fixes and automatic infrastructure can show read-only facts and
+remaining evidence; advisory readiness still never disables a real control,
+rejects Save or overrides its saved choice. A finished meaningful control
+graduates to its proper settings section; an automatic feature's advisory
+card leaves Developer when its acceptance is complete. K-06's clock
+measurement retains its accepted no-switch design under this clarification.
+
 | Stage | What happens | Where it is recorded |
 |---|---|---|
 | Enters | A feature that is not fully active or not fully tested gets a Developer card: its explicit switch (or, for automatic behaviour, an explanation), advisory readiness, and one **Leaves Developer when … Then …** line | `devGraduation(waitingOn, then)` in `web/pages/settings-developer.js` |
@@ -187,6 +197,7 @@ graduates in this change; **(c)** unclear, stays and is listed for Paul.
 | Live TV deinterlace cadence | `live_tv_deinterlace_output` | S-08 | merged: M1–M4 | M5 media1 QSV/VAAPI qualification | (a) stays → Settings → Live TV |
 | Portable cluster backup | `backup_*` | K-01 | merged: M1–M4; amd64 container smoke passed in run 3205 | M4 arm64 in-lane leg; M5 loss drills, physical restore, RPO/RTO | (a) stays → Settings → Cluster |
 | Seek scratch accounting | none (automatic) | [SEEK-SCRATCH-RESERVATIONS-STATUS](../streaming/SEEK-SCRATCH-RESERVATIONS-STATUS.html) | merged and deployed | physical acceptance | (a) stays → card removed |
+| Cluster clock observation (added 2026-09-30) | none (automatic; meaningful-control clarification above) | [K-06 measurement](../cluster/CLOCK-SKEW-MEASUREMENT-IMPLEMENTATION.md) | measurement implementation; release review and gate pending | identified measurement fleet receipt, separate enforcement and its acceptance | (a) stays → read-only diagnostics move to Settings → Cluster |
 | Adaptive Auto quality | `playback_auto_abr` | A-04, A-05 | A-04 blocked: incomplete D3 matrix; A-05 unclaimed | Safari, HDR and Apple/Android physical traces; native controllers | (a) stays → Playback toggle, or removed (Paul's choice) |
 | Fit Auto to display | `playback_display_aware_auto` (`playback.display_aware_auto`) | [Combined Auto plan](../streaming/DISPLAY-AWARE-AUTO-QUALITY-PLAN.md) | source implementation in progress; qualification open | source-grade worker proofs, display-fit candidates and physical runtime recovery | (a) Playback toggle if permanent choice remains useful, otherwise removed |
 | Prepared quality handoff | `prepared_quality_handoff` | [QUALITY-SWITCH-CONTINUITY-BUILD](../playback-control/QUALITY-SWITCH-CONTINUITY-BUILD.md) | in execution | M2-Android, M1-web, M3; physical-client fleet receipt | (a) stays → Settings → Playback |

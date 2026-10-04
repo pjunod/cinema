@@ -18,7 +18,43 @@ use crate::seam_hooks::{HookFuture, HookReady};
 
 use crate::admission::{
     Admissions, HwSlot, LiveWait, PoolSnapshot, Priority, SwPermit, TranscodeResourceEstimate,
+    Workload,
 };
+
+/// Freeze the encoder allowance without reducing whole-pipeline accounting.
+pub(crate) fn frozen_software_threads(work: &Workload<'_>, budget: usize) -> u32 {
+    work.software_threads().min(budget).max(1) as u32
+}
+
+/// Current policy must still allow the frozen encoder. The shared admission
+/// pool owns the conservative pipeline claim and its isolated oversize rule.
+pub(crate) fn try_admit_frozen_bundle(
+    admissions: &Admissions,
+    hardware_limit: usize,
+    software_budget: usize,
+    resources: &TranscodeResourceEstimate,
+    options: &TranscodeOptions,
+    priority: Priority,
+    claim: Option<u64>,
+) -> Result<crate::admission::TranscodePermit, bool> {
+    let frozen_floor = if resources.hardware_slot {
+        // Hardware output ignores the software encoder cap. Its CPU decode
+        // and filter estimate remains the operative policy floor.
+        resources.cpu_threads
+    } else {
+        resources.cpu_threads.min(
+            options
+                .software_threads
+                .map_or(resources.cpu_threads, |threads| threads as usize),
+        )
+    };
+    if frozen_floor > software_budget {
+        return Err(true);
+    }
+    admissions
+        .try_admit_bundle_claiming(hardware_limit, software_budget, resources, priority, claim)
+        .ok_or(false)
+}
 
 /// Resolved once before attachment. A restart cannot silently change encoder,
 /// grade, cadence, rate control, tracks, or burn pixels under an immutable URI.
@@ -81,6 +117,11 @@ pub(crate) struct ActiveProductionEvidence {
 }
 
 impl CandidateProductionProofs {
+    #[cfg(test)]
+    pub(crate) fn record_for_test(&self, recipe: [u8; 32], proof: ActiveProductionEvidence) {
+        self.record(recipe, proof);
+    }
+
     pub(crate) fn get(&self, recipe: [u8; 32]) -> Option<ActiveProductionEvidence> {
         let now = Instant::now();
         let mut rows = self.rows.lock().expect("candidate production proofs");
@@ -481,6 +522,29 @@ impl Encoding {
             Output = Result<(Option<String>, Option<String>), plurx_core::error::StoreError>,
         >,
     ) -> Option<EncodePermit> {
+        self.try_permit_with_priority(policy, None).await
+    }
+
+    /// The finite output-preparation owner uses real background resources;
+    /// it never registers foreground demand or borrows a handoff claim.
+    pub(crate) async fn try_background_permit(&self) -> Option<EncodePermit> {
+        self.try_permit_with_priority(
+            self.store.get_setting_pair(
+                plurx_core::store::keys::MAX_HW_SESSIONS,
+                plurx_core::store::keys::SW_POOL_THREADS,
+            ),
+            Some(Priority::Background),
+        )
+        .await
+    }
+
+    async fn try_permit_with_priority(
+        &self,
+        policy: impl std::future::Future<
+            Output = Result<(Option<String>, Option<String>), plurx_core::error::StoreError>,
+        >,
+        preparation_priority: Option<Priority>,
+    ) -> Option<EncodePermit> {
         // Pool policy is current node state, not immutable media identity.
         // A failed policy read closes admission; an existing child's permit
         // remains owned until reap and is never confiscated underneath it.
@@ -505,7 +569,8 @@ impl Encoding {
             .and_then(|value| value.trim().parse().ok())
             .unwrap_or_else(crate::admission::software_budget);
         let mut queued = self.queued.lock().expect("VOD encoder admission");
-        let priority = self.priority();
+        // Preserve ordinary promotion's post-policy-read observation.
+        let priority = preparation_priority.unwrap_or_else(|| self.priority());
         if priority == Priority::Live {
             queued.get_or_insert_with(|| self.admissions.wait_for_slot());
         }
@@ -519,22 +584,22 @@ impl Encoding {
             });
             None
         };
-        // The shared pool deliberately admits one oversize job when otherwise
-        // idle. A frozen VOD recipe cannot shrink its thread demand on retry,
-        // so an operator lowering the budget below that exact plan is an
-        // explicit refusal rather than an oversize exception.
-        if self.resources().cpu_threads > software_budget {
-            return refuse(true);
-        }
-        let claim = *self.handoff_claim.lock().expect("VOD handoff claim");
-        let Some(bundle) = self.admissions.try_admit_bundle_claiming(
+        // A shared-audio producer admits its own bounded AAC estimate, never
+        // the video recipe it was resolved beside.
+        let claim = (priority != Priority::Background)
+            .then(|| *self.handoff_claim.lock().expect("VOD handoff claim"))
+            .flatten();
+        let bundle = match try_admit_frozen_bundle(
+            &self.admissions,
             hardware_limit,
             software_budget,
             &self.resources(),
+            &self.options,
             priority,
             claim,
-        ) else {
-            return refuse(false);
+        ) {
+            Ok(bundle) => bundle,
+            Err(over_budget) => return refuse(over_budget),
         };
         let permit = EncodePermit::from(bundle);
         queued.take();
@@ -620,8 +685,10 @@ impl Encoding {
         if let Some(audio) = &self.shared_audio {
             audio.plan_on_grid(duration_ms, self.grid)
         } else {
+            // Typed audio delivery owns the budget; a copied or downmixed
+            // track is never planned at the transitional scalar rate.
             let audio_rate = if self.plan.options().input_has_audio {
-                self.options.audio_bitrate_kbps
+                self.options.audio_budget_kbps()
             } else {
                 0
             };

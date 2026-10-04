@@ -1,6 +1,9 @@
 # FFmpeg spawn unification — one producer spawn path, one progress classifier
 
-**Status:** M1/M2 built in PR #415; M3 pending deployed fleet evidence ·
+**Status:** open · M1/M2 merged (PR #415) · M3 PASS in the owned lab on lab3,
+2026-10-02, for VOD encode, VOD burn, VOD copy and progressive remux
+(§5.3.1); rolling HLS not measurable from library files on this build; the
+media1 reading is still owed ·
 **Executes:** F-stream-13, the progress-line half of F-stream-12, and the
 "unify the spawn path (fixes the drift)" step of
 §4.1 from
@@ -345,23 +348,67 @@ ready-PR fast lane supplies the broad `make unit` result.
 
 ### 5.3 M3 — fleet check
 
-GPT prompt after the M1 deploy:
+GPT prompt after the M1 deploy (corrected 2026-10-02: the first text used
+`pgrep`, which the image does not have, a placeholder title, and "the
+journal", which a Docker node does not write to; the loop selects children by
+`readlink $p/exe`, since a `cmdline` match also finds the loop's own
+`sh -c`):
 
-> On media1 (a Docker deployment): start *Harbor Lights* as an encoded VOD
-> session with the text subtitle track burned in. Paste `cat
-> /proc/$(pgrep -n -f 'ffmpeg.*dev/fd/3')/environ | tr '\0' '\n' | grep
-> -E 'XDG_CACHE_HOME|AV_LOG_FORCE_NOCOLOR'` (both must be present for the
-> VOD producer; before this change they were absent), and time-to-first-
-> segment from the session's playback-info for this start and for a second
-> start of the same title (the second should not pay a fontconfig cache
-> rebuild). Then start a progressive remux from the web client (a title
-> that direct-plays the video but re-encodes audio) and paste the same
-> `environ` grep for its ffmpeg.
+> On media1 (a Docker deployment): start any title that has a *text*
+> subtitle track as an encoded VOD session with that track burned in
+> (choose a quality that transcodes). While it plays, run on the host:
+> `docker exec plurxd sh -c 'for p in /proc/[0-9]*; do readlink $p/exe
+> 2>/dev/null | grep -q ffmpeg && { echo "== ${p#/proc/}"; tr "\0" "\n"
+> <$p/environ | grep -E "XDG_CACHE_HOME|AV_LOG_FORCE_NOCOLOR|FONTCONFIG_";
+> tr "\0" " " <$p/cmdline | grep -o "/dev/fd/[345]"; ls -l $p/fd/3
+> $p/fd/4 2>/dev/null; }; done'` and paste it (both variables must be
+> present for the VOD producer; before this change they were absent). Send
+> time-to-first-segment from the session's playback-info for this start and
+> for a second start of the same title (the second should not pay a
+> fontconfig cache rebuild). Then start a progressive remux from the web
+> client (a title that direct-plays the video but re-encodes audio), paste
+> the same loop's output for its ffmpeg, and send `docker logs --since 2h
+> plurxd 2>&1 | grep -E 'remux ffmpeg:|progress key'`.
 
 Acceptance: both variables present on both producers; no regression in
 first-segment time; the M2 deploy shows no new `remux ffmpeg:` lines in
-the journal for an ordinary tracked remux (a new-key warn would appear
+the daemon log for an ordinary tracked remux (a new-key warn would appear
 here, per §3.2's last row).
+
+#### 5.3.1 Owned-lab evidence, 2026-10-02 — M3 PASS (rolling not measurable)
+
+**Where.** A throwaway container on **lab3**, from an image built from the
+effort branch with the P-02 reproducibility continuation (`9ed98a30c`);
+sessions created over the API; children read from the host through `/proc`
+of every pid in the container's cgroup, once a second. Every library session
+took the encoded-VOD route: on this build a library file cannot start rolling
+HLS (any `presentation` other than `vod` answers 410
+`live_presentation_removed`), so **no rolling producer was measured**.
+**Caveat:** an owned lab on lab3, not media1.
+
+| Child | `XDG_CACHE_HOME` | `AV_LOG_FORCE_NOCOLOR` | argv input | fd 3 / fd 4 |
+|---|---|---|---|---|
+| VOD producer, encode (12 in the first phase, 3 in the second) | the runtime cache ✓ | `1` ✓ | `-i /dev/fd/3 … -i /dev/fd/4` | both the source file ✓ |
+| VOD producer, ASS text burn | ✓ | ✓ (plus `FONTCONFIG_FILE`, `FONTCONFIG_SYSROOT`) | `/dev/fd/3`, `/dev/fd/4` | the source ✓ |
+| VOD producer, copy session (`copy:true, aac:true`) | ✓ | ✓ | `-i /dev/fd/3 … -c:v copy -c:a aac … pipe:1` | the source ✓ |
+| progressive remux `stream.mp4` (twice) | ✓ | ✓ | `-progress pipe:2 … -readrate 4.00 -i <path>` | fd 3 a pipe, fd 4 the source (the path in argv is by design: §2.3, "descriptor attachment: C remux none") |
+| held-source ffprobe at session start | environment cleared — a probe, not a producer | — | `/dev/fd/3` | the source |
+
+**Logs.** Two `remux ffmpeg:` lines in total, both the source's own decoder
+complaint (`[h264 …] number of reference frames (0+5) exceeds max (4;
+probably corrupt input)`), which is a real diagnostic and not a progress
+key. No progress-key line and no progress-key warning anywhere.
+
+**First segment, first versus second start.** SDR film: 717 ms on the
+first-ever start (segment 0), 117–125 ms restarted over materialised
+segments, 806–1044 ms at fresh positions. Text-burn title: 1458 ms on the
+cold-font first start versus 790 ms on the second start (a new font
+environment and a fresh encode) — no Fontconfig rebuild penalty on the
+second start. Progressive remux time to first byte: 15.8 ms and 16.0 ms
+(first and second).
+
+**Verdict: M3 PASS** for VOD encode, VOD burn, VOD copy and progressive
+remux; rolling HLS not measurable from files on this build.
 
 ## 6. Verification and rollout
 
@@ -369,8 +416,10 @@ here, per §3.2's last row).
   mandatory for M1 because B is the path it exercises.
 - Lane: the one ready plan PR runs `make unit`; `cargo check -p plurxd --tests --target
   x86_64-pc-windows-msvc` for M1 in the PR body (the builder has Windows
-  branches — `descriptors.verify()` and the Job Object — and the Windows
-  lane compiles release only). The 2026-09-21 author-host cross-check reached
+  branches — `descriptors.verify()` and the Job Object — so the server test
+  target needs compilation). The current Windows composite action builds all
+  workspace targets; the recovered exact-source receipt below includes the
+  server test target. The 2026-09-21 author-host cross-check reached
   third-party C builds but could not reach project Rust: this macOS host has
   the Rust target installed but no MSVC C headers/toolchain (`stdlib.h` was
   missing in `libsqlite3-sys`/`onig_sys`, and `assert.h` in `ring`). The exact
@@ -387,6 +436,33 @@ here, per §3.2's last row).
   M2 (which uses `SpawnOptions.env`); independent of
   [ENCODED-VOD-HOLD-AND-RELEASE.md](ENCODED-VOD-HOLD-AND-RELEASE.md) (which
   changes when `spawn_generation` is called, not what it does).
+
+**Windows test-target receipt, 2026-09-30 ([#643](http://192.168.4.7:3000/noirr/plurx/pulls/643)).**
+The existing successful [Effort gate UI 3635](http://192.168.4.7:3000/noirr/plurx/actions/runs/3635)
+(API run 3656), Windows job 38936, checked out exact source
+`8a305517ccf702ed4c46496a10d244df112311cf`. Its
+[primary log](http://192.168.4.7:3000/api/v1/repos/noirr/plurx/actions/jobs/38936/logs)
+records `plurxd` (bin `plurxd` test) with 46 warnings (7 duplicates), then
+`Finished dev profile [unoptimized + debuginfo] target(s) in 4m 28s` at
+2026-09-30 15:53:32 UTC. The ordinary server binary reported 12 warnings.
+This is successful Windows test-target compilation, with warnings disclosed;
+it is not strict-warning compliance or execution on a native Windows host.
+
+The [Windows composite action](../../.github/actions/windows-cross/action.yml)
+at that exact source runs:
+
+```bash
+cargo xwin build --workspace --all-targets --locked \
+  --exclude plurx-cluster-check --target x86_64-pc-windows-msvc
+```
+
+Source and integrated landing `61bd96c4b831d4aa3ed4377c758ba3adb0aa7315`
+have equal tree `aa3cdb768beb254a34d76abd6b359c152bac026e`. This receipt
+supersedes the missing Windows compilation evidence, while retaining the
+September 21 author-host C-header failure above. No Windows build, test or CI
+rerun was needed to recover it. M3's encoded-burn/remux environment,
+first/second-start TTFF and progress-diagnostic fleet checks remain open;
+S-05 is not done.
 
 ## 7. Decisions
 
@@ -430,3 +506,5 @@ trailers `Agent-Model:` / `Agent-Session:` on every commit of the branch.
 | 2026-09-21 | gpt-5.6-sol | agent:/root/p01_builder | M2 | [#415](http://192.168.4.7:3000/noirr/plurx/pulls/415) · `60b2faa9` | One strict classifier definition; core and remux focused tests passed. Media1's deployed key vocabulary matched the closed set exactly. |
 | 2026-09-21 | gpt-5.6-sol | agent:/root/p01_builder | M3 | [#415](http://192.168.4.7:3000/noirr/plurx/pulls/415) | needs: deploy the candidate, run the §5.3 encoded-burn and progressive-remux environment/TTFF checks, and inspect the journal for unexpected progress keys. |
 | 2026-09-21 | gpt-5.6-sol | agent:/root/c02_builder | Sole-review disposition | [#415](http://192.168.4.7:3000/noirr/plurx/pulls/415) · this commit | Added executable low-descriptor collision and fd 6 closure coverage, live-child direct-drop and VOD-slot termination/reap coverage through the shared spawn result, and an end-to-end remux stderr-consumer regression that observes the warning while progress remains unchanged. The portable ownership tests exercise the same builder and typed `ChildJob` path on Windows when run there; Windows execution is not claimed on this macOS host. M3 remains pending. |
+| 2026-09-30 | gpt-6.1-sol | agent:/root/k08_upstream_receipt_sol61 | Recovered Windows test-target compilation | [#643](http://192.168.4.7:3000/noirr/plurx/pulls/643) | Evidence-only continuation from effort `61bd96c4b831d4aa3ed4377c758ba3adb0aa7315`; public draft claim `0384be61a` preceded receipt edits. Independently read existing successful API run 3656/UI 3635/job 38936 and its exact-source log: source `8a305517ccf702ed4c46496a10d244df112311cf`, equal source/landing tree `aa3cdb768beb254a34d76abd6b359c152bac026e`, all-target Windows build finished in 4m 28s with ordinary/test binary warnings disclosed above. Historical C-header failure and original implementation authorship remain. No Windows execution, fleet acceptance, source/test/workflow edit or new CI run; M3 remains open. Root coordinator manages this continuation's sole independent review, exact-current Effort gate and integration. |
+| 2026-10-02 | claude-opus-5-5 | https://claude.ai/code/session_01CAyBrYCQ7PpAtuZwUxKfp7 | M3 owned-lab evidence | branch `opus/encoder-lab-evidence` (evidence-only docs) | Owned lab on lab3 (not media1). M3 PASS (§5.3.1) for VOD encode, burn and copy producers and the progressive remux: `XDG_CACHE_HOME` and `AV_LOG_FORCE_NOCOLOR` on every producer, the burn also with `FONTCONFIG_FILE`/`FONTCONFIG_SYSROOT`, sources on fd 3/4 as designed; two `remux ffmpeg:` lines, both the source decoder's own complaint, no progress-key lines; no Fontconfig rebuild penalty on a second burn start (1458 ms cold versus 790 ms). Rolling HLS is not startable for library files on this build (410 `live_presentation_removed`) and was not measured. §5.3 prompt corrected (no `pgrep`, no placeholder title, `docker logs`). |

@@ -1321,6 +1321,37 @@ fn render_background_overruns(out: &mut String) {
     );
 }
 
+/// Why a started session's complete-output preparation was not handed to
+/// [`crate::transcode::TranscodeManager::output_enqueue_loop`], in index order.
+pub(crate) const OUTPUT_ENQUEUE_DROP_REASONS: [&str; 2] = ["queue_full", "worker_stopped"];
+
+static OUTPUT_ENQUEUE_DROPS: [AtomicU64; OUTPUT_ENQUEUE_DROP_REASONS.len()] =
+    [const { AtomicU64::new(0) }; OUTPUT_ENQUEUE_DROP_REASONS.len()];
+
+/// Count one complete-output preparation the create could not hand off. The
+/// title's next start offers the same deduplicated job again, so a drop costs
+/// time, not correctness; a rising count names a worker that is behind
+/// (`queue_full`) or gone (`worker_stopped`).
+pub(crate) fn record_output_enqueue_drop(reason: &str) {
+    if let Some(index) = OUTPUT_ENQUEUE_DROP_REASONS
+        .iter()
+        .position(|label| *label == reason)
+    {
+        OUTPUT_ENQUEUE_DROPS[index].fetch_add(1, Ordering::Relaxed);
+    }
+}
+
+fn render_output_enqueue_drops(out: &mut String) {
+    render_counters(
+        out,
+        "plurx_transcode_output_enqueue_dropped_total",
+        "Complete-output preparations a started session could not hand to the output-enqueue worker, by reason.",
+        "reason",
+        &OUTPUT_ENQUEUE_DROP_REASONS,
+        &OUTPUT_ENQUEUE_DROPS,
+    );
+}
+
 #[cfg(test)]
 fn render_start_outcomes_for_test(record: impl FnOnce(&StartOutcomeCounters)) -> String {
     let counters = StartOutcomeCounters::new();
@@ -2022,6 +2053,17 @@ fn prior_observation(
     let network = network?;
     let credential_generation = network.credential_generation.as_ref()?;
     let user_id = network.user_id?;
+    let detail = event.detail.as_deref().unwrap_or_default();
+    // CPU encode pressure, decoder failure, deliberate hold or lost authority say nothing about
+    // this credential's network. Even accompanying throughput must not turn
+    // those observations into a shared quality ceiling.
+    let cause = detail.split_once(':').map(|(cause, _)| cause);
+    if matches!(
+        cause,
+        Some("encode" | "decode" | "hold" | "authority" | "unknown")
+    ) {
+        return None;
+    }
     let client_kbps = event
         .bandwidth_kbps
         .filter(|value| *value > 0)
@@ -2035,9 +2077,9 @@ fn prior_observation(
         (Some(value), None) | (None, Some(value)) => Some(value),
         (None, None) => None,
     };
-    let detail = event.detail.as_deref().unwrap_or_default();
     let starved = event.event == "stall"
-        && (detail.contains("supply")
+        && (cause == Some("link")
+            || detail.contains("supply")
             || detail.contains("network")
             || detail.contains("blocked")
             || detail.contains("kind=buffering")
@@ -2055,6 +2097,11 @@ fn prior_observation(
         throughput_kbps,
         starved_rung_height,
         observed_at_ms: event.at_unix_ms,
+        // ClientLog supplies a smoothed meter and aggregate delivery facts,
+        // not a completed, unpaced network body's timing/provenance. Even a
+        // `link:` label must remain legacy evidence until a real producer
+        // supplies the typed completed-transfer proof.
+        measured_link: None,
     })
 }
 
@@ -2064,12 +2111,38 @@ pub fn prometheus() -> String {
     metrics.push_str(&SUBTITLE_SOURCE_METRICS.render());
     metrics.push_str(&START_OUTCOME_COUNTERS.render());
     render_background_overruns(&mut metrics);
+    render_output_enqueue_drops(&mut metrics);
     metrics
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A dropped output-enqueue hand-off is counted by reason on /metrics; an
+    /// unknown reason is not folded into a real one. The counter is node-wide,
+    /// so the test compares before and after.
+    #[test]
+    fn output_enqueue_drops_are_counted_by_reason() {
+        let sample = |reason: &str| -> u64 {
+            let prefix =
+                format!("plurx_transcode_output_enqueue_dropped_total{{reason=\"{reason}\"}} ");
+            prometheus()
+                .lines()
+                .find_map(|line| line.strip_prefix(prefix.as_str()))
+                .and_then(|value| value.trim().parse().ok())
+                .expect("the drop counter is exposed")
+        };
+        let full = sample("queue_full");
+        record_output_enqueue_drop("queue_full");
+        record_output_enqueue_drop("not_a_reason");
+        assert!(sample("queue_full") > full);
+        let _ = sample("worker_stopped");
+        assert!(!prometheus().contains("reason=\"not_a_reason\""));
+        assert!(
+            prometheus().contains("# TYPE plurx_transcode_output_enqueue_dropped_total counter")
+        );
+    }
 
     /// C-08 M5 row 4: the start-outcome families render every enumerated
     /// label pair and nothing else, and the production exposition carries
@@ -2209,6 +2282,201 @@ mod tests {
 
     fn isolated_metrics() -> &'static QueueMetrics {
         Box::leak(Box::new(QueueMetrics::new()))
+    }
+
+    /// Drive the public segment handler, not only telemetry admission. A fresh
+    /// process contains fixture tasks and the real keyed sink registration;
+    /// neither the production registry nor another test's metrics are reset.
+    #[test]
+    fn hls_segment_delivery_stays_bounded_under_slow_and_failed_writer() {
+        const CHILD: &str = "PLURX_C06_HANDLER_TEST_CHILD";
+        const TEST: &str =
+            "telemetry::tests::hls_segment_delivery_stays_bounded_under_slow_and_failed_writer";
+        if std::env::var_os(CHILD).is_none() {
+            struct OwnedChild(Option<std::process::Child>);
+            impl Drop for OwnedChild {
+                fn drop(&mut self) {
+                    if let Some(child) = self.0.as_mut() {
+                        let _ = child.kill();
+                        let _ = child.wait();
+                    }
+                }
+            }
+            let mut owned = OwnedChild(Some(
+                std::process::Command::new(std::env::current_exe().expect("test executable"))
+                    .args(["--exact", TEST, "--nocapture", "--test-threads=1"])
+                    .env(CHILD, "1")
+                    .stdout(std::process::Stdio::piped())
+                    .stderr(std::process::Stdio::piped())
+                    .spawn()
+                    .expect("isolated handler fixture"),
+            ));
+            let deadline = std::time::Instant::now() + Duration::from_secs(35);
+            loop {
+                let child = owned.0.as_mut().expect("owned child");
+                if child.try_wait().expect("poll child").is_some() {
+                    let output = owned
+                        .0
+                        .take()
+                        .expect("finished child")
+                        .wait_with_output()
+                        .expect("collect child");
+                    let stdout = String::from_utf8_lossy(&output.stdout);
+                    let stderr = String::from_utf8_lossy(&output.stderr);
+                    assert!(
+                        output.status.success(),
+                        "fixture failed: {stdout}\n{stderr}"
+                    );
+                    assert!(
+                        stdout.contains("C06 handler assertions completed"),
+                        "exact fixture did not complete: {stdout}"
+                    );
+                    print!("{stdout}");
+                    break;
+                }
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "handler child exceeded 35s"
+                );
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            return;
+        }
+
+        struct ControlledWriter {
+            block_next: AtomicBool,
+            entered: Notify,
+            release: Notify,
+        }
+        impl WriterStore for ControlledWriter {
+            fn write_batch<'a>(
+                &'a self,
+                events: &'a [PlaybackEvent],
+                _observations: &'a [NetworkPriorObservation],
+            ) -> BoxFuture<'a, Result<u64, StoreError>> {
+                Box::pin(async move {
+                    assert!(events.len() <= BATCH, "writer clone batch bound");
+                    if self.block_next.swap(false, Ordering::AcqRel) {
+                        self.entered.notify_one();
+                        tokio::time::timeout(Duration::from_secs(15), self.release.notified())
+                            .await
+                            .expect("controlled writer must be released");
+                        return Err(StoreError::Task("injected node-local writer error".into()));
+                    }
+                    Ok(events.len() as u64)
+                })
+            }
+            fn setting_pair(&self) -> BoxFuture<'_, Result<SettingPair, StoreError>> {
+                Box::pin(async { Ok((Some("30".into()), Some("0".into()))) })
+            }
+        }
+
+        async fn samples(
+            fixture: &crate::transcode::HlsDeliveryFixture,
+            bytes: &[u8],
+        ) -> Vec<u128> {
+            use axum::extract::{Path, State};
+            let mut elapsed = Vec::with_capacity(8);
+            for _ in 0..8 {
+                let started = std::time::Instant::now();
+                tokio::time::timeout(Duration::from_millis(500), async {
+                    let response = crate::http::hls::segment(
+                        State(fixture.state.clone()),
+                        Path(("c06-pressure".to_owned(), "seg00001.m4s".to_owned())),
+                        axum::http::HeaderMap::new(),
+                    )
+                    .await
+                    .expect("actual segment handler");
+                    assert_eq!(response.status(), axum::http::StatusCode::OK);
+                    let body = axum::body::to_bytes(response.into_body(), bytes.len() + 1)
+                        .await
+                        .expect("fully drain actual body");
+                    assert_eq!(body.as_ref(), bytes);
+                })
+                .await
+                .expect("delivery must not await the blocked writer");
+                elapsed.push(started.elapsed().as_micros());
+            }
+            elapsed
+        }
+
+        tokio::runtime::Builder::new_current_thread().enable_all().build()
+            .expect("runtime").block_on(async {
+                tokio::time::timeout(Duration::from_secs(25), async {
+                    let dir = crate::test_tempdir().expect("fixture directory");
+                    let fixture = crate::transcode::HlsDeliveryFixture::publish_without_process(
+                        dir.path(), "c06-pressure").await;
+                    fixture.make_segment_window_servable().await;
+                    let bytes = vec![7_u8; 12 * 1024];
+                    tokio::fs::write(dir.path().join("seg00001.m4s"), &bytes)
+                        .await.expect("segment bytes");
+                    let metrics = isolated_metrics();
+                    let writer = Arc::new(ControlledWriter {
+                        block_next: AtomicBool::new(false), entered: Notify::new(), release: Notify::new(),
+                    });
+                    let sink = install_test_sink(&fixture.store, writer.clone(), metrics);
+                    let queue_capacity = sink.queue.locked().jobs.capacity();
+                    assert_eq!(queue_capacity, QUEUE);
+                    let _warm = samples(&fixture, &bytes).await;
+                    let baseline = samples(&fixture, &bytes).await;
+
+                    writer.block_next.store(true, Ordering::Release);
+                    emit(Arc::clone(&fixture.store), PlaybackEvent {
+                        event: "producer_pass".into(), session_id: Some("seed".into()),
+                        ..PlaybackEvent::default()
+                    });
+                    tokio::time::timeout(Duration::from_secs(2), writer.entered.notified())
+                        .await.expect("prove writer entered before pressure");
+                    let inflight_capacity = sink.inflight.lock().expect("inflight mutex").as_ref()
+                        .expect("writer owns inflight batch").capacity();
+                    assert!(inflight_capacity <= BATCH);
+                    // Distinct, bounded ordinary samples model concurrent playback
+                    // telemetry pressure; they are not handler-raised terminals.
+                    for index in 0..5_000 {
+                        emit(Arc::clone(&fixture.store), PlaybackEvent {
+                            event: "producer_pass".into(),
+                            session_id: Some(format!("pressure-{index:04}")),
+                            ..PlaybackEvent::default()
+                        });
+                    }
+                    {
+                    let queue = sink.queue.locked();
+                    assert!(queue.jobs.len() <= QUEUE);
+                    assert_eq!(queue.jobs.capacity(), queue_capacity);
+                    assert!(queue.jobs.iter().all(|job| {
+                        job.event.session_id.as_ref().is_some_and(|id| id.len() <= 13)
+                            && job.event.extra.is_none() && job.network.is_none()
+                            && serde_json::to_vec(&job.event).expect("fixture event JSON").len() <= 512
+                    }), "known bounded fixture payloads");
+                    }
+                    assert!(metrics.dropped_queue_full.load(Ordering::Relaxed) > 0);
+                    let stressed = samples(&fixture, &bytes).await;
+                    assert!(sink.inflight.lock().expect("inflight mutex").is_some(), "writer still blocked");
+                    assert_eq!(metrics.written_error.load(Ordering::Relaxed), 0);
+                    writer.release.notify_one();
+                    tokio::time::timeout(Duration::from_secs(2), async {
+                        while metrics.written_error.load(Ordering::Relaxed) == 0
+                            || sink.queue.len() != 0 || sink.inflight.lock().expect("inflight mutex").is_some() {
+                            tokio::task::yield_now().await;
+                        }
+                    }).await.expect("count error and recover the bounded queue");
+                    assert!(metrics.written_ok.load(Ordering::Relaxed) > 0);
+                    let recovered = samples(&fixture, &bytes).await;
+                    let mut base_sorted = baseline.clone(); base_sorted.sort_unstable();
+                    let mut stress_sorted = stressed.clone(); stress_sorted.sort_unstable();
+                    let noise = base_sorted[7] - base_sorted[0];
+                    let median_delta = stress_sorted[4].saturating_sub(base_sorted[4]);
+                    // Report actual distribution/noise; do not turn host scheduling
+                    // noise into a flaky correctness assertion or claim fleet latency.
+                    println!("C06 wall_us baseline={baseline:?} blocked={stressed:?} recovered={recovered:?}; baseline_span_us={noise}; median_increase_us={median_delta}; within_observed_span={}", median_delta <= noise);
+                    println!("C06 capacities queue={queue_capacity} inflight={inflight_capacity}; dropped={} error={} written={}", metrics.dropped_queue_full.load(Ordering::Relaxed), metrics.written_error.load(Ordering::Relaxed), metrics.written_ok.load(Ordering::Relaxed));
+                    drain_sink(&sink).await;
+                    assert!(sink.queue.is_closed());
+                    assert_eq!(sink.queue.len(), 0);
+                    assert!(sink.inflight.lock().expect("inflight mutex").is_none());
+                    println!("C06 handler assertions completed");
+                }).await.expect("bounded complete handler scenario");
+            });
     }
 
     /// The reserve, exercised on the queue itself rather than on a predicate.
@@ -2999,13 +3267,86 @@ mod tests {
 
         let mut decode = event;
         decode.detail = Some("decode:late_frames".to_owned());
-        let observation = prior_observation(&decode, Some(&network)).expect("throughput remains");
-        assert_eq!(observation.starved_rung_height, None);
+        assert!(prior_observation(&decode, Some(&network)).is_none());
 
         decode.height = None;
-        let observation = prior_observation(&decode, Some(&network))
-            .expect("a throughput sample does not require a rung");
-        assert_eq!(observation.throughput_kbps, Some(5_000));
+        assert!(prior_observation(&decode, Some(&network)).is_none());
+    }
+
+    #[test]
+    fn typed_auto_causes_do_not_turn_decode_hold_or_authority_into_network_pressure() {
+        let network = NetworkIdentity {
+            client_class: "android".into(),
+            network_fingerprint: "192.0.2.0/24".into(),
+            credential_generation: Some(CredentialGeneration::from("test-gen".to_owned())),
+            user_id: Some(42),
+        };
+        for cause in ["link", "decode", "hold", "authority", "unknown"] {
+            let event = PlaybackEvent {
+                event: "stall".into(),
+                height: Some(720),
+                bandwidth_kbps: Some(100),
+                runway_ds: Some(0),
+                detail: Some(format!("{cause}:buffering")),
+                ..PlaybackEvent::default()
+            };
+            let observation = prior_observation(&event, Some(&network));
+            if cause == "link" {
+                assert_eq!(observation.expect(cause).starved_rung_height, Some(720));
+            } else {
+                assert!(observation.is_none(), "{cause} is not network evidence");
+            }
+        }
+    }
+
+    #[test]
+    fn encode_cpu_pressure_never_updates_network_prior() {
+        let network = NetworkIdentity {
+            client_class: "android".into(),
+            network_fingerprint: "192.0.2.0/24".into(),
+            credential_generation: Some(CredentialGeneration::from("test-gen".to_owned())),
+            user_id: Some(42),
+        };
+        let event = PlaybackEvent {
+            event: "stall".into(),
+            height: Some(1440),
+            bandwidth_kbps: Some(100),
+            delivered_bps: Some(100_000),
+            runway_ds: Some(0),
+            detail: Some("encode:adaptive_reopen".into()),
+            ..PlaybackEvent::default()
+        };
+        assert!(prior_observation(&event, Some(&network)).is_none());
+    }
+
+    #[test]
+    fn a05_legacy_link_meter_never_claims_completed_transfer_provenance() {
+        let network = NetworkIdentity {
+            client_class: "android".into(),
+            network_fingerprint: "192.0.2.0/24".into(),
+            credential_generation: Some(CredentialGeneration::from("test-gen".to_owned())),
+            user_id: Some(42),
+        };
+        for cause in ["link", "supply", "encode", "decode", "hold", "authority"] {
+            let event = PlaybackEvent {
+                at_unix_ms: 123_000,
+                event: "stall".into(),
+                height: Some(1080),
+                bandwidth_kbps: Some(100),
+                delivered_bps: Some(100_000),
+                runway_ds: Some(0),
+                detail: Some(format!("{cause}:buffering")),
+                ..PlaybackEvent::default()
+            };
+            let observation = prior_observation(&event, Some(&network));
+            if matches!(cause, "link" | "supply") {
+                let observation = observation.expect("legacy prior remains available");
+                assert_eq!(observation.starved_rung_height, Some(1080));
+                assert!(observation.measured_link.is_none());
+            } else {
+                assert!(observation.is_none(), "{cause}");
+            }
+        }
     }
 
     /// How the writer called its Store, recorded call by call.

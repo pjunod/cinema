@@ -27,6 +27,12 @@ inputs:
       pins this number; it is written out anyway so the log names the intent and
       an unexpected build fails here rather than inside a playback assertion.
     required: true
+  binary:
+    description: >-
+      When set, require ffmpeg on PATH to resolve to this exact executable.
+      M5 uses this to distinguish the shipped Jellyfin build from a distro
+      ffmpeg with the same major.
+    required: false
 
 runs:
   using: composite
@@ -73,15 +79,29 @@ runs:
       shell: bash
       env:
         WANT_MAJOR: ${{ inputs.major }}
+        WANT_BINARY: ${{ inputs.binary }}
       run: |
         set -euo pipefail
+        # This step is the one that reads the optional binary input. The runner
+        # leaves an empty optional input's variable unset, so default it here
+        # instead of failing every caller that names only a major.
+        WANT_BINARY="${WANT_BINARY:-}"
         # Not `ffmpeg -version | head -1`: `head` closes the pipe on the first
         # line and `ffmpeg` still has a dozen to write, so under `pipefail` that
         # is a SIGPIPE away from failing a required gate for no reason. Take the
         # whole banner and cut it in the shell.
         version_output="$(ffmpeg -version)"
         banner="${version_output%%$'\n'*}"
-        package="$(dpkg-query -W -f='${Version}' ffmpeg 2>/dev/null || echo 'not from apt')"
+        resolved="$(readlink -f "$(command -v ffmpeg)")"
+        if [ -n "$WANT_BINARY" ] && [ "$resolved" != "$WANT_BINARY" ]; then
+          echo "::error::Expected ffmpeg executable '$WANT_BINARY', got '$resolved'" >&2
+          exit 1
+        fi
+        if [ "$resolved" = /usr/lib/jellyfin-ffmpeg/ffmpeg ]; then
+          package="jellyfin-ffmpeg8 $(dpkg-query -W -f='${Version}' jellyfin-ffmpeg8 2>/dev/null || echo 'not from apt')"
+        else
+          package="ffmpeg $(dpkg-query -W -f='${Version}' ffmpeg 2>/dev/null || echo 'not from apt')"
+        fi
         # `ffmpeg version 6.1.1-3ubuntu5 Copyright ...`, and some builds prefix
         # the number with `n`. Anything else leaves `got` empty and fails below
         # rather than silently comparing against nothing.
@@ -92,6 +112,7 @@ runs:
           echo
           echo "- expected major: \`$WANT_MAJOR\`"
           echo "- resolved: \`$banner\`"
+          echo "- executable: \`$resolved\`"
           echo "- apt package: \`$package\`"
         } >> "$GITHUB_STEP_SUMMARY"
         echo "expected major=$WANT_MAJOR resolved=$banner apt=$package"

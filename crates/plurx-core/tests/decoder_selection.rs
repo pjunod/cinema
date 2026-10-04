@@ -76,6 +76,7 @@ fn facts(stream: Value) -> DecodeFacts {
 fn options(pipeline: Pipeline) -> TranscodeMediaOptions {
     TranscodeMediaOptions {
         video_sample_envelope: plurx_core::transcode::VideoSampleEnvelope::EncoderDefault,
+        audio: None,
         target_height: 1080,
         video_bitrate_kbps: 8_000,
         effective_rate_control: EffectiveRateControl::Vbr,
@@ -305,6 +306,7 @@ fn execution_file(path: &str) -> MediaFile {
 fn execution_options() -> TranscodeOptions {
     TranscodeOptions {
         video_sample_envelope: plurx_core::transcode::VideoSampleEnvelope::EncoderDefault,
+        audio: None,
         auto_quality_rate_profile: None,
         normalized_geometry: false,
         target_height: 1080,
@@ -322,6 +324,64 @@ fn execution_options() -> TranscodeOptions {
         force_idr: false,
         software_threads: None,
     }
+}
+
+#[test]
+fn current_main_geometry_composes_with_independent_audio_and_codec_identity() {
+    use plurx_core::playback::audio::{AudioAction, AudioDelivery};
+    let mut stream = video(
+        0,
+        Some("h264"),
+        Some("High"),
+        1920,
+        1080,
+        Some("yuv420p"),
+        "30/1",
+        "30/1",
+        Some("bt709"),
+    );
+    stream["sample_aspect_ratio"] = json!("1:1");
+    stream["side_data_list"] = json!([{"side_data_type":"Display Matrix", "rotation":0,
+        "displaymatrix":"00000000: 65536 0 0\n00000001: 0 65536 0\n00000002: 0 0 1073741824\n"}]);
+    let input = facts(stream);
+    let mut media = options(Pipeline::Cpu);
+    media.target_height = 720;
+    media.audio = Some(AudioDelivery {
+        action: AudioAction::Copy {
+            codec: "ac3".into(),
+            channels: 6,
+        },
+        downmix: None,
+        reason: "retained independent audio".into(),
+    });
+    let caps = software_capabilities("h264", "h264");
+    let policy = DecodePolicySnapshot::new(DecodePlanPolicy::Legacy, None);
+    let request =
+        TranscodeRequest::new(Encoder::Software, media.clone()).with_normalized_geometry();
+    let copied = resolve_transcode(
+        &request,
+        &input,
+        &caps,
+        &policy,
+        &AttemptRestrictions::none(),
+    )
+    .expect("combined normalized/audio plan");
+    assert_eq!(copied.output_contract().effective_width(), Some(1280));
+    assert_eq!(copied.output_contract().effective_height(), Some(720));
+    assert!(copied.output_contract().normalized_geometry().is_some());
+    assert_eq!(copied.codec_contract().codec.name(), "h264");
+    let contract = serde_json::to_value(copied.output_contract()).expect("contract");
+    assert_eq!(contract["audio"]["action"]["kind"], json!("copy"));
+    media.audio = None;
+    let legacy_audio = resolve_transcode(
+        &TranscodeRequest::new(Encoder::Software, media).with_normalized_geometry(),
+        &input,
+        &caps,
+        &policy,
+        &AttemptRestrictions::none(),
+    )
+    .expect("scalar audio plan");
+    assert_ne!(copied.plan_digest(), legacy_audio.plan_digest());
 }
 
 fn software_capabilities(codec: &str, implementation: &str) -> DecodeCapabilities {

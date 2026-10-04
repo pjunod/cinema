@@ -22,7 +22,10 @@ class ToneMapCalibrationTests(unittest.TestCase):
             with self.subTest(case=case), self.assertRaises(ValueError):
                 validate(tagged, case)
         source = Path(__file__).resolve().parents[2] / "crates/plurx-core/src/transcode/mod.rs"
-        TOOL["production_binding"](source)
+        binding = TOOL["production_binding"](source)
+        self.assertIn("zscale=tin={transfer_in}:", binding["template"])
+        self.assertIn("t=linear:p=bt709:npl=100,format=gbrpf32le,tonemap=", binding["template"])
+        self.assertNotIn("format=gbrpf32le,zscale=p=bt709", binding["template"])
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
             changed = root / "mod.rs"

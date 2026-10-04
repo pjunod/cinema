@@ -23,6 +23,8 @@ quality_catalog: None,
             request_id: Some("r".to_owned()),
             start_seconds: 0.0,
             audio_index: None,
+            audio_delivery: None,
+            audio_claim: None,
             kind: SessionKind::Copy {
                 aac: false,
                 preserve_dolby_vision: true,
@@ -473,6 +475,7 @@ quality_catalog: None,
             subtitle_burn,
         );
         let offline_spec = OfflineSpec {
+            audio_delivery: None,
             target_height: 720,
             audio_index,
             subtitle: OfflineSubtitle::None,
@@ -564,6 +567,7 @@ quality_catalog: None,
         supported.set_supported(Encoder::Software, true);
         let package_id = "offline-vbr-snapshot";
         let requested = NewOfflinePackage {
+            audio_recipe: None,
             id: package_id.to_owned(),
             request_id: "offline-vbr-snapshot-request".to_owned(),
             user_id: user.id,
@@ -608,6 +612,7 @@ quality_catalog: None,
             };
         };
         let spec = OfflineSpec {
+            audio_delivery: None,
             target_height: 720,
             audio_index: None,
             subtitle: OfflineSubtitle::None,
@@ -695,6 +700,7 @@ quality_catalog: None,
 
         let package_id = "offline-one-shot-decode-recovery";
         let requested = NewOfflinePackage {
+            audio_recipe: None,
             id: package_id.to_owned(),
             request_id: "offline-one-shot-decode-recovery-request".to_owned(),
             user_id: user.id,
@@ -729,6 +735,7 @@ quality_catalog: None,
             .expect("claim")
             .expect("queued package");
         let spec = OfflineSpec {
+            audio_delivery: None,
             target_height: 720,
             audio_index: None,
             subtitle: OfflineSubtitle::None,
@@ -1181,7 +1188,7 @@ quality_catalog: None,
         );
 
         writer
-            .apply_rate_control_settings(RateMode::Bitrate, None)
+            .apply_rate_control_settings(Some(RateMode::Bitrate), None)
             .await
             .expect("replicated write");
         assert_eq!(
@@ -1206,6 +1213,50 @@ quality_catalog: None,
             peer.effective_rate_control(Encoder::Software),
             EffectiveRateControl::Vbr,
             "the two-second refresher must replace the peer's stale snapshot"
+        );
+    }
+
+    /// The replicated request is tri-state end to end: an explicit `bitrate`
+    /// and a cleared request are different durable facts on every peer, so a
+    /// later per-family default flip reaches the cleared cluster and leaves
+    /// the explicit one alone.
+    #[tokio::test]
+    async fn clearing_the_rate_mode_returns_every_peer_to_the_family_default() {
+        use plurx_core::store::SqliteStore;
+
+        let store: Arc<dyn Store> = Arc::new(SqliteStore::open_in_memory().expect("store"));
+        let (writer, _writer_work, _writer_cache) = cached_manager(&store);
+        let (peer, _peer_work, _peer_cache) = cached_manager(&store);
+
+        writer
+            .apply_rate_control_settings(Some(RateMode::Bitrate), None)
+            .await
+            .expect("explicit bitrate");
+        assert_eq!(
+            peer.requested_rate_control().await.expect("requested pair"),
+            (Some(RateMode::Bitrate), None),
+            "an explicit choice replicates as an explicit choice"
+        );
+
+        writer
+            .apply_rate_control_settings(None, None)
+            .await
+            .expect("clear to the family default");
+        assert_eq!(
+            peer.requested_rate_control().await.expect("requested pair"),
+            (None, None),
+            "a cleared request must replicate as unset, not as an explicit bitrate"
+        );
+        assert_eq!(writer.rate_control_snapshot().requested_mode, None);
+        let refreshed = peer
+            .refresh_rate_control()
+            .await
+            .expect("refresh")
+            .expect("no quality probe is needed while every default is Bitrate");
+        assert_eq!(refreshed.requested_mode, None);
+        assert_eq!(
+            peer.effective_rate_control(Encoder::Software),
+            EffectiveRateControl::Vbr
         );
     }
 
@@ -1247,7 +1298,7 @@ quality_catalog: None,
         let _viewer = mgr.admissions.wait_for_slot();
 
         assert!(matches!(
-            mgr.apply_rate_control_settings(RateMode::Quality, Some(22))
+            mgr.apply_rate_control_settings(Some(RateMode::Quality), Some(22))
                 .await,
             Err(ApplyRateControlError::Busy)
         ));
@@ -1271,7 +1322,7 @@ quality_catalog: None,
         let _producer = mgr.background_producer.lock().await;
 
         assert!(matches!(
-            mgr.apply_rate_control_settings(RateMode::Quality, Some(22))
+            mgr.apply_rate_control_settings(Some(RateMode::Quality), Some(22))
                 .await,
             Err(ApplyRateControlError::Busy)
         ));

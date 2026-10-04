@@ -39,6 +39,7 @@ import androidx.compose.ui.unit.dp
 import androidx.lifecycle.viewModelScope
 import androidx.media3.common.C
 import androidx.media3.common.Format
+import androidx.media3.common.ForwardingPlayer
 import androidx.media3.common.MediaItem
 import androidx.media3.common.PlaybackException
 import androidx.media3.common.Player
@@ -54,6 +55,7 @@ import androidx.media3.exoplayer.source.LoadEventInfo
 import androidx.media3.exoplayer.source.MediaLoadData
 import androidx.media3.datasource.HttpDataSource
 import androidx.media3.exoplayer.ExoPlayer
+import androidx.media3.exoplayer.hls.HlsManifest
 import androidx.media3.exoplayer.analytics.AnalyticsListener
 import androidx.media3.exoplayer.audio.AudioSink
 import androidx.media3.session.MediaSession
@@ -62,6 +64,8 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.TimeoutCancellationException
 import kotlinx.coroutines.withTimeout
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -202,6 +206,7 @@ class Controller internal constructor(
     private fun preparedSwitchAnalytics(pipeline: ExoPlayer): AnalyticsListener =
         object : AnalyticsListener {
             private val tag = System.identityHashCode(pipeline)
+            private var cumulativeDropped = 0L
 
             override fun onDroppedVideoFrames(
                 eventTime: AnalyticsListener.EventTime,
@@ -209,6 +214,18 @@ class Controller internal constructor(
                 elapsedMs: Long,
             ) {
                 preparedSwitch.noteDroppedFrames(monotonicNowMs(), droppedFrames, tag)
+                if (droppedFrames < 0 || cumulativeDropped > Long.MAX_VALUE - droppedFrames) return
+                cumulativeDropped += droppedFrames
+                if (autoDecodePressure.observe(pipeline, autoActiveCandidateId,
+                        monotonicNowMs(), realPosition(), cumulativeDropped,
+                        pipeline === player && establishedPlayback && presentationForeground && player.isPlaying &&
+                            playbackIntent.pendingSeek == null && directedChange == null &&
+                            player.bufferedPosition - player.currentPosition >= 10_000L)) {
+                    val evidence = autoDecodePressure.evidence
+                    scope.launch(start = kotlinx.coroutines.CoroutineStart.UNDISPATCHED) {
+                        if (noteAutoDecodeFailure(pressure = evidence)) restartAt(realPosition(), "decode-quality")
+                    }
+                }
             }
 
             override fun onAudioUnderrun(
@@ -331,14 +348,14 @@ class Controller internal constructor(
         if (continuousUsed || player !== continuousPlayer || predecessorAttached() || plan.isAudioOnly) {
             Log.i("PlurxPlayback", "continuous enrollment not offered: used=$continuousUsed ownPlayer=${player === continuousPlayer} " +
                 "predecessor=${predecessorAttached()} audioOnly=${plan.isAudioOnly}")
-            return vm.createHlsSession(plan.fileId, body)
+            return vm.createHlsSession(plan.fileId, body, recoveryLinkReceipt(body))
         }
         val enrollment = continuousAttempt ?: ContinuousEnrollment(Session.origin, Session.token.orEmpty()).also { continuousAttempt = it }
         val started = enrollment.open(plan.fileId, body)
         if (started == null) {
             enrollment.close()
             continuousAttempt = null
-            return vm.createHlsSession(plan.fileId, body)
+            return vm.createHlsSession(plan.fileId, body, recoveryLinkReceipt(body))
         }
         continuousAttempt = null
         continuousUsed = true
@@ -668,13 +685,35 @@ class Controller internal constructor(
     val currentSessionId: String? get() = sessionId
     val currentSessionIsVod: Boolean get() = sessionIsVod
 
-    private val mediaSession = MediaSession.Builder(context.applicationContext, player).build()
+    private var currentMediaSessionTransport: Player? = null
+    private val mediaSession = MediaSession.Builder(context.applicationContext,
+        mediaSessionTransport(player, null)).build()
     init {
         if (plan.isAudioOnly) PlaybackService.attach(context, mediaSession)
     }
 
     /** The HLS session this player owns, if the plan opened one. */
     private var sessionId: String? = null
+
+    /** Transport interception happens before Media3 mutates the delegate, so
+     * MediaSession Play/Pause reaches the same viewer writer as the UI. Other
+     * player commands still use ForwardingPlayer's ordinary forwarding and
+     * command availability. */
+    private fun mediaSessionTransport(delegate: ExoPlayer, capturedSession: String?): Player {
+        lateinit var transport: Player
+        transport = autoViewerTransport(delegate, {
+            currentMediaSessionTransport === transport && player === delegate &&
+                sessionId == capturedSession && playbackControlBootstrapFence.isActive()
+        }, ::setViewerPlaybackRequested)
+        currentMediaSessionTransport = transport
+        return transport
+    }
+
+    private fun rebindMediaSessionTransport() {
+        interceptedTransportCallbacks.clear()
+        explicitViewerPause = null
+        mediaSession.setPlayer(mediaSessionTransport(player, sessionId))
+    }
 
     /**
      * Set while paused when the server retired this rolling session (see
@@ -855,19 +894,44 @@ class Controller internal constructor(
     private var autoCatalog = plan.qualityCandidates
     private var continuousAutoRequest = 0L
     private var continuousAutoEpoch = 0L
+    private var autoMeasuredOutputs = emptyList<tv.plurx.app.data.MeasuredCandidateOutput>()
     private var autoDesiredCandidate: tv.plurx.app.data.QualityCandidate? = null
     private var autoActiveCandidateId: String? = plan.qualityCandidateId
     private var autoRouteProtocol: String? = plan.displayAwareAutoProtocol
     private var autoNextTickMs = 0L
+    private val autoLinkClaims = LinkedHashMap<String, Triple<Long, Boolean, String>>()
     private var autoUpgradeSinceMs: Long? = null
+    private val autoUpgradeEvidence = AutoUpgradeEvidenceWindow()
     private var autoLastSwitchMs: Long? = null
+    private var autoLastEvaluation: Triple<Any, Long, Long>? = null
     private val autoSwitchTimes = mutableListOf<Long>()
     private val autoBlockedUntil = mutableMapOf<String, Long>()
+    /** An original-quality preparation a viewer boundary (a seek, or a resume
+     * after a long explicit pause) asked for. It is an ordinary Auto prepared
+     * replacement in every respect — the incumbent keeps playing and the
+     * rendezvous hands off — except that a fresh link proof stands in for the
+     * mid-play quiet window. Nothing waits on it. */
+    private class AutoBoundaryAttempt(val incumbent: ExoPlayer, val sessionId: String, val epoch: Long,
+        val candidateId: String, val recipe: PlaybackMediaRecipe, val qualitySequence: Long?,
+        val transportLifetime: Any, val audio: Long?, val subtitle: Long?, val audioOffsetMs: Long,
+        val previousCandidate: tv.plurx.app.data.QualityCandidate?, val previousId: String?,
+        val previousHeight: Int?)
+    private var autoBoundaryAttempt: AutoBoundaryAttempt? = null
+    /** The viewer boundary the next ordinary Auto evaluation owes a re-plan. */
+    private val autoBoundaryReplan = AutoBoundaryReplan()
+    private var viewerTransportLifetime: Any = Any()
+    private data class ExplicitViewerPause(val player: ExoPlayer, val session: String?,
+        val epoch: Long, val atMs: Long)
+    private var explicitViewerPause: ExplicitViewerPause? = null
+    private val interceptedTransportCallbacks = ArrayDeque<Pair<ExoPlayer, Boolean>>()
     private var autoPreparing = false
     private var autoVoluntary = true
     private var autoMildSamples = 0
     private var autoMildTransferCompletedMs: Long? = null
     private val autoDecoderRejected = playbackIntent.rejectedAutoCandidateIds
+    private val autoDecodePressure = AutoDecodePressureWindow()
+    private var autoDecodeQualityResponseUsed = false
+    private var autoRecoveryCause: AutoRecoveryCauseTicket? = null
     private var autoPreparedTargetRevision: Long? = null
     private var autoPreparedMutationEpoch: Long? = null
     private var autoStagedStatus: PlaybackSessionStatus? = null
@@ -1035,6 +1099,12 @@ class Controller internal constructor(
 
     private val listener = object : Player.Listener {
         override fun onPlayerError(error: PlaybackException) {
+            scope.launch(start = kotlinx.coroutines.CoroutineStart.UNDISPATCHED) { handlePlayerError(error) }
+        }
+
+        private suspend fun handlePlayerError(error: PlaybackException) {
+            val failureAttachment = player
+            val failureAttempt = stallGuard.observeStall()
             if (!playbackControlBootstrapFence.isActive()) return
             // The departing item's failure does not own a newer requested
             // recipe (or seek create). That create and its target deadline
@@ -1122,7 +1192,13 @@ class Controller internal constructor(
                 return
             }
             if (handleAudioSinkFailure(error, refusal)) return
-            if (controlErrorCode(error.errorCode) == ClientErrorCode.DECODER) noteAutoDecodeFailure()
+            val decodeRecovery = controlErrorCode(error.errorCode) == ClientErrorCode.DECODER && noteAutoDecodeFailure()
+            if (player !== failureAttachment || !stallGuard.isCurrent(failureAttempt)) return
+            if (decodeRecovery) {
+                restartAt(realPosition(), "decode-quality")
+                raiseRecoveryStep(refusal, "Retrying a decoder-compatible quality.")
+                return
+            }
             val action = playbackErrorAction(
                 deliveryMode = deliveryMode,
                 preservesDolbyVision = plan.preserveDolbyVision,
@@ -1304,6 +1380,15 @@ class Controller internal constructor(
             // writes always apply this same latest value; transient buffering
             // and audio-focus suppression do not replace viewer intent.
             if (reason == Player.PLAY_WHEN_READY_CHANGE_REASON_USER_REQUEST) {
+                // This exact edge was already recorded before delegate mutation
+                // by our current UI/MediaSession viewer writer. Do not mint a
+                // second viewer sequence when the SDK reports its consequence.
+                val intercepted = interceptedTransportCallbacks.firstOrNull()
+                if (intercepted?.first === player && intercepted.second == playWhenReady) {
+                    interceptedTransportCallbacks.removeFirst()
+                    sampleTargetPresentationDeadline()
+                    return
+                }
                 // Play from the notification, a headset or the Assistant reaches
                 // the player directly rather than through `playPause()`, and
                 // must open the replacement for a retired paused session too.
@@ -1475,6 +1560,9 @@ class Controller internal constructor(
                 // timer, just the reading the stall tracker already took.
                 sampleSurface(mediaPositionMs, observedAtMs)
                 if (openStall != null) {
+                    autoUpgradeEvidence.bind(autoTransfersByPlayer[player], mediaMutationEpoch, observedAtMs)
+                    autoUpgradeEvidence.stalled(observedAtMs)
+                    autoUpgradeSinceMs = null
                     if (openStall.controlMayDefer) {
                         playbackStallCount += 1
                     }
@@ -1576,6 +1664,7 @@ class Controller internal constructor(
         reason: String,
         observedAtMs: Long = monotonicNowMs(),
     ): PlaybackAttempt {
+        autoUpgradeEvidence.reset()
         establishedPlayback = false
         openStallTracker.reset()
         return playbackTelemetry.begin(reason, observedAtMs, playbackIntent.pendingSeek?.sequence)
@@ -1599,6 +1688,12 @@ class Controller internal constructor(
 
     private fun enqueueSeek(begin: () -> PlaybackIntent.PendingSeek) {
         if (!playbackControlBootstrapFence.isActive()) return
+        revokeAutoBoundaryTransport()
+        // The seek is executed on the incumbent without waiting for anything
+        // optional. The original-quality re-plan this boundary is owed runs
+        // afterwards, from the ordinary Auto evaluation, as a prepared
+        // replacement the playing incumbent hands off to.
+        autoBoundaryReplan.arm(viewerTransportLifetime)
         stallGuard.viewerSeek {
             playbackControl.clearVerdict()
             val pending = begin()
@@ -1610,7 +1705,7 @@ class Controller internal constructor(
                 delay(SEEK_COALESCE_MS)
                 if (!playbackControlBootstrapFence.isActive() ||
                     mediaMutationEpoch != publicationEpoch ||
-                    !playbackIntent.isCurrent(pending.sequence)
+                    !playbackIntent.isCurrent(pending.sequence) || preparedLedger.isSwitched
                 ) return@launch
                 executeSeek(pending.targetMs, pending.sequence)
             }
@@ -1706,6 +1801,9 @@ class Controller internal constructor(
         val incumbentSelection = playbackControlSelection().quality
         retainedQualityRequest = null
         resetAutoQualityBudgetForViewer()
+        // A viewer-chosen rung ends the original-first re-plan a previous
+        // boundary owed; Auto starts over from this selection.
+        autoBoundaryReplan.clear()
         autoDesiredCandidate = null
         playbackIntent.requestAutomaticCandidate(null, null)
         planReplacement.retain(onPrepared)
@@ -1922,21 +2020,71 @@ class Controller internal constructor(
     }
 
     fun playPause() {
+        setViewerPlaybackRequested(!playbackIntent.playbackRequested)
+    }
+
+    private fun writeViewerDelegate(requested: Boolean) {
+        val effective = requested && !lifecyclePaused
+        if (player.playWhenReady != effective) {
+            if (interceptedTransportCallbacks.size >= 8) interceptedTransportCallbacks.clear()
+            interceptedTransportCallbacks.addLast(player to effective)
+        }
+        player.playWhenReady = effective
+    }
+
+    /** A newer viewer transport edge supersedes the boundary that asked for
+     * an optional original preparation. It is withdrawn, not failed: nothing
+     * about the candidate was disproved, so it earns no backoff. A switch
+     * already in flight is left to settle on its own first frame. */
+    private fun revokeAutoBoundaryTransport() {
+        viewerTransportLifetime = Any()
+        val boundary = autoBoundaryAttempt ?: return
+        if (preparedLedger.isSwitched) return
+        abandonPreparedReplacement(failed = false)
+        withdrawAutoBoundary(boundary)
+    }
+
+    /** The same viewer writer serves the UI and pre-dispatch MediaSession
+     * transport. The delegate follows the viewer at once on every edge; a
+     * resume after a long explicit pause only arms the Auto boundary re-plan,
+     * which never holds the delegate. */
+    private fun setViewerPlaybackRequested(requested: Boolean) {
         if (!playbackControlBootstrapFence.isActive()) return
-        if (!playbackIntent.playbackRequested) {
+        val now = monotonicNowMs()
+        val paused = explicitViewerPause
+        val wasRequested = playbackIntent.playbackRequested
+        // Latest viewer intent must already govern any rollback caused by
+        // revocation; an explicit Pause cannot transiently restart its owner.
+        stallGuard.setPlaybackRequested(playbackIntent, requested) { }
+        viewerTransport.report(requested)?.let(surfaceOwner::playbackRequested)
+        revokeAutoBoundaryTransport()
+        if (requested && !wasRequested) {
             currentPausedRetirement()?.let { retired ->
+                explicitViewerPause = null
                 reopenAfterPausedRetirement(retired)
                 return
             }
         }
-        if (plan.isAudioOnly && !playbackIntent.playbackRequested) {
+        if (plan.isAudioOnly && requested && !wasRequested) {
             PlaybackService.attach(context, mediaSession)
         }
+        if (!requested) {
+            // A repeated Pause revokes the optional owner, but does not renew
+            // the original explicit pause's observation timestamp.
+            if (wasRequested || paused == null || paused.player !== player || paused.session != sessionId ||
+                paused.epoch != mediaMutationEpoch) {
+                explicitViewerPause = ExplicitViewerPause(player, sessionId, mediaMutationEpoch, now)
+            }
+        } else explicitViewerPause = null
         playbackControl.clearVerdict()
-        stallGuard.setPlaybackRequested(playbackIntent, !playbackIntent.playbackRequested) {
-            samplePreparedCommitFrameBudget()
-            player.playWhenReady = it && !lifecyclePaused
-        }
+        val edge = viewerTransportEdge(requested, wasRequested, paused?.atMs,
+            paused != null && paused.player === player && paused.session == sessionId &&
+                paused.epoch == mediaMutationEpoch, now)
+        // The first-frame budget of a pending prepared commit is sampled
+        // before the delegate changes, so a Pause does not spend it.
+        samplePreparedCommitFrameBudget()
+        writeViewerDelegate(edge.delegatePlayWhenReady)
+        if (edge.armsAutoBoundaryReplan) autoBoundaryReplan.arm(viewerTransportLifetime)
         playbackControl.playerChanged()
     }
 
@@ -2010,6 +2158,9 @@ class Controller internal constructor(
         controlRenderOverride = null
         controlEvidencePositionMs = null
         sessionId = null
+        currentMediaSessionTransport = null
+        explicitViewerPause = null
+        autoBoundaryReplan.clear()
 
         surfaceOwner.retire(mediaMutationEpoch)
         player.removeListener(listener)
@@ -2218,8 +2369,15 @@ class Controller internal constructor(
         val recipe = currentRecipe()
         val createBody = sessionBody(ms, recipe = recipe.recipe)
         val endingSession = sessionId
-        endPlaybackControl { endingSession?.let(::releaseOwnedSession) }
-        sessionId = null
+        // A typed Auto recovery keeps its predecessor alive through the create:
+        // the server validates previous_session_id against a live session and
+        // supersedes it atomically. Every other reopen releases it here, through
+        // the owner that holds it (a continuous family or an ordinary session).
+        if (createBody.reopen_reason == null || createBody.reopen_reason == tv.plurx.app.data.ReopenReason.Stall) {
+            endPlaybackControl { endingSession?.let(::releaseOwnedSession) }
+            sessionId = null
+            rebindMediaSessionTransport()
+        }
         clearStatusPolling()
         encoder = null
         sessionIsVod = false
@@ -2292,6 +2450,7 @@ class Controller internal constructor(
                 if (hls.session_id !in continuousPending) retireContinuousForReplacement()
                 sessionCreateCoordinator.attachIfCurrent(hls, { stallGuard.isCurrent(requestVersion) }) { hls ->
                     sessionId = hls.session_id
+                    rebindMediaSessionTransport()
                     beginPlaybackControl(hls)
                     startStatusPolling(hls.session_id)
                     // Save this session's resolved height so the stall-reopen budget
@@ -2343,6 +2502,7 @@ class Controller internal constructor(
         event: OpenPlaybackStallTracker.Event,
     ): Boolean = when (verdict.type) {
         "terminal" -> {
+            reportAutoRecoveryCause(tv.plurx.app.data.ReopenReason.Authority)
             // Ruling D1 keeps the verdict from tearing anything down: returning
             // true here is what stops a reopen from starting and a budget from
             // being spent, and that is unchanged.
@@ -2367,6 +2527,7 @@ class Controller internal constructor(
             true
         }
         "hold", "retry_resource" -> {
+            reportAutoRecoveryCause(tv.plurx.app.data.ReopenReason.Hold)
             // Production is deliberately not advancing, or stopped for
             // something that may not recur. Either way a reopen would churn
             // against a server that already knows better, and it must not
@@ -2462,8 +2623,14 @@ class Controller internal constructor(
         if (!playbackControlBootstrapFence.isActive() || !presentationForeground) return
         if (!player.playWhenReady || player.playbackState == Player.STATE_ENDED) return
         if (kotlin.math.abs(realPosition() - positionMs) >= 250L) return
+        // The incumbent stalled: whatever recovery follows (a hold, a
+        // downgrade, a reopen), the original-first re-plan a viewer boundary
+        // armed is evidence-free now and is not carried into it.
+        autoBoundaryReplan.clear()
         if (verdict != null && applyStallVerdict(verdict, event)) return
-        selectAutoStallRecoveryCandidate()
+        selectAutoStallRecoveryCandidate(observation,
+            observedAtMs, observedAtMs + openStallTracker.remainingRecoveryMs(event, observedAtMs, observedAtMs))
+        if (sessionId != session || !stallGuard.isCurrent(observation)) return
         // A reopen is a new recovery episode. If the replacement freezes at
         // the same playhead, it must receive its own bounded deadline rather
         // than inheriting the fired latch from the item it replaced.
@@ -2514,8 +2681,12 @@ class Controller internal constructor(
         // [endPlaybackControl] so the abandonment acknowledgement still has a
         // control session to leave on.
         abandonPreparedReplacement(failed = false)
-        endPlaybackControl()
-        sessionId = null
+        val typedRecovery = currentAutoRecoveryCause()
+        if (typedRecovery == null) {
+            endPlaybackControl()
+            sessionId = null
+            rebindMediaSessionTransport()
+        }
         clearStatusPolling()
         encoder = null
         sessionIsVod = false
@@ -2600,6 +2771,7 @@ class Controller internal constructor(
                     stallReopenBudget.record(hls.height)
                     surfaceOwner.ownerSuccess(mediaMutationEpoch)
                     sessionId = hls.session_id
+                    rebindMediaSessionTransport()
                     beginPlaybackControl(hls)
                     startStatusPolling(hls.session_id)
                     encoder = hls.encoder
@@ -2665,7 +2837,24 @@ class Controller internal constructor(
                         }
                     } ?: if (playbackIntent.automaticCandidateId == null) body.height else null
                 else body.height,
-            ) else body
+            ).let(::applyAutoRecoveryCause) else body
+
+    private fun currentAutoRecoveryCause(): AutoRecoveryCauseTicket? = autoRecoveryCause?.takeIf {
+        playbackIntent.desiredQuality == PlaybackQuality.Auto &&
+            it.isCurrent(sessionId, player, autoActiveCandidateId, autoDesiredCandidate?.id, monotonicNowMs())
+    }
+
+    private fun applyAutoRecoveryCause(body: CreateSessionReq): CreateSessionReq {
+        val ticket = currentAutoRecoveryCause() ?: return body
+        return body.copy(previous_session_id = ticket.session, reopen_reason = ticket.cause)
+    }
+
+    private fun recoveryLinkReceipt(body: CreateSessionReq): String? {
+        if (body.reopen_reason != tv.plurx.app.data.ReopenReason.Link) return currentLinkReceipt()
+        val ticket = currentAutoRecoveryCause() ?: return null
+        return ticket.receiptForRequest(body.previous_session_id,
+            (body.intent?.selection?.quality as? QualitySelection.AutoCandidate)?.candidateId, body.reopen_reason)
+    }
 
     private fun trackFor(index: Long?): SubTrack? =
         index?.let { i -> plan.subtitles.firstOrNull { it.index == i } }
@@ -2800,6 +2989,7 @@ class Controller internal constructor(
             }
         }
         sessionId = null
+        rebindMediaSessionTransport()
         clearStatusPolling()
         encoder = null
         sessionIsVod = false
@@ -2924,6 +3114,7 @@ class Controller internal constructor(
             progressiveMediaOrigin.begin(next, realPosition())
         }
         player.setMediaItem(MediaItem.fromUri(next), attachPosition)
+        rebindMediaSessionTransport()
         attachRecipe(recipe, transport)
         presentationSequence?.let { sequence ->
             markIntentExecuted(sequence, recipe)
@@ -2968,6 +3159,7 @@ class Controller internal constructor(
         autoRouteProtocol = hls.display_aware_auto_protocol
         if (hls.display_aware_auto_protocol == "route-v1") {
             autoCatalog = hls.quality_candidates
+            autoMeasuredOutputs = hls.measured_candidate_outputs
             autoActiveCandidateId = hls.quality_candidate_id
         }
         endPlaybackControl()
@@ -2994,6 +3186,7 @@ class Controller internal constructor(
             playbackControl.begin(
                 bootstrap = bootstrap,
                 observe = ::playbackControlObservation,
+                linkReceipt = { if (playbackControlBootstrapFence.isCurrent(claim, sessionId)) currentLinkReceipt() else null },
                 onSubtitleReady = ::retryNativeSubtitleAfterReadiness,
             onSubtitleUnavailable = {
                 raiseDegradedNotice(SUBTITLE_UNAVAILABLE_NOTICE)
@@ -3270,12 +3463,14 @@ class Controller internal constructor(
         scope.launch {
             val fresh = try {
                 vm.playbackDecision(plan.fileId, PreplayTracks(selectedAudio, SubtitleChoice(selectedSubtitle)),
-                    PlaybackQuality.Auto, target, selectionKey.third).decision
+                    PlaybackQuality.Auto, target, selectionKey.third, currentLinkReceipt()).decision
             } catch (_: Exception) { return@launch }
             if (controlObservationIsClosed || selectionKey != Triple(selectedAudio, selectedSubtitle, audioOffsetMs)) return@launch
-            if (fresh.display_aware_auto_protocol == "route-v1") autoCatalog =
-                continuousAttachment?.takeIf { player === continuousPlayer }?.boundCatalog(fresh.quality_candidates)
+            if (fresh.display_aware_auto_protocol == "route-v1") {
+                autoCatalog = continuousAttachment?.takeIf { player === continuousPlayer }?.boundCatalog(fresh.quality_candidates)
                     ?: fresh.quality_candidates
+                autoMeasuredOutputs = fresh.measured_candidate_outputs
+            }
             // Only an attached-session receipt may change the active identity.
         }
     }
@@ -3292,51 +3487,97 @@ class Controller internal constructor(
         }
     }
 
-    private fun selectAutoStallRecoveryCandidate() {
+    private suspend fun selectAutoStallRecoveryCandidate(observation: ControllerStallGuard.Observation, capturedAtMs: Long, deadlineMs: Long) {
         if (!tv.plurx.app.data.Session.displayAwareAuto || !tv.plurx.app.data.Session.autoAbr ||
             tv.plurx.app.data.Session.displayAwareAutoProtocol != "route-v1" ||
             autoRouteProtocol != "route-v1" || playbackIntent.desiredQuality != PlaybackQuality.Auto ||
             !player.playWhenReady || playbackIntent.pendingSeek != null) return
-        val current = autoCatalog.firstOrNull { it.hasValidIdentity && it.id == autoActiveCandidateId } ?: return
+        val policyCatalog = measuredCostCatalog()
+        val current = policyCatalog.firstOrNull { it.hasValidIdentity && it.id == autoActiveCandidateId } ?: return
         val now = monotonicNowMs()
         val transfer = latestAutoCompletedTransfer
         val duration = transfer?.bodyDurationMs
         val link = if (transfer != null && duration != null && transfer.networkLoad &&
             transfer.fromLocalCache == false && transfer.producerPaced == false &&
+            transfer.statusCode == 200 && transfer.receipt != null && transfer.etag != null &&
+            autoTransferOriginCurrent(transfer) &&
+            transfer.pipelineIdentity === autoTransfersByPlayer[player] && sessionId != null &&
+            transfer.segmentId.contains("/$sessionId/") &&
             transfer.ageMs(now) <= 10_000L && duration > 0 && transfer.bodyBytes > 0)
             transfer.bodyBytes.toDouble() * 8_000.0 / duration else null
         val downsideCost = autoDownsideCostBps(current, transfer, sessionId, now)
         val severe = link?.let { bps -> downsideCost?.let { bps < it * 0.7 } } == true
+        autoUpgradeEvidence.bind(autoTransfersByPlayer[player], mediaMutationEpoch, now)
+        if (severe && transfer != null) autoUpgradeEvidence.cliff(transfer.completedAtMs, now)
         val mild = autoMildSamples >= 2 && link?.let { bps -> downsideCost?.let { bps < it * (if (current.peak_bps != null) 1.3 else 1.0) } } == true
-        val producer = sessionStatusAgeMs?.let { it <= 15_000L } == true &&
-            sessionStatus?.producer_state == "running" && sessionStatus?.active_encode_candidate_id == current.id &&
-            sessionStatus?.active_encode_age_ms?.let { it >= 0 && it + (sessionStatusAgeMs ?: 15_001L) <= 15_000L } == true &&
-            sessionStatus?.active_encode_segments?.let { it >= 2 } == true &&
-            sessionStatus?.active_encode_active_ms?.let { it >= 2_000L } == true &&
-            sessionStatus?.active_encode_milli_realtime?.let { it in 1..999 } == true
+        val producer = autoActiveProductionPressure(sessionStatus,
+            sessionStatusAgeMs?.let { now - it }, now, sessionId, current.id,
+            player.bufferedPosition - player.currentPosition)
         if (!severe && !producer && !mild) return
         autoSwitchTimes.removeAll { now - it >= 3_600_000L }
         if (!severe && (autoSwitchTimes.size >= 6 || autoLastSwitchMs?.let { now - it < 60_000L } == true)) return
-        val next = autoRecoveryCandidate(autoCatalog, current, autoDecoderRejected,
+        val next = autoRecoveryCandidate(policyCatalog, current, autoDecoderRejected,
             link.takeIf { severe || mild }) ?: return
+        if (!producer) {
+            val incumbent = player
+            val incumbentSession = sessionId ?: return
+            val stalledPosition = realPosition()
+            val sample = transfer ?: return
+            val receipt = sample.receipt ?: return
+            val payload = negativeLinkPayload() ?: return
+            val beforeAck = monotonicNowMs()
+            if (beforeAck < capturedAtMs || !acknowledgeNegativeLink(payload, receipt, deadlineMs - beforeAck) ||
+                monotonicNowMs() >= deadlineMs || monotonicNowMs() < capturedAtMs ||
+                !stallGuard.isCurrent(observation) || player !== incumbent || sessionId != incumbentSession ||
+                autoActiveCandidateId != current.id || playbackIntent.desiredQuality != PlaybackQuality.Auto ||
+                !player.playWhenReady || !presentationForeground || playbackIntent.pendingSeek != null ||
+                player.playbackState != Player.STATE_BUFFERING || preparedPlayer != null || directedChange != null ||
+                kotlin.math.abs(realPosition() - stalledPosition) >= 250L ||
+                latestAutoCompletedTransfer?.receipt != receipt ||
+                latestAutoCompletedTransfer?.completedAtMs != sample.completedAtMs ||
+                sample.ageMs(monotonicNowMs()) > 15_000L) return
+            autoLinkClaims[receipt] = Triple(sample.completedAtMs, true, current.id)
+        }
+        reportAutoRecoveryCause(if (producer) tv.plurx.app.data.ReopenReason.Encode else tv.plurx.app.data.ReopenReason.Link)
         autoDesiredCandidate = next
+        sessionId?.let { session -> autoRecoveryCause = AutoRecoveryCauseTicket(session, player,
+            current.id, next.id, if (producer) tv.plurx.app.data.ReopenReason.Encode else tv.plurx.app.data.ReopenReason.Link, now,
+            linkReceipt = if (producer) null else latestAutoCompletedTransfer?.receipt) }
         playbackIntent.requestAutomaticCandidate(next.id, next.target_height)
         autoPreparing = false
         autoUpgradeSinceMs = null
         surfaceOwner.logOnly(mediaMutationEpoch, "auto_quality_recovery:${if (severe) "link" else "encode"}:${next.id}")
     }
 
-    private fun noteAutoDecodeFailure() {
+    private fun noteAutoDecodeFailure(pressure: AutoDecodePressureEvidence? = null): Boolean {
         if (!tv.plurx.app.data.Session.displayAwareAuto || !tv.plurx.app.data.Session.autoAbr ||
             tv.plurx.app.data.Session.displayAwareAutoProtocol != "route-v1" ||
-            autoRouteProtocol != "route-v1" || playbackIntent.desiredQuality != PlaybackQuality.Auto) return
-        val current = autoCatalog.firstOrNull { it.id == autoActiveCandidateId } ?: return
-        if (!autoDecoderRejected.add(current.id)) return
-        val next = autoRecoveryCandidate(autoCatalog, current, autoDecoderRejected, decoderRecovery = true) ?: return
+            autoRouteProtocol != "route-v1" || playbackIntent.desiredQuality != PlaybackQuality.Auto) return false
+        val current = autoCatalog.firstOrNull { it.id == autoActiveCandidateId } ?: return false
+        val session = sessionId ?: return false
+        val observedAt = monotonicNowMs()
+        // The failure is this device's own evidence, so the candidate joins the
+        // local rejected set now. The server's acceptance of the sample only
+        // authorizes server-side consequences (recording the decode cause on
+        // the reopen), which the server checks for itself; nothing waits on it.
+        if (!rejectFailedDecoderCandidate(autoDecoderRejected, current.id)) return false
+        postPlaybackClientLog(scope, PlaybackClientLog(level = "warn",
+            event = "candidate_recovery", message = "Candidate decoder evidence", ua = "Android Media3", sessionId = session,
+            candidateRecovery = CandidateRecoverySample(cause = "decode", event_id = UUID.randomUUID().toString(),
+                candidate_id = current.id, recipe_digest = current.recipe_digest, age_ms = 0,
+                decoder_failed = pressure == null,
+                rendered_elapsed_ms = pressure?.elapsedMs ?: 0, position_progress_ms = pressure?.progressMs ?: 0,
+                dropped_frames = pressure?.droppedFrames ?: 0, runway_ms = (player.bufferedPosition - player.currentPosition).coerceAtLeast(0))))
+        if (autoDecodeQualityResponseUsed) return false
+        val next = autoRecoveryCandidate(autoCatalog, current, autoDecoderRejected, decoderRecovery = true) ?: return false
+        autoDecodeQualityResponseUsed = true
+        autoRecoveryCause = AutoRecoveryCauseTicket(session, player, current.id, next.id,
+            tv.plurx.app.data.ReopenReason.Decode, observedAt)
         autoDesiredCandidate = next
         playbackIntent.requestAutomaticCandidate(next.id, next.target_height)
         autoPreparing = false
         autoUpgradeSinceMs = null
+        return true
     }
 
     private var autoGate: String? = null
@@ -3350,6 +3591,7 @@ class Controller internal constructor(
 
     private fun tickDisplayAwareAuto() {
         val now = monotonicNowMs()
+        autoUpgradeEvidence.bind(autoTransfersByPlayer[player], mediaMutationEpoch, now)
         if (now < autoNextTickMs) return
         autoNextTickMs = now + 5_000L
         val gate = autoDecisionGate(AutoTickState(
@@ -3358,7 +3600,7 @@ class Controller internal constructor(
             automatic = playbackIntent.desiredQuality == PlaybackQuality.Auto,
             playing = establishedPlayback && player.isPlaying && presentationForeground,
             seeking = playbackIntent.pendingSeek != null,
-            changePending = autoPreparing || preparedPlayer != null || directedChange != null,
+            changePending = autoPreparing || autoBoundaryAttempt != null || preparedPlayer != null || directedChange != null,
             controlClosed = controlObservationIsClosed,
             producerState = sessionStatus?.producer_state.takeIf { sessionStatusAgeMs?.let { it <= 15_000L } == true },
         ))
@@ -3367,37 +3609,50 @@ class Controller internal constructor(
             autoUpgradeSinceMs = null
             return
         }
+        // A viewer boundary re-plans original first, once, on the first
+        // evaluation where the incumbent is established, playing and has the
+        // runway a handoff needs. The incumbent is never held for it.
+        // Without a fresh link proof there is no candidate, and the boundary
+        // stays owed for the next evaluation rather than being spent on nothing.
+        autoBoundaryReplan.take(viewerTransportLifetime, player.bufferedPosition - player.currentPosition) {
+            autoOriginalBoundaryCandidate(now)
+        }?.let { chosen ->
+            if (beginAutoBoundaryPreparation(chosen, now)) return
+        }
         val target = autoPresentationTarget ?: return noteAutoGate("no_presentation_target")
-        val current = autoCatalog.firstOrNull { it.hasValidIdentity && it.id == autoActiveCandidateId }
+        val policyCatalog = measuredCostCatalog()
+        val current = policyCatalog.firstOrNull { it.hasValidIdentity && it.id == autoActiveCandidateId }
             ?: return noteAutoGate("no_active_candidate")
+        reportCandidateLinkSample(negative = false)
         val transfer = latestAutoCompletedTransfer
         val duration = transfer?.bodyDurationMs
         val link = if (transfer != null && duration != null && transfer.networkLoad &&
             transfer.fromLocalCache == false && transfer.producerPaced == false &&
+            transfer.statusCode == 200 && transfer.receipt != null && transfer.etag != null &&
+            autoTransferOriginCurrent(transfer) &&
+            transfer.pipelineIdentity === autoTransfersByPlayer[player] && sessionId != null &&
+            transfer.segmentId.contains("/$sessionId/") &&
             transfer.ageMs(now) <= 10_000L && duration > 0 && transfer.bodyBytes > 0) {
             (transfer.bodyBytes.toDouble() * 8_000.0 / duration).takeIf { it.isFinite() && it > 0 }
         } else null
         noteAutoGate(if (link == null) "no_link_sample" else null)
         autoSwitchTimes.removeAll { now - it >= 3_600_000L }
         val area = current.width.toLong() * current.height
-        val eligible = autoCatalog.filter {
+        val eligible = policyCatalog.filter {
             it.hasValidIdentity && it.id !in autoDecoderRejected && it.width > 0 && it.height > 0 &&
             it.decoder_compatible && (it.route != "encode" || it.grade == current.grade) && (autoBlockedUntil[it.id] ?: 0L) <= now }
         val downsideCost = autoDownsideCostBps(current, transfer, sessionId, now)
         val severe = link?.let { bps -> downsideCost?.let { bps < it * 0.7 } } == true
+        if (severe && transfer != null) autoUpgradeEvidence.cliff(transfer.completedAtMs, now)
         val mild = link?.let { bps -> downsideCost?.let { bps < it * (if (current.peak_bps != null) 1.3 else 1.0) } } == true
         if (!mild) { autoMildSamples = 0; autoMildTransferCompletedMs = null }
         else if (autoMildTransferCompletedMs != transfer?.completedAtMs) {
             autoMildSamples = (autoMildSamples + 1).coerceAtMost(2)
             autoMildTransferCompletedMs = transfer?.completedAtMs
         }
-        val producerPressure = sessionStatusAgeMs?.let { it <= 15_000L } == true &&
-            sessionStatus?.producer_state == "running" && sessionStatus?.active_encode_candidate_id == current.id &&
-            sessionStatus?.active_encode_age_ms?.let { it >= 0 && it + (sessionStatusAgeMs ?: 15_001L) <= 15_000L } == true &&
-            sessionStatus?.active_encode_segments?.let { it >= 2 } == true &&
-            sessionStatus?.active_encode_active_ms?.let { it >= 2_000L } == true &&
-            sessionStatus?.active_encode_milli_realtime?.let { it in 1..999 } == true &&
-            player.bufferedPosition - player.currentPosition < 10_000L
+        val producerPressure = autoActiveProductionPressure(sessionStatus,
+            sessionStatusAgeMs?.let { now - it }, now, sessionId, current.id,
+            player.bufferedPosition - player.currentPosition)
         val pressure = ((severe || autoMildSamples >= 2) &&
             (current.peak_bps != null || player.bufferedPosition - player.currentPosition < 10_000L)) || producerPressure
         val aspect = current.width.toDouble() / current.height
@@ -3408,7 +3663,11 @@ class Controller internal constructor(
             autoRecoveryCandidate(eligible, current, autoDecoderRejected,
                 link.takeIf { severe || autoMildSamples >= 2 })
         } else {
-            val fitting = eligible.filter { candidate -> link?.let { bps -> (candidate.peak_bps?.let { peak -> bps >= peak * 1.8 } ?: (candidate.route != "encode")) } == true }
+            val fitting = eligible.filter { candidate -> link?.let { bps ->
+                candidate.peak_bps?.let { peak -> bps >= peak * 1.8 } ?: autoCatalog.firstOrNull {
+                    it.id == candidate.id && it.recipe_digest == candidate.recipe_digest
+                }?.let { autoUnknownOriginalTrial(it, autoMeasuredOutputs) && bps > 0 } ?: false
+            } == true }
             val pick = autoPreferredDisplayCandidate(fitting, neededWidth, neededHeight)
             if (pick == null || !(pick.width.toLong() * pick.height > area ||
                     current.route == "encode" && pick.route != "encode") ||
@@ -3418,11 +3677,16 @@ class Controller internal constructor(
                 return
             }
             if (autoUpgradeSinceMs == null) autoUpgradeSinceMs = now
-            if (now - (autoUpgradeSinceMs ?: now) < 45_000L) return
+            if (!autoUpgradeEvidence.allowsProposal(now, autoUpgradeSinceMs)) return
+            autoLastEvaluation?.let { evaluation ->
+                if (autoTransfersByPlayer[player] === evaluation.first && mediaMutationEpoch == evaluation.second &&
+                    (now < evaluation.third || now - evaluation.third < 60_000L)) return
+            }
             pick
         } ?: return
         if (!severe && (autoSwitchTimes.size >= 6 || autoLastSwitchMs?.let { now - it < 60_000L } == true)) return
         autoDesiredCandidate = chosen
+        if (!pressure) autoTransfersByPlayer[player]?.let { autoLastEvaluation = Triple(it, mediaMutationEpoch, now) }
         autoVoluntary = !pressure
         playbackIntent.requestAutomaticCandidate(chosen.id, chosen.target_height)
         autoPreparing = true
@@ -3470,7 +3734,204 @@ class Controller internal constructor(
         raiseDegradedNotice("Auto quality change could not be confirmed. Playback continues while its outcome is checked.")
     }
 
+    private fun autoTransferOriginCurrent(sample: AutoCompletedTransfer): Boolean {
+        val actual = sample.origin?.let(tv.plurx.app.data.Session::canonicalOrigin) ?: return false
+        val primary = tv.plurx.app.data.Session.canonicalPrimaryOrigin() ?: return false
+        return actual == primary
+    }
+
+    private fun currentLinkReceipt(): String? {
+        if (playbackIntent.desiredQuality != PlaybackQuality.Auto) return null
+        val sample = latestAutoCompletedTransfer ?: return null
+        val currentSession = sessionId ?: return null
+        val receipt = sample.receipt ?: return null
+        val duration = sample.bodyDurationMs ?: return null
+        val uri = android.net.Uri.parse(sample.segmentId)
+        if (sample.pipelineIdentity !== autoTransfersByPlayer[player] ||
+            !uri.pathSegments.contains(currentSession) || autoActiveCandidateId == null ||
+            sample.statusCode != 200 || !sample.networkLoad || sample.fromLocalCache != false ||
+            !autoTransferOriginCurrent(sample) ||
+            sample.producerPaced != false || sample.ageMs(monotonicNowMs()) > 15_000L ||
+            duration !in 1..120_000L || sample.bodyBytes <= 0 || sample.etag.isNullOrEmpty() ||
+            autoLinkClaims[receipt]?.first != sample.completedAtMs ||
+            autoLinkClaims[receipt]?.third != autoActiveCandidateId ||
+            !Regex("[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}").matches(receipt)) return null
+        return receipt
+    }
+
+    private fun reportCandidateLinkSample(negative: Boolean) {
+        val now = monotonicNowMs()
+        autoLinkClaims.entries.removeAll { now < it.value.first || now - it.value.first > 15_000L }
+        val sample = latestAutoCompletedTransfer ?: return
+        val currentSession = sessionId ?: return
+        val candidate = autoCatalog.firstOrNull { it.hasValidIdentity && it.id == autoActiveCandidateId } ?: return
+        val duration = sample.bodyDurationMs ?: return
+        val receipt = sample.receipt ?: return
+        val etag = sample.etag ?: return
+        val uri = android.net.Uri.parse(sample.segmentId)
+        if (playbackIntent.desiredQuality != PlaybackQuality.Auto ||
+            sample.pipelineIdentity !== autoTransfersByPlayer[player] ||
+            !uri.pathSegments.contains(currentSession) || candidate.id != autoActiveCandidateId ||
+            !Regex("seg[0-9]+\\.(m4s|ts)").matches(uri.lastPathSegment.orEmpty()) ||
+            sample.statusCode != 200 || !sample.networkLoad || sample.fromLocalCache != false ||
+            !autoTransferOriginCurrent(sample) ||
+            sample.producerPaced != false || sample.ageMs(now) > 15_000L ||
+            duration !in 1..120_000L || sample.bodyBytes <= 0 || receipt.length != 36 || etag.isEmpty()) return
+        val runway = (player.bufferedPosition - player.currentPosition).coerceAtLeast(0L)
+        if (negative) {
+            if (autoLinkClaims[receipt]?.second != false || !establishedPlayback || !presentationForeground ||
+                !player.playWhenReady || player.playbackState != Player.STATE_BUFFERING ||
+                playbackIntent.pendingSeek != null || preparedPlayer != null || directedChange != null ||
+                runway > 1500 || sample.observedMediaDurationMs?.let { duration > it } != true) return
+        } else if (autoLinkClaims.containsKey(receipt)) return
+        if (autoLinkClaims.size >= 32 && !autoLinkClaims.containsKey(receipt)) return
+        postPlaybackClientLog(scope, PlaybackClientLog(level = "warn", event = "candidate_link_sample",
+            message = "Completed candidate body", ua = "Android Media3", sessionId = currentSession,
+            linkSample = CandidateLinkSample(receipt, uri.lastPathSegment.orEmpty(), etag,
+                sample.bodyBytes, duration, sample.ageMs(now), true, false, false, "link", negative,
+                sample.observedMediaDurationMs, establishedPlayback && presentationForeground,
+                player.playbackState == Player.STATE_BUFFERING, runway)))
+        autoLinkClaims[receipt] = Triple(sample.completedAtMs, negative, candidate.id)
+    }
+
+    private fun negativeLinkPayload(): PlaybackClientLog? {
+        val sample = latestAutoCompletedTransfer ?: return null
+        val receipt = currentLinkReceipt() ?: return null
+        val currentSession = sessionId ?: return null
+        val duration = sample.bodyDurationMs ?: return null
+        val media = sample.observedMediaDurationMs ?: return null
+        val runway = (player.bufferedPosition - player.currentPosition).coerceAtLeast(0L)
+        if (autoLinkClaims[receipt]?.second != false || !establishedPlayback || !presentationForeground ||
+            !player.playWhenReady || player.playbackState != Player.STATE_BUFFERING ||
+            playbackIntent.pendingSeek != null || preparedPlayer != null || directedChange != null ||
+            runway > 1500 || duration <= media) return null
+        val uri = android.net.Uri.parse(sample.segmentId)
+        return PlaybackClientLog(level = "warn", event = "candidate_link_sample",
+            message = "Completed candidate body", ua = "Android Media3", sessionId = currentSession,
+            linkSample = CandidateLinkSample(receipt, uri.lastPathSegment.orEmpty(), sample.etag ?: return null,
+                sample.bodyBytes, duration, sample.ageMs(monotonicNowMs()), true, false, false, "link", true,
+                media, true, true, runway))
+    }
+
+    private fun reportAutoRecoveryCause(cause: tv.plurx.app.data.ReopenReason) {
+        val session = sessionId ?: return
+        val candidate = autoCatalog.firstOrNull { it.hasValidIdentity && it.id == autoActiveCandidateId } ?: return
+        postPlaybackClientLog(scope, PlaybackClientLog(level = "warn", event = "candidate_recovery",
+            message = "Candidate recovery evidence", ua = "Android Media3", sessionId = session,
+            candidateRecovery = CandidateRecoverySample(cause = cause.name.lowercase(),
+                event_id = UUID.randomUUID().toString(), candidate_id = candidate.id,
+                recipe_digest = candidate.recipe_digest, age_ms = 0, decoder_failed = false,
+                rendered_elapsed_ms = 0, position_progress_ms = 0, dropped_frames = 0,
+                runway_ms = (player.bufferedPosition - player.currentPosition).coerceAtLeast(0L))))
+    }
+
+    private fun measuredCostCatalog(): List<tv.plurx.app.data.QualityCandidate> {
+        val family = liveContinuous()
+        return autoCatalog.map { candidate ->
+            val peak = tv.plurx.app.data.measuredCandidatePeak(candidate, autoMeasuredOutputs)
+            val output = if (peak == null) null else autoMeasuredOutputs.firstOrNull { it.matches(candidate) }
+            val measured = candidate.copy(average_bps = output?.average_bps, peak_bps = peak)
+            // A member of the live continuous family is costed by the family's
+            // own declared delivery budget (video plus shared audio), which
+            // [ContinuousAttachment.boundCatalog] binds; an unmeasured
+            // advertised peak is still discarded for every other candidate.
+            if (peak != null || family == null) measured
+            else runCatching { family.boundCatalog(listOf(measured)).single() }.getOrDefault(measured)
+        }
+    }
+
+    private fun autoOriginalBoundaryCandidate(now: Long): tv.plurx.app.data.QualityCandidate? {
+        if (!Session.displayAwareAuto || !Session.autoAbr || Session.displayAwareAutoProtocol != "route-v1" ||
+            autoRouteProtocol != "route-v1" || playbackIntent.desiredQuality != PlaybackQuality.Auto ||
+            !playbackIntent.playbackRequested || !establishedPlayback || !presentationForeground ||
+            autoPreparing || autoBoundaryAttempt != null || preparedPlayer != null || directedChange != null ||
+            autoPresentationTarget == null ||
+            !playbackControlBootstrapFence.isActive() || currentLinkReceipt() == null ||
+            player.bufferedPosition - player.currentPosition < 10_000L ||
+            !vm.preferences.value.preparedReplacement) return null
+        val sample = latestAutoCompletedTransfer ?: return null
+        val link = autoCompletedTransferBps(sample, now, 15_000L) ?: return null
+        val current = measuredCostCatalog().firstOrNull { it.id == autoActiveCandidateId } ?: return null
+        if (autoDownsideCostBps(current, sample, sessionId, now)?.let { link < it } == true) return null
+        return autoCatalog.filter { candidate ->
+            candidate.id != current.id && candidate.hasValidIdentity && candidate.decoder_compatible &&
+                candidate.route == "remux" && candidate.id !in autoDecoderRejected &&
+                (autoBlockedUntil[candidate.id] ?: 0L) <= now &&
+                (tv.plurx.app.data.measuredCandidatePeak(candidate, autoMeasuredOutputs)?.let { link >= it * 1.8 }
+                    ?: autoUnknownOriginalTrial(candidate, autoMeasuredOutputs))
+        }.maxByOrNull { it.width.toLong() * it.height }
+    }
+
+    private fun autoBoundaryOwnerIsCurrent(boundary: AutoBoundaryAttempt): Boolean =
+        autoBoundaryAttempt === boundary && boundary.epoch == mediaMutationEpoch &&
+            player === boundary.incumbent && sessionId == boundary.sessionId &&
+            playbackControlBootstrapFence.isActive() && presentationForeground &&
+            playbackIntent.playbackRequested && playbackIntent.desiredQuality == PlaybackQuality.Auto &&
+            viewerTransportLifetime === boundary.transportLifetime &&
+            selectedAudio == boundary.audio && selectedSubtitle == boundary.subtitle &&
+            audioOffsetMs == boundary.audioOffsetMs &&
+            currentRecipe().recipe == boundary.recipe &&
+            playbackIntent.pendingQualityChange?.sequence == boundary.qualitySequence
+
+    private fun autoBoundaryIsCurrent(boundary: AutoBoundaryAttempt): Boolean =
+        autoBoundaryOwnerIsCurrent(boundary) && autoDesiredCandidate?.id == boundary.candidateId
+
+    /**
+     * Ask for the boundary's original candidate through the same accepted
+     * prepared transaction the mid-play upgrade uses, and return at once. The
+     * incumbent is already playing (or already sought) for the viewer; the
+     * successor primes beside it and the rendezvous hands off, or it is
+     * abandoned and the incumbent simply carries on. The commit, the failure
+     * and the withdrawal all settle through the prepared ledger's own events.
+     */
+    private fun beginAutoBoundaryPreparation(chosen: tv.plurx.app.data.QualityCandidate, now: Long): Boolean {
+        val currentSession = sessionId ?: return false
+        val boundary = AutoBoundaryAttempt(player, currentSession, mediaMutationEpoch, chosen.id,
+            currentRecipe().recipe, playbackIntent.pendingQualityChange?.sequence, viewerTransportLifetime,
+            selectedAudio, selectedSubtitle, audioOffsetMs, autoDesiredCandidate,
+            playbackIntent.automaticCandidateId, playbackIntent.automaticCandidateHeight)
+        autoBoundaryAttempt = boundary
+        autoDesiredCandidate = chosen
+        autoVoluntary = true
+        autoPreparing = true
+        autoPreparedTargetRevision = autoPresentationTarget?.revision
+        autoPreparedMutationEpoch = mediaMutationEpoch
+        playbackIntent.requestAutomaticCandidate(chosen.id, chosen.target_height)
+        scope.launch {
+            playbackControl.reportIntent()
+            val step = playbackControl.awaitPreparedOffer(now)
+            if (step is PreparedOfferWait.Step.Offered && autoBoundaryIsCurrent(boundary) &&
+                step.action.effectiveSelection?.candidateId == chosen.id) {
+                onPrepareAction(step.action)
+                // The offer can build nothing: refused, a replay of a staging
+                // that already settled, a closed controller, or an action
+                // without a playlist or media origin. No prepared event will
+                // ever arrive to settle this boundary then, so it is withdrawn
+                // here, as Apple does when its offer does not own the change.
+                if (autoBoundaryOfferBuiltNothing(autoBoundaryAttempt === boundary,
+                        built = preparedPlayer != null, switched = preparedLedger.isSwitched)) {
+                    if (preparedLedger.isLive && preparedLedger.actionId == step.action.actionId) {
+                        abandonPreparedReplacement(failed = false)
+                    }
+                    withdrawAutoBoundary(boundary)
+                }
+            } else withdrawAutoBoundary(boundary)
+        }
+        return true
+    }
+
+    /** Put Auto back where the boundary found it, if nothing newer owns it. */
+    private fun withdrawAutoBoundary(boundary: AutoBoundaryAttempt) {
+        if (autoBoundaryAttempt === boundary) autoBoundaryAttempt = null
+        if (autoDesiredCandidate?.id != boundary.candidateId) return
+        autoDesiredCandidate = boundary.previousCandidate
+        playbackIntent.requestAutomaticCandidate(boundary.previousId, boundary.previousHeight)
+        autoPreparing = false
+        playbackControl.reportEvidence()
+    }
+
     private fun failAutoPreparation() {
+        autoBoundaryAttempt = null
         autoDesiredCandidate?.let { autoBlockedUntil[it.id] = monotonicNowMs() + 300_000L }
         autoDesiredCandidate = null
         playbackIntent.requestAutomaticCandidate(null, null)
@@ -3507,7 +3968,8 @@ class Controller internal constructor(
     fun setPresentationForeground(foreground: Boolean, inPictureInPicture: Boolean = false) {
         if (!playbackControlBootstrapFence.isActive()) return
         val visible = foreground || inPictureInPicture
-        if (presentationForeground != visible) stallGuard.invalidateObservation()
+        val visibilityChanged = presentationForeground != visible
+        if (visibilityChanged) stallGuard.invalidateObservation()
         presentationForeground = visible
         val lifecycle = lifecyclePlaybackTransition(
             ownerPaused = lifecyclePaused,
@@ -3517,6 +3979,10 @@ class Controller internal constructor(
             viewerRequested = playbackIntent.playbackRequested,
         )
         lifecyclePaused = lifecycle.ownerPaused
+        if (visibilityChanged) {
+            explicitViewerPause = null
+            revokeAutoBoundaryTransport()
+        }
         when (lifecycle.effect) {
             LifecyclePlaybackEffect.PauseVideo -> {
                 applyEffectivePlayWhenReady()
@@ -4096,6 +4562,64 @@ class Controller internal constructor(
     private var preparedListener: Player.Listener? = null
     private var preparedStartedAtMs = 0L
     private var preparedReadinessDeadlineJob: Job? = null
+    private data class AutoStagedObservation(val player: ExoPlayer, val meter: AutoTransferEvidence,
+        val sessionId: String, val candidateId: String, val recipeDigest: List<Int>,
+        val startedAtMs: Long, val deadlineMs: Long, val credentialOrigin: String, val credentialToken: String?,
+        var playlistUrl: String? = null, var immutableVod: Boolean = false)
+    private var autoStagedObservation: AutoStagedObservation? = null
+    private var autoStagedPlaylistJob: Job? = null
+
+    private fun autoStagedObservationCurrent(observation: AutoStagedObservation, nowMs: Long): Boolean =
+        nowMs >= observation.startedAtMs && nowMs < observation.deadlineMs &&
+            Session.origin == observation.credentialOrigin && Session.token == observation.credentialToken &&
+            preparedPlayer === observation.player && autoTransfersByPlayer[observation.player] === observation.meter &&
+            preparedLedger.action?.sessionId == observation.sessionId &&
+            preparedLedger.action?.effectiveSelection?.candidateId == observation.candidateId &&
+            autoDesiredCandidate?.id == observation.candidateId &&
+            autoDesiredCandidate?.recipe_digest == observation.recipeDigest
+
+    /** One received media-playlist lookup, bound to the stage and original deadline. */
+    private fun captureAutoStagedVodPlaylist(observation: AutoStagedObservation) {
+        if (!autoStagedObservationCurrent(observation, monotonicNowMs()) || observation.playlistUrl != null) return
+        val manifest = observation.player.currentManifest as? HlsManifest ?: return
+        val url = manifest.mediaPlaylist.baseUri
+        val uri = Uri.parse(url)
+        if (Session.canonicalOrigin(url) != Session.canonicalOrigin(observation.credentialOrigin) ||
+            !uri.pathSegments.contains(observation.sessionId) || uri.lastPathSegment?.endsWith(".m3u8") != true) return
+        observation.playlistUrl = url
+        val remaining = observation.deadlineMs - monotonicNowMs()
+        if (remaining <= 0) return
+        val client = (observation.credentialToken?.let(Net::profileClient) ?: Net.capabilityClient)
+            .newBuilder().retryOnConnectionFailure(false)
+            .callTimeout(remaining, java.util.concurrent.TimeUnit.MILLISECONDS).build()
+        autoStagedPlaylistJob = scope.launch {
+            val valid = withContext(Dispatchers.IO) {
+                runCatching {
+                    client.newCall(okhttp3.Request.Builder().url(url).header("Cache-Control", "no-cache").build())
+                        .execute().use responseBody@{ response ->
+                            val body = response.body
+                            if (response.code != 200 || response.request.url.toString() != url || body == null ||
+                                body.contentLength() > 1_048_576L) return@responseBody false
+                            val bytes = java.io.ByteArrayOutputStream()
+                            body.byteStream().use { input ->
+                                val buffer = ByteArray(8192)
+                                while (true) {
+                                    if (monotonicNowMs() >= observation.deadlineMs) return@responseBody false
+                                    val count = input.read(buffer)
+                                    if (count < 0) break
+                                    if (bytes.size() + count > 1_048_576) return@responseBody false
+                                    bytes.write(buffer, 0, count)
+                                }
+                            }
+                            (body.contentLength() < 0 || body.contentLength() == bytes.size().toLong()) &&
+                                autoImmutableVodPlaylist(bytes.toByteArray())
+                        }
+                }.getOrDefault(false)
+            }
+            if (valid && autoStagedObservation === observation &&
+                autoStagedObservationCurrent(observation, monotonicNowMs())) observation.immutableVod = true
+        }
+    }
 
     /**
      * When the switch happened, while the commit still waits for the frame that
@@ -4119,6 +4643,7 @@ class Controller internal constructor(
         val requiresHlsOverride: Boolean?,
         val progressiveMediaOrigin: ProgressiveMediaOrigin,
         val baseMs: Long,
+        val sessionIsVod: Boolean,
         val sessionId: String?,
         val activeMediaPath: String?,
         val deliveredRange: String?,
@@ -4219,7 +4744,14 @@ class Controller internal constructor(
             is PreparationOffer.Refuse -> Unit
             is PreparationOffer.Start -> {
                 offer.supersedes?.let(::publishAcknowledgement)
+                // Releasing a superseded pipeline must not drop the boundary
+                // this very offer is the preparation for; a boundary for some
+                // other candidate is gone with the pipeline as before.
+                val boundary = autoBoundaryAttempt?.takeIf {
+                    it.candidateId == offer.action.effectiveSelection?.candidateId
+                }
                 releaseSuccessor()
+                if (boundary != null) autoBoundaryAttempt = boundary
                 startSuccessor(offer.action)
             }
         }
@@ -4263,12 +4795,22 @@ class Controller internal constructor(
             return
         }
         autoTransfersByPlayer[built.player] = built.autoTransfers
+        val desired = autoDesiredCandidate
+        val stagedSessionId = action.sessionId
+        autoStagedObservation = if (autoPreparing && desired != null && desired.recipe_digest.size == 32 &&
+            stagedSessionId != null && action.effectiveSelection?.candidateId == desired.id)
+            AutoStagedObservation(built.player, built.autoTransfers, stagedSessionId, desired.id,
+                desired.recipe_digest.toList(), preparedStartedAtMs,
+                preparedStartedAtMs + minOf(15_000L, PREPARED_READINESS_BOUND_MS), Session.origin, Session.token) else null
         rendezvousJob?.cancel()
         rendezvousJob = null
         rendezvous = null
         rendezvousSeekObserved = false
         preparedOrigin = built.progressiveMediaOrigin
         val successorListener = object : Player.Listener {
+            override fun onTimelineChanged(timeline: androidx.media3.common.Timeline, reason: Int) {
+                autoStagedObservation?.takeIf { it.player === built.player }?.let(::captureAutoStagedVodPlaylist)
+            }
             override fun onPlayerError(error: PlaybackException) {
                 // Posted, not called. Abandoning releases this very player, and
                 // re-entering `release()` from inside its own `ListenerSet`
@@ -4346,6 +4888,38 @@ class Controller internal constructor(
         }
         val successor = preparedPlayer ?: return
         if (!preparedLedger.isLive) return
+        // A boundary preparation whose owner moved on (backgrounded, another
+        // selection, a different rung) is withdrawn, not failed.
+        autoBoundaryAttempt?.let { boundary ->
+            if (!preparedLedger.isSwitched && !autoBoundaryIsCurrent(boundary)) {
+                abandonPreparedReplacement(failed = false)
+                withdrawAutoBoundary(boundary)
+                return
+            }
+        }
+        if (autoPreparing && autoVoluntary) {
+            val now = monotonicNowMs()
+            val observation = autoStagedObservation
+            val current = measuredCostCatalog().firstOrNull { it.id == autoActiveCandidateId }
+            val pressure = current?.let { autoActiveProductionPressure(sessionStatus,
+                sessionStatusAgeMs?.let { now - it }, now, sessionId, it.id,
+                player.bufferedPosition - player.currentPosition) } ?: true
+            val sample = latestAutoCompletedTransfer
+            val link = sample?.takeIf { it.pipelineIdentity === autoTransfersByPlayer[player] &&
+                sessionId != null && it.segmentId.contains("/$sessionId/") && it.statusCode == 200 &&
+                it.receipt != null && it.etag != null && autoTransferOriginCurrent(it) }
+                ?.let { autoCompletedTransferBps(it, now, 15_000L) }
+            val cost = current?.let { autoDownsideCostBps(it, sample, sessionId, now) }
+            val linkPressure = link != null && cost != null && link < cost * (if (current?.peak_bps == null) 1.0 else 1.3)
+            if (link != null && cost != null && link < cost * 0.7 && sample != null)
+                autoUpgradeEvidence.cliff(sample.completedAtMs, now)
+            if (observation == null || !autoStagedObservationCurrent(observation, now) ||
+                player.bufferedPosition - player.currentPosition < 10_000L || pressure || linkPressure ||
+                (autoBoundaryAttempt?.let(::autoBoundaryIsCurrent) != true && !autoUpgradeEvidence.allowsUpgrade(now))) {
+                abandonPreparedReplacement(failed = true)
+                return
+            }
+        }
         if (monotonicNowMs() - preparedStartedAtMs >=
             minOf(PREPARED_READINESS_BOUND_MS, PREPARED_OVERLAP_BOUND_MS)) {
             abandonPreparedReplacement(failed = true)
@@ -4493,11 +5067,15 @@ class Controller internal constructor(
             abandonPreparedReplacement(failed = true)
             return false
         }
+        val stagedFilmLocalVod = autoStagedObservation?.let {
+            autoStagedObservationCurrent(it, monotonicNowMs()) && it.immutableVod && originMs == 0L
+        } == true
         if (autoPreparing && !autoTrialMayCommit(autoDesiredCandidate?.id, action.effectiveSelection?.candidateId,
                 autoPreparedTargetRevision, autoPresentationTarget?.revision,
                 autoPreparedMutationEpoch, mediaMutationEpoch,
                 playbackIntent.desiredQuality == PlaybackQuality.Auto && tv.plurx.app.data.Session.autoAbr,
-                player.isPlaying && presentationForeground, playbackIntent.pendingSeek != null)) {
+                presentationForeground && player.isPlaying,
+                playbackIntent.pendingSeek != null)) {
             abandonPreparedReplacement(failed = true)
             return false
         }
@@ -4506,9 +5084,40 @@ class Controller internal constructor(
             if (desired.route == "encode" && !desired.complete_cache &&
                 !autoStagedEncodeProof(autoStagedStatus, autoStagedStatusObservedMs, monotonicNowMs(),
                     action.sessionId ?: return false, desired.id)) return false
-            if (desired.route != "encode" && desired.peak_bps == null &&
-                !autoOriginalTransferMarginProven(autoTransfersByPlayer[successor]?.recent().orEmpty(),
-                    action.sessionId ?: return false, monotonicNowMs())) return false
+            val now = monotonicNowMs()
+            val observation = autoStagedObservation ?: return false
+            if (!autoStagedObservationCurrent(observation, now)) return false
+            val peak = tv.plurx.app.data.measuredCandidatePeak(desired, autoMeasuredOutputs)
+            val unknown = autoCatalog.firstOrNull { it.id == desired.id && it.recipe_digest == desired.recipe_digest }
+                ?.let { autoUnknownOriginalTrial(it, autoMeasuredOutputs) } == true
+            if (peak == null && !unknown) return false
+            autoTransfersByPlayer[successor]?.recent().orEmpty().forEach { sample ->
+                val receipt = sample.receipt
+                val duration = sample.bodyDurationMs
+                val uri = android.net.Uri.parse(sample.segmentId)
+                if (preparedPlayer === successor && preparedLedger.action === action &&
+                    sample.pipelineIdentity === autoTransfersByPlayer[successor] && receipt != null &&
+                    Regex("[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}").matches(receipt) &&
+                    uri.pathSegments.contains(action.sessionId) && !sample.etag.isNullOrEmpty() &&
+                    sample.statusCode == 200 && autoTransferOriginCurrent(sample) &&
+                    autoCompletedTransferBps(sample, now, 15_000L) != null && duration != null &&
+                    !autoLinkClaims.containsKey(receipt) && autoLinkClaims.size < 32) {
+                    postPlaybackClientLog(scope, PlaybackClientLog(level = "warn", event = "candidate_link_sample",
+                        message = "Completed staged candidate body", ua = "Android Media3", sessionId = action.sessionId,
+                        linkSample = CandidateLinkSample(receipt, uri.lastPathSegment.orEmpty(), sample.etag!!,
+                            sample.bodyBytes, duration, sample.ageMs(now), true, false, false, "link", false,
+                            sample.observedMediaDurationMs, false, false, 0)))
+                    autoLinkClaims[receipt] = Triple(sample.completedAtMs, false, desired.id)
+                }
+            }
+            val samples = observation.meter.recent().filter { autoTransferOriginCurrent(it) }
+            val margin = if (unknown) observation.immutableVod && autoStagedEmpiricalMargin(samples, observation.meter,
+                observation.sessionId, now, observation.deadlineMs) else samples.any { sample ->
+                sample.pipelineIdentity === observation.meter &&
+                    sample.segmentId.contains("/${observation.sessionId}/") && sample.receipt != null && sample.etag != null &&
+                    sample.statusCode == 200 && autoCompletedTransferBps(sample, now, 15_000L)?.let { it >= (peak ?: return false) * 1.8 } == true
+            }
+            if (!margin) return false
         }
         val successorFilmMs = successorFilmPositionMs(originMs, successor.currentPosition)
         val bufferedThrough = successorFilmPositionMs(originMs, successor.bufferedPosition)
@@ -4562,6 +5171,7 @@ class Controller internal constructor(
             requiresHlsOverride = attachedRequiresHlsOverride,
             progressiveMediaOrigin = progressiveMediaOrigin,
             baseMs = baseMs,
+            sessionIsVod = sessionIsVod,
             sessionId = sessionId,
             activeMediaPath = activeMediaPath,
             deliveredRange = deliveredRange,
@@ -4572,11 +5182,9 @@ class Controller internal constructor(
             establishedPlayback = establishedPlayback,
         )
 
+        handOverAudioFocus(previous.asAudioFocusOwner(), successor.asAudioFocusOwner())
         successor.volume = previousVolume
         successor.playbackParameters = previousPlaybackParameters
-        // Audio focus follows the audible owner: release it from the retiring
-        // player before the successor requests it, so neither receives a loss.
-        PreparedAudioFocus.move(previous.audioFocusHandling(), successor.audioFocusHandling())
         successor.playWhenReady = previousPlayWhenReady
         preparedOrigin?.let { progressiveMediaOrigin = it }
 
@@ -4595,7 +5203,6 @@ class Controller internal constructor(
         externalListeners.forEach { successor.addListener(it) }
 
         player = successor
-        mediaSession.setPlayer(successor)
         // A different `ExoPlayer` with its own item is on the screen now, so
         // it gets its own single `BEHIND_LIVE_WINDOW` recovery. This path never
         // passed through the ordinary session attachment, so record both the
@@ -4610,6 +5217,9 @@ class Controller internal constructor(
         // controller derives from "which session am I playing" moves with it,
         // in one place, so no two answers about the same stream can drift.
         activeMediaPath = action.playlistUrl?.let(::relativeMediaPath)
+        // ENDLIST is a delivery proof, never permission to erase a nonzero
+        // explicit media origin or retain the incumbent's timeline regime.
+        sessionIsVod = stagedFilmLocalVod
         baseMs = sessionPlaybackTimeline(
             mediaOriginMs = originMs,
             isVod = sessionIsVod,
@@ -4619,6 +5229,7 @@ class Controller internal constructor(
             sessionId = successorSession
             startStatusPolling(successorSession)
         }
+        rebindMediaSessionTransport()
         action.effectiveSelection?.let { stallReopenBudget.seed(it.height.toInt()) }
         // The badges and the info panel describe the stream on the screen, and
         // both halves of the grade move together or neither does.
@@ -4690,6 +5301,9 @@ class Controller internal constructor(
             autoPreparing = false
             autoUpgradeSinceMs = null
         }
+        // A boundary preparation ends with its own first frame, exactly like
+        // the mid-play upgrade it now is.
+        autoBoundaryAttempt = null
         publishAcknowledgement(preparedLedger.committed(firstFrameUnixMs))
         // The viewer is looking at the rung they asked for. The directed change
         // is honoured and owes nothing — least of all a reopen.
@@ -4728,6 +5342,7 @@ class Controller internal constructor(
             attachRecipe(recipe, predecessor.transport ?: recipe.recipe.desiredTransport)
         }
         baseMs = predecessor.baseMs
+        sessionIsVod = predecessor.sessionIsVod
         sessionId = predecessor.sessionId
         activeMediaPath = predecessor.activeMediaPath
         deliveredRange = predecessor.deliveredRange
@@ -4741,8 +5356,12 @@ class Controller internal constructor(
         // ON_STOP still suppresses output without replacing standing Play intent.
         predecessor.player.volume = failedSuccessor.volume
         predecessor.player.playbackParameters = failedSuccessor.playbackParameters
-        PreparedAudioFocus.rollback(failedSuccessor.audioFocusHandling(), failedSuccessor.playbackSilencing(),
-            predecessor.player.audioFocusHandling())
+        // The failed successor stays parked behind the surface overlap until it
+        // is collected. Losing focus alone left it playing and audible over the
+        // restored player, so it is paused and muted (after its viewer volume
+        // was read above) before focus moves back.
+        failedSuccessor.playbackSilencing().silence()
+        handOverAudioFocus(failedSuccessor.asAudioFocusOwner(), predecessor.player.asAudioFocusOwner())
         predecessor.player.playWhenReady = effectivePlayWhenReady()
 
         preparedPredecessor = null
@@ -4752,7 +5371,7 @@ class Controller internal constructor(
         retiredPlayer = failedSuccessor
         retiredParkedAtMs = monotonicNowMs()
         player = predecessor.player
-        mediaSession.setPlayer(predecessor.player)
+        rebindMediaSessionTransport()
         preparedVideoSurfaces?.expose(predecessor.player) { collectRetiredPlayer() }
         return true
     }
@@ -4829,6 +5448,11 @@ class Controller internal constructor(
     private fun releaseSuccessor() {
         preparedReadinessDeadlineJob?.cancel()
         preparedReadinessDeadlineJob = null
+        // The preparation a boundary asked for is gone with its pipeline.
+        if (!preparedLedger.isSwitched) autoBoundaryAttempt = null
+        autoStagedPlaylistJob?.cancel()
+        autoStagedPlaylistJob = null
+        autoStagedObservation = null
         autoStagedStatus = null
         autoStagedStatusObservedMs = null
         val successor = preparedPlayer ?: return
@@ -5070,8 +5694,87 @@ internal data class AutoCompletedTransfer(
     val producerPaced: Boolean?,
     val segmentId: String = "",
     val mediaDurationMs: Long? = null,
+    val receipt: String? = null,
+    val etag: String? = null,
+    val statusCode: Int? = null,
+    val pipelineIdentity: Any? = null,
+    val observedMediaDurationMs: Long? = null,
+    val mediaStartTimeMs: Long? = null,
+    val mediaEndTimeMs: Long? = null,
+    val fullObject: Boolean = false,
 ) {
     fun ageMs(nowMs: Long): Long = if (nowMs >= completedAtMs) nowMs - completedAtMs else Long.MAX_VALUE
+}
+
+/** Empirical stage-only margin; never a full-output peak qualification. */
+/** Strict bounded immutable media-playlist type proof; no guessed timeline. */
+internal fun autoImmutableVodPlaylist(bytes: ByteArray): Boolean {
+    if (bytes.isEmpty() || bytes.size > 1_048_576) return false
+    val text = runCatching { java.nio.charset.StandardCharsets.UTF_8.newDecoder()
+        .onMalformedInput(java.nio.charset.CodingErrorAction.REPORT)
+        .onUnmappableCharacter(java.nio.charset.CodingErrorAction.REPORT)
+        .decode(java.nio.ByteBuffer.wrap(bytes)).toString() }.getOrNull() ?: return false
+    val lines = text.lineSequence().filter { it.isNotEmpty() }.toList()
+    if (lines.firstOrNull() != "#EXTM3U" || lines.lastOrNull() != "#EXT-X-ENDLIST" ||
+        "#EXT-X-PLAYLIST-TYPE:VOD" !in lines) return false
+    var pending = false
+    val names = mutableSetOf<String>()
+    for (line in lines.drop(1)) {
+        if (line.startsWith("#EXTINF:")) {
+            val duration = line.removePrefix("#EXTINF:").removeSuffix(",").toDoubleOrNull()
+            if (pending || !line.endsWith(",") || duration == null || !duration.isFinite() || duration <= 0 || duration > 120)
+                return false
+            pending = true
+        } else if (line.startsWith("#")) {
+            if (pending || !(line == "#EXT-X-ENDLIST" || line == "#EXT-X-PLAYLIST-TYPE:VOD" ||
+                    line == "#EXT-X-MEDIA-SEQUENCE:0" || line == "#EXT-X-MAP:URI=\"init.mp4\"" ||
+                    line.startsWith("#EXT-X-VERSION:") || line.startsWith("#EXT-X-TARGETDURATION:"))) return false
+        } else {
+            val index = line.removePrefix("seg").removeSuffix(".m4s").toUIntOrNull()
+            if (!pending || index == null || line != "seg${index.toString().padStart(5, '0')}.m4s" ||
+                names.size >= 8192 || !names.add(line)) return false
+            pending = false
+        }
+    }
+    return !pending && names.isNotEmpty()
+}
+
+internal fun autoStagedEmpiricalMargin(samples: List<AutoCompletedTransfer>, pipeline: Any,
+    sessionId: String, nowMs: Long, deadlineMs: Long): Boolean {
+    if (nowMs < 0 || nowMs >= deadlineMs) return false
+    val names = mutableSetOf<String>()
+    val receipts = mutableSetOf<String>()
+    val etags = mutableSetOf<String>()
+    val intervals = mutableListOf<Pair<Long, Long>>()
+    var duration = 0L
+    var minimumLink = Double.POSITIVE_INFINITY
+    var maximumObservedCost = 0.0
+    samples.forEach { sample ->
+        val uri = runCatching { java.net.URI(sample.segmentId) }.getOrNull() ?: return@forEach
+        val path = uri.rawPath ?: return@forEach
+        val name = path.substringAfterLast('/')
+        val index = name.removePrefix("seg").removeSuffix(".m4s").toLongOrNull() ?: return@forEach
+        val start = sample.mediaStartTimeMs ?: return@forEach
+        val end = sample.mediaEndTimeMs ?: return@forEach
+        val advertised = sample.observedMediaDurationMs ?: return@forEach
+        val receipt = sample.receipt ?: return@forEach
+        val etag = sample.etag?.takeIf { it.isNotEmpty() } ?: return@forEach
+        val link = autoCompletedTransferBps(sample, nowMs, 15_000L) ?: return@forEach
+        if (sample.pipelineIdentity !== pipeline || !sample.fullObject || sample.statusCode != 200 ||
+            !path.split('/').contains(sessionId) || index !in 0..4_294_967_295L ||
+            name != "seg${index.toString().padStart(5, '0')}.m4s" || start < 0 || end <= start ||
+            advertised <= 0 || kotlin.math.abs(advertised - (end - start)) > 2 ||
+            !Regex("[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}").matches(receipt) ||
+            name in names || receipt in receipts || etag in etags ||
+            intervals.any { (a, b) -> !(b <= start || end <= a) }) return@forEach
+        names.add(name); receipts.add(receipt); etags.add(etag)
+        intervals.add(start to end)
+        duration += end - start
+        minimumLink = minOf(minimumLink, link)
+        maximumObservedCost = maxOf(maximumObservedCost, sample.bodyBytes.toDouble() * 8_000 / (end - start))
+    }
+    return intervals.size >= 2 && duration >= 2_000 && maximumObservedCost > 0 &&
+        maximumObservedCost.isFinite() && minimumLink >= maximumObservedCost * 1.8
 }
 
 internal fun autoCompletedTransferBps(sample: AutoCompletedTransfer, nowMs: Long, maximumAgeMs: Long = 10_000L): Double? {
@@ -5079,6 +5782,110 @@ internal fun autoCompletedTransferBps(sample: AutoCompletedTransfer, nowMs: Long
     if (!sample.networkLoad || sample.fromLocalCache != false || sample.producerPaced != false ||
         sample.ageMs(nowMs) > maximumAgeMs || sample.bodyBytes <= 0 || duration <= 0) return null
     return (sample.bodyBytes.toDouble() * 8_000.0 / duration).takeIf { it.isFinite() && it > 0 }
+}
+
+/** Unknown source-copy exposure is a bounded trial, never a measured peak. */
+internal fun autoUnknownOriginalTrial(candidate: tv.plurx.app.data.QualityCandidate,
+    outputs: List<tv.plurx.app.data.MeasuredCandidateOutput>): Boolean =
+    candidate.hasValidIdentity && candidate.decoder_compatible && candidate.route == "remux" &&
+        candidate.peak_bps == null && outputs.size <= 64 && outputs.none {
+            it.candidate_id == candidate.id && it.recipe_digest == candidate.recipe_digest && it.route == candidate.route
+        }
+
+/** Private observational windows; attachment changes cannot inherit old proof. */
+internal class AutoUpgradeEvidenceWindow {
+    private var attachment: Any? = null
+    private var epoch: Long? = null
+    private var observationStartMs: Long? = null
+    var lastStallMs: Long? = null
+        private set
+    var lastCliffMs: Long? = null
+        private set
+    fun reset() { attachment = null; epoch = null; observationStartMs = null; lastStallMs = null; lastCliffMs = null }
+    fun bind(attachment: Any?, epoch: Long, nowMs: Long) {
+        if (this.attachment === attachment && this.epoch == epoch) return
+        reset()
+        this.attachment = attachment
+        this.epoch = epoch
+        observationStartMs = if (attachment != null && nowMs >= 0) nowMs else null
+    }
+    fun stalled(nowMs: Long) {
+        if (attachment != null && nowMs >= 0) lastStallMs = maxOf(lastStallMs ?: nowMs, nowMs)
+    }
+    fun cliff(completedAtMs: Long, nowMs: Long) {
+        if (attachment != null && completedAtMs >= 0 && nowMs >= completedAtMs && nowMs - completedAtMs <= 15_000L)
+            lastCliffMs = maxOf(lastCliffMs ?: completedAtMs, completedAtMs)
+    }
+    fun allowsUpgrade(nowMs: Long): Boolean {
+        val start = observationStartMs ?: return false
+        val quietStart = maxOf(start, lastStallMs ?: start)
+        return attachment != null && nowMs >= quietStart && nowMs - quietStart >= 60_000L &&
+            (lastCliffMs?.let { nowMs >= it && nowMs - it >= 90_000L } ?: true)
+    }
+    fun allowsProposal(nowMs: Long, headroomStartedAtMs: Long?): Boolean =
+        headroomStartedAtMs != null && nowMs >= headroomStartedAtMs &&
+            nowMs - headroomStartedAtMs >= 45_000L && allowsUpgrade(nowMs)
+}
+
+/** Two progressing supplied intervals, never a wait callback or stale player. */
+internal data class AutoDecodePressureEvidence(val elapsedMs: Long, val progressMs: Long, val droppedFrames: Long)
+internal class AutoDecodePressureWindow {
+    private var attachment: Any? = null
+    private var candidate: String? = null
+    private var previous: Triple<Long, Long, Long>? = null
+    private var intervals = 0
+    private var first: Triple<Long, Long, Long>? = null
+    var evidence: AutoDecodePressureEvidence? = null
+        private set
+    fun observe(attachment: Any?, candidate: String?, nowMs: Long, positionMs: Long,
+                cumulativeDropped: Long?, eligible: Boolean): Boolean {
+        if (this.attachment !== attachment || this.candidate != candidate) {
+            this.attachment = attachment; this.candidate = candidate; previous = null; first = null; evidence = null; intervals = 0
+        }
+        if (attachment == null || candidate == null || !eligible || nowMs < 0 || positionMs < 0 ||
+            cumulativeDropped == null || cumulativeDropped < 0) {
+            previous = null; first = null; evidence = null; intervals = 0; return false
+        }
+        val old = previous
+        previous = Triple(nowMs, positionMs, cumulativeDropped)
+        if (old == null || nowMs < old.first || positionMs < old.second || cumulativeDropped < old.third) {
+            first = null; evidence = null; intervals = 0; return false
+        }
+        val elapsed = nowMs - old.first
+        if (elapsed !in 1_000L..5_000L || positionMs - old.second < elapsed / 2 || cumulativeDropped - old.third < 3) {
+            first = null; evidence = null; intervals = 0; return false
+        }
+        intervals = (intervals + 1).coerceAtMost(2)
+        if (first == null) first = old
+        val start = first ?: return false
+        if (intervals < 2 || nowMs - start.first < 4_000L) return false
+        evidence = AutoDecodePressureEvidence(nowMs - start.first, positionMs - start.second, cumulativeDropped - start.third)
+        return true
+    }
+}
+
+internal data class AutoRecoveryCauseTicket(val session: String, val attachment: Any,
+    val incumbentCandidate: String, val proposedCandidate: String,
+    val cause: tv.plurx.app.data.ReopenReason, val observedAtMs: Long, val linkReceipt: String? = null) {
+    fun receiptForRequest(previous: String?, candidate: String?, cause: tv.plurx.app.data.ReopenReason?): String? =
+        linkReceipt.takeIf { this.cause == tv.plurx.app.data.ReopenReason.Link && cause == this.cause &&
+            previous == session && candidate == proposedCandidate }
+    fun isCurrent(session: String?, attachment: Any?, candidate: String?, proposed: String?, nowMs: Long): Boolean =
+        this.session == session && this.attachment === attachment && incumbentCandidate == candidate &&
+            proposedCandidate == proposed && nowMs >= observedAtMs && nowMs - observedAtMs <= 15_000L
+}
+
+internal fun autoActiveProductionPressure(status: PlaybackSessionStatus?, observedAtMs: Long?, nowMs: Long,
+                                          sessionId: String?, candidateId: String, runwayMs: Long?): Boolean {
+    if (status == null || observedAtMs == null || nowMs < observedAtMs) return false
+    val age = status.active_encode_age_ms ?: return false
+    val elapsed = nowMs - observedAtMs
+    return elapsed <= 15_000L && age >= 0 && age <= 15_000L - elapsed &&
+        sessionId != null && status.id == sessionId && status.active_encode_candidate_id == candidateId &&
+        status.active_encode_segments?.let { it >= 2 } == true &&
+        status.active_encode_active_ms?.let { it >= 2_000L } == true &&
+        status.active_encode_milli_realtime?.let { it in 1..999 } == true &&
+        runwayMs?.let { it in 0..9_999L } == true
 }
 
 internal fun autoOriginalTransferMarginProven(samples: List<AutoCompletedTransfer>, sessionId: String, nowMs: Long): Boolean {
@@ -5148,7 +5955,10 @@ internal fun autoLinkMediaSegment(path: String): Boolean =
 @UnstableApi
 internal class AutoTransferEvidence(private val delegate: TransferListener) : TransferListener {
     private data class Body(val uri: String, val startedAtMs: Long, val network: Boolean,
-                            val origin: String?, val paced: Boolean?, var bytes: Long = 0)
+                            val origin: String?, val paced: Boolean?, val receipt: String?,
+                            val etag: String?, val statusCode: Int?, val observedMediaDurationMs: Long?,
+                            val fullObject: Boolean,
+                            var bytes: Long = 0)
     private val active = java.util.IdentityHashMap<DataSource, Body>()
     private val ended = LinkedHashMap<String, AutoCompletedTransfer>()
     private var completed: AutoCompletedTransfer? = null
@@ -5165,7 +5975,9 @@ internal class AutoTransferEvidence(private val delegate: TransferListener) : Tr
             sample.bodyBytes != load.bytesLoaded) return
         val duration = if (media.mediaStartTimeMs != C.TIME_UNSET && media.mediaEndTimeMs != C.TIME_UNSET)
             (media.mediaEndTimeMs - media.mediaStartTimeMs).takeIf { it > 0 } else null
-        val confirmed = sample.copy(segmentId = load.uri.toString(), mediaDurationMs = duration)
+        val confirmed = sample.copy(segmentId = load.uri.toString(), mediaDurationMs = duration,
+            mediaStartTimeMs = media.mediaStartTimeMs.takeIf { it != C.TIME_UNSET && it >= 0 },
+            mediaEndTimeMs = media.mediaEndTimeMs.takeIf { it != C.TIME_UNSET && it >= 0 })
         completed = confirmed
         recent.removeAll { it.segmentId == confirmed.segmentId }
         recent.add(confirmed)
@@ -5177,12 +5989,19 @@ internal class AutoTransferEvidence(private val delegate: TransferListener) : Tr
         delegate.onTransferStart(source, dataSpec, isNetwork)
         val headers = source.responseHeaders
         val paced = headers.entries.firstOrNull { it.key.equals("X-Plurx-Producer-Paced", true) }?.value?.singleOrNull()
+        val receipt = headers.entries.firstOrNull { it.key.equals("X-Plurx-Link-Receipt", true) }?.value?.singleOrNull()
+        val etag = headers.entries.firstOrNull { it.key.equals("ETag", true) }?.value?.singleOrNull()
+        val observedMediaDuration = headers.entries.firstOrNull {
+            it.key.equals("X-Plurx-Link-Media-Duration-Ms", true)
+        }?.value?.singleOrNull()?.toLongOrNull()?.takeIf { it in 1..4_294_967_295L }
         val uri = source.uri ?: dataSpec.uri
         val origin = if (uri.scheme != null && uri.host != null) "${uri.scheme}://${uri.host}${if (uri.port >= 0) ":${uri.port}" else ""}" else null
         synchronized(this) {
             if (active.size >= 32) active.clear()
             active[source] = Body(uri.toString(), monotonicNowMs(), isNetwork, origin,
-                when (paced) { "0" -> false; "1" -> true; else -> null })
+                when (paced) { "0" -> false; "1" -> true; else -> null }, receipt, etag,
+                (source as? HttpDataSource)?.responseCode, observedMediaDuration,
+                dataSpec.position == 0L && dataSpec.length == C.LENGTH_UNSET.toLong())
         }
     }
     override fun onBytesTransferred(source: DataSource, dataSpec: DataSpec, isNetwork: Boolean, bytesTransferred: Int) {
@@ -5196,7 +6015,9 @@ internal class AutoTransferEvidence(private val delegate: TransferListener) : Tr
             val now = monotonicNowMs()
             val duration = (now - body.startedAtMs).takeIf { it in 1..120_000 }
             ended[body.uri] = AutoCompletedTransfer(body.bytes, duration, now, body.origin, body.network,
-                if (body.network) false else null, body.paced)
+                if (body.network) false else null, body.paced, receipt = body.receipt, etag = body.etag,
+                statusCode = body.statusCode, pipelineIdentity = this,
+                observedMediaDurationMs = body.observedMediaDurationMs, fullObject = body.fullObject)
             while (ended.size > 32) ended.remove(ended.keys.first())
         }
     }
@@ -5243,8 +6064,10 @@ fun buildSuccessorPlayer(context: Context, vm: AppViewModel, audioOnly: Boolean 
     // rather than relied on from the composition not rendering it: a prepared
     // successor that is merely off-screen is still an audio stream.
     built.player.volume = 0f
-    PreparedAudioFocus.stage(built.player.audioFocusHandling())
     built.player.setVideoSurface(null)
+    // An audio-only successor is built in the Audio role, which holds focus
+    // for ordinary playback; a successor never does until its switch.
+    built.player.asAudioFocusOwner().ownAudioFocus(false)
     built.player.playWhenReady = true
     return built
 }
@@ -5527,3 +6350,91 @@ internal fun codecShort(mime: String?): String? = when {
 
 /** A hidden status panel cannot justify two-second network polling. */
 internal fun statusPollIntervalMs(visible: Boolean): Long = if (visible) 2_000L else 10_000L
+
+/** Private-controller transport interception; unchanged commands remain the
+ * SDK delegate's commands, while stale transport wrappers have no authority. */
+internal fun autoViewerTransport(delegate: Player, isCurrent: () -> Boolean,
+    request: (Boolean) -> Unit): Player = object : ForwardingPlayer(delegate) {
+    override fun play() { if (isCurrent()) request(true) }
+    override fun pause() { if (isCurrent()) request(false) }
+    override fun setPlayWhenReady(playWhenReady: Boolean) {
+        if (isCurrent()) request(playWhenReady)
+    }
+}
+
+/** What one viewer Play/Pause edge does to the player right now. */
+internal data class ViewerTransportEdge(
+    /** Written to the delegate immediately. Nothing optional may hold it. */
+    val delegatePlayWhenReady: Boolean,
+    /** The edge is a resume after at least [LONG_VIEWER_PAUSE_MS] of explicit
+     * pause on the same attachment, which owes Auto one original-first
+     * re-plan. The re-plan runs later, beside the playing incumbent. */
+    val armsAutoBoundaryReplan: Boolean,
+)
+
+internal const val LONG_VIEWER_PAUSE_MS = 60_000L
+
+/**
+ * The viewer's Play reaches the player on the press, however long the pause
+ * was. A long pause used to defer that write until an optional original
+ * preparation either committed at the paused frame or timed out — seconds of
+ * a pressed Play doing nothing. The re-plan is still owed; it is just no
+ * longer allowed to stand between the viewer and the picture.
+ */
+internal fun viewerTransportEdge(requested: Boolean, wasRequested: Boolean, pausedAtMs: Long?,
+    pauseOwnerCurrent: Boolean, nowMs: Long): ViewerTransportEdge =
+    ViewerTransportEdge(
+        delegatePlayWhenReady = requested,
+        armsAutoBoundaryReplan = requested && !wasRequested && pauseOwnerCurrent && pausedAtMs != null &&
+            nowMs >= pausedAtMs && nowMs - pausedAtMs >= LONG_VIEWER_PAUSE_MS,
+    )
+
+/**
+ * The one Auto re-plan a viewer boundary is owed, held until the ordinary
+ * Auto evaluation can serve it as a prepared replacement.
+ *
+ * It is keyed by the viewer transport lifetime that armed it, so any newer
+ * viewer edge (a Pause, another seek) makes it stale without a timer, and it
+ * is consumed by the first evaluation where the incumbent has the runway a
+ * handoff needs. Nothing waits on it.
+ */
+internal class AutoBoundaryReplan {
+    private var armedBy: Any? = null
+
+    val isArmed: Boolean get() = armedBy != null
+
+    fun arm(lifetime: Any) { armedBy = lifetime }
+
+    fun clear() { armedBy = null }
+
+    /**
+     * The candidate [produce] names, exactly once per armed boundary, when
+     * [runwayMs] can carry it. A boundary is spent only on a candidate: with
+     * none (no fresh link proof yet, every original blocked) it stays owed
+     * until it is served, superseded or [clear]ed.
+     */
+    fun <T : Any> take(lifetime: Any, runwayMs: Long, produce: () -> T?): T? {
+        val owner = armedBy ?: return null
+        if (owner !== lifetime) {
+            armedBy = null
+            return null
+        }
+        if (runwayMs < AUTO_BOUNDARY_RUNWAY_MS) return null
+        val chosen = produce() ?: return null
+        armedBy = null
+        return chosen
+    }
+
+    companion object {
+        const val AUTO_BOUNDARY_RUNWAY_MS = 10_000L
+    }
+}
+
+/**
+ * After a boundary's offer reached `onPrepareAction`: true when it
+ * left no pipeline behind for the boundary that still owns Auto. A switched
+ * preparation is on screen (its player has already moved to the incumbent
+ * slot) and settles through its own first frame, so it never counts.
+ */
+internal fun autoBoundaryOfferBuiltNothing(boundaryStillOwns: Boolean, built: Boolean, switched: Boolean): Boolean =
+    boundaryStillOwns && !built && !switched

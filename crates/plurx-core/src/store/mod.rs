@@ -23,11 +23,21 @@ pub mod classification;
 pub use classification::ClassificationStore;
 mod downloaded_subtitles;
 mod dv_conversion;
+mod field_order_backfill;
+pub use field_order_backfill::{
+    field_order_backfill_page, FieldOrderBackfillPage, FieldOrderBackfillPort,
+};
 mod file_grants;
 pub use downloaded_subtitles::{
     valid_downloaded_vtt, MAX_DOWNLOADED_SUBTITLES, MAX_DOWNLOADED_SUBTITLE_BYTES,
 };
 pub use file_grants::{FileGrant, FileGrantStore, NewFileGrant, FILE_GRANTS_SCHEMA};
+mod candidate_link;
+mod candidate_recovery;
+pub use candidate_recovery::{
+    CandidateRecoveryCause, CandidateRecoveryMemory, CandidateRecoveryObservation,
+    CandidateRecoveryScope,
+};
 mod continuous_family;
 mod fragindex;
 mod fragment_index_cluster;
@@ -50,6 +60,10 @@ mod timeline_annotations;
 
 mod publication;
 mod scan_identity_repair;
+mod schema_lineage;
+#[cfg(feature = "hiqlite-contract-tests")]
+#[doc(hidden)]
+pub use schema_lineage::{validation_sqlite_bridge_rollback, validation_sqlite_union_fingerprint};
 mod sql_source;
 pub use scan_identity_repair::{
     plan_identity_repair, IdentityRepairBlocker, IdentityRepairCounts, IdentityRepairFile,
@@ -116,6 +130,7 @@ mod consistent_read_census;
 pub mod background_jobs;
 pub use background_jobs::{AnalysisViewerInterest, ArtifactViewerInterest, BackgroundJobStore};
 pub mod background_jobs_artwork;
+mod background_jobs_copy_output;
 mod background_jobs_delivery;
 pub mod background_jobs_domain;
 pub mod background_jobs_embeddings;
@@ -1745,6 +1760,13 @@ pub mod keys {
     /// Opt in to automatic expired-session takeover after the web/proxy
     /// interruption corpus passes. Kept separate from new-session placement.
     pub const CLUSTER_SESSION_TAKEOVER_ENABLED: &str = "cluster.session_takeover_enabled";
+    /// Operator switch for the cluster clock guard, read with
+    /// `stored_switch(.., false)`, so missing is off: clock evidence is
+    /// measured and reported (advisory refusals, Developer readiness) but
+    /// never refuses takeover, expiry, membership changes or readiness.
+    /// Startup is always advisory because this replicated key is unreadable
+    /// until the store is open.
+    pub const CLUSTER_CLOCK_GUARD_ENFORCED: &str = "cluster.clock_guard_enforced";
     /// Stable unique id for this logical server. Generated on first startup,
     /// immutable thereafter; in a cluster it identifies the *cluster*, not a
     /// node (REQ-HA-5: one logical identity).
@@ -2115,13 +2137,31 @@ pub mod keys {
     pub const JOB_VIDEO_CODEC_TAG_BACKFILL_DONE: &str = "jobs.video_codec_tag_backfilled";
     /// Node-local strictly-after cursor for the bounded sample-entry walk.
     pub const JOB_VIDEO_CODEC_TAG_BACKFILL_CURSOR: &str = "jobs.video_codec_tag_backfill_cursor";
-    /// Set after the bounded stored-probe walk has assigned every pre-column
-    /// file either its reporter token or the explicit `unknown` value.
-    pub const JOB_FIELD_ORDER_BACKFILL_DONE: &str = "jobs.field_order_backfilled";
+    /// Set after the bounded stored-probe walk has assigned every probed file
+    /// with a `NULL` field order either its reporter token or the explicit
+    /// `unknown` value.
+    ///
+    /// The second pass. The first (`jobs.field_order_backfilled`) stamped
+    /// itself done while the scanner still wrote `NULL` for a probe without
+    /// the key, so every row scanned after its stamp stayed `NULL`. The parsed
+    /// probe now always carries a token, and this pass sweeps those rows. The
+    /// first pass's stamp and cursors are left in place, as every superseded
+    /// backfill's are: deleting them would only make a not-yet-upgraded node
+    /// in a rolling deploy run the first pass again and re-create them.
+    pub const JOB_FIELD_ORDER_BACKFILL_DONE: &str = "jobs.field_order_backfilled_v2";
     /// Node-local strictly-after cursor for the field-order backfill.
-    pub const JOB_FIELD_ORDER_BACKFILL_CURSOR: &str = "jobs.field_order_backfill_cursor";
+    pub const JOB_FIELD_ORDER_BACKFILL_CURSOR: &str = "jobs.field_order_backfill_v2_cursor";
     pub const JOB_LUMINANCE_BACKFILL_DONE: &str = "jobs.luminance_backfilled";
     pub const JOB_LUMINANCE_BACKFILL_CURSOR: &str = "jobs.luminance_backfill_cursor";
+    /// Set after every HDR row the stored-document backfill left `none` has
+    /// been considered for one bounded first-frame read. The walk starts only
+    /// after [`JOB_LUMINANCE_BACKFILL_DONE`], so no row that walk classifies
+    /// lands behind its cursor. A later rescan can still write `none` under a
+    /// passed id, but only after attempting the same frame read itself; such
+    /// a row waits for the file's next change.
+    pub const JOB_LUMINANCE_FRAME_BACKFILL_DONE: &str = "jobs.luminance_frame_backfilled";
+    /// Node-local strictly-after cursor for the first-frame luminance walk.
+    pub const JOB_LUMINANCE_FRAME_BACKFILL_CURSOR: &str = "jobs.luminance_frame_backfill_cursor";
     /// Per-library permanent Profile 7 conversion policy, encoded as a JSON
     /// object from decimal library id to `off`, `manual`, or `auto`. Missing
     /// libraries are always off: an upgrade must never rewrite media by
@@ -3177,6 +3217,25 @@ pub trait MediaStore: Send + Sync + 'static {
         max_fall: Option<i64>,
         mastering_max_luminance: Option<i64>,
         source: &str,
+    ) -> Result<bool, StoreError>;
+    /// HDR rows whose stored stream document carried no luminance record
+    /// (`luminance_source = 'none'`), strictly after `after_id` in ascending
+    /// id order: the candidates for the bounded first-frame read. Same
+    /// identity projection, so the write below is fenced to this snapshot.
+    async fn files_without_luminance_facts(
+        &self,
+        after_id: i64,
+        limit: i64,
+    ) -> Result<Vec<MissingVideoCodecTag>, StoreError>;
+    /// Record what the first frame carried and classify the row `frame`,
+    /// only while it is still `none` and still the exact source and probe
+    /// snapshot `files_without_luminance_facts` returned.
+    async fn set_file_frame_luminance(
+        &self,
+        candidate: &MissingVideoCodecTag,
+        max_cll: Option<i64>,
+        max_fall: Option<i64>,
+        mastering_max_luminance: Option<i64>,
     ) -> Result<bool, StoreError>;
     /// Write one file's Dolby Vision columns, and the display label derived
     /// from them.
@@ -4311,6 +4370,15 @@ pub trait PlaybackTelemetryStore: Send + Sync + 'static {
 /// prior describes the network observed by one server node.
 #[async_trait]
 pub trait NetworkPriorStore: Send + Sync + 'static {
+    async fn observe_candidate_link(
+        &self,
+        value: &crate::domain::CandidateLinkObservation,
+        now_ms: i64,
+    ) -> Result<(), StoreError>;
+    async fn candidate_link_prior(
+        &self,
+        binding: &crate::domain::CandidateLinkBinding,
+    ) -> Result<Option<crate::domain::CandidateLinkPrior>, StoreError>;
     async fn observe_network_prior(
         &self,
         observation: &NetworkPriorObservation,
@@ -4611,6 +4679,20 @@ pub trait FencedPublicationStore: Send + Sync + 'static {
 /// client-controlled rows before inserting them.
 #[async_trait]
 pub trait MediaSessionStore: Send + Sync + 'static {
+    /// Optional failure attribution cannot create another recovery budget.
+    async fn observe_candidate_recovery(
+        &self,
+        _observation: &CandidateRecoveryObservation,
+        _now_ms: i64,
+    ) -> Result<Option<CandidateRecoveryMemory>, StoreError> {
+        Ok(None)
+    }
+    async fn candidate_recovery_memory(
+        &self,
+        _scope: &CandidateRecoveryScope,
+    ) -> Result<CandidateRecoveryMemory, StoreError> {
+        Ok(CandidateRecoveryMemory::default())
+    }
     #[allow(clippy::too_many_arguments)]
     async fn claim_media_session_request(
         &self,
@@ -5196,8 +5278,46 @@ pub struct FragmentIndexValidationBackfill {
     pub remaining: u64,
 }
 
+/// Bound one metadata projection's connection lease, including audiobook pages.
+pub const FRAGMENT_INDEX_STATUS_CHUNK: usize = 256;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum IndexPresence {
+    Ready,
+    Unverified,
+    Absent,
+}
+
+#[derive(Clone, Debug)]
+pub struct FragmentIndexStatus {
+    pub file_id: i64,
+    pub argv_fingerprint: String,
+    pub presence: IndexPresence,
+    /// Zero unless this revision's publication proof still matches.
+    pub fragments: u32,
+    pub outcome: Option<crate::segplan::FragmentIndexOutcome>,
+}
+
+/// Test-only decoder counter scoped to one owned file-backed database.
+/// Its strong handle controls the registration lifetime; parallel tests on
+/// other databases cannot affect its positive/negative control.
+#[cfg(any(test, feature = "fixtures"))]
+pub fn fragment_index_unpack_counter(
+    database: &std::path::Path,
+) -> std::sync::Arc<std::sync::atomic::AtomicUsize> {
+    fragindex::unpack_counter(database)
+}
+
 #[async_trait]
 pub trait FragmentIndexStore: Send + Sync + 'static {
+    /// Metadata-only badge answers in input order, including duplicates.
+    /// The validation marker proves the payload; no packed rows leave SQLite.
+    /// Callers chunk at [`FRAGMENT_INDEX_STATUS_CHUNK`].
+    async fn fragment_index_status(
+        &self,
+        wanted: &[(i64, crate::segplan::SourceIdentity)],
+    ) -> Result<Vec<FragmentIndexStatus>, StoreError>;
+
     /// Store or replace one file's index.
     async fn put_fragment_index(
         &self,
@@ -5494,9 +5614,17 @@ pub async fn requeue_cluster_fragment_index_after_no_holder(
 pub struct HttpStoreOperationCounts {
     counts: std::sync::Arc<[std::sync::atomic::AtomicU64; 3]>,
     watch_reads: std::sync::Arc<std::sync::atomic::AtomicU64>,
+    index_status_calls: std::sync::Arc<std::sync::atomic::AtomicU64>,
 }
 
 impl HttpStoreOperationCounts {
+    /// Physical node-local projection leases inside this request, on either
+    /// backend. This is not a SQL-statement or replicated-operation count.
+    #[must_use]
+    pub fn index_status_calls(&self) -> u64 {
+        self.index_status_calls
+            .load(std::sync::atomic::Ordering::Relaxed)
+    }
     #[must_use]
     pub fn snapshot(&self) -> [u64; 3] {
         use std::sync::atomic::Ordering;
@@ -5555,6 +5683,14 @@ pub(super) fn record_http_watch_read() {
     let _ = HTTP_STORE_OPERATION_COUNTS.try_with(|counts| {
         counts
             .watch_reads
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+    });
+}
+
+pub(super) fn record_http_index_status_call() {
+    let _ = HTTP_STORE_OPERATION_COUNTS.try_with(|counts| {
+        counts
+            .index_status_calls
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
     });
 }

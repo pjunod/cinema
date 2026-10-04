@@ -78,6 +78,18 @@ pub enum ProbeError {
     Parse(String),
 }
 
+impl ProbeError {
+    /// Whether this failure is ffprobe's own verdict on the file — it ran to
+    /// completion on this host and refused the input, or answered something
+    /// unparseable for it — as opposed to the tool or the host failing to do
+    /// the read at all (`Spawn`: not found, not executable, exit 126/127;
+    /// `Transient`: timed out, cancelled, killed by a signal). Only a verdict
+    /// says anything about the file; the others say the read did not happen.
+    pub fn is_file_verdict(&self) -> bool {
+        matches!(self, Self::Failed { .. } | Self::Parse(_))
+    }
+}
+
 /// Errors from password hashing / token generation.
 #[derive(Debug, Error)]
 pub enum AuthError {

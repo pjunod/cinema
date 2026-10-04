@@ -479,6 +479,7 @@ test("Developer keeps only experiments; everyday controls retain their saves and
       // whole gate reports one failure instead of checking anything.
       shippedSource("contentEncodingCard"), shippedSource("vodReorderCard"),
       shippedSource("subtitleNotReadyCard"),
+      shippedSource("clusterClockCard"),
       shippedSource("pgsOverlayCard"),
       // The fifth time: #517 put the automatic playback-ranges card at the
       // head of the stored-subtitle section without composing it here.
@@ -502,6 +503,7 @@ test("Developer keeps only experiments; everyday controls retain their saves and
       shippedSource("autoQualityCard"), shippedSource("displayAwareAutoCard"), shippedSource("preparedQualityCard"), shippedSource("dvrCard"),
       shippedSource("libraryChannelsSettingsCard"),
       shippedSource("playbackProtocolCard"), shippedSource("liveHlsRecoveryCard"),
+      shippedSource("rateControlCard"),
       shippedSource("playbackPanel"), shippedSource("metadataPanel"),
       shippedSource("searchSettingsCard"), shippedSource("windowsServerCard"),
       shippedSource("maintenancePanel"), shippedSource("presetOpts"),
@@ -571,6 +573,18 @@ test("Developer keeps only experiments; everyday controls retain their saves and
   const ranges = /Parallel playback subtitle ranges[\s\S]*?(?=<div class="setsection"|TOG:subsrc)/.exec(html);
   assert.ok(ranges, "Developer shows the automatic playback-ranges card");
   assert.doesNotMatch(ranges[0], /TOG:/, "playback ranges have no enable switch");
+  // The clock guard is an operator switch, off by default, whose readiness
+  // rows are advisory: no hard gate in code.
+  const clocks = /Cluster clock guard[\s\S]*?(?=<div class="setsection")/.exec(html);
+  assert.ok(clocks, "Developer shows the clock guard switch");
+  assert.match(clocks[0], /TOG:cluster-clock-enforced\|[^|]*\|[^|]*\|checked=false/, "enforcement is off by default");
+  assert.match(clocks[0], /FOOT:saveClusterClockGuard/);
+  assert.match(clocks[0], /advisory and never prevent saving/);
+  assert.match(clocks[0], /Leaves Developer when/);
+  assert.match(
+    panels.developerPanel({ ...settings, cluster_clock_guard_enforced: true }, readiness),
+    /TOG:cluster-clock-enforced\|[^|]*\|[^|]*\|checked=true/,
+  );
   const unverified = panels.developerPanel({...settings, hevc_unverified_copy:true,
     hevc_header_trace_available:false, vod_index_cluster_cache:false, vod_index_mins:0}, readiness);
   assert.match(unverified, /TOG:hevc-unverified\|[^|]*\|[^|]*\|checked=true\|/);
@@ -1403,6 +1417,87 @@ test("HEVC override saves either choice without consulting advisory readiness", 
     assert.equal(card.outerHTML, `saved:${enabled}`);
     assert.equal(err.textContent, "");
   }
+});
+
+test("Rate control round-trips an unset request as unset and keeps explicit choices", async () => {
+  const card = new Function("setCard","cardHead","setCardFoot","esc",
+    `${shippedSource("rateControlCard")}\nreturn rateControlCard;`)(
+    (body, opts) => `CARD#${(opts||{}).id}[${body}]`, (title) => `HEAD:${title}`, (fn) => `FOOT:${fn}`, esc);
+  const request = new Function(`${shippedSource("rateControlRequest")}\nreturn rateControlRequest;`)();
+  const selected = (html) => {
+    const chosen = [...html.matchAll(/<option value="([^"]*)" (selected)?>/g)].filter((m) => m[2]);
+    assert.equal(chosen.length, 1, html);
+    return chosen[0][1];
+  };
+  const quality = (html) => /id="prq"[^>]*value="([^"]*)"/.exec(html)[1];
+  const unset = {transcode_rate_mode:null, transcode_quality:null, transcode_rate_mode_default:"bitrate",
+    transcode_rate_mode_default_encoder:"qsv", transcode_quality_default:22};
+  const html = card(unset);
+  assert.match(html, /Default \(per encoder\) — on this node, qsv uses bitrate/);
+  assert.match(html, /id="prq"[^>]* disabled>/, "the quality value is inert outside Quality mode");
+  assert.match(html, /placeholder="family default \(22\)"/);
+  assert.match(html, /FOOT:saveRateControl/);
+  // A Save that never touched the control sends the clear, never a bitrate pin.
+  assert.deepEqual(request(selected(html), quality(html)), {transcode_rate_mode:null, transcode_quality:null});
+  for (const [mode, q] of [["bitrate", null], ["quality", 21]]) {
+    const explicit = card({...unset, transcode_rate_mode:mode, transcode_quality:q});
+    assert.deepEqual(request(selected(explicit), quality(explicit)), {transcode_rate_mode:mode, transcode_quality:q});
+  }
+  assert.doesNotMatch(card({...unset, transcode_rate_mode:"quality", transcode_quality:21}), /id="prq"[^>]* disabled>/);
+
+  const calls = [];
+  const fields = {prc:{value:""}, prq:{value:""}, rcerr:{textContent:""}, rccard:{outerHTML:""}};
+  const save = new Function("api","document","cacheSettings","toast","setCardSaved","rateControlCard","rateControlRequest",
+    `${shippedSource("saveRateControl")}\nreturn saveRateControl;`)(
+    async (path, opts) => { calls.push([path, opts.method, opts.body]); return unset; },
+    {getElementById:(id) => fields[id]}, () => {}, () => {}, () => {}, (s) => `rerendered:${s.transcode_rate_mode}`, request);
+  await save({disabled:false});
+  assert.deepEqual(calls, [["/settings", "PUT", {transcode_rate_mode:null, transcode_quality:null}]]);
+  assert.equal(fields.rccard.outerHTML, "rerendered:null");
+  assert.equal(fields.rcerr.textContent, "");
+});
+
+test("Default plus a typed value sends {null, null}", async () => {
+  const request = new Function(`${shippedSource("rateControlRequest")}\nreturn rateControlRequest;`)();
+  // `effective_for` reads the quality only when the mode resolves to Quality,
+  // so outside Quality a value changes no output — but it would move the
+  // speculative key's quality component and cancel queued rows cluster-wide.
+  assert.deepEqual(request("", "22"), {transcode_rate_mode:null, transcode_quality:null});
+  assert.deepEqual(request("bitrate", "22"), {transcode_rate_mode:"bitrate", transcode_quality:null});
+  assert.deepEqual(request("quality", "22"), {transcode_rate_mode:"quality", transcode_quality:22});
+
+  const calls = [];
+  const fields = {prc:{value:""}, prq:{value:"22", disabled:false}, rcerr:{textContent:""}, rccard:{outerHTML:""}};
+  const save = new Function("api","document","cacheSettings","toast","setCardSaved","rateControlCard","rateControlRequest",
+    `${shippedSource("saveRateControl")}\nreturn saveRateControl;`)(
+    async (path, opts) => { calls.push(opts.body); return {}; },
+    {getElementById:(id) => fields[id]}, () => {}, () => {}, () => {}, () => "", request);
+  await save({disabled:false});
+  assert.deepEqual(calls, [{transcode_rate_mode:null, transcode_quality:null}]);
+
+  const changed = new Function("document", `${shippedSource("rateControlModeChanged")}\nreturn rateControlModeChanged;`)(
+    {getElementById:(id) => fields[id]});
+  changed({value:"bitrate"});
+  assert.deepEqual([fields.prq.disabled, fields.prq.value], [true, ""]);
+  changed({value:"quality"});
+  assert.equal(fields.prq.disabled, false);
+});
+
+test("the version stamp dates a release by its source date, not a compile time", () => {
+  // built_at is SOURCE_DATE_EPOCH, else the commit time, else the compile
+  // clock (crates/plurxd/build_support/source_date.rs). For an exact-tag
+  // release it is the tagged commit's date, so the label must not say "built".
+  const make = (server) => new Function("SERVER",
+    `${shippedSource("sourceDateLabel")}\n${shippedSource("buildLabel")}\nreturn buildLabel;`)(server);
+  const at = "2026-10-02T14:44:46Z";
+  assert.equal(make({version:"0.3.0", build:"v0.3.0", built_at:at})(), "0.3.0 · dated 02 Oct 14:44Z");
+  assert.equal(make({version:"0.3.0", build:"unknown", built_at:at})(), "0.3.0 · dated 02 Oct 14:44Z");
+  assert.equal(make({version:"0.3.0", build:"v0.3.0-5-gabc", built_at:at})(), "0.3.0 · v0.3.0-5-gabc");
+  const tag = new Function("esc",
+    `${shippedSource("sourceDateLabel")}\n${shippedSource("buildTag")}\nreturn buildTag;`)(esc);
+  const unstamped = tag({version:"0.3.0", build:"unknown", built_at:at});
+  assert.match(unstamped, /\(unstamped · dated 02 Oct 14:44Z\)/);
+  assert.doesNotMatch(unstamped, /build time|· built/);
 });
 
 test("tone-map probe failures stay collapsed beneath the selected pipeline", () => {

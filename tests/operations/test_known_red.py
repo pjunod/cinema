@@ -55,9 +55,49 @@ class KnownRedContractTest(unittest.TestCase):
         # needs the pinned model files its ignore reason names.
         # K-08 M5 adds embed_thread_scaling, the inference thread-count
         # measurement behind EMBED_THREADS, which needs the same model files.
-        # Video-quality C2 adds an explicit native FFmpeg/libvmaf qualification.
-        # It is run independently when those tools exist, not hidden as known red.
-        self.assertEqual(len(ignored), 21)
+        # S11's operator-only capture is not a known-red product regression.
+        # It requires an owned manifest, real browser and an explicit ignored
+        # invocation; its module is feature/Unix-gated, absent in default lists.
+        capture_identity = (
+            "crates/plurxd/src/transcode/tests/rolling_grid_campaign.rs::"
+            "transcode::tests::rolling_grid_campaign::owned_real_rolling_cell"
+        )
+        captures = tuple(item for item in ignored if item.identity == capture_identity)
+        self.assertEqual(len(captures), 1)
+        capture = captures[0]
+        self.assertEqual(capture.reason, "explicit owned rolling campaign only; requires validated manifest and real browser")
+        self.assertEqual(capture.cargo_name, "transcode::tests::rolling_grid_campaign::owned_real_rolling_cell")
+        # S10 is also an explicitly admitted acquisition, not a known-red
+        # product regression. Unlike S11, its source is not feature-gated:
+        # it must resolve once in an ordinary Cargo listing, never be absent.
+        public_wire_identity = (
+            "crates/plurxd/src/http/tests/public_copy_wire.rs::"
+            "http::tests::public_copy_wire::"
+            "public_copy_new_retained_attachment_freezes_measured_master_and_exact_mux_wire"
+        )
+        public_wires = tuple(item for item in ignored if item.identity == public_wire_identity)
+        self.assertEqual(len(public_wires), 1)
+        public_wire = public_wires[0]
+        self.assertEqual(public_wire.reason, "requires explicit frozen-source and externally bounded runtime admission")
+        self.assertEqual(
+            public_wire.cargo_name,
+            "http::tests::public_copy_wire::public_copy_new_retained_attachment_freezes_measured_master_and_exact_mux_wire",
+        )
+        admitted_identities = {capture_identity, public_wire_identity}
+        # Main's native FFmpeg/libvmaf qualification remains independently
+        # admitted; keep it in addition to effort's two acquisition identities.
+        self.assertEqual(len(tuple(item for item in ignored if item.identity not in admitted_identities)), 21)
+        validate_listed_tests(public_wires, (public_wire.cargo_name,))
+        with self.assertRaisesRegex(KnownRedError, "absent"):
+            validate_listed_tests(public_wires, ())
+        # Optional absence is exact-identity only, and feature-enabled presence
+        # must still resolve once. A similarly named unknown source refuses.
+        validate_listed_tests(captures, ())
+        validate_listed_tests(captures, (capture.cargo_name,))
+        foreign = IgnoredTest(capture.identity + "_foreign", capture.cargo_name + "_foreign",
+                              capture.reason, capture.path, capture.line)
+        with self.assertRaisesRegex(KnownRedError, "absent"):
+            validate_listed_tests((foreign,), ())
         self.assertTrue(all(item.reason for item in ignored))
         self.assertTrue(all(item.path in item.identity for item in ignored))
         self.assertTrue(all(item.cargo_name in item.identity for item in ignored))

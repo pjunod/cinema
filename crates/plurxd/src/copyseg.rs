@@ -322,6 +322,9 @@ struct SessionDir {
     /// admitted with a growing reservation. `None` keeps the historical
     /// behaviour for a session that reserved its whole ceiling up front.
     grants: Option<WriteGrants>,
+    measurement:
+        Option<std::sync::Arc<std::sync::Mutex<crate::rolling_output::RollingOutputMeasurement>>>,
+    retained: Option<std::sync::Arc<crate::vodserve::retained::RollingCollection>>,
 }
 
 impl SessionDir {
@@ -341,6 +344,8 @@ impl SessionDir {
             diagnostic_session: None,
             writer_started_at: std::time::Instant::now(),
             grants,
+            measurement: None,
+            retained: None,
         }
     }
 
@@ -363,14 +368,40 @@ impl SessionDir {
     /// rename, and a playlist rewrite overlaps its predecessor, so the grant
     /// asks for the slice twice over rather than pretending the rename is
     /// free.
-    async fn publish_file(&self, name: &str, bytes: &[u8]) -> std::io::Result<()> {
+    ///
+    /// A media object is digested exactly once, on the blocking pool beside
+    /// its write (the owned copy `tokio::fs::write` would make anyway), and
+    /// the one committed object is shared by output measurement and the
+    /// retained collector. A segment can be 64 MiB: hashing it on an async
+    /// worker, twice, stalled every body that worker was pumping.
+    async fn publish_file(
+        &self,
+        name: &str,
+        bytes: &[u8],
+    ) -> std::io::Result<Option<crate::rolling_output::CommittedObject>> {
         let authorized = self
             .authorize_write(name, bytes.len().saturating_mul(2))
             .await?;
         let tmp = self.dir.join(format!("{name}.tmp"));
+        let measured =
+            name != "index.m3u8" && (self.measurement.is_some() || self.retained.is_some());
         let written = async {
-            tokio::fs::write(&tmp, bytes).await?;
-            tokio::fs::rename(&tmp, self.dir.join(name)).await
+            let owned = bytes.to_vec();
+            let target = tmp.clone();
+            let digest = tokio::task::spawn_blocking(move || {
+                use sha2::Digest;
+                std::fs::write(&target, &owned)?;
+                Ok::<_, std::io::Error>(
+                    measured.then(|| -> [u8; 32] { sha2::Sha256::digest(&owned).into() }),
+                )
+            })
+            .await
+            .map_err(std::io::Error::other)??;
+            tokio::fs::rename(&tmp, self.dir.join(name)).await?;
+            Ok::<_, std::io::Error>(digest.map(|digest| crate::rolling_output::CommittedObject {
+                bytes: bytes.len() as u64,
+                digest,
+            }))
         }
         .await;
         // The reservation is held until the rename settles and is then
@@ -384,6 +415,11 @@ impl SessionDir {
             // still bytes the directory owes, so charging the slice is the
             // conservative answer and cleanup owns what is actually there.
             authorized.landed(i64::try_from(bytes.len()).unwrap_or(i64::MAX));
+        }
+        if let Ok(Some(object)) = &written {
+            if let Some(collector) = &self.retained {
+                collector.capture(self.dir.join(name), name, object.clone());
+            }
         }
         written
     }
@@ -456,7 +492,8 @@ impl SessionDir {
     }
 
     async fn write_init(&mut self, init: &Init) -> std::io::Result<()> {
-        self.publish_file("init.mp4", &init.bytes).await?;
+        let committed = self.publish_file("init.mp4", &init.bytes).await?;
+        self.observe_object("init.mp4", committed);
         // No playlist yet: one with no segment in it is a promise the session
         // cannot keep if ffmpeg dies in the next second. The actor's first-
         // media admission observes exactly this file, so it lands only when
@@ -477,7 +514,8 @@ impl SessionDir {
             )));
         }
         let name = published.name();
-        self.publish_file(&name, &published.segment.bytes).await?;
+        let committed = self.publish_file(&name, &published.segment.bytes).await?;
+        self.observe_object(&name, committed);
         if self.published_secs == 0.0 {
             tracing::info!(
                 target: "plurxd::transcode",
@@ -527,7 +565,22 @@ impl SessionDir {
         // — the client sees VOD from the start.
         self.started = true;
         let text = self.playlist(true);
-        self.publish_file("index.m3u8", text.as_bytes()).await
+        self.publish_file("index.m3u8", text.as_bytes())
+            .await
+            .map(|_| ())
+    }
+
+    fn observe_object(
+        &self,
+        name: &str,
+        committed: Option<crate::rolling_output::CommittedObject>,
+    ) {
+        let (Some(measurement), Some(committed)) = (&self.measurement, committed) else {
+            return;
+        };
+        if let Ok(mut measurement) = measurement.lock() {
+            measurement.committed(name, committed);
+        }
     }
 }
 
@@ -579,8 +632,9 @@ async fn session_directory_gone(dir: &Path) -> bool {
 /// Generic over the source so the tests can drive a whole session from a byte
 /// slice: everything this does between the pipe and the disk is worth testing,
 /// and none of it needs a real child process to be worth testing.
+#[cfg(test)]
 pub async fn run<R: AsyncRead + Unpin>(
-    mut src: R,
+    src: R,
     dir: PathBuf,
     session_id: &str,
     limits: Limits,
@@ -598,6 +652,51 @@ pub async fn run<R: AsyncRead + Unpin>(
     // Authorizes each object before it is written, for a session admitted
     // with a growing reservation. `None` is the historical behaviour.
     grants: Option<WriteGrants>,
+) -> Outcome {
+    run_observed(src, dir, session_id, limits, source, video, grants, None).await
+}
+
+#[allow(clippy::too_many_arguments)] // the same writer plus optional metadata observer
+#[cfg(test)]
+pub(crate) async fn run_observed<R: AsyncRead + Unpin>(
+    src: R,
+    dir: PathBuf,
+    session_id: &str,
+    limits: Limits,
+    source: &MediaFile,
+    video: plurx_core::transcode::CopyVideoOptions,
+    grants: Option<WriteGrants>,
+    measurement: Option<
+        std::sync::Arc<std::sync::Mutex<crate::rolling_output::RollingOutputMeasurement>>,
+    >,
+) -> Outcome {
+    run_observed_retained(
+        src,
+        dir,
+        session_id,
+        limits,
+        source,
+        video,
+        grants,
+        measurement,
+        None,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)] // existing writer plus private optional retained owner
+pub(crate) async fn run_observed_retained<R: AsyncRead + Unpin>(
+    mut src: R,
+    dir: PathBuf,
+    session_id: &str,
+    limits: Limits,
+    source: &MediaFile,
+    video: plurx_core::transcode::CopyVideoOptions,
+    grants: Option<WriteGrants>,
+    measurement: Option<
+        std::sync::Arc<std::sync::Mutex<crate::rolling_output::RollingOutputMeasurement>>,
+    >,
+    retained: Option<std::sync::Arc<crate::vodserve::retained::RollingCollection>>,
 ) -> Outcome {
     let strip_dolby_vision_record = video.leaves_a_stale_dolby_vision_record(source);
     let retain_hevc_parameter_sets = video.retains_hevc_parameter_sets();
@@ -618,6 +717,8 @@ pub async fn run<R: AsyncRead + Unpin>(
     }
     let mut reader = FragmentReader::new();
     let mut out = SessionDir::new(dir, limits.publish_gate_secs, limits.target_seconds, grants);
+    out.measurement = measurement;
+    out.retained = retained;
     out.diagnostic_session = Some(crate::transcode::session_log_id(session_id));
     // Hold the initialization segment until the first video sample arrives.
     // ffmpeg may put HDR10's static SEIs only in that sample; Apple needs the

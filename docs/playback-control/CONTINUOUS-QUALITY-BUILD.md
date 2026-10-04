@@ -3445,6 +3445,10 @@ changes. Published replicated planning schema v69 precedes quality cancellation
 v70 and dependencies v71; published SQLite planning v91 precedes cancellation
 v92 and dependencies v93. Earlier ledger migration numbers describe their
 then-current unpublished base and are superseded by this sequence.
+Superseded again by the main #793 integration: main shipped replicated
+v70–v73 and SQLite v92–v97 first, so quality cancellation is now replicated
+v74 (from encoded output v73) and dependencies v75, and SQLite cancellation
+v98 and dependencies v99.
 
 Continuous starts reuse the canonical catalog and startup allowance. The exact
 companion recipe is carried inside the negotiated continuous-media envelope and
@@ -6916,7 +6920,7 @@ regression test that fails on the previous code.
 |---|---|---|
 | Core | Three receipt-shape unit tests and one store contract assertion did not match the compact receipt / lost-CAS contract | Tests assert ledger state; a changed-attachment write is `Ok(false)` like every lost CAS |
 | Core | A Prepare left older reservation-free transactions `Cancelling`, which only a client cancel resolved; sixteen rapid changes exhausted the transaction bound for the rest of the session | A cancelled transaction without reservations resolves immediately (Superseded / RetainedCurrent / Disposed if it ever appended); Prepare also frees rows an older build left `Cancelling` |
-| Core | Single-node → cluster import skipped the three continuous-quality tables | Import plans added (v92/v93) |
+| Core | Single-node → cluster import skipped the three continuous-quality tables | Import plans added (v92/v93 then; v98/v99 after the main #793 integration) |
 | Core | Cancellation receipts capped at 128 per generation and pruned only after the parent ended; a receipt could not settle after takeover | Settled receipts of older recipe revisions pruned under the live owner fence; settle accepted under the parent's current owner |
 | Server | Every fragment publish of every rendition read reservations under a 1 s timeout and a timeout retired the rendition | Only recipes a continuous family can pin consult reservations; an unknown answer holds the fragment instead of failing the producer |
 | Server | `quality-schedule` absent from learner and maintenance route lists | Added, with continuous creates on learners |
@@ -7042,7 +7046,8 @@ once on the lab host (only the failed tests were rerun after each fix):
   `store_result::observe` for two discarded settlements, consistent-read
   authority reasons (+7), unchecked binding arity (+3), two write-read-back
   SQLite transactions, the fourth preparation statement (the cancellation
-  owner binding), and the downgrade fixtures for v92/v93.
+  owner binding), and the downgrade fixtures for v92/v93 (v98/v99 after the
+  main #793 integration).
 - **Fixtures that never matched production.** Continuous AVC fixtures lacked
   the recipe's `setparams` BT.709 tagging and `+write_colr` (ffmpeg 8 leaves
   colour unspecified without them; CI's ffmpeg 6 hid it); routes used

@@ -94,8 +94,23 @@ seekTelemetrySupersession = { function = "beginSeekPresentationMonitor", scopes 
 blackFrameDecodeFailure = { function = "makePeriodicPlaybackObservation", scopes = ["lifecycle", "viewerAction"] }
 stallRecovery = { function = "retrySameDeliveryAfterStall", scopes = ["open", "viewerAction"] }
 itemFailureLadder = { function = "handleItemFailure", scopes = ["open", "viewerAction"] }
+# Exact original pre/post-ACK continuations; each case remains single-use.
+# No epoch scope changes, handwritten allowance growth or renewed capture.
+blackFrameDecoderAcknowledgement = { function = "handleBlackFrameDecodeFailure", scopes = ["lifecycle", "viewerAction"] }
+itemDecoderAcknowledgement = { function = "handleItemFailure", scopes = ["open", "viewerAction"] }
+stallCandidateAcknowledgement = { function = "selectAutoStallRecoveryCandidate", scopes = ["open", "viewerAction"] }
+stallCandidateReturn = { function = "retrySameDeliveryAfterStall", scopes = ["open", "viewerAction"] }
+preparedPressureEntry = { function = "sampleThePreparedSwitch", scopes = ["lifecycle", "viewerAction"] }
+preparedPressureAcknowledgement = { function = "sampleThePreparedSwitch", scopes = ["lifecycle", "viewerAction"] }
 seekIntent = { function = "issueSeek", scopes = ["viewerAction", "seek"] }
 seekIntentAfterControl = { function = "issueSeek", scopes = ["viewerAction", "seek"] }
+# A05: a viewer boundary's optional original preparation is an ordinary
+# prepared replacement beside the playing incumbent; nothing waits on it. Its
+# owner is the captured title/attachment/viewer action with exact
+# session/item/candidate checked beside it, and the armed re-plan is owed only
+# while its viewer action is the latest. No handwritten allowlist growth.
+autoBoundaryOwnerCurrent = { function = "autoBoundaryIsCurrent", scopes = ["lifecycle", "open", "viewerAction"] }
+autoBoundaryReplanCurrent = { function = "tickDisplayAwareAuto", scopes = ["lifecycle", "viewerAction"] }
 nativeSeekCompletion = { function = "issueSeek", scopes = ["open", "viewerAction", "seek"] }
 nativeSeekAfterSelection = { function = "issueSeek", scopes = ["open", "viewerAction", "seek"] }
 recoveryEvidencePoll = { function = "startRecoveryEvidencePoll", scopes = ["open"] }

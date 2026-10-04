@@ -245,18 +245,17 @@ ssh lab3 'cat /opt/noirr/plurx-agent/.forgejo-registry-token' |
     --username fleet --password-stdin'
 ```
 
-Every successful Forgejo `main` run ends with
-`publish merged image (Forgejo registry)`. The job waits for the post-merge
-validation fan-out, builds once on an X64 runner, verifies the immutable
-registry copy, and only then moves the fleet tag. It publishes
-`sha-<12hex>` for rollback and `main` for the newest qualified merge.
-Versioned releases own `latest`; fleet merges never overwrite that alias.
-**No run currently reaches that job:** `ci.yml` runs on `v*` tags and manual
-dispatch only, and the job's condition is a push to `main`, so no new
-`sha-` image has had an automatic producer since `3cd127e2` (2026-09-10)
-([LEDGER-TEXT-CONTRACTS-AND-RELEASE-TAGS.md](ci/LEDGER-TEXT-CONTRACTS-AND-RELEASE-TAGS.md)
-correction 1, re-verified 2026-09-24; the fix belongs to
-[RUST-TEST-EXECUTION-POLICY.md](ci/RUST-TEST-EXECUTION-POLICY.md) §3.1(b)).
+Only a manual Forgejo `ci.yml` dispatch on `main` can reach
+`publish merged image (Forgejo registry)`. A merge starts no runtime sweep
+or image build, as P-01 option (a) requires. The dispatched job waits for
+the full validation fan-out, builds once on an X64 runner, verifies the
+immutable registry copy, and only then moves the fleet tag. It publishes
+`sha-<12hex>` for rollback and `main` for the newest manually qualified
+tree. A dispatch on another branch and a `v*` tag cannot reach this job.
+Versioned releases own `latest`; fleet images never overwrite that alias.
+The 2026-09-29 trigger decision and its first-tag limits are recorded in
+[LEDGER-TEXT-CONTRACTS-AND-RELEASE-TAGS.md](ci/LEDGER-TEXT-CONTRACTS-AND-RELEASE-TAGS.md)
+correction 1.
 
 **Two identities, two questions.** The `sha-<12hex>` image is the deploy and
 rollback identity: it is what `deploy/.env`'s `PLURX_IMAGE` names and what a
@@ -1938,13 +1937,32 @@ start at all. Never move two voters concurrently and retain both verified copies
 through a soak period.
 
 `cluster.read_pool_size` is bounded from 1 through 16 and defaults to 4. It
-changes only local read-only SQLite connections. WAL size/sync, the 10,000-log
-snapshot trigger, disaster-recovery log retention, heartbeat, and election
+changes only local read-only SQLite connections. WAL size/sync, the default
+10,000-log snapshot trigger, disaster-recovery log retention, heartbeat, and election
 timers remain unchanged. The setting now reaches the named-host runner's node
 configuration and is repeated in schema-versioned raw and campaign evidence,
 so a 4/8/16 sweep measures and attests three different pools; an earlier runner
 built its own configuration and would have measured the default three times,
 so no deferred artifact from before that change means anything.
+
+`cluster.logs_until_snapshot` accepts 1,000 through 200,000 and defaults to
+10,000. `PLURX_CLUSTER_LOGS_UNTIL_SNAPSHOT` overrides the TOML value. The
+threshold is read when the embedded node starts, so a change takes effect on
+the next separately authorized restart and must match on every voter. The
+range is not a tuning recommendation: retain 10,000 until the snapshot
+cadence plan's fleet B/E/S/W/A evidence supports a different value. Retention
+stays `max_in_snapshot_log_to_keep = 1`.
+
+Snapshot builds check `2 × live DB bytes + max(live WAL bytes, 32 MiB) +
+64 MiB` on the state-machine filesystem before requesting the writer cut.
+Insufficient or unknown space defers for ten seconds per recheck, bounded
+by ten minutes; expiry attempts the existing path and cannot claim success
+on a full disk. `plurx_raft_snapshot_deferrals_total{reason="storage"}` counts
+retries; `plurx_raft_snapshot_required_storage_bytes` is the last known local
+floor, not a promise about current free space. Promotion needs the target's
+fresh same-heartbeat floor proof and `max(512 MiB, floor)` headroom. Upgrade a
+legacy target before promotion; its old 512 MiB-only readiness is unknown for
+this proof. No new Developer toggle gates this automatic correctness path.
 
 Run three campaigns from the same clean source/image, changing only
 `read_pool_size` and the new output directory. Validate all three directories,
@@ -2323,6 +2341,16 @@ recorded in the benchmark artifact as a go/no-go failure for membership changes,
 failure drills, or performance runs. Bounded-replica freshness uses a local
 monotonic deadline, but clock synchronization remains an operational
 prerequisite for the existing cross-node protocols and comparable evidence.
+
+The measurement release exposes `plurx_cluster_clock_offset_seconds`, its
+uncertainty and per-peer `observation_state` on `/metrics`; numeric gauges
+are absent for Unknown peers. Compare `abs(offset) + uncertainty` with the
+fixed 2,000 ms relative contract, retain the discontinuity and Unknown-round
+counters, and report `plurx_cluster_clock_authority_reads_total` to measure
+inbound probe authorization cost. This observation changes no acquisition or
+readiness decision and does not replace the absolute 250 ms discipline rule.
+See [the measurement handoff](cluster/CLOCK-SKEW-MEASUREMENT-IMPLEMENTATION.md)
+for the identified one-hour idle and sixty-second loaded receipt still owed.
 
 **Prepare the existing voter.** Give each node reachable, unique Raft and
 cluster-API addresses. `advertise_host` is a host or IP, not a URL. Set
@@ -3084,6 +3112,7 @@ membership addresses and token-file paths are intentionally file-only:
 | `PLURX_CLUSTER_BOUNDED_REPLICA_READS` | `cluster.bounded_replica_reads` | `true` | Initial bounded-read preference; the replicated Developer setting overrides it. Each read proves consistency independently |
 | `PLURX_CLUSTER_BOUNDED_REPLICA_MAX_LAG_ENTRIES` | `cluster.bounded_replica_max_lag_entries` | `64` | Maximum quorum-commit to local-applied gap admitted for a bounded catalogue operation; `0..10000`, identical on every voter |
 | `PLURX_CLUSTER_READ_POOL_SIZE` | `cluster.read_pool_size` | `4` | Local replicated-read connection pool, bounded 1–16; tune only with retained 4/8/16 evidence |
+| `PLURX_CLUSTER_LOGS_UNTIL_SNAPSHOT` | `cluster.logs_until_snapshot` | `10000` | Snapshot trigger, bounded 1,000–200,000; next restart, identical on every voter; change from the default only with fleet cadence evidence |
 | `PLURX_CLUSTER_SNAPSHOT_CHUNK_TIMEOUT_SECS` | `cluster.snapshot_chunk_timeout_secs` | `30` | One non-final snapshot chunk RPC in seconds, bounded 5–300; must not exceed the transfer timeout and must match on every voter |
 | `PLURX_CLUSTER_SNAPSHOT_TRANSFER_TIMEOUT_SECS` | `cluster.snapshot_transfer_timeout_secs` | `1200` | Absolute snapshot transfer stage in seconds, bounded 60–14,400; retries, reconnects, and mismatches cannot renew it |
 | `PLURX_CLUSTER_INSTALL_SNAPSHOT_TIMEOUT_SECS` | `cluster.install_snapshot_timeout_secs` | `120` | Final chunk/install RPC cap in seconds, bounded 10–3,600; keep identical on every voter |
@@ -3756,8 +3785,15 @@ sessions.
 When no mode is stored, the server resolves the selected encoder's code
 default; this is distinct from an operator explicitly choosing `bitrate`.
 Every family default remains Bitrate as of S-06 PR #414. Admin diagnostics
-report the map at `encoders.quality_rc.default_rate_mode`; the settings form
-keeps presenting `bitrate` for an absent legacy pair.
+report the map at `encoders.quality_rc.default_rate_mode`. `GET
+/api/v1/settings` reports an unset mode as `null`, with the selected family's
+default beside it in `transcode_rate_mode_default`; Settings → Playback →
+Advanced server delivery → Encoder rate control offers **Default (per
+encoder)**, which saves the clear. Before 2026-10-02 the settings response
+reported an unset pair as `"bitrate"` and `scripts/bench` restored that value,
+which stored an explicit bitrate on any cluster it measured — every node then
+logged `requested_mode="bitrate"` and a family default flip would not reach it.
+Return such a cluster to the defaults with the clear below.
 
 Read-only census at deployed revision `882862e8` on 2026-09-21 found QSV
 selected on `nynuc`, `nuc4` and `nuc3`, and VA-API selected on `m6`. The fresh
@@ -3785,11 +3821,20 @@ curl -fsS -X PUT \
   --data '{"transcode_rate_mode":"quality","transcode_quality":22}' \
   http://media1:32400/api/v1/settings
 
-# Return to the byte-for-byte legacy path and clear the override.
+# Pin the byte-for-byte legacy path explicitly and clear the override.
 curl -fsS -X PUT \
   -H "Authorization: Bearer $PLURX_ADMIN_TOKEN" \
   -H 'Content-Type: application/json' \
   --data '{"transcode_rate_mode":"bitrate","transcode_quality":null}' \
+  http://media1:32400/api/v1/settings
+
+# Return to each encoder family's default (unset): the response's
+# transcode_rate_mode is null and the boot/refresh log reads
+# requested_mode="family_default".
+curl -fsS -X PUT \
+  -H "Authorization: Bearer $PLURX_ADMIN_TOKEN" \
+  -H 'Content-Type: application/json' \
+  --data '{"transcode_rate_mode":null,"transcode_quality":null}' \
   http://media1:32400/api/v1/settings
 ```
 
@@ -3983,7 +4028,13 @@ as shown without `--quality`.
 
 Omitting `--quality` explicitly sends and verifies
 `transcode_quality: null` for both captures; it does not preserve a preexisting
-override. The original pair is still restored in the final cleanup path.
+override. The original pair is still restored in the final cleanup path,
+exactly as stored: an unset mode goes back as `null` (each family's default),
+never as the default the settings response displays beside it, and an explicit
+choice goes back as that choice. The harness refuses, before any mutation, a
+server whose settings response has no `transcode_rate_mode_default` field —
+such a server reports unset as `"bitrate"`, and restoring that pinned the
+measured cluster to an explicit bitrate until 2026-10-02.
 
 The 2026-08-14 media1 QSV acceptance used deployed build
 `v0.2.7-167-gb6aaed6` and selected default 22. The no-override run passed with
@@ -5497,6 +5548,7 @@ the loading overlay a few seconds longer, then playback).
 | Master playlist returns `init_inspection_unavailable` | Storage or inspection capacity prevented a trustworthy bounded read | Retry within the client startup allowance, then inspect storage and node-capacity logs. Unlike an invalid init, this response does not convict the media |
 | A transcode start returns HTTP 503 with `transcode capacity is temporarily unavailable` | The five-second foreground admission window expired before configured **live** hardware/software capacity became available, or the class cannot run in software and every hardware slot is held | Retry after the named work releases. Background ownership no longer produces this: a live start that waits out the window with only background work in the way is admitted over it (since 2026-09-28, [LIVE-TV-SLOTS-BUSY-OVER-BACKGROUND-RCA](streaming/LIVE-TV-SLOTS-BUSY-OVER-BACKGROUND-RCA.md)), so if the sentence says background encoding did not yield the start was speculative, not a viewer's |
 | `plurx_transcode_background_overrun_total{pool}` is rising | A background worker (pre-transcode producer, subtitle backfill, fragment indexing, probes) held an encoder permit through a phase that never looks at the pool, and a live start was admitted over it after the five-second window | Zero is the design. Each increment has a WARN `background work did not yield within the cooperative window; starting the viewer over it` in `plurxd::transcode` naming the pool; the worker to fix is whatever `plurxd::background_jobs` / `plurxd::state` was doing at that second. The viewer (VOD or Live TV) paid five seconds of delay, not a refusal. The take is bounded by live usage: a pool other viewers have spent is still refused with `spent by live sessions` |
+| `plurx_transcode_output_enqueue_dropped_total{reason}` is rising | A started VOD session could not hand its complete-output preparation to the output-enqueue worker: `queue_full` means the worker is behind, `worker_stopped` means it has exited (normally only at shutdown) | Each increment has an INFO `complete output preparation not handed off` in `plurxd::transcode` naming the file and reason. Nothing is lost: the title's next start offers the same deduplicated job again, so a drop delays the complete output rather than refusing anything. A steady `queue_full` rate means queue publication itself is slow; read the worker's `complete output preparation queued` / `not queued` lines for `waited_ms` and `elapsed_ms` |
 | Live TV answers `encoder_capacity` ("the tuner owner's encoder is busy") | The tuners were free but the owner's video encoder pool refused the transcode this route needs. Distinct from `tuner_capacity`, which lists what holds the tuners | `GET /api/v1/system` → `hw_slots_in_use` / `hw_slots_max` on the owner; a copy route on the same channel (a client that decodes MPEG-2 or HEVC itself) starts without this |
 | 4K HDR is slow but plays | The tone-map is running on the CPU. `GET /api/v1/system` → `tone_map` names the graph in use and why each candidate was rejected — no GPU device, a driver that refused the filter, output that didn't match the reference, or a graph that wasn't faster than the CPU chain | A rejection naming a missing device is usually a container passthrough (`--device /dev/dri`) or a missing driver package. HLG and Dolby Vision always use the CPU chain by design |
 | "All hardware transcode slots are in use" | The cap (`transcode.max_hw_sessions`, default 2) is doing its job. A start waits up to 5 s for a slot, then runs in software *only if this server has measured that class of stream above realtime there* — never because the output is small, since the decode and the tone-map happen at source resolution whatever size you ask for | `GET /api/v1/system` → `hw_slots_in_use` / `hw_slots_max`. Refused at 0 of 2 is a bug; refused at 2 of 2 is the design. A 4K HDR source is the shape software cannot carry, so it is refused rather than started to stall |

@@ -428,6 +428,13 @@ impl From<&mut Row<'_>> for TerminalAckRow {
 
 struct PointerRow(String);
 
+struct CandidateRecoveryRecipeRow(String, bool);
+impl From<&mut Row<'_>> for CandidateRecoveryRecipeRow {
+    fn from(row: &mut Row<'_>) -> Self {
+        Self(row.get("recipe"), row.get::<i64>("quality_step") == 1)
+    }
+}
+
 impl From<&mut Row<'_>> for PointerRow {
     fn from(row: &mut Row<'_>) -> Self {
         Self(row.get("current_incarnation_id"))
@@ -1359,6 +1366,77 @@ async fn claim_existing_or_reacquire(
 
 #[async_trait]
 impl MediaSessionStore for HiqliteAuthStore {
+    async fn observe_candidate_recovery(
+        &self,
+        observation: &crate::store::CandidateRecoveryObservation,
+        now_ms: i64,
+    ) -> Result<Option<crate::store::CandidateRecoveryMemory>, StoreError> {
+        if !observation.valid(now_ms) {
+            return Ok(None);
+        }
+        let scope = observation.scope.key().expect("validated scope");
+        let r = &observation.route;
+        let s = &observation.scope;
+        let results = self
+            .client()
+            .txn([
+                (
+                    crate::store::candidate_recovery::PRUNE_SQL,
+                    params!(now_ms.saturating_sub(86_400_000)),
+                ),
+                (
+                    crate::store::candidate_recovery::OBSERVE_SQL,
+                    params!(
+                        scope,
+                        hex::encode(observation.recipe_digest),
+                        observation.cause.as_str(),
+                        observation.event_id.clone(),
+                        s.user_id,
+                        s.playback_id.clone(),
+                        s.recovery_epoch.clone(),
+                        now_ms,
+                        r.incarnation_id.clone(),
+                        r.session_id.clone(),
+                        r.owner_node_id.clone(),
+                        r.owner_epoch,
+                        r.recipe_json.clone(),
+                        s.file_id,
+                        s.source_size,
+                        s.source_mtime,
+                        i64::from(observation.quality_step)
+                    ),
+                ),
+            ])
+            .await?
+            .into_iter()
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(database_error)?;
+        if results.get(1).copied().unwrap_or(0) == 0 {
+            return Ok(None);
+        }
+        self.candidate_recovery_memory(s).await.map(Some)
+    }
+
+    async fn candidate_recovery_memory(
+        &self,
+        scope: &crate::store::CandidateRecoveryScope,
+    ) -> Result<crate::store::CandidateRecoveryMemory, StoreError> {
+        let Some(key) = scope.key() else {
+            return Ok(crate::store::CandidateRecoveryMemory::default());
+        };
+        let rows = self
+            .client()
+            // authority: the recovery budget must include the failure just committed, or lag re-offers that recipe.
+            .query_consistent_map::<CandidateRecoveryRecipeRow, _>(
+                crate::store::candidate_recovery::READ_SQL,
+                params!(key),
+            )
+            .await?;
+        Ok(crate::store::candidate_recovery::memory(
+            rows.into_iter().map(|r| (r.0, r.1)).collect(),
+        ))
+    }
+
     async fn claim_media_session_request(
         &self,
         user_id: i64,

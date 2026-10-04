@@ -262,6 +262,12 @@ pub async fn continuous_candidates(
         .quality_candidates(
             &state,
             crate::media_pool::QualityCatalogRequest {
+                // The same claim the continuous create's selection catalog
+                // derives from these caps, so the advertised rows match it.
+                audio_claim: plurx_core::playback::audio::AudioClaim::from_caps(caps)
+                    .ok()
+                    .flatten(),
+                audio_delivery: None,
                 copy_contract: None,
                 file_id: source.id,
                 source_size: source.size,
@@ -394,6 +400,18 @@ enum CreatePurpose {
 }
 
 impl CreateSession {
+    pub(super) fn candidate_auto_policy(&self) -> bool {
+        use plurx_core::playback::DesiredQuality;
+        if self.height == Some(1440) {
+            return false;
+        }
+        match self.intent.as_ref().map(|intent| intent.selection.quality) {
+            Some(DesiredQuality::Auto { .. }) => true,
+            Some(_) => false,
+            None => self.quality_auto == Some(true) && self.copy != Some(true),
+        }
+    }
+
     /// `height` is initially resolved by the caller — Auto answered, explicit
     /// rungs snapped, the source-height promise honored. A bound stall reopen
     /// is the one later normalization: `claim_request` replaces this value
@@ -441,6 +459,8 @@ impl CreateSession {
             kind,
             start_seconds: self.start.unwrap_or(0.0).max(0.0),
             audio_index: self.audio.filter(|a| *a >= 0),
+            audio_delivery: None,
+            audio_claim: None,
             subtitle_burn: self.subtitle_burn.filter(|s| *s >= 0),
             audio_offset_ms: self.audio_offset_ms.unwrap_or(0).clamp(-15_000, 15_000),
             hdr10: self.hdr10 == Some(true),
@@ -1274,9 +1294,14 @@ pub(crate) async fn resolve_height(
 /// not grow a second resolver.** The drift would be invisible, because both
 /// sides would look correct in isolation.
 pub(crate) struct ResolvedPlan {
+    pub(crate) selected_candidate: Option<plurx_core::playback::candidate::QualityCandidate>,
     /// Canonical request-local evidence. Never reconstruct it from control caps.
     pub quality_catalog: Option<crate::media_pool::QualityCatalogResult>,
     pub request: crate::transcode::SessionRequest,
+    /// Actual Auto policy after geometry/copy normalization, not wire intent.
+    pub candidate_auto_policy: bool,
+    pub candidate_route: Option<plurx_core::playback::candidate::CandidateRoute>,
+    pub candidate_cost_proof: Option<crate::vodserve::retained::MeasuredCandidateCostProof>,
     /// The height this plan resolved to, which is not always the one asked
     /// for.
     pub height: i64,
@@ -1306,6 +1331,8 @@ pub(crate) struct PlanInputs<'a> {
     pub file_id: i64,
     pub source: Option<&'a MediaFile>,
     pub network_prior: Option<&'a plurx_core::domain::NetworkPrior>,
+    pub network_identity: Option<&'a crate::telemetry::NetworkIdentity>,
+    pub incumbent_receipt: Option<&'a str>,
 }
 
 /// Resolve a create body into the recipe it would produce.
@@ -1348,6 +1375,8 @@ async fn resolve_plan_with_continuous(
         file_id,
         source,
         network_prior,
+        network_identity,
+        incumbent_receipt,
     } = inputs;
     let hdr10_requested = review
         .as_ref()
@@ -1357,6 +1386,8 @@ async fn resolve_plan_with_continuous(
         resolve_height(state, source, network_prior, hdr10_requested, body.height).await;
     let mut candidate_context = None;
     let mut continuous_media = None;
+    let mut candidate_route = None;
+    let mut selected_candidate = None;
     let mut retained_catalog = None;
     let mut candidate_copy = false;
     if body.copy == Some(true) {
@@ -1440,6 +1471,18 @@ async fn resolve_plan_with_continuous(
                 || body.height == Some(1440)
                 || (body.quality_auto == Some(true) && body.copy != Some(true)))
         {
+            if requested.is_none() && body.candidate_auto_policy() {
+                // The fallback belongs to the actual negotiated catalog, not
+                // to legacy starvation heights or an unattributed rate EWMA.
+                height = resolve_height(
+                    state,
+                    Some(source),
+                    super::super::stream::prior_for_candidate_policy(network_prior, true),
+                    hdr10_requested,
+                    body.height,
+                )
+                .await;
+            }
             body.audio = if let Some(snapshot) = snapshot {
                 crate::transcode::TranscodeManager::candidate_audio_from_snapshot(
                     snapshot, body.audio,
@@ -1450,22 +1493,24 @@ async fn resolve_plan_with_continuous(
                     .candidate_audio_index(source, body.audio)
                     .await
             };
+            let catalog_request = crate::media_pool::QualityCatalogRequest {
+                audio_claim: plurx_core::playback::audio::AudioClaim::from_caps(caps)
+                    .ok()
+                    .flatten(),
+                audio_delivery: None,
+                copy_contract: None,
+                file_id: source.id,
+                source_size: source.size,
+                source_mtime: source.mtime,
+                caps: caps.clone(),
+                audio_index: body.audio,
+                audio_offset_ms: body.audio_offset_ms.unwrap_or(0),
+                subtitle_burn: body.subtitle_burn,
+                presentation: crate::transcode::Presentation::Vod,
+            };
             let catalogue_result = state
                 .media_pool
-                .quality_catalog(
-                    state,
-                    crate::media_pool::QualityCatalogRequest {
-                        copy_contract: None,
-                        file_id: source.id,
-                        source_size: source.size,
-                        source_mtime: source.mtime,
-                        caps: caps.clone(),
-                        audio_index: body.audio,
-                        audio_offset_ms: body.audio_offset_ms.unwrap_or(0),
-                        subtitle_burn: body.subtitle_burn,
-                        presentation: crate::transcode::Presentation::Vod,
-                    },
-                )
+                .quality_catalog(state, catalog_request.clone())
                 .await;
             tracing::info!(target: "plurxd::http::hls", file_id, purpose = "selection", complete = catalogue_result.complete,
                 causes = ?catalogue_result.causes, "create catalog accounting");
@@ -1495,11 +1540,58 @@ async fn resolve_plan_with_continuous(
                                 && initial_auto
                                 && entry.node_id == state.node_id))
                 })
+                .cloned()
                 .collect();
-            let catalog: Vec<_> = eligible_workers
+            let mut catalog: Vec<_> = eligible_workers
                 .iter()
                 .map(|entry| entry.candidate.clone())
                 .collect();
+            if body.candidate_auto_policy() {
+                catalog = super::candidate_recovery::auto_catalog(
+                    state,
+                    network_identity,
+                    source,
+                    &body.playback_id,
+                    catalog,
+                    link_receipts::advisory_deadline(),
+                )
+                .await;
+            }
+            if requested.is_none() && body.candidate_auto_policy() {
+                // This create's one advisory deadline (minted on its first
+                // advisory read), shared by every link-evidence read of it.
+                let advisory = link_receipts::advisory_deadline();
+                catalog = link_receipts::filter_catalog(
+                    state,
+                    network_identity,
+                    source,
+                    catalog,
+                    advisory,
+                )
+                .await;
+                if incumbent_receipt.is_some() && body.height != Some(1440) {
+                    let measured = link_receipts::measured_outputs(
+                        state,
+                        source,
+                        &catalog_request,
+                        &eligible_workers,
+                        snapshot,
+                        advisory,
+                    )
+                    .await;
+                    catalog = link_receipts::positive_catalog(
+                        state,
+                        network_identity,
+                        source,
+                        incumbent_receipt,
+                        Some(&body.playback_id),
+                        catalog,
+                        measured.as_deref(),
+                        advisory,
+                    )
+                    .await;
+                }
+            }
             let picked = if requested.is_none() && body.height != Some(1440) {
                 (if let Some(snapshot) = snapshot {
                     crate::transcode::TranscodeManager::quality_facts_from_snapshot(snapshot)
@@ -1568,6 +1660,8 @@ async fn resolve_plan_with_continuous(
                     ApiError::Conflict(format!("candidate_{reason}"))
                 }
             })?;
+            candidate_route = Some(candidate.route);
+            selected_candidate = Some(candidate.clone());
             candidate_copy =
                 candidate.route != plurx_core::playback::candidate::CandidateRoute::Encode;
             height = i64::from(candidate.target_height);
@@ -1646,6 +1740,12 @@ async fn resolve_plan_with_continuous(
                         && context.owner_node_id.as_deref() == Some(entry.node_id.as_str())
                 })
                 .and_then(|entry| entry.binding.clone());
+            context.planning_snapshot = snapshot
+                .filter(|snapshot| {
+                    context.planning_binding.as_ref()
+                        == Some(&crate::media_pool::PlanningBinding::from_snapshot(snapshot))
+                })
+                .map(|snapshot| Arc::new(snapshot.clone()));
             candidate_context = Some(Box::new(context));
             retained_catalog = Some(catalogue_result);
         }
@@ -1676,7 +1776,16 @@ async fn resolve_plan_with_continuous(
             }
         }
     }
+    let audio_claim = body
+        .caps
+        .as_ref()
+        .map(plurx_core::playback::audio::AudioClaim::from_caps)
+        .transpose()
+        .map_err(|error| ApiError::BadRequest(error.to_owned()))?
+        .flatten();
+    let candidate_auto_policy = body.candidate_auto_policy();
     let mut request = body.into_request(file_id, height);
+    request.audio_claim = audio_claim;
     request.candidate_context = candidate_context;
     request.continuous_media = continuous_media;
     if continuous.is_some() && request.continuous_media.is_none() {
@@ -1727,9 +1836,104 @@ async fn resolve_plan_with_continuous(
             crate::transcode::SessionKind::Transcode { height }
         };
     }
+    if let (Some(file), Some(claim)) = (source, request.audio_claim.as_ref()) {
+        let selected = request.audio_index.map_or_else(
+            || file.audio_streams.first(),
+            |index| {
+                file.audio_streams
+                    .iter()
+                    .find(|stream| stream.index == index)
+            },
+        );
+        let route = match request.kind {
+            crate::transcode::SessionKind::Copy { .. } => {
+                plurx_core::playback::audio::AudioRoute::Progressive
+            }
+            _ => plurx_core::playback::audio::AudioRoute::EncodedVod,
+        };
+        let delivery = plurx_core::playback::audio::resolve_audio(
+            selected,
+            &claim.profile(),
+            route,
+            request.audio_offset_ms,
+        );
+        if let crate::transcode::SessionKind::Copy { aac, .. } = &mut request.kind {
+            *aac = delivery.transcodes();
+        }
+        // The transcode route is provisional here: encoded VOD may fall back
+        // to rolling HLS. Its actual producer resolves the canonical claim.
+        // Only copy has selected its final route; retained transcode answers
+        // arrive later from the producer's StartResponse.
+        if matches!(request.kind, crate::transcode::SessionKind::Copy { .. }) {
+            request.audio_delivery = Some(delivery);
+        }
+    }
+    // Observational retained-output override follows the original intent hash
+    // and full route/audio reconciliation. Advisory JSON cannot construct it.
+    let candidate_cost_proof = if candidate_auto_policy && incumbent_receipt.is_some() {
+        if let (Some(candidate), Some(network), Some(source), Some(context)) = (
+            selected_candidate.as_ref(),
+            network_identity,
+            source,
+            request.candidate_context.as_ref(),
+        ) {
+            // The cost read and the live link proof are advisory: they share
+            // this create's one advisory deadline, and a miss leaves the
+            // choice unproven.
+            let advisory = link_receipts::advisory_deadline();
+            let cost = tokio::time::timeout_at(
+                advisory,
+                state
+                    .transcode
+                    .measured_candidate_cost(candidate, &request, None),
+            )
+            .await
+            .ok()
+            .flatten();
+            if let Some(cost) = cost {
+                let link = state
+                    .link_receipts
+                    .current_positive_until(
+                        state,
+                        network,
+                        source,
+                        incumbent_receipt,
+                        Some(&request.playback_id),
+                        context.owner_node_id.as_deref(),
+                        advisory,
+                    )
+                    .await;
+                if link
+                    .as_ref()
+                    .and_then(link_receipts::LiveLinkProof::transfer)
+                    .and_then(|transfer| transfer.usable_bps())
+                    .is_some_and(|bps| u128::from(bps) * 10 >= u128::from(cost.rfc_peak_bps()) * 18)
+                {
+                    request
+                        .candidate_context
+                        .as_mut()
+                        .expect("selected context")
+                        .retained_output = Some(cost.artifact_facts());
+                    Some(cost)
+                } else {
+                    None
+                }
+            } else {
+                None
+            }
+        } else {
+            None
+        }
+    } else {
+        None
+    };
     Ok(ResolvedPlan {
+        selected_candidate,
         quality_catalog: retained_catalog,
         request,
+        candidate_auto_policy,
+        candidate_route,
+        candidate_cost_proof,
         height,
         intent_fingerprint: fingerprint,
         plan_notes,
@@ -2168,14 +2372,47 @@ async fn create_with_purpose_inner(
             file_id: id,
             source: source.as_ref(),
             network_prior: network_prior.as_ref(),
+            network_identity: identity.as_ref(),
+            incumbent_receipt: link_receipts::requested_receipt(&headers),
         },
         review,
         req,
         continuous.as_ref(),
     )
     .await?;
+    let candidate_auto_policy = resolved.candidate_auto_policy;
+    let candidate_route = resolved.candidate_route;
+    // Retain the actual immutable artifact through the eventual dispatch, not
+    // just its public rates or digest. Dispatch revalidates the exact facts.
+    let _candidate_cost_proof = resolved.candidate_cost_proof;
     let mut quality_catalog = resolved.quality_catalog;
     let mut request = resolved.request;
+    // Capture before start and compare again after acceptance. A replacement
+    // source must not turn an older completed output into a new-source proof.
+    // The pre-start half reuses the source fence this create's advisory reads
+    // already took (one fence per request); the post-acceptance half below
+    // fences the source again, because its whole point is to see a change.
+    let link_source_binding = if candidate_auto_policy {
+        if let (Some(identity), Some(source), Some(context), Some(route)) = (
+            identity.as_ref(),
+            source.as_ref(),
+            request.candidate_context.as_ref(),
+            candidate_route,
+        ) {
+            link_receipts::request_binding_until(
+                identity,
+                source,
+                context.recipe_digest,
+                route,
+                link_receipts::advisory_deadline(),
+            )
+            .await
+        } else {
+            None
+        }
+    } else {
+        None
+    };
     if let (Some(source), Some(caps)) = (source.as_ref(), planning_caps.as_ref()) {
         validate_hevc_copy_transport(&state, source, caps, &request).await?;
     }
@@ -2388,6 +2625,34 @@ async fn create_with_purpose_inner(
         request_claim_id.clone(),
         incarnation_id.clone(),
     );
+    // A typed cause is advisory evidence. Unknown, remote, expired or
+    // replayed evidence leaves it unrecorded and the reopen proceeds as an
+    // ordinary reopen; it is never a reason to refuse a stalled viewer.
+    match super::candidate_recovery::observe(
+        &state,
+        identity.as_ref(),
+        source.as_ref(),
+        &request,
+        link_receipts::requested_receipt(&headers),
+        &request_claim_id,
+    )
+    .await
+    {
+        super::candidate_recovery::CauseRecord::Untyped => {}
+        super::candidate_recovery::CauseRecord::Recorded(cause) => {
+            tracing::debug!(target: "plurxd::http::hls",
+                file_id = id,
+                cause = ?cause,
+                "typed recovery cause recorded");
+        }
+        super::candidate_recovery::CauseRecord::Unrecorded(reason) => {
+            tracing::info!(target: "plurxd::http::hls",
+                file_id = id,
+                reopen_reason = request.reopen_reason.map(crate::transcode::ReopenReason::as_str),
+                reason,
+                "typed recovery cause not recorded; continuing as an ordinary reopen");
+        }
+    }
 
     let advertise_control = plurx_core::store::stored_switch(
         planning_snapshot
@@ -2418,6 +2683,8 @@ async fn create_with_purpose_inner(
                     .quality_catalog(
                         &state,
                         crate::media_pool::QualityCatalogRequest {
+                            audio_claim: request.audio_claim.clone(),
+                            audio_delivery: request.audio_delivery.clone(),
                             copy_contract: request.kind.copy_contract(),
                             file_id: source.id,
                             source_size: source.size,
@@ -2474,7 +2741,9 @@ async fn create_with_purpose_inner(
                 .is_none_or(|owner| quality_owners.contains(owner)));
     let mut worker_request = request.clone();
     worker_request.request_id = Some(incarnation_id.clone());
-    let remote_request = RemoteStartRequest {
+    let mut remote_request = RemoteStartRequest {
+        retained_output: None,
+        retained_output_receiver: Some(1),
         candidate_catalog: request.candidate_context.as_ref().and_then(|context| {
             Some(crate::media_sessions::CandidateCatalogContext {
                 caps: context.canonical_caps.clone()?,
@@ -2508,7 +2777,7 @@ async fn create_with_purpose_inner(
         }),
         request: worker_request,
     };
-    let recipe_json = serde_json::to_string(&remote_request)?;
+    let mut recipe_json = serde_json::to_string(&remote_request)?;
     if library_channel.is_some()
         && !state
             .store
@@ -2785,6 +3054,11 @@ async fn create_with_purpose_inner(
                 }
             }
         } else {
+            remote_request.retained_output_receiver = state
+                .media_pool
+                .retained_output_receiver(&candidate)
+                .await
+                .then_some(1);
             match state
                 .media_sessions
                 .start_remote(&candidate, &remote_request, placement_deadline)
@@ -2953,12 +3227,56 @@ async fn create_with_purpose_inner(
     } else {
         info.playlist_url
     };
+    remote_request.retained_output = info.retained_output.clone();
+    recipe_json = serde_json::to_string(&remote_request)?;
+    let measured_candidate_outputs = if let (true, Some(source), Some(caps), Some(catalog)) = (
+        quality_enabled && quality_negotiated,
+        source.as_ref(),
+        candidate_decoder_caps.as_ref(),
+        quality_catalog.as_ref(),
+    ) {
+        let catalog_request = crate::media_pool::QualityCatalogRequest {
+            audio_claim: request.audio_claim.clone(),
+            audio_delivery: info.audio_delivery.clone(),
+            copy_contract: request.kind.copy_contract(),
+            file_id: source.id,
+            source_size: source.size,
+            source_mtime: source.mtime,
+            caps: caps.device_caps(),
+            audio_index: request.audio_index,
+            audio_offset_ms: request.audio_offset_ms,
+            subtitle_burn: request.subtitle_burn,
+            presentation: request.presentation,
+        };
+        // Project from the same bound catalogue, not another authority enumeration.
+        let accepted: Vec<_> = catalog
+            .candidates
+            .iter()
+            .filter(|entry| {
+                entry.dispatch_supported && (!entry.partial || entry.node_id == state.node_id)
+            })
+            .cloned()
+            .collect();
+        link_receipts::measured_outputs(
+            &state,
+            source,
+            &catalog_request,
+            &accepted,
+            planning_snapshot.as_ref(),
+            link_receipts::advisory_deadline(),
+        )
+        .await
+    } else {
+        None
+    };
     let response = StartResponse {
+        delivered_audio: info.audio_delivery.clone(),
         display_aware_auto_protocol: quality_negotiated.then(|| "route-v1".to_owned()),
         quality_candidate_id: request
             .candidate_context
             .as_ref()
             .map(|context| context.candidate_id),
+        measured_candidate_outputs,
         quality_catalog_status: quality_catalog.as_ref().map(
             |catalog| serde_json::json!({"complete": catalog.complete, "causes": catalog.causes}),
         ),
@@ -2985,8 +3303,16 @@ async fn create_with_purpose_inner(
         // at the source height: an advertised rung is a promise, and the web
         // ABR controller upgrades into any rung the ladder lists. See
         // `capability_height_ceiling`.
-        ladder: crate::transcode::advertised_ladder(source_height, ladder_ceiling),
-        prior_kbps: network_prior.and_then(|prior| prior.sustained_kbps),
+        ladder: crate::transcode::advertised_ladder_with_audio(
+            source_height,
+            ladder_ceiling,
+            info.audio_delivery.as_ref(),
+        ),
+        prior_kbps: super::super::stream::prior_for_candidate_policy(
+            network_prior.as_ref(),
+            candidate_auto_policy && request.candidate_context.is_some(),
+        )
+        .and_then(|prior| prior.sustained_kbps),
         delivered_dynamic_range: delivered.map(str::to_owned),
         delivered_dolby_vision_profile: session_delivered_dolby_vision_profile(
             source.as_ref(),
@@ -3272,6 +3598,33 @@ async fn create_with_purpose_inner(
             .media_sessions
             .seed_owned_lease(&published_route)
             .await;
+        if candidate_auto_policy {
+            if let (Some(identity), Some(source), Some(context), Some(candidate_route)) = (
+                identity.as_ref(),
+                source.as_ref(),
+                request.candidate_context.as_ref(),
+                candidate_route,
+            ) {
+                if let Some(source) = link_receipts::binding_until(
+                    identity,
+                    source,
+                    context.recipe_digest,
+                    candidate_route,
+                    link_receipts::advisory_deadline(),
+                )
+                .await
+                {
+                    if link_source_binding.as_ref() == Some(&source) {
+                        state.link_receipts.register(link_receipts::SessionBinding {
+                            source,
+                            session: published_route.session_id.clone(),
+                            incarnation: published_route.incarnation_id.clone(),
+                            owner_epoch: published_route.owner_epoch,
+                        });
+                    }
+                }
+            }
+        }
     }
     if library_channel.is_none() {
         crate::playstart::note_playback_started(

@@ -750,6 +750,11 @@ impl Shared {
             completed_cache_budget: settings.completed_cache_bytes,
             materialize_budget: settings.materialize_budget,
             manifest: Mutex::new(manifest),
+            output_measurement: StdMutex::new(PublishedOutputMeasurement::default()),
+            copy_preparation: StdMutex::new(None),
+            preparation_epoch: AtomicU64::new(0),
+            retained_offer: StdMutex::new(None),
+            cancelled_preparation_epoch: AtomicU64::new(0),
             identity: Mutex::new(identity_state),
             slot: ProducerSlot::new(),
             retained_admission: crate::vodencode::RetainedEncodeAdmission::default(),
@@ -874,6 +879,9 @@ impl Shared {
         let Some(rendition) = rendition else {
             return;
         };
+        if rendition.preparation().is_some() {
+            return;
+        }
         if !rendition.readers.lock().await.is_empty() {
             return;
         }

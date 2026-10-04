@@ -1691,6 +1691,7 @@ use crate::queue_fixture::QueueFixture;
         let file = store.get_file(file_id).await.expect("get").expect("file");
         let package_id = "offline-preemption";
         let requested = NewOfflinePackage {
+            audio_recipe: None,
             id: package_id.to_owned(),
             request_id: "offline-preemption-request".to_owned(),
             user_id: user.id,
@@ -1750,6 +1751,7 @@ use crate::queue_fixture::QueueFixture;
                 &claimed,
                 &file,
                 &OfflineSpec {
+                    audio_delivery: None,
                     target_height: 240,
                     audio_index: None,
                     subtitle: OfflineSubtitle::None,
@@ -2224,6 +2226,106 @@ use crate::queue_fixture::QueueFixture;
             "speculative-auto-v2:\
              08494ca183d08fdddf67791b5c47a324dbf4dd32544694dc2fd12589a6c67723",
             "the speculative dedupe key for an unset pair is durable state"
+        );
+    }
+
+    /// A family default flip must move the speculative rows that family may
+    /// claim, and only those. Before, the key spelled an unset pair as
+    /// `requested:bitrate` whatever the families resolved to, so a flip would
+    /// have left every queued row on the old policy.
+    #[test]
+    fn a_family_default_flip_moves_only_that_familys_speculative_keys() {
+        fn shipped(encoder: Encoder) -> RateMode {
+            encoder.default_rate_mode()
+        }
+        fn qsv_flipped(encoder: Encoder) -> RateMode {
+            match encoder {
+                Encoder::Qsv => RateMode::Quality,
+                other => other.default_rate_mode(),
+            }
+        }
+        fn all_flipped(_: Encoder) -> RateMode {
+            RateMode::Quality
+        }
+        let prefs = plurx_core::tracks::LangPrefs::default();
+        let unset = RateControlSnapshot {
+            requested_mode: None,
+            requested_quality: None,
+            quality_rc: QualityRc::default(),
+        };
+        let bitrate = RateControlSnapshot {
+            requested_mode: Some(RateMode::Bitrate),
+            ..unset
+        };
+        let quality = RateControlSnapshot {
+            requested_mode: Some(RateMode::Quality),
+            ..unset
+        };
+        let key = |snapshot, requested: &str, defaults: fn(Encoder) -> RateMode| {
+            TranscodeManager::pretranscode_policy_generation_with(
+                snapshot, requested, &prefs, defaults,
+            )
+        };
+        assert!(
+            speculative_encoder_families("auto")
+                .iter()
+                .all(|encoder| encoder.default_rate_mode() == RateMode::Bitrate),
+            "this test models a flip; the shipped defaults themselves must not move here"
+        );
+
+        // Rows QSV may claim move: pinned to QSV, and auto.
+        for requested in ["qsv", "auto", ""] {
+            assert_ne!(
+                key(unset, requested, shipped),
+                key(unset, requested, qsv_flipped),
+                "an unset {requested:?} row may be produced by QSV and must move"
+            );
+        }
+        // Rows QSV can never claim keep their identity.
+        for requested in ["software", "vaapi", "nvenc", "videotoolbox"] {
+            assert_eq!(
+                key(unset, requested, shipped),
+                key(unset, requested, qsv_flipped),
+                "a {requested:?} row is not produced by QSV and must keep its key"
+            );
+        }
+        // Explicit choices never follow a default, so their queued rows stay.
+        for requested in ["qsv", "auto", "software", "vaapi"] {
+            for explicit in [bitrate, quality] {
+                assert_eq!(
+                    key(explicit, requested, shipped),
+                    key(explicit, requested, qsv_flipped),
+                    "an explicit request on {requested:?} must not move with a default"
+                );
+                assert_eq!(
+                    key(explicit, requested, shipped),
+                    key(explicit, requested, all_flipped),
+                );
+                assert_eq!(
+                    key(explicit, requested, shipped),
+                    TranscodeManager::pretranscode_policy_generation_for(
+                        explicit, requested, &prefs
+                    ),
+                );
+            }
+        }
+        // The key spells the effective policy: an unset pair is the same key
+        // as the explicit mode every claimable family resolves it to.
+        assert_eq!(
+            key(unset, "qsv", qsv_flipped),
+            key(quality, "qsv", shipped),
+            "unset on a quality-default family is the explicit quality policy"
+        );
+        assert_eq!(key(unset, "auto", all_flipped), key(quality, "auto", shipped));
+        assert_eq!(key(unset, "vaapi", qsv_flipped), key(bitrate, "vaapi", shipped));
+        assert_eq!(
+            TranscodeManager::speculative_rate_policy(
+                None,
+                speculative_encoder_families("auto"),
+                qsv_flipped,
+            ),
+            "requested:software=bitrate,nvenc=bitrate,qsv=quality,vaapi=bitrate,\
+             videotoolbox=bitrate"
         );
     }
 

@@ -418,6 +418,10 @@ pub(super) async fn settle_cancelled_preparation(
     let _ = take_active_preparation(&active.preparation.incarnation_id);
     crate::playback_control::record_preparation_cancelled(reason);
     active.cancelled.cancel();
+    active.state.link_receipts.retire_staged(
+        &active.preparation.session_id,
+        &active.preparation.incarnation_id,
+    );
     let deadline = tokio::time::Instant::now() + PREPARATION_SETTLEMENT_RETRY_BUDGET;
     let mut delay = PREPARATION_SETTLEMENT_RETRY_MIN;
     let durable_settled = loop {
@@ -824,6 +828,7 @@ pub(super) enum PreparationPurpose {
 }
 
 pub(super) struct PreparationCandidateInputs {
+    pub(super) accepted_observation: Option<super::prepared_link::AcceptedObservation>,
     /// The live session this exchange belongs to. Staging needs it twice: to
     /// reach the actor that owns the one successor slot, and to name the
     /// predecessor the commit CAS will fence against.
@@ -873,6 +878,73 @@ pub(super) struct PreparationCandidateInputs {
 /// whole. Recipes written before the durable response sidecar was retained use
 /// the legacy edit path so an upgrade never guesses capabilities that the
 /// client did not provide.
+pub(super) fn preserve_prepared_audio(
+    predecessor: &crate::transcode::SessionRequest,
+    candidate: &mut crate::transcode::SessionRequest,
+    source: &MediaFile,
+) -> Result<(), ApiError> {
+    use plurx_core::playback::audio::{resolve_audio, AudioAction, AudioRoute};
+    let same_track_and_route = candidate.audio_index == predecessor.audio_index
+        && candidate.audio_claim == predecessor.audio_claim
+        && candidate.audio_offset_ms == predecessor.audio_offset_ms;
+    let full_encode = matches!(
+        candidate.kind,
+        crate::transcode::SessionKind::Transcode { .. }
+    ) && candidate.presentation == crate::transcode::Presentation::Vod;
+    if same_track_and_route && !full_encode {
+        candidate.audio_delivery = predecessor.audio_delivery.clone();
+    } else if let Some(claim) = &candidate.audio_claim {
+        let selected = candidate
+            .audio_index
+            .and_then(|index| {
+                source
+                    .audio_streams
+                    .iter()
+                    .find(|track| track.index == index)
+            })
+            .or_else(|| source.audio_streams.first());
+        candidate.audio_delivery = Some(resolve_audio(
+            selected,
+            &claim.profile(),
+            if full_encode {
+                AudioRoute::EncodedVod
+            } else if matches!(candidate.kind, crate::transcode::SessionKind::Copy { .. }) {
+                AudioRoute::Progressive
+            } else {
+                AudioRoute::RollingHls
+            },
+            candidate.audio_offset_ms,
+        ));
+    }
+    // Compare what the incumbent's playlist told the client's audio decoder,
+    // not the encoder's bytes. A full-encode VOD successor can never copy
+    // audio, so a byte comparison refused every Original→rung switch from a
+    // copy session even when both deliver stereo AAC. The splice is a
+    // discontinuity; only a codec or channel-count change is unsafe there.
+    if candidate
+        .audio_delivery
+        .as_ref()
+        .and_then(|audio| audio.presentation_identity())
+        != predecessor
+            .audio_delivery
+            .as_ref()
+            .and_then(|audio| audio.presentation_identity())
+    {
+        return Err(ApiError::typed(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "prepared_output_unsupported",
+            "the audio codec or channel count changed; reopen instead of switching a prepared successor",
+        ));
+    }
+    if let (crate::transcode::SessionKind::Copy { aac, .. }, Some(audio)) =
+        (&mut candidate.kind, &candidate.audio_delivery)
+    {
+        *aac = matches!(audio.action, AudioAction::Encode { .. });
+    }
+    Ok(())
+}
+
+#[cfg(test)]
 pub(super) async fn plan_preparation_candidate(
     state: &AppState,
     predecessor: &RemoteStartRequest,
@@ -882,6 +954,34 @@ pub(super) async fn plan_preparation_candidate(
     source: &MediaFile,
     delivered_height: i64,
 ) -> Result<crate::transcode::SessionRequest, ApiError> {
+    plan_preparation_with_candidate(
+        state,
+        predecessor,
+        planning_caps,
+        planning_overrides,
+        selection,
+        source,
+        delivered_height,
+    )
+    .await
+    .map(|(request, _)| request)
+}
+
+async fn plan_preparation_with_candidate(
+    state: &AppState,
+    predecessor: &RemoteStartRequest,
+    planning_caps: Option<&plurx_core::playback::DeviceCaps>,
+    planning_overrides: Option<&CreateOverrides>,
+    selection: &crate::playback_control::ClientSelection,
+    source: &MediaFile,
+    delivered_height: i64,
+) -> Result<
+    (
+        crate::transcode::SessionRequest,
+        Option<plurx_core::playback::candidate::QualityCandidate>,
+    ),
+    ApiError,
+> {
     if let Some(caps) = planning_caps {
         super::super::stream::validate_device_caps(caps)?;
     }
@@ -929,7 +1029,7 @@ pub(super) async fn plan_preparation_candidate(
         // document (or one this build cannot parse) can still have a
         // successor staged as a burn that tone-maps the picture at the moment
         // it is committed, which is the failure this guard exists for.
-        let candidate = crate::playback_control::candidate_request(
+        let mut candidate = crate::playback_control::candidate_request(
             &predecessor.request,
             selection,
             height,
@@ -949,7 +1049,8 @@ pub(super) async fn plan_preparation_candidate(
                 "error": HDR_SUBTITLE_BURN_REFUSAL,
             })));
         }
-        return Ok(candidate);
+        preserve_prepared_audio(&predecessor.request, &mut candidate, source)?;
+        return Ok((candidate, None));
     };
 
     use plurx_core::playback::{DeviceProfile, Force, PlaybackMethod};
@@ -1188,12 +1289,15 @@ pub(super) async fn plan_preparation_candidate(
             file_id: predecessor.request.file_id,
             source: Some(source),
             network_prior: None,
+            network_identity: None,
+            incumbent_receipt: None,
         },
         Some(review),
         body,
     )
     .await?;
     let plan_height = plan.height;
+    let selected_candidate = plan.selected_candidate;
     let mut resolved = plan.request;
     validate_hevc_copy_transport(state, source, caps, &resolved).await?;
     // The same guard ordinary create runs, on the same function. This path
@@ -1226,6 +1330,7 @@ pub(super) async fn plan_preparation_candidate(
     // the incumbent use rolling has not changed merely because its quality or
     // tracks did. VOD stays VOD and rolling stays rolling.
     resolved.presentation = predecessor.request.presentation;
+    preserve_prepared_audio(&predecessor.request, &mut resolved, source)?;
     if resolved.quality_catalog.is_none()
         && predecessor.decoder_caps.is_some()
         && caps.video.len() <= plurx_core::playback::MAX_CLIENT_DECODER_ENTRIES
@@ -1235,6 +1340,8 @@ pub(super) async fn plan_preparation_candidate(
             .quality_catalog(
                 state,
                 crate::media_pool::QualityCatalogRequest {
+                    audio_claim: resolved.audio_claim.clone(),
+                    audio_delivery: resolved.audio_delivery.clone(),
                     file_id: source.id,
                     source_size: source.size,
                     source_mtime: source.mtime,
@@ -1249,7 +1356,7 @@ pub(super) async fn plan_preparation_candidate(
             .await;
         resolved.quality_catalog = Some(Arc::new(catalog));
     }
-    Ok(resolved)
+    Ok((resolved, selected_candidate))
 }
 
 async fn prepared_relocation_owner(
@@ -1304,6 +1411,7 @@ pub(super) async fn process_preparation_candidate(
     exchange: PreparationCandidateInputs,
 ) {
     let PreparationCandidateInputs {
+        accepted_observation,
         session_id,
         route,
         mut recipe,
@@ -1318,6 +1426,11 @@ pub(super) async fn process_preparation_candidate(
         accepted_film_time_ms,
         purpose,
     } = exchange;
+    if let Ok(response) = serde_json::from_str::<StartResponse>(&route.response_json) {
+        if let Some(audio) = response.delivered_audio {
+            recipe.request.audio_delivery = Some(audio);
+        }
+    }
     let _finished = PreparationCandidateFinished {
         hooks: state.hls_route_hooks.get(),
         incarnation_id: &route.incarnation_id,
@@ -1408,7 +1521,7 @@ pub(super) async fn process_preparation_candidate(
             }
         }
     }
-    let candidate = match plan_preparation_candidate(
+    let (mut candidate, selected_candidate) = match plan_preparation_with_candidate(
         &state,
         &recipe,
         planning_caps.as_ref(),
@@ -1453,9 +1566,36 @@ pub(super) async fn process_preparation_candidate(
         selection: &proposed,
         grade: crate::playback_control::GradeIntent::from_request(&candidate),
     };
+    let candidate_auto = matches!(
+        selection.quality,
+        crate::playback_control::QualitySelection::Auto { .. }
+    ) && candidate.candidate_context.is_some();
+    let prepared_proof = if let Some(observation) = accepted_observation.as_ref() {
+        if let Some(selected) = selected_candidate.as_ref() {
+            // Advisory link evidence: one shared advisory deadline for the
+            // whole proof (prior, cost, live link, source fence), not a
+            // short per-read cap. A miss is Unknown and stages no proof.
+            let advisory = super::link_receipts::advisory_deadline();
+            tokio::time::timeout_at(
+                advisory,
+                observation.proposed_proof(&state, source, &mut candidate, selected, advisory),
+            )
+            .await
+            .ok()
+            .flatten()
+        } else {
+            None
+        }
+    } else {
+        None
+    };
     let conditions = crate::playback_control::PreparationConditions {
-        observed_download_bps,
-        delivered_bps,
+        observed_download_bps: if candidate_auto {
+            None
+        } else {
+            observed_download_bps
+        },
+        delivered_bps: if candidate_auto { None } else { delivered_bps },
     };
     let decision = crate::playback_control::decide_preparation(
         delivered_view,
@@ -1498,6 +1638,17 @@ pub(super) async fn process_preparation_candidate(
         }
         PreparationPurpose::PlannedRelocation(_) => None,
     };
+    // An implicit measured upgrade needs real incumbent Link and full-output
+    // cost proof. Unknown is not a feature/ordinary/manual/recovery refusal.
+    let successor_owner = if candidate_auto
+        && proposed.height > delivered.height
+        && prepared_proof.is_none()
+        && matches!(purpose, PreparationPurpose::SelectionChange)
+    {
+        None
+    } else {
+        successor_owner
+    };
     if let Some(successor_owner) = successor_owner {
         // Production always stages and primes. Hooks that decline priming (the
         // test hooks of `AppState::new` do, until a test calls
@@ -1521,6 +1672,7 @@ pub(super) async fn process_preparation_candidate(
             &successor_owner,
             purpose,
             AcceptedAsk {
+                prepared_proof,
                 film_time_ms: accepted_film_time_ms,
                 desired_digest: Some(selection.desired().digest()),
                 planning_cancellation: Some(pending.cancellation_token()),
@@ -1590,6 +1742,7 @@ const PREPARATION_PRIME_BUDGET: Duration = Duration::from_secs(45);
 /// one exchange under the ask from another builds a successor for a moment and
 /// a selection that never coexisted.
 pub(super) struct AcceptedAsk {
+    pub(super) prepared_proof: Option<super::prepared_link::PreparedProof>,
     /// The absolute film time the accepted envelope settled on — the viewer's
     /// seek target where they asked for one, their playhead otherwise.
     pub(super) film_time_ms: i64,
@@ -1660,6 +1813,7 @@ pub(super) async fn stage_prepared_successor_with_prime(
         return;
     }
     let AcceptedAsk {
+        prepared_proof,
         film_time_ms: accepted_film_time_ms,
         desired_digest,
         planning_cancellation,
@@ -1748,6 +1902,8 @@ pub(super) async fn stage_prepared_successor_with_prime(
         ..candidate.clone()
     };
     let staged_recipe = RemoteStartRequest {
+        retained_output: None,
+        retained_output_receiver: Some(1),
         candidate_catalog: candidate.candidate_context.as_ref().and_then(|context| {
             Some(crate::media_sessions::CandidateCatalogContext {
                 caps: context.canonical_caps.clone()?,
@@ -1780,6 +1936,8 @@ pub(super) async fn stage_prepared_successor_with_prime(
     // on the bootstrap being present, so a row without it answers 404
     // `session_gone` on the successor's first exchange after commit.
     let response = StartResponse {
+        measured_candidate_outputs: None,
+        delivered_audio: staged_request.audio_delivery.clone(),
         quality_catalog_status: candidate.quality_catalog.as_ref().map(
             |catalog| serde_json::json!({"complete": catalog.complete, "causes": catalog.causes}),
         ),
@@ -2070,8 +2228,26 @@ pub(super) async fn stage_prepared_successor_with_prime(
         };
         if let Some(guard) = activated {
             let active = guard.disarm();
+            // Observations cannot delay the existing cleanup/deadline owner.
+            arm_preparation_deadline(active.clone());
+            if successor_owner == state.node_id {
+                if let Some(proof) = prepared_proof.as_ref() {
+                    // Bounded by the shared advisory stage; a registration
+                    // that misses it leaves the stage without link evidence.
+                    let _ = tokio::time::timeout_at(
+                        super::link_receipts::advisory_deadline(),
+                        proof.register(
+                            state,
+                            &active.preparation.session_id,
+                            &active.preparation.incarnation_id,
+                            active.preparation.deadline_ms,
+                            active.cancelled.clone(),
+                        ),
+                    )
+                    .await;
+                }
+            }
             crate::playback_control::record_preparation_staged(true);
-            arm_preparation_deadline(active);
         } else {
             crate::playback_control::record_preparation_staged(false);
         }

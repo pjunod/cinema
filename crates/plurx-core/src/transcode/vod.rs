@@ -954,7 +954,8 @@ pub fn vod_pipe_args_with_reorder(
     // The VOD presentation owns a film-global sample-lattice correction
     // below. The shared plan builder must still own decoder/renderer/encoder
     // selection, but its ordinary one-input A/V filter would apply the same
-    // semantic offset a second time.
+    // semantic offset a second time. That `-af` also carries any measured
+    // downmix; the lattice chain below re-adds it ahead of its own stages.
     if let Some(index) = args.iter().position(|argument| argument == "-af") {
         args.drain(index..=index + 1);
     }
@@ -1064,7 +1065,17 @@ pub fn vod_pipe_args_with_reorder(
         args[index + 1] = format!("{graph}{last}{BURNED_VIDEO_LABEL}");
     }
     if has_audio {
-        args.extend(["-af".to_owned(), audio.filter()]);
+        // The fold runs first, on the decoded preroll, so the limiter's
+        // look-ahead and release state are already settled when the sample
+        // trim below reaches the generation's first kept sample: adjacent
+        // generations then join on identical gain.
+        let downmix = media
+            .audio
+            .as_ref()
+            .and_then(|audio| audio.downmix_filter())
+            .map(|filter| format!("{filter},"))
+            .unwrap_or_default();
+        args.extend(["-af".to_owned(), format!("{downmix}{}", audio.filter())]);
         args.extend([
             "-ar".to_owned(),
             VOD_AUDIO_RATE.to_string(),
@@ -1161,16 +1172,12 @@ pub fn vod_pipe_args_with_reorder(
 mod tests {
     use super::*;
 
-    fn encoded_recipe_fixture(
-        hdr: bool,
-    ) -> (
-        MediaFile,
-        ResolvedTranscode,
-        TranscodeExecution,
-        crate::transcode::DecodeFacts,
-        crate::transcode::DecodeCapabilities,
-    ) {
-        let source = crate::domain::MediaFile {
+    fn chaptered_source() -> crate::domain::MediaFile {
+        encoded_recipe_source(false)
+    }
+
+    fn encoded_recipe_source(hdr: bool) -> MediaFile {
+        MediaFile {
             downloaded_subtitles: Vec::new(),
             id: 1,
             item_id: 1,
@@ -1199,15 +1206,29 @@ mod tests {
             audio_offset_ms: 0,
             probed: true,
             dolby_vision: crate::domain::DolbyVisionFacts::default(),
-        };
-        let options = crate::transcode::TranscodeOptions {
-            pipeline: if hdr {
-                crate::transcode::Pipeline::Hdr10Passthrough
-            } else {
-                crate::transcode::Pipeline::Cpu
-            },
-            ..Default::default()
-        };
+        }
+    }
+
+    fn recipe_plan_and_execution(
+        source: &MediaFile,
+        options: &crate::transcode::TranscodeOptions,
+    ) -> (ResolvedTranscode, TranscodeExecution) {
+        let (plan, execution, _, _) = recipe_fixture_parts(source, options);
+        (plan, execution)
+    }
+
+    /// The resolved plan and execution plus the decode facts and capabilities
+    /// they were resolved against, for tests that re-resolve variants.
+    fn recipe_fixture_parts(
+        source: &MediaFile,
+        options: &crate::transcode::TranscodeOptions,
+    ) -> (
+        ResolvedTranscode,
+        TranscodeExecution,
+        crate::transcode::DecodeFacts,
+        crate::transcode::DecodeCapabilities,
+    ) {
+        let hdr = options.pipeline.output_grade() == crate::transcode::OutputGrade::Hdr10;
         let facts = crate::transcode::DecodeFacts::from_ffprobe_json(
             &serde_json::json!({"streams":[{
                 "index":0,"codec_type":"video","codec_name":"hevc",
@@ -1237,7 +1258,7 @@ mod tests {
         let plan = crate::transcode::resolve_transcode(
             &crate::transcode::TranscodeRequest::new(
                 crate::transcode::Encoder::Software,
-                crate::transcode::TranscodeMediaOptions::from_options(&source, &options),
+                crate::transcode::TranscodeMediaOptions::from_options(source, options),
             ),
             &facts,
             &capabilities,
@@ -1249,13 +1270,49 @@ mod tests {
         )
         .expect("software plan");
         let execution = crate::transcode::TranscodeExecution::from_options(
-            &source,
-            &options,
+            source,
+            options,
             crate::transcode::Pacing::unpaced(),
             ".",
         )
         .expect("execution");
+        (plan, execution, facts, capabilities)
+    }
+
+    fn encoded_recipe_fixture(
+        hdr: bool,
+    ) -> (
+        MediaFile,
+        ResolvedTranscode,
+        TranscodeExecution,
+        crate::transcode::DecodeFacts,
+        crate::transcode::DecodeCapabilities,
+    ) {
+        let source = encoded_recipe_source(hdr);
+        let options = crate::transcode::TranscodeOptions {
+            pipeline: if hdr {
+                crate::transcode::Pipeline::Hdr10Passthrough
+            } else {
+                crate::transcode::Pipeline::Cpu
+            },
+            ..Default::default()
+        };
+        let (plan, execution, facts, capabilities) = recipe_fixture_parts(&source, &options);
         (source, plan, execution, facts, capabilities)
+    }
+
+    fn pipe_args_for(
+        source: &MediaFile,
+        options: &crate::transcode::TranscodeOptions,
+    ) -> Vec<String> {
+        let (plan, execution) = recipe_plan_and_execution(source, options);
+        vod_pipe_args(
+            source,
+            &plan,
+            &execution,
+            VodFrameGrid::new(24, 1).expect("grid"),
+            12.0,
+        )
     }
 
     #[test]
@@ -1478,6 +1535,46 @@ mod tests {
             args.iter().position(|arg| arg == "-map_chapters")
                 < args.iter().position(|arg| arg == "pipe:1")
         );
+    }
+
+    /// The fold runs on the decoded preroll, ahead of the lattice trim, so
+    /// the limiter has settled before the first kept sample and adjacent
+    /// generations join on identical gain.
+    #[test]
+    fn encoded_vod_folds_ahead_of_the_sample_lattice() {
+        use crate::playback::audio::{resolve_audio, AudioRoute, DownmixMatrix};
+        let mut source = chaptered_source();
+        source.audio_streams = vec![crate::domain::AudioStream {
+            index: 1,
+            codec: "truehd".into(),
+            channels: Some(8),
+            channel_layout: Some("7.1".into()),
+            sample_rate: Some(48_000),
+            ..Default::default()
+        }];
+        let mut options = crate::transcode::TranscodeOptions::default();
+        let audio = resolve_audio(
+            source.audio_streams.first(),
+            crate::playback::default_profile(),
+            AudioRoute::EncodedVod,
+            0,
+        );
+        assert_eq!(audio.downmix, Some(DownmixMatrix::LoRo71));
+        options.set_audio_delivery(audio);
+        let args = pipe_args_for(&source, &options);
+        let filters: Vec<_> = args
+            .windows(2)
+            .filter(|pair| pair[0] == "-af")
+            .map(|pair| pair[1].clone())
+            .collect();
+        assert_eq!(filters.len(), 1, "{filters:?}");
+        let fold = DownmixMatrix::LoRo71.filter().expect("measured fold");
+        assert!(
+            filters[0].starts_with(&format!("{fold},asetpts=PTS-")),
+            "{}",
+            filters[0]
+        );
+        assert!(filters[0].ends_with(",apad"), "{}", filters[0]);
     }
 
     #[test]

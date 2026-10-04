@@ -71,6 +71,153 @@ fn refresh_encoded_plan(file: &MediaFile, encoding: &mut crate::vodencode::Encod
     encoding.resources = resources;
 }
 
+#[test]
+fn encoded_vod_frozen_cpu_floor_preserves_empty_pool_and_lowered_policy() {
+    use crate::admission::{Admissions, Priority, TranscodeResourceEstimate, Workload};
+    use crate::vodencode::{frozen_software_threads, try_admit_frozen_bundle};
+    use plurx_core::transcode::{
+        vod_pipe_args, Encoder, Pacing, TranscodeExecution, TranscodeOptions, VodFrameGrid,
+    };
+
+    // Metadata-only: no media generation, child process, or runtime measurement.
+    let mut file = media_file_at(PathBuf::from("/s02-source-chain-only.mkv"), 45_000);
+    file.width = Some(3840);
+    file.height = Some(2160);
+    file.bit_depth = Some(10);
+    file.hdr = Some("hdr10".into());
+    let work = Workload::of(&file, 2160);
+    assert_eq!(work.software_threads(), 8);
+    let options = TranscodeOptions {
+        target_height: 2160,
+        software_threads: Some(frozen_software_threads(&work, 3)),
+        ..Default::default()
+    };
+    assert_eq!(options.software_threads, Some(3));
+    let plan = encoded_plan(&file, &options, Encoder::Software);
+    let resources = TranscodeResourceEstimate::of(&plan, &work);
+    assert_eq!(resources.cpu_threads, 8);
+    assert_eq!(resources.decoder_threads, None);
+    assert!(!resources.hardware_slot);
+    let execution = TranscodeExecution::from_options(&file, &options, Pacing::unpaced(), ".")
+        .expect("frozen execution");
+    let args = vod_pipe_args(
+        &file,
+        &plan,
+        &execution,
+        VodFrameGrid::new(24000, 1001).expect("grid"),
+        45.0,
+    );
+    let input = args.iter().position(|arg| arg == "-i").expect("input");
+    let encoder_threads = args
+        .windows(2)
+        .position(|pair| pair == ["-threads", "3"])
+        .expect("frozen output encoder threads");
+    assert!(encoder_threads > input);
+    assert!(!args[..input].iter().any(|arg| arg == "-threads"));
+    assert!(!args
+        .iter()
+        .any(|arg| matches!(arg.as_str(), "-filter_threads" | "-filter_complex_threads")));
+
+    let admissions = Admissions::new();
+    let permit = try_admit_frozen_bundle(
+        &admissions,
+        1,
+        3,
+        &resources,
+        &options,
+        Priority::Live,
+        None,
+    )
+    .expect("empty pool admits the capped frozen recipe");
+    assert_eq!(admissions.software_in_use(), 8);
+    for priority in [Priority::Live, Priority::Background, Priority::Speculative] {
+        assert!(admissions
+            .try_admit_bundle(1, 3, &resources, priority)
+            .is_none());
+        assert_eq!(admissions.software_in_use(), 8);
+    }
+    let (hardware, software) = permit.into_parts();
+    assert!(hardware.is_none());
+    let software = software.expect("full CPU reservation");
+    assert_eq!(software.threads(), 8);
+    drop(software);
+    assert_eq!(admissions.software_in_use(), 0);
+    for lowered in [2, 0] {
+        assert!(matches!(
+            try_admit_frozen_bundle(
+                &admissions,
+                1,
+                lowered,
+                &resources,
+                &options,
+                Priority::Live,
+                None
+            ),
+            Err(true)
+        ));
+        assert_eq!(admissions.software_in_use(), 0);
+    }
+    let restored = try_admit_frozen_bundle(
+        &admissions,
+        1,
+        3,
+        &resources,
+        &options,
+        Priority::Live,
+        None,
+    )
+    .expect("restored policy admits the unchanged recipe");
+    drop(restored);
+    let unknown = TranscodeOptions {
+        software_threads: None,
+        ..options.clone()
+    };
+    assert!(matches!(
+        try_admit_frozen_bundle(
+            &admissions,
+            1,
+            3,
+            &resources,
+            &unknown,
+            Priority::Live,
+            None
+        ),
+        Err(true)
+    ));
+    let hardware_only = TranscodeResourceEstimate {
+        hardware_slot: true,
+        cpu_threads: 0,
+        decoder_threads: None,
+    };
+    // Resolve a real hardware encoder with a CPU filter graph: its output
+    // does not enforce options.software_threads, so Some(3) cannot excuse8.
+    let mixed_plan = encoded_plan(&file, &options, Encoder::Vaapi);
+    assert!(!mixed_plan.options().pipeline.keeps_frames_off_the_cpu());
+    let mixed = TranscodeResourceEstimate::of(&mixed_plan, &work);
+    assert!(mixed.hardware_slot);
+    assert_eq!(mixed.cpu_threads, 8);
+    assert!(matches!(
+        try_admit_frozen_bundle(&admissions, 1, 3, &mixed, &options, Priority::Live, None),
+        Err(true)
+    ));
+    assert_eq!(admissions.software_in_use(), 0);
+    assert_eq!(admissions.in_use(), 0);
+    let hardware = try_admit_frozen_bundle(
+        &admissions,
+        1,
+        0,
+        &hardware_only,
+        &unknown,
+        Priority::Live,
+        None,
+    )
+    .expect("CPU-free hardware still follows hardware admission");
+    assert_eq!(admissions.in_use(), 1);
+    assert_eq!(admissions.software_in_use(), 0);
+    drop(hardware);
+    assert_eq!(admissions.in_use(), 0);
+}
+
 // Each test below owns a fresh `Admissions`, while production encoders on
 // one daemon share a single admission budget. Running these restart campaigns
 // concurrently can therefore launch more real FFmpeg processes than a daemon
@@ -113,6 +260,7 @@ async fn encoded_fixture(base: &Path) -> (MediaFile, Arc<crate::vodencode::Encod
         codec: "aac".into(),
         channels: Some(1),
         sample_rate: Some(48_000),
+        channel_layout: None,
         language: Some("eng".into()),
         title: None,
         default: true,
@@ -316,7 +464,7 @@ async fn shared_audio_vod_reserves_cpu_only_and_publishes_one_audio_track() {
             companion_context: None,
         version: 1, family_generation: uuid::Uuid::new_v4().to_string(), role: crate::transcode::ContinuousMediaRole::Video,
     }));
-    let attach = || VodRecipeRequest { companion: None, request: &parent_request, encoding: Some(Arc::clone(&video)), soundtrack: Some(Arc::clone(&encoding)) };
+    let attach = || VodRecipeRequest { measured_candidate: None, retained_capture: RetainedOutputCapture::New, companion: None, request: &parent_request, encoding: Some(Arc::clone(&video)), soundtrack: Some(Arc::clone(&encoding)) };
     let attribution = VodAttribution { user_name: "test", item_title: "paired continuous attachment", supersession_user: "test" };
     assert!(serve.try_create(attach(), &file, &settings(), attribution, parent.clone()).await.is_err());
     assert!(!serve.shared.sessions.lock().await.contains_key(&parent));
@@ -383,7 +531,7 @@ async fn shared_audio_vod_reserves_cpu_only_and_publishes_one_audio_track() {
     let media = parent_request.continuous_media.as_mut().expect("role");
     media.autonomous_companion = Some(companion_id);
     let family_budget = budget + companion.resources().cpu_threads;
-    let autonomous = || VodRecipeRequest { request: &parent_request,
+    let autonomous = || VodRecipeRequest { measured_candidate: None, retained_capture: RetainedOutputCapture::New, request: &parent_request,
         encoding: Some(Arc::clone(&video)), soundtrack: Some(Arc::clone(&encoding)),
         companion: Some((companion_request.clone(), Arc::clone(&companion))) };
     encoding.store.put_setting(plurx_core::store::keys::SW_POOL_THREADS, &(family_budget - 1).to_string()).await.expect("one short family budget");
@@ -640,7 +788,10 @@ async fn candidate_vod_cache_requires_exact_complete_present_members() {
     let serve = bare_serve(&base.path().join("renditions"));
     let rendition = serve.shared.build_rendition(
         "candidate-cache", None, Recipe {
+            retained_logical: None,
+            measured_candidate: None,
             file, audio_index: None, aac: true,
+            audio_delivery: None,
             video: CopyVideoOptions::new(false, false),
             source_object_version: Some(encoding.source_object_version.clone()),
             cluster_cache_key: None, encoding: Some(Arc::clone(&encoding)),
@@ -684,6 +835,9 @@ async fn candidate_vod_cache_requires_exact_complete_present_members() {
     assert!(!legacy_encoding.options.normalized_geometry, "fixture is the ordinary legacy recipe");
     let legacy = serve.shared.build_rendition(
         "legacy-candidate-cache", None, Recipe {
+            retained_logical: None,
+            measured_candidate: None,
+            audio_delivery: None,
             file: rendition.recipe.file.clone(), audio_index: None, aac: true,
             video: CopyVideoOptions::new(false, false),
             source_object_version: Some(legacy_encoding.source_object_version.clone()),
@@ -804,8 +958,10 @@ async fn encoded_vod_resurrection_cannot_adopt_same_size_mtime_replacement() {
     req.kind = SessionKind::Transcode { height: 64 };
     old.try_create(
         VodRecipeRequest {
+            measured_candidate: None,
+            retained_capture: RetainedOutputCapture::New,
             companion: None,
-                soundtrack: None,
+            soundtrack: None,
             request: &req,
             encoding: Some(Arc::clone(&encoding)),
         },
@@ -853,7 +1009,9 @@ async fn encoded_vod_resurrection_cannot_adopt_same_size_mtime_replacement() {
     let refused = new
         .try_create(
             VodRecipeRequest {
-            companion: None,
+                measured_candidate: None,
+                retained_capture: RetainedOutputCapture::New,
+                companion: None,
                 soundtrack: None,
                 request: &req,
                 encoding: Some(Arc::clone(&encoding)),
@@ -906,8 +1064,10 @@ async fn encoded_vod_resurrection_cannot_adopt_same_size_mtime_replacement() {
     });
     new.try_create(
         VodRecipeRequest {
+            measured_candidate: None,
+            retained_capture: RetainedOutputCapture::New,
             companion: None,
-                soundtrack: None,
+            soundtrack: None,
             request: &req,
             encoding: Some(fresh),
         },
@@ -1047,10 +1207,13 @@ async fn encoded_vod_held_capacity_keeps_cached_gets_open_and_rechecks_seek_afte
             "held-admission",
             None,
             Recipe {
+                retained_logical: None,
+                measured_candidate: None,
                 file,
                 audio_index: None,
-                aac: true,
-                video: CopyVideoOptions::new(false, false),
+               aac: true,
+                audio_delivery: None,
+               video: CopyVideoOptions::new(false, false),
                 source_object_version: Some(encoding.source_object_version.clone()),
                 cluster_cache_key: None,
                 encoding: Some(Arc::clone(&encoding)),
@@ -1456,7 +1619,9 @@ async fn encoded_pair(
     serve
         .try_create(
             VodRecipeRequest {
-            companion: None,
+                measured_candidate: None,
+                retained_capture: RetainedOutputCapture::New,
+                companion: None,
                 soundtrack: None,
                 request: &req,
                 encoding: Some(Arc::clone(encoding)),
@@ -1833,8 +1998,10 @@ async fn assert_encoded_restarts(
         let started = serve
             .try_create(
                 VodRecipeRequest {
-            companion: None,
-                soundtrack: None,
+                    measured_candidate: None,
+                    retained_capture: RetainedOutputCapture::New,
+                    companion: None,
+                    soundtrack: None,
                     request: &req,
                     encoding: Some(Arc::clone(&encoding)),
                 },

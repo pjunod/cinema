@@ -176,6 +176,45 @@ async function hevcTiersMediaCapabilities(){
   }
   return answered?{passed, pqPassed}:null;
 }
+// Channels this browser's audio output reaches. The destination of an
+// AudioContext is the only public answer; the context is closed again at once
+// so a page that never plays sound keeps no audio device open. Unknown is
+// stereo, never a guessed surround claim.
+function browserOutputChannels(){
+  try{
+    // Safari before 14.1 named it webkitAudioContext; TypeScript knows only the standard name.
+    const Ctx=window.AudioContext||/** @type {any} */ (window).webkitAudioContext;
+    if(!Ctx) return 2;
+    const context=new Ctx();
+    const channels=Number(context.destination&&context.destination.maxChannelCount);
+    try{ const closing=context.close(); if(closing&&closing.catch) closing.catch(()=>{}); }catch(e){}
+    return Number.isFinite(channels)&&channels>0?channels:2;
+  }catch(e){ return 2; }
+}
+// Read when a caps document is first built for a request (after the viewer
+// has interacted, so no autoplay warning at page load) and again after an
+// output device change, never on every document.
+let BROWSER_OUTPUT_CHANNELS=null;
+function browserOutputChannelsCached(){
+  if(BROWSER_OUTPUT_CHANNELS===null) BROWSER_OUTPUT_CHANNELS=browserOutputChannels();
+  return BROWSER_OUTPUT_CHANNELS;
+}
+try{
+  if(navigator.mediaDevices&&navigator.mediaDevices.addEventListener){
+    navigator.mediaDevices.addEventListener("devicechange",()=>{ BROWSER_OUTPUT_CHANNELS=null; });
+  }
+}catch(e){}
+// The route claim the server negotiates audio from (AUDIO-RESOLVED-
+// INDEPENDENTLY.md §3.1). A browser decodes every codec it lists itself and
+// never passes a bitstream through, so each decoded codec reaches exactly the
+// output's channel count, and the browser resamples anything it decodes. Only
+// codecs the server's negotiation understands are claimed.
+function browserAudioSinks(acodec, outputChannels){
+  const raw=Math.floor(Number(outputChannels));
+  const channels=Number.isFinite(raw)?Math.min(8,Math.max(2,raw)):2;
+  return String(acodec||"").split(",").filter(codec=>["aac","mp3","flac","ac3","eac3"].includes(codec))
+    .map(codec=>({codec, max_channels:channels, passthrough:false, sample_rates_hz:[44100,48000]}));
+}
 function buildPlayCaps(hevc){
   let v=null; try{ v=document.createElement("video"); }catch(e){}
   const can=t=>{ try{ return !!v && v.canPlayType(t)!==""; }catch(e){ return false; } };
@@ -345,6 +384,8 @@ function capsDocument(c, limits){
     // Only when this browser has one; absent is not a claim.
     ...(c.dv?{dv_transport:"progressive"}:{}),
     display:{hdr:!!c.hdrDisplay, dolby_vision:dvProfiles.length>0},
+    // Absent is the legacy audio contract, so an empty claim is not sent.
+    ...(Array.isArray(c.audioSinks)&&c.audioSinks.length?{audio_sinks:c.audioSinks.slice(0,16)}:{}),
     ...(c.maxheight?{max_height:c.maxheight}:{}),
     // The identity is the MAP KEY in localStorage, so the entries have to be
     // rebuilt with it inlined — the obvious `Object.values()` would send a
@@ -402,7 +443,9 @@ function measuredPresentationTarget(){
   return {...PRESENTATION_TARGET_RECT};
 }
 function currentCapsDocument(){
-  const caps=capsDocument(PLAY_CAPS, decodeLimits());
+  const sinks=browserAudioSinks(PLAY_CAPS.acodec, browserOutputChannelsCached());
+  const caps=capsDocument(sinks.length?Object.assign({}, PLAY_CAPS, {audioSinks:sinks}):PLAY_CAPS,
+    decodeLimits());
   const target=measuredPresentationTarget();
   if(SERVER&&SERVER.playback_display_aware_auto&&target){
     Object.assign(caps.display,{presentation_target:target});
@@ -979,6 +1022,7 @@ function buildPlayer(attempt,decided,prepared){
     attemptId:null, attemptReason:null, bufferLimits:null,
     ladder, priorKbps, autoHeight:autoStartHeight,
     qualityCandidates:Array.isArray(decision.quality_candidates)?decision.quality_candidates:null,
+    measuredCandidateOutputs:Array.isArray(decision.measured_candidate_outputs)?decision.measured_candidate_outputs:null,
     qualityCandidateId:decision.quality_candidate_id||null,
     bandwidthSeedBps:replacementBandwidthSeed,
     abr:{requestedCandidateId:decision.quality_candidate_id||null,
@@ -990,6 +1034,7 @@ function buildPlayer(attempt,decided,prepared){
       recentEstimateSource:null,recentEstimateUrl:null,
       completedTransfers:[],lastCliffAtMs:null,
       switches:[],switching:false,stableSinceMs:clickedAt,supplyRescued:false,
+      decodeStepConsumed:false,
       // Rungs this playback has already failed to open. Per playback, not
       // persisted: a transient server failure must not cap quality forever.
       failedHeights:new Set()},

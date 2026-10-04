@@ -1,0 +1,22 @@
+{
+  "version": 1,
+  "repository": 1,
+  "branch": "codex/qualification-promotion-binding",
+  "suite": "operations",
+  "source_commit": null,
+  "test_file": "tests/operations/test_contracts.py",
+  "test_file_sha256": "d563c1f991ef083640b3ab19fc533b233a923d3a2c6d4081c148b1d114572989",
+  "test_ids": [
+    "test_contracts.OperationsContractCase.test_only_manual_main_dispatch_publishes_after_validation"
+  ],
+  "command": "python3 -m unittest tests.operations.test_manual_qualification_binding.ManualQualificationBindingCase.test_authenticated_manual_promotion_binding_refuses_stale_or_partial_evidence tests.operations.test_contracts.OperationsContractCase.test_only_manual_main_dispatch_publishes_after_validation -v",
+  "output": "Genuine exec_command tool result f65dba, exit0: both named methods ... ok; Ran 2 tests in 0.003s; OK. This document covers ONE of those two events, not an invented separate invocation. The existing publisher method was genuinely invalidated by the new qualification exclusion predicate. Actual source was uncommitted stagedc877182cda4ea59825decebecd57c5d0097f725c on base74b73a9b1f24537a6f96b36f61467f85a6edb9ae; bounded30s/64KiB controller0.11068645800696686s. Retained tool-output transcription SHA c2dafc32662da15e6edc5230e7ecb1d7f05c6f4c109e583a0b167001dadf36de; no live raw-file capture or later-commit execution claimed. Current1f2b3bb source file remains byte-identical.",
+  "result": {
+    "failed": 0,
+    "errors": 0,
+    "skipped": 0,
+    "expected_failures": 0,
+    "unexpected_successes": 0,
+    "count": 1
+  }
+}

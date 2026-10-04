@@ -1065,8 +1065,124 @@ assert.equal(context.ACT_TIMER, null);
         self.assertEqual(supported_max_startup_seconds, 18135)
         self.assertIn("`5h3m`", read("docs/OPERATIONS.md"))
 
+    def test_runtime_assets_layer_drops_build_time_state(self):
+        """P-02 M6: the media runtime layer must not carry build-time state.
+
+        Two cold builds of one commit differed in that layer only by apt,
+        dpkg and alternatives logs, ldconfig's aux-cache, fontconfig's caches,
+        the static probe's `config.log` and (across days) the account's
+        last-change day. Each is either removed or given a fixed input.
+        """
+        dockerfile = read("Dockerfile")
+        assets = dockerfile.split(" AS runtime-assets\n", 1)[1].split("\nFROM ", 1)[0]
+        run = assets[assets.index("\nRUN ") :]
+        removal = run.index("rm -rf /var/log/apt/* /var/log/*.log /var/cache/ldconfig/aux-cache")
+        self.assertIn("/var/cache/fontconfig/*.cache-*", run[removal : removal + 200])
+        # Removal comes after the last package operation in the layer.
+        self.assertLess(run.rindex("apt-get autoremove -y"), removal)
+        self.assertIn(
+            'SOURCE_DATE_EPOCH=$(date -u -d "$snapshot_day" +%s) \\\n'
+            "        useradd -r -g plurx -d /var/lib/plurx plurx",
+            run,
+        )
+        self.assertIn("snapshot_day=$(printf '%s' \"$DEBIAN_SNAPSHOT\" | cut -c1-8)", run)
+        # The commit's time would rebuild this layer on every commit.
+        self.assertNotRegex(assets, r"(?m)^ARG SOURCE_DATE_EPOCH")
+
+        probe = read("scripts/build-static-ffprobe")
+        self.assertNotIn('"$documentation/config.log"', probe)
+        self.assertIn('cp config.h "$documentation/config.h"', probe)
+        self.assertIn('cp ffbuild/config.mak "$documentation/config.mak"', probe)
+
+    def test_image_builds_pass_the_commit_time_as_source_date_epoch(self):
+        """P-02 M6: two builds of one commit must be the same binary.
+
+        `crates/plurxd/build.rs` used to stamp `built_at` from the compile
+        clock, so no rebuild was ever byte-identical. It now honours
+        `SOURCE_DATE_EPOCH`, which is only worth anything if every image build
+        actually passes the commit's time: the Docker context has no `.git`.
+        """
+        dockerfile = read("Dockerfile")
+        build_stage = dockerfile.split(" AS build\n", 1)[1].split("\nFROM ", 1)[0]
+        self.assertRegex(build_stage, r"(?m)^ARG SOURCE_DATE_EPOCH$")
+        self.assertLess(
+            build_stage.index("ARG SOURCE_DATE_EPOCH"), build_stage.index("cargo build")
+        )
+
+        makefile = read("Makefile")
+        self.assertIn(
+            "SOURCE_DATE_EPOCH := $(if $(filter %-dirty,$(BUILD_REF)),,"
+            "$(shell git log -1 --format=%ct 2>/dev/null))",
+            makefile,
+        )
+        commit_time = subprocess.run(
+            ["git", "log", "-1", "--format=%ct"],
+            cwd=ROOT, check=True, text=True, stdout=subprocess.PIPE,
+        ).stdout.strip()
+
+        def docker_build(*variables: str, env: dict[str, str] | None = None) -> str:
+            result = subprocess.run(
+                ["make", "--no-print-directory", "-n", "docker", *variables],
+                cwd=ROOT, check=True, text=True, stdout=subprocess.PIPE,
+                env={**os.environ, **(env or {})},
+            )
+            (line,) = [c for c in result.stdout.splitlines() if "docker build" in c]
+            return line
+
+        # A clean tree is dated by HEAD, even with an unrelated value exported.
+        clean = docker_build("BUILD_REF=v1.2.3", env={"SOURCE_DATE_EPOCH": "77"})
+        self.assertIn(f'--build-arg SOURCE_DATE_EPOCH="{commit_time}"', clean)
+        # A dirty tree is not HEAD: no date is passed, so build.rs reads the clock.
+        dirty = docker_build("BUILD_REF=v1.2.3-4-gabc-dirty")
+        self.assertIn('--build-arg SOURCE_DATE_EPOCH=""', dirty)
+        (pinned,) = [
+            c
+            for c in make_dry_run_commands("docker", "SOURCE_DATE_EPOCH=1234")
+            if "docker build" in c
+        ]
+        self.assertIn('--build-arg SOURCE_DATE_EPOCH="1234"', pinned)
+        (rollout,) = [
+            c
+            for c in make_dry_run_commands("docker-up", "SOURCE_DATE_EPOCH=1234")
+            if "docker compose up -d --build" in c
+        ]
+        self.assertIn('SOURCE_DATE_EPOCH="1234" ', rollout)
+        self.assertIn(
+            "SOURCE_DATE_EPOCH: ${SOURCE_DATE_EPOCH:-}", read("deploy/docker-compose.yml")
+        )
+
+        push = read("scripts/registry-push")
+        self.assertIn('SOURCE_DATE_EPOCH="$(git log -1 --format=%ct "$FULL_SHA")"', push)
+        self.assertIn('--build-arg SOURCE_DATE_EPOCH="$SOURCE_DATE_EPOCH"', push)
+
+        smoke = workflow_job_blocks(".github/workflows/ci.yml")["package_smoke"]
+        self.assertIn(
+            'echo "source_date_epoch=$(git log -1 --format=%ct HEAD)" >> "$GITHUB_OUTPUT"',
+            smoke,
+        )
+        self.assertIn(
+            "SOURCE_DATE_EPOCH=${{ steps.binary-build.outputs.source_date_epoch }}", smoke
+        )
+        release = read(".github/workflows/publish-release.yml")
+        self.assertIn(
+            'echo "source_date_epoch=$(git show -s --format=%ct "$commit_sha")"', release
+        )
+        self.assertIn(
+            "source_date_epoch: ${{ steps.release.outputs.source_date_epoch }}", release
+        )
+        self.assertIn(
+            "SOURCE_DATE_EPOCH=${{ needs.resolve.outputs.source_date_epoch }}", release
+        )
+
+        build_rs = read("crates/plurxd/build.rs")
+        self.assertIn("cargo:rerun-if-env-changed=SOURCE_DATE_EPOCH", build_rs)
+        self.assertIn('std::env::var("SOURCE_DATE_EPOCH")', build_rs)
+
     def test_docker_build_frees_each_ffmpeg_download_before_the_next(self):
         dockerfile = read("Dockerfile")
+        # Only the shipped media installer owns these two cache-clean points.
+        # The CI tooling stage cleans its independently installed build tools.
+        dockerfile = dockerfile.split("FROM runtime-assets AS ci", 1)[0]
         distro_install = dockerfile.index("intel-media-va-driver-non-free")
         first_clean = dockerfile.index("apt-get clean", distro_install)
         jellyfin_verify = dockerfile.index("sha256sum -c -", first_clean)
@@ -1274,6 +1390,7 @@ assert.equal(context.ACT_TIMER, null);
             [
                 "release-bin/plurxd",
                 "release-bin/plurx-cluster-check",
+                "release-bin/*.dwp",
                 "release-bin/build-manifest.json",
                 "release-bin/*.sha256",
             ],
@@ -1503,7 +1620,14 @@ assert.equal(context.ACT_TIMER, null);
         self.assertNotIn("./.github/actions/playwright", fast_rust)
         self.assertNotIn("uses: ./.github/actions/ffmpeg", fast_rust)
         self.assertIn("uses: ./.github/actions/ffmpeg", unit_rust)
-        self.assertIn('major: "6"', unit_rust)
+        self.assertIn('major: "8"', unit_rust)
+        self.assertIn("binary: /usr/lib/jellyfin-ffmpeg/ffmpeg", unit_rust)
+        # The shipped-runtime qualification uses FFmpeg 8; the independent
+        # main fast lane still retains FFmpeg 6 burst-honoring coverage.
+        self.assertIn(
+            'major: "6"',
+            workflow_job_blocks(".github/workflows/main-fast-lane.yml")["rust_compile"],
+        )
         # Membership alone would stay green with the step moved below the gate
         # it provisions, which is exactly the failure this contract records.
         self.assertLess(
@@ -1709,16 +1833,21 @@ assert.equal(context.ACT_TIMER, null);
                 contract_preflight.index(
                     "actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020"
                 ),
-                contract_preflight.index("run: make operations-check"),
+                contract_preflight.index(
+                    "run: python3 -m validation.python_unit_receipts run"
+                    if contract_preflight == effort_preflight
+                    else "run: make operations-check"
+                ),
             )
             # The shared player-input fixtures compile into no Rust and no
             # client on a fixture-only diff, so without this step a ruling
             # could be edited out of the contract with nothing to notice.
-            self.assertIn(
-                "node tests/playback/player-input-contract.test.js",
-                contract_preflight,
-            )
-            self.assertIn("node tests/web/player-dom.test.js", contract_preflight)
+            if contract_preflight == effort_preflight:
+                self.assertNotIn("node tests/playback/player-input-contract.test.js", contract_preflight)
+                self.assertNotIn("node tests/web/player-dom.test.js", contract_preflight)
+            else:
+                self.assertIn("node tests/playback/player-input-contract.test.js", contract_preflight)
+                self.assertIn("node tests/web/player-dom.test.js", contract_preflight)
 
         lint = read(".github/workflows/lint.yml")
         self.assertNotIn("\n  pull_request:\n", lint)
@@ -1934,7 +2063,7 @@ assert.equal(context.ACT_TIMER, null);
             ["make unit"],
         )
         self.assertIn('major: "6"', fast_rust_steps["Install the pinned FFmpeg"])
-        self.assertIn("timeout-minutes: 60", fast_jobs["rust_compile"])
+        self.assertIn("timeout-minutes: 90", fast_jobs["rust_compile"])
         fast_preflight = workflow_step_blocks(fast_jobs["preflight"])
         playback_contracts = workflow_step_literal(
             fast_preflight["Check the shared player input contract"], "run"
@@ -1996,7 +2125,7 @@ assert.equal(context.ACT_TIMER, null);
         )
         self.assertIn("run: make apple-build", effort)
         self.assertIn("run: make android", effort)
-        self.assertIn("run: make web-check", effort)
+        self.assertIn("run: make effort-web-static-check", effort)
         web_check = makefile.split(".PHONY: web-check", 1)[1].split(".PHONY:", 1)[0]
         self.assertIn("node tests/web/cluster-membership.test.js", web_check)
         self.assertIn(
@@ -3111,7 +3240,7 @@ assert.equal(context.ACT_TIMER, null);
         for point in ("cluster.auth", "cluster.membership", "cluster.operations"):
             self.assertIn("cluster-transport-recovery", points[point]["checks"])
 
-    def test_workflow_cancellation_preserves_only_frozen_qualification(self):
+    def test_workflow_cancellation_preserves_qualification_and_python_receipts(self):
         workflow = read(".github/workflows/ci.yml")
         effort_workflow = read(".github/workflows/effort-ci.yml")
 
@@ -3126,7 +3255,8 @@ assert.equal(context.ACT_TIMER, null);
             self.assertIn(contract, workflow)
         self.assertIn("group: ci-${{ github.ref }}", workflow)
         self.assertNotIn("github.event.pull_request.number || github.ref", workflow)
-        self.assertIn("cancel-in-progress: true", effort_workflow)
+        self.assertIn("cancel-in-progress: false", effort_workflow)
+        self.assertNotIn("cancel-in-progress: true", effort_workflow)
 
         def cancels(
             event: str, *, ref: str = "", head: str = "", base: str = ""
@@ -3309,15 +3439,49 @@ assert.equal(context.ACT_TIMER, null);
         self.assertIn("run: make release-check", readiness)
         self.assertIn("fetch-depth: 0", readiness)
 
-    def test_main_push_builds_once_and_publishes_only_after_validation(self):
+    def test_effort_web_lints_source_without_provisioning_behavior_browser(self):
+        web = workflow_job_blocks(".github/workflows/effort-ci.yml")["web_static"]
+        self.assertIn("run: make effort-web-static-check", web)
+        self.assertNotIn("playwright", web.lower())
+        self.assertNotIn("run: make web-check", web)
+
+    def test_preflight_budgets_allow_full_history_and_contracts(self):
+        for workflow in ("ci", "effort-ci", "main-fast-lane"):
+            with self.subTest(workflow=workflow):
+                preflight = workflow_job_blocks(
+                    f".github/workflows/{workflow}.yml"
+                )["preflight"]
+                self.assertIn("timeout-minutes: 10", preflight)
+                for command in (
+                    "make history-check",
+                    "make validation-lint",
+                    "python3 -m validation.python_unit_receipts run"
+                    if workflow == "effort-ci" else "make operations-check",
+                ):
+                    self.assertIn(command, preflight)
+
+    def test_only_manual_main_dispatch_publishes_after_validation(self):
         workflow = read(".github/workflows/ci.yml")
         jobs = workflow_job_blocks(".github/workflows/ci.yml")
         publish = jobs["publish_main"]
         script = read("scripts/registry-push")
 
         self.assertIn("name: publish merged image (Forgejo registry)", publish)
-        self.assertIn("github.event_name == 'push'", publish)
-        self.assertIn("github.ref == 'refs/heads/main'", publish)
+        condition = publish.split("    if: >-\n", 1)[1].split("\n    runs-on:", 1)[0]
+        self.assertEqual(
+            " ".join(condition.split()),
+            "always() && github.event_name == 'workflow_dispatch' && "
+            "github.ref == 'refs/heads/main' && inputs.promotion_pr == '' && "
+            "inputs.promotion_head_sha == '' && inputs.promotion_base_sha == '' && "
+            "needs.scope.outputs.qualification != 'true'",
+        )
+        for field in ("promotion_pr", "promotion_head_sha", "promotion_base_sha"):
+            self.assertIn(f"inputs.{field} == ''", condition)
+        self.assertIn("needs.scope.outputs.qualification != 'true'", condition)
+        triggers = workflow.split("on:\n", 1)[1].split("\njobs:", 1)[0]
+        self.assertIn("workflow_dispatch:", triggers)
+        self.assertNotIn("branches: [main]", triggers)
+        self.assertNotIn("  schedule:", triggers)
         for dependency in (
             "check",
             "cluster_store",
@@ -3442,12 +3606,27 @@ assert.equal(context.ACT_TIMER, null);
                     and name == "apple_compile"
                 ):
                     expected = apple
-                elif path == ".github/workflows/ci.yml" and name == "cluster_daemon":
-                    expected = high_cpu_ffmpeg6
+                elif path == ".github/workflows/ci.yml" and name in {
+                    "check",
+                    "cluster_daemon",
+                }:
+                    # The pinned private CI image supplies shipped FFmpeg 8;
+                    # host trust labels remain unchanged, without a FFmpeg-6
+                    # installation requirement on these image-owned jobs.
+                    expected = high_cpu
+                elif path == ".github/workflows/ci.yml" and name in {
+                    "web_layout", "vod_web"
+                }:
+                    expected = general
                 elif path == ".github/workflows/coverage.yml" and name == "coverage":
                     expected = high_cpu
-                elif path == ".github/workflows/ci.yml" and name == "web_layout":
-                    expected = ffmpeg6
+                elif (
+                    path == ".github/workflows/effort-ci.yml"
+                    and name == "windows_compile"
+                ):
+                    # The high-cpu pool also includes 8 GiB Incus guests;
+                    # Windows cross-linking needs the larger bare-metal hosts.
+                    expected = local("Linux", "X64", "lab", "general", "baremetal")
                 elif path == ".github/workflows/ci.yml" and name == "package_smoke":
                     expected = "    runs-on: ${{ fromJSON(matrix.runs_on) }}"
                 elif path == ".github/workflows/ci.yml" and name == "publish_main":
@@ -3479,8 +3658,6 @@ assert.equal(context.ACT_TIMER, null);
                     "cluster_transport_recovery",
                 }:
                     expected = ci_topology
-                elif path == ".github/workflows/ci.yml" and name == "check":
-                    expected = high_cpu_ffmpeg6
                 elif path == ".github/workflows/ci.yml" and name == "cluster_wal":
                     expected = high_cpu
                 elif (
@@ -3740,6 +3917,74 @@ assert.equal(context.ACT_TIMER, null);
             "the ffmpeg majors CI covers changed; update docs/VALIDATION.md's "
             "'Which ffmpeg the profiles assume' in the same commit",
         )
+
+    def test_m5_shipped_ffmpeg_jobs_use_one_digest_and_keep_burst_coverage(self):
+        dockerfile = read("Dockerfile")
+        self.assertIn("FROM runtime-assets AS ci", dockerfile)
+        ci_stage = dockerfile.split("FROM runtime-assets AS ci", 1)[1].split(
+            "FROM runtime-assets AS runtime", 1
+        )[0]
+        self.assertIn("COPY LICENSE NOTICE THIRD-PARTY-NOTICES.md /usr/share/doc/plurx/", ci_stage)
+        self.assertIn("COPY licenses/ /usr/share/doc/plurx/licenses/", ci_stage)
+        self.assertIn("PLAYWRIGHT_BROWSERS_PATH=/opt/playwright-browsers", dockerfile)
+        self.assertLess(
+            dockerfile.index("PLAYWRIGHT_BROWSERS_PATH=/opt/playwright-browsers"),
+            dockerfile.index("python3 -m playwright install --with-deps chromium"),
+        )
+        self.assertIn("PLURX_FFMPEG=/usr/lib/jellyfin-ffmpeg/ffmpeg", dockerfile)
+        self.assertIn("/usr/local/bin/ffmpeg", dockerfile)
+
+        jobs = workflow_job_blocks(".github/workflows/ci.yml")
+        image = None
+        self.assertNotIn("coverage", jobs)
+        for name in ("check", "cluster_daemon", "web_layout", "vod_web"):
+            with self.subTest(job=name):
+                block = jobs[name]
+                self.assertNotIn("ffmpeg-6", block)
+                self.assertIn('major: "8"', block)
+                self.assertIn(
+                    "binary: /usr/lib/jellyfin-ffmpeg/ffmpeg", block
+                )
+                steps = workflow_step_blocks(block)
+                capture = steps["Capture mounted runner workspace owner"]
+                restore = steps["Restore persistent runner workspace ownership"]
+                self.assertIn('dirname -- "$GITHUB_WORKSPACE"', capture)
+                self.assertIn('echo "HOST_WORKSPACE_OWNER=$owner"', capture)
+                self.assertIn('"${owner%%:*}" = 0', capture)
+                self.assertIn('"${owner##*:}" = 0', capture)
+                self.assertIn('chown -R "$HOST_WORKSPACE_OWNER"', restore)
+                self.assertNotIn('stat -c', restore)
+                self.assertIn("    container:\n", block)
+                match = re.search(r"(?m)^      image: (.+)$", block)
+                self.assertIsNotNone(match)
+                pinned = match.group(1)
+                self.assertRegex(
+                    pinned,
+                    r"^\$\{\{ vars\.FLEET_REGISTRY \|\| 'fleet-registry\.unset\.invalid' \}\}"
+                    r"/noirr/plurx-ci@sha256:[0-9a-f]{64}$",
+                )
+                if image is None:
+                    image = pinned
+                self.assertEqual(image, pinned)
+                self.assertIn("      credentials:\n        username: noirr\n", block)
+                self.assertIn(
+                    "        password: ${{ secrets.CI_REGISTRY_PULL_TOKEN }}", block
+                )
+                self.assertNotIn("secrets.LOCAL_REGISTRY_TOKEN", block.split("    steps:", 1)[0])
+
+        fast = workflow_job_blocks(".github/workflows/main-fast-lane.yml")[
+            "rust_compile"
+        ]
+        self.assertIn("container: ubuntu:24.04", fast)
+        self.assertIn('major: "6"', fast)
+        self.assertIn("make unit", fast)
+        coverage = workflow_job_blocks(".github/workflows/coverage.yml")["coverage"]
+        self.assertIn("container: ubuntu:24.04", coverage)
+        self.assertIn('major: "6"', coverage)
+        self.assertNotIn("plurx-ci@sha256:", coverage)
+        self.assertIn("cargo llvm-cov --workspace --locked --exclude plurx-cluster-check", coverage)
+        action = read(".github/actions/ffmpeg/action.yml")
+        self.assertIn('if [ -n "$WANT_BINARY" ]', action)
 
     def test_ci_flake_ledger_records_real_job_outcomes_and_durations(self):
         script = ROOT / "scripts/ci-flake-report"

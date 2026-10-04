@@ -857,6 +857,7 @@ function wirePlayerMedia(v){
       showStallRecoveryFailure(msg||"The browser reported video error "+code+".");
       return;
     }
+    if(code===3&&autoDecodeMediaError(PLAYER,v)) return;
     // `playbackIsReal()` and not `PLAYER.started`: the guard means "we already
     // got real playback going, don't churn", and audio alone used to satisfy
     // it — which disabled this rescue in precisely the black-picture-with-

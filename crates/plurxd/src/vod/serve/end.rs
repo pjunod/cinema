@@ -210,6 +210,7 @@ impl VodServe {
                     .is_some_and(|current| Arc::ptr_eq(current, &rendition));
                 if session.tombstone.is_some() && exact_cleanup && exact_rendition {
                     session.rendition = None;
+                    session.retained_output = None;
                 }
             }
             drop(sessions);

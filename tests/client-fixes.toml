@@ -1,6 +1,88 @@
 version = 1
 enforce_after = "e8a910f"
 
+# Current once-passed A05 bridges, not historical execution claims. Native
+# adapter compile evidence and physical device acceptance remain separate.
+[[fixes]]
+id = "apple.a05-exact-completed-body-receipt"
+commits = ["9161485793d0907eb8a3e3aa5fb59658ea25ce30"]
+source = "clients/apple/Sources/PlayerController.swift"
+source_anchor = "receipt: response?.value(forHTTPHeaderField: \"X-Plurx-Link-Receipt\")"
+test = "tests/playback/current-main-effort-quality.test.js"
+test_anchor = "a05 genuine completed body carries the response receipt without cache promotion"
+
+[[fixes]]
+id = "apple.a05-qualified-full-output-margin"
+commits = ["05f8b90c11eb2aa1e894a54be1d85b66a6ca62cc"]
+source = "clients/apple/Sources/PlayerController.swift"
+source_anchor = "measuredCandidatePeak(desired, outputs: decision?.measuredCandidateOutputs)"
+test = "tests/playback/current-main-effort-quality.test.js"
+test_anchor = "a05 qualified full-output sidecar is required for positive candidate margin"
+
+[[fixes]]
+id = "apple.a05-retired-attachment-evidence-refusal"
+commits = ["40ceb6e681bf2a487a3f9df7d0a99636b65443f8"]
+source = "clients/apple/Sources/PlayerController.swift"
+source_anchor = "private func currentLinkReceipt() -> String?"
+test = "tests/playback/current-main-effort-quality.test.js"
+test_anchor = "a05 positive margin refuses bare metrics and retired candidate attachment"
+
+[[fixes]]
+id = "apple.a05-per-call-incumbent-receipt"
+commits = ["14c5b75eea72b14d26f79daa09d16b44f585c6c4"]
+source = "clients/apple/Sources/PlayerController.swift"
+source_anchor = "PlaybackLinkRequestContext.$receipt.withValue(receipt)"
+test = "tests/playback/current-main-effort-quality.test.js"
+test_anchor = "a05 request header uses only this installed incumbent nonce"
+
+# Current native recovery bridges cover the new typed-pressure and accepted
+# negative acknowledgement adapters; earlier web executions remain historical.
+[[fixes]]
+id = "apple.auto-typed-candidate-recovery-pressure"
+commits = ["d9d7c04522f27d7f47368c1369fbfc2b0d753a4b"]
+source = "clients/apple/Sources/PlayerController.swift"
+source_anchor = "struct AutoDecodePressureWindow"
+test = "clients/apple/Tests/PlaybackControlReporterTests.swift"
+test_anchor = "testA05TypedRecoveryKeepsCandidateAttachmentAndSuppliedDecodeIntervals"
+
+[[fixes]]
+id = "android.auto-typed-candidate-recovery-pressure"
+commits = []
+supplements = "apple.auto-typed-candidate-recovery-pressure"
+source = "clients/android/app/src/main/java/tv/plurx/app/player/Controller.kt"
+source_anchor = "internal class AutoDecodePressureWindow"
+test = "clients/android/app/src/test/java/tv/plurx/app/player/PlaybackControlReporterTest.kt"
+test_anchor = "a05TypedRecoveryKeepsCandidateAttachmentAndSuppliedDecodeIntervals"
+
+[[fixes]]
+id = "apple.auto-exact-negative-recovery-ack"
+commits = []
+supplements = "apple.auto-typed-candidate-recovery-pressure"
+source = "clients/apple/Sources/PlayerController.swift"
+source_anchor = "func receiptForRequest(previous: String?, candidate: String?, cause: String?)"
+test = "clients/apple/Tests/PlaybackControlReporterTests.swift"
+test_anchor = "testA05NegativeAcknowledgementKeepsExactNonceAttachmentAndOriginalDeadline"
+
+[[fixes]]
+id = "android.auto-exact-negative-recovery-ack"
+commits = []
+supplements = "apple.auto-typed-candidate-recovery-pressure"
+source = "clients/android/app/src/main/java/tv/plurx/app/player/Controller.kt"
+source_anchor = "fun receiptForRequest(previous: String?, candidate: String?, cause:"
+test = "clients/android/app/src/test/java/tv/plurx/app/player/PlaybackControlReporterTest.kt"
+test_anchor = "a05NegativeAcknowledgementKeepsExactNonceAttachmentAndOriginalDeadline"
+
+# Original A05 height controller was removed before landing because PR669 owns
+# the combined route-v1 controller. This anchors its historical client commit
+# to the current removal contract, not to an adapter claimed to be shipped.
+[[fixes]]
+id = "android.a05-height-controller-superseded"
+commits = ["d47d4a83afd1d19583223a095aa72bf255876b08"]
+source = "clients/android/app/src/main/java/tv/plurx/app/player/Controller.kt"
+source_anchor = "class Controller internal constructor("
+test = "tests/operations/test_a05_superseded_controller.py"
+test_anchor = "test_removed_height_controller_does_not_reappear"
+
 # A-04 physical shaping acceptance refuses a saved-server fallback when the
 # explicit Debug launch proxy is absent or does not match the server identity.
 [[fixes]]
@@ -2183,9 +2265,20 @@ test_anchor = "fun initialFocusCanDisableItselfOnlyAfterTheTargetAcceptsFocus()"
 id = "android.playback-heap-budget"
 commits = ["f49a1d7ed"]
 source = "clients/android/app/src/main/java/tv/plurx/app/player/PlaybackLoadControl.kt"
-source_anchor = ".setTargetBufferBytes(playbackBufferTargetBytes(memoryClass))"
+source_anchor = ".setTargetBufferBytes(target)"
 test = "clients/android/app/src/androidTest/java/tv/plurx/app/player/PlaybackLoadControlTest.kt"
 test_anchor = "fun byteBudgetStopsLoadingBeforeTimeTargetForNetworkAndLocalMedia()"
+
+# D-01 retained the allocator-budget behavior while binding each role to the
+# actual Runtime.maxMemory grant. Keep the prior fix association above and
+# anchor the new corrective commit to its already-landed JVM regression.
+[[fixes]]
+id = "android.actual-granted-heap-budget"
+commits = ["fd0babf30c89699c66a7270423c154eb480c67ab"]
+source = "clients/android/app/src/main/java/tv/plurx/app/player/PlaybackBufferBudget.kt"
+source_anchor = "minOf(existingCeiling.toLong(), (grantedHeapBytes / 8).coerceAtLeast(1)).toInt()"
+test = "clients/android/app/src/test/java/tv/plurx/app/player/PlaybackBufferBudgetTest.kt"
+test_anchor = "fun actualGrantedHeapClampsEveryRoleWithoutRaisingTheExistingCeiling()"
 
 [[fixes]]
 id = "apple.prepared-fallback-epoch-ownership"
@@ -2633,7 +2726,7 @@ test_anchor = "assert.equal(video.src, `/api/live-tv/sessions/${session.session_
 [[fixes]]
 id = "apple.library-paging-target-merge"
 commits = ["12331fb3"]
-source = "clients/apple/Sources/LibraryView.swift"
+source = "clients/apple/Sources/LibraryGridCoordinator.swift"
 source_anchor = "requestedThrough = max(requestedThrough, through)"
 test = "clients/apple/Tests/LibraryMergeTests.swift"
 test_anchor = "testFirstPaintNeedsOnePagePerLibrary"
@@ -3203,6 +3296,67 @@ source_anchor = "@JvmStatic @AfterClass fun sealCompletedInvocation()"
 test = "tests/operations/test_android_profile_report.py"
 test_anchor = "test_real_macrobenchmark_device_context_and_binding_are_required"
 
+[[fixes]]
+id = "apple.library-query-task-ownership"
+commits = ["5b32b380e"]
+source = "clients/apple/Sources/LibraryGridCoordinator.swift"
+source_anchor = "final class LibraryGridCoordinator: ObservableObject"
+test = "clients/apple/Tests/LibraryGridCoordinatorTests.swift"
+test_anchor = "testQueryDrivesActualPagerToCompletionAndSummaryReportsProgress"
+
+[[fixes]]
+id = "apple.library-stale-filter-result"
+commits = []
+supplements = "apple.library-query-task-ownership"
+source = "clients/apple/Sources/LibraryGridCoordinator.swift"
+source_anchor = "private func filterNow()"
+test = "clients/apple/Tests/LibraryGridCoordinatorTests.swift"
+test_anchor = "testLateFilterResultCannotReplaceNewerQuerySnapshot"
+
+[[fixes]]
+id = "apple.library-query-cancellation"
+commits = []
+supplements = "apple.library-query-task-ownership"
+source = "clients/apple/Sources/LibraryGridCoordinator.swift"
+source_anchor = "func queryChanged(_ text: String) async"
+test = "clients/apple/Tests/LibraryGridCoordinatorTests.swift"
+test_anchor = "testFiveQueryEditsCoalesceIntoOneActualFilterPassAfter150msWait"
+
+[[fixes]]
+id = "android.library-filter-and-focus-wiring"
+commits = ["75e3d561f"]
+source = "clients/android/app/src/main/java/tv/plurx/app/ui/LibraryPager.kt"
+source_anchor = "fun setWatchFilter(filter: WatchFilter)"
+test = "clients/android/app/src/test/java/tv/plurx/app/ui/LibraryPagerWatchFilterTest.kt"
+test_anchor = "watchFilterLoadsTheUnfetchedTailAndPublishesActualLoadedTotals"
+
+[[fixes]]
+id = "android.library-filter-drive-cancellation"
+commits = []
+supplements = "android.library-filter-and-focus-wiring"
+source = "clients/android/app/src/main/java/tv/plurx/app/ui/LibraryPager.kt"
+source_anchor = "fun setWatchFilter(filter: WatchFilter)"
+test = "clients/android/app/src/test/java/tv/plurx/app/ui/LibraryPagerWatchFilterTest.kt"
+test_anchor = "clearingTheWatchFilterCancelsTheDriveWithoutDiscardingLoadedTitles"
+
+[[fixes]]
+id = "android.library-page-arrival-dpad-focus"
+commits = []
+supplements = "android.library-filter-and-focus-wiring"
+source = "clients/android/app/src/main/java/tv/plurx/app/ui/LibraryScreen.kt"
+source_anchor = "internal fun LibraryScreen("
+test = "clients/android/app/src/androidTest/java/tv/plurx/app/ui/LibraryPageArrivalFocusTest.kt"
+test_anchor = "arrivingPagePreservesTheDpadSelectedCardAndItsOpenAction"
+
+[[fixes]]
+id = "android.library-local-loader-production-bridge"
+commits = []
+supplements = "android.library-filter-and-focus-wiring"
+source = "clients/android/app/src/main/java/tv/plurx/app/ui/LibraryScreen.kt"
+source_anchor = "pager.setWatchFilter(filter)"
+test = "tests/operations/test_android_library_paging_wiring.py"
+test_anchor = "test_view_model_route_uses_the_same_grid_and_watch_filter_policy"
+
 # A rolling session retired by the 180 s pause grace failed the paused item
 # with "resource unavailable" and raised "Playback stopped." for nobody. The
 # failure now parks while paused and Play reopens at the saved position.
@@ -3273,6 +3427,128 @@ source_anchor = "func autoDownsideCostBps("
 test = "clients/apple/Tests/PlaybackControlReporterTests.swift"
 test_anchor = "testOriginalAverageIsDownsideOnlyAndNeedsFreshUnpacedSessionEvidence"
 
+# A05 prepared HTTP observations: these are source-to-current-contract
+# bridges to the new once-passed web regressions, not claims that native unit
+# methods executed. Exact-source Apple/Android compilation is separate evidence.
+[[fixes]]
+id = "apple.prepared-explicit-observation-header"
+commits = ["00c1cfad4110c21638b67651fdc1bd3696d7f89b"]
+source = "clients/apple/Sources/PlaybackControlSession.swift"
+source_anchor = "urlRequest.setValue(linkReceipt, forHTTPHeaderField: \"X-Plurx-Link-Receipt\")"
+test = "tests/playback/current-main-effort-quality.test.js"
+test_anchor = "a05 prepared control sends only its explicit per-call nonce"
+
+[[fixes]]
+id = "android.prepared-explicit-observation-header"
+commits = []
+supplements = "apple.prepared-explicit-observation-header"
+source = "clients/android/app/src/main/java/tv/plurx/app/player/PlaybackControlSession.kt"
+source_anchor = "builder.header(\"X-Plurx-Link-Receipt\", linkReceipt)"
+test = "tests/playback/current-main-effort-quality.test.js"
+test_anchor = "a05 prepared control sends only its explicit per-call nonce"
+
+[[fixes]]
+id = "apple.prepared-own-completed-body-observation"
+commits = []
+supplements = "apple.prepared-explicit-observation-header"
+source = "clients/apple/Sources/PlayerController.swift"
+source_anchor = "private func reportStagedLinkSample("
+test = "tests/playback/current-main-effort-quality.test.js"
+test_anchor = "a05 staged completed body reports only its own attachment nonce"
+
+[[fixes]]
+id = "android.prepared-own-completed-body-observation"
+commits = []
+supplements = "apple.prepared-explicit-observation-header"
+source = "clients/android/app/src/main/java/tv/plurx/app/player/Controller.kt"
+source_anchor = "message = \"Completed staged candidate body\""
+test = "tests/playback/current-main-effort-quality.test.js"
+test_anchor = "a05 staged completed body reports only its own attachment nonce"
+
+# A05 native pacing and attachment-bound quiet windows: each bridge names
+# the new native method executed once against its attributed source snapshot.
+[[fixes]]
+id = "apple.auto-paced-production-upgrade-windows"
+commits = ["080b45734c8246e46158662bed8c42b3766fd22d"]
+source = "clients/apple/Sources/PlayerController.swift"
+source_anchor = "func autoActiveProductionPressure("
+test = "clients/apple/Tests/PlaybackControlReporterTests.swift"
+test_anchor = "testA05PacingAndAttachmentUpgradeWindowsUseActualEvidence"
+
+[[fixes]]
+id = "android.auto-paced-production-upgrade-windows"
+commits = []
+supplements = "apple.auto-paced-production-upgrade-windows"
+source = "clients/android/app/src/main/java/tv/plurx/app/player/Controller.kt"
+source_anchor = "internal fun autoActiveProductionPressure("
+test = "clients/android/app/src/test/java/tv/plurx/app/player/PlaybackControlReporterTest.kt"
+test_anchor = "fun a05PacingAndAttachmentUpgradeWindowsUseActualEvidence()"
+
+[[fixes]]
+id = "apple.auto-observed-attachment-quiet-window"
+commits = ["af9362e368c60d0c1c55716051671623e8f4ed91"]
+source = "clients/apple/Sources/PlayerController.swift"
+source_anchor = "let quietStart = max(observationStartMs, lastStallMs ?? observationStartMs)"
+test = "clients/apple/Tests/PlaybackControlReporterTests.swift"
+test_anchor = "testA05FreshAttachmentRequiresObservedQuietIntervalBeforeHeadroomUpgrade"
+
+[[fixes]]
+id = "android.auto-observed-attachment-quiet-window"
+commits = []
+supplements = "apple.auto-observed-attachment-quiet-window"
+source = "clients/android/app/src/main/java/tv/plurx/app/player/Controller.kt"
+source_anchor = "val quietStart = maxOf(start, lastStallMs ?: start)"
+test = "clients/android/app/src/test/java/tv/plurx/app/player/PlaybackControlReporterTest.kt"
+test_anchor = "fun a05FreshAttachmentRequiresObservedQuietIntervalBeforeHeadroomUpgrade()"
+
+# The new exact Android regression compiles this existing test source; this
+# bridge does not claim that any old PlaybackControlAskTest method executed.
+[[fixes]]
+id = "android.receipt-callback-test-transport-binding"
+commits = ["69fae8ab1a179c8be6f7cbcb7a6b703646df895c"]
+source = "clients/android/app/src/test/java/tv/plurx/app/player/PlaybackControlAskTest.kt"
+source_anchor = "transport = transport(\"hold\", reason = \"no_room\", sequence = sequence)"
+test = "clients/android/app/src/test/java/tv/plurx/app/player/PlaybackControlReporterTest.kt"
+test_anchor = "fun a05PacingAndAttachmentUpgradeWindowsUseActualEvidence()"
+
+[[fixes]]
+id = "apple.auto-staged-advertised-interval-proof"
+commits = ["fd5dbb84921e72025d4349d9c523e860abf1c6a9"]
+source = "clients/apple/Sources/PlayerController.swift"
+source_anchor = "func autoVODAdvertisedIntervals(_ data: Data)"
+test = "clients/apple/Tests/PlaybackControlReporterTests.swift"
+test_anchor = "testA05StagedAdvertisedIntervalsRequireCapturedScopeAndOriginalDeadline"
+
+[[fixes]]
+id = "android.auto-staged-completed-load-interval-proof"
+commits = []
+supplements = "apple.auto-staged-advertised-interval-proof"
+source = "clients/android/app/src/main/java/tv/plurx/app/player/Controller.kt"
+source_anchor = "internal fun autoStagedEmpiricalMargin(samples: List<AutoCompletedTransfer>"
+test = "clients/android/app/src/test/java/tv/plurx/app/player/PlaybackControlReporterTest.kt"
+test_anchor = "fun a05StagedMediaIntervalsRequireCapturedPipelineAndOriginalDeadline()"
+
+# Native original-boundary source-to-current-test bridges. These two methods
+# passed once on exact a82 source; no historical fd74 execution is implied.
+# The boundary no longer holds Play or a seek: the anchors now name the
+# re-plan that the ordinary Auto evaluation serves beside the incumbent.
+[[fixes]]
+id = "android.auto-prepared-viewer-boundary-owner-and-budget"
+commits = ["e7511b9c9945d0ab19a0234d64a74ed19d35ae60", "228874547df1c1c870973e417be0986d7e0948e4", "d9dea0ab387f6e7f69047162d4a47f53ba466481"]
+source = "clients/android/app/src/main/java/tv/plurx/app/player/Controller.kt"
+source_anchor = "internal fun autoViewerTransport(delegate: Player"
+test = "clients/android/app/src/test/java/tv/plurx/app/player/PlaybackControlReporterTest.kt"
+test_anchor = "fun a05ViewerTransportRefusesStaleWrappers()"
+
+[[fixes]]
+id = "apple.auto-prepared-viewer-boundary-original-budget"
+commits = []
+supplements = "android.auto-prepared-viewer-boundary-owner-and-budget"
+source = "clients/apple/Sources/PlayerController.swift"
+source_anchor = "struct AutoBoundaryReplan"
+test = "clients/apple/Tests/PlaybackControlReporterTests.swift"
+test_anchor = "testOptionalOriginalReplanNeverBlocksAndIsServedOnceBesideThePlayingIncumbent"
+
 [[fixes]]
 id = "player.ten-and-thirty-second-controls"
 commits = ["270231322"]
@@ -3298,6 +3574,71 @@ source = "crates/plurxd/src/web/index.html"
 source_anchor = 'class="pseek-arrows"'
 test = "tests/playback/seek-control.test.js"
 test_anchor = "10 and 30 second buttons accumulate mixed taps and clamp at title bounds"
+
+# Actual caller provenance, covered once by the new source-contract method;
+# this does not claim physical AVPlayer boundary execution.
+[[fixes]]
+id = "apple.auto-viewer-relative-and-internal-marker-provenance"
+commits = ["603964bccac111a019d5515c8011eb4d603a5375"]
+source = "clients/apple/Sources/PlayerController.swift"
+source_anchor = "issueSeek(to: request.target, generation: request.generation, viewerBoundary: true)"
+test = "clients/apple/Tests/PlaybackControlReporterTests.swift"
+test_anchor = "testA05SeekCallsitesPreserveViewerAndAutomaticMarkerProvenance"
+
+[[fixes]]
+id = "apple.auto-boundary-captured-typed-epoch-ownership"
+commits = ["f94345baa99553e333f0a8280dc9995ee640cc43"]
+source = "clients/apple/Sources/PlayerController.swift"
+source_anchor = "AutoBoundaryAttempt(attempt: snapshotAttempt(), item:"
+test = "clients/apple/Tests/PlaybackControlReporterTests.swift"
+test_anchor = "testA05BoundaryEpochFencesKeepCapturedOwnershipAndIndependentScopes"
+
+# Same review58 source-to-new-pass bridges; these four controls were executed
+# once on the repair source, not on historical pre-proof native code.
+[[fixes]]
+id = "apple.auto-decoder-accepted-event-original-budget"
+commits = []
+supplements = "apple.auto-typed-candidate-recovery-pressure"
+source = "clients/apple/Sources/PlayerController.swift"
+source_anchor = "func rejectFailedDecoderCandidate(_ rejected: inout Set<String>"
+test = "clients/apple/Tests/PlaybackControlReporterTests.swift"
+test_anchor = "testDecoderFailureRejectsTheCandidateLocallyOnceWithoutServerAcknowledgement"
+
+[[fixes]]
+id = "android.auto-decoder-accepted-event-original-budget"
+commits = []
+supplements = "apple.auto-typed-candidate-recovery-pressure"
+source = "clients/android/app/src/main/java/tv/plurx/app/player/PlaybackTelemetry.kt"
+source_anchor = "internal fun rejectFailedDecoderCandidate(rejected: MutableSet<String>"
+test = "clients/android/app/src/test/java/tv/plurx/app/player/PlaybackTelemetryTest.kt"
+test_anchor = "fun decoderFailureRejectsTheCandidateLocallyOnceWithoutServerAcknowledgement()"
+
+# S-09 route sink claims (claude-opus-5-5). Device-route acceptance (M3/M5)
+# remains separate physical evidence.
+[[fixes]]
+id = "apple.audio-route-sink-claim"
+commits = ["fa43eab6a0f30a178d1ed112d8c9af6333691eda"]
+source = "clients/apple/Sources/Caps.swift"
+source_anchor = "static func audioSinks(route: AudioRouteFacts) -> [AudioSinkClaim]"
+test = "clients/apple/Tests/AppleClientTests.swift"
+test_anchor = "testAudioSinkClaimFollowsTheRouteAndPassesThroughOnlyToAMultichannelReceiver"
+
+[[fixes]]
+id = "android.audio-route-sink-claim"
+commits = ["68c21b9aeb35cbac74fc284c552b4e1c8d03d6ce", "8af9707a2664258a02aac2e5a97c8c825fbb3ee9"]
+source = "clients/android/app/src/main/java/tv/plurx/app/data/CapsPolicy.kt"
+source_anchor = "internal fun audioSinkClaims("
+test = "clients/android/app/src/test/java/tv/plurx/app/data/CapsPolicyTest.kt"
+test_anchor = "theAudioSinkClaimFollowsTheRouteAndPassesBitstreamsOnlyToTheSink"
+# D-02 prepared-successor audio focus (claude-opus-5-5). The device re-run of
+# a prepared quality change remains separate physical evidence.
+[[fixes]]
+id = "android.successor-audio-focus-owner"
+commits = ["054dd9c8084647beb455d128fdb02f343dde5569"]
+source = "clients/android/app/src/main/java/tv/plurx/app/player/Controller.kt"
+source_anchor = "handOverAudioFocus(previous.asAudioFocusOwner(), successor.asAudioFocusOwner())"
+test = "clients/android/app/src/test/java/tv/plurx/app/player/AudioFocusOwnershipTest.kt"
+test_anchor = "everySwapSiteMovesFocusToTheAudiblePlayer"
 
 [[fixes]]
 id = "android.tcl-decoder-envelope-compaction"
@@ -3706,3 +4047,44 @@ source = "clients/apple/Sources/PlayerController.swift"
 source_anchor = "private func preparedCommitStillOwned(_ commit: Attempt) -> Bool {"
 test = "clients/apple/Tests/AttemptScopesTests.swift"
 test_anchor = "func testEachMigratedFenceComparesExactlyTheFieldsItsConjunctionDid()"
+
+# 2026-10-04 promotion-review client fixes (Opus).
+[[fixes]]
+id = "android.recovery-sample-encodes-cause-and-age"
+commits = ["35f6f21d5bcbe30f6d3aedc2eb0d53932b2cf5c5"]
+source = "clients/android/app/src/main/java/tv/plurx/app/player/PlaybackTelemetry.kt"
+source_anchor = "internal fun rejectFailedDecoderCandidate(rejected: MutableSet<String>, candidateId: String): Boolean ="
+test = "clients/android/app/src/test/java/tv/plurx/app/player/PlaybackTelemetryTest.kt"
+test_anchor = "fun candidateRecoverySampleAlwaysEncodesCauseAndAge()"
+
+[[fixes]]
+id = "android.play-and-seek-never-wait-on-original-stage"
+commits = ["8ad649654d3de0d15a7f724f0a686a4de5ac1deb"]
+source = "clients/android/app/src/main/java/tv/plurx/app/player/Controller.kt"
+source_anchor = "internal class AutoBoundaryReplan {"
+test = "clients/android/app/src/test/java/tv/plurx/app/player/PlaybackControlReporterTest.kt"
+test_anchor = "@Test fun playAfterALongPauseReachesThePlayerImmediately()"
+
+[[fixes]]
+id = "apple.play-and-seek-never-wait-on-original-stage"
+commits = ["44fb5ac0d69c59a4447e3cd90dc3bacf932b907a"]
+source = "clients/apple/Sources/PlayerController.swift"
+source_anchor = "struct AutoBoundaryReplan {"
+test = "clients/apple/Tests/PlaybackControlReporterTests.swift"
+test_anchor = "func testPlayAfterALongPauseIsAppliedAtOnceAndOnlyArmsTheReplan() throws"
+
+[[fixes]]
+id = "android.boundary-replan-that-builds-nothing-is-withdrawn"
+commits = ["8000338dbde659102bedbe69472f6e72db21e1c3"]
+source = "clients/android/app/src/main/java/tv/plurx/app/player/Controller.kt"
+source_anchor = "internal fun autoBoundaryOfferBuiltNothing(boundaryStillOwns: Boolean, built: Boolean, switched: Boolean): Boolean ="
+test = "clients/android/app/src/test/java/tv/plurx/app/player/PlaybackControlReporterTest.kt"
+test_anchor = "@Test fun boundaryOfferThatBuildsNothingIsWithdrawn()"
+
+[[fixes]]
+id = "apple.boundary-replan-spent-only-on-a-candidate"
+commits = ["bb131fad23c46195c116453c558d96bb5c3d68a0"]
+source = "clients/apple/Sources/PlayerController.swift"
+source_anchor = "struct AutoBoundaryReplan {"
+test = "clients/apple/Tests/PlaybackControlReporterTests.swift"
+test_anchor = "func testBoundaryReplanIsSpentOnlyOnACandidate()"

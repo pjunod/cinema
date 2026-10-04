@@ -7,6 +7,16 @@ impl TranscodeManager {
             // An idempotent replay of a VOD create: repeat the persisted
             // answer, field for field, from the session record.
             return Some(StartInfo {
+                retained_output: self
+                    .vod
+                    .hls_facts(&recovered.start.session_id)
+                    .await
+                    .and_then(|facts| facts.response_owner.retained_output_facts()),
+                audio_delivery: self
+                    .vod
+                    .hls_facts(&recovered.start.session_id)
+                    .await
+                    .and_then(|facts| facts.audio_delivery),
                 playlist_url: format!("/api/v1/hls/{}/index.m3u8", recovered.start.session_id),
                 session_id: recovered.start.session_id,
                 duration_ms: Some(recovered.start.duration_ms),
@@ -33,6 +43,8 @@ impl TranscodeManager {
             .and_then(|f| f.duration_ms);
         let encoder = *session.encoder_label.lock().await;
         Some(StartInfo {
+            retained_output: None,
+            audio_delivery: session.audio_delivery.clone(),
             playlist_url: format!("/api/v1/hls/{session_id}/index.m3u8"),
             session_id: session_id.to_owned(),
             duration_ms,
@@ -122,6 +134,12 @@ impl TranscodeManager {
     pub async fn software_budget(&self) -> usize {
         self.num_setting(keys::SW_POOL_THREADS, crate::admission::software_budget())
             .await
+    }
+
+    /// The encoder this node's capabilities resolve `prefer` (the stored
+    /// [`keys::HWACCEL`] value; empty = auto) to, without a store read.
+    pub fn encoder_for_preference(&self, prefer: &str) -> Encoder {
+        self.caps.choose(prefer)
     }
 
     /// Choose the encoder given the admin preference setting (empty = auto).
@@ -713,15 +731,19 @@ impl TranscodeManager {
     /// Validate and durably apply one complete requested setting pair.
     /// Sessions keep the old effective snapshot until every probe and both
     /// writes succeed, then all new sessions see the new one at once.
+    ///
+    /// `mode: None` clears the request: the stored mode becomes empty, which
+    /// [`normalize_rate_control_request`] reads back as "use each encoder
+    /// family's code default", distinct from an explicit `bitrate`.
     pub async fn apply_rate_control_settings(
         &self,
-        mode: RateMode,
+        mode: Option<RateMode>,
         quality: Option<u8>,
     ) -> Result<(), ApplyRateControlError> {
         let _serial = self.rate_control_update.lock().await;
         let snapshot = match self
             .validate_rate_control_snapshot(
-                Some(mode),
+                mode,
                 quality,
                 RateControlProbePolicy::YieldingBackground,
             )
@@ -731,13 +753,14 @@ impl TranscodeManager {
             RateControlValidation::Deferred => return Err(ApplyRateControlError::Busy),
         };
         let stored_quality = quality.map(|value| value.to_string()).unwrap_or_default();
+        let stored_mode = mode.map_or("", RateMode::as_str);
         self.store
             .put_settings(&[
                 (keys::TRANSCODE_QUALITY, stored_quality.as_str()),
-                (keys::TRANSCODE_RATE_MODE, mode.as_str()),
+                (keys::TRANSCODE_RATE_MODE, stored_mode),
             ])
             .await?;
-        if self.requested_rate_control().await? == (Some(mode), quality) {
+        if self.requested_rate_control().await? == (mode, quality) {
             let selected = self.encoder().await;
             self.publish_rate_control(snapshot, selected);
         } else {

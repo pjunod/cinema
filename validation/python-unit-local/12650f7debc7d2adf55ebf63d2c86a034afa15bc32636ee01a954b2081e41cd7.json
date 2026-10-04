@@ -1,0 +1,33 @@
+{
+  "version": 1,
+  "repository": 1,
+  "branch": "codex/k03-external-observer",
+  "suite": "operations",
+  "test_file": "tests/operations/test_replicated_write_capture.py",
+  "test_file_sha256": "b44699ae3a8a669cf585644d70be58eb3a6f7805627fddd27638c04eb76946c9",
+  "source_commit": "060cee30b056b3fad20fb1458fedd663f2a72dd2",
+  "source_tree": "d1e945c5c994f6fa4b4645b92b3d417f41057a14",
+  "command": "PYTHONPATH=tests/operations python3 -m unittest -v test_replicated_write_capture.GateCase.test_external_observer_sanitizes_actual_settings_and_refuses_unbound_deployment",
+  "test_ids": [
+    "test_replicated_write_capture.GateCase.test_external_observer_sanitizes_actual_settings_and_refuses_unbound_deployment"
+  ],
+  "output": "test_external_observer_sanitizes_actual_settings_and_refuses_unbound_deployment (test_replicated_write_capture.GateCase.test_external_observer_sanitizes_actual_settings_and_refuses_unbound_deployment)\nSynthetic HTTP adapter only; never a real deployment or twelve-hour run. ... ok\n\n----------------------------------------------------------------------\nRan 1 test in 0.005s\n\nOK\n",
+  "raw_output_sha256": "dfb1ff3315c65ee37382ad89c795542cf9821b30c829194af3bf37ec8a92d810",
+  "result": {
+    "count": 1,
+    "failed": 0,
+    "errors": 0,
+    "skipped": 0,
+    "expected_failures": 0,
+    "unexpected_successes": 0
+  },
+  "bounds": {
+    "external_seconds": 60,
+    "cpu_seconds": 30,
+    "file_bytes": 16777216,
+    "captured_output_bytes": 1048576,
+    "file_descriptors": 256
+  },
+  "observed_outer_seconds": 0.112730625027325,
+  "tool_chunk": "1986f4"
+}

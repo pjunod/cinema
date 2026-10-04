@@ -89,6 +89,14 @@ final class AttemptScopesTests: XCTestCase {
         .stallRecovery: [.open, .viewerAction],
         // `openGeneration == generation`, `viewerActionEpoch == actionEpoch`
         .itemFailureLadder: [.open, .viewerAction],
+        // The exact pre/post-acknowledgement continuations each keep the
+        // conjunction of the handler they continue; none is widened.
+        .blackFrameDecoderAcknowledgement: [.lifecycle, .viewerAction],
+        .itemDecoderAcknowledgement: [.open, .viewerAction],
+        .stallCandidateAcknowledgement: [.open, .viewerAction],
+        .stallCandidateReturn: [.open, .viewerAction],
+        .preparedPressureEntry: [.lifecycle, .viewerAction],
+        .preparedPressureAcknowledgement: [.lifecycle, .viewerAction],
         // `generation == seekState.generation`, `actionEpoch == viewerActionEpoch`
         .seekIntent: [.viewerAction, .seek],
         // The same captured intent is checked again after the control await.
@@ -97,6 +105,12 @@ final class AttemptScopesTests: XCTestCase {
         .nativeSeekCompletion: [.open, .viewerAction, .seek],
         // The same native attempt is checked after subtitle reconciliation.
         .nativeSeekAfterSelection: [.open, .viewerAction, .seek],
+        // A boundary's optional original preparation belongs to the title,
+        // attachment and viewer action that started it.
+        .autoBoundaryOwnerCurrent: [.lifecycle, .open, .viewerAction],
+        // The armed re-plan is owed while its viewer action is the latest; a
+        // reopen for the same seek does not supersede it.
+        .autoBoundaryReplanCurrent: [.lifecycle, .viewerAction],
         // Status sampling follows an attachment through Pause but not reopen.
         .recoveryEvidencePoll: [.open],
         .autoInitialLayout: [.initialDecision],
@@ -179,6 +193,14 @@ final class AttemptScopesTests: XCTestCase {
             .blackFrameDecodeFailure: .lifecycle,
             .stallRecovery: .open,
             .itemFailureLadder: .open,
+            .blackFrameDecoderAcknowledgement: .lifecycle,
+            .itemDecoderAcknowledgement: .open,
+            .stallCandidateAcknowledgement: .open,
+            .stallCandidateReturn: .open,
+            .preparedPressureEntry: .lifecycle,
+            .preparedPressureAcknowledgement: .lifecycle,
+            .autoBoundaryOwnerCurrent: .lifecycle,
+            .autoBoundaryReplanCurrent: .lifecycle,
             .nativeSeekCompletion: .open,
             .nativeSeekAfterSelection: .open,
             .recoveryEvidencePoll: .open,

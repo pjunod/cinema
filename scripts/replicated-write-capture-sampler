@@ -5,6 +5,12 @@
 set -uo pipefail
 
 capture_dir=$(cd "$(dirname "$0")" && pwd)
+# Opt-in AFTER uses its own create-only, expiring owner. The default M0
+# sampler below is byte-for-byte unchanged, including its historical schema.
+if [[ ${1:-} == --after ]]; then
+  shift
+  exec python3 "$capture_dir/replicated-write-capture" sample-after "$@"
+fi
 samples="$capture_dir/samples.tsv"
 events="$capture_dir/events.log"
 status_file="$capture_dir/status.txt"

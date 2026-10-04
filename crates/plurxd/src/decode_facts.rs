@@ -5372,16 +5372,26 @@ void probe_main(unsigned long *stack) {
         std::fs::write(&artifact, elf).expect("write initially accepted ELF");
         let opened = std::fs::File::open(&artifact).expect("open initially accepted ELF");
         require_direct_probe_executable(&opened).expect("initial bytes qualify structurally");
-        std::fs::copy(
-            std::env::current_exe().expect("current dynamic executable"),
-            &artifact,
-        )
-        .expect("replace configured bytes in place");
+        std::fs::copy(small_dynamic_executable(), &artifact)
+            .expect("replace configured bytes in place");
         let snapshot = snapshot_executable(&opened).expect("snapshot replacement bytes");
         assert!(matches!(
             require_direct_probe_executable(snapshot.as_file()),
             Err(DecodeFactError::ProbeIdentity(reason)) if reason.contains("statically linked")
         ));
+    }
+
+    /// A real dynamically linked executable well under
+    /// `MAX_PROBE_EXECUTABLE_BYTES`. The debug test binary itself is not: it
+    /// grew past 512 MiB, so snapshotting `current_exe()` tested its size, not
+    /// the sealing or static-link rules these tests are about.
+    #[cfg(target_os = "linux")]
+    fn small_dynamic_executable() -> std::path::PathBuf {
+        ["/usr/bin/true", "/bin/true"]
+            .iter()
+            .map(std::path::PathBuf::from)
+            .find(|path| path.is_file())
+            .unwrap_or_else(|| std::env::current_exe().expect("current executable"))
     }
 
     #[cfg(target_os = "linux")]
@@ -5390,8 +5400,8 @@ void probe_main(unsigned long *stack) {
         use std::os::fd::AsRawFd;
         use std::os::unix::fs::FileExt;
 
-        let current = std::fs::File::open(std::env::current_exe().expect("current executable"))
-            .expect("open current executable");
+        let current =
+            std::fs::File::open(small_dynamic_executable()).expect("open a small executable");
         let snapshot = snapshot_executable(&current).expect("sealed executable snapshot");
         let seals = unsafe { libc::fcntl(snapshot.as_file().as_raw_fd(), libc::F_GET_SEALS) };
         assert_eq!(seals & libc::F_SEAL_WRITE, libc::F_SEAL_WRITE);

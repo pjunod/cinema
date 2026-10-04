@@ -146,7 +146,10 @@ jobs:
     # A cold shared-runner build used 12 minutes before tests, and the core
     # and SQLite suites used another 17. Allow the daemon and restart suites
     # to finish as well, with bounded headroom for shared-runner contention.
-    timeout-minutes: 60
+    # Measured 2026-10-04 on the architecture promotion: 16.5 min to the first
+    # test, core lib 15 min, store contracts 11.4 min, daemon ~11 min, which
+    # leaves no headroom under 60; 90 keeps the same bound with room again.
+    timeout-minutes: 90
     steps:
       - name: Install Rust gate prerequisites
         run: |
