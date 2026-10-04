@@ -805,73 +805,108 @@ async fn prepare_publication_route<T: Backend>(
         revision: i64,
         pending: i64,
     }
-    let rows=backend.sharing_read("SELECT json_object('hash',e.token_hash,'expires',r.claim_expires_at_ms,'session',s.session_id,'lease',s.lease_expires_at_ms,'revision',j.revision,'pending',CASE WHEN r.state='starting' AND b.start_resolved_at_ms IS NULL AND s.publication_ready_at_ms=9223372036854775807 THEN 1 WHEN r.state='resolved' AND b.start_resolved_at_ms IS NOT NULL AND s.publication_ready_at_ms=0 THEN 0 ELSE -1 END) AS payload FROM sharing_source_session_bindings b JOIN media_session_requests r ON r.owner_key=b.owner_key AND r.request_id=b.request_id AND r.incarnation_id=b.incarnation_id JOIN media_sessions s ON s.incarnation_id=b.incarnation_id JOIN job_leases j ON j.resource='session:'||s.incarnation_id AND j.owner_node_id=s.owner_node_id AND j.fence=s.owner_epoch AND j.expires_at_ms=s.lease_expires_at_ms JOIN sharing_exports e ON e.id=b.share_grant_id JOIN cluster_nodes n ON n.raft_id=$1 AND n.node_id=s.owner_node_id AND n.removed_at IS NULL WHERE b.incarnation_id=$2 AND b.owner_key=$3 AND s.owner_node_id=$4 AND b.reservation_state='held' AND b.dispatch_generation=1 AND s.state='active' AND s.owner_epoch=1 AND s.lease_expires_at_ms>$5 AND length(s.session_id) BETWEEN 1 AND 256 AND length(e.token_hash)=64 AND j.revision>0 AND j.revision<9223372036854775807",vec![raft.into(),binding.incarnation_id.into(),binding.principal.owner_key().into(),assignment.owner_node_id.clone().into(),now.into()]).await?;
-    let [row] = rows.as_slice() else {
-        return Ok(SourcePublicationAuthorityRead::Unavailable);
-    };
-    let current: Current = serde_json::from_str(row).map_err(|_| invalid())?;
-    if !matches!(current.pending, 0 | 1) || !is_hash(&current.hash) {
-        return Ok(SourcePublicationAuthorityRead::Unavailable);
+    // The observation read and the guard read below are separate. A renewal
+    // by this same owner can commit between them, and the guard, which pins
+    // the observed lease revision, then fails although nothing changed but
+    // the lease. Re-observe in that case; any other failure is a refusal.
+    let mut attempts = 0;
+    loop {
+        let rows=backend.sharing_read("SELECT json_object('hash',e.token_hash,'expires',r.claim_expires_at_ms,'session',s.session_id,'lease',s.lease_expires_at_ms,'revision',j.revision,'pending',CASE WHEN r.state='starting' AND b.start_resolved_at_ms IS NULL AND s.publication_ready_at_ms=9223372036854775807 THEN 1 WHEN r.state='resolved' AND b.start_resolved_at_ms IS NOT NULL AND s.publication_ready_at_ms=0 THEN 0 ELSE -1 END) AS payload FROM sharing_source_session_bindings b JOIN media_session_requests r ON r.owner_key=b.owner_key AND r.request_id=b.request_id AND r.incarnation_id=b.incarnation_id JOIN media_sessions s ON s.incarnation_id=b.incarnation_id JOIN job_leases j ON j.resource='session:'||s.incarnation_id AND j.owner_node_id=s.owner_node_id AND j.fence=s.owner_epoch AND j.expires_at_ms=s.lease_expires_at_ms JOIN sharing_exports e ON e.id=b.share_grant_id JOIN cluster_nodes n ON n.raft_id=$1 AND n.node_id=s.owner_node_id AND n.removed_at IS NULL WHERE b.incarnation_id=$2 AND b.owner_key=$3 AND s.owner_node_id=$4 AND b.reservation_state='held' AND b.dispatch_generation=1 AND s.state='active' AND s.owner_epoch=1 AND s.lease_expires_at_ms>$5 AND length(s.session_id) BETWEEN 1 AND 256 AND length(e.token_hash)=64 AND j.revision>0 AND j.revision<9223372036854775807",vec![raft.into(),binding.incarnation_id.into(),binding.principal.owner_key().into(),assignment.owner_node_id.clone().into(),now.into()]).await?;
+        let [row] = rows.as_slice() else {
+            return Ok(SourcePublicationAuthorityRead::Unavailable);
+        };
+        let current: Current = serde_json::from_str(row).map_err(|_| invalid())?;
+        if !matches!(current.pending, 0 | 1) || !is_hash(&current.hash) {
+            return Ok(SourcePublicationAuthorityRead::Unavailable);
+        }
+        let request = SourceSessionRequest {
+            principal: binding.principal.clone(),
+            request_id: binding.request_id.clone(),
+            request_fingerprint: binding.request_fingerprint.clone(),
+            playback_id: binding.playback_id.clone(),
+            incarnation_id: binding.incarnation_id,
+            now_ms: now,
+            claim_expires_at_ms: current.expires,
+            credential_hash: current.hash,
+            item_id: binding.item_id.clone(),
+            file_id: binding.file_id.clone(),
+            file_revision: binding.file_revision.clone(),
+        };
+        let intent = match prepare_intent(backend, request, credential, true).await? {
+            SourceIntentRead::Ready(i) => i,
+            SourceIntentRead::Unavailable => {
+                return Ok(SourcePublicationAuthorityRead::Unavailable)
+            }
+            SourceIntentRead::Capacity => return Ok(SourcePublicationAuthorityRead::Capacity),
+        };
+        if !agrees(binding, &intent) {
+            return Ok(SourcePublicationAuthorityRead::Unavailable);
+        }
+        // Bare Core has an uninhabited observation; this construction cannot
+        // complete there, even though the shared source body remains type-checked.
+        #[cfg_attr(not(feature = "hiqlite-store"), allow(unused_variables))]
+        let authority = SourceOwnedRouteAuthority {
+            assignment: SourceDispatchAssignment {
+                binding: binding.clone(),
+                owner_node_id: assignment.owner_node_id.clone(),
+                dispatch_generation: assignment.dispatch_generation,
+                members: members.clone(),
+            },
+            intent,
+            session_id: current.session,
+            lease_expires_at_ms: current.lease,
+            lease_revision: current.revision,
+        };
+        let phase = if current.pending == 1 {
+            SourcePublicationPhase::Pending
+        } else {
+            SourcePublicationPhase::Published
+        };
+        let Some((condition, values)) = route_condition(&authority, phase, now_ms()?)? else {
+            return Ok(SourcePublicationAuthorityRead::Unavailable);
+        };
+        let rows = backend
+            .sharing_read(
+                &format!("SELECT json_quote(CASE WHEN {condition} THEN 1 ELSE 0 END) AS payload"),
+                values,
+            )
+            .await?;
+        if rows.first().map(String::as_str) != Some("1") {
+            attempts += 1;
+            if attempts < 4
+                && lease_revision_moved(backend, binding.incarnation_id, authority.lease_revision)
+                    .await?
+            {
+                continue;
+            }
+            return Ok(SourcePublicationAuthorityRead::Unavailable);
+        }
+        return Ok(SourcePublicationAuthorityRead::Ready(Box::new(
+            SourcePublicationAuthority {
+                owned: authority,
+                phase,
+            },
+        )));
     }
-    let request = SourceSessionRequest {
-        principal: binding.principal.clone(),
-        request_id: binding.request_id.clone(),
-        request_fingerprint: binding.request_fingerprint.clone(),
-        playback_id: binding.playback_id.clone(),
-        incarnation_id: binding.incarnation_id,
-        now_ms: now,
-        claim_expires_at_ms: current.expires,
-        credential_hash: current.hash,
-        item_id: binding.item_id.clone(),
-        file_id: binding.file_id.clone(),
-        file_revision: binding.file_revision.clone(),
-    };
-    let intent = match prepare_intent(backend, request, credential, true).await? {
-        SourceIntentRead::Ready(i) => i,
-        SourceIntentRead::Unavailable => return Ok(SourcePublicationAuthorityRead::Unavailable),
-        SourceIntentRead::Capacity => return Ok(SourcePublicationAuthorityRead::Capacity),
-    };
-    if !agrees(binding, &intent) {
-        return Ok(SourcePublicationAuthorityRead::Unavailable);
-    }
-    // Bare Core has an uninhabited observation; this construction cannot
-    // complete there, even though the shared source body remains type-checked.
-    #[cfg_attr(not(feature = "hiqlite-store"), allow(unused_variables))]
-    let authority = SourceOwnedRouteAuthority {
-        assignment: SourceDispatchAssignment {
-            binding: binding.clone(),
-            owner_node_id: assignment.owner_node_id.clone(),
-            dispatch_generation: assignment.dispatch_generation,
-            members: members.clone(),
-        },
-        intent,
-        session_id: current.session,
-        lease_expires_at_ms: current.lease,
-        lease_revision: current.revision,
-    };
-    let phase = if current.pending == 1 {
-        SourcePublicationPhase::Pending
-    } else {
-        SourcePublicationPhase::Published
-    };
-    let Some((condition, values)) = route_condition(&authority, phase, now_ms()?)? else {
-        return Ok(SourcePublicationAuthorityRead::Unavailable);
-    };
+}
+
+/// Whether the session lease revision moved past `observed`: the signature
+/// of a renewal committed by the same owner between two reads.
+async fn lease_revision_moved<T: Backend>(
+    backend: &T,
+    incarnation: uuid::Uuid,
+    observed: i64,
+) -> Result<bool, StoreError> {
     let rows = backend
         .sharing_read(
-            &format!("SELECT json_quote(CASE WHEN {condition} THEN 1 ELSE 0 END) AS payload"),
-            values,
+            "SELECT json_quote(revision) AS payload FROM job_leases WHERE resource='session:'||$1",
+            vec![incarnation.into()],
         )
         .await?;
-    if rows.first().map(String::as_str) != Some("1") {
-        return Ok(SourcePublicationAuthorityRead::Unavailable);
-    }
-    Ok(SourcePublicationAuthorityRead::Ready(Box::new(
-        SourcePublicationAuthority {
-            owned: authority,
-            phase,
-        },
-    )))
+    Ok(match rows.as_slice() {
+        [row] => row.parse::<i64>().is_ok_and(|revision| revision > observed),
+        _ => false,
+    })
 }
 
 async fn complete_publication<T: Backend + super::MediaSessionStore>(
