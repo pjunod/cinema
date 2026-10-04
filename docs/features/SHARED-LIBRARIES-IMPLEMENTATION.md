@@ -5043,7 +5043,7 @@ as by a committed cluster leave, so these owners observe one drain token.
 
 Open after this review:
 
-- Nothing sweeps an expired receiver row that still has a relay binding; maintenance keeps such rows on purpose. This is part of the section 4 crash and restart work.
+- Nothing sweeps an expired receiver row that still has a relay binding; maintenance keeps such rows on purpose. This is part of the section 4 crash and restart work. Addressed by "B orphaned receiver crash recovery" below.
 - `WriterSettlement::Abandoned` is recorded but not yet read. A panicked writer should become a rendition failure.
 - A stuck retirement or settlement is reported only in the log. It belongs in Settings, Developer.
 
@@ -5051,3 +5051,111 @@ The Encoded and Native text lanes now run through the real pinned B
 (`sharing_receiver_real_pinned_source_encoded_and_native_lanes_through_b`). The
 Source fixture media is 320x180, so both recipes stay inside the v1 control
 height contract (144 to 2160).
+
+### B orphaned receiver crash recovery (2026-10-04)
+
+Closes the first open item of the ownership review above. A receiver owner
+that crashed, or whose in-process retirement stalled, left its RemoteSource
+route, relay binding, job lease and request behind for good. Maintenance keeps
+bound rows on purpose. The local takeover CAS excludes `remote_source` recipes.
+The credential, viewer and endpoint needed to authenticate the owed Source End
+lived only in the dead process.
+
+**Durable dispatch record.** `sharing_relay_upstream.dispatch_envelope` is new
+in the unreleased sharing schema (no marker bump; v70/v92 are not on `main`).
+Activation writes `none`. `start_file_source` seals `{credential, viewer,
+endpoint, Source request}` under the Upstream purpose and B-server/import AAD.
+`record_receiver_dispatch` stores it after `retain_dispatch` and before
+`file_start`. The record needs fresh original-login authority and the exact
+live blocked owner, epoch and lease. It replaces `none` once, replays exactly
+and refuses anything else. A refusal or an error sends nothing. NULL means
+unknown. The sealed census, cluster import plan and migration census carry the
+column; `none` is not a credential. A never-dispatched retirement now also
+requires the durable `none`.
+
+**Inventory and claim (Core, both backends).** `orphaned_receiver_sessions`
+is a read-only keyset page (at most 16) of routes whose lease is 60 s past
+expiry, or whose owner node carries a removal key, with a matching job lease
+and pending or attached binding. Partial bindings, unknown dispatch and
+undecodable rows are reported and never claimed.
+
+`claim_orphaned_receiver_session` asserts the exact observed row, then moves
+owner, epoch+1 and a 180 s lease onto this node in one transaction. It
+revokes delivery grants and drops old-epoch pins. It never changes state,
+publication or the discontinuity sequence. Commit-unknown is decided by an
+exact re-read. Every old-epoch writer matches node and epoch, so the claim
+fences them all:
+
+- pending renewal;
+- dispatch record;
+- attach, publish and renew;
+- retirement.
+
+**Retirement reuse, not adoption.** `receiver_recovery_loop` is spawned
+beside the claim loop, not in the maintenance tick. It runs with sharing off,
+ticks every 30 s, takes batches of 8 and runs two attempts at a time. Drain is
+observed between attempts. For each orphan:
+
+1. A live local registry actor for the same Source request is its owner, so the
+   loop skips the route.
+2. End material is opened **before** claiming, so a node that cannot open a
+   capsule never takes a route it cannot settle.
+   - Attached: the upstream capsule's Source session and incarnation must equal
+     the binding columns. `SourcePeerLineage::from_capsule` applies the
+     `from_start` checks.
+   - Pending with a sealed dispatch: a lost-Start End without lineage.
+   - Pending with `none`: the committed claim is the no-send proof, because the
+     dead owner's record needs its own epoch.
+3. The claim runs.
+4. `CleanupPeerConnection::end` runs, with `RetirementBudget` and
+   `RetirementStep::from_source_end` as the live owner uses them.
+5. The exact `retire_receiver_session` witness is applied. A refusal refreshes
+   only a lease that maintenance moved while node, epoch and session stay ours.
+
+Recovery never calls `start_file_source`, never creates a registry actor and
+never attaches, publishes, renews or delivers. A Source refusal, an exhausted
+budget, an unopenable capsule or unknown dispatch keeps the rows and reports
+them as stranded.
+
+`receiver_source_wrapper` is shared by ingress and recovery, so a recovered End
+names exactly the dispatched Start.
+
+**Visibility.** `/sharing/status` gains `receiver_recovery`:
+
+- `last_scan_at_ms`;
+- `in_flight`;
+- `retired_total`;
+- `stranded`, with incarnation and reason, bounded at 32.
+
+The Sharing settings "This node" card renders it. The new metric is
+`plurx_sharing_receiver_orphan_total{outcome=retired|stranded|lost}`. A
+stranded route is logged once as a warning, with no credential material. The
+design's pause setting is deliberately absent.
+
+Evidence on nuc4 (rustc 1.97.1):
+
+- Core `--lib sharing_receiver_orphan`/`sharing_receiver_dispatch`: six tests
+  over memory/pooled SQLite × retained/rebuilt principal layouts (grace and
+  removal key, foreign fence and recipe, exclusive claim and fenced old-epoch
+  writers, maintenance-ended row, dispatch record replay/refusal and census,
+  attached retirement with other routes unchanged and read-only replay,
+  keyset paging and stranded/unreadable rows).
+- `--test store_contract sharing_receiver_orphan_three_voters_exclusive_claim_fence_and_confirmed_retire`:
+  two concurrent claims through the actual Raft log, exactly one wins; old
+  renewal, dispatch record and retirement refuse; confirmed retirement and
+  read-only replay.
+- Daemon: `receiver_source_wrapper_matches_ingress_prepare`,
+  `receiver_orphan_capsule_rejects_foreign_aad_and_lineage`,
+  `receiver_orphan_sweeper_skips_live_local_actor`,
+  `receiver_orphan_sweeper_never_retires_without_end_receipt` (claimed, End
+  unanswered, drain: binding and lease kept), `receiver_orphan_sweeper_never_adopts_producer`
+  (never-dispatched route retired with no actor, publication or delivery;
+  unknown dispatch kept and reported), `receiver_orphan_sweeper_observes_drain`.
+- The real pinned CGNAT fixtures (`..._h1_b_h1_h2_start_resources_and_confirmed_end`,
+  `..._encoded_and_native_lanes_through_b`) pass with the dispatch record in
+  the Start path.
+
+Not qualified: a process-level SIGKILL of a published or pending B daemon
+followed by restart. `tests/sharing_daemon_restart.rs` restarts paired
+daemons but has no shared-playback harness. Clusters, NAT/DERP and devices
+remain open, as above.
