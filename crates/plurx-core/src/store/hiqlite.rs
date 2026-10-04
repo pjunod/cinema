@@ -3079,33 +3079,26 @@ impl HiqliteAuthStore {
                     )
                     .await?;
                 }
+                // Each new step runs in its own boxed future. This chain is one
+                // async fn with an arm per version, and in debug builds every
+                // inline arm's temporaries widen the frame that polls it; the
+                // daemon join test thread had no headroom left for two more.
                 SchemaMigrationAction::MigrateFrom(QUALITY_LEDGER_SCHEMA_MIGRATION_SOURCE) => {
-                    let now = self.now()?;
-                    for result in self.client().batch(super::quality_ledger::SCHEMA).await? {
-                        result.map_err(database_error)?;
-                    }
-                    let attempt = self.client().txn(vec![("UPDATE cluster_meta SET schema_version = $1, migrated_at = $2 WHERE singleton = 1 AND schema_version = $3".to_owned(),
-                        params!(QUALITY_LEDGER_SCHEMA_VERSION,now,QUALITY_LEDGER_SCHEMA_MIGRATION_SOURCE))]).await;
-                    self.settle_migration_attempt(QUALITY_LEDGER_SCHEMA_MIGRATION_SOURCE, attempt)
-                        .await?;
+                    Box::pin(self.migrate_additive_schema_step(
+                        super::quality_ledger::SCHEMA,
+                        QUALITY_LEDGER_SCHEMA_MIGRATION_SOURCE,
+                        QUALITY_LEDGER_SCHEMA_VERSION,
+                    ))
+                    .await?;
                 }
                 SchemaMigrationAction::MigrateFrom(
                     QUALITY_CANCELLATION_SCHEMA_MIGRATION_SOURCE,
                 ) => {
-                    let now = self.now()?;
-                    for result in self
-                        .client()
-                        .batch(super::quality_cancellation::QUALITY_CANCELLATION_SCHEMA)
-                        .await?
-                    {
-                        result.map_err(database_error)?;
-                    }
-                    let attempt = self.client().txn(vec![("UPDATE cluster_meta SET schema_version = $1, migrated_at = $2 WHERE singleton = 1 AND schema_version = $3".to_owned(),
-                        params!(QUALITY_CANCELLATION_SCHEMA_VERSION, now, QUALITY_CANCELLATION_SCHEMA_MIGRATION_SOURCE))]).await;
-                    self.settle_migration_attempt(
+                    Box::pin(self.migrate_additive_schema_step(
+                        super::quality_cancellation::QUALITY_CANCELLATION_SCHEMA,
                         QUALITY_CANCELLATION_SCHEMA_MIGRATION_SOURCE,
-                        attempt,
-                    )
+                        QUALITY_CANCELLATION_SCHEMA_VERSION,
+                    ))
                     .await?;
                 }
                 SchemaMigrationAction::MigrateFrom(VIEWER_ANALYSIS_SCHEMA_MIGRATION_SOURCE) => {
@@ -3237,6 +3230,30 @@ impl HiqliteAuthStore {
             )
             .await?;
         Ok(rows.first().is_some_and(|row| row.count > 0))
+    }
+
+    /// One additive schema step: create its tables, then advance the marker
+    /// from exactly `source` to `target` in a single Raft transaction.
+    async fn migrate_additive_schema_step(
+        &self,
+        schema: &'static str,
+        source: i64,
+        target: i64,
+    ) -> Result<(), StoreError> {
+        let now = self.now()?;
+        for result in self.client().batch(schema).await? {
+            result.map_err(database_error)?;
+        }
+        let attempt = self
+            .client()
+            .txn(vec![(
+                "UPDATE cluster_meta SET schema_version = $1, migrated_at = $2 \
+                 WHERE singleton = 1 AND schema_version = $3"
+                    .to_owned(),
+                params!(target, now, source),
+            )])
+            .await;
+        self.settle_migration_attempt(source, attempt).await
     }
 
     async fn settle_migration_attempt(
