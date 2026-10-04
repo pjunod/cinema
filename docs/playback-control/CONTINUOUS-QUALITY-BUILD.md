@@ -6625,3 +6625,72 @@ rescore failed evidence. Owned generated fixtures, browser bundles, warm
 compiler target and temporary helpers remain for continuation; remove them
 once no longer needed. The discarded native framebuffer-reader prototype
 must not land. No production service/network or user repository was changed.
+
+### 10.223 Android 409 Capacity: replay receipts were a hidden rate limit
+
+**Cause, measured.** The run resumed on nuc3 with an owned API 36 x86_64
+emulator (Docker, KVM, adb 5041 / console 5580) against an owned isolated
+backend built from `ff87c371d`. A read-only ledger monitor sampled the
+replicated `continuous_quality_ledgers` row every two seconds. With the
+`ff87c371d` Android client the attachment accepted about 1.7 commands per
+second and reached exactly 128 retained receipts after 74 seconds of
+playback; from then on every command was refused with `Capacity` (287
+refusals in 27 seconds). Pins stayed between 11 and 20 and the ledger at
+96 KB, so neither the interval, byte nor transaction bound was involved.
+Receipts were kept for a 90-second horizon and capped at 128, so any client
+that reports facts faster than about 1.4 per second fails after a minute.
+The Android client reports one command per artifact (appended video, disposed
+video and disposed AAC every two seconds, plus scheduling).
+
+A second defect turned the refusal into a stop: both clients kept a refused
+command pending and replayed it before every later command. On Android the
+fact pump is woken by every rendered frame, so the refused request was resent
+at display rate and starved every reservation until playback stopped.
+
+**Fix, in the protocol's own terms.** An attachment is one serialized command
+channel: a client sends N+1 only after N settled by its acknowledgement or an
+authoritative ledger read. Accepting a newer sequence therefore acknowledges
+every older one; the ledger now retains only the newest receipt. Exact replay
+of the newest command and conflicting-replay refusal are unchanged; an older
+sequence is stale. `MAX_QUALITY_RECEIPTS` remains as the decoding bound for
+stored rows, and the 90-second horizon keeps its separate meaning for
+inactive-parent maintenance. A `Capacity` refusal now logs which ledger bound
+it reached.
+
+Both clients settle a 4xx refusal with one ledger read instead of replaying
+it: the owner can refuse after its durable write settled (a 409 is returned
+for store failures and post-acceptance preparation failures too), and the
+attachment is the only writer, so an accepted sequence at or past the refused
+one means it applied. An unreadable ledger keeps it pending. Android's fact
+pump paces failed passes to once a second and reports all appends and
+disposals observed in one pass as one fact per owning transaction.
+
+With the batching client against the old server the steady state was about
+96 receipts per 90 seconds, 78 KB of ledger: below the old bound but close to
+both it and the 128 KiB ledger bound, which confirms that batching alone would
+only have moved the cliff. Evidence:
+`target/playback-lab/reports/continuous-android-ff87-receipt-exhaustion.tgz`.
+
+**Environment finding (recorded for the human).** Android offers continuous
+enrollment only when the server's `playback.display_aware_auto` setting is on,
+because the intent envelope is built only for display-aware Auto (route-v1).
+That setting belongs to the display-aware Auto effort and defaults off, so a
+default server never enrolls Android in continuous quality. The lab enables it
+explicitly. Enrollment and bypass reasons are now logged once per start.
+
+Regressions (authored, unrun until the fast lane):
+`continuous_quality.rs::unbatched_fact_cadence_never_exhausts_replay_receipts`,
+`ContinuousQualityProtocolTest.kt::refusalIsResolvedByOneLedgerReadAndNeverResent`,
+`tests/web/continuous-quality.test.js::a refused command is settled by one ledger read and never resent`.
+
+**Fix verified on the emulator.** Backend and client built from the fixed
+tree (`d1641f34d` working tree: these commits plus the enrollment-reason log)
+played for over three minutes with 245 accepted commands, one retained
+receipt, a 9–17 KB ledger and zero refusals; the server's rolling disposed
+list held at its 128-entry window. A following Auto→manual 720p choice could
+not be judged: the lab daemon's single-node replicated store timed out for
+several seconds (`slow leader quorum watermark proof`, 4.4 s; 503 on
+`/status` and `quality-schedule`) while nuc3 also carried another session's
+heavy compile and lab, so the client reopened. That run is a host-overload
+failure, not a switch result; Android manual/Auto switching stays unqualified.
+Evidence: `target/playback-lab/reports/continuous-android-d1641-cumulative-receipts.tgz`.
