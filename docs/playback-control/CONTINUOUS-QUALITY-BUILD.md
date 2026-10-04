@@ -6775,3 +6775,44 @@ default `dev` profile with full debug information grew this session's cargo
 target to 19 GB while another session also wrote there. The target, old
 binaries and lab runtimes were removed (37 GB free afterwards), and builds
 here now use `CARGO_PROFILE_DEV_DEBUG=0` and `CARGO_INCREMENTAL=0`.
+
+### 10.227 Android prepared handoff paused the incumbent; held producer froze Auto
+
+**Audio focus.** With link samples available, Auto chose an out-of-family
+candidate three seconds into playback and built a prepared successor. The
+successor was constructed with audio-focus handling and started muted with
+`playWhenReady`; its focus request delivered a focus loss to the incumbent,
+which Media3 answers by pausing. The incumbent stayed PAUSED at 1.8 s for
+the rest of the run, including after the successor's 12-second rollback.
+Focus now follows the audible owner: the successor stages without focus, the
+commit releases the retiring player's focus before the successor requests it,
+and rollback moves it back. Verified: the incumbent stayed PLAYING through a
+staged 1080p successor and its rollback. Regression:
+`PreparedAudioFocusTest.kt::aStagedSuccessorNeverRequestsFocusAndCommitReleasesBeforeRequesting`.
+
+**Held producer.** Bounded gate logging then showed Auto blocked on
+`producer_held`. The display-aware tick returned whenever the server producer
+was held, which is the steady state of a producer ahead of the 12-second
+client budget. The native adaptive design and the shared policy fixture
+(`producer-paced`) say a held producer is evidence in neither direction, so the
+gate is removed; the remaining reasons are a pure function
+(`AutoDecisionGateTest.kt::aHeldProducerNeverBlocksAnAutoDecision`).
+
+**Result on the emulator.** A cliff from 100 to 13 Mb/s moved Auto 720p→480p
+through the continuous path in 24 s, in the original session. Recovery at
+100 Mb/s did not upgrade within 240 s: the shaper's per-second peak at 480p
+was 5.5 Mb/s because small 480p objects are latency-bound through emulator
+networking, and an upgrade needs a per-transfer link sample of 1.8× the bound
+720p cost, about 32 Mb/s.
+
+**Open decision for the human — continuous Auto cost.** §10.158 bound Auto
+costs for continuous candidates to the family's delivery ceilings (video
+ceiling plus shared AAC ceiling: 9.8 / 17.8 Mb/s for this 480p/720p family)
+instead of the catalog peaks (3.16 / 6.16 Mb/s). The ceiling is a deliberately
+conservative per-segment guarantee (three nominal rates plus a two-second
+burst and container allowance), so an upgrade to a 4 Mb/s 720p stream needs a
+32 Mb/s measured link, about three times what the same encode needs outside a
+continuous family. Recommendation: price Auto on the encoder's configured peak
+(the catalog peak, which already includes audio) and keep the ceiling only for
+the HLS `BANDWIDTH` an autonomous engine reads. This reverses a qualified
+earlier decision, so it is left unchanged pending the human.
