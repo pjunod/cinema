@@ -941,74 +941,14 @@ async fn sharing_receiver_real_pinned_quality_reopen_preserves_position_and_rele
 /// confirmed Source End that frees its Source slot.
 async fn actual_pinned_reopen(address: IpAddr) {
     use axum::http::StatusCode;
-    use plurx_core::sharing_tls::{LiveNodeTls, SharingTlsListener};
-    let fixture = real_receiver_fixture(address, SourceFixtureMode::Copy).await;
-    let tls = Arc::new(
-        LiveNodeTls::open(
-            &fixture.directory().join("source-runtime-tls"),
-            crate::state::clock_ms() / 1000,
-        )
-        .expect("actual Source runtime TLS"),
+    let pair = PinnedPair::start(address).await;
+    let (fixture, b_address, login, base, session) = (
+        &pair.fixture,
+        pair.b_address,
+        pair.login.clone(),
+        pair.base.clone(),
+        pair.session.clone(),
     );
-    let (pin, _) = tls.status().expect("actual Source runtime SPKI");
-    let source_listener = tokio::net::TcpListener::bind((address, 0))
-        .await
-        .expect("actual Source CGNAT listener");
-    let endpoint = Endpoint {
-        ipv4: match address {
-            IpAddr::V4(ip) => ip,
-            _ => panic!("IPv4 CGNAT fixture"),
-        },
-        ipv6: None,
-        ts_fqdn: "source.fixture.ts.net".into(),
-        port: source_listener.local_addr().expect("Source bind").port(),
-        spki_sha256: pin,
-    };
-    let (source_stop, source_stopped) = tokio::sync::oneshot::channel();
-    let source_task = tokio::spawn(crate::serve_http(
-        SharingTlsListener::new(source_listener, tls),
-        super::sharing::peer_router((*fixture.source.state).clone()),
-        async move {
-            let _ = source_stopped.await;
-        },
-        crate::HTTP_TIMEOUTS,
-    ));
-    fixture.pair(endpoint).await;
-    let b_listener = tokio::net::TcpListener::bind((address, 0))
-        .await
-        .expect("actual B CGNAT listener");
-    let b_address = b_listener.local_addr().expect("B bind");
-    let (b_stop, b_stopped) = tokio::sync::oneshot::channel();
-    let b_task = tokio::spawn(crate::serve_http(
-        b_listener,
-        fixture_router(fixture.state.clone()),
-        async move {
-            let _ = b_stopped.await;
-        },
-        crate::HTTP_TIMEOUTS,
-    ));
-    let login = fixture.original_login.clone();
-    let (status, _, bytes) = b_request(
-        b_address,
-        false,
-        "GET",
-        &format!(
-            "/api/v1/shared/imports/{}/items/{}",
-            fixture.import_id,
-            fixture.source.reference.item_id.as_str(),
-        ),
-        &login,
-        Vec::new(),
-    )
-    .await;
-    assert_eq!(status, StatusCode::OK, "actual details");
-    let details: Value = serde_json::from_slice(&bytes).expect("details");
-    let base = details["files"][0]["file_base"]
-        .as_str()
-        .expect("signed B file alias")
-        .to_owned();
-    let original: Value = serde_json::from_slice(&fixture.source.request).expect("recipe");
-    let session = original["session"].clone();
     let (status, _, bytes) = b_request(
         b_address,
         false,
@@ -1036,41 +976,7 @@ async fn actual_pinned_reopen(address: IpAddr) {
                    epoch: u64,
                    sequence: u64,
                    selection: crate::playback_control::ClientSelection| {
-        use crate::playback_control as pc;
-        serde_json::to_vec(&pc::ControlRequestV1 {
-            intent: None,
-            protocol: pc::PROTOCOL_V1.to_owned(),
-            generation: generation.to_owned(),
-            control_epoch: epoch,
-            client_instance_id: "6f1c2d1e-7f9a-4b8e-9d3c-2a1b0c9d8e7f".to_owned(),
-            sequence,
-            demand: pc::PlaybackDemand::Active,
-            position_ms: 1_000,
-            buffered_from_ms: Some(0),
-            buffered_through_ms: 1_500,
-            playback_rate: 1.0,
-            render_state: pc::RenderState::Rendering,
-            seek_target_ms: None,
-            observed_download_bps: None,
-            selection,
-            capabilities: Some(pc::DynamicCapabilities {
-                presentation_target: None,
-                decoder_caps: None,
-                platform: pc::ClientPlatform::Web,
-                max_height: 1080,
-                codecs: vec![pc::CodecPolicy::H264],
-                dynamic_ranges: vec![pc::DynamicRangePolicy::Sdr],
-                dual_player_preparation: true,
-            }),
-            observation: None,
-            acknowledgement: None,
-            supported_actions: Some(vec![
-                "hold".to_owned(),
-                "retry_resource".to_owned(),
-                pc::PREPARE_REPLACEMENT_ACTION.to_owned(),
-            ]),
-        })
-        .expect("ordinary v1 control")
+        fixture_control(generation, epoch, sequence, selection, false, None)
     };
     let first_control = format!("/api/v1/hls/{first_id}/control");
     let current = original_selection(&session);
@@ -1247,17 +1153,464 @@ async fn actual_pinned_reopen(address: IpAddr) {
     .await;
     assert_eq!(status, StatusCode::NO_CONTENT, "confirmed successor End");
     assert_eq!(fixture.source.active_source_sessions().await, 0);
-    let _ = b_stop.send(());
-    b_task
+    pair.finish().await;
+}
+
+/// One real pinned Source and B pair on the disposable CGNAT address, with
+/// the viewer's signed B file alias and the Source's create body. Shared by
+/// the directed-change fixtures.
+struct PinnedPair {
+    fixture: RealReceiverFixture,
+    b_address: std::net::SocketAddr,
+    login: String,
+    base: String,
+    session: Value,
+    b_stop: tokio::sync::oneshot::Sender<()>,
+    b_task: tokio::task::JoinHandle<anyhow::Result<()>>,
+    source_stop: tokio::sync::oneshot::Sender<()>,
+    source_task: tokio::task::JoinHandle<anyhow::Result<()>>,
+}
+
+impl PinnedPair {
+    async fn start(address: IpAddr) -> Self {
+        use axum::http::StatusCode;
+        use plurx_core::sharing_tls::{LiveNodeTls, SharingTlsListener};
+        let fixture = real_receiver_fixture(address, SourceFixtureMode::Copy).await;
+        let tls = Arc::new(
+            LiveNodeTls::open(
+                &fixture.directory().join("source-runtime-tls"),
+                crate::state::clock_ms() / 1000,
+            )
+            .expect("actual Source runtime TLS"),
+        );
+        let (pin, _) = tls.status().expect("actual Source runtime SPKI");
+        let source_listener = tokio::net::TcpListener::bind((address, 0))
+            .await
+            .expect("actual Source CGNAT listener");
+        let endpoint = Endpoint {
+            ipv4: match address {
+                IpAddr::V4(ip) => ip,
+                _ => panic!("IPv4 CGNAT fixture"),
+            },
+            ipv6: None,
+            ts_fqdn: "source.fixture.ts.net".into(),
+            port: source_listener.local_addr().expect("Source bind").port(),
+            spki_sha256: pin,
+        };
+        let (source_stop, source_stopped) = tokio::sync::oneshot::channel();
+        let source_task = tokio::spawn(crate::serve_http(
+            SharingTlsListener::new(source_listener, tls),
+            super::sharing::peer_router((*fixture.source.state).clone()),
+            async move {
+                let _ = source_stopped.await;
+            },
+            crate::HTTP_TIMEOUTS,
+        ));
+        fixture.pair(endpoint).await;
+        let b_listener = tokio::net::TcpListener::bind((address, 0))
+            .await
+            .expect("actual B CGNAT listener");
+        let b_address = b_listener.local_addr().expect("B bind");
+        let (b_stop, b_stopped) = tokio::sync::oneshot::channel();
+        let b_task = tokio::spawn(crate::serve_http(
+            b_listener,
+            fixture_router(fixture.state.clone()),
+            async move {
+                let _ = b_stopped.await;
+            },
+            crate::HTTP_TIMEOUTS,
+        ));
+        let login = fixture.original_login.clone();
+        let (status, _, bytes) = b_request(
+            b_address,
+            false,
+            "GET",
+            &format!(
+                "/api/v1/shared/imports/{}/items/{}",
+                fixture.import_id,
+                fixture.source.reference.item_id.as_str(),
+            ),
+            &login,
+            Vec::new(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "actual details");
+        let details: Value = serde_json::from_slice(&bytes).expect("details");
+        let base = details["files"][0]["file_base"]
+            .as_str()
+            .expect("signed B file alias")
+            .to_owned();
+        let original: Value = serde_json::from_slice(&fixture.source.request).expect("recipe");
+        let session = original["session"].clone();
+        Self {
+            fixture,
+            b_address,
+            login,
+            base,
+            session,
+            b_stop,
+            b_task,
+            source_stop,
+            source_task,
+        }
+    }
+
+    async fn finish(self) {
+        let _ = self.b_stop.send(());
+        self.b_task
+            .await
+            .expect("actual B server joined")
+            .expect("B server result");
+        let _ = self.source_stop.send(());
+        self.source_task
+            .await
+            .expect("actual Source server joined")
+            .expect("Source server result");
+        self.fixture.shutdown().await;
+    }
+}
+
+/// An ordinary web v1 control exchange. `shared` adds the Shared successor
+/// promise beside `prepare_replacement`; without it the client keeps the P0
+/// reopen.
+fn fixture_control(
+    generation: &str,
+    epoch: u64,
+    sequence: u64,
+    selection: crate::playback_control::ClientSelection,
+    shared: bool,
+    acknowledgement: Option<crate::playback_control::ActionAcknowledgement>,
+) -> Vec<u8> {
+    use crate::playback_control as pc;
+    let mut supported_actions = vec![
+        "hold".to_owned(),
+        "retry_resource".to_owned(),
+        pc::PREPARE_REPLACEMENT_ACTION.to_owned(),
+    ];
+    if shared {
+        supported_actions.push(pc::SHARED_PREPARE_REPLACEMENT_ACTION.to_owned());
+    }
+    serde_json::to_vec(&pc::ControlRequestV1 {
+        intent: None,
+        protocol: pc::PROTOCOL_V1.to_owned(),
+        generation: generation.to_owned(),
+        control_epoch: epoch,
+        client_instance_id: "6f1c2d1e-7f9a-4b8e-9d3c-2a1b0c9d8e7f".to_owned(),
+        sequence,
+        demand: pc::PlaybackDemand::Active,
+        position_ms: 1_000,
+        buffered_from_ms: Some(0),
+        buffered_through_ms: 1_500,
+        playback_rate: 1.0,
+        render_state: pc::RenderState::Rendering,
+        seek_target_ms: None,
+        observed_download_bps: None,
+        selection,
+        capabilities: Some(pc::DynamicCapabilities {
+            presentation_target: None,
+            decoder_caps: None,
+            platform: pc::ClientPlatform::Web,
+            max_height: 1080,
+            codecs: vec![pc::CodecPolicy::H264],
+            dynamic_ranges: vec![pc::DynamicRangePolicy::Sdr],
+            dual_player_preparation: true,
+        }),
+        observation: None,
+        acknowledgement,
+        supported_actions: Some(supported_actions),
+    })
+    .expect("ordinary v1 control")
+}
+
+#[tokio::test]
+#[ignore = "requires an isolated Linux CGNAT namespace and PLURX_SHARING_FIXTURE_IP"]
+async fn sharing_receiver_real_pinned_prepared_handoff_commit_and_abort() {
+    let address: IpAddr = std::env::var("PLURX_SHARING_FIXTURE_IP")
+        .expect("explicit disposable CGNAT namespace")
+        .parse()
+        .expect("fixture IP");
+    assert!(plurx_core::sharing::is_tailnet_address(address));
+    for h2 in [false, true] {
+        tokio::time::timeout(
+            std::time::Duration::from_secs(330),
+            Box::pin(actual_pinned_prepared_handoff(address, h2)),
+        )
         .await
-        .expect("actual B server joined")
-        .expect("B server result");
-    let _ = source_stop.send(());
-    source_task
-        .await
-        .expect("actual Source server joined")
-        .expect("Source server result");
-    fixture.shutdown().await;
+        .expect("bounded real prepared handoff fixture");
+    }
+}
+
+/// The exchanges of one B control channel at a fixed tuple, spaced by the
+/// per-session control budget between new sequences.
+struct FixtureChannel<'a> {
+    pair: &'a PinnedPair,
+    h2: bool,
+    session: String,
+    generation: String,
+    epoch: u64,
+    sequence: u64,
+}
+
+impl FixtureChannel<'_> {
+    fn of<'p>(pair: &'p PinnedPair, h2: bool, start: &Value) -> FixtureChannel<'p> {
+        FixtureChannel {
+            pair,
+            h2,
+            session: start["session_id"].as_str().expect("B session").to_owned(),
+            generation: start["control"]["generation"]
+                .as_str()
+                .expect("B generation")
+                .to_owned(),
+            epoch: start["control"]["control_epoch"].as_u64().expect("B epoch"),
+            sequence: 0,
+        }
+    }
+    async fn raw(&self, body: Vec<u8>) -> (axum::http::StatusCode, axum::body::Bytes) {
+        let (status, _, bytes) = b_request(
+            self.pair.b_address,
+            self.h2,
+            "POST",
+            &format!("/api/v1/hls/{}/control", self.session),
+            &self.pair.login,
+            body,
+        )
+        .await;
+        (status, bytes)
+    }
+    /// The next sequence: the body sent, its status and its answer bytes.
+    async fn next(
+        &mut self,
+        selection: crate::playback_control::ClientSelection,
+        acknowledgement: Option<crate::playback_control::ActionAcknowledgement>,
+    ) -> (Vec<u8>, axum::http::StatusCode, axum::body::Bytes) {
+        if self.sequence > 0 {
+            tokio::time::sleep(std::time::Duration::from_millis(1_100)).await;
+        }
+        self.sequence += 1;
+        let body = fixture_control(
+            &self.generation,
+            self.epoch,
+            self.sequence,
+            selection,
+            true,
+            acknowledgement,
+        );
+        let (status, bytes) = self.raw(body.clone()).await;
+        (body, status, bytes)
+    }
+    /// Exchange the ask until B offers its successor; every answer before it
+    /// is `staging`.
+    async fn offered(
+        &mut self,
+        selection: &crate::playback_control::ClientSelection,
+    ) -> crate::playback_control::ControlAction {
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(90);
+        loop {
+            let (_, status, bytes) = self.next(selection.clone(), None).await;
+            assert_eq!(
+                status,
+                axum::http::StatusCode::OK,
+                "control {}: {}",
+                self.sequence,
+                String::from_utf8_lossy(&bytes)
+            );
+            let answer: crate::playback_control::ControlResponseV1 =
+                serde_json::from_slice(&bytes).expect("control answer");
+            match answer.delivery.preparation.as_deref() {
+                Some("offered") => return answer.action,
+                Some("staging") => {}
+                other => panic!("B stages its own successor, never {other:?}"),
+            }
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "the successor publishes"
+            );
+        }
+    }
+}
+
+fn committed(
+    action_id: &str,
+    origin: i64,
+) -> Option<crate::playback_control::ActionAcknowledgement> {
+    Some(crate::playback_control::ActionAcknowledgement {
+        action_id: action_id.to_owned(),
+        state: crate::playback_control::AcknowledgementState::Committed,
+        buffered_through_ms: None,
+        committed_media_origin_ms: Some(origin),
+        first_frame_unix_ms: Some(crate::state::clock_ms()),
+    })
+}
+
+async fn wait_source_sessions(pair: &PinnedPair, expected: i64, what: &str) {
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(60);
+    while pair.fixture.source.active_source_sessions().await != expected {
+        assert!(tokio::time::Instant::now() < deadline, "{what}");
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    }
+}
+
+/// P2 through the real pinned B over H1 or H2: B stages its own successor
+/// (a second Source session counted on both sides), offers a `prepare`
+/// naming only B URLs once it is published, serves its playlist before
+/// commit, settles a commit exactly (replayed byte-identical, predecessor
+/// retired with a confirmed Source End), and an abort frees the successor's
+/// Source slot and refuses a late commit.
+async fn actual_pinned_prepared_handoff(address: IpAddr, h2: bool) {
+    use crate::playback_control::{ControlAction, QualitySelection};
+    use axum::http::StatusCode;
+    let pair = PinnedPair::start(address).await;
+    let (status, _, bytes) = b_request(
+        pair.b_address,
+        h2,
+        "POST",
+        &format!("{}/hls/sessions", pair.base),
+        &pair.login,
+        serde_json::to_vec(&pair.session).expect("CreateSession"),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "first B Start: {}",
+        String::from_utf8_lossy(&bytes)
+    );
+    let first: Value = serde_json::from_slice(&bytes).expect("first Start");
+    let mut watched = FixtureChannel::of(&pair, h2, &first);
+    let current = original_selection(&pair.session);
+    let (_, status, bytes) = watched.next(current.clone(), None).await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "{}",
+        String::from_utf8_lossy(&bytes)
+    );
+    assert_eq!(pair.fixture.source.active_source_sessions().await, 1);
+
+    // Commit.
+    let mut directed = current.clone();
+    directed.quality = QualitySelection::Manual { height: 144 };
+    let ControlAction::Prepare {
+        action_id,
+        session_id,
+        playlist_url,
+        control,
+        media_origin_ms,
+        effective_selection,
+    } = watched.offered(&directed).await
+    else {
+        panic!("an offered preparation carries prepare");
+    };
+    assert_ne!(session_id, watched.session);
+    assert_eq!(playlist_url, format!("/api/v1/hls/{session_id}/index.m3u8"));
+    let control = control.expect("successor control bootstrap");
+    assert_eq!(control.url, format!("/api/v1/hls/{session_id}/control"));
+    assert_eq!(effective_selection.height, 144);
+    assert_eq!(
+        pair.fixture.source.active_source_sessions().await,
+        2,
+        "the successor is a real second Source session"
+    );
+    // Served before commit.
+    let (status, _, playlist) = b_request(
+        pair.b_address,
+        h2,
+        "GET",
+        &playlist_url,
+        &pair.login,
+        Vec::new(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "successor playlist before commit");
+    assert!(!String::from_utf8_lossy(&playlist).contains("sharing/v1"));
+    let (commit, status, answer) = watched
+        .next(directed.clone(), committed(&action_id, media_origin_ms))
+        .await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "{}",
+        String::from_utf8_lossy(&answer)
+    );
+    // A lost answer replays byte-identical and writes nothing.
+    let (status, replay) = watched.raw(commit.clone()).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(replay, answer, "exact replay");
+    wait_source_sessions(&pair, 1, "the committed predecessor frees its Source slot").await;
+    let (status, replay) = watched.raw(commit).await;
+    assert_eq!(
+        (status, replay),
+        (StatusCode::OK, answer),
+        "exact replay after the predecessor retired"
+    );
+    let (status, _, _) = b_request(
+        pair.b_address,
+        h2,
+        "DELETE",
+        &format!("/api/v1/hls/{}", watched.session),
+        &pair.login,
+        Vec::new(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NO_CONTENT, "confirmed predecessor End");
+
+    // Abort, on the committed successor's own channel.
+    let mut now_watched = FixtureChannel {
+        pair: &pair,
+        h2,
+        session: session_id.clone(),
+        generation: control.generation.clone(),
+        epoch: control.control_epoch,
+        sequence: 0,
+    };
+    let (_, status, bytes) = now_watched.next(directed.clone(), None).await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "{}",
+        String::from_utf8_lossy(&bytes)
+    );
+    let answer: crate::playback_control::ControlResponseV1 =
+        serde_json::from_slice(&bytes).expect("successor answer");
+    assert_eq!(answer.effective_selection.height, 144);
+    let ControlAction::Prepare {
+        action_id: aborted, ..
+    } = now_watched.offered(&current).await
+    else {
+        panic!("a second change is offered too");
+    };
+    wait_source_sessions(&pair, 2, "the second successor holds a Source slot").await;
+    let abort = Some(crate::playback_control::ActionAcknowledgement {
+        action_id: aborted.clone(),
+        state: crate::playback_control::AcknowledgementState::Aborted,
+        buffered_through_ms: None,
+        committed_media_origin_ms: None,
+        first_frame_unix_ms: None,
+    });
+    let (_, status, bytes) = now_watched.next(current.clone(), abort).await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "{}",
+        String::from_utf8_lossy(&bytes)
+    );
+    wait_source_sessions(&pair, 1, "the aborted successor frees its Source slot").await;
+    let (_, status, _) = now_watched
+        .next(current.clone(), committed(&aborted, 0))
+        .await;
+    assert_eq!(status, StatusCode::CONFLICT, "a late commit is stale");
+    let (status, _, _) = b_request(
+        pair.b_address,
+        h2,
+        "DELETE",
+        &format!("/api/v1/hls/{session_id}"),
+        &pair.login,
+        Vec::new(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NO_CONTENT, "confirmed successor End");
+    assert_eq!(pair.fixture.source.active_source_sessions().await, 0);
+    pair.finish().await;
 }
 
 async fn b_request(

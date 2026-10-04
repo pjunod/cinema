@@ -3692,7 +3692,11 @@ pattern = "(?:[A-Za-z_]\\w*::)+(?:sleep|sleep_until|interval|interval_at|timeout
 # control-interval wait and its bounded predecessor-retirement poll. The reopen
 # itself adds no timer: it is driven by the control answer and the existing
 # client fallback.
-expected_occurrences = 1314
+# +3 for the shared prepared successor (P1/P2), all test-only, in the prepared
+# handoff CGNAT fixture: its outer bound, its control-interval wait between
+# new sequences, and its bounded Source-session poll. The successor deadline
+# adds no timer: it is checked on the successor owner's existing renewal tick.
+expected_occurrences = 1317
 # +1 native-startup delayed-init fixture: its joined writer owns one bounded
 # six-second sleep, under the test request's unchanged twelve-second deadline.
 # No production timer or recovery clock is added.
