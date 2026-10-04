@@ -1,7 +1,0 @@
-version = 1
-
-[[coverage]]
-commits = ["69f6250d", "c559b5ee"]
-points = ["playback.pipeline"]
-checks = ["rust-gate"]
-reason = "The HEVC configuration trace unit suite requires an over-long stderr line that carries neither the trace_headers prefix nor a bare trace field (a tee banner naming one slave per PGS track, or accumulated progress lines) to leave a clean proof intact, while an over-long line carrying the prefix or a bare ' = <integer>' field anywhere, including across the 8 KiB boundary or after it, and a stream ending inside a dropped line still refuse."

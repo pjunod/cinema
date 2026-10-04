@@ -1,7 +1,0 @@
-version = 1
-
-[[coverage]]
-commits = ["5313e8d7"]
-points = ["playback.pipeline"]
-checks = ["rust-gate"]
-reason = "The HTTP unit suite requires Settings and the Developer readiness card to read the stored content-analysis switch the way the queue and VOD create path do: missing and off spellings read off, and every on spelling, including a hand-written true, reads on in both."
