@@ -136,6 +136,30 @@ struct SharedStart {
     }
 }
 
+/// Ordinary complete B Start retained with its authenticated signed-file context.
+/// This is routing metadata; it never asserts Source physical production.
+struct SharedStartedPlayback {
+    let start: SharedStart
+    let context: PlaybackFileContext
+    let request: CreateSessionRequest
+}
+
+extension SharedStart {
+    func bindInitial(_ context: PlaybackFileContext, request: CreateSessionRequest) throws -> SharedStartedPlayback {
+        guard context.reference != nil, context.sessionId == nil,
+              response.vod == true, let position = response.startSeconds,
+              position.isFinite, position >= 0, position <= 9_007_199_254_740,
+              response.durationMs.map({ $0 >= 0 }) ?? true,
+              let control = response.control,
+              PlaybackFileContext.matches(control.generation, "^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"),
+              control.nextExchangeMs == 5_000, control.leaseTimeoutMs == 300_000
+        else { throw APIError.badURL }
+        let bound = try context.withSession(response.sessionId)
+        _ = try validated(bound)
+        return SharedStartedPlayback(start: self, context: bound, request: request)
+    }
+}
+
 /// B session authority must already be admitted; a metadata response cannot bind it.
 enum SharedStartValidation {
     static func validated(_ start: HlsStart, context: PlaybackFileContext) throws -> HlsStart {
@@ -222,3 +246,183 @@ struct SharedPGSManifest: Codable {
     }
 }
 
+
+/// A beat is retained verbatim across uncertain sends. A conflict discards it;
+/// only a fresh authorized watch read can permit the next new beat.
+struct SharedProgressBeat: Encodable, Equatable {
+    let sessionId: String
+    let sequence: Int64
+    let positionMs: Int64
+    let durationMs: Int64?
+    let watched: Bool
+    func validate() throws {
+        guard sessionId.count == 36,
+              PlaybackFileContext.matches(sessionId, "^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"),
+              (0...9_007_199_254_740_991).contains(sequence),
+              (0...9_007_199_254_740_991).contains(positionMs),
+              durationMs.map({ (0...9_007_199_254_740_991).contains($0) }) ?? true
+        else { throw APIError.badURL }
+    }
+}
+enum SharedProgressResult: Equatable {
+    case acknowledged
+    case previousBeatAcknowledged
+    case resyncRequired(currentSequence: Int64?)
+}
+struct SharedProgressOrder {
+    private(set) var sequence: Int64
+    private(set) var pending: SharedProgressBeat?
+    private(set) var needsResync = false
+    init(sequence: Int64) throws {
+        guard (0...9_007_199_254_740_991).contains(sequence) else { throw APIError.badURL }
+        self.sequence = sequence
+    }
+    mutating func beat(sessionId: String, positionMs: Int64, durationMs: Int64?, watched: Bool) throws -> SharedProgressBeat {
+        guard !needsResync else { throw APIError.badURL }
+        if let pending { guard pending.sessionId == sessionId else { throw APIError.badURL }; return pending }
+        guard sequence < 9_007_199_254_740_991 else { throw APIError.badURL }
+        let beat = SharedProgressBeat(sessionId: sessionId, sequence: sequence + 1, positionMs: positionMs, durationMs: durationMs, watched: watched)
+        try beat.validate(); sequence = beat.sequence; pending = beat; return beat
+    }
+    mutating func complete(_ beat: SharedProgressBeat, result: SharedProgressResult) throws {
+        guard pending == beat else { throw APIError.badURL }
+        if case let .resyncRequired(current) = result {
+            if let current { guard (0...9_007_199_254_740_991).contains(current) else { throw APIError.badURL }; sequence = max(sequence, current) }
+            needsResync = true
+        }
+        pending = nil
+    }
+    mutating func resync(freshAuthorizedSequence: Int64) throws {
+        guard needsResync, (0...9_007_199_254_740_991).contains(freshAuthorizedSequence) else { throw APIError.badURL }
+        sequence = max(sequence, freshAuthorizedSequence); needsResync = false
+    }
+}
+
+/// An initial Shared subject has no numeric Local item or file identity.
+struct SharedPlaybackSubject {
+    let context: PlaybackFileContext
+    let title: String
+    let resumeMs: Int64
+    let watchSequence: Int64
+    func validate() throws {
+        guard context.sessionId == nil, let reference = context.reference,
+              let revision = context.revision, title.utf8.count <= 4096,
+              (0...9_007_199_254_740_991).contains(resumeMs),
+              (0...9_007_199_254_740_991).contains(watchSequence) else { throw APIError.badURL }
+        try context.validateSharedReference(reference, file: context.sourceFileId, revision: revision)
+    }
+}
+/// The fixed initial HLS plan retains the raw original ask for later directed
+/// control equality. Delivered encoder dimensions never replace that ask.
+struct SharedPlaybackPlan {
+    let subject: SharedPlaybackSubject
+    let decision: SharedDecision
+    let caps: DeviceCaps
+    let request: CreateSessionRequest
+    init(subject: SharedPlaybackSubject, decision: SharedDecision, caps: DeviceCaps, request: CreateSessionRequest) throws {
+        try subject.validate(); _ = try decision.validated(subject.context)
+        guard caps.v == 2, caps.transports.contains("hls"), request.caps == caps,
+              request.presentation == "vod", request.intent == nil,
+              request.previousSessionId == nil, request.controlSequence == nil, request.reopenReason == nil,
+              request.subtitleBurn == nil, request.preserveDolbyVision != true, request.hdr10 != true,
+              decision.presentation.deliveredDynamicRange.map({ $0 == "sdr" }) ?? true,
+              (request.start ?? 0) == Double(subject.resumeMs) / 1000,
+              request.height.map({ $0 > 0 && $0 <= 8192 }) ?? true,
+              decision.method == "transcode" ? request.copy != true : request.copy == true
+        else { throw APIError.transport("This Shared HLS plan is not available yet.") }
+        self.subject = subject; self.decision = decision; self.caps = caps; self.request = request
+    }
+}
+
+/// Current-rendition control selection comes from the original ask, never the
+/// delivered encoder height. Kept separate from Local auto-candidate enums.
+extension SharedPlaybackPlan {
+    func frozenControlSelection() throws -> SharedPlaybackJSON {
+        guard request.height.map({ (PlaybackControl.minimumHeight...PlaybackControl.maximumHeight).contains($0) }) ?? true,
+              request.audio.map({ (0...1024).contains($0) }) ?? true
+        else { throw APIError.transport("The original Shared selection is outside the control grammar.") }
+        var quality: [String: SharedPlaybackJSON]
+        if request.qualityAuto ?? (request.height == nil) {
+            quality = ["mode": .string("auto")]
+            if let height = request.height { quality["height"] = .integer(Int64(height)) }
+        } else if request.copy == true { quality = ["mode": .string("original")] }
+        else if let height = request.height, height > 0 { quality = ["mode": .string("manual"), "height": .integer(Int64(height))] }
+        else { throw APIError.transport("The original Shared selection is unavailable.") }
+        var subtitle: [String: SharedPlaybackJSON] = ["mode": .string("off")]
+        if request.nativeSubtitles == true, let track = request.subtitle {
+            guard (0...1024).contains(track) else { throw APIError.transport("The original Shared subtitle selection is unavailable.") }
+            subtitle = ["mode": .string("native"), "track": .integer(Int64(track))]
+        }
+        return .object(["quality": .object(quality), "audio_track": request.audio.map { .integer(Int64($0)) } ?? .null,
+            "audio_offset_ms": .integer(0), "subtitle": .object(subtitle), "codec": .string("auto"), "dynamic_range": .string("auto")])
+    }
+}
+
+/// Shared telemetry is presentation metadata, never a Local owner/status DTO.
+struct SharedPlaybackStatus {
+    let wire: [String: SharedPlaybackJSON]
+    let targetHeight: Int64
+    let encoder: String
+    let producerState: String
+    var summary: String { "Shared HLS · \(targetHeight)p · \(encoder) · \(producerState)" }
+    static let requiredCounters = Set("target_height fetched_end_ms materialized_segments planned_segments materialized_bytes planned_bytes working_set_bytes working_set_budget_bytes completed_cache_bytes delivered_bytes delivered_idle_ms http_wait_count status_generated_unix_ms".split(separator: " ").map(String.init))
+    static let optionalCounters = Set("active_encode_milli_realtime active_encode_age_ms active_encode_active_ms active_encode_segments tone_map_peak_nits reported_position_ms client_runway_ms server_ready_anchor_ms server_ready_end_ms server_next_ready_start_ms server_next_ready_end_ms published_end_ms ready_ahead_end_ms fetched_segment ahead_seconds delivered_bps http_wait_oldest_ms http_wait_segment".split(separator: " ").map(String.init))
+    static let requiredWords: Set<String> = ["encoder", "playlist_shape", "producer_state", "server_ready_state"]
+    static let optionalWords: Set<String> = ["tone_map_peak_source", "producer_hold", "producer_decision", "control_demand", "render_state"]
+    static func decode(_ data: Data, playback: SharedStartedPlayback) throws -> Self {
+        guard data.count <= 65_536,
+              let outer = try JSONDecoder().decode(SharedPlaybackJSON.self, from: data).object,
+              Set(outer.keys) == Set(["subject", "reference", "session_id", "incarnation_id", "control_epoch", "status"]),
+              outer["subject"] == .string("shared"),
+              outer["session_id"] == .string(playback.start.response.sessionId),
+              let control = playback.start.response.control,
+              outer["incarnation_id"] == .string(control.generation),
+              outer["control_epoch"] == .integer(Int64(control.controlEpoch)),
+              let status = outer["status"]?.object,
+              let original = try JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let rawStatus = original["status"] as? [String: Any]
+        else { throw APIError.badURL }
+        _ = try playback.start.validated(playback.context)
+        let decoder = JSONDecoder(); decoder.keyDecodingStrategy = .convertFromSnakeCase
+        guard let reference = outer["reference"] else { throw APIError.badURL }
+        try decoder.decode(SharedPlaybackFileReference.self, from: JSONEncoder().encode(reference)).validate(playback.context)
+        let booleans: Set<String> = ["admitted", "suspended", "final"]
+        let allowed = requiredCounters.union(optionalCounters).union(requiredWords).union(optionalWords).union(booleans).union(["server_ready_seconds", "active_encode_candidate_id"])
+        guard Set(status.keys).isSubset(of: allowed), requiredCounters.union(requiredWords).union(booleans).isSubset(of: Set(status.keys)) else { throw APIError.badURL }
+        guard requiredCounters.union(requiredWords).allSatisfy({ status[$0] != .null }) else { throw APIError.badURL }
+        for key in requiredCounters.union(optionalCounters) {
+            guard let value = status[key], value != .null else { continue }
+            guard let number = rawStatus[key] as? NSNumber, !["d", "f"].contains(String(cString: number.objCType)) else { throw APIError.badURL }
+            switch value {
+            case .integer(let n): guard n >= 0 else { throw APIError.badURL }
+            case .unsigned: break
+            default: throw APIError.badURL
+            }
+        }
+        let u32Fields: Set<String> = ["active_encode_milli_realtime", "active_encode_age_ms", "active_encode_active_ms", "active_encode_segments", "tone_map_peak_nits"]
+        let wideFields: Set<String> = ["materialized_segments", "planned_segments", "materialized_bytes", "planned_bytes", "working_set_bytes", "working_set_budget_bytes", "completed_cache_bytes", "http_wait_count"]
+        for key in requiredCounters.union(optionalCounters) {
+            if case .unsigned(let number) = status[key], !wideFields.contains(key), number > UInt64(Int64.max) { throw APIError.badURL }
+            if u32Fields.contains(key) {
+                switch status[key] { case .integer(let n) where n > Int64(UInt32.max): throw APIError.badURL; case .unsigned(let n) where n > UInt64(UInt32.max): throw APIError.badURL; default: break }
+            }
+        }
+        for key in requiredWords.union(optionalWords) {
+            guard let value = status[key], value != .null else { continue }
+            guard let text = value.string, !text.isEmpty, text.utf8.count <= 32,
+                  !text.unicodeScalars.contains(where: { $0.value < 32 || $0.value == 127 }) else { throw APIError.badURL }
+        }
+        for key in booleans { guard case .bool = status[key] else { throw APIError.badURL } }
+        if let candidate = status["active_encode_candidate_id"], candidate != .null {
+            guard let value = candidate.string, PlaybackFileContext.matches(value, "^[0-9a-f]{32}$") else { throw APIError.badURL }
+        }
+        if let seconds = status["server_ready_seconds"], seconds != .null {
+            let value: Double
+            switch seconds { case .number(let n): value = n; case .integer(let n): value = Double(n); case .unsigned(let n): value = Double(n); default: throw APIError.badURL }
+            guard value.isFinite, value >= 0 else { throw APIError.badURL }
+        }
+        guard case .integer(let height) = status["target_height"], (1...16384).contains(height),
+              let encoder = status["encoder"]?.string, let producer = status["producer_state"]?.string else { throw APIError.badURL }
+        return Self(wire: status, targetHeight: height, encoder: encoder, producerState: producer)
+    }
+}

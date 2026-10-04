@@ -131,6 +131,8 @@ struct SharedLibraryItemsView: View {
 struct SharedLibraryDetailView: View {
     let reference: SharedPlaybackReference
     let library: SharedLibraryRow
+    @EnvironmentObject private var model: AppModel
+    @State private var playbackPlan: SharedPlaybackPlan?
     @State private var detail: SharedLibraryDetail?
     @State private var error: String?
     @State private var loading = false
@@ -146,8 +148,10 @@ struct SharedLibraryDetailView: View {
                     Text([detail.item.kind, detail.item.year.map(String.init)].compactMap { $0 }.joined(separator: " · "))
                     if let overview = detail.item.overview { Text(overview) }
                     if !detail.item.genres.isEmpty { Text(detail.item.genres.joined(separator: " · ")).foregroundStyle(.secondary) }
-                    Label("Playback is unavailable for this Shared title.", systemImage: "info.circle")
-                        .accessibilityIdentifier("shared-playback-unavailable")
+                    if detail.deliveryStatus != "available" {
+                        Label("Playback is unavailable for this Shared title.", systemImage: "info.circle")
+                            .accessibilityIdentifier("shared-playback-unavailable")
+                    }
                     if let watch = detail.watch {
                         Text(watch.watched ? "Watched on this server" : "Position on this server: \(watch.positionMs / 1000) seconds")
                             .font(.caption).foregroundStyle(.secondary)
@@ -162,6 +166,9 @@ struct SharedLibraryDetailView: View {
                             Text([file.container, file.videoCodec].compactMap { $0 }.joined(separator: " · "))
                             if let width = file.width, let height = file.height { Text("\(width) × \(height)") }
                             if let duration = file.durationMs { Text("Duration: \(duration / 1000) seconds") }
+                            if detail.deliveryStatus == "available" && file.fileBase != nil {
+                                Button("Play Shared file") { Task { await play(file.fileId) } }.disabled(loading)
+                            }
                         }.font(.caption).foregroundStyle(.secondary)
                     }
                 }
@@ -169,7 +176,15 @@ struct SharedLibraryDetailView: View {
             }.padding()
         }
         .navigationTitle(detail?.item.title ?? "Shared title")
+        .sheet(isPresented: Binding(get: { playbackPlan != nil }, set: { if !$0 { playbackPlan = nil } })) {
+            if let playbackPlan { SharedPlayerView(plan: playbackPlan) }
+        }
         .task(id: reference) { await load() }
+    }
+    private func play(_ file: String) async {
+        loading = true; defer { loading = false }
+        do { playbackPlan = try await model.prepareSharedPlayback(reference: reference, fileId: file); error = nil }
+        catch { self.error = error.localizedDescription }
     }
     private func load() async {
         loading = true; defer { loading = false }

@@ -107,7 +107,7 @@ class PlaybackFileContext private constructor(
         closedMetadataQuery(uri).forEach { (key, text) ->
             require(when (key) {
                 "native" -> text in setOf("0", "1")
-                "subtitle" -> text == "-1" || (Regex("[0-9]+").matches(text) && text.toLongOrNull()?.let { it <= 4095 } == true)
+                "subtitle" -> text.toLongOrNull()?.let { it.toString() == text && it in -1..4095 } == true
                 "diagnostic" -> text in setOf("video-only", "video-only-codecs", "video-only-range", "video-only-hdr")
                 else -> false
             })

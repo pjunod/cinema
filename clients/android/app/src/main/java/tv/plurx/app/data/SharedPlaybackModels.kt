@@ -138,6 +138,21 @@ internal class SharedStart private constructor(val response: HlsStart, val wire:
     }
 }
 
+/** Authenticated ordinary B Start metadata, never Source physical evidence. */
+internal class SharedStartedPlayback(val start: SharedStart, val context: PlaybackFileContext, val request: CreateSessionReq)
+
+internal fun SharedStart.bindInitial(context: PlaybackFileContext, request: CreateSessionReq): SharedStartedPlayback {
+    require(context.reference != null && context.sessionId == null)
+    require(response.vod == true && response.start_seconds.isFinite() && response.start_seconds >= 0 && response.start_seconds <= 9_007_199_254_740.0)
+    require(response.duration_ms?.let { it >= 0 } != false)
+    val control = requireNotNull(response.control)
+    require(Regex("[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}").matches(control.generation))
+    require(control.nextExchangeMs == 5_000L && control.leaseTimeoutMs == 300_000L)
+    val bound = context.withSession(response.session_id)
+    validated(bound)
+    return SharedStartedPlayback(this, bound, request)
+}
+
 internal object SharedStartValidation {
     fun validated(start: HlsStart, context: PlaybackFileContext): HlsStart {
         context.validateSessionPlaylist(start.playlist_url, start.session_id)
@@ -228,3 +243,142 @@ internal data class SharedPGSManifest(
     }
 }
 
+
+@Serializable
+internal data class SharedProgressBeat(
+    val session_id: String, val sequence: Long, val position_ms: Long,
+    val duration_ms: Long? = null, val watched: Boolean,
+) {
+    fun validate() {
+        require(Regex("[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}").matches(session_id))
+        require(sequence in 0..9_007_199_254_740_991L && position_ms in 0..9_007_199_254_740_991L)
+        require(duration_ms == null || duration_ms in 0..9_007_199_254_740_991L)
+    }
+}
+internal sealed interface SharedProgressResult {
+    data object Acknowledged : SharedProgressResult
+    data object PreviousBeatAcknowledged : SharedProgressResult
+    data class ResyncRequired(val currentSequence: Long?) : SharedProgressResult
+}
+/** One watch-key order: uncertain sends retain the exact beat; conflicts require
+ * a fresh authorized watch read and never renumber the discarded old beat. */
+internal class SharedProgressOrder(initialSequence: Long) {
+    var sequence = initialSequence; private set
+    var pending: SharedProgressBeat? = null; private set
+    var needsResync = false; private set
+    init { require(sequence in 0..9_007_199_254_740_991L) }
+    fun beat(sessionId: String, positionMs: Long, durationMs: Long?, watched: Boolean): SharedProgressBeat {
+        require(!needsResync)
+        pending?.let { require(it.session_id == sessionId); return it }
+        require(sequence < 9_007_199_254_740_991L)
+        val beat = SharedProgressBeat(sessionId, sequence + 1, positionMs, durationMs, watched)
+        beat.validate(); sequence = beat.sequence; pending = beat; return beat
+    }
+    fun complete(beat: SharedProgressBeat, result: SharedProgressResult) {
+        require(pending == beat)
+        if (result is SharedProgressResult.ResyncRequired) {
+            result.currentSequence?.let { require(it in 0..9_007_199_254_740_991L); sequence = maxOf(sequence, it) }
+            needsResync = true
+        }
+        pending = null
+    }
+    fun resync(freshAuthorizedSequence: Long) {
+        require(needsResync && freshAuthorizedSequence in 0..9_007_199_254_740_991L)
+        sequence = maxOf(sequence, freshAuthorizedSequence); needsResync = false
+    }
+}
+
+/** Initial Shared subject carries full strings/opaque B context, never a Local ID. */
+internal data class SharedPlaybackSubject(val context: PlaybackFileContext, val title: String, val resumeMs: Long, val watchSequence: Long) {
+    fun validate() {
+        require(context.sessionId == null && title.toByteArray().size <= 4096)
+        require(resumeMs in 0..9_007_199_254_740_991L && watchSequence in 0..9_007_199_254_740_991L)
+        context.validateSharedReference(requireNotNull(context.reference), context.sourceFileId, requireNotNull(context.revision))
+    }
+}
+/** Retains the raw original desired ask, not normalized delivered dimensions. */
+internal class SharedPlaybackPlan(val subject: SharedPlaybackSubject, val decision: SharedDecision, val caps: DeviceCaps, val request: CreateSessionReq) {
+    init {
+        subject.validate(); decision.validated(subject.context)
+        require(caps.v == 2 && "hls" in caps.transports && request.caps == caps)
+        require(request.presentation == "vod" && request.intent == null && request.previous_session_id == null && request.control_sequence == null && request.reopen_reason == null)
+        require(request.subtitle_burn == null && request.preserve_dolby_vision != true && request.hdr10 != true)
+        require(decision.presentation.delivered_dynamic_range?.let { it == "sdr" } != false)
+        require((request.start ?: 0.0) == subject.resumeMs.toDouble() / 1000)
+        require(request.height?.let { it in 1..8192 } != false)
+        require(if (decision.method == "transcode") request.copy != true else request.copy == true)
+    }
+}
+
+/** Exact original current-rendition selection, without Local candidate coercion. */
+internal fun SharedPlaybackPlan.frozenControlSelection(): JsonObject = buildJsonObject {
+    require(request.height?.let { it in tv.plurx.app.player.PlaybackControl.MIN_HEIGHT..tv.plurx.app.player.PlaybackControl.MAX_HEIGHT } != false)
+    require(request.audio?.let { it in 0..1024 } != false)
+    require((request.audio_offset_ms ?: 0) in -15000L..15000L)
+    put("quality", buildJsonObject {
+        when {
+            request.quality_auto ?: (request.height == null) -> { put("mode", "auto"); request.height?.let { put("height", it) } }
+            request.copy == true -> put("mode", "original")
+            else -> { val height = requireNotNull(request.height); require(height > 0); put("mode", "manual"); put("height", height) }
+        }
+    })
+    put("audio_track", request.audio?.let(::JsonPrimitive) ?: JsonNull)
+    put("audio_offset_ms", request.audio_offset_ms ?: 0)
+    put("subtitle", buildJsonObject {
+        if (request.native_subtitles == true && request.subtitle != null) {
+            require(request.subtitle in 0..1024); put("mode", "native"); put("track", request.subtitle)
+        } else put("mode", "off")
+    })
+    put("codec", "auto"); put("dynamic_range", "auto")
+}
+
+/** Shared telemetry cannot acquire numeric Local ownership or recovery policy. */
+internal class SharedPlaybackStatus private constructor(val wire: JsonObject, val targetHeight: Long, val encoder: String, val producerState: String) {
+    val summary: String get() = "Shared HLS · ${targetHeight}p · $encoder · $producerState"
+    companion object {
+        val requiredCounters = "target_height fetched_end_ms materialized_segments planned_segments materialized_bytes planned_bytes working_set_bytes working_set_budget_bytes completed_cache_bytes delivered_bytes delivered_idle_ms http_wait_count status_generated_unix_ms".split(" ").toSet()
+        val optionalCounters = "active_encode_milli_realtime active_encode_age_ms active_encode_active_ms active_encode_segments tone_map_peak_nits reported_position_ms client_runway_ms server_ready_anchor_ms server_ready_end_ms server_next_ready_start_ms server_next_ready_end_ms published_end_ms ready_ahead_end_ms fetched_segment ahead_seconds delivered_bps http_wait_oldest_ms http_wait_segment".split(" ").toSet()
+        val requiredWords = setOf("encoder", "playlist_shape", "producer_state", "server_ready_state")
+        val optionalWords = setOf("tone_map_peak_source", "producer_hold", "producer_decision", "control_demand", "render_state")
+        fun decode(bytes: ByteArray, playback: SharedStartedPlayback): SharedPlaybackStatus {
+            require(bytes.size <= 65_536)
+            val outer = Json.parseToJsonElement(bytes.decodeToString()).jsonObject
+            require(outer.keys == setOf("subject", "reference", "session_id", "incarnation_id", "control_epoch", "status"))
+            require(outer.strictString("subject") == "shared" && outer.strictString("session_id") == playback.start.response.session_id)
+            val control = requireNotNull(playback.start.response.control)
+            require(outer.strictString("incarnation_id") == control.generation)
+            val epoch = outer.getValue("control_epoch").jsonPrimitive
+            require(!epoch.isString && epoch.content.matches(Regex("[1-9][0-9]*")) && epoch.longOrNull == control.controlEpoch)
+            playback.start.validated(playback.context)
+            Json.decodeFromJsonElement<SharedPlaybackFileReference>(outer.getValue("reference")).validate(playback.context)
+            val status = outer.getValue("status").jsonObject
+            val booleans = setOf("admitted", "suspended", "final")
+            val required = requiredCounters + requiredWords + booleans
+            val allowed = required + optionalCounters + optionalWords + setOf("server_ready_seconds", "active_encode_candidate_id")
+            require(status.keys.all { it in allowed } && required.all { status[it] != null && status[it] != JsonNull })
+            (requiredCounters + optionalCounters).forEach { key ->
+                status[key]?.takeUnless { it == JsonNull }?.jsonPrimitive?.let {
+                    require(!it.isString && it.content.matches(Regex("0|[1-9][0-9]*")) && it.content.toULongOrNull() != null)
+                }
+            }
+            val u32Fields = setOf("active_encode_milli_realtime", "active_encode_age_ms", "active_encode_active_ms", "active_encode_segments", "tone_map_peak_nits")
+            val wideFields = setOf("materialized_segments", "planned_segments", "materialized_bytes", "planned_bytes", "working_set_bytes", "working_set_budget_bytes", "completed_cache_bytes", "http_wait_count")
+            (requiredCounters + optionalCounters).forEach { key -> status[key]?.takeUnless { it == JsonNull }?.jsonPrimitive?.content?.toULongOrNull()?.let {
+                require(key in wideFields || it <= Long.MAX_VALUE.toULong())
+                require(key !in u32Fields || it <= UInt.MAX_VALUE.toULong())
+            } }
+            (requiredWords + optionalWords).forEach { key -> status[key]?.takeUnless { it == JsonNull }?.let {
+                val text = status.strictString(key)
+                require(text.isNotEmpty() && text.toByteArray().size <= 32 && text.none { ch -> ch.code < 32 || ch.code == 127 })
+            } }
+            booleans.forEach { require(!status.getValue(it).jsonPrimitive.isString && status.getValue(it).jsonPrimitive.booleanOrNull != null) }
+            status["active_encode_candidate_id"]?.takeUnless { it == JsonNull }?.let { require(status.strictString("active_encode_candidate_id").matches(Regex("[0-9a-f]{32}"))) }
+            status["server_ready_seconds"]?.takeUnless { it == JsonNull }?.jsonPrimitive?.let {
+                val number = it.doubleOrNull; require(!it.isString && number != null && number.isFinite() && number >= 0)
+            }
+            val height = status.getValue("target_height").jsonPrimitive.longOrNull
+            require(height != null && height in 1..16384)
+            return SharedPlaybackStatus(status, height, status.strictString("encoder"), status.strictString("producer_state"))
+        }
+    }
+}

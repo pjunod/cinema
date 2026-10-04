@@ -214,7 +214,7 @@ struct PlaybackFileContext: Hashable {
             switch field.name {
             case "native": valid = field.value == "0" || field.value == "1"
             case "subtitle":
-                if let text = field.value, let index = Int(text) { valid = text == "-1" || (Self.matches(text, "^[0-9]+$") && (0...4095).contains(index)) } else { valid = false }
+                if let text = field.value, let index = Int(text) { valid = String(index) == text && (-1...4095).contains(index) } else { valid = false }
             case "diagnostic": valid = ["video-only", "video-only-codecs", "video-only-range", "video-only-hdr"].contains(field.value ?? "")
             default: valid = false
             }

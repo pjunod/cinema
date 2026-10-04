@@ -43,6 +43,11 @@ import tv.plurx.app.data.Library
 import tv.plurx.app.data.LoginReq
 import tv.plurx.app.data.Net
 import tv.plurx.app.data.PlaybackFileContext
+import tv.plurx.app.data.SharedPlaybackReference
+import tv.plurx.app.data.SharedPlaybackPlan
+import tv.plurx.app.data.SharedLibraryClient
+import tv.plurx.app.data.SharedDecisionClient
+import tv.plurx.app.data.SharedPlaybackSubject
 import tv.plurx.app.data.PlurxApi
 import tv.plurx.app.data.parseRefusal
 import tv.plurx.app.player.PlaybackClientLog
@@ -883,6 +888,23 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
             )
         }
         return null
+    }
+
+    internal suspend fun prepareSharedPlayback(reference: SharedPlaybackReference, fileId: String): SharedPlaybackPlan {
+        val catalogue = SharedLibraryClient.create()
+        val detail = catalogue.detail(reference); catalogue.requireCurrent()
+        require(detail.delivery_status == "available" && detail.files.any { it.file_id == fileId && it.file_base != null }) { "Playback is unavailable for this Shared title." }
+        val context = PlaybackFileContext.authenticatedDetail(reference, fileId)
+        require(context.lifecycleGeneration == detail.lifecycle_generation)
+        val quality = _preferences.value.playbackQuality
+        val query = when (quality) { PlaybackQuality.Auto -> emptyMap(); PlaybackQuality.Original -> mapOf("force" to "original"); else -> mapOf("force" to "transcode") }
+        val result = SharedDecisionClient.create().decision(context, getApplication<Application>(), query)
+        val position = detail.watch?.let { if (it.watched) 0 else it.position_ms } ?: 0
+        val subject = SharedPlaybackSubject(context, detail.item.title, position, detail.watch?.sequence ?: 0)
+        val body = CreateSessionReq(playback_id = java.util.UUID.randomUUID().toString(), request_id = java.util.UUID.randomUUID().toString(),
+            height = quality.rungHeight, quality_auto = quality == PlaybackQuality.Auto, start = position.toDouble() / 1000,
+            copy = result.decision.method != "transcode", aac = result.decision.presentation.transcode_audio, caps = result.caps)
+        return SharedPlaybackPlan(subject, result.decision, result.caps, body)
     }
 
     suspend fun createHlsSession(fileId: Long, body: CreateSessionReq, fileContext: PlaybackFileContext = PlaybackFileContext.local(fileId)): HlsStart {

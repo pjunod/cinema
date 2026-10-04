@@ -4578,6 +4578,106 @@ seconds, preserving complete request fields, recovery refusal, account-authentic
 aliases and the unregistered public route. The normal merge hook remains
 required for the exact resulting tree.
 
+### Native authenticated initial Start adapter
+
+Apple and Android retain the complete ordinary CreateSession request through an
+authenticated initial Shared Start, with the original v2 caps, resume, quality
+and canonical client request UUID. They post only to the captured signed opaque
+B file base. Non-null predecessor, control sequence, reopen reason and initial
+intent are refused before network dispatch, as are unsupported burn/HDR/DV
+requests. Original Local API guards remain intact.
+
+The complete ordinary B reply binds a new context only after current account,
+B session playlist/control paths, finite VOD timeline, incarnation, epoch and
+bootstrap cadence validation. Additive reply fields remain available alongside
+the ordinary playback projection. No numeric Source ID is converted into a
+Local file identity. Playlist query permits only unique bounded native,
+canonical subtitle and closed diagnostic values. The web caller accepts this
+same ordinary closed query grammar; arbitrary, duplicate and encoded fields
+refuse.
+
+The established native baseline uses Xcode 27 / Swift 6.4 and the pinned Android
+JDK 25 image. iOS Debug builds pass. The actual iOS simulator Shared client/model
+filter reports 11 passed, zero failures, including complete synthetic B Start
+through authenticated URLProtocol I/O. The source-only Android baseline reports
+40 passed across six Shared/context suites, zero failures/skips, with Kotlin
+compilation and lint passing in 4 minutes 30 seconds. The committed Native
+initial Start adapter then passes 42 tests with zero failures/errors/skips,
+Kotlin main/unit compilation and lint in 4 minutes 52 seconds. These are protocol
+fixtures, not physical Source production or hardware playback qualification.
+Native player launch and ordered B progress remain the next integration slice.
+
+
+### Native ordered progress adapter
+
+The native client progress body contains only the admitted B session UUID,
+sequence, position, optional duration and watched state. It posts to the
+captured account's compound Shared item route. It repeats current account and
+complete admitted B context validation, permits only bounded numeric values,
+and caps ACK/conflict responses at 16 KiB. It exposes only typed acknowledged
+or stale/conflict resync outcomes; Source authority stays server-owned.
+
+An ordered beat journal retains an uncertain beat unchanged. Swift JSON uses
+sorted keys so retry bytes stay identical. A typed conflict discards that beat
+and blocks the next beat until a fresh authorized watch read seeds the next
+sequence. It never renumbers the old payload after another device advances
+history. Actual iOS simulator tests pass 12 with zero failures, including
+zero-position network body, identical retries, numeric-only conflict sequence,
+oversized response refusal and journal exhaustion/resync. The committed progress
+primitives then pass Android Kotlin main/unit compilation, 43 tests with zero
+failures/errors/skips, and lint in 4 minutes 50 seconds. Player handoff remains
+explicit follow-up work. These synthetic protocol fixtures do not prove
+physical B-to-Source playback or hardware acceptance.
+
+
+The native progress pool keys orders by captured account authorization, Source
+server, catalogue epoch and item, including across import/library aliases. It
+holds at most 256 orders and four nonqueued operations globally, with one busy
+operation per watch key. Only idle acknowledged entries can be evicted; uncertain
+beats retain their sequence and payload. Account replacement clears the old
+namespace while old operations retain their own counted admission until actual
+network settlement. A changed B session with an uncertain predecessor beat
+requires fresh authorized detail/watch state before a new session beat.
+
+Actual iOS simulator tests pass 12 with zero failures on the bounded-pool source,
+including separate authenticated imports/libraries/B sessions for the same
+Source item observing sequences 8, 9 and 10 rather than restarting the order.
+The corrected pool and tagged plan pass their exact source-only Android run
+on `091415fbe`: Kotlin main/unit compilation, 43 tests with zero
+failures/errors/skips, and lint pass in 5 minutes 17 seconds.
+This bounded metadata journal never grants Source production or retirement.
+
+
+### Tagged native Shared player plan foundation
+
+The initial Shared subject is a full authenticated compound reference and
+opaque B context, title, safe resume position and watch sequence. It cannot
+carry a Local item/file ID. Its fixed HLS plan requires the same validated
+Shared decision and exact v2 caps as the retained whole CreateSession request.
+It refuses unsupported predecessor/intent/recovery/burn/HDR/DV asks and an
+inconsistent copy/encode choice. The original raw height, quality mode,
+track ask and resume stay intact; eventual Source control comparison must use
+that original ask rather than normalized Start output dimensions.
+
+The actual iOS simulator client/model filter passes 12 tests with zero failures,
+including retained raw 720-height/12.5-second resume, largest signed-i64 Source
+file string, and refusal of Local context/wrong copy/predecessor plans. The
+corrected progress pool plus tagged plan pass their exact Android run above.
+Explicit native controller/view/browser handoff remains unfinished; Shared
+status must use a tagged B-bound common-VOD adapter, never the numeric Local
+status decoder. No physical producer or hardware qualification is implied.
+
+
+The same frozen Native runtime source `091415fbe` passes both actual iOS and tvOS
+Debug simulator client/model filters: 12 tests each, zero failures. Both iOS
+and tvOS Release simulator builds succeed using Xcode 27 / Swift 6.4 and owned
+DerivedData. The prior Android pool snapshot failed compilation on the
+fresh-detail auth/transport argument order; the corrected exact snapshot is the
+qualified result, not the failed run. The normal tracked hook passes for each
+finite source checkpoint. These tests use synthetic authenticated B DTOs and
+actual native HTTP clients; physical Source playback, native hardware and the
+unfinished controller/browser handoff remain separate qualification boundaries.
+
 Root integration of web/delivery checkpoint `b2da6e0e7` onto Source HTTP/status
 checkpoint `850bd67c5` passed pinned all-target check in 79 seconds and denied
 feature Clippy in 88 seconds. The three Shared web suites passed 33 tests,
@@ -4618,6 +4718,39 @@ Source resources and client/ownership seams; they do not qualify full physical
 B playback, accepted B writers, controls or live Tailscale/hardware behavior.
 Documentation checks and the normal tracked hook remain required before commit.
 
+### Native tagged player draft (2026-10-03)
+
+The existing Apple and Android browser/controller files now dispatch a Shared
+subject through the authenticated signed-file Start client. The player retains
+its complete raw initial request and compound file context; it never supplies a
+numeric Local item/file sentinel or calls Local history, recovery or autoplay.
+Fresh detail delivery readiness controls the Play action. The saved Developer
+Sharing choice remains authoritative.
+
+Progress retains exact uncertain bytes and distinguishes an acknowledged old
+beat from the newly requested final position. Renderer resources close before
+best-effort B End. Original-login replacement refuses retained Start, progress,
+and End requests. Pending renderer controls are hidden until B can translate a
+server-accepted current-rendition control response; quality, tracks and recovery
+remain explicitly unavailable.
+
+On integrated Root `9a9109602`, the iOS Debug simulator client/model filter passed
+12 tests with no failures. The Android controller draft still needs its exact
+source-only compiler, unit-test and lint loop; this checkpoint does not qualify
+physical Source playback, B relay, device hardware, or the unfinished controls.
+
+Regression-Test: clients/apple/Tests/SharedDecisionClientTests.swift::testAuthenticatedInitialStartRetainsWholeRequestAndBContext
+Regression-Test: clients/android/app/src/test/java/tv/plurx/app/data/SharedDecisionClientTest.kt::initialStartRetainsWholeRequestAndBoundBContext
+
+The Native Shared model also projects the frozen current-rendition selection
+from its retained raw Start request. Auto keeps an optional raw height without
+inventing a candidate; Manual keeps the original ask rather than delivered
+encoder dimensions; Original, raw audio, offset and native subtitle index stay
+explicit. Missing codec/range policies remain Auto. This is a pure projection,
+not a control dispatch or proof of server acceptance. The existing Local enums
+and guards remain unchanged. Current control grammar requires Manual height at
+least 144; the regression distinguishes raw 144 from delivered 72.
+
 Receiver transport candidate after the upstream socket checkpoint
 ----------------------------------------------------------------
 
@@ -4655,6 +4788,29 @@ all-target check in 62 seconds, denied feature Clippy in 83 seconds, and nine
 receiver ownership tests with zero ignored. The final Start-writer tree passed
 denied feature Clippy in 77 seconds; its focused regression and normal tracked
 hook remain required before committing this candidate.
+
+Native player qualification update: committed `03b77807a` passed the source-only
+Android main/unit Kotlin compilation, 43 focused Shared/context tests (zero
+failures, errors or skipped), and lint in 6m54 using the bounded owned compiler
+container. On full Root `61820efe8`, iOS Shared client/model/catalogue tests passed
+17/17 and the isolated Local/Shared context class passed 7/7. The broader Apple
+client class passed 335 tests. One combined run also exposed an inconsistent
+synthetic transcode fixture (method changed without delivery mode); that fixture
+was corrected before the 17-test pass. The combined context failure did not
+reproduce in its complete isolated seven-test class, so the combined run is not
+reported as a pass. Exact Android qualification of the additional frozen-control
+projection and current base remains required.
+
+The combined Apple failure was traced to the existing pure presenter fixture
+creating `AppModel()` and leaving its discovery/bootstrap task running. That
+unjoined task could replace the global account during a later authenticated
+context read. The model initializer now accepts `startServices` with the normal
+application default `true`; only that presenter fixture passes `false`.
+Original-account refusal remains intact. The complete combined iOS set then
+passed 359 tests with zero failures. The preceding exact tvOS Shared/context
+set passed 24 tests with zero failures.
+
+Regression-Test: clients/apple/Tests/AppleClientTests.swift::testTheRowEighteenSitesLogOnceAndDrawNothing
 
 Receiver End and progress candidate after `61820efe8`
 ---------------------------------------------------
@@ -4721,3 +4877,65 @@ pairing sixteen tests with zero ignored in 20.64 seconds, and denied feature
 Clippy in 71 seconds. The transport/media fixture is being added separately;
 this pairing checkpoint does not establish pinned B playback, queued B writer
 closure or positive End/progress over the network.
+
+### Native tagged player qualification on current receiver base
+
+Frozen `1d5354f81` includes full Root `cdc567b86`, including actual-receipt End
+and ordered progress candidates. Its source-only Android archive passed main,
+unit and instrumentation Kotlin compilation, 47 focused Shared/context and
+Local player-policy/surface tests (zero failures, errors or skipped), and lint
+in 5m52. Instrumentation was compiled, not executed on hardware. The bounded
+owned Docker compiler/container was released on completion.
+
+The same Native source passed 359 combined iOS simulator tests after the
+bootstrap fixture correction and 349 combined tvOS simulator tests. The tvOS
+runner reported `TEST SUCCEEDED` after its idle verbose diagnostic collector
+was stopped; its recorded testcase results were preserved. Both iOS and tvOS
+Release simulator builds reported `BUILD SUCCEEDED`. The full `cdc567b86`
+merge changed no Apple bytes relative to the iOS test tree; the exact combined
+branch was rebuilt for both Release targets and tested on tvOS. Documentation
+index checks passed four tests; the merge's normal hook passed formatting,
+workspace Clippy (1m16), catalog and 75 JavaScript syntax checks.
+
+This qualifies Native compilation and synthetic authenticated protocol
+contracts. It does not qualify a physical Native renderer against paired B/A,
+Tailscale/NAT or device hardware. Initial launch still depends on freshly
+available B delivery. Directed rendition/recovery controls remain unavailable;
+server-accepted current-rendition controls and the Shared-only status reader
+remain the next adapters. Swift's current language mode reports a non-Sendable
+Start task-result warning; the next controller slice will retain an owned Void
+join rather than add an unchecked Sendable claim.
+
+### Native Shared status candidate
+
+The existing Shared models and clients now read only the agreed B status
+endpoint, `/api/v1/hls/{Bsid}/status`, with the original captured login. The
+closed `subject: shared` envelope must match the retained full file reference,
+B session, incarnation and control epoch. Telemetry accepts the bounded Source
+VOD fields; it rejects Local identity fields, producer-failure prose, unknown
+fields, malformed or negative counters, oversized bodies and foreign lineage.
+The renderer shows a passive Shared summary and does not enter Local starvation,
+recovery or rendition-change policy. The Apple Start owner now joins a `Void`
+task through completion rather than exporting a non-Sendable result.
+
+The final Apple status client/model/context filters passed 19 tests on each of
+iOS and tvOS, with zero failures, using the established simulator compiler.
+The prior Shared task-result concurrency warning is absent from these builds.
+These are synthetic authenticated protocol tests, not Source physical or
+hardware evidence. Android status compilation is pending the server fixture's
+reserved Docker window; the preceding clean Native checkpoint remains
+`ecebec1d6`. No directed controls or Local fallback are enabled by this slice.
+
+Native status qualification: frozen `1e4b05b39` passed the exact source-only
+Android main/unit/instrumentation Kotlin compiler, all 47 focused Shared,
+context and Local player-policy/surface tests (zero failures, errors or skipped),
+and lint in 5m43. The owned Docker container was released afterward. Both Apple
+Release simulator builds also reported `BUILD SUCCEEDED`; iOS and tvOS each
+passed the final 19-test client/model/context filter. Logs are
+`/private/tmp/sharing-s4-native-status-android.log`,
+`/private/tmp/sharing-s4-native-status-final-ios.log`,
+`/private/tmp/sharing-s4-native-status-final-tvos.log`, and the two
+`/private/tmp/sharing-s4-native-status-release-{ios,tvos}.log` files. The source
+archive is `/private/tmp/plurx-sharing-s4-native-status-source.tar`. These checks
+qualify compilation and synthetic authenticated protocol behavior; the real B
+status relay, paired renderer, directed controls and hardware remain separate.

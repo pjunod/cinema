@@ -55,7 +55,7 @@ function playbackFileContext(value){
 }
 function withPlaybackFileSession(value,id){
   const context=playbackFileContext(value);
-  if(typeof id!=="string"||! /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(id)) playbackFileReject();
+  if(typeof id!=="string"||id.length!==36||! /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(id)) playbackFileReject();
   return registerPlaybackFileContext({...context,session_id:id});
 }
 function playbackFileKey(value){
@@ -199,22 +199,39 @@ function playbackFileContextForPlay(fileId,meta){
   return c;
 }
 
+function sharedPlaybackSessionPlaylist(url,id){
+  if(typeof url!=="string"||url.length>512||url.includes("%"))return false;
+  const parts=url.split("?");
+  if(parts.length>2||!["master.m3u8","index.m3u8","video.m3u8"].some(name=>parts[0]===`/api/v1/hls/${id}/${name}`))return false;
+  if(parts.length===1)return true;
+  if(!parts[1]||parts[1].length>256)return false;
+  const seen=new Set();
+  for(const field of parts[1].split("&")){
+    const pair=field.split("=");if(pair.length!==2||seen.has(pair[0]))return false;seen.add(pair[0]);
+    const [key,value]=pair;
+    if(key==="native"){if(!["0","1"].includes(value))return false;}
+    else if(key==="subtitle"){if(value!=="-1"&&(!/^(0|[1-9][0-9]{0,3})$/.test(value)||String(Number(value))!==value||Number(value)>4095))return false;}
+    else if(key==="diagnostic"){if(!["video-only","video-only-codecs","video-only-range","video-only-hdr"].includes(value))return false;}
+    else return false;
+  }
+  return true;
+}
+
 // Ordinary complete B Start reply, bound to the authenticated signed-file
 // request. This validates routing metadata; it is not Source producer evidence.
 function sharedPlaybackStartContext(value,response){
   const c=playbackFileContext(value);
   if(c.source_ref.kind==="local"||c.session_id||!response||typeof response!=="object") playbackFileReject();
   const id=response.session_id,control=response.control;
-  if(typeof id!=="string"||! /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(id)
-    ||typeof response.playlist_url!=="string"
-    ||!new RegExp(`^/api/v1/hls/${id}/(?:master|index|video)\\.m3u8$`).test(response.playlist_url)
+  if(typeof id!=="string"||id.length!==36||! /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(id)
+    ||!sharedPlaybackSessionPlaylist(response.playlist_url,id)
     ||response.vod!==true||!Number.isFinite(response.start_seconds)||response.start_seconds<0
     ||response.start_seconds>9007199254740
     ||response.duration_ms!=null&&(!Number.isSafeInteger(response.duration_ms)||response.duration_ms<0)
     ||response.media_origin_ms!=null&&!Number.isSafeInteger(response.media_origin_ms)
     ||!control||control.protocol!=="plurx-playback-control-v1"
     ||control.url!==`/api/v1/hls/${id}/control`
-    ||typeof control.generation!=="string"||! /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(control.generation)
+    ||typeof control.generation!=="string"||control.generation.length!==36||! /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(control.generation)
     ||!Number.isSafeInteger(control.control_epoch)||control.control_epoch<=0
     ||control.next_exchange_ms!==5000||control.lease_timeout_ms!==300000) playbackFileReject();
   return withPlaybackFileSession(c,id);

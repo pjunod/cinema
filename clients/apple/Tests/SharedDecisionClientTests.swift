@@ -114,4 +114,182 @@ final class SharedDecisionClientTests: XCTestCase {
         XCTAssertEqual(calls, 0)
     }
 
+    // Synthetic ordinary B reply through actual authenticated URLProtocol I/O;
+    // this is client protocol evidence, not physical Source playback.
+    func testAuthenticatedInitialStartRetainsWholeRequestAndBContext() async throws {
+        let context = try await context("9223372036854775807"), session = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
+        let reply: [String: Any] = ["session_id": session, "playlist_url": "/api/v1/hls/\(session)/master.m3u8?native=1&subtitle=2", "vod": true,
+            "start_seconds": 0.0, "duration_ms": 90_000, "control": ["protocol": "plurx-playback-control-v1", "url": "/api/v1/hls/\(session)/control",
+            "generation": "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb", "control_epoch": 1, "next_exchange_ms": 5_000, "lease_timeout_ms": 300_000],
+            "future": ["exact": Int64.max]]
+        let bytes = try JSONSerialization.data(withJSONObject: reply)
+        var sent: Data?
+        DecisionHTTP.answer = { request in
+            XCTAssertEqual(request.url?.path, self.base + "/hls/sessions"); XCTAssertEqual(request.value(forHTTPHeaderField: "Authorization"), "Bearer decision-bearer")
+            XCTAssertEqual(request.timeoutInterval, 310); sent = try self.body(request)
+            return (request.url!, 200, [:], bytes)
+        }
+        let request = CreateSessionRequest(playbackId: "shared-browser", requestId: "cccccccc-cccc-4ccc-8ccc-cccccccccccc", height: 720, start: 12.5, audio: 2, copy: true, caps: Caps.snapshot().document)
+        let result = try await SharedDecisionClient(testConfiguration: configuration).start(context: context, request: request)
+        let subject = SharedPlaybackSubject(context: context, title: "Shared film", resumeMs: 12_500, watchSequence: 7)
+        let sdrDecision = try SharedDecision.decode(wire("9223372036854775807") { $0["delivered_dynamic_range"] = "sdr"; $0["preserve_dolby_vision"] = false })
+        let plan = try SharedPlaybackPlan(subject: subject, decision: sdrDecision, caps: request.caps!, request: request)
+        XCTAssertEqual(plan.request.height, 720); XCTAssertEqual(plan.request.start, 12.5)
+        XCTAssertEqual(plan.subject.context.sourceFileId, "9223372036854775807")
+        XCTAssertEqual(try plan.frozenControlSelection().object?["quality"], .object(["mode": .string("original")]))
+        var frozen = request; frozen.qualityAuto = true; frozen.nativeSubtitles = true; frozen.subtitle = 0
+        let autoPlan = try SharedPlaybackPlan(subject: subject, decision: sdrDecision, caps: request.caps!, request: frozen)
+        XCTAssertEqual(try autoPlan.frozenControlSelection().object?["quality"], .object(["mode": .string("auto"), "height": .integer(720)]))
+        XCTAssertEqual(try autoPlan.frozenControlSelection().object?["subtitle"], .object(["mode": .string("native"), "track": .integer(0)]))
+        let encodedDecision = try SharedDecision.decode(wire("9223372036854775807") { $0["method"] = "transcode"; $0["delivered_dynamic_range"] = "sdr"; $0["height"] = 72; var delivery = $0["delivery"] as! [String: Any]; delivery["mode"] = "transcode"; $0["delivery"] = delivery })
+        frozen = request; frozen.height = 144; frozen.qualityAuto = false; frozen.copy = false
+        let manualPlan = try SharedPlaybackPlan(subject: subject, decision: encodedDecision, caps: request.caps!, request: frozen)
+        XCTAssertEqual(try manualPlan.frozenControlSelection().object?["quality"], .object(["mode": .string("manual"), "height": .integer(144)]))
+        var wrong = request; wrong.copy = false
+        XCTAssertThrowsError(try SharedPlaybackPlan(subject: subject, decision: sdrDecision, caps: request.caps!, request: wrong))
+        wrong = request; wrong.previousSessionId = ""
+        XCTAssertThrowsError(try SharedPlaybackPlan(subject: subject, decision: sdrDecision, caps: request.caps!, request: wrong))
+        XCTAssertThrowsError(try SharedPlaybackSubject(context: .local(0), title: "Local", resumeMs: 0, watchSequence: 0).validate())
+
+        XCTAssertEqual(result.context.sourceFileId, "9223372036854775807"); XCTAssertEqual(result.context.reference, ref); XCTAssertEqual(result.context.sessionId, session)
+        XCTAssertEqual(result.request.start, 12.5); XCTAssertEqual(result.request.height, 720); XCTAssertEqual(result.request.caps, request.caps)
+        let raw = try JSONSerialization.jsonObject(with: XCTUnwrap(sent)) as! [String: Any]
+        XCTAssertEqual(raw["request_id"] as? String, request.requestId); XCTAssertNil(raw["intent"]); XCTAssertNil(raw["previous_session_id"])
+        XCTAssertEqual(result.start.wire["future"]?.object?["exact"], .integer(Int64.max)); XCTAssertThrowsError(try result.context.localID())
+        var metrics: [String: Any] = Dictionary(uniqueKeysWithValues: SharedPlaybackStatus.requiredCounters.map { ($0, 0) })
+        metrics["target_height"] = 72; metrics["encoder"] = "libx264"; metrics["playlist_shape"] = "vod"
+        metrics["producer_state"] = "ready"; metrics["server_ready_state"] = "ready"
+        metrics["admitted"] = true; metrics["suspended"] = false; metrics["final"] = false
+        metrics["server_ready_seconds"] = 0.5
+        var statusWire: [String: Any] = ["subject": "shared", "reference": try binding("9223372036854775807"),
+            "session_id": session, "incarnation_id": "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb", "control_epoch": 1, "status": metrics]
+        let statusBytes = try JSONSerialization.data(withJSONObject: statusWire)
+        DecisionHTTP.answer = { request in
+            XCTAssertEqual(request.url?.path, "/api/v1/hls/\(session)/status")
+            XCTAssertEqual(request.value(forHTTPHeaderField: "Authorization"), "Bearer decision-bearer")
+            return (request.url!, 200, [:], statusBytes)
+        }
+        let telemetryClient = try SharedDecisionClient(testConfiguration: configuration)
+        let telemetry = try await telemetryClient.status(playback: result)
+        XCTAssertEqual(telemetry.targetHeight, 72); XCTAssertEqual(telemetry.summary, "Shared HLS · 72p · libx264 · ready")
+        for key in ["file_id", "id", "producer_failed", "message"] {
+            var bad = metrics; bad[key] = "/private/source/file"
+            statusWire["status"] = bad
+            XCTAssertThrowsError(try SharedPlaybackStatus.decode(JSONSerialization.data(withJSONObject: statusWire), playback: result))
+        }
+        for value in [-1, 1.5, "0", NSNull()] as [Any] {
+            var bad = metrics; bad["delivered_bytes"] = value; statusWire["status"] = bad
+            XCTAssertThrowsError(try SharedPlaybackStatus.decode(JSONSerialization.data(withJSONObject: statusWire), playback: result))
+        }
+        statusWire["status"] = metrics; statusWire["control_epoch"] = 2
+        XCTAssertThrowsError(try SharedPlaybackStatus.decode(JSONSerialization.data(withJSONObject: statusWire), playback: result))
+        statusWire["control_epoch"] = 1; statusWire["incarnation_id"] = "dddddddd-dddd-4ddd-8ddd-dddddddddddd"
+        XCTAssertThrowsError(try SharedPlaybackStatus.decode(JSONSerialization.data(withJSONObject: statusWire), playback: result))
+        XCTAssertThrowsError(try SharedPlaybackStatus.decode(Data(repeating: 32, count: 65_537), playback: result))
+        statusWire["incarnation_id"] = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"
+        var foreignReference = try binding("9223372036854775807")
+        var foreignItem = foreignReference["item"] as! [String: Any]; foreignItem["catalogue_epoch"] = "dddddddd-dddd-4ddd-8ddd-dddddddddddd"; foreignReference["item"] = foreignItem
+        statusWire["reference"] = foreignReference
+        XCTAssertThrowsError(try SharedPlaybackStatus.decode(JSONSerialization.data(withJSONObject: statusWire), playback: result))
+        let client = try SharedDecisionClient(testConfiguration: configuration)
+        let beat = SharedProgressBeat(sessionId: session, sequence: 7, positionMs: 0, durationMs: 90_000, watched: false)
+        var progressSent: Data?
+        DecisionHTTP.answer = { request in
+            XCTAssertEqual(request.url?.path, "/api/v1/shared/imports/\(self.ref.importId)/items/\(self.ref.itemId)/progress")
+            XCTAssertEqual(request.value(forHTTPHeaderField: "Authorization"), "Bearer decision-bearer")
+            let encoded = try self.body(request)
+            if let progressSent { XCTAssertEqual(progressSent, encoded) }; progressSent = encoded
+            return (request.url!, 409, [:], Data("{\"code\":\"sharing_progress_stale\",\"current_sequence\":20}".utf8))
+        }
+        for _ in 0..<2 { let outcome = try await client.progress(playback: result, beat: beat); XCTAssertEqual(outcome, .resyncRequired(currentSequence: 20)) }
+        let progressBody = try JSONSerialization.jsonObject(with: XCTUnwrap(progressSent)) as! [String: Any]
+        XCTAssertEqual(Set(progressBody.keys), ["session_id", "sequence", "position_ms", "duration_ms", "watched"])
+        XCTAssertEqual(progressBody["position_ms"] as? Int, 0)
+        DecisionHTTP.answer = { ($0.url!, 409, [:], Data("{\"code\":\"sharing_progress_stale\",\"current_sequence\":\"20\"}".utf8)) }
+        do { _ = try await client.progress(playback: result, beat: beat); XCTFail("accepted string sequence") } catch {}
+        DecisionHTTP.answer = { ($0.url!, 200, [:], Data(repeating: 32, count: 16_385)) }
+        do { _ = try await client.progress(playback: result, beat: beat); XCTFail("accepted oversized progress ACK") } catch {}
+        var sequences: [Int] = []
+        DecisionHTTP.answer = { request in
+            let object = try JSONSerialization.jsonObject(with: self.body(request)) as! [String: Any]
+            sequences.append(object["sequence"] as! Int)
+            return (request.url!, 200, [:], Data("{}".utf8))
+        }
+        _ = try await client.orderedProgress(playback: result, initialWatchSequence: 7, positionMs: 0, durationMs: 90_000)
+        _ = try await SharedDecisionClient(testConfiguration: configuration).orderedProgress(playback: result, initialWatchSequence: 0, positionMs: 500, durationMs: 90_000)
+        XCTAssertEqual(sequences, [8, 9])
+        let other = SharedPlaybackReference(importId: "dddddddd-dddd-4ddd-8ddd-dddddddddddd", serverId: ref.serverId, catalogueEpoch: ref.catalogueEpoch, libraryId: "0", itemId: ref.itemId)
+        let otherBase = "/api/v1/shared/imports/\(other.importId)/files/" + String(repeating: "L", count: 236)
+        let encoder = JSONEncoder(); encoder.keyEncodingStrategy = .convertToSnakeCase
+        var otherBinding = try binding("0"); otherBinding["item"] = try JSONSerialization.jsonObject(with: encoder.encode(other))
+        let detail = try JSONSerialization.data(withJSONObject: ["lifecycle_generation": Int64.max, "files": [["file_id": "0", "revision": String(repeating: "a", count: 64), "file_base": otherBase, "reference": otherBinding]]])
+        DecisionHTTP.answer = { ($0.url!, 200, [:], detail) }
+        let otherContext = try await PlaybackFileContext.authenticatedDetail(reference: other, fileId: "0", testTransport: URLSession(configuration: configuration))
+        let otherSession = "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee"
+        var otherReply = reply; otherReply["session_id"] = otherSession; otherReply["playlist_url"] = "/api/v1/hls/\(otherSession)/master.m3u8"
+        var control = otherReply["control"] as! [String: Any]; control["url"] = "/api/v1/hls/\(otherSession)/control"; otherReply["control"] = control
+        let otherBytes = try JSONSerialization.data(withJSONObject: otherReply)
+        DecisionHTTP.answer = { ($0.url!, 200, [:], otherBytes) }
+        let otherPlayback = try await client.start(context: otherContext, request: request)
+        DecisionHTTP.answer = { request in
+            XCTAssertEqual(request.url?.path, "/api/v1/shared/imports/\(other.importId)/items/\(other.itemId)/progress")
+            let object = try JSONSerialization.jsonObject(with: self.body(request)) as! [String: Any]
+            sequences.append(object["sequence"] as! Int)
+            return (request.url!, 200, [:], Data("{}".utf8))
+        }
+        _ = try await client.orderedProgress(playback: otherPlayback, initialWatchSequence: 0, positionMs: 1000, durationMs: 90_000)
+        XCTAssertEqual(sequences, [8, 9, 10])
+        var uncertain: Data?
+        DecisionHTTP.answer = { request in uncertain = try self.body(request); throw URLError(.networkConnectionLost) }
+        do { _ = try await client.orderedProgress(playback: otherPlayback, initialWatchSequence: 0, positionMs: 2000, durationMs: 90_000); XCTFail("accepted uncertain beat") } catch {}
+        DecisionHTTP.answer = { request in
+            XCTAssertEqual(try self.body(request), uncertain)
+            return (request.url!, 200, [:], Data("{}".utf8))
+        }
+        let previous = try await client.orderedProgress(playback: otherPlayback, initialWatchSequence: 0, positionMs: 3000, durationMs: 90_000)
+        XCTAssertEqual(previous, .previousBeatAcknowledged)
+        DecisionHTTP.answer = { request in
+            let value = try JSONSerialization.jsonObject(with: self.body(request)) as! [String: Any]
+            XCTAssertEqual(value["sequence"] as? Int, 12); XCTAssertEqual(value["position_ms"] as? Int, 3000)
+            return (request.url!, 200, [:], Data("{}".utf8))
+        }
+        let current = try await client.orderedProgress(playback: otherPlayback, initialWatchSequence: 0, positionMs: 3000, durationMs: 90_000)
+        XCTAssertEqual(current, .acknowledged)
+        XCTAssertEqual(try client.playlistURL(playback: otherPlayback).absoluteString, "https://b.test/api/v1/hls/\(otherSession)/master.m3u8")
+        var ends = 0
+        DecisionHTTP.answer = { request in
+            ends += 1; XCTAssertEqual(request.httpMethod, "DELETE")
+            XCTAssertEqual(request.url?.path, "/api/v1/hls/\(otherSession)")
+            XCTAssertEqual(request.value(forHTTPHeaderField: "Authorization"), "Bearer decision-bearer")
+            return (request.url!, 204, [:], Data())
+        }
+        try await client.end(playback: otherPlayback)
+        Session.shared.setCredentials(origin: "https://new.test", token: "new-bearer")
+        do { try await client.end(playback: otherPlayback); XCTFail("sent End with replaced account") } catch {}
+        do { _ = try await telemetryClient.status(playback: result); XCTFail("sent Shared status with replaced account") } catch {}
+        XCTAssertEqual(ends, 1)
+
+
+
+
+    }
+    func testInitialStartRefusesUnsupportedOriginalFieldsBeforeNetwork() async throws {
+        let context = try await context(), client = try SharedDecisionClient(testConfiguration: configuration); var calls = 0
+        DecisionHTTP.answer = { _ in calls += 1; return nil }
+        let base = CreateSessionRequest(playbackId: "shared", requestId: "cccccccc-cccc-4ccc-8ccc-cccccccccccc", caps: Caps.snapshot().document)
+        for index in 0..<6 {
+            var request = base
+            switch index {
+            case 0: request.previousSessionId = ""
+            case 1: request.controlSequence = 0
+            case 2: request.reopenReason = "stall"
+            case 3: request.subtitleBurn = 0
+            case 4: request.preserveDolbyVision = true
+            default: request.requestId = request.requestId!.uppercased()
+            }
+            do { _ = try await client.start(context: context, request: request); XCTFail("accepted unsupported initial Start") } catch {}
+        }
+        XCTAssertEqual(calls, 0)
+    }
+
 }

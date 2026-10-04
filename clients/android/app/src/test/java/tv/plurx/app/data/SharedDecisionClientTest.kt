@@ -139,4 +139,154 @@ class SharedDecisionClientTest {
         Session.token = "replaced"; assertTrue(runCatching { SharedDecisionClient.forTest(transport).decisionForTest(context, caps()) }.isFailure)
         assertEquals(0, calls)
     }
+    // Synthetic complete B response through the actual authenticated client;
+    // this does not qualify a physical Source producer or device playback.
+    @Test fun initialStartRetainsWholeRequestAndBoundBContext(): Unit = runBlocking {
+        login(); val context = context("9223372036854775807"); val session = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
+        val reply = buildJsonObject {
+            put("session_id", session); put("playlist_url", "/api/v1/hls/$session/master.m3u8?native=1&subtitle=2"); put("vod", true); put("start_seconds", 0); put("duration_ms", 90_000)
+            put("control", buildJsonObject { put("protocol", "plurx-playback-control-v1"); put("url", "/api/v1/hls/$session/control"); put("generation", "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"); put("control_epoch", 1); put("next_exchange_ms", 5_000); put("lease_timeout_ms", 300_000) })
+            put("future", buildJsonObject { put("exact", Long.MAX_VALUE) })
+        }.toString()
+        var sent: String? = null
+        var progressReply: String? = null
+        var progressSent: String? = null
+        val transport = OkHttpClient.Builder().addInterceptor { chain ->
+            if (progressReply != null) {
+                assertEquals("/api/v1/shared/imports/${reference.import_id}/items/${reference.item_id}/progress", chain.request().url.encodedPath)
+                assertEquals("Bearer decision-bearer", chain.request().header("Authorization"))
+                val buffer = Buffer(); chain.request().body!!.writeTo(buffer)
+                val bytes = buffer.readUtf8(); progressSent?.let { assertEquals(it, bytes) }; progressSent = bytes
+                return@addInterceptor response(chain.request(), progressReply!!, 409)
+            }
+            assertEquals("$base/hls/sessions", chain.request().url.encodedPath); assertEquals("Bearer decision-bearer", chain.request().header("Authorization"))
+            val buffer = Buffer(); chain.request().body!!.writeTo(buffer); sent = buffer.readUtf8(); response(chain.request(), reply)
+        }.build()
+        val request = CreateSessionReq(playback_id = "shared-browser", request_id = "cccccccc-cccc-4ccc-8ccc-cccccccccccc", start = 12.5, height = 720, copy = true, caps = caps())
+        val result = SharedDecisionClient.forTest(transport).start(context, request)
+        val subject = SharedPlaybackSubject(context, "Shared film", 12_500, 7)
+        val sdrDecision = SharedDecision.decode(wire("9223372036854775807") { JsonObject(it + mapOf("delivered_dynamic_range" to JsonPrimitive("sdr"), "preserve_dolby_vision" to JsonPrimitive(false))) })
+        val plan = SharedPlaybackPlan(subject, sdrDecision, request.caps!!, request)
+        assertEquals(720, plan.request.height); assertEquals(12.5, plan.request.start)
+        assertEquals("9223372036854775807", plan.subject.context.sourceFileId)
+        assertEquals("original", plan.frozenControlSelection().getValue("quality").jsonObject.getValue("mode").jsonPrimitive.content)
+        val autoPlan = SharedPlaybackPlan(subject, sdrDecision, request.caps, request.copy(quality_auto = true, native_subtitles = true, subtitle = 0, audio_offset_ms = 250))
+        assertEquals(720, autoPlan.frozenControlSelection().getValue("quality").jsonObject.getValue("height").jsonPrimitive.int)
+        assertEquals(0, autoPlan.frozenControlSelection().getValue("subtitle").jsonObject.getValue("track").jsonPrimitive.int)
+        assertEquals(250L, autoPlan.frozenControlSelection().getValue("audio_offset_ms").jsonPrimitive.long)
+        val encodedDecision = SharedDecision.decode(wire("9223372036854775807") { JsonObject(it + mapOf("method" to JsonPrimitive("transcode"), "delivered_dynamic_range" to JsonPrimitive("sdr"), "height" to JsonPrimitive(72), "delivery" to JsonObject(it.getValue("delivery").jsonObject + ("mode" to JsonPrimitive("transcode"))))) })
+        val manualPlan = SharedPlaybackPlan(subject, encodedDecision, request.caps, request.copy(height = 144, quality_auto = false, copy = false))
+        assertEquals(144, manualPlan.frozenControlSelection().getValue("quality").jsonObject.getValue("height").jsonPrimitive.int)
+        assertTrue(runCatching { SharedPlaybackPlan(subject, sdrDecision, request.caps, request.copy(copy = false)) }.isFailure)
+        assertTrue(runCatching { SharedPlaybackPlan(subject, sdrDecision, request.caps, request.copy(previous_session_id = "")) }.isFailure)
+        assertTrue(runCatching { SharedPlaybackSubject(PlaybackFileContext.local(0), "Local", 0, 0).validate() }.isFailure)
+
+        assertEquals("9223372036854775807", result.context.sourceFileId); assertEquals(reference, result.context.reference); assertEquals(session, result.context.sessionId)
+        assertEquals(request, result.request); assertEquals(Net.json.encodeToJsonElement(request).jsonObject, Json.parseToJsonElement(sent!!).jsonObject)
+        assertEquals(Long.MAX_VALUE, result.start.wire["future"]!!.jsonObject["exact"]!!.jsonPrimitive.long)
+        assertTrue(runCatching { result.context.localId() }.isFailure)
+        val metrics = buildJsonObject {
+            SharedPlaybackStatus.requiredCounters.forEach { put(it, 0) }
+            put("target_height", 72); put("encoder", "libx264"); put("playlist_shape", "vod"); put("producer_state", "ready"); put("server_ready_state", "ready")
+            put("admitted", true); put("suspended", false); put("final", false); put("server_ready_seconds", 0.5)
+        }
+        val statusWire = buildJsonObject { put("subject", "shared"); put("reference", binding("9223372036854775807")); put("session_id", session)
+            put("incarnation_id", "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"); put("control_epoch", 1); put("status", metrics) }
+        val statusClient = SharedDecisionClient.forTest(OkHttpClient.Builder().addInterceptor { chain ->
+            assertEquals("/api/v1/hls/$session/status", chain.request().url.encodedPath)
+            assertEquals("Bearer decision-bearer", chain.request().header("Authorization"))
+            response(chain.request(), statusWire.toString())
+        }.build())
+        assertEquals("Shared HLS · 72p · libx264 · ready", statusClient.status(result).summary)
+        fun refuses(value: JsonObject) = assertTrue(runCatching { SharedPlaybackStatus.decode(value.toString().toByteArray(), result) }.isFailure)
+        listOf("file_id", "id", "producer_failed", "message").forEach { key -> refuses(JsonObject(statusWire + ("status" to JsonObject(metrics + (key to JsonPrimitive("/private/source/file")))))) }
+        listOf(JsonPrimitive(-1), JsonPrimitive(1.5), JsonPrimitive("0"), JsonNull).forEach { value -> refuses(JsonObject(statusWire + ("status" to JsonObject(metrics + ("delivered_bytes" to value))))) }
+        refuses(JsonObject(statusWire + ("control_epoch" to JsonPrimitive(2))))
+        refuses(JsonObject(statusWire + ("incarnation_id" to JsonPrimitive("dddddddd-dddd-4ddd-8ddd-dddddddddddd"))))
+        assertTrue(runCatching { SharedPlaybackStatus.decode(ByteArray(65_537) { 32 }, result) }.isFailure)
+        val foreignReference = JsonObject(binding("9223372036854775807") + ("item" to JsonObject(binding("9223372036854775807").getValue("item").jsonObject + ("catalogue_epoch" to JsonPrimitive("dddddddd-dddd-4ddd-8ddd-dddddddddddd")))))
+        refuses(JsonObject(statusWire + ("reference" to foreignReference)))
+        val client = SharedDecisionClient.forTest(transport)
+        val beat = SharedProgressBeat(session, 7, 0, 90_000, false)
+        progressReply = "{\"code\":\"sharing_progress_stale\",\"current_sequence\":20}"
+        repeat(2) { assertEquals(SharedProgressResult.ResyncRequired(20), client.progress(result, beat)) }
+        val progressBody = Json.parseToJsonElement(progressSent!!).jsonObject
+        assertEquals(setOf("session_id", "sequence", "position_ms", "duration_ms", "watched"), progressBody.keys)
+        assertEquals(0L, progressBody.getValue("position_ms").jsonPrimitive.long)
+        progressReply = "{\"code\":\"sharing_progress_stale\",\"current_sequence\":\"20\"}"
+        assertTrue(runCatching { client.progress(result, beat) }.isFailure)
+        progressReply = " ".repeat(16_385)
+        assertTrue(runCatching { client.progress(result, beat) }.isFailure)
+        val sequences = mutableListOf<Long>()
+        val orderedTransport = OkHttpClient.Builder().addInterceptor { chain ->
+            val buffer = Buffer(); chain.request().body!!.writeTo(buffer)
+            sequences += Json.parseToJsonElement(buffer.readUtf8()).jsonObject.getValue("sequence").jsonPrimitive.long
+            response(chain.request(), "{}")
+        }.build()
+        SharedDecisionClient.forTest(orderedTransport).orderedProgress(result, 7, 0, 90_000)
+        SharedDecisionClient.forTest(orderedTransport).orderedProgress(result, 0, 500, 90_000)
+        assertEquals(listOf(8L, 9L), sequences)
+        val other = reference.copy(import_id = "dddddddd-dddd-4ddd-8ddd-dddddddddddd", library_id = "0")
+        val otherBase = "/api/v1/shared/imports/${other.import_id}/files/${"L".repeat(236)}"
+        val otherBinding = JsonObject(binding("0") + ("item" to Json.encodeToJsonElement(other)))
+        val detail = buildJsonObject { put("lifecycle_generation", Long.MAX_VALUE); put("files", buildJsonArray { add(buildJsonObject {
+            put("file_id", "0"); put("revision", revision); put("file_base", otherBase); put("reference", otherBinding)
+        }) }) }.toString()
+        val detailTransport = OkHttpClient.Builder().addInterceptor { response(it.request(), detail) }.build()
+        val otherContext = PlaybackFileContext.authenticatedDetailForTest(other, "0", detailTransport)
+        val otherSession = "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee"
+        val originalReply = Json.parseToJsonElement(reply).jsonObject
+        val otherReply = JsonObject(originalReply + mapOf("session_id" to JsonPrimitive(otherSession), "playlist_url" to JsonPrimitive("/api/v1/hls/$otherSession/master.m3u8"),
+            "control" to JsonObject(originalReply.getValue("control").jsonObject + ("url" to JsonPrimitive("/api/v1/hls/$otherSession/control"))))).toString()
+        val otherTransport = OkHttpClient.Builder().addInterceptor { chain ->
+            if (chain.request().url.encodedPath.endsWith("/hls/sessions")) response(chain.request(), otherReply)
+            else {
+                assertEquals("/api/v1/shared/imports/${other.import_id}/items/${other.item_id}/progress", chain.request().url.encodedPath)
+                val buffer = Buffer(); chain.request().body!!.writeTo(buffer)
+                sequences += Json.parseToJsonElement(buffer.readUtf8()).jsonObject.getValue("sequence").jsonPrimitive.long
+                response(chain.request(), "{}")
+            }
+        }.build()
+        val otherClient = SharedDecisionClient.forTest(otherTransport)
+        val otherPlayback = otherClient.start(otherContext, request)
+        otherClient.orderedProgress(otherPlayback, 0, 1000, 90_000)
+        assertEquals(listOf(8L, 9L, 10L), sequences)
+        val uncertainBodies = mutableListOf<String>()
+        var uncertain = true
+        val retryClient = SharedDecisionClient.forTest(OkHttpClient.Builder().addInterceptor { chain ->
+            val buffer = Buffer(); chain.request().body!!.writeTo(buffer)
+            uncertainBodies += buffer.readUtf8()
+            if (uncertain) { uncertain = false; throw java.io.IOException("lost acknowledgement") }
+            response(chain.request(), "{}")
+        }.build())
+        assertTrue(runCatching { retryClient.orderedProgress(otherPlayback, 0, 2000, 90_000) }.isFailure)
+        assertEquals(SharedProgressResult.PreviousBeatAcknowledged, retryClient.orderedProgress(otherPlayback, 0, 3000, 90_000))
+        assertEquals(uncertainBodies[0], uncertainBodies[1])
+        assertEquals(SharedProgressResult.Acknowledged, retryClient.orderedProgress(otherPlayback, 0, 3000, 90_000))
+        assertEquals(12L, Json.parseToJsonElement(uncertainBodies[2]).jsonObject.getValue("sequence").jsonPrimitive.long)
+        var ends = 0
+        val endClient = SharedDecisionClient.forTest(OkHttpClient.Builder().addInterceptor { chain ->
+            assertEquals("DELETE", chain.request().method)
+            assertEquals("/api/v1/hls/$otherSession", chain.request().url.encodedPath)
+            assertEquals("Bearer decision-bearer", chain.request().header("Authorization"))
+            ends++; response(chain.request(), "", 204)
+        }.build())
+        endClient.end(otherPlayback)
+        Session.token = "replacement-bearer"
+        assertTrue(runCatching { endClient.end(otherPlayback) }.isFailure)
+        assertTrue(runCatching { statusClient.status(result) }.isFailure)
+        assertEquals(1, ends)
+
+
+    }
+    @Test fun initialStartRefusesUnsupportedFieldsBeforeNetwork(): Unit = runBlocking {
+        login(); val context = context(); var calls = 0
+        val client = SharedDecisionClient.forTest(OkHttpClient.Builder().addInterceptor { calls++; response(it.request(), "{}") }.build())
+        val base = CreateSessionReq(playback_id = "shared", request_id = "cccccccc-cccc-4ccc-8ccc-cccccccccccc", caps = caps())
+        for (request in listOf(base.copy(previous_session_id = ""), base.copy(control_sequence = 0), base.copy(reopen_reason = ReopenReason.Stall), base.copy(subtitle_burn = 0), base.copy(preserve_dolby_vision = true), base.copy(request_id = base.request_id!!.uppercase()))) {
+            assertTrue(runCatching { client.start(context, request) }.isFailure)
+        }
+        assertEquals(0, calls)
+    }
+
 }
