@@ -924,7 +924,8 @@ impl MediaSessionStore for SqliteStore {
                        WHERE l.token_hash=jellyfin_plays.token_digest AND l.user_id=jellyfin_plays.user_id
                          AND l.device_digest=jellyfin_plays.device_digest AND l.client_family=jellyfin_plays.client_family)
                      AND EXISTS(SELECT 1 FROM jellyfin_entity_ids WHERE wire_id=jellyfin_plays.item_wire_id AND retired=0)
-                     AND EXISTS(SELECT 1 FROM jellyfin_entity_ids WHERE wire_id=jellyfin_plays.file_wire_id AND retired=0)",
+                     AND EXISTS(SELECT 1 FROM jellyfin_entity_ids WHERE wire_id=jellyfin_plays.file_wire_id AND retired=0)
+                     AND lower(trim(COALESCE((SELECT value FROM settings WHERE key='compat.jellyfin.enabled'),''),char(9)||char(10)||char(11)||char(12)||char(13)||' ')) IN ('1','true','yes','on') AND (SELECT value FROM settings WHERE key='compat.jellyfin.generation')=json_extract(jellyfin_plays.payload,'$.switch_generation')",
                     params![play_id, activation.user_id, activation.playback_id, activation.now_ms,
                         activation.incarnation_id, activation.request_fingerprint, activation.media_origin_ms],
                     |row| row.get(0),
@@ -1274,7 +1275,8 @@ impl MediaSessionStore for SqliteStore {
             tx.execute(
                 crate::store::jellyfin_play::SUPERSEDE_AT_NATIVE_POINTER,
                 params![activation.user_id, activation.playback_id, activation.incarnation_id,
-                    activation.now_ms.saturating_add(crate::store::jellyfin_play::JELLYFIN_TERMINAL_PLAY_TTL_MS)],
+                    activation.now_ms.saturating_add(crate::store::jellyfin_play::JELLYFIN_TERMINAL_PLAY_TTL_MS),
+                    activation.request_id.as_deref().unwrap_or("")],
             )?;
             // Re-read inside the transaction instead of fabricating a
             // superseded result. Another first-writer terminal cause may have

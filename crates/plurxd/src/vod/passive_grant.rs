@@ -111,7 +111,6 @@ impl Grant {
 impl super::VodServe {
     /// Trusted caller must first resolve exact current durable play/owner.
     /// Native terminal projection rechecks local liveness under the same gate.
-    #[allow(dead_code)] // Compatibility service ingress follows J0 verification.
     pub(crate) async fn passive_presence(
         &self,
         session: &str,
@@ -157,6 +156,20 @@ impl super::VodServe {
         let session = sessions.get(id).expect("test attachment");
         *session.last_touch.lock().expect("touch lock") =
             std::time::Instant::now() - super::SESSION_IDLE_TTL - Duration::from_secs(1);
+    }
+    pub(crate) async fn passive_grant_remaining_for_test(&self, id: &str) -> Option<Duration> {
+        let sessions = self.shared.sessions.lock().await;
+        let grant = sessions.get(id)?.passive_grant.as_ref()?;
+        let state = grant.state.lock().expect("presence lock");
+        (!state.released).then(|| state.expires.saturating_duration_since(Instant::now()))
+    }
+    pub(crate) async fn shorten_passive_grant_for_test(&self, id: &str, remaining: Duration) {
+        let sessions = self.shared.sessions.lock().await;
+        let grant = sessions
+            .get(id)
+            .and_then(|session| session.passive_grant.as_ref())
+            .expect("test grant");
+        grant.state.lock().expect("presence lock").expires = Instant::now() + remaining;
     }
     pub(crate) async fn expire_passive_grant_for_test(&self, id: &str) {
         let sessions = self.shared.sessions.lock().await;

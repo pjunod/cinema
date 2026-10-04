@@ -50,6 +50,7 @@ impl JellyfinPlayStore for HiqliteAuthStore {
             .client()
             .txn(vec![
                 (jp::CLEANUP, params!(play.created_at_ms)),
+                (jp::RETIRE_ORPHANED_ACTIVE, params!(play.created_at_ms)),
                 (
                     jp::CREATE,
                     params!(
@@ -64,7 +65,8 @@ impl JellyfinPlayStore for HiqliteAuthStore {
                         payload,
                         expiry,
                         play.item_wire_id,
-                        play.file_wire_id
+                        play.file_wire_id,
+                        play.media_grant_id
                     ),
                 ),
             ])
@@ -72,7 +74,7 @@ impl JellyfinPlayStore for HiqliteAuthStore {
             .into_iter()
             .collect::<Result<Vec<_>, _>>()
             .map_err(database_error)?;
-        Ok(results[1] == 1)
+        Ok(results[2] == 1)
     }
     async fn jellyfin_play(
         &self,
@@ -97,6 +99,45 @@ impl JellyfinPlayStore for HiqliteAuthStore {
             .next()
             .map(jp::RawPlay::decode)
             .transpose()
+    }
+    async fn jellyfin_play_for_direct_grant(
+        &self,
+        grant_id: &str,
+    ) -> Result<Option<JellyfinPlay>, StoreError> {
+        if !jp::reference(grant_id) {
+            return Ok(None);
+        }
+        self.client()
+            // authority: an anonymous scoped media link must observe Stop, supersession and login replacement exactly.
+            .query_consistent_map::<jp::RawPlay, _>(jp::READ_BY_DIRECT_GRANT, params!(grant_id))
+            .await?
+            .into_iter()
+            .next()
+            .map(jp::RawPlay::decode)
+            .transpose()
+    }
+    async fn jellyfin_plays_superseded_by(
+        &self,
+        play_id: &str,
+        scope: &JellyfinPlayScope,
+    ) -> Result<Vec<JellyfinPlay>, StoreError> {
+        jp::validate_key(play_id, scope)?;
+        self.client()
+            // authority: releasing a predecessor's exact resources must see the supersession its own activation committed.
+            .query_consistent_map::<jp::RawPlay, _>(
+                jp::READ_SUPERSEDED_BY,
+                params!(
+                    scope.user_id,
+                    play_id,
+                    &scope.token_digest,
+                    &scope.device_digest,
+                    scope.client_family.as_str()
+                ),
+            )
+            .await?
+            .into_iter()
+            .map(jp::RawPlay::decode)
+            .collect()
     }
     async fn activate_jellyfin_play(
         &self,

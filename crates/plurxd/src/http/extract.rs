@@ -717,7 +717,16 @@ pub(crate) async fn authenticate_user_token(
     state: &AppState,
     token: &str,
 ) -> Result<plurx_core::domain::User, ApiError> {
-    let hash = auth::hash_token(token);
+    authenticate_token_digest(state, auth::hash_token(token)).await
+}
+
+/// The same expiry, revocation and cache-proof bookkeeping as a presented
+/// token, for a caller that holds only its digest (a scoped media link that
+/// resolved to the login it was issued under).
+pub(crate) async fn authenticate_token_digest(
+    state: &AppState,
+    hash: String,
+) -> Result<plurx_core::domain::User, ApiError> {
     let ticket = state.cache_only_admin_proofs.authentication_ticket();
     let user = match state.store.authenticate_token(&hash).await? {
         TokenAuthentication::Authenticated(user) => user,

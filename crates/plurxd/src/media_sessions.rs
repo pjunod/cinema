@@ -1556,6 +1556,12 @@ pub(crate) enum RelayResource {
         segment: String,
     },
     Delete,
+    /// Authenticated compatibility presence for one exact passive play.
+    PassivePresence {
+        user: String,
+        player: String,
+        request: String,
+    },
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
@@ -1651,6 +1657,15 @@ impl RelayResource {
                 (0..=1_024).contains(index) && valid_resource_name(segment)
             }
             Self::Segment { segment } => valid_resource_name(segment),
+            Self::PassivePresence {
+                user,
+                player,
+                request,
+            } => [user, player, request].iter().all(|value| {
+                !value.trim().is_empty()
+                    && value.len() <= 256
+                    && !value.chars().any(char::is_control)
+            }),
         }
     }
 
@@ -1661,7 +1676,10 @@ impl RelayResource {
             | Self::VideoPlaylist
             | Self::SubtitlePlaylist { .. } => RELAY_PLAYLIST_MAX_LIFETIME,
             Self::Segment { .. } => RELAY_SEGMENT_MAX_LIFETIME,
-            Self::Status | Self::SubtitleSegment { .. } | Self::Delete => RELAY_SHORT_MAX_LIFETIME,
+            Self::Status
+            | Self::SubtitleSegment { .. }
+            | Self::Delete
+            | Self::PassivePresence { .. } => RELAY_SHORT_MAX_LIFETIME,
         }
     }
 
@@ -6118,6 +6136,29 @@ mod tests {
             request.owner_budget_at(origin_deadline).is_none(),
             "publication cannot start after ingress abandonment"
         );
+    }
+
+    #[test]
+    fn passive_presence_relay_resource_round_trips_and_bounds_its_identity() {
+        let resource = RelayResource::PassivePresence {
+            user: "[\"user_id\",1]".into(),
+            player: "jellyfin:player".into(),
+            request: "11111111-1111-4111-8111-111111111111".into(),
+        };
+        let wire = serde_json::to_value(&resource).expect("relay resource");
+        assert_eq!(wire["resource"], "passive_presence");
+        let decoded: RelayResource = serde_json::from_value(wire).expect("round trip");
+        assert!(decoded.is_valid());
+        assert_eq!(decoded.max_lifetime(), RELAY_SHORT_MAX_LIFETIME);
+        let long = "x".repeat(257);
+        for bad in ["", "  ", "line\nbreak", long.as_str()] {
+            let invalid = RelayResource::PassivePresence {
+                user: "[\"user_id\",1]".into(),
+                player: bad.into(),
+                request: "request".into(),
+            };
+            assert!(!invalid.is_valid(), "{bad:?}");
+        }
     }
 
     #[test]

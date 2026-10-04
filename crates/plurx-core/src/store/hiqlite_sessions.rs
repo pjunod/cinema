@@ -1490,7 +1490,8 @@ impl MediaSessionStore for HiqliteAuthStore {
                        WHERE l.token_hash=jellyfin_plays.token_digest AND l.user_id=jellyfin_plays.user_id
                          AND l.device_digest=jellyfin_plays.device_digest AND l.client_family=jellyfin_plays.client_family)
                      AND EXISTS(SELECT 1 FROM jellyfin_entity_ids WHERE wire_id=jellyfin_plays.item_wire_id AND retired=0)
-                     AND EXISTS(SELECT 1 FROM jellyfin_entity_ids WHERE wire_id=jellyfin_plays.file_wire_id AND retired=0)",
+                     AND EXISTS(SELECT 1 FROM jellyfin_entity_ids WHERE wire_id=jellyfin_plays.file_wire_id AND retired=0)
+                     AND lower(trim(COALESCE((SELECT value FROM settings WHERE key='compat.jellyfin.enabled'),''),char(9)||char(10)||char(11)||char(12)||char(13)||' ')) IN ('1','true','yes','on') AND (SELECT value FROM settings WHERE key='compat.jellyfin.generation')=json_extract(jellyfin_plays.payload,'$.switch_generation')",
                 params!(play_id, activation.user_id, activation.playback_id.as_str(), activation.now_ms,
                     activation.incarnation_id.as_str(), activation.request_fingerprint.as_str(), activation.media_origin_ms),
             ).await?;
@@ -1583,7 +1584,8 @@ impl MediaSessionStore for HiqliteAuthStore {
                        WHERE l.token_hash=jellyfin_plays.token_digest AND l.user_id=jellyfin_plays.user_id
                          AND l.device_digest=jellyfin_plays.device_digest AND l.client_family=jellyfin_plays.client_family)
                      AND EXISTS(SELECT 1 FROM jellyfin_entity_ids WHERE wire_id=jellyfin_plays.item_wire_id AND retired=0)
-                     AND EXISTS(SELECT 1 FROM jellyfin_entity_ids WHERE wire_id=jellyfin_plays.file_wire_id AND retired=0)))
+                     AND EXISTS(SELECT 1 FROM jellyfin_entity_ids WHERE wire_id=jellyfin_plays.file_wire_id AND retired=0)
+                     AND lower(trim(COALESCE((SELECT value FROM settings WHERE key='compat.jellyfin.enabled'),''),char(9)||char(10)||char(11)||char(12)||char(13)||' ')) IN ('1','true','yes','on') AND (SELECT value FROM settings WHERE key='compat.jellyfin.generation')=json_extract(jellyfin_plays.payload,'$.switch_generation')))
                     AND ($15 = '' OR EXISTS (
                       SELECT 1 FROM media_session_requests
                        WHERE user_id = $3 AND request_id = $15 AND incarnation_id = $1
@@ -1817,7 +1819,8 @@ impl MediaSessionStore for HiqliteAuthStore {
             (
                 super::jellyfin_play::SUPERSEDE_AT_NATIVE_POINTER,
                 params!(activation.user_id, activation.playback_id.as_str(), activation.incarnation_id.as_str(),
-                    activation.now_ms.saturating_add(super::jellyfin_play::JELLYFIN_TERMINAL_PLAY_TTL_MS)),
+                    activation.now_ms.saturating_add(super::jellyfin_play::JELLYFIN_TERMINAL_PLAY_TTL_MS),
+                    activation.request_id.as_deref().unwrap_or("")),
             ),
         ];
         let statement_count = statements.len();

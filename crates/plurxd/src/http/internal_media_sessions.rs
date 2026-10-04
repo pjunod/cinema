@@ -735,7 +735,10 @@ pub(crate) async fn relay(
     else {
         return StatusCode::BAD_REQUEST.into_response();
     };
-    let authorization = if matches!(&request.resource, RelayResource::Delete) {
+    let authorization = if matches!(
+        &request.resource,
+        RelayResource::Delete | RelayResource::PassivePresence { .. }
+    ) {
         authorize(&state, &headers, RELAY_PATH, &body).await
     } else {
         authorize_read(&state, &headers, RELAY_PATH, &body).await
@@ -755,7 +758,7 @@ pub(crate) async fn relay(
     let request_deadline = now + budget;
     let media_resource = !matches!(
         &request.resource,
-        RelayResource::Status | RelayResource::Delete
+        RelayResource::Status | RelayResource::Delete | RelayResource::PassivePresence { .. }
     );
     let resolution = if media_resource {
         state

@@ -622,6 +622,16 @@ mod tests {
             )
             .await
             .expect("login");
+        store
+            .set_jellyfin_compatibility(true)
+            .await
+            .expect("compatibility enabled");
+        let switch_generation = store
+            .jellyfin_compatibility_state()
+            .await
+            .expect("switch state")
+            .generation
+            .expect("switch generation");
         let file_id = store
             .upsert_file(
                 item_id,
@@ -669,6 +679,8 @@ mod tests {
             selection_json: "{}".into(),
             source_origin_ms: 0,
             created_at_ms: now * 1000,
+            media_grant_id: None,
+            switch_generation,
         };
         assert!(store.create_jellyfin_play(play).await.expect("binding"));
         let grant = format!("progress-fixture-{play_id}");

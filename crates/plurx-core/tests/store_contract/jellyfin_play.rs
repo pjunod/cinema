@@ -45,6 +45,16 @@ async fn fixture(store: &Arc<dyn Store>) -> NewJellyfinPlay {
         )
         .await
         .expect("scoped login"));
+    store
+        .set_jellyfin_compatibility(true)
+        .await
+        .expect("compatibility enabled");
+    let switch_generation = store
+        .jellyfin_compatibility_state()
+        .await
+        .expect("switch state")
+        .generation
+        .expect("switch generation");
     NewJellyfinPlay {
         play_id: uuid::Uuid::new_v4().simple().to_string(),
         scope,
@@ -59,7 +69,336 @@ async fn fixture(store: &Arc<dyn Store>) -> NewJellyfinPlay {
         selection_json: "{\"audio\":0,\"subtitle\":null}".into(),
         source_origin_ms: 120_000,
         created_at_ms: 1_000,
+        media_grant_id: None,
+        switch_generation,
     }
+}
+fn link_grant(play: &NewJellyfinPlay, id: &str, file_id: i64) -> plurx_core::store::NewFileGrant {
+    plurx_core::store::NewFileGrant {
+        id: id.into(),
+        token_hash: digest(&format!("link-secret-{id}")),
+        file_id,
+        user_id: play.scope.user_id,
+        source_token_hash: play.scope.token_digest.clone(),
+        created_at: 1,
+        expires_at: 86_401,
+    }
+}
+#[tokio::test]
+async fn jellyfin_scoped_link_grant_resolves_only_its_exact_play_and_observes_stop() {
+    for_each_backend(|store, backend| async move {
+        let mut play = fixture(&store).await;
+        store
+            .create_file_grant(link_grant(&play, "link-grant", play.file_id))
+            .await
+            .expect("link grant");
+        play.media_grant_id = Some("link-grant".into());
+        assert!(
+            store
+                .create_jellyfin_play(play.clone())
+                .await
+                .expect("create"),
+            "{backend}"
+        );
+        let bound = store
+            .jellyfin_play_for_direct_grant("link-grant")
+            .await
+            .expect("read")
+            .expect("bound play");
+        assert_eq!(bound.state, "pending", "{backend}");
+        assert_eq!(bound.direct_grant_id.as_deref(), Some("link-grant"));
+        assert_eq!(bound.negotiation.play_id, play.play_id);
+        assert_eq!(
+            bound.negotiation.scope.token_digest,
+            play.scope.token_digest
+        );
+        assert_eq!(
+            bound.negotiation.scope.device_digest,
+            play.scope.device_digest
+        );
+        assert!(store
+            .jellyfin_play_for_direct_grant("unknown-grant")
+            .await
+            .expect("unknown read")
+            .is_none());
+
+        // A grant issued under another login, or one already revoked, cannot be bound.
+        let mut foreign = play.clone();
+        foreign.play_id = uuid::Uuid::new_v4().simple().to_string();
+        let mut foreign_grant = link_grant(&foreign, "foreign-grant", foreign.file_id);
+        foreign_grant.source_token_hash = digest("another-login");
+        store
+            .create_file_grant(foreign_grant)
+            .await
+            .expect("foreign grant");
+        foreign.media_grant_id = Some("foreign-grant".into());
+        assert!(
+            !store
+                .create_jellyfin_play(foreign.clone())
+                .await
+                .expect("foreign create"),
+            "{backend}: a grant from another login must not bind"
+        );
+        let mut revoked = play.clone();
+        revoked.play_id = uuid::Uuid::new_v4().simple().to_string();
+        store
+            .create_file_grant(link_grant(&revoked, "revoked-grant", revoked.file_id))
+            .await
+            .expect("revoked grant");
+        assert!(store
+            .revoke_file_grant("revoked-grant", revoked.scope.user_id, 2)
+            .await
+            .expect("revoke"));
+        revoked.media_grant_id = Some("revoked-grant".into());
+        assert!(
+            !store
+                .create_jellyfin_play(revoked)
+                .await
+                .expect("revoked create"),
+            "{backend}: a revoked grant must not bind"
+        );
+
+        // Activation keeps the negotiated grant and refuses any other.
+        store
+            .create_file_grant(link_grant(&play, "substitute-grant", play.file_id))
+            .await
+            .expect("substitute grant");
+        assert!(!store
+            .activate_jellyfin_play(
+                &play.play_id,
+                &play.scope,
+                Activation::DirectGrant("substitute-grant".into()),
+                2_000
+            )
+            .await
+            .expect("substitute activation"));
+        assert!(store
+            .activate_jellyfin_play(
+                &play.play_id,
+                &play.scope,
+                Activation::DirectGrant("link-grant".into()),
+                2_000
+            )
+            .await
+            .expect("activation"));
+        assert_eq!(
+            store
+                .jellyfin_play_for_direct_grant("link-grant")
+                .await
+                .expect("active read")
+                .expect("active")
+                .state,
+            "active"
+        );
+        assert!(store
+            .end_jellyfin_play(&play.play_id, &play.scope, 3_000)
+            .await
+            .expect("stop"));
+        assert_eq!(
+            store
+                .jellyfin_play_for_direct_grant("link-grant")
+                .await
+                .expect("ended read")
+                .expect("tombstone")
+                .state,
+            "ended",
+            "{backend}: Stop must be visible to the link"
+        );
+    })
+    .await;
+}
+#[tokio::test]
+async fn jellyfin_play_transitions_commit_only_under_their_switch_generation() {
+    for_each_backend(|store, backend| async move {
+        let play = fixture(&store).await;
+        store
+            .create_file_grant(link_grant(&play, "generation-grant", play.file_id))
+            .await
+            .expect("grant");
+        assert!(store
+            .create_jellyfin_play(play.clone())
+            .await
+            .expect("create"));
+        for enabled in [false, true] {
+            store
+                .set_jellyfin_compatibility(enabled)
+                .await
+                .expect("switch");
+        }
+        assert!(
+            !store
+                .activate_jellyfin_play(
+                    &play.play_id,
+                    &play.scope,
+                    Activation::DirectGrant("generation-grant".into()),
+                    2_000
+                )
+                .await
+                .expect("activation"),
+            "{backend}: a play from before the switch went off cannot activate"
+        );
+        let mut stale = play.clone();
+        stale.play_id = uuid::Uuid::new_v4().simple().to_string();
+        assert!(
+            !store
+                .create_jellyfin_play(stale)
+                .await
+                .expect("stale create"),
+            "{backend}: an old generation cannot admit new plays"
+        );
+        let mut current = play.clone();
+        current.play_id = uuid::Uuid::new_v4().simple().to_string();
+        current.switch_generation = store
+            .jellyfin_compatibility_state()
+            .await
+            .expect("state")
+            .generation
+            .expect("generation");
+        assert!(store
+            .create_jellyfin_play(current.clone())
+            .await
+            .expect("current create"));
+        store.set_jellyfin_compatibility(false).await.expect("off");
+        let mut off = current.clone();
+        off.play_id = uuid::Uuid::new_v4().simple().to_string();
+        assert!(
+            !store.create_jellyfin_play(off).await.expect("off create"),
+            "{backend}: nothing is admitted while the switch is off"
+        );
+    })
+    .await;
+}
+#[tokio::test]
+async fn jellyfin_replacement_names_superseded_plays_and_orphans_retire_after_the_terminal_window()
+{
+    for_each_backend(|store, backend| async move {
+        let first = fixture(&store).await;
+        let mut second = first.clone();
+        second.play_id = uuid::Uuid::new_v4().simple().to_string();
+        for (play, grant) in [(&first, "first-grant"), (&second, "second-grant")] {
+            store
+                .create_file_grant(link_grant(play, grant, play.file_id))
+                .await
+                .expect("grant");
+            let mut play = play.clone();
+            play.media_grant_id = Some(grant.into());
+            assert!(store.create_jellyfin_play(play).await.expect("create"));
+        }
+        assert!(store
+            .activate_jellyfin_play(
+                &first.play_id,
+                &first.scope,
+                Activation::DirectGrant("first-grant".into()),
+                2_000
+            )
+            .await
+            .expect("first activation"));
+        assert!(store
+            .activate_jellyfin_play(
+                &second.play_id,
+                &second.scope,
+                Activation::DirectGrant("second-grant".into()),
+                3_000
+            )
+            .await
+            .expect("second activation"));
+        let superseded = store
+            .jellyfin_plays_superseded_by(&second.play_id, &second.scope)
+            .await
+            .expect("superseded");
+        assert_eq!(superseded.len(), 1, "{backend}");
+        assert_eq!(superseded[0].negotiation.play_id, first.play_id);
+        assert_eq!(
+            superseded[0].direct_grant_id.as_deref(),
+            Some("first-grant")
+        );
+        assert!(store
+            .jellyfin_plays_superseded_by(&first.play_id, &first.scope)
+            .await
+            .expect("none")
+            .is_empty());
+
+        // Logout returns the retained tombstone for release without extending it.
+        let tombstone_expiry = superseded[0].expires_at_ms;
+        let ended = store
+            .end_jellyfin_login_plays(&first.scope, 4_000)
+            .await
+            .expect("logout");
+        let retained = ended
+            .iter()
+            .find(|play| play.negotiation.play_id == first.play_id)
+            .expect("tombstone returned for release");
+        assert_eq!(retained.expires_at_ms, tombstone_expiry, "{backend}");
+
+        // An active binding whose grant was revoked a full window ago retires
+        // at the next admission; one revoked inside the window survives.
+        let third = fixture_reuse(&store, &first).await;
+        assert!(store
+            .activate_jellyfin_play(
+                &third.play_id,
+                &third.scope,
+                Activation::DirectGrant("third-grant".into()),
+                5_000
+            )
+            .await
+            .expect("third activation"));
+        assert!(store
+            .revoke_file_grant("third-grant", third.scope.user_id, 10)
+            .await
+            .expect("revoke"));
+        let mut inside = third.clone();
+        inside.play_id = uuid::Uuid::new_v4().simple().to_string();
+        inside.media_grant_id = None;
+        inside.created_at_ms = (10 + 86_000) * 1000;
+        assert!(store
+            .create_jellyfin_play(inside)
+            .await
+            .expect("inside window"));
+        assert_eq!(
+            store
+                .jellyfin_play(&third.play_id, &third.scope)
+                .await
+                .expect("read")
+                .expect("row")
+                .state,
+            "active",
+            "{backend}: a failed final can still retry inside the window"
+        );
+        let mut after = third.clone();
+        after.play_id = uuid::Uuid::new_v4().simple().to_string();
+        after.media_grant_id = None;
+        after.created_at_ms = (10 + 86_400) * 1000 + 1_000;
+        assert!(store
+            .create_jellyfin_play(after)
+            .await
+            .expect("after window"));
+        assert_eq!(
+            store
+                .jellyfin_play(&third.play_id, &third.scope)
+                .await
+                .expect("read")
+                .expect("row")
+                .state,
+            "ended",
+            "{backend}: the orphaned active binding retires"
+        );
+    })
+    .await;
+}
+/// A new login-scoped play for the same fixture login, with its own grant.
+async fn fixture_reuse(store: &Arc<dyn Store>, base: &NewJellyfinPlay) -> NewJellyfinPlay {
+    let mut play = base.clone();
+    play.play_id = uuid::Uuid::new_v4().simple().to_string();
+    store
+        .create_file_grant(link_grant(&play, "third-grant", play.file_id))
+        .await
+        .expect("grant");
+    play.media_grant_id = Some("third-grant".into());
+    assert!(store
+        .create_jellyfin_play(play.clone())
+        .await
+        .expect("create"));
+    play
 }
 #[tokio::test]
 async fn jellyfin_pending_admission_expiry_and_terminal_fences_preserve_active_play() {
@@ -262,6 +601,65 @@ async fn jellyfin_direct_activation_fences_prior_play_without_negotiation_or_rep
     .await;
 }
 
+/// Claim, own and activate a native session for one exact reserved request.
+async fn reserved_media_session(
+    store: &dyn Store,
+    play: &NewJellyfinPlay,
+    incarnation_id: &str,
+    session_id: &str,
+    backend: &str,
+) {
+    let request_id = format!("jellyfin:{}", play.play_id);
+    let activation = MediaSessionActivation {
+        recovery_epoch: String::new(),
+        expected_desired_revision: None,
+        incarnation_id: incarnation_id.to_owned(),
+        session_id: session_id.to_owned(),
+        user_id: play.scope.user_id,
+        playback_id: play.playback_id.clone(),
+        expected_predecessor_incarnation_id: None,
+        fence_predecessor: false,
+        request_id: Some(request_id.clone()),
+        request_fingerprint: play.native_request_fingerprint.clone(),
+        owner_node_id: "staged-node".to_owned(),
+        recipe_json: "{}".to_owned(),
+        response_json: r#"{"session":"current"}"#.to_owned(),
+        publication_ready_at_ms: MEDIA_SESSION_PUBLICATION_BLOCKED,
+        media_origin_ms: play.source_origin_ms,
+        now_ms: 1_000,
+        lease_expires_at_ms: 900_000,
+    };
+    assert!(matches!(
+        store
+            .claim_media_session_request(
+                play.scope.user_id,
+                &request_id,
+                &activation.request_fingerprint,
+                &activation.playback_id,
+                incarnation_id,
+                1_000,
+                900_000
+            )
+            .await
+            .expect("claim"),
+        MediaSessionRequestClaim::Acquired { .. }
+    ));
+    assert!(store
+        .assign_media_session_request_owner(
+            play.scope.user_id,
+            &request_id,
+            incarnation_id,
+            &activation.owner_node_id,
+            1_000
+        )
+        .await
+        .expect("owner"));
+    store
+        .activate_media_session(&activation)
+        .await
+        .unwrap_or_else(|error| panic!("{backend}: activate reserved session: {error}"))
+        .unwrap_or_else(|| panic!("{backend}: reserved activation must win"));
+}
 #[tokio::test]
 async fn jellyfin_native_pointer_activation_atomically_fences_prior_events_and_keeps_newer_asks() {
     for_each_backend(|store, backend| async move {
@@ -283,6 +681,7 @@ async fn jellyfin_native_pointer_activation_atomically_fences_prior_events_and_k
         let mut selected = old.clone();
         selected.play_id = uuid::Uuid::new_v4().simple().to_string();
         selected.native_request_fingerprint = "a".repeat(64);
+        selected.source_origin_ms = 0;
         selected.created_at_ms = 1_000;
         assert!(store
             .create_jellyfin_play(selected.clone())
@@ -309,10 +708,17 @@ async fn jellyfin_native_pointer_activation_atomically_fences_prior_events_and_k
             "active",
             "{backend}: pending asks must leave incumbent live"
         );
-        current_media_session(
+        // A second pending ask with the selected recipe fingerprint: only the
+        // exact reserved request the native activation carries is chosen.
+        let mut twin = selected.clone();
+        twin.play_id = uuid::Uuid::new_v4().simple().to_string();
+        assert!(store
+            .create_jellyfin_play(twin.clone())
+            .await
+            .expect("twin ask"));
+        reserved_media_session(
             store.as_ref(),
-            selected.scope.user_id,
-            &selected.playback_id,
+            &selected,
             "11111111-1111-4111-8111-111111111301",
             "11111111-1111-4111-8111-111111111302",
             backend,
@@ -322,6 +728,7 @@ async fn jellyfin_native_pointer_activation_atomically_fences_prior_events_and_k
             (&old, "ended"),
             (&stale, "ended"),
             (&selected, "pending"),
+            (&twin, "pending"),
             (&newer, "pending"),
             (&other_player, "active"),
         ] {

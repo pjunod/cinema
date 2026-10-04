@@ -1,6 +1,6 @@
 # Jellyfin compatibility — measured build progress and remaining gates
 
-**Status:** open · J0–J3 integrated; J4 profile and VOD implementation underway; physical Infuse repeat deferred · **Updated:** 2026-10-03 EDT.
+**Status:** open · J0–J3 integrated; J4 service work complete pending integration; physical client matrix deferred · **Updated:** 2026-10-04 EDT.
 
 Companion to [the reviewed build contract](JELLYFIN-COMPATIBILITY-BUILD.md)
 (what must be built and proved) — this records execution and evidence. The
@@ -742,3 +742,55 @@ and all 28 SQL/read/process censuses pass. The exact integrated branch is
 rechecked before pushing. No-signal/replacement cleanup, encoded/HEVC service
 qualification and the physical client matrix remain open; Apple TV stays
 deferred.
+
+PR #787 merged as `b138ae619` with parents `235e1c44d` and `1a2b6499d`, the
+tested head's exact tree and its three checked regression references, after
+all eight jobs passed in
+[effort run 4039](http://192.168.4.7:3000/noirr/plurx/actions/runs/4039).
+
+## 11. J4 completion — access, lifecycle and the remaining service matrix
+
+This slice finishes the service-side J4 work the handoff left open. Every
+change sits on an owner that already existed; it adds no timer, background
+task, playback owner or producer.
+
+**Encoded HLS qualification.** The real native HLS fixture also runs the
+encoded path: a complete probe, an asserted-absent copy index, copy refused by
+the request and a 750 kbit/s ceiling frozen into the recipe. A fetched mapped
+fragment decodes for both video and audio through a finite, awaited test
+decoder, which the ownership inventory records.
+
+**Approved access (Paul, 2026-10-03).** Mapped Primary/Backdrop artwork answers
+without a login while the switch is on, keeping the per-address miss budget and
+the existing artwork owner. Direct play has a scoped link: Jellyfin Android TV
+0.19.10 builds its own direct URL from `mediaSource.eTag` and sends neither a
+credential nor a `PlaySessionId` (checked in its pinned source), so the
+negotiation returns one 256-bit secret as the source ETag. The secret is the
+token of the native one-file grant minted with the negotiation, expiring
+within 24 hours of it. A grant-keyed read resolves its play; Stop,
+supersession, logout, token revocation, idle expiry and an earlier switch
+generation all end it (typed `410 media_link_gone`). The direct route also
+parses Jellyfin's case-insensitive query names; before this it required a
+case-exact `PlaySessionId` that Android never sends.
+
+**Lifecycle root causes.**
+
+| Gap | Cause | Fix on the existing seam |
+|---|---|---|
+| Long pause returns 410 | Paused progress never reached the native passive grant, so it expired 600 s after the last media request | Authenticated Progress renews the exact grant (user, player, incarnation) on whichever node owns the route, through a new relay resource beside Status and Delete |
+| Old session left after a replacement without Stopped | Activation ended predecessor bindings but nothing released their native session or direct grant | Supersession records `superseded_by`; the activating request reads that bounded set and releases each through the native owner |
+| Active bindings accumulate | A vanished client's active row had no end condition | Admission retires active rows whose native session has been terminal, or whose grant expired or was revoked, for the full 24 h tombstone window, then terminal retention deletes them |
+| Logout extended tombstones | `END_LOGIN` rewrote every scoped row's expiry | Ended rows keep their expiry; they are still returned for idempotent release |
+| Switch off raced in-flight activation | Enablement was checked once at request entry | Each play records its switch generation; admission, activation, native admission and publication commit only while that generation is saved and enabled. Off ends a play for good |
+| Pointer supersession could pick the wrong ask | Chosen pending ask was "the only one with this fingerprint" | The native activation's exact reserved request names the chosen play |
+| Infuse direct events refused | Infuse labels static Range delivery `DirectStream`; the adapter required `DirectPlay` | Refuse only a label naming the other delivery |
+
+**Closed manifests and representation.** The manifest rewriter now refuses an
+unknown colon-less `#EXT` tag (native playlists emit only `#EXTM3U`,
+`#EXT-X-ENDLIST`, `#EXT-X-DISCONTINUITY` and `#EXT-X-INDEPENDENT-SEGMENTS`) and
+a subtitle playlist naming another track's cue. A direct representation test
+pins native truth through the facade: 416 with `bytes */len`, suffix ranges,
+no invented validator, `If-Range` serving the whole file, and HEAD.
+
+Still open: the physical Infuse and Android matrix on the frozen candidate,
+HDR/Dolby Vision, the multipage corpus, and the effort's promotion.
