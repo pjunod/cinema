@@ -182,8 +182,20 @@ pub async fn quality_control(
     .await
     {
         Ok(response) => response,
-        Err(_) => StatusCode::SERVICE_UNAVAILABLE.into_response(),
+        Err(_) => quality_control_unavailable(),
     }
+}
+
+/// A transient failure the client may retry, with the hint it waits on.
+pub(crate) fn quality_control_unavailable() -> Response {
+    (
+        StatusCode::SERVICE_UNAVAILABLE,
+        [
+            (header::RETRY_AFTER, "1"),
+            (header::CACHE_CONTROL, "no-store"),
+        ],
+    )
+        .into_response()
 }
 
 pub(crate) async fn quality_control_routed(
@@ -198,8 +210,20 @@ pub(crate) async fn quality_control_routed(
     }
     let route = match state.media_sessions.control_route(session).await {
         Ok(Some(route)) => route,
-        Ok(None) => return StatusCode::NOT_FOUND.into_response(),
-        Err(_) => return StatusCode::SERVICE_UNAVAILABLE.into_response(),
+        // A typed body, so a relaying ingress can tell this owner's route miss
+        // from an owner that has no quality-control endpoint at all.
+        Ok(None) => {
+            return control_error(
+                StatusCode::NOT_FOUND,
+                "session_gone",
+                "no media session holds this capability",
+                None,
+                None,
+                None,
+                None,
+            )
+        }
+        Err(_) => return quality_control_unavailable(),
     };
     if route.incarnation_id != request.generation
         || u64::try_from(route.owner_epoch).ok() != Some(request.control_epoch)
@@ -243,7 +267,7 @@ pub(crate) async fn quality_control_routed(
             .quality_control(&route.owner_node_id, &relay)
             .await
         {
-            Ok(Some(reply)) => {
+            Ok(crate::media_sessions::QualityControlRelayOutcome::Reply(reply)) => {
                 let mut response = Json(reply).into_response();
                 response.headers_mut().insert(
                     header::CACHE_CONTROL,
@@ -251,8 +275,11 @@ pub(crate) async fn quality_control_routed(
                 );
                 response
             }
-            Ok(None) => answer(&request, "unsupported", false, None),
-            Err(_) => StatusCode::SERVICE_UNAVAILABLE.into_response(),
+            Ok(crate::media_sessions::QualityControlRelayOutcome::Unsupported) => {
+                answer(&request, "unsupported", false, None)
+            }
+            Ok(crate::media_sessions::QualityControlRelayOutcome::Refused(response)) => response,
+            Err(_) => quality_control_unavailable(),
         };
     }
     match request.operation {
@@ -271,7 +298,7 @@ pub(crate) async fn quality_control_routed(
             let receipt_key = quality_cancellation_receipt_key(identity);
             let existing = match state.store.quality_cancellation_receipt(&receipt_key).await {
                 Ok(receipt) => receipt,
-                Err(_) => return StatusCode::SERVICE_UNAVAILABLE.into_response(),
+                Err(_) => return quality_control_unavailable(),
             };
             if let Some(receipt) = existing {
                 if receipt.state == "settled" {
@@ -306,7 +333,7 @@ pub(crate) async fn quality_control_routed(
                 };
                 match state.store.request_quality_cancellation(&receipt).await {
                     Ok(Some(_)) => {}
-                    Ok(None) | Err(_) => return StatusCode::SERVICE_UNAVAILABLE.into_response(),
+                    Ok(None) | Err(_) => return quality_control_unavailable(),
                 }
             }
             let found = cancel_quality_preparation(&route.playback_id, identity);

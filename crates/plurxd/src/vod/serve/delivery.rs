@@ -929,8 +929,13 @@ impl VodServe {
                 if media.len() as u64 != ready.len {
                     return Err("preparation fragment length changed".into());
                 }
+                let (media, artifact_id) = quality_inspection(move || {
+                    let artifact_id = hex::encode(Sha256::digest(&media));
+                    (media, artifact_id)
+                })
+                .await?;
                 let interval = plurx_core::playback::continuous_quality::QualityInterval {
-                    artifact_id: hex::encode(Sha256::digest(&media)),
+                    artifact_id,
                     rendition_id: rendition_id.into(),
                     timescale,
                     from_tick: entry.start_ticks,
@@ -949,9 +954,16 @@ impl VodServe {
                     256 * 1024,
                 )
                 .await?;
-                super::vod_serve_serve::verify_cached_quality_interval(
-                    &init, &media, rung, &interval,
-                )?;
+                let (verified_rung, verified_interval) = (rung.clone(), interval.clone());
+                quality_inspection(move || {
+                    super::vod_serve_serve::verify_cached_quality_interval(
+                        &init,
+                        &media,
+                        &verified_rung,
+                        &verified_interval,
+                    )
+                })
+                .await??;
                 drop(_gate);
                 if let Some(audio) = family.audio() {
                     let audio_lookup = self
@@ -1011,22 +1023,33 @@ impl VodServe {
                             .plan
                             .entry(index)
                             .ok_or("soundtrack plan changed")?;
-                        let dependency =
-                            plurx_core::playback::continuous_quality::QualityInterval {
-                                artifact_id: hex::encode(Sha256::digest(&bytes)),
-                                rendition_id: audio.rendition_id().into(),
-                                timescale: soundtrack.rendition.timescale,
-                                from_tick: entry.start_ticks,
-                                through_tick: entry.end_ticks(),
-                                byte_length: ready.len,
-                            };
-                        super::vod_serve_serve::verify_cached_shared_audio_interval(
-                            &init,
-                            &bytes,
-                            audio,
-                            &dependency,
-                            index as usize + 1 == soundtrack.rendition.plan.len(),
-                        )?;
+                        let final_interval = index as usize + 1 == soundtrack.rendition.plan.len();
+                        let (audio_timescale, from_tick, through_tick, byte_length) = (
+                            soundtrack.rendition.timescale,
+                            entry.start_ticks,
+                            entry.end_ticks(),
+                            ready.len,
+                        );
+                        let verified_audio = audio.clone();
+                        quality_inspection(move || {
+                            let dependency =
+                                plurx_core::playback::continuous_quality::QualityInterval {
+                                    artifact_id: hex::encode(Sha256::digest(&bytes)),
+                                    rendition_id: verified_audio.rendition_id().into(),
+                                    timescale: audio_timescale,
+                                    from_tick,
+                                    through_tick,
+                                    byte_length,
+                                };
+                            super::vod_serve_serve::verify_cached_shared_audio_interval(
+                                &init,
+                                &bytes,
+                                &verified_audio,
+                                &dependency,
+                                final_interval,
+                            )
+                        })
+                        .await??;
                         if self.source_changed(&soundtrack.rendition) {
                             return Err("soundtrack source changed".into());
                         }
@@ -1262,6 +1285,18 @@ impl VodServe {
             owner,
         })
     }
+}
+
+/// Hashing and parsing a bounded preparation fragment (up to 16 MiB of video,
+/// plus its AAC dependencies) is CPU work, and up to 64 schedules can prepare
+/// at once, so it runs on the blocking pool and the async workers keep
+/// serving. The result is exactly what the same closure returns inline.
+async fn quality_inspection<T: Send + 'static>(
+    work: impl FnOnce() -> T + Send + 'static,
+) -> Result<T, String> {
+    tokio::task::spawn_blocking(work)
+        .await
+        .map_err(|error| format!("quality inspection task failed: {error}"))
 }
 
 /// Validate the opened init, retaining the same descriptor for HTTP streaming.

@@ -2105,6 +2105,10 @@ fn maintenance_route_eligible(method: &Method, path: &str) -> bool {
                 | crate::media_sessions::RELAY_PATH
                 | crate::media_sessions::CONTROL_PATH
                 | hls::QUALITY_CONTROL_PATH
+                // Schedule mutations are control of an existing session: a
+                // node in maintenance keeps streaming it, so it must keep
+                // honouring the viewer's quality changes too.
+                | hls::QUALITY_SCHEDULE_PATH
         | crate::live_tv::RESOURCE_PATH
                 | crate::live_tv::STOP_PATH
                 // A retire is a stop plus a fence. Refusing it during
@@ -2133,7 +2137,13 @@ fn maintenance_route_eligible(method: &Method, path: &str) -> bool {
     let existing_media_control = (method == Method::POST
         && matches!(
             segments.as_slice(),
-            ["api", "v1", "hls", _, "control" | "quality-control"]
+            [
+                "api",
+                "v1",
+                "hls",
+                _,
+                "control" | "quality-control" | "quality-schedule"
+            ]
         ))
         || (method == Method::DELETE
             && matches!(
@@ -2231,6 +2241,9 @@ fn learner_route_eligible(method: &Method, path: &str) -> bool {
                     | crate::media_sessions::RELAY_PATH
                     | crate::media_sessions::CONTROL_PATH
                     | hls::QUALITY_CONTROL_PATH
+                    // A learner can own a continuous session; every schedule
+                    // relayed to it arrives here.
+                    | hls::QUALITY_SCHEDULE_PATH
                     | crate::live_tv::RESOURCE_PATH
                     | crate::live_tv::STOP_PATH
             ))
@@ -2308,8 +2321,12 @@ fn learner_route_eligible(method: &Method, path: &str) -> bool {
         && matches!(
             segments.as_slice(),
             ["api", "v1", "files", _, "hls", "sessions"]
+                // The continuous family create walks the same create path as
+                // `hls/sessions`, and its catalog read is the same kind of
+                // node-local, write-nothing POST as the caps-v2 decision.
+                | ["api", "v1", "files", _, "hls", "continuous-sessions" | "continuous-candidates"]
                 | ["api", "v1", "files", _, "publication"]
-                | ["api", "v1", "hls", _, "control" | "quality-control"]
+                | ["api", "v1", "hls", _, "control" | "quality-control" | "quality-schedule"]
                 // The caps-v2 spelling of the decision read. It is a POST only
                 // because its capabilities are a JSON document rather than a
                 // query string — it writes nothing, and a learner that answers
@@ -3980,6 +3997,13 @@ mod tests {
             (Method::POST, "/api/v1/files/8/decision"),
             (Method::POST, "/api/v1/hls/session-8/control"),
             (Method::POST, "/api/v1/hls/session-8/quality-control"),
+            // A learner entry node and a learner-owned continuous session
+            // must both accept schedule mutations, and a learner must be
+            // able to start the family it would serve.
+            (Method::POST, "/api/v1/hls/session-8/quality-schedule"),
+            (Method::POST, hls::QUALITY_SCHEDULE_PATH),
+            (Method::POST, "/api/v1/files/8/hls/continuous-sessions"),
+            (Method::POST, "/api/v1/files/8/hls/continuous-candidates"),
             (Method::DELETE, "/api/v1/hls/session-8"),
             (Method::GET, "/api/v1/live-tv/sessions/cap/index.m3u8"),
             (
@@ -4063,6 +4087,10 @@ mod tests {
             (Method::GET, "/api/v1/publication/session/chapter.xhtml"),
             (Method::DELETE, "/api/v1/hls/session"),
             (Method::POST, "/api/v1/hls/session/quality-control"),
+            // An existing continuous session keeps streaming in maintenance,
+            // so its schedule (public and owner relay) stays reachable.
+            (Method::POST, "/api/v1/hls/session/quality-schedule"),
+            (Method::POST, hls::QUALITY_SCHEDULE_PATH),
             (Method::POST, crate::media_sessions::ABORT_PATH),
             (Method::POST, crate::media_sessions::CONTROL_PATH),
             (Method::POST, hls::QUALITY_CONTROL_PATH),
@@ -4102,6 +4130,8 @@ mod tests {
             (Method::POST, "/api/v1/files/8/decision"),
             (Method::GET, "/api/v1/files/8/direct"),
             (Method::POST, "/api/v1/files/8/hls/sessions"),
+            (Method::POST, "/api/v1/files/8/hls/continuous-sessions"),
+            (Method::POST, "/api/v1/files/8/hls/continuous-candidates"),
             (Method::POST, crate::media_sessions::START_PATH),
             (Method::POST, crate::media_sessions::ACTIVATE_PATH),
             (Method::GET, "/api/v1/live-tv/readiness"),

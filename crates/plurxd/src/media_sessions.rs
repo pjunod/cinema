@@ -1979,6 +1979,15 @@ impl MediaSessionCoordinator {
             .admit_with_limit(Instant::now(), session_id, QUALITY_RATE_PER_SESSION)
     }
 
+    /// Schedule admissions charged in the current node-wide window.
+    #[cfg(test)]
+    pub(crate) fn quality_schedule_admissions_in_window(&self) -> u32 {
+        self.quality_admission
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .admitted
+    }
+
     /// Cache active routes and short negative answers. Deterministic query
     /// shards single-flight repeated capabilities and hard-bound concurrent
     /// consensus reads even when an unauthenticated caller sprays random UUIDs.
@@ -2881,9 +2890,9 @@ impl MediaSessionCoordinator {
         }
         let deadline = deadline_after(Duration::from_millis(remaining as u64));
         let base = self.peer_base(owner_node_id, deadline).await?;
-        let response = self
+        let (response, retry_after) = self
             .transport
-            .request(
+            .request_with_retry_after(
                 owner_node_id,
                 &base,
                 reqwest::Method::POST,
@@ -2900,19 +2909,14 @@ impl MediaSessionCoordinator {
                 .filter(|reply| reply.valid_for(&request.request))
                 .ok_or(PeerTransportError::InvalidResponse)?;
         }
-        Response::builder()
-            .status(response.status.as_u16())
-            .header(header::CACHE_CONTROL, "no-store")
-            .header(header::CONTENT_TYPE, "application/json")
-            .body(Body::from(response.body))
-            .map_err(|_| PeerTransportError::InvalidResponse)
+        relayed_owner_response(response.status.as_u16(), retry_after, response.body)
     }
 
     pub(crate) async fn quality_control(
         &self,
         owner_node_id: &str,
         request: &crate::http::hls::QualityControlRelayRequest,
-    ) -> Result<Option<crate::http::hls::QualityControlResponse>, PeerTransportError> {
+    ) -> Result<QualityControlRelayOutcome, PeerTransportError> {
         let body = serde_json::to_vec(request).map_err(|_| PeerTransportError::InvalidResponse)?;
         if body.len() > crate::http::hls::QUALITY_CONTROL_MAX_BYTES {
             return Err(PeerTransportError::InvalidResponse);
@@ -2922,9 +2926,9 @@ impl MediaSessionCoordinator {
                 .ok_or(PeerTransportError::TimedOut)?;
         let deadline = deadline_after(budget);
         let base = self.peer_base(owner_node_id, deadline).await?;
-        let response = self
+        let (response, retry_after) = self
             .transport
-            .request(
+            .request_with_retry_after(
                 owner_node_id,
                 &base,
                 reqwest::Method::POST,
@@ -2935,18 +2939,7 @@ impl MediaSessionCoordinator {
                 PeerAuthMode::ExactRequest,
             )
             .await?;
-        if matches!(response.status.as_u16(), 404 | 405) {
-            return Ok(None);
-        }
-        if !response.status.is_success() {
-            return Err(PeerTransportError::InvalidResponse);
-        }
-        let response =
-            serde_json::from_slice::<crate::http::hls::QualityControlResponse>(&response.body)
-                .ok()
-                .filter(|response| response.valid_for(&request.request))
-                .ok_or(PeerTransportError::InvalidResponse)?;
-        Ok(Some(response))
+        classify_quality_control_relay(response, retry_after, &request.request)
     }
 
     /// Mutating playback control uses its own exact-auth endpoint. It must not
@@ -3056,6 +3049,91 @@ fn remote_abort_legacy_retry_body(
     }
     serde_json::to_vec(&request.without_reason())
         .map(Some)
+        .map_err(|_| PeerTransportError::InvalidResponse)
+}
+
+/// What an owner answered a relayed quality-control exchange.
+pub(crate) enum QualityControlRelayOutcome {
+    Reply(crate::http::hls::QualityControlResponse),
+    /// The owner has no quality-control endpoint (an older build).
+    Unsupported,
+    /// The owner refused or deferred this exchange; its status, body and
+    /// retry hint reach the client unchanged.
+    Refused(Response<Body>),
+}
+
+/// An owner's quality-control answer, keeping its meaning across the relay.
+///
+/// A 404 carrying the owner's own `session_gone` body is a route miss on a
+/// node that does implement the endpoint; any other 404, or a 405, is an
+/// owner without the endpoint, which is what "unsupported" means. Owner
+/// refusals (409/410/425) and deferrals (429/503) pass through rather than
+/// collapsing into a 503 that loses the difference between "stop" and
+/// "retry".
+fn classify_quality_control_relay(
+    response: PeerResponse,
+    retry_after: Option<u32>,
+    request: &crate::http::hls::QualityControlRequest,
+) -> Result<QualityControlRelayOutcome, PeerTransportError> {
+    let status = response.status.as_u16();
+    if response.status.is_success() {
+        return serde_json::from_slice::<crate::http::hls::QualityControlResponse>(&response.body)
+            .ok()
+            .filter(|reply| reply.valid_for(request))
+            .map(QualityControlRelayOutcome::Reply)
+            .ok_or(PeerTransportError::InvalidResponse);
+    }
+    let error_body =
+        serde_json::from_slice::<crate::playback_control::ControlErrorBody>(&response.body)
+            .ok()
+            .filter(|body| body.is_valid_for_status(status));
+    match (status, error_body) {
+        (404, Some(body)) => quality_control_refusal(status, retry_after, Some(body)),
+        (404 | 405, None) => Ok(QualityControlRelayOutcome::Unsupported),
+        (409 | 410 | 425 | 429 | 503, body) => {
+            // The owner answers some refusals with a bare status; an
+            // unparseable body is dropped rather than relayed.
+            quality_control_refusal(status, retry_after, body)
+        }
+        _ => Err(PeerTransportError::InvalidResponse),
+    }
+}
+
+fn quality_control_refusal(
+    status: u16,
+    retry_after: Option<u32>,
+    body: Option<crate::playback_control::ControlErrorBody>,
+) -> Result<QualityControlRelayOutcome, PeerTransportError> {
+    let retry_after = retry_after.or_else(|| {
+        body.as_ref()
+            .and_then(|body| body.retry_after_ms)
+            .map(|delay_ms| delay_ms.div_ceil(1000).max(1))
+    });
+    let bytes = match body {
+        Some(body) => serde_json::to_vec(&body).map_err(|_| PeerTransportError::InvalidResponse)?,
+        None => Vec::new(),
+    };
+    relayed_owner_response(status, retry_after, bytes).map(QualityControlRelayOutcome::Refused)
+}
+
+/// One owner answer relayed to the client: its status and body, plus its
+/// retry hint. A deferral (429/503) always carries one, so a client that
+/// waits on the header never spins on an owner that omitted it.
+fn relayed_owner_response(
+    status: u16,
+    retry_after: Option<u32>,
+    body: Vec<u8>,
+) -> Result<Response<Body>, PeerTransportError> {
+    let retry_after = retry_after.or(matches!(status, 429 | 503).then_some(1));
+    let mut builder = Response::builder()
+        .status(status)
+        .header(header::CACHE_CONTROL, "no-store")
+        .header(header::CONTENT_TYPE, "application/json");
+    if let Some(seconds) = retry_after {
+        builder = builder.header(header::RETRY_AFTER, seconds.to_string());
+    }
+    builder
+        .body(Body::from(body))
         .map_err(|_| PeerTransportError::InvalidResponse)
 }
 
@@ -8366,6 +8444,133 @@ mod tests {
             .admit_with_limit(started, "extra", QUALITY_RATE_PER_SESSION)
             .is_err());
         assert!(spray.sessions.len() <= MAX_CONTROL_RATE_ENTRIES);
+    }
+
+    fn owner_answer(status: u16, body: &[u8]) -> PeerResponse {
+        PeerResponse {
+            status: reqwest::StatusCode::from_u16(status).expect("status"),
+            body: body.to_vec(),
+        }
+    }
+
+    fn quality_discovery() -> crate::http::hls::QualityControlRequest {
+        crate::http::hls::QualityControlRequest {
+            version: 1,
+            generation: uuid::Uuid::new_v4().to_string(),
+            control_epoch: 1,
+            operation: crate::http::hls::QualityControlOperation::Discover,
+            identity: None,
+        }
+    }
+
+    /// An owner's refusal or deferral must keep its meaning across the relay:
+    /// collapsing 409/410/429 into 503 turns "stop" into "retry", and calling
+    /// an owner's route miss "unsupported" disables cancellation for a
+    /// session that merely raced its own end.
+    #[test]
+    fn quality_control_relay_keeps_owner_refusals_and_route_misses_distinct() {
+        let request = quality_discovery();
+        let gone = serde_json::to_vec(&crate::playback_control::ControlErrorBody {
+            terminal_reason: None,
+            code: "session_gone".into(),
+            message: "no media session holds this capability".into(),
+            generation: None,
+            control_epoch: None,
+            retry_after_ms: None,
+            invalid_field: None,
+        })
+        .expect("error body");
+        let Ok(QualityControlRelayOutcome::Refused(miss)) =
+            classify_quality_control_relay(owner_answer(404, &gone), None, &request)
+        else {
+            panic!("an owner's own route miss is not 'unsupported'");
+        };
+        assert_eq!(miss.status(), StatusCode::NOT_FOUND);
+        for status in [404, 405] {
+            assert!(
+                matches!(
+                    classify_quality_control_relay(owner_answer(status, b""), None, &request),
+                    Ok(QualityControlRelayOutcome::Unsupported)
+                ),
+                "an owner without the endpoint ({status}) is unsupported"
+            );
+        }
+        for status in [409, 410] {
+            let Ok(QualityControlRelayOutcome::Refused(refusal)) =
+                classify_quality_control_relay(owner_answer(status, b""), None, &request)
+            else {
+                panic!("owner {status} must pass through");
+            };
+            assert_eq!(refusal.status().as_u16(), status);
+            assert!(refusal.headers().get(header::RETRY_AFTER).is_none());
+        }
+        let limited = serde_json::to_vec(&crate::playback_control::ControlErrorBody {
+            terminal_reason: None,
+            code: "control_rate_limited".into(),
+            message: "the quality control budget is exhausted".into(),
+            generation: None,
+            control_epoch: None,
+            retry_after_ms: Some(2_500),
+            invalid_field: None,
+        })
+        .expect("error body");
+        let Ok(QualityControlRelayOutcome::Refused(deferred)) =
+            classify_quality_control_relay(owner_answer(429, &limited), None, &request)
+        else {
+            panic!("owner 429 must pass through");
+        };
+        assert_eq!(deferred.status(), StatusCode::TOO_MANY_REQUESTS);
+        assert_eq!(
+            deferred
+                .headers()
+                .get(header::RETRY_AFTER)
+                .and_then(|v| v.to_str().ok()),
+            Some("3"),
+            "the owner's own delay reaches the client"
+        );
+        let Ok(QualityControlRelayOutcome::Refused(unavailable)) =
+            classify_quality_control_relay(owner_answer(503, b""), Some(7), &request)
+        else {
+            panic!("owner 503 must pass through");
+        };
+        assert_eq!(unavailable.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(
+            unavailable
+                .headers()
+                .get(header::RETRY_AFTER)
+                .and_then(|v| v.to_str().ok()),
+            Some("7")
+        );
+        assert!(matches!(
+            classify_quality_control_relay(owner_answer(500, b""), None, &request),
+            Err(PeerTransportError::InvalidResponse)
+        ));
+    }
+
+    /// The schedule relay keeps the owner's status and its retry hint, and a
+    /// deferral without one still tells the client when to come back.
+    #[test]
+    fn quality_schedule_relay_passes_owner_status_and_retry_after() {
+        let deferred = relayed_owner_response(429, Some(4), Vec::new()).expect("relay");
+        assert_eq!(deferred.status(), StatusCode::TOO_MANY_REQUESTS);
+        assert_eq!(
+            deferred
+                .headers()
+                .get(header::RETRY_AFTER)
+                .and_then(|v| v.to_str().ok()),
+            Some("4")
+        );
+        let unavailable = relayed_owner_response(503, None, Vec::new()).expect("relay");
+        assert_eq!(
+            unavailable
+                .headers()
+                .get(header::RETRY_AFTER)
+                .and_then(|v| v.to_str().ok()),
+            Some("1")
+        );
+        let refused = relayed_owner_response(409, None, Vec::new()).expect("relay");
+        assert_eq!(refused.status(), StatusCode::CONFLICT);
+        assert!(refused.headers().get(header::RETRY_AFTER).is_none());
     }
 
     #[test]
