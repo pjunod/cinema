@@ -1302,7 +1302,11 @@ pattern = "publication_ready_at_ms"
 # A05 recovery: 104 -> 112, six activation/confirmation fixture fields in
 # three new exact recovery/ack cases plus two refusal-only incumbent reads.
 # No new publication writer or lifecycle owner is introduced.
-expected_occurrences = 112
+# Promotion review fixes: +1 test-only confirmation in chunk_06's
+# a05_committed_preparation_drops_staged_proof_and_binds_as_ordinary, which
+# confirms the activation before committing a prepared successor so the
+# staged link proof can be shown to end at commit. No shipped fence moves.
+expected_occurrences = 113
 
 [[module_symbols]]
 id = "m4-durable-projection-safety-window"

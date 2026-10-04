@@ -438,7 +438,7 @@ pub(crate) fn create_source_link(
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .as_ref()
-                .filter(|identity| matches(*identity))
+                .filter(|identity| matches(identity))
                 .cloned()
         })
         .ok()
