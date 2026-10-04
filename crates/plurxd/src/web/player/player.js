@@ -129,6 +129,14 @@
  * @property {string|null} [qualityCandidateId] the server-confirmed active route
  * @property {any} [continuousQuality] the reservation-bound continuous attachment
  * @property {any} [qualityRetainedSelection] the retained incumbent selection while a requested change waits
+ * @property {Map<string,any>} [continuousQualityStarts] in-flight continuous family starts, keyed by attempt
+ * @property {string} [continuousQualityObservation] the newest continuous adapter fault, for diagnostics
+ * @property {string} [continuousQualityObservationStack] that fault's bounded stack, for diagnostics
+ * @property {Array<{at_ms:number,message:string}>} [continuousQualityObservations] bounded continuous fault history
+ * @property {{candidate_id:string,width:number,height:number,film_tick:number,timescale:number}|null} [continuousQualityPresented] the continuous rendition last seen on screen
+ * @property {{key:string,supported:boolean,response:any}|null} [qualityControlSupport] the owner's quality-control feature answer
+ * @property {{key:string,promise:Promise<any>}|null} [qualityControlDiscovery] the in-flight quality-control feature discovery
+ * @property {{change:any,selection:any}|null} [qualityNegotiatingSelection] the incumbent selection reported while a change negotiates
  * @property {string|null} [qualityProtocol] protocol negotiated with the actual session owner
  * @property {number|null} [priorKbps]     the bandwidth estimate carried from the last playback
  * @property {number|null} [autoHeight]    the rung Auto started or settled on
