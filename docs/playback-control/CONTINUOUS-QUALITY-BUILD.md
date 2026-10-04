@@ -6816,3 +6816,81 @@ continuous family. Recommendation: price Auto on the encoder's configured peak
 (the catalog peak, which already includes audio) and keep the ceiling only for
 the HLS `BANDWIDTH` an autonomous engine reads. This reverses a qualified
 earlier decision, so it is left unchanged pending the human.
+
+### 10.228 Firefox full campaign on disjoint CPUs; every switch boundary is optically clean
+
+Source `a28c6560c` (server and web identical to `5a53425f1`), headed Firefox
+on an owned Xvfb display, browser and observers on CPUs 0-3,8-9, daemon and
+FFmpeg on 4-7,10-15, software pool 32 threads. Receipts:
+`reports/continuous-firefox-a28c6560c-cpusep-full1*`.
+
+**Browser oracle — PASS.** Fifteen manual changes and five actual Auto changes
+(`quality recovered` / `link pressure`, alternating 720p↔1080p) in one session
+and one player generation. Maximum and p95 video gap 85.6 ms (the earlier
+Firefox failure was a single 101.74 ms gap on the shared-CPU topology), zero
+stalls, hitches, waits or reopens.
+
+**Optical switch boundaries — clean.** A per-boundary analysis of the captured
+frame clock (±48 frames around each of the 20 presented boundaries, by film
+frame number, not wall time) found a maximum held picture of 79.2 ms lower /
+87.5 ms upper bound, and zero skipped, backward or uncaptured samples at every
+boundary.
+
+**Whole-window optical criterion — failed, not at switches.** The harness
+requires the whole 25-minute capture to be complete. It was not: 9 capture
+sampling gaps, 32 skipped counter values, a worst hold of 186–206 ms. Every
+long hold lies 3–20 s away from the nearest switch boundary, in steady
+playback. The four manual-phase holds coincide exactly with Firefox's own
+`droppedVideoFrames` increments (8 frames in 4 episodes at film 17.6, 273.9,
+517.2 and 702.0–702.5 s). The Auto-phase holds are not counted by Firefox and
+coincide with capture sampling gaps, i.e. they are downstream of the video
+element (compositor, X server or capture). `sar` shows the client CPUs at
+about 30 % average utilisation, so this is not sustained saturation; the
+sub-second cause was not identified. These are not continuous-quality
+artifacts: no hold is at a transition, and the transition oracle is the one the
+design depends on. Recorded as a lab-display limitation, not a product fix.
+
+Tools kept in the receipts folder on the lab host: per-event and per-boundary
+optical analysers.
+
+### 10.229 Main integration: activation lease maintenance
+
+Main `aa3d77101` (#788) fixed the same root cause as this branch's
+`97967c6ce`: a create admission claim (60 s) outlives the activation lease
+(12 s). Main's predicate is the refined one — exclude a starting activation
+whose route is still BLOCKED, keep confirmed finite handoffs and committed
+prepared successors renewable — so the merge takes main's SQL in both stores
+and its 60-second test claim. This branch's atomic handoff-arming refusal stays;
+its precondition is already the blocked state.
+
+### 10.230 Private three-voter partition probe
+
+Three `a28c6560c` daemons as voters in separate network namespaces on one
+host, headless Firefox through a routing proxy that sends continuous creates
+to node B and everything else to node A. Receipts:
+`reports/continuous-private-cluster-a28c6560c-partition-playback{2..6}*`.
+
+Two earlier failures were in the probe, not the product. (1) It called `play()`
+as soon as the function existed, racing the app's first route render; the
+decision fetch was aborted 0.3 s after it started and the player never
+retried. Waiting for the same readiness the playback lab uses (document
+complete, player code, signed-in user, first route rendered) fixed it.
+Direct decisions on all three nodes answered in under 1 s. (2) It compared
+the raw session id with Activity's one-way delivery correlation id; it now
+finds the delivery by file and node hostname.
+
+**Result — PASS on its stated scope.** Controlled 1080p playback with node B
+as the owner. With B's link down for 13 s: the saved manual 720p choice
+stayed, A and C stayed reachable, all three daemons stayed alive, and the
+voter roster recovered after the link returned.
+
+**Observed, not changed — recovery after restore.** Playback did not resume
+within 40 s. B self-fenced 0.9 s after the cut and regained serving authority
+only at its next quorum-watermark sample, 7.8 s after the link returned. The
+player's persistent-stall restart created a new session on B (the probe pins
+creates to B) inside that window and got `serving_fenced`, which the web
+client treats as terminal by design ("the server retired this stream; reopen
+to continue"). A real client talks to one node, so it would hit this only if
+that node is the one rejoining. Whether a create refused during a fence
+should wait for the fence to clear is a cluster serving-fence policy
+question outside continuous quality; left for the human.
