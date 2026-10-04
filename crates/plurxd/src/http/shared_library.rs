@@ -470,8 +470,36 @@ struct SourceContentAuthority {
     items: Vec<(SourceId, SourceId)>,
     files: Vec<(SourceId, SourceId, SourceId)>,
 }
+// Bounds Source media bodies that are still producing bytes. Completed and
+// in-memory responses hold no permit.
 static CONTENT_MONITORS: std::sync::LazyLock<std::sync::Arc<tokio::sync::Semaphore>> =
     std::sync::LazyLock::new(|| std::sync::Arc::new(tokio::sync::Semaphore::new(64)));
+/// A monitored body owns its monitor's lifetime. Hyper drops a body at EOF,
+/// once a declared length is yielded, on stream reset or with its connection;
+/// that drop is the "this response is finished with the writer" signal, so the
+/// monitor and its global permit end with the response, not the keep-alive
+/// connection that carried it.
+struct MonitoredBody {
+    inner: Body,
+    _permit: tokio::sync::OwnedSemaphorePermit,
+    _live: tokio_util::sync::DropGuard,
+}
+impl http_body::Body for MonitoredBody {
+    type Data = axum::body::Bytes;
+    type Error = axum::Error;
+    fn poll_frame(
+        self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Option<Result<http_body::Frame<Self::Data>, Self::Error>>> {
+        std::pin::Pin::new(&mut self.get_mut().inner).poll_frame(cx)
+    }
+    fn is_end_stream(&self) -> bool {
+        self.inner.is_end_stream()
+    }
+    fn size_hint(&self) -> http_body::SizeHint {
+        self.inner.size_hint()
+    }
+}
 fn bounded_json(value: Value) -> Result<Response, ApiError> {
     struct BoundedJson(Vec<u8>);
     impl std::io::Write for BoundedJson {
@@ -653,6 +681,24 @@ pub(super) async fn guard_source_response(
         )
         .into_response();
     };
+    let Some(source_guard) = response
+        .extensions()
+        .get::<std::sync::Arc<crate::transcode::source_actor::SourceResponseGuard>>()
+        .cloned()
+    else {
+        // Catalogue JSON and artwork are complete in memory when the handler
+        // returns, so this check is their authority point. Re-observing bytes
+        // that already exist cannot withdraw them; artwork memory is owned by
+        // its Bytes (`shared_artwork::asset_response`), not by a monitor.
+        if !source_content_current(&state, &authority).await {
+            return fail(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "sharing_body_authority_unavailable",
+            )
+            .into_response();
+        }
+        return response;
+    };
     let Some(connection) = connection else {
         return fail(
             StatusCode::SERVICE_UNAVAILABLE,
@@ -671,44 +717,40 @@ pub(super) async fn guard_source_response(
         .into_response();
     }
     let cancel = connection.0.clone();
-    let art_lease = response
-        .extensions()
-        .get::<std::sync::Arc<super::shared_artwork::ArtBodyLease>>()
-        .cloned();
-    let source_guard = response
-        .extensions()
-        .get::<std::sync::Arc<crate::transcode::source_actor::SourceResponseGuard>>()
-        .cloned();
     let closed = connection.closed();
-    let monitored=connection.monitor(async move {
-        let _permit=permit;
-        let _art_body_owner=art_lease;
-        // EOF only releases the stream's copy. Queued Hyper DATA remains owned
-        // until the accepted connection future and its writer have dropped.
-        let source_body_owner=source_guard;
-        let mut interval=tokio::time::interval(std::time::Duration::from_secs(1));
+    // Cancelled by the body's drop, or with the connection as its parent.
+    let live = connection.0.child_token();
+    let body_live = live.clone();
+    let monitored = connection.monitor(async move {
+        // Source media keeps producing bytes after the handler returns, and
+        // replicated revocation has no change feed, so authority is
+        // re-observed while this body is alive. Its drop ends the observation.
+        let mut interval = tokio::time::interval(std::time::Duration::from_secs(1));
         interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         loop {
             tokio::select! {
-                ()=closed.wait()=>return,
-                ()=cancel.cancelled()=>break,
-                ()=async {
-                    match source_body_owner.as_ref() {
-                        Some(guard)=>guard.cancelled().await,
-                        None=>std::future::pending::<()>().await,
-                    }
-                }=>{cancel.cancel();break;},
-                _=interval.tick()=>{},
+                () = body_live.cancelled() => break,
+                () = source_guard.cancelled() => { cancel.cancel(); break; },
+                _ = interval.tick() => {},
             }
             tokio::select! {
-                ()=closed.wait()=>return,
-                ()=cancel.cancelled()=>break,
-                current=source_content_current(&state,&authority)=> {if !current {cancel.cancel();break;}},
+                () = body_live.cancelled() => break,
+                current = source_content_current(&state, &authority) => {
+                    if !current { cancel.cancel(); break; }
+                },
             }
         }
-        if source_body_owner.is_some() {
-            // A cancellation request is not an accepted-writer join receipt.
-            closed.wait().await;
+        // EOF only releases the stream's copy. Queued Hyper DATA remains owned
+        // until the accepted connection future and its writer have dropped, and
+        // a retiring Source must still be able to close that writer. Both are
+        // events; nothing is polled here.
+        tokio::select! {
+            () = closed.wait() => {},
+            () = source_guard.cancelled() => {
+                cancel.cancel();
+                // A cancellation request is not an accepted-writer join receipt.
+                closed.wait().await;
+            },
         }
     });
     if monitored.is_err() {
@@ -719,7 +761,15 @@ pub(super) async fn guard_source_response(
         )
         .into_response();
     }
-    response
+    let (parts, body) = response.into_parts();
+    Response::from_parts(
+        parts,
+        Body::new(MonitoredBody {
+            inner: body,
+            _permit: permit,
+            _live: live.drop_guard(),
+        }),
+    )
 }
 pub(super) fn attach_source_art_authority(
     response: &mut Response,
@@ -994,17 +1044,15 @@ pub(super) async fn attach_receiver_art_authority(
     response.extensions_mut().insert(authority);
     Ok(())
 }
-static RECEIVER_MONITORS: std::sync::LazyLock<std::sync::Arc<tokio::sync::Semaphore>> =
-    std::sync::LazyLock::new(|| std::sync::Arc::new(tokio::sync::Semaphore::new(32)));
+/// Every receiver catalogue and artwork body is complete in memory when its
+/// handler returns, so this pre-return check is its authority point and no
+/// monitor follows the response. Receiver media bodies are owned by the
+/// receiver playback actor instead.
 pub(super) async fn receiver_content_guard(
     State(state): State<AppState>,
     request: Request<Body>,
     next: Next,
 ) -> Response {
-    let connection = request
-        .extensions()
-        .get::<crate::SharingConnectionCancellation>()
-        .cloned();
     let response = next.run(request).await;
     if !response.status().is_success() {
         return response;
@@ -1020,16 +1068,6 @@ pub(super) async fn receiver_content_guard(
         )
         .into_response();
     };
-    let Some(connection) = connection else {
-        return fail(
-            StatusCode::SERVICE_UNAVAILABLE,
-            "sharing_transport_authority_unavailable",
-        )
-        .into_response();
-    };
-    let Ok(permit) = RECEIVER_MONITORS.clone().try_acquire_owned() else {
-        return fail(StatusCode::TOO_MANY_REQUESTS, "sharing_body_capacity").into_response();
-    };
     if !receiver_content_current(&state, &authority).await {
         return fail(
             StatusCode::SERVICE_UNAVAILABLE,
@@ -1037,21 +1075,6 @@ pub(super) async fn receiver_content_guard(
         )
         .into_response();
     }
-    let art_lease = response
-        .extensions()
-        .get::<std::sync::Arc<super::shared_artwork::ArtBodyLease>>()
-        .cloned();
-    let cancel = connection.0.clone();
-    if connection.monitor(async move{
-        let _permit=permit;
-        let _art_body_owner=art_lease;
-        let mut interval=tokio::time::interval(std::time::Duration::from_secs(1));
-        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-        loop {
-            tokio::select!{()=cancel.cancelled()=>return,_=interval.tick()=>{}}
-            tokio::select!{()=cancel.cancelled()=>return,current=receiver_content_current(&state,&authority)=>{if !current{cancel.cancel();return;}}}
-        }
-    }).is_err(){connection.0.cancel();return fail(StatusCode::TOO_MANY_REQUESTS,"sharing_connection_authority_capacity").into_response();}
     response
 }
 
@@ -1765,8 +1788,10 @@ mod tests {
         Arc, Mutex,
     };
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    // Wraps the production Bytes without copying, so the writer's queue still
+    // holds whatever the response attached to them (artwork leases).
     struct PayloadOwner {
-        bytes: Vec<u8>,
+        bytes: Bytes,
         dropped: Arc<AtomicBool>,
     }
     impl AsRef<[u8]> for PayloadOwner {
@@ -1804,7 +1829,7 @@ mod tests {
                         frame.map(|frame| {
                             frame.map_data(|data| {
                                 Bytes::from_owner(PayloadOwner {
-                                    bytes: data.to_vec(),
+                                    bytes: data,
                                     dropped: flag,
                                 })
                             })
@@ -2185,7 +2210,7 @@ mod tests {
         .expect("connection owner aborts and releases every monitor");
     }
     #[tokio::test]
-    async fn sharing_catalogue_idle_connection_retains_bounded_authority_until_close() {
+    async fn sharing_catalogue_completed_responses_release_authority_on_keep_alive_connection() {
         let _serial = BODY_FIXTURES.lock().await;
         let fixture = body_fixture().await;
         let baseline = CONTENT_MONITORS.available_permits();
@@ -2214,25 +2239,28 @@ mod tests {
                 .body(Body::empty())
                 .expect("request")
         };
-        // The actual handler refuses before registering work when all global
-        // monitor slots are occupied. It never waits in an admission queue.
+        // Catalogue JSON is complete when its handler returns, so its
+        // pre-return check is the authority point. An exhausted media-body
+        // pool cannot refuse it.
         let occupied = CONTENT_MONITORS
             .clone()
             .try_acquire_many_owned(baseline as u32)
-            .expect("occupy global bounded registry");
-        let refused = sender
+            .expect("occupy global media-body pool");
+        let response = sender
             .send_request(request())
             .await
-            .expect("capacity response");
-        assert_eq!(refused.status(), StatusCode::TOO_MANY_REQUESTS);
-        refused
+            .expect("metadata response");
+        assert_eq!(response.status(), StatusCode::OK);
+        response
             .into_body()
             .collect()
             .await
-            .expect("closed refusal body");
+            .expect("complete metadata");
         drop(occupied);
         let connection = captured.await.expect("accepted connection");
-        for count in 1..=32 {
+        // Well past the former bounds (32 per connection, 64 per node): a
+        // completed response leaves nothing behind on its keep-alive transport.
+        for _ in 0..80 {
             let response = sender
                 .send_request(request())
                 .await
@@ -2243,133 +2271,149 @@ mod tests {
                 .collect()
                 .await
                 .expect("fully consumed response");
-            assert_eq!(CONTENT_MONITORS.available_permits(), baseline - count);
+            assert_eq!(
+                CONTENT_MONITORS.available_permits(),
+                baseline,
+                "a completed response holds no monitor"
+            );
         }
-        tokio::time::sleep(std::time::Duration::from_millis(1200)).await;
         assert!(!connection.0.is_cancelled());
-        assert_eq!(
-            CONTENT_MONITORS.available_permits(),
-            baseline - 32,
-            "idle completed responses retain bounded authority until connection end"
-        );
-        // A 33rd request cannot create a monitor on this accepted connection.
-        // Cancellation may close the transport before its 429 reaches the client.
-        let result = tokio::time::timeout(
-            std::time::Duration::from_secs(3),
-            sender.send_request(request()),
-        )
-        .await
-        .expect("capacity refusal deadline");
-        if let Ok(response) = result {
-            assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
-        }
-        tokio::time::timeout(std::time::Duration::from_secs(3), connection.0.cancelled())
+        // Revocation is enforced by the next response's own authority point.
+        fixture
+            .state
+            .store
+            .revoke_share(fixture.grant, 2000)
             .await
-            .expect("full connection registry closes");
-        tokio::time::timeout(std::time::Duration::from_secs(3), async {
-            while CONTENT_MONITORS.available_permits() != baseline {
-                tokio::task::yield_now().await;
-            }
-        })
-        .await
-        .expect("all idle monitor permits released");
+            .expect("grant revocation");
+        let refused = sender
+            .send_request(request())
+            .await
+            .expect("revoked response");
+        assert!(!refused.status().is_success());
+        refused
+            .into_body()
+            .collect()
+            .await
+            .expect("closed refusal body");
+        assert!(
+            !connection.0.is_cancelled(),
+            "a refusal does not close the shared transport"
+        );
         drop(sender);
         let _ = driver.await;
         stop.send(()).expect("fixture stop");
         served.await.expect("server task").expect("server result");
     }
     #[tokio::test]
-    async fn sharing_catalogue_blocked_http1_closes_on_grant_scope_and_item_revocation() {
-        let _serial = BODY_FIXTURES.lock().await;
-        for change in 0..3 {
-            let fixture = body_fixture().await;
-            let body_dropped = Arc::new(AtomicBool::new(false));
-            let data_dropped = Arc::new(AtomicBool::new(false));
-            let baseline = CONTENT_MONITORS.available_permits();
-            let (address, captured, stop, served) =
-                body_server(&fixture, body_dropped.clone(), data_dropped.clone()).await;
-            let socket = tokio::net::TcpSocket::new_v4().expect("client socket");
-            socket
-                .set_recv_buffer_size(4096)
-                .expect("small receive buffer");
-            let mut client = socket.connect(address).await.expect("client connection");
-            client.write_all(format!("GET /sharing/v1/libraries/{}/items?limit=200 HTTP/1.1\r\nHost: fixture\r\nAuthorization: CinemaShare {}\r\n\r\n",fixture.library,fixture.secret.expose()).as_bytes()).await.expect("catalogue request");
-            let mut head = Vec::new();
-            tokio::time::timeout(std::time::Duration::from_secs(3), async {
-                while !head.ends_with(b"\r\n\r\n") {
-                    head.push(client.read_u8().await.expect("response head"));
-                }
-            })
+    async fn sharing_monitored_body_drop_ends_its_monitor_and_releases_its_permit() {
+        let pool = Arc::new(tokio::sync::Semaphore::new(1));
+        let connection = tokio_util::sync::CancellationToken::new();
+        let live = connection.child_token();
+        let mut body = MonitoredBody {
+            inner: Body::from("complete media"),
+            _permit: pool.clone().try_acquire_owned().expect("one body permit"),
+            _live: live.clone().drop_guard(),
+        };
+        assert_eq!(pool.available_permits(), 0);
+        let data = body
+            .frame()
             .await
-            .expect("response head deadline");
-            assert!(
-                head.starts_with(b"HTTP/1.1 200"),
-                "{}",
-                String::from_utf8_lossy(&head)
-            );
-            let connection = captured.await.expect("captured connection");
-            assert_eq!(CONTENT_MONITORS.available_permits(), baseline - 1);
-            await_flag(&body_dropped, true).await;
-            assert!(
-                !data_dropped.load(Ordering::SeqCst),
-                "writer must retain data behind blocked socket"
-            );
-            match change {
-                0 => fixture
-                    .state
-                    .store
-                    .revoke_share(fixture.grant, 2000)
-                    .await
-                    .expect("grant revocation"),
-                1 => {
-                    let status = fixture
-                        .state
-                        .store
-                        .sharing_grant_status(&secret_hash(SecretDomain::Grant, &fixture.secret))
-                        .await
-                        .expect("grant")
-                        .expect("active");
-                    fixture
-                        .state
-                        .store
-                        .share_scope(
-                            fixture.grant,
-                            status.grant.mutation_generation,
-                            vec![fixture.private],
-                            2000,
-                        )
-                        .await
-                        .expect("scope revocation");
-                }
-                _ => {
-                    rusqlite::Connection::open(&fixture.path)
-                        .expect("item writer")
-                        .execute(
-                            "UPDATE items SET library_id=?1 WHERE id=?2",
-                            rusqlite::params![fixture.private, fixture.item],
-                        )
-                        .expect("item move removes effective scope");
-                }
-            }
-            tokio::time::timeout(std::time::Duration::from_secs(3), connection.0.cancelled())
-                .await
-                .expect("revoked blocked writer closes within grant bound");
-            await_flag(&data_dropped, true).await;
-            await_flag(&body_dropped, true).await;
-            tokio::time::timeout(std::time::Duration::from_secs(3), async {
-                while CONTENT_MONITORS.available_permits() != baseline {
-                    tokio::task::yield_now().await;
-                }
-            })
-            .await
-            .expect("monitor permit released");
-            drop(client);
-            stop.send(()).expect("fixture stop");
-            served.await.expect("server task").expect("server result");
-        }
+            .expect("frame")
+            .expect("data frame")
+            .into_data()
+            .expect("data");
+        assert_eq!(&data[..], b"complete media");
+        assert!(http_body::Body::is_end_stream(&body));
+        // Hyper drops a finished body; EOF alone is not the release.
+        assert!(!live.is_cancelled());
+        assert_eq!(pool.available_permits(), 0);
+        drop(body);
+        assert!(live.is_cancelled(), "body drop ends its monitor");
+        assert_eq!(pool.available_permits(), 1, "body drop returns its permit");
+        assert!(
+            !connection.is_cancelled(),
+            "a finished response never closes its connection"
+        );
     }
     #[tokio::test]
-    async fn sharing_artwork_blocked_http1_http2_releases_bytes_on_grant_delete_or_move() {
+    async fn sharing_catalogue_blocked_http1_body_holds_no_monitor_after_authorization() {
+        let _serial = BODY_FIXTURES.lock().await;
+        let fixture = body_fixture().await;
+        let body_dropped = Arc::new(AtomicBool::new(false));
+        let data_dropped = Arc::new(AtomicBool::new(false));
+        let baseline = CONTENT_MONITORS.available_permits();
+        let (address, captured, stop, served) =
+            body_server(&fixture, body_dropped.clone(), data_dropped.clone()).await;
+        let socket = tokio::net::TcpSocket::new_v4().expect("client socket");
+        socket
+            .set_recv_buffer_size(4096)
+            .expect("small receive buffer");
+        let mut client = socket.connect(address).await.expect("client connection");
+        let path = format!("/sharing/v1/libraries/{}/items?limit=200", fixture.library);
+        client
+            .write_all(
+                format!(
+                    "GET {path} HTTP/1.1\r\nHost: fixture\r\nAuthorization: CinemaShare {}\r\n\r\n",
+                    fixture.secret.expose()
+                )
+                .as_bytes(),
+            )
+            .await
+            .expect("catalogue request");
+        let mut head = Vec::new();
+        tokio::time::timeout(std::time::Duration::from_secs(3), async {
+            while !head.ends_with(b"\r\n\r\n") {
+                head.push(client.read_u8().await.expect("response head"));
+            }
+        })
+        .await
+        .expect("response head deadline");
+        assert!(
+            head.starts_with(b"HTTP/1.1 200"),
+            "{}",
+            String::from_utf8_lossy(&head)
+        );
+        let connection = captured.await.expect("captured connection");
+        await_flag(&body_dropped, true).await;
+        assert!(
+            !data_dropped.load(Ordering::SeqCst),
+            "writer retains data behind blocked socket"
+        );
+        assert_eq!(
+            CONTENT_MONITORS.available_permits(),
+            baseline,
+            "an authorized in-memory body holds no monitor"
+        );
+        fixture
+            .state
+            .store
+            .revoke_share(fixture.grant, 2000)
+            .await
+            .expect("grant revocation");
+        // Bytes complete before revocation are not re-authorized; the next
+        // response is refused at its own authority point.
+        let refused = reqwest::Client::builder()
+            .redirect(reqwest::redirect::Policy::none())
+            .no_proxy()
+            .build()
+            .expect("fresh client")
+            .get(format!("http://{address}{path}"))
+            .header(
+                "authorization",
+                format!("CinemaShare {}", fixture.secret.expose()),
+            )
+            .send()
+            .await
+            .expect("fresh request");
+        assert!(!refused.status().is_success());
+        assert!(!connection.0.is_cancelled());
+        drop(client);
+        await_flag(&data_dropped, true).await;
+        stop.send(()).expect("fixture stop");
+        served.await.expect("server task").expect("server result");
+    }
+    #[tokio::test]
+    async fn sharing_artwork_blocked_http1_http2_bytes_own_their_lease_without_a_monitor() {
         use plurx_core::{
             sharing_artwork::{artwork_expiry, ArtKind, ArtVariant, SourceArtReference},
             sharing_catalogue_details::CatalogueRevisionKey,
@@ -2377,367 +2421,18 @@ mod tests {
         let _serial = BODY_FIXTURES.lock().await;
         let _art_serial = super::super::shared_artwork::ART_FIXTURES.lock().await;
         for h2 in [false, true] {
-            for change in 0..4 {
-                if !h2 && change == 3 {
-                    continue;
-                }
-                let mut fixture = body_fixture().await;
-                fixture.state.artwork_dir = fixture
-                    ._directory
-                    .path()
-                    .canonicalize()
-                    .expect("canonical owned path")
-                    .join("artwork");
-                std::fs::create_dir(&fixture.state.artwork_dir).expect("owned artwork fixture");
-                let mut bytes = vec![23u8; 8 * 1024 * 1024];
-                bytes[..8].copy_from_slice(b"\x89PNG\r\n\x1a\n");
-                std::fs::write(fixture.state.artwork_dir.join("fixture.png"), bytes)
-                    .expect("bounded original");
-                let identity = fixture
-                    .state
-                    .store
-                    .sharing_identity(1000)
-                    .await
-                    .expect("identity");
-                let envelope = CatalogueRevisionKey::generate_sealed(
-                    &fixture.state.sharing.key,
-                    identity.clone(),
-                )
-                .expect("fixture key");
-                let key = CatalogueRevisionKey::open(
-                    &fixture.state.sharing.key,
-                    identity.clone(),
-                    &envelope,
-                )
-                .expect("fixture key open");
-                let writer = rusqlite::Connection::open(&fixture.path).expect("fixture writer");
-                writer
-                    .execute_batch(
-                        plurx_core::store::sharing_catalogue_source::CANDIDATE_REVISION_KEY_SCHEMA,
-                    )
-                    .expect("candidate key only");
-                writer
-                    .execute(
-                        "INSERT INTO sharing_catalogue_keys VALUES(1,?1,?2,?3)",
-                        rusqlite::params![
-                            identity.server_id.to_string(),
-                            identity.catalogue_epoch.to_string(),
-                            envelope.as_stored()
-                        ],
-                    )
-                    .expect("key selection");
-                writer
-                    .execute(
-                        "UPDATE items SET poster_path='fixture.png' WHERE id=?1",
-                        [fixture.item],
-                    )
-                    .expect("poster");
-                drop(writer);
-                let now = clock_ms();
-                let resource = key
-                    .issue_art(
-                        &SourceArtReference {
-                            server_id: identity.server_id,
-                            catalogue_epoch: identity.catalogue_epoch,
-                            grant_id: fixture.grant,
-                            library_id: SourceId::parse(&fixture.library.to_string())
-                                .expect("library"),
-                            item_id: SourceId::parse(&fixture.item.to_string()).expect("item"),
-                            kind: ArtKind::Poster,
-                            variant: ArtVariant::Original,
-                            expires_at_ms: artwork_expiry(now).expect("expiry"),
-                        },
-                        now,
-                    )
-                    .expect("opaque resource");
-                let reference = resource.reference_unverified().expect("closed reference");
-                assert!(key.verify_art(&resource, fixture.grant, clock_ms()).is_ok());
-                let snapshot = fixture
-                    .state
-                    .store
-                    .source_art_snapshot(
-                        &secret_hash(SecretDomain::Grant, &fixture.secret),
-                        fixture.grant,
-                        &reference,
-                    )
-                    .await
-                    .expect("snapshot query");
-                let plurx_core::store::sharing_catalogue_artwork::SourceArtRead::Authorized(
-                    snapshot,
-                ) = snapshot
-                else {
-                    panic!("current source artwork snapshot absent");
-                };
-                assert_eq!(snapshot.filename(), "fixture.png");
-                let asset = super::super::images::shared_artwork_asset(
-                    &fixture.state,
-                    &snapshot,
-                    &secret_hash(SecretDomain::Grant, &fixture.secret),
-                    super::super::shared_artwork::ArtBodyLease::source(false).expect("lease"),
-                )
-                .await
-                .expect("opened image")
-                .expect("original exists");
-                assert!(asset.still_current().await);
-                drop(asset);
-                assert!(
-                    source_art_scope_current(&fixture.state, &reference).await,
-                    "current source scope"
-                );
-                if !h2 && change == 0 {
-                    let variant = plurx_core::sharing_artwork::SourceArtReference {
-                        variant: ArtVariant::W300,
-                        ..reference.clone()
-                    };
-                    let variant = key
-                        .issue_art(&variant, clock_ms())
-                        .expect("exact canonical variant");
-                    let mut headers = HeaderMap::new();
-                    headers.insert(
-                        "authorization",
-                        axum::http::HeaderValue::from_str(&format!(
-                            "CinemaShare {}",
-                            fixture.secret.expose()
-                        ))
-                        .expect("fixture auth"),
-                    );
-                    for _ in 0..2 {
-                        let response = super::super::shared_artwork::source(
-                            State(fixture.state.clone()),
-                            headers.clone(),
-                            Path(variant.as_str().to_owned()),
-                            RawQuery(None),
-                        )
-                        .await
-                        .expect_err("unpublished variant never falls back to original")
-                        .into_response();
-                        assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
-                    }
-                    let jobs = rusqlite::Connection::open(&fixture.path)
-                        .expect("job census")
-                        .query_row(
-                            "SELECT count(*) FROM background_jobs WHERE kind='artwork_derivative'",
-                            [],
-                            |row| row.get::<_, i64>(0),
-                        )
-                        .expect("count");
-                    assert_eq!(jobs, 1, "canonical demand is deduplicated");
-                    headers.insert(
-                        "authorization",
-                        axum::http::HeaderValue::from_str(&format!(
-                            "CinemaShare {}",
-                            new_secret().expect("wrong credential").expose()
-                        ))
-                        .expect("auth"),
-                    );
-                    let denied = super::super::shared_artwork::source(
-                        State(fixture.state.clone()),
-                        headers,
-                        Path(variant.as_str().to_owned()),
-                        RawQuery(None),
-                    )
-                    .await
-                    .expect_err("wrong credential before demand")
-                    .into_response();
-                    assert_eq!(denied.status(), StatusCode::NOT_FOUND);
-                    assert_eq!(rusqlite::Connection::open(&fixture.path).expect("job census").query_row("SELECT count(*) FROM background_jobs WHERE kind='artwork_derivative'",[],|row|row.get::<_,i64>(0)).expect("count"),jobs,"refused authority cannot add render work");
-                }
-                let dropped = Arc::new(AtomicBool::new(false));
-                let data = Arc::new(AtomicBool::new(false));
-                let before = super::super::shared_artwork::source_capacity();
-                let (address, captured, stop, served) =
-                    body_server(&fixture, dropped.clone(), data.clone()).await;
-                let socket = tokio::net::TcpSocket::new_v4().expect("socket");
-                socket.set_recv_buffer_size(4096).expect("bounded window");
-                let client = socket.connect(address).await.expect("connect");
-                let mut raw = None;
-                let mut h2_sender = None;
-                let mut h2_driver = None;
-                let mut h2_body = None;
-                if h2 {
-                    let (mut sender, driver) = hyper::client::conn::http2::Builder::new(
-                        hyper_util::rt::TokioExecutor::new(),
-                    )
-                    .initial_stream_window_size(1024)
-                    .initial_connection_window_size(1024)
-                    .handshake::<_, Body>(hyper_util::rt::TokioIo::new(client))
-                    .await
-                    .expect("H2");
-                    h2_driver = Some(tokio::spawn(driver));
-                    let response = sender
-                        .send_request(
-                            Request::builder()
-                                .uri(format!(
-                                    "http://fixture/sharing/v1/art/{}",
-                                    resource.as_str()
-                                ))
-                                .header(
-                                    "authorization",
-                                    format!("CinemaShare {}", fixture.secret.expose()),
-                                )
-                                .body(Body::empty())
-                                .expect("request"),
-                        )
-                        .await
-                        .expect("art head");
-                    assert_eq!(response.status(), StatusCode::OK);
-                    h2_body = Some(response.into_body());
-                    h2_sender = Some(sender);
-                } else {
-                    let mut client = client;
-                    client.write_all(format!("GET /sharing/v1/art/{} HTTP/1.1\r\nHost: fixture\r\nAuthorization: CinemaShare {}\r\n\r\n",resource.as_str(),fixture.secret.expose()).as_bytes()).await.expect("request");
-                    let mut head = Vec::new();
-                    tokio::time::timeout(std::time::Duration::from_secs(5), async {
-                        while !head.ends_with(b"\r\n\r\n") {
-                            head.push(client.read_u8().await.expect("head"));
-                        }
-                    })
-                    .await
-                    .expect("head deadline");
-                    assert!(
-                        head.starts_with(b"HTTP/1.1 200"),
-                        "{}",
-                        String::from_utf8_lossy(&head)
-                    );
-                    raw = Some(client);
-                }
-                let connection = captured.await.expect("connection");
-                await_flag(&dropped, true).await;
-                assert!(
-                    !data.load(Ordering::SeqCst),
-                    "queued DATA retains actual bytes"
-                );
-                assert_eq!(
-                    super::super::shared_artwork::source_capacity(),
-                    (before.0 - 1, before.1 - 8193)
-                );
-                if change == 3 {
-                    h2_body
-                        .take()
-                        .expect("first artwork body")
-                        .collect()
-                        .await
-                        .expect("consume artwork");
-                    for count in 2..=4 {
-                        let response = h2_sender
-                            .as_mut()
-                            .expect("sender")
-                            .send_request(
-                                Request::builder()
-                                    .uri(format!(
-                                        "http://fixture/sharing/v1/art/{}",
-                                        resource.as_str()
-                                    ))
-                                    .header(
-                                        "authorization",
-                                        format!("CinemaShare {}", fixture.secret.expose()),
-                                    )
-                                    .body(Body::empty())
-                                    .expect("art request"),
-                            )
-                            .await
-                            .expect("idle art");
-                        assert_eq!(response.status(), StatusCode::OK);
-                        response.into_body().collect().await.expect("consume");
-                        assert_eq!(
-                            super::super::shared_artwork::source_capacity(),
-                            (before.0 - count, before.1 - count * 8193)
-                        );
-                    }
-                    let response = h2_sender
-                        .as_mut()
-                        .expect("sender")
-                        .send_request(
-                            Request::builder()
-                                .uri(format!(
-                                    "http://fixture/sharing/v1/art/{}",
-                                    resource.as_str()
-                                ))
-                                .header(
-                                    "authorization",
-                                    format!("CinemaShare {}", fixture.secret.expose()),
-                                )
-                                .body(Body::empty())
-                                .expect("art request"),
-                        )
-                        .await
-                        .expect("bounded refusal");
-                    assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
-                    response.into_body().collect().await.expect("refusal");
-                    tokio::time::sleep(std::time::Duration::from_millis(1200)).await;
-                    assert!(!connection.0.is_cancelled());
-                    assert_eq!(
-                        super::super::shared_artwork::source_capacity(),
-                        (0, before.1 - 4 * 8193),
-                        "idle completed responses retain actual bounded ownership"
-                    );
-                    drop(h2_sender);
-                    if let Some(driver) = h2_driver {
-                        driver.abort();
-                        let _ = driver.await;
-                    }
-                    tokio::time::timeout(std::time::Duration::from_secs(3), async {
-                        while super::super::shared_artwork::source_capacity() != before {
-                            tokio::task::yield_now().await;
-                        }
-                    })
-                    .await
-                    .expect("connection close releases all idle art owners");
-                    stop.send(()).expect("stop");
-                    served.await.expect("server task").expect("server");
-                    continue;
-                }
-                match change {
-                    0 => fixture
-                        .state
-                        .store
-                        .revoke_share(fixture.grant, clock_ms())
-                        .await
-                        .expect("revoke"),
-                    1 => {
-                        rusqlite::Connection::open(&fixture.path)
-                            .expect("writer")
-                            .execute("DELETE FROM items WHERE id=?1", [fixture.item])
-                            .expect("delete");
-                    }
-                    _ => {
-                        rusqlite::Connection::open(&fixture.path)
-                            .expect("writer")
-                            .execute(
-                                "UPDATE items SET library_id=?1 WHERE id=?2",
-                                rusqlite::params![fixture.private, fixture.item],
-                            )
-                            .expect("move");
-                    }
-                }
-                tokio::time::timeout(std::time::Duration::from_secs(3), connection.0.cancelled())
-                    .await
-                    .expect("revocation closes accepted transport");
-                await_flag(&data, true).await;
-                tokio::time::timeout(std::time::Duration::from_secs(3), async {
-                    while super::super::shared_artwork::source_capacity() != before {
-                        tokio::task::yield_now().await;
-                    }
-                })
-                .await
-                .expect("actual task/byte/operation cleanup");
-                drop(raw);
-                drop(h2_body);
-                drop(h2_sender);
-                if let Some(driver) = h2_driver {
-                    let _ = driver.await;
-                }
-                stop.send(()).expect("stop");
-                served.await.expect("server task").expect("server");
-            }
-        }
-    }
-    #[tokio::test]
-    async fn sharing_catalogue_details_blocked_writer_closes_on_file_delete_or_move() {
-        use plurx_core::sharing_catalogue_details::CatalogueRevisionKey;
-        let _serial = BODY_FIXTURES.lock().await;
-        for moved in [false, true] {
-            let fixture = body_fixture().await;
+            let mut fixture = body_fixture().await;
+            fixture.state.artwork_dir = fixture
+                ._directory
+                .path()
+                .canonicalize()
+                .expect("canonical owned path")
+                .join("artwork");
+            std::fs::create_dir(&fixture.state.artwork_dir).expect("owned artwork fixture");
+            let mut bytes = vec![23u8; 8 * 1024 * 1024];
+            bytes[..8].copy_from_slice(b"\x89PNG\r\n\x1a\n");
+            std::fs::write(fixture.state.artwork_dir.join("fixture.png"), bytes)
+                .expect("bounded original");
             let identity = fixture
                 .state
                 .store
@@ -2746,14 +2441,16 @@ mod tests {
                 .expect("identity");
             let envelope =
                 CatalogueRevisionKey::generate_sealed(&fixture.state.sharing.key, identity.clone())
-                    .expect("fixture purpose key");
-            let probe=json!({"chapters":(0..1024).map(|n|json!({"start_time":n.to_string(),"end_time":(n+1).to_string(),"tags":{"title":"x".repeat(512)}})).collect::<Vec<_>>(),"private_path":"/private/never-export"}).to_string();
+                    .expect("fixture key");
+            let key =
+                CatalogueRevisionKey::open(&fixture.state.sharing.key, identity.clone(), &envelope)
+                    .expect("fixture key open");
             let writer = rusqlite::Connection::open(&fixture.path).expect("fixture writer");
             writer
                 .execute_batch(
                     plurx_core::store::sharing_catalogue_source::CANDIDATE_REVISION_KEY_SCHEMA,
                 )
-                .expect("fixture-only key table");
+                .expect("candidate key only");
             writer
                 .execute(
                     "INSERT INTO sharing_catalogue_keys VALUES(1,?1,?2,?3)",
@@ -2763,206 +2460,293 @@ mod tests {
                         envelope.as_stored()
                     ],
                 )
-                .expect("fixture-only key selection");
-            writer.execute("INSERT INTO files(id,item_id,path,size,mtime,probe_json) VALUES(1,?1,'/private/movie.mkv',20,1000,?2)",rusqlite::params![fixture.item,probe]).expect("bounded large details");
-            writer.execute("INSERT INTO files(id,item_id,path,size,mtime,probe_json) SELECT 2,item_id,'/private/second.mkv',size,mtime,probe_json FROM files WHERE id=1",[]).expect("second bounded file");
-            writer.execute("INSERT INTO files(id,item_id,path,size,mtime,probe_json) SELECT 3,item_id,'/private/third.mkv',size,mtime,probe_json FROM files WHERE id=1",[]).expect("third bounded file");
-            drop(writer);
-            let body_dropped = Arc::new(AtomicBool::new(false));
-            let data_dropped = Arc::new(AtomicBool::new(false));
-            let baseline = CONTENT_MONITORS.available_permits();
-            let (address, captured, stop, served) =
-                body_server(&fixture, body_dropped.clone(), data_dropped.clone()).await;
-            let socket = tokio::net::TcpSocket::new_v4().expect("socket");
-            socket
-                .set_recv_buffer_size(4096)
-                .expect("small receive buffer");
-            let mut client = socket.connect(address).await.expect("connect");
-            client.write_all(format!("GET /sharing/v1/items/{} HTTP/1.1\r\nHost: fixture\r\nAuthorization: CinemaShare {}\r\n\r\n",fixture.item,fixture.secret.expose()).as_bytes()).await.expect("details request");
-            let mut head = Vec::new();
-            tokio::time::timeout(std::time::Duration::from_secs(3), async {
-                while !head.ends_with(b"\r\n\r\n") {
-                    head.push(client.read_u8().await.expect("response head"));
-                }
-            })
-            .await
-            .expect("head deadline");
-            assert!(
-                head.starts_with(b"HTTP/1.1 200"),
-                "{}",
-                String::from_utf8_lossy(&head)
-            );
-            let connection = captured.await.expect("connection");
-            await_flag(&body_dropped, true).await;
-            assert!(
-                !data_dropped.load(Ordering::SeqCst),
-                "actual blocked DATA owner"
-            );
-            let writer = rusqlite::Connection::open(&fixture.path).expect("file writer");
+                .expect("key selection");
             writer
                 .execute(
-                    "UPDATE files SET path='/private/revised.mkv' WHERE id=1",
-                    [],
+                    "UPDATE items SET poster_path='fixture.png' WHERE id=?1",
+                    [fixture.item],
                 )
-                .expect("revision change");
-            tokio::time::sleep(std::time::Duration::from_millis(1200)).await;
-            assert!(
-                !connection.0.is_cancelled(),
-                "revision changes preserve metadata delivery"
-            );
-            if moved {
-                writer
-                    .execute("UPDATE files SET item_id=?1 WHERE id=1", [fixture.item + 1])
-                    .expect("move file to another exported item");
-            } else {
-                writer
-                    .execute("DELETE FROM files WHERE id=1", [])
-                    .expect("delete file");
-            }
+                .expect("poster");
             drop(writer);
-            tokio::time::timeout(std::time::Duration::from_secs(3), connection.0.cancelled())
+            let now = clock_ms();
+            let resource = key
+                .issue_art(
+                    &SourceArtReference {
+                        server_id: identity.server_id,
+                        catalogue_epoch: identity.catalogue_epoch,
+                        grant_id: fixture.grant,
+                        library_id: SourceId::parse(&fixture.library.to_string()).expect("library"),
+                        item_id: SourceId::parse(&fixture.item.to_string()).expect("item"),
+                        kind: ArtKind::Poster,
+                        variant: ArtVariant::Original,
+                        expires_at_ms: artwork_expiry(now).expect("expiry"),
+                    },
+                    now,
+                )
+                .expect("opaque resource");
+            let reference = resource.reference_unverified().expect("closed reference");
+            assert!(key.verify_art(&resource, fixture.grant, clock_ms()).is_ok());
+            let snapshot = fixture
+                .state
+                .store
+                .source_art_snapshot(
+                    &secret_hash(SecretDomain::Grant, &fixture.secret),
+                    fixture.grant,
+                    &reference,
+                )
                 .await
-                .expect("file revocation bound");
-            await_flag(&data_dropped, true).await;
-            await_flag(&body_dropped, true).await;
-            tokio::time::timeout(std::time::Duration::from_secs(3), async {
-                while CONTENT_MONITORS.available_permits() != baseline {
-                    tokio::task::yield_now().await
+                .expect("snapshot query");
+            let plurx_core::store::sharing_catalogue_artwork::SourceArtRead::Authorized(snapshot) =
+                snapshot
+            else {
+                panic!("current source artwork snapshot absent");
+            };
+            assert_eq!(snapshot.filename(), "fixture.png");
+            let asset = super::super::images::shared_artwork_asset(
+                &fixture.state,
+                &snapshot,
+                &secret_hash(SecretDomain::Grant, &fixture.secret),
+                super::super::shared_artwork::ArtBodyLease::source(false).expect("lease"),
+            )
+            .await
+            .expect("opened image")
+            .expect("original exists");
+            assert!(asset.still_current().await);
+            drop(asset);
+            assert!(
+                source_art_scope_current(&fixture.state, &reference).await,
+                "current source scope"
+            );
+            if !h2 {
+                let variant = plurx_core::sharing_artwork::SourceArtReference {
+                    variant: ArtVariant::W300,
+                    ..reference.clone()
+                };
+                let variant = key
+                    .issue_art(&variant, clock_ms())
+                    .expect("exact canonical variant");
+                let mut headers = HeaderMap::new();
+                headers.insert(
+                    "authorization",
+                    axum::http::HeaderValue::from_str(&format!(
+                        "CinemaShare {}",
+                        fixture.secret.expose()
+                    ))
+                    .expect("fixture auth"),
+                );
+                for _ in 0..2 {
+                    let response = super::super::shared_artwork::source(
+                        State(fixture.state.clone()),
+                        headers.clone(),
+                        Path(variant.as_str().to_owned()),
+                        RawQuery(None),
+                    )
+                    .await
+                    .expect_err("unpublished variant never falls back to original")
+                    .into_response();
+                    assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
                 }
-            })
-            .await
-            .expect("all permits release");
-            drop(client);
-            stop.send(()).expect("stop");
-            served.await.expect("task").expect("result");
-        }
-    }
-    #[tokio::test]
-    async fn sharing_catalogue_http2_retains_authority_after_body_drop_and_other_stream_flush() {
-        let _serial = BODY_FIXTURES.lock().await;
-        let fixture = body_fixture().await;
-        let body_dropped = Arc::new(AtomicBool::new(false));
-        let data_dropped = Arc::new(AtomicBool::new(false));
-        let baseline = CONTENT_MONITORS.available_permits();
-        let (address, captured, stop, served) =
-            body_server(&fixture, body_dropped.clone(), data_dropped.clone()).await;
-        let client = tokio::net::TcpStream::connect(address)
-            .await
-            .expect("client connection");
-        let mut builder =
-            hyper::client::conn::http2::Builder::new(hyper_util::rt::TokioExecutor::new());
-        builder.initial_stream_window_size(1024);
-        let (mut sender, driver) = builder
-            .handshake::<_, Body>(hyper_util::rt::TokioIo::new(client))
-            .await
-            .expect("HTTP2 handshake");
-        let driver = tokio::spawn(driver);
-        let response = sender
-            .send_request(
+                let jobs = rusqlite::Connection::open(&fixture.path)
+                    .expect("job census")
+                    .query_row(
+                        "SELECT count(*) FROM background_jobs WHERE kind='artwork_derivative'",
+                        [],
+                        |row| row.get::<_, i64>(0),
+                    )
+                    .expect("count");
+                assert_eq!(jobs, 1, "canonical demand is deduplicated");
+                headers.insert(
+                    "authorization",
+                    axum::http::HeaderValue::from_str(&format!(
+                        "CinemaShare {}",
+                        new_secret().expect("wrong credential").expose()
+                    ))
+                    .expect("auth"),
+                );
+                let denied = super::super::shared_artwork::source(
+                    State(fixture.state.clone()),
+                    headers,
+                    Path(variant.as_str().to_owned()),
+                    RawQuery(None),
+                )
+                .await
+                .expect_err("wrong credential before demand")
+                .into_response();
+                assert_eq!(denied.status(), StatusCode::NOT_FOUND);
+                assert_eq!(
+                    rusqlite::Connection::open(&fixture.path)
+                        .expect("job census")
+                        .query_row(
+                            "SELECT count(*) FROM background_jobs WHERE kind='artwork_derivative'",
+                            [],
+                            |row| row.get::<_, i64>(0)
+                        )
+                        .expect("count"),
+                    jobs,
+                    "refused authority cannot add render work"
+                );
+            }
+            let dropped = Arc::new(AtomicBool::new(false));
+            let data = Arc::new(AtomicBool::new(false));
+            let before = super::super::shared_artwork::source_capacity();
+            let monitors = CONTENT_MONITORS.available_permits();
+            let (address, captured, stop, served) =
+                body_server(&fixture, dropped.clone(), data.clone()).await;
+            let socket = tokio::net::TcpSocket::new_v4().expect("socket");
+            socket.set_recv_buffer_size(4096).expect("bounded window");
+            let client = socket.connect(address).await.expect("connect");
+            let mut raw = None;
+            let mut h2_sender = None;
+            let mut h2_driver = None;
+            let mut h2_body = None;
+            if h2 {
+                let (mut sender, driver) =
+                    hyper::client::conn::http2::Builder::new(hyper_util::rt::TokioExecutor::new())
+                        .initial_stream_window_size(1024)
+                        .initial_connection_window_size(1024)
+                        .handshake::<_, Body>(hyper_util::rt::TokioIo::new(client))
+                        .await
+                        .expect("H2");
+                h2_driver = Some(tokio::spawn(driver));
+                let response = sender
+                    .send_request(
+                        Request::builder()
+                            .uri(format!(
+                                "http://fixture/sharing/v1/art/{}",
+                                resource.as_str()
+                            ))
+                            .header(
+                                "authorization",
+                                format!("CinemaShare {}", fixture.secret.expose()),
+                            )
+                            .body(Body::empty())
+                            .expect("request"),
+                    )
+                    .await
+                    .expect("art head");
+                assert_eq!(response.status(), StatusCode::OK);
+                h2_body = Some(response.into_body());
+                h2_sender = Some(sender);
+            } else {
+                let mut client = client;
+                client.write_all(format!("GET /sharing/v1/art/{} HTTP/1.1\r\nHost: fixture\r\nAuthorization: CinemaShare {}\r\n\r\n",resource.as_str(),fixture.secret.expose()).as_bytes()).await.expect("request");
+                let mut head = Vec::new();
+                tokio::time::timeout(std::time::Duration::from_secs(5), async {
+                    while !head.ends_with(b"\r\n\r\n") {
+                        head.push(client.read_u8().await.expect("head"));
+                    }
+                })
+                .await
+                .expect("head deadline");
+                assert!(
+                    head.starts_with(b"HTTP/1.1 200"),
+                    "{}",
+                    String::from_utf8_lossy(&head)
+                );
+                raw = Some(client);
+            }
+            let connection = captured.await.expect("connection");
+            await_flag(&dropped, true).await;
+            assert!(
+                !data.load(Ordering::SeqCst),
+                "queued DATA retains actual bytes"
+            );
+            assert_eq!(
+                super::super::shared_artwork::source_capacity(),
+                (before.0 - 1, before.1 - 8193),
+                "queued bytes own their lease"
+            );
+            assert_eq!(
+                CONTENT_MONITORS.available_permits(),
+                monitors,
+                "artwork is authorized once and holds no monitor"
+            );
+            let art_request = || {
                 Request::builder()
                     .uri(format!(
-                        "http://fixture/sharing/v1/libraries/{}/items?limit=200",
-                        fixture.library
+                        "http://fixture/sharing/v1/art/{}",
+                        resource.as_str()
                     ))
                     .header(
                         "authorization",
                         format!("CinemaShare {}", fixture.secret.expose()),
                     )
                     .body(Body::empty())
-                    .expect("request"),
-            )
-            .await
-            .expect("metadata response");
-        assert_eq!(response.status(), StatusCode::OK);
-        let connection = captured.await.expect("connection scope");
-        await_flag(&body_dropped, true).await;
-        assert!(
-            !data_dropped.load(Ordering::SeqCst),
-            "body ended while HTTP2 data still awaits window capacity"
-        );
-        assert_eq!(CONTENT_MONITORS.available_permits(), baseline - 1);
-        let other = sender
-            .send_request(
-                Request::builder()
-                    .uri("http://fixture/sharing/v1/identity")
-                    .body(Body::empty())
-                    .expect("other request"),
-            )
-            .await
-            .expect("other stream response");
-        assert_eq!(other.status(), StatusCode::OK);
-        other
-            .into_body()
-            .collect()
-            .await
-            .expect("other stream flush");
-        assert!(
-            !data_dropped.load(Ordering::SeqCst),
-            "other stream flush cannot retire blocked metadata"
-        );
-        let ordinary = sender
-            .send_request(
-                Request::builder()
-                    .uri("http://fixture/ordinary/pending")
-                    .body(Body::empty())
-                    .expect("ordinary request"),
-            )
-            .await
-            .expect("ordinary response");
-        let replacement = new_secret().expect("rotation fixture");
-        assert_eq!(
-            fixture
-                .state
-                .store
-                .rotate_share(
-                    fixture.grant,
-                    uuid::Uuid::new_v4(),
-                    &secret_hash(SecretDomain::Grant, &fixture.secret),
-                    &secret_hash(SecretDomain::Grant, &replacement),
-                    2000
-                )
-                .await
-                .expect("credential rotation"),
-            MutationOutcome::Applied
-        );
-        tokio::time::sleep(std::time::Duration::from_millis(1200)).await;
-        assert!(
-            !connection.0.is_cancelled(),
-            "credential rotation alone must preserve accepted content authority"
-        );
-        rusqlite::Connection::open(&fixture.path)
-            .expect("item writer")
-            .execute(
-                "UPDATE items SET library_id=?1 WHERE id=?2",
-                rusqlite::params![fixture.private, fixture.item],
-            )
-            .expect("effective item revocation");
-        tokio::time::timeout(std::time::Duration::from_secs(3), connection.0.cancelled())
-            .await
-            .expect("blocked HTTP2 connection closes within grant bound");
-        assert!(
-            tokio::time::timeout(
-                std::time::Duration::from_secs(3),
-                ordinary.into_body().collect()
-            )
-            .await
-            .expect("multiplex cancellation deadline")
-            .is_err(),
-            "connection cancellation also retires unrelated multiplexed streams"
-        );
-        await_flag(&data_dropped, true).await;
-        tokio::time::timeout(std::time::Duration::from_secs(3), async {
-            while CONTENT_MONITORS.available_permits() != baseline {
-                tokio::task::yield_now().await;
+                    .expect("art request")
+            };
+            if h2 {
+                h2_body
+                    .take()
+                    .expect("first artwork body")
+                    .collect()
+                    .await
+                    .expect("consume artwork");
+                // Five completed reads against four operation permits: each
+                // returns its lease once its bytes have left the writer.
+                for _ in 0..4 {
+                    tokio::time::timeout(std::time::Duration::from_secs(3), async {
+                        while super::super::shared_artwork::source_capacity() != before {
+                            tokio::task::yield_now().await;
+                        }
+                    })
+                    .await
+                    .expect("written bytes return their lease");
+                    let response = h2_sender
+                        .as_mut()
+                        .expect("sender")
+                        .send_request(art_request())
+                        .await
+                        .expect("completed art");
+                    assert_eq!(response.status(), StatusCode::OK);
+                    response.into_body().collect().await.expect("consume");
+                }
+                assert!(!connection.0.is_cancelled());
+            } else {
+                fixture
+                    .state
+                    .store
+                    .revoke_share(fixture.grant, clock_ms())
+                    .await
+                    .expect("revoke");
+                // Revocation reaches the next fresh read, never bytes that were
+                // already authorized and queued.
+                let refused = reqwest::Client::builder()
+                    .redirect(reqwest::redirect::Policy::none())
+                    .no_proxy()
+                    .build()
+                    .expect("fresh client")
+                    .get(format!(
+                        "http://{address}/sharing/v1/art/{}",
+                        resource.as_str()
+                    ))
+                    .header(
+                        "authorization",
+                        format!("CinemaShare {}", fixture.secret.expose()),
+                    )
+                    .send()
+                    .await
+                    .expect("fresh art read");
+                assert!(!refused.status().is_success());
+                assert!(!connection.0.is_cancelled());
+                drop(raw.take());
+                await_flag(&data, true).await;
             }
-        })
-        .await
-        .expect("monitor released");
-        drop(response);
-        drop(sender);
-        let _ = driver.await;
-        stop.send(()).expect("fixture stop");
-        served.await.expect("server task").expect("server result");
+            tokio::time::timeout(std::time::Duration::from_secs(3), async {
+                while super::super::shared_artwork::source_capacity() != before {
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .expect("bytes return their lease once they leave the writer");
+            drop(h2_body);
+            drop(h2_sender);
+            if let Some(driver) = h2_driver {
+                driver.abort();
+                let _ = driver.await;
+            }
+            stop.send(()).expect("stop");
+            served.await.expect("server task").expect("server");
+        }
     }
     #[tokio::test]
     async fn sharing_catalogue_viewer_routes_require_login_and_fail_closed_without_import() {
@@ -3114,7 +2898,7 @@ mod tests {
         }
     }
     #[tokio::test]
-    async fn sharing_receiver_blocked_http1_and_http2_cancel_on_login_loss() {
+    async fn sharing_receiver_blocked_http1_and_http2_refuse_next_response_on_login_loss() {
         let _serial = BODY_FIXTURES.lock().await;
         for (h2, loss) in [false, true]
             .into_iter()
@@ -3220,38 +3004,16 @@ mod tests {
             .scope;
             let app=Router::new().route("/test/shared/items",get(move |State(state):State<AppState>,super::super::extract::AuthUser(user):super::super::extract::AuthUser,super::super::extract::RawToken(token):super::super::extract::RawToken| { let scope = scope.clone(); async move{receiver_json_scoped(&state,&token,user.id,vec![scope],Vec::new(),json!({"receiver_test_payload":"x".repeat(2*1024*1024)})).await} }))
                 .route_layer(middleware::from_fn_with_state(fixture.state.clone(),receiver_content_guard)).with_state(fixture.state.clone());
-            let baseline = RECEIVER_MONITORS.available_permits();
             let body_dropped = Arc::new(AtomicBool::new(false));
             let data_dropped = Arc::new(AtomicBool::new(false));
             let (address, captured, stop, served) =
                 body_server_app(app, body_dropped.clone(), data_dropped.clone()).await;
             let client = blocked_receiver_client(address, "/test/shared/items", token, h2).await;
             let connection = captured.await.expect("accepted receiver connection");
-            assert_eq!(RECEIVER_MONITORS.available_permits(), baseline - 1);
             await_flag(&body_dropped, true).await;
             assert!(
                 !data_dropped.load(Ordering::SeqCst),
                 "actual receiver DATA remains blocked"
-            );
-            let before = fixture
-                .state
-                .store
-                .list_tokens_for_user(user.id)
-                .await
-                .expect("last seen")[0]
-                .last_seen_at;
-            tokio::time::sleep(std::time::Duration::from_millis(1200)).await;
-            assert!(!connection.0.is_cancelled());
-            assert_eq!(
-                fixture
-                    .state
-                    .store
-                    .list_tokens_for_user(user.id)
-                    .await
-                    .expect("last seen")[0]
-                    .last_seen_at,
-                before,
-                "monitor must not renew idle login"
             );
             match loss {
                 0 => {
@@ -3278,18 +3040,22 @@ mod tests {
                 }
                 _ => unreachable!(),
             }
-            tokio::time::timeout(std::time::Duration::from_secs(3), connection.0.cancelled())
+            // The blocked body was complete and authorized before the loss; the
+            // next response is refused at its own authority point.
+            let refused = reqwest::Client::builder()
+                .redirect(reqwest::redirect::Policy::none())
+                .no_proxy()
+                .build()
+                .expect("fresh client")
+                .get(format!("http://{address}/test/shared/items"))
+                .header("authorization", format!("Bearer {token}"))
+                .send()
                 .await
-                .expect("blocked B connection closes");
-            await_flag(&data_dropped, true).await;
-            tokio::time::timeout(std::time::Duration::from_secs(3), async {
-                while RECEIVER_MONITORS.available_permits() != baseline {
-                    tokio::task::yield_now().await;
-                }
-            })
-            .await
-            .expect("receiver monitor permit released");
+                .expect("fresh receiver request");
+            assert!(!refused.status().is_success(), "loss {loss}");
+            assert!(!connection.0.is_cancelled());
             release_receiver_client(client).await;
+            await_flag(&data_dropped, true).await;
             stop.send(()).expect("stop");
             served.await.expect("server task").expect("server result");
         }
@@ -3751,8 +3517,8 @@ mod tests {
         }
     }
     /// Runs only inside the explicitly assigned disposable CGNAT container.
-    /// The real Source router, SPKI dialer, identity check, receiver router,
-    /// Store authorities and accepted-connection ownership remain in the path.
+    /// The real Source router, SPKI dialer, identity check, receiver router and
+    /// Store authorities remain in the path.
     #[cfg(target_os = "linux")]
     #[tokio::test]
     #[ignore = "requires disposable CGNAT network and PLURX_SHARING_FIXTURE_IP"]
@@ -4096,7 +3862,6 @@ mod tests {
                 );
                 let body_dropped = Arc::new(AtomicBool::new(false));
                 let data_dropped = Arc::new(AtomicBool::new(false));
-                let baseline = RECEIVER_MONITORS.available_permits();
                 let (b_address, captured, stop, served) =
                     body_server_app(app, body_dropped.clone(), data_dropped.clone()).await;
                 let art_baseline = super::super::shared_artwork::receiver_capacity();
@@ -4114,7 +3879,6 @@ mod tests {
                 };
                 let mut client = blocked_receiver_client(b_address, &path, token, h2).await;
                 let connection = captured.await.expect("accepted B connection");
-                assert_eq!(RECEIVER_MONITORS.available_permits(), baseline - 1);
                 await_flag(&body_dropped, true).await;
                 assert!(
                     !data_dropped.load(Ordering::SeqCst),
@@ -4372,26 +4136,16 @@ mod tests {
                         );
                     }
                 }
-                tokio::time::timeout(std::time::Duration::from_secs(3), connection.0.cancelled())
-                    .await
-                    .expect("B blocked connection current-authority deadline");
+                // A delivered B response is never re-observed; each change
+                // reaches the next response's own authority point instead.
+                tokio::time::sleep(std::time::Duration::from_millis(1200)).await;
+                assert!(
+                    !connection.0.is_cancelled(),
+                    "no monitor re-authorizes a delivered B response"
+                );
+                drop(ordinary);
+                release_receiver_client(client).await;
                 await_flag(&data_dropped, true).await;
-                if let Some(mut ordinary) = ordinary {
-                    assert!(
-                        tokio::time::timeout(std::time::Duration::from_secs(3), ordinary.frame())
-                            .await
-                            .expect("multiplex close deadline")
-                            .is_none_or(|frame| frame.is_err()),
-                        "connection cancellation closes unrelated H2 stream"
-                    );
-                }
-                tokio::time::timeout(std::time::Duration::from_secs(3), async {
-                    while RECEIVER_MONITORS.available_permits() != baseline {
-                        tokio::task::yield_now().await;
-                    }
-                })
-                .await
-                .expect("B permit cleanup");
                 assert_eq!(
                     receiver.sharing.scope_control_available(),
                     32,
@@ -4409,9 +4163,8 @@ mod tests {
                         }
                     })
                     .await
-                    .expect("B art operation/byte settlement");
+                    .expect("B art bytes return their lease once released");
                 }
-                release_receiver_client(client).await;
                 stop.send(()).expect("stop B");
                 served.await.expect("B task").expect("B result");
                 source_stop.send(()).expect("stop Source");
@@ -4423,7 +4176,7 @@ mod tests {
         }
     }
 
-    /// Actual pinned Source read and accepted connection authority for an administrator
+    /// Actual pinned Source read and per-response authority for an administrator
     /// whose import has no viewer assignments. This is an isolated CGNAT fixture.
     #[cfg(target_os = "linux")]
     #[tokio::test]
@@ -4600,13 +4353,11 @@ mod tests {
                 let app = super::super::router(receiver.clone());
                 let body_dropped = Arc::new(AtomicBool::new(false));
                 let data_dropped = Arc::new(AtomicBool::new(false));
-                let baseline = RECEIVER_MONITORS.available_permits();
                 let (b_address, captured, stop, served) =
                     body_server_app(app, body_dropped.clone(), data_dropped.clone()).await;
                 let path = format!("/api/v1/sharing/imports/{import}/libraries");
                 let client = blocked_receiver_client(b_address, &path, token, h2).await;
                 let connection = captured.await.expect("accepted B connection");
-                assert_eq!(RECEIVER_MONITORS.available_permits(), baseline - 1);
                 await_flag(&body_dropped, true).await;
                 match loss {
                     0 => {
@@ -4637,16 +4388,20 @@ mod tests {
                         .expect("sharing off"),
                     _ => unreachable!(),
                 }
-                tokio::time::timeout(std::time::Duration::from_secs(3), connection.0.cancelled())
+                // The delivered admin read is not re-observed; the loss is
+                // enforced by the next read's own authority point.
+                let refused = reqwest::Client::builder()
+                    .redirect(reqwest::redirect::Policy::none())
+                    .no_proxy()
+                    .build()
+                    .expect("fresh B client")
+                    .get(format!("http://{b_address}{path}"))
+                    .header("authorization", format!("Bearer {token}"))
+                    .send()
                     .await
-                    .expect("current admin/source connection authority closes");
-                tokio::time::timeout(std::time::Duration::from_secs(3), async {
-                    while RECEIVER_MONITORS.available_permits() != baseline {
-                        tokio::task::yield_now().await;
-                    }
-                })
-                .await
-                .expect("monitor permit returned");
+                    .expect("fresh admin read");
+                assert!(!refused.status().is_success(), "loss {loss}");
+                assert!(!connection.0.is_cancelled());
                 release_receiver_client(client).await;
                 stop.send(()).expect("stop B");
                 served.await.expect("B task").expect("B server");

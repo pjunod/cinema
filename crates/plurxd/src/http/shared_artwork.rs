@@ -24,8 +24,9 @@ static RECEIVER_OPERATIONS: LazyLock<Arc<Semaphore>> =
     LazyLock::new(|| Arc::new(Semaphore::new(4)));
 static RECEIVER_BYTES: LazyLock<Arc<Semaphore>> =
     LazyLock::new(|| Arc::new(Semaphore::new(BYTE_KIB)));
-/// Owned by accepted connection monitors and any still-running blocking read.
-/// Body Drop cannot return capacity while DATA remains queued to the transport.
+/// Owned by the response Bytes and any still-running blocking read or disk
+/// writer. Body Drop alone cannot return capacity while DATA remains queued to
+/// the transport; the queued Bytes keep their lease until the writer drops them.
 pub(super) struct ArtBodyLease {
     _operation: OwnedSemaphorePermit,
     bytes: Mutex<OwnedSemaphorePermit>,
@@ -122,10 +123,17 @@ pub(super) fn asset_response(
     lease: Arc<ArtBodyLease>,
 ) -> Result<Response, super::error::ApiError> {
     lease.retain_body_bytes(bytes.len())?;
-    let mut response = Response::new(Body::from(bytes.clone()));
+    let len = bytes.len();
+    // The response bytes own the lease: Hyper and h2 hold these Bytes while
+    // DATA is queued behind a blocked writer and drop them once written or
+    // with the connection, so capacity returns exactly when they leave.
+    let mut response = Response::new(Body::from(axum::body::Bytes::from_owner(LeasedArtBytes {
+        bytes,
+        _lease: lease,
+    })));
     for (key, value) in [
         ("x-plurx-art-sha256", hex::encode(digest)),
-        ("x-plurx-art-bytes", bytes.len().to_string()),
+        ("x-plurx-art-bytes", len.to_string()),
         ("x-plurx-art-variant", variant.label().to_owned()),
     ] {
         response.headers_mut().insert(
@@ -135,7 +143,7 @@ pub(super) fn asset_response(
     }
     response.headers_mut().insert(
         header::CONTENT_LENGTH,
-        HeaderValue::from_str(&bytes.len().to_string()).map_err(|_| unavailable())?,
+        HeaderValue::from_str(&len.to_string()).map_err(|_| unavailable())?,
     );
     response
         .headers_mut()
@@ -152,7 +160,6 @@ pub(super) fn asset_response(
         header::CACHE_CONTROL,
         HeaderValue::from_static("private, no-store, no-transform"),
     );
-    response.extensions_mut().insert(lease);
     Ok(response)
 }
 pub(super) async fn source(
@@ -358,13 +365,15 @@ const DISK_BYTES: u64 = 256 * 1024 * 1024;
 const DISK_ENTRIES: usize = 2048;
 static DISK_WRITER: LazyLock<Arc<tokio::sync::Mutex<()>>> =
     LazyLock::new(|| Arc::new(tokio::sync::Mutex::new(())));
-/// Managed cache publication follows a fresh pinned Source byte/digest proof.
-/// A detached writer retains its copy reservation until filesystem settlement.
-struct OwnedArtWrite {
+/// Bytes that own their admission lease. A response body hands these to the
+/// writer, and managed cache publication (after a fresh pinned Source
+/// byte/digest proof) to its detached writer; either way the reservation is
+/// retained until the last owner of the actual bytes settles.
+struct LeasedArtBytes {
     bytes: axum::body::Bytes,
     _lease: Arc<ArtBodyLease>,
 }
-impl AsRef<[u8]> for OwnedArtWrite {
+impl AsRef<[u8]> for LeasedArtBytes {
     fn as_ref(&self) -> &[u8] {
         &self.bytes
     }
@@ -509,7 +518,7 @@ async fn publish_disk_snapshot(
         fs_secure::atomic_write_child_owned(
             &root,
             &filename,
-            OwnedArtWrite {
+            LeasedArtBytes {
                 bytes,
                 _lease: owner,
             },

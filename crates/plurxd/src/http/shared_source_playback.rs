@@ -3234,6 +3234,183 @@ mod tests {
         drop(owned);
         fixture.shutdown().await;
     }
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn sharing_source_http_live_media_body_stops_on_revocation() {
+        Box::pin(actual_source_media_revocation()).await;
+    }
+    /// The one body that keeps producing bytes after its handler returns keeps
+    /// its authority monitor, and replicated revocation still reaches it.
+    async fn actual_source_media_revocation() {
+        use std::{
+            sync::{atomic::Ordering, Arc},
+            time::{Duration, Instant},
+        };
+        let fixture = real_source_start_fixture().await;
+        let response = start(
+            axum::extract::State((*fixture.state).clone()),
+            fixture.headers.clone(),
+            axum::extract::Path((
+                fixture.reference.item_id.as_str().to_owned(),
+                fixture.reference.file_id.as_str().to_owned(),
+            )),
+            axum::body::Body::from(fixture.request.clone()),
+        )
+        .await
+        .expect("actual Source Start");
+        let bytes = axum::body::to_bytes(response.into_body(), 4 * 1024 * 1024)
+            .await
+            .expect("real full DTO");
+        let decoded = super::super::decode_source_start_response(&bytes, &fixture.reference)
+            .expect("strict actual Start");
+        let mut request: Value = serde_json::from_slice(&fixture.request).expect("recipe");
+        let request_id = request["session"]["request_id"]
+            .as_str()
+            .expect("request")
+            .to_owned();
+        request["incarnation_id"] = json!(decoded.incarnation_id());
+        request["session_id"] = json!(decoded.response().session_id);
+        request["control_epoch"] = json!(
+            decoded
+                .response()
+                .control
+                .as_ref()
+                .expect("control")
+                .control_epoch
+        );
+        request["resource"] = json!("init.mp4");
+        let resource_body = serde_json::to_vec(&request).expect("resource request");
+        let read_gate = Arc::new(SourceReadJobGate::default());
+        let io_probe = Arc::new(AcceptedWriterProbe::default());
+        let (capture, captured) = tokio::sync::oneshot::channel();
+        let capture = Arc::new(std::sync::Mutex::new(Some(capture)));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("listener");
+        let address = listener.local_addr().expect("address");
+        let app = super::super::sharing::peer_router((*fixture.state).clone())
+            .layer(axum::Extension(Arc::clone(&read_gate)))
+            .layer(axum::middleware::from_fn(
+                move |request: axum::extract::Request, next: axum::middleware::Next| {
+                    let capture = Arc::clone(&capture);
+                    async move {
+                        if request.uri().path().ends_with("/resources") {
+                            let connection = request
+                                .extensions()
+                                .get::<crate::SharingConnectionCancellation>()
+                                .expect("actual connection")
+                                .clone();
+                            capture
+                                .lock()
+                                .expect("capture")
+                                .take()
+                                .expect("one resource")
+                                .send(connection)
+                                .ok();
+                        }
+                        next.run(request).await
+                    }
+                },
+            ));
+        let (stop, stopped) = tokio::sync::oneshot::channel();
+        let server = tokio::spawn(crate::serve_http(
+            GatedStartListener {
+                listener,
+                probe: Arc::clone(&io_probe),
+            },
+            app,
+            async move {
+                let _ = stopped.await;
+            },
+            crate::HTTP_TIMEOUTS,
+        ));
+        let socket = tokio::net::TcpStream::connect(address).await.expect("TCP");
+        let (mut sender, driver) =
+            hyper::client::conn::http2::Builder::new(hyper_util::rt::TokioExecutor::new())
+                .handshake::<_, axum::body::Body>(hyper_util::rt::TokioIo::new(socket))
+                .await
+                .expect("real H2");
+        let driver = tokio::spawn(driver);
+        let path = format!(
+            "/sharing/v1/items/{}/files/{}/sessions/{request_id}",
+            fixture.reference.item_id.as_str(),
+            fixture.reference.file_id.as_str()
+        );
+        let request = axum::http::Request::builder()
+            .method("POST")
+            .uri(format!("http://fixture{path}/resources"))
+            .header(
+                "authorization",
+                fixture.headers.get("authorization").expect("auth"),
+            )
+            .header(
+                "cinemashare-viewer",
+                fixture.headers.get("cinemashare-viewer").expect("viewer"),
+            )
+            .header("content-type", "application/json")
+            .body(axum::body::Body::from(resource_body))
+            .expect("H2 request");
+        let send = tokio::spawn(async move { sender.send_request(request).await });
+        let connection = captured.await.expect("accepted resource connection");
+        tokio::time::timeout(Duration::from_secs(10), async {
+            while !read_gate.entered.load(Ordering::SeqCst) {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("actual blocking read is running");
+        let response = tokio::time::timeout(Duration::from_secs(5), send)
+            .await
+            .expect("H2 response headers")
+            .expect("send task")
+            .expect("actual response");
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(response.headers()["cinemashare-resource"], "init.mp4");
+        assert_eq!(response.headers()["cinemashare-request-id"], request_id);
+        assert_eq!(response.headers()["content-type"], "video/mp4");
+        assert!(!connection.closed().is_closed());
+        assert!(!read_gate.complete.load(Ordering::SeqCst));
+        assert!(!read_gate.file_closed.load(Ordering::SeqCst));
+        let entry = fixture
+            .state
+            .transcode
+            .source_http_starts
+            .entries
+            .lock()
+            .expect("entry")
+            .first()
+            .cloned()
+            .expect("actual owner");
+        let owned = entry
+            .wait(Instant::now() + Duration::from_secs(1))
+            .await
+            .expect("owner");
+        fixture
+            .state
+            .store
+            .revoke_share(fixture.grant, crate::state::clock_ms())
+            .await
+            .expect("actual grant revoke");
+        tokio::time::timeout(Duration::from_secs(5), connection.0.cancelled())
+            .await
+            .expect("revocation closes the live media body's transport");
+        tokio::time::timeout(Duration::from_secs(10), connection.closed().wait())
+            .await
+            .expect("accepted writer dropped");
+        drop(response);
+        read_gate.release();
+        let actor = owned.actor.clone();
+        let _ = tokio::time::timeout(
+            Duration::from_secs(15),
+            tokio::spawn(async move { actor.retire().await }),
+        )
+        .await;
+        driver.abort();
+        let _ = driver.await;
+        let _ = stop.send(());
+        server.await.expect("server").expect("shutdown");
+        drop(owned);
+        fixture.shutdown().await;
+    }
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn sharing_source_http_fixture_uses_actual_startup_factory_and_full_current_file_reference(
     ) {
