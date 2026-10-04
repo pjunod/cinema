@@ -699,9 +699,19 @@ pub(crate) fn peer_router(state: crate::state::AppState) -> axum::Router<crate::
                 .route(
                     "/sharing/v1/items/{item}/files/{file}/sessions/{request}/resources",
                     axum::routing::post(resources),
+                )
+                .route(
+                    "/sharing/v1/items/{item}/files/{file}/sessions/{request}/vod-status",
+                    axum::routing::post(control::vod_status),
+                )
+                .route(
+                    "/sharing/v1/items/{item}/files/{file}/sessions/{request}/control",
+                    axum::routing::post(control::control),
                 ),
         )
 }
+#[path = "shared_source_control.rs"]
+pub(crate) mod control;
 #[cfg(test)]
 #[derive(Default)]
 struct SourceReadJobGate {

@@ -1218,6 +1218,8 @@ paths = [
   "crates/plurxd/src/http/shared_receiver_ingress.rs",
   "crates/plurxd/src/http/shared_receiver_fixture.rs",
   "crates/plurxd/src/http/shared_source_playback.rs",
+  "crates/plurxd/src/http/shared_source_control.rs",
+  "crates/plurxd/src/http/shared_receiver_control.rs",
   "crates/plurxd/src/http/shared_artwork.rs",
   "crates/plurxd/src/http/sharing_playback_wire.rs",
   "crates/plurxd/src/http/sharing_decision_decode.rs",

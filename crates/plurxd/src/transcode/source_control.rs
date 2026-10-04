@@ -6,13 +6,22 @@ use crate::playback_control::{
     PlaybackDemandSnapshot, PreparedSuccessorObservation,
 };
 
-#[allow(dead_code)] // Source HTTP control transport follows actual actor qualification.
+/// One owned current-rendition exchange. `route` and `start` are the exact
+/// Source facts the acceptance was fenced against; the HTTP adapter projects
+/// the wire response from them and never from a stored or caller value.
 pub(crate) struct SourceOpenedControl {
     result: Result<LocalControlResult, ControlStateError>,
     guard: SourceResponseGuard,
+    route: MediaSessionRoute,
+    start: crate::http::hls::StartResponse,
+}
+pub(crate) struct SourceControlParts {
+    pub(crate) result: Result<LocalControlResult, ControlStateError>,
+    pub(crate) guard: SourceResponseGuard,
+    pub(crate) route: MediaSessionRoute,
+    pub(crate) start: crate::http::hls::StartResponse,
 }
 impl SourceOpenedControl {
-    #[allow(dead_code)] // Source HTTP control transport follows actual actor qualification.
     pub(crate) fn into_parts(
         self,
     ) -> (
@@ -20,6 +29,15 @@ impl SourceOpenedControl {
         SourceResponseGuard,
     ) {
         (self.result, self.guard)
+    }
+    /// The HTTP adapter projects its wire answer from these exact facts.
+    pub(crate) fn into_wire_parts(self) -> SourceControlParts {
+        SourceControlParts {
+            result: self.result,
+            guard: self.guard,
+            route: self.route,
+            start: self.start,
+        }
     }
 }
 
@@ -165,7 +183,6 @@ impl SourceControlAuthority<'_> {
 }
 
 impl SourceViewerActor {
-    #[allow(dead_code)] // HTTP control transport follows the qualified actor slice.
     pub(crate) async fn control(
         &self,
         request: ControlRequestV1,
@@ -246,6 +263,11 @@ impl SourceViewerActor {
             .await
             .ok_or(SourceWorkerError::Unavailable)?;
         drop(authority);
-        Ok(SourceOpenedControl { result, guard })
+        Ok(SourceOpenedControl {
+            result,
+            guard,
+            route,
+            start: response,
+        })
     }
 }

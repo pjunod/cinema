@@ -16,6 +16,8 @@ use std::{
     time::{Duration, Instant},
 };
 use uuid::Uuid;
+#[path = "shared_receiver_control.rs"]
+mod control;
 #[path = "shared_receiver_retirement.rs"]
 mod retirement;
 
@@ -1190,6 +1192,27 @@ pub(crate) async fn receiver_media(
         return match actor.wait_confirmed_end(session_id).await {
             Ok(()) => StatusCode::NO_CONTENT.into_response(),
             Err(_) => StatusCode::SERVICE_UNAVAILABLE.into_response(),
+        };
+    }
+    if request.uri().query().is_none() && matches!(suffix, "status" | "control") {
+        let Some(connection) = request
+            .extensions()
+            .get::<crate::SharingConnectionCancellation>()
+            .cloned()
+        else {
+            return StatusCode::SERVICE_UNAVAILABLE.into_response();
+        };
+        if actor.current_delivery_attachment(&state).await.is_err() {
+            return StatusCode::SERVICE_UNAVAILABLE.into_response();
+        }
+        let state = Arc::new(state);
+        let method = request.method().clone();
+        return match (suffix, &method) {
+            ("status", &Method::GET) => control::receiver_status(actor, state, &connection).await,
+            ("control", &Method::POST) => {
+                control::receiver_control(actor, state, &connection, request.into_body()).await
+            }
+            _ => StatusCode::METHOD_NOT_ALLOWED.into_response(),
         };
     }
     if request.method() != Method::GET {

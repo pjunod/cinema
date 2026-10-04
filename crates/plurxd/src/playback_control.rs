@@ -53,6 +53,11 @@ const MAX_ACTION_NAME_LEN: usize = 32;
 const HOLD_ACTION: &str = "hold";
 const TERMINAL_ACTION: &str = "terminal";
 const RETRY_RESOURCE_ACTION: &str = "retry_resource";
+/// The actions that report what production is doing and carry no
+/// transaction, session or URL: a relay may forward exactly these.
+pub(crate) fn is_advisory_action_name(name: &str) -> bool {
+    matches!(name, HOLD_ACTION | TERMINAL_ACTION | RETRY_RESOURCE_ACTION)
+}
 /// The name a client declares to be offered a staged successor.
 ///
 /// Named for the transaction rather than for the moment — roadmap §3.1 calls
@@ -2316,7 +2321,7 @@ pub(crate) fn resolve_action(
 ///
 /// Deliberately not the producer's own prose: that text carries file paths and
 /// ffmpeg diagnostics, and this travels to three clients and their logs.
-fn terminal_message(decision: ProducerDecisionReason) -> String {
+pub(crate) fn terminal_message(decision: ProducerDecisionReason) -> String {
     let text = match decision {
         ProducerDecisionReason::Unsupported => {
             "this source cannot be carried by this delivery pipeline"
@@ -14254,7 +14259,7 @@ impl RollingControlHandle {
     }
 }
 
-fn node_hash(node_id: &str) -> String {
+pub(crate) fn node_hash(node_id: &str) -> String {
     let digest = Sha256::digest(node_id.as_bytes());
     format!("n-{}", hex::encode(&digest[..8]))
 }

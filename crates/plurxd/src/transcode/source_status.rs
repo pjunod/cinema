@@ -213,14 +213,12 @@ impl SourceVodStatus {
     }
 }
 
-#[allow(dead_code)] // Private /vod-status transport follows actor qualification.
 pub(crate) struct SourceOpenedStatus {
     status: SourceVodStatus,
     guard: SourceResponseGuard,
 }
 impl SourceOpenedStatus {
     /// Keep the real guard through the entire response Body and accepted writer.
-    #[allow(dead_code)] // Private /vod-status transport follows actor qualification.
     pub(crate) fn into_parts(self) -> (SourceVodStatus, SourceResponseGuard) {
         (self.status, self.guard)
     }
@@ -230,7 +228,6 @@ impl SourceViewerActor {
     /// The owned observation retains its Body obligation through VOD's nested
     /// metadata jobs even if its HTTP waiter disappears. It never touches the
     /// viewer demand, accepted control sequence, or VOD inactivity clock.
-    #[allow(dead_code)] // Private /vod-status transport follows actor qualification.
     pub(crate) async fn open_status(
         &self,
         deadline: Instant,

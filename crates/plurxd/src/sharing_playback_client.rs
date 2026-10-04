@@ -1094,3 +1094,404 @@ mod resource_tests {
         assert!(SourceResourceHead::parse(&changed, &session, &known, &resource).is_err());
     }
 }
+
+/// B's bounded, closed copy of one Source VOD observation. Text fields are
+/// short machine vocabulary, never prose; numbers are the same bounds the
+/// Source applied before publishing. Neither a Local session identity nor a
+/// numeric Source file identity can be represented.
+#[derive(Clone, Debug, PartialEq, Deserialize, serde::Serialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct SharedVodStatus {
+    pub(crate) active_encode_milli_realtime: Option<u32>,
+    pub(crate) active_encode_age_ms: Option<u32>,
+    pub(crate) active_encode_active_ms: Option<u32>,
+    pub(crate) active_encode_segments: Option<u32>,
+    pub(crate) active_encode_candidate_id: Option<plurx_core::playback::candidate::CandidateId>,
+    pub(crate) target_height: i64,
+    pub(crate) encoder: String,
+    pub(crate) tone_map_peak_nits: Option<u32>,
+    pub(crate) tone_map_peak_source: Option<String>,
+    pub(crate) playlist_shape: String,
+    pub(crate) producer_state: String,
+    pub(crate) producer_hold: Option<String>,
+    pub(crate) producer_decision: Option<String>,
+    pub(crate) control_demand: Option<String>,
+    pub(crate) reported_position_ms: Option<i64>,
+    pub(crate) client_runway_ms: Option<i64>,
+    pub(crate) render_state: Option<String>,
+    pub(crate) server_ready_state: String,
+    pub(crate) server_ready_anchor_ms: Option<i64>,
+    pub(crate) server_ready_end_ms: Option<i64>,
+    pub(crate) server_ready_seconds: Option<f64>,
+    pub(crate) server_next_ready_start_ms: Option<i64>,
+    pub(crate) server_next_ready_end_ms: Option<i64>,
+    pub(crate) published_end_ms: Option<i64>,
+    pub(crate) ready_ahead_end_ms: Option<i64>,
+    pub(crate) fetched_end_ms: i64,
+    pub(crate) fetched_segment: Option<i64>,
+    pub(crate) ahead_seconds: Option<i64>,
+    pub(crate) materialized_segments: u64,
+    pub(crate) planned_segments: u64,
+    pub(crate) materialized_bytes: u64,
+    pub(crate) planned_bytes: u64,
+    pub(crate) working_set_bytes: u64,
+    pub(crate) working_set_budget_bytes: u64,
+    pub(crate) completed_cache_bytes: u64,
+    pub(crate) admitted: bool,
+    pub(crate) delivered_bytes: i64,
+    pub(crate) delivered_bps: Option<i64>,
+    pub(crate) delivered_idle_ms: i64,
+    pub(crate) http_wait_count: u64,
+    pub(crate) http_wait_oldest_ms: Option<i64>,
+    pub(crate) http_wait_segment: Option<i64>,
+    pub(crate) status_generated_unix_ms: i64,
+    pub(crate) suspended: bool,
+    #[serde(rename = "final")]
+    pub(crate) final_: bool,
+}
+fn status_token(text: &str) -> bool {
+    !text.is_empty()
+        && text.len() <= 32
+        && text
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'-' | b'.'))
+}
+impl SharedVodStatus {
+    pub(crate) fn is_valid(&self) -> bool {
+        const MAX_SAFE: i64 = 9_007_199_254_740_991;
+        let safe = |value: i64| (0..=MAX_SAFE).contains(&value);
+        (1..=16_384).contains(&self.target_height)
+            && self
+                .server_ready_seconds
+                .is_none_or(|value| value.is_finite() && value >= 0.0)
+            && safe(self.delivered_bytes)
+            && self.delivered_bps.is_none_or(safe)
+            && safe(self.delivered_idle_ms)
+            && safe(self.fetched_end_ms)
+            && safe(self.status_generated_unix_ms)
+            && [
+                self.reported_position_ms,
+                self.client_runway_ms,
+                self.server_ready_anchor_ms,
+                self.server_ready_end_ms,
+                self.server_next_ready_start_ms,
+                self.server_next_ready_end_ms,
+                self.published_end_ms,
+                self.ready_ahead_end_ms,
+                self.fetched_segment,
+                self.ahead_seconds,
+                self.http_wait_oldest_ms,
+                self.http_wait_segment,
+            ]
+            .into_iter()
+            .flatten()
+            .all(safe)
+            && [
+                Some(self.encoder.as_str()),
+                Some(self.playlist_shape.as_str()),
+                Some(self.producer_state.as_str()),
+                self.producer_hold.as_deref(),
+                self.producer_decision.as_deref(),
+                self.control_demand.as_deref(),
+                self.render_state.as_deref(),
+                Some(self.server_ready_state.as_str()),
+                self.tone_map_peak_source.as_deref(),
+            ]
+            .into_iter()
+            .flatten()
+            .all(status_token)
+            && [
+                self.materialized_segments,
+                self.planned_segments,
+                self.materialized_bytes,
+                self.planned_bytes,
+                self.working_set_bytes,
+                self.working_set_budget_bytes,
+                self.completed_cache_bytes,
+                self.http_wait_count,
+            ]
+            .into_iter()
+            .all(|value| value <= MAX_SAFE as u64)
+    }
+}
+
+/// The exact echo every Source session operation reply must carry.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct OperationEcho {
+    reference: SourcePlaybackTarget,
+    #[serde(deserialize_with = "canonical_uuid")]
+    request_id: Uuid,
+    #[serde(deserialize_with = "canonical_uuid")]
+    incarnation_id: Uuid,
+    #[serde(deserialize_with = "canonical_uuid")]
+    session_id: Uuid,
+    control_epoch: i64,
+}
+/// Split a bounded reply into its exact echo and its one payload member.
+fn operation_reply(
+    bytes: &[u8],
+    session: &SourcePeerSession,
+    known: &SourcePeerLineage,
+    payloads: &[&str],
+) -> Result<(String, Value), PeerError> {
+    if bytes.is_empty() || bytes.len() > MAX_REPLY {
+        return Err(PeerError::InvalidResponse);
+    }
+    let mut decoder = serde_json::Deserializer::from_slice(bytes);
+    let value = crate::http::bounded_decision_value(&mut decoder)
+        .map_err(|_| PeerError::InvalidResponse)?;
+    decoder.end().map_err(|_| PeerError::InvalidResponse)?;
+    let mut object = match value {
+        Value::Object(object) => object,
+        _ => return Err(PeerError::InvalidResponse),
+    };
+    let present: Vec<&str> = payloads
+        .iter()
+        .copied()
+        .filter(|key| object.contains_key(*key))
+        .collect();
+    let [payload] = present.as_slice() else {
+        return Err(PeerError::InvalidResponse);
+    };
+    let payload = (*payload).to_owned();
+    let member = object.remove(&payload).ok_or(PeerError::InvalidResponse)?;
+    let expected_reference =
+        serde_json::to_value(&session.reference).map_err(|_| PeerError::InvalidResponse)?;
+    if object.get("reference") != Some(&expected_reference)
+        || object.get("session_id").and_then(Value::as_str)
+            != Some(known.session_id.to_string().as_str())
+        || object.get("incarnation_id").and_then(Value::as_str)
+            != Some(known.incarnation_id.to_string().as_str())
+    {
+        return Err(PeerError::InvalidResponse);
+    }
+    let echo: OperationEcho =
+        serde_json::from_value(Value::Object(object)).map_err(|_| PeerError::InvalidResponse)?;
+    if echo.reference != session.reference
+        || echo.request_id != session.request_id
+        || echo.incarnation_id != known.incarnation_id
+        || echo.session_id != known.session_id
+        || echo.control_epoch != known.control_epoch
+    {
+        return Err(PeerError::InvalidResponse);
+    }
+    Ok((payload, member))
+}
+
+/// Authenticated live VOD metrics for the retained Source session. Neither a
+/// readiness grant nor an activity renewal.
+pub(crate) struct SourceVodStatusReceipt(SharedVodStatus);
+impl SourceVodStatusReceipt {
+    pub(crate) fn parse(
+        bytes: &[u8],
+        session: &SourcePeerSession,
+        known: &SourcePeerLineage,
+    ) -> Result<Self, PeerError> {
+        let (_, status) = operation_reply(bytes, session, known, &["status"])?;
+        let status: SharedVodStatus =
+            serde_json::from_value(status).map_err(|_| PeerError::InvalidResponse)?;
+        if !status.is_valid() {
+            return Err(PeerError::InvalidResponse);
+        }
+        Ok(Self(status))
+    }
+    pub(crate) fn into_status(self) -> SharedVodStatus {
+        self.0
+    }
+}
+
+/// One Source control outcome, checked against the exact Source tuple and the
+/// request that was actually sent. B rebinds it before any client sees it.
+pub(crate) struct SourceControlReceipt(
+    Result<
+        crate::playback_control::ControlResponseV1,
+        crate::http::shared_source_playback::control::SharedControlRefusal,
+    >,
+);
+impl SourceControlReceipt {
+    pub(crate) fn parse(
+        bytes: &[u8],
+        session: &SourcePeerSession,
+        known: &SourcePeerLineage,
+        sent: &crate::playback_control::ControlRequestV1,
+    ) -> Result<Self, PeerError> {
+        let (payload, member) = operation_reply(bytes, session, known, &["response", "refusal"])?;
+        if payload == "refusal" {
+            let refusal: crate::http::shared_source_playback::control::SharedControlRefusal =
+                serde_json::from_value(member).map_err(|_| PeerError::InvalidResponse)?;
+            if !refusal.is_valid() {
+                return Err(PeerError::InvalidResponse);
+            }
+            return Ok(Self(Err(refusal)));
+        }
+        let response: crate::playback_control::ControlResponseV1 =
+            serde_json::from_value(member).map_err(|_| PeerError::InvalidResponse)?;
+        let relay = crate::playback_control::ControlRelayRequest {
+            session_id: known.session_id.to_string(),
+            generation: known.incarnation_id.to_string(),
+            expected_owner_node_id: "source".to_owned(),
+            expected_owner_epoch: known.control_epoch,
+            deadline_unix_ms: 0,
+            control: sent.clone(),
+        };
+        if sent.generation != relay.generation
+            || i64::try_from(sent.control_epoch).ok() != Some(known.control_epoch)
+            || !response.is_valid_for(&relay)
+            || matches!(
+                response.action,
+                crate::playback_control::ControlAction::Prepare { .. }
+            )
+        {
+            return Err(PeerError::InvalidResponse);
+        }
+        Ok(Self(Ok(response)))
+    }
+    pub(crate) fn into_outcome(
+        self,
+    ) -> Result<
+        crate::playback_control::ControlResponseV1,
+        crate::http::shared_source_playback::control::SharedControlRefusal,
+    > {
+        self.0
+    }
+}
+
+impl SourcePeerSession {
+    fn operation_body(
+        &self,
+        known: &SourcePeerLineage,
+        control: Option<&crate::playback_control::ControlRequestV1>,
+    ) -> Result<Vec<u8>, PeerError> {
+        let mut value: Value = serde_json::from_slice(&self.end_body(Some(known))?)
+            .map_err(|_| PeerError::InvalidResponse)?;
+        if let Some(control) = control {
+            value["control"] =
+                serde_json::to_value(control).map_err(|_| PeerError::InvalidResponse)?;
+        }
+        let bytes = serde_json::to_vec(&value).map_err(|_| PeerError::InvalidResponse)?;
+        if bytes.len() > 128 * 1024 {
+            return Err(PeerError::InvalidResponse);
+        }
+        Ok(bytes)
+    }
+}
+
+impl PeerConnection {
+    /// One fixed-path authenticated POST with a bounded reply. The caller owns
+    /// the connection lifetime; a timeout never synthesizes a reply.
+    async fn session_operation(
+        &mut self,
+        credential: &Secret,
+        viewer_hash: &str,
+        session: &SourcePeerSession,
+        operation: &'static str,
+        body: Vec<u8>,
+        budget: Duration,
+    ) -> Result<Vec<u8>, PeerError> {
+        if self.verified_endpoint.is_none()
+            || viewer_hash.len() != 64
+            || !viewer_hash
+                .bytes()
+                .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+        {
+            return Err(PeerError::InvalidResponse);
+        }
+        tokio::time::timeout(budget, async {
+            let mut auth = HeaderValue::from_str(&format!("CinemaShare {}", credential.expose()))
+                .map_err(|_| PeerError::InvalidResponse)?;
+            auth.set_sensitive(true);
+            let mut viewer =
+                HeaderValue::from_str(viewer_hash).map_err(|_| PeerError::InvalidResponse)?;
+            viewer.set_sensitive(true);
+            let request = Request::builder()
+                .method(Method::POST)
+                .uri(format!(
+                    "/sharing/v1/items/{}/files/{}/sessions/{}/{operation}",
+                    session.reference.item_id.as_str(),
+                    session.reference.file_id.as_str(),
+                    session.request_id
+                ))
+                .header(header::HOST, &self.host)
+                .header(header::CONTENT_TYPE, "application/json")
+                .header(header::ACCEPT, "application/json")
+                .header(header::AUTHORIZATION, auth)
+                .header("cinemashare-viewer", viewer)
+                .body(Body::from(body))
+                .map_err(|_| PeerError::InvalidResponse)?;
+            self.sender
+                .ready()
+                .await
+                .map_err(|_| PeerError::Unavailable)?;
+            let response = self
+                .sender
+                .send_request(request)
+                .await
+                .map_err(|_| PeerError::Unavailable)?;
+            let status = response.status();
+            let bytes = axum::body::to_bytes(
+                Body::new(
+                    response
+                        .into_body()
+                        .map_err(|_| std::io::Error::other("sharing peer operation body")),
+                ),
+                MAX_REPLY,
+            )
+            .await
+            .map_err(|_| PeerError::InvalidResponse)?;
+            if status == StatusCode::UNAUTHORIZED {
+                return Err(PeerError::Authentication);
+            }
+            if status == StatusCode::UPGRADE_REQUIRED {
+                return Err(PeerError::ProtocolUnsupported);
+            }
+            if status != StatusCode::OK {
+                return Err(PeerError::Rejected(status));
+            }
+            Ok(bytes.to_vec())
+        })
+        .await
+        .map_err(|_| PeerError::Unavailable)?
+    }
+    pub(crate) async fn file_vod_status(
+        &mut self,
+        credential: &Secret,
+        viewer_hash: &str,
+        session: &SourcePeerSession,
+        known: &SourcePeerLineage,
+    ) -> Result<SourceVodStatusReceipt, PeerError> {
+        let body = session.operation_body(known, None)?;
+        let bytes = self
+            .session_operation(
+                credential,
+                viewer_hash,
+                session,
+                "vod-status",
+                body,
+                Duration::from_secs(10),
+            )
+            .await?;
+        SourceVodStatusReceipt::parse(&bytes, session, known)
+    }
+    pub(crate) async fn file_control(
+        &mut self,
+        credential: &Secret,
+        viewer_hash: &str,
+        session: &SourcePeerSession,
+        known: &SourcePeerLineage,
+        control: &crate::playback_control::ControlRequestV1,
+    ) -> Result<SourceControlReceipt, PeerError> {
+        let body = session.operation_body(known, Some(control))?;
+        let bytes = self
+            .session_operation(
+                credential,
+                viewer_hash,
+                session,
+                "control",
+                body,
+                Duration::from_millis(3_500),
+            )
+            .await?;
+        SourceControlReceipt::parse(&bytes, session, known, control)
+    }
+}
