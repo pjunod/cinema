@@ -9638,6 +9638,54 @@ mod tests {
         assert_eq!(users.as_array().expect("array").len(), 1);
     }
 
+    /// One stored content-analysis switch, read one way by Settings, the
+    /// Developer card and the serving path. Missing is off for all three: the
+    /// card used to report it on while creates answered "shared preparation
+    /// is disabled", and Settings reported a hand-written `true` as off while
+    /// the queue and the serving path treated it as on.
+    #[tokio::test]
+    async fn content_analysis_switch_reads_the_same_in_settings_and_developer() {
+        let (app, state) = test_app_with_state();
+        let admin = setup_admin(&app).await;
+        for (stored, expected) in [
+            (None, false),
+            (Some("true"), true),
+            (Some(" On "), true),
+            (Some("1"), true),
+            (Some("off"), false),
+            (Some("0"), false),
+        ] {
+            if let Some(value) = stored {
+                state
+                    .store
+                    .put_setting(plurx_core::store::keys::VOD_INDEX_CLUSTER_CACHE, value)
+                    .await
+                    .expect("store the switch");
+            }
+            let (status, settings) = call(&app, get("/api/v1/settings", Some(&admin))).await;
+            assert_eq!(status, StatusCode::OK);
+            assert_eq!(
+                settings["vod_index_cluster_cache"],
+                json!(expected),
+                "Settings read {stored:?}"
+            );
+            let (status, readiness) =
+                call(&app, get("/api/v1/developer/readiness", Some(&admin))).await;
+            assert_eq!(status, StatusCode::OK);
+            let card = readiness["items"]
+                .as_array()
+                .expect("items")
+                .iter()
+                .find(|item| item["id"] == "content_analysis_repair")
+                .expect("content analysis card");
+            assert_eq!(
+                card["enabled"],
+                json!(expected),
+                "Developer read {stored:?}"
+            );
+        }
+    }
+
     /// The Developer section's prerequisite rows, and the rule that they are
     /// reporting rather than deciding.
     ///
