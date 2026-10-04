@@ -4088,3 +4088,11 @@ source = "clients/apple/Sources/PlayerController.swift"
 source_anchor = "struct AutoBoundaryReplan {"
 test = "clients/apple/Tests/PlaybackControlReporterTests.swift"
 test_anchor = "func testBoundaryReplanIsSpentOnlyOnACandidate()"
+
+[[fixes]]
+id = "web.continuous-auto-family-budget-margin"
+commits = ["a81fa97684ea6b099e3bb6fc4706fa6792a0f1f8"]
+source = "crates/plurxd/src/web/player/stall-diagnosis.js"
+source_anchor = "if(family!=null&&continuousFamilyPeak(p,p.qualityCandidateId)!=null) return own&&link>=family*1.8;"
+test = "tests/playback/current-main-effort-quality.test.js"
+test_anchor = "continuous family upgrades use the enforced family budget and the family's own objects"
