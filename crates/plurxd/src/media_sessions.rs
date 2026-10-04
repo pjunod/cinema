@@ -1277,6 +1277,8 @@ fn worker_session_request_fields_are_valid(request: &SessionRequest) -> bool {
     (!request.passive_vod
         || (request.vod_only && request.request_id.as_deref().is_some_and(|id| !id.trim().is_empty())))
         && (!request.vod_only || request.presentation == crate::transcode::Presentation::Vod)
+        && request.finite_bitrate_limit_bps.is_none_or(|limit|
+            request.passive_vod && request.vod_only && (64_000..=1_000_000_000).contains(&limit))
         && request.file_id > 0
         && !request.playback_id.trim().is_empty()
         && request.playback_id.len() <= 128
@@ -5460,6 +5462,7 @@ pub(crate) fn takeover_eligible_route(session_id: &str, incarnation_id: &str) ->
             candidate_context: None,
             vod_only: false,
             passive_vod: false,
+            finite_bitrate_limit_bps: None,
             request_id: Some(incarnation_id.to_owned()),
             presentation: crate::transcode::Presentation::Live,
             ..base.request
@@ -5903,6 +5906,7 @@ mod tests {
                 candidate_context: None,
                 vod_only: false,
                 passive_vod: false,
+                finite_bitrate_limit_bps: None,
                 control_sequence: None,
                 file_id: 11,
                 playback_id: "player-a".to_owned(),
@@ -6928,6 +6932,7 @@ mod tests {
                 candidate_context: None,
                 vod_only: false,
                 passive_vod: false,
+                finite_bitrate_limit_bps: None,
                 presentation: crate::transcode::Presentation::Vod,
                 ..eligible.request.clone()
             },
@@ -7076,6 +7081,7 @@ mod tests {
                 candidate_context: None,
                 vod_only: false,
                 passive_vod: false,
+                finite_bitrate_limit_bps: None,
                 presentation: crate::transcode::Presentation::Vod,
                 ..eligible.request.clone()
             },

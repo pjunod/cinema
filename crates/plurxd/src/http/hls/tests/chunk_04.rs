@@ -340,6 +340,7 @@
             candidate_context: None,
             vod_only: false,
             passive_vod: false,
+            finite_bitrate_limit_bps: None,
             file_id: fixture.file_id(),
             playback_id: route.playback_id.clone(),
             request_id: Some(staged_incarnation_id.to_owned()),
@@ -456,6 +457,7 @@
             candidate_context: None,
             vod_only: false,
             passive_vod: false,
+            finite_bitrate_limit_bps: None,
             file_id: fixture.file_id(),
             playback_id: predecessor.playback_id.clone(),
             request_id: Some(incarnation_id.clone()),
@@ -749,6 +751,7 @@
             candidate_context: None,
             vod_only: false,
             passive_vod: false,
+            finite_bitrate_limit_bps: None,
                 playback_id: playback_id.clone(),
                 ..staged_candidate_request()
             },
@@ -824,6 +827,7 @@
             candidate_context: None,
             vod_only: false,
             passive_vod: false,
+            finite_bitrate_limit_bps: None,
                 playback_id: ending_playback.clone(),
                 ..staged_candidate_request()
             },
@@ -1067,6 +1071,7 @@
             candidate_context: None,
             vod_only: false,
             passive_vod: false,
+            finite_bitrate_limit_bps: None,
             playback_id: playback_id.clone(),
             ..staged_candidate_request()
         };
@@ -1262,6 +1267,7 @@
             candidate_context: None,
             vod_only: false,
             passive_vod: false,
+            finite_bitrate_limit_bps: None,
                 playback_id: playback_id.clone(),
                 ..staged_candidate_request()
             },
@@ -1424,6 +1430,7 @@
             candidate_context: None,
             vod_only: false,
             passive_vod: false,
+            finite_bitrate_limit_bps: None,
             playback_id: playback_id.clone(),
             ..staged_candidate_request()
         };
@@ -1829,6 +1836,7 @@
             candidate_context: None,
             vod_only: false,
             passive_vod: false,
+            finite_bitrate_limit_bps: None,
             control_sequence: None,
             file_id: 11,
             playback_id: "stage-player".to_owned(),

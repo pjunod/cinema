@@ -7,3 +7,5 @@ pub mod query;
 pub mod ticks;
 
 pub mod subtitle;
+
+pub mod hls;

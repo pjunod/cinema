@@ -732,9 +732,20 @@ impl TranscodeManager {
         req: &SessionRequest,
         file: &plurx_core::domain::MediaFile,
     ) -> Result<Option<Arc<crate::vodencode::Encoding>>, String> {
+        if req.finite_bitrate_limit_bps.is_some_and(|limit| {
+            !req.vod_only || !req.passive_vod || !(64_000..=1_000_000_000).contains(&limit)
+        }) {
+            return Err(vod_refusal_error(
+                "vod_output_budget_refused",
+                "invalid finite bitrate policy",
+            ));
+        }
         if matches!(req.kind, SessionKind::Copy { .. }) {
             match req.subtitle_burn {
-                None => return Ok(None),
+                None => {
+                    validate_finite_copy_rate(req, file)?;
+                    return Ok(None);
+                }
                 // A copy whose burn track the store holds as having no cues
                 // has nothing to burn: it stays the copy it would have been,
                 // rather than a full re-encode to overlay nothing.
@@ -745,6 +756,7 @@ impl TranscodeManager {
                         subtitle_index = index,
                         "the burn track has no cues; serving the copy without an overlay"
                     );
+                    validate_finite_copy_rate(req, file)?;
                     return Ok(None);
                 }
                 Some(_) => {}
@@ -977,6 +989,7 @@ impl TranscodeManager {
                 options.effective_rate_control = plurx_core::transcode::EffectiveRateControl::Vbr;
             }
         }
+        constrain_finite_vod_rate(req, file, &mut options)?;
         let subtitle = if let Some(subtitle) = burn_file {
             #[cfg(unix)]
             {
@@ -1101,8 +1114,46 @@ impl TranscodeManager {
         })))
     }
 
-    /// The only public HLS presentation. A request either receives immutable
-    /// VOD or fails with a stable refusal; it never enters the live arms.
+    /// Negotiation shares native encoded preparation and the exact copy
+    /// prerequisite resolver, without allocating a media session or producer.
+    pub(crate) async fn preview_compatibility_vod(
+        &self,
+        req: &SessionRequest,
+        file: &plurx_core::domain::MediaFile,
+    ) -> Result<Option<Arc<crate::vodencode::Encoding>>, String> {
+        if !req.vod_only
+            || !req.passive_vod
+            || req.presentation != Presentation::Vod
+            || req
+                .request_id
+                .as_deref()
+                .is_none_or(|id| id.trim().is_empty())
+        {
+            return Err(vod_refusal_error(
+                "vod_passive_policy_invalid",
+                "compatibility preview requires the server-owned passive VOD policy",
+            ));
+        }
+        if self.vod_settings(req).await?.is_none() {
+            return Err(vod_refusal_error(
+                "vod_disabled",
+                "VOD session creation is disabled on this server",
+            ));
+        }
+        let encoding = self.prepare_vod_encoding(req, file).await?;
+        self.vod
+            .preview_recipe(
+                crate::vodserve::VodRecipeRequest {
+                    request: req,
+                    encoding,
+                },
+                file,
+                None,
+            )
+            .await
+    }
+
+    /// The only public HLS presentation: immutable VOD or a typed refusal.
     #[allow(clippy::too_many_arguments)]
     async fn try_vod_session(
         &self,
@@ -1821,4 +1872,71 @@ impl TranscodeManager {
         };
         Ok((normalized, Some(target_height)))
     }
+}
+
+/// Both plain copies and copies with a known empty burn track share the same
+/// source-rate proof. The empty-track optimization cannot bypass the ceiling.
+pub(super) fn validate_finite_copy_rate(
+    request: &SessionRequest,
+    file: &plurx_core::domain::MediaFile,
+) -> Result<(), String> {
+    if request.finite_bitrate_limit_bps.is_some_and(|limit| {
+        let extra_audio = if matches!(request.kind, SessionKind::Copy { aac: true, .. }) {
+            320_000
+        } else {
+            0
+        };
+        file.bitrate.is_none_or(|bitrate| {
+            bitrate <= 0
+                || bitrate
+                    .checked_add(extra_audio)
+                    .is_none_or(|total| total > i64::from(limit))
+        })
+    }) {
+        return Err(vod_refusal_error(
+            "vod_output_budget_refused",
+            "copy delivery cannot meet the finite bitrate ceiling",
+        ));
+    }
+    Ok(())
+}
+
+/// Apply a service-owned ceiling before the native semantic recipe is frozen.
+/// VBR's existing 1.5x video peak and the native audio rate share this budget.
+pub(super) fn constrain_finite_vod_rate(
+    request: &SessionRequest,
+    file: &plurx_core::domain::MediaFile,
+    options: &mut plurx_core::transcode::TranscodeOptions,
+) -> Result<(), String> {
+    let Some(limit) = request.finite_bitrate_limit_bps else {
+        return Ok(());
+    };
+    if !request.vod_only
+        || !request.passive_vod
+        || !(64_000..=1_000_000_000).contains(&limit)
+        || request.candidate_context.is_some()
+    {
+        return Err(vod_refusal_error(
+            "vod_output_budget_refused",
+            "invalid finite bitrate policy",
+        ));
+    }
+    let audio_bps = if file.audio_streams.is_empty() {
+        0
+    } else {
+        u64::from(options.audio_bitrate_kbps) * 1000
+    };
+    let video_kbps = u64::from(limit)
+        .checked_sub(audio_bps)
+        .map(|remaining| remaining / 1500)
+        .filter(|rate| *rate >= 32)
+        .ok_or_else(|| {
+            vod_refusal_error(
+                "vod_output_budget_refused",
+                "the ceiling cannot contain the native audio and a valid video rate",
+            )
+        })?;
+    options.video_bitrate_kbps = options.video_bitrate_kbps.min(video_kbps as u32);
+    options.effective_rate_control = plurx_core::transcode::EffectiveRateControl::Vbr;
+    Ok(())
 }

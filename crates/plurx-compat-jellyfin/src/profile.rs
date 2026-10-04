@@ -457,6 +457,13 @@ mod container_tests {
 
 /// One ordered output tuple. The adapter must validate its native delivery
 /// against this entry; entries are never merged into a combined capability.
+/// The observed manifest extension is accepted only for implemented VTT.
+#[derive(Clone, Debug, Deserialize)]
+pub enum ManifestSubtitleFormat {
+    #[serde(rename = "vtt")]
+    Vtt,
+}
+
 #[derive(Clone, Debug, Deserialize)]
 #[serde(rename_all = "PascalCase", deny_unknown_fields)]
 pub struct TranscodingRule {
@@ -482,6 +489,8 @@ pub struct TranscodingRule {
     pub copy_timestamps: bool,
     #[serde(default)]
     pub enable_subtitles_in_manifest: bool,
+    #[serde(default)]
+    pub manifest_subtitles: Option<ManifestSubtitleFormat>,
     #[serde(default)]
     pub min_segments: u32,
     #[serde(default)]
@@ -550,10 +559,86 @@ impl TranscodingRule {
     }
 }
 
+/// Audio-only entries do not constrain movie/episode delivery. Each video entry remains a
+/// separate output tuple; malformed video predicates cannot disappear during normalization.
+pub fn video_transcoding_rules(
+    value: &serde_json::Value,
+) -> Result<Vec<TranscodingRule>, &'static str> {
+    let entries = value
+        .as_array()
+        .filter(|v| v.len() <= 32)
+        .ok_or("invalid transcoding profiles")?;
+    let mut rules = Vec::new();
+    for entry in entries {
+        match entry.get("Type").and_then(serde_json::Value::as_str) {
+            Some("Audio") => continue,
+            Some("Video") => {}
+            _ => return Err("unsupported transcoding media type"),
+        }
+        let rule: TranscodingRule = serde_json::from_value(entry.clone())
+            .map_err(|_| "unsupported transcoding constraint")?;
+        if !rule.valid() {
+            return Err("invalid video transcoding profile");
+        }
+        rules.push(rule);
+    }
+    Ok(rules)
+}
+
 #[cfg(test)]
 mod transcoding_tests {
     use super::*;
     use serde_json::json;
+    #[test]
+    fn video_transcoding_normalization_keeps_observed_audio_entries_separate() {
+        let infuse = json!([
+            {"Type":"Audio","Container":"aac","AudioCodec":"aac","MaxAudioChannels":"2","Protocol":"hls","BreakOnNonKeyFrames":true,"MinSegments":1},
+            {"Type":"Video","Container":"ts","VideoCodec":"hevc,h264,av1","AudioCodec":"aac","MaxAudioChannels":"2","ManifestSubtitles":"vtt","Protocol":"hls","BreakOnNonKeyFrames":true,"MinSegments":1}
+        ]);
+        let rules = video_transcoding_rules(&infuse).expect("observed Infuse");
+        assert_eq!(rules.len(), 1);
+        assert!(rules[0].accepts_output(
+            "ts",
+            "hevc",
+            "aac",
+            &Facts::from([(Property::AudioChannels, Fact::Number(2.0))])
+        ));
+        assert!(!rules[0].accepts_output(
+            "ts",
+            "hevc",
+            "aac",
+            &Facts::from([(Property::AudioChannels, Fact::Number(6.0))])
+        ));
+        let android = json!([
+            {"Type":"Video","Container":"ts","VideoCodec":"hevc,h264","AudioCodec":"aac,ac3,eac3","Protocol":"hls","EnableSubtitlesInManifest":true,"Conditions":[]},
+            {"Type":"Audio","Container":"ts","VideoCodec":"","AudioCodec":"aac","Protocol":"hls","Conditions":[]}
+        ]);
+        assert_eq!(
+            video_transcoding_rules(&android)
+                .expect("observed Android")
+                .len(),
+            1
+        );
+        let mut invalid = infuse;
+        invalid[1]["Conditions"] =
+            json!([{"Property":"FutureConstraint","Condition":"Equals","Value":"true"}]);
+        assert!(video_transcoding_rules(&invalid).is_err());
+    }
+    #[test]
+    fn observed_manifest_subtitle_extension_accepts_only_implemented_vtt() {
+        let mut value = json!({"Type":"Video","Container":"ts","Protocol":"hls","VideoCodec":"h264","AudioCodec":"aac","ManifestSubtitles":"vtt"});
+        let rule: TranscodingRule =
+            serde_json::from_value(value.clone()).expect("observed VTT extension");
+        assert!(rule.valid());
+        assert!(matches!(
+            rule.manifest_subtitles,
+            Some(ManifestSubtitleFormat::Vtt)
+        ));
+        for unsupported in ["srt", "ass", "", "VTT"] {
+            value["ManifestSubtitles"] = json!(unsupported);
+            assert!(serde_json::from_value::<TranscodingRule>(value.clone()).is_err());
+        }
+    }
     #[test]
     fn transcoding_profiles_keep_each_output_tuple_and_conditions_separate() {
         let rules: Vec<TranscodingRule> = serde_json::from_value(json!([

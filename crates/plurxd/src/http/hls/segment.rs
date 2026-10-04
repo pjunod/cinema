@@ -30,7 +30,7 @@ pub async fn segment(
     .await
 }
 
-pub(super) fn requested_byte_range(
+pub(in crate::http) fn requested_byte_range(
     value: Option<&str>,
     len: u64,
 ) -> Result<Option<(u64, u64)>, ()> {
@@ -447,7 +447,7 @@ async fn vod_segment_response_before(
             ],
         )
             .into_response();
-        return complete_buffered_response_before(
+        return Box::pin(complete_buffered_response_before(
             state,
             session,
             &owner,
@@ -458,7 +458,7 @@ async fn vod_segment_response_before(
             true,
             response,
             publication_deadline,
-        )
+        ))
         .await;
     }
     let requested_range =
@@ -570,7 +570,7 @@ async fn vod_segment_response_before(
                 ],
             )
                 .into_response();
-            return complete_buffered_response_before(
+            return Box::pin(complete_buffered_response_before(
                 state,
                 session,
                 &owner,
@@ -581,7 +581,7 @@ async fn vod_segment_response_before(
                 true,
                 response,
                 publication_deadline,
-            )
+            ))
             .await;
         }
         let requested_range =
@@ -637,7 +637,7 @@ async fn vod_segment_response_before(
         if let Some(range) = content_range {
             headers_mut.insert(header::CONTENT_RANGE, range.parse().expect("range"));
         }
-        return complete_buffered_response_before(
+        return Box::pin(complete_buffered_response_before(
             state,
             session,
             &owner,
@@ -648,7 +648,7 @@ async fn vod_segment_response_before(
             range_covers_object(requested_range, ready.len),
             response,
             publication_deadline,
-        )
+        ))
         .await;
     }
     let etag = artifact_etag;

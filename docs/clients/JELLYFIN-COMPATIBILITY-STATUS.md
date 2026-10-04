@@ -653,3 +653,42 @@ backends (9.82 seconds). Final workspace/all-target Clippy and all 28
 SQL/read/process censuses pass on pinned Rust 1.97.1; all 14 focused
 documentation/identity/ownership contracts pass. No physical-client or HLS
 qualification is claimed by these receipts.
+
+
+The native admission slice landed in PR #784 at `e8ff688f10`, with exact
+parents `5f27b2905` and `18719c68d`. All eight jobs passed in
+[effort run 4030](http://192.168.4.7:3000/noirr/plurx/actions/runs/4030),
+and the landing preserves its checked regression reference.
+
+The next transport slice translates one closed transcode tuple at a time,
+resolves actual native VOD output before advertising it, and freezes that
+recipe fingerprint for activation. Trusted passive/VOD-only policy and the
+finite bitrate ceiling cross the existing worker request seam; unknown policy
+fields refuse on an older worker. Video rate limits reserve the actual native
+AAC budget before applying the native VBR peak. Original source clock remains
+zero-based even when the requested start is nonzero.
+
+Mapped master/media/init/fragment/subtitle resources recheck fresh login,
+source revision, exact native pointer and publication owner. They delegate the
+existing native serving path and its body lifetime. The measured init-prefix
+representation maps composite ranges to precise native ranges and rechecks
+object validators rather than consuming a whole fragment and slicing it.
+The native buffered lifetime wrapper retains known Content-Length.
+Constructing the large native handler future in a separate helper keeps the
+inline-range adapter within the ordinary regression-test stack.
+
+This slice does not claim full J4/J6 completion: shared bounded startup retry,
+encoded/HEVC service qualification, no-signal and replacement cleanup, and the
+physical requesting-client matrix remain open. Apple TV use stays deferred.
+Generated media URLs contain no login token and every media request remains
+authenticated; no anonymous artwork or new media bearer capability is added.
+
+
+On current admission base `e8ff688f10`, all 26 focused Jellyfin HTTP tests
+pass (9.68 seconds), including real indexed copy/range/original-clock/Stop
+cleanup on the ordinary stack. All 22 pure wire tests, eight compatibility
+service regressions, the finite worker-budget regression, and the existing
+native range/frontier and trace-redaction regressions pass. Workspace/all-target
+Clippy, all 28 SQL/read/process censuses and all 17 documentation/API/identity/
+ownership contracts pass on pinned Rust 1.97.1. These are service receipts;
+encoded/HEVC and physical-client qualification are still open.

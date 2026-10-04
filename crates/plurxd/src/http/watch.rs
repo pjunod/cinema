@@ -99,6 +99,7 @@ pub(crate) async fn apply_progress(
 pub(crate) async fn apply_jellyfin_progress(
     state: &AppState,
     write: plurx_core::store::JellyfinProgressWrite,
+    method: &str,
     direct_key: &crate::delivery::Key,
 ) -> Result<Option<plurx_core::domain::WatchState>, ApiError> {
     let user_id = write.provenance.scope.user_id;
@@ -111,7 +112,7 @@ pub(crate) async fn apply_jellyfin_progress(
         position_ms: write.position_ms,
         duration_ms: write.duration_ms,
         recorded_at: None,
-        method: Some("direct_play".into()),
+        method: Some(method.into()),
     };
     let Some(update) = state.progress.put_jellyfin(write).await? else {
         return Ok(None);
@@ -144,10 +145,12 @@ async fn progress_effects(
     // synchronous — a hash lookup, not a store read — because every open
     // player in the house arrives here every few seconds.
     if req.recorded_at.is_none() {
-        if let Some(key) = direct_key {
-            state.direct_plays.touch_key(key);
-        } else {
-            state.direct_plays.touch_item(user_id, id);
+        if req.method.as_deref() != Some("transcode") {
+            if let Some(key) = direct_key {
+                state.direct_plays.touch_key(key);
+            } else {
+                state.direct_plays.touch_item(user_id, id);
+            }
         }
         // And the play it belongs to stays one start attempt however long
         // the viewer is paused (C-08 M5 row 4).
