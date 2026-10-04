@@ -368,14 +368,40 @@ impl SessionDir {
     /// rename, and a playlist rewrite overlaps its predecessor, so the grant
     /// asks for the slice twice over rather than pretending the rename is
     /// free.
-    async fn publish_file(&self, name: &str, bytes: &[u8]) -> std::io::Result<()> {
+    ///
+    /// A media object is digested exactly once, on the blocking pool beside
+    /// its write (the owned copy `tokio::fs::write` would make anyway), and
+    /// the one committed object is shared by output measurement and the
+    /// retained collector. A segment can be 64 MiB: hashing it on an async
+    /// worker, twice, stalled every body that worker was pumping.
+    async fn publish_file(
+        &self,
+        name: &str,
+        bytes: &[u8],
+    ) -> std::io::Result<Option<crate::rolling_output::CommittedObject>> {
         let authorized = self
             .authorize_write(name, bytes.len().saturating_mul(2))
             .await?;
         let tmp = self.dir.join(format!("{name}.tmp"));
+        let measured = name != "index.m3u8"
+            && (self.measurement.is_some() || self.retained.is_some());
         let written = async {
-            tokio::fs::write(&tmp, bytes).await?;
-            tokio::fs::rename(&tmp, self.dir.join(name)).await
+            let owned = bytes.to_vec();
+            let target = tmp.clone();
+            let digest = tokio::task::spawn_blocking(move || {
+                use sha2::Digest;
+                std::fs::write(&target, &owned)?;
+                Ok::<_, std::io::Error>(
+                    measured.then(|| -> [u8; 32] { sha2::Sha256::digest(&owned).into() }),
+                )
+            })
+            .await
+            .map_err(std::io::Error::other)??;
+            tokio::fs::rename(&tmp, self.dir.join(name)).await?;
+            Ok::<_, std::io::Error>(digest.map(|digest| crate::rolling_output::CommittedObject {
+                bytes: bytes.len() as u64,
+                digest,
+            }))
         }
         .await;
         // The reservation is held until the rename settles and is then
@@ -390,17 +416,9 @@ impl SessionDir {
             // conservative answer and cleanup owns what is actually there.
             authorized.landed(i64::try_from(bytes.len()).unwrap_or(i64::MAX));
         }
-        if written.is_ok() && name != "index.m3u8" {
+        if let Ok(Some(object)) = &written {
             if let Some(collector) = &self.retained {
-                use sha2::Digest;
-                collector.capture(
-                    self.dir.join(name),
-                    name,
-                    crate::rolling_output::CommittedObject {
-                        bytes: bytes.len() as u64,
-                        digest: sha2::Sha256::digest(bytes).into(),
-                    },
-                );
+                collector.capture(self.dir.join(name), name, object.clone());
             }
         }
         written
@@ -474,8 +492,8 @@ impl SessionDir {
     }
 
     async fn write_init(&mut self, init: &Init) -> std::io::Result<()> {
-        self.publish_file("init.mp4", &init.bytes).await?;
-        self.observe_object("init.mp4", &init.bytes);
+        let committed = self.publish_file("init.mp4", &init.bytes).await?;
+        self.observe_object("init.mp4", committed);
         // No playlist yet: one with no segment in it is a promise the session
         // cannot keep if ffmpeg dies in the next second. The actor's first-
         // media admission observes exactly this file, so it lands only when
@@ -496,8 +514,8 @@ impl SessionDir {
             )));
         }
         let name = published.name();
-        self.publish_file(&name, &published.segment.bytes).await?;
-        self.observe_object(&name, &published.segment.bytes);
+        let committed = self.publish_file(&name, &published.segment.bytes).await?;
+        self.observe_object(&name, committed);
         if self.published_secs == 0.0 {
             tracing::info!(
                 target: "plurxd::transcode",
@@ -547,21 +565,17 @@ impl SessionDir {
         // — the client sees VOD from the start.
         self.started = true;
         let text = self.playlist(true);
-        self.publish_file("index.m3u8", text.as_bytes()).await
+        self.publish_file("index.m3u8", text.as_bytes())
+            .await
+            .map(|_| ())
     }
 
-    fn observe_object(&self, name: &str, bytes: &[u8]) {
-        use sha2::{Digest, Sha256};
-        if let Some(measurement) = &self.measurement {
-            if let Ok(mut measurement) = measurement.lock() {
-                measurement.committed(
-                    name,
-                    crate::rolling_output::CommittedObject {
-                        bytes: bytes.len() as u64,
-                        digest: Sha256::digest(bytes).into(),
-                    },
-                );
-            }
+    fn observe_object(&self, name: &str, committed: Option<crate::rolling_output::CommittedObject>) {
+        let (Some(measurement), Some(committed)) = (&self.measurement, committed) else {
+            return;
+        };
+        if let Ok(mut measurement) = measurement.lock() {
+            measurement.committed(name, committed);
         }
     }
 }
