@@ -588,6 +588,18 @@ quality_catalog: None,
     }
 
     async fn activate_control_route(store: &SqliteStore, session_id: &str, generation: &str) {
+        activate_control_route_with_recipe(store, session_id, generation, "node-a", "{}").await;
+    }
+
+    /// A route whose durable recipe is the worker envelope a real start
+    /// records, for paths (continuous family binding) that read it back.
+    async fn activate_control_route_with_recipe(
+        store: &SqliteStore,
+        session_id: &str,
+        generation: &str,
+        owner_node_id: &str,
+        recipe_json: &str,
+    ) {
         let now_ms = crate::media_sessions::unix_ms();
         let fingerprint = "a".repeat(64);
         let playback_id = format!("vod-control-{session_id}");
@@ -604,7 +616,7 @@ quality_catalog: None,
             .await
             .expect("claim route");
         assert!(store
-            .assign_media_session_request_owner(7, generation, generation, "node-a", now_ms,)
+            .assign_media_session_request_owner(7, generation, generation, owner_node_id, now_ms,)
             .await
             .expect("assign route owner"));
         let activation = plurx_core::domain::MediaSessionActivation {
@@ -618,8 +630,8 @@ quality_catalog: None,
             fence_predecessor: false,
             request_id: Some(generation.to_owned()),
             request_fingerprint: fingerprint,
-            owner_node_id: "node-a".to_owned(),
-            recipe_json: "{}".to_owned(),
+            owner_node_id: owner_node_id.to_owned(),
+            recipe_json: recipe_json.to_owned(),
             response_json: "{}".to_owned(),
             publication_ready_at_ms: plurx_core::domain::MEDIA_SESSION_PUBLICATION_BLOCKED,
             media_origin_ms: 0,

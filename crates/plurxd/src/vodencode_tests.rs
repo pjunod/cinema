@@ -367,6 +367,9 @@ async fn shared_audio_vod_reserves_cpu_only_and_publishes_one_audio_track() {
         assert!(rendition.readers.lock().await.is_empty());
     }
     assert_eq!(encoding.admissions.software_in_use(), 0, "End and confirmed reap release the whole group");
+    // End above tombstoned the paired parent, and a terminal session id never
+    // starts again; the three-role family is a new presentation of the same playback.
+    let parent = uuid::Uuid::new_v4().to_string();
     // Reuse the existing AAC campaign to exercise the real three-role parent.
     let mut companion = video.clone_with_admissions_for_test(encoding.admissions.clone()).await;
     let mutable = Arc::get_mut(&mut companion).expect("new companion recipe");
@@ -396,6 +399,33 @@ async fn shared_audio_vod_reserves_cpu_only_and_publishes_one_audio_track() {
         sessions[&parent].children.iter().map(|child| Arc::clone(&child.rendition)).collect::<Vec<_>>()
     };
     assert_eq!(encoding.admissions.software_in_use(), family_budget);
+    // Publishing the family binds it to the parent's durable route, so the
+    // route exists before the first master is served, as a real start's does.
+    let generation = uuid::Uuid::new_v4().to_string();
+    // The durable recipe is the worker envelope a real start records: the
+    // family bind only accepts a route whose recipe names this parent's video
+    // role, its own candidate and its autonomous companion.
+    let mut worker_request = parent_request.clone();
+    worker_request.request_id = Some(generation.clone());
+    let route_recipe = crate::media_sessions::RemoteStartRequest {
+        candidate_catalog: None,
+        candidate_id: parent_request.candidate_context.as_ref().map(|context| context.candidate_id),
+        presentation_target: None,
+        decoder_caps: None,
+        protocol_version: crate::media_pool::PROTOCOL_VERSION,
+        incarnation_id: generation.clone(),
+        user_id: 7,
+        source_size: file.size,
+        source_mtime: file.mtime,
+        typeless_playlist: false,
+        library_channel: None,
+        request: worker_request,
+    };
+    // A real start's route is owned by the node that serves it, and that node
+    // schedules quality under its own id.
+    let owner_node = serve.shared.cluster_node_id.clone().expect("serving cluster node");
+    activate_control_route_with_recipe(schedule_store.as_ref(), &parent, &generation, &owner_node,
+        &serde_json::to_string(&route_recipe).expect("route recipe")).await;
     let master = serve.continuous_master_before(&parent, Instant::now() + Duration::from_secs(30)).await
         .expect("continuous parent");
     let master_bytes = master.result.expect("verified family").expect("master bytes");
@@ -430,8 +460,6 @@ async fn shared_audio_vod_reserves_cpu_only_and_publishes_one_audio_track() {
     assert_eq!(intervals[0].through_tick, intervals[1].from_tick);
     assert!(intervals.iter().all(|interval| interval.valid() && interval.rendition_id == rung.rendition_id()));
     use plurx_core::playback::continuous_quality::{QualityAttachment, QualityOperation, QualityState, QualityTransitionRequest};
-    let generation = uuid::Uuid::new_v4().to_string();
-    activate_control_route(schedule_store.as_ref(), &parent, &generation).await;
     let attachment = QualityAttachment { client_instance_id: uuid::Uuid::new_v4().to_string(), lifetime_id: "movie".into(),
         attachment_id: uuid::Uuid::new_v4().to_string(), family_id: verified.family.id().to_owned() };
     let transaction_id = uuid::Uuid::new_v4().to_string();
@@ -441,17 +469,17 @@ async fn shared_audio_vod_reserves_cpu_only_and_publishes_one_audio_track() {
     let mut schedule = super::vod_serve_quality::QualityScheduleRequest { version: 1, generation: generation.clone(), control_epoch: 1,
         attachment, transition: Some(prepare.clone()), window: None, frontier: Some(super::vod_serve_quality::QualityAppendFrontier {
             timescale: rung.grid().numerator, through_tick: 0 }) };
-    let prepared = serve.quality_schedule_before(&parent, "node-a", &schedule, Instant::now() + Duration::from_secs(12)).await
+    let prepared = serve.quality_schedule_before(&parent, &owner_node, &schedule, Instant::now() + Duration::from_secs(12)).await
         .expect("owner prepares actual family");
     assert_eq!(prepared.ledger.transactions[0].state, QualityState::Ready);
-    let replay = serve.quality_schedule_before(&parent, "node-a", &schedule, Instant::now() + Duration::from_secs(12)).await.expect("prepare replay");
+    let replay = serve.quality_schedule_before(&parent, &owner_node, &schedule, Instant::now() + Duration::from_secs(12)).await.expect("prepare replay");
     assert_eq!(prepared.receipt, replay.receipt);
     assert_eq!(prepared.ledger.transactions[0].preparation, replay.ledger.transactions[0].preparation);
     schedule.frontier = None;
     let mut transition = prepare.clone(); transition.sequence = 2;
     transition.operation = QualityOperation::Scheduled { intervals: prepared.ledger.transactions[0].ready.clone() };
     schedule.transition = Some(transition.clone());
-    let reserved = serve.quality_schedule_before(&parent, "node-a", &schedule, Instant::now() + Duration::from_secs(12)).await.expect("physical reservation CAS");
+    let reserved = serve.quality_schedule_before(&parent, &owner_node, &schedule, Instant::now() + Duration::from_secs(12)).await.expect("physical reservation CAS");
     assert_eq!(reserved.ledger.transactions[0].state, QualityState::Scheduled);
     assert!(!reserved.ledger.shared_audio_reserved().is_empty(), "same CAS pins verified AAC dependencies");
     assert_eq!(schedule_store.quality_reserved_intervals(rung.rendition_id()).await.expect("durable video pins"), reserved.ledger.transactions[0].reserved);
@@ -459,7 +487,7 @@ async fn shared_audio_vod_reserves_cpu_only_and_publishes_one_audio_track() {
     window.window = Some(super::vod_serve_quality::QualityReadyWindow { transaction_id: transaction_id.clone(),
         frontier: super::vod_serve_quality::QualityAppendFrontier { timescale: rung.grid().numerator,
             through_tick: reserved.ledger.transactions[0].reserved[0].through_tick } });
-    let extended = serve.quality_schedule_before(&parent, "node-a", &window, Instant::now() + Duration::from_secs(12)).await.expect("next append window");
+    let extended = serve.quality_schedule_before(&parent, &owner_node, &window, Instant::now() + Duration::from_secs(12)).await.expect("next append window");
     assert_eq!(extended.ledger.latest_intent_revision, reserved.ledger.latest_intent_revision);
     assert_eq!(extended.ledger.accepted_sequence, reserved.ledger.accepted_sequence);
     assert_eq!(extended.ledger.transactions[0].reserved, reserved.ledger.transactions[0].reserved);
@@ -468,16 +496,16 @@ async fn shared_audio_vod_reserves_cpu_only_and_publishes_one_audio_track() {
     transition.sequence = 3;
     transition.operation = QualityOperation::CancelUnappended { completed: reserved.ledger.transactions[0].reserved.clone() };
     schedule.transition = Some(transition.clone());
-    let cancelled = serve.quality_schedule_before(&parent, "node-a", &schedule, Instant::now() + Duration::from_secs(12)).await.expect("lost append cancellation");
+    let cancelled = serve.quality_schedule_before(&parent, &owner_node, &schedule, Instant::now() + Duration::from_secs(12)).await.expect("lost append cancellation");
     assert_eq!(cancelled.ledger.transactions[0].state, QualityState::Appended);
-    assert!(serve.quality_schedule_before(&parent, "node-a", &window, Instant::now() + Duration::from_secs(12)).await.is_err(), "cancelled intent cannot renew readiness");
+    assert!(serve.quality_schedule_before(&parent, &owner_node, &window, Instant::now() + Duration::from_secs(12)).await.is_err(), "cancelled intent cannot renew readiness");
     assert_eq!(cancelled.ledger.transactions[0].reserved, reserved.ledger.transactions[0].reserved);
     assert_eq!(cancelled.ledger.shared_audio_reserved(), reserved.ledger.shared_audio_reserved());
     transition.sequence = 4;
     transition.operation = QualityOperation::Disposed { artifacts: cancelled.ledger.transactions[0].reserved.iter()
         .chain(cancelled.ledger.shared_audio_reserved()).map(|interval| interval.artifact_id.clone()).collect() };
     schedule.transition = Some(transition);
-    let disposed = serve.quality_schedule_before(&parent, "node-a", &schedule, Instant::now() + Duration::from_secs(12)).await.expect("named completed disposal");
+    let disposed = serve.quality_schedule_before(&parent, &owner_node, &schedule, Instant::now() + Duration::from_secs(12)).await.expect("named completed disposal");
     assert!(disposed.ledger.transactions[0].reserved.is_empty());
     assert!(disposed.ledger.shared_audio_reserved().is_empty());
     assert!(schedule_store.quality_reserved_intervals(rung.rendition_id()).await.expect("released pins").is_empty());
@@ -555,12 +583,16 @@ async fn continuous_reservation_verifies_actual_init_and_sample_bounds() {
     let output = tokio::process::Command::new(ffmpeg_bin()).args([
         "-hide_banner","-loglevel","error","-f","lavfi","-i",
         "testsrc2=size=64x36:rate=24000/1001","-frames:v","96",
+        // The continuous recipe's tagging: newer ffmpeg leaves the stream
+        // unspecified unless the frames carry BT.709 themselves.
+        "-vf","setparams=range=limited:color_primaries=bt709:color_trc=bt709:colorspace=bt709",
         "-c:v","libx264","-preset","veryfast","-threads","1",
         "-profile:v","high","-level:v","5.0","-pix_fmt","yuv420p","-bf","0",
         "-g","48","-keyint_min","48","-sc_threshold","0",
         "-color_primaries","bt709","-color_trc","bt709","-colorspace","bt709",
         "-color_range","tv","-an","-video_track_timescale","24000",
-        "-movflags","frag_keyframe+empty_moov+default_base_moof+delay_moov",
+        // As the continuous recipe does: newer ffmpeg writes `colr` only on request.
+        "-movflags","frag_keyframe+empty_moov+default_base_moof+delay_moov+write_colr",
         "-f","mp4","pipe:1",
     ]).kill_on_drop(true).output().await.expect("encode interval fixture");
     assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));

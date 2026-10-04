@@ -3804,7 +3804,9 @@
         let base = crate::test_tempdir().expect("reserved traversal");
         let store = Arc::new(SqliteStore::open_in_memory().expect("store"));
         let generation = uuid::Uuid::new_v4().to_string();
-        activate_control_route(&store, "reserved-traversal", &generation).await;
+        // A route's session id is a capability UUID; the store refuses others.
+        let session = uuid::Uuid::new_v4().to_string();
+        activate_control_route(&store, &session, &generation).await;
         let serve = local_serve(base.path().to_path_buf(), store.clone());
         let mut rendition = synthetic_rendition(base.path()).await;
         Arc::get_mut(&mut rendition).expect("private rendition").key = "b".repeat(64);
@@ -3817,7 +3819,7 @@
             rendition_id: rendition.key.clone(), timescale: rendition.timescale,
             from_tick: entry.start_ticks, through_tick: entry.end_ticks(), byte_length: original.len() as u64 };
         let attachment = QualityAttachment { client_instance_id: uuid::Uuid::new_v4().to_string(),
-            lifetime_id: "reserved-traversal".into(), attachment_id: uuid::Uuid::new_v4().to_string(),
+            lifetime_id: session.clone(), attachment_id: uuid::Uuid::new_v4().to_string(),
             family_id: "c".repeat(64) };
         let mut ledger = QualityLedger::new(generation.clone(), 1, attachment.clone()).expect("ledger");
         let transaction = uuid::Uuid::new_v4().to_string();
@@ -3867,14 +3869,15 @@
         // Make the reservation lookup for this key fail: two ledgers name one
         // immutable artifact with different facts.
         let entry = rendition.plan.entry(0).expect("entry");
-        for (session, byte_length) in [("ordinary-a", 10_u64), ("ordinary-b", 11)] {
+        for byte_length in [10_u64, 11] {
+            let session = uuid::Uuid::new_v4().to_string();
             let generation = uuid::Uuid::new_v4().to_string();
-            activate_control_route(&store, session, &generation).await;
+            activate_control_route(&store, &session, &generation).await;
             let interval = QualityInterval { artifact_id: "d".repeat(64),
                 rendition_id: rendition.key.clone(), timescale: rendition.timescale,
                 from_tick: entry.start_ticks, through_tick: entry.end_ticks(), byte_length };
             let attachment = QualityAttachment { client_instance_id: uuid::Uuid::new_v4().to_string(),
-                lifetime_id: session.into(), attachment_id: uuid::Uuid::new_v4().to_string(),
+                lifetime_id: session.clone(), attachment_id: uuid::Uuid::new_v4().to_string(),
                 family_id: "c".repeat(64) };
             let mut ledger = QualityLedger::new(generation.clone(), 1, attachment.clone()).expect("ledger");
             let transaction = uuid::Uuid::new_v4().to_string();

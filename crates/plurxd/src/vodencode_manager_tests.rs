@@ -845,6 +845,17 @@ quality_catalog: None,
 
 #[tokio::test]
 async fn continuous_worker_roles_resolve_video_only_and_one_cpu_soundtrack() {
+    // An unoptimized test frame keeps a stack slot for every future it awaits.
+    // Build each production entry point in its own short frame and await it
+    // boxed, so this walk of every role fits the default 2 MiB test stack.
+    type Boxed<'a, T> = std::pin::Pin<Box<dyn std::future::Future<Output = Result<T, String>> + 'a>>;
+    fn create<'a>(manager: &'a TranscodeManager, request: &'a SessionRequest) -> Boxed<'a, StartInfo> {
+        Box::pin(manager.create_session(request, "test"))
+    }
+    fn prepare<'a>(manager: &'a TranscodeManager, request: &'a SessionRequest,
+        file: &'a plurx_core::domain::MediaFile) -> Boxed<'a, Option<Arc<crate::vodencode::Encoding>>> {
+        Box::pin(manager.prepare_vod_encoding(request, file))
+    }
     use plurx_core::store::SqliteStore;
     let base = crate::test_tempdir().expect("continuous worker fixture");
     let source = plurx_core::testfixtures::source("h264");
@@ -860,7 +871,13 @@ async fn continuous_worker_roles_resolve_video_only_and_one_cpu_soundtrack() {
         &probe,
     ).await.expect("attested file");
     let file = store.get_file(file_id).await.expect("read file").expect("seeded file");
-    let manager = TranscodeManager::new(store, base.path().join("manager"), EncoderCaps::default(), Pipeline::Cpu);
+    // Production planning always has a cache identity and the startup-bound
+    // FFprobe; normalized continuous geometry is refused without either.
+    let decode_probe = crate::decode_facts::DecodeProbeIdentity::discover_fixture(&crate::ffmpeg::bound_ffprobe_bin())
+        .await.expect("bound FFprobe identity");
+    let manager = TranscodeManager::new(store, base.path().join("manager"), EncoderCaps::default(), Pipeline::Cpu)
+        .with_cache(base.path().join("cache"), "test-ffmpeg".into(), "test-node".into())
+        .with_decode_probe(Some(decode_probe));
     let mut request = SessionRequest {
         continuous_media: Some(Box::new(ContinuousMediaRequest {
             controlled: false,
@@ -883,15 +900,18 @@ async fn continuous_worker_roles_resolve_video_only_and_one_cpu_soundtrack() {
     };
     let planning = manager.store.playback_planning_snapshot(file.id,
         &crate::transcode::QUALITY_PLANNING_KEYS).await.expect("planning snapshot").expect("source");
+    // HLS create resolves the concrete soundtrack before it asks for the
+    // catalog and carries that same index in the session request.
+    request.audio_index = TranscodeManager::candidate_audio_from_snapshot(&planning, request.audio_index);
     let catalog = manager.quality_candidates_from_snapshot_progress(&planning,
         &plurx_core::playback::DeviceCaps { v: 2, ..Default::default() },
-        None, 0, None, Presentation::Vod, None, None, None).await;
+        request.audio_index, 0, None, Presentation::Vod, None, None, None).await;
     let candidate = catalog.iter().find(|candidate| candidate.normalized_geometry
         && candidate.grade == OutputGrade::Sdr
         && candidate.route == plurx_core::playback::candidate::CandidateRoute::Encode).expect("normalized SDR catalog candidate");
     request.kind = SessionKind::Transcode { height: i64::from(candidate.target_height) };
     request.candidate_context = Some(Box::new(TranscodeManager::candidate_context(candidate)));
-    let video = manager.prepare_vod_encoding(&request, &file).await.expect("video planning from catalog").expect("video recipe");
+    let video = prepare(&manager, &request, &file).await.expect("video planning from catalog").expect("video recipe");
     assert!(video.candidate_recipe.is_none(), "video-only work is not a muxed candidate speed proof");
     assert!(!video.plan.options().input_has_audio);
     assert!(video.shared_audio.is_none());
@@ -900,7 +920,7 @@ async fn continuous_worker_roles_resolve_video_only_and_one_cpu_soundtrack() {
     assert!(video_args.iter().any(|arg| arg == "-an"));
     assert!(!video_args.iter().any(|arg| arg == "aac"));
     request.continuous_media.as_mut().expect("continuous role").role = ContinuousMediaRole::SharedAudio;
-    let audio = manager.prepare_vod_encoding(&request, &file).await.expect("audio planning").expect("audio recipe");
+    let audio = prepare(&manager, &request, &file).await.expect("audio planning").expect("audio recipe");
     assert!(audio.shared_audio.is_some());
     assert!(audio.candidate_recipe.is_none(), "shared AAC is not a muxed candidate speed proof");
     assert!(!audio.resources().hardware_slot);
@@ -925,9 +945,9 @@ async fn continuous_worker_roles_resolve_video_only_and_one_cpu_soundtrack() {
     let mut incumbent_request = request.clone();
     incumbent_request.continuous_media = None;
     incumbent_request.request_id = Some(uuid::Uuid::new_v4().to_string());
-    let incumbent = manager.create_session(&incumbent_request, "test").await.expect("healthy incumbent");
+    let incumbent = create(&manager, &incumbent_request).await.expect("healthy incumbent");
     manager.store.put_setting(plurx_core::store::keys::SW_POOL_THREADS, "3").await.expect("audio-only capacity");
-    let refused = manager.create_session(&request, "test").await.err().expect("the whole video/audio group does not fit");
+    let refused = create(&manager, &request).await.err().expect("the whole video/audio group does not fit");
     assert!(refused.contains("vod_family_capacity"));
     assert!(manager.vod.playlist(&incumbent.session_id).await.expect("incumbent remains registered").result.is_ok(),
         "failed family admission must not run the legacy supersession sweep");
@@ -944,10 +964,10 @@ async fn continuous_worker_roles_resolve_video_only_and_one_cpu_soundtrack() {
     media.companion_context = Some(Box::new(ContinuousCompanionContext {
         height: i64::from(companion.target_height), candidate: TranscodeManager::candidate_context(companion),
     }));
-    let refused = manager.create_session(&family, "test").await.err().expect("three-role capacity denial");
+    let refused = create(&manager, &family).await.err().expect("three-role capacity denial");
     assert!(refused.contains("vod_family_capacity"), "both derived video and AAC roles validate before admission: {refused}");
     assert!(manager.vod.playlist(&incumbent.session_id).await.expect("incumbent survives family denial").result.is_ok());
     manager.vod.end(&incumbent.session_id, crate::vodserve::Terminal::Deleted).await;
     request.continuous_media.as_mut().expect("continuous role").version = 2;
-    assert!(manager.prepare_vod_encoding(&request, &file).await.is_err());
+    assert!(prepare(&manager, &request, &file).await.is_err());
 }

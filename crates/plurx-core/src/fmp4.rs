@@ -5985,6 +5985,10 @@ mod tests {
             "testsrc2=size=640x360:rate=24000/1001",
             "-t",
             "0.3",
+            // The continuous recipe's own tagging: newer ffmpeg leaves the
+            // stream unspecified unless the frames themselves carry BT.709.
+            "-vf",
+            "setparams=range=limited:color_primaries=bt709:color_trc=bt709:colorspace=bt709",
             "-c:v",
             "libx264",
             "-profile:v",
@@ -6002,8 +6006,9 @@ mod tests {
             "-an",
             "-video_track_timescale",
             "24000",
+            // As the continuous recipe does: newer ffmpeg writes `colr` only on request.
             "-movflags",
-            "frag_keyframe+empty_moov+default_base_moof+delay_moov",
+            "frag_keyframe+empty_moov+default_base_moof+delay_moov+write_colr",
             "-f",
             "mp4",
             "pipe:1",
