@@ -1,8 +1,26 @@
 # Status — what the agent is working on and where it stands
 
-**Updated:** 2026-09-28 · Kept current by the working agent in the same
+**Updated:** 2026-10-04 · Kept current by the working agent in the same
 commit as the work it describes; a stale entry here is a bug. Newest effort
 first.
+
+## A leader restart no longer ends progressive or Live TV playback
+
+**Branch `fix/progressive-fence-grace`, one PR to `main`; not deployed.**
+Paul's standing rule is that a quorum leader restart must not interrupt
+playback. #798 gave the rolling registry a 5 s serving-fence grace; two more
+owners of running playback still treated any fence generation bump as final,
+even after authority came back. The progressive `stream.mp4` remux owner
+killed ffmpeg and ended the response, with no respawn, on every node. On the
+Live TV owner, the session observer, tuner fan-out, lease loop and request
+fence ended every session, shared transport and recording, and requests
+during the blip answered 410. Both now use #798's policy, moved beside the
+fence as `serving_fence::SessionGrace`. Brief losses keep the work, and
+nothing is published while authority is lost. Live TV requests answer a
+retryable 503. Sustained losses end the work within one grace, as before.
+RCA: `docs/streaming/BAD-BOYS-APPLE-TV-INTERRUPTIONS-RCA.md` finding 6.
+Still owed: the GPT leader-restart check under live progressive, rolling and
+Live TV playback, before and after deploy.
 
 ## Content analysis stopped: the queue's receipt bound is the next cliff after #608
 

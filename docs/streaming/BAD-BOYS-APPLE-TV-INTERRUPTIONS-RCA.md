@@ -1,7 +1,8 @@
 # Apple TV interruptions on a 79.5 GB remux: why they happened and what fixes them
 
-**Status:** findings 3, 4 and 5 fixed (fence grace, resumable attestation,
-rolling deferral); findings 1 and 2 are deploy-procedure recommendations. **Written:** 2026-10-04 EDT. **Incident build:**
+**Status:** findings 3, 4, 5 and 6 fixed (fence grace, resumable attestation,
+rolling deferral, the same grace for progressive and Live TV playback);
+findings 1 and 2 are deploy-procedure recommendations. **Written:** 2026-10-04 EDT. **Incident build:**
 `aa3d77101` (PR #788) on all three voters. **Title:** *Bad Boys: Ride or Die*
 (2024), catalog file 5208, a 79.5 GB 2160p HEVC remux, played on the Apple TV
 from media1.
@@ -205,6 +206,78 @@ Regressions in `transcode/tests/chunk_03.rs`:
 - `rolling_publication_budget_wedged_waiting_viewer_is_retired_after_the_pause_grace`
 - `rolling_publication_budget_low_rate_retires_before_the_window_can_skip`
   (unchanged, still retires)
+
+### Finding 6 — progressive `stream.mp4` and Live TV had the same coupling (FIXED)
+
+Finding 3's fix covered the rolling-session registry only. Two other owners
+of running playback compared the generation they were admitted under with the
+fence's current one, and generations only rise, so any loss ended them for
+good, even after authority had returned within milliseconds:
+
+- **Progressive remux** (`http/stream.rs`, since `025c65bb7`, 2026-08-22).
+  The child owner broke on `authority_lost_since(admitted_generation)`,
+  killed ffmpeg and ended the response body. A progressive remux never
+  respawns, so every `stream.mp4` play on every node stopped on a leader
+  restart. A unit test pinned the behaviour ("publish recovery before the
+  owner gets a scheduling point ... must still make the owner reap the
+  child").
+- **Live TV on its owner node** (`live_tv.rs`, `live_tv/dvr.rs`,
+  `live_tv/resource.rs`). The session observer polled `is_current` every
+  25 ms, the tuner fan-out checked it per chunk, and the per-second session
+  fence, the transport lease loop and every playlist/segment request
+  (answering 410) checked it too. A leader restart drops the owner's fence
+  like every voter's, so every Live TV session, shared tuner transport and
+  recording on the owner ended. A follower's own blip ended nothing: its
+  ingress only checks `is_ready` and answers 503 meanwhile.
+
+`live_tv.rs`'s guide refresh loop also subscribes to the fence; on a loss it
+skips one refresh and retries, which is harmless.
+
+**Fix.** One policy for every owner of running work.
+`serving_fence::SessionGrace` is #798's outage budget, moved beside the fence
+with `SERVING_FENCE_SESSION_GRACE`; the rolling registry's loop now calls it
+unchanged.
+
+- The progressive remux owner resolves a loss through it: a loss that
+  recovers inside the grace keeps ffmpeg and the response, and the owner
+  adopts the current generation; one that outlasts it ends the stream as
+  before. The body publishes only while authority is held (ffmpeg blocks on
+  its pipe meanwhile) and learns of an expiry through the owner's `fenced`
+  token, which a natural exit never fires.
+- Live TV holds a `LiveTvAuthority`. Admissions and commits still use the
+  exact generation. Running work asks `running(generation)`, which stays true
+  until a loss outlasts the grace; then the authority's one loop raises a
+  running floor to the loss generation and everything admitted before it stops
+  at its next check. While authority is lost, requests answer a retryable
+  `serving_fenced` 503 instead of 410, and a joiner can still join a transport
+  that survived. Keeping tuner transports and recordings writing through the
+  grace is safe because single ownership lives in the replicated resource
+  ledger: a replacement owner can claim a capture or an ingest only after this
+  owner's 30 s lease (renewed every 5 s) has lapsed, so at least twenty
+  seconds of lease remain when the grace runs out.
+
+A node that has truly lost authority still stops serving within one grace on
+every path.
+
+Not verified here: whether the Live TV ledger's renewal and snapshot Store
+calls ride out an election (the Store's own quorum-recovery budget suggests
+they do); the leader-restart device check covers it.
+
+Regressions:
+
+- `http/stream.rs`: `remux_owner_keeps_the_child_through_a_brief_loss`,
+  `remux_owner_reaps_the_child_after_a_sustained_loss`,
+  `remux_owner_losses_after_a_recovery_share_one_grace`,
+  `remux_owner_adopts_a_new_generation_when_authority_is_already_back`,
+  `remux_owner_reaps_the_child_when_the_fence_closes_during_a_loss`,
+  `remux_body_publishes_nothing_while_authority_is_lost`
+- `live_tv.rs`: `live_tv_running_work_survives_a_brief_serving_loss`,
+  `live_tv_running_work_ends_after_a_sustained_serving_loss`,
+  `live_tv_losses_after_a_recovery_share_one_grace`,
+  `live_tv_running_work_survives_a_generation_bump_with_authority_back`,
+  `live_tv_running_work_ends_when_the_fence_closes_during_a_loss`,
+  `a_loss_inside_the_grace_keeps_the_session_and_refuses_requests_retryably`
+- `live_tv/dvr.rs`: `a_transport_keeps_writing_through_a_loss_inside_the_grace`
 
 ## 3. Evidence sources
 
