@@ -20,11 +20,12 @@ feeding an AVR keeps lossless TrueHD instead of a 256 kb/s AAC downmix: the box
 has no TrueHD decoder, the receiver does, and the claim follows the route. It is
 recomputed on every decision, because unplugging HDMI changes the answer.
 
-> Status: **v0.3.0**, build `144` — continuous quality: manual and Auto
+> Status: **v0.3.0**, build `145` — continuous quality: manual and Auto
 > quality changes adapt inside the one player, with owned outputs and release
-> fences around a prepared replacement. Production and test sources compile;
+> fences around a prepared replacement, on top of current main's recovery
+> parity and audio-focus handover. Production and test sources compile;
 > physical-device transitions remain unmeasured.
-> The same build carries current main's decoder envelopes, which compact conservatively
+> Build `144` — decoder envelopes compact conservatively
 > while preserving crossing limits, profiles and display grades. The bounded
 > contract is negotiated with the server; no evidence is truncated. Physical
 > TCL/Streamer acceptance remains outstanding.
