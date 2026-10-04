@@ -8,7 +8,9 @@ const RETAINED_GC_BATCH: usize = 32;
 
 #[path = "rolling_retained.rs"]
 mod rolling_retained;
-pub(crate) use rolling_retained::{RollingArtifact, RollingCollection};
+pub(crate) use rolling_retained::{
+    RetainedOutputRow, RetainedRelease, RollingArtifact, RollingCollection,
+};
 
 /// Process-private measured authority. Serialized rates cannot construct it.
 pub(crate) struct MeasuredCandidateCostProof {
@@ -536,6 +538,10 @@ struct RetainedState {
     startup_scan: Option<std::fs::ReadDir>,
     startup_done: bool,
     orphans: VecDeque<PathBuf>,
+    /// Live, unpublished rolling collections: what free-space shedding
+    /// abandons and what Activity lists as collecting. Weak, so this index
+    /// never keeps a session's collection alive.
+    collections: HashMap<uuid::Uuid, Weak<rolling_retained::RollingCollection>>,
 }
 
 impl RetainedState {
@@ -629,6 +635,17 @@ impl RetainedArtifactRegistry {
         Some(Arc::new(
             super::copy_preparation::PreparationAllowance::new(shared, nonce, cap),
         ))
+    }
+
+    /// What `budget` still admits beside retained bytes and open
+    /// reservations.
+    pub(super) fn remaining(&self, budget: u64) -> u64 {
+        let state = self.state.lock().expect("retained registry lock");
+        let reserved = state
+            .preparations
+            .values()
+            .fold(0_u64, |sum, bytes| sum.saturating_add(*bytes));
+        budget.saturating_sub(state.bytes.saturating_add(reserved))
     }
 
     pub(super) fn release_preparation(&self, nonce: uuid::Uuid) {
@@ -901,7 +918,7 @@ impl RetainedArtifactRegistry {
         let Some(path) = candidate else {
             return;
         };
-        match remove_artifact_batch(&path).await {
+        match remove_artifact_within(&path, Instant::now() + RETAINED_GC_TICK_BUDGET).await {
             Ok(true) => {
                 self.state
                     .lock()
@@ -1604,6 +1621,24 @@ async fn retained_hard_link(
     })
     .await
     .map_err(io::Error::other)?
+}
+
+/// How long one collector tick may spend unlinking one directory. A batch of
+/// 32 files per 30 s tick took about 56 minutes to release a two-hour rolling
+/// title; this keeps each tick bounded without a second scheduler.
+pub(super) const RETAINED_GC_TICK_BUDGET: Duration = Duration::from_millis(250);
+
+/// [`remove_artifact_batch`] repeated until the directory is gone or the
+/// deadline passes. `Ok(true)` only when the directory no longer exists.
+pub(super) async fn remove_artifact_within(path: &Path, deadline: Instant) -> io::Result<bool> {
+    loop {
+        if remove_artifact_batch(path).await? {
+            return Ok(true);
+        }
+        if Instant::now() >= deadline {
+            return Ok(false);
+        }
+    }
 }
 
 async fn remove_artifact_batch(path: &Path) -> io::Result<bool> {
@@ -2477,5 +2512,51 @@ mod tests {
                 .is_none());
             assert!(!outside.path().join(".owner.lock").exists());
         }
+    }
+
+    // ---- D3 (main-merge defects 2026-10-04): prompt, bounded release ------
+
+    fn d3_rolling_tree(dir: &Path, segments: usize) {
+        std::fs::create_dir_all(dir).expect("artifact dir");
+        std::fs::write(dir.join("init.mp4"), b"init").expect("init");
+        for index in 0..segments {
+            std::fs::write(dir.join(format!("seg{index:05}.m4s")), [index as u8; 16])
+                .expect("segment");
+        }
+    }
+
+    #[tokio::test]
+    async fn retired_rolling_directory_is_deleted_within_one_tick() {
+        // A two-hour title is ~1,800 segments: at 32 files per 30 s tick
+        // the old collector needed about 56 minutes to release it.
+        let temp = crate::test_tempdir().expect("tick");
+        let dir = temp.path().join("artifact");
+        d3_rolling_tree(&dir, 1_800);
+        assert!(
+            remove_artifact_within(&dir, Instant::now() + RETAINED_GC_TICK_BUDGET)
+                .await
+                .expect("bounded removal"),
+            "one tick's budget releases a whole two-hour rolling artifact"
+        );
+        assert!(!dir.exists());
+    }
+
+    #[tokio::test]
+    async fn rolling_orphans_from_a_crash_are_swept_at_first_maintain() {
+        let temp = crate::test_tempdir().expect("orphan");
+        let orphan = temp
+            .path()
+            .join(".retained")
+            .join(uuid::Uuid::new_v4().to_string());
+        // A rolling collection's directory has no manifest: after a crash it
+        // is an orphan, and retention is refused while any remain.
+        d3_rolling_tree(&orphan, 600);
+        let serve = crate::vodserve::tests::bare_serve(temp.path());
+        serve.shared.retained_artifacts.collect(temp.path()).await;
+        assert!(
+            !orphan.exists(),
+            "the first maintenance tick sweeps a crash-orphaned rolling directory"
+        );
+        assert_eq!(serve.retained_cleanup_pending(), 0);
     }
 }

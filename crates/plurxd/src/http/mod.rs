@@ -446,6 +446,7 @@ fn http_route_group(path: &str) -> usize {
         | "/api/v1/activity/sessions/{id}"
         | "/api/v1/activity/offline/{id}"
         | "/api/v1/activity/producer"
+        | "/api/v1/activity/retained/{nonce}"
         | "/api/v1/activity/processes/{pid}"
         | "/api/v1/trakt/status"
         | "/api/v1/trakt/link"
@@ -1455,6 +1456,10 @@ pub fn router(state: AppState) -> Router {
         .route(
             "/activity/producer",
             axum::routing::delete(system::stop_producer),
+        )
+        .route(
+            "/activity/retained/{nonce}",
+            axum::routing::delete(system::stop_retained_output),
         )
         .route(
             "/activity/processes/{pid}",

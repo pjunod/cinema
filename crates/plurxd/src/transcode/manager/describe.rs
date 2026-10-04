@@ -65,14 +65,42 @@ impl TranscodeManager {
         T: std::str::FromStr + PartialOrd + Default,
     {
         match self.store.get_setting(key).await {
-            Ok(Some(v)) => v
-                .trim()
-                .parse::<T>()
-                .ok()
-                .filter(|n| *n >= T::default())
-                .unwrap_or(default),
-            _ => default,
+            Ok(value) => Self::parse_num_setting(value.as_deref(), default),
+            Err(_) => default,
         }
+    }
+
+    /// A numeric setting's stored value, or `default` when absent,
+    /// unparseable or negative: [`Self::num_setting`]'s rule for a value the
+    /// caller already holds.
+    pub(super) fn parse_num_setting<T>(value: Option<&str>, default: T) -> T
+    where
+        T: std::str::FromStr + PartialOrd + Default,
+    {
+        value
+            .and_then(|v| v.trim().parse::<T>().ok())
+            .filter(|n| *n >= T::default())
+            .unwrap_or(default)
+    }
+
+    /// [`Self::num_setting`] over a settings map read with the rest of a plan.
+    pub(super) fn num_from<T>(
+        settings: &std::collections::BTreeMap<String, String>,
+        key: &str,
+        default: T,
+    ) -> T
+    where
+        T: std::str::FromStr + PartialOrd + Default,
+    {
+        Self::parse_num_setting(settings.get(key).map(String::as_str), default)
+    }
+
+    /// How an HLS session's input should be paced, given the admin settings
+    /// and what this ffmpeg build supports. `for_copy` picks the pre-5.1
+    /// degradation (see [`crate::ffmpeg::PacingCaps::resolve`]). The settings
+    /// come from the caller's one planning snapshot.
+    pub(super) async fn pacing_from(rate: f64, burst: f64, for_copy: bool) -> Pacing {
+        pacing_caps().await.resolve(rate, burst, for_copy)
     }
 
     /// Conservative shape guarantee for a peer whose serving contract may
@@ -97,19 +125,6 @@ impl TranscodeManager {
             .ok()
             .flatten()
             .is_some_and(|value| value.trim() == "1")
-    }
-
-    /// How an HLS session's input should be paced, given the admin settings
-    /// and what this ffmpeg build supports. `for_copy` picks the pre-5.1
-    /// degradation (see [`crate::ffmpeg::PacingCaps::resolve`]).
-    pub(super) async fn pacing(&self, for_copy: bool) -> Pacing {
-        let rate = self
-            .num_setting(keys::HLS_READRATE, HLS_READRATE_DEFAULT)
-            .await;
-        let burst = self
-            .num_setting(keys::HLS_BURST_SECS, HLS_BURST_SECS_DEFAULT)
-            .await;
-        pacing_caps().await.resolve(rate, burst, for_copy)
     }
 
     /// Hardware slots in use, and the cap. The pair is the diagnostic: "2"
@@ -943,11 +958,18 @@ impl TranscodeManager {
     pub(super) async fn try_lang_prefs(
         &self,
     ) -> Result<plurx_core::tracks::LangPrefs, plurx_core::error::StoreError> {
-        let mut prefs = plurx_core::tracks::LangPrefs::default();
         let settings = self
             .store
             .get_settings(&[keys::AUDIO_LANG, keys::SUB_LANG, keys::SUB_MODE])
             .await?;
+        Ok(Self::lang_prefs_from(&settings))
+    }
+
+    /// The server-wide language preferences from settings a caller holds.
+    pub(super) fn lang_prefs_from(
+        settings: &std::collections::BTreeMap<String, String>,
+    ) -> plurx_core::tracks::LangPrefs {
+        let mut prefs = plurx_core::tracks::LangPrefs::default();
         if let Some(v) = settings.get(keys::AUDIO_LANG) {
             if !v.trim().is_empty() {
                 prefs.audio_lang = v.trim().to_owned();
@@ -961,7 +983,7 @@ impl TranscodeManager {
         if let Some(v) = settings.get(keys::SUB_MODE) {
             prefs.sub_mode = plurx_core::tracks::SubMode::parse(v.trim());
         }
-        Ok(prefs)
+        prefs
     }
 
     /// Kill any session belonging to the same player instance.

@@ -792,6 +792,19 @@ where
                 authorized.landed(read_bytes);
             }
             if let Err(error) = written {
+                // A full disk is the one failure rolling retention can be
+                // the cause of: its links pin bytes the ledger stopped
+                // counting. Shed every unpublished collection on this node.
+                if error.kind() == std::io::ErrorKind::StorageFull {
+                    let collector = shared
+                        .retained
+                        .lock()
+                        .unwrap_or_else(PoisonError::into_inner)
+                        .clone();
+                    if let Some(collector) = collector {
+                        collector.shed_all();
+                    }
+                }
                 let refused = io("writing the temporary object", error);
                 shared.fail_lane(request.lane, refused.reason.clone());
                 return Err(refused);

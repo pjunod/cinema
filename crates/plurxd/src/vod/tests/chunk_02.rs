@@ -2188,7 +2188,7 @@
         req.vod_only = true;
         req.passive_vod = true;
         req.request_id = Some("compatibility-preview-attempt".into());
-        serve.preview_recipe((&req).into(), &file, None).await
+        serve.preview_recipe((&req).into(), &file, &settings(), None).await
             .expect("the indexed copy is predictable without allocation");
         assert!(serve.shared.sessions.lock().await.is_empty());
         assert!(serve.shared.renditions.lock().await.is_empty());
@@ -2199,7 +2199,7 @@
         assert_eq!(serve.shared.completed_cache.load(std::sync::atomic::Ordering::Acquire), 0);
 
         req.kind = SessionKind::Transcode { height: 720 };
-        let error = serve.preview_recipe((&req).into(), &file, None).await
+        let error = serve.preview_recipe((&req).into(), &file, &settings(), None).await
             .expect_err("an unresolved encoded recipe must fail during negotiation");
         assert_eq!(crate::transcode::vod_refusal(&error).expect("typed refusal").0,
             "vod_recipe_unresolved");

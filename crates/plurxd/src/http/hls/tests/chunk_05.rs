@@ -2988,6 +2988,11 @@
             block_budget: Duration::from_secs(8),
             materialize_budget: Duration::from_secs(30),
             blocked_get_cap: 64,
+            index_cluster_cache: false,
+            hevc_unverified_copy: false,
+            live_recovery: true,
+            output_preparation: crate::vodserve::OutputPreparation::Off,
+            output_budget_bytes: 1 << 30,
         }, crate::vodserve::VodAttribution {
             user_name: &user.username,
             item_title: "Fixture",

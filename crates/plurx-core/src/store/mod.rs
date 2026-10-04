@@ -2132,6 +2132,14 @@ pub mod keys {
     /// made the trade backwards. Eviction is LRU, so what survives is what
     /// people actually come back to.
     pub const CACHE_MAX_GB: &str = "cache.max_gb";
+    /// Developer switch for complete-output preparation queued by a VOD start:
+    /// `off` (absent), `copy`, or `copy_and_encoded`. Off is the default — a
+    /// single play must not start a whole-title background encode unasked —
+    /// and turning it off cancels rows already queued.
+    pub const VOD_OUTPUT_PREPARATION: &str = "vod.output_preparation";
+    /// Developer switch for retaining a rolling session's complete output as a
+    /// reusable artifact. Absent means off.
+    pub const VOD_ROLLING_RETENTION: &str = "vod.rolling_retention";
     /// Last user id inspected by the bounded speculative-candidate fan-out.
     /// The singleton lease makes advancing this replicated cursor race-free.
     pub const CACHE_PRETRANSCODE_USER_CURSOR: &str = "cache.pretranscode_user_cursor";

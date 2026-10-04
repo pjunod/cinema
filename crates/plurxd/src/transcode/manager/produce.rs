@@ -253,7 +253,7 @@ impl TranscodeManager {
             .ok()
             .and_then(|bytes| bytes.checked_mul(2))
             .and_then(|bytes| bytes.checked_add(64 * 1024 * 1024))
-            .map(|bytes| bytes.min(settings.completed_cache_bytes))
+            .map(|bytes| bytes.min(settings.output_budget_bytes))
             .filter(|bytes| *bytes > 0)
             .ok_or("encoded retention cap unavailable")?;
         let payload = JobPayload::EncodedOutputPrepare {
@@ -289,7 +289,14 @@ impl TranscodeManager {
                     consumer_kind: "encoded_output".to_owned(),
                     consumer_ref: file.id.to_string(),
                     target_node_id: Some(node.to_owned()),
-                    deadline_ms: None,
+                    // Viewer demand does not outlive the request retention
+                    // window: a row nothing executes expires instead of
+                    // holding a slot of the shared active-row cap forever.
+                    deadline_ms: Some(
+                        now.saturating_add(
+                            plurx_core::store::background_jobs::REQUEST_RETENTION_MS,
+                        ),
+                    ),
                     retain_identity: false,
                 },
             })
@@ -591,7 +598,7 @@ impl TranscodeManager {
             .ok()
             .and_then(|bytes| bytes.checked_mul(2))
             .and_then(|bytes| bytes.checked_add(64 * 1024 * 1024))
-            .map(|bytes| bytes.min(settings.completed_cache_bytes))
+            .map(|bytes| bytes.min(settings.output_budget_bytes))
             .filter(|bytes| *bytes > 0)
             .ok_or("copy preparation allocation cap unavailable")?;
         let intent = CopyOutputIntent {
@@ -661,7 +668,14 @@ impl TranscodeManager {
                     consumer_kind: "copy_output".to_owned(),
                     consumer_ref: file.id.to_string(),
                     target_node_id: Some(node.to_owned()),
-                    deadline_ms: None,
+                    // Viewer demand does not outlive the request retention
+                    // window: a row nothing executes expires instead of
+                    // holding a slot of the shared active-row cap forever.
+                    deadline_ms: Some(
+                        now.saturating_add(
+                            plurx_core::store::background_jobs::REQUEST_RETENTION_MS,
+                        ),
+                    ),
                     retain_identity: false,
                 },
             })

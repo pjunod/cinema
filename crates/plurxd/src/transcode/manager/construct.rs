@@ -518,19 +518,41 @@ impl TranscodeManager {
     /// request paths keep using the last completed (or fail-closed zero)
     /// sample only until its maximum age.
     pub(crate) async fn scratch_space_loop(self: Arc<Self>) {
-        let Some(cache_dir) = self.cache.as_ref().map(|cache| cache.dir.clone()) else {
-            return;
-        };
+        // A node with no pre-transcode cache root still samples the retained
+        // namespace: rolling retention's headroom needs a sample whether or
+        // not there is a cache, and without one retention refuses forever.
+        // The cache's own free-space fields are left exactly as before
+        // (never written) on such a node.
+        let cache_dir = self.cache.as_ref().map(|cache| cache.dir.clone());
         let mut interval = tokio::time::interval(SCRATCH_SAMPLE_INTERVAL);
         interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         loop {
             interval.tick().await;
             let (sender, mut receiver) = tokio::sync::oneshot::channel();
             let sample_path = cache_dir.clone();
+            // The retained namespace holds rolling retention's hard links;
+            // its filesystem is the one their headroom is about. Sampled in
+            // the same OS-call slot, so a dead mount still blocks one thread.
+            let retained_path = self.vod.retained_base();
             if let Err(error) = std::thread::Builder::new()
                 .name("plurx-scratch-sample".to_owned())
                 .spawn(move || {
-                    let _ = sender.send(available_cache_scratch_bytes(&sample_path));
+                    let cache = sample_path
+                        .as_deref()
+                        .and_then(available_cache_scratch_bytes);
+                    let retained = if retained_path.exists() {
+                        available_cache_scratch_bytes(&retained_path)
+                    } else if sample_path.is_some() {
+                        cache
+                    } else {
+                        // The namespace is created by the first collection;
+                        // its parent is the filesystem it will live on.
+                        retained_path
+                            .parent()
+                            .filter(|parent| parent.exists())
+                            .and_then(available_cache_scratch_bytes)
+                    };
+                    let _ = sender.send((cache, retained));
                 })
             {
                 tracing::debug!(
@@ -541,11 +563,17 @@ impl TranscodeManager {
             loop {
                 tokio::select! {
                     sample = &mut receiver => {
-                        let sample = sample.ok().flatten().unwrap_or(0).max(0);
-                        self.scratch_sample_generation.fetch_add(1, AcqRel);
-                        self.scratch_bytes_free.store(sample, Relaxed);
-                        self.scratch_sampled_at_unix_ms.store(unix_ms(), Relaxed);
-                        self.scratch_sample_generation.fetch_add(1, Release);
+                        let (cache, retained) = sample.unwrap_or((None, None));
+                        if cache_dir.is_some() {
+                            let sample = cache.unwrap_or(0).max(0);
+                            self.scratch_sample_generation.fetch_add(1, AcqRel);
+                            self.scratch_bytes_free.store(sample, Relaxed);
+                            self.scratch_sampled_at_unix_ms.store(unix_ms(), Relaxed);
+                            self.scratch_sample_generation.fetch_add(1, Release);
+                        }
+                        if let Some(free) = retained {
+                            self.record_retained_headroom(free);
+                        }
                         break;
                     }
                     _ = interval.tick() => {
@@ -553,6 +581,30 @@ impl TranscodeManager {
                         // Do not submit another one until it actually returns.
                     }
                 }
+            }
+        }
+    }
+
+    /// Publish one retained-headroom sample: free bytes on the retained
+    /// filesystem against everything scratch is authorised to write, from a
+    /// ledger snapshot and cap read in the same pass. When it fails, every
+    /// unpublished rolling collection is abandoned at once.
+    pub(crate) fn record_retained_headroom(&self, free_bytes: i64) {
+        let headroom = self.scratch_ledger.headroom();
+        headroom.record_against(
+            free_bytes,
+            &self.scratch_ledger.snapshot(),
+            &self.scratch_cap,
+        );
+        if headroom.admits(Duration::from_secs(60)).is_err() {
+            let shed = self.vod.shed_rolling_collections();
+            if shed > 0 {
+                tracing::warn!(
+                    target: "plurxd::transcode",
+                    shed,
+                    slack = headroom.slack(),
+                    "rolling retention shed: free-space headroom below the reserve"
+                );
             }
         }
     }
@@ -891,6 +943,13 @@ impl TranscodeManager {
             format!("audio-lang:{audio_lang}"),
             format!("subtitle-lang:{sub_lang}"),
             format!("subtitle-mode:{}", prefs.sub_mode.as_str()),
+            // The audio claim producers plan under is part of every producer
+            // key, so a row planned under another claim is another artifact.
+            format!(
+                "audio-claim:{}",
+                serde_json::to_string(&plurx_core::playback::audio::canonical_producer_claim())
+                    .expect("the producer audio claim serializes")
+            ),
         ] {
             hasher.update((value.len() as u64).to_be_bytes());
             hasher.update(value.as_bytes());
@@ -1049,6 +1108,69 @@ impl TranscodeManager {
             && !self
                 .offline_waiting
                 .load(std::sync::atomic::Ordering::Acquire)
+    }
+
+    /// What the Developer card reports about rolling retention on this node:
+    /// whether session scratch and the retained namespace share a filesystem
+    /// (hard links need it), the live headroom slack, and what the collector
+    /// still owes.
+    pub(crate) async fn rolling_retention_facts(&self) -> RollingRetentionFacts {
+        let base = self.vod.retained_base();
+        let same_filesystem = {
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::MetadataExt;
+                // The namespace may not exist until the first collection;
+                // its parent is the filesystem it will be created on.
+                let probe = if base.exists() {
+                    base.clone()
+                } else {
+                    base.parent()
+                        .map(std::path::Path::to_path_buf)
+                        .unwrap_or(base.clone())
+                };
+                match (
+                    tokio::fs::metadata(&self.work_dir).await,
+                    tokio::fs::metadata(&probe).await,
+                ) {
+                    (Ok(work), Ok(namespace)) => Some(work.dev() == namespace.dev()),
+                    _ => None,
+                }
+            }
+            #[cfg(not(unix))]
+            {
+                Some(false)
+            }
+        };
+        let headroom = self.scratch_ledger.headroom();
+        RollingRetentionFacts {
+            same_filesystem,
+            slack: headroom.slack(),
+            admits: headroom.admits(Duration::from_secs(60)),
+            rows: self.vod.retained_snapshot(),
+            cleanup_pending: self.vod.retained_cleanup_pending(),
+        }
+    }
+
+    /// Rolling artifacts this node holds or is collecting, for Activity.
+    pub(crate) fn retained_output_snapshot(
+        &self,
+    ) -> Vec<crate::vodserve::retained::RetainedOutputRow> {
+        self.vod.retained_snapshot()
+    }
+
+    /// Activity's Stop for one retained output on this node.
+    pub(crate) fn release_retained_output(
+        &self,
+        nonce: uuid::Uuid,
+    ) -> crate::vodserve::retained::RetainedRelease {
+        self.vod.release_retained_output(nonce)
+    }
+
+    /// What `budget` still admits for complete output in the retained
+    /// registry: the capacity an output-preparation claim is checked against.
+    pub(crate) fn retained_output_remaining(&self, budget: u64) -> u64 {
+        self.vod.retained_remaining(budget)
     }
 
     pub(crate) fn copy_preparation_attachment_observation(&self) -> u64 {

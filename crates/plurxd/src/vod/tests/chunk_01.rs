@@ -480,6 +480,11 @@ use crate::queue_fixture::QueueFixture;
             block_budget: Duration::from_secs(30),
             materialize_budget: Duration::from_secs(30),
             blocked_get_cap: DEFAULT_GLOBAL_WAIT_CAP,
+            index_cluster_cache: false,
+            hevc_unverified_copy: false,
+            live_recovery: true,
+            output_preparation: crate::vodserve::OutputPreparation::Off,
+            output_budget_bytes: 50 << 30,
         }
     }
 

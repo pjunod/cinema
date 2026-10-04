@@ -1439,6 +1439,13 @@ pub struct SqliteStore {
     /// The database file, so a connection a panic left unusable can be
     /// replaced (`housekeeping::lock_or_recover`). `None` in memory.
     path: Option<Arc<PathBuf>>,
+    /// Every settings-bearing read this handle served, in order, as its key
+    /// list. Test builds only (the dev-only `fixtures` feature): plurxd's
+    /// start-path tests assert how many linearizable settings statements one
+    /// Play costs, and a wrapper delegating the whole `Store` surface to count
+    /// four methods is not a thing anyone should maintain.
+    #[cfg(feature = "fixtures")]
+    settings_reads: Arc<Mutex<Vec<Vec<String>>>>,
 }
 
 pub use housekeeping::prometheus_sqlite_health;
@@ -1534,7 +1541,33 @@ impl SqliteStore {
             reads: None,
             token_activity: Arc::default(),
             path: None,
+            #[cfg(feature = "fixtures")]
+            settings_reads: Arc::default(),
         })
+    }
+
+    #[cfg(feature = "fixtures")]
+    pub(crate) fn note_settings_read(&self, keys: &[&str]) {
+        self.settings_reads
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .push(keys.iter().map(|key| (*key).to_owned()).collect());
+    }
+
+    #[cfg(not(feature = "fixtures"))]
+    #[inline(always)]
+    pub(crate) fn note_settings_read(&self, _keys: &[&str]) {}
+
+    /// The settings-bearing reads since the last call, oldest first; each is
+    /// the key list of one statement (`["*"]` for a whole-table snapshot).
+    #[cfg(feature = "fixtures")]
+    pub fn take_settings_reads(&self) -> Vec<Vec<String>> {
+        std::mem::take(
+            &mut *self
+                .settings_reads
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner),
+        )
     }
 
     /// One-time backfill of `hdr_format` from the probe JSON already stored for
@@ -2187,6 +2220,7 @@ impl SettingsStore for SqliteStore {
     }
 
     async fn get_setting(&self, key: &str) -> Result<Option<String>, StoreError> {
+        self.note_settings_read(&[key]);
         let key = key.to_owned();
         self.with_read(move |conn| {
             Ok(conn
@@ -2223,6 +2257,7 @@ impl SettingsStore for SqliteStore {
         first: &str,
         second: &str,
     ) -> Result<(Option<String>, Option<String>), StoreError> {
+        self.note_settings_read(&[first, second]);
         let first = first.to_owned();
         let second = second.to_owned();
         self.with_read(move |conn| {
@@ -2251,6 +2286,7 @@ impl SettingsStore for SqliteStore {
         &self,
         keys: &[&str],
     ) -> Result<std::collections::BTreeMap<String, String>, StoreError> {
+        self.note_settings_read(keys);
         let keys = super::selected_settings_json(keys)?;
         self.with_read(move |conn| {
             // Keep the SQL and its binding in one statement so the placeholder
@@ -2264,6 +2300,7 @@ impl SettingsStore for SqliteStore {
     async fn settings_snapshot(
         &self,
     ) -> Result<std::collections::BTreeMap<String, String>, StoreError> {
+        self.note_settings_read(&["*"]);
         self.with_read(move |conn| {
             let mut stmt = conn.prepare("SELECT key, value FROM settings ORDER BY key")?;
             let rows = stmt.query_map([], |row| {

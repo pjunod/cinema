@@ -89,6 +89,38 @@ pub struct AudioSink {
     pub sample_rates_hz: Vec<u32>,
 }
 
+/// The one audio claim every server-side producer that writes a shared cache
+/// entry plans under: the pre-transcode pass and the content-aware measured
+/// producer. Live lookups are typed whenever a client sends `audio_sinks`
+/// (web, Apple and Android all do), and the recipe digest feeds the typed
+/// delivery, so a producer that planned untyped audio wrote keys no current
+/// client computes.
+///
+/// One artifact per rung cannot serve every client. This claim is a stereo
+/// AAC route that decodes only AAC, so it is reached by:
+///
+/// | Source audio | Artifact carries | Hit by |
+/// |---|---|---|
+/// | AAC (any channels) | the AAC track, copied | every client |
+/// | DTS, TrueHD, FLAC, Opus, PCM | stereo AAC, measured fold | clients on a stereo route with no 6-channel sink |
+/// | AC-3, E-AC-3 | stereo AAC | only clients that cannot decode Dolby (Chrome, Firefox, Android without Dolby decoders); Apple copies, so never |
+/// | MP3 | AAC | nobody: every client copies MP3 |
+/// | any, client sends no sinks | — | nobody; claimless clients keep the untyped key |
+///
+/// Changing it changes every producer key, so it also feeds the speculative
+/// policy generation, which cancels and rediscovers queued producer rows.
+pub fn canonical_producer_claim() -> AudioClaim {
+    AudioClaim {
+        decoders: vec!["aac".to_owned()],
+        sinks: vec![AudioSink {
+            codec: "aac".to_owned(),
+            max_channels: 2,
+            passthrough: false,
+            sample_rates_hz: vec![AUDIO_SAMPLE_RATE],
+        }],
+    }
+}
+
 /// The delivery envelope whose mux rules constrain audio copying.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AudioRoute {
@@ -497,6 +529,23 @@ fn output_admitted(profile: &DeviceProfile, codec: &str, minimum_channels: u8) -
 mod tests {
     use super::*;
     use crate::playback::{default_profile, DeviceCaps};
+
+    #[test]
+    fn the_canonical_producer_claim_is_a_valid_canonical_snapshot() {
+        let claim = canonical_producer_claim();
+        assert!(claim.valid_snapshot());
+        let caps = DeviceCaps {
+            v: DeviceCaps::VERSION,
+            audio: claim.decoders.clone(),
+            audio_sinks: claim.sinks.clone(),
+            ..DeviceCaps::default()
+        };
+        assert_eq!(
+            AudioClaim::from_caps(&caps).expect("valid caps"),
+            Some(claim),
+            "the producer claim is already in the form a client's caps canonicalize to"
+        );
+    }
 
     #[test]
     fn audio_claim_canonicalizes_order_without_inventing_sink_authority() {
