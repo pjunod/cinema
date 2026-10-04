@@ -50,6 +50,21 @@ impl SourceProducerAssociationsSettled {
 }
 
 impl SourceRenditionOwners {
+    pub(super) fn contains_live_assignment(&self, assignment: &SourceDispatchAssignment) -> bool {
+        self.state
+            .lock()
+            .expect("Source rendition owners")
+            .owners
+            .iter()
+            .any(|owner| {
+                owner.assignment.same_identity(assignment)
+                    && !owner
+                        .generations
+                        .lock()
+                        .expect("Source producer associations")
+                        .detached
+            })
+    }
     #[allow(dead_code)] // Source attach remains closed until actor integration.
     pub(super) fn attach(
         &self,

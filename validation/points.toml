@@ -1204,6 +1204,8 @@ paths = [
   "crates/plurxd/src/sharing_client.rs",
   "crates/plurxd/src/sharing_playback_client.rs",
   "crates/plurxd/src/transcode/source_actor.rs",
+  "crates/plurxd/src/transcode/source_control.rs",
+  "crates/plurxd/src/transcode/source_status.rs",
   "crates/plurxd/src/transcode/source_preparation.rs",
   "crates/plurxd/src/transcode/source_subtitles.rs",
   "crates/plurxd/src/vod/source_lifetime.rs",

@@ -1851,3 +1851,101 @@ Denied-lint and normal tracked-hook validation complete the checkpoint.
 The exact pinned denied-warning daemon all-target Clippy check also passed
 in 66 seconds. Production closes the descriptor without publishing a diagnostic
 boolean as authority; only test observers record the descriptor census.
+
+### Candidate current-rendition Source control authority
+
+The next isolated slice starts from descriptor checkpoint
+`d7352bf759d1d299ffadcd48eafdbb7e8544e0e4`. Its private actor factory retains
+an explicit original legacy selection before the common engine normalizes
+the recipe. Auto retains the raw optional height; explicit Original and
+Manual remain distinct. Audio, offset and native/burn selection retain the
+original ask. Legacy create has no directed codec or dynamic-range policy,
+so their absent-policy semantics are Auto. A current control must match the
+complete frozen desired selection; response height and encoder are never
+used to reconstruct it. Initial legacy starts without an intent envelope
+remain reachable. Directed rendition changes, prepared-successor actions,
+acknowledgements and End through this control method remain unavailable;
+End continues through the independently owned actor retirement path.
+
+`SourceViewerActor::control` returns an opaque `SourceOpenedControl` carrying
+the existing process-local control result and an actual counted Source body
+guard. `SourceControlAuthority` has no caller constructor or wire decoder.
+The existing VOD sequence/reader/activity algorithm acquires its actual
+session lifecycle gate, then obtains a fresh Source member/key/file/owned
+route observation and executes the guarded renewal in that gate. It compares
+the exact session/incarnation/node/epoch and requires a live full immutable
+assignment in the rendition association ledger. Held-file, original
+observation time and actor-retirement checks run again after reader-lock
+acquisition immediately before sequence acceptance. The Source branch
+suppresses generic marker prewarm and accepts no preparation admission.
+Ordinary Local controls retain their existing authority and behavior.
+
+The candidate fixtures use actual legacy no-intent Source copy and encoded
+starts, exact seek replay and pause, wrong generation/epoch and directed-audio
+refusal, and an actual held control-response guard across retirement. Separate
+production-layout hooks park the control after observation or immediately
+before acceptance to exercise same-write purpose-floor/saved-switch refusal,
+original-clock expiry and real held-file drift without advancing viewer
+sequence/activity. Qualification receipts will follow actual test results;
+private HTTP control and native client adapters are separate slices.
+
+The control matrix passed six tests, zero ignored, in 28.04 seconds on normal
+stacks. The encoded fixture retains raw Manual 144 while its actual engine
+output is 72; it therefore proves that controls compare the original ask,
+not normalized output. Existing Local VOD control/activity and terminal replay
+passed two tests, zero ignored, in 0.76 seconds. A rapid new sequence follows
+the existing real rate-limit response before retrying; the Source branch does
+not bypass that policy. Wrong immutable generation/epoch and invalid controls
+are checked before any authority extension. Validation uses the actual
+admitted Copy/Transcode segment allowance. The final pinned daemon all-target
+check passed in 50.62 seconds and denied all-target Clippy in 65 seconds
+(after removing an unnecessary clone of a Copy selection). Documentation
+index checks passed four tests and catalog lint covered 2,716 files. The
+normal tracked hook completes the isolated checkpoint; latest Root-base
+integration still requires its own exact qualification.
+
+### Guarded Source VOD observations
+
+The Source-control checkpoint `9ab93d6c1` passed its normal tracked hook. This
+status candidate merges the complete current integration base `9a9109602`
+without changing the existing private `/status` Start envelope. The separately
+owned `/vod-status` transport will consume `SourceOpenedStatus` and its real
+`SourceResponseGuard`; it must keep that guard through accepted response writing.
+
+`SourceVodStatus` projects actual VOD telemetry without a numeric Source file
+ID, Local session object, private failure sentence or path. It retains finite
+real production, control, timeline, bytes, admission and delivery observations,
+including typed producer decision/hold facts. Invalid negative/nonfinite
+metrics or oversized static vocabulary refuse the observation. Status never
+accepts a viewer sequence, changes demand or touches the VOD idle clock.
+
+The observer runs in a detached task under the existing bounded actor/body
+accounting, retaining the actual response guard through nested VOD metadata
+jobs when its waiter times out or cancels. An unresolved job keeps its physical
+obligation; a waiter deadline does not prove settlement. After the read it
+obtains fresh actual owned-route authority and performs the guarded same-write
+renewal, then validates the full current Source assignment, exact VOD response
+owner, readiness, real file fence and original observation deadline before
+returning. It rechecks file/time/retirement after the last owner-lock await.
+
+The actual normal-stack status filter passed seven tests, zero ignored, in
+27.60 seconds: six real one-voter/FFmpeg actor cases and the existing strict
+Source status client. These cases prove private metric projection, unchanged
+viewer activity, counted Body retirement, saved-switch and purpose-floor
+races, original-clock expiry, fresh authority after a five-second parked read,
+and waiter cancellation while the owned observation retains its guard.
+HTTP adapters and the B projection remain separate qualification steps.
+
+On this exact combined candidate, `cargo test -p plurxd --bin plurxd
+source_control_` passed six tests, zero ignored, in 27.63 seconds; existing
+Local `vod_control_` passed two in 0.75 seconds and
+`status_describes_vod_without_touching_its_idle_lease` passed one in 0.15
+seconds. The pinned daemon all-target check passed in 54.81 seconds and
+all-target Clippy with denied warnings in 94 seconds. The status filter command
+is `cargo test -p plurxd --bin plurxd source_status_ -- --nocapture`.
+
+The separate media-resource path still needs an owned nested file-open/metadata
+custody checkpoint: its existing VOD segment opener uses Tokio filesystem jobs,
+and HTTP reader custody alone does not qualify cancellation during that inner
+observation. That audit remains open; this status checkpoint protects its own
+whole observation and does not claim the resource path is settled.

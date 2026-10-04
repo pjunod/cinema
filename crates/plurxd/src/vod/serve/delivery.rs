@@ -319,6 +319,34 @@ impl VodServe {
             })
     }
 
+    /// Read-only Source telemetry gate. The publication must still belong to
+    /// this exact live attachment and complete immutable Source assignment.
+    pub(crate) async fn source_status_owner_is_current(
+        &self,
+        session_id: &str,
+        owner: &ResponseOwner,
+        assignment: &plurx_core::sharing_source_sessions::SourceDispatchAssignment,
+    ) -> bool {
+        let _lifecycle = owner.lifecycle.lock().await;
+        let sessions = self.shared.sessions.lock().await;
+        let Some(session) = sessions.get(session_id) else {
+            return false;
+        };
+        session.tombstone.is_none()
+            && owner.tombstone.is_none()
+            && Arc::ptr_eq(&session.lifecycle, &owner.lifecycle)
+            && Arc::ptr_eq(&session.incarnation, &owner.incarnation)
+            && session.rendition_key == owner.rendition_key
+            && session.supersession_user == assignment.binding().principal().owner_key()
+            && session.rendition.as_ref().is_some_and(|rendition| {
+                owner
+                    .rendition
+                    .as_ref()
+                    .is_some_and(|owned| Arc::ptr_eq(rendition, owned))
+                    && rendition.source_owners.contains_live_assignment(assignment)
+            })
+    }
+
     /// Frozen source facts carried by this exact VOD response owner. HTTP may
     /// prepare a representation from them before final owner admission without
     /// consulting whichever attachment currently reuses the public id.
