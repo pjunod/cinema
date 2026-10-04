@@ -156,15 +156,17 @@ pub fn rewrite_manifest(
         if !line.starts_with('#') && !line.is_empty() {
             let resource =
                 resolve(line, parent, native_session).ok_or("unsupported HLS resource")?;
-            let legal = matches!(
-                (parent, &resource),
-                (Resource::Master, Resource::Media)
-                    | (Resource::Media, Resource::Segment(_))
-                    | (
-                        Resource::SubtitlePlaylist(_),
-                        Resource::SubtitleSegment(_, _)
-                    )
-            );
+            let legal = match (parent, &resource) {
+                (Resource::Master, Resource::Media) | (Resource::Media, Resource::Segment(_)) => {
+                    true
+                }
+                // A subtitle playlist lists only its own track's cues, even
+                // when the native URI is absolute.
+                (Resource::SubtitlePlaylist(track), Resource::SubtitleSegment(owner, _)) => {
+                    track == owner
+                }
+                _ => false,
+            };
             if !legal {
                 return Err("unexpected HLS child resource");
             }
@@ -251,6 +253,18 @@ pub fn rewrite_manifest(
             } else {
                 output.push_str(line);
             }
+        } else if line.starts_with("#EXT")
+            && !matches!(
+                line,
+                "#EXTM3U"
+                    | "#EXT-X-ENDLIST"
+                    | "#EXT-X-DISCONTINUITY"
+                    | "#EXT-X-INDEPENDENT-SEGMENTS"
+            )
+        {
+            // The colon-less tags native playlists emit; any other tag is an
+            // HLS feature this adapter has not qualified.
+            return Err("unsupported HLS extension");
         } else {
             output.push_str(line);
         }
@@ -369,6 +383,40 @@ mod tests {
             false
         )
         .is_err());
+        for (line, parent) in [
+            ("#EXT-X-GAP", Resource::Media),
+            ("#EXT-X-I-FRAMES-ONLY", Resource::Media),
+            ("#EXT-X-UNKNOWN-FLAG", Resource::Master),
+            (
+                "/api/v1/hls/native-private-session/subs/3/seg1.vtt",
+                Resource::SubtitlePlaylist(2),
+            ),
+        ] {
+            assert!(
+                rewrite_manifest(
+                    &if parent == Resource::Media {
+                        format!("#EXTM3U\n#EXT-X-MAP:URI=\"init.mp4\"\n{line}\n")
+                    } else {
+                        format!("#EXTM3U\n{line}\n")
+                    },
+                    &parent,
+                    SESSION,
+                    BASE,
+                    false
+                )
+                .is_err(),
+                "{line}"
+            );
+        }
+        let own = rewrite_manifest(
+            "#EXTM3U\n#EXT-X-INDEPENDENT-SEGMENTS\n/api/v1/hls/native-private-session/subs/2/seg1.vtt\n#EXT-X-DISCONTINUITY\n#EXT-X-ENDLIST\n",
+            &Resource::SubtitlePlaylist(2),
+            SESSION,
+            BASE,
+            false,
+        )
+        .expect("own subtitle track");
+        assert!(own.contains(&format!("{BASE}subs/2/seg1.vtt")));
         assert!(Resource::parse("subs/4294967296/index.m3u8").is_none());
         assert!(Resource::parse("seg4294967296.m4s").is_none());
     }
