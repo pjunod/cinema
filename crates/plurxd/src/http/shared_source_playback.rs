@@ -1746,6 +1746,10 @@ async fn build_real_source_start_fixture(
     let file = directory
         .path()
         .join(if native { "source.mkv" } else { "source.mp4" });
+    // 180 rows so both recipes stay inside the v1 control contract
+    // (heights 144..=2160): Copy names 180 and Encoded a real 144 encode.
+    // A client controls with the rung it started, so a sub-144 fixture
+    // could start but never be controlled.
     let generated = tokio::process::Command::new(crate::ffmpeg::ffmpeg_bin())
         .args([
             "-v",
@@ -1753,7 +1757,7 @@ async fn build_real_source_start_fixture(
             "-f",
             "lavfi",
             "-i",
-            "color=s=128x72:r=24",
+            "color=s=320x180:r=24",
             "-t",
             "2",
             "-c:v",
@@ -1864,7 +1868,7 @@ async fn build_real_source_start_fixture(
     } else {
         None
     };
-    client.execute("INSERT INTO files(id,item_id,path,size,mtime,duration_ms,container,video_codec,width,height,bit_depth,bitrate,probe_json,scanned_at) VALUES(1,$1,$2,$3,$4,2000,'mp4','h264',128,72,8,100000,$5,$6)",hiqlite::params!(item,file.to_string_lossy().to_string(),metadata.len() as i64,mtime,String::from_utf8(probe.stdout).expect("scan JSON"),crate::state::clock_ms()/1000)).await.expect("actual scanned file facts");
+    client.execute("INSERT INTO files(id,item_id,path,size,mtime,duration_ms,container,video_codec,width,height,bit_depth,bitrate,probe_json,scanned_at) VALUES(1,$1,$2,$3,$4,2000,'mp4','h264',320,180,8,100000,$5,$6)",hiqlite::params!(item,file.to_string_lossy().to_string(),metadata.len() as i64,mtime,String::from_utf8(probe.stdout).expect("scan JSON"),crate::state::clock_ms()/1000)).await.expect("actual scanned file facts");
     if let Some(native_tracks) = native_tracks {
         let tracks = serde_json::to_string(&native_tracks).expect("actual embedded subtitle facts");
         client
@@ -1972,12 +1976,12 @@ async fn build_real_source_start_fixture(
         "cinemashare-viewer",
         "c".repeat(64).parse().expect("viewer"),
     );
-    let request=serde_json::to_vec(&serde_json::json!({"reference":reference,"session":{"playback_id":"actual-http-client","request_id":Uuid::new_v4(),"copy":true,"height":72,"quality_auto":false,"presentation":"vod","caps":{"v":2,"video":[{"codec":"h264","max_height":2160,"present":["sdr"]}],"audio":["aac"],"containers":["mp4"],"transports":["hls","progressive"]}}})).expect("canonical complete recipe");
+    let request=serde_json::to_vec(&serde_json::json!({"reference":reference,"session":{"playback_id":"actual-http-client","request_id":Uuid::new_v4(),"copy":true,"height":180,"quality_auto":false,"presentation":"vod","caps":{"v":2,"video":[{"codec":"h264","max_height":2160,"present":["sdr"]}],"audio":["aac"],"containers":["mp4"],"transports":["hls","progressive"]}}})).expect("canonical complete recipe");
     let mut recipe: serde_json::Value =
         serde_json::from_slice(&request).expect("full fixture recipe");
     if encoded {
         recipe["session"]["copy"] = serde_json::json!(false);
-        recipe["session"]["height"] = serde_json::json!(36);
+        recipe["session"]["height"] = serde_json::json!(144);
     }
     if native {
         recipe["session"]["native_subtitles"] = serde_json::json!(true);
