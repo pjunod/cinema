@@ -245,6 +245,173 @@ impl ReceiverStartRegistry {
     }
 }
 impl ReceiverStartActor {
+    async fn current_delivery_attachment(
+        &self,
+        state: &AppState,
+    ) -> Result<
+        (
+            plurx_core::sharing_receiver_sessions::ReceiverSessionWriteAuthority,
+            ReceiverSourceAttachment,
+            Arc<ReceivedSource>,
+        ),
+        ReceiverStartError,
+    > {
+        if self.0.stop.is_cancelled() {
+            return Err(ReceiverStartError::Unresolved);
+        }
+        let (mut attachment, received) = {
+            let owned = self.0.state.lock().expect("receiver owner");
+            if !matches!(owned.start, Some(Ok(_))) || owned.retirement_started {
+                return Err(ReceiverStartError::Unresolved);
+            }
+            let mut attachment = owned.source.clone().ok_or(ReceiverStartError::Unresolved)?;
+            attachment.owner = owned.owner.clone().ok_or(ReceiverStartError::Unresolved)?;
+            (
+                attachment,
+                owned
+                    .received
+                    .clone()
+                    .ok_or(ReceiverStartError::Unresolved)?,
+            )
+        };
+        attachment.owner.now_ms = clock_ms();
+        let authority = state
+            .store
+            .prepare_receiver_session_authority(self.0.intent.clone())
+            .await
+            .map_err(|_| ReceiverStartError::Unresolved)?
+            .ok_or(ReceiverStartError::Unresolved)?;
+        let snapshot = state
+            .store
+            .receiver_source_binding(&authority, &attachment.owner)
+            .await
+            .map_err(|_| ReceiverStartError::Unresolved)?
+            .ok_or(ReceiverStartError::Unresolved)?;
+        let a = &attachment.binding;
+        let b = &snapshot.binding;
+        let original = a
+            .capability_envelope
+            .to_persist()
+            .map_err(|_| ReceiverStartError::Unresolved)?;
+        let current = b
+            .capability_envelope
+            .to_persist()
+            .map_err(|_| ReceiverStartError::Unresolved)?;
+        if snapshot.response_json.is_none()
+            || a.reference != b.reference
+            || a.file_id != b.file_id
+            || a.file_revision != b.file_revision
+            || a.source_request_id != b.source_request_id
+            || a.source_session_id != b.source_session_id
+            || a.source_incarnation_id != b.source_incarnation_id
+            || original != current
+        {
+            return Err(ReceiverStartError::Unresolved);
+        }
+        let hash = plurx_core::auth::hash_token(&attachment.owner.session_id.to_string());
+        state
+            .store
+            .receiver_delivery(&authority, &attachment, &hash)
+            .await
+            .map_err(|_| ReceiverStartError::Unresolved)?
+            .ok_or(ReceiverStartError::Unresolved)?;
+        if self.0.stop.is_cancelled() {
+            return Err(ReceiverStartError::Unresolved);
+        }
+        Ok((authority, attachment, received))
+    }
+    pub(crate) async fn open_source_resource(
+        &self,
+        state: &AppState,
+        resource: &plurx_core::sharing_resources::SharingHlsResource,
+    ) -> Result<crate::sharing_client::SourcePeerResource, ReceiverStartError> {
+        let (_, _, received) = self.current_delivery_attachment(state).await?;
+        self.current_source_status(state).await?;
+        let expected = plurx_core::sharing::SharingIdentity {
+            server_id: self.0.intent.scope.source_server_id,
+            catalogue_epoch: self.0.intent.scope.catalogue_epoch,
+            created_at_ms: 0,
+        };
+        let lifetime: Arc<dyn Send + Sync> = self.0.bodies.reserve()?;
+        let (peer, _) = crate::sharing_client::PeerConnection::verified_with_lifetime(
+            &state.sharing,
+            std::slice::from_ref(&received.endpoint),
+            &expected,
+            lifetime,
+        )
+        .await
+        .map_err(|_| ReceiverStartError::Unresolved)?;
+        let known = crate::sharing_client::SourcePeerLineage::from_start(
+            received.incarnation,
+            &received.response,
+        )
+        .map_err(|_| ReceiverStartError::Unresolved)?;
+        let opened = peer
+            .file_resource(
+                &received.credential,
+                &received.viewer_hash,
+                &self.0.peer_session,
+                &known,
+                resource,
+            )
+            .await
+            .map_err(|_| ReceiverStartError::Unresolved)?;
+        // Source IO can park. Reobserve the original B login, exact route,
+        // current binding and delivery grant before returning any body bytes.
+        self.current_delivery_attachment(state).await?;
+        Ok(opened)
+    }
+    async fn current_source_status(
+        &self,
+        state: &AppState,
+    ) -> Result<crate::sharing_client::SourceStatusReceipt, ReceiverStartError> {
+        if self.0.stop.is_cancelled() {
+            return Err(ReceiverStartError::Unresolved);
+        }
+        // Current B policy precedes the network operation; every following
+        // committing writer still obtains and repeats its own fresh guard.
+        state
+            .store
+            .prepare_receiver_session_authority(self.0.intent.clone())
+            .await
+            .map_err(|_| ReceiverStartError::Unresolved)?
+            .ok_or(ReceiverStartError::Unresolved)?;
+        let received = self
+            .0
+            .state
+            .lock()
+            .expect("receiver owner")
+            .received
+            .clone()
+            .ok_or(ReceiverStartError::Unresolved)?;
+        let expected = plurx_core::sharing::SharingIdentity {
+            server_id: self.0.intent.scope.source_server_id,
+            catalogue_epoch: self.0.intent.scope.catalogue_epoch,
+            created_at_ms: 0,
+        };
+        let lifetime: Arc<dyn Send + Sync> = self.0.bodies.reserve()?;
+        let (mut peer, _) = crate::sharing_client::PeerConnection::verified_with_lifetime(
+            &state.sharing,
+            std::slice::from_ref(&received.endpoint),
+            &expected,
+            lifetime,
+        )
+        .await
+        .map_err(|_| ReceiverStartError::Unresolved)?;
+        let known = crate::sharing_client::SourcePeerLineage::from_start(
+            received.incarnation,
+            &received.response,
+        )
+        .map_err(|_| ReceiverStartError::Unresolved)?;
+        peer.file_status(
+            &received.credential,
+            &received.viewer_hash,
+            &self.0.peer_session,
+            &known,
+        )
+        .await
+        .map_err(|_| ReceiverStartError::Unresolved)
+    }
     fn close_dispatch(&self) {
         self.0.state.lock().expect("receiver owner").dispatch_closed = true;
         self.0.stop.cancel();
@@ -467,11 +634,13 @@ async fn run_owner(
     };
     let dispatch_owner = pending.clone();
     let dispatch_entry = entry.clone();
+    let connection_lifetime: Arc<dyn Send + Sync> = entry.bodies.reserve()?;
     let start = state.sharing.start_file_source(
         &state,
         intent,
         &dispatch_owner,
         &source_wrapper,
+        connection_lifetime,
         move |credential, viewer, endpoint| {
             dispatch_entry.retain_dispatch(DispatchedSource {
                 credential: plurx_core::secrets::Secret::from_cleartext(credential.expose()),
@@ -586,8 +755,11 @@ async fn run_owner(
     };
     // Retain the received physical lineage before any authority or Store await.
     entry.state.lock().expect("receiver owner").source = Some(attachment.clone());
+    let source_status = ReceiverStartActor(entry.clone())
+        .current_source_status(&state)
+        .await?;
     let projected = project_shared_start(
-        received.response.clone(),
+        source_status.response().clone(),
         source_session,
         attachment.owner.session_id,
         incarnation,
@@ -635,11 +807,40 @@ async fn run_owner(
     {
         return Err(ReceiverStartError::Unresolved);
     }
+    // The actual B session UUID remains its bearer capability; persist only
+    // its hash and a finite deadline under fresh original-login authority.
+    let authority = state
+        .store
+        .prepare_receiver_session_authority(intent.clone())
+        .await
+        .map_err(|_| ReceiverStartError::Unresolved)?
+        .ok_or(ReceiverStartError::Unresolved)?;
+    attachment.owner.now_ms = clock_ms();
+    let deadline_ms = authority
+        .receiver_delivery_deadline(attachment.owner.lease_expires_at_ms)
+        .ok_or(ReceiverStartError::Unresolved)?;
+    let delivery = plurx_core::sharing_receiver_delivery::ReceiverDeliveryGrant {
+        token_hash: plurx_core::auth::hash_token(&attachment.owner.session_id.to_string()),
+        deadline_ms,
+    };
+    if state
+        .store
+        .issue_receiver_delivery(&authority, &attachment, &delivery)
+        .await
+        .map_err(|_| ReceiverStartError::Unresolved)?
+        == plurx_core::sharing_receiver_delivery::ReceiverDeliveryWrite::Refused
+    {
+        return Err(ReceiverStartError::Unresolved);
+    }
     {
         let mut owned = entry.state.lock().expect("receiver owner");
         if owned.dispatch_closed {
             return Err(ReceiverStartError::Unresolved);
         }
+        // Source dispatch may have extended the pending lease. Retain the
+        // exact lease used by attachment/publication before readers can run.
+        owned.owner = Some(attachment.owner.clone());
+        owned.source = Some(attachment.clone());
         owned.start = Some(Ok(projected));
     }
     entry.changed.notify_waiters();
@@ -648,6 +849,9 @@ async fn run_owner(
             _ = entry.stop.cancelled() => return Err(ReceiverStartError::Unresolved),
             _ = timer.tick() => {}
         }
+        ReceiverStartActor(entry.clone())
+            .current_source_status(&state)
+            .await?;
         let authority = state
             .store
             .prepare_receiver_session_authority(intent.clone())

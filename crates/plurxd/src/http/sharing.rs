@@ -170,20 +170,40 @@ async fn peer_guard(
             return failure(StatusCode::TOO_MANY_REQUESTS, "sharing_capacity").into_response()
         }
     };
-    match crate::sharing::enabled(state.store.as_ref()).await {
-        Ok(true) => {}
-        Ok(false) => {
-            return failure(StatusCode::SERVICE_UNAVAILABLE, "sharing_disabled").into_response()
+    let cleanup_end = request.method() == axum::http::Method::POST
+        && request
+            .extensions()
+            .get::<axum::extract::MatchedPath>()
+            .is_some_and(|p| {
+                p.as_str() == "/sharing/v1/items/{item}/files/{file}/sessions/{request}/end"
+            });
+    // This exception exposes only exact retained physical cleanup; the End
+    // handler independently authenticates its previously owned full recipe.
+    if !cleanup_end {
+        match crate::sharing::enabled(state.store.as_ref()).await {
+            Ok(true) => {}
+            Ok(false) => {
+                return failure(StatusCode::SERVICE_UNAVAILABLE, "sharing_disabled").into_response()
+            }
+            Err(error) => return authority(error).into_response(),
         }
-        Err(error) => return authority(error).into_response(),
     }
     let deadline = match request
         .extensions()
         .get::<axum::extract::MatchedPath>()
         .map(|path| path.as_str())
     {
-        Some("/sharing/v1/items/{item}/files/{file}/decision") => Duration::from_secs(10),
-        Some("/sharing/v1/items/{item}/files/{file}/sessions") => Duration::from_secs(310),
+        Some(
+            "/sharing/v1/items/{item}/files/{file}/decision"
+            | "/sharing/v1/items/{item}/files/{file}/sessions/{request}/status",
+        ) => Duration::from_secs(10),
+        Some(
+            "/sharing/v1/items/{item}/files/{file}/sessions"
+            | "/sharing/v1/items/{item}/files/{file}/sessions/{request}/end",
+        ) => Duration::from_secs(310),
+        Some("/sharing/v1/items/{item}/files/{file}/sessions/{request}/resources") => {
+            Duration::from_secs(30)
+        }
         _ => Duration::from_secs(3),
     };
     match tokio::time::timeout(deadline, next.run(request)).await {

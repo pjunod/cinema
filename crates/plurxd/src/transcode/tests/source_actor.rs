@@ -1092,6 +1092,111 @@ async fn source_actual_actor(
             .expect("actual retained DTO"),
         serde_json::to_value(&response).expect("actual complete DTO")
     );
+    if (36..=41).contains(&mode) {
+        let baseline = manager
+            .vod
+            .source_control_observation_for_test(&response.session_id)
+            .await
+            .expect("actual activity");
+        if mode == 36 {
+            let opened = actor
+                .open_status(Instant::now() + Duration::from_secs(10))
+                .await
+                .expect("actual guarded Source status");
+            let (status, held) = opened.into_parts();
+            let value = serde_json::to_value(&status).expect("closed telemetry");
+            assert!(value.get("file_id").is_none());
+            assert!(value.get("id").is_none());
+            assert!(value.get("producer_failed").is_none());
+            assert!(value.get("final").is_some());
+            assert_eq!(value["playlist_shape"], "vod");
+            assert_eq!(value["target_height"], response.height);
+            assert_eq!(
+                manager
+                    .vod
+                    .source_control_observation_for_test(&response.session_id)
+                    .await
+                    .expect("activity after status"),
+                baseline
+            );
+            actor.request_retirement();
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            assert!(
+                actor.settlement_status().is_none(),
+                "actual status Body holds retirement"
+            );
+            drop(held);
+            actor.retire().await.expect("actual status retirement");
+            return;
+        }
+        let pause = actor.0.status_hooks.pause(matches!(mode, 39 | 41));
+        let owned = actor.clone();
+        let call = tokio::spawn(Box::pin(async move {
+            owned
+                .open_status(Instant::now() + Duration::from_secs(14))
+                .await
+        }));
+        let pause_guard = pause.reached().await;
+        match mode {
+            37 => {
+                state
+                    .store
+                    .put_setting(keys::SHARING_ENABLED, "false")
+                    .await
+                    .expect("saved switch race");
+            }
+            38 => {
+                client
+                    .execute(
+                        "DELETE FROM cluster_node_capabilities WHERE capability=$1",
+                        hiqlite::params!(
+                            plurx_core::cluster::membership::SHARING_PURPOSE_KEYS_CAPABILITY
+                        ),
+                    )
+                    .await
+                    .expect("actual purpose floor race");
+            }
+            39 => {
+                call.abort();
+                assert!(matches!(call.await, Err(error) if error.is_cancelled()));
+                actor.request_retirement();
+                tokio::time::sleep(Duration::from_millis(100)).await;
+                assert!(actor.settlement_status().is_none(), "owned status observation must retain its actual guard after waiter cancellation");
+                drop(pause_guard);
+                actor
+                    .retire()
+                    .await
+                    .expect("actual status job joins retirement");
+                return;
+            }
+            40 | 41 => tokio::time::sleep(Duration::from_millis(5100)).await,
+            _ => unreachable!(),
+        }
+        drop(pause_guard);
+        let outcome = call.await.expect("owned status waiter");
+        if mode == 41 {
+            let (status, guard) = outcome
+                .expect("fresh observation after parked status read")
+                .into_parts();
+            assert_eq!(status.playlist_shape, "vod");
+            drop(guard);
+        } else {
+            assert!(matches!(outcome, Err(SourceWorkerError::Unavailable)));
+        }
+        assert_eq!(
+            manager
+                .vod
+                .source_control_observation_for_test(&response.session_id)
+                .await
+                .expect("status activity unchanged"),
+            baseline
+        );
+        actor
+            .retire()
+            .await
+            .expect("actual raced status retirement");
+        return;
+    }
     if (30..=35).contains(&mode) {
         use crate::playback_control::*;
         let bootstrap = response
@@ -1624,4 +1729,29 @@ async fn source_control_refuses_expired_original_clock_without_activity() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn source_control_refuses_changed_held_file_without_activity() {
     Box::pin(source_copy_preadmission_fixture(35)).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn source_status_actual_metrics_are_private_activity_free_and_counted() {
+    Box::pin(source_copy_preadmission_fixture(36)).await;
+}
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn source_status_saved_switch_race_refuses_without_activity() {
+    Box::pin(source_copy_preadmission_fixture(37)).await;
+}
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn source_status_purpose_floor_race_refuses_without_activity() {
+    Box::pin(source_copy_preadmission_fixture(38)).await;
+}
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn source_status_waiter_cancellation_retains_owned_observation() {
+    Box::pin(source_copy_preadmission_fixture(39)).await;
+}
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn source_status_original_observation_expiry_refuses_without_activity() {
+    Box::pin(source_copy_preadmission_fixture(40)).await;
+}
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn source_status_parked_read_reobserves_fresh_authority() {
+    Box::pin(source_copy_preadmission_fixture(41)).await;
 }

@@ -198,3 +198,24 @@ function playbackFileContextForPlay(fileId,meta){
   if(typeof fileId!=="string"||playbackFileDecimal(fileId)!==c.source_file_id) playbackFileReject();
   return c;
 }
+
+// Ordinary complete B Start reply, bound to the authenticated signed-file
+// request. This validates routing metadata; it is not Source producer evidence.
+function sharedPlaybackStartContext(value,response){
+  const c=playbackFileContext(value);
+  if(c.source_ref.kind==="local"||c.session_id||!response||typeof response!=="object") playbackFileReject();
+  const id=response.session_id,control=response.control;
+  if(typeof id!=="string"||! /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(id)
+    ||typeof response.playlist_url!=="string"
+    ||!new RegExp(`^/api/v1/hls/${id}/(?:master|index|video)\\.m3u8$`).test(response.playlist_url)
+    ||response.vod!==true||!Number.isFinite(response.start_seconds)||response.start_seconds<0
+    ||response.start_seconds>9007199254740
+    ||response.duration_ms!=null&&(!Number.isSafeInteger(response.duration_ms)||response.duration_ms<0)
+    ||response.media_origin_ms!=null&&!Number.isSafeInteger(response.media_origin_ms)
+    ||!control||control.protocol!=="plurx-playback-control-v1"
+    ||control.url!==`/api/v1/hls/${id}/control`
+    ||typeof control.generation!=="string"||! /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(control.generation)
+    ||!Number.isSafeInteger(control.control_epoch)||control.control_epoch<=0
+    ||control.next_exchange_ms!==5000||control.lease_timeout_ms!==300000) playbackFileReject();
+  return withPlaybackFileSession(c,id);
+}

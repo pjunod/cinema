@@ -56,6 +56,12 @@ function decisionUrl(fileId, force, sel){
 // unrestricted legacy path. Serving nodes therefore roll before this client.
 async function askDecision(fileId, force, sel, signal=null){
   const query=`force=${force}${prePlaySelectionQuery(sel)}`;
+  const context=playbackFileContext(fileId);
+  if(context.source_ref.kind!=="local"){
+    const selected={force,...playbackFileQueryFromLegacy(query)};
+    for(const field of ["audio","subtitle","audio_offset_ms"])if(Object.hasOwn(selected,field))selected[field]=Number(selected[field]);
+    return SHARED_DECISION.decision(context,selected,signal);
+  }
   const caps=currentCapsDocument();
   try{
     const decision=await api(playbackFileApiPath(fileId,"decision",playbackFileQueryFromLegacy(query)),

@@ -96,6 +96,9 @@ mod tests;
 #[path = "source_control.rs"]
 pub(crate) mod control;
 
+#[path = "source_status.rs"]
+pub(crate) mod status;
+
 use plurx_core::{
     domain::{
         MediaSessionActivation, MediaSessionEnd, MediaSessionRenewal, MediaSessionRoute,
@@ -128,6 +131,7 @@ pub(super) struct SourceWorkerRegistry {
 struct SourceViewerInner {
     control_target_duration_ms: i64,
     control_hooks: control::SourceControlHookOwner,
+    status_hooks: status::SourceStatusHookOwner,
     original_selection: Option<plurx_core::playback::DesiredSelection>,
     assignment: SourceDispatchAssignment,
     manager: std::sync::Weak<TranscodeManager>,
@@ -718,6 +722,7 @@ impl TranscodeManager {
                 SessionKind::Transcode { .. } => plurx_core::transcode::SEGMENT_SECONDS,
             }) * 1_000,
             control_hooks: Default::default(),
+            status_hooks: Default::default(),
             original_selection: prepared.original_selection().copied(),
             assignment,
             manager: Arc::downgrade(self),

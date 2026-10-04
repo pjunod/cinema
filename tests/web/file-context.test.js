@@ -87,6 +87,12 @@ function callerHarness(capQuery="vcodec=h264,hevc&acodec=aac&container=mp4&hdr=0
     function plannedHlsTransport(){return null;}function playbackOwnsAttachedMedia(){return true;}
     function tok(url){return url;}
     async function api(url,options){requests.push({url,options});return {};}
+    // URL-routing seam only; complete synthetic protocol responses are tested
+    // through the actual Shared decision module in shared-decision.test.js.
+    const SHARED_DECISION={
+      decision(c,q,signal){return api(playbackFileApiPath(c,"decision",q),{signal});},
+      start(c,body,signal){return api(playbackFileApiPath(c,"hls/sessions"),{body,signal});}
+    };
   `+functions+`\nthis.calls={
     shared:sharedPlaybackFileContextFromDetail,local:localPlaybackFileContext,
     bind:withPlaybackFileSession,url:playbackFileUrl,key:playbackFileKey,
@@ -221,4 +227,20 @@ test("shipped remux and session-start callers preserve legitimate full engine ca
   assert.throws(()=>h.url(shared,"stream.mp4",extra));
   assert.throws(()=>h.url(shared,"decision",{achannels:17}));
   assert.throws(()=>h.url(shared,"stream.mp4",{vmaxheight:"hevc:999999"}));
+});
+
+test("Shared initial route is session-first HLS and refuses burn HDR or absent capability",()=>{
+ const ctx=vm.createContext({AUTH_GENERATION:0,window:{Hls:{isSupported:()=>true}},PLAYER:{},failed:[]});
+ vm.runInContext(source+`
+ const Hls=window.Hls;
+ const useNativeHls=()=>false,segmentedRemuxOk=()=>true,copyHlsMseOk=()=>true,noSegments=()=>false;
+ const playbackInitialRoute=()=>"direct_play";
+ `+shippedFunction("player/decode-tiers.js","choosePlayRoute")+`
+ this.run=(c,method,grade,burn)=>choosePlayRoute({fileContext:c,video:{},sessionAudioOffset:0,libraryChannel:false,failPreparation:e=>failed.push(e.code)},{decision:{method,delivered_dynamic_range:grade}},{preBurn:burn},null);
+ this.shared=sharedPlaybackFileContextFromDetail;`,ctx);
+ const c=ctx.shared(reference,detail());
+ assert.equal(ctx.run(c,"direct_play","sdr",null),"copy_hls");assert.equal(ctx.run(c,"transcode","sdr",null),"transcode_hls");
+ assert.equal(ctx.run(c,"transcode","hdr10",null),null);assert.equal(ctx.run(c,"remux","sdr",0),null);
+ ctx.window.Hls.isSupported=()=>false;assert.equal(ctx.run(c,"transcode","sdr",null),null);
+ assert.deepEqual(Array.from(ctx.failed),Array(3).fill("sharing_start_unsupported"));
 });
