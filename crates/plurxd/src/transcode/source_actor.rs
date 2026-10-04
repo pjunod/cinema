@@ -708,11 +708,40 @@ impl SourceProducerAuthority {
             _ => Err(SourceWorkerError::Unavailable),
         }
     }
+    /// Renew this owner's Source session lease.
+    ///
+    /// The Store guard is optimistic: it pins the exact lease revision the
+    /// proof observed. Status, resources, control and the actor heartbeat all
+    /// renew the same session, so one renewal can lose the race to another by
+    /// this same owner. That is not a loss of authority. Re-observe the owned
+    /// route and retry against the newer lease; a refusal against an
+    /// unchanged lease, or any change of route identity, is a real refusal.
     async fn renew_with(
         &self,
         assignment: &SourceDispatchAssignment,
         proof: &plurx_core::sharing_source_sessions::SourceOwnedRouteAuthority,
     ) -> Result<MediaSessionRoute, SourceWorkerError> {
+        const ATTEMPTS: usize = 4;
+        let mut fresh: Option<Box<plurx_core::sharing_source_sessions::SourceOwnedRouteAuthority>> =
+            None;
+        for _ in 0..ATTEMPTS {
+            let observed = fresh.as_deref().unwrap_or(proof);
+            if let Some(route) = self.renew_observed(assignment, observed).await? {
+                return Ok(route);
+            }
+            let current = self.current_owned(assignment).await?;
+            if !observed.renewed_by_same_owner(&current) {
+                return Err(SourceWorkerError::Unavailable);
+            }
+            fresh = Some(current);
+        }
+        Err(SourceWorkerError::Unavailable)
+    }
+    async fn renew_observed(
+        &self,
+        assignment: &SourceDispatchAssignment,
+        proof: &plurx_core::sharing_source_sessions::SourceOwnedRouteAuthority,
+    ) -> Result<Option<MediaSessionRoute>, SourceWorkerError> {
         let incarnation = assignment.binding().incarnation_id().to_string();
         let route = self
             .store
@@ -735,8 +764,7 @@ impl SourceProducerAuthority {
                 now.saturating_add(60_000),
             )
             .await
-            .map_err(|_| SourceWorkerError::Unresolved)?
-            .ok_or(SourceWorkerError::Unavailable)
+            .map_err(|_| SourceWorkerError::Unresolved)
     }
 }
 

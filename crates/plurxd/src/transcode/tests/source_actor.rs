@@ -1177,7 +1177,7 @@ async fn source_actual_actor(
         );
         return;
     }
-    if (36..=41).contains(&mode) {
+    if (36..=41).contains(&mode) || mode == 45 {
         let baseline = manager
             .vod
             .source_control_observation_for_test(&response.session_id)
@@ -1255,13 +1255,23 @@ async fn source_actual_actor(
                 return;
             }
             40 | 41 => tokio::time::sleep(Duration::from_millis(5100)).await,
+            45 => {
+                // Another renewal by this same owner wins the optimistic
+                // lease race while the observation is parked between its
+                // proof read and its renewal.
+                let (_, concurrent) = actor
+                    .open_start_response(Instant::now() + Duration::from_secs(5))
+                    .await
+                    .expect("concurrent same-owner renewal");
+                drop(concurrent);
+            }
             _ => unreachable!(),
         }
         drop(pause_guard);
         let outcome = call.await.expect("owned status waiter");
-        if mode == 41 {
+        if matches!(mode, 41 | 45) {
             let (status, guard) = outcome
-                .expect("fresh observation after parked status read")
+                .expect("fresh observation after parked status read or lost lease race")
                 .into_parts();
             assert_eq!(status.playlist_shape, "vod");
             drop(guard);
@@ -1839,6 +1849,10 @@ async fn source_status_original_observation_expiry_refuses_without_activity() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn source_status_parked_read_reobserves_fresh_authority() {
     Box::pin(source_copy_preadmission_fixture(41)).await;
+}
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn source_status_survives_a_concurrent_same_owner_lease_renewal() {
+    Box::pin(source_copy_preadmission_fixture(45)).await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

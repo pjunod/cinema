@@ -290,6 +290,16 @@ impl SourceOwnedRouteAuthority {
     pub fn validate_observation_freshness(&self, now_ms: i64) -> Result<(), SourceAdmissionError> {
         self.assignment.validate_observation_freshness(now_ms)
     }
+    /// Whether `fresh` is this same owned route after another renewal by the
+    /// same owner advanced its lease revision. The renewal guard pins the
+    /// exact lease a proof observed, so two renewals by one owner race; the
+    /// loser may retry against `fresh`. Any other difference is a real change
+    /// of authority and must not be retried.
+    pub fn renewed_by_same_owner(&self, fresh: &Self) -> bool {
+        self.assignment.same_identity(&fresh.assignment)
+            && self.session_id == fresh.session_id
+            && fresh.lease_revision > self.lease_revision
+    }
 }
 pub enum SourceOwnedRouteAuthorityRead {
     Ready(Box<SourceOwnedRouteAuthority>),
