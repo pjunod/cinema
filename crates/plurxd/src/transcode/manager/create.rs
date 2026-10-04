@@ -2063,11 +2063,16 @@ impl TranscodeManager {
         let Some(reason) = request.reopen_reason else {
             return Err(invalid_reopen_error("unsupported reopen reason"));
         };
-        if reason != ReopenReason::Stall && request.candidate_context.is_none() {
-            return Err(invalid_reopen_error(
-                "typed recovery requires a full candidate",
-            ));
-        }
+        // A typed cause (link/encode/decode/hold/authority) is advisory
+        // evidence recorded at HTTP ingress, never a precondition for media.
+        // Its reopen keeps the exact target the client asked for; a missing
+        // full candidate or an incumbent this node no longer runs leaves the
+        // cause unrecorded rather than refusing a stalled viewer.
+        let typed = reason != ReopenReason::Stall;
+        let requested_height = match request.kind {
+            SessionKind::Transcode { height } => Some(height),
+            SessionKind::Copy { .. } => None,
+        };
         // A stall reopen bound to a VOD predecessor: validate the binding
         // against the VOD registry and pass the request through untouched. A
         // VOD session has no persisted rung to inherit — the reopen decides
@@ -2098,9 +2103,16 @@ impl TranscodeManager {
             kind,
         ) = {
             let sessions = self.sessions.lock().await;
-            let previous = sessions
-                .get(previous_session_id)
-                .ok_or_else(|| invalid_reopen_error("the previous session is no longer running"))?;
+            let Some(previous) = sessions.get(previous_session_id) else {
+                if typed {
+                    // Remote, retired or already-replaced incumbent: the
+                    // typed reopen proceeds as an ordinary start.
+                    return Ok((request.clone(), requested_height));
+                }
+                return Err(invalid_reopen_error(
+                    "the previous session is no longer running",
+                ));
+            };
             (
                 Arc::clone(previous),
                 previous.supersession_user.clone(),
@@ -2120,12 +2132,8 @@ impl TranscodeManager {
             ));
         }
 
-        if request.candidate_context.is_some() {
-            let height = match request.kind {
-                SessionKind::Transcode { height } => Some(height),
-                SessionKind::Copy { .. } => None,
-            };
-            return Ok((request.clone(), height));
+        if typed || request.candidate_context.is_some() {
+            return Ok((request.clone(), requested_height));
         }
 
         // The rung step exists for a link that could not keep up. A predecessor

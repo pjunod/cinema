@@ -130,8 +130,35 @@ pub(crate) async fn accept_sample(
     .flatten()
 }
 
+/// What became of a typed recovery cause. None of these is a playback
+/// refusal: the cause is advisory evidence, and the reopen it rides on
+/// proceeds either way.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum CauseRecord {
+    /// No typed cause: a fresh start or an ordinary stall reopen.
+    Untyped,
+    /// The cause was authenticated against the incumbent (and a decoder
+    /// cause was durably recorded).
+    Recorded(plurx_core::store::CandidateRecoveryCause),
+    /// Missing, unknown, remote, expired or replayed evidence. The cause is
+    /// simply not recorded and the create continues as an ordinary reopen.
+    Unrecorded(&'static str),
+}
+
+#[cfg(test)]
+impl CauseRecord {
+    pub(super) fn recorded(self) -> bool {
+        matches!(self, Self::Recorded(_))
+    }
+}
+
 /// Consume a typed cause only after the create's durable request was acquired.
 /// Replays cannot spend the single decoder-quality response again.
+///
+/// Missing/legacy/remote facts are Unknown, not an ordinary playback refusal:
+/// failure to authenticate a cause never changes media authority, it only
+/// leaves the cause unrecorded. Store work here is bounded by the create's
+/// own startup deadline, not by a private timeout.
 pub(super) async fn observe(
     state: &AppState,
     network: Option<&NetworkIdentity>,
@@ -139,19 +166,34 @@ pub(super) async fn observe(
     request: &crate::transcode::SessionRequest,
     nonce: Option<&str>,
     event: &str,
-) -> Result<(), String> {
+) -> CauseRecord {
+    match authenticate_cause(state, network, file, request, nonce, event).await {
+        Ok(Some(cause)) => CauseRecord::Recorded(cause),
+        Ok(None) => CauseRecord::Untyped,
+        Err(reason) => CauseRecord::Unrecorded(reason),
+    }
+}
+
+async fn authenticate_cause(
+    state: &AppState,
+    network: Option<&NetworkIdentity>,
+    file: Option<&MediaFile>,
+    request: &crate::transcode::SessionRequest,
+    nonce: Option<&str>,
+    event: &str,
+) -> Result<Option<plurx_core::store::CandidateRecoveryCause>, &'static str> {
     use crate::transcode::ReopenReason;
     use plurx_core::store::{CandidateRecoveryCause as Cause, CandidateRecoveryObservation};
     let Some(reason) = request.reopen_reason else {
-        return Ok(());
+        return Ok(None);
     };
     if reason == ReopenReason::Stall {
-        return Ok(());
+        return Ok(None);
     }
     let context = request
         .candidate_context
         .as_ref()
-        .ok_or("typed recovery requires a full candidate")?;
+        .ok_or("typed recovery has no full candidate")?;
     let network = network.ok_or("typed recovery has no authenticated client namespace")?;
     let file = file.ok_or("typed recovery has no current source")?;
     let previous = request
@@ -172,7 +214,7 @@ pub(super) async fn observe(
             if proof.incumbent_session() != previous
                 || proof.incumbent_recipe().0 != bound.candidate.recipe_digest
             {
-                return Err("Link recovery proof belongs to another candidate".into());
+                return Err("Link recovery proof belongs to another candidate");
             }
             Cause::Link
         }
@@ -182,37 +224,33 @@ pub(super) async fn observe(
                 .candidate_production_proof(bound.candidate.recipe_digest)
                 .is_some_and(|speed| speed > 0 && speed < 1000)
             {
-                return Err("Encode recovery has no fresh active producer-pressure proof".into());
+                return Err("Encode recovery has no fresh active producer-pressure proof");
             }
             Cause::Encode
         }
         ReopenReason::Decode => {
             if !state.link_receipts.decoder_current(&bound) {
-                return Err("Decode recovery has no accepted current decoder evidence".into());
+                return Err("Decode recovery has no accepted current decoder evidence");
             }
-            let memory = tokio::time::timeout(
-                Duration::from_millis(100),
-                state.store.candidate_recovery_memory(&bound.scope),
-            )
-            .await
-            .map_err(|_| "decoder memory read timed out")?
-            .map_err(|_| "decoder memory read failed")?;
+            let memory = state
+                .store
+                .candidate_recovery_memory(&bound.scope)
+                .await
+                .map_err(|_| "decoder memory read failed")?;
             if changed && memory.decode_step_recipe.is_some() {
-                return Err(
-                    "decoder quality response already belongs to the compatibility owner".into(),
-                );
+                return Err("decoder quality response already belongs to the compatibility owner");
             }
             Cause::Decode
         }
         ReopenReason::Hold => {
             if changed {
-                return Err("Hold cannot change candidate".into());
+                return Err("Hold cannot change candidate");
             }
             Cause::Hold
         }
         ReopenReason::Authority => {
             if changed {
-                return Err("Authority cannot change candidate".into());
+                return Err("Authority cannot change candidate");
             }
             Cause::Authority
         }
@@ -230,9 +268,9 @@ pub(super) async fn observe(
             || current.route.owner_epoch != bound.route.owner_epoch
             || current.candidate.id != bound.candidate.id
         {
-            return Err("typed recovery incumbent changed during proof validation".into());
+            return Err("typed recovery incumbent changed during proof validation");
         }
-        return Ok(());
+        return Ok(Some(cause));
     }
     let now = super::unix_ms();
     let current = incumbent(state, network, file, &request.playback_id, Some(previous))
@@ -243,7 +281,7 @@ pub(super) async fn observe(
         || current.route.incarnation_id != bound.route.incarnation_id
         || current.route.owner_epoch != bound.route.owner_epoch
     {
-        return Err("decoder evidence changed before response admission".into());
+        return Err("decoder evidence changed before response admission");
     }
     let observation = CandidateRecoveryObservation {
         scope: bound.scope,
@@ -253,15 +291,13 @@ pub(super) async fn observe(
         cause,
         quality_step: cause == Cause::Decode && changed,
     };
-    let recorded = tokio::time::timeout(
-        Duration::from_millis(100),
-        state.store.observe_candidate_recovery(&observation, now),
-    )
-    .await
-    .map_err(|_| "candidate recovery write timed out")?
-    .map_err(|_| "candidate recovery write failed")?;
-    recorded.ok_or_else(|| "candidate recovery was duplicate, stale or unavailable".to_owned())?;
-    Ok(())
+    state
+        .store
+        .observe_candidate_recovery(&observation, now)
+        .await
+        .map_err(|_| "candidate recovery write failed")?
+        .ok_or("candidate recovery was duplicate, stale or unavailable")?;
+    Ok(Some(cause))
 }
 
 pub(super) struct BoundRecovery {

@@ -1438,7 +1438,7 @@ mod tests {
         ] {
             request.reopen_reason = Some(cause);
             assert!(
-                crate::http::hls::candidate_recovery::observe(
+                !crate::http::hls::candidate_recovery::observe(
                     &state,
                     Some(&network),
                     Some(&file),
@@ -1447,7 +1447,7 @@ mod tests {
                     &uuid::Uuid::new_v4().to_string()
                 )
                 .await
-                .is_err(),
+                .recorded(),
                 "labels cannot mint missing proof or change held authority"
             );
         }
@@ -1460,7 +1460,7 @@ mod tests {
             .is_none());
         request.reopen_reason = Some(ReopenReason::Decode);
         let event = uuid::Uuid::new_v4().to_string();
-        assert!(crate::http::hls::candidate_recovery::observe(
+        assert!(!crate::http::hls::candidate_recovery::observe(
             &state,
             None,
             Some(&file),
@@ -1469,10 +1469,10 @@ mod tests {
             &event
         )
         .await
-        .is_err());
+        .recorded());
         if review_controls {
             assert!(
-                crate::http::hls::candidate_recovery::observe(
+                !crate::http::hls::candidate_recovery::observe(
                     &state,
                     Some(&network),
                     Some(&file),
@@ -1481,7 +1481,7 @@ mod tests {
                     &event
                 )
                 .await
-                .is_err(),
+                .recorded(),
                 "authenticated Decode label cannot mint evidence"
             );
         }
@@ -1568,18 +1568,22 @@ mod tests {
                 "replay cannot acknowledge or refresh its original proof"
             );
         }
-        assert!(crate::http::hls::candidate_recovery::observe(
-            &state,
-            Some(&network),
-            Some(&file),
-            &request,
-            None,
-            &event
-        )
-        .await
-        .is_ok());
-        assert!(
+        assert_eq!(
             crate::http::hls::candidate_recovery::observe(
+                &state,
+                Some(&network),
+                Some(&file),
+                &request,
+                None,
+                &event
+            )
+            .await,
+            crate::http::hls::candidate_recovery::CauseRecord::Recorded(
+                plurx_core::store::CandidateRecoveryCause::Decode
+            )
+        );
+        assert!(
+            !crate::http::hls::candidate_recovery::observe(
                 &state,
                 Some(&network),
                 Some(&file),
@@ -1588,7 +1592,7 @@ mod tests {
                 &uuid::Uuid::new_v4().to_string()
             )
             .await
-            .is_err(),
+            .recorded(),
             "second quality response stays with compatibility owner"
         );
         let memory = state

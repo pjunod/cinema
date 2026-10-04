@@ -2201,7 +2201,10 @@ async fn create_with_purpose_inner(
         request_claim_id.clone(),
         incarnation_id.clone(),
     );
-    super::candidate_recovery::observe(
+    // A typed cause is advisory evidence. Unknown, remote, expired or
+    // replayed evidence leaves it unrecorded and the reopen proceeds as an
+    // ordinary reopen; it is never a reason to refuse a stalled viewer.
+    match super::candidate_recovery::observe(
         &state,
         identity.as_ref(),
         source.as_ref(),
@@ -2210,7 +2213,22 @@ async fn create_with_purpose_inner(
         &request_claim_id,
     )
     .await
-    .map_err(ApiError::BadRequest)?;
+    {
+        super::candidate_recovery::CauseRecord::Untyped => {}
+        super::candidate_recovery::CauseRecord::Recorded(cause) => {
+            tracing::debug!(target: "plurxd::http::hls",
+                file_id = id,
+                cause = ?cause,
+                "typed recovery cause recorded");
+        }
+        super::candidate_recovery::CauseRecord::Unrecorded(reason) => {
+            tracing::info!(target: "plurxd::http::hls",
+                file_id = id,
+                reopen_reason = request.reopen_reason.map(crate::transcode::ReopenReason::as_str),
+                reason,
+                "typed recovery cause not recorded; continuing as an ordinary reopen");
+        }
+    }
 
     let advertise_control = plurx_core::store::stored_switch(
         planning_snapshot
