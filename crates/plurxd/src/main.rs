@@ -3144,6 +3144,15 @@ fn spawn_background_loops(
         std::sync::Arc::clone(&state.live_tv)
             .guide_refresh_loop(state.serving.subscribe(), background_shutdown.clone()),
     );
+    // Running Live TV survives a loss of serving authority inside the session
+    // grace, as rolling and progressive playback do; this loop decides when a
+    // loss has outlasted it.
+    tokio::spawn(
+        state
+            .live_tv
+            .authority()
+            .serving_fence_loop(state.serving.subscribe()),
+    );
     // One queue, one worker: the recording and reminder loops enqueue and
     // never await the network, so an unreachable endpoint cannot delay a
     // capture starting or stopping.
