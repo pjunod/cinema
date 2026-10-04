@@ -4424,7 +4424,9 @@ pattern = "\\.(?:spawn|output|status)\\s*\\("
 # +1: one test `Response::status()` read of the facade segment resumed
 # after the native reader was idle-reaped (465 -> 466 on the tree merged
 # with main). No process.
-expected_occurrences = 466
+# 466 -> 467: one test `Response::status()` read asserting a play without
+# manifest subtitles has no HLS subtitle playlist. No process.
+expected_occurrences = 467
 # +2 native-startup delayed-init fixture: Axum Response::status() reads
 # assert the master and legacy bridge responses. Neither launches a process.
 

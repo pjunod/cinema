@@ -832,3 +832,27 @@ request still fences that one play's progress; the window is seconds long.
 
 Still open: the physical Infuse and Android matrix on the frozen candidate,
 HDR/Dolby Vision, the multipage corpus, and the effort's promotion.
+
+### Acceptance run and promotion review
+
+A disposable real-binary server (hiqlite store, a 12-minute film, real HTTP)
+ran the direct, link and HLS flows. Every direct-play and link check passed.
+It found two HLS defects, fixed in #796:
+- the master alias answered a media playlist, which Infuse refuses;
+- a client resuming after a long pause overflowed the worker stack. A gdb
+  frame walk measured 643 KB in the facade's `serve` frame, because each
+  arm's native future was built on the stack before boxing. Construction now
+  happens outside the polling frame. The stack size is unchanged.
+
+The Fable 5.1 review of the promotion candidate then found that the
+always-multivariant master advertised the file's text renditions even for a
+play negotiated without manifest subtitles (Infuse's profile, or a burn-in).
+That master now carries no subtitle group, and that play's HLS subtitle
+resources answer 404.
+
+Open, rare: on an SDR HEVC High-tier copy with no text tracks, the native
+master still serves its direct media-playlist envelope, because Apple's
+eligibility check rejects High-tier declarations in a multivariant. Infuse
+would see a media playlist at the master URL for that file. Negotiation
+already refuses HDR copy, so it reaches only that source class; J6 decides it
+with the physical client.

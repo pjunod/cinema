@@ -3261,7 +3261,10 @@ each fragment includes the exact native init bytes. Composite byte ranges map
 to native object ranges, with both native validators rechecked; an adapter
 cannot credit a partial fragment as fully fetched. Native buffered bodies
 preserve their known Content-Length through the admitted lifetime wrapper.
-HEAD keeps representation headers and returns no body. Stop and logout use
+HEAD keeps representation headers and returns no body. The master URL is
+always a multivariant playlist. A play negotiated without manifest subtitles
+gets one with no subtitle group, and its HLS subtitle resources answer 404;
+its subtitles stay on the out-of-band subtitle route. Stop and logout use
 the existing exact native release path. Bounded startup retry sharing and
 no-signal/client qualification remain open in the compatibility build record.
 

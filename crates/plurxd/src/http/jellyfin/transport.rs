@@ -5,7 +5,7 @@ use axum::{
     extract::Query,
     http::{header, Method},
 };
-use plurx_compat_jellyfin::hls::{rewrite_manifest, Resource};
+use plurx_compat_jellyfin::hls::{rewrite_manifest, without_subtitle_renditions, Resource};
 use plurx_core::store::JellyfinPlay;
 
 pub(super) async fn route(state: &AppState, play: &JellyfinPlay) -> Result<String, ApiError> {
@@ -194,6 +194,18 @@ async fn serve(
     let session = route(state, &play).await?;
     let selection: Value = serde_json::from_str(&play.negotiation.selection_json)?;
     let inline = selection["vod"]["inline_init"] == true;
+    // The negotiated profile, not the file, decides whether the manifest
+    // carries subtitles. Without manifest subtitles the client is never told
+    // the HLS subtitle resources, so they do not exist for this play.
+    let manifest_subtitles = selection["vod"]["body"]["native_subtitles"] == true;
+    if !manifest_subtitles
+        && matches!(
+            resource,
+            Resource::SubtitlePlaylist(_) | Resource::SubtitleSegment(..)
+        )
+    {
+        return Err(ApiError::NotFound("subtitle rendition"));
+    }
     let manifest = matches!(
         resource,
         Resource::Master | Resource::Media | Resource::SubtitlePlaylist(_)
@@ -246,6 +258,15 @@ async fn serve(
             Resource::Media
         } else {
             resource.clone()
+        };
+        let subtitle_free;
+        let input = if manifest_resource == Resource::Master && !manifest_subtitles {
+            subtitle_free = without_subtitle_renditions(input).map_err(|_| {
+                ApiError::ServiceUnavailable("native manifest representation unsupported".into())
+            })?;
+            subtitle_free.as_str()
+        } else {
+            input
         };
         let rewritten = rewrite_manifest(input, &manifest_resource, &session, &base, inline)
             .map_err(|_| {

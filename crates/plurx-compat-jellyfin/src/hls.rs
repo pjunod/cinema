@@ -279,12 +279,94 @@ pub fn rewrite_manifest(
     Ok(output)
 }
 
+/// Remove the subtitle rendition group from a native multivariant playlist.
+///
+/// A play negotiated without manifest subtitles still needs the multivariant
+/// wrapper at its master URL (Infuse refuses a media playlist there), but must
+/// not advertise text renditions its profile did not ask for: a player could
+/// auto-select one over the user's choice or a burn-in. Each `TYPE=SUBTITLES`
+/// rendition and every variant's `SUBTITLES` reference are dropped; all other
+/// lines, including other attributes' order and quoting, are unchanged.
+pub fn without_subtitle_renditions(master: &str) -> Result<String, &'static str> {
+    let mut output = String::with_capacity(master.len());
+    for line in master.lines() {
+        if let Some(list) = line.strip_prefix("#EXT-X-MEDIA:") {
+            if attribute_fields(list)?
+                .iter()
+                .any(|(key, value)| *key == "TYPE" && *value == "SUBTITLES")
+            {
+                continue;
+            }
+        } else if let Some(list) = line.strip_prefix("#EXT-X-STREAM-INF:") {
+            let kept = attribute_fields(list)?
+                .into_iter()
+                .filter(|(key, _)| *key != "SUBTITLES")
+                .map(|(key, value)| format!("{key}={value}"))
+                .collect::<Vec<_>>();
+            output.push_str("#EXT-X-STREAM-INF:");
+            output.push_str(&kept.join(","));
+            output.push('\n');
+            continue;
+        }
+        output.push_str(line);
+        output.push('\n');
+    }
+    Ok(output)
+}
+
+/// Split an HLS attribute list into `(key, value)` pairs, respecting commas
+/// inside quoted values.
+fn attribute_fields(list: &str) -> Result<Vec<(&str, &str)>, &'static str> {
+    let mut fields = Vec::new();
+    let mut start = 0;
+    let mut quoted = false;
+    for (end, c) in list
+        .bytes()
+        .enumerate()
+        .chain(std::iter::once((list.len(), b',')))
+    {
+        if c == b'"' {
+            quoted = !quoted;
+        }
+        if c != b',' || quoted {
+            continue;
+        }
+        fields.push(
+            list[start..end]
+                .split_once('=')
+                .ok_or("invalid HLS attribute")?,
+        );
+        start = end + 1;
+    }
+    if quoted {
+        return Err("invalid HLS attribute");
+    }
+    Ok(fields)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     const BASE: &str =
         "/jellyfin/Videos/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb/hls/";
     const SESSION: &str = "native-private-session";
+
+    #[test]
+    fn subtitle_free_master_drops_only_the_subtitle_group() {
+        let master = "#EXTM3U\n#EXT-X-INDEPENDENT-SEGMENTS\n#EXT-X-MEDIA:TYPE=SUBTITLES,GROUP-ID=\"subs\",NAME=\"English, SDH\",LANGUAGE=\"en\",AUTOSELECT=YES,URI=\"subs/2/index.m3u8\"\n#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID=\"aud\",NAME=\"Main\",URI=\"audio.m3u8\"\n#EXT-X-STREAM-INF:BANDWIDTH=750000,CODECS=\"avc1.64001f,mp4a.40.2\",SUBTITLES=\"subs\",FRAME-RATE=24.000\nindex.m3u8\n";
+        let stripped = without_subtitle_renditions(master).expect("native master");
+        assert_eq!(
+            stripped,
+            "#EXTM3U\n#EXT-X-INDEPENDENT-SEGMENTS\n#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID=\"aud\",NAME=\"Main\",URI=\"audio.m3u8\"\n#EXT-X-STREAM-INF:BANDWIDTH=750000,CODECS=\"avc1.64001f,mp4a.40.2\",FRAME-RATE=24.000\nindex.m3u8\n"
+        );
+        let wrapped = without_subtitle_renditions(&stripped).expect("idempotent");
+        assert_eq!(wrapped, stripped);
+        assert!(without_subtitle_renditions(
+            "#EXTM3U\n#EXT-X-STREAM-INF:CODECS=\"avc1\nindex.m3u8\n"
+        )
+        .is_err());
+        assert!(without_subtitle_renditions("#EXTM3U\n#EXT-X-MEDIA:TYPE\n").is_err());
+    }
 
     #[test]
     fn manifests_rewrite_exact_resources_and_preserve_source_timeline() {
