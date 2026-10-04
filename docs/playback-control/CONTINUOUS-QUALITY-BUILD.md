@@ -7020,3 +7020,33 @@ The preflight suites (history audit, validation-lint, `tests/validation`,
 `operations-check`, the player-contract node suites) and the web syntax/type
 gate were run once locally against the merge candidate before restarting the
 lane, so the lane would not cycle on them.
+
+### 10.235 Fast-lane Rust gate: the branch's never-run tests
+
+The first Rust gate run aborted two test binaries on stack overflows, so most
+of their tests had never executed on this branch. Every failure was then run
+once on the lab host (only the failed tests were rerun after each fix):
+
+- **Stack depth.** VOD resurrection's future (73 KB, rebuilt presentation)
+  was awaited inline by seven delivery handlers, making the segment handler's
+  future 78 KB; it is now boxed at its definition (segment future 9 KB). The
+  replicated schema chain is one async fn with an arm per version; the two new
+  arms widened its debug poll frame past the daemon-join test thread, so both
+  steps now run through one boxed helper. The join test had (and on main has)
+  under 200 KB of headroom at 2 MiB; splitting the remaining arms is future
+  work for the chain's owner.
+- **Contracts the branch had not updated.** Store method inventory (+9),
+  HLS source scan (two handler files), the preparation-cancellation metric
+  (new `intent_cancelled` bucket instead of an unexplained `other`), route
+  groups for the continuous routes, parent log targets for three new events,
+  `store_result::observe` for two discarded settlements, consistent-read
+  authority reasons (+7), unchecked binding arity (+3), two write-read-back
+  SQLite transactions, the fourth preparation statement (the cancellation
+  owner binding), and the downgrade fixtures for v92/v93.
+- **Fixtures that never matched production.** Continuous AVC fixtures lacked
+  the recipe's `setparams` BT.709 tagging and `+write_colr` (ffmpeg 8 leaves
+  colour unspecified without them; CI's ffmpeg 6 hid it); routes used
+  non-UUID session ids and an empty recipe the family binding cannot match;
+  an ended session id was reused; the worker-role test built a manager without
+  the cache, bound-FFprobe identity and resolved audio index a real create has;
+  and the schedule owner differed from the serving node.
