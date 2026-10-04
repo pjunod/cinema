@@ -363,6 +363,7 @@ fn http_route_group(path: &str) -> usize {
         // Playback decisions, control, media bodies and watch state.
         "/jellyfin/Items/{item_id}/PlaybackInfo"
         | "/jellyfin/Videos/{item_id}/{source_id}/Subtitles/{index}/{filename}"
+        | "/jellyfin/Videos/{item_id}/{source_id}/Subtitles/{index}/{start_ticks}/{filename}"
         | "/jellyfin/Videos/{item_id}/stream"
         | "/jellyfin/Videos/{item_id}/{play_id}/hls/{*resource}"
         | "/jellyfin/Videos/{item_id}/{filename}"

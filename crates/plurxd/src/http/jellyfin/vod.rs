@@ -3,6 +3,9 @@ use super::*;
 use plurx_compat_jellyfin::profile::{
     CodecKind, CodecRule, ContainerRule, Fact, Facts, MediaKind, Property, TranscodingRule,
 };
+use plurx_compat_jellyfin::subtitle::{
+    delivery, DeliveryMethod, SubtitleRule, TrackFacts, Transport,
+};
 use plurx_core::store::PlaybackPlanningSnapshot;
 
 pub(super) struct Requested<'a> {
@@ -17,6 +20,9 @@ pub(super) struct Requested<'a> {
     pub allow_encode: bool,
     pub allow_audio_copy: bool,
     pub source_facts: &'a Facts,
+    /// The client's `SubtitleProfiles`, which decide per output rule whether
+    /// a text track is a manifest rendition, a sidecar or a burn.
+    pub subtitle_rules: &'a [SubtitleRule],
 }
 
 pub(super) struct Plan {
@@ -24,6 +30,17 @@ pub(super) struct Plan {
     pub fingerprint: String,
     pub bitrate: Option<u32>,
     pub inline_init: bool,
+    /// The chosen output can carry VTT renditions in its master.
+    pub manifest_capable: bool,
+}
+
+/// The decision facts of one native subtitle track.
+pub(super) fn track_facts(track: &plurx_core::domain::SubtitleStream) -> TrackFacts<'_> {
+    TrackFacts {
+        codec: &track.codec,
+        language: track.language.as_deref(),
+        text: !plurx_core::tracks::subtitle_requires_burn(&track.codec),
+    }
 }
 
 fn ceiling(profile: &Value, requested: Option<i64>) -> Option<Result<Option<u32>, ApiError>> {
@@ -164,20 +181,35 @@ pub(super) async fn negotiate(
         .audio
         .and_then(|index| file.audio_streams.get(index as usize))
         .or_else(|| file.audio_streams.first());
-    let burn = ask
+    let selected = ask
         .subtitle
-        .and_then(|index| file.subtitle_streams.get(index as usize))
-        .filter(|track| plurx_core::tracks::subtitle_requires_burn(&track.codec))
-        .map(|_| ask.subtitle.expect("selected track"));
+        .and_then(|index| file.subtitle_streams.get(index as usize));
     for rule in rules {
         if rule.protocol != "hls" || !matches!(rule.container.as_str(), "ts" | "mp4") {
             continue;
         }
-        let manifest_subtitles =
-            rule.enable_subtitles_in_manifest || rule.manifest_subtitles.is_some();
-        if ask.subtitle.is_some() && burn.is_none() && !manifest_subtitles {
-            continue;
-        }
+        // Jellyfin decides each track's delivery from the subtitle profiles
+        // for this output: a manifest rendition only where an `Hls` entry
+        // wins and the output can carry one, otherwise a sidecar or a burn.
+        let transport = Transport::Hls {
+            manifest: rule.enable_subtitles_in_manifest || rule.manifest_subtitles.is_some(),
+        };
+        let manifest_subtitles = file.subtitle_streams.iter().any(|track| {
+            delivery(ask.subtitle_rules, track_facts(track), transport).method
+                == DeliveryMethod::Hls
+        });
+        let (subtitle, burn) = match selected {
+            None => (None, None),
+            Some(track) => match delivery(ask.subtitle_rules, track_facts(track), transport).method
+            {
+                DeliveryMethod::Hls => (ask.subtitle, None),
+                // A sidecar the client fetches itself; the video carries none.
+                DeliveryMethod::External | DeliveryMethod::Embed => (None, None),
+                DeliveryMethod::Encode if !track_facts(track).text => (None, ask.subtitle),
+                // A text burn is not offered through this facade.
+                DeliveryMethod::Encode => continue,
+            },
+        };
         let caps = capabilities(&rule)?;
         super::super::stream::validate_device_caps(&caps)?;
         let profile = plurx_core::playback::DeviceProfile::from_caps_v2(&caps);
@@ -201,7 +233,7 @@ pub(super) async fn negotiate(
             }
             let mut body = json!({"playback_id":ask.playback_id,"request_id":format!("jellyfin:{}", ask.play_id),
                 "quality_auto":true,"start":ask.start_ms as f64 / 1000.0,"audio":ask.audio,
-                "subtitle":if burn.is_some() { None } else { ask.subtitle },"subtitle_burn":burn,"native_subtitles":manifest_subtitles,
+                "subtitle":subtitle,"subtitle_burn":burn,"native_subtitles":manifest_subtitles,
                 "copy":copy,"aac":copy && audio.is_some_and(|a| !ask.allow_audio_copy || !rule.audio_codec.as_deref().unwrap_or("").split(',').any(|c| c.trim().eq_ignore_ascii_case(&a.codec))),
                 "preserve_dolby_vision":false,"hdr10":false,"presentation":"vod","transport":"native","caps":caps});
             let native = serde_json::from_value(body.clone())
@@ -334,6 +366,7 @@ pub(super) async fn negotiate(
                 fingerprint: resolved.intent_fingerprint,
                 bitrate,
                 inline_init: rule.container == "ts",
+                manifest_capable: matches!(transport, Transport::Hls { manifest: true }),
             }));
         }
     }

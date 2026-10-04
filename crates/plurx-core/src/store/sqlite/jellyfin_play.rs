@@ -147,6 +147,44 @@ impl JellyfinPlayStore for SqliteStore {
             .await?;
         row.map(jp::RawPlay::decode).transpose()
     }
+    async fn jellyfin_current_direct_play(
+        &self,
+        scope: &JellyfinPlayScope,
+        item_wire_id: &str,
+        file_wire_id: &str,
+    ) -> Result<Option<JellyfinPlay>, StoreError> {
+        jp::validate_source(scope, item_wire_id, file_wire_id)?;
+        let scope = scope.clone();
+        let (item, file) = (item_wire_id.to_owned(), file_wire_id.to_owned());
+        let row = self
+            .with_conn(move |conn| {
+                Ok(conn
+                    .query_row(
+                        jp::READ_CURRENT_DIRECT,
+                        params![
+                            scope.user_id,
+                            scope.token_digest,
+                            scope.device_digest,
+                            scope.client_family.as_str(),
+                            item,
+                            file
+                        ],
+                        |row| {
+                            Ok(jp::RawPlay {
+                                payload: row.get(0)?,
+                                state: row.get(1)?,
+                                expires_at_ms: row.get(2)?,
+                                manual_revision: row.get(3)?,
+                                native_incarnation_id: row.get(4)?,
+                                direct_grant_id: row.get(5)?,
+                            })
+                        },
+                    )
+                    .optional()?)
+            })
+            .await?;
+        row.map(jp::RawPlay::decode).transpose()
+    }
     async fn jellyfin_plays_superseded_by(
         &self,
         play_id: &str,
