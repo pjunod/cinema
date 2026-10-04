@@ -134,3 +134,17 @@ test("an expired or substituted Source cursor reopens the list once instead of r
  const rows=fixture.elements.get("rows"),button=rows.more;button.disabled=false;await button.onclick();
  assert.equal(calls,2);assert.equal(button.disabled,false);assert.match(rows.innerHTML,/Kept/);
 });
+
+test("a show page renders its seasons instead of refusing children as a changed source",async()=>{
+ const show={...ref,item_id:"100"},season={...ref,item_id:"9007199254740995"};
+ const fixture=harness(async path=>{
+  if(path.endsWith("/items/100"))return reply({item:{source:"shared",reference:show,title:"Show",kind:"show"},files:[],delivery_status:"unavailable",watch:null});
+  if(path.includes("/items/100/children"))return reply({items:[{source:"shared",reference:season,title:"Season 1",kind:"season"}],next_cursor:null});
+  throw new Error("unexpected "+path);
+ });
+ const route=fixture.h.href(show);fixture.context.location.hash=route;
+ await fixture.h.view(1);
+ const children=fixture.elements.get("shared-children").innerHTML;
+ assert.match(children,/Season 1/);assert.ok(!children.includes("unavailable"),children);
+ assert.ok(!fixture.elements.get("shared-catalogue").innerHTML.includes("Mark watched"),"a show has no single watched state");
+});

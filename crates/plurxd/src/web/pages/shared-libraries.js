@@ -124,7 +124,9 @@ async function viewSharedCatalogue(generation=++PAGE_RENDER_GENERATION){
             finally{if(sharedCatalogueCurrent(capture))button.disabled=!launch;}
           };
         }
-        await sharedCatalogueLoadPage(`${base}/items/${ref.item_id}/children`,ref,capture,"shared-children");
+        // Children are other items of the same library: bind the page to the
+        // library reference, not to this parent's item identity.
+        await sharedCatalogueLoadPage(`${base}/items/${ref.item_id}/children`,sharedCatalogueLibraryReference(ref),capture,"shared-children");
       }else{
         const ref=parsed.reference;
         paint(`<form id="shared-search"><label>Search this library <input name="q" maxlength="512" value="${esc(parsed.q)}"></label><button class="ghost" type="submit">Search</button></form><div id="shared-items"></div>`);
