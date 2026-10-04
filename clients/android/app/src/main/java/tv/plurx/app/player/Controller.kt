@@ -3303,25 +3303,37 @@ class Controller internal constructor(
         autoUpgradeSinceMs = null
     }
 
+    private var autoGate: String? = null
+
+    /** One bounded log line whenever the reason Auto cannot decide changes. */
+    private fun noteAutoGate(reason: String?) {
+        if (reason == autoGate) return
+        autoGate = reason
+        Log.i("PlurxPlayback", "auto gate ${reason ?: "open"}")
+    }
+
     private fun tickDisplayAwareAuto() {
         val now = monotonicNowMs()
         if (now < autoNextTickMs) return
         autoNextTickMs = now + 5_000L
-        if (!tv.plurx.app.data.Session.displayAwareAuto || !tv.plurx.app.data.Session.autoAbr ||
-            tv.plurx.app.data.Session.displayAwareAutoProtocol != "route-v1" ||
-            autoRouteProtocol != "route-v1" ||
-            playbackIntent.desiredQuality != PlaybackQuality.Auto || !establishedPlayback ||
-            !player.isPlaying || !presentationForeground || playbackIntent.pendingSeek != null || autoPreparing ||
-            preparedPlayer != null || directedChange != null || controlObservationIsClosed) {
+        val gate = autoDecisionGate(AutoTickState(
+            protocol = tv.plurx.app.data.Session.displayAwareAuto && tv.plurx.app.data.Session.autoAbr &&
+                tv.plurx.app.data.Session.displayAwareAutoProtocol == "route-v1" && autoRouteProtocol == "route-v1",
+            automatic = playbackIntent.desiredQuality == PlaybackQuality.Auto,
+            playing = establishedPlayback && player.isPlaying && presentationForeground,
+            seeking = playbackIntent.pendingSeek != null,
+            changePending = autoPreparing || preparedPlayer != null || directedChange != null,
+            controlClosed = controlObservationIsClosed,
+            producerState = sessionStatus?.producer_state.takeIf { sessionStatusAgeMs?.let { it <= 15_000L } == true },
+        ))
+        if (gate != null) {
+            noteAutoGate(gate)
             autoUpgradeSinceMs = null
             return
         }
-        val target = autoPresentationTarget ?: return
-        val current = autoCatalog.firstOrNull { it.hasValidIdentity && it.id == autoActiveCandidateId } ?: return
-        if (sessionStatusAgeMs?.let { it <= 15_000L } == true && sessionStatus?.producer_state == "held") {
-            autoUpgradeSinceMs = null
-            return
-        }
+        val target = autoPresentationTarget ?: return noteAutoGate("no_presentation_target")
+        val current = autoCatalog.firstOrNull { it.hasValidIdentity && it.id == autoActiveCandidateId }
+            ?: return noteAutoGate("no_active_candidate")
         val transfer = latestAutoCompletedTransfer
         val duration = transfer?.bodyDurationMs
         val link = if (transfer != null && duration != null && transfer.networkLoad &&
@@ -3329,6 +3341,7 @@ class Controller internal constructor(
             transfer.ageMs(now) <= 10_000L && duration > 0 && transfer.bodyBytes > 0) {
             (transfer.bodyBytes.toDouble() * 8_000.0 / duration).takeIf { it.isFinite() && it > 0 }
         } else null
+        noteAutoGate(if (link == null) "no_link_sample" else null)
         autoSwitchTimes.removeAll { now - it >= 3_600_000L }
         val area = current.width.toLong() * current.height
         val eligible = autoCatalog.filter {
@@ -5059,6 +5072,31 @@ internal fun autoTrialMayCommit(requestedId: String?, offeredId: String?, reques
     requestedId != null && requestedId == offeredId && requestedTargetRevision != null &&
         requestedTargetRevision == targetRevision && requestedViewerEpoch == viewerEpoch &&
         automatic && presenting && !seeking
+
+internal data class AutoTickState(
+    val protocol: Boolean,
+    val automatic: Boolean,
+    val playing: Boolean,
+    val seeking: Boolean,
+    val changePending: Boolean,
+    val controlClosed: Boolean,
+    val producerState: String?,
+)
+
+/** Why display-aware Auto cannot decide on this tick, or null. A held producer
+ * is not a reason: it is the ordinary paced steady state of a producer running
+ * ahead of its viewer and evidence in neither direction (the `producer-paced`
+ * case of tests/playback/auto-quality-policy.json). Transfers it paced are
+ * excluded by their own provenance. */
+internal fun autoDecisionGate(state: AutoTickState): String? = when {
+    !state.protocol -> "protocol"
+    !state.automatic -> "manual"
+    !state.playing -> "not_playing"
+    state.seeking -> "seeking"
+    state.changePending -> "change_pending"
+    state.controlClosed -> "control_closed"
+    else -> null
+}
 
 /** A completed body that measures the link: an ordinary session segment, or a
  * continuous family's video segment. Shared AAC objects are too small to be a
