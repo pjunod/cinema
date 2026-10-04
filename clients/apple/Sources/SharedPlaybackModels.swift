@@ -246,3 +246,53 @@ struct SharedPGSManifest: Codable {
     }
 }
 
+
+/// A beat is retained verbatim across uncertain sends. A conflict discards it;
+/// only a fresh authorized watch read can permit the next new beat.
+struct SharedProgressBeat: Encodable, Equatable {
+    let sessionId: String
+    let sequence: Int64
+    let positionMs: Int64
+    let durationMs: Int64?
+    let watched: Bool
+    func validate() throws {
+        guard sessionId.count == 36,
+              PlaybackFileContext.matches(sessionId, "^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"),
+              (0...9_007_199_254_740_991).contains(sequence),
+              (0...9_007_199_254_740_991).contains(positionMs),
+              durationMs.map({ (0...9_007_199_254_740_991).contains($0) }) ?? true
+        else { throw APIError.badURL }
+    }
+}
+enum SharedProgressResult: Equatable {
+    case acknowledged
+    case resyncRequired(currentSequence: Int64?)
+}
+struct SharedProgressOrder {
+    private(set) var sequence: Int64
+    private(set) var pending: SharedProgressBeat?
+    private(set) var needsResync = false
+    init(sequence: Int64) throws {
+        guard (0...9_007_199_254_740_991).contains(sequence) else { throw APIError.badURL }
+        self.sequence = sequence
+    }
+    mutating func beat(sessionId: String, positionMs: Int64, durationMs: Int64?, watched: Bool) throws -> SharedProgressBeat {
+        guard !needsResync else { throw APIError.badURL }
+        if let pending { guard pending.sessionId == sessionId else { throw APIError.badURL }; return pending }
+        guard sequence < 9_007_199_254_740_991 else { throw APIError.badURL }
+        let beat = SharedProgressBeat(sessionId: sessionId, sequence: sequence + 1, positionMs: positionMs, durationMs: durationMs, watched: watched)
+        try beat.validate(); sequence = beat.sequence; pending = beat; return beat
+    }
+    mutating func complete(_ beat: SharedProgressBeat, result: SharedProgressResult) throws {
+        guard pending == beat else { throw APIError.badURL }
+        if case let .resyncRequired(current) = result {
+            if let current { guard (0...9_007_199_254_740_991).contains(current) else { throw APIError.badURL }; sequence = max(sequence, current) }
+            needsResync = true
+        }
+        pending = nil
+    }
+    mutating func resync(freshAuthorizedSequence: Int64) throws {
+        guard needsResync, (0...9_007_199_254_740_991).contains(freshAuthorizedSequence) else { throw APIError.badURL }
+        sequence = max(sequence, freshAuthorizedSequence); needsResync = false
+    }
+}

@@ -136,6 +136,25 @@ final class SharedDecisionClientTests: XCTestCase {
         let raw = try JSONSerialization.jsonObject(with: XCTUnwrap(sent)) as! [String: Any]
         XCTAssertEqual(raw["request_id"] as? String, request.requestId); XCTAssertNil(raw["intent"]); XCTAssertNil(raw["previous_session_id"])
         XCTAssertEqual(result.start.wire["future"]?.object?["exact"], .integer(Int64.max)); XCTAssertThrowsError(try result.context.localID())
+        let client = try SharedDecisionClient(testConfiguration: configuration)
+        let beat = SharedProgressBeat(sessionId: session, sequence: 7, positionMs: 0, durationMs: 90_000, watched: false)
+        var progressSent: Data?
+        DecisionHTTP.answer = { request in
+            XCTAssertEqual(request.url?.path, "/api/v1/shared/imports/\(self.ref.importId)/items/\(self.ref.itemId)/progress")
+            XCTAssertEqual(request.value(forHTTPHeaderField: "Authorization"), "Bearer decision-bearer")
+            let encoded = try self.body(request)
+            if let progressSent { XCTAssertEqual(progressSent, encoded) }; progressSent = encoded
+            return (request.url!, 409, [:], Data("{\"code\":\"sharing_progress_stale\",\"current_sequence\":20}".utf8))
+        }
+        for _ in 0..<2 { let outcome = try await client.progress(playback: result, beat: beat); XCTAssertEqual(outcome, .resyncRequired(currentSequence: 20)) }
+        let progressBody = try JSONSerialization.jsonObject(with: XCTUnwrap(progressSent)) as! [String: Any]
+        XCTAssertEqual(Set(progressBody.keys), ["session_id", "sequence", "position_ms", "duration_ms", "watched"])
+        XCTAssertEqual(progressBody["position_ms"] as? Int, 0)
+        DecisionHTTP.answer = { ($0.url!, 409, [:], Data("{\"code\":\"sharing_progress_stale\",\"current_sequence\":\"20\"}".utf8)) }
+        do { _ = try await client.progress(playback: result, beat: beat); XCTFail("accepted string sequence") } catch {}
+        DecisionHTTP.answer = { ($0.url!, 200, [:], Data(repeating: 32, count: 16_385)) }
+        do { _ = try await client.progress(playback: result, beat: beat); XCTFail("accepted oversized progress ACK") } catch {}
+
     }
     func testInitialStartRefusesUnsupportedOriginalFieldsBeforeNetwork() async throws {
         let context = try await context(), client = try SharedDecisionClient(testConfiguration: configuration); var calls = 0

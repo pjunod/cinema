@@ -149,7 +149,16 @@ class SharedDecisionClientTest {
             put("future", buildJsonObject { put("exact", Long.MAX_VALUE) })
         }.toString()
         var sent: String? = null
+        var progressReply: String? = null
+        var progressSent: String? = null
         val transport = OkHttpClient.Builder().addInterceptor { chain ->
+            if (progressReply != null) {
+                assertEquals("/api/v1/shared/imports/${reference.import_id}/items/${reference.item_id}/progress", chain.request().url.encodedPath)
+                assertEquals("Bearer decision-bearer", chain.request().header("Authorization"))
+                val buffer = Buffer(); chain.request().body!!.writeTo(buffer)
+                val bytes = buffer.readUtf8(); progressSent?.let { assertEquals(it, bytes) }; progressSent = bytes
+                return@addInterceptor response(chain.request(), progressReply!!, 409)
+            }
             assertEquals("$base/hls/sessions", chain.request().url.encodedPath); assertEquals("Bearer decision-bearer", chain.request().header("Authorization"))
             val buffer = Buffer(); chain.request().body!!.writeTo(buffer); sent = buffer.readUtf8(); response(chain.request(), reply)
         }.build()
@@ -159,6 +168,18 @@ class SharedDecisionClientTest {
         assertEquals(request, result.request); assertEquals(Net.json.encodeToJsonElement(request).jsonObject, Json.parseToJsonElement(sent!!).jsonObject)
         assertEquals(Long.MAX_VALUE, result.start.wire["future"]!!.jsonObject["exact"]!!.jsonPrimitive.long)
         assertTrue(runCatching { result.context.localId() }.isFailure)
+        val client = SharedDecisionClient.forTest(transport)
+        val beat = SharedProgressBeat(session, 7, 0, 90_000, false)
+        progressReply = "{\"code\":\"sharing_progress_stale\",\"current_sequence\":20}"
+        repeat(2) { assertEquals(SharedProgressResult.ResyncRequired(20), client.progress(result, beat)) }
+        val progressBody = Json.parseToJsonElement(progressSent!!).jsonObject
+        assertEquals(setOf("session_id", "sequence", "position_ms", "duration_ms", "watched"), progressBody.keys)
+        assertEquals(0L, progressBody.getValue("position_ms").jsonPrimitive.long)
+        progressReply = "{\"code\":\"sharing_progress_stale\",\"current_sequence\":\"20\"}"
+        assertTrue(runCatching { client.progress(result, beat) }.isFailure)
+        progressReply = " ".repeat(16_385)
+        assertTrue(runCatching { client.progress(result, beat) }.isFailure)
+
     }
     @Test fun initialStartRefusesUnsupportedFieldsBeforeNetwork(): Unit = runBlocking {
         login(); val context = context(); var calls = 0

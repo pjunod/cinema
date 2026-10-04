@@ -4584,7 +4584,30 @@ JDK 25 image. iOS Debug builds pass. The actual iOS simulator Shared client/mode
 filter reports 11 passed, zero failures, including complete synthetic B Start
 through authenticated URLProtocol I/O. The source-only Android baseline reports
 40 passed across six Shared/context suites, zero failures/skips, with Kotlin
-compilation and lint passing in 4 minutes 30 seconds. Android adapter changes
-still require their exact committed-source compiler run. These are protocol
+compilation and lint passing in 4 minutes 30 seconds. The committed Native
+initial Start adapter then passes 42 tests with zero failures/errors/skips,
+Kotlin main/unit compilation and lint in 4 minutes 52 seconds. These are protocol
 fixtures, not physical Source production or hardware playback qualification.
 Native player launch and ordered B progress remain the next integration slice.
+
+
+### Native ordered progress adapter
+
+The native client progress body contains only the admitted B session UUID,
+sequence, position, optional duration and watched state. It posts to the
+captured account's compound Shared item route. It repeats current account and
+complete admitted B context validation, permits only bounded numeric values,
+and caps ACK/conflict responses at 16 KiB. It exposes only typed acknowledged
+or stale/conflict resync outcomes; Source authority stays server-owned.
+
+An ordered beat journal retains an uncertain beat unchanged. Swift JSON uses
+sorted keys so retry bytes stay identical. A typed conflict discards that beat
+and blocks the next beat until a fresh authorized watch read seeds the next
+sequence. It never renumbers the old payload after another device advances
+history. Actual iOS simulator tests pass 12 with zero failures, including
+zero-position network body, identical retries, numeric-only conflict sequence,
+oversized response refusal and journal exhaustion/resync. Android qualification
+for this committed progress slice remains pending its source-only build. Player
+handoff, watch-key serialization across imports and fresh-detail resync wiring
+remain explicit follow-up work. These synthetic protocol fixtures do not prove
+physical B-to-Source playback or hardware acceptance.

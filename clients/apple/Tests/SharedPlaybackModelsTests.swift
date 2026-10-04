@@ -134,4 +134,23 @@ final class SharedPlaybackModelsTests: XCTestCase {
         wrong.control?.url = "/api/v1/hls/55555555-5555-4555-8555-555555555555/control"
         XCTAssertThrowsError(try SharedStartValidation.validated(wrong, context: bound))
     }
+    func testProgressOrderRetainsUncertainBeatAndRequiresFreshResync() throws {
+        let session = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
+        var order = try SharedProgressOrder(sequence: 10)
+        let old = try order.beat(sessionId: session, positionMs: 0, durationMs: nil, watched: false)
+        XCTAssertEqual(old.sequence, 11)
+        XCTAssertEqual(try order.beat(sessionId: session, positionMs: 9000, durationMs: 10000, watched: true), old)
+        XCTAssertThrowsError(try order.beat(sessionId: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb", positionMs: 1, durationMs: nil, watched: false))
+        try order.complete(old, result: .resyncRequired(currentSequence: 20))
+        XCTAssertNil(order.pending)
+        XCTAssertThrowsError(try order.beat(sessionId: session, positionMs: 1, durationMs: nil, watched: false))
+        try order.resync(freshAuthorizedSequence: 22)
+        let fresh = try order.beat(sessionId: session, positionMs: 3000, durationMs: 10000, watched: false)
+        XCTAssertEqual(fresh.sequence, 23); XCTAssertEqual(fresh.positionMs, 3000)
+        try order.complete(fresh, result: .acknowledged)
+        XCTAssertNil(order.pending)
+        var exhausted = try SharedProgressOrder(sequence: 9_007_199_254_740_991)
+        XCTAssertThrowsError(try exhausted.beat(sessionId: session, positionMs: 0, durationMs: nil, watched: false))
+    }
+
 }

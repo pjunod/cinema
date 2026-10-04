@@ -7,7 +7,7 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.encodeToString
-import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.*
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
@@ -20,6 +20,28 @@ import kotlin.coroutines.coroutineContext
 /** Captured authenticated B account; Source IDs never enter a Local Decision. */
 internal class SharedDecisionClient private constructor(private val auth: Session.PlaybackAuthorization, private val transport: OkHttpClient) {
     private fun requireCurrent() { require(Session.playbackAuthorization() == auth && !auth.token.isNullOrEmpty()) }
+    suspend fun progress(playback: SharedStartedPlayback, beat: SharedProgressBeat): SharedProgressResult {
+        requireCurrent(); beat.validate()
+        val context = playback.context
+        val reference = requireNotNull(context.reference)
+        require(context.sessionId == beat.session_id && playback.start.response.session_id == beat.session_id)
+        context.validateSharedReference(reference, context.sourceFileId, requireNotNull(context.revision))
+        playback.start.validated(context)
+        val bytes = Net.json.encodeToString(beat); require(bytes.toByteArray().size <= 1024)
+        val request = Request.Builder().url("${auth.origin}/api/v1/shared/imports/${reference.import_id}/items/${reference.item_id}/progress")
+            .header("Authorization", "Bearer ${auth.token}").post(bytes.toRequestBody("application/json".toMediaType())).build()
+        val response = readResponse(request, auth, transport, statuses = setOf(200, 409), maxBytes = 16_384) { requireCurrent() }
+        requireCurrent()
+        if (response.status == 200) return SharedProgressResult.Acknowledged
+        val refusal = Json.parseToJsonElement(strictUtf8(response.bytes)).jsonObject
+        val code = refusal["code"]?.jsonPrimitive?.content
+        require(code == "sharing_progress_stale" || code == "sharing_progress_conflict")
+        val current = refusal["current_sequence"]?.let { value ->
+            if (value == JsonNull) null else { val primitive = value.jsonPrimitive; require(!primitive.isString); requireNotNull(primitive.longOrNull) }
+        }
+        require(current == null || current in 0..9_007_199_254_740_991L)
+        return SharedProgressResult.ResyncRequired(current)
+    }
     suspend fun decision(context: PlaybackFileContext, device: Context, query: Map<String, String> = emptyMap()): Result {
         val caps = Caps.snapshot(device).document
         return execute(context, caps, query)
@@ -98,8 +120,11 @@ internal class SharedDecisionClient private constructor(private val auth: Sessio
         }
         private fun strictUtf8(bytes: ByteArray): String = Charsets.UTF_8.newDecoder().onMalformedInput(CodingErrorAction.REPORT)
             .onUnmappableCharacter(CodingErrorAction.REPORT).decode(ByteBuffer.wrap(bytes)).toString()
+        private data class HTTPResponse(val bytes: ByteArray, val status: Int)
+        private suspend fun read(request: Request, auth: Session.PlaybackAuthorization, transport: OkHttpClient, initialStart: Boolean = false, current: () -> Unit): ByteArray =
+            readResponse(request, auth, transport, initialStart, current = current).bytes
         @OptIn(InternalCoroutinesApi::class)
-        private suspend fun read(request: Request, auth: Session.PlaybackAuthorization, transport: OkHttpClient, initialStart: Boolean = false, current: () -> Unit): ByteArray = withContext(Dispatchers.IO) {
+        private suspend fun readResponse(request: Request, auth: Session.PlaybackAuthorization, transport: OkHttpClient, initialStart: Boolean = false, statuses: Set<Int> = setOf(200), maxBytes: Int = 4_194_304, current: () -> Unit): HTTPResponse = withContext(Dispatchers.IO) {
             ensureActive(); current()
             val builder = transport.newBuilder().followRedirects(false).followSslRedirects(false).cache(null)
                 .cookieJar(okhttp3.CookieJar.NO_COOKIES).authenticator(okhttp3.Authenticator.NONE)
@@ -113,11 +138,11 @@ internal class SharedDecisionClient private constructor(private val auth: Sessio
                 call.execute().use { response ->
                     current(); ensureActive()
                     require(response.request.url == request.url && response.priorResponse == null)
-                    if (response.code != 200) throw IllegalStateException("Server returned ${response.code}")
-                    val body = requireNotNull(response.body); require(body.contentLength() <= 4_194_304)
-                    val source = body.source(); source.request(4_194_305)
-                    val bytes = source.buffer.readByteArray(source.buffer.size.coerceAtMost(4_194_305))
-                    require(bytes.size <= 4_194_304); current(); ensureActive(); bytes
+                    if (response.code !in statuses) throw IllegalStateException("Server returned ${response.code}")
+                    val body = requireNotNull(response.body); require(body.contentLength() <= maxBytes)
+                    val source = body.source(); source.request(maxBytes.toLong() + 1)
+                    val bytes = source.buffer.readByteArray(source.buffer.size.coerceAtMost(maxBytes.toLong() + 1))
+                    require(bytes.size <= maxBytes); current(); ensureActive(); HTTPResponse(bytes, response.code)
                 }
             } catch (error: Exception) {
                 ensureActive(); throw error

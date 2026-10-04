@@ -58,6 +58,31 @@ struct SharedDecisionClient {
         try Task.checkCancellation(); try requireCurrent()
         return try SharedStart.decode(data).bindInitial(context, request: retained)
     }
+    /// Exact B session beat only. The caller retains it on an uncertain send
+    /// and obtains fresh authorized detail/watch state after a typed conflict.
+    func progress(playback: SharedStartedPlayback, beat: SharedProgressBeat) async throws -> SharedProgressResult {
+        try Task.checkCancellation(); try requireCurrent(); try beat.validate()
+        let context = playback.context
+        guard let reference = context.reference, context.sessionId == beat.sessionId,
+              playback.start.response.sessionId == beat.sessionId,
+              let revision = context.revision else { throw APIError.badURL }
+        try context.validateSharedReference(reference, file: context.sourceFileId, revision: revision)
+        _ = try playback.start.validated(context)
+        let encoder = JSONEncoder(); encoder.keyEncodingStrategy = .convertToSnakeCase; encoder.outputFormatting = [.sortedKeys]
+        let bytes = try encoder.encode(beat)
+        guard bytes.count <= 1024, let url = URL(string: origin + "/api/v1/shared/imports/\(reference.importId)/items/\(reference.itemId)/progress") else { throw APIError.badURL }
+        var request = URLRequest(url: url); request.httpMethod = "POST"; request.httpBody = bytes; request.timeoutInterval = 10
+        request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization"); request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        let response = try await SharedDecisionReadOperation(request: request, configuration: configuration, statuses: [200, 409], maxBytes: 16_384, current: requireCurrent).readResponse()
+        try requireCurrent(); try Task.checkCancellation()
+        if response.status == 200 { return .acknowledged }
+        struct Refusal: Decodable { let code: String; let currentSequence: Int64? }
+        let decoder = JSONDecoder(); decoder.keyDecodingStrategy = .convertFromSnakeCase
+        let refusal = try decoder.decode(Refusal.self, from: response.data)
+        guard ["sharing_progress_stale", "sharing_progress_conflict"].contains(refusal.code),
+              refusal.currentSequence.map({ (0...9_007_199_254_740_991).contains($0) }) ?? true else { throw APIError.badURL }
+        return .resyncRequired(currentSequence: refusal.currentSequence)
+    }
     #if DEBUG
     func decisionForTest(context: PlaybackFileContext, caps: DeviceCaps, query: [URLQueryItem] = []) async throws -> (decision: SharedDecision, caps: DeviceCaps) {
         try await execute(context: context, caps: caps, query: query)
@@ -104,6 +129,8 @@ struct SharedDecisionClient {
     }
 }
 
+private struct SharedDecisionHTTPResponse { let data: Data; let status: Int }
+
 private final class SharedDecisionReadOperation: NSObject, URLSessionDataDelegate {
     private let request: URLRequest
     private let configuration: URLSessionConfiguration
@@ -111,20 +138,25 @@ private final class SharedDecisionReadOperation: NSObject, URLSessionDataDelegat
     private let lock = NSLock()
     private var data = Data()
     private var completed = false
-    private var continuation: CheckedContinuation<Data, Error>?
+    private var continuation: CheckedContinuation<SharedDecisionHTTPResponse, Error>?
+    private let statuses: Set<Int>
+    private let maxBytes: Int
+    private var responseStatus = 0
     private var session: URLSession?
     private var task: URLSessionDataTask?
     private var observer: UUID?
-    init(request: URLRequest, configuration: URLSessionConfiguration, current: @escaping () throws -> Void) {
+    init(request: URLRequest, configuration: URLSessionConfiguration, statuses: Set<Int> = [200], maxBytes: Int = 4_194_304, current: @escaping () throws -> Void) {
         self.request = request; self.configuration = configuration; self.current = current
-        super.init(); data.reserveCapacity(4_194_304)
+        self.statuses = statuses; self.maxBytes = maxBytes
+        super.init(); data.reserveCapacity(maxBytes)
     }
-    func read() async throws -> Data {
+    func read() async throws -> Data { try await readResponse().data }
+    func readResponse() async throws -> SharedDecisionHTTPResponse {
         try await withTaskCancellationHandler(operation: {
             try await withCheckedThrowingContinuation { continuation in start(continuation) }
         }, onCancel: { [weak self] in self?.finish(.failure(CancellationError())) })
     }
-    private func start(_ continuation: CheckedContinuation<Data, Error>) {
+    private func start(_ continuation: CheckedContinuation<SharedDecisionHTTPResponse, Error>) {
         lock.lock()
         if completed { lock.unlock(); continuation.resume(throwing: CancellationError()); return }
         self.continuation = continuation; lock.unlock()
@@ -141,7 +173,7 @@ private final class SharedDecisionReadOperation: NSObject, URLSessionDataDelegat
         self.session = session; self.task = task; observer = registration.id; lock.unlock()
         do { try current(); task.resume() } catch { finish(.failure(error)) }
     }
-    private func finish(_ result: Result<Data, Error>) {
+    private func finish(_ result: Result<SharedDecisionHTTPResponse, Error>) {
         lock.lock()
         guard !completed else { lock.unlock(); return }
         completed = true
@@ -162,22 +194,22 @@ private final class SharedDecisionReadOperation: NSObject, URLSessionDataDelegat
         do {
             try current()
             guard let response = response as? HTTPURLResponse, response.url == request.url else { throw APIError.badURL }
-            guard response.statusCode == 200 else { throw APIError.http(response.statusCode) }
-            guard response.expectedContentLength < 0 || response.expectedContentLength <= 4_194_304 else { throw APIError.badURL }
-            lock.lock(); let done = completed; lock.unlock()
+            guard statuses.contains(response.statusCode) else { throw APIError.http(response.statusCode) }
+            guard response.expectedContentLength < 0 || response.expectedContentLength <= maxBytes else { throw APIError.badURL }
+            lock.lock(); let done = completed; responseStatus = response.statusCode; lock.unlock()
             completionHandler(done ? .cancel : .allow)
         } catch { completionHandler(.cancel); finish(.failure(error)) }
     }
     func urlSession(_ session: URLSession, dataTask: URLSessionDataTask, didReceive bytes: Data) {
         do { try current() } catch { finish(.failure(error)); return }
         lock.lock(); guard !completed else { lock.unlock(); return }
-        guard bytes.count <= 4_194_304 - data.count else { lock.unlock(); finish(.failure(APIError.badURL)); return }
+        guard bytes.count <= maxBytes - data.count else { lock.unlock(); finish(.failure(APIError.badURL)); return }
         data.append(bytes); lock.unlock()
     }
     func urlSession(_ session: URLSession, task: URLSessionTask, didCompleteWithError error: Error?) {
         if let error { finish(.failure(error)); return }
         do { try current() } catch { finish(.failure(error)); return }
-        lock.lock(); let result = data; let valid = !data.isEmpty; lock.unlock()
+        lock.lock(); let result = SharedDecisionHTTPResponse(data: data, status: responseStatus); let valid = !data.isEmpty; lock.unlock()
         if valid { finish(.success(result)) } else { finish(.failure(APIError.badURL)) }
     }
 }

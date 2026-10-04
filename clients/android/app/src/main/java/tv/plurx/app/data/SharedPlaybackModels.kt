@@ -243,3 +243,46 @@ internal data class SharedPGSManifest(
     }
 }
 
+
+@Serializable
+internal data class SharedProgressBeat(
+    val session_id: String, val sequence: Long, val position_ms: Long,
+    val duration_ms: Long? = null, val watched: Boolean,
+) {
+    fun validate() {
+        require(Regex("[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}").matches(session_id))
+        require(sequence in 0..9_007_199_254_740_991L && position_ms in 0..9_007_199_254_740_991L)
+        require(duration_ms == null || duration_ms in 0..9_007_199_254_740_991L)
+    }
+}
+internal sealed interface SharedProgressResult {
+    data object Acknowledged : SharedProgressResult
+    data class ResyncRequired(val currentSequence: Long?) : SharedProgressResult
+}
+/** One watch-key order: uncertain sends retain the exact beat; conflicts require
+ * a fresh authorized watch read and never renumber the discarded old beat. */
+internal class SharedProgressOrder(initialSequence: Long) {
+    var sequence = initialSequence; private set
+    var pending: SharedProgressBeat? = null; private set
+    var needsResync = false; private set
+    init { require(sequence in 0..9_007_199_254_740_991L) }
+    fun beat(sessionId: String, positionMs: Long, durationMs: Long?, watched: Boolean): SharedProgressBeat {
+        require(!needsResync)
+        pending?.let { require(it.session_id == sessionId); return it }
+        require(sequence < 9_007_199_254_740_991L)
+        val beat = SharedProgressBeat(sessionId, sequence + 1, positionMs, durationMs, watched)
+        beat.validate(); sequence = beat.sequence; pending = beat; return beat
+    }
+    fun complete(beat: SharedProgressBeat, result: SharedProgressResult) {
+        require(pending == beat)
+        if (result is SharedProgressResult.ResyncRequired) {
+            result.currentSequence?.let { require(it in 0..9_007_199_254_740_991L); sequence = maxOf(sequence, it) }
+            needsResync = true
+        }
+        pending = null
+    }
+    fun resync(freshAuthorizedSequence: Long) {
+        require(needsResync && freshAuthorizedSequence in 0..9_007_199_254_740_991L)
+        sequence = maxOf(sequence, freshAuthorizedSequence); needsResync = false
+    }
+}
