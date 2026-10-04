@@ -78,9 +78,13 @@ impl Drop for RestartAdmission {
 }
 
 /// Monotonic serving authority. `ready` may recover, but a loss generation
-/// never does: a consumer admitted under generation N must retire when it
-/// observes any generation greater than N, even if a fast loss/recovery was
-/// coalesced into one watch notification before that consumer was scheduled.
+/// never does: an admission or commit made under generation N must refuse
+/// itself when it observes any generation greater than N, even if a fast
+/// loss/recovery was coalesced into one watch notification before that
+/// consumer was scheduled. Existing rolling sessions are not admissions:
+/// they survive a loss that recovers within
+/// `transcode::manager_control::SERVING_FENCE_SESSION_GRACE`, because every
+/// response they publish admits against the generation current at the time.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) struct ServingState {
     pub(crate) ready: bool,
@@ -688,8 +692,10 @@ struct AuthorityOutcome {
 ///
 /// Rule 4 is the one that keeps this a continuation rather than a second route
 /// to authority. Once a loss is published the generation has bumped and every
-/// admitted session has been torn down, so returning on a retained proof would
-/// resume service on grounds this node had already declared insufficient.
+/// admission made under it refuses itself (existing sessions only survive a
+/// loss that a fresh proof ends within their grace), so returning on a
+/// retained proof would resume service on grounds this node had already
+/// declared insufficient.
 /// Recovery is a fresh proof's job, and only a fresh proof's.
 fn decide_authority(
     unmanaged: bool,

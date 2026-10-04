@@ -1,5 +1,19 @@
 use super::*;
 
+/// How long existing sessions outlive a loss of serving authority, summed
+/// over one outage, before they are retired. Elections and one-second leader
+/// stalls recover well inside it (234 ms and 1.7 s on 2026-10-04). It also
+/// stays inside the window in which a session's twelve-second replicated
+/// lease can still be renewed (a renewal needs four seconds left, and the
+/// last one is at most a tick and a renewal deadline old), so a loss longer
+/// than this would end the session through the lease loop anyway.
+#[cfg(not(test))]
+pub(crate) const SERVING_FENCE_SESSION_GRACE: std::time::Duration =
+    std::time::Duration::from_secs(5);
+#[cfg(test)]
+pub(crate) const SERVING_FENCE_SESSION_GRACE: std::time::Duration =
+    std::time::Duration::from_secs(2);
+
 impl TranscodeManager {
     /// Exact passive-grant presence on this node's VOD registry.
     pub(crate) async fn passive_presence(
@@ -1492,27 +1506,111 @@ impl TranscodeManager {
         .await;
     }
 
-    /// Kill every mutable HLS producer on the first loss transition. The
-    /// watch is process-local and changes synchronously with readiness, so
-    /// teardown never waits for another Store request to time out.
+    /// Close the registration gate on every loss transition, and kill every
+    /// mutable HLS producer once serving authority has been lost for longer
+    /// than [`SERVING_FENCE_SESSION_GRACE`] in one outage.
+    ///
+    /// A loss that recovers inside the grace leaves existing sessions alone.
+    /// A Raft election after the leader restarts, or a leader stalled for a
+    /// second on one slow apply, loses the one-second quorum watermark on
+    /// every voter at once; retiring every session on that ended healthy
+    /// playback on nodes that had nothing to do with the restart (2026-10-04,
+    /// two cluster-wide interruptions in two minutes, each retired 48 ms after
+    /// authority had already returned).
+    ///
+    /// Keeping them is safe because nothing they hold is served while the
+    /// node is fenced: the router answers `serving_fenced` for media paths,
+    /// and every response admits against the *current* generation, so a
+    /// response can only be published under the authority that came back.
+    /// Ownership is not this loop's to prove. Another node can claim a session
+    /// only after its twelve-second replicated lease has expired, and renewals
+    /// run every three seconds, so in normal operation more than the grace is
+    /// left when authority is lost, even when only this node lost it and the
+    /// rest of the cluster keeps quorum. If a claim did commit, the kept
+    /// session still could not serve it: after recovery a request is served
+    /// locally only while the replicated route names this node (read through
+    /// a one-second cache), and the lease loop reaps a session whose lease is
+    /// gone. New registrations stay refused for the old generation exactly as
+    /// before.
+    ///
+    /// The grace is a budget for one outage, not per loss: losses that
+    /// follow each other within a grace of the last recovery spend the same
+    /// budget, so a quorum that keeps flapping cannot keep sessions forever.
     pub(crate) async fn serving_fence_loop(
         self: Arc<Self>,
         mut serving: tokio::sync::watch::Receiver<crate::serving_fence::ServingState>,
     ) {
+        let mut outage_spent = std::time::Duration::ZERO;
+        let mut last_recovered_at: Option<tokio::time::Instant> = None;
         loop {
             let state = *serving.borrow_and_update();
             let previous_generation = self.serving_loss_generation.load(Acquire);
             if !state.ready || state.loss_generation != previous_generation {
-                // Keep the gate closed until the old generation is fully
-                // retired. A racing registration either observes false in its
-                // final pre-insert check or publishes before this loop obtains
-                // the registry lock, in which case the snapshot includes it.
+                // Keep the gate closed until this transition is resolved. A
+                // racing registration either observes false in its final
+                // pre-insert check or publishes before this loop obtains the
+                // registry lock, in which case a retirement snapshot includes
+                // it; registrations admitted under the old generation refuse
+                // themselves either way.
                 self.serving_ready.store(false, Release);
                 self.serving_loss_generation
                     .store(state.loss_generation, Release);
-                self.stop_all_sessions_for_serving_fence().await;
+                if last_recovered_at
+                    .is_some_and(|recovered| recovered.elapsed() >= SERVING_FENCE_SESSION_GRACE)
+                {
+                    outage_spent = std::time::Duration::ZERO;
+                }
+                let remaining = SERVING_FENCE_SESSION_GRACE.saturating_sub(outage_spent);
+                let lost_at = tokio::time::Instant::now();
+                // `Some(true)`: authority came back inside the grace;
+                // `Some(false)`: the grace ran out; `None`: the fence is gone
+                // (shutdown), so retire and stop.
+                let recovered = if state.ready {
+                    Some(true)
+                } else {
+                    tokio::time::timeout(remaining, async {
+                        loop {
+                            if serving.changed().await.is_err() {
+                                return None;
+                            }
+                            if serving.borrow().ready {
+                                return Some(true);
+                            }
+                        }
+                    })
+                    .await
+                    .unwrap_or(Some(false))
+                };
+                let Some(recovered) = recovered else {
+                    self.stop_all_sessions_for_serving_fence().await;
+                    break;
+                };
+                if recovered {
+                    outage_spent = outage_spent.saturating_add(lost_at.elapsed());
+                    last_recovered_at = Some(tokio::time::Instant::now());
+                    let kept = self.sessions.lock().await.len();
+                    tracing::warn!(
+                        target: "plurxd::transcode",
+                        outage_ms = u64::try_from(lost_at.elapsed().as_millis()).unwrap_or(u64::MAX),
+                        outage_budget_spent_ms = u64::try_from(outage_spent.as_millis()).unwrap_or(u64::MAX),
+                        kept_sessions = kept,
+                        grace_ms = u64::try_from(SERVING_FENCE_SESSION_GRACE.as_millis()).unwrap_or(u64::MAX),
+                        "serving authority returned within the session grace; existing sessions kept"
+                    );
+                } else {
+                    outage_spent = std::time::Duration::ZERO;
+                    last_recovered_at = None;
+                    self.stop_all_sessions_for_serving_fence().await;
+                }
             }
+            let state = *serving.borrow_and_update();
+            self.serving_loss_generation
+                .store(state.loss_generation, Release);
             self.serving_ready.store(state.ready, Release);
+            if !state.ready {
+                // Lost again, or never recovered: resolve it on the next turn.
+                continue;
+            }
             if serving.changed().await.is_err() {
                 break;
             }
