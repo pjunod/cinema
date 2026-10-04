@@ -215,7 +215,8 @@
       control_epoch: bootstrap.control_epoch,
       client_instance_id: clientInstanceId,
       sequence,
-      supported_actions: SUPPORTED_ACTIONS.slice(),
+      supported_actions: Array.isArray(snapshot.supported_actions)
+        ? SUPPORTED_ACTIONS.filter(action=>snapshot.supported_actions.includes(action)) : SUPPORTED_ACTIONS.slice(),
     });
     return request;
   }

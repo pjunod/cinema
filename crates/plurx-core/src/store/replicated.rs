@@ -804,6 +804,23 @@ pub const SQLITE_TRANSACTION_SITES: &[SqliteTransactionSite] = &[
         mechanism: TransactionMechanism::RusqliteTransaction,
         shape: TransactionShape::ReadBranchWrite,
     },
+    // Continuous quality: prune superseded settled receipts, insert this one
+    // `ON CONFLICT DO NOTHING`, then read the winning receipt back.
+    SqliteTransactionSite {
+        module: "sessions.rs",
+        method: "request_quality_cancellation",
+        is_async: true,
+        mechanism: TransactionMechanism::RusqliteTransaction,
+        shape: TransactionShape::WriteReadBack,
+    },
+    // Fenced settle, then read whether the receipt is settled for this owner.
+    SqliteTransactionSite {
+        module: "sessions.rs",
+        method: "settle_quality_cancellation",
+        is_async: true,
+        mechanism: TransactionMechanism::RusqliteTransaction,
+        shape: TransactionShape::WriteReadBack,
+    },
     // One migration step: its DDL, the foreign-key integrity read that
     // decides whether it may commit, and the `user_version` stamp, in one
     // transaction. `migrate` itself no longer opens one; it calls this per
@@ -1281,7 +1298,12 @@ mod tests {
         // Jellyfin play activation binds and conditionally supersedes in one
         // boundary that branches on the binding's rows affected.
         // Merged with main's candidate recovery: 96 + 4 + 1.
-        assert_eq!(methods.len(), 101);
+        //
+        // 103 with continuous quality's two `sessions.rs` boundaries:
+        // `request_quality_cancellation` prunes, inserts and reads the winning
+        // receipt back, and `settle_quality_cancellation` settles and reads
+        // whether the receipt is settled for this owner.
+        assert_eq!(methods.len(), 103);
     }
 
     #[test]

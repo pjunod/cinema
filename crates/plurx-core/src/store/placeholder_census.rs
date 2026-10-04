@@ -187,6 +187,12 @@ const SHARED_CONSTANT_SOURCES: &[(&str, &str)] = &[
         "downloaded_subtitles.rs",
         include_str!("downloaded_subtitles.rs"),
     ),
+    ("continuous_family.rs", include_str!("continuous_family.rs")),
+    (
+        "quality_cancellation.rs",
+        include_str!("quality_cancellation.rs"),
+    ),
+    ("quality_ledger.rs", include_str!("quality_ledger.rs")),
     ("dv_conversion.rs", include_str!("dv_conversion.rs")),
     ("fragindex.rs", include_str!("fragindex.rs")),
     (
@@ -940,7 +946,12 @@ fn is_sqlite_candidate(text: &str) -> bool {
 // same-statement scanner's reach.
 // J3 removes three separately prepared watch-tree loop statements; the shared
 // atomic manual SQL is exercised by both-backend revision contracts.
-const EXPECTED_UNCHECKED_SQLITE_ARITY: usize = 89;
+// 89 -> 92: three continuous-quality SQLite statements bind their values
+// away from the literal's own statement, where this scanner cannot count them.
+// They are the continuous-quality ledger, reservation and cancellation-receipt
+// paths; the continuous_quality_ledger_* and quality_cancellation_* store
+// contracts execute every one of them on both backends.
+const EXPECTED_UNCHECKED_SQLITE_ARITY: usize = 92;
 
 #[test]
 fn every_sqlite_placeholder_and_local_binding_arity_is_valid() {
@@ -1047,11 +1058,18 @@ fn every_replicated_placeholder_is_introduced_in_order() {
     let mut offenders = Vec::new();
     let mut fragments = Vec::new();
     let mut scanned = 0_usize;
-    for (name, source) in STORE_SOURCES.iter().chain(
-        SHARED_CONSTANT_SOURCES
-            .iter()
-            .filter(|(name, _)| *name == "../live_tv_resource.rs"),
-    ) {
+    for (name, source) in STORE_SOURCES
+        .iter()
+        .chain(SHARED_CONSTANT_SOURCES.iter().filter(|(name, _)| {
+            matches!(
+                *name,
+                "../live_tv_resource.rs"
+                    | "continuous_family.rs"
+                    | "quality_cancellation.rs"
+                    | "quality_ledger.rs"
+            )
+        }))
+    {
         let (literals, is_code) = literals_and_code_mask(source);
         let test_ranges = test_item_ranges(source, &is_code);
         let constants = constants_for(name, source, &literals);

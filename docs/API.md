@@ -14,7 +14,7 @@ This file is the specification in the meantime, written by reading the routers
 and the handlers on 2026-09-07. Where a plan document and the code disagreed,
 the code won and the disagreement is recorded in §23.
 
-One binary serves everything on one port (`:32400` by default). plurx has 284
+One binary serves everything on one port (`:32400` by default). plurx has 293
 routes across the five surfaces below. Every path here is absolute; the native
 API is the only one under a version prefix, and §7-§18 state that prefix once
 per section rather than repeating it in every row.
@@ -1327,6 +1327,8 @@ the ffmpeg is taken down.
 | Method | Path | Auth | What it does |
 |---|---|---|---|
 | POST | `/files/{id}/hls/sessions` | bearer | Creates a session; body ≤ 64 KiB |
+| POST | `/files/{id}/hls/continuous-candidates` | bearer | Read-only continuous-quality pair negotiation; body ≤ 64 KiB (§9.6) |
+| POST | `/files/{id}/hls/continuous-sessions` | bearer | Creates a continuous-quality family session; body ≤ 64 KiB (§9.6) |
 | GET | `/files/{id}/hls/start` | bearer | Deprecated bridge over the same handler |
 | GET | `/hls/{session}/master.m3u8` | **capability** | Multivariant playlist with subtitle renditions |
 | GET | `/hls/{session}/index.m3u8` | **capability** | Media playlist (the historical shape) |
@@ -1336,6 +1338,11 @@ the ffmpeg is taken down.
 | GET | `/hls/{session}/{segment}` | **capability** | One media segment, or `init.mp4` |
 | GET | `/hls/{session}/status` | **capability** | Production and delivery telemetry |
 | POST | `/hls/{session}/control` | **capability** | One bounded control exchange; body ≤ 16 KiB |
+| POST | `/hls/{session}/quality-control` | **capability** | Quality-cancellation discovery and cancel; body ≤ 4 KiB (§10) |
+| GET | `/hls/{session}/quality-family` | **capability** | Versioned continuous-family description (§9.6) |
+| POST | `/hls/{session}/quality-schedule` | **capability** | One versioned quality-ledger mutation or read; body ≤ 160 KiB (§9.6) |
+| GET | `/hls/{session}/{role}/{rendition}/index.m3u8` | **capability** | One family rendition's media playlist (§9.6) |
+| GET | `/hls/{session}/{role}/{rendition}/{kind}/{object}` | **capability** | One family rendition's init object or media segment (§9.6) |
 | DELETE | `/hls/{session}` | **capability** | Releases the session |
 
 ### 9.1 Create — and why it is a POST
@@ -1553,6 +1560,90 @@ emitting samples entirely — `-1` there is explicit unknown, not zero. And
 `published_end_ms` behind the playhead is not by itself a fault; check
 `ready_ahead_end_ms`.
 
+### 9.6 Continuous quality families
+
+A continuous-quality session is one public session whose master carries a
+*family* of verified video rungs and one shared AAC rendition, so a quality
+change switches renditions inside the session instead of opening a successor.
+Every route below is separate and versioned: ordinary start, control and
+Library-channel JSON are unchanged, and an older server answers the new paths
+with 404 rather than silently dropping the family request.
+
+**`POST /files/{id}/hls/continuous-candidates`** — read-only; no encoder
+starts. The body is `{version: 1, start}`, where `start` is the ordinary create
+body (§9.1). `start.caps` must be a current, non-empty capabilities document
+(else 400 `continuous_catalog_requires_caps`), and `copy`, `hdr10`, a
+`subtitle_burn` or a non-`vod` presentation are refused with 400
+`continuous_catalog_incompatible`. The answer is `{version: 1, candidates[],
+pairs[]}`: at most 32 worker-catalog candidates that are dispatchable, complete,
+normalized SDR encodes, each paired (`primary_candidate_id`,
+`companion_candidate_id`) with the nearest rung of a different height and raster
+on the same node. A missing file is 404; 32 concurrent reads per node bound the
+route and the 33rd is 503 `continuous_catalog_busy`.
+
+**`POST /files/{id}/hls/continuous-sessions`** — the body is `{version: 1,
+controlled?, family_generation, primary_candidate_id, companion_candidate_id,
+start}`. `family_generation` is a UUID, the two candidate ids differ, `start`
+carries caps and is neither copy, HDR10 nor burned-subtitle; anything else is
+400 `continuous_family_start_incompatible`. The nested start walks the ordinary
+create path, including its errors and startup budget. Success is
+`{version: 1, playback, quality}`: `playback` is the ordinary `StartResponse`,
+whose playlist is the family's multivariant master, and `quality` is
+`{generation, control_epoch, schedule_url, family_url}` naming this session's
+`quality-schedule` and `quality-family` paths. Reading the new owner back can
+answer 503 `continuous_family_owner_timeout`, or 409
+`continuous_family_owner_missing` / `continuous_family_owner_changed`.
+
+**`GET /hls/{session}/quality-family`** — `application/json`, `Cache-Control:
+no-store`, at most 32 KiB, relayed to the owner like a playlist: `{version: 1,
+family_id, mode, master, video[], audio}`. `mode` is `autonomous_reserved` or
+`controlled`. Each video row names its `candidate_id`, `rendition_id`,
+`init_id`, actual `width`/`height`/`codec`, `timescale`, `frame_ticks`,
+`segment_ticks`, `peak_bps` and relative `playlist`; `audio` names the shared
+rendition the same way. Every value comes from the init-verified family, never
+from scanner metadata. An ordinary session answers 404; an ended or lost owner
+answers the §9.2 410s.
+
+**`GET /hls/{session}/{role}/{rendition}/index.m3u8`** and
+**`GET /hls/{session}/{role}/{rendition}/{kind}/{object}`** — the family's
+child media, under the parent's capability and response fences. `role` is
+`video` or `audio` and `rendition` a 64-hex rendition id; `kind` is `init` with
+a 64-hex `object` + `.mp4`, or `segment` with a canonical decimal index +
+`.m4s`. Any other spelling is 404 before the session is touched. Segments
+carry the §9.2 entity-tag, range and status contract.
+
+**`POST /hls/{session}/quality-schedule`** — one strict versioned ledger
+exchange: `{version: 1, generation, control_epoch, attachment, transition?,
+frontier?, window?}`. `attachment` is `{client_instance_id, lifetime_id,
+attachment_id, family_id}`. `transition` is a ledger command (`prepare`,
+`scheduled`, `appended`, `presented`, `cancel_unappended`, `recovery_owned`,
+`disposed`) whose generation, epoch and attachment repeat the envelope's; a
+`prepare` requires `frontier` `{timescale, through_tick}`, and `window`
+`{transaction_id, frontier}` stands alone. With neither it is a ledger read.
+Success is 200, `Cache-Control: no-store`, `{version: 1, generation,
+control_epoch, attachment, revision, terminal?, receipt, ledger}`: a replayed
+command returns its original `receipt`, separate from the current `ledger`.
+The exchange is bounded to 12 s, relays to the owner node when this node is not
+it, and on an ended session reconciles non-media commands against the durable
+ledger on whichever node receives it.
+
+| Status | Meaning |
+|---|---|
+| 400 | Malformed or invalid envelope, or a session id that is not a UUID |
+| 404 | No such session |
+| 409 | Generation, epoch or owner mismatch, or the ledger refused the command; retrying the same request cannot succeed — settle with one ledger read |
+| 410 | The session ended or its lease lapsed, or a media-advancing command reached an ended session |
+| 425 `owner_transition` | The route's publication handoff is unsettled; a control-error body `{code, message, generation, control_epoch, retry_after_ms: 500}` |
+| 429 + `Retry-After: 1` | The node's 64 in-flight schedule owners, this session's 32 admissions per second, or the node's 512 per second are exhausted |
+| 503 + `Retry-After: 1` | Store, deadline, relay or owner transition: the same request may succeed shortly |
+
+A Library-channel session additionally answers the control plane's own
+refusals (503 `control_unavailable`, 410 `channel_unavailable`) before any
+ledger work.
+Nothing that may succeed on a retry answers a 4xx other than 429, because
+clients settle any other 4xx as a final refusal and would silently cancel the
+viewer's change.
+
 ---
 
 ## 10. Playback — the control protocol
@@ -1638,6 +1729,53 @@ telling the client directly which of the three it is looking at, rather than
 the client inferring it from `producer_state`.
 
 ---
+
+### Independent quality cancellation negotiation
+
+`POST /api/v1/hls/{session}/quality-control` uses the same session capability
+with a separate strict JSON envelope (maximum 4096 bytes, four-second total
+deadline). It leaves existing control bootstrap/request/response shapes
+unchanged. Discover first with
+`{version:1,generation,control_epoch,operation:"discover"}`. The response
+repeats the generation and epoch and advertises `features:["quality_cancel_v1"]`
+only if both ingress and the active owner implement this endpoint. An old
+ingress returns 404; an old owner's missing endpoint produces
+`features:[],outcome:"unsupported"`. Owner/generation changes require rediscovery.
+Continuous rendition support is not advertised by this cancellation extension.
+
+After an accepted control exchange carrying a media intent, cancel with
+`operation:"cancel_unappended"` and `identity` containing `generation`,
+`control_epoch`, `client_instance_id`, `lifetime_id`, `recipe_revision`, and
+`accepted_sequence`. All must match the exact planning owner; the accepted
+sequence prevents a delayed cancel from reaching a later same-selection retry.
+Cancellation reaches planning and registered uncommitted successors and never
+retires the incumbent. Repetition does not allocate or cancel a newer owner.
+
+`outcome:"cancel_requested"` acknowledges initiation, not completed worker or
+Store cleanup. `observation_unknown` means this owner no longer has matching
+cancellable work; it may already have moved to commit ownership. Neither
+outcome is a `retained_current` settlement or permission to discard committed
+media. `cancelled` is an exact replayable cleanup receipt: planning has exited
+without a worker, or the registered successor's durable reservation and worker
+have both been retired. It is still not presentation evidence or permission to
+discard appended media. SQLite and replicated storage preserve the first
+receipt and settlement timestamps. The cancellation marker atomically fences
+late preparation admission and commit. A preparation's receipt binding cannot
+change on replay or rejoin.
+
+Receipts are bounded to 128 per active generation; exhaustion refuses new
+cancellation rather than evicting an active marker. Maintenance removes receipts
+only after the parent is inactive and the receipt is at least 60 seconds old,
+in batches of 256. A lost cleanup observation or owner change remains unknown
+until exact cleanup is acknowledged; it never fabricates retention. Client
+retention settlement remains implementation work in the continuous-quality
+build.
+
+The cluster hop uses `POST /internal/cluster/media/sessions/quality-control`,
+exact-write Ed25519 request authentication, an inherited deadline, and the
+expected owner node. A generation/epoch/owner mismatch refuses the operation.
+No user credentials are forwarded and all discovery responses are uncacheable.
+
 
 ## 11. Subtitles and overlays
 
@@ -3081,6 +3219,8 @@ streaming, and refuses a response signed for the wrong node or nonce.
 | POST | `/internal/cluster/media/sessions/prepare` | 96 KiB | Validates an already-reserved successor identity, primes its durable recipe on the target owner, and returns only after the existing actor slot accepts it |
 | POST | `/internal/cluster/media/sessions/abort`, `/internal/cluster/media/sessions/relay` | 96 KiB | Settles an abort; relays one owned HLS resource |
 | POST | `/internal/cluster/media/sessions/control` | 20 KiB | Relays one playback-control exchange |
+| POST | `/internal/cluster/media/sessions/quality-control` | 4 KiB | Relays one quality-cancellation exchange to the expected owner (§10) |
+| POST | `/internal/cluster/media/sessions/quality-schedule` | 160 KiB | Relays one quality-schedule exchange `{session_id, expected_owner_node_id, deadline_unix_ms, request}` with an inherited deadline; a different owner is 400 and the public status contract (§9.6) applies |
 
 The five path prefixes are historical, not a versioning scheme. In particular,
 the `/api/v1/internal/…` ones are inside the API prefix **by spelling only** —

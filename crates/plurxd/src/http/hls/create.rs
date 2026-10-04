@@ -170,6 +170,230 @@ pub struct CreateSession {
     pub transport: Option<String>,
 }
 
+/// A separate route prevents older parsers from silently accepting the
+/// nested ordinary start while discarding its required family semantics.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CreateContinuousFamily {
+    pub version: u8,
+    #[serde(default)]
+    pub controlled: bool,
+    pub family_generation: String,
+    pub primary_candidate_id: plurx_core::playback::candidate::CandidateId,
+    pub companion_candidate_id: plurx_core::playback::candidate::CandidateId,
+    pub start: CreateSession,
+}
+
+impl CreateContinuousFamily {
+    pub(super) fn valid(&self) -> bool {
+        self.version == 1
+            && uuid::Uuid::parse_str(&self.family_generation).is_ok()
+            && self.primary_candidate_id != self.companion_candidate_id
+            && self.start.caps.is_some()
+            && self.start.copy != Some(true)
+            && self.start.hdr10 != Some(true)
+            && self.start.subtitle_burn.is_none()
+    }
+}
+
+/// Read-only negotiation for clients whose ordinary Auto catalog is absent.
+/// It reuses worker recipes and does not enable or choose an Auto policy.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ContinuousCandidatesRequest {
+    pub version: u8,
+    pub start: CreateSession,
+}
+
+#[derive(Serialize)]
+pub struct ContinuousCandidatesResponse {
+    pub version: u8,
+    pub candidates: Vec<plurx_core::playback::candidate::QualityCandidate>,
+    pub pairs: Vec<ContinuousCandidatePair>,
+}
+#[derive(Serialize)]
+pub struct ContinuousCandidatePair {
+    pub primary_candidate_id: plurx_core::playback::candidate::CandidateId,
+    pub companion_candidate_id: plurx_core::playback::candidate::CandidateId,
+}
+
+pub async fn continuous_candidates(
+    AuthUser(_user): AuthUser,
+    State(state): State<AppState>,
+    AxPath(id): AxPath<i64>,
+    Json(body): Json<ContinuousCandidatesRequest>,
+) -> Result<Json<ContinuousCandidatesResponse>, ApiError> {
+    if body.version != 1
+        || body.start.copy == Some(true)
+        || body.start.hdr10 == Some(true)
+        || body.start.subtitle_burn.is_some()
+        || body
+            .start
+            .presentation
+            .as_deref()
+            .is_some_and(|value| value != "vod")
+    {
+        return Err(ApiError::BadRequest(
+            "continuous_catalog_incompatible".into(),
+        ));
+    }
+    let caps = body
+        .start
+        .caps
+        .as_ref()
+        .filter(|caps| caps.v == plurx_core::playback::DeviceCaps::VERSION && !caps.is_empty())
+        .ok_or_else(|| ApiError::BadRequest("continuous_catalog_requires_caps".into()))?;
+    static SLOTS: std::sync::OnceLock<tokio::sync::Semaphore> = std::sync::OnceLock::new();
+    let _permit = SLOTS
+        .get_or_init(|| tokio::sync::Semaphore::new(32))
+        .try_acquire()
+        .map_err(|_| ApiError::ServiceUnavailable("continuous_catalog_busy".into()))?;
+    let source = state
+        .store
+        .get_file(id)
+        .await?
+        .ok_or(ApiError::NotFound("file"))?;
+    let audio_index = state
+        .transcode
+        .candidate_audio_index(&source, body.start.audio)
+        .await;
+    let workers = state
+        .media_pool
+        .quality_candidates(
+            &state,
+            crate::media_pool::QualityCatalogRequest {
+                // The same claim the continuous create's selection catalog
+                // derives from these caps, so the advertised rows match it.
+                audio_claim: plurx_core::playback::audio::AudioClaim::from_caps(caps)
+                    .ok()
+                    .flatten(),
+                audio_delivery: None,
+                copy_contract: None,
+                file_id: source.id,
+                source_size: source.size,
+                source_mtime: source.mtime,
+                caps: caps.clone(),
+                audio_index,
+                audio_offset_ms: body.start.audio_offset_ms.unwrap_or(0),
+                subtitle_burn: None,
+                presentation: crate::transcode::Presentation::Vod,
+            },
+        )
+        .await;
+    Ok(Json(continuous_candidates_from_workers(&workers)))
+}
+
+pub(super) fn continuous_candidates_from_workers(
+    workers: &[crate::media_pool::WorkerQualityCandidate],
+) -> ContinuousCandidatesResponse {
+    let compatible: Vec<_> = workers
+        .iter()
+        .filter(|entry| {
+            use plurx_core::playback::candidate::CandidateRoute;
+            entry.dispatch_supported
+                && !entry.partial
+                && entry.candidate.route == CandidateRoute::Encode
+                && entry.candidate.decoder_compatible
+                && entry.candidate.normalized_geometry
+                && entry.candidate.grade == plurx_core::transcode::OutputGrade::Sdr
+        })
+        .collect();
+    let mut candidates = Vec::new();
+    let mut pairs = Vec::new();
+    for primary in &compatible {
+        if candidates.iter().any(
+            |candidate: &plurx_core::playback::candidate::QualityCandidate| {
+                candidate.id == primary.candidate.id
+            },
+        ) {
+            continue;
+        }
+        let companion = compatible
+            .iter()
+            .filter(|other| {
+                other.node_id == primary.node_id
+                    && other.candidate.id != primary.candidate.id
+                    && other.candidate.target_height != primary.candidate.target_height
+                    && (other.candidate.width, other.candidate.height)
+                        != (primary.candidate.width, primary.candidate.height)
+            })
+            .min_by_key(|other| {
+                other
+                    .candidate
+                    .target_height
+                    .abs_diff(primary.candidate.target_height)
+            });
+        let Some(companion) = companion else {
+            continue;
+        };
+        candidates.push(primary.candidate.clone());
+        pairs.push(ContinuousCandidatePair {
+            primary_candidate_id: primary.candidate.id,
+            companion_candidate_id: companion.candidate.id,
+        });
+        if candidates.len() == 32 {
+            break;
+        }
+    }
+    pairs.retain(|pair| {
+        candidates
+            .iter()
+            .any(|candidate| candidate.id == pair.companion_candidate_id)
+    });
+    ContinuousCandidatesResponse {
+        version: 1,
+        candidates,
+        pairs,
+    }
+}
+
+/// Bootstrap for the independently negotiated family protocol. Its durable
+/// parent identity never depends on whether legacy M1 control is enabled.
+#[derive(Serialize)]
+pub struct CreateContinuousResponse {
+    pub version: u8,
+    pub playback: StartResponse,
+    pub quality: ContinuousQualityBootstrap,
+}
+
+#[derive(Serialize)]
+pub struct ContinuousQualityBootstrap {
+    pub generation: String,
+    pub control_epoch: u64,
+    pub schedule_url: String,
+    pub family_url: String,
+}
+
+impl ContinuousQualityBootstrap {
+    pub(super) fn from_route(route: &MediaSessionRoute) -> Result<Self, ApiError> {
+        let epoch = u64::try_from(route.owner_epoch)
+            .ok()
+            .filter(|epoch| (1..=9_007_199_254_740_991).contains(epoch));
+        if route.state != "active"
+            || route.lease_expires_at_ms <= unix_ms()
+            || uuid::Uuid::parse_str(&route.incarnation_id).is_err()
+            || uuid::Uuid::parse_str(&route.session_id).is_err()
+            || epoch.is_none()
+        {
+            return Err(ApiError::Conflict("continuous_family_owner_changed".into()));
+        }
+        Ok(Self {
+            generation: route.incarnation_id.clone(),
+            control_epoch: epoch.expect("validated epoch"),
+            schedule_url: format!("/api/v1/hls/{}/quality-schedule", route.session_id),
+            family_url: format!("/api/v1/hls/{}/quality-family", route.session_id),
+        })
+    }
+}
+
+#[derive(Clone)]
+struct ContinuousFamilyStart {
+    controlled: bool,
+    family_generation: String,
+    primary_candidate_id: plurx_core::playback::candidate::CandidateId,
+    companion_candidate_id: plurx_core::playback::candidate::CandidateId,
+}
+
 impl CreateSession {
     pub(super) fn candidate_auto_policy(&self) -> bool {
         use plurx_core::playback::DesiredQuality;
@@ -217,6 +441,7 @@ impl CreateSession {
             .transport
             .filter(|transport| crate::transcode::session_transport_is_valid(transport));
         crate::transcode::SessionRequest {
+            continuous_media: None,
             quality_catalog: None,
             candidate_context: None,
             vod_only: false,
@@ -1130,7 +1355,16 @@ pub(crate) struct PlanInputs<'a> {
 pub(crate) async fn resolve_plan(
     inputs: PlanInputs<'_>,
     review: Option<PlanReview>,
+    body: CreateSession,
+) -> Result<ResolvedPlan, ApiError> {
+    resolve_plan_with_continuous(inputs, review, body, None).await
+}
+
+async fn resolve_plan_with_continuous(
+    inputs: PlanInputs<'_>,
+    review: Option<PlanReview>,
     mut body: CreateSession,
+    continuous: Option<&ContinuousFamilyStart>,
 ) -> Result<ResolvedPlan, ApiError> {
     let PlanInputs {
         snapshot,
@@ -1149,6 +1383,7 @@ pub(crate) async fn resolve_plan(
     let mut height =
         resolve_height(state, source, network_prior, hdr10_requested, body.height).await;
     let mut candidate_context = None;
+    let mut continuous_media = None;
     let mut candidate_route = None;
     let mut selected_candidate = None;
     let mut retained_catalog = None;
@@ -1196,25 +1431,36 @@ pub(crate) async fn resolve_plan(
     }
 
     if let (Some(source), Some(caps)) = (source, body.caps.as_ref()) {
-        let enabled = if let Some(snapshot) = snapshot {
-            snapshot
-                .settings
-                .get(plurx_core::store::keys::PLAYBACK_DISPLAY_AWARE_AUTO)
-                .is_some_and(|value| value.trim() == "1")
-        } else {
-            state
-                .store
-                .get_setting(plurx_core::store::keys::PLAYBACK_DISPLAY_AWARE_AUTO)
-                .await?
-                .is_some_and(|value| value.trim() == "1")
-        };
-        let requested = body
-            .intent
-            .as_ref()
-            .and_then(|intent| match intent.selection.quality {
-                plurx_core::playback::DesiredQuality::Auto { candidate_id, .. } => candidate_id,
-                _ => None,
-            });
+        let enabled = continuous.is_some()
+            || if let Some(snapshot) = snapshot {
+                snapshot
+                    .settings
+                    .get(plurx_core::store::keys::PLAYBACK_DISPLAY_AWARE_AUTO)
+                    .is_some_and(|value| value.trim() == "1")
+            } else {
+                state
+                    .store
+                    .get_setting(plurx_core::store::keys::PLAYBACK_DISPLAY_AWARE_AUTO)
+                    .await?
+                    .is_some_and(|value| value.trim() == "1")
+            };
+        let intent_candidate =
+            body.intent
+                .as_ref()
+                .and_then(|intent| match intent.selection.quality {
+                    plurx_core::playback::DesiredQuality::Auto { candidate_id, .. } => candidate_id,
+                    _ => None,
+                });
+        if continuous.is_some_and(|family| {
+            intent_candidate.is_some_and(|id| id != family.primary_candidate_id)
+        }) {
+            return Err(ApiError::Conflict(
+                "continuous_primary_differs_from_viewer_intent".into(),
+            ));
+        }
+        let requested = continuous
+            .map(|family| family.primary_candidate_id)
+            .or(intent_candidate);
         if requested.is_some() && !enabled {
             return Err(ApiError::BadRequest("candidate_route_disabled".to_owned()));
         }
@@ -1423,6 +1669,67 @@ pub(crate) async fn resolve_plan(
                 .find(|entry| entry.candidate.id == candidate.id)
                 .filter(|entry| entry.dispatch_supported)
                 .map(|entry| entry.node_id.clone());
+            if let Some(family) = continuous {
+                use plurx_core::playback::candidate::CandidateRoute;
+                let primary_owner = context
+                    .owner_node_id
+                    .as_deref()
+                    .ok_or_else(|| ApiError::Conflict("continuous_primary_owner_unknown".into()))?;
+                let companion = worker_catalog
+                    .iter()
+                    .find(|entry| {
+                        entry.node_id == primary_owner
+                            && entry.candidate.id == family.companion_candidate_id
+                            && entry.candidate.route == CandidateRoute::Encode
+                            && entry.candidate.decoder_compatible
+                            && entry.candidate.normalized_geometry
+                            && entry.candidate.grade == plurx_core::transcode::OutputGrade::Sdr
+                            && entry.candidate.target_height != candidate.target_height
+                    })
+                    .ok_or_else(|| {
+                        ApiError::Conflict(
+                            "continuous_companion_recipe_changed_or_decoder_unavailable".into(),
+                        )
+                    })?;
+                if candidate.route != CandidateRoute::Encode
+                    || !candidate.normalized_geometry
+                    || candidate.grade != plurx_core::transcode::OutputGrade::Sdr
+                    || body
+                        .intent
+                        .as_ref()
+                        .is_some_and(|intent| match intent.selection.quality {
+                            plurx_core::playback::DesiredQuality::Original => true,
+                            plurx_core::playback::DesiredQuality::Manual { height } => {
+                                height != i64::from(candidate.target_height)
+                            }
+                            _ => false,
+                        })
+                {
+                    return Err(ApiError::Conflict(
+                        "continuous_primary_recipe_incompatible".into(),
+                    ));
+                }
+                let mut companion_context =
+                    crate::transcode::TranscodeManager::candidate_context(&companion.candidate);
+                companion_context.owner_node_id = Some(companion.node_id.clone());
+                companion_context.canonical_caps = Some(caps.clone());
+                companion_context.planning_binding = companion.binding.clone();
+                continuous_media = Some(Box::new(crate::transcode::ContinuousMediaRequest {
+                    version: 1,
+                    controlled: family.controlled,
+                    family_generation: family.family_generation.clone(),
+                    role: crate::transcode::ContinuousMediaRole::Video,
+                    autonomous_companion: Some(family.companion_candidate_id),
+                    companion_catalog: Some(Box::new(companion.candidate.clone())),
+                    family_descriptor: None,
+                    companion_context: Some(Box::new(
+                        crate::transcode::ContinuousCompanionContext {
+                            height: i64::from(companion.candidate.target_height),
+                            candidate: companion_context,
+                        },
+                    )),
+                }));
+            }
             context.canonical_caps = Some(caps.clone());
             context.planning_binding = worker_catalog
                 .iter()
@@ -1478,6 +1785,12 @@ pub(crate) async fn resolve_plan(
     let mut request = body.into_request(file_id, height);
     request.audio_claim = audio_claim;
     request.candidate_context = candidate_context;
+    request.continuous_media = continuous_media;
+    if continuous.is_some() && request.continuous_media.is_none() {
+        return Err(ApiError::BadRequest(
+            "continuous_requires_current_source_and_capabilities".into(),
+        ));
+    }
     request.quality_catalog = retained_catalog
         .as_ref()
         .map(|catalog| Arc::new(catalog.clone()));
@@ -1695,6 +2008,68 @@ pub async fn create(
     created
 }
 
+/// A refused continuous start still owns an unpublished family. Give its
+/// authenticated caller the exact release capability so abandoning the bounded
+/// retry sequence can retire that family without touching the predecessor.
+fn continuous_handoff_pending(session_id: &str) -> ApiError {
+    ApiError::typed_detail(
+        StatusCode::SERVICE_UNAVAILABLE,
+        "media_session_handoff_pending",
+        "the predecessor handoff remains durably owned; retry this request",
+        serde_json::json!({"pending_session_id": session_id}),
+    )
+}
+
+pub async fn create_continuous(
+    AuthUser(user): AuthUser,
+    State(state): State<AppState>,
+    AxPath(id): AxPath<i64>,
+    headers: HeaderMap,
+    super::super::network::RemoteAddress(remote): super::super::network::RemoteAddress,
+    Json(body): Json<CreateContinuousFamily>,
+) -> Result<Json<CreateContinuousResponse>, ApiError> {
+    if !body.valid() {
+        return Err(ApiError::BadRequest(
+            "continuous_family_start_incompatible".into(),
+        ));
+    }
+    let purpose = ContinuousFamilyStart {
+        controlled: body.controlled,
+        family_generation: body.family_generation,
+        primary_candidate_id: body.primary_candidate_id,
+        companion_candidate_id: body.companion_candidate_id,
+    };
+    let (user_id, start_attempts) = (user.id, Arc::clone(&state.start_attempts));
+    let created = create_with_purpose(
+        user,
+        state.clone(),
+        id,
+        headers,
+        remote,
+        body.start,
+        ServiceCreatePurpose::Continuous(purpose),
+    )
+    .await;
+    if let Err(error) = &created {
+        start_attempts.refused(user_id, id, None, error.code(), Instant::now());
+    }
+    let Json(playback) = created?;
+    let route = tokio::time::timeout(
+        ACTIVATION_STORE_DEADLINE,
+        state.media_sessions.control_route(&playback.session_id),
+    )
+    .await
+    .map_err(|_| ApiError::ServiceUnavailable("continuous_family_owner_timeout".into()))?
+    .map_err(|error| ApiError::ServiceUnavailable(format!("reading family owner: {error}")))?
+    .ok_or_else(|| ApiError::Conflict("continuous_family_owner_missing".into()))?;
+    let quality = ContinuousQualityBootstrap::from_route(&route)?;
+    Ok(Json(CreateContinuousResponse {
+        version: 1,
+        playback,
+        quality,
+    }))
+}
+
 /// The finite-session application service used by Library channels after it
 /// has authoritatively resolved an occurrence. The purpose is not a public
 /// field on ordinary VOD creation: old servers must reject the dedicated
@@ -1725,6 +2100,9 @@ pub(crate) async fn create_for_library_channel(
 enum ServiceCreatePurpose {
     Native,
     LibraryChannel(crate::http::library_channels::LibraryChannelPlaybackPurpose),
+    /// The dedicated continuous-family route; its family semantics reach the
+    /// plan through `continuous_media`, which the intent fingerprint covers.
+    Continuous(ContinuousFamilyStart),
     PassiveCompatibility {
         bitrate_limit_bps: Option<u32>,
         expected_fingerprint: String,
@@ -1737,7 +2115,7 @@ impl ServiceCreatePurpose {
         fingerprint: String,
     ) -> Result<String, ApiError> {
         match self {
-            Self::Native => Ok(fingerprint),
+            Self::Native | Self::Continuous(_) => Ok(fingerprint),
             Self::LibraryChannel(channel) => Ok(channel.bind_session_fingerprint(&fingerprint)),
             Self::PassiveCompatibility {
                 bitrate_limit_bps,
@@ -2006,6 +2384,10 @@ async fn create_with_purpose_inner(
         ServiceCreatePurpose::LibraryChannel(channel) => Some(channel),
         _ => None,
     };
+    let continuous = match &purpose {
+        ServiceCreatePurpose::Continuous(family) => Some(family),
+        _ => None,
+    };
     if let Some(caps) = req.caps.as_ref() {
         super::super::stream::validate_device_caps(caps)?;
     }
@@ -2214,7 +2596,7 @@ async fn create_with_purpose_inner(
             .map_err(|error| {
                 ApiError::ServiceUnavailable(format!("reading the network prior: {error:?}"))
             })?;
-    let resolved = resolve_plan(
+    let resolved = resolve_plan_with_continuous(
         PlanInputs {
             snapshot: planning_snapshot.as_ref(),
             state: &state,
@@ -2227,6 +2609,7 @@ async fn create_with_purpose_inner(
         },
         review,
         req,
+        continuous,
     )
     .await?;
     let candidate_auto_policy = resolved.candidate_auto_policy;
@@ -2356,6 +2739,9 @@ async fn create_with_purpose_inner(
         MediaSessionRequestClaim::Resolved(route)
             if route.state == "active" && route.publication_ready_at_ms != 0 =>
         {
+            if continuous.is_some() {
+                return Err(continuous_handoff_pending(&route.session_id));
+            }
             return Err(ApiError::typed(
                 StatusCode::SERVICE_UNAVAILABLE,
                 "media_session_handoff_pending",
@@ -2519,14 +2905,15 @@ async fn create_with_purpose_inner(
         true,
     );
 
-    let quality_enabled = planning_snapshot
-        .as_ref()
-        .and_then(|snapshot| {
-            snapshot
-                .settings
-                .get(plurx_core::store::keys::PLAYBACK_DISPLAY_AWARE_AUTO)
-        })
-        .is_some_and(|value| value.trim() == "1");
+    let quality_enabled = continuous.is_some()
+        || planning_snapshot
+            .as_ref()
+            .and_then(|snapshot| {
+                snapshot
+                    .settings
+                    .get(plurx_core::store::keys::PLAYBACK_DISPLAY_AWARE_AUTO)
+            })
+            .is_some_and(|value| value.trim() == "1");
     if quality_enabled && candidate_decoder_caps.is_some() && quality_catalog.is_none() {
         if let (Some(source), Some(caps)) = (source.as_ref(), planning_caps.as_ref()) {
             quality_catalog = Some(
@@ -3065,7 +3452,7 @@ async fn create_with_purpose_inner(
         crate::transcode::SessionKind::Copy { .. } => crate::delivery::Method::HlsCopy,
         crate::transcode::SessionKind::Transcode { .. } => crate::delivery::Method::Transcode,
     };
-    let playlist_url = if native_subtitles {
+    let playlist_url = if request.continuous_media.is_some() || native_subtitles {
         // Give the multivariant playlist its own path. AVPlayer caches HLS
         // resources by URL and can otherwise conflate `index.m3u8?native=1`
         // with the child `index.m3u8` media playlist referenced by that
@@ -3337,6 +3724,11 @@ async fn create_with_purpose_inner(
                 }
             ) {
                 publication_guard.disarm();
+                if continuous.is_some() {
+                    return Err(continuous_handoff_pending(
+                        &publication_activation.session_id,
+                    ));
+                }
             }
             return Err(error);
         }
@@ -3415,8 +3807,21 @@ async fn create_with_purpose_inner(
     })?
     .map_err(|error| session_store_error("publishing the media-session response", error))?
     .filter(|route| {
-        route_matches_activation(route, &publication_activation)
-            && route.publication_ready_at_ms == 0
+        let exact = route_matches_activation(route, &publication_activation)
+            && route.publication_ready_at_ms == 0;
+        if !exact {
+            tracing::warn!(
+                target: "plurxd::http::hls",
+                state = %route.state,
+                owner_epoch = route.owner_epoch,
+                publication_ready_at_ms = route.publication_ready_at_ms,
+                lease_live = route.lease_expires_at_ms > unix_ms(),
+                recipe_matches = route.recipe_json == publication_activation.recipe_json,
+                response_matches = route.response_json == publication_activation.response_json,
+                "media-session publication refused its exact activation projection"
+            );
+        }
+        exact
     })
     .ok_or_else(|| {
         ApiError::ServiceUnavailable(
@@ -4220,9 +4625,19 @@ pub(super) async fn settle_armed_activation_handoff(
         .max(0);
     let boundary_deadline = tokio::time::Instant::now()
         + Duration::from_millis(u64::try_from(remaining_ms).unwrap_or(u64::MAX));
-    let acknowledged =
-        project_activation_predecessor_until(state, &predecessor_incarnation, boundary_deadline)
-            .await;
+    let projection = project_activation_predecessor_while_current(
+        state,
+        &predecessor_incarnation,
+        boundary_deadline,
+        Some(&successor),
+    )
+    .await;
+    // A durably terminal or replaced successor has no publication to finish.
+    // Release its admission owner without completing the predecessor fence.
+    if matches!(projection, PredecessorProjection::SuccessorGone) {
+        return true;
+    }
+    let acknowledged = matches!(projection, PredecessorProjection::Acknowledged);
     if acknowledged
         && matches!(
             complete_activation_handoff_until(
@@ -4349,12 +4764,55 @@ pub(super) async fn project_activation_predecessor_until(
     predecessor_incarnation: &str,
     deadline: tokio::time::Instant,
 ) -> bool {
+    matches!(
+        project_activation_predecessor_while_current(
+            state,
+            predecessor_incarnation,
+            deadline,
+            None
+        )
+        .await,
+        PredecessorProjection::Acknowledged
+    )
+}
+
+enum PredecessorProjection {
+    Acknowledged,
+    SuccessorGone,
+    Pending,
+}
+
+async fn project_activation_predecessor_while_current(
+    state: &AppState,
+    predecessor_incarnation: &str,
+    deadline: tokio::time::Instant,
+    successor: Option<&MediaSessionRoute>,
+) -> PredecessorProjection {
     loop {
         let now = tokio::time::Instant::now();
         if now >= deadline {
-            return false;
+            return PredecessorProjection::Pending;
         }
         let read_deadline = (now + ACTIVATION_STORE_DEADLINE).min(deadline);
+        if let Some(successor) = successor {
+            if let Ok(Ok(Some(current))) = tokio::time::timeout_at(
+                read_deadline,
+                state
+                    .store
+                    .media_session_route_by_incarnation(&successor.incarnation_id),
+            )
+            .await
+            {
+                if current.incarnation_id == successor.incarnation_id
+                    && (current.state != "active"
+                        || current.owner_node_id != successor.owner_node_id
+                        || current.owner_epoch != successor.owner_epoch)
+                {
+                    return PredecessorProjection::SuccessorGone;
+                }
+            }
+            // Unknown durable state never authorizes release or publication.
+        }
         let route = tokio::time::timeout_at(
             read_deadline,
             state
@@ -4375,7 +4833,7 @@ pub(super) async fn project_activation_predecessor_until(
                     );
                     let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
                     if remaining.is_zero() {
-                        return false;
+                        return PredecessorProjection::Pending;
                     }
                     tokio::time::sleep(PREDECESSOR_PROJECTION_RETRY_DELAY.min(remaining)).await;
                     continue;
@@ -4406,14 +4864,14 @@ pub(super) async fn project_activation_predecessor_until(
                         .filter(|proof| proof.terminal_projection_complete())
                     {
                         state.transcode.complete_session_release_durable(&proof);
-                        return true;
+                        return PredecessorProjection::Acknowledged;
                     }
                 }
             }
         }
         let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
         if remaining.is_zero() {
-            return false;
+            return PredecessorProjection::Pending;
         }
         tokio::time::sleep(PREDECESSOR_PROJECTION_RETRY_DELAY.min(remaining)).await;
     }

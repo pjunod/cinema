@@ -769,8 +769,10 @@ expected_occurrences = 8
 [[module_symbols]]
 id = "m4-vod-resurrection-deadline"
 pattern = "vod_resurrected_before"
-# J0: one test-only post-expiry resurrection refusal through the existing HTTP owner.
-expected_occurrences = 6
+# Continuous-quality (#774) and main (#797) union, measured on the merged tree:
+# ours 8 + main's J0 test-only post-expiry resurrection refusal through the
+# existing HTTP owner (main 6, base 5).
+expected_occurrences = 9
 
 [[module_symbols]]
 id = "m4-first-media-deadline-settlement"
@@ -805,17 +807,17 @@ pattern = "response_publication_deadline_before"
 # +1 native startup: the legacy-native VOD bridge derives the final
 # response-admission subdeadline after preparation, clipped to its original
 # request deadline. It neither renews that deadline nor adds a producer owner.
-expected_occurrences = 25
+expected_occurrences = 28
 
 [[module_symbols]]
 id = "m4-playlist-request-deadline-chain"
 pattern = "playlist_request_deadlines"
-expected_occurrences = 8
+expected_occurrences = 12
 
 [[module_symbols]]
 id = "m4-segment-request-deadline"
 pattern = "segment_request_deadline"
-expected_occurrences = 3
+expected_occurrences = 4
 
 [[module_symbols]]
 id = "m4-bounded-vod-lookup"
@@ -993,7 +995,7 @@ id = "m4-owner-bound-vod-facade"
 pattern = "VodResponsePublication"
 # 15 -> 22: the init-inspection facade returns the existing owner-bearing
 # wrapper and its exhaustive HTTP classification tests construct each outcome.
-expected_occurrences = 22
+expected_occurrences = 30
 
 [[module_symbols]]
 id = "m4-owner-bound-vod-outcome"
@@ -1007,12 +1009,13 @@ pattern = "VodPublication"
 # S10 #680: +2 in vod/serve/delivery.rs::segment_before. Both retained-object
 # early results carry the already captured ResponseOwner; neither creates an
 # owner, producer, or recovery decision.
-expected_occurrences = 28
+# Continuous-quality (#774) and main (#793) union, counted on the merged source.
+expected_occurrences = 50
 
 [[module_symbols]]
 id = "m4-vod-status-owner-admission"
 pattern = "response_status_owner_is_current"
-expected_occurrences = 6
+expected_occurrences = 7
 
 [[module_symbols]]
 id = "m4-vod-supersession-transaction"
@@ -1023,7 +1026,7 @@ expected_occurrences = 4
 [[module_symbols]]
 id = "m4-relay-owner-deadline-budget"
 pattern = "owner_budget_at"
-expected_occurrences = 9
+expected_occurrences = 10
 
 [[module_symbols]]
 id = "m4-relay-origin-deadline-budget"
@@ -1082,7 +1085,8 @@ pattern = "ServingAuthority"
 # the `test_manager_with` fixture parameter that lets a Live TV test drive a
 # real `ServingFence`, and `test_manager_with_system`'s always-ready argument
 # in its new position.
-expected_occurrences = 26
+# Measured on the merge with main at 36: 36 + (-9) = 27.
+expected_occurrences = 27
 
 [[module_symbols]]
 id = "m4-serving-authority-commit-guard"
@@ -1229,7 +1233,7 @@ expected_occurrences = 19
 [[module_symbols]]
 id = "m4-activation-handoff-proof"
 pattern = "(?:ActivationHandoffVerdict|complete_activation_handoff_until|project_activation_predecessor_until)"
-expected_occurrences = 26
+expected_occurrences = 25
 
 [[module_symbols]]
 id = "m4-durable-release-proof"
@@ -1333,9 +1337,9 @@ pattern = "publication_ready_at_ms"
 # a05_committed_preparation_drops_staged_proof_and_binds_as_ordinary, which
 # confirms the activation before committing a prepared successor so the
 # staged link proof can be shown to end at commit. No shipped fence moves.
-# Merged with main's architecture review (#793): main's count plus the
-# effort's reviewed sites, measured on the merged tree.
-expected_occurrences = 115
+# Continuous-quality (#774) and main (#797 Jellyfin facade) union, measured on
+# the merged tree (equals ours + main - merge base).
+expected_occurrences = 120
 
 [[module_symbols]]
 id = "m4-durable-projection-safety-window"
@@ -1381,7 +1385,8 @@ pattern = "MEDIA_SESSION_PUBLICATION_BLOCKED"
 # writer/settlement/producer lifecycle owner.
 # A05 recovery: 35 -> 38, three new exact ack/typed-recovery fixtures use
 # the existing blocked activation then Confirm. No new shipped sentinel write.
-expected_occurrences = 38
+# Continuous-quality (#774) and main (#793) union, counted on the merged source.
+expected_occurrences = 39
 
 [[module_symbols]]
 id = "m4-terminal-projection-safety-window"
@@ -1547,7 +1552,7 @@ pattern = "terminal_reason"
 # Three define/validate/map its optional ControlErrorBody field; four existing
 # control fixtures explicitly initialize it to None. None writes durable state
 # or chooses a cause: retirement and the playback actor retain ownership.
-expected_occurrences = 46
+expected_occurrences = 48
 
 [[module_symbols]]
 id = "m4-release-terminal-cause"
@@ -1706,7 +1711,8 @@ pattern = "rendition_build_gate"
 # S10 copy preparation: +2 acquisitions of this SAME gate, for exact
 # cancelled preparation termination and settled private artifact exposure.
 # Neither creates a new build owner or scheduler.
-expected_occurrences = 18
+# Continuous-quality (#774) and main (#793) union, counted on the merged source.
+expected_occurrences = 29
 
 [[module_symbols]]
 id = "m4-vod-preparing-owner"
@@ -1737,7 +1743,7 @@ expected_occurrences = 39
 [[module_symbols]]
 id = "m4-cancellation-independent-vod-build-owner"
 pattern = "spawn_cancellation_independent"
-expected_occurrences = 3
+expected_occurrences = 5
 
 [[module_symbols]]
 id = "m4-bounded-vod-head-regeneration"
@@ -2594,6 +2600,8 @@ pattern = "(?:[A-Za-z_]\\w*::)+spawn(?:_blocking|_local|_for_test)?\\s*\\("
 # 689 -> 691: the two serving-fence tests that spawn the real fence loop
 # (see `all-detached-tokio-tasks`).
 # Effort and main union: 726 (effort) + 2 (main serving-fence tests) = 728, measured on the merged source.
+# Continuous-quality (#774) and main (#797 Jellyfin facade) union, measured on
+# the merged tree (equals ours + main - merge base).
 # Merged with main's architecture review (#793): main's count plus the
 # effort's reviewed sites, measured on the merged tree.
 # 731 -> 733 with Live TV's serving grace: main.rs spawns
@@ -2601,7 +2609,8 @@ pattern = "(?:[A-Za-z_]\\w*::)+spawn(?:_blocking|_local|_for_test)?\\s*\\("
 # owner that decides when a loss of serving authority has outlasted the grace
 # for running Live TV (it awaits the shared `SessionGrace` in place and owns no
 # media); and one test helper spawns that real loop over a test fence.
-expected_occurrences = 733
+# Measured on the merge with main at 740: 740 + (+2) = 742.
+expected_occurrences = 742
 # E1 plus S-14 M8: both ownership sets retained and counted on the merged source.
 # 643 -> 647 with S-14 M8 (`plan/S-14-5`: `Encoding`, `RollingFlowSync`, `TerminalCleanup`,
 # `HeadChildOwner`, `VodServingAdmission` behind per-owner hooks), measured by
@@ -2779,7 +2788,8 @@ pattern = "\\.spawn(?:_blocking|_local)?\\s*\\("
 # uses exec to avoid descendants, enables kill-on-drop, and verifies run_part
 # terminated and reaped it for foreground, download, ownership and deadline yields.
 # Review64 R4: +1 owned/joined finite-stack test thread. No production task.
-expected_occurrences = 55
+# Continuous-quality (#774) and main (#793) union, counted on the merged source.
+expected_occurrences = 57
 
 [[module_structures]]
 id = "bare-task-spawn"
@@ -2792,7 +2802,7 @@ pattern = "(?<![:.\\w])spawn(?:_blocking|_local)?\\s*\\("
 # the drop and slot-termination reap fixtures, and the fd-6 closure fixture).
 # None of them is a task call, and the five shipped callers reach the builder by
 # its `crate::producer_spawn::` path, which the namespaced sentinel counts.
-expected_occurrences = 10
+expected_occurrences = 12
 
 [[module_structures]]
 id = "namespaced-time-constructor"
@@ -3895,6 +3905,8 @@ pattern = "(?:[A-Za-z_]\\w*::)+(?:sleep|sleep_until|interval|interval_at|timeout
 # lets the pump finish its 20 s storage read with one paused-clock sleep
 # instead of advance-plus-yields, so the consumer wait starts after handoff.
 # Effort and main union: 1225 (effort) + 4 (main serving-fence loop and tests) = 1229, measured on the merged source.
+# Continuous-quality (#774) and main (#797 Jellyfin facade) union, measured on
+# the merged tree (equals ours + main - merge base).
 # Merged with main's architecture review (#793): main's count plus the
 # effort's reviewed sites, measured on the merged tree.
 # 1237 -> 1246 with the progressive serving-fence grace. Production is net
@@ -3912,7 +3924,8 @@ pattern = "(?:[A-Za-z_]\\w*::)+(?:sleep|sleep_until|interval|interval_at|timeout
 # 1253 -> 1257: `remux_owner_still_decides_for_the_body_after_a_natural_exit`
 # lets the stand-in exit with two bounded sleeps and joins the owner twice
 # under bounded waits. Test-only.
-expected_occurrences = 1257
+# Measured on the merge with main at 1268: 1268 + (+20) = 1288.
+expected_occurrences = 1288
 
 [[module_structures]]
 id = "bare-time-constructor"
@@ -4270,9 +4283,9 @@ pattern = "(?:[A-Za-z_]\\w*::)*Command::new\\s*\\("
 # Merged with main's video-quality batch; measured on the merged tree.
 # Main/effort source union: 208 exact command constructors; both retained finite
 # fixtures and main's admitted diagnostic children remain under their owners.
-# Merged with main's architecture review (#793): main's count plus the
-# effort's reviewed sites, measured on the merged tree.
-expected_occurrences = 210
+# Continuous-quality (#774) and main (#797 Jellyfin facade) union, measured on
+# the merged tree (equals ours + main - merge base).
+expected_occurrences = 214
 
 [[module_structures]]
 id = "process-capable-launch-method"
@@ -4800,9 +4813,9 @@ pattern = "\\.(?:spawn|output|status)\\s*\\("
 # assert the master and legacy bridge responses. Neither launches a process.
 # Main/effort source union: 435 exact method shapes. Response status assertions
 # remain non-process observations; collected commands retain the owners above.
-# Merged with main's architecture review (#793): main's count plus the
-# effort's reviewed sites, measured on the merged tree.
-expected_occurrences = 488
+# Continuous-quality (#774) and main (#797 Jellyfin facade) union, measured on
+# the merged tree (equals ours + main - merge base).
+expected_occurrences = 515
 
 [[module_structures]]
 id = "process-command-ufcs-launch"
@@ -5042,7 +5055,8 @@ pattern = "\\.(?:kill|start_kill|wait|try_wait|exec)\\s*\\("
 # cancellable collector adds start_kill and a separate awaited wait branch; its
 # successful ordinary/cancelled wait retains the same child-job owner until reap.
 # Main/effort source union retains both sets: 255 exact lifecycle method sites.
-expected_occurrences = 255
+# Continuous-quality (#774) and main (#793) union, counted on the merged source.
+expected_occurrences = 260
 
 [[module_structures]]
 id = "free-or-ufcs-process-lifecycle"
@@ -5102,7 +5116,7 @@ pattern = "(?:(?:[A-Za-z_]\\w*::)+(?:kill|signal|raise|wait|waitpid|waitid|wait3
 # zeroing this row on the merge of main into #562. Both test-only observations coexist; the merge adds no new site.
 # E1 plus S-14 M8: both reviewed fixture ownership sets retained.
 # E2 integration retains and counts both E1/S-14 and the admitted analysis/integrity owners.
-expected_occurrences = 55
+expected_occurrences = 57
 
 [[module_structures]]
 id = "kill-on-drop-construction"
@@ -5217,8 +5231,9 @@ pattern = "kill_on_drop\\s*\\("
 # production launcher or producer is added.
 # Video-quality batch: +2 guards on the one-shot VAAPI capability probe and
 # finite reordered-VOD decode fixture. Their enclosing owners also await reap.
-# Merged with main's video-quality batch; measured on the merged tree.
-expected_occurrences = 96
+# Continuous-quality (#774) and main (#797 Jellyfin facade) union, measured on
+# the merged tree (equals ours + main - merge base).
+expected_occurrences = 98
 
 [[module_structures]]
 id = "rolling-supervisor-construction"

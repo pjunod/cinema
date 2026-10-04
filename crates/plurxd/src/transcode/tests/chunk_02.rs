@@ -14,7 +14,8 @@
     #[test]
     fn a_converting_copy_fingerprints_apart_from_the_copy_it_replaces() {
         let copy = |convert: bool| SessionRequest {
-            quality_catalog: None,
+            continuous_media: None,
+quality_catalog: None,
             candidate_context: None,
             vod_only: false,
             passive_vod: false,

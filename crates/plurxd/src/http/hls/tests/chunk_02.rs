@@ -2506,7 +2506,8 @@
             .expect("staging user");
         let incarnation_id = uuid::Uuid::new_v4().to_string();
         let predecessor_request = crate::transcode::SessionRequest {
-            quality_catalog: None,
+            continuous_media: None,
+quality_catalog: None,
             candidate_context: None,
             vod_only: false,
             passive_vod: false,

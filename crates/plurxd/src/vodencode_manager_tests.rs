@@ -41,11 +41,12 @@ async fn encoded_vod_manager_create_resolves_real_recipe_and_served_codecs() {
         Pipeline::Cpu,
     );
     let req = SessionRequest {
-        quality_catalog: None,
-            candidate_context: None,
-            vod_only: false,
-            passive_vod: false,
-            finite_bitrate_limit_bps: None,
+        continuous_media: None,
+quality_catalog: None,
+        candidate_context: None,
+        vod_only: false,
+        passive_vod: false,
+        finite_bitrate_limit_bps: None,
         request_id: Some("qualification-vod".into()),
         previous_session_id: None,
         reopen_reason: None,
@@ -56,11 +57,12 @@ async fn encoded_vod_manager_create_resolves_real_recipe_and_served_codecs() {
         ..reopen_request(file_id, "encoded-manager", "unused", "unused")
     };
     let missing = SessionRequest {
-        quality_catalog: None,
-            candidate_context: None,
-            vod_only: false,
-            passive_vod: false,
-            finite_bitrate_limit_bps: None,
+        continuous_media: None,
+quality_catalog: None,
+        candidate_context: None,
+        vod_only: false,
+        passive_vod: false,
+        finite_bitrate_limit_bps: None,
         file_id: i64::MAX,
         request_id: Some("qualification-vod-missing".into()),
         ..req.clone()
@@ -259,7 +261,8 @@ async fn encoded_vod_manager_admits_a_reported_eac3_atmos_profile_the_node_omits
             Pipeline::Cpu,
         );
         let request = SessionRequest {
-            quality_catalog: None,
+            continuous_media: None,
+quality_catalog: None,
             candidate_context: None,
             vod_only: false,
             passive_vod: false,
@@ -399,11 +402,12 @@ async fn encoded_vod_manager_refuses_replaced_source_with_stale_probe() {
         Pipeline::Cpu,
     );
     let request = SessionRequest {
-        quality_catalog: None,
-            candidate_context: None,
-            vod_only: false,
-            passive_vod: false,
-            finite_bitrate_limit_bps: None,
+        continuous_media: None,
+quality_catalog: None,
+        candidate_context: None,
+        vod_only: false,
+        passive_vod: false,
+        finite_bitrate_limit_bps: None,
         request_id: None,
         previous_session_id: None,
         reopen_reason: None,
@@ -495,11 +499,12 @@ async fn an_empty_stored_track_starts_an_encoded_session_without_the_overlay() {
         Pipeline::Cpu,
     );
     let req = SessionRequest {
-        quality_catalog: None,
-            candidate_context: None,
-            vod_only: false,
-            passive_vod: false,
-            finite_bitrate_limit_bps: None,
+        continuous_media: None,
+quality_catalog: None,
+        candidate_context: None,
+        vod_only: false,
+        passive_vod: false,
+        finite_bitrate_limit_bps: None,
         request_id: Some("stored-empty-burn".into()),
         previous_session_id: None,
         reopen_reason: None,
@@ -539,11 +544,12 @@ async fn an_empty_stored_track_starts_an_encoded_session_without_the_overlay() {
     let plain = manager
         .prepare_vod_encoding(
             &SessionRequest {
-                quality_catalog: None,
-            candidate_context: None,
-            vod_only: false,
-            passive_vod: false,
-            finite_bitrate_limit_bps: None,
+                continuous_media: None,
+quality_catalog: None,
+                candidate_context: None,
+                vod_only: false,
+                passive_vod: false,
+                finite_bitrate_limit_bps: None,
                 request_id: Some("stored-empty-plain".into()),
                 subtitle_burn: None,
                 ..req.clone()
@@ -576,11 +582,12 @@ async fn an_empty_stored_track_starts_an_encoded_session_without_the_overlay() {
     let burned = manager
         .prepare_vod_encoding(
             &SessionRequest {
-                quality_catalog: None,
-            candidate_context: None,
-            vod_only: false,
-            passive_vod: false,
-            finite_bitrate_limit_bps: None,
+                continuous_media: None,
+quality_catalog: None,
+                candidate_context: None,
+                vod_only: false,
+                passive_vod: false,
+                finite_bitrate_limit_bps: None,
                 request_id: Some("stored-empty-control".into()),
                 ..req.clone()
             },
@@ -683,11 +690,12 @@ async fn a_source_encoder_selection_refuses_is_refused_before_any_burn_extractio
         Pipeline::Cpu,
     );
     let req = SessionRequest {
-        quality_catalog: None,
-            candidate_context: None,
-            vod_only: false,
-            passive_vod: false,
-            finite_bitrate_limit_bps: None,
+        continuous_media: None,
+quality_catalog: None,
+        candidate_context: None,
+        vod_only: false,
+        passive_vod: false,
+        finite_bitrate_limit_bps: None,
         request_id: Some("refused-before-burn".into()),
         previous_session_id: None,
         reopen_reason: None,
@@ -770,11 +778,12 @@ async fn the_profile5_pixel_proof_takes_the_class_of_the_caller_waiting_on_it() 
     )
     .with_dovi_reshape(true);
     let req = SessionRequest {
-        quality_catalog: None,
-            candidate_context: None,
-            vod_only: false,
-            passive_vod: false,
-            finite_bitrate_limit_bps: None,
+        continuous_media: None,
+quality_catalog: None,
+        candidate_context: None,
+        vod_only: false,
+        passive_vod: false,
+        finite_bitrate_limit_bps: None,
         request_id: Some("profile5-proof-class".into()),
         previous_session_id: None,
         reopen_reason: None,
@@ -865,11 +874,12 @@ async fn encoding_shipped_shape() {
         Pipeline::Cpu,
     );
     let req = SessionRequest {
-        quality_catalog: None,
-            candidate_context: None,
-            vod_only: false,
-            passive_vod: false,
-            finite_bitrate_limit_bps: None,
+        continuous_media: None,
+quality_catalog: None,
+        candidate_context: None,
+        vod_only: false,
+        passive_vod: false,
+        finite_bitrate_limit_bps: None,
         request_id: Some("encoding-shipped-shape".into()),
         previous_session_id: None,
         reopen_reason: None,
@@ -891,6 +901,163 @@ async fn encoding_shipped_shape() {
     assert!(encoding.admissions.software_in_use() > 0, "the permit holds software capacity");
     drop(permit);
     assert_eq!(encoding.admissions.software_in_use(), 0);
+}
+
+#[tokio::test]
+async fn continuous_worker_roles_resolve_video_only_and_one_cpu_soundtrack() {
+    // An unoptimized test frame keeps a stack slot for every future it awaits.
+    // Build each production entry point in its own short frame and await it
+    // boxed, so this walk of every role fits the default 2 MiB test stack.
+    type Boxed<'a, T> = std::pin::Pin<Box<dyn std::future::Future<Output = Result<T, String>> + 'a>>;
+    fn create<'a>(manager: &'a TranscodeManager, request: &'a SessionRequest) -> Boxed<'a, StartInfo> {
+        Box::pin(manager.create_session(request, "test"))
+    }
+    fn prepare<'a>(manager: &'a TranscodeManager, request: &'a SessionRequest,
+        file: &'a plurx_core::domain::MediaFile) -> Boxed<'a, Option<Arc<crate::vodencode::Encoding>>> {
+        Box::pin(manager.prepare_vod_encoding(request, file))
+    }
+    use plurx_core::store::SqliteStore;
+    let base = crate::test_tempdir().expect("continuous worker fixture");
+    let source = plurx_core::testfixtures::source("h264");
+    let probe = plurx_core::scan::probe::probe(&source).await.expect("source probe");
+    let metadata = std::fs::metadata(&source).expect("metadata");
+    let store: Arc<dyn Store> = Arc::new(SqliteStore::open_in_memory().expect("store"));
+    let file_id = seed_file_with_probe_at(&store, source.to_str().expect("fixture path"), probe.clone()).await;
+    store.upsert_file(
+        store.get_file(file_id).await.expect("read file").expect("seeded file").item_id,
+        source.to_str().expect("fixture path"),
+        metadata.len() as i64,
+        metadata.modified().expect("fixture mtime").duration_since(std::time::UNIX_EPOCH).expect("unix mtime").as_secs() as i64,
+        &probe,
+    ).await.expect("attested file");
+    let file = store.get_file(file_id).await.expect("read file").expect("seeded file");
+    // Production planning always has a cache identity and the startup-bound
+    // FFprobe; normalized continuous geometry is refused without either.
+    let decode_probe = crate::decode_facts::DecodeProbeIdentity::discover_fixture(&crate::ffmpeg::bound_ffprobe_bin())
+        .await.expect("bound FFprobe identity");
+    let manager = TranscodeManager::new(store, base.path().join("manager"), EncoderCaps::default(), Pipeline::Cpu)
+        .with_cache(base.path().join("cache"), "test-ffmpeg".into(), "test-node".into())
+        .with_decode_probe(Some(decode_probe));
+    let mut request = SessionRequest {
+        continuous_media: Some(Box::new(ContinuousMediaRequest {
+            controlled: false,
+            autonomous_companion: None,
+            companion_catalog: None,
+            family_descriptor: None,
+            companion_context: None,
+            version: 1,
+            family_generation: uuid::Uuid::new_v4().to_string(),
+            role: ContinuousMediaRole::Video,
+        })),
+        candidate_context: None,
+        request_id: Some(uuid::Uuid::new_v4().to_string()),
+        previous_session_id: None,
+        reopen_reason: None,
+        presentation: Presentation::Vod,
+        automatic: false,
+        kind: SessionKind::Transcode { height: 240 },
+        ..reopen_request(file_id, "continuous-worker", "unused", "unused")
+    };
+    let planning = manager.store.playback_planning_snapshot(file.id,
+        &crate::transcode::QUALITY_PLANNING_KEYS).await.expect("planning snapshot").expect("source");
+    // HLS create resolves the concrete soundtrack before it asks for the
+    // catalog and carries that same index in the session request.
+    request.audio_index = TranscodeManager::candidate_audio_from_snapshot(&planning, request.audio_index);
+    // A browser declares an audio sink, so the catalog and HLS create both
+    // carry an audio claim; the muxed catalog recipe includes its delivery.
+    let caps = plurx_core::playback::DeviceCaps {
+        v: 2,
+        audio: vec!["aac".into()],
+        audio_sinks: vec![plurx_core::playback::AudioSink {
+            codec: "aac".into(), max_channels: 2, passthrough: false, sample_rates_hz: vec![48_000],
+        }],
+        ..Default::default()
+    };
+    request.audio_claim = plurx_core::playback::audio::AudioClaim::from_caps(&caps)
+        .expect("valid audio sinks");
+    assert!(request.audio_claim.is_some());
+    let catalog = manager.quality_candidates_from_snapshot_progress(&planning,
+        &caps, request.audio_index, 0, None, Presentation::Vod, None, None, None).await;
+    // A real create binds every selected row to the planning inputs it was
+    // built from (`PlanningBinding`); the worker refuses an unbound row.
+    let bound = |candidate: &plurx_core::playback::candidate::QualityCandidate| {
+        let mut context = TranscodeManager::candidate_context(candidate);
+        context.planning_binding = Some(crate::media_pool::PlanningBinding::from_snapshot(&planning));
+        context
+    };
+    let candidate = catalog.iter().find(|candidate| candidate.normalized_geometry
+        && candidate.grade == OutputGrade::Sdr
+        && candidate.route == plurx_core::playback::candidate::CandidateRoute::Encode).expect("normalized SDR catalog candidate");
+    request.kind = SessionKind::Transcode { height: i64::from(candidate.target_height) };
+    request.candidate_context = Some(Box::new(bound(candidate)));
+    let video = prepare(&manager, &request, &file).await.expect("video planning from catalog").expect("video recipe");
+    assert!(video.candidate_recipe.is_none(), "video-only work is not a muxed candidate speed proof");
+    assert!(!video.plan.options().input_has_audio);
+    assert!(video.shared_audio.is_none());
+    assert_eq!(video.plan.options().video_sample_envelope, plurx_core::transcode::VideoSampleEnvelope::ContinuousAvcHigh50);
+    let video_args = video.args(&file, 0.0, file.duration_ms.expect("fixture duration") as f64 / 1000.0);
+    assert!(video_args.iter().any(|arg| arg == "-an"));
+    assert!(!video_args.iter().any(|arg| arg == "aac"));
+    request.continuous_media.as_mut().expect("continuous role").role = ContinuousMediaRole::SharedAudio;
+    let audio = prepare(&manager, &request, &file).await.expect("audio planning").expect("audio recipe");
+    assert!(audio.shared_audio.is_some());
+    assert!(audio.candidate_recipe.is_none(), "shared AAC is not a muxed candidate speed proof");
+    assert!(!audio.resources().hardware_slot);
+    assert_eq!(audio.resources().cpu_threads, 3);
+    assert_eq!(audio.media_plan(file.duration_ms.expect("fixture duration")).timescale, 48_000);
+    let audio_args = audio.args(&file, 0.0, file.duration_ms.expect("fixture duration") as f64 / 1000.0);
+    assert!(audio_args.iter().any(|arg| arg == "-vn"));
+    assert!(audio_args.iter().any(|arg| arg == "aac"));
+    for encoding in [&video, &audio] {
+        let plan = encoding.media_plan(file.duration_ms.expect("source duration"));
+        let peak = encoding.continuous_peak_bps(&plan).expect("container-inclusive ceiling");
+        assert!(peak > 0);
+        for (index, entry) in plan.entries.iter().enumerate() {
+            let bound = u64::try_from(u128::from(peak) * u128::from(entry.duration_ticks)
+                / (8 * u128::from(plan.timescale))).expect("entry bytes");
+            assert_eq!(encoding.continuous_object_fits(&plan, index as u32, bound), Some(true));
+            assert_eq!(encoding.continuous_object_fits(&plan, index as u32, bound + 1), Some(false));
+        }
+    }
+    request.continuous_media.as_mut().expect("continuous role").role = ContinuousMediaRole::Video;
+    request.candidate_context = None;
+    let mut incumbent_request = request.clone();
+    incumbent_request.continuous_media = None;
+    incumbent_request.request_id = Some(uuid::Uuid::new_v4().to_string());
+    let incumbent = create(&manager, &incumbent_request).await.expect("healthy incumbent");
+    manager.store.put_setting(plurx_core::store::keys::SW_POOL_THREADS, "3").await.expect("audio-only capacity");
+    let refused = create(&manager, &request).await.err().expect("the whole video/audio group does not fit");
+    assert!(refused.contains("vod_family_capacity"));
+    assert!(manager.vod.playlist(&incumbent.session_id).await.expect("incumbent remains registered").result.is_ok(),
+        "failed family admission must not run the legacy supersession sweep");
+    let companion = catalog.iter().find(|row| row.id != candidate.id && row.normalized_geometry
+        && row.target_height != candidate.target_height && row.grade == OutputGrade::Sdr
+        && row.route == plurx_core::playback::candidate::CandidateRoute::Encode)
+        .expect("second canonical video recipe");
+    // The capacity setting above is a planning input, so the family is
+    // bound to the snapshot taken after it, as a real create would be.
+    let planning = manager.store.playback_planning_snapshot(file.id,
+        &crate::transcode::QUALITY_PLANNING_KEYS).await.expect("planning snapshot").expect("source");
+    let bound = |candidate: &plurx_core::playback::candidate::QualityCandidate| {
+        let mut context = TranscodeManager::candidate_context(candidate);
+        context.planning_binding = Some(crate::media_pool::PlanningBinding::from_snapshot(&planning));
+        context
+    };
+    let mut family = request.clone();
+    family.request_id = Some(uuid::Uuid::new_v4().to_string());
+    family.candidate_context = Some(Box::new(bound(candidate)));
+    let media = family.continuous_media.as_mut().expect("family role");
+    media.autonomous_companion = Some(companion.id);
+    media.companion_catalog = Some(Box::new(companion.clone()));
+    media.companion_context = Some(Box::new(ContinuousCompanionContext {
+        height: i64::from(companion.target_height), candidate: bound(companion),
+    }));
+    let refused = create(&manager, &family).await.err().expect("three-role capacity denial");
+    assert!(refused.contains("vod_family_capacity"), "both derived video and AAC roles validate before admission: {refused}");
+    assert!(manager.vod.playlist(&incumbent.session_id).await.expect("incumbent survives family denial").result.is_ok());
+    manager.vod.end(&incumbent.session_id, crate::vodserve::Terminal::Deleted).await;
+    request.continuous_media.as_mut().expect("continuous role").version = 2;
+    assert!(prepare(&manager, &request, &file).await.is_err());
 }
 
 #[tokio::test]

@@ -177,7 +177,12 @@ internal class PreparedOfferWait(
  *
  * Not thread-safe: [Controller] owns it and touches it from the player's scope.
  */
-internal class DirectedChange(val epoch: Long, val quality: PlaybackQuality) {
+internal class DirectedChange(
+    val epoch: Long,
+    val quality: PlaybackQuality,
+    val pending: PlaybackIntent.PendingQualityChange? = null,
+    val incumbentSelection: QualitySelection? = null,
+) {
     private var settled = false
 
     /** True once this change can no longer produce a reopen. */
@@ -194,16 +199,20 @@ internal class DirectedChange(val epoch: Long, val quality: PlaybackQuality) {
      * still the viewer's current intent. Returns whether it routed.
      */
     fun fallBackOnce(reason: String, currentEpoch: Long, route: () -> Unit): Boolean {
+        return settleFailureOnce(currentEpoch, false, {}, route)
+    }
+
+    /** Healthy optional failure retains once; stale/replayed failures do nothing. */
+    fun settleFailureOnce(
+        currentEpoch: Long,
+        incumbentHealthy: Boolean,
+        retain: () -> Unit,
+        reopen: () -> Unit,
+    ): Boolean {
         if (settled) return false
-        // The media moved on under this change — another quality tap, a title
-        // change, a reopen someone else already took. Routing now would drag
-        // the viewer back to a rung they have since left.
-        if (currentEpoch != epoch) {
-            settled = true
-            return false
-        }
         settled = true
-        route()
+        if (currentEpoch != epoch) return false
+        if (incumbentHealthy) retain() else reopen()
         return true
     }
 
@@ -214,7 +223,7 @@ internal class DirectedChange(val epoch: Long, val quality: PlaybackQuality) {
 }
 
 /**
- * How far ahead of the incumbent the successor is parked.
+ * Estimated wall time needed to park the successor ahead of the incumbent.
  *
  * Long enough to cover a cold seek on the slowest measured device — the
  * tunneled Google TV of M5.5 — with margin, and short enough that the viewer's
@@ -230,11 +239,8 @@ internal const val RENDEZVOUS_PAUSED_POLL_MS = 500L
 
 /**
  * How often the hold looks for the successor to have landed on the rendezvous.
- *
- * Its own cadence rather than the one-second ladder tick. At 2x a 1 500 ms lead
- * is 750 ms of wall time, so a sampler that looks once a second discovers the
- * successor has arrived only after the incumbent has already gone past — and
- * turns every fast-rate handoff into a re-park.
+ * Its own cadence observes seek and decoded readiness before the meeting point
+ * rather than waiting for the one-second ladder tick.
  */
 internal const val RENDEZVOUS_READY_POLL_MS = 100L
 
@@ -302,7 +308,8 @@ internal class RendezvousHold(
     private var ready = false
 
     /** Pick the first rendezvous and send the successor to it, parked. */
-    fun park(nowMs: Long, incumbentFilmMs: Long): Park = repark(nowMs, incumbentFilmMs)
+    fun park(nowMs: Long, incumbentFilmMs: Long, speed: Double = 1.0): Park =
+        repark(nowMs, incumbentFilmMs, speed)
 
     /** The successor's seek landed and it holds runway through the rendezvous. */
     fun ready(nowMs: Long) {
@@ -325,7 +332,7 @@ internal class RendezvousHold(
     fun delayMs(incumbentFilmMs: Long, speed: Double): Long {
         val target = rendezvousFilmMs ?: return pausedPollMs
         if (!speed.isFinite() || speed <= 0.0) return pausedPollMs
-        val remaining = target - incumbentFilmMs
+        val remaining = target.toDouble() - incumbentFilmMs.toDouble()
         if (remaining <= 0) return 0L
         return (remaining / speed).toLong().coerceAtLeast(0L)
     }
@@ -344,29 +351,34 @@ internal class RendezvousHold(
         successorFilmMs: Long,
         successorReady: Boolean,
         speed: Double,
+        alignmentWindowMs: Double = slackMs.toDouble(),
     ): Step {
-        val target = rendezvousFilmMs ?: return Step.Repark(repark(nowMs, incumbentFilmMs))
+        val target = rendezvousFilmMs ?: return Step.Repark(repark(nowMs, incumbentFilmMs, speed))
         // Short of the rendezvous: the incumbent is still on its way, or it is
         // paused and will resume. Neither is a miss; recompute and wait.
-        if (incumbentFilmMs < target - slackMs) return Step.Wait(delayMs(incumbentFilmMs, speed))
-        val aligned = kotlin.math.abs(incumbentFilmMs - target) <= slackMs &&
-            kotlin.math.abs(successorFilmMs - incumbentFilmMs) <= slackMs
+        val window = alignmentWindowMs.takeIf { it.isFinite() && it > 0 }
+            ?.coerceAtMost(slackMs.toDouble())
+            ?: return Step.Abandon("invalid_frame_window")
+        if (incumbentFilmMs.toDouble() < target.toDouble() - window) return Step.Wait(delayMs(incumbentFilmMs, speed))
+        val aligned = kotlin.math.abs(incumbentFilmMs.toDouble() - target.toDouble()) <= window &&
+            kotlin.math.abs(successorFilmMs.toDouble() - incumbentFilmMs.toDouble()) <= window
         if (aligned && successorReady) return Step.Commit(incumbentFilmMs)
         // At or past the rendezvous without a successor waiting there: a seek
         // that took longer than the lead, a forward seek, or a rate change.
         if (reparks >= maxReparks) return Step.Abandon("rendezvous_missed")
-        return Step.Repark(repark(nowMs, incumbentFilmMs))
+        return Step.Repark(repark(nowMs, incumbentFilmMs, speed))
     }
 
-    private fun repark(nowMs: Long, incumbentFilmMs: Long): Park {
+    private fun repark(nowMs: Long, incumbentFilmMs: Long, speed: Double): Park {
         if (rendezvousFilmMs != null) reparks += 1
-        // The lead for the next attempt is the larger of the device-class
-        // estimate and what this device's last seek actually cost, so a second
-        // attempt is never aimed at a point the first one already proved is too
-        // close. Slack on top, because the seek still has to land *before* the
-        // incumbent arrives rather than with it.
-        val lead = maxOf(leadMs, observedSeekMs + slackMs)
-        val target = incumbentFilmMs + lead
+        // Seek latency is wall time. Convert the larger of the estimate and
+        // observed latency plus margin to film time at the incumbent's rate.
+        // Retain the physical overlap deadline in the controller.
+        val measuredWallLead = observedSeekMs.coerceAtMost(Long.MAX_VALUE - slackMs) + slackMs
+        val wallLead = maxOf(leadMs, measuredWallLead)
+        val rate = speed.takeIf { it.isFinite() && it > 0 }?.coerceAtMost(16.0) ?: 1.0
+        val filmLead = kotlin.math.ceil(wallLead.toDouble() * rate).toLong().coerceAtLeast(1)
+        val target = incumbentFilmMs.coerceAtMost(Long.MAX_VALUE - filmLead) + filmLead
         rendezvousFilmMs = target
         parkIssuedAtMs = nowMs
         ready = false
@@ -388,7 +400,7 @@ internal class RendezvousHold(
  */
 internal object PreparedReplacementAdvisory {
     data class Advice(
-        /** `committed <ms>`, `declined`, `timed out`, `fell back`, or null. */
+        /** Actual outcome: committed, retained current, refusal, or recovery fallback. */
         val outcome: String? = null,
         /** The last `delivery.preparation` the server sent, verbatim. */
         val preparation: String? = null,
@@ -420,10 +432,40 @@ internal object PreparedReplacementAdvisory {
 
     /** How a `via=` tag becomes the sentence the row shows. */
     fun outcomeLabel(via: String, elapsedMs: Long?): String = when (via) {
+        "retained_current" -> "retained current"
         "prepared" -> "committed" + (elapsedMs?.let { " ${it}ms" } ?: "")
         "declined" -> "declined"
         "timed_out" -> "timed out"
         else -> "fell back"
+    }
+}
+
+/** Presentation time spent under Play intent, independent of decoder stalls. */
+internal class PreparedActiveWallBudget(
+    boundMs: Long,
+    nowMs: Long,
+    playbackRequested: Boolean,
+    overlapBoundMs: Long? = null,
+    overlapStartedAtMs: Long = nowMs,
+) {
+    var remainingMs = boundMs.coerceAtLeast(0)
+        private set
+    var remainingOverlapMs = overlapBoundMs?.let { bound ->
+        val limit = bound.coerceAtLeast(0)
+        limit - minOf(limit, (nowMs - overlapStartedAtMs).coerceAtLeast(0))
+    }
+        private set
+    private var observedAtMs = nowMs.coerceAtLeast(0)
+    private var wasActive = playbackRequested
+
+    fun update(nowMs: Long, playbackRequested: Boolean): Boolean {
+        val current = maxOf(observedAtMs, nowMs)
+        val elapsed = current - observedAtMs
+        if (wasActive) remainingMs -= minOf(remainingMs, elapsed)
+        remainingOverlapMs = remainingOverlapMs?.let { it - minOf(it, elapsed) }
+        observedAtMs = current
+        wasActive = playbackRequested
+        return remainingMs == 0L || remainingOverlapMs == 0L
     }
 }
 
@@ -440,6 +482,8 @@ internal object PreparedReplacementAdvisory {
  * only then reopens through the normal path.
  */
 internal const val PREPARED_COMMIT_FRAME_BOUND_MS = 5_000L
+/** Pause parks observation but cannot retain a second decoder indefinitely. */
+internal const val PREPARED_OVERLAP_BOUND_MS = 12_000L
 
 /**
  * How long a retired predecessor may sit parked before the watchdog collects it

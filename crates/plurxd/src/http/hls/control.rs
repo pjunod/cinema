@@ -1722,7 +1722,7 @@ async fn control_inner_observed(
 /// The session UUID is still the bearer capability, but it cannot keep a
 /// deleted, disabled, or newly-hidden channel alive. Ordinary VOD response
 /// JSON has no `library_channel` member and pays only one object lookup.
-async fn library_channel_control_refusal(
+pub(super) async fn library_channel_control_refusal(
     state: &AppState,
     route: &MediaSessionRoute,
 ) -> Option<Response> {
@@ -2206,6 +2206,56 @@ pub(super) async fn control_local_inner(
         preparation_settlement_slots(),
     )
     .await
+}
+
+/// A verified controlled family owns its in-family video intent. Legacy
+/// control still owns transport, other recipe axes and planned relocation.
+pub(super) fn continuous_family_owns_quality(
+    recipe: &RemoteStartRequest,
+    selection: &crate::playback_control::ClientSelection,
+) -> bool {
+    use crate::playback_control::{
+        CodecPolicy, DynamicRangePolicy, QualitySelection, SubtitleMode,
+    };
+    let Some(media) = recipe.request.continuous_media.as_ref() else {
+        return false;
+    };
+    let Some(family) = media.family_descriptor.as_ref() else {
+        return false;
+    };
+    if !media.controlled
+        || media.role != crate::transcode::ContinuousMediaRole::Video
+        || family.mode != "controlled"
+        || !family.valid()
+        || selection.audio_track != recipe.request.audio_index
+        || selection.audio_offset_ms != recipe.request.audio_offset_ms
+        || !matches!(selection.codec, CodecPolicy::Auto | CodecPolicy::H264)
+        || !matches!(
+            selection.dynamic_range,
+            DynamicRangePolicy::Auto | DynamicRangePolicy::Sdr
+        )
+        || (if selection.subtitle.mode == SubtitleMode::Burn {
+            selection.subtitle.track
+        } else {
+            None
+        }) != recipe.request.subtitle_burn
+    {
+        return false;
+    }
+    match selection.quality {
+        QualitySelection::Original => false,
+        QualitySelection::Manual { height } => family
+            .video
+            .iter()
+            .any(|row| i64::from(row.height) == height),
+        QualitySelection::Auto {
+            height,
+            candidate_id,
+        } => family.video.iter().any(|row| {
+            height.is_none_or(|height| i64::from(row.height) == height)
+                && candidate_id.is_none_or(|candidate| row.candidate_id == candidate)
+        }),
+    }
 }
 
 #[cfg(test)]
@@ -2874,7 +2924,23 @@ async fn control_local_with_observation(
     // exchange: they must be the same string, or a client would be told
     // `staging` about a candidate for an ask it has already left.
     let desired_digest = request.selection.desired().digest();
-    let preparation_purpose = (!incumbent_waiting)
+    let quality_intent_cancelled = if let Some(intent) = request.intent.as_ref() {
+        state
+            .store
+            .quality_intent_cancelled(
+                &request.generation,
+                &request.client_instance_id,
+                &intent.lifetime_id,
+                i64::try_from(intent.recipe_revision).unwrap_or(i64::MAX),
+            )
+            .await
+            .unwrap_or(true)
+    } else {
+        false
+    };
+    // A cancelled intent is never a fresh preparation because the owner
+    // restarted or its reporter sent another ordinary exchange.
+    let preparation_purpose = (!incumbent_waiting && !quality_intent_cancelled)
         .then(|| {
             planned_relocation
                 .map(PreparationPurpose::PlannedRelocation)
@@ -2883,6 +2949,7 @@ async fn control_local_with_observation(
                         .selection
                         .dispatch_preparation
                         .then_some(PreparationPurpose::SelectionChange)
+                        .filter(|_| !continuous_family_owns_quality(&recipe, &request.selection))
                 })
         })
         .flatten();
@@ -2923,7 +2990,10 @@ async fn control_local_with_observation(
         // Claimed before the spawn, not inside it: a task that has not been
         // polled yet is still work this playback is doing, and an exchange
         // that raced in between would otherwise be told `none`.
-        let pending = PendingCandidateGuard::begin(&route.playback_id, &desired_digest);
+        // Owned by this control exchange: the quality intent identity and the
+        // settlement route ride the guard (`begin_control` claims the same
+        // `desired_digest` this exchange answers against).
+        let pending = PendingCandidateGuard::begin_control(state, route, &request);
         let observation_budget = Duration::from_millis(
             u64::try_from(deadline_unix_ms.saturating_sub(unix_ms()))
                 .unwrap_or(0)

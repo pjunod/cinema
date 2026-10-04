@@ -399,6 +399,9 @@ impl ServingFence {
     pub(crate) fn starts_mutable_media(method: &str, path: &str) -> bool {
         (method == "POST"
             && (path.ends_with("/hls/sessions")
+                // The continuous family create spawns the same session work
+                // through the same create path, so it drains the same way.
+                || path.ends_with("/hls/continuous-sessions")
                 || path.ends_with("/offline-packages")
                 || path.ends_with("/publication")
                 || (path.contains("/live-tv/channels/") && path.ends_with("/sessions"))
@@ -1106,6 +1109,32 @@ mod tests {
         );
         decide_authority(false, false, true, consult);
         assert_eq!(consulted.get(), 1, "and the one case that may use it, does");
+    }
+
+    /// Every create spelling that admits session work counts against
+    /// restart drain; reads and controls of existing sessions do not.
+    #[test]
+    fn continuous_family_creates_count_as_new_media_admissions() {
+        for (method, path) in [
+            ("POST", "/api/v1/files/8/hls/sessions"),
+            ("POST", "/api/v1/files/8/hls/continuous-sessions"),
+        ] {
+            assert!(
+                ServingFence::starts_mutable_media(method, path),
+                "{method} {path}"
+            );
+        }
+        for (method, path) in [
+            ("POST", "/api/v1/files/8/hls/continuous-candidates"),
+            ("POST", "/api/v1/hls/session-8/quality-schedule"),
+            ("POST", "/api/v1/hls/session-8/quality-control"),
+            ("GET", "/api/v1/hls/session-8/quality-family"),
+        ] {
+            assert!(
+                !ServingFence::starts_mutable_media(method, path),
+                "{method} {path}"
+            );
+        }
     }
 
     #[test]

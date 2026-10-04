@@ -13,6 +13,12 @@ separate from the build plan for one reason: the plan says what to build and is
 finished when it is built, and this says what the thing that was built did to a
 viewer's picture and sound, which only hardware can say.
 
+**2026-09-30 follow-up:** [Continuous quality](CONTINUOUS-QUALITY-BUILD.md)
+now defines the next build and its acceptance. It replaces mandatory
+reopen-on-failure for healthy playback and adds compatible HLS rendition
+switching. This document retains the earlier contract and its historical
+evidence; it does not establish completion of the new work.
+
 ## 1. The bar
 
 Twenty consecutive viewer-directed quality changes per platform, on a realistic

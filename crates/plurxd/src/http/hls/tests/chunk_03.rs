@@ -102,6 +102,9 @@
             Some(&staged_source_file()),
             AcceptedAsk {
                 prepared_proof: None,
+                planning_registration: None,
+                quality_intent: None,
+                planning_cancellation: None,
                 film_time_ms: STAGED_ACCEPTED_FILM_TIME_MS,
                 desired_digest: None,
             },
@@ -152,6 +155,9 @@
             Some(&staged_source_file()),
             AcceptedAsk {
                 prepared_proof: None,
+                planning_registration: None,
+                quality_intent: None,
+                planning_cancellation: None,
                 film_time_ms: STAGED_ACCEPTED_FILM_TIME_MS,
                 desired_digest: None,
             },
@@ -204,6 +210,9 @@
             Some(&staged_source_file()),
             AcceptedAsk {
                 prepared_proof: None,
+                planning_registration: None,
+                quality_intent: None,
+                planning_cancellation: None,
                 film_time_ms: STAGED_ACCEPTED_FILM_TIME_MS,
                 desired_digest: None,
             },
@@ -361,6 +370,7 @@
         };
         let now_ms = unix_ms();
         let preparation = plurx_core::domain::MediaSessionPreparation {
+            quality_cancellation_key: None,
             expected_desired_revision: None,
             incarnation_id: staged_incarnation_id.clone(),
             session_id: staged_session_id,
@@ -441,6 +451,9 @@
             Some(&staged_source_file()),
             AcceptedAsk {
                 prepared_proof: None,
+                planning_registration: None,
+                quality_intent: None,
+                planning_cancellation: None,
                 film_time_ms: STAGED_ACCEPTED_FILM_TIME_MS,
                 desired_digest: None,
             },
@@ -535,6 +548,9 @@
             Some(&staged_source_file()),
             AcceptedAsk {
                 prepared_proof: None,
+                planning_registration: None,
+                quality_intent: None,
+                planning_cancellation: None,
                 film_time_ms: STAGED_ACCEPTED_FILM_TIME_MS,
                 desired_digest: None,
             },
@@ -921,6 +937,9 @@
             Some(&staged_source_file()),
             AcceptedAsk {
                 prepared_proof: None,
+                planning_registration: None,
+                quality_intent: None,
+                planning_cancellation: None,
                 film_time_ms: STAGED_ACCEPTED_FILM_TIME_MS,
                 desired_digest: None,
             },
@@ -944,6 +963,9 @@
             Some(&staged_source_file()),
             AcceptedAsk {
                 prepared_proof: None,
+                planning_registration: None,
+                quality_intent: None,
+                planning_cancellation: None,
                 film_time_ms: STAGED_ACCEPTED_FILM_TIME_MS,
                 desired_digest: None,
             },
@@ -980,6 +1002,9 @@
             Some(&staged_source_file()),
             AcceptedAsk {
                 prepared_proof: None,
+                planning_registration: None,
+                quality_intent: None,
+                planning_cancellation: None,
                 film_time_ms: STAGED_ACCEPTED_FILM_TIME_MS,
                 desired_digest: None,
             },
@@ -1013,6 +1038,9 @@
             Some(&staged_source_file()),
             AcceptedAsk {
                 prepared_proof: None,
+                planning_registration: None,
+                quality_intent: None,
+                planning_cancellation: None,
                 film_time_ms: STAGED_ACCEPTED_FILM_TIME_MS,
                 desired_digest: None,
             },
@@ -1243,6 +1271,9 @@
             Some(&staged_source_file()),
             AcceptedAsk {
                 prepared_proof: None,
+                planning_registration: None,
+                quality_intent: None,
+                planning_cancellation: None,
                 film_time_ms: STAGED_ACCEPTED_FILM_TIME_MS,
                 desired_digest: None,
             },
@@ -1334,6 +1365,9 @@
             Some(&staged_source_file()),
             AcceptedAsk {
                 prepared_proof: None,
+                planning_registration: None,
+                quality_intent: None,
+                planning_cancellation: None,
                 film_time_ms: STAGED_ACCEPTED_FILM_TIME_MS,
                 desired_digest: None,
             },
@@ -1467,6 +1501,9 @@
             Some(&staged_source_file()),
             AcceptedAsk {
                 prepared_proof: None,
+                planning_registration: None,
+                quality_intent: None,
+                planning_cancellation: None,
                 film_time_ms: STAGED_ACCEPTED_FILM_TIME_MS,
                 desired_digest: None,
             },
@@ -1555,6 +1592,9 @@
             Some(&staged_source_file()),
             AcceptedAsk {
                 prepared_proof: None,
+                planning_registration: None,
+                quality_intent: None,
+                planning_cancellation: None,
                 film_time_ms: STAGED_ACCEPTED_FILM_TIME_MS,
                 desired_digest: None,
             },
@@ -1645,6 +1685,9 @@
             Some(&staged_source_file()),
             AcceptedAsk {
                 prepared_proof: None,
+                planning_registration: None,
+                quality_intent: None,
+                planning_cancellation: None,
                 film_time_ms: STAGED_ACCEPTED_FILM_TIME_MS,
                 desired_digest: None,
             },
@@ -1701,6 +1744,9 @@
                     Some(&staged_source_file()),
                     AcceptedAsk {
                         prepared_proof: None,
+                        planning_registration: None,
+                        quality_intent: None,
+                        planning_cancellation: None,
                         film_time_ms: STAGED_ACCEPTED_FILM_TIME_MS,
                         desired_digest: None,
                     },
@@ -1837,6 +1883,9 @@
                 Some(&staged_source_file()),
                 AcceptedAsk {
                     prepared_proof: None,
+                    planning_registration: None,
+                    quality_intent: None,
+                    planning_cancellation: None,
                     film_time_ms: STAGED_ACCEPTED_FILM_TIME_MS,
                     desired_digest: None,
                 },
@@ -1965,7 +2014,8 @@
         // explicit clear the successor would stage claiming to be a reopen of
         // a session that is still playing.
         let candidate = crate::transcode::SessionRequest {
-            quality_catalog: None,
+            continuous_media: None,
+quality_catalog: None,
             candidate_context: None,
             vod_only: false,
             passive_vod: false,
@@ -1983,6 +2033,9 @@
             Some(&staged_source_file()),
             AcceptedAsk {
                 prepared_proof: None,
+                planning_registration: None,
+                quality_intent: None,
+                planning_cancellation: None,
                 film_time_ms: STAGED_ACCEPTED_FILM_TIME_MS,
                 desired_digest: None,
             },
@@ -2140,6 +2193,9 @@
             Some(&staged_source_file()),
             AcceptedAsk {
                 prepared_proof: None,
+                planning_registration: None,
+                quality_intent: None,
+                planning_cancellation: None,
                 film_time_ms: STAGED_ACCEPTED_FILM_TIME_MS,
                 desired_digest: None,
             },
@@ -2288,6 +2344,9 @@
             Some(&staged_source_file()),
             AcceptedAsk {
                 prepared_proof: None,
+                planning_registration: None,
+                quality_intent: None,
+                planning_cancellation: None,
                 film_time_ms: STAGED_ACCEPTED_FILM_TIME_MS,
                 desired_digest: None,
             },
@@ -2407,6 +2466,9 @@
             Some(&staged_source_file()),
             AcceptedAsk {
                 prepared_proof: None,
+                planning_registration: None,
+                quality_intent: None,
+                planning_cancellation: None,
                 film_time_ms: STAGED_ACCEPTED_FILM_TIME_MS,
                 desired_digest: None,
             },

@@ -125,8 +125,19 @@
  * Quality ladder and adaptive bitrate
  * @property {any[]} [ladder]              the quality rungs on offer
  * @property {any[]|null} [qualityCandidates] source- and decoder-specific server catalog; null uses legacy rungs
+ * @property {{generation:string,control_epoch:number,schedule_url:string,family_url:string,family:any,primary_candidate_id:string,selection:any}|null} [continuousQualityBootstrap] attachment-owned continuous family enrollment
  * @property {any[]|null} [measuredCandidateOutputs] bounded HTTP-only full-output cost provenance
  * @property {string|null} [qualityCandidateId] the server-confirmed active route
+ * @property {any} [continuousQuality] the reservation-bound continuous attachment
+ * @property {any} [qualityRetainedSelection] the retained incumbent selection while a requested change waits
+ * @property {Map<string,any>} [continuousQualityStarts] in-flight continuous family starts, keyed by attempt
+ * @property {string} [continuousQualityObservation] the newest continuous adapter fault, for diagnostics
+ * @property {string} [continuousQualityObservationStack] that fault's bounded stack, for diagnostics
+ * @property {Array<{at_ms:number,message:string}>} [continuousQualityObservations] bounded continuous fault history
+ * @property {{candidate_id:string,width:number,height:number,film_tick:number,timescale:number}|null} [continuousQualityPresented] the continuous rendition last seen on screen
+ * @property {{key:string,supported:boolean,response:any}|null} [qualityControlSupport] the owner's quality-control feature answer
+ * @property {{key:string,promise:Promise<any>}|null} [qualityControlDiscovery] the in-flight quality-control feature discovery
+ * @property {{change:any,selection:any}|null} [qualityNegotiatingSelection] the incumbent selection reported while a change negotiates
  * @property {string|null} [qualityProtocol] protocol negotiated with the actual session owner
  * @property {number|null} [priorKbps]     the bandwidth estimate carried from the last playback
  * @property {number|null} [autoHeight]    the rung Auto started or settled on
@@ -706,6 +717,39 @@ function noteCompletedAutoTransfer(p,bytes,loading,now,networkDetails=null,url=n
   if(evidence) p.abr.qualityTransfer={...evidence,media_duration_ms:mediaDurationMs,attachment:p.mediaAttachment,
     session_id:p.sessionId,candidate_id:p.qualityCandidateId};
 }
+const QUALITY_RESOURCE_TIMING_LIMIT=128;
+const qualityResourceTimingRows=new Map();
+let qualityResourceTimingObserver=null;
+function rememberQualityResourceTimings(entries){
+  for(const entry of entries){
+    try{if(!new URL(entry.name,location.href).pathname.startsWith('/api/v1/hls/'))continue;}
+    catch(_){continue;}
+    const row={name:entry.name,startTime:entry.startTime,responseStart:entry.responseStart,
+      responseEnd:entry.responseEnd,encodedBodySize:entry.encodedBodySize,transferSize:entry.transferSize};
+    qualityResourceTimingRows.delete(row.name);qualityResourceTimingRows.set(row.name,row);
+    while(qualityResourceTimingRows.size>QUALITY_RESOURCE_TIMING_LIMIT)
+      qualityResourceTimingRows.delete(qualityResourceTimingRows.keys().next().value);
+  }
+}
+function observeQualityResourceTimings(){
+  if(qualityResourceTimingObserver!==null)return;
+  qualityResourceTimingObserver=false;
+  if(typeof PerformanceObserver!=='function')return;
+  let observer;
+  try{
+    observer=new PerformanceObserver(list=>rememberQualityResourceTimings(list.getEntries()));
+    observer.observe({type:'resource',buffered:true});qualityResourceTimingObserver=observer;
+  }catch(_){observer?.disconnect();}
+}
+// The browser's resource timing buffer can drop a response before hls.js
+// reports it loaded. The observed row is offered alongside the retained
+// entries, never in place of them: the completed-response join below still
+// requires exactly one match, so a retained duplicate stays ambiguous.
+function qualityResourceTimingObserved(name){
+  observeQualityResourceTimings();
+  if(qualityResourceTimingObserver)rememberQualityResourceTimings(qualityResourceTimingObserver.takeRecords());
+  return qualityResourceTimingRows.get(name)||null;
+}
 function completedQualityTransfer(networkDetails,url,loading,now,bytes){
   // Upgrade evidence needs a completed network body from bytes already sealed
   // by the server. hls.js load averages alone cannot distinguish cache hits,
@@ -719,8 +763,12 @@ function completedQualityTransfer(networkDetails,url,loading,now,bytes){
     if(!Number.isSafeInteger(Number(bytes))||!(Number(bytes)>0)
       ||!Number.isFinite(started)||!Number.isFinite(ended)||!(ended>started)) return;
     // The API's explicit resource entry-type filter narrows its broad DOM type.
-    const entries=/** @type {PerformanceResourceTiming[]} */
+    const retained=/** @type {PerformanceResourceTiming[]} */
       (performance.getEntriesByName(name,"resource"));
+    const observed=typeof qualityResourceTimingObserved==='function'?qualityResourceTimingObserved(name):null;
+    const entries=observed&&!retained.some(timing=>timing.startTime===observed.startTime
+      &&timing.responseEnd===observed.responseEnd&&timing.encodedBodySize===observed.encodedBodySize)
+      ?[...retained,observed]:retained;
     // Never borrow the latest same-URL request. Coarse or ambiguous timer
     // joins cannot prove which completed response supplied this nonce.
     const matches=entries.filter(timing=>timing.encodedBodySize===Number(bytes)
@@ -964,10 +1012,20 @@ function hlsStartupEpisode(attachedPlayer,attachment,playlistUrl,startAt,transpo
   return {tgt,startup};
 }
 function constructHls(startup,tgt,video,startAt,observesCurrent){
+  observeQualityResourceTimings();
   const attachedPlayer=startup.player;
   const playlistUrl=startup.playlistUrl;
   const StockLoader=Hls.DefaultConfig&&Hls.DefaultConfig.loader;
+  const continuous=attachedPlayer.continuousQualityBootstrap
+    ?continuousQualityAdapter(attachedPlayer,video,startup.attachment,attachedPlayer.continuousQualityBootstrap):null;
+  attachedPlayer.continuousQuality=continuous;
   const hls=new Hls({preferManagedMediaSource:false,
+    ...(continuous?{autoStartLoad:false,progressive:false,
+      // Plurx owns every reserved rung, including when the viewer chose Auto.
+      // hls.js must not clear that manual level and fetch an unreserved
+      // companion after a preparation or delivery error.
+      preserveManualLevelOnError:true,
+      fLoader:continuous.loader(createHlsStartupLoader(StockLoader,startup))}:{}),
     maxBufferLength:tgt.fwd,
     backBufferLength:tgt.back,
     ...(tgt.budgeted?{maxBufferSize:tgt.fwdBytes}:{}),
@@ -1014,6 +1072,7 @@ function constructHls(startup,tgt,video,startAt,observesCurrent){
   }
   startup.hls=hls;
   PLAYER.hls=hls;
+  if(continuous)continuous.bind(hls,startAt);
   hls.loadSource(playlistUrl);
   hls.attachMedia(video);
   return hls;

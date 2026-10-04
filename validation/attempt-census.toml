@@ -57,6 +57,16 @@ version = 1
 "refreshPGSOverlayWindow::self.pgsOverlayItemGeneration == itemGeneration" = 1
 "refreshPGSOverlayWindow::self.pgsOverlaySelectionGeneration == selectionGeneration" = 2
 "restartInitialDecision::initialDecisionGeneration == generation" = 2
+# `retainManualQualityFailure` compares epochs held in the
+# `ManualQualityRetention` record, not a snapshot it took. The record's
+# `viewerEpoch` is advanced by `transportChanged` across Play and Pause, so a
+# retained failure outlives transport but not a newer choice; an `Attempt`
+# cannot be advanced, so naming `[.viewerAction]` would drop the retention at
+# the first Pause. `seekGeneration` is the tap's destination, compared the way
+# `seekWhenReady` compares its owner's. Both wait for the record to carry an
+# `Attempt` of its own.
+"retainManualQualityFailure::manualQualityRetention.retained?.viewerEpoch == viewerActionEpoch" = 1
+"retainManualQualityFailure::seekState.generation == retained.seekGeneration" = 1
 "retryNativeSubtitleAfterReadiness::self.viewerActionEpoch == actionEpoch" = 2
 "seekWhenReady::self.seekState.generation == owner.seekGeneration" = 1
 "seekWhenReady::self.viewerActionEpoch == owner.actionEpoch" = 1
@@ -107,4 +117,6 @@ recoveryEvidencePoll = { function = "startRecoveryEvidencePoll", scopes = ["open
 autoInitialLayout = { function = "load", scopes = ["initialDecision"] }
 autoCatalogRefresh = { function = "refreshAutoCatalogForViewerRecipe", scopes = ["lifecycle", "viewerAction"] }
 autoQualityOffer = { function = "tickDisplayAwareAuto", scopes = ["lifecycle", "viewerAction"] }
-autoQualityRollback = { function = "commitPreparedSuccessor", scopes = ["lifecycle", "open", "viewerAction"] }
+preparedPipelineRollback = { function = "commitPreparedSuccessor", scopes = ["lifecycle", "open", "seek"] }
+preparedCommit = { function = "preparedCommitStillOwned", scopes = ["viewerAction"] }
+retainedQualityRestart = { function = "applyRetainedQualityWithRestart", scopes = ["viewerAction"] }

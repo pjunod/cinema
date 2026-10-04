@@ -206,7 +206,8 @@ function rollbackPreparedReplacement(p,state,successor){
   p.encoder=predecessor.encoder;
   p.qualityCandidateId=predecessor.qualityCandidateId;
   p.deliveredRange=predecessor.deliveredRange;
-  p.wantsPlayback=predecessor.wantsPlayback;
+  // Transport intent belongs to the viewer, including commands made while
+  // the successor was awaiting its first frame. Rollback restores media only.
   p.health=predecessor.health;
   p.healthObservedAt=predecessor.healthObservedAt;
   p.presentationAdvancedAt=predecessor.presentationAdvancedAt;
@@ -214,11 +215,11 @@ function rollbackPreparedReplacement(p,state,successor){
   retired.id="video";
   successor.id="video-prepared";
   retired.style.display="";
-  retired.muted=predecessor.muted;
+  retired.muted=successor.muted;
   try{
-    retired.volume=predecessor.volume;
-    retired.defaultPlaybackRate=predecessor.defaultPlaybackRate;
-    retired.playbackRate=predecessor.playbackRate;
+    retired.volume=successor.volume;
+    retired.defaultPlaybackRate=successor.defaultPlaybackRate;
+    retired.playbackRate=successor.playbackRate;
   }catch(e){}
   retired.removeAttribute("aria-hidden");
   successor.style.display="none";
@@ -227,7 +228,7 @@ function rollbackPreparedReplacement(p,state,successor){
   restorePreparedOverlap(state);
   adoptPlaybackMediaElement(p,retired);
   resetPlaybackTransportEvents(retired);
-  if(predecessor.wantsPlayback===false){
+  if(p.wantsPlayback===false){
     try{ retired.pause(); }catch(e){}
   }else{
     try{ const resumed=retired.play(); if(resumed&&resumed.catch) resumed.catch(()=>{}); }catch(e){}
@@ -299,6 +300,9 @@ function preparedFirstFrame(p,state,element,onFrame,onTimeout){
     if(settled||state.frameCancelled) return;
     settled=true;
     if(state.frameTimer!=null){ clearTimeout(state.frameTimer); state.frameTimer=null; }
+    state.frameBudgetUpdate=null;
+    if(state.frameCallbackId!=null&&typeof element.cancelVideoFrameCallback==="function")
+      try{ element.cancelVideoFrameCallback(state.frameCallbackId); }catch(e){}
     if(state.frameListener){
       try{ element.removeEventListener("timeupdate",state.frameListener); }catch(e){}
       state.frameListener=null;
@@ -308,7 +312,31 @@ function preparedFirstFrame(p,state,element,onFrame,onTimeout){
     state.frameElement=null;
     run();
   };
-  state.frameTimer=setTimeout(()=>finish(onTimeout),PREPARED_FIRST_FRAME_MS);
+  // Spend active wall time only while the viewer wants playback. A decoder
+  // pause or stall still spends the bound; an explicit viewer Pause does not.
+  // Transport intent calls this owner directly, including a Play whose media
+  // promise rejects without producing a native play event.
+  let remaining=PREPARED_FIRST_FRAME_MS,at=performance.now();
+  let active=p.wantsPlayback!==false,budgetRevision=0;
+  const updateBudget=()=>{
+    if(settled||state.frameCancelled) return;
+    const now=performance.now();
+    if(active) remaining=Math.max(0,remaining-Math.max(0,now-at));
+    at=now;
+    active=p.wantsPlayback!==false;
+    const revision=++budgetRevision;
+    if(state.frameTimer!=null){ clearTimeout(state.frameTimer); state.frameTimer=null; }
+    if(!active) return;
+    if(remaining<=0){ finish(onTimeout); return; }
+    state.frameTimer=setTimeout(()=>{
+      if(revision!==budgetRevision||settled||state.frameCancelled) return;
+      if(p.wantsPlayback===false){ updateBudget(); return; }
+      remaining=0;
+      finish(onTimeout);
+    },remaining);
+  };
+  state.frameBudgetUpdate=updateBudget;
+  updateBudget();
   const done=()=>finish(()=>onFrame(Date.now()));
   // Prefer the frame callback. Older engines expose a monotonic presented or
   // decoded-frame counter instead; an increment after the local switch is
@@ -388,6 +416,7 @@ function freePreparedReplacement(p,state){
   const spare=preparedVideoElement();
   restorePreparedOverlap(state);
   if(state.frameTimer!=null){ clearTimeout(state.frameTimer); state.frameTimer=null; }
+  state.frameBudgetUpdate=null;
   if(state.exposeFrameTimer!=null){ clearTimeout(state.exposeFrameTimer); state.exposeFrameTimer=null; }
   if(spare&&state.exposeFrameCallbackId!=null&&typeof spare.cancelVideoFrameCallback==="function")
     try{ spare.cancelVideoFrameCallback(state.exposeFrameCallbackId); }catch(e){}
@@ -488,6 +517,7 @@ function cancelPreparedFirstFrame(p){
   p.preparedCommitting=null;
   state.frameCancelled=true;
   if(state.frameTimer!=null){ clearTimeout(state.frameTimer); state.frameTimer=null; }
+  state.frameBudgetUpdate=null;
   if(state.framePollTimer!=null){ clearTimeout(state.framePollTimer); state.framePollTimer=null; }
   const spare=state.frameElement||document.getElementById("video");
   if(state.frameListener&&spare){
@@ -641,12 +671,24 @@ function controlVerdictText(message){
 // A terminal answer belongs to the intent that earned it. Automatic recovery
 // may carry it across a replacement of that same intent; any viewer command
 // retires it and every ask that was waiting on the previous action epoch.
-function supersedePlaybackControlIntent(p,{preserveHlsStartup=false}={}){
+function supersedePlaybackControlIntent(p,{preserveHlsStartup=false,preserveContinuousManualQuality=false}={}){
   if(!p) return 0;
   cancelNextEpisodePreparation(p);
   clearAutoplayNextPreparation();
   const previous=p.controlIntentGeneration||0;
   p.controlIntentGeneration=previous+1;
+  // Pause/resume or an attached VOD seek changes transport intent while
+  // retaining the quality recipe. Carry only the immediately preceding manual request
+  // owned by this exact continuous adapter and media attachment.
+  const quality=p.directedChange;
+  if(preserveContinuousManualQuality&&quality&&!quality.settled
+    &&quality.reason==='manual'&&!quality.autoMove
+    &&quality.intentGeneration===previous
+    &&quality.incumbentSessionId===p.sessionId
+    &&quality.continuousOwner&&quality.continuousOwner===p.continuousQuality
+    &&quality.continuousAttachment===p.mediaAttachment){
+    quality.intentGeneration=p.controlIntentGeneration;
+  }
   if(p.directedChange&&p.directedChange.autoMove&&!p.directedChange.settled){
     abandonPreparedReplacement(p,"aborted","viewer intent superseded automatic trial");
     settleDirectedChange(p,p.directedChange,"superseded");
