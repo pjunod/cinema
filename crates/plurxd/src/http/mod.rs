@@ -50,6 +50,8 @@ pub(crate) mod scan_identity;
 pub(crate) mod shared_artwork;
 pub(crate) mod shared_library;
 pub(crate) mod shared_playback;
+#[cfg(test)]
+mod shared_receiver_fixture;
 #[allow(
     dead_code,
     reason = "candidate Shared Start router remains unregistered pending actual relay qualification"
