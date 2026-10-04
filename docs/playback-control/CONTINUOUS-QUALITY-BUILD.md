@@ -6946,3 +6946,34 @@ workflow (review → fixes → one fast-lane pass → merge) is followed.
 Android was not re-qualified on the emulator after these fixes: they touch
 fallback retirement, fact filtering and recovery reporting, which the unit
 tests pin; physical-device verification is in the post-merge prompt.
+
+### 10.233 Final Chrome qualification, and a review fix that broke the design
+
+**Observation bound.** The review fix for an unbounded continuous settle used
+a 30-second wall-clock timer from the tap. With the normal 60-second
+prebuffer a manual target presents about a minute later, so every manual
+change would have settled `observation_unknown` before its boundary — the
+"false 30-second presentation bound" §4.2 rules out. Replaced with the
+design's clock: a 30-second active-time budget until the target holds a
+reservation, then boundary presentation plus two seconds of active play on
+film time (pause suspends it, playback rate scales it).
+Regression: `tests/playback/web-control.test.js::a reserved continuous target
+is observed until its boundary plus two active seconds`. Eight player fields
+written by the continuous adapter were also added to the `Player` typedef
+(`tests/web/player-typedef.test.js`).
+
+**Runs on the fixed trees (Chrome, shared CPUs).**
+
+| Source | Result | Host at the failure |
+|---|---|---|
+| `76d150901` | Failed: one 83.4 ms late frame 3.8 s after a manual request | not sampled |
+| `af57a0559` | Failed: picture held 3.3 s right after the tenth boundary (readyState 4, 61 s buffered) | 09:20–09:30 interval: load 13.7, 25.6 % system CPU, memory reclaim (free memory 1.7 → 12.6 GB) from other host work |
+| `1f8e9d5ad` | Failed: one 116.8 ms steady-play gap 46 s after an Auto boundary | not sampled at 1 s |
+| `1f8e9d5ad` (with 1 Hz PSI sampling) | **PASS:** fifteen manual and five actual Auto changes, one session, **50.1 ms** maximum video gap (best recorded), zero stalls, hitches and dropped frames, End producers 2/0/0/0 | load ≤ 4.2, CPU PSI avg10 ≤ 14 %, memory PSI avg10 ≤ 0.54 % |
+
+None of the failures sat at a quality boundary except the held picture, and
+that one coincided with the heaviest host interval of the day. The passing run
+on the same final source was sampled for host pressure and was clean. This is
+recorded as host contention, not proven: the held picture's mechanism inside
+Chrome was not captured. Physical-device checks after deploy remain the
+authority.
