@@ -217,6 +217,20 @@ function sharedPlaybackSessionPlaylist(url,id){
   return true;
 }
 
+// B's Shared status grammar for this context's started session. Only the
+// nested Source metrics come back, and only when the outer subject, session,
+// item and file revision are this context's; anything else is no sample at
+// all, never something to read as Local status.
+function sharedPlaybackStatusMetrics(value,reply){
+  const c=playbackFileContext(value);
+  if(c.source_ref.kind==="local"||!c.session_id||!reply||typeof reply!=="object"||Array.isArray(reply)) return null;
+  const r=reply.reference,status=reply.status;
+  if(reply.subject!=="shared"||reply.session_id!==c.session_id||!r||typeof r!=="object"
+    ||r.item?.import_id!==c.source_ref.import_id||r.item?.item_id!==c.source_ref.item_id
+    ||r.file_id!==c.source_file_id||r.revision!==c.file_revision
+    ||!status||typeof status!=="object"||Array.isArray(status)) return null;
+  return status;
+}
 // Ordinary complete B Start reply, bound to the authenticated signed-file
 // request. This validates routing metadata; it is not Source producer evidence.
 function sharedPlaybackStartContext(value,response){

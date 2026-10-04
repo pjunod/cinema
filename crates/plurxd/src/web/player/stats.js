@@ -512,7 +512,10 @@ async function pollSessionHealth(force){
   try{
     const h=await api(url);
     if(current()) {
-      p.health=h;
+      // A shared session answers in the Shared grammar: its metrics are nested
+      // and bound to this session, so read them through the file context.
+      const fileContext=playbackFileContextForPlayer(p);
+      p.health=fileContext.source_ref.kind==="local"? h : sharedPlaybackStatusMetrics(fileContext,h);
       p.healthObservedAt=performance.now();
       // No surface is raised or restated here: a fault is raised by the event
       // that caused it. A live media wait reads this sample through the

@@ -6,7 +6,7 @@ const {test}=require("node:test");
 const source=fs.readFileSync("crates/plurxd/src/web/core/file-context.js","utf8");
 function harness(){
   const context=vm.createContext({AUTH_GENERATION:0});
-  vm.runInContext(source+"\nthis.helper={localPlaybackFileContext,sharedPlaybackFileContextFromDetail,playbackFileKey,playbackFileUrl,playbackFileApiPath,withPlaybackFileSession,playbackFileDecisionMediaUrl,playbackFileContext,logout(){AUTH_GENERATION++;}};",context);
+  vm.runInContext(source+"\nthis.helper={sharedPlaybackStatusMetrics,localPlaybackFileContext,sharedPlaybackFileContextFromDetail,playbackFileKey,playbackFileUrl,playbackFileApiPath,withPlaybackFileSession,playbackFileDecisionMediaUrl,playbackFileContext,logout(){AUTH_GENERATION++;}};",context);
   return context.helper;
 }
 const reference={import_id:"11111111-1111-4111-8111-111111111111",server_id:"22222222-2222-4222-8222-222222222222",catalogue_epoch:"33333333-3333-4333-8333-333333333333",library_id:"7",item_id:"9"};
@@ -243,4 +243,23 @@ test("Shared initial route is session-first HLS and refuses burn HDR or absent c
  assert.equal(ctx.run(c,"transcode","hdr10",null),null);assert.equal(ctx.run(c,"remux","sdr",0),null);
  ctx.window.Hls.isSupported=()=>false;assert.equal(ctx.run(c,"transcode","sdr",null),null);
  assert.deepEqual(Array.from(ctx.failed),Array(3).fill("sharing_start_unsupported"));
+});
+test("shared status metrics are read only from the bound Shared grammar",()=>{
+  const h=harness(),id="55555555-5555-4555-8555-555555555555";
+  const started=h.withPlaybackFileSession(h.sharedPlaybackFileContextFromDetail(reference,detail()),id);
+  const status={target_height:720,http_wait_count:2,active_encode_milli_realtime:1500};
+  const reply={subject:"shared",reference:{item:{...reference},file_id:"7",revision:"a".repeat(64),lifecycle_generation:1},
+    session_id:id,incarnation_id:"66666666-6666-4666-8666-666666666666",control_epoch:1,status};
+  assert.equal(h.sharedPlaybackStatusMetrics(started,reply),status);
+  for(const wrong of [
+    {...reply,subject:"local"},
+    {...reply,session_id:"77777777-7777-4777-8777-777777777777"},
+    {...reply,reference:{...reply.reference,file_id:"8"}},
+    {...reply,reference:{...reply.reference,revision:"b".repeat(64)}},
+    {...reply,reference:{...reply.reference,item:{...reference,item_id:"10"}}},
+    {...reply,status:null},
+    status,
+  ]) assert.equal(h.sharedPlaybackStatusMetrics(started,wrong),null);
+  assert.equal(h.sharedPlaybackStatusMetrics(h.sharedPlaybackFileContextFromDetail(reference,detail()),reply),null);
+  assert.equal(h.sharedPlaybackStatusMetrics(h.localPlaybackFileContext(7),reply),null);
 });
