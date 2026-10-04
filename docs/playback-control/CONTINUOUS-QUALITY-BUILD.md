@@ -7118,3 +7118,38 @@ fields). The merged workspace suite then failed five tests on the lab host
   create does.
 - **Chain end.** One of main's tests asserted that a reopened v96 store
   stops at v97; it now asserts the end of the chain, since our steps follow.
+
+**Chrome on the integrated build found a real composition bug.** The first
+full campaign on `c0046eabc` failed before the first frame: every continuous
+create answered 500 `candidate_recipe_changed`. Main's encoded start applies
+the request's audio claim (from the browser's declared audio sinks) to the
+execution options, and the quality catalog resolves every row with the same
+claim. A continuous role re-derives the muxed catalog plan before splitting
+it, and that plan was built without the claim, so its digest never matched
+the row it came from. Unit fixtures declared no audio sinks, so no test saw
+it. The catalog plan now takes the same audio options, and the worker-role
+test declares an audio sink the way a browser does; with the test change
+alone it fails with the lab's exact error, and with the fix it passes.
+
+**The second Chrome run found the Auto composition gap.** With the audio fix,
+the fifteen manual changes ran, but Auto then held 720p at a 100 Mb/s link
+for 240 s ("current route retained"). Main's Auto admits an upgrade only to
+a candidate with a measured complete full-mux output and a receipted body
+transfer of at least 1.8× that output's peak; Android also requires a
+receipt for any link sample at all. A continuous family has neither: its
+rungs are role-split objects of one session (never a muxed candidate's
+complete output, which is also why continuous parents take no measured
+candidate), and the server registers no candidate link binding for them,
+so no receipt is minted.
+
+Decision (recorded for review): between members of the live family, Auto
+costs a rung by the family's declared delivery budget (video plus shared
+audio), which the server enforces — an object over it is refused, never
+served — and takes its evidence from a completed family object of this
+session, attachment and current member (full 200, network load, not cached,
+not producer-paced, ETag). Those transfers are not reported as candidate
+link samples, so main's candidate-keyed negatives are never attributed to a
+muxed candidate that did not produce the bytes. Every other candidate keeps
+main's measured-output and receipt rules. The rejected alternative was to
+register continuous sessions for receipts: the binding names one muxed
+candidate, so family transfers would have recorded negatives against it.
