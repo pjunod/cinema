@@ -12246,7 +12246,7 @@ mod tests {
         a_tick.expect("tick a");
         b_tick.expect("tick b");
         c_tick.expect("tick c");
-        tokio::time::timeout(std::time::Duration::from_secs(2), entered.notified())
+        tokio::time::timeout(PROVIDER_LIVENESS, entered.notified())
             .await
             .expect("winning provider pass started");
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
@@ -12256,7 +12256,7 @@ mod tests {
             "three real scheduler ticks must dispatch one provider pass"
         );
         release.notify_waiters();
-        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        tokio::time::timeout(PROVIDER_LIVENESS, async {
             while a.retrying_artwork.load(Ordering::Relaxed)
                 || b.retrying_artwork.load(Ordering::Relaxed)
                 || c.retrying_artwork.load(Ordering::Relaxed)
@@ -12470,6 +12470,14 @@ mod tests {
             }),
         )
     }
+
+    /// How long the blocking-provider tests wait for something that must
+    /// happen. Each wait is either liveness (the pass reached the provider,
+    /// the owner let go) or proves the other side was not held by a provider
+    /// that never answers until the test releases it, so a longer bound
+    /// proves the same thing. Two seconds failed on loaded CI runners, where
+    /// the whole suite took 900 s, while the same tests pass locally in 0.3 s.
+    const PROVIDER_LIVENESS: std::time::Duration = std::time::Duration::from_secs(30);
 
     fn blocking_season_tmdb(
         season_hits: Arc<AtomicUsize>,
@@ -15390,15 +15398,12 @@ mod tests {
         let jobs = manager_with_tmdb(store, artwork.path(), &base);
 
         let first = tokio::spawn(Arc::clone(&jobs).artwork_retry_pass());
-        tokio::time::timeout(std::time::Duration::from_secs(2), entered.notified())
+        tokio::time::timeout(PROVIDER_LIVENESS, entered.notified())
             .await
             .expect("first pass reached provider");
-        tokio::time::timeout(
-            std::time::Duration::from_secs(2),
-            Arc::clone(&jobs).artwork_retry_pass(),
-        )
-        .await
-        .expect("second pass returned");
+        tokio::time::timeout(PROVIDER_LIVENESS, Arc::clone(&jobs).artwork_retry_pass())
+            .await
+            .expect("second pass returned");
         assert_eq!(hits.load(Ordering::SeqCst), 1);
         release.notify_waiters();
         first.await.expect("first pass task");
@@ -15435,14 +15440,11 @@ mod tests {
             Pipeline::Cpu,
         ));
 
-        tokio::time::timeout(
-            std::time::Duration::from_secs(2),
-            jobs.run_due_jobs(&transcode),
-        )
-        .await
-        .expect("scheduler returned while artwork was blocked")
-        .expect("scheduler tick");
-        tokio::time::timeout(std::time::Duration::from_secs(2), entered.notified())
+        tokio::time::timeout(PROVIDER_LIVENESS, jobs.run_due_jobs(&transcode))
+            .await
+            .expect("scheduler returned while artwork was blocked")
+            .expect("scheduler tick");
+        tokio::time::timeout(PROVIDER_LIVENESS, entered.notified())
             .await
             .expect("artwork reached provider");
         let cleanup_key = jobs.local_job_key(keys::JOB_LAST_TRANSCODE_CLEANUP);
@@ -15478,7 +15480,7 @@ mod tests {
         assert!(other.job_stamp(&other_key).await.is_some());
         assert_eq!(hits.load(Ordering::SeqCst), 1);
         release.notify_waiters();
-        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        tokio::time::timeout(PROVIDER_LIVENESS, async {
             while jobs.retrying_artwork.load(Ordering::Relaxed) {
                 tokio::task::yield_now().await;
             }
