@@ -2162,12 +2162,7 @@ fn ordered_cluster_index_paths(
 }
 
 fn setting_enabled(value: Option<String>) -> bool {
-    value.is_some_and(|value| {
-        matches!(
-            value.trim().to_ascii_lowercase().as_str(),
-            "1" | "true" | "yes" | "on"
-        )
-    })
+    plurx_core::store::stored_switch(value.as_deref(), false)
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
