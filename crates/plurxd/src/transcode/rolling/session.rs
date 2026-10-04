@@ -1100,14 +1100,56 @@ impl Session {
                         .iter()
                         .find(|segment| segment.index >= first_new_segment)
                 }) {
+                    // The next segment is only early: publishing nothing never
+                    // moves the served window, so the protected segment stays
+                    // served (the window check below is the invariant). Wait
+                    // for the viewer to consume into the floor instead of
+                    // ending the session, whenever that wait is bounded or
+                    // owned elsewhere:
+                    //
+                    // - not consuming (paused, waiting, seeking): the floor walk
+                    //   reaches the reserve ceiling after one to two minutes of
+                    //   pause, and before this every pause that long ended the
+                    //   session (2026-10-04, file 5208, retired two seconds
+                    //   after a 1x resume). The pause grace owns how long a
+                    //   paused viewer is kept;
+                    // - consuming at 1x or faster: the overshoot drains at least
+                    //   as fast as wall time, and is at most one segment after
+                    //   a pause (longer only after a seek back into the buffer);
+                    // - a slower viewer whose wait still fits the hard deadline.
+                    //
+                    // Only a slow viewer who would wait past the hard deadline
+                    // is retired, which is the case this guard exists for.
+                    let overshoot_ms = first_new.end_ms.saturating_sub(
+                        budget
+                            .consumed_end_ms
+                            .saturating_add(ROLLING_RESERVE_MAX_MS),
+                    );
+                    let consuming = demand.is_some_and(|demand| {
+                        demand.demand == crate::playback_control::PlaybackDemand::Active
+                            && demand.render_state
+                                == crate::playback_control::RenderState::Rendering
+                    });
+                    let eligible_in_ms = if consuming {
+                        // `rolling_playback_rate` clamps to at least 0.25x.
+                        ((overshoot_ms as f64) / playback_rate.max(0.25)).ceil() as i64
+                    } else {
+                        i64::MAX
+                    };
+                    let hard_ms =
+                        i64::try_from(ROLLING_PUBLICATION_HARD.as_millis()).unwrap_or(i64::MAX);
+                    if previous_served.is_some()
+                        && (!consuming || playback_rate >= 1.0 || eligible_in_ms <= hard_ms)
+                    {
+                        return Ok(());
+                    }
                     // The verdict ends the viewer's session, so it carries the
-                    // numbers that produced it. Without them a retirement at
-                    // 1x after a resume (2026-10-04, file 5208) could not be
-                    // told apart from the low-rate case this guard exists for.
+                    // numbers that produced it.
                     return Err(format!(
                         "rolling_window_budget_exhausted: next completed segment exceeds the active publication safety floor \
                          (consumed_end_ms={} desired_end_ms={} allowed_end_ms={} reserve_max_ms={} \
-                         first_new_segment={} first_new_end_ms={} served_end_ms={} demand_sequence={} observation_age_ms={})",
+                         first_new_segment={} first_new_end_ms={} served_end_ms={} demand_sequence={} observation_age_ms={} \
+                         consuming={consuming} playback_rate={playback_rate:.2} eligible_in_ms={eligible_in_ms})",
                         budget.consumed_end_ms,
                         budget.desired_end_ms,
                         budget.allowed_end_ms,

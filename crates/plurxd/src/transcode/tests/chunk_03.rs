@@ -970,6 +970,107 @@
         }
     }
 
+    /// The 2026-10-04 incident shape: a 1x Apple TV viewer paused for about
+    /// a minute on a rolling copy session and was retired two seconds after
+    /// resuming. While paused the publication clock keeps walking one segment
+    /// per cycle up to the reserve ceiling; at the ceiling the next segment
+    /// is merely early, so the session must wait for the viewer, not end.
+    #[tokio::test(start_paused = true)]
+    async fn rolling_publication_budget_pause_then_resume_at_one_x_is_not_retired() {
+        use crate::playback_control::{PlaybackDemand, RenderState};
+        const CYCLE_MS: i64 = 16_000;
+        const PAUSE_AT: i64 = 6;
+        // 176 s, inside the pause grace.
+        const PAUSE_CYCLES: i64 = 11;
+        const RESUME_CYCLES: i64 = 12;
+        let directory = crate::test_tempdir().expect("pause/resume budget");
+        let session = test_session(directory.path().to_path_buf());
+        let started = Instant::now();
+        let resume_at = PAUSE_AT + PAUSE_CYCLES;
+        let mut topped_out_end_ms = None;
+        for step in 0..resume_at + RESUME_CYCLES {
+            let elapsed_ms = step * CYCLE_MS;
+            let paused = (PAUSE_AT..resume_at).contains(&step);
+            let position_ms = if step < PAUSE_AT {
+                elapsed_ms
+            } else if paused {
+                PAUSE_AT * CYCLE_MS
+            } else {
+                (step - PAUSE_CYCLES) * CYCLE_MS
+            };
+            let (demand, rate, render) = if paused {
+                (PlaybackDemand::Hold, 0.0, RenderState::Rendering)
+            } else if step == 0 {
+                (PlaybackDemand::Active, 1.0, RenderState::Starting)
+            } else {
+                (PlaybackDemand::Active, 1.0, RenderState::Rendering)
+            };
+            accept_rolling_publication_demand(
+                &session,
+                u64::try_from(step + 1).expect("sequence"),
+                position_ms,
+                rate,
+                demand,
+                render,
+            )
+            .await;
+            // Worst case for the walk: every cut at the 16 s ceiling and a
+            // producer that is always ahead.
+            let produced_end_ms = 64_000 + elapsed_ms * 12 / 10;
+            let count = usize::try_from(produced_end_ms / CYCLE_MS).expect("segment count");
+            tokio::fs::write(
+                directory.path().join("index.m3u8"),
+                rolling_playlist(&vec![16.0; count], false),
+            )
+            .await
+            .expect("writer playlist");
+            session
+                .publication_cycle_at(
+                    "rolling_publication_budget_pause_resume",
+                    started
+                        + Duration::from_millis(
+                            u64::try_from(elapsed_ms + 1_000).expect("elapsed"),
+                        ),
+                )
+                .await
+                .unwrap_or_else(|reason| {
+                    panic!("1x viewer retired at step {step} (paused={paused}): {reason}")
+                });
+            let clock = session.publication.lock().await;
+            let served = clock.served.as_ref().expect("served snapshot");
+            let lead_ms = served.end_ms - position_ms;
+            assert!(
+                lead_ms <= ROLLING_RESERVE_MAX_MS,
+                "reserve ceiling exceeded at step {step}: {lead_ms}"
+            );
+            if step > 1 {
+                assert!(
+                    lead_ms >= rolling_initial_runway_ms(1.0) - CYCLE_MS,
+                    "runway drained at step {step}: {lead_ms}"
+                );
+            }
+            if paused && step >= resume_at - 2 {
+                let held = *topped_out_end_ms.get_or_insert(served.end_ms);
+                assert_eq!(
+                    served.end_ms, held,
+                    "a paused walk stops at the reserve ceiling instead of retiring"
+                );
+            }
+            drop(clock);
+            tokio::time::advance(Duration::from_millis(251)).await;
+        }
+        assert!(
+            !session.failed.load(Acquire),
+            "pause and resume at 1x must not retire the session"
+        );
+        let clock = session.publication.lock().await;
+        assert!(
+            clock.served.as_ref().expect("served").end_ms
+                > topped_out_end_ms.expect("the pause reached the ceiling"),
+            "publication resumes once the viewer consumes again"
+        );
+    }
+
     #[tokio::test(start_paused = true)]
     async fn rolling_publication_budget_low_rate_retires_before_the_window_can_skip() {
         let directory = crate::test_tempdir().expect("low-rate budget");
