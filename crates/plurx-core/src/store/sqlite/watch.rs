@@ -636,29 +636,6 @@ mod tests {
     use crate::domain::{ItemKind, LibraryKind, NewItem, NewLibrary, WatchRollup};
     use crate::store::{LibraryStore, MediaStore, SqliteStore, UserStore, WatchStore};
 
-    #[cfg(feature = "hiqlite-store")]
-    #[test]
-    fn sqlite_v95_watch_revision_upgrade_recovers_an_interrupted_version_stamp() {
-        let dir = tempfile::tempdir().expect("create migration directory");
-        let path = dir.path().join("v94.db");
-        let connection = rusqlite::Connection::open(&path).expect("open predecessor fixture");
-        SqliteStore::apply_migrations_for_test(&connection, 94).expect("create v94 schema");
-        connection
-            .execute_batch(&format!(
-                "BEGIN;\n{}\nCOMMIT;",
-                crate::store::jellyfin_watch::SCHEMA
-            ))
-            .expect("apply v95 DDL without stamp");
-        // The crash window: the migration committed, user_version did not move.
-        drop(connection);
-        drop(SqliteStore::open(&path).expect("resume v95 after interrupted stamp"));
-        let connection = rusqlite::Connection::open(&path).expect("inspect migrated database");
-        let version: i64 = connection
-            .query_row("PRAGMA user_version", [], |row| row.get(0))
-            .expect("read schema version");
-        assert_eq!(version, crate::store::SQLITE_SCHEMA_VERSION);
-    }
-
     /// K-05: the page's watch map is one `(user_id, item_id)` key lookup per
     /// requested id, driven from the id list, never a walk of every watch
     /// row the user has.

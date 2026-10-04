@@ -2,6 +2,7 @@
 
 use std::collections::hash_map::DefaultHasher;
 use std::collections::{HashMap, HashSet};
+use std::future::Future;
 use std::hash::{Hash, Hasher};
 use std::io;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -11,6 +12,9 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use axum::body::{Body, Bytes};
 use axum::http::{header, HeaderName, Response, StatusCode};
 use futures_util::{future::BoxFuture, stream, StreamExt};
+use plurx_core::cluster::clock::{
+    ClockDecision, ClockRefusal, ClusterClockGuard, OwnedClockAcquisitionTicket,
+};
 use plurx_core::cluster::membership::MembershipManager;
 use plurx_core::domain::{
     MediaSessionActivation, MediaSessionEnd, MediaSessionProjectionCompletion, MediaSessionRenewal,
@@ -308,6 +312,43 @@ struct PendingTakeoverSettlement<W = TakeoverWorkerGuard, A = SessionAdoptionTok
     monotonic_expiry: tokio::time::Instant,
     claim_cache_generation: u64,
     metric: TakeoverMetricGuard,
+}
+
+struct TakeoverClockAdmission {
+    ticket: OwnedClockAcquisitionTicket,
+    monotonic_expiry: tokio::time::Instant,
+}
+
+impl TakeoverClockAdmission {
+    fn claim(
+        &self,
+        original: &MediaSessionRoute,
+        next_owner_node_id: &str,
+    ) -> MediaSessionTakeover {
+        let now_ms = self.ticket.now_ms();
+        MediaSessionTakeover {
+            incarnation_id: original.incarnation_id.clone(),
+            expected_owner_node_id: original.owner_node_id.clone(),
+            expected_owner_epoch: original.owner_epoch,
+            next_owner_node_id: next_owner_node_id.to_owned(),
+            now_ms,
+            lease_expires_at_ms: now_ms.saturating_add(TAKEOVER_CLAIM_LEASE_TTL_MS),
+        }
+    }
+}
+
+fn acquire_takeover_clock(
+    clock: &Arc<ClusterClockGuard>,
+) -> Result<TakeoverClockAdmission, ClockRefusal> {
+    // Capture before the serialized wall reading so this conservative local
+    // lifetime cannot outlive the original fixed caller-bound claim.
+    let origin = tokio::time::Instant::now();
+    let ticket = clock.acquire_owned_for(ClockDecision::Takeover)?;
+    Ok(TakeoverClockAdmission {
+        ticket,
+        monotonic_expiry: origin
+            + Duration::from_millis(u64::try_from(TAKEOVER_CLAIM_LEASE_TTL_MS).unwrap_or_default()),
+    })
 }
 
 trait TakeoverWorkerLifecycle: Send + Sized + 'static {
@@ -1188,6 +1229,10 @@ pub(crate) struct CandidateCatalogContext {
 #[serde(deny_unknown_fields)]
 pub(crate) struct RemoteStartRequest {
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retained_output_receiver: Option<u8>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retained_output: Option<crate::transcode::RetainedOutputFacts>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub candidate_catalog: Option<CandidateCatalogContext>,
     /// Retained route context. Tolerated by the parser floor, never minted by
     /// it and never sufficient to authorize a worker route.
@@ -1227,7 +1272,10 @@ impl RemoteStartRequest {
 }
 
 fn remote_start_envelope_is_valid(request: &RemoteStartRequest) -> bool {
-    (request.candidate_id.is_none() || request.decoder_caps.is_some() && request.candidate_catalog.is_some())
+    request.retained_output_receiver.is_none_or(|version| version == 1)
+        && (request.retained_output.is_none() || request.retained_output_receiver == Some(1))
+        && request.retained_output.as_ref().is_none_or(crate::transcode::RetainedOutputFacts::valid)
+        && (request.candidate_id.is_none() || request.decoder_caps.is_some() && request.candidate_catalog.is_some())
         && request.candidate_catalog.as_ref().is_none_or(|context| {
             request.candidate_id == Some(context.candidate.id) && context.candidate.identity_matches()
                 && context.caps.v == 2 && context.caps.video.len() <= plurx_core::playback::MAX_CLIENT_DECODER_ENTRIES
@@ -1292,6 +1340,8 @@ fn worker_session_request_fields_are_valid(request: &SessionRequest) -> bool {
         && request
             .audio_index
             .is_none_or(|index| (0..=1_024).contains(&index))
+        && request.audio_delivery.as_ref().is_none_or(|audio| audio.valid_snapshot())
+        && request.audio_claim.as_ref().is_none_or(|claim| claim.valid_snapshot())
         && request
             .subtitle_burn
             .is_none_or(|index| (0..=1_024).contains(&index))
@@ -1322,6 +1372,10 @@ fn worker_session_request_fields_are_valid(request: &SessionRequest) -> bool {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct RemoteStartResponse {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retained_output: Option<crate::transcode::RetainedOutputFacts>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub audio_delivery: Option<plurx_core::playback::audio::AudioDelivery>,
     pub session_id: String,
     pub playlist_url: String,
     pub duration_ms: Option<i64>,
@@ -1434,6 +1488,8 @@ fn decode_remote_start_response(
 impl From<StartInfo> for RemoteStartResponse {
     fn from(info: StartInfo) -> Self {
         Self {
+            retained_output: info.retained_output,
+            audio_delivery: info.audio_delivery,
             session_id: info.session_id,
             playlist_url: info.playlist_url,
             duration_ms: info.duration_ms,
@@ -1453,6 +1509,14 @@ impl From<StartInfo> for RemoteStartResponse {
 impl RemoteStartResponse {
     pub(crate) fn is_valid(&self) -> bool {
         uuid::Uuid::parse_str(&self.session_id).is_ok()
+            && self
+                .retained_output
+                .as_ref()
+                .is_none_or(|facts| self.vod && facts.valid())
+            && self
+                .audio_delivery
+                .as_ref()
+                .is_none_or(|audio| audio.valid_snapshot())
             && self.playlist_url == format!("/api/v1/hls/{}/index.m3u8", self.session_id)
             && self
                 .duration_ms
@@ -2690,7 +2754,11 @@ impl MediaSessionCoordinator {
                 (REMOTE_START_OWNERSHIP_HEADER, REMOTE_START_OWNERSHIP_V1),
             )
             .await?;
-        decode_remote_start_response(response)
+        let started = decode_remote_start_response(response)?;
+        if request.retained_output_receiver != Some(1) && started.info.retained_output.is_some() {
+            return Err(PeerTransportError::InvalidResponse);
+        }
+        Ok(started)
     }
 
     pub(crate) async fn activate_remote(
@@ -4832,6 +4900,30 @@ impl TakeoverGate {
 /// Contest expired session routes only after the separate replicated rollout
 /// switch is enabled. Every candidate independently proves source/pipeline
 /// eligibility; the Store CAS still admits exactly one successor epoch.
+async fn clock_guarded_expiry_scan<Q, F>(
+    clock: &ClusterClockGuard,
+    query: Q,
+) -> Result<Vec<MediaSessionRoute>, String>
+where
+    Q: FnOnce(i64) -> F,
+    F: Future<Output = Result<Vec<MediaSessionRoute>, StoreError>>,
+{
+    let ticket = clock
+        .acquire_for(ClockDecision::ExpiryScan)
+        .map_err(|cause| format!("media-session expiry clock refused: {cause:?}"))?;
+    // One original caller timestamp, not a fresh wall read after the Store
+    // await. Discard the entire page on invalidation, leaving its keyset
+    // cursor unchanged so a later healthy tick can reconsider it.
+    let routes = tokio::time::timeout(Duration::from_secs(3), query(ticket.now_ms()))
+        .await
+        .map_err(|_| "media-session expiry inventory timed out".to_owned())?
+        .map_err(|error| error.to_string())?;
+    clock
+        .revalidate_for(ClockDecision::ExpiryScan, &ticket)
+        .map_err(|cause| format!("media-session expiry clock refused: {cause:?}"))?;
+    Ok(routes)
+}
+
 pub(crate) async fn takeover_loop(state: AppState) {
     let mut interval = tokio::time::interval(TAKEOVER_INTERVAL);
     interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
@@ -4848,21 +4940,19 @@ pub(crate) async fn takeover_loop(state: AppState) {
             scan_cursor = None;
             continue;
         }
-        let now_ms = unix_ms();
-        let routes = match tokio::time::timeout(
-            Duration::from_secs(3),
+        let clock = state.membership.clock_guard();
+        let routes = match clock_guarded_expiry_scan(&clock, |now_ms| {
             state
                 .store
-                .expired_media_sessions(now_ms, scan_cursor.clone(), TAKEOVER_BATCH),
-        )
+                .expired_media_sessions(now_ms, scan_cursor.clone(), TAKEOVER_BATCH)
+        })
         .await
         {
-            Ok(Ok(routes)) => routes,
-            Ok(Err(error)) => {
+            Ok(routes) => routes,
+            Err(error) => {
                 tracing::debug!(%error, "media-session takeover inventory unavailable");
                 continue;
             }
-            Err(_) => continue,
         };
         if routes.is_empty() {
             // Reaching the end starts a fresh oldest-first pass on the next
@@ -4999,6 +5089,7 @@ async fn stop_pending_takeover<W, A>(
 async fn settle_initial_takeover_claim<I, W, A>(
     io: &I,
     pending: PendingTakeoverSettlement<W, A>,
+    before_submission: impl FnOnce() -> Result<(), ClockRefusal>,
 ) -> Result<(), String>
 where
     I: TakeoverSettlementIo<A, W>,
@@ -5017,6 +5108,18 @@ where
         .await;
         return Err("media-session takeover claim expired before submission".to_owned());
     };
+    // The fixed proposal is still unsubmitted here. A clock refusal is not a
+    // Store ambiguity: stop the exact worker, never enter replay/read. After
+    // io.claim is submitted its original reconciliation remains ungated.
+    if let Err(cause) = before_submission() {
+        stop_pending_takeover(
+            pending,
+            "media-session takeover clock refused before submission",
+            TAKEOVER_SKIPPED,
+        )
+        .await;
+        return Err(format!("media-session takeover clock refused: {cause:?}"));
+    }
     match tokio::time::timeout_at(claim_deadline, io.claim(&pending.claim)).await {
         Ok(Ok(Some(claimed))) => reconcile_pending_takeover(io, pending, Some(claimed)).await,
         Ok(Ok(None)) => {
@@ -5391,6 +5494,7 @@ async fn supervise_takeover_settlement(
     settlement: SessionSettlementGuard,
     slot: tokio::sync::OwnedSemaphorePermit,
     metric: TakeoverMetricGuard,
+    clock: TakeoverClockAdmission,
 ) -> Result<(), String> {
     let provisional_id = start.provisional_session_id.clone();
     let replacement = state
@@ -5444,18 +5548,13 @@ async fn supervise_takeover_settlement(
         return Err("media-session takeover creation changed its provisional id".to_owned());
     }
 
-    let claim_now_ms = unix_ms();
-    let claim_monotonic_expiry = tokio::time::Instant::now()
-        + Duration::from_millis(u64::try_from(TAKEOVER_CLAIM_LEASE_TTL_MS).unwrap_or_default());
+    // Preparation spends this original 24-second lease, rather than replacing
+    // the ticket's wall time or silently extending its monotonic lifetime.
+    // Existing minimum-runway checks refuse a late publication; bootstrap
+    // renewal remains unchanged once the exact fixed proposal has won.
+    let claim_monotonic_expiry = clock.monotonic_expiry;
     let claim_cache_generation = state.media_sessions.route_generation(&original.session_id);
-    let takeover = MediaSessionTakeover {
-        incarnation_id: original.incarnation_id.clone(),
-        expected_owner_node_id: original.owner_node_id.clone(),
-        expected_owner_epoch: original.owner_epoch,
-        next_owner_node_id: state.node_id.clone(),
-        now_ms: claim_now_ms,
-        lease_expires_at_ms: claim_now_ms.saturating_add(TAKEOVER_CLAIM_LEASE_TTL_MS),
-    };
+    let takeover = clock.claim(&original, &state.node_id);
     worker.retain_settlement_until(takeover.lease_expires_at_ms, claim_monotonic_expiry);
     let pending = PendingTakeoverSettlement {
         original,
@@ -5467,7 +5566,7 @@ async fn supervise_takeover_settlement(
         claim_cache_generation,
         metric,
     };
-    settle_initial_takeover_claim(&state, pending).await
+    settle_initial_takeover_claim(&state, pending, || clock.ticket.revalidate()).await
 }
 
 /// A route whose durable recipe the takeover path accepts, for the tests in
@@ -5524,6 +5623,10 @@ async fn attempt_takeover(state: &AppState, route: MediaSessionRoute) -> Result<
         metric.outcome = TAKEOVER_SKIPPED;
         return Ok(());
     }
+    let clock = acquire_takeover_clock(&state.membership.clock_guard()).map_err(|cause| {
+        metric.outcome = TAKEOVER_SKIPPED;
+        format!("media-session takeover clock refused: {cause:?}")
+    })?;
     let Some(takeover_slot) = try_admit_takeover_settlement() else {
         metric.outcome = TAKEOVER_SKIPPED;
         return Err("media-session takeover settlement capacity is full".to_owned());
@@ -5652,10 +5755,13 @@ async fn attempt_takeover(state: &AppState, route: MediaSessionRoute) -> Result<
     // an ordinary height plan after takeover.
     tokio::time::timeout_at(
         deadline,
-        state.transcode.restore_candidate_context(&mut envelope),
+        state
+            .transcode
+            .restore_candidate_context_with_deadline(&mut envelope, deadline),
     )
     .await
-    .map_err(|_| "candidate takeover validation timed out".to_owned())??;
+    .map_err(|_| "candidate takeover validation timed out".to_owned())?
+    .map_err(|error| error.to_string())?;
     let user = tokio::time::timeout_at(deadline, state.store.get_user(route.user_id))
         .await
         .map_err(|_| "media-session takeover timed out".to_owned())?
@@ -5684,6 +5790,7 @@ async fn attempt_takeover(state: &AppState, route: MediaSessionRoute) -> Result<
             settlement,
             takeover_slot,
             metric,
+            clock,
         )
         .await
         {
@@ -5912,9 +6019,125 @@ mod tests {
 
     use crate::transcode::ReopenReason;
 
+    fn clock_fixture(offset: Option<(i64, i64)>) -> Arc<ClusterClockGuard> {
+        let guard = Arc::new(ClusterClockGuard::new(true));
+        // These fixtures exercise the operator-enabled guard; the default
+        // (advisory) mode is covered by the advisory test below.
+        guard.set_enforced(true);
+        if let Some((offset_us, uncertainty_us)) = offset {
+            let ticket = guard.roster(&["peer".into()]);
+            assert!(guard.publish(
+                ticket,
+                std::collections::BTreeMap::from([(
+                    "peer".into(),
+                    plurx_core::cluster::clock::PeerClockOffset::Bounded {
+                        offset_us,
+                        uncertainty_us,
+                        observed_at: Instant::now(),
+                    },
+                )]),
+            ));
+        }
+        guard
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn takeover_clock_guard_expiry_requires_bound_and_discards_changed_page() {
+        for (offset, allowed) in [
+            (Some((0, 1_000)), true),
+            (Some((1_999_000, 1_000)), true),
+            (Some((1_500_000, 601_000)), false),
+            (Some((2_500_000, 1_000)), false),
+            (None, false),
+        ] {
+            let clock = clock_fixture(offset);
+            let called = AtomicU64::new(0);
+            let called_ref = &called;
+            let result = clock_guarded_expiry_scan(&clock, |now_ms| async move {
+                called_ref.fetch_add(1, Ordering::Relaxed);
+                assert!(now_ms > 0);
+                Ok(vec![media_route("expired-clock-fixture")])
+            })
+            .await;
+            assert_eq!(result.is_ok(), allowed, "{offset:?}");
+            assert_eq!(called.load(Ordering::Relaxed), u64::from(allowed));
+        }
+        for clock in [Arc::new(ClusterClockGuard::new(false)), clock_fixture(None)] {
+            clock.roster(&[]);
+            assert!(
+                clock_guarded_expiry_scan(&clock, |_| async { Ok(Vec::new()) })
+                    .await
+                    .is_ok()
+            );
+        }
+        let clock = clock_fixture(Some((0, 1_000)));
+        let error = clock_guarded_expiry_scan(&clock, |_| async {
+            tokio::task::yield_now().await;
+            clock.roster_failed();
+            Ok(vec![media_route("must-not-advance-cursor")])
+        })
+        .await
+        .expect_err("discard a page invalidated during the Store await");
+        assert!(error.contains("GenerationChanged"));
+        assert!(clock.prometheus().contains(
+            "plurx_cluster_clock_refusals_total{decision=\"expiry_scan\",cause=\"generation_changed\"} 1\n"
+        ));
+        let clock = clock_fixture(Some((0, 1_000)));
+        assert!(clock_guarded_expiry_scan(&clock, |_| {
+            std::future::pending::<Result<Vec<MediaSessionRoute>, StoreError>>()
+        })
+        .await
+        .expect_err("existing inventory timeout remains finite")
+        .contains("timed out"));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn takeover_clock_guard_is_advisory_while_enforcement_is_off() {
+        for offset in [None, Some((2_500_000, 1_000))] {
+            let clock = clock_fixture(offset);
+            clock.set_enforced(false);
+            assert!(
+                acquire_takeover_clock(&clock).is_ok(),
+                "an unbounded or unknown clock never blocks takeover while off: {offset:?}"
+            );
+            let called = AtomicU64::new(0);
+            let called_ref = &called;
+            assert!(clock_guarded_expiry_scan(&clock, |_| async move {
+                called_ref.fetch_add(1, Ordering::Relaxed);
+                Ok(Vec::new())
+            })
+            .await
+            .is_ok());
+            assert_eq!(called.load(Ordering::Relaxed), 1);
+            let metrics = clock.prometheus();
+            assert!(
+                metrics.contains("plurx_cluster_clock_refusals_total{decision=\"takeover\",cause=\"unknown\"} 0\n")
+                    && metrics.contains("plurx_cluster_clock_refusals_total{decision=\"takeover\",cause=\"offset\"} 0\n"),
+                "nothing is actually refused"
+            );
+            let cause = if offset.is_none() {
+                "unknown"
+            } else {
+                "offset"
+            };
+            for decision in ["takeover", "expiry_scan"] {
+                assert!(
+                    metrics.contains(&format!(
+                        "plurx_cluster_clock_advisory_refusals_total{{decision=\"{decision}\",cause=\"{cause}\"}} "
+                    )) && !metrics.contains(&format!(
+                        "plurx_cluster_clock_advisory_refusals_total{{decision=\"{decision}\",cause=\"{cause}\"}} 0\n"
+                    )),
+                    "{decision} records what enforcement would have refused"
+                );
+            }
+        }
+    }
+
     pub(super) fn valid_start_request() -> RemoteStartRequest {
         let incarnation_id = "00000000-0000-4000-8000-0000000000a1".to_owned();
         RemoteStartRequest {
+            retained_output: None,
+            retained_output_receiver: None,
             candidate_catalog: None,
             candidate_id: None,
             presentation_target: None,
@@ -5942,6 +6165,8 @@ mod tests {
                 kind: SessionKind::Transcode { height: 720 },
                 start_seconds: 12.5,
                 audio_index: Some(1),
+                audio_delivery: None,
+                audio_claim: None,
                 subtitle_burn: None,
                 audio_offset_ms: 0,
                 hdr10: false,
@@ -5950,6 +6175,71 @@ mod tests {
                 transport: None,
             },
         }
+    }
+
+    #[test]
+    fn retained_receipt_extensions_are_omitted_for_legacy_and_require_negotiation() {
+        // The pre-extension strict worker key set, not a permissive JSON map.
+        #[derive(serde::Deserialize)]
+        #[serde(deny_unknown_fields)]
+        #[allow(dead_code)]
+        struct LegacyStart {
+            candidate_id: Option<plurx_core::playback::candidate::CandidateId>,
+            presentation_target: Option<plurx_core::playback::candidate::PresentationTarget>,
+            decoder_caps: Option<crate::playback_control::DecoderCapsSnapshot>,
+            protocol_version: i64,
+            incarnation_id: String,
+            user_id: i64,
+            source_size: i64,
+            source_mtime: i64,
+            typeless_playlist: bool,
+            library_channel: Option<serde_json::Value>,
+            request: SessionRequest,
+        }
+        let mut request = valid_start_request();
+        let legacy_wire = serde_json::to_value(&request).expect("legacy serialization");
+        assert!(legacy_wire.get("retained_output_receiver").is_none());
+        assert!(legacy_wire.get("retained_output").is_none());
+        assert!(serde_json::from_value::<LegacyStart>(legacy_wire.clone()).is_ok());
+        let decoded: RemoteStartRequest =
+            serde_json::from_value(legacy_wire).expect("new parser accepts legacy");
+        assert_eq!(decoded.retained_output_receiver, None);
+        assert!(decoded.retained_output.is_none());
+        request.retained_output_receiver = Some(1);
+        let negotiated = serde_json::to_value(&request).expect("negotiated serialization");
+        assert!(
+            serde_json::from_value::<LegacyStart>(negotiated).is_err(),
+            "never send extension to a strict old worker"
+        );
+        assert!(request.is_valid());
+        request.retained_output_receiver = Some(2);
+        assert!(!request.is_valid());
+        request.retained_output_receiver = None;
+        request.retained_output = Some(crate::transcode::RetainedOutputFacts {
+            artifact_id: uuid::Uuid::new_v4().to_string(),
+            output_identity: "ab".repeat(32),
+            average_bps: 8000,
+            peak_bps: 12000,
+        });
+        assert!(
+            !request.is_valid(),
+            "unnegotiated retained descriptor is not accepted"
+        );
+        request.retained_output_receiver = Some(1);
+        assert!(request.is_valid());
+        let mut response = valid_start_response();
+        let legacy_response = serde_json::to_value(&response).expect("legacy response");
+        assert!(
+            legacy_response.get("retained_output").is_none(),
+            "new worker with legacy capture emits no extension"
+        );
+        response.retained_output = request.retained_output;
+        assert!(response.is_valid());
+        response.vod = false;
+        assert!(
+            !response.is_valid(),
+            "retained VOD proof cannot be replayed onto rolling output"
+        );
     }
 
     fn valid_prepare_request() -> RemotePrepareRequest {
@@ -5988,6 +6278,8 @@ mod tests {
     fn valid_start_response() -> RemoteStartResponse {
         let session_id = "00000000-0000-4000-8000-0000000000b1".to_owned();
         RemoteStartResponse {
+            retained_output: None,
+            audio_delivery: None,
             playlist_url: format!("/api/v1/hls/{session_id}/index.m3u8"),
             session_id,
             duration_ms: Some(7_200_000),
@@ -6007,6 +6299,7 @@ mod tests {
     fn remote_start_status_carries_created_ownership_and_legacy_is_conservative() {
         let body = serde_json::to_vec(&valid_start_response()).expect("start response JSON");
         let created = decode_remote_start_response(crate::http::peer_transport::PeerResponse {
+            clock_timing: None,
             status: reqwest::StatusCode::CREATED,
             body: body.clone(),
         })
@@ -6018,6 +6311,7 @@ mod tests {
         );
 
         let recovered = decode_remote_start_response(crate::http::peer_transport::PeerResponse {
+            clock_timing: None,
             status: reqwest::StatusCode::ALREADY_REPORTED,
             body: body.clone(),
         })
@@ -6032,6 +6326,7 @@ mod tests {
         let mut legacy_info = valid_start_response();
         legacy_info.activation_generation = None;
         let legacy = decode_remote_start_response(crate::http::peer_transport::PeerResponse {
+            clock_timing: None,
             status: reqwest::StatusCode::OK,
             body: serde_json::to_vec(&legacy_info).expect("legacy start response JSON"),
         })
@@ -6362,6 +6657,7 @@ mod tests {
         renewals: StdMutex<std::collections::VecDeque<ScriptedOutcome<bool>>>,
         cache_results: StdMutex<std::collections::VecDeque<bool>>,
         next_generation: AtomicU64,
+        fail_clock_on_initial_claim: Option<Arc<ClusterClockGuard>>,
     }
 
     impl ScriptedTakeoverIo {
@@ -6376,6 +6672,7 @@ mod tests {
                 renewals: StdMutex::new(std::collections::VecDeque::new()),
                 cache_results: StdMutex::new(std::collections::VecDeque::new()),
                 next_generation: AtomicU64::new(10),
+                fail_clock_on_initial_claim: None,
             }
         }
 
@@ -6429,6 +6726,9 @@ mod tests {
         ) -> BoxFuture<'a, Result<Option<MediaSessionRoute>, StoreError>> {
             Box::pin(async move {
                 self.record("claim");
+                if let Some(clock) = self.fail_clock_on_initial_claim.as_ref() {
+                    clock.roster_failed();
+                }
                 let outcome = self
                     .claims
                     .lock()
@@ -7420,6 +7720,155 @@ mod tests {
         );
     }
 
+    fn scripted_clock_takeover(
+        events: Arc<StdMutex<Vec<String>>>,
+        clock: &TakeoverClockAdmission,
+    ) -> (
+        PendingTakeoverSettlement<ProbeTakeoverWorker, ProbeTakeoverAdoption>,
+        MediaSessionRoute,
+    ) {
+        let (mut pending, mut winner) = scripted_takeover(events);
+        pending.claim = clock.claim(&pending.original, "node-new");
+        pending.monotonic_expiry = clock.monotonic_expiry;
+        winner.lease_expires_at_ms = pending.claim.lease_expires_at_ms;
+        winner.updated_at_ms = pending.claim.now_ms;
+        (pending, winner)
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn takeover_clock_guard_refuses_only_unsubmitted_claim_and_stops_exact_worker() {
+        for (offset, expected) in [
+            (None, ClockRefusal::Unknown),
+            (Some((1_500_000, 601_000)), ClockRefusal::Offset),
+            (Some((2_500_000, 1_000)), ClockRefusal::Offset),
+        ] {
+            assert_eq!(
+                acquire_takeover_clock(&clock_fixture(offset)).err(),
+                Some(expected)
+            );
+        }
+        for clock in [
+            Arc::new(ClusterClockGuard::new(false)),
+            clock_fixture(Some((1_999_000, 1_000))),
+        ] {
+            assert!(acquire_takeover_clock(&clock).is_ok());
+        }
+        for recovered in [false, true] {
+            let guard = clock_fixture(Some((0, 1_000)));
+            let clock = acquire_takeover_clock(&guard).expect("original admission");
+            let original_now = clock.ticket.now_ms();
+            let events = Arc::new(StdMutex::new(Vec::new()));
+            let io = ScriptedTakeoverIo::new(Arc::clone(&events));
+            let (pending, _) = scripted_clock_takeover(Arc::clone(&events), &clock);
+            tokio::task::yield_now().await;
+            guard.roster_failed();
+            if recovered {
+                let round = guard.roster(&[]);
+                assert!(guard.publish(round, std::collections::BTreeMap::new()));
+            }
+            let error = settle_initial_takeover_claim(&io, pending, || clock.ticket.revalidate())
+                .await
+                .expect_err("an old proof cannot be renewed by recovered evidence");
+            assert!(error.contains("GenerationChanged"));
+            assert_eq!(clock.ticket.now_ms(), original_now);
+            assert_eq!(
+                io.events(),
+                vec!["worker:worker-a:stop:media-session takeover clock refused before submission"],
+                "no claim, replay, pin, publication or unrelated worker teardown"
+            );
+            assert!(guard.prometheus().contains(
+                "plurx_cluster_clock_refusals_total{decision=\"takeover\",cause=\"generation_changed\"} 1\n"
+            ));
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn takeover_clock_guard_preserves_original_24s_lease_and_publication_runway() {
+        for preparation in [Duration::from_secs(8), Duration::from_secs(12)] {
+            let guard = Arc::new(ClusterClockGuard::new(false));
+            let clock = acquire_takeover_clock(&guard).expect("standalone admission");
+            let original_now = clock.ticket.now_ms();
+            let original_monotonic_expiry = clock.monotonic_expiry;
+            tokio::time::advance(preparation).await;
+            let events = Arc::new(StdMutex::new(Vec::new()));
+            let io = ScriptedTakeoverIo::new(Arc::clone(&events));
+            let (pending, winner) = scripted_clock_takeover(Arc::clone(&events), &clock);
+            assert_eq!(pending.claim.now_ms, original_now);
+            assert_eq!(pending.claim.lease_expires_at_ms - original_now, 24_000);
+            assert_eq!(pending.monotonic_expiry, original_monotonic_expiry);
+            assert_eq!(
+                pending.monotonic_expiry - tokio::time::Instant::now(),
+                Duration::from_secs(24) - preparation
+            );
+            io.claims
+                .lock()
+                .expect("scripted claim")
+                .push_back(ScriptedOutcome::Ready(Some(winner)));
+            io.allow_publication();
+            let result =
+                settle_initial_takeover_claim(&io, pending, || clock.ticket.revalidate()).await;
+            let published = io.events().iter().any(|event| event.ends_with(":publish"));
+            if preparation == Duration::from_secs(8) {
+                result.expect("eight-second preparation still has sufficient original runway");
+                assert!(published);
+                assert!(io
+                    .events()
+                    .iter()
+                    .any(|event| event == "renew:provisional-scripted"));
+            } else {
+                assert!(
+                    result.is_err(),
+                    "insufficient runway never extends the original lease"
+                );
+                assert!(!published);
+                assert!(io
+                    .events()
+                    .iter()
+                    .any(|event| event.contains("stop-retain:")));
+            }
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn takeover_clock_guard_keeps_submitted_ambiguous_reconciliation_ungated() {
+        for mode in ["error", "timeout"] {
+            let guard = clock_fixture(Some((0, 1_000)));
+            let clock = acquire_takeover_clock(&guard).expect("original admission");
+            let events = Arc::new(StdMutex::new(Vec::new()));
+            let mut io = ScriptedTakeoverIo::new(Arc::clone(&events));
+            io.fail_clock_on_initial_claim = Some(Arc::clone(&guard));
+            let (pending, winner) = scripted_clock_takeover(Arc::clone(&events), &clock);
+            io.claims
+                .lock()
+                .expect("scripted claim")
+                .push_back(if mode == "error" {
+                    ScriptedOutcome::Error("reply lost after submission and clock failure")
+                } else {
+                    ScriptedOutcome::Never
+                });
+            io.replays
+                .lock()
+                .expect("scripted replay")
+                .push_back(ScriptedOutcome::Ready(Some(winner)));
+            io.allow_publication();
+            settle_initial_takeover_claim(&io, pending, || clock.ticket.revalidate())
+                .await
+                .expect("submitted fixed claim reconciles despite later clock failure");
+            assert_eq!(guard.acquire().err(), Some(ClockRefusal::Unknown));
+            let events = io.events();
+            assert_eq!(events.first().map(String::as_str), Some("claim"));
+            assert!(events.iter().any(|event| event == "replay"), "{mode}");
+            assert!(events
+                .iter()
+                .any(|event| event == "renew:provisional-scripted"));
+            assert!(events.iter().any(|event| event.ends_with(":publish")));
+            assert!(!events.iter().any(|event| event.contains("drop-teardown")));
+            assert!(guard.prometheus().contains(
+                "plurx_cluster_clock_refusals_total{decision=\"takeover\",cause=\"generation_changed\"} 0\n"
+            ));
+        }
+    }
+
     #[tokio::test(start_paused = true)]
     async fn ambiguous_initial_claim_error_and_timeout_reconcile_to_one_worker() {
         for mode in ["error", "timeout"] {
@@ -7440,7 +7889,7 @@ mod tests {
                 .push_back(ScriptedOutcome::Ready(Some(winner)));
             io.allow_publication();
 
-            settle_initial_takeover_claim(&io, pending)
+            settle_initial_takeover_claim(&io, pending, || Ok(()))
                 .await
                 .expect("ambiguous initial claim must reconcile");
             let events = io.events();
@@ -9233,6 +9682,7 @@ mod tests {
         for disposition in ["accepted", "replayed"] {
             let response = validated_control_relay_response(
                 PeerResponse {
+                    clock_timing: None,
                     status: reqwest::StatusCode::OK,
                     body: body.clone(),
                 },

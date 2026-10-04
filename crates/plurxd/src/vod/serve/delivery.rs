@@ -404,6 +404,26 @@ impl VodServe {
             budget = budget.min(deadline.saturating_duration_since(Instant::now()));
         }
         let owner = publication.owner;
+        if let Some(artifact) = owner.retained_output.as_ref() {
+            let index = if name == INIT_NAME {
+                None
+            } else {
+                let Some(index) =
+                    planned_index(name).filter(|index| (*index as usize) < rendition.plan.len())
+                else {
+                    return Some(VodPublication {
+                        result: Ok(None),
+                        owner,
+                    });
+                };
+                Some(index)
+            };
+            let result = artifact
+                .open(index, &delivery, &self.shared, &rendition, budget)
+                .await
+                .map(Some);
+            return Some(VodPublication { result, owner });
+        }
         if name == INIT_NAME {
             return Some(VodPublication {
                 result: self

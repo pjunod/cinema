@@ -147,6 +147,11 @@ use status::*;
 // split: end hls-status
 
 // split: begin hls-response
+#[path = "hls/candidate_recovery.rs"]
+pub(crate) mod candidate_recovery;
+#[path = "hls/link_receipts.rs"]
+pub(crate) mod link_receipts;
+mod prepared_link;
 #[path = "hls/response.rs"]
 mod response;
 pub(in crate::http) use response::*;

@@ -26,12 +26,30 @@ SUPPORTED_BINARY_COPIES = (
         "/usr/local/bin/plurx-cluster-check",
     ),
 )
+SUPPORTED_DEBUG_COPIES = tuple(
+    (name, f"COPY --from=build /{name}.dwp /usr/local/bin/{name}.dwp",
+     f"COPY --chmod=0644 release-bin/{name}.dwp /usr/local/bin/{name}.dwp")
+    for name, _, _ in SUPPORTED_BINARY_COPIES
+)
 
 
 def _runtime(source: str) -> str:
     if source.count(RUNTIME_STAGE) != 1:
         raise ValueError("tagged Dockerfile must contain one Bookworm runtime stage")
-    return RUNTIME_STAGE + source.split(RUNTIME_STAGE, 1)[1]
+    runtime = RUNTIME_STAGE + source.split(RUNTIME_STAGE, 1)[1]
+    final_stage = "FROM runtime-assets AS runtime"
+    if final_stage not in runtime:
+        return runtime  # Historical one-stage release Dockerfiles.
+    if runtime.count(final_stage) != 1:
+        raise ValueError("tagged Dockerfile must contain one final runtime stage")
+    assets, final = runtime.split(final_stage, 1)
+    # CI-only stages may sit between runtime-assets and the shipped runtime.
+    # The release packager needs the assets and final stage, never their
+    # toolchains; the default Dockerfile still ends in the shipped runtime.
+    intervening = re.search(r"(?m)^FROM ", assets[len(RUNTIME_STAGE) :])
+    if intervening:
+        assets = assets[: len(RUNTIME_STAGE) + intervening.start()]
+    return assets + final_stage + final
 
 
 def required_binaries(source: str) -> tuple[str, ...]:
@@ -49,14 +67,33 @@ def required_binaries(source: str) -> tuple[str, ...]:
         if count == 1:
             binaries.append(name)
         unrecognized = unrecognized.replace(source_copy, "")
+    for _name, source_copy, _artifact_copy in SUPPORTED_DEBUG_COPIES:
+        unrecognized = unrecognized.replace(source_copy, "")
     if "COPY --from=build" in unrecognized:
         raise ValueError("tagged runtime copies an unsupported build artifact")
     return tuple(binaries)
 
 
+def required_debug_binaries(source: str) -> tuple[str, ...]:
+    """Historical tags have no DWP; profile C must retain the whole binary set."""
+    runtime = _runtime(source)
+    binaries = required_binaries(source)
+    debug = []
+    for name, source_copy, _ in SUPPORTED_DEBUG_COPIES:
+        count = runtime.count(source_copy)
+        if count > 1:
+            raise ValueError("tagged runtime copies packed debug more than once")
+        if count:
+            debug.append(name)
+    if debug and tuple(debug) != binaries:
+        raise ValueError("tagged runtime must retain packed debug for every binary")
+    return tuple(debug)
+
+
 def render(source: str, runtime_image: str | None = None) -> str:
     runtime = _runtime(source)
     binaries = required_binaries(source)
+    debug = required_debug_binaries(source)
     if runtime_image is not None:
         if not IMMUTABLE_IMAGE.fullmatch(runtime_image):
             raise ValueError("media runtime image must have an immutable sha256 digest")
@@ -69,6 +106,9 @@ def render(source: str, runtime_image: str | None = None) -> str:
         )
     for name, source_copy, artifact_copy in SUPPORTED_BINARY_COPIES:
         if name in binaries:
+            runtime = runtime.replace(source_copy, artifact_copy)
+    for name, source_copy, artifact_copy in SUPPORTED_DEBUG_COPIES:
+        if name in debug:
             runtime = runtime.replace(source_copy, artifact_copy)
     generated = (
         "# syntax=docker/dockerfile:1\n\n"
@@ -87,6 +127,7 @@ def render_binary_export(source: str) -> str:
     """Keep the tagged build stage and export only its runtime binaries."""
 
     binaries = required_binaries(source)
+    debug = required_debug_binaries(source)
     build_stage = source.split(RUNTIME_STAGE, 1)[0].rstrip()
     if " AS build" not in build_stage:
         raise ValueError("tagged Dockerfile must name its Rust stage build")
@@ -103,6 +144,7 @@ def render_binary_export(source: str) -> str:
     copies = "\n".join(
         f"COPY --from=build /{name} /{name}" for name in binaries
     )
+    copies += "".join(f"\nCOPY --from=build /{name}.dwp /{name}.dwp" for name in debug)
     return (
         build_stage
         + "\nRUN rustc -Vv > /rustc-version\n\n"
@@ -116,18 +158,19 @@ def main() -> int:
     parser = argparse.ArgumentParser()
     mode = parser.add_mutually_exclusive_group()
     mode.add_argument("--list-binaries", action="store_true")
+    mode.add_argument("--list-debug-binaries", action="store_true")
     mode.add_argument("--binary-export", action="store_true")
     parser.add_argument("--runtime-image")
     parser.add_argument("source", type=Path)
     parser.add_argument("output", type=Path, nargs="?")
     args = parser.parse_args()
     source = args.source.read_text(encoding="utf-8")
-    if args.runtime_image and (args.binary_export or args.list_binaries):
+    if args.runtime_image and (args.binary_export or args.list_binaries or args.list_debug_binaries):
         parser.error("--runtime-image is only valid when rendering packaging")
-    if args.list_binaries:
+    if args.list_binaries or args.list_debug_binaries:
         if args.output is not None:
             parser.error("--list-binaries does not accept an output path")
-        for name in required_binaries(source):
+        for name in (required_debug_binaries(source) if args.list_debug_binaries else required_binaries(source)):
             print(name)
         return 0
     if args.output is None:

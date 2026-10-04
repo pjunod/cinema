@@ -29,6 +29,7 @@ pub(crate) mod hls;
 pub(crate) mod images;
 pub(crate) mod internal_activity;
 pub(crate) mod internal_auth_revocation;
+pub(crate) mod internal_clock;
 pub(crate) mod internal_live_tv;
 pub(crate) mod internal_media;
 pub(crate) mod internal_media_sessions;
@@ -44,6 +45,7 @@ pub(crate) mod peer_transport;
 mod pgs_overlay;
 mod photos;
 mod plex;
+pub(crate) mod plex_census;
 pub(crate) mod publication;
 mod reading;
 mod scan;
@@ -506,6 +508,7 @@ fn http_route_group(path: &str) -> usize {
         | "/internal/media/fragment-index/{cache_key}"
         | "/internal/media/subtitle-source/{file_id}/{ordinal}/{format}" => 7,
         internal_activity::PATH
+        | internal_clock::PATH
         | cluster_operations::INTERNAL_PATH
         | internal_auth_revocation::PATH
         | crate::subtitle_ranges::PATH
@@ -653,14 +656,24 @@ const PLEX_OUTCOMES: [&str; 4] = ["ok", "not_found", "unauthorized", "error"];
 /// in the binary that sends façade traffic, on libtest's parallel threads, and
 /// the adversarial review of PR #462 measured that race failing 34 runs in
 /// 400.
+///
+/// `cells` are this process's counts and keep the in-process meaning of
+/// `plurx_plex_requests_total`. `ledger` is the durable census (C-07 §8.5,
+/// [`plex_census`]): restored once at startup from the node's data directory,
+/// it adds what earlier processes counted, so one read of
+/// `plurx_plex_requests_since_census_total` covers every restart since the
+/// census began. A router built without a restore (every test router) has no
+/// ledger and exposes the process counter alone.
 pub(crate) struct PlexCensus {
-    cells: [AtomicU64; PLEX_HANDLERS.len() * PLEX_OUTCOMES.len()],
+    cells: [AtomicU64; plex_census::CELLS],
+    ledger: std::sync::OnceLock<plex_census::CensusLedger>,
 }
 
 impl Default for PlexCensus {
     fn default() -> Self {
         Self {
             cells: std::array::from_fn(|_| AtomicU64::new(0)),
+            ledger: std::sync::OnceLock::new(),
         }
     }
 }
@@ -721,7 +734,60 @@ impl PlexCensus {
                 ));
             }
         }
+        if let Some(ledger) = self.ledger.get() {
+            out.push_str(&ledger.prometheus(&self.cells));
+        }
         out
+    }
+
+    /// Restore the durable census from `data_dir` and write it back at once,
+    /// marked as running, so a crash before the first periodic write still
+    /// leaves a bounded gap. Never fails: an unusable file starts a new census
+    /// with the reason logged. `floor_unix_s` is the earliest clock reading
+    /// trusted (the build's source date); below it, or with no clock, nothing
+    /// is written until a later write sees a trustworthy one. Called once,
+    /// before the listener accepts; the returned start is what was logged.
+    pub(crate) async fn restore_durable(
+        &self,
+        data_dir: &std::path::Path,
+        now_unix_s: Option<u64>,
+        floor_unix_s: u64,
+    ) -> plex_census::CensusStart {
+        let (ledger, start) =
+            plex_census::CensusLedger::restore(data_dir, now_unix_s, floor_unix_s).await;
+        ledger.log_start(&start);
+        if self.ledger.set(ledger).is_err() {
+            tracing::warn!("the Plex façade census was already restored in this process");
+            return start;
+        }
+        if let Err(error) = self.flush_durable(now_unix_s, false).await {
+            tracing::warn!(
+                %error,
+                "could not write the Plex façade census at startup; the periodic write retries"
+            );
+        }
+        start
+    }
+
+    /// Write the durable census; `clean` records a clean stop and is final.
+    /// `Ok(false)` when there is no ledger, the clean stop already landed, or
+    /// the clock is unreadable or below the build's source date.
+    pub(crate) async fn flush_durable(
+        &self,
+        now_unix_s: Option<u64>,
+        clean: bool,
+    ) -> std::io::Result<bool> {
+        match self.ledger.get() {
+            Some(ledger) => ledger.flush(&self.cells, now_unix_s, clean).await,
+            None => Ok(false),
+        }
+    }
+
+    #[cfg(test)]
+    fn since_census(&self) -> Option<[u64; plex_census::CELLS]> {
+        self.ledger
+            .get()
+            .map(|ledger| ledger.since_census(&self.cells))
     }
 }
 
@@ -1862,6 +1928,7 @@ pub fn router(state: AppState) -> Router {
     let public_media = Router::new()
         .route("/download/plurx-android.apk", get(web::download_android))
         .route(internal_activity::PATH, get(internal_activity::snapshot))
+        .route(internal_clock::PATH, get(internal_clock::snapshot))
         .route(
             cluster_operations::INTERNAL_PATH,
             get(cluster_operations::local),
@@ -2092,6 +2159,7 @@ fn maintenance_route_eligible(method: &Method, path: &str) -> bool {
                 | "/api/v1/cluster/media"
                 | "/api/v1/cluster/ingress"
                 | cluster_operations::INTERNAL_PATH
+                | internal_clock::PATH
         )
     {
         return true;
@@ -2197,6 +2265,7 @@ fn learner_route_eligible(method: &Method, path: &str) -> bool {
                 | "/api/v1/cluster/status"
                 | "/api/v1/cluster/support-bundle"
                 | cluster_operations::INTERNAL_PATH
+                | internal_clock::PATH
         )
     {
         return true;
@@ -2450,6 +2519,7 @@ pub(crate) enum ReadinessFailure {
     Maintenance,
     QuorumUnavailable,
     StoreUnavailable,
+    ClockUnbounded,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -2457,6 +2527,21 @@ pub(crate) struct ReadinessEvaluation {
     pub(crate) ready: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) reason: Option<ReadinessFailure>,
+}
+
+/// Shared Store-free clock consequence for readiness and operations status.
+///
+/// Only while the operator has turned the clock guard on: otherwise one
+/// skewed node would take every node's `/readyz` down. The measurement stays
+/// visible in the Developer readiness rows and the clock metrics either way.
+fn clock_readiness_failure(state: &AppState) -> Option<ReadinessEvaluation> {
+    let guard = state.membership.clock_guard();
+    (guard.is_enforced() && guard.snapshot().readiness.is_unbounded()).then_some(
+        ReadinessEvaluation {
+            ready: false,
+            reason: Some(ReadinessFailure::ClockUnbounded),
+        },
+    )
 }
 
 /// One typed readiness decision shared by `/readyz` and cluster status.
@@ -2475,10 +2560,10 @@ pub(crate) async fn evaluate_readiness(state: &AppState) -> ReadinessEvaluation 
     // when an isolated node needs to self-fence promptly.
     if state.serving.is_quorum_managed() {
         return if state.serving.is_ready() {
-            ReadinessEvaluation {
+            clock_readiness_failure(state).unwrap_or(ReadinessEvaluation {
                 ready: true,
                 reason: None,
-            }
+            })
         } else {
             ReadinessEvaluation {
                 ready: false,
@@ -2487,10 +2572,10 @@ pub(crate) async fn evaluate_readiness(state: &AppState) -> ReadinessEvaluation 
         };
     }
     match state.store.ping().await {
-        Ok(()) => ReadinessEvaluation {
+        Ok(()) => clock_readiness_failure(state).unwrap_or(ReadinessEvaluation {
             ready: true,
             reason: None,
-        },
+        }),
         Err(error) => {
             tracing::warn!(%error, "readiness probe failed");
             ReadinessEvaluation {
@@ -2517,6 +2602,10 @@ async fn readyz(State(state): State<AppState>) -> impl IntoResponse {
             reason: Some(ReadinessFailure::StoreUnavailable),
             ..
         } => (StatusCode::SERVICE_UNAVAILABLE, "store unavailable\n"),
+        ReadinessEvaluation {
+            reason: Some(ReadinessFailure::ClockUnbounded),
+            ..
+        } => (StatusCode::SERVICE_UNAVAILABLE, "clock unbounded\n"),
         ReadinessEvaluation {
             ready: false,
             reason: None,
@@ -2586,9 +2675,55 @@ mod tests {
 
     use super::*;
 
+    mod public_copy_wire;
+
     async fn slow_test_handler() -> &'static str {
         tokio::time::sleep(Duration::from_millis(40)).await;
         "ok"
+    }
+
+    #[tokio::test]
+    async fn clock_route_refuses_household_and_forged_proofs_without_timing() {
+        let (app, _) = test_app_with_state();
+        for bearer in [None, Some("household-session")] {
+            let mut request = Request::builder().uri(internal_clock::PATH);
+            if let Some(bearer) = bearer {
+                request = request.header(header::AUTHORIZATION, format!("Bearer {bearer}"));
+            }
+            let response = app
+                .clone()
+                .oneshot(request.body(Body::empty()).expect("clock request"))
+                .await
+                .expect("clock route");
+            assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+            assert!(!response
+                .headers()
+                .contains_key(peer_transport::RESPONSE_SIGNATURE_HEADER));
+            let body = response
+                .into_body()
+                .collect()
+                .await
+                .expect("refusal body")
+                .to_bytes();
+            assert!(!String::from_utf8_lossy(&body).contains("received_unix_ms"));
+        }
+        let request = Request::builder()
+            .uri(internal_clock::PATH)
+            .header(peer_transport::NODE_HEADER, "peer")
+            .header(peer_transport::TARGET_HEADER, "test-node")
+            .header(peer_transport::TIMESTAMP_HEADER, "1")
+            .header(
+                peer_transport::NONCE_HEADER,
+                "123e4567-e89b-42d3-a456-426614174000",
+            )
+            .header(peer_transport::SIGNATURE_HEADER, "a".repeat(128))
+            .body(Body::empty())
+            .expect("forged clock request");
+        let response = app.oneshot(request).await.expect("forged clock route");
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        assert!(!response
+            .headers()
+            .contains_key(peer_transport::RESPONSE_SIGNATURE_HEADER));
     }
 
     async fn watch_write_handler(
@@ -3949,6 +4084,7 @@ mod tests {
             "/api/v1/files/8/hls/start",
             "/api/v1/hls/session/index.m3u8",
             crate::media_pool::SNAPSHOT_PATH,
+            internal_clock::PATH,
         ] {
             assert!(learner_route_eligible(&Method::GET, path), "{path}");
         }
@@ -4884,6 +5020,101 @@ mod tests {
             b = b.header("authorization", format!("Bearer {t}"));
         }
         b.body(Body::empty()).expect("req")
+    }
+
+    #[tokio::test]
+    async fn readiness_clock_guard_requires_two_positive_rounds_and_preserves_unknown() {
+        use plurx_core::cluster::clock::PeerClockOffset;
+        let (app, state) = test_app_with_state();
+        state.serving.validation_set_ready(true).await;
+        let clock = state.membership.clock_guard();
+        let publish = |offset_us| {
+            let ticket = clock.roster(&["peer".to_owned()]);
+            assert!(clock.publish(
+                ticket,
+                std::collections::BTreeMap::from([(
+                    "peer".to_owned(),
+                    PeerClockOffset::Bounded {
+                        offset_us,
+                        uncertainty_us: 1_000,
+                        observed_at: std::time::Instant::now(),
+                    },
+                )]),
+            ));
+        };
+        assert!(evaluate_readiness(&state).await.ready, "standalone NoPeers");
+        publish(2_500_000);
+        publish(2_500_000);
+        assert!(
+            evaluate_readiness(&state).await.ready
+                && cluster_operations::operations_readiness(&state).ready,
+            "an unbounded clock is advisory while the guard is not enforced"
+        );
+        assert_eq!(
+            call_text(&app, get("/readyz", None)).await.0,
+            StatusCode::OK
+        );
+        clock.set_enforced(true);
+        publish(0);
+        publish(2_500_000);
+        for _ in 0..3 {
+            assert!(
+                evaluate_readiness(&state).await.ready,
+                "reads are not rounds"
+            );
+        }
+        publish(2_500_000);
+        assert_eq!(
+            evaluate_readiness(&state).await.reason,
+            Some(ReadinessFailure::ClockUnbounded)
+        );
+        assert_eq!(
+            cluster_operations::operations_readiness(&state).reason,
+            Some(ReadinessFailure::ClockUnbounded),
+            "the Store-free operations projection uses the same consequence"
+        );
+        assert_eq!(
+            call_text(&app, get("/readyz", None)).await,
+            (
+                StatusCode::SERVICE_UNAVAILABLE,
+                "clock unbounded\n".to_owned()
+            )
+        );
+        assert_eq!(
+            call_text(&app, get("/healthz", None)).await.0,
+            StatusCode::OK
+        );
+        state.serving.validation_set_ready(false).await;
+        assert_eq!(
+            evaluate_readiness(&state).await.reason,
+            Some(ReadinessFailure::QuorumUnavailable),
+            "the existing quorum failure keeps precedence"
+        );
+        assert_eq!(
+            cluster_operations::operations_readiness(&state).reason,
+            Some(ReadinessFailure::QuorumUnavailable)
+        );
+        state.serving.validation_set_ready(true).await;
+        clock.roster_failed();
+        assert!(
+            evaluate_readiness(&state).await.ready,
+            "Unknown is not positive violation"
+        );
+        publish(2_500_000);
+        assert!(
+            evaluate_readiness(&state).await.ready,
+            "failed round reset the streak"
+        );
+        publish(0);
+        assert!(
+            evaluate_readiness(&state).await.ready,
+            "healthy round resets the streak"
+        );
+        clock.roster(&["replacement".to_owned()]);
+        assert!(
+            evaluate_readiness(&state).await.ready,
+            "new peer remains Unknown"
+        );
     }
 
     #[tokio::test]
@@ -8313,8 +8544,28 @@ mod tests {
         let admin = setup_admin(&app).await;
         let (status, initial) = call(&app, get("/api/v1/settings", Some(&admin))).await;
         assert_eq!(status, StatusCode::OK);
-        assert_eq!(initial["transcode_rate_mode"], "bitrate");
+        assert!(
+            initial["transcode_rate_mode"].is_null(),
+            "an unset pair must read back as unset, not as the family default a client \
+             would then write back as an explicit bitrate pin: {initial}"
+        );
         assert!(initial["transcode_quality"].is_null(), "{initial}");
+        let family = state.transcode.encoder_for_preference("");
+        assert_eq!(
+            initial["transcode_rate_mode_default"],
+            family.default_rate_mode().as_str(),
+            "{initial}"
+        );
+        assert_eq!(
+            initial["transcode_rate_mode_default_encoder"],
+            family.family_name(),
+            "{initial}"
+        );
+        assert_eq!(
+            initial["transcode_quality_default"],
+            family.default_quality(),
+            "{initial}"
+        );
 
         let (status, bad) = call(
             &app,
@@ -8387,6 +8638,83 @@ mod tests {
             state.transcode.effective_rate_control(Encoder::Software),
             EffectiveRateControl::Vbr
         );
+        assert_eq!(
+            state
+                .store
+                .get_setting_pair(
+                    plurx_core::store::keys::TRANSCODE_RATE_MODE,
+                    plurx_core::store::keys::TRANSCODE_QUALITY,
+                )
+                .await
+                .expect("settings pair")
+                .0
+                .as_deref(),
+            Some("bitrate"),
+            "an explicit bitrate persists as an explicit choice"
+        );
+
+        // An unrelated Save must not touch the pair.
+        let (status, unrelated) = call(
+            &app,
+            put(
+                "/api/v1/settings",
+                Some(&admin),
+                json!({ "stream_readrate": "4" }),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{unrelated}");
+        assert_eq!(unrelated["transcode_rate_mode"], "bitrate");
+
+        // JSON null is the explicit "return to each family's default".
+        let (status, cleared) = call(
+            &app,
+            put(
+                "/api/v1/settings",
+                Some(&admin),
+                json!({
+                    "transcode_rate_mode": null,
+                    "transcode_quality": null
+                }),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{cleared}");
+        assert!(cleared["transcode_rate_mode"].is_null(), "{cleared}");
+        assert!(cleared["transcode_quality"].is_null(), "{cleared}");
+        let (stored_mode, stored_quality) = state
+            .store
+            .get_setting_pair(
+                plurx_core::store::keys::TRANSCODE_RATE_MODE,
+                plurx_core::store::keys::TRANSCODE_QUALITY,
+            )
+            .await
+            .expect("settings pair");
+        assert_eq!(
+            crate::transcode::normalize_rate_control_request(
+                stored_mode.as_deref(),
+                stored_quality.as_deref(),
+            ),
+            (None, None, false),
+            "the cleared pair must read back as unset, not as an explicit bitrate"
+        );
+        assert_eq!(
+            state.transcode.effective_rate_control(Encoder::Software),
+            EffectiveRateControl::Vbr,
+            "every family default is still Bitrate"
+        );
+
+        // A null mode still travels as one complete pair.
+        let (status, half) = call(
+            &app,
+            put(
+                "/api/v1/settings",
+                Some(&admin),
+                json!({ "transcode_rate_mode": null }),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{half}");
     }
 
     #[tokio::test]
@@ -9990,6 +10318,11 @@ mod tests {
                 // Jellyfin compatibility: one advisory row (pinned-client
                 // qualification) that never gates the switch.
                 "jellyfin_compatibility",
+                // The clock guard's enforcement switch. All four rows are
+                // advisory; on this standalone fixture there is no remote
+                // member to observe, so coverage and the consequence row are
+                // `met` and the offset and NTP rows `unobservable`.
+                "cluster_clock",
                 "durable_cluster_work",
                 "bounded_catalogue_reads",
                 "cluster_backup",
@@ -10120,6 +10453,10 @@ mod tests {
                 // The ffmpeg row is absent here because the fixture never
                 // probed a build.
                 "chapter_thumbs_work",
+                // The clock guard's: no committed remote member, so nothing
+                // is uncovered and current evidence would refuse nothing.
+                "consequence",
+                "coverage",
                 "durable_queue",
                 "durable_role",
                 "rolling_contract_built",
@@ -10150,6 +10487,15 @@ mod tests {
                 seen.get(id).map(String::as_str),
                 Some("unobservable"),
                 "{id} claimed to have read something this process cannot reach: {body}"
+            );
+        }
+        // The clock guard has no member offset to bound here, and this process
+        // never reads a node's time-synchronisation daemon.
+        for id in ["upper_bound", "ntp"] {
+            assert_eq!(
+                seen.get(id).map(String::as_str),
+                Some("unobservable"),
+                "{id} claimed a clock fact this standalone node cannot read: {body}"
             );
         }
         // Statements about this build, true whatever the deployment looks
@@ -14646,6 +14992,41 @@ mod tests {
             resuming.contains(&h.video),
             "a partially-watched home video belongs in continue-watching: {hubs}"
         );
+    }
+
+    /// The real start route must keep its authoritative presence check even
+    /// when detail has a newer, bounded observation cache. A poisoned detail
+    /// probe is counted through the router, not an unused cache instance.
+    #[tokio::test]
+    async fn playback_decision_does_not_probe_detail_availability() {
+        let (_, mut state) = test_state();
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let seen = Arc::clone(&calls);
+        state.detail_availability =
+            crate::availability::AvailabilityCache::with_test_probe(move |_| {
+                let seen = Arc::clone(&seen);
+                async move {
+                    seen.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    false
+                }
+            });
+        let app = router(state.clone());
+        let admin = setup_admin(&app).await;
+        let seeded = seed_content(&state).await;
+        let (status, body) = call(
+            &app,
+            get(
+                &format!(
+                    "/api/v1/files/{}/decision?vcodec=h264&acodec=aac&container=mp4&hdr=0",
+                    seeded.file
+                ),
+                Some(&admin),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(body["method"], "direct_play");
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 0);
     }
 
     /// A big remux gets told to go through MSE; an ordinary direct play does
@@ -20149,6 +20530,7 @@ mod tests {
                         codec: "truehd".into(),
                         channels: Some(8),
                         sample_rate: Some(48_000),
+                        channel_layout: None,
                         language: Some("eng".into()),
                         title: None,
                         default: true,
@@ -20177,6 +20559,7 @@ mod tests {
                         codec: "aac".into(),
                         channels: Some(2),
                         sample_rate: Some(48_000),
+                        channel_layout: None,
                         language: Some("eng".into()),
                         title: None,
                         default: true,
@@ -20384,6 +20767,7 @@ mod tests {
                         codec: "aac".into(),
                         channels: Some(2),
                         sample_rate: Some(48_000),
+                        channel_layout: None,
                         language: None,
                         title: None,
                         default: true,

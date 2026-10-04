@@ -155,10 +155,13 @@
         let duration_ms = index_video_ms(&index);
         let identity = SourceIdentity::new(1, 1, "fingerprint");
         let recipe = Recipe {
+            retained_logical: None,
+            measured_candidate: None,
             file: media_file_at(source_path, duration_ms),
             audio_index: None,
-            aac: true,
-            video: CopyVideoOptions::new(false, false),
+           aac: true,
+            audio_delivery: None,
+           video: CopyVideoOptions::new(false, false),
             source_object_version: None,
             cluster_cache_key: None,
             encoding: None,
@@ -249,10 +252,13 @@
         let duration_ms = index_video_ms(&index);
         let identity = SourceIdentity::new(1, 1, "fingerprint");
         let recipe = Recipe {
+            retained_logical: None,
+            measured_candidate: None,
             file: media_file_at(source_path, duration_ms),
             audio_index: None,
-            aac: true,
-            video: CopyVideoOptions::new(false, false),
+           aac: true,
+            audio_delivery: None,
+           video: CopyVideoOptions::new(false, false),
             source_object_version: None,
             cluster_cache_key: None,
             encoding: None,
@@ -2451,6 +2457,7 @@
             Session {
                 passive_grant: None,
                 rendition: Some(Arc::clone(&rendition)),
+                retained_output: None,
                 rendition_key: rendition.key.clone(),
                 file: Arc::new(rendition.recipe.file.clone()),
                 playback_id: "play-a".into(),
@@ -2587,6 +2594,7 @@
             Session {
                 passive_grant: None,
                 rendition: Some(Arc::clone(&rendition)),
+                retained_output: None,
                 rendition_key: rendition.key.clone(),
                 file: Arc::new(rendition.recipe.file.clone()),
                 playback_id: "play-a".into(),

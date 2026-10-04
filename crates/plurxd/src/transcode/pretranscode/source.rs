@@ -5,7 +5,7 @@ use super::*;
 /// Short, because this interval *is* the latency a viewer pays to preempt it:
 /// a quarter-second of polling plus a kill is well inside the five seconds a
 /// live start is willing to queue, and the poll itself costs nothing.
-pub(super) const PRODUCER_POLL: Duration = Duration::from_millis(250);
+pub(crate) const PRODUCER_POLL: Duration = Duration::from_millis(250);
 
 /// How long a producer waits before asking for a slot again after being
 /// refused one. Longer than the poll: it has already been told a viewer is
@@ -158,15 +158,31 @@ impl PretranscodePolicySnapshot {
     }
 
     pub fn acceptable_encoder_families(&self) -> Vec<String> {
-        match self.requested_encoder.trim().to_ascii_lowercase().as_str() {
-            family @ ("software" | "nvenc" | "qsv" | "vaapi" | "videotoolbox") => {
-                vec![family.to_owned()]
-            }
-            _ => ["software", "nvenc", "qsv", "vaapi", "videotoolbox"]
-                .into_iter()
-                .map(str::to_owned)
-                .collect(),
-        }
+        speculative_encoder_families(&self.requested_encoder)
+            .iter()
+            .map(|family| family.family_name().to_owned())
+            .collect()
+    }
+}
+
+/// The encoder families a speculative row queued under `requested_encoder`
+/// may be produced by: the one pinned family, or every family for auto. The
+/// claim-time `encoder_not_allowed` check and the policy generation's
+/// rate-control spelling both derive from this one list.
+pub(crate) fn speculative_encoder_families(requested_encoder: &str) -> &'static [Encoder] {
+    match requested_encoder.trim().to_ascii_lowercase().as_str() {
+        "software" => &[Encoder::Software],
+        "nvenc" => &[Encoder::Nvenc],
+        "qsv" => &[Encoder::Qsv],
+        "vaapi" => &[Encoder::Vaapi],
+        "videotoolbox" => &[Encoder::VideoToolbox],
+        _ => &[
+            Encoder::Software,
+            Encoder::Nvenc,
+            Encoder::Qsv,
+            Encoder::Vaapi,
+            Encoder::VideoToolbox,
+        ],
     }
 }
 
@@ -191,6 +207,7 @@ pub struct OfflineSpec {
     pub subtitle: OfflineSubtitle,
     /// Immutable package identity captured when the request was accepted.
     pub effective_rate_control: EffectiveRateControl,
+    pub audio_delivery: Option<plurx_core::playback::audio::AudioDelivery>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

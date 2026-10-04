@@ -365,6 +365,95 @@
         );
     }
 
+    #[test]
+    fn a05_candidate_hls_isolation_requires_actual_auto_not_protocol_or_manual() {
+        use plurx_core::playback::DesiredQuality;
+        let mut body = bare_create();
+        assert!(!body.candidate_auto_policy(), "old inferred Auto is not a candidate claim");
+        body.quality_auto = Some(true);
+        assert!(body.candidate_auto_policy());
+        body.copy = Some(true);
+        assert!(!body.candidate_auto_policy(), "compat Original keeps legacy semantics");
+        body.intent = Some(envelope(1, DesiredQuality::Auto { height: None, candidate_id: None }));
+        assert!(body.candidate_auto_policy(), "typed Auto is authoritative");
+        body.intent = Some(envelope(1, DesiredQuality::Manual { height: 1080 }));
+        assert!(!body.candidate_auto_policy(), "typed manual wins over compat Auto");
+        body.intent = Some(envelope(1, DesiredQuality::Original));
+        assert!(!body.candidate_auto_policy());
+        body.intent = Some(envelope(1, DesiredQuality::Auto { height: None, candidate_id: None }));
+        body.height = Some(1440);
+        assert!(!body.candidate_auto_policy(), "the explicit 1440 route is preserved");
+    }
+
+    #[tokio::test]
+    async fn a05_candidate_auto_fallback_ignores_both_legacy_prior_branches() {
+        let state = resolver_state();
+        let mut source = hls_file(Vec::new());
+        source.height = Some(2160);
+        let prior = plurx_core::domain::NetworkPrior {
+            credential_generation: Default::default(),
+            client_class: "web".to_owned(),
+            network_fingerprint: "candidate-isolation".to_owned(),
+            sustained_kbps: Some(1),
+            worst_rung_height: Some(2160),
+            starved_at_ms: Some(unix_ms()),
+            sample_count: 99,
+            updated_at_ms: unix_ms(),
+            link_worst_rung_height: None,
+            link_starved_at_ms: None,
+        };
+        let neutral = resolve_height(&state, Some(&source), None, false, None).await;
+        let isolated = resolve_height(
+            &state, Some(&source),
+            crate::http::stream::prior_for_candidate_policy(Some(&prior), true),
+            false, None,
+        ).await;
+        let legacy = resolve_height(&state, Some(&source), Some(&prior), false, None).await;
+        assert_eq!(isolated, neutral);
+        assert!(legacy < isolated, "legacy policy still consumes its old rate/starvation history");
+        assert_eq!(resolve_height(&state, Some(&source), Some(&prior), false, Some(1440)).await, 1440);
+        assert_eq!(resolve_height(&state, Some(&source), Some(&prior), false, Some(2160)).await, 2160);
+    }
+
+    #[tokio::test]
+    async fn a05_geometry_promoted_compat_copy_carries_resolved_auto_policy() {
+        use plurx_core::domain::{ItemKind, LibraryKind, NewItem, NewLibrary, ProbeResult};
+        let state = resolver_state();
+        let library = state.store.create_library(&NewLibrary {
+            name: "A05 geometry promotion".into(), kind: LibraryKind::Movies,
+            paths: vec![], anime: false,
+        }).await.expect("library");
+        let item = state.store.insert_item(&NewItem {
+            library_id: library.id, kind: ItemKind::Movie, parent_id: None,
+            title: "geometry promotion".into(), year: None,
+            season_number: None, episode_number: None,
+        }).await.expect("item");
+        let id = state.store.upsert_file(item, "/media/a05-geometry.mkv", 1000, 1, &ProbeResult {
+            video_codec: Some("h264".into()), width: Some(3840), height: Some(2160),
+            bit_depth: Some(8), raw_json: Some(serde_json::json!({"streams":[{
+                "index":0,"codec_type":"video","codec_name":"h264","profile":"High",
+                "width":3840,"height":2160,"pix_fmt":"yuv420p",
+                "sample_aspect_ratio":"1:1","r_frame_rate":"24/1","avg_frame_rate":"24/1"
+            }]}).to_string()), ..Default::default()
+        }).await.expect("file");
+        let source = state.store.get_file(id).await.expect("file read").expect("source");
+        let body = CreateSession {
+            playback_id: "geometry-auto".into(), copy: Some(true), quality_auto: Some(true),
+            caps: Some(serde_json::from_value(serde_json::json!({"v":2,"video":[{
+                "codec":"h264","max_width":1920,"max_height":1080
+            }]})).expect("bounded decoder caps")), ..bare_create()
+        };
+        assert!(!body.candidate_auto_policy(), "the original wire copy was not candidate Auto");
+        let resolved = resolve_plan(PlanInputs {
+            snapshot: None,
+            state: &state, user_id: 7, file_id: id, source: Some(&source), network_prior: None, network_identity: None, incumbent_receipt: None,
+        }, None, body).await.expect("geometry-promoted plan");
+        assert!(matches!(resolved.request.kind, crate::transcode::SessionKind::Transcode { .. }));
+        assert!(resolved.candidate_auto_policy, "response policy must follow actual normalized Auto");
+        assert_eq!(resolved.intent_fingerprint, resolved.request.durable_intent_fingerprint(7),
+            "the private resolved policy field does not alter request identity");
+    }
+
     async fn resolved_height(state: &AppState, source: &MediaFile, asked: Option<i64>) -> i64 {
         let body = CreateSession {
             playback_id: "player-a".into(),
@@ -379,6 +468,8 @@
                 file_id: source.id,
                 source: Some(source),
                 network_prior: None,
+                network_identity: None,
+                incumbent_receipt: None,
             },
             None,
             body,
@@ -464,6 +555,8 @@
             starved_at_ms: Some(1),
             sample_count: 12,
             updated_at_ms: 1,
+            link_worst_rung_height: None,
+            link_starved_at_ms: None,
         };
 
         for hdr10 in [false, true] {
@@ -481,6 +574,8 @@
                     file_id: source.id,
                     source: Some(&source),
                     network_prior: Some(&prior),
+                    network_identity: None,
+                    incumbent_receipt: None,
                 },
                 None,
                 body,
@@ -524,6 +619,8 @@
             file_id: source.id,
             source: Some(&source),
             network_prior: None,
+            network_identity: None,
+            incumbent_receipt: None,
         };
         let plain = resolve_plan(inputs(), None, body())
             .await
@@ -589,6 +686,8 @@
                 file_id: source.id,
                 source: Some(&source),
                 network_prior: None,
+                network_identity: None,
+                incumbent_receipt: None,
             },
             Some(review),
             CreateSession {
@@ -1149,6 +1248,7 @@
         supplemental_codecs: Option<&str>,
     ) -> crate::transcode::HlsContext {
         crate::transcode::HlsContext {
+            codec_facts: None,
             bandwidth: None,
             file_id: 5615,
             start_seconds: 0.0,
@@ -1161,6 +1261,25 @@
 
     fn sdr_context() -> crate::transcode::HlsContext {
         hls_context("avc1.640034,mp4a.40.2", None)
+    }
+
+    #[test]
+    fn sdr_master_declares_only_complete_frozen_output_components() {
+        let file = hls_file(vec![]);
+        let mut context = sdr_context();
+        assert!(!master_playlist(&file, None, &context).contains("CODECS="));
+        let mut facts = crate::transcode::FrozenHlsCodecFacts::audio(None, true, false);
+        facts.bind_output_avc_init("avc1.64001F".to_owned());
+        context.codec_facts = Some(facts);
+        assert!(!master_playlist(&file, None, &context).contains("CODECS="));
+        let mut facts = crate::transcode::FrozenHlsCodecFacts::audio(None, false, false);
+        facts.bind_output_avc_init("avc1.64001F".to_owned());
+        context.codec_facts = Some(facts);
+        let master = master_playlist(&file, None, &context);
+        assert!(master.contains("CODECS=\"avc1.64001F\""), "{master}");
+        assert!(!master.contains("mp4a.40.2"));
+        assert!(!master.contains("VIDEO-RANGE="));
+        assert_eq!(master.matches("#EXT-X-STREAM-INF:").count(), 1);
     }
 
     #[test]
@@ -1564,6 +1683,7 @@
 
     fn hls_context_with(codecs: &str, supplemental: Option<&str>) -> crate::transcode::HlsContext {
         crate::transcode::HlsContext {
+            codec_facts: None,
             bandwidth: None,
             file_id: 1,
             start_seconds: 0.0,
@@ -1820,21 +1940,24 @@
             subtitle: None,
             diagnostic: None,
         };
+        // Each request runs as its own heap-allocated task in production.
+        // Joining both handler state machines inline on a 2 MiB debug test
+        // thread overflows it, so box them the way a spawned task holds them.
         let (master, legacy) = tokio::join!(
-            master_playlist_response_local_before(
+            Box::pin(master_playlist_response_local_before(
                 &fixture.state,
                 "delayed-native-init",
                 query(),
                 deadline,
                 deadline
-            ),
-            playlist_local_before(
+            )),
+            Box::pin(playlist_local_before(
                 &fixture.state,
                 "delayed-native-init",
                 query(),
                 deadline,
                 deadline
-            ),
+            )),
         );
         assert_eq!(
             master.expect("master waits through preparation").status(),
@@ -1855,6 +1978,26 @@
     }
 
     #[tokio::test]
+    async fn actual_avc_init_binds_video_without_inventing_missing_audio_facts() {
+        let dir = crate::test_tempdir().expect("segment directory");
+        let fixture = HlsDeliveryFixture::publish(dir.path(), "avc-facts").await;
+        fixture.make_segment_window_servable().await;
+        let init = valid_avc_init();
+        let expected = plurx_core::fmp4::avc_rfc6381_codec(&init)
+            .expect("valid avcC").expect("AVC codec");
+        tokio::fs::write(dir.path().join("init.mp4"), &init.bytes).await.expect("write init");
+        let mut context = hls_context_with("avc1,mp4a.40.2", None);
+        context.codec_facts = Some(crate::transcode::FrozenHlsCodecFacts::audio(None, true, false));
+        let resolved = exact_hls_context(&fixture.state, "avc-facts", context.clone()).await.expect("unknown audio resolves without declaration");
+        assert_eq!(resolved.codec_facts.expect("component facts").complete_sdr_codecs(), None);
+        context.codec_facts = Some(crate::transcode::FrozenHlsCodecFacts::audio(None, false, false));
+        let resolved = exact_hls_context(&fixture.state, "avc-facts", context).await.expect("video-only init resolves");
+        let facts = resolved.codec_facts.expect("component facts");
+        assert_eq!(facts.complete_sdr_codecs(), Some(expected));
+        assert!(serde_json::to_string(&facts).expect("serializable facts").contains("OutputInit"));
+    }
+
+    #[tokio::test]
     async fn an_fmp4_avc_session_normalises_its_codec_from_the_init() {
         let dir = crate::test_tempdir().expect("segment directory");
         let fixture = HlsDeliveryFixture::publish(dir.path(), "avc-init").await;
@@ -1868,6 +2011,7 @@
             .expect("AVC init");
 
         let context = crate::transcode::HlsContext {
+            codec_facts: None,
             bandwidth: None,
             file_id: 1,
             start_seconds: 0.0,
@@ -1895,6 +2039,7 @@
             .await
             .expect("ambiguous AVC init");
         let context = crate::transcode::HlsContext {
+            codec_facts: None,
             bandwidth: None,
             file_id: 1,
             start_seconds: 0.0,
@@ -1921,6 +2066,7 @@
         let dir = crate::test_tempdir().expect("segment directory");
         let fixture = HlsDeliveryFixture::publish(dir.path(), "mpegts-avc").await;
         let context = crate::transcode::HlsContext {
+            codec_facts: None,
             bandwidth: None,
             file_id: 1,
             start_seconds: 0.0,
@@ -2031,6 +2177,7 @@
             .expect("dolby vision init");
 
         let context = crate::transcode::HlsContext {
+            codec_facts: None,
             bandwidth: None,
             file_id: 1,
             start_seconds: 0.0,
@@ -2062,6 +2209,7 @@
             .expect("dolby vision init");
 
         let context = crate::transcode::HlsContext {
+            codec_facts: None,
             bandwidth: None,
             file_id: 1,
             start_seconds: 0.0,
@@ -2089,6 +2237,7 @@
             .expect("init without dvcC");
 
         let context = crate::transcode::HlsContext {
+            codec_facts: None,
             bandwidth: None,
             file_id: 1,
             start_seconds: 0.0,
@@ -2514,6 +2663,8 @@
             ("before_preparation_registered", hooks.before_preparation_registered("p")),
             ("after_release_fence_closed", hooks.after_release_fence_closed(&session_id)),
             ("after_release_tombstoned", hooks.after_release_tombstoned(&session_id)),
+            ("after_link_source_validated", hooks.after_link_source_validated()),
+            ("after_staged_link_route_read", hooks.after_staged_link_route_read()),
         ] {
             assert!(
                 hook.as_mut().poll(&mut context).is_ready(),
@@ -2663,9 +2814,12 @@
             fixture.state.clone(),
             PendingCandidateGuard::begin(&playback_id, &digest),
             PreparationCandidateInputs {
+                accepted_observation: None,
                 session_id: session_id.clone(),
                 route: route.clone(),
                 recipe: RemoteStartRequest {
+                    retained_output: None,
+                    retained_output_receiver: None,
                     candidate_catalog: None,
                     candidate_id: None,
                     presentation_target: None,
@@ -2807,6 +2961,7 @@
             &staged_candidate_request(),
             Some(&staged_source_file()),
             AcceptedAsk {
+                prepared_proof: None,
                 film_time_ms: STAGED_ACCEPTED_FILM_TIME_MS,
                 desired_digest: None,
             },
@@ -3039,6 +3194,293 @@
             "the unreachable remote owner is tried after the point, and the release deferred"
         );
     }
+    #[tokio::test]
+    async fn a05_prepared_http_observation_is_optional_auth_not_capability_authority() {
+        let dir = crate::test_tempdir().expect("state dir");
+        let playback = unique_playback_id("a05-optional-observation-auth");
+        let (fixture, session, route) = staging_fixture_for_playback(dir.path(), &playback).await;
+        let request = preparing_control_request(&route);
+        let mut headers = HeaderMap::new();
+        headers.insert("X-Plurx-Link-Receipt", uuid::Uuid::new_v4().to_string().parse().expect("A05 prepared fixture"));
+        headers.insert("authorization", "Bearer invalid-observation-token".parse().expect("A05 prepared fixture"));
+        let remote = Some("192.0.2.8:12345".parse().expect("A05 prepared fixture"));
+        assert!(super::prepared_link::authenticate(&fixture.state, &headers, remote,
+            std::time::Instant::now() + crate::playback_control::EXCHANGE_DEADLINE).await.is_none());
+        let response = super::control::control(State(fixture.state.clone()), AxPath(session),
+            headers.clone(), crate::http::network::RemoteAddress(remote),
+            Bytes::from(serde_json::to_vec(&request).expect("A05 prepared fixture"))).await;
+        let (status, _) = control_body(response).await;
+        assert_eq!(status, StatusCode::OK, "invalid observation credentials do not reject valid capability control");
+        let token = "a05-prepared-observation-owned-token";
+        fixture.store.create_token(&plurx_core::auth::hash_token(token), route.user_id, None).await.expect("A05 prepared fixture");
+        headers.insert("authorization", format!("Bearer {token}").parse().expect("A05 prepared fixture"));
+        assert!(super::prepared_link::authenticate(&fixture.state, &headers, remote,
+            std::time::Instant::now() + crate::playback_control::EXCHANGE_DEADLINE).await.is_some());
+        assert!(super::prepared_link::authenticate(&fixture.state, &headers, remote,
+            std::time::Instant::now()).await.is_none(), "expired original deadline is not renewed");
+        headers.remove("X-Plurx-Link-Receipt");
+        assert!(super::prepared_link::authenticate(&fixture.state, &headers, remote,
+            std::time::Instant::now() + crate::playback_control::EXCHANGE_DEADLINE).await.is_none());
+    }
+    #[tokio::test]
+    async fn a05_prepared_auth_ignores_all_forwarding_headers_and_requires_ipv4_socket() {
+        let dir = crate::test_tempdir().expect("state dir");
+        let playback = unique_playback_id("a05-peer-only-observation-auth");
+        let (fixture, _, route) = staging_fixture_for_playback(dir.path(), &playback).await;
+        let token = "a05-peer-only-observation-owned-token";
+        fixture.store.create_token(&plurx_core::auth::hash_token(token), route.user_id, None)
+            .await.expect("owned authentication token");
+        let mut headers = HeaderMap::new();
+        headers.insert("X-Plurx-Link-Receipt", uuid::Uuid::new_v4().to_string().parse().expect("nonce"));
+        headers.insert("authorization", format!("Bearer {token}").parse().expect("authorization"));
+        headers.insert("forwarded", "for=198.51.100.9".parse().expect("forwarded"));
+        headers.insert("x-forwarded-for", "203.0.113.9".parse().expect("xff"));
+        headers.insert("x-real-ip", "192.0.99.9".parse().expect("real ip"));
+        let remote = Some("192.0.2.8:12345".parse().expect("IPv4 socket"));
+        let observation = super::prepared_link::authenticate(&fixture.state, &headers, remote,
+            std::time::Instant::now() + crate::playback_control::EXCHANGE_DEADLINE).await.expect("actual IPv4 peer authority");
+        assert_eq!(observation.network_fingerprint(), "192.0.2.0/24");
+        for unsupported in [None, Some("[2001:db8::8]:12345".parse().expect("IPv6 socket"))] {
+            assert!(super::prepared_link::authenticate(&fixture.state, &headers, unsupported,
+                std::time::Instant::now() + crate::playback_control::EXCHANGE_DEADLINE).await.is_none(),
+                "forwarding headers cannot authorize a missing or unsupported socket");
+        }
+        headers.remove("forwarded");
+        headers.remove("x-forwarded-for");
+        assert!(super::prepared_link::authenticate(&fixture.state, &headers, None,
+            std::time::Instant::now() + crate::playback_control::EXCHANGE_DEADLINE).await.is_none(),
+            "X-Real-IP alone cannot authorize an absent socket");
+    }
+
+    #[tokio::test]
+    async fn a05_unknown_original_prepared_branch_requires_authenticated_incumbent_and_own_stage_body() {
+        use plurx_core::playback::candidate::{CandidateId, CandidateRoute, QualityCandidate};
+        use super::link_receipts::{ClientLinkSample, SessionBinding};
+        let dir = crate::test_tempdir().expect("source");
+        let playback = unique_playback_id("a05-unknown-original");
+        // An automatic session's evidence counts only behind a proved
+        // incumbent, so the route is a real Auto incumbent: it serves the
+        // fixture's actual source and selected this candidate, the one its
+        // link receipts are bound to below.
+        let incumbent_digest = [7;32];
+        let incumbent = QualityCandidate {id:CandidateId::for_recipe_digest(incumbent_digest), recipe_digest:incumbent_digest,
+            route:CandidateRoute::Encode, normalized_geometry:true, width:1920, height:1080, target_height:1080,
+            average_bps:Some(8_000_000), peak_bps:Some(12_000_000), grade:plurx_core::transcode::OutputGrade::Sdr,
+            decoder_compatible:true, complete_cache:false, sustainable:true};
+        let session_id = uuid::Uuid::new_v4().to_string();
+        let published = HlsDeliveryFixture::publish(dir.path(), &session_id).await;
+        let (fixture, session, route) =
+            staging_route_with_incumbent_on(published, session_id, &playback, Some(incumbent.clone())).await;
+        fixture.store.put_setting(plurx_core::store::keys::PLAYBACK_NETWORK_PRIORS, "1").await.expect("setting");
+        let control = preparing_control_request(&route);
+        accepted_exchange(&fixture, &route, &control).await;
+        let user = fixture.store.get_user(route.user_id).await.expect("user query").expect("user");
+        let token = "a05-unknown-original-owned-token";
+        fixture.store.create_token(&plurx_core::auth::hash_token(token), user.id, None).await.expect("token");
+        let remote = Some("192.0.2.8:12345".parse().expect("peer"));
+        let mut headers = HeaderMap::new();
+        headers.insert("authorization", format!("Bearer {token}").parse().expect("auth"));
+        headers.insert("user-agent", "Mozilla/5.0".parse().expect("UA"));
+        let mut network = crate::http::network::identity(&headers, remote).expect("network");
+        network.user_id = Some(user.id);
+        network.credential_generation = Some(plurx_core::domain::CredentialGeneration::derive(user.id, user.created_at, &user.password_hash));
+        let file = fixture.store.get_file(fixture.file_id()).await.expect("file query").expect("file");
+        let source = super::link_receipts::binding(&network, &file, incumbent.recipe_digest, incumbent.route).await.expect("source identity");
+        fixture.state.link_receipts.register(SessionBinding {source, session:session.clone(), incarnation:route.incarnation_id.clone(), owner_epoch:route.owner_epoch});
+        let (nonce, eof) = fixture.state.link_receipts.mint(&session, "seg00001.m4s", "incumbent-etag", 4_000_000, Some(4000), true).expect("body");
+        let sample = ClientLinkSample {receipt:nonce.clone(), object_name:"seg00001.m4s".into(), etag:"incumbent-etag".into(), body_bytes:4_000_000,
+            body_duration_ms:1000, age_ms:0, network_load:Some(true), from_cache:Some(false), producer_paced:Some(false),
+            cause:plurx_core::domain::NetworkPriorCause::Link, negative:false, media_duration_ms:Some(4000), presenting:true, stalled:false, runway_ms:12000};
+        headers.insert("X-Plurx-Link-Receipt", nonce.parse().expect("nonce"));
+        let http = super::prepared_link::authenticate(&fixture.state, &headers, remote,
+            std::time::Instant::now() + crate::playback_control::EXCHANGE_DEADLINE).await.expect("ordinary auth");
+        let observation = super::prepared_link::capture(&fixture.state, &route, &control,
+            crate::playback_control::ControlDisposition::Accepted, Some(http)).await.expect("accepted actor");
+        let digest = [12;32];
+        let candidate = QualityCandidate {id:CandidateId::for_recipe_digest(digest), recipe_digest:digest, route:CandidateRoute::Remux,
+            normalized_geometry:true, width:3840, height:2160, target_height:2160, average_bps:Some(90_000_000), peak_bps:None,
+            grade:plurx_core::transcode::OutputGrade::Sdr, decoder_compatible:true, complete_cache:false, sustainable:true};
+        let mut request = serde_json::from_str::<RemoteStartRequest>(&route.recipe_json).expect("recipe").request;
+        request.candidate_context = Some(Box::new(crate::transcode::CandidateExecutionContext {
+            planning_snapshot:None,
+            retained_output:None, canonical_caps:None, selected_candidate:candidate.clone(), planning_binding:None,
+            owner_node_id:Some(fixture.state.node_id.clone()),
+            candidate_id:candidate.id, recipe_digest:digest, normalized_geometry:true, grade:candidate.grade, profile:None}));
+        assert!(observation.proposed_proof(&fixture.state, &file, &mut request, &candidate, super::link_receipts::advisory_deadline()).await.is_none(), "header without EOF cannot start a trial");
+        eof(std::time::Instant::now(), unix_ms());
+        assert!(fixture.state.link_receipts.accept(&fixture.state, &network, Some(&session), &sample).await.is_some());
+        let proof = observation.proposed_proof(&fixture.state, &file, &mut request, &candidate, super::link_receipts::advisory_deadline()).await.expect("authenticated unknown-cost copy trial");
+        assert!(request.candidate_context.as_ref().expect("context").retained_output.is_none(), "trial never invents retained full output");
+        let mut known = candidate.clone(); known.peak_bps = Some(90_000_000);
+        assert!(observation.proposed_proof(&fixture.state, &file, &mut request, &known, super::link_receipts::advisory_deadline()).await.is_none(), "known cost cannot become unknown trial");
+        let staged = uuid::Uuid::new_v4().to_string();
+        let incarnation = uuid::Uuid::new_v4().to_string();
+        let deadline = unix_ms()+15000;
+        assert!(observation.gate.stage_preparation_for_owner(incarnation.clone(), control.generation.clone(), deadline,
+            i64::try_from(control.control_epoch).expect("epoch"), Some(control.selection.desired().digest())).await);
+        let activation = plurx_core::domain::MediaSessionActivation {incarnation_id:incarnation.clone(), session_id:staged.clone(), user_id:user.id,
+            playback_id:playback, recovery_epoch:String::new(), expected_predecessor_incarnation_id:None, fence_predecessor:false,
+            request_id:None, request_fingerprint:"a".repeat(64), owner_node_id:fixture.state.node_id.clone(), recipe_json:"{}".into(), response_json:"{}".into(),
+            publication_ready_at_ms:plurx_core::domain::MEDIA_SESSION_PUBLICATION_BLOCKED, media_origin_ms:0, now_ms:unix_ms(), lease_expires_at_ms:deadline, expected_desired_revision:None};
+        assert!(fixture.store.activate_media_session(&activation).await.expect("stage activation").is_some());
+        proof.register(&fixture.state, &staged, &incarnation, deadline, tokio_util::sync::CancellationToken::new()).await;
+        let (own_nonce, own_eof) = fixture.state.link_receipts.mint(&staged, "seg00002.m4s", "own-etag", 4096, Some(2000), true).expect("registered trial body");
+        let own = ClientLinkSample {receipt:own_nonce, object_name:"seg00002.m4s".into(), etag:"own-etag".into(), body_bytes:4096, media_duration_ms:Some(2000), ..sample};
+        assert!(fixture.state.link_receipts.accept(&fixture.state, &network, Some(&staged), &own).await.is_none());
+        own_eof(std::time::Instant::now(), unix_ms());
+        assert!(fixture.state.link_receipts.accept(&fixture.state, &network, Some(&staged), &own).await.is_some(), "trial acquires its own authenticated body");
+        let (late_nonce, late_eof) = fixture.state.link_receipts.mint(&staged, "seg00003.m4s", "late-etag", 4096, Some(2000), true).expect("late body");
+        late_eof(std::time::Instant::now(), unix_ms());
+        let late = ClientLinkSample {receipt:late_nonce, object_name:"seg00003.m4s".into(), etag:"late-etag".into(), ..own};
+        assert!(observation.gate.begin_abort_preparation_for_owner(&incarnation, i64::try_from(control.control_epoch).expect("epoch")).await);
+        assert!(fixture.state.link_receipts.accept(&fixture.state, &network, Some(&staged), &late).await.is_none(), "aborted trial cannot claim a late completed body");
+    }
+
+    #[tokio::test]
+    async fn a05_staged_intake_uses_own_eof_and_refuses_aborted_actor_without_claim() {
+        a05_staged_intake_fixture(0).await;
+    }
+
+    #[tokio::test]
+    async fn a05_staged_intake_timeout_is_unknown_and_preserves_raw_claim_retry() {
+        a05_staged_intake_fixture(1).await;
+    }
+
+    #[tokio::test]
+    async fn a05_staged_intake_abort_during_final_route_await_invalidates_token_without_claim() {
+        a05_staged_intake_fixture(2).await;
+    }
+
+    #[tokio::test]
+    async fn a05_committed_preparation_drops_staged_proof_and_binds_as_ordinary() {
+        a05_staged_intake_fixture(3).await;
+    }
+
+    #[tokio::test]
+    async fn a05_aborted_preparation_retires_staged_proof_and_binding() {
+        a05_staged_intake_fixture(4).await;
+    }
+
+    async fn a05_staged_intake_fixture(mode: u8) {
+        use plurx_core::domain::{MediaSessionActivation, NetworkPriorCause, CredentialGeneration};
+        use super::link_receipts::ClientLinkSample;
+        use plurx_core::playback::candidate::CandidateRoute;
+        let dir = crate::test_tempdir().expect("A05 prepared fixture");
+        let playback = unique_playback_id("a05-staged-intake");
+        let (fixture, session, route) = staging_fixture_for_playback(dir.path(), &playback).await;
+        let request = preparing_control_request(&route);
+        accepted_exchange(&fixture, &route, &request).await;
+        let gate = fixture.state.transcode.session_preparation_gate(&session).await.expect("A05 prepared fixture");
+        let desired = request.selection.desired().digest();
+        let fence = gate.accepted_observation(crate::playback_control::AcceptedControlIdentity {
+            generation: request.generation.clone(), owner_epoch: request.control_epoch,
+            client_instance_id: request.client_instance_id.clone(), sequence: request.sequence,
+            fingerprint: request.fingerprint().expect("A05 prepared fixture"), desired_digest: desired.clone(),
+        }).await.expect("A05 prepared fixture");
+        let staged = uuid::Uuid::new_v4().to_string();
+        let incarnation = uuid::Uuid::new_v4().to_string();
+        let now = unix_ms();
+        let deadline = now + 60_000;
+        assert!(gate.stage_preparation_for_owner(incarnation.clone(), request.generation.clone(),
+            deadline, i64::try_from(request.control_epoch).expect("A05 prepared fixture"), Some(desired)).await);
+        let activation = MediaSessionActivation {
+            incarnation_id: incarnation.clone(), session_id: staged.clone(), user_id: route.user_id,
+            playback_id: playback.clone(), recovery_epoch: String::new(), expected_predecessor_incarnation_id: None,
+            fence_predecessor: false, request_id: None, request_fingerprint: "a".repeat(64),
+            owner_node_id: fixture.state.node_id.clone(), recipe_json: "{}".into(), response_json: "{}".into(),
+            publication_ready_at_ms: plurx_core::domain::MEDIA_SESSION_PUBLICATION_BLOCKED,
+            media_origin_ms: 0, now_ms: now, lease_expires_at_ms: deadline, expected_desired_revision: None,
+        };
+        assert!(fixture.store.activate_media_session(&activation).await.expect("A05 prepared fixture").is_some());
+        let user = fixture.store.get_user(route.user_id).await.expect("A05 prepared fixture").expect("A05 prepared fixture");
+        let network = crate::telemetry::NetworkIdentity {
+            user_id: Some(user.id), credential_generation: Some(CredentialGeneration::derive(user.id, user.created_at, &user.password_hash)),
+            client_class: "web".into(), network_fingerprint: "192.0.2.0/24".into(),
+        };
+        let file = fixture.store.get_file(fixture.file_id()).await.expect("A05 prepared fixture").expect("A05 prepared fixture");
+        let source = super::link_receipts::binding(&network, &file, [7;32], CandidateRoute::Encode).await.expect("A05 prepared fixture");
+        let binding = super::link_receipts::SessionBinding { source, session: staged.clone(), incarnation: incarnation.clone(), owner_epoch: 1 };
+        fixture.state.link_receipts.register_staged(binding, super::prepared_link::StagedProof {
+            stage: gate.staged_observation_is_current(fence.clone(), incarnation.clone(), deadline).await.expect("A05 prepared fixture"),
+            gate: Arc::clone(&gate), fence, incarnation: incarnation.clone(), owner_epoch: 1,
+            deadline_unix_ms: deadline, cancelled: tokio_util::sync::CancellationToken::new(),
+            trial_deadline: None,
+        });
+        let (nonce, eof) = fixture.state.link_receipts.mint(&staged, "seg00001.m4s", "etag", 4096, Some(4000), true).expect("A05 prepared fixture");
+        let mut sample = ClientLinkSample { receipt: nonce, object_name: "seg00001.m4s".into(), etag: "etag".into(),
+            body_bytes:4096, body_duration_ms:1000, age_ms:0, network_load:Some(true), from_cache:Some(false),
+            producer_paced:Some(false), cause:NetworkPriorCause::Link, negative:false, media_duration_ms:Some(4000),
+            presenting:false, stalled:false, runway_ms:0 };
+        assert!(fixture.state.link_receipts.accept(&fixture.state, &network, Some(&staged), &sample).await.is_none(), "header without own EOF is not proof");
+        eof(std::time::Instant::now(), now);
+        struct StalledObservation;
+        impl crate::playback_control::PreparationGate for StalledObservation {
+            fn stage_preparation_for_owner<'a>(&'a self, _: String, _: String, _: i64, _: i64, _: Option<String>) -> crate::playback_control::GateAnswer<'a> { Box::pin(async { false }) }
+            fn may_commit_preparation_for_owner<'a>(&'a self, _: &'a str, _: i64) -> crate::playback_control::GateAnswer<'a> { Box::pin(async { false }) }
+            fn begin_abort_preparation_for_owner<'a>(&'a self, _: &'a str, _: i64) -> crate::playback_control::GateAnswer<'a> { Box::pin(async { false }) }
+            fn reject_preparation_commit_for_owner<'a>(&'a self, _: &'a str, _: i64) -> crate::playback_control::GateAnswer<'a> { Box::pin(async { false }) }
+            fn settle_preparation_for_owner<'a>(&'a self, _: &'a str, _: bool, _: i64) -> crate::playback_control::GateAnswer<'a> { Box::pin(async { false }) }
+            fn observation_is_current<'a>(&'a self, _: crate::playback_control::AcceptedControlFence)
+                -> crate::playback_control::GateAnswer<'a> {
+                Box::pin(std::future::pending())
+            }
+        }
+        if mode == 3 {
+            fixture.store.put_setting(plurx_core::store::keys::PLAYBACK_NETWORK_PRIORS, "1").await.expect("setting");
+            fixture.store.settle_media_session_activation(&activation,
+                plurx_core::domain::MediaSessionActivationSettlement::Confirm { publication_ready_at_ms: 0 }, now)
+                .await.expect("commit").expect("published successor");
+            let committed = fixture.store.media_session_route(&staged).await.expect("route query").expect("committed route");
+            assert!(fixture.state.link_receipts.accept(&fixture.state, &network, Some(&staged), &sample).await.is_none(),
+                "a staged row outliving its commit refuses the committed route");
+            fixture.state.link_receipts.settle_committed(&committed, &fixture.state.node_id);
+            assert!(fixture.state.link_receipts.accept(&fixture.state, &network, Some(&staged), &sample).await.is_some(),
+                "the committed successor accepts its completed body as an ordinary binding");
+            assert!(fixture.state.link_receipts.current_positive_until(&fixture.state, &network, &file, Some(&sample.receipt),
+                Some(&playback), Some(&fixture.state.node_id), super::link_receipts::advisory_deadline()).await.is_some(),
+                "the committed successor proves like any registered session");
+            assert!(fixture.state.link_receipts.mint(&staged, "seg00002.m4s", "etag2", 4096, Some(4000), true).is_some(),
+                "the committed successor keeps minting after its stage ends");
+            return;
+        }
+        if mode == 4 {
+            fixture.state.link_receipts.retire_staged(&staged, &incarnation);
+            assert!(fixture.state.link_receipts.mint(&staged, "seg00002.m4s", "etag2", 4096, Some(4000), true).is_none(),
+                "a retired stage mints nothing");
+            assert!(fixture.state.link_receipts.accept(&fixture.state, &network, Some(&staged), &sample).await.is_none(),
+                "a retired stage accepts nothing");
+            return;
+        }
+        if mode == 2 {
+            let pause = super::pause_staged_link_route_result(&fixture.state);
+            let intake = fixture.state.link_receipts.accept(&fixture.state, &network, Some(&staged), &sample);
+            tokio::pin!(intake);
+            let held = tokio::select! {
+                held = pause.reached() => held,
+                _ = &mut intake => panic!("intake must suspend inside final route result await"),
+            };
+            assert!(gate.begin_abort_preparation_for_owner(&incarnation, i64::try_from(request.control_epoch).expect("A05 prepared fixture")).await);
+            held.release();
+            assert!(intake.await.is_none(), "same desired digest cannot rescue an aborted stage token");
+            assert!(!fixture.state.link_receipts.raw_claimed_for_test(&sample.receipt), "refusal cannot consume raw claim");
+            return;
+        }
+        if mode == 1 {
+            fixture.state.link_receipts.replace_staged_gate_for_test(&staged, Arc::new(StalledObservation));
+            let query_started = std::time::Instant::now();
+            assert!(fixture.state.link_receipts.accept(&fixture.state, &network, Some(&staged), &sample).await.is_none(),
+                "unresponsive optional observational query is bounded Unknown");
+            assert!(query_started.elapsed() < Duration::from_millis(500));
+            fixture.state.link_receipts.replace_staged_gate_for_test(&staged, Arc::clone(&gate));
+        }
+        assert!(fixture.state.link_receipts.accept(&fixture.state, &network, Some(&staged), &sample).await.is_some(), "own completed body is observable before commit");
+        assert!(fixture.state.link_receipts.current_positive_until(&fixture.state, &network, &file, Some(&sample.receipt), Some(&playback), Some(&fixture.state.node_id), super::link_receipts::advisory_deadline()).await.is_none(), "staged proof cannot lend incumbent admission");
+        let (second, complete) = fixture.state.link_receipts.mint(&staged, "seg00002.m4s", "etag2", 4096, Some(4000), true).expect("A05 prepared fixture");
+        complete(std::time::Instant::now(), now);
+        sample.receipt = second; sample.object_name = "seg00002.m4s".into(); sample.etag = "etag2".into();
+        assert!(gate.begin_abort_preparation_for_owner(&incarnation, i64::try_from(request.control_epoch).expect("A05 prepared fixture")).await);
+        assert!(fixture.state.link_receipts.accept(&fixture.state, &network, Some(&staged), &sample).await.is_none(), "aborted actor refuses its still-completed body");
+    }
 
     #[test]
     fn planning_binding_detects_same_timestamp_probe_and_generation_changes() {
@@ -3059,6 +3501,7 @@
     async fn expired_catalog_budget_refuses_before_validation_or_source_work() {
         let state = resolver_state();
         let request = crate::media_pool::QualityCatalogRequest {
+            audio_claim: None, audio_delivery: None,
             file_id: -1, source_size: -1, source_mtime: -1,
             caps: Default::default(), copy_contract: None, audio_index: None,
             audio_offset_ms: 0, subtitle_burn: None,
@@ -3092,7 +3535,7 @@
             (true, true, None, StatusCode::OK),
         ] {
             let body = CreateSession { playback_id: "legacy-catalog-contract".into(), caps: Some(caps.clone()), quality_auto: Some(auto), copy: Some(copy), height, ..bare_create() };
-            let result = resolve_plan(PlanInputs { snapshot: None, state: &state, user_id: 1, file_id: source.id, source: Some(&source), network_prior: None }, None, body).await;
+            let result = resolve_plan(PlanInputs { snapshot: None, state: &state, user_id: 1, file_id: source.id, source: Some(&source), network_prior: None, network_identity: None, incumbent_receipt: None }, None, body).await;
             assert_eq!(result.map(|_| StatusCode::OK).unwrap_or_else(|error| error.into_response().status()), expected);
         }
     }

@@ -650,6 +650,83 @@ fn validate_takeover(takeover: &MediaSessionTakeover) -> Result<(), StoreError> 
 
 #[async_trait]
 impl MediaSessionStore for SqliteStore {
+    async fn observe_candidate_recovery(
+        &self,
+        observation: &crate::store::CandidateRecoveryObservation,
+        now_ms: i64,
+    ) -> Result<Option<crate::store::CandidateRecoveryMemory>, StoreError> {
+        if !observation.valid(now_ms) {
+            return Ok(None);
+        }
+        let value = observation.clone();
+        self.with_conn(move |conn| {
+            let tx = conn.unchecked_transaction()?;
+            let scope = value.scope.key().expect("validated scope");
+            tx.execute(
+                crate::store::candidate_recovery::PRUNE_SQL,
+                params![now_ms.saturating_sub(86_400_000)],
+            )?;
+            let r = &value.route;
+            let s = &value.scope;
+            let changed = tx.execute(
+                crate::store::candidate_recovery::OBSERVE_SQL,
+                params![
+                    scope,
+                    hex::encode(value.recipe_digest),
+                    value.cause.as_str(),
+                    value.event_id,
+                    s.user_id,
+                    s.playback_id,
+                    s.recovery_epoch,
+                    now_ms,
+                    r.incarnation_id,
+                    r.session_id,
+                    r.owner_node_id,
+                    r.owner_epoch,
+                    r.recipe_json,
+                    s.file_id,
+                    s.source_size,
+                    s.source_mtime,
+                    i64::from(value.quality_step)
+                ],
+            )?;
+            if changed == 0 {
+                return Ok(None);
+            }
+            let recipes = {
+                let mut statement = tx.prepare(crate::store::candidate_recovery::READ_SQL)?;
+                let recipes = statement
+                    .query_map(params![scope], |row| {
+                        Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)? == 1))
+                    })?
+                    .collect::<Result<Vec<_>, _>>()?;
+                recipes
+            };
+            tx.commit()?;
+            Ok(Some(crate::store::candidate_recovery::memory(recipes)))
+        })
+        .await
+    }
+
+    async fn candidate_recovery_memory(
+        &self,
+        scope: &crate::store::CandidateRecoveryScope,
+    ) -> Result<crate::store::CandidateRecoveryMemory, StoreError> {
+        let Some(key) = scope.key() else {
+            return Ok(crate::store::CandidateRecoveryMemory::default());
+        };
+        self.with_conn(move |conn| {
+            let mut statement = conn.prepare(crate::store::candidate_recovery::READ_SQL)?;
+            let recipes = statement
+                .query_map(params![key], |row| {
+                    Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)? == 1))
+                })?
+                .collect::<Result<Vec<_>, _>>()?;
+            Ok(crate::store::candidate_recovery::memory(recipes))
+        })
+        .await
+    }
+
     async fn claim_media_session_request(
         &self,
         user_id: i64,

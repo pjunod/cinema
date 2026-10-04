@@ -2008,6 +2008,7 @@ pub struct TranscodeMediaOptions {
     pub effective_rate_control: EffectiveRateControl,
     pub audio_channels: u32,
     pub audio_bitrate_kbps: u32,
+    pub audio: Option<crate::playback::audio::AudioDelivery>,
     pub audio_index: Option<i64>,
     pub audio_offset_ms: i64,
     pub input_has_audio: bool,
@@ -2041,6 +2042,7 @@ impl TranscodeMediaOptions {
             effective_rate_control: options.effective_rate_control,
             audio_channels: options.audio_channels,
             audio_bitrate_kbps: options.audio_bitrate_kbps,
+            audio: options.audio.clone(),
             audio_index: options.audio_index,
             audio_offset_ms: source.audio_offset_ms,
             input_has_audio: !source.audio_streams.is_empty(),
@@ -2224,6 +2226,8 @@ pub struct PresentationContract {
     output_codec: String,
     output_encoder: String,
     output_profile: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    sdr_avc: Option<super::QualifiedSdrAvc>,
     output_pixel_format: String,
     output_dynamic_range: String,
     output_transfer: String,
@@ -2239,6 +2243,8 @@ pub struct PresentationContract {
     effective_height: Option<u32>,
     audio_channels: u32,
     audio_bitrate_kbps: u32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    audio: Option<crate::playback::audio::AudioDelivery>,
     audio_index: Option<i64>,
     subtitle_index: Option<i64>,
     subtitle_rendering: SubtitleRendering,
@@ -2260,6 +2266,10 @@ impl PresentationContract {
 
     pub fn output_profile(&self) -> Option<&str> {
         self.output_profile.as_deref()
+    }
+
+    pub fn sdr_avc(&self) -> Option<&super::QualifiedSdrAvc> {
+        self.sdr_avc.as_ref()
     }
 
     pub fn output_pixel_format(&self) -> &str {
@@ -2405,12 +2415,61 @@ pub struct ResolvedTranscode {
     source_identity: DecodeSourceIdentity,
     source_binding: PlanSourceBinding,
     output_contract: PresentationContract,
+    codec_contract: super::OutputCodecContract,
     input_dynamic_range: Option<DynamicRangeClass>,
     routing_dynamic_range: Option<String>,
     deinterlace: Deinterlace,
 }
 
 impl ResolvedTranscode {
+    /// Bind only a completed exact-node experiment to this output plan. The
+    /// caller supplies the resolved OUTPUT grid; VOD must rebind after choosing
+    /// its fps-filter grid rather than reuse a source's average cadence.
+    pub fn with_sdr_avc_qualification(
+        mut self,
+        caps: &super::EncoderCaps,
+        cadence: Option<Rational>,
+        forced_idr: bool,
+    ) -> Self {
+        if self.output_contract.sdr_avc.take().is_some()
+            && self.codec_contract.grade == OutputGrade::Sdr
+        {
+            self.output_contract.output_profile =
+                (self.encoder == Encoder::Software).then(|| "high".to_owned());
+        }
+        let (Some(width), Some(height), Some(cadence)) = (
+            self.output_contract.effective_width,
+            self.output_contract.effective_height,
+            cadence,
+        ) else {
+            return self;
+        };
+        if self.output_contract.width_rule != OutputWidthRule::PreserveAspectEven
+            || self.codec_contract.grade != OutputGrade::Sdr
+            || u64::from(cadence.numerator()) > 60 * u64::from(cadence.denominator())
+        {
+            return self;
+        }
+        self.output_contract.sdr_avc = caps
+            .sdr_avc
+            .iter()
+            .find(|proof| {
+                proof.matches(
+                    self.encoder,
+                    (width, height),
+                    cadence,
+                    self.options.video_bitrate_kbps,
+                    self.options.effective_rate_control,
+                    forced_idr,
+                )
+            })
+            .cloned();
+        if self.output_contract.sdr_avc.is_some() {
+            self.output_contract.output_profile = Some("high".to_owned());
+        }
+        self
+    }
+
     pub fn decode(&self) -> &ResolvedDecode {
         &self.decode
     }
@@ -2429,6 +2488,11 @@ impl ResolvedTranscode {
 
     pub fn output_contract(&self) -> &PresentationContract {
         &self.output_contract
+    }
+
+    /// Delivered dimensions, resolved from this node's graph, never the source codec.
+    pub fn codec_contract(&self) -> &super::OutputCodecContract {
+        &self.codec_contract
     }
 
     pub fn input_dynamic_range(&self) -> Option<DynamicRangeClass> {
@@ -2566,6 +2630,21 @@ impl ResolvedTranscode {
             },
         );
         feed("encoder", self.encoder.label().as_bytes());
+        if let Some(proof) = self.output_contract.sdr_avc() {
+            // Conditional: old/unqualified plans retain their exact digest.
+            // Qualified software changes level flags too, so it is not exempt
+            // from cache identity merely because its old profile was High.
+            feed("sdr_avc_codec", proof.codec().as_bytes());
+            feed(
+                "sdr_avc_grid",
+                format!(
+                    "{}/{}",
+                    proof.cadence().numerator(),
+                    proof.cadence().denominator()
+                )
+                .as_bytes(),
+            );
+        }
         let options = &self.options;
         feed("height", options.target_height.to_string().as_bytes());
         feed(
@@ -2588,6 +2667,42 @@ impl ResolvedTranscode {
             "audio_index",
             options.audio_index.unwrap_or(-1).to_string().as_bytes(),
         );
+        if let Some(audio) = &options.audio {
+            use crate::playback::audio::AudioAction;
+            feed(
+                "audio_action",
+                match audio.action {
+                    AudioAction::None => b"none",
+                    AudioAction::Copy { .. } => b"copy",
+                    AudioAction::Encode { .. } => b"encode",
+                },
+            );
+            feed("audio_codec", audio.codec().unwrap_or("none").as_bytes());
+            match &audio.action {
+                AudioAction::Encode {
+                    layout,
+                    sample_rate,
+                    ..
+                } => {
+                    feed(
+                        "audio_layout",
+                        layout.as_deref().unwrap_or("default").as_bytes(),
+                    );
+                    feed("audio_sample_rate", sample_rate.to_string().as_bytes());
+                }
+                AudioAction::Copy { .. } | AudioAction::None => {
+                    feed("audio_layout", b"source");
+                    feed("audio_sample_rate", b"source");
+                }
+            }
+            // The incumbent fold (no filter) keeps its historical spelling so
+            // no existing key moves; a measured fold feeds its exact filter
+            // chain, so any change to its gains or limiter is a new key.
+            match audio.downmix_filter() {
+                Some(filter) => feed("audio_downmix", filter.as_bytes()),
+                None => feed("audio_downmix", b"default"),
+            }
+        }
         feed(
             "audio_offset_ms",
             options.audio_offset_ms.to_string().as_bytes(),
@@ -2969,10 +3084,15 @@ pub fn resolve_transcode(
     } else {
         None
     };
-    let output_grade = options.pipeline.output_grade();
-    let output_encoder = request
-        .encoder
-        .video_codec_for(output_grade)
+    let codec_contract = super::OutputCodecContract::resolve(
+        request.encoder,
+        options.pipeline,
+        options.effective_rate_control,
+    )
+    .ok_or(PlanError::IncompatibleRenderer)?;
+    let output_grade = codec_contract.grade;
+    let output_encoder = codec_contract
+        .encoder_name()
         .ok_or(PlanError::IncompatibleRenderer)?;
     let surface = surface_contract(
         backend,
@@ -3065,11 +3185,7 @@ pub fn resolve_transcode(
     }
     let output_contract = PresentationContract {
         output_grade,
-        output_codec: match output_grade {
-            OutputGrade::Sdr => "h264",
-            OutputGrade::Hdr10 => "hevc",
-        }
-        .to_owned(),
+        output_codec: codec_contract.codec.name().to_owned(),
         output_encoder: output_encoder.to_owned(),
         output_profile: match output_grade {
             OutputGrade::Hdr10 => Some("main10".to_owned()),
@@ -3080,6 +3196,7 @@ pub fn resolve_transcode(
             }
             OutputGrade::Sdr => None,
         },
+        sdr_avc: None,
         output_pixel_format: output_grade.pixel_format().to_owned(),
         output_dynamic_range: output_grade.delivered_dynamic_range().to_owned(),
         output_transfer: output_grade.transfer().to_owned(),
@@ -3097,6 +3214,7 @@ pub fn resolve_transcode(
         effective_height: effective_geometry.map(|geometry| geometry.1),
         audio_channels: options.audio_channels,
         audio_bitrate_kbps: options.audio_bitrate_kbps,
+        audio: options.audio.clone(),
         audio_index: options.audio_index,
         subtitle_index: options
             .subtitle_burn
@@ -3123,6 +3241,7 @@ pub fn resolve_transcode(
         source_identity: facts.source_identity.clone(),
         source_binding: facts.binding,
         output_contract,
+        codec_contract,
         input_dynamic_range: facts.dynamic_range,
         routing_dynamic_range: facts.routing_dynamic_range().map(str::to_owned),
         deinterlace,
@@ -3142,6 +3261,26 @@ fn effective_output_geometry(facts: &DecodeFacts, requested_max_height: u32) -> 
 }
 
 fn validate_media_options(options: &TranscodeMediaOptions) -> Result<(), PlanError> {
+    if let Some(audio) = &options.audio {
+        if !audio.valid_snapshot() {
+            return Err(PlanError::InvalidMediaOption("audio_delivery"));
+        }
+        match &audio.action {
+            crate::playback::audio::AudioAction::Encode {
+                channels,
+                bitrate_kbps,
+                ..
+            } if options.audio_channels != u32::from(*channels)
+                || options.audio_bitrate_kbps != *bitrate_kbps =>
+            {
+                return Err(PlanError::InvalidMediaOption("audio_delivery"));
+            }
+            crate::playback::audio::AudioAction::Copy { .. } if options.audio_offset_ms != 0 => {
+                return Err(PlanError::InvalidMediaOption("audio_delivery"));
+            }
+            _ => {}
+        }
+    }
     if options.target_height < 2 {
         return Err(PlanError::InvalidMediaOption("target_height"));
     }

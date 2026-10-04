@@ -103,7 +103,6 @@ pub fn validation_register_applied_sql_classes(classes: &[&str]) -> bool {
             .collect();
         VALIDATION_SQL_CLASS_COUNTS
             .set(counters)
-            .ok()
             .expect("sql class counters follow their classes");
     }
     registered
@@ -301,6 +300,7 @@ pub struct StateMachineSqlite {
     filename_db: String,
     prepared_statement_cache_capacity: usize,
     read_pool_size: usize,
+    snapshot_storage_deferral: std::time::Duration,
     snapshot_files: Arc<Mutex<SnapshotFileState>>,
     snapshot_recovery_pending: Arc<AtomicBool>,
 
@@ -320,10 +320,13 @@ impl StateMachineSqlite {
         log_statements: bool,
         prepared_statement_cache_capacity: usize,
         read_pool_size: usize,
+        snapshot_storage_deferral: std::time::Duration,
         #[cfg(feature = "s3")] s3_config: Option<Arc<crate::s3::S3Config>>,
         do_reset_metadata: bool,
         #[cfg(feature = "backup")] local_backup_keep_days: u16,
+        staged_startup: bool,
     ) -> Result<StateMachineSqlite, StorageError<NodeId>> {
+        let mut startup_writer = crate::startup_cleanup::StartupStorageOwner::new(staged_startup);
         // IMPORTANT: Do NOT change the order of the db exists check!
         // DB recovery will fail otherwise!
         let mut db_exists = Self::db_exists(data_dir, filename_db).await;
@@ -358,6 +361,9 @@ impl StateMachineSqlite {
             #[cfg(feature = "backup")]
             local_backup_keep_days,
         );
+        // Retain the handle before the first post-spawn await. Recoverable
+        // read-pool/recovery errors and constructor panic cannot orphan it.
+        startup_writer.protect_writer(write_tx.clone());
 
         let read_pool = Self::connect_read_pool(
             path_db.as_ref(),
@@ -382,6 +388,7 @@ impl StateMachineSqlite {
             prepared_statement_cache_capacity,
             read_pool_size,
             snapshot_files: Arc::new(Mutex::new(SnapshotFileState::default())),
+            snapshot_storage_deferral,
             snapshot_recovery_pending: Arc::new(AtomicBool::new(false)),
             #[cfg(feature = "s3")]
             s3_config,
@@ -399,6 +406,7 @@ impl StateMachineSqlite {
             slf.update_state_machine_(snapshot.path).await?;
         }
 
+        startup_writer.handoff();
         Ok(slf)
     }
 
@@ -1160,8 +1168,15 @@ impl RaftStateMachine<TypeConfigSqlite> for StateMachineSqlite {
             // in exchange for a more complicated logic -> test!
 
             let resp = match entry.payload {
-                // TODO we probably need to update the log id in writer in case of ::Empty?
-                EntryPayload::Blank => Response::Empty,
+                EntryPayload::Blank => {
+                    let (ack, rx) = oneshot::channel();
+                    self.write_tx
+                        .send_async(WriterRequest::MetadataApplied((last_applied_log_id, ack)))
+                        .await
+                        .expect("sql writer to always be listening");
+                    rx.await.expect("to always get a response from sql writer");
+                    Response::Empty
+                }
 
                 EntryPayload::Normal(QueryWrite::Execute(Query { sql, params })) => {
                     let (tx, rx) = oneshot::channel();
@@ -1335,6 +1350,8 @@ impl RaftStateMachine<TypeConfigSqlite> for StateMachineSqlite {
             #[cfg(feature = "backup")]
             path_backups: self.path_backups.clone(),
             path_snapshots: self.path_snapshots.clone(),
+            database_path: std::path::Path::new(&self.path_db).join(&self.filename_db),
+            storage_deferral: self.snapshot_storage_deferral,
             write_tx: self.write_tx.clone(),
             snapshot_files: self.snapshot_files.clone(),
             snapshot_recovery_pending: self.snapshot_recovery_pending.clone(),
@@ -1586,25 +1603,21 @@ mod backup_owner_contracts {
 
     #[test]
     fn old_and_reserved_backup_builds_decode_each_others_rtt() {
-        let old_bytes = crate::helpers::serialize(&LegacyQueryWrite::RTT)
-            .expect("serialize deployed RTT");
-        let new_bytes = crate::helpers::serialize(&QueryWrite::RTT)
-            .expect("serialize reserved-variant RTT");
+        let old_bytes =
+            crate::helpers::serialize(&LegacyQueryWrite::RTT).expect("serialize deployed RTT");
+        let new_bytes =
+            crate::helpers::serialize(&QueryWrite::RTT).expect("serialize reserved-variant RTT");
         assert_eq!(old_bytes, [5, 0, 0, 0]);
         assert_eq!(new_bytes, old_bytes);
 
-        let (new_from_old, _): (QueryWrite, usize) = bincode::serde::decode_from_slice(
-            &old_bytes,
-            bincode::config::legacy(),
-        )
-        .expect("new build decodes deployed RTT");
+        let (new_from_old, _): (QueryWrite, usize) =
+            bincode::serde::decode_from_slice(&old_bytes, bincode::config::legacy())
+                .expect("new build decodes deployed RTT");
         assert!(matches!(new_from_old, QueryWrite::RTT));
 
-        let (old_from_new, _): (LegacyQueryWrite, usize) = bincode::serde::decode_from_slice(
-            &new_bytes,
-            bincode::config::legacy(),
-        )
-        .expect("deployed build decodes reserved-variant RTT");
+        let (old_from_new, _): (LegacyQueryWrite, usize) =
+            bincode::serde::decode_from_slice(&new_bytes, bincode::config::legacy())
+                .expect("deployed build decodes reserved-variant RTT");
         assert!(matches!(old_from_new, LegacyQueryWrite::RTT));
     }
 }
@@ -1632,11 +1645,13 @@ mod snapshot_metrics_contracts {
             false,
             16,
             1,
+            std::time::Duration::from_secs(600),
             #[cfg(feature = "s3")]
             None,
             false,
             #[cfg(feature = "backup")]
             30,
+            false,
         )
         .await
     }
@@ -1799,6 +1814,138 @@ mod snapshot_metrics_contracts {
         drop(current);
         shutdown_state(&restarted).await;
         fs::remove_dir_all(&root).await.expect("remove test root");
+    }
+
+    #[tokio::test]
+    async fn storage_deferral_does_not_block_incoming_receive_or_install() {
+        use std::future::Future;
+        use std::task::{Context, Poll, Waker};
+        let root = std::env::temp_dir().join(format!("hiqlite-admission-live-{}", Uuid::now_v7()));
+        fs::create_dir_all(&root).await.expect("create test root");
+        let mut state = new_test_state(root.to_str().expect("UTF-8 root"), "admission.db")
+            .await
+            .expect("create live state");
+        let snapshot = state
+            .get_snapshot_builder()
+            .await
+            .build_snapshot()
+            .await
+            .expect("build incoming snapshot fixture");
+        let source = format!("{}/{}", state.path_snapshots, snapshot.meta.snapshot_id);
+        let mut builder = state.get_snapshot_builder().await;
+        // An actual missing database probe is Unknown and enters bounded
+        // admission, without simulating filesystem success or waiting 600s.
+        builder.database_path = root.join("missing-database.db");
+        let mut deferred = Box::pin(builder.build_snapshot());
+        let mut context = Context::from_waker(Waker::noop());
+        assert!(matches!(
+            deferred.as_mut().poll(&mut context),
+            Poll::Pending
+        ));
+        let receive =
+            tokio::time::timeout(Duration::from_secs(2), state.begin_receiving_snapshot())
+                .await
+                .expect("storage deferral cannot block receive")
+                .expect("begin receive during deferral");
+        fs::copy(&source, format!("{}/temp", state.path_snapshots))
+            .await
+            .expect("stage incoming image");
+        tokio::time::timeout(
+            Duration::from_secs(2),
+            state.install_snapshot(&snapshot.meta, receive),
+        )
+        .await
+        .expect("storage deferral cannot block install")
+        .expect("install during deferral");
+        assert!(matches!(
+            deferred.as_mut().poll(&mut context),
+            Poll::Pending
+        ));
+        drop(deferred);
+        drop(snapshot);
+        shutdown_state(&state).await;
+        drop(state);
+        fs::remove_dir_all(root)
+            .await
+            .expect("remove owned test fixture");
+    }
+
+    #[tokio::test]
+    async fn off_writer_copy_failure_preserves_published_generation_and_live_integrity() {
+        let root = std::env::temp_dir().join(format!("hiqlite-copy-failure-{}", Uuid::now_v7()));
+        fs::create_dir_all(&root).await.unwrap();
+        let mut state = new_test_state(root.to_str().unwrap(), "copy.db")
+            .await
+            .unwrap();
+        let snapshot = state
+            .get_snapshot_builder()
+            .await
+            .build_snapshot()
+            .await
+            .unwrap();
+        let before_id = snapshot.meta.snapshot_id.clone();
+        drop(snapshot);
+        writer::inject_snapshot_copy_full(format!("{}/", state.path_snapshots));
+        assert!(
+            state
+                .get_snapshot_builder()
+                .await
+                .build_snapshot()
+                .await
+                .is_err()
+        );
+        let current = state.get_current_snapshot().await.unwrap().unwrap();
+        assert_eq!(current.meta.snapshot_id, before_id);
+        drop(current);
+        let database = format!("{}/{}", state.path_db, state.filename_db);
+        task::spawn_blocking(move || {
+            let conn = rusqlite::Connection::open(database).unwrap();
+            assert_eq!(
+                conn.query_row("PRAGMA integrity_check", [], |row| row.get::<_, String>(0))
+                    .unwrap(),
+                "ok"
+            );
+            let bytes: Vec<u8> = conn
+                .query_row("SELECT data FROM _metadata WHERE key='meta'", [], |row| {
+                    row.get(0)
+                })
+                .unwrap();
+            let meta: StateMachineData = deserialize(&bytes).unwrap();
+            assert_eq!(meta.last_snapshot_id.as_deref(), Some(before_id.as_str()));
+        })
+        .await
+        .unwrap();
+        shutdown_state(&state).await;
+        drop(state);
+        fs::remove_dir_all(root).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn blank_entry_advances_the_actual_snapshot_cut() {
+        let root = std::env::temp_dir().join(format!("hiqlite-blank-cut-{}", Uuid::now_v7()));
+        fs::create_dir_all(&root).await.unwrap();
+        let mut state = new_test_state(root.to_str().unwrap(), "blank.db")
+            .await
+            .unwrap();
+        let applied = LogId::new(CommittedLeaderId::new(3, 1), 42);
+        state
+            .apply([openraft::Entry {
+                log_id: applied,
+                payload: EntryPayload::Blank,
+            }])
+            .await
+            .unwrap();
+        let snapshot = state
+            .get_snapshot_builder()
+            .await
+            .build_snapshot()
+            .await
+            .unwrap();
+        assert_eq!(snapshot.meta.last_log_id, Some(applied));
+        drop(snapshot);
+        shutdown_state(&state).await;
+        drop(state);
+        fs::remove_dir_all(root).await.unwrap();
     }
 
     #[tokio::test]

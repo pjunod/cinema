@@ -46,8 +46,8 @@ use plurx_core::segplan::{
 };
 use plurx_core::store::Store;
 use plurx_core::transcode::{
-    copy_pipe_args_with_dolby_vision, CopyVideoOptions, Pacing, COPY_FIRST_SEGMENT_SECONDS,
-    COPY_SEGMENT_MAX_BYTES, COPY_SEGMENT_MAX_SECS, COPY_SEGMENT_SECONDS,
+    CopyVideoOptions, Pacing, COPY_FIRST_SEGMENT_SECONDS, COPY_SEGMENT_MAX_BYTES,
+    COPY_SEGMENT_MAX_SECS, COPY_SEGMENT_SECONDS,
 };
 use sha2::{Digest, Sha256};
 use tokio::io::{AsyncRead, AsyncReadExt};
@@ -300,6 +300,7 @@ pub struct VodHlsFacts {
     pub file: MediaFile,
     pub audio_index: Option<i64>,
     pub aac: bool,
+    pub audio_delivery: Option<plurx_core::playback::audio::AudioDelivery>,
     pub preserve_dolby_vision: bool,
     /// Whether this session's copy rewrites Profile 7 RPUs to 8.1. Carried
     /// beside the preservation because the playlist has to describe what the
@@ -315,6 +316,7 @@ pub struct VodHlsFacts {
 /// session that reused the durable session id.
 #[derive(Clone)]
 pub(crate) struct ResponseOwner {
+    retained_output: Option<Arc<retained::RetainedVodArtifact>>,
     lifecycle: Arc<Mutex<()>>,
     incarnation: Arc<()>,
     /// Present only for a live media owner. Terminal owners deliberately do
@@ -337,6 +339,13 @@ impl std::fmt::Debug for ResponseOwner {
             .field("rendition_key", &self.rendition_key)
             .field("tombstone", &self.tombstone)
             .finish_non_exhaustive()
+    }
+}
+
+impl ResponseOwner {
+    pub(crate) fn retained_output_facts(&self) -> Option<crate::transcode::RetainedOutputFacts> {
+        let artifact = self.retained_output.as_ref()?;
+        Some(artifact.facts())
     }
 }
 
@@ -556,6 +565,8 @@ pub struct VodStart {
 /// The durable request plus an already resolved encoder recipe. Plain copy
 /// callers need no encoder preparation and convert from their request alone.
 pub(crate) struct VodRecipeRequest<'a> {
+    pub(crate) measured_candidate: Option<RetainedCandidateBinding>,
+    pub(crate) retained_capture: RetainedOutputCapture,
     pub request: &'a SessionRequest,
     pub encoding: Option<Arc<crate::vodencode::Encoding>>,
 }
@@ -563,10 +574,35 @@ pub(crate) struct VodRecipeRequest<'a> {
 impl<'a> From<&'a SessionRequest> for VodRecipeRequest<'a> {
     fn from(request: &'a SessionRequest) -> Self {
         Self {
+            measured_candidate: None,
             request,
+            retained_capture: RetainedOutputCapture::New,
             encoding: None,
         }
     }
+}
+
+/// Private dispatch-attested identity, never a client proof or catalog budget.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct RetainedCandidateBinding {
+    pub(crate) kind: SessionKind,
+    pub(crate) normalized_geometry: bool,
+    pub(crate) profile: Option<plurx_core::transcode::AutoQualityRateProfile>,
+    pub(crate) candidate_id: plurx_core::playback::candidate::CandidateId,
+    pub(crate) recipe_digest: [u8; 32],
+    pub(crate) file_id: i64,
+    pub(crate) audio_index: Option<i64>,
+    pub(crate) audio_offset_ms: i64,
+    pub(crate) subtitle_burn: Option<i64>,
+    pub(crate) grade: plurx_core::transcode::OutputGrade,
+    pub(crate) route: plurx_core::playback::candidate::CandidateRoute,
+}
+
+#[derive(Clone)]
+pub(crate) enum RetainedOutputCapture {
+    New,
+    ReceiverUnavailable,
+    Restore(Option<crate::transcode::RetainedOutputFacts>),
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -699,6 +735,8 @@ pub enum VodSupersedeError {
 /// An open, verified segment ready to stream.
 #[derive(Debug)]
 pub struct SegmentReady {
+    /// Immutable plan duration, rounded outward to milliseconds; init is None.
+    pub observed_media_duration_ms: Option<u32>,
     pub file: tokio::fs::File,
     pub len: u64,
     /// Strong: rendition key + plan index + materialization instant + length.
@@ -710,6 +748,7 @@ pub struct SegmentReady {
     /// with. The delivery rate remains advisory preparation and fleet
     /// telemetry; a body served against no meter would silently lose it.
     pub delivery: Arc<crate::meter::Meter>,
+    pub(crate) retained_lease: Option<Arc<retained::RetainedVodArtifact>>,
 }
 
 // split: begin vod-reader
@@ -764,9 +803,16 @@ struct Shared {
     pool: WaitPool,
     /// Node-wide un-admitted materialized bytes — `prodsched`'s working set.
     working_set: AtomicU64,
+    /// Only live reserved preparation media already included in working_set.
+    preparation_media: AtomicU64,
+    /// Observes successful foreground graph attachments, not admission attempts.
+    /// Lock order: this guard, private staged artifact, retained registry.
+    /// No await while held; issued immutable artifacts are never revoked here.
+    preparation_attachment: StdMutex<u64>,
     /// Bytes of admitted renditions, moved here from the working set at
     /// completion.
     completed_cache: AtomicU64,
+    retained_artifacts: retained::RetainedArtifactRegistry,
     /// Fair starting point for the bounded terminal route-confirmation batch.
     terminal_eviction_cursor: AtomicU64,
     /// The registry's test points (TRANSCODE-DECOMPOSITION-PLAN §3.9, M8),
@@ -972,6 +1018,15 @@ use marker_dispatch::*;
 #[path = "vod/generation.rs"]
 mod generation;
 use generation::*;
+#[path = "vod/output_measurement.rs"]
+mod output_measurement;
+use output_measurement::PublishedOutputMeasurement;
+#[path = "vod/copy_preparation.rs"]
+mod copy_preparation;
+#[path = "vod/retained.rs"]
+pub(crate) mod retained;
+#[path = "vod/retained_manifest.rs"]
+mod retained_manifest;
 // split: end vod-generation
 
 // split: begin vod-plan

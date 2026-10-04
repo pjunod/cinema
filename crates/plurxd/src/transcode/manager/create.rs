@@ -1,6 +1,75 @@
 use super::*;
 
+fn recovered_retained_output_matches(
+    capture: &crate::vodserve::RetainedOutputCapture,
+    candidate_expected: Option<&RetainedOutputFacts>,
+    actual: Option<&RetainedOutputFacts>,
+) -> bool {
+    match capture {
+        crate::vodserve::RetainedOutputCapture::Restore(expected) => expected.as_ref() == actual,
+        crate::vodserve::RetainedOutputCapture::ReceiverUnavailable => actual.is_none(),
+        crate::vodserve::RetainedOutputCapture::New => {
+            candidate_expected.is_none_or(|expected| actual == Some(expected))
+        }
+    }
+}
+
 impl TranscodeManager {
+    /// Retained output is authoritative; an initial claim is negotiated only
+    /// after this producer has selected the encoded route and its AAC lattice.
+    pub(super) fn encoded_start_audio_options(
+        &self,
+        req: &SessionRequest,
+        file: &plurx_core::domain::MediaFile,
+        options: TranscodeOptions,
+    ) -> Result<TranscodeOptions, String> {
+        Self::encoded_audio_options(
+            file,
+            req.audio_index,
+            req.audio_claim.as_ref(),
+            req.audio_delivery.as_ref(),
+            options,
+        )
+    }
+
+    pub(super) fn encoded_audio_options(
+        file: &plurx_core::domain::MediaFile,
+        audio_index: Option<i64>,
+        claim: Option<&plurx_core::playback::audio::AudioClaim>,
+        retained: Option<&plurx_core::playback::audio::AudioDelivery>,
+        mut options: TranscodeOptions,
+    ) -> Result<TranscodeOptions, String> {
+        if let Some(audio) = retained {
+            options.set_audio_delivery(audio.clone());
+        } else if let Some(claim) = claim {
+            let selected = audio_index.map_or_else(
+                || file.audio_streams.first(),
+                |index| {
+                    file.audio_streams
+                        .iter()
+                        .find(|stream| stream.index == index)
+                },
+            );
+            options.set_audio_delivery(plurx_core::playback::audio::resolve_audio(
+                selected,
+                &claim.profile(),
+                plurx_core::playback::audio::AudioRoute::EncodedVod,
+                file.audio_offset_ms,
+            ));
+        }
+        if options
+            .audio
+            .as_ref()
+            .is_some_and(|audio| !audio.is_encoded_vod_compatible())
+        {
+            return Err(vod_refusal_error(
+                "vod_audio_recipe_invalid",
+                "encoded VOD requires its fixed AAC sample lattice",
+            ));
+        }
+        Ok(options)
+    }
+
     /// Create a session, or hand back the one an identical request already
     /// created.
     ///
@@ -43,7 +112,7 @@ impl TranscodeManager {
             None,
             None,
             None,
-            Priority::Live,
+            (Priority::Live, crate::vodserve::RetainedOutputCapture::New),
         )
         .await
         .map(|creation| creation.info)
@@ -65,7 +134,37 @@ impl TranscodeManager {
             user_name,
             deadline,
             admitted_serving_generation,
-            Priority::Live,
+            (Priority::Live, crate::vodserve::RetainedOutputCapture::New),
+        )
+        .await
+    }
+
+    /// Start a provisional make-before-break worker only from spare capacity.
+    pub(crate) async fn create_cluster_session_for_receiver(
+        &self,
+        request: (&SessionRequest, Option<u8>, Option<&RetainedOutputFacts>),
+        recovery: &SessionRecoveryIdentity,
+        user_name: &str,
+        deadline: tokio::time::Instant,
+        admitted_serving_generation: u64,
+    ) -> Result<ClusterSessionStart, String> {
+        let capture = if request.1 == Some(1) {
+            request
+                .2
+                .cloned()
+                .map_or(crate::vodserve::RetainedOutputCapture::New, |facts| {
+                    crate::vodserve::RetainedOutputCapture::Restore(Some(facts))
+                })
+        } else {
+            crate::vodserve::RetainedOutputCapture::ReceiverUnavailable
+        };
+        self.create_cluster_session_with_priority(
+            request.0,
+            recovery,
+            user_name,
+            deadline,
+            admitted_serving_generation,
+            (Priority::Live, capture),
         )
         .await
     }
@@ -88,7 +187,10 @@ impl TranscodeManager {
             user_name,
             deadline,
             admitted_serving_generation,
-            Priority::Speculative,
+            (
+                Priority::Speculative,
+                crate::vodserve::RetainedOutputCapture::New,
+            ),
         )
         .await
     }
@@ -100,7 +202,7 @@ impl TranscodeManager {
         user_name: &str,
         deadline: tokio::time::Instant,
         admitted_serving_generation: u64,
-        priority: Priority,
+        priority: (Priority, crate::vodserve::RetainedOutputCapture),
     ) -> Result<ClusterSessionStart, String> {
         let user_id = recovery.user_id;
         let serving_admission = ClusterServingAdmission {
@@ -210,7 +312,10 @@ impl TranscodeManager {
             Some(deadline),
             Some(takeover),
             None,
-            Priority::Live,
+            (
+                Priority::Live,
+                crate::vodserve::RetainedOutputCapture::ReceiverUnavailable,
+            ),
         )
         .await
         .map(|creation| creation.info)
@@ -429,8 +534,9 @@ impl TranscodeManager {
         replacement_deadline: Option<tokio::time::Instant>,
         takeover: Option<SessionTakeoverStart>,
         serving_admission: Option<ClusterServingAdmission>,
-        priority: Priority,
+        priority: (Priority, crate::vodserve::RetainedOutputCapture),
     ) -> Result<SessionCreation, String> {
+        let (priority, retained_capture) = priority;
         if let Some(admission) = serving_admission {
             self.require_cluster_serving_authority(admission)?;
         }
@@ -450,15 +556,24 @@ impl TranscodeManager {
         let claim = match req.request_id.as_deref() {
             Some(key) => match self.claim_request(key, req, supersession_user).await? {
                 Claimed::Recovered(info) => {
+                    if !recovered_retained_output_matches(
+                        &retained_capture,
+                        req.candidate_context
+                            .as_ref()
+                            .and_then(|context| context.retained_output.as_ref()),
+                        info.retained_output.as_ref(),
+                    ) {
+                        return Err(vod_refusal_error("retained_artifact_unavailable", "the recovered presentation does not own the exact issued retained artifact"));
+                    }
                     if let Some(admission) = serving_admission {
                         self.require_cluster_serving_authority(admission)?;
                     }
                     return Ok(SessionCreation {
-                        info,
+                        info: *info,
                         created: false,
                     });
                 }
-                Claimed::Mine(claim, normalized) => Some((claim, normalized)),
+                Claimed::Mine(claim, normalized) => Some((claim, *normalized)),
             },
             None => None,
         };
@@ -528,6 +643,7 @@ impl TranscodeManager {
                     replacement_deadline,
                     takeover.is_some(),
                     serving_admission,
+                    retained_capture,
                 )
                 .await;
             tracing::info!(
@@ -667,6 +783,8 @@ impl TranscodeManager {
                     req.hdr10,
                     req.candidate_context.as_deref(),
                     priority,
+                    req.audio_claim.as_ref(),
+                    req.audio_delivery.as_ref(),
                 )
                 .await
             }
@@ -692,6 +810,7 @@ impl TranscodeManager {
                     takeover,
                     &req.playback_id,
                     req.automatic,
+                    req.audio_delivery.as_ref(),
                 )
                 .await
             }
@@ -722,6 +841,84 @@ impl TranscodeManager {
             crate::subtitle_source::Live::Path(&file.path),
         )
         .await
+    }
+
+    /// Retain the accepted inputs or acquire one real bounded atomic snapshot.
+    /// Revalidation can reject it, but cannot silently replace its choice.
+    pub(super) async fn vod_preparation_snapshot(
+        &self,
+        req: &SessionRequest,
+        file: &plurx_core::domain::MediaFile,
+    ) -> Result<Arc<plurx_core::store::PlaybackPlanningSnapshot>, String> {
+        let context = req.candidate_context.as_ref();
+        if context.is_some_and(|context| context.planning_binding.is_none()) {
+            return Err(catalog_input_error(
+                "selected candidate planning binding missing",
+            ));
+        }
+        let snapshot = if let Some(snapshot) =
+            context.and_then(|context| context.planning_snapshot.as_ref())
+        {
+            if context.and_then(|context| context.planning_binding.as_ref())
+                != Some(&crate::media_pool::PlanningBinding::from_snapshot(snapshot))
+            {
+                return Err(catalog_input_error("accepted planning snapshot is unbound"));
+            }
+            Arc::clone(snapshot)
+        } else {
+            Arc::new(
+                tokio::time::timeout_at(
+                    crate::media_pool::create_stage_deadline(Duration::from_secs(2)),
+                    self.store
+                        .playback_planning_snapshot(req.file_id, &super::QUALITY_PLANNING_KEYS),
+                )
+                .await
+                .map_err(|_| catalog_input_error("VOD planning snapshot deadline"))?
+                .map_err(|error| catalog_input_error(error.to_string()))?
+                .ok_or_else(|| catalog_input_error("VOD planning source missing"))?,
+            )
+        };
+        if req.file_id != file.id
+            || snapshot.file.id != file.id
+            || snapshot.file.size != file.size
+            || snapshot.file.mtime != file.mtime
+            || !matches!((Self::plan_source_identity(file), Self::plan_source_identity(&snapshot.file)),
+                (Ok(expected), Ok(actual)) if expected == actual)
+        {
+            return Err(catalog_input_error("VOD planning source changed"));
+        }
+        if context
+            .and_then(|context| context.planning_binding.as_ref())
+            .is_some_and(|binding| {
+                *binding != crate::media_pool::PlanningBinding::from_snapshot(&snapshot)
+            })
+        {
+            return Err(catalog_input_error("VOD planning binding changed"));
+        }
+        Ok(snapshot)
+    }
+
+    /// The same equality seam checked before the frozen Encoding is built.
+    pub(super) fn validate_prepared_candidate_recipe(
+        &self,
+        plan: &ResolvedTranscode,
+        presentation: super::Presentation,
+        reorder_frames: bool,
+        context: &CandidateExecutionContext,
+    ) -> Result<[u8; 32], String> {
+        let actual = self
+            .candidate_recipe_digest(plan, presentation, reorder_frames)
+            .map_err(|error| vod_refusal_error("candidate_recipe_unavailable", error))?;
+        if actual != context.recipe_digest
+            || plurx_core::playback::candidate::CandidateId::for_recipe_digest(actual)
+                != context.candidate_id
+        {
+            return Err(vod_refusal_error(
+                "candidate_recipe_changed",
+                "the resolved source/route no longer matches the selected candidate",
+            ));
+        }
+        Ok(actual)
     }
 
     /// Freeze an executable encoded recipe before any rendition is named.
@@ -982,10 +1179,10 @@ impl TranscodeManager {
             }
             None => (None, None),
         };
-        let software_threads = Workload::of(file, target_height)
-            .software_threads()
-            .min(self.software_budget().await)
-            .max(1) as u32;
+        let software_threads = crate::vodencode::frozen_software_threads(
+            &Workload::of(file, target_height),
+            self.software_budget().await,
+        );
         let mut options = self.live_lookup_options(
             self.rate_control_snapshot(),
             encoder,
@@ -997,6 +1194,7 @@ impl TranscodeManager {
             Some(software_threads),
             grade,
         );
+        options = self.encoded_start_audio_options(req, file, options)?;
         if let Some(context) = req.candidate_context.as_ref() {
             options.normalized_geometry = context.normalized_geometry;
             if let Some(profile) = context.profile {
@@ -1055,19 +1253,27 @@ impl TranscodeManager {
                 )
             })?;
         }
+        // The VOD builder still derives its raster from the retained file.
+        // Do not attach a held-facts experiment if these two rasters differ.
+        let output = plan.output_contract();
+        let same_raster = transcode::output_size(file, options.target_height)
+            == output
+                .effective_width()
+                .zip(output.effective_height())
+                .map(|(width, height)| (i64::from(width), i64::from(height)));
+        let cadence = same_raster
+            .then(|| transcode::Rational::new(grid.numerator, grid.denominator))
+            .flatten();
+        let plan = plan.with_sdr_avc_qualification(&self.caps, cadence, options.force_idr);
+        let planning = self.vod_preparation_snapshot(req, file).await?;
+        let reorder_frames = Self::vod_reorder_from_snapshot(&planning);
         if let Some(context) = req.candidate_context.as_ref() {
-            let actual = self
-                .candidate_recipe_digest(&plan, req.presentation)
-                .map_err(|error| vod_refusal_error("candidate_recipe_unavailable", error))?;
-            if actual != context.recipe_digest
-                || plurx_core::playback::candidate::CandidateId::for_recipe_digest(actual)
-                    != context.candidate_id
-            {
-                return Err(vod_refusal_error(
-                    "candidate_recipe_changed",
-                    "the resolved source/route no longer matches the selected candidate",
-                ));
-            }
+            self.validate_prepared_candidate_recipe(
+                &plan,
+                req.presentation,
+                reorder_frames,
+                context,
+            )?;
         }
         let resources = TranscodeResourceEstimate::of(&plan, &Workload::of(file, target_height));
         if !source.unchanged() {
@@ -1100,15 +1306,6 @@ impl TranscodeManager {
                 "the source changed while attesting the encoded engine; rescan it before playback",
             ));
         }
-        let reorder_frames = self
-            .store
-            .get_setting("playback.vod_reorder_frames")
-            .await
-            .map_err(|error| {
-                start_infrastructure_error(format!("reading VOD reorder setting: {error}"))
-            })?
-            .as_deref()
-            == Some("2");
         Ok(Some(Arc::new(crate::vodencode::Encoding {
             source_object_version,
             plan,
@@ -1174,6 +1371,8 @@ impl TranscodeManager {
         self.vod
             .preview_recipe(
                 crate::vodserve::VodRecipeRequest {
+                    measured_candidate: None,
+                    retained_capture: crate::vodserve::RetainedOutputCapture::New,
                     request: req,
                     encoding,
                 },
@@ -1194,6 +1393,7 @@ impl TranscodeManager {
         replacement_deadline: Option<tokio::time::Instant>,
         is_takeover: bool,
         serving_admission: Option<ClusterServingAdmission>,
+        retained_capture: crate::vodserve::RetainedOutputCapture,
     ) -> Result<StartInfo, String> {
         if let Some(admission) = serving_admission {
             self.require_cluster_serving_authority(admission)?;
@@ -1253,7 +1453,119 @@ impl TranscodeManager {
                 encoding.options.pipeline,
             )
         });
+        let measured_candidate = if let Some(context) = req.candidate_context.as_ref() {
+            use plurx_core::playback::candidate::{CandidateId, CandidateRoute};
+            let actual_grade = encoding.as_ref().map_or_else(
+                || super::manager_candidates::copy_candidate_grade(&file),
+                |encoding| encoding.options.pipeline.output_grade(),
+            );
+            let (actual, route) = if let Some(encoding) = &encoding {
+                (
+                    self.candidate_recipe_digest(
+                        &encoding.plan,
+                        req.presentation,
+                        encoding.reorder_frames,
+                    )?,
+                    CandidateRoute::Encode,
+                )
+            } else if let SessionKind::Copy {
+                aac,
+                preserve_dolby_vision,
+                convert_dolby_vision,
+            } = req.kind
+            {
+                let source = crate::fragment_index_cluster::open_source_fence(&file, None).await?;
+                let executable = crate::ffmpeg::EncodedExecutable::capture()
+                    .await
+                    .map_err(|error| error.to_string())?;
+                let engine = crate::ffmpeg::EncodedEngine::capture(None)
+                    .await
+                    .map_err(|error| error.to_string())?;
+                let raster = file
+                    .width
+                    .and_then(|value| u32::try_from(value).ok())
+                    .zip(file.height.and_then(|value| u32::try_from(value).ok()))
+                    .ok_or_else(|| {
+                        vod_refusal_error("candidate_recipe_changed", "copy geometry is unknown")
+                    })?;
+                let actual = super::manager_candidates::copy_candidate_recipe_digest(
+                    &file,
+                    req.audio_index,
+                    file.audio_offset_ms,
+                    req.subtitle_burn,
+                    (aac, preserve_dolby_vision, convert_dolby_vision),
+                    Some(source.object_version()),
+                    Some(&executable.digest),
+                    Some(&engine.digest),
+                    raster,
+                );
+                if !source.unchanged() {
+                    return Err(vod_refusal_error(
+                        "candidate_recipe_changed",
+                        "copy source changed during equality validation",
+                    ));
+                }
+                (actual, CandidateRoute::Remux)
+            } else {
+                return Err(vod_refusal_error(
+                    "candidate_recipe_changed",
+                    "no actual candidate route",
+                ));
+            };
+            if actual != context.recipe_digest
+                || CandidateId::for_recipe_digest(actual) != context.candidate_id
+                || actual_grade != context.grade
+            {
+                return Err(vod_refusal_error(
+                    "candidate_recipe_changed",
+                    "actual execution differs from the accepted candidate",
+                ));
+            }
+            Some(crate::vodserve::RetainedCandidateBinding {
+                kind,
+                normalized_geometry: context.normalized_geometry,
+                profile: context.profile,
+                candidate_id: context.candidate_id,
+                recipe_digest: actual,
+                file_id: file.id,
+                audio_index: req.audio_index,
+                audio_offset_ms: file.audio_offset_ms,
+                subtitle_burn: req.subtitle_burn,
+                grade: context.grade,
+                route,
+            })
+        } else {
+            None
+        };
+        // Complete-output queue publication is handed to the owned enqueue
+        // worker once the session exists; it never runs on the start path.
+        let output_enqueue = (matches!(
+            &retained_capture,
+            crate::vodserve::RetainedOutputCapture::New
+        ) && req
+            .candidate_context
+            .as_ref()
+            .is_none_or(|context| context.retained_output.is_none()))
+        .then(|| {
+            (
+                req.clone(),
+                file.clone(),
+                settings.clone(),
+                encoding.clone(),
+            )
+        });
         let prepared = crate::vodserve::VodRecipeRequest {
+            measured_candidate,
+            retained_capture: match retained_capture {
+                crate::vodserve::RetainedOutputCapture::New => req
+                    .candidate_context
+                    .as_ref()
+                    .and_then(|context| context.retained_output.clone())
+                    .map_or(crate::vodserve::RetainedOutputCapture::New, |facts| {
+                        crate::vodserve::RetainedOutputCapture::Restore(Some(facts))
+                    }),
+                existing => existing,
+            },
             request: req,
             encoding,
         };
@@ -1328,7 +1640,27 @@ impl TranscodeManager {
         if let Some((encoder, grade, pipeline)) = codec_qualification {
             self.record_codec_qualification_session(encoder, grade, Some(pipeline));
         }
+        if let Some((request, file, settings, encoding)) = output_enqueue {
+            self.hand_off_output_enqueue(OutputEnqueue {
+                request,
+                file,
+                settings,
+                encoding,
+                session_id: start.session_id.clone(),
+                queued_at: Instant::now(),
+            });
+        }
         Ok(StartInfo {
+            retained_output: self
+                .vod
+                .hls_facts(&start.session_id)
+                .await
+                .and_then(|facts| facts.response_owner.retained_output_facts()),
+            audio_delivery: self
+                .vod
+                .hls_facts(&start.session_id)
+                .await
+                .and_then(|facts| facts.audio_delivery),
             playlist_url: format!("/api/v1/hls/{}/index.m3u8", start.session_id),
             session_id: start.session_id,
             duration_ms: Some(start.duration_ms),
@@ -1651,6 +1983,10 @@ impl TranscodeManager {
                 .vod
                 .try_create_before_release(
                     crate::vodserve::VodRecipeRequest {
+                        measured_candidate: None,
+                        retained_capture: crate::vodserve::RetainedOutputCapture::Restore(
+                            remote.retained_output.clone(),
+                        ),
                         request: &req,
                         encoding,
                     },
@@ -1687,6 +2023,115 @@ impl TranscodeManager {
         })
         .await
         .unwrap_or(false)
+    }
+
+    /// Hand a started session's complete-output queue publication to the
+    /// owned worker. Never waits: a full hand-off is reported and skipped,
+    /// and the title's next start offers the same deduplicated job again.
+    fn hand_off_output_enqueue(&self, work: OutputEnqueue) {
+        let file_id = work.file.id;
+        if let Err(error) = self.output_enqueue.sender.try_send(work) {
+            let reason = match error {
+                tokio::sync::mpsc::error::TrySendError::Full(_) => "queue_full",
+                tokio::sync::mpsc::error::TrySendError::Closed(_) => "worker_stopped",
+            };
+            crate::telemetry::record_output_enqueue_drop(reason);
+            tracing::info!(
+                target: "plurxd::transcode",
+                file_id,
+                reason,
+                "complete output preparation not handed off; the next start offers it again"
+            );
+        }
+    }
+
+    /// The single owner of post-start complete-output queue publication,
+    /// spawned beside [`Self::vod_maintain_loop`]. Each publication keeps its
+    /// own stage budget (the catalog restore's create-stage deadline and the
+    /// store's own write bound) instead of borrowing the viewer's start
+    /// budget, and every outcome is logged against its file and session.
+    ///
+    /// It stops on the daemon's `shutdown` token, both while idle and while a
+    /// publication is in flight: an interrupted publication is the same
+    /// deduplicated job the title's next start offers again, so dropping it
+    /// at shutdown loses nothing durable.
+    pub async fn output_enqueue_loop(
+        self: Arc<Self>,
+        shutdown: tokio_util::sync::CancellationToken,
+    ) {
+        let Some(mut receiver) = self
+            .output_enqueue
+            .receiver
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take()
+        else {
+            return;
+        };
+        loop {
+            let work = tokio::select! {
+                () = shutdown.cancelled() => break,
+                work = receiver.recv() => match work {
+                    Some(work) => work,
+                    None => break,
+                },
+            };
+            let started = Instant::now();
+            let publication = async {
+                match &work.encoding {
+                    Some(encoding) => (
+                        "encoded_output",
+                        self.enqueue_encoded_output(
+                            &work.request,
+                            &work.file,
+                            &work.settings,
+                            encoding,
+                        )
+                        .await,
+                    ),
+                    None => (
+                        "copy_output",
+                        self.enqueue_copy_output(&work.request, &work.file, &work.settings)
+                            .await,
+                    ),
+                }
+            };
+            let (kind, result) = tokio::select! {
+                () = shutdown.cancelled() => {
+                    tracing::info!(
+                        target: "plurxd::transcode",
+                        file_id = work.file.id,
+                        session_id = %work.session_id,
+                        "complete output preparation interrupted by shutdown"
+                    );
+                    break;
+                }
+                outcome = publication => outcome,
+            };
+            let waited_ms = started.duration_since(work.queued_at).as_millis() as u64;
+            let elapsed_ms = started.elapsed().as_millis() as u64;
+            match result {
+                Ok(()) => tracing::debug!(
+                    target: "plurxd::transcode",
+                    file_id = work.file.id,
+                    session_id = %work.session_id,
+                    kind,
+                    waited_ms,
+                    elapsed_ms,
+                    "complete output preparation queued"
+                ),
+                Err(error) => tracing::info!(
+                    target: "plurxd::transcode",
+                    file_id = work.file.id,
+                    session_id = %work.session_id,
+                    kind,
+                    waited_ms,
+                    elapsed_ms,
+                    %error,
+                    "complete output preparation not queued"
+                ),
+            }
+        }
     }
 
     /// The VOD serving maintenance loop, spawned beside [`Self::reap_loop`].
@@ -1774,7 +2219,7 @@ impl TranscodeManager {
                         };
                         entry.target_height = target_height;
                     }
-                    return Ok(Claimed::Mine(claim, normalized));
+                    return Ok(Claimed::Mine(claim, Box::new(normalized)));
                 }
                 Step::Recover(session_id, persisted_target) => {
                     if let Some(info) = self.recover(&session_id).await {
@@ -1784,7 +2229,7 @@ impl TranscodeManager {
                             ));
                         }
                         tracing::debug!(target: "plurxd::transcode", session = %session_log_id(&session_id), request_id = key, "idempotent create: same session");
-                        return Ok(Claimed::Recovered(info));
+                        return Ok(Claimed::Recovered(Box::new(info)));
                     }
                     // Its session is gone; the entry is stale, not
                     // authoritative. Remove exactly the entry that was seen —
@@ -1826,8 +2271,18 @@ impl TranscodeManager {
             };
             return Ok((request.clone(), target_height));
         };
-        let Some(ReopenReason::Stall) = request.reopen_reason else {
+        let Some(reason) = request.reopen_reason else {
             return Err(invalid_reopen_error("unsupported reopen reason"));
+        };
+        // A typed cause (link/encode/decode/hold/authority) is advisory
+        // evidence recorded at HTTP ingress, never a precondition for media.
+        // Its reopen keeps the exact target the client asked for; a missing
+        // full candidate or an incumbent this node no longer runs leaves the
+        // cause unrecorded rather than refusing a stalled viewer.
+        let typed = reason != ReopenReason::Stall;
+        let requested_height = match request.kind {
+            SessionKind::Transcode { height } => Some(height),
+            SessionKind::Copy { .. } => None,
         };
         // A stall reopen bound to a VOD predecessor: validate the binding
         // against the VOD registry and pass the request through untouched. A
@@ -1859,9 +2314,16 @@ impl TranscodeManager {
             kind,
         ) = {
             let sessions = self.sessions.lock().await;
-            let previous = sessions
-                .get(previous_session_id)
-                .ok_or_else(|| invalid_reopen_error("the previous session is no longer running"))?;
+            let Some(previous) = sessions.get(previous_session_id) else {
+                if typed {
+                    // Remote, retired or already-replaced incumbent: the
+                    // typed reopen proceeds as an ordinary start.
+                    return Ok((request.clone(), requested_height));
+                }
+                return Err(invalid_reopen_error(
+                    "the previous session is no longer running",
+                ));
+            };
             (
                 Arc::clone(previous),
                 previous.supersession_user.clone(),
@@ -1881,12 +2343,8 @@ impl TranscodeManager {
             ));
         }
 
-        if request.candidate_context.is_some() {
-            let height = match request.kind {
-                SessionKind::Transcode { height } => Some(height),
-                SessionKind::Copy { .. } => None,
-            };
-            return Ok((request.clone(), height));
+        if typed || request.candidate_context.is_some() {
+            return Ok((request.clone(), requested_height));
         }
 
         // The rung step exists for a link that could not keep up. A predecessor
@@ -1993,4 +2451,70 @@ pub(super) fn constrain_finite_vod_rate(
     options.video_bitrate_kbps = options.video_bitrate_kbps.min(video_kbps as u32);
     options.effective_rate_control = plurx_core::transcode::EffectiveRateControl::Vbr;
     Ok(())
+}
+
+#[cfg(test)]
+mod retained_recovery_tests {
+    use super::*;
+
+    #[test]
+    fn idempotent_recovery_preserves_captured_absence_and_exact_artifact_identity() {
+        use crate::vodserve::RetainedOutputCapture;
+        let original = RetainedOutputFacts {
+            artifact_id: uuid::Uuid::new_v4().to_string(),
+            output_identity: "ab".repeat(32),
+            average_bps: 8000,
+            peak_bps: 12000,
+        };
+        let mut other = original.clone();
+        other.artifact_id = uuid::Uuid::new_v4().to_string();
+        assert!(recovered_retained_output_matches(
+            &RetainedOutputCapture::Restore(None),
+            None,
+            None
+        ));
+        assert!(!recovered_retained_output_matches(
+            &RetainedOutputCapture::Restore(None),
+            None,
+            Some(&original)
+        ));
+        assert!(!recovered_retained_output_matches(
+            &RetainedOutputCapture::Restore(Some(original.clone())),
+            None,
+            None
+        ));
+        assert!(recovered_retained_output_matches(
+            &RetainedOutputCapture::Restore(Some(original.clone())),
+            None,
+            Some(&original)
+        ));
+        assert!(!recovered_retained_output_matches(
+            &RetainedOutputCapture::Restore(Some(original.clone())),
+            None,
+            Some(&other)
+        ));
+        assert!(!recovered_retained_output_matches(
+            &RetainedOutputCapture::ReceiverUnavailable,
+            None,
+            Some(&original)
+        ));
+        assert!(
+            recovered_retained_output_matches(&RetainedOutputCapture::New, None, Some(&original)),
+            "new capable replay reads the incumbent without changing it"
+        );
+        assert!(
+            !recovered_retained_output_matches(&RetainedOutputCapture::New, Some(&original), None),
+            "a measured selection cannot silently downgrade to old captured None"
+        );
+        assert!(!recovered_retained_output_matches(
+            &RetainedOutputCapture::New,
+            Some(&original),
+            Some(&other)
+        ));
+        assert!(recovered_retained_output_matches(
+            &RetainedOutputCapture::New,
+            Some(&original),
+            Some(&original)
+        ));
+    }
 }

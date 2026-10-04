@@ -61,6 +61,9 @@ services:
         # the next.
         PLURX_BUILD_REF: ${PLURX_BUILD_REF:-}
         PLURX_BUILD_SHA: ${PLURX_BUILD_SHA:-}
+        # The commit time, so a rebuild of one commit stamps the same built_at
+        # (crates/plurxd/build_support/source_date.rs). `make docker-up` sets it.
+        SOURCE_DATE_EPOCH: ${SOURCE_DATE_EPOCH:-}
     image: ${PLURX_IMAGE:-plurx/plurxd:latest}
     container_name: plurxd
     restart: unless-stopped

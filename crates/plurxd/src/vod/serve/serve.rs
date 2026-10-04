@@ -41,6 +41,7 @@ impl VodServe {
             file: rendition.recipe.file.clone(),
             audio_index: rendition.recipe.audio_index,
             aac: rendition.recipe.aac,
+            audio_delivery: rendition.recipe.audio_delivery.clone(),
             preserve_dolby_vision: rendition.recipe.video.preserves_dolby_vision(),
             convert_dolby_vision: rendition.recipe.video.converts_dolby_vision(),
             encoding: rendition.recipe.encoding.clone(),
@@ -91,6 +92,10 @@ impl VodServe {
         // so a crash cannot erase the only durable key needed to collect the
         // node-local database row.
         self.shared.reconcile_obsolete_encoded_generations().await;
+        self.shared
+            .retained_artifacts
+            .collect(&self.shared.base)
+            .await;
 
         let terminal_cleanups = {
             let sessions = self.shared.sessions.lock().await;
@@ -225,6 +230,9 @@ impl VodServe {
                         })
                 });
                 if exact_terminal {
+                    if let Some(session) = sessions.get(&candidate.session_id) {
+                        session.invalidate_observational_attachment();
+                    }
                     sessions.remove(&candidate.session_id)
                 } else {
                     None
@@ -291,12 +299,19 @@ impl VodServe {
                             .is_some_and(|grant| grant.live())
                     });
                     if let Some(session) = retained {
-                        // Stale response owners cannot publish after this detach.
+                        // Stale response and observation owners cannot publish
+                        // after this detach; the retained artifact goes with
+                        // the rendition, as terminal cleanup releases both.
+                        session.invalidate_observational_attachment();
                         session.abort_staged_preparation();
                         session.incarnation = Arc::new(());
                         session.marker_destinations.clear();
+                        session.retained_output = None;
                         session.rendition.take()
                     } else {
+                        if let Some(session) = sessions.get(&id) {
+                            session.invalidate_observational_attachment();
+                        }
                         sessions.remove(&id).and_then(|session| session.rendition)
                     }
                 } else {
@@ -350,8 +365,15 @@ impl VodServe {
                 .map(Arc::clone)
                 .collect()
         };
+        let mut offered = false;
         for rendition in renditions {
             rendition.kick();
+            if !offered {
+                offered = crate::vodserve::retained::RetainedArtifactRegistry::offer(
+                    &self.shared,
+                    &rendition,
+                );
+            }
         }
         self.shared.prune_session_lifecycles();
         self.shared.prune_rendition_builds();
@@ -609,7 +631,10 @@ impl VodServe {
         )
         .await
         {
-            Ok(ready) => Ok(Some(ready)),
+            Ok(mut ready) => {
+                ready.observed_media_duration_ms = plan_media_duration_ms(rendition, index);
+                Ok(Some(ready))
+            }
             // The manifest lied — treat as planned; reconcile repairs it.
             Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
             Err(error) => Err(VodError::Io(error)),

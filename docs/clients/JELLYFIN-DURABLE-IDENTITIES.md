@@ -34,7 +34,7 @@ validate changed source fingerprints when playback integration is added.
 
 ## 2. Migrations — upgrade and fresh bootstrap share one schema
 
-SQLite appends migration 92. Hiqlite advances schema 69 to 70 and installs the
+SQLite appends migration 98. Hiqlite advances schema 73 to 74 and installs the
 same idempotent schema during fresh bootstrap after native catalog tables
 exist. The protocol activation range stays under its existing mechanism.
 The import inventory includes all five identity columns from SQLite version

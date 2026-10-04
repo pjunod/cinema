@@ -1313,7 +1313,14 @@ mod tests {
                 // `media_playback_desired` is dropped, any write to
                 // `media_playback_pointers` fails with "no such table" rather
                 // than with anything about this fixture.
-                "DROP TRIGGER IF EXISTS live_tv_capture_revision_update;
+                // v95 and v97 replace background-prefixed triggers, already
+                // removed by the shared queue helper above.
+                "DROP TABLE IF EXISTS candidate_recovery;
+             DROP TABLE IF EXISTS candidate_link_priors;
+             ALTER TABLE network_priors DROP COLUMN link_starved_at_ms;
+             ALTER TABLE network_priors DROP COLUMN link_worst_rung_height;
+             ALTER TABLE offline_packages DROP COLUMN audio_recipe;
+             DROP TRIGGER IF EXISTS live_tv_capture_revision_update;
              DROP TRIGGER IF EXISTS live_tv_capture_revision_delete;
              DROP TABLE IF EXISTS live_tv_resource_records;
              DROP TABLE IF EXISTS live_tv_resource_revision;
@@ -1478,7 +1485,7 @@ mod tests {
     #[test]
     fn the_downgrade_fixture_undoes_every_migration_after_the_guard() {
         const GUARD_SCHEMA_VERSION: i64 = 44;
-        const DROPPED_BY_THE_FIXTURE: [&str; 51] = [
+        const DROPPED_BY_THE_FIXTURE: [&str; 57] = [
             "fragment_index_outcomes",
             "attempt_errors",
             "video_identity",
@@ -1567,7 +1574,20 @@ mod tests {
             "CREATE INDEX IF NOT EXISTS background_jobs_file_source",
             "ADD COLUMN requested_manually",
             "CREATE TABLE IF NOT EXISTS playback_input_generation",
-            // v92–v95: both fixtures call remove_jellyfin_compatibility_schema.
+            // v92's offline audio snapshot, an additive `offline_packages`
+            // column: both fixtures drop it or the replay meets its own column.
+            "ADD COLUMN audio_recipe",
+            // v93's Link pair on the v19 `network_priors` table. The v43
+            // fixture drops both columns; the v14 one drops the whole table.
+            "ADD COLUMN link_worst_rung_height",
+            "CREATE TABLE IF NOT EXISTS candidate_link_priors",
+            // v95 and v97 replace background-prefixed triggers; the shared
+            // helper drops every background_* object before either replay.
+            // Each is named by the trigger only it creates.
+            "CREATE TRIGGER IF NOT EXISTS background_job_publish_copy_output_command",
+            "CREATE TABLE IF NOT EXISTS candidate_recovery",
+            "CREATE TRIGGER IF NOT EXISTS background_job_encoded_output_target",
+            // v98–v101 (Jellyfin compatibility): both fixtures call remove_jellyfin_compatibility_schema.
             "CREATE TABLE IF NOT EXISTS jellyfin_entity_ids",
             "CREATE TABLE IF NOT EXISTS jellyfin_login_tokens",
             "CREATE TABLE IF NOT EXISTS jellyfin_plays",

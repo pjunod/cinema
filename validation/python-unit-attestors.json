@@ -1,0 +1,8 @@
+{
+  "version": 1,
+  "verified_on": "2026-10-01",
+  "verification": "ROOT independently read actual authenticated /user and /repos/noirr/plurx/collaborators/pjunod/permission: returned user.id1/loginpjunod, permission owner, role_name owner. Current-role check required when changing enrollment. This source-reviewed enrollment is only the narrow collaborator HTTP403 fallback; it is not a token or an arbitrary comment claim.",
+  "attestors": [
+    {"repository": 1, "user": 1, "login": "pjunod", "permission": "owner"}
+  ]
+}

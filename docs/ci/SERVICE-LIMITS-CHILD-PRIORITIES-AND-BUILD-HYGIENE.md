@@ -57,8 +57,9 @@ reason and says so in the file.
 
 Done means: every directive in §3.1 has its observation and validation
 row filled; the child-priority change has its realtime measurement; the
-`check` job's runner label reads `ffmpeg-8`; the release profile is the
-§3.5 one with numbers; four fuzz targets have corpora and artefact upload.
+`check` job verifies Jellyfin ffmpeg 8 in a digest-pinned CI container (the
+§3.4 fallback); the release profile is the §3.5 one with numbers; four fuzz
+targets have corpora and artefact upload.
 
 ---
 
@@ -686,7 +687,7 @@ Two options; the plan takes the first and keeps the second as fallback:
   the persistent lab runners installs `jellyfin-ffmpeg8` from the same
   Jellyfin apt repository the `Dockerfile` uses, symlinks it first on
   `PATH` for runner jobs, and relabels those runners `ffmpeg-8`. `ci.yml`'s
-  `check`, `cluster_daemon`, `web_layout`, `vod_web`, `coverage` move to
+  `check`, `cluster_daemon`, `web_layout`, `vod_web` move to
   `ffmpeg-8` with `major: "8"`. The action already fails on a mismatch, so
   a runner that did not get the package fails loudly.
 - **Run in the `runtime-assets` image** (fallback): a `container:` job
@@ -739,8 +740,35 @@ change `chunk_05.rs` to assert the paced-rate behaviour on 8 instead of
 skipping — and say which in VALIDATION.md, as §3.4 requires.
 
 This is a source audit only. It does **not** establish that `make unit` is
-green on a jellyfin-ffmpeg 8 runner, which is M5's actual acceptance and
-needs the runner-provisioning change in `plurx-agent` first.
+green on the shipped Jellyfin ffmpeg 8 build; that is M5's acceptance.
+
+**M5 fallback decision, 2026-09-29.** The versioned
+`pjunod/ansible` `github-runners/` role registers GitHub Actions runners,
+while Forgejo is this repository's CI control plane. A read-only check on
+`nynuc` found four active Forgejo runner units using independent
+`/opt/forgejo-runner*/.runner` registrations: all four expose
+`general`/`high-cpu`/`ubuntu-26.04`, none exposes `ffmpeg-8`; the host's
+`/usr/bin/ffmpeg` is distro 8.0.1, not the Jellyfin package. No versioned
+Forgejo provisioning owner was identified. M5 therefore takes the
+`runtime-assets` container fallback, not a guessed Ansible change.
+`main-fast-lane.yml`'s existing Ubuntu 24.04 `rust_compile` job runs
+`make unit` on ffmpeg 6, preserving `chunk_05.rs`'s burst-honouring
+assertions. The full-sweep jobs move to Jellyfin 8 only after a separately
+published CI image has been smoke-checked and its immutable digest written
+into `ci.yml`. No runner label or live host is changed by this choice.
+
+**Current-main composition, 2026-10-01.** The four full-sweep jobs are
+`check`, `cluster_daemon`, `web_layout` and `vod_web`. Main's landed #660
+removed the old fifth `ci.yml` coverage job and moved diagnostic measurement
+and dated badge publication to `coverage.yml`; #661 runs that workflow on
+general/high-cpu workers in `ubuntu:24.04` with pinned FFmpeg 6, and #667
+corrects its installer action pin. P02 preserves all three complete deltas.
+The diagnostic coverage lane and the fast lane remain separate FFmpeg 6
+consumers; neither uses the private Jellyfin 8 image. The fast lane's
+`make unit` still retains the burst-honouring regression. The M5 contract
+`test_m5_shipped_ffmpeg_jobs_use_one_digest_and_keep_burst_coverage` checks
+this four-job/older-runtime split. The historical five-job audit above is
+not a claim about the current workflow.
 
 ### 3.5 Dockerfile base pin and the release profile
 
@@ -1033,16 +1061,153 @@ acceptance is a playback matrix or a GPU selection under the new unit on a
 lab VM, which a transient unit on nuc3 cannot stand in for; `TasksMax` also
 still lacks its observed peak. The steps are in the execution log.
 
+**Compose rows proposed, 2026-10-02 (claude-opus-5-5, for Paul to ratify;
+nothing deployed).** §7 question 1 found no node running
+`deploy/plurxd.service`, so the systemd rows above harden an install path
+with nothing behind it. What the fleet inherits is the Compose service.
+Rescoping M4 from the unit to Compose is **Paul's call**; this is the
+proposal he would ratify, with the read-only evidence for each row. The
+systemd rows stay as written for bare-metal installs.
+
+Production deploys this repository's own `deploy/docker-compose.yml`:
+`docker inspect plurxd` on lab4 reads
+`com.docker.compose.project.config_files=/opt/noirr/plurx/deploy/docker-compose.yml,/opt/noirr/plurx/deploy/docker-compose.override.yml`
+(working directory `/opt/noirr/plurx/deploy`, a checkout of this repository
+plus the host's untracked override, which the separate ansible repository
+provisions). Because the tracked file **is** what production runs, the rows
+are documented here and not committed to it: a commit there would change the
+fleet on its next deploy without the ratification and lab matrix below.
+
+Evidence, read 2026-10-02 14:38 UTC on all four nodes (lab3, lab4, media1,
+lab6), each container started 06:19–06:33 UTC that day:
+
+```text
+$ docker inspect plurxd --format '{{json .HostConfig}}'        # lab4, abridged
+"LogConfig":{"Type":"json-file","Config":{}} "CapAdd":null "CapDrop":null
+"GroupAdd":["109"] "OomScoreAdj":0 "SecurityOpt":null "PidsLimit":null
+"Ulimits":null "Devices":[{"PathOnHost":"/dev/dri",...}] "Privileged":false
+"ReadonlyPaths":["/proc/bus","/proc/fs","/proc/irq","/proc/sys","/proc/sysrq-trigger"]
+$ docker exec plurxd grep -E '^(Cap|NoNewPrivs|Seccomp)' /proc/1/status   # all four
+CapInh/CapPrm/CapEff/CapAmb 0000000000000000   CapBnd 00000000a80425fb
+NoNewPrivs 0   Seccomp 2
+```
+
+| Compose key | Proposed | Observed today | Why it is safe / what it buys | Validate on the lab instance |
+|---|---|---|---|---|
+| `oom_score_adj` | `-500` | `0` on all four (`HostConfig.OomScoreAdj`, `/proc/1/oom_score_adj`) | M3 (§3.2.2) gives every child `+500` (realtime) or `+800` (background) from its own `pre_exec`. Raising a value needs no capability; the runtime sets `-500` as root, which is also the floor the daemon could not go below later. So children still rank far above the daemon for the OOM killer, which is §3.1's intent, and the daemon no longer ties with a wedged x265 | `/proc/1/oom_score_adj` reads `-500`; under two transcodes each ffmpeg reads `500` or `800`; `plurx_child_priority_unapplied_total` stays 0 |
+| `security_opt` | `["no-new-privileges:true"]` | `NoNewPrivs: 0` | The daemon runs as `1000:1000` (`user:` at `deploy/docker-compose.yml:117`, the override's `group_add` for the render group). Nothing it spawns (ffmpeg, ffprobe, the static probe, `dovi_tool`, `mkvmerge`, `find`) needs a setuid or file-capability gain: the image's only setuid/setgid files are the Debian base's `su`, `mount`, `umount`, `passwd`, `chfn`, `chsh`, `gpasswd`, `newgrp`, `chage`, `expiry` and `unix_chkpwd`, and no file carries a capability xattr (read from every layer of §5.6's image). This is the Compose form of the unit's `NoNewPrivileges=true` and `RestrictSUIDSGID=true` | `NoNewPrivs: 1`; the playback matrix and a DVR recording succeed |
+| `cap_drop` | `[ALL]` | effective, permitted and ambient sets already empty; bounding set `0xa80425fb` (Docker's default fourteen) | An unprivileged process holds no effective capability, so the drop changes only what an `execve` of a setuid or file-capability binary could regain. Ports are 32400–32402/tcp and 32414/udp (no `NET_BIND_SERVICE`); GPU access is the `/dev/dri` device plus the render group, not a capability. A host that overrides `PUID`/`PGID` to 0 would lose `CHOWN`/`DAC_OVERRIDE` over its data directory, so the row says so in its comment | `CapBnd: 0000000000000000`; scratch, DVR and data-dir writes succeed; QSV/VAAPI still selected |
+| `logging` | `driver: json-file`, `max-size: "50m"`, `max-file: "5"` | `json-file` with no options on all four, and `daemon.json` sets none (lab4) | The current container's log was 0.26–4.2 MB after ~8.3 h (largest lab3, ~12 MB/day), and grows without bound for as long as one container lives. 250 MB is about three weeks at that rate, so the week-without-`EMFILE` check (§3.1) can still read `docker logs` | `docker inspect --format '{{json .HostConfig.LogConfig}}'` shows both options; `docker logs` still answers |
+| `pids_limit` | `4096`, **pending** | cgroup `pids.max` is the host slice default (29 428–74 782); `pids.peak` since start 146 (lab3), 150 (lab4), 147 (media1), 195 (lab6) | 195 is 4.8 % of 4096, but the day's load is unknown and is not §3.1's named busy sample (two transcodes, a direct play, a DVR recording). The row lands only when that sample's `pids.peak` is ≤ 1024 (25 %) | `pids.peak` read during the busy sample |
+| `ulimits.nofile` | **not proposed** | soft/hard 524 288 after §3.3's startup raise | 65 536 would lower the limit the daemon already has (§3.1.1) | — |
+
+Already true of the container and so not proposed: `/proc/sys` is mounted
+read-only (`ReadonlyPaths`), the Compose equivalent of
+`ProtectKernelTunables=true`; the container has its own `/tmp` (the
+`PrivateTmp=true` row); Docker's default seccomp profile (`Seccomp: 2`)
+admits `personality(2)` only for a short list of personas, close to what
+`LockPersonality=true` buys. `read_only: true` for the root filesystem is a
+separate question (font and probe caches) and is not part of this proposal.
+
+The rows as they would read in the `plurxd` service of
+`deploy/docker-compose.yml` once ratified:
+
+```yaml
+    oom_score_adj: -500        # children set +500/+800 themselves (§3.2.2)
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL                    # an unprivileged daemon holds none; PUID=0 hosts need CHOWN/DAC_OVERRIDE back
+    logging:
+      driver: json-file
+      options:
+        max-size: "50m"
+        max-file: "5"
+    # pids_limit: 4096         # pending the busy sample's pids.peak <= 1024
+```
+
+Acceptance, once ratified, on an owned lab instance from the image §5.6
+records (not production): recreate with the rows, read back
+`docker inspect` and `/proc/1/status`, then play direct, copy HLS, a
+transcode with burned text subtitles and one DVR programme, and confirm the
+GPU probe still selects QSV/VAAPI. Any row that breaks a step stays out and
+is recorded. The fleet rollout is a later deploy through the normal path.
+
 ### 5.5 M5 — jellyfin-ffmpeg 8 in CI
 
-The runner provisioning change (in `plurx-agent`'s runner role, referenced
-by path in the PR), the label and `major` changes in `ci.yml`, the audit
-result for a retained ffmpeg-6 lane, VALIDATION.md's ffmpeg paragraph.
+The §3.4 container fallback: Dockerfile `ci` stage from `runtime-assets`,
+with pinned Rust 1.97.1, Node 22 and Playwright 1.62.0/Chromium; one
+published immutable image digest in the five `ci.yml` jobs, each with
+`major: "8"`; the existing ffmpeg-6 `main-fast-lane.yml` `make unit` job
+explicitly retained for burst-honouring coverage; and VALIDATION.md's
+ffmpeg paragraph. The image must exist and be smoke-checked before the
+workflow branch is pushed.
 
 Acceptance: the `check` job's step summary reads `expected major: 8`
-`resolved: ffmpeg version 8…jellyfin`; `make unit` green on that runner;
-`grep -n "ffmpeg-6" .github/workflows/ci.yml` returns either nothing or
-only the retained lane named in VALIDATION.md.
+`resolved: ffmpeg version 8…jellyfin`, with the Jellyfin executable and
+package; `make unit` green inside the CI image and in the retained Ubuntu
+24.04 fast lane; `grep -n "ffmpeg-6" .github/workflows/ci.yml` returns
+nothing, while VALIDATION.md names the retained lane.
+
+**Original image publication sequence (completed 2026-09-30).** Wait until the Mac is free of
+the seek gate; Docker Desktop was not running at source-preparation time.
+Build the exact committed M5 tree locally for Linux amd64, then smoke the
+image before any registry write. The CI stage builds runtime assets and
+tooling, not the release binary. These commands contain no credential:
+
+```bash
+source_sha="$(git rev-parse HEAD)"
+docker buildx build --platform linux/amd64 --target ci --load \
+  --build-arg "PLURX_CI_SOURCE_SHA=$source_sha" \
+  -t plurx-ci:m5-local .
+docker run --rm --platform linux/amd64 plurx-ci:m5-local sh -ec \
+  'rustc +1.97.1 --version; node --version; ffmpeg -version | sed -n "1p"; \
+   test "$(readlink -f "$(command -v ffmpeg)")" = /usr/lib/jellyfin-ffmpeg/ffmpeg; \
+   python3 -c "import importlib.metadata; assert importlib.metadata.version(\"playwright\") == \"1.62.0\""'
+docker image inspect plurx-ci:m5-local \
+  --format '{{ index .Config.Labels "org.opencontainers.image.revision" }}'
+docker run --rm --platform linux/amd64 plurx-ci:m5-local python3 -c \
+  'from playwright.sync_api import sync_playwright; p=sync_playwright().start(); b=p.chromium.launch(headless=True, args=["--no-sandbox"]); b.close(); p.stop()'
+```
+
+Check that the label equals `source_sha`, Chromium starts headless, and the
+FFmpeg action reports the Jellyfin package. Then, with explicit registry
+authorization and the operator's existing Docker login, publish only the
+unique source-SHA tag:
+
+```bash
+image="192.168.4.7:3000/noirr/plurx-ci:p02-m5-${source_sha}"
+docker tag plurx-ci:m5-local "$image"
+docker push "$image"
+docker buildx imagetools inspect "$image" | sed -n '/^Digest:/p'
+```
+
+Resolve the registry manifest digest from that output and put the
+`192.168.4.7:3000/noirr/plurx-ci@sha256:<digest>` reference into all five
+jobs before pushing the workflow branch. A tag, local image ID, or Dockerfile
+base digest is **not** the published CI image digest. No workflow with the
+`M5_CI_IMAGE_DIGEST_REQUIRED` placeholder is pushable.
+
+**Publication receipt, 2026-09-30.** The retained smoke-tested artifact was
+published privately at the unique `p02-m5-d1a334853a45d31ec81c6d24f96529bd8752a07a`
+tag, manifest
+`sha256:3d84b711936233da699308d0301ac1e91f12e76c6b928967c41817e841f5e855`.
+All nine OCI blobs were checksum-verified before publication. Its image-input
+fingerprint remains
+`aaa581bde3e453f15e3ee5942d36cb4fb40826e53fba75a5e0c33ef1a1281701`
+on the current effort integration; the original source revision label is
+unchanged. No rebuild, source relabel, moving runtime tag or fleet deployment
+occurred. Host-only registry requests refused cross-origin redirects and
+verified the package owner's private visibility and anonymous denial before
+and after publication.
+
+The supplied Forgejo management token could read an actual private manifest;
+it was not copied into CI. A `noirr` token scoped only to `read:package` also
+read an actual private manifest (HTTP 200) and was stored as repository secret
+`CI_REGISTRY_PULL_TOKEN`. The five jobs use that secret with owner `noirr`
+and the identical published digest. No credential file or Docker login was
+created. This resolves publication and pull authorization, not the owed real
+FFmpeg 8 unit lane, campaign receipts or full plan qualification.
 
 ### 5.6 M6 — Dockerfile digests and release profile PR 1
 
@@ -1101,6 +1266,162 @@ upload beside the image and an operator would have to fetch to
 symbolicate; B is honest and simple and five times the download. Whichever
 lands, `plurxd diagnostic-panic` on the deployed image is the check.
 
+**Reproducible image, 2026-10-02** (claude-opus-5-5, branch
+`opus/p02-repro-continuation`,
+[PR #733](http://forge.lan:3000/noirr/plurx/pulls/733)). This closes M6's
+"`docker build` reproduces" and "image size delta recorded" for the profile C
+tree, and re-runs `plurxd diagnostic-panic` on the image itself.
+
+*The stamp.* `crates/plurxd/build.rs` stamped `PLURX_BUILT_AT` from
+`SystemTime::now()`, so no two builds of a commit could be the same binary.
+It is now the build's source date (`crates/plurxd/build_support/source_date.rs`,
+unit-tested from `version.rs`): `SOURCE_DATE_EPOCH` when set and non-empty,
+else the `HEAD` commit's committer time when the tree is clean, else the
+clock; a malformed `SOURCE_DATE_EPOCH` fails the build. A `-dirty` build is
+not HEAD, so neither the build script nor `make` dates it with HEAD's time
+(review of #733); and `make` takes the date from the checkout it stamps, not
+from a `SOURCE_DATE_EPOCH` left exported in the shell (`make docker
+SOURCE_DATE_EPOCH=…` still overrides deliberately). The field keeps its name and its job (it
+still tells one deploy from the next, because two commits differ in it); its
+meaning is documented as "source date". The Docker context has no `.git`, so
+every image build passes the commit time: `ARG SOURCE_DATE_EPOCH` in the build
+stage, `make docker`/`make docker-up` (through the Compose build args) and
+`scripts/registry-push` derive it with `git log -1 --format=%ct`, and CI
+package-smoke and publish-release pass it from the commit they compile.
+`test_image_builds_pass_the_commit_time_as_source_date_epoch` holds the
+wiring. BuildKit also takes it as the image's `created` time.
+
+*Method.* An isolated `docker-container` builder on lab3 (`opus-p02`,
+BuildKit v0.33.1, buildx 0.30.1; CPU shares 256 on cores 2–15, 18 GB), and
+before each build `docker buildx prune --builder opus-p02 -af`, so the cargo
+registry and both target cache mounts start empty as well
+(`--no-cache` does not empty cache mounts). Each build:
+
+```sh
+docker buildx build --builder opus-p02 --no-cache --provenance=false --sbom=false \
+  --platform linux/amd64 --target runtime \
+  --build-arg PLURX_BUILD_REF="$(git describe --tags --always --dirty)" \
+  --build-arg PLURX_BUILD_SHA="$(git rev-parse HEAD)" \
+  --build-arg SOURCE_DATE_EPOCH="$(git log -1 --format=%ct)" \
+  --output type=oci,dest=buildN.tar,rewrite-timestamp=true .
+```
+
+Provenance is off because the attestation records the build's own start and
+finish times; `rewrite-timestamp=true` clamps every file's mtime in each layer
+to `SOURCE_DATE_EPOCH`.
+
+*Pair 1, `9b45483e7` (the stamp fix alone):* 1,171 s and 901 s. The **Rust
+output reproduced**: `plurxd`
+`59e49410d1170ee4330cad452f66ed177e41e5d0b3581a10e811dff8039115ae`
+(279,098,144 B), `plurxd.dwp`
+`4a038fb5a4e7928def5c8de8da072167ef6f99a26a9f8b361d1ec66b4937f6bd`
+(214,635,552 B), `plurx-cluster-check`
+`eae1fc1dc303e1abc9d16936b51512af09193c27eed4b1f2a8681c6985c296f6`
+(127,421,208 B) and its `.dwp`
+`7660a6515ff7aa17908f84660f50466650ae8b19611248a1d0755cc42d0186bf`
+(79,310,920 B) were byte-identical, as were eight of the nine layers,
+including all four binary layers. The embedded stamp read
+`2026-10-02T14:44:46Z`, the commit time. The **image did not reproduce**:
+manifest `sha256:563b1172…` against `sha256:8470c836…`, because the
+runtime-assets `RUN` layer (`sha256:0dcb08c9…`, 295,570,889 B compressed)
+differed in 10 of its 4,549 entries:
+
+| Entry | Why it differed |
+|---|---|
+| `var/log/dpkg.log`, `var/log/alternatives.log`, `var/log/apt/history.log`, `var/log/apt/term.log` | install timestamps |
+| `var/cache/ldconfig/aux-cache` | inode and change times of the libraries |
+| four `var/cache/fontconfig/*-le64.cache-8` | they embed the font directories' build-time mtimes (with a `rewrite-timestamp` export, as here, those mtimes are then clamped, so the baked caches are also stale; a plain `docker build` keeps them valid) |
+| `usr/share/doc/plurx/ffprobe/config.log` | the configure log dumps the shell environment (BuildKit's per-build `TRACEPARENT`), the script's `mktemp -d` path, configure's own random `ffconf.*` scratch paths and a `mktemp -u` probe |
+
+`/etc/shadow`'s `plurx:!:20728::::::` matched only because both builds ran
+on the same day: `useradd` stamps the last-change day from
+`SOURCE_DATE_EPOCH` or the clock (checked on the pinned bookworm base:
+`SOURCE_DATE_EPOCH=86400 useradd -r t` writes `t:!:1::::::`).
+
+*The layer fix (`9ed98a30c`).* The `RUN` now removes the logs, the aux-cache
+and the fontconfig caches after its last package operation. Dropping the
+font caches is harmless whichever exporter is used: the image carries six
+fonts, which rescan instantly, and each ffmpeg child regenerates its cache
+under its `XDG_CACHE_HOME` on the writable data volume; `useradd` gets `SOURCE_DATE_EPOCH` from the pinned `DEBIAN_SNAPSHOT`
+day, which is already this layer's input. The commit time is deliberately
+not declared in this stage: it would change the `RUN`'s cache key on every
+commit and rebuild apt plus the static probe each time.
+`scripts/build-static-ffprobe` retains the resolved `config.h` and
+`ffbuild/config.mak` (and the configure line in `build.txt`) instead of
+`config.log`. `test_runtime_assets_layer_drops_build_time_state` holds both.
+
+*Pair 2, `9ed98a30c` (both fixes): **reproduced.*** 886 s and 1,201 s. The
+two OCI archives are byte-identical (SHA-256
+`281560581ac5f464a680ee66c6857d3c6058281b7df7276b4e7364a0fe780337`,
+496,409,088 B):
+
+| Object | Digest (both builds) |
+|---|---|
+| `index.json` | `sha256:bed3d8756c79f7049aaabb19bf2ecb1d8344fac54ea7e7edcc57a763d2889a17` |
+| image manifest | `sha256:60afe40502fbd6b8b10b93b527e62a98dff5899f927aadbc6966c9a3559a45c5` |
+| config (the Docker image ID) | `sha256:90e2a1d25c2fd3b7fed38cb66dd9d6f57cb966b4135498aad1d5a0f6eecb65f4`, `created` `2026-10-02T15:27:03Z` (the commit time) |
+| layer 0, `bookworm-slim` | `sha256:774043cc…0150`, 28,238,443 B |
+| layer 1, static-probe script | `sha256:660c43c2…1cda`, 1,805 B |
+| layer 2, media runtime `RUN` | `sha256:e1f2bb64…cedf2`, 295,457,733 B |
+| layers 3–4, notices | `sha256:7017a82b…99fc4`, `sha256:7972f9e3…0c31` |
+| layer 5, `plurxd` | `sha256:04607aab…a24f`, 72,823,873 B |
+| layer 6, `plurxd.dwp` | `sha256:5529463d…050bf`, 46,656,314 B |
+| layer 7, `plurx-cluster-check` | `sha256:3814127d…273d91`, 34,063,466 B |
+| layer 8, `plurx-cluster-check.dwp` | `sha256:f01ac004…65208`, 19,123,030 B |
+
+| File in the image | SHA-256 | Bytes |
+|---|---|---|
+| `plurxd` | `a1df11fbeb99c5dd2ab4043408bbd6507c0da5d78667e82492f4eaf97fa851af` | 279,096,952 |
+| `plurxd.dwp` | `4a038fb5a4e7928def5c8de8da072167ef6f99a26a9f8b361d1ec66b4937f6bd` | 214,635,552 |
+| `plurx-cluster-check` | `9148263cbc0f4bb1ffe0af7db0fe31bbeeed34157fd02903223b6c64e2e5f3df` | 127,421,904 |
+| `plurx-cluster-check.dwp` | `7660a6515ff7aa17908f84660f50466650ae8b19611248a1d0755cc42d0186bf` | 79,310,920 |
+
+Both `.dwp` files are also identical to pair 1's: the commits between them
+change no Rust code.
+
+*Size.* Against the production image on lab3 at the time (`plurx/plurxd:latest`,
+main `dd304bf99`, profile A, so stripped and with no `.dwp`):
+
+| | `docker image inspect .Size` | `plurxd` | `plurx-cluster-check` | `.dwp` files |
+|---|---:|---:|---:|---:|
+| production, main | 1,018,459,699 | 94,160,472 | 40,883,440 | — |
+| effort, profile C | 1,583,182,667 | 279,096,952 | 127,421,904 | 293,946,472 |
+| delta | **+564,722,968 (+55.4 %)** | +184,936,480 | +86,538,464 | +293,946,472 |
+
+The binaries and their debug files account for the whole delta (the runtime
+layer is ~0.7 MB smaller without the removed state). Compressed, the effort
+image's nine layers are 496,382,446 B, of which the four binary layers are
+172,666,683 B.
+
+*`plurxd diagnostic-panic` on the image.* Pair 2's archive was loaded as
+**`plurx-opus-lab:effort-9ed98a30c`** (image ID `sha256:90e2a1d2…65f4`, kept
+on lab3 for an owned lab instance) and run once:
+
+```sh
+docker run --rm --network none --read-only --cpus 1 --memory 512m --pids-limit 64 \
+  --cap-drop ALL --security-opt no-new-privileges:true -e RUST_BACKTRACE=1 \
+  --entrypoint /usr/local/bin/plurxd plurx-opus-lab:effort-9ed98a30c diagnostic-panic
+```
+
+Exit 101; the 3,118-byte log (SHA-256
+`ed1ba83b27972b36997eff0a422e53585c839f1c1338543348067a689013a4da`) resolved
+`plurxd::diagnostic_panic at ./src/crates/plurxd/src/main.rs:505:5`, the
+dispatch at `main.rs:547:37`, the runtime block at `main.rs:488:6` and `main`
+at `main.rs:496:7`, with tokio frames at their registry file:line. Those are
+this tree's lines (`main.rs:505` is the `panic!`). It also ran with M4's
+proposed `cap_drop: ALL` and `no-new-privileges`.
+
+
+*Still not shown.* Both pairs ran on one day on one amd64 host, so a rebuild
+on a later day or on arm64 is unexercised (the `useradd` input is now fixed;
+nothing else in the layer is known to read the date). `make docker` and
+`scripts/registry-push` use the default `docker` driver without
+`rewrite-timestamp`, so their binaries and file contents now reproduce but
+their layer mtimes, and therefore layer digests, still carry the build time;
+reproducing a published digest needs the OCI or image exporter with
+`rewrite-timestamp=true`, which is a change to the fleet publish path and is
+not made here. The binaries themselves are the same from either path.
+
 ### 5.7 M7 — release profile PRs 2–4 (each by its numbers)
 
 Split debug only if M6's delta > 15 %; fat LTO / CGU 1 with the build-time
@@ -1108,6 +1429,159 @@ table; overflow checks after `make test-full` and seven lab1 days.
 
 Acceptance: each PR body carries its table; PR 4's acceptance is the
 journal grep `attempt to .* with overflow` empty after seven days on lab1.
+
+**2026-09-30 PR 3 preparation (not executed).** Existing draft #629 adds
+[`scripts/p02-release-cost.py`](../../scripts/p02-release-cost.py): four
+serial thin/fat × CGU 16/1 cold builds on the native AMD64 high-CPU runner
+**host**, not a Forgejo workflow-job receipt or unit acceptance. A committed
+source-only archive and an audited immutable compiler image are prerequisites.
+The shipped debug/strip/panic/overflow policy stays unchanged. Each trial has
+8 CPU, 24 GiB memory with no swap, 1024 PIDs and 45 minutes; the cumulative
+deadline is 180 minutes and actual owned scratch is capped at 20 GiB.
+Capacity/production-health checks stop only the owned trial on deterioration;
+timeouts/OOMs remain failures without retry. Each target is cold and removed
+after its trial; a separately bounded ten-minute fetch precedes every timed
+trial, then builds use `--offline --locked` and network-none. Only download
+cache may stay warm within the run. The container root is read-only with a
+bounded 1 GiB temporary mount; its logging driver is bounded.
+The compiler/fetch user is the host controller's numeric UID:GID (asserted
+from effective container configuration), with an owned HOME under `/tmp`.
+Source is read-only; target and download-cache binds are writable and owned
+by that same user, so host cleanup does not encounter root-owned subtrees.
+The public image's shared toolchain must be readable by this non-root user.
+Host load must be at most 8 initially and 12 while the owned eight-CPU trial runs.
+After the first fetch, a subsequent case may wait passively at most 60 seconds
+for the original 36 GiB/40 GiB/load-8 preflight to recover, within the unchanged
+180-minute cumulative deadline. Ongoing pressure/health guards remain blocking.
+Wait duration/cause is recorded; failed recovery stops further cases without
+retrying a compiler. The first fetch preflight is immediate.
+Health/cgroup samples run every two seconds and full scratch scans every ten
+seconds; observer overhead is included in wall time and recorded separately.
+The 20 GiB limit is monitored, not a filesystem quota: detection may lag ten
+seconds plus bounded RPC time, so a transient overshoot remains possible.
+The full temporary/log allocation is conservatively reserved in the budget.
+Setup/extraction/preflight failures also retain compact failure receipts and
+remove only exact owned scratch, unless a live owned container requires it.
+Compact source/archive/image/host provenance, timing/RSS, binary size/hash, OOM/exit
+and failed logs survive cleanup. The focused operations contract is
+`test_release_cost_measurement_is_serial_cold_bounded_and_not_ci_acceptance`.
+The source-free tooling recipe is
+[`scripts/p02-release-cost.Dockerfile`](../../scripts/p02-release-cost.Dockerfile),
+based on the audited native AMD64 public Rust 1.97.1 image and recording
+installed-package versions. Its provisioning is not a measured trial.
+Root recipe inspection precedes execution; no profile choice, publication,
+deployment or measurement result is claimed by this preparation.
+
+**Source-free tooling provisioned, 2026-09-30 (not a cold-build result).**
+One pre-start Docker logging failure was retained: the local logging driver
+requires `compress=false` with `max-file=1`. No process/apt ran in that failed
+attempt, and its exact container was removed. The explicitly approved finite
+configuration continuation passed in 20.02 seconds with unchanged 2 CPU,
+2 GiB/no-swap, PID 512 and 900-second bounds. Five host/RW samples recorded
+310,751,232 peak writable-layer bytes and at least 58,612,400,128 available
+memory bytes. Installed `rustc` reads `1.97.1 (8bab26f4f 2026-07-14)`.
+The retained source-free local tooling image ID is
+`sha256:858e143bef76b513e689a655a9733faa62f9912fc2db5dc942b11ded31fe2151`;
+this is a Docker image ID, not an asserted OCI config digest. The public base
+index is `0e2bcaef56d041a486784e54104a81aebe0da44bd03019bd70bc0401e42e4a97`,
+its AMD64 child is `408fe88047cef61a2087653b0c5255fa51c0f2d6d94ddedd7a2562a9b91a46f6`.
+The exact provisioning container is gone and production stayed healthy with
+zero restarts/readiness 200. Nynuc retains both provisioning receipts;
+successful receipt SHA-256 is
+`070b832138823ee9313f06342973a8fd51fbaf113d1c6949bd113be0d6fd44b2`,
+package-manifest SHA-256 is
+`e01501eeb5973d135ac27717984da780ed012a390c3add5a2923f5afe270c40d`.
+No four-way cold build, profile change or CI-job acceptance is claimed.
+
+**Non-root prerequisite probe, 2026-09-30 (not a build).** Root's single
+source-free probe confirmed the retained tooling image is readable as host
+UID:GID `1000:1000`: Rust 1.97.1 and Cargo 1.97.1 read back, and HOME/Cargo
+home under bounded temporary storage were writable. It used 1 CPU, 512 MiB
+with no swap, PID 64, a read-only root, network-none, all capabilities dropped,
+no-new-privileges and an internal 20-second timeout, with no source/cache bind
+or downloads. Exit was zero with no OOM; the exact owned container was removed
+and production remained healthy/restarts zero/readiness 200. No second probe
+or cold compile is claimed. Effective-user/bind-role cleanup is pinned by
+`test_release_cost_effective_user_and_bind_roles_preserve_host_cleanup`.
+
+**PR 3 measured, 2026-09-30 — retain thin/16, not all M7 closed.** The
+delegated decision retains the existing thin LTO/default CGU 16 for fastest
+builds: every alternative took more than twice as long, and no runtime benefit
+was measured. `Cargo.toml` stays unchanged; no full unit run is needed for an
+unchanged profile. This settles this four-way build-cost comparison, not PR 2
+split-debug plumbing, M6's full release-image/debug acceptance, or PR 4's
+overflow/full-suite/seven-day acceptance. Those remain separate and open.
+
+Measured source is exactly `f523e097a5faf98aff36903308927f018468e8cb`, not
+any later documentation head. Its source-only archive SHA-256 is
+`484686532b50fa4a65e50a3c6bb1fb936008591887b5407da20c3aadcece2558`.
+The actual high-CPU runner **host** was nynuc, Intel Core Ultra 7 255H
+(16 logical CPUs), Linux `7.0.0-31-generic`, native AMD64; this was not a
+Forgejo workflow job, CI unit acceptance or complete release qualification.
+The audited tooling image ID above and Rust 1.97.1 were used as UID:GID
+1000:1000. Debug 0, strip symbols, panic unwind and overflow checks false
+were fixed throughout. One bounded fetch preceded the fixed serial order
+thin/16 → thin/1 → fat/16 → fat/1. Every build used a new empty Cargo target,
+`--offline --locked`, and network-none. Download cache was warm; host OS caches
+were not flushed. One trial per cell, no retry, and no runtime/performance
+benchmark was run. Later base refreshes must preserve this old-source scope.
+
+| LTO / CGU | GNU command wall (s) | Supervisor wall (s) | Binary bytes | GNU child/process max RSS (KiB) | Last sampled cgroup peak (bytes) |
+|---|---:|---:|---:|---:|---:|
+| thin / 16 | 285.84 | 287.061 | 92,729,688 | 9,128,072 | 10,093,047,808 |
+| thin / 1 | 620.94 | 622.748 | 69,899,352 | 7,450,692 | 8,435,294,208 |
+| fat / 16 | 612.55 | 614.364 | 81,310,968 | 10,018,608 | 11,324,690,432 |
+| fat / 1 | 709.21 | 709.785 | 67,799,608 | 7,428,308 | 8,304,152,576 |
+
+**How to read it.** Relative to thin/16, thin/1 takes 2.172× time for 24.62 %
+fewer binary bytes; fat/16 takes 2.143× for 12.31 % fewer; fat/1 takes 2.481×
+for 26.88 % fewer. Binary bytes are not compressed-image or runtime benefit.
+GNU wall is the measured timeout/Cargo command, excluding fetch; supervisor
+wall also includes preflight/start/observer time. Fetch was 3.63 s GNU wall,
+4.384 s supervisor wall. GNU max RSS is the command/child-process measure,
+not summed concurrent-process memory. Cgroup peak includes the whole
+container's memory charge (including cache), and is the **last sampled** peak,
+not an asserted exact final peak after exit. They are not interchangeable.
+
+All four cases and fetch passed with exit zero; Docker OOM flags and every
+sampled cgroup `oom`/`oom_kill`/`oom_group_kill` were zero. Observer RPC work
+was 11.115 / 21.185 / 20.848 / 23.755 s across the four cases; it overlaps the
+compiler, remains included, and is not subtracted to invent an adjusted time.
+No cooldown was needed (all waits below 0.001 s, no cause). Actual bounds
+remained 8 CPU, 24 GiB/no-swap, PID 1024, 45 minutes/case and 180 minutes total.
+Initial guard was 36 GiB available/40 GiB disk/load ≤8; ongoing floor was
+16 GiB/20 GiB/load ≤12, swap increase ≤512 MiB and unchanged production health.
+Across recorded samples including fetch: available memory ≥48,961,646,592 B,
+free disk ≥63,288,238,080 B, load ≤8.3741; swap was
+6,087,905,280–6,107,533,312 B against baseline 6,107,541,504 B (no increase).
+The conservative scratch upper bound peaked at 3,419,742,208 B, including
+full reserved tmpfs/log capacity, below the monitored 20 GiB budget.
+Health/cgroup checks were every 2 s and full scratch scans every 10 s; a
+transient scratch overshoot can exist before detection because this is not
+a filesystem quota. All exact owned containers and scratch
+`/var/tmp/p02-m7-erfoa1zt` were removed. Production remained
+healthy/restarts zero/readiness 200. M5 image inputs remain unchanged and its
+private-pull credential/publication prerequisite is still pending.
+
+After measurement, the exact source-free tooling tag/image was removed after
+checking no container referenced it; the public base was untouched. The
+checksum-verified remote staging archive/controller were removed. Compact
+remote receipts (736 KiB) and the complete local receipts remain. Controller
+session 30498 exited zero; this completes the owned measurement lifecycle.
+
+Compact raw JSON/log/time/provenance evidence is retained on the Mac at
+`/private/tmp/p02-m7-receipts.GAxzsr/receipts`. SHA-256 identities:
+
+| Case | Binary | JSON receipt | GNU time receipt | Log receipt |
+|---|---|---|---|---|
+| thin/16 | `09f54f85e4fd9dce996a86e49b01053f443ddc102d21ecb89bcbc1825a1ceb5a` | `c3069d8a7ca1cb6f72b4435e7a6d58ecab80be4bfc8deaa17223e9e5fca373d1` | `4cbd26bf1aa94d91ba34fa7b7a33c77bbcf4da8e6cea2054ec40bb1525d93077` | `4c6e22fc3e7a0f371d88b28f3ea1cf8463067a17a2eac459a086c038978694ff` |
+| thin/1 | `219060542a07ded0610bb52392882803c8eb8130494ddfeaa49969dc1db4bb02` | `aee2834ed035c805db302f1afd070f0a373af916b8839007db1c35faab6e910c` | `8807b59064f4939f6bea8f56bda098ec4cdab258daf611d21b60177bcb4bdbdd` | `cb3da10fedfd45fc16df67f873afd0eecd8dd1a8f280870dd58d37a809bbe828` |
+| fat/16 | `5335360a6858dd1f4140264ed90e2437f4f7aa30b3c8251f2d82063500057b57` | `3b366322083ca7753f481edca992d57aa74878236d4ac4e5fba615ad170f33d8` | `ec111ce1a9906d2a6855ba1ae758834f1907470a6e2ee4dc7fa4149a76b7bf9a` | `86af333079e287418a35ec11942ce7354a5388ec8dbfb0fa0dec1de34304e9e1` |
+| fat/1 | `06859af7271957ba1597c1f8ab8c0a569827e40197b40254b89648e7727df172` | `fef54615a2ff19c9c3f5a3467001733fae56f431a12b0ac777809aa84c7f47da` | `29caf094f673844288fd1881c01f90bb66378c4cdb51d88f5be1525a5fb5bea6` | `f4abda1e891f72ca29decace6dae38f2550e50c39ada6261ebd52d30419b40b3` |
+| fetch | — | `0fdb5917bda8a4e59957c02d4bf010ae5cfda375753cafa2027c5b604393d948` | `8c2d56981797aae609f08b1a704a2593128c8a4ad263c537c2e73f44fb044d67` | `66c87e6e7669220f9f777a0e4425c51eb5c3783755468f57e227dc0210961875` |
+
+Provenance JSON SHA-256:
+`32c62d69a952180480600c35e1202c0fe3e2d66cc3e3787021ceda46e961a8c4`.
 
 ### 5.8 M8 — four fuzz targets
 
@@ -1129,6 +1603,91 @@ first minute (§3.6). `tests.operations.test_evidence_workflows` green. The
 five-campaign nightly summary is **post-merge** evidence: the job has not
 run on a runner yet, and its first night's summaries belong in the
 execution log through the evidence-only docs PR.
+
+**Manual receipt correction (2026-09-29):** The preceding local counts keep
+their original review-round scope. PR #510 merged at `b47c5ff88867201e595a7511fe49ef606e07307e`
+on 2026-09-25 at 13:18:24 UTC. A read-only Forgejo audit found no later
+`validation-nightly.yml` run; its six historical runs were all before the
+merge. Runtime schedules were disabled on 2026-09-10, so waiting for a night
+cannot supply acceptance. The P-02 continuation prepares an explicit
+`fuzz_only` boolean in the existing manual workflow (default `false`).
+With `ref: main`, `fuzz_only: true` and `seed_pgs_crash: false`, it runs
+`inspect_sup`, `fmp4_reader`, `rpu_rewrite`, `nfo_parse` and `epub_facts`, each
+for 900 seconds, while skipping deep validation, ffmpeg 8 pacing and mutation.
+The PGS step now records its starting corpus count; all five summaries show
+executions and corpus before/after, and an unexecuted campaign cannot report
+clean completion. Default manual dispatch still runs the full workflow;
+no schedule is added.
+
+The manual runner receipt remains **pending**. After this source change
+lands, record the selected source SHA, run and job URLs, all five positive
+execution counts, corpus counts/sizes and clean completed logs in this
+execution log. A green workflow alone is insufficient. The focused contracts
+are `test_manual_fuzz_only_keeps_all_five_campaigns_and_skips_runtime_sweeps`
+and `test_fuzz_summary_records_growth_and_refuses_an_unexecuted_clean_receipt`
+in `tests.operations.test_evidence_workflows`; neither runs a fuzzer.
+
+**Post-merge receipt, 2026-10-01 — scoped M8 campaign acceptance satisfied.**
+The first actual manual fuzz-only run is
+[API run 3727 / UI run 3706](http://192.168.4.7:3000/noirr/plurx/actions/runs/3706)
+on effort `d3dfbe2aeaea39f773a20cc08327bddaa74d7ea6`, with
+`fuzz_only=true` and `seed_pgs_crash=false`. All five jobs completed cleanly
+using `nightly-2026-08-01`. Deep, pacing and mutation suites were skipped,
+not passed. Each configured budget was 900 seconds; libFuzzer reported
+901 seconds including final stopping. No campaign was repeated for this
+evidence-only update. These results supersede the pending runner receipt
+above, without relabeling the older local review-round measurements.
+
+| Target / job ID | Executions | Corpus files before → after | Final corpus | Outcome |
+|---|---:|---:|---:|---|
+| `inspect_sup` / 39480 | 3,695,229 | 2 → 204 | 836 KiB | budget spent, no finding |
+| `epub_facts` / 39481 | 281,032 | 17 → 924 | 63,084 KiB | budget spent, no finding |
+| `fmp4_reader` / 39482 | 6,267,134 | 13 → 366 | 2,476 KiB | budget spent, no finding |
+| `nfo_parse` / 39483 | 44,062,346 | 20 → 2,084 | 8,488 KiB | budget spent, no finding |
+| `rpu_rewrite` / 39484 | 36,752,979 | 16 → 802 | 3,276 KiB | budget spent, no finding |
+
+**How to read it:** file growth is each completed campaign summary's actual
+before/after count, not libFuzzer's intermediate added-unit count. A spent
+budget with no finding is bounded parser evidence, not proof of no bugs.
+The PGS job separately executed its explicit seed-opt-in control once:
+`tests::only_the_explicit_seed_enables_the_crash_proof` passed; this is not
+a repeated task-PR fast lane.
+
+Raw logs and downloaded artifact ZIPs are retained privately. Each actual
+upload ZIP hash matches the downloaded bytes; each ZIP contains one target
+log, not a full corpus export. No corpus-content identity is inferred from
+the file counts. Immutable receipt identities:
+
+| Job | Raw log SHA-256 | Artifact ID | Downloaded ZIP SHA-256 |
+|---|---|---:|---|
+| 39480 | `4983ca31ce39e80bd0180407a54a7b5f25281c674e5f554b8c549467d59edfb3` | 1497 | `68550afd1dcc7241f677242aa2555eab093321b419bcd20e6f2e2dfca9bc3793` |
+| 39481 | `e315bf8426549795fe9956a78df7adb611928b06b3a6ed71be1dfd819e536884` | 1499 | `145c9c5c03607b553425d4451d70c57d726fa56a2efa6c6e6a3fed55b1d1c945` |
+| 39482 | `3c5069e6c5e1deea6de4fadbee8c3a6df8da4e9ef73fc37340c0b1782b4977ba` | 1500 | `6187b0a8c9ee40de1aae0f11322f3e5fb620dc1ded611a825077f86574bf1aaf` |
+| 39483 | `875d35efb3057603ae52e34dc52aad5e5fbb7ab97e259a6b862185484b929876` | 1498 | `17f1d925a87bbf2157ebc24ba1b7dfedbb847f8ec71424e3873b9d0bbfab8598` |
+| 39484 | `39dc8e855af37aa057a89cc25699f3ce0edcfd5da4a308002a2d89f58b435f43` | 1501 | `cda9b85bc165b760bbcc674be31f1e30bd5ae984fe87b47a50eb4647998f2021` |
+
+**Separately scoped M6 file/line backtrace, 2026-10-01.** One deliberate
+`plurxd diagnostic-panic` invocation on the frozen `4f243a01` artifact
+resolved native file/line frames, with the paired DWP present. Exact source
+is `4f243a01c04868f6a4d9a56fdb96f9aeb95ee4d8`, tree
+`2814294643036f95bcf8cd51e8bc6c4e736b46bf`, image manifest
+`sha256:3b7ea70808a7b212e800768b11ab90cdda35e8093177c0009c36c1b302ac4b18`.
+This is not an assertion about the later `d3dfbe2a` release binary.
+The full stack resolved `diagnostic_panic` at
+`/src/crates/plurxd/src/main.rs:503:5`, dispatch at `545:37` and main at
+`494:7`; the panic banner alone was not the proof. Expected and actual
+exit were 101, OOM false, start `2026-10-01T10:28:22.712655274Z`, finish
+`2026-10-01T10:28:22.840966759Z`. The owned read-only, network-none container
+had no host mounts, 1 CPU / 256 MiB / 64 PIDs / 30-second deadline;
+no daemon or cluster started and zero unit methods ran. Its exact owned
+container was removed after retaining the raw 9,949-byte log, SHA-256
+`9a0a5961e930b61a7492c79bdeed7a7b3db6311d3402aefc0cde49b58546fcb7`.
+
+**Still open:** whole P02 and current-main qualification; full-image
+reproducibility/size comparison; measured systemd/Compose peak-load and
+playback/GPU matrices; realtime priority cadence/readback; and the
+overflow/full-suite/workload acceptance. No deployment, service directives,
+runner policy, profile settings or production load changed in this update.
 
 ---
 
@@ -1160,9 +1719,10 @@ the whole procedure. Profile changes roll back by the `sha-` image tag.
    measurement may settle on 5 and BE/4 or on none.
    **As built (M3):** two classes, realtime 5 / BE 4 / `+500` and
    background 15 / BE 7 / `+800` (§3.2.2); the measurement still decides.
-3. **Runner provisioning ownership.** The Ansible runner role lives in
-   `plurx-agent`; M5's provisioning half is a PR there, referenced from the
-   `ci.yml` PR.
+3. **Runner provisioning ownership.** The `pjunod/ansible`
+   `github-runners/` role provisions GitHub Actions, not the active Forgejo
+   runner units (§3.4, 2026-09-29). M5 uses the container fallback, so no
+   Forgejo runner provisioning change is proposed.
 4. **Fat LTO build time on the `high-cpu` runner.** If it doubles the
    release build, Paul may prefer thin + CGU 1; PR 3's table is the input.
 5. **`epub_facts` vs `parse_epub`.** Two EPUB parsers exist (metadata facts
@@ -1177,10 +1737,105 @@ the whole procedure. Profile changes roll back by the `sha-` image tag.
    frames, 420 MiB binary). The executing session's recommendation is D now
    and C when line numbers are worth the artefact plumbing; §5.7's PR 2 is
    C. **Paul's call.**
+   **Answered 2026-09-30:** Paul selected C. The dated implementation below
+   supersedes the recommendation to ship D; the historical measurements stay
+   measurements of their named source, not of the new release tree.
 
 ---
 
 ## Execution log
+
+**Profile C continuation, 2026-09-30:** The separately owned
+`codex/p02-packed-debug-artifacts` branch starts from effort
+`8a7dbf5337584b2bb0556d0b617fef48122def2e`. Before edits it fetched newest
+main `f16be4f22296f98a6bce9f2a38b76b2411759e53` and audited Cargo, Docker,
+release/export/manifest tools, Windows packaging and their focused tests.
+Main has no newer hunks in those build files. Open PR629
+(`826d3d643cf4eca6ffa38941da25884d9118af53`) owns the intervening CI image
+stage and runtime-stage extraction; this task leaves that extraction hunk
+unchanged and adds only paired-debug handling. PR403's optical helper and
+runtime additions are preserved: when its third binary integrates, its
+binary-set contract must also retain that binary's platform debug artifact.
+The workboard is not permission to restore older build behavior.
+
+After main-sync landed, the unpublished source was ported onto actual effort
+`df1e443dab63653131e2851192529eef1457242b`. Fresh main was
+`1da6326d239eb0b809c8a569f36127d58a8efef9`; its removal of the duplicate
+`coverage` job from `ci.yml` is retained explicitly. The effort's newer
+ten-minute preflight and manual-only image publication policy remain intact:
+those unrelated main/effort differences are not reverted by artifact work.
+This current-tree composition is qualified separately from the earlier
+tiny-fixture and old-base receipts above.
+
+The release profile is `debug = "line-tables-only"`, `strip = "none"`,
+`split-debuginfo = "packed"`. Thin LTO, default codegen units, unwind and
+overflow policy are unchanged; these are the
+[Cargo profile settings](https://doc.rust-lang.org/cargo/reference/profiles.html).
+For the GNU amd64/arm64 container paths,
+Docker copies each `.dwp` out of its cached target and beside its executable
+in `/usr/local/bin`; the binary-only exporter and verified-runtime rewrite
+retain the same pair. Package-smoke artifacts retain `.dwp` files, and the
+immutable release image carries them beyond the workflow receipt's retention
+period. Historical tags without a paired-debug copy keep schema1 and do not
+invent a `.dwp` requirement.
+
+Profile-C manifests use schema2. Their exact entry set includes each `.dwp`
+and SHA-256 sidecar, binds its bytes to its executable digest and the source
+tree/commit/build-ref, and checks actual compiler identity against the tagged
+`rust-toolchain.toml`. Packaging rejects tracked source changes before naming
+that tree; untracked generated export/packaging files remain allowed. The
+bounded ELF/DWARF verifier requires symbol and
+line sections, a valid DWP compilation-unit index and coverage of every
+executable skeleton DWO identity. Missing, symlinked, torn, wrong-machine or
+mismatched debug files fail rather than producing a flags-only receipt.
+Metadata reads are capped at 32 MiB; DWP contribution ranges are checked
+against their actual section sizes, without reading the whole debug payload.
+
+Windows emits a PDB, not a `.dwp`. Its existing zip now verifies the PE
+CodeView GUID/age against the MSF7 PDB identity stream and requires the
+existing Windows x86_64 release machine before retaining both
+`plurxd.exe` and the verified PDB under its CodeView basename (including a
+hashed build basename when present). There is no macOS daemon release archive in
+this workflow; macOS packed debug is a dSYM and is not represented as a DWP.
+The Windows format/zip regression uses an owned synthetic PE/PDB pair, not a
+claim that a Windows release was rebuilt or executed here.
+Archive creation uses Python's standard `zipfile` writer, already required
+by PE/PDB verification, rather than assuming the preflight host has Info-ZIP.
+The regression puts a failing external `zip` on PATH and verifies the actual
+archive's executable/PDB bytes and missing-PDB refusal; no dependency skip
+or mocked archive substitutes for those checks.
+
+The GNU proof was a separate committed, std-only Rust fixture
+`4d52c6d4ca59e18acd086adc4f7532620d213f36`, archive SHA-256
+`b51f0ebdbb4672cc1ce33c354142182c7a1e8390943c92151e3d1b133abc8a0b`,
+on the existing audited Rust image
+`sha256:897e260d0a1a5a5146433bdb73f62bd84f5f47e846d3485e5f70f63912b5917d`.
+It verified Rust1.97.1 before its 2.50-second build, then the new verifier
+matched all six actual DWO identities. Its panic retained named `/source/src/main.rs`
+file/line frames. Removing the DWP did not remove every frame's line table:
+some reside in the executable; that observation is not weakened into a false
+negative assertion. The shipping contract nevertheless retains and verifies
+the complete pair. The first attempt failed before compilation because the
+local Docker log driver required `compress=false` with `max-file=1`; that
+failure and the separately named corrected attempt remain distinct receipts.
+Both exact owned containers and scratch directories were removed; production
+remained healthy, restart count0, readiness200. CPU2, RAM2 GiB without swap,
+PID128, read-only root, no capabilities, no-new-privileges, no network,
+64 MiB scratch and a fixed120-second controller budget were retained; load
+was telemetry for this functional fixture, not performance qualification.
+
+Focused format/packaging evidence is named by
+`tests/operations/test_release_debug.py` and
+`tests/operations/test_release_pdb.py`, with the existing publication and
+license-notice contracts retained. This is not full-release qualification,
+M4's measured service-limit/playback/GPU matrix, M3's live workload comparison,
+or M8's actual fuzz campaigns. No production service directive, runner
+configuration, deployment, playback or process-supervision contract changes.
+| Date | Model | Session | Milestone | PR | Evidence |
+|---|---|---|---|---|---|
+| 2026-10-02 | claude-opus-5-5 | https://claude.ai/code/session_01CAyBrYCQ7PpAtuZwUxKfp7 | M6 reproducible image and size; M4 Compose proposal | [#733](http://forge.lan:3000/noirr/plurx/pulls/733) (`opus/p02-repro-continuation`) | `9b45483e7` stamps `built_at` from `SOURCE_DATE_EPOCH` (else commit time, else clock) and every image build passes the commit time; two cold isolated builds then matched in every Rust binary, `.dwp` and binary layer, and differed only in ten build-time entries of the media runtime layer, which `9ed98a30c` removes. Two more cold builds of `9ed98a30c` were byte-identical OCI archives, manifest `sha256:60afe405…`, image ID `sha256:90e2a1d2…`; +564,722,968 B (+55.4 %) over production main, all binaries and debug files. `plurxd diagnostic-panic` on that image resolved file:line frames; the image is kept as `plurx-opus-lab:effort-9ed98a30c`. M4's Compose rows are proposed in §5.4 for Paul (documented only: production deploys this tracked Compose file). Still owed: §3.2's busy-load cadence and the M1/M3 readback with real transcodes, cross-day/arm64 rebuilds, and the publish path's timestamp rewrite (§5.6). |
+| 2026-10-01 | gpt-6.1-sol | agent:/root/s09_665_resume_sol61 | M8 actual post-merge campaigns; M6 frozen-artifact backtrace | Evidence-only continuation; draft PR pending | All five bounded run3727 campaigns on exact effort `d3dfbe2a` completed; counts/log/ZIP identities in §5.8. Separate frozen `4f243a01` artifact resolved native file/line stack with expected exit101 and owned cleanup. Neither result closes whole P02 or current-main qualification. No fuzz or unit campaign repeated by this docs author. |
+| 2026-09-30 | gpt-6.1-sol | agent:/root/p02_effort_sync_sol61 | M7 PR 3 measured — retain thin/16 | [#629](http://192.168.4.7:3000/noirr/plurx/pulls/629) draft | Exact `f523e097a` source, serial native AMD64 host matrix, no retry; §5.7 records all binary/receipt hashes and bounded guard ranges. All four passed; unchanged thin/16 retained for build cost only. Owned containers, scratch and tooling image removed; production healthy/restarts0. M7 PRs 2/4, M6 image acceptance, M5 credential prerequisite and M8 post-merge campaigns remain open. |
 
 Executing sessions append one row per milestone PR (see the
 [work board](../reviews/ARCHITECTURE-REVIEW-2026-09-20-WORKBOARD.md) for the
@@ -1204,4 +1859,6 @@ trailers `Agent-Model:` / `Agent-Session:` on every commit of the branch.
 | 2026-09-25 | claude-fable-5-1 | https://claude.ai/code/session_01MuSahCpDVTu88LbxWMUMwS | M6 release-profile half — measured, profile not shipped | [#510](http://192.168.4.7:3000/noirr/plurx/pulls/510) | `c5ee15d8` adds `plurxd diagnostic-panic`; four profiles built on nuc3 (§5.6 table): PR 1 as written is +427 % binary; `strip = "debuginfo"` is +36 % (+11.5 % gzipped) with named frames; packed split is 230 MiB + a 177 MiB `.dwp`. `Cargo.toml` keeps main's profile; which one ships is §7 question 6, Paul's. |
 | 2026-09-25 | claude-opus-5-5 | https://claude.ai/code/session_01AZemhL7Y1nXGWxUGRC2tkK | M3 — built (Paul 2026-09-25: go) | [#518](http://192.168.4.7:3000/noirr/plurx/pulls/518) | §3.2.2. One launcher with a `ChildWork` on every call; realtime 5 / BE 4 / `+500`, background 15 / BE 7 / `+800`; the eleven §3.2.1 rows and three Windows-only probes migrated; the decode-fact probe registers its priority before its exec-from-`pre_exec`; a source census plus clippy `disallowed-methods` over every production spawn; `processes` on `/activity/detail`, admin `DELETE /activity/processes/{pid}` through a pidfd, the web Processes table and three `/metrics` families. Built on `origin/main` @ `448e803d`, apart from [#510](http://192.168.4.7:3000/noirr/plurx/pulls/510) (M6 profile measurement, M8); #510 merged while this was open and main was merged in after it, with conflicts in documents only. Each behavioural hunk was reverted and its test seen to fail: the `pre_exec` (three priority tests), the pidfd kill (the stop test times out), a spawn site put back to `cmd.spawn()` (the census names `metadata/local.rs:419`), the decode-facts `apply` (its order test), the `processes` field, the `/metrics` families and the DELETE route (the HTTP test, each at its own assertion), the painter line (the web suite), and the census's lexical path resolution (without it the census reads `vodencode_tests.rs`, `include!`d from a test chunk, as production). Gate results are in the PR body. **Outstanding, post-merge (GPT):** §3.2's measurement — on media1, with three concurrent transcodes, a 4K direct play and a DVR recording, `for p in $(pgrep ffmpeg); do echo $p $(awk '{print $19}' /proc/$p/stat) $(cat /proc/$p/oom_score_adj); done` inside the container (realtime children read 5 / 500, background 15 / 800, `/proc/1` its own), the Activity page's Processes table and `curl -s localhost:32400/metrics \| grep plurx_child_` (`plurx_child_priority_unapplied_total` 0 for both classes), then each session's `http_wait_count` and the journal's segment materialisation interval with the build before this PR and with this PR; if a copy-HLS or transcode producer that kept up now falls behind, report it — the values move, not the launcher. |
 | 2026-09-25 | claude-opus-5-5 | https://claude.ai/code/session_01AZemhL7Y1nXGWxUGRC2tkK | M4 — not started | [#518](http://192.168.4.7:3000/noirr/plurx/pulls/518) | Not separable from its evidence: no node runs the unit, and each row's acceptance needs a lab VM's playback matrix or GPU selection under the new unit. `OOMScoreAdjust=-500` joins M4. **Steps (GPT, lab VM running `deploy/install`):** (1) at peak (two transcodes, a direct play, a DVR recording) record `systemctl show plurxd -p TasksCurrent -p MemoryCurrent` and `cat /proc/$(pidof plurxd)/oom_score_adj`; (2) add `TasksMax=4096` (only if the peak is ≤ 25 % of it), `PrivateTmp=true`, `ProtectKernelTunables=true`, `RestrictSUIDSGID=true`, `LockPersonality=true` and `OOMScoreAdjust=-500` to the unit, `systemctl daemon-reload && systemctl restart plurxd`; (3) paste `systemd-analyze security plurxd` before and after; (4) play direct, copy HLS, a transcode with burned text subtitles, record one DVR programme, and confirm the GPU probe still selects QSV/VAAPI; (5) confirm `/proc/$(pidof plurxd)/oom_score_adj` is -500 while every ffmpeg reads 500 or 800. Any row that breaks playback stays out and is recorded. |
+| 2026-09-29 | gpt-6-sol | none:codex:2026-09-29 | M5 container fallback — source preparation | Draft PR pending CI image digest | Direct-Forgejo branch `codex/p02-m5-container-ci` prepares the pinned Dockerfile CI stage, five full-sweep jobs on Jellyfin ffmpeg 8, and the retained Ubuntu 24.04 fast-lane `make unit` coverage. No image build, registry publication, workflow push, or runner change has occurred. The workflow has an intentional non-runnable image placeholder until an isolated builder is approved, the image is smoke-checked, and its digest is resolved. Static contracts and the exact image evidence will be recorded before the draft PR. |
+| 2026-09-29 | gpt-6.1-sol | none:codex:2026-09-29 | M8 manual receipt path — source preparation | Same P-02 continuation; draft PR pending | The `fuzz_only` selector skips unrelated sweeps and keeps all five bounded campaigns. PGS records actual corpus growth; a missing execution count cannot claim clean acceptance. No dispatch occurred. The original local evidence remains scoped to the review-round tree; all five post-merge runner summaries remain pending (§5.8). |
 | 2026-09-25 | claude-opus-5-5 | https://claude.ai/code/session_01AZemhL7Y1nXGWxUGRC2tkK | M3 — review round ([comment 4817](http://192.168.4.7:3000/noirr/plurx/pulls/518#issuecomment-4817)) | [#518](http://192.168.4.7:3000/noirr/plurx/pulls/518) | Main @ `3c89ad2ee` merged in first (`76608b5ca`); conflicts in `subtitles.rs` (main's bounded playhead-window pipe kept, this branch's realtime class given to it), `process/mod.rs` (the `output_job_owned` audit), the ownership ledger (three counts measured by zeroing) and the board; the textually clean `/metrics` `format!` had 17 placeholders for 18 arguments and was given one. **Finding 1 (P1), fixed:** the class is now the caller's (§3.2.2's table). The VOD start's held source probe, its decode-fact probes, the Profile 5 pixel proof asked for by any session start or peer offer, the burn extraction a start joins, and the `/subs` extraction a viewer waits on are realtime; the pre-transcode pass, offline packages, the rate-control refresh and the HLS warm-up are background. `plurx_child_spawns_by_purpose_total{class,purpose}` reads each choice back. Revert-proved: each helper put back to its fixed background class (held probe, decode-fact collection, pixel probe, whole-track `.vtt`, burn extraction) and each caller's choice flipped (`SESSION_START_CLASS`, `BoundPlanCaller::decode_fact_work`, the `/subs` handler) fails its test — `an_empty_stored_track_starts_an_encoded_session_without_the_overlay`, `decode_fact_probes_take_the_class_of_the_caller_waiting_on_them`, `the_profile5_pixel_proof_takes_the_class_of_the_caller_waiting_on_it`, `a_whole_track_extraction_runs_at_the_class_its_caller_passes`, `subtitle_extraction_is_cached_by_source_identity`; the counter itself, `every_spawn_is_counted_by_its_class_and_purpose`. **Not changed, recorded:** a joined single flight or a memoized proof keeps the class of the caller that started it (§3.2.2's known limit), and a Profile 5 proof that fails because it timed out is still memoized as failed until restart; the class change makes that timeout less likely under load but does not change the memo, which is a behaviour question for Paul rather than part of this finding. **Finding 2 (P2), fixed:** each `spikes/` workspace carries its own `clippy.toml`; `cargo clippy --locked --manifest-path spikes/hiqlite-m0/Cargo.toml --tests --no-deps -- -D warnings` exits 0 with it and 101 without it, and `clippy_refuses_every_spawning_method_outside_tests` now fails when a spike workspace has none. **Post-merge (GPT), added to the measurement above:** after a VOD start, a Profile 5 start and a `/subs` request on media1, `curl -s localhost:32400/metrics \| grep plurx_child_spawns_by_purpose_total` shows `held source probe for a session start`, `decode-fact probe for a session start`, `Dolby Vision pixel probe`, `burned-subtitle track extraction` and `subtitle track a viewer turned on` under `class="realtime"`. |

@@ -305,6 +305,13 @@ impl TranscodeManager {
             None => request,
         };
         transcode::resolve_transcode(&request, facts, &capabilities, &policy, restrictions)
+            .map(|plan| {
+                let frame_rate = facts.frame_rate();
+                let cadence = (frame_rate.provenance() != transcode::FrameRateProvenance::Variable)
+                    .then(|| frame_rate.value())
+                    .flatten();
+                plan.with_sdr_avc_qualification(&self.caps, cadence, options.force_idr)
+            })
             .map_err(|error| format!("decoder plan refused: {error}"))
     }
 
@@ -609,6 +616,7 @@ impl TranscodeManager {
         &self,
         plan: &ResolvedTranscode,
         presentation: super::Presentation,
+        reorder_frames: bool,
     ) -> Result<[u8; 32], String> {
         let digest = self
             .digest()
@@ -621,6 +629,10 @@ impl TranscodeManager {
             super::Presentation::Live => b"rolling-mpegts".as_slice(),
         });
         hash.update(recipe.as_bytes());
+        if presentation == super::Presentation::Vod {
+            hash.update(b"\0plurx:encoded-vod-reorder:v1\0");
+            hash.update([u8::from(reorder_frames)]);
+        }
         Ok(hash.finalize().into())
     }
 
@@ -1361,7 +1373,7 @@ impl TranscodeManager {
         spec: &OfflineSpec,
         subtitle_burn: Option<plurx_core::transcode::SubtitleBurn>,
     ) -> TranscodeOptions {
-        self.options_for_effective_rate_control(
+        let mut options = self.options_for_effective_rate_control(
             encoder,
             file,
             spec.target_height,
@@ -1374,7 +1386,11 @@ impl TranscodeManager {
             // An offline package is downloaded for playback anywhere later;
             // the SDR rung is the one that plays everywhere.
             OutputGrade::Sdr,
-        )
+        );
+        if let Some(audio) = &spec.audio_delivery {
+            options.set_audio_delivery(audio.clone());
+        }
+        options
     }
 
     /// A lossless-enough sidecar for simple text codecs. ASS/SSA remains

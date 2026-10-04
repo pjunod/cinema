@@ -139,6 +139,11 @@ pub struct Generation {
 /// (`RenditionDir::materialize` under its manifest lock); kept as a trait so
 /// this module tests against memory.
 pub trait Sink: Send + Sync {
+    /// Metadata-only notification after a verified trailer and every final
+    /// planned/tail materialization succeeded. A killed pipe never calls it.
+    fn completed_output(&self) -> impl std::future::Future<Output = ()> + Send {
+        std::future::ready(())
+    }
     fn materialize(
         &self,
         entry: u32,
@@ -712,6 +717,7 @@ impl<S: Sink> GenerationRun<'_, S> {
                 )))
             }
         }
+        self.sink.completed_output().await;
         Outcome::Ran {
             produced_through: self.produced_through,
         }
@@ -1480,6 +1486,65 @@ mod tests {
              film"
         );
         assert_eq!(produced_through, Some(1));
+    }
+
+    #[tokio::test]
+    async fn completed_output_notification_requires_real_trailer_and_successful_tail_writes() {
+        use std::sync::atomic::{AtomicU32, Ordering};
+        #[derive(Default)]
+        struct ObservedSink {
+            inner: MemSink,
+            completed: AtomicU32,
+        }
+        impl Sink for ObservedSink {
+            async fn materialize(&self, entry: u32, bytes: Vec<u8>) -> std::io::Result<()> {
+                self.inner.materialize(entry, bytes).await
+            }
+            async fn completed_output(&self) {
+                self.completed.fetch_add(1, Ordering::Relaxed);
+            }
+        }
+        let film = film().await;
+        let full = ObservedSink::default();
+        assert!(matches!(
+            run(
+                &film.feed[..],
+                generation(&film, 0),
+                &full,
+                "measurement-full"
+            )
+            .await,
+            Outcome::Ran { .. }
+        ));
+        assert_eq!(full.completed.load(Ordering::Relaxed), 1);
+        let truncated = ObservedSink::default();
+        let cut = fragment_boundary_cut(&film.feed, 4);
+        assert!(matches!(
+            run(
+                &film.feed[..cut],
+                generation(&film, 0),
+                &truncated,
+                "measurement-cut"
+            )
+            .await,
+            Outcome::Ran { .. }
+        ));
+        assert_eq!(truncated.completed.load(Ordering::Relaxed), 0);
+        let refused = ObservedSink {
+            inner: MemSink::refusing(1, std::io::ErrorKind::Other),
+            completed: AtomicU32::new(0),
+        };
+        assert!(matches!(
+            run(
+                &film.feed[..],
+                generation(&film, 0),
+                &refused,
+                "measurement-refused"
+            )
+            .await,
+            Outcome::Failed(_)
+        ));
+        assert_eq!(refused.completed.load(Ordering::Relaxed), 0);
     }
 
     /// The production pipe with its audio outrunning the plan: the fixture's

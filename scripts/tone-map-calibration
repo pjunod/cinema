@@ -39,12 +39,19 @@ def validate_source_metadata(payload, case):
 
 def production_binding(source):
     text = source.read_text()
-    match = re.search(r'"(zscale=tin=\{tin\}:min=bt2020nc:pin=bt2020:t=linear:npl=100,format=gbrpf32le,.*?)"', text, re.S)
-    if not match:
+    # Bind the actual helper and its peak units, not an older inline spelling
+    # or an incidental copy in a comment/test. Production now fuses the linear
+    # gamut conversion into its first zscale; preserve that newer graph.
+    matches = re.findall(
+        r'pub fn zscale_tone_map_filter\(transfer_in: &str, peak_nits: u32\) -> String \{\s*'
+        r'format!\(\s*"(.*?)",\s*peak = f64::from\(peak_nits\) / 100\.0,\s*\)\s*\}',
+        text, re.S,
+    )
+    if len(matches) != 1:
         raise ValueError("production CPU tone-map graph could not be located")
-    template = re.sub(r"\\\n\s*", "", match.group(1))
+    template = re.sub(r"\\\n\s*", "", matches[0])
     for case in CASES:
-        expected = template.format(tin="arib-std-b67" if case == "hlg" else "smpte2084", peak=40 if case == "pq-4000" else 10)
+        expected = template.format(transfer_in="arib-std-b67" if case == "hlg" else "smpte2084", peak=40 if case == "pq-4000" else 10)
         if graph(case, "current").rsplit(",scale=", 1)[0] != expected:
             raise ValueError("calibration current graph drifted from production source")
     return {"file": "crates/plurx-core/src/transcode/mod.rs", "sha256": sha256(source), "template": template}
@@ -90,9 +97,10 @@ def graph(case, variant):
     scale = "scale=-2:'min(1080,ih)'"
     if variant == "historical":
         return f"{scale},{linear},tonemap=tonemap=hable:desat=0,zscale=p=bt709:t=bt709:m=bt709:r=tv,format=yuv420p"
+    linear = f"zscale=tin={trc}:min=bt2020nc:pin=bt2020:t=linear:p=bt709:npl=100,format=gbrpf32le"
     peak = 40 if case == "pq-4000" else 10
     dither = ":dither=error_diffusion" if variant == "current" else ""
-    return (f"{linear},zscale=p=bt709,tonemap=tonemap=hable:desat=0:peak={peak},"
+    return (f"{linear},tonemap=tonemap=hable:desat=0:peak={peak},"
             f"zscale=t=bt709:m=bt709:r=tv{dither},format=yuv420p,{scale}")
 
 

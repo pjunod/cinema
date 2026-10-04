@@ -31,6 +31,8 @@
             kind: SessionKind::Transcode { height: 720 },
             start_seconds: 0.0,
             audio_index: None,
+            audio_delivery: None,
+            audio_claim: None,
             subtitle_burn: None,
             audio_offset_ms: 0,
             hdr10: false,
@@ -93,7 +95,7 @@
                 None,
                 None,
                 None,
-                Priority::Live,
+                (Priority::Live, crate::vodserve::RetainedOutputCapture::New),
             )
             .await
             .expect("create");
@@ -107,7 +109,7 @@
                 None,
                 None,
                 None,
-                Priority::Live,
+                (Priority::Live, crate::vodserve::RetainedOutputCapture::New),
             )
             .await
             .expect("replay");
@@ -198,6 +200,8 @@
             kind: SessionKind::Transcode { height: 720 },
             start_seconds: 0.0,
             audio_index: None,
+            audio_delivery: None,
+            audio_claim: None,
             subtitle_burn: None,
             audio_offset_ms: 0,
             hdr10: false,
@@ -277,6 +281,8 @@
             kind: SessionKind::Transcode { height: 720 },
             start_seconds: 0.0,
             audio_index: None,
+            audio_delivery: None,
+            audio_claim: None,
             subtitle_burn: None,
             audio_offset_ms: 0,
             hdr10: false,
@@ -339,6 +345,8 @@
             kind: SessionKind::Transcode { height: 1080 },
             start_seconds: 0.0,
             audio_index: None,
+            audio_delivery: None,
+            audio_claim: None,
             subtitle_burn: None,
             audio_offset_ms: 0,
             hdr10: false,

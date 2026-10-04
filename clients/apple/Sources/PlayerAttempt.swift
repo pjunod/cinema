@@ -157,10 +157,23 @@ enum AttemptFence: String, CaseIterable, Sendable {
     case stallRecovery = "stall_recovery"
     /// `handleItemFailure`: the failure ladder after its control ask.
     case itemFailureLadder = "item_failure_ladder"
+    case blackFrameDecoderAcknowledgement = "black_frame_decoder_acknowledgement"
+    case itemDecoderAcknowledgement = "item_decoder_acknowledgement"
+    case stallCandidateAcknowledgement = "stall_candidate_acknowledgement"
+    case stallCandidateReturn = "stall_candidate_return"
+    case preparedPressureEntry = "prepared_pressure_entry"
+    case preparedPressureAcknowledgement = "prepared_pressure_acknowledgement"
     /// `issueSeek`: coalesced intent before reporting to control.
     case seekIntent = "seek_intent"
     /// `issueSeek`: the intent after the awaited control report.
     case seekIntentAfterControl = "seek_intent_after_control"
+    /// `autoBoundaryIsCurrent`: a boundary's optional original preparation
+    /// belongs to the title, attachment and viewer action that started it.
+    case autoBoundaryOwnerCurrent = "auto_boundary_owner_current"
+    /// `tickDisplayAwareAuto`: the re-plan a viewer seek or long-pause resume
+    /// armed is owed only while that viewer action is still the latest. A
+    /// reopen for the same seek does not supersede it.
+    case autoBoundaryReplanCurrent = "auto_boundary_replan_current"
     /// `issueSeek`: the awaited native seek completion.
     case nativeSeekCompletion = "native_seek_completion"
     /// `issueSeek`: the native seek after awaited subtitle reconciliation.
@@ -186,8 +199,16 @@ enum AttemptFence: String, CaseIterable, Sendable {
         case .blackFrameDecodeFailure: return [.lifecycle, .viewerAction]
         case .stallRecovery: return [.open, .viewerAction]
         case .itemFailureLadder: return [.open, .viewerAction]
+        case .blackFrameDecoderAcknowledgement: return [.lifecycle, .viewerAction]
+        case .itemDecoderAcknowledgement: return [.open, .viewerAction]
+        case .stallCandidateAcknowledgement: return [.open, .viewerAction]
+        case .stallCandidateReturn: return [.open, .viewerAction]
+        case .preparedPressureEntry: return [.lifecycle, .viewerAction]
+        case .preparedPressureAcknowledgement: return [.lifecycle, .viewerAction]
         case .seekIntent: return [.viewerAction, .seek]
         case .seekIntentAfterControl: return [.viewerAction, .seek]
+        case .autoBoundaryOwnerCurrent: return [.lifecycle, .open, .viewerAction]
+        case .autoBoundaryReplanCurrent: return [.lifecycle, .viewerAction]
         case .nativeSeekCompletion: return [.open, .viewerAction, .seek]
         case .nativeSeekAfterSelection: return [.open, .viewerAction, .seek]
         case .recoveryEvidencePoll: return [.open]

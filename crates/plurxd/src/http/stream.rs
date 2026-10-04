@@ -729,6 +729,9 @@ pub struct DecisionResponse {
     pub quality_candidate_id: Option<plurx_core::playback::candidate::CandidateId>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub quality_candidates: Option<Vec<plurx_core::playback::candidate::QualityCandidate>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) measured_candidate_outputs:
+        Option<Vec<crate::vodserve::retained::MeasuredCandidateOutput>>,
     pub file_id: i64,
     /// Whether this node has a fragment index matching the current file and
     /// the copy-video identity selected by this decision.
@@ -2188,6 +2191,19 @@ pub async fn decision_post(
     decision(auth, state, path, Query(q), headers, remote).await
 }
 
+/// Legacy priors have neither completed-body nor candidate-recipe provenance.
+/// Only legacy policy may read them; catalog negotiation itself is not proof.
+pub(super) fn prior_for_candidate_policy(
+    prior: Option<&plurx_core::domain::NetworkPrior>,
+    candidate_policy: bool,
+) -> Option<&plurx_core::domain::NetworkPrior> {
+    if candidate_policy {
+        None
+    } else {
+        prior
+    }
+}
+
 pub async fn decision(
     AuthUser(user): AuthUser,
     State(state): State<AppState>,
@@ -2479,6 +2495,12 @@ pub async fn decision(
     // to Trakt, and a third-party call belongs nowhere near the click path.
     // The media endpoints announce it once delivery is actually happening.
 
+    let mut measured_candidate_outputs = None;
+    // One advisory deadline for every link-evidence read this decision makes
+    // (measured costs, recorded negatives, the live incumbent proof), taken
+    // once the catalogue itself is in hand so its enumeration cannot spend
+    // it. Missing evidence is Unknown; it never refuses the decision.
+    let mut advisory = None;
     let quality_candidates = if state
         .store
         .get_setting(plurx_core::store::keys::PLAYBACK_DISPLAY_AWARE_AUTO)
@@ -2486,25 +2508,67 @@ pub async fn decision(
         .is_some_and(|value| value.trim() == "1")
     {
         if let Some(caps) = q.caps_v2.as_ref() {
-            Some(
-                state
-                    .media_pool
-                    .quality_candidates(
-                        &state,
-                        crate::media_pool::QualityCatalogRequest {
-                            copy_contract: None,
-                            file_id: file.id,
-                            source_size: file.size,
-                            source_mtime: file.mtime,
-                            caps: caps.clone(),
-                            audio_index: selected_audio,
-                            audio_offset_ms: file.audio_offset_ms,
-                            subtitle_burn: selected_subtitle
-                                .filter(|_| selected_subtitle_requires_burn),
-                            presentation: crate::transcode::Presentation::Vod,
-                        },
-                    )
+            let request = crate::media_pool::QualityCatalogRequest {
+                audio_claim: plurx_core::playback::audio::AudioClaim::from_caps(caps)
+                    .ok()
+                    .flatten(),
+                audio_delivery: None,
+                copy_contract: None,
+                file_id: file.id,
+                source_size: file.size,
+                source_mtime: file.mtime,
+                caps: caps.clone(),
+                audio_index: selected_audio,
+                audio_offset_ms: file.audio_offset_ms,
+                subtitle_burn: selected_subtitle.filter(|_| selected_subtitle_requires_burn),
+                presentation: crate::transcode::Presentation::Vod,
+            };
+            let accepted = state
+                .media_pool
+                .quality_candidates(&state, request.clone())
+                .await;
+            // Costs are advisory, but their source/settings must be the exact
+            // accepted local row. Acquisition and projection share one deadline.
+            let deadline = *advisory.insert(super::hls::link_receipts::advisory_deadline());
+            measured_candidate_outputs = tokio::time::timeout_at(deadline, async {
+                let planning = state
+                    .store
+                    .playback_planning_snapshot(file.id, &crate::transcode::QUALITY_PLANNING_KEYS)
                     .await
+                    .ok()??;
+                let binding = crate::media_pool::PlanningBinding::from_snapshot(&planning);
+                if planning.file.id != file.id
+                    || planning.file.size != file.size
+                    || planning.file.mtime != file.mtime
+                    || !accepted.iter().any(|entry| {
+                        entry.node_id == state.node_id && entry.binding.as_ref() == Some(&binding)
+                    })
+                {
+                    return None;
+                }
+                let local: Vec<_> = accepted
+                    .iter()
+                    .filter(|entry| {
+                        entry.node_id == state.node_id && entry.binding.as_ref() == Some(&binding)
+                    })
+                    .cloned()
+                    .collect();
+                super::hls::link_receipts::measured_outputs(
+                    &state,
+                    &file,
+                    &request,
+                    &local,
+                    Some(&planning),
+                    deadline,
+                )
+                .await
+            })
+            .await
+            .ok()
+            .flatten();
+
+            Some(
+                accepted
                     .into_iter()
                     .map(|entry| entry.candidate)
                     .collect::<Vec<_>>(),
@@ -2515,12 +2579,57 @@ pub async fn decision(
     } else {
         None
     };
+    // Keep the public menu/explicit choices. This narrows only this warm Auto
+    // advisory selection, never the feature switch or a manual request.
+    let selection_candidates = if q.force.as_deref().unwrap_or("auto") == "auto" {
+        if let Some(catalog) = quality_candidates.as_ref() {
+            let advisory = advisory.unwrap_or_else(super::hls::link_receipts::advisory_deadline);
+            let catalog = super::hls::candidate_recovery::decision_catalog(
+                &state,
+                identity.as_ref(),
+                &file,
+                super::hls::link_receipts::requested_receipt(&headers),
+                catalog.clone(),
+                advisory,
+            )
+            .await;
+            let catalog = super::hls::link_receipts::filter_catalog(
+                &state,
+                identity.as_ref(),
+                &file,
+                catalog,
+                advisory,
+            )
+            .await;
+            Some(
+                super::hls::link_receipts::positive_catalog(
+                    &state,
+                    identity.as_ref(),
+                    &file,
+                    super::hls::link_receipts::requested_receipt(&headers),
+                    None,
+                    catalog,
+                    measured_candidate_outputs.as_deref(),
+                    advisory,
+                )
+                .await,
+            )
+        } else {
+            None
+        }
+    } else {
+        quality_candidates.clone()
+    };
+    // A negotiated catalog cannot reinterpret coarse legacy supply history
+    // as completed-transfer evidence for its candidate recipes.
+    let candidate_prior =
+        prior_for_candidate_policy(network_prior.as_ref(), quality_candidates.is_some());
     let fallback_height = state
         .transcode
-        .auto_height_for_request(Some(&file), network_prior.as_ref(), q.hdr10t == Some(1))
+        .auto_height_for_request(Some(&file), candidate_prior, q.hdr10t == Some(1))
         .await;
     let display_aspect = state.transcode.quality_display_aspect(&file).await;
-    let quality_candidate_id = quality_candidates.as_ref().and_then(|catalog| {
+    let quality_candidate_id = selection_candidates.as_ref().and_then(|catalog| {
         if decision.method != playback::PlaybackMethod::Transcode {
             catalog
                 .iter()
@@ -2567,6 +2676,7 @@ pub async fn decision(
         display_aware_auto_protocol: Some("route-v1".to_owned()),
         quality_candidate_id,
         quality_candidates,
+        measured_candidate_outputs,
         file_id: id,
         vod_indexed,
         source: source_summary(&file, probe_json.as_deref()),
@@ -2586,7 +2696,7 @@ pub async fn decision(
         audio_offset_ms: file.audio_offset_ms,
         declared_offset_ms: declared_av_offset(&state, id).await,
         ladder: crate::transcode::ladder(file.height),
-        prior_kbps: network_prior.and_then(|prior| prior.sustained_kbps),
+        prior_kbps: candidate_prior.and_then(|prior| prior.sustained_kbps),
         prefer_segmented,
     }))
 }
@@ -2888,6 +2998,8 @@ pub struct StreamQuery {
     pub vcodec: Option<String>,
     pub vmaxheight: Option<String>,
     pub acodec: Option<String>,
+    #[serde(default, deserialize_with = "deserialize_audio_channels")]
+    pub achannels: Option<u8>,
     pub container: Option<String>,
     pub maxheight: Option<i64>,
     pub hdr: Option<u8>,
@@ -2959,7 +3071,7 @@ impl StreamQuery {
             vcodec: self.vcodec.clone(),
             vmaxheight: self.vmaxheight.clone(),
             acodec: self.acodec.clone(),
-            achannels: None,
+            achannels: self.achannels,
             container: self.container.clone(),
             maxheight: self.maxheight,
             hdr: self.hdr,
@@ -3124,6 +3236,12 @@ async fn serve_stream_mp4(
     #[cfg(not(windows))]
     let remux_path = file.path.clone();
     remux(RemuxSpec {
+        audio_delivery: (caps.achannels.is_some()
+            || caps
+                .caps_v2
+                .as_ref()
+                .is_some_and(|caps| !caps.audio_sinks.is_empty()))
+        .then_some(&served.delivered_audio),
         path: &remux_path,
         #[cfg(windows)]
         source: &source.handle,
@@ -3378,6 +3496,7 @@ pub(crate) async fn serve_file_range(
 /// bare bools and numbers — a call site with seven positional arguments is one
 /// transposition away from remuxing at the wrong pace with the wrong track.
 struct RemuxSpec<'a> {
+    audio_delivery: Option<&'a plurx_core::playback::audio::AudioDelivery>,
     path: &'a Path,
     #[cfg(windows)]
     source: &'a std::fs::File,
@@ -3564,6 +3683,7 @@ async fn consume_remux_stderr<R>(
 
 async fn remux(spec: RemuxSpec<'_>) -> Result<Response, ApiError> {
     let RemuxSpec {
+        audio_delivery,
         path,
         #[cfg(windows)]
         source,
@@ -3655,7 +3775,17 @@ async fn remux(spec: RemuxSpec<'_>) -> Result<Response, ApiError> {
             retain_hevc_parameter_sets,
         ));
     }
-    if transcode_audio {
+    if let Some(audio) = audio_delivery {
+        let offset = if audio.transcodes() {
+            plurx_core::transcode::audio_offset_filter(audio_offset_ms)
+        } else {
+            None
+        };
+        if let Some(af) = plurx_core::transcode::audio_filter_chain(Some(audio), offset) {
+            args.extend(["-af".to_owned(), af]);
+        }
+        plurx_core::transcode::push_audio_delivery_args(&mut args, audio, false);
+    } else if transcode_audio {
         if let Some(af) = plurx_core::transcode::audio_offset_filter(audio_offset_ms) {
             args.extend(["-af".to_owned(), af]);
         }
@@ -3876,6 +4006,28 @@ mod tests {
     use super::*;
 
     #[test]
+    fn a05_candidate_catalog_never_promotes_legacy_prior_provenance() {
+        let prior = plurx_core::domain::NetworkPrior {
+            credential_generation: Default::default(),
+            client_class: "web".to_owned(),
+            network_fingerprint: "candidate-isolation".to_owned(),
+            sustained_kbps: Some(1),
+            worst_rung_height: Some(2160),
+            starved_at_ms: Some(i64::MAX),
+            sample_count: 99,
+            updated_at_ms: i64::MAX,
+            link_worst_rung_height: Some(2160),
+            link_starved_at_ms: Some(i64::MAX),
+        };
+        assert!(prior_for_candidate_policy(Some(&prior), true).is_none());
+        let legacy = prior_for_candidate_policy(Some(&prior), false)
+            .expect("legacy consumers retain their unchanged prior");
+        assert!(std::ptr::eq(legacy, &prior));
+        assert_eq!(legacy.sustained_kbps, Some(1));
+        assert!(prior_for_candidate_policy(None, false).is_none());
+    }
+
+    #[test]
     fn flat_audio_channel_claim_is_bounded_at_the_request_boundary() {
         for value in ["0", "17", "255"] {
             assert!(
@@ -3898,6 +4050,43 @@ mod tests {
             ["-c:a", "aac", "-ac", "2", "-b:a", "256k", "-ar", "48000"]
         );
         assert_eq!(progressive_audio_args(false), ["-c:a", "copy"]);
+    }
+
+    #[test]
+    fn progressive_query_preserves_the_existing_flat_audio_channel_claim() {
+        let query: StreamQuery =
+            serde_urlencoded::from_str("acodec=aac&achannels=2").expect("bounded flat claim");
+        let caps = query.caps();
+        assert_eq!(caps.achannels, Some(2));
+        let source = plurx_core::domain::AudioStream {
+            codec: "aac".into(),
+            channels: Some(6),
+            sample_rate: Some(48_000),
+            ..Default::default()
+        };
+        let audio = plurx_core::playback::audio::resolve_audio(
+            Some(&source),
+            &caps.profile(NOW_MS),
+            plurx_core::playback::audio::AudioRoute::Progressive,
+            0,
+        );
+        assert!(matches!(
+            audio.action,
+            plurx_core::playback::audio::AudioAction::Encode { channels: 2, .. }
+        ));
+        let mut argv = Vec::new();
+        plurx_core::transcode::push_audio_delivery_args(&mut argv, &audio, false);
+        assert!(argv.windows(2).any(|pair| pair == ["-ac", "2"]));
+        for value in [0, 17] {
+            assert!(
+                serde_urlencoded::from_str::<StreamQuery>(&format!("achannels={value}")).is_err()
+            );
+        }
+        assert!(serde_urlencoded::from_str::<StreamQuery>("")
+            .expect("legacy query")
+            .caps()
+            .achannels
+            .is_none());
     }
 
     /// A fixed clock for every test that builds a device profile.
@@ -4588,6 +4777,7 @@ mod tests {
                 display_aware_auto_protocol: Some("route-v1".to_owned()),
                 quality_candidate_id: None,
                 quality_candidates: None,
+                measured_candidate_outputs: None,
                 file_id: 42,
                 vod_indexed: false,
                 decision,
@@ -4790,6 +4980,7 @@ mod tests {
             codec: "eac3".into(),
             channels: Some(6),
             sample_rate: Some(48_000),
+            channel_layout: None,
             language: Some(language.into()),
             title: None,
             default,
@@ -4845,6 +5036,7 @@ mod tests {
                     codec: "eac3".into(),
                     channels: Some(8),
                     sample_rate: Some(48_000),
+                    channel_layout: None,
                     language: Some("fra".into()),
                     title: Some("French E-AC-3".into()),
                     default: true,
@@ -4854,6 +5046,7 @@ mod tests {
                     codec: "truehd".into(),
                     channels: Some(8),
                     sample_rate: Some(48_000),
+                    channel_layout: None,
                     language: Some("eng".into()),
                     title: Some("English TrueHD Atmos".into()),
                     default: false,

@@ -813,7 +813,7 @@ found five more, all fixed:
 | Finding | Root cause | Fix |
 |---|---|---|
 | A renegotiation could end an incumbent that activated during startup and strand its native session | The Rust `pending` check was not in the SQL, and release used the pre-END snapshot | `withdraw_pending_jellyfin_play` ends only a still-pending ask, so the snapshot it releases is exact |
-| A standalone node crashing in v95's commit window could never start again | v95 lacked the restartable `ADD COLUMN` guard v41–v90 carry | The guard checks the revision column |
+| A standalone node crashing in v95's commit window could never start again | v95 lacked the restartable `ADD COLUMN` guard v41–v90 carry | The guard checks the revision column (superseded: main's `apply_migration_step` now commits each step's marker with its DDL, so the step is v101 and needs no guard) |
 | `/api/v1/grants/{token}/content` answered a Jellyfin link (a validity oracle) | Links share the native one-file grant table | The open-in route refuses any grant a Jellyfin play owns before saying whether it is live |
 | A failed VOD bind stranded the native start until idle expiry | Only the refused path released | A start no binding claims is released; a claimed or unknowable one is left to its owner |
 | Logout re-released every retained tombstone | Release ran for already-ended native sessions | Release skips a native route that is already ended |
@@ -849,6 +849,19 @@ always-multivariant master advertised the file's text renditions even for a
 play negotiated without manifest subtitles (Infuse's profile, or a burn-in).
 That master now carries no subtitle group, and that play's HLS subtitle
 resources answer 404.
+
+**Merged with the architecture review (#793).** Main took SQLite v92–v97 and
+replicated v70–v73, so the Jellyfin steps are now SQLite v98–v101 and
+replicated v74–v77. The private-lineage bridge stamps the end of the union it
+builds (v73), and the Jellyfin steps run after it.
+
+Main's `apply_migration_step` commits each SQLite step's marker with its DDL,
+so the v95 crash-restart guard is gone. Fixtures that rewind a marker drop the
+watch columns instead, as main does for its own `ADD COLUMN` steps.
+
+Jellyfin plays carry no client network identity: both negotiation and native
+activation run with no network prior. So they agree, and these plays take no
+part in priors or candidate recovery.
 
 Open, rare: on an SDR HEVC High-tier copy with no text tracks, the native
 master still serves its direct media-playlist envelope, because Apple's

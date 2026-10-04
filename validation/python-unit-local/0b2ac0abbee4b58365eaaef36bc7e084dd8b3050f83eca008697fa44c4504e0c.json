@@ -1,0 +1,13 @@
+{
+  "version": 1,
+  "repository": 1,
+  "branch": "codex/ci-windows-baremetal-routing",
+  "suite": "validation",
+  "source_commit": null,
+  "test_file": "tests/validation/test_python_receipt_cli_identity.py",
+  "test_file_sha256": "dd4dda921024826a340623c74f46bae2c16aa90e36cd0ca4fb379607ca5381b7",
+  "command": "python3 -m unittest -v tests.validation.test_python_receipt_cli_identity.ReceiptCLIIdentityCase.test_module_cli_owner_fallback_and_exact_zero_unit_refusal",
+  "test_ids": ["test_python_receipt_cli_identity.ReceiptCLIIdentityCase.test_module_cli_owner_fallback_and_exact_zero_unit_refusal"],
+  "result": {"failed": 0, "errors": 0, "skipped": 0, "expected_failures": 0, "unexpected_successes": 0, "count": 1},
+  "output": "Adopted for PR767 without replay. Original execution was an uncommitted owned-clone patch on0782c1ac4d04e7ee3592f2a97e4b40cbfed31f09, private branch codex/pr767-interrupted-journal-recovery, stagedtreec129d07da0b43f68083b4f6d140b2845807e374d, not a final-candidate or CI execution. Genuine tool22d057 exit0, one new synthetic method only. Actual bounded raw /private/tmp/PR767_NEW_CLI_CONTROL_ONCE_SOL61_20261003.raw SHA256c3fe320b5f94c90815042201a3de2e563d32111ccd86a0980a02061a912522d5. Original core SHA256e0ad290b9f032d5961b4160fd859318b720005620f1383a25b0830dfd6f16f0f, recovery SHA2566921a70970044d1c80d8534e4b338dee81ae738e8a00618228ec9372cc8370ee, descriptor SHA256f17328b9800a00a750ece1e6dbb2c8ce7a52c3db01509ae7af30a2d12324c909; adopted bytes unchanged. Fresh child CPython actual-m runpy entry exercised shared403 exception identity and enrolled-owner fallback, exact synthetic zero-unit3985 recovery, unchanged inherited map and eight refused altered evidence cases; no network or credentials. Exact raw output:\ntest_module_cli_owner_fallback_and_exact_zero_unit_refusal (tests.validation.test_python_receipt_cli_identity.ReceiptCLIIdentityCase.test_module_cli_owner_fallback_and_exact_zero_unit_refusal) ... ok\n\n----------------------------------------------------------------------\nRan 1 test in 0.102s\n\nOK\n"
+}

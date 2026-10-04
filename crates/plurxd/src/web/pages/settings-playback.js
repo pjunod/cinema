@@ -469,3 +469,62 @@ function verifiedDecodeCard(s){
       <div class="err" id="dhqerr" role="alert"></div>
       ${setCardFoot("saveVerifiedDecode")}`,{id:"vdcard"});
 }
+
+// Encoder rate control. The stored request is tri-state: unset (each encoder
+// family's measured code default applies), or an explicit bitrate / quality
+// choice that stays put if a family default later changes. The server reports
+// unset as null and the default it resolves to separately; this card must
+// round-trip null as null. Writing the displayed default back as "bitrate"
+// was how a cluster ended up pinned to an explicit bitrate nobody chose.
+//
+// The quality value is sent only with an explicit Quality mode. It changes
+// nothing effective under Bitrate or Default, but it is part of the
+// speculative queue's policy key, so a stray value there would cancel queued
+// background transcodes cluster-wide for no change in output.
+function rateControlRequest(mode,quality){
+  const m=String(mode==null?"":mode).trim();
+  const q=m==="quality"?String(quality==null?"":quality).trim():"";
+  return {transcode_rate_mode:m===""?null:m,transcode_quality:q===""?null:Number(q)};
+}
+function rateControlModeChanged(select){
+  const input=/** @type {HTMLInputElement|null} */(document.getElementById("prq"));
+  if(!input) return;
+  const quality=select.value==="quality";
+  input.disabled=!quality;
+  if(!quality) input.value="";
+}
+function rateControlCard(s){
+  const mode=s.transcode_rate_mode==null?"":String(s.transcode_rate_mode);
+  const family=s.transcode_rate_mode_default_encoder||"this encoder";
+  const familyMode=s.transcode_rate_mode_default||"bitrate";
+  const qualityMode=mode==="quality";
+  const quality=!qualityMode||s.transcode_quality==null?"":String(s.transcode_quality);
+  const qualityDefault=s.transcode_quality_default==null?"family default":`family default (${s.transcode_quality_default})`;
+  const opt=(value,label)=>`<option value="${value}" ${mode===value?"selected":""}>${esc(label)}</option>`;
+  return setCard(`${cardHead("Encoder rate control","Server encoding · Applies to new transcodes. Default follows each encoder family's measured choice; an explicit choice stays put if a default changes.")}
+      <div class="setfields">
+        <div><label for="prc">Rate control</label><select id="prc" style="min-width:260px" onchange="rateControlModeChanged(this)">
+          ${opt("",`Default (per encoder) — on this node, ${family} uses ${familyMode}`)}
+          ${opt("bitrate","Bitrate — fixed target")}
+          ${opt("quality","Quality — constant quality, capped")}</select></div>
+        <div><label for="prq">Quality value</label><input id="prq" type="number" min="0" max="255" step="1" placeholder="${esc(qualityDefault)}" value="${esc(quality)}"${qualityMode?"":" disabled"}></div>
+      </div>
+      <div class="hint">The quality value applies only to Quality. Switching a family to or from Quality, or changing its quality value, moves the cache identity of its transcodes, so those titles are encoded again on next demand; clearing an explicit Bitrate to a Default that is also bitrate moves nothing. A quality request is tested on this node's encoder before it is saved; a driver that refuses it keeps bitrate.</div>
+      <div class="err" id="rcerr" role="alert"></div>
+      ${setCardFoot("saveRateControl")}`,{id:"rccard"});
+}
+async function saveRateControl(btn){
+  const err=document.getElementById("rcerr"); err.textContent="";
+  if(btn) btn.disabled=true;
+  try{
+    const mode=/** @type {HTMLSelectElement} */(document.getElementById("prc"));
+    const quality=/** @type {HTMLInputElement} */(document.getElementById("prq"));
+    const saved=await api("/settings",{method:"PUT",body:rateControlRequest(mode.value,quality.value)});
+    cacheSettings(saved);
+    toast("Rate control saved"); if(btn) setCardSaved(btn);
+    // Re-render this card from the response: the server's answer, including
+    // the default it resolves an unset request to, is what is in force.
+    const card=document.getElementById("rccard");
+    if(card) card.outerHTML=rateControlCard(saved);
+  }catch(e){ err.textContent=e.message; if(btn) btn.disabled=false; }
+}

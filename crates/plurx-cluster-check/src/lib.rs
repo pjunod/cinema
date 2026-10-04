@@ -338,6 +338,12 @@ pub async fn run(args: Vec<String>) -> Result<()> {
         Some("singleton") => run_singleton_takeover_case().await,
         Some("singleton-attempt") => run_singleton_takeover_attempt().await,
         Some("serving-partition") => run_serving_partition_case().await,
+        Some("bounded-watch-failure") => {
+            if args.get(2).is_some() {
+                bail!("bounded-watch-failure accepts no arguments");
+            }
+            run_bounded_catalogue_failure_case().await
+        }
         Some("growth") => compacted_growth_gate(args.get(2).map(PathBuf::from)).await,
         Some("transport-recovery") => {
             if args.get(3).is_some() {
@@ -877,7 +883,7 @@ async fn controller() -> Result<()> {
     run_quorum_watermark_rolling_compatibility_case().await?;
     println!("cluster-check: P3a three-column watermark compatibility");
     run_p3a_watermark_rolling_compatibility_case().await?;
-    println!("cluster-check: bounded catalogue apply-pause and follower partition");
+    println!("cluster-check: bounded catalogue and watch apply-pause/partition");
     run_bounded_catalogue_failure_case().await?;
     println!("cluster-check: three voters plus an admitted learner");
     let learner = run_learner_membership_case().await?;
@@ -2682,6 +2688,106 @@ struct BoundedReadObservation {
     serving_ready: bool,
 }
 
+#[derive(Clone, Copy, Debug, Serialize, Deserialize)]
+pub enum BoundedWatchKind {
+    Map,
+    Rollup,
+    Summary,
+    Rails,
+}
+
+#[derive(Clone, Copy, Debug, Serialize, Deserialize)]
+pub enum BoundedWatchWrite {
+    Progress,
+    Watched(bool),
+}
+
+const BOUNDED_WATCH_KINDS: [BoundedWatchKind; 4] = [
+    BoundedWatchKind::Map,
+    BoundedWatchKind::Rollup,
+    BoundedWatchKind::Summary,
+    BoundedWatchKind::Rails,
+];
+
+#[derive(Debug)]
+struct BoundedWatchObservation {
+    value: Option<serde_json::Value>,
+    error: Option<String>,
+    consistent_query_calls: u64,
+    non_consistent_query_calls: u64,
+    watermark_valid: bool,
+    serving_ready: bool,
+}
+
+async fn bounded_watch_read(
+    cluster: &mut ClusterProcesses,
+    node_id: u64,
+    kind: BoundedWatchKind,
+    user_id: i64,
+    item_id: i64,
+    read_after: u64,
+) -> Result<BoundedWatchObservation> {
+    match cluster
+        .request(
+            node_id,
+            Request::BoundedWatchRead {
+                kind,
+                user_id,
+                item_id,
+                read_after,
+            },
+        )
+        .await?
+    {
+        Response::BoundedWatchRead {
+            value,
+            error,
+            consistent_query_calls,
+            non_consistent_query_calls,
+            watermark_valid,
+            serving_ready,
+        } => Ok(BoundedWatchObservation {
+            value,
+            error,
+            consistent_query_calls,
+            non_consistent_query_calls,
+            watermark_valid,
+            serving_ready,
+        }),
+        response => bail!("bounded watch request returned {response:?}"),
+    }
+}
+
+async fn read_bounded_watch_kind(
+    reader: &CatalogueReader,
+    kind: BoundedWatchKind,
+    user_id: i64,
+    item_id: i64,
+    read_after: u64,
+) -> Result<serde_json::Value> {
+    let value = match kind {
+        BoundedWatchKind::Map => serde_json::to_value(
+            reader
+                .watch_map(user_id, &[item_id], Some(read_after))
+                .await?,
+        )?,
+        BoundedWatchKind::Rollup => serde_json::to_value(
+            reader
+                .watch_rollup(user_id, item_id, Some(read_after))
+                .await?,
+        )?,
+        BoundedWatchKind::Summary => serde_json::to_value(
+            reader
+                .watch_summary(user_id, &[item_id], &[item_id], Some(read_after))
+                .await?,
+        )?,
+        BoundedWatchKind::Rails => {
+            serde_json::to_value(reader.progress_rails(user_id, 20, Some(read_after)).await?)?
+        }
+    };
+    Ok(value)
+}
+
 async fn bounded_read(
     cluster: &mut ClusterProcesses,
     node_id: u64,
@@ -2728,7 +2834,8 @@ async fn wait_for_local_catalogue_read(
         if observation.error.is_none()
             && observation.title.as_deref() == Some(expected_title)
             && observation.consistent_query_calls == 0
-            && observation.non_consistent_query_calls == 1
+            // The replicated preference and catalogue row each use local SQL.
+            && observation.non_consistent_query_calls == 2
             && observation.watermark_valid
             && observation
                 .watermark_age_millis
@@ -2746,9 +2853,101 @@ async fn wait_for_local_catalogue_read(
     }
 }
 
-/// Drive the P3 acceptance against three real voter processes. Apply pause is
-/// below Raft's log and transport paths; the partition cuts this follower's
-/// Raft and cluster-query transports while leaving the harness control pipe.
+async fn write_bounded_watch(
+    cluster: &mut ClusterProcesses,
+    node_id: u64,
+    user_id: i64,
+    item_id: i64,
+    write: BoundedWatchWrite,
+) -> Result<u64> {
+    match cluster
+        .request(
+            node_id,
+            Request::WriteBoundedWatch {
+                user_id,
+                item_id,
+                write,
+            },
+        )
+        .await?
+    {
+        Response::BoundedWatchWriteAck { commit_index } if commit_index > 0 => Ok(commit_index),
+        response => bail!("watch write lacked an acknowledged log index: {response:?}"),
+    }
+}
+
+fn assert_bounded_watch_value(
+    observation: &BoundedWatchObservation,
+    kind: BoundedWatchKind,
+    watched: bool,
+    in_progress: bool,
+) -> Result<()> {
+    let value = observation
+        .value
+        .as_ref()
+        .with_context(|| format!("{kind:?} returned no watch value: {observation:?}"))?;
+    let actual = match kind {
+        BoundedWatchKind::Map => value.pointer("/0/1/watched").and_then(|v| v.as_bool()),
+        BoundedWatchKind::Rollup => value
+            .pointer("/watched")
+            .and_then(|v| v.as_i64())
+            .map(|count| count == 1),
+        BoundedWatchKind::Summary => value
+            .pointer("/watch/0/1/watched")
+            .and_then(|v| v.as_bool()),
+        BoundedWatchKind::Rails => value
+            .pointer("/continue_watching")
+            .and_then(|v| v.as_array())
+            .map(|items| !items.is_empty()),
+    };
+    let expected = if matches!(kind, BoundedWatchKind::Rails) {
+        in_progress
+    } else {
+        watched
+    };
+    if actual != Some(expected) {
+        bail!("{kind:?} returned stale watch state: expected={expected}, value={value}");
+    }
+    Ok(())
+}
+
+async fn wait_for_local_watch_reads(
+    cluster: &mut ClusterProcesses,
+    node_id: u64,
+    user_id: i64,
+    item_id: i64,
+    read_after: u64,
+    watched: bool,
+    in_progress: bool,
+) -> Result<()> {
+    for kind in BOUNDED_WATCH_KINDS {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            let observation =
+                bounded_watch_read(cluster, node_id, kind, user_id, item_id, read_after).await?;
+            if observation.error.is_none()
+                && observation.consistent_query_calls == 0
+                // One preference lookup plus the one watch-state statement.
+                && observation.non_consistent_query_calls == 2
+                && observation.watermark_valid
+                && observation.serving_ready
+            {
+                assert_bounded_watch_value(&observation, kind, watched, in_progress)?;
+                break;
+            }
+            if Instant::now() >= deadline {
+                bail!("{kind:?} did not become a fresh local watch read: {observation:?}");
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+    }
+    Ok(())
+}
+
+/// Drive P3's catalogue and K-04's watch failure contracts against three real
+/// voter processes. Apply pause is below Raft's log and transport paths; the
+/// partition cuts this follower's Raft and cluster-query transports while
+/// leaving the harness control pipe.
 async fn run_bounded_catalogue_failure_case() -> Result<()> {
     let executable = harness_executable()?;
     let root = tempfile::tempdir().context("bounded catalogue failure data root")?;
@@ -2785,6 +2984,31 @@ async fn run_bounded_catalogue_failure_case() -> Result<()> {
     };
     const EXPECTED_TITLE: &str = "Original artwork fence title";
     wait_for_local_catalogue_read(&mut cluster, follower, item_id, EXPECTED_TITLE).await?;
+    let (watch_user, watch_item) = match cluster
+        .request(leader, Request::SeedBoundedWatchItem)
+        .await?
+    {
+        Response::BoundedWatchItem { user_id, item_id } => (user_id, item_id),
+        response => bail!("bounded watch seed returned {response:?}"),
+    };
+    let progress_index = write_bounded_watch(
+        &mut cluster,
+        leader,
+        watch_user,
+        watch_item,
+        BoundedWatchWrite::Progress,
+    )
+    .await?;
+    wait_for_local_watch_reads(
+        &mut cluster,
+        follower,
+        watch_user,
+        watch_item,
+        progress_index,
+        false,
+        true,
+    )
+    .await?;
 
     cluster
         .request(follower, Request::PauseApply)
@@ -2815,6 +3039,17 @@ async fn run_bounded_catalogue_failure_case() -> Result<()> {
         }
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
+    let watched_index = write_bounded_watch(
+        &mut cluster,
+        leader,
+        watch_user,
+        watch_item,
+        BoundedWatchWrite::Watched(true),
+    )
+    .await?;
+    if watched_index <= progress_index {
+        bail!("watch mutation did not advance the acknowledged Raft log index");
+    }
     let fallback_deadline = Instant::now() + Duration::from_secs(3);
     loop {
         let observation = bounded_read(&mut cluster, follower, item_id).await?;
@@ -2832,11 +3067,39 @@ async fn run_bounded_catalogue_failure_case() -> Result<()> {
         }
         tokio::time::sleep(Duration::from_millis(25)).await;
     }
+    for kind in BOUNDED_WATCH_KINDS {
+        let observation = bounded_watch_read(
+            &mut cluster,
+            follower,
+            kind,
+            watch_user,
+            watch_item,
+            watched_index,
+        )
+        .await?;
+        if observation.error.is_some()
+            || observation.non_consistent_query_calls != 0
+            || observation.consistent_query_calls != 1
+        {
+            bail!("apply-paused {kind:?} did not use Authority: {observation:?}");
+        }
+        assert_bounded_watch_value(&observation, kind, true, false)?;
+    }
     cluster
         .request(follower, Request::ResumeApply)
         .await?
         .require_ok()?;
     wait_for_local_catalogue_read(&mut cluster, follower, item_id, EXPECTED_TITLE).await?;
+    wait_for_local_watch_reads(
+        &mut cluster,
+        follower,
+        watch_user,
+        watch_item,
+        watched_index,
+        true,
+        false,
+    )
+    .await?;
 
     cluster
         .request(follower, Request::SetRaftPartitioned { partitioned: true })
@@ -2857,13 +3120,12 @@ async fn run_bounded_catalogue_failure_case() -> Result<()> {
     if before_expiry.error.is_some()
         || before_expiry.title.as_deref() != Some(EXPECTED_TITLE)
         || before_expiry.consistent_query_calls != 0
-        || before_expiry.non_consistent_query_calls != 1
+        || before_expiry.non_consistent_query_calls != 2
         || !before_expiry.watermark_valid
         || before_expiry.apply_lag_entries != Some(0)
     {
-        bail!("partition precondition did not execute one zero-gap local read: {before_expiry:?}");
+        bail!("partition precondition did not execute preference and zero-gap local reads: {before_expiry:?}");
     }
-
     let isolated = loop {
         let observation = bounded_read(&mut cluster, follower, item_id).await?;
         // Proof expiry and the production serving-fence poll are deliberately
@@ -2892,12 +3154,56 @@ async fn run_bounded_catalogue_failure_case() -> Result<()> {
             partition_started.elapsed()
         );
     }
+    // Preserve the P3 one-second expiry timing check above. After it has
+    // passed, commit a newer watch state on the majority and echo that index
+    // to the isolated follower. Every watch method must refuse its stale
+    // local row and attempt Authority, which cannot answer this partition.
+    let unwatched_index = write_bounded_watch(
+        &mut cluster,
+        leader,
+        watch_user,
+        watch_item,
+        BoundedWatchWrite::Watched(false),
+    )
+    .await?;
+    if unwatched_index <= watched_index {
+        bail!("isolated watch mutation did not advance the acknowledged index");
+    }
+    for kind in BOUNDED_WATCH_KINDS {
+        let observation = bounded_watch_read(
+            &mut cluster,
+            follower,
+            kind,
+            watch_user,
+            watch_item,
+            unwatched_index,
+        )
+        .await?;
+        if observation.value.is_some()
+            || observation.error.is_none()
+            || observation.consistent_query_calls != 1
+            || observation.non_consistent_query_calls != 0
+            || observation.watermark_valid
+        {
+            bail!("expired watermark admitted partitioned {kind:?}: {observation:?}");
+        }
+    }
 
     cluster
         .request(follower, Request::SetRaftPartitioned { partitioned: false })
         .await?
         .require_ok()?;
     wait_for_local_catalogue_read(&mut cluster, follower, item_id, EXPECTED_TITLE).await?;
+    wait_for_local_watch_reads(
+        &mut cluster,
+        follower,
+        watch_user,
+        watch_item,
+        unwatched_index,
+        false,
+        false,
+    )
+    .await?;
     cluster.shutdown_all().await
 }
 
@@ -7782,6 +8088,18 @@ pub enum Request {
     BoundedCatalogueGetItem {
         item_id: i64,
     },
+    SeedBoundedWatchItem,
+    WriteBoundedWatch {
+        user_id: i64,
+        item_id: i64,
+        write: BoundedWatchWrite,
+    },
+    BoundedWatchRead {
+        kind: BoundedWatchKind,
+        user_id: i64,
+        item_id: i64,
+        read_after: u64,
+    },
     ProveOldWatermarkStreamCompatibility,
     ProveP3aWatermarkCompatibility,
     ReplicationStatus,
@@ -7929,6 +8247,21 @@ pub enum Response {
         watermark_age_millis: Option<u64>,
         local_reads_supported: bool,
         apply_lag_entries: Option<u64>,
+        serving_ready: bool,
+    },
+    BoundedWatchItem {
+        user_id: i64,
+        item_id: i64,
+    },
+    BoundedWatchWriteAck {
+        commit_index: u64,
+    },
+    BoundedWatchRead {
+        value: Option<serde_json::Value>,
+        error: Option<String>,
+        consistent_query_calls: u64,
+        non_consistent_query_calls: u64,
+        watermark_valid: bool,
         serving_ready: bool,
     },
     ReplicationStatus {
@@ -9901,6 +10234,7 @@ async fn handle_request(
             let store = store_ref(store)?;
             let now = unix_now()?;
             let package = NewOfflinePackage {
+                audio_recipe: None,
                 id: format!("tombstone-fence-{node_id}"),
                 request_id: format!("fence-{node_id}-{now}"),
                 user_id: 1,
@@ -10902,6 +11236,93 @@ async fn handle_request(
                 serving_ready: serving.is_ready(),
             })
         }
+        Request::SeedBoundedWatchItem => {
+            let store = store_ref(store)?;
+            let user = store
+                .create_user("bounded-watch-reader", "hash", false)
+                .await?;
+            let library = store
+                .create_library(&NewLibrary {
+                    name: "Bounded watch failure fixture".to_owned(),
+                    kind: LibraryKind::Movies,
+                    paths: vec![PathBuf::from("/cluster-bounded-watch")],
+                    anime: false,
+                })
+                .await?;
+            let item_id = store
+                .insert_item(&NewItem {
+                    library_id: library.id,
+                    kind: ItemKind::Movie,
+                    parent_id: None,
+                    title: "Bounded watch failure item".to_owned(),
+                    year: None,
+                    season_number: None,
+                    episode_number: None,
+                })
+                .await?;
+            Ok(Response::BoundedWatchItem {
+                user_id: user.id,
+                item_id,
+            })
+        }
+        Request::WriteBoundedWatch {
+            user_id,
+            item_id,
+            write,
+        } => {
+            let store = store_ref(store)?;
+            let ack = plurx_core::store::HttpWatchWriteAck::default();
+            plurx_core::store::scope_http_watch_write_ack(ack.clone(), async {
+                match write {
+                    BoundedWatchWrite::Progress => {
+                        store
+                            .put_progress(user_id, item_id, 1_000, Some(10_000))
+                            .await?;
+                    }
+                    BoundedWatchWrite::Watched(watched) => {
+                        store.set_watched(user_id, item_id, watched).await?;
+                    }
+                }
+                Ok::<(), StoreError>(())
+            })
+            .await?;
+            Ok(Response::BoundedWatchWriteAck {
+                commit_index: ack
+                    .commit_index()
+                    .context("watch write did not acknowledge a Raft log index")?,
+            })
+        }
+        Request::BoundedWatchRead {
+            kind,
+            user_id,
+            item_id,
+            read_after,
+        } => {
+            let store = catalogue_store_ref(catalogue_store)?;
+            store.validation_reset_operation_counts();
+            let result = read_bounded_watch_kind(
+                catalogue_ref(catalogue)?,
+                kind,
+                user_id,
+                item_id,
+                read_after,
+            )
+            .await;
+            let counts = store.validation_operation_counts();
+            let view = replication.metrics_handle().snapshot();
+            let (value, error) = match result {
+                Ok(value) => (Some(value), None),
+                Err(error) => (None, Some(error.to_string())),
+            };
+            Ok(Response::BoundedWatchRead {
+                value,
+                error,
+                consistent_query_calls: counts.consistent_query_calls,
+                non_consistent_query_calls: counts.non_consistent_query_calls,
+                watermark_valid: view.watermark_valid,
+                serving_ready: serving.is_ready(),
+            })
+        }
         Request::ProveOldWatermarkStreamCompatibility => {
             let error = client
                 .db_quorum_watermark()
@@ -11462,6 +11883,7 @@ async fn seed_offline_removal_work(
             )
             .await?;
         let package = NewOfflinePackage {
+            audio_recipe: None,
             id: format!("{package_id}-{node_id}"),
             request_id: format!("{package_id}-request-{node_id}"),
             user_id: user.id,
@@ -11613,6 +12035,7 @@ async fn seed_offline_work_during_removal(
         )
         .await?;
     let package = NewOfflinePackage {
+        audio_recipe: None,
         id: format!("{LATE_PACKAGE}-{node_id}"),
         request_id: format!("{LATE_PACKAGE}-request-{node_id}"),
         user_id,
@@ -12229,6 +12652,7 @@ async fn exercise(store: &HiqliteAuthStore, ordinal: u64) -> Result<()> {
         .create_user(&format!("offline-outsider-{suffix}"), "hash", false)
         .await?;
     let offline = NewOfflinePackage {
+        audio_recipe: None,
         id: format!("offline-{suffix}"),
         request_id: format!("offline-request-{suffix}"),
         user_id: user.id,

@@ -82,7 +82,7 @@ claim cleanup cannot admit a delayed replacement. The service completes the
 exclusion before recording a fresh authentication proof; it never reuses its
 pre-exclusion ticket.
 
-SQLite migration 93 and replicated migration 71 add the digest-only scope
+SQLite migration 99 and replicated migration 75 add the digest-only scope
 mapping with cascading token/user deletion. The SQLite import plan preserves
 this mapping after its token rows, allowing replacement from another node.
 The backend regressions prove simultaneous replacements converge to one

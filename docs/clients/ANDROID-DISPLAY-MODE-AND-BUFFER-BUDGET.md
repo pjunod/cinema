@@ -1,6 +1,6 @@
 # Android display-mode matching and buffer budget — implementation plan
 
-**Status:** implementation complete through M3; M0/M4/M5 pending physical-device evidence · **Executes:** §2.9 / D1 / F-android-1 /
+**Status:** M1–M3 built; M4 actual-heap containment implemented; M0 measured on the Google TV Streamer 2026-10-02; M4 larger allocation decided *not justified* (coordinator decision, awaiting Paul's review); M0 on the other televisions and the M5 HDMI matrix open · **Executes:** §2.9 / D1 / F-android-1 /
 F-android-2 from
 [ARCHITECTURE-REVIEW-2026-09-20.md](../reviews/ARCHITECTURE-REVIEW-2026-09-20.md)
 · **Written:** 2026-09-20 against `main` @ `88a3957a`
@@ -142,6 +142,60 @@ the measurement-dependent allocation change out of the branch. The Developer
 switch always remains operable; its seven-day matched-switch observation is
 status, not a gate.
 
+#### Measurement status — 2026-10-02 (M0, Google TV Streamer)
+
+First production-process M0 row. Collected over adb by
+claude-opus-5-5 (session
+https://claude.ai/code/session_01CAyBrYCQ7PpAtuZwUxKfp7), 2026-10-02
+08:04–08:49 UTC, on the Google TV Streamer (API 34, 32-bit
+`armeabi-v7a` process) running installed release build 142. The raw
+`dumpsys meminfo`, display and logcat captures are held outside the repo
+with the collector's receipt; the numbers below are copied from it.
+
+**Build caveat.** Build 142 predates `1ffaae2a4` (the granted-heap clamp
+and its `PlurxBufferBudget` log line), so the active formula was the legacy
+`(memoryClass/8).coerceAtMost(64)` = **48 MiB per pipeline**. On this device
+the clamp gives the same value (`Runtime.maxMemory()` = 384 MiB, /8 = 48 MiB,
+measured 2026-09-30), so the reading carries over to the effort branch.
+
+| Column | Google TV Streamer |
+|---|---|
+| memoryClass / largeMemoryClass | **384 / 512 MB** (`dalvik.vm.heapgrowthlimit` / `heapsize`); no `largeHeap` request |
+| Granted heap | 384 MiB (`Runtime.maxMemory()`, 2026-09-30 isolated probe on the same device; 142 does not log it) |
+| Buffer target | **48 MiB** per pipeline — about 5.5 s at 73 Mb/s, about 47 s at 8.2 Mb/s |
+| TOTAL PSS idle (Home) | 63–70 MB (Java ~6.9 MB allocated, graphics 27 MB) |
+| TOTAL PSS playing | 4K remux 132 MB, **158 MB peak while stalled** (Java ~59 MB, graphics 54 MB); 1080p 91–142 MB as the buffer filled; 720p steady 111–126 MB |
+| TOTAL PSS primed | 137–**146 MB** with a successor alive — **not** a valid primed reading, see below |
+| Crash / OOM | no crash or OOM entries in the crash buffer during the run (`logcat -b crash`; its last entry is from 2026-09-25). Low-memory-killer and `ApplicationExitInfo` history were not captured |
+| Network | **2.4 GHz Wi-Fi** (802.11n, 2412 MHz, link 130–144 Mb/s; Ethernet unused). Measured delivery about 20 Mb/s (`wlan0` rx 19–22 Mb/s in 10 s windows; `adb push` about 18 Mb/s) |
+| Stalls | 73 Mb/s DV Profile 7 remux (played as HDR10, TrueHD so remux, not direct play): three "Playback is stalled" dialogs in about 16 min, panel counted **3 supply / 0 decode**. 720p (4.2 Mb/s): zero buffering transitions in 5 min, 50 s buffered on device |
+| Supported / active modes | 19 modes: 720p 50/59.94/60; 1080p 23.976/24/25/29.97/30/50/59.94/60; 2160p 23.976/24/25/29.97/30/50/59.94/60. Active 2160p60 throughout (HDR10 only advertised) |
+
+Peak PSS was 158 MB against a 384 MiB Java limit, and Java allocation never
+exceeded about 68 MB. **The stalls were supply, not buffer size**: the link
+delivered about 20 Mb/s against a 73 Mb/s stream, a sustained deficit of about
+53 Mb/s that empties any finite buffer — at 48 MiB in about 7.6 s, at 128 MiB in
+about 20 s. A bigger buffer only moves the first stall later; it cannot remove
+it. At a rendition the link can carry (720p, and 1080p at 8.2 Mb/s) the 48 MiB
+target held 47–50 s of media and nothing stalled.
+
+**Why the primed row is not valid.** On build 142 the staged successor
+requested audio focus at `playWhenReady = true` and paused the incumbent
+within 3 ms; the incumbent sat frozen about 20 s, both players were released
+and a cold start followed. So the 146 MB "primed" PSS is one paused incumbent
+plus a successor that only created an audio decoder — not two healthy
+pipelines. That defect is already corrected on this effort branch
+(`320535286`, pinned by `f646b9bdb`: `handlesAudioFocus(role)` is false for
+`PlayerRole.Successor` and focus moves with `handOverAudioFocus` at commit),
+but no installed build carries it yet. A valid primed reading needs the
+first build that does.
+
+**Not measured:** the TCL 9445X and the Lenovo TB322FC were not visible to adb
+during the run. The Lenovo is a tablet (`isTelevision()` is false there), and no
+Shield is reachable; the plan's three-television list needs Paul's device
+substitution ruling (proposed: Google TV Streamer for the HDMI/Shield rows, the
+TCL for a television panel, the Lenovo for tablet memory only).
+
 ### 2.4 Where the frame rate lives
 
 | Source | Field | Shape | Available before `prepare()` |
@@ -263,6 +317,34 @@ preference in this plan (§7 Q1).
 
 ### 3.2 Buffer budget
 
+**Execution clarification, 2026-09-30:** the original larger incumbent
+allocation below still requires M0's three-device idle/playing/primed
+measurements. A side-by-side instrumented process cannot qualify the
+installed production process or supply that matrix. While collecting honest
+supplemental evidence, the continuation implements the independently sound
+containment: `min(existing memoryClass/8 ceiling, Runtime.maxMemory()/8)`
+for every explicit `BufferRole`. No role's target increases, no `largeHeap`
+request is added, and no unmeasured incumbent share, image-cache allowance or
+successor reserve is chosen. A lower actual grant reduces the legacy target;
+the historical floor is not allowed to defeat the real process grant.
+
+`PlaybackBufferBudget.kt` owns the pure policy. `PlurxPlayerBuilder` maps
+staged successors to `Successor`, Live TV to `Live`, and other roles to
+`Incumbent`; a committed successor retains its original load control.
+`PlaybackLoadControl` records the actual class, hypothetical large class,
+granted heap, configured Coil cache bound and chosen target locally. Cache
+bytes are observations, not a new guessed reserve. This target remains an
+allocator threshold, not a decoder/native-memory cap. Byte priority for local
+and network media, full-buffer startup and all Live TV durations are unchanged.
+
+`PlaybackBufferBudgetTest` rejects a declared 512 MiB class being treated as
+a granted 128 MiB heap and proves every role stays within its existing
+ceiling and the existing two-buffer quarter-heap containment. The real
+`PlaybackLoadControlTest` retains every startup/loading assertion and loops
+over all roles. Its provenance sample names package, version, SDK, ABI,
+debuggable/largeHeap flags, actual grant, cache bound and targets. Physical
+receipts below must distinguish a test process from production playback.
+
 Two budgets instead of one:
 
 ```kotlin
@@ -346,7 +428,15 @@ starts playback).
 
 ## 5. Milestones
 
-One draft PR per milestone into `main` under the fast lane. Every Kotlin
+**Integration amendment, 2026-09-30:** the remaining continuation branches
+from current `effort/architecture-review-2026-09-20` and targets that effort,
+with one independent review, the tracked hook and the smallest focused
+Android regressions. `Effort development gate` blocks integration; full
+exact-tree qualification and `Main promotion gate` separately block final
+promotion. The original `main` fast-lane instruction is retained as history,
+not the continuation's rollout path.
+
+Originally, one draft PR per milestone into `main` under the fast lane. Every Kotlin
 change needs the Android build-counter bump (`validation/mobile_versions.py`,
 `versionCode` in `clients/android/app/build.gradle.kts:48`).
 
@@ -426,6 +516,17 @@ second play of the same title; with the setting off, `outcome=disabled`.
 
 ### 5.5 M4 — role-based budget from M0's numbers
 
+The September 30 actual-heap clamp is complete containment, not acceptance
+of this milestone's proposed larger incumbent budget. The remaining share,
+cache headroom and prepared-successor PSS still require the original M0
+matrix. Supplementary no-activity instrumentation uses the existing isolated
+`capabilityProbe` identity by passing `-PplurxIsolatedBudgetProbe=true`; it
+must verify the generated target package before installing and cannot replace
+`tv.plurx.app`. Run only `PlaybackLoadControlTest`, without launching an
+Activity, waking a display, signing in, starting playback or changing settings.
+Never run the generic instrumentation install target against physical
+production hardware: that target uninstalls `tv.plurx.app`.
+
 `playbackBufferTargetBytes(memoryClassMb, largeMemoryClassMb, role)`, the
 constants filled from M0 with their readings in comments, `Runtime.
 maxMemory()` as the granted heap, one logcat line at player build naming
@@ -440,6 +541,34 @@ disposable emulator passes `PlaybackLoadControlTest` for both roles; the M0
 PSS "primed" measurement re-run on the Lenovo stays below the device's
 low-memory kill threshold with the new incumbent budget (GPT prompt in §6).
 
+**M4 decision, 2026-10-02 — recorded by the coordinator for Paul's review.**
+A larger incumbent allocation is **not justified by the evidence**. The one
+production M0 row (Google TV Streamer, §2.3, 2026-10-02) shows peak PSS 158 MB
+against a 384 MiB grant, a 48 MiB target that held 47–50 s of any rendition the
+link could carry, and every stall attributed to supply (about 20 Mb/s delivered
+on 2.4 GHz Wi-Fi against a 73 Mb/s remux), which no buffer size fixes. So:
+
+- the September 30 granted-heap containment stays as the shipped M4;
+  `INCUMBENT_SHARE`, the image-cache allowance and the successor reserve are
+  **not** introduced, and `largeHeap` stays out of the manifest;
+- the role parameter remains deliberately inert (`when (role)` maps every role
+  to the same ceiling) — that is the decision, not an omission;
+- §7 question 3 (successor size after commit) is moot while the roles share one
+  size;
+- the instrumented `PlaybackLoadControlTest` and `PlaybackBufferBudgetTest`
+  invariants are unchanged.
+
+What would reopen it: a television whose stalls are counted as decode- or
+buffer-side while delivery meets the stream's bitrate, or a valid primed-successor
+reading (on a build carrying `320535286`) whose Dalvik allocation — the
+`dumpsys meminfo` Dalvik Heap "Alloc" column, at most about 68 MB on 142 — exceeds
+half of the granted `Runtime.maxMemory()` (192 MiB on the Google TV). Total PSS
+is not the comparison: it includes native and graphics memory that the Java heap
+limit does not govern. The supply-side remedy the evidence does point at — Auto quality stepping
+down when delivery is far below the stream (on 142 Auto stayed on the 73 Mb/s
+original through three stall dialogs) — belongs to the native adaptive-quality
+work, not to this plan.
+
 ### 5.6 M5 — device verification and the doc row
 
 Run §6's two prompts, record results under a dated heading here, add the
@@ -448,6 +577,40 @@ plan).
 
 Acceptance: both verification tables filled; `python3 -m unittest
 tests.operations.test_docs_index` passes.
+
+
+**M5 precondition, 2026-10-02.** The matched path needs the replicated setting
+`playback.display_mode_match` turned **on** (Settings → Developer → **Android TV display-mode
+matching**). It is **currently off** on the fleet: `/api/v1/server` returned
+`display_mode_match: false`, and every 2026-10-02 play logged
+`playback_display_mode outcome=disabled`. With it off the Google TV stayed at
+2160p60 before, during and after playback (the setting-OFF row of §6 is
+therefore observed on that device), and 23.976 content on the 60 Hz output
+produced about 20,900 `VideoRenderQualityTracker` frame-timing warnings in
+about 42 minutes — the cost this plan exists to remove. The system's own
+`match_content_frame_rate` was 1 and did not switch the mode either, so the app
+request is the only path.
+
+**Matcher timeout leaves the request set (checked 2026-10-02 against
+`DisplayModeMatcher.match`).** On the 2 s timeout `withTimeoutOrNull` returns
+null and `match` reports `outcome=timeout`, but nothing clears
+`window.attributes.preferredDisplayModeId`; only `reset(owner)` does, and the
+callers (`Controller` start path, `LiveTvPlayer` tune) call it on stop or
+release, not on timeout. Playback then starts at the current mode, and if the
+display completes the switch later the HDMI resync lands seconds into playback
+with no telemetry recording when. The same is true of the owner-changed return
+after the wait. This is a real gap, not yet observed: it can only happen with the
+setting on. M5 must look for it explicitly — note any mode change after first
+frame and its time. The recommended correction is to clear
+`preferredDisplayModeId` (back to 0, as `reset` does) when the wait times out
+while this owner is still current: that removes the late switch at its root.
+Merely logging a late switch would need a *new* listener registered at the
+timeout and held until `reset(owner)` — the wait's own listener cannot do it,
+because `withTimeoutOrNull` cancels the wait and `invokeOnCancellation`
+unregisters that listener (`DisplayModeMatcher.kt`, the `match` wait). On the
+owner-changed return the request must not be cleared blindly, since the new
+owner may have set its own. The `late` path (`onTracksChanged`, no source rate)
+switches mid-play by design and is not this gap.
 
 ---
 
@@ -461,7 +624,7 @@ television with a real HDMI sink proves the switch, so:
 **GPT prompt — display mode:**
 
 ```text
-Shield and Google TV, plurx setting "Match display mode" ON in Settings →
+Shield and Google TV, plurx setting "Android TV display-mode matching" ON in Settings →
 Developer, TV's own Match Content OFF. Play "Harbor Lights" (23.976, HDR10)
 from the start; within 10 s run `adb shell dumpsys display | grep
 mActiveMode` and read the TV's info panel (the TV's own HDMI-mode overlay, not
@@ -509,6 +672,36 @@ the mobile release role.
 
 ## Execution log
 
+**2026-09-30 continuation:** original M0/M4/M5 gaps remain explicit. The
+Google TV Streamer's passive observation found production build 139 without
+a running process and display OFF; heap properties 384m/512m were not
+relabeled granted heap. Supplemental isolated instrumentation and source
+checks are attributed to their exact build and package, not to production 139.
+
+**Supplemental Google TV Streamer run, 2026-09-30 23:52–23:56 UTC:** wireless
+serial `61171HFAG1GG00`, API 34; isolated debug package
+`tv.plurx.app.capabilityprobe`, version 141, instrumented target verified as
+that package. Both `PlaybackLoadControlTest` cases passed in 1.027 s without
+an Activity, player start, media request, display wake or setting change.
+The process reported `Runtime.maxMemory() = 402653184` bytes (384 MiB),
+`memoryClass = 384`, hypothetical `largeMemoryClass = 512`, no largeHeap
+request, configured Coil bound 80530636 bytes (about 76.8 MiB), and target
+50331648 bytes (48 MiB) for each role. Reported device ABI list was
+`armeabi-v7a,armeabi`; it is not a claim about a production process.
+
+App APK SHA256
+`8832de19a95a2267794bb9969e56c411aae95ee689a595078441ec38f2d45026`;
+test APK SHA256
+`56d8a01fffba601d27e0f1c90ca5b6357e38b70c7311e54e3a4b715510c6192b`.
+Both debug signatures were verified, certificate SHA256
+`5cefd0c7db3f0a8d6fd818937425b7647b3222f9ed1419d79883a12c3e168bce`.
+The build used verified Temurin 25.0.4.1+1 / AGP 9.3.2 / SDK 37.0, not the
+earlier JBR 21 baseline. Both previously absent probe packages were uninstalled;
+production 139 APK hash, install/update times and absence of a running
+production process were unchanged. Display stayed OFF with no app mode
+request. No Java/native/graphics PSS under playback, primed successor, OOM
+threshold, delivered bitrate or HDMI matrix is established by these tests.
+
 Executing sessions append one row per milestone PR (see the
 [work board](../reviews/ARCHITECTURE-REVIEW-2026-09-20-WORKBOARD.md) for the
 claim protocol). **Model** is the runtime's exact model identifier;
@@ -524,3 +717,7 @@ trailers `Agent-Model:` / `Agent-Session:` on every commit of the branch.
 | 2026-09-21 | gpt-5.6-sol | agent:/root/s01_builder | M3 review fix | [#409 comment #3199](http://192.168.4.7:3000/noirr/plurx/pulls/409#issuecomment-3199) | A post-wait channel/window ownership fence and exact-session cleanup prevent delayed Live TV display matching from resurrecting or releasing the wrong tune. The advisory display-mode checkbox now uses the server's ordinary one-key settings shape rather than the unrelated Live TV generation CAS. Deterministic coroutine/lease regressions and the real server save regression pass. |
 | 2026-09-21 | gpt-5.6-sol | agent:/root/s01_builder | M4 | [#409](http://192.168.4.7:3000/noirr/plurx/pulls/409) | blocked by M0: no role-based allocation or `largeHeap` request was guessed; current sizing and instrumented behavior remain intact. |
 | 2026-09-21 | gpt-5.6-sol | agent:/root/s01_builder | M5 | [#409](http://192.168.4.7:3000/noirr/plurx/pulls/409) | needs: run both §6 physical-device prompts after M0/M4; no display, HDR, black-frame, PSS, or OOM result is claimed. |
+| 2026-09-30 | gpt-6.1-sol | agent:/root/k06_runtime_sol61 | M4 containment and supplementary measurement | `codex/d01-android-buffer-budget` into the architecture effort | Actual-granted-heap no-increase policy and role wiring; focused JVM4, Android lint/application/test compile, and isolated wireless Google TV allocator/provenance2 pass. Original larger incumbent allocation and three-TV M0/M5 remain open. |
+| 2026-10-02 | claude-opus-5-5 | https://claude.ai/code/session_01CAyBrYCQ7PpAtuZwUxKfp7 | M0 (Google TV Streamer) | `opus/client-evidence` into the architecture effort | Production build 142 measured over adb: memoryClass 384 / large 512, PSS 63–158 MB, 48 MiB buffer, stalls 3 supply / 0 decode on about 20 Mb/s 2.4 GHz Wi-Fi; dated table in §2.3. Primed row invalid (successor audio-focus defect, corrected on the effort by `320535286`). TCL and Lenovo not reachable; the device-substitution ruling is Paul's. |
+| 2026-10-02 | claude-opus-5-5 | https://claude.ai/code/session_01CAyBrYCQ7PpAtuZwUxKfp7 | M4 decision | `opus/client-evidence` | Coordinator decision for Paul's review: larger incumbent allocation not justified; granted-heap containment stays as M4 (§5.5). |
+| 2026-10-02 | claude-opus-5-5 | https://claude.ai/code/session_01CAyBrYCQ7PpAtuZwUxKfp7 | M5 precondition | `opus/client-evidence` | `display_mode_match` is off on the fleet, so only the setting-OFF row is observed (Google TV stayed 2160p60). Matcher timeout leaves `preferredDisplayModeId` set (§5.6 note); M5 must watch for a late switch. |

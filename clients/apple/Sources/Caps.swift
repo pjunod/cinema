@@ -11,6 +11,10 @@ struct DeviceCaps: Codable, Equatable {
     let client: ClientInfo
     let video: [VideoCaps]
     let audio: [String]
+    /// The current route's reach per codec (AUDIO-RESOLVED-INDEPENDENTLY.md
+    /// §3.1). Empty (encoded as `[]`) is the legacy contract: the server
+    /// treats an empty list exactly like an absent one.
+    var audioSinks: [AudioSinkClaim] = []
     let containers: [String]
     let transports: [String]
     var progressiveHevcSampleEntries: [String]? = nil
@@ -21,6 +25,30 @@ struct DeviceCaps: Codable, Equatable {
     let dvTransport: String
     var display: DisplayCaps
     var learnedLimits: [LearnedLimit] = []
+}
+
+struct AudioSinkClaim: Codable, Equatable {
+    let codec: String
+    let maxChannels: Int
+    let passthrough: Bool
+    let sampleRatesHz: [Int]
+}
+
+/// What the active audio route can reproduce, read once per capability
+/// snapshot so the claim and every session derived from it describe one route.
+struct AudioRouteFacts: Equatable {
+    /// `AVAudioSession.maximumOutputNumberOfChannels`.
+    let outputChannels: Int
+    /// Any current output is HDMI, where a receiver may take a bitstream.
+    let hdmi: Bool
+
+    static func current() -> AudioRouteFacts {
+        let session = AVAudioSession.sharedInstance()
+        return AudioRouteFacts(
+            outputChannels: session.maximumOutputNumberOfChannels,
+            hdmi: session.currentRoute.outputs.contains { $0.portType == .HDMI }
+        )
+    }
 }
 
 struct ClientInfo: Codable, Equatable {
@@ -94,6 +122,7 @@ enum Caps {
     /// Capture the four live probes once, then spell that exact state in both
     /// protocols. Output format can change while a POST is in flight on tvOS.
     static func snapshot() -> CapabilitySnapshot {
+        let audioRoute = AudioRouteFacts.current()
         let hevc = VTIsHardwareDecodeSupported(kCMVideoCodecType_HEVC)
         let av1 = VTIsHardwareDecodeSupported(kCMVideoCodecType_AV1)
         let displayHDR = displayIsHDR
@@ -108,13 +137,14 @@ enum Caps {
         legacyQuery.append(URLQueryItem(name: "client", value: "apple"))
         legacyQuery.append(URLQueryItem(name: "device", value: device))
         let snapshot = legacyQuery.map { "\($0.name)=\($0.value ?? "")" }.joined(separator: " ")
-        logger.info("runtime playback capabilities: \(snapshot, privacy: .public)")
+        logger.info("runtime playback capabilities: \(snapshot, privacy: .public) audio route channels=\(audioRoute.outputChannels, privacy: .public) hdmi=\(audioRoute.hdmi, privacy: .public)")
         return CapabilitySnapshot(
             document: capsDocument(
                 hevc: hevc,
                 av1: av1,
                 displayHDR: displayHDR,
-                dolbyVision: dolbyVision
+                dolbyVision: dolbyVision,
+                audioRoute: audioRoute
             ),
             legacyQuery: legacyQuery
         )
@@ -126,7 +156,8 @@ enum Caps {
         hevc: Bool,
         av1: Bool,
         displayHDR: Bool,
-        dolbyVision: Bool
+        dolbyVision: Bool,
+        audioRoute: AudioRouteFacts? = nil
     ) -> DeviceCaps {
         let supportsDolbyVision = hevc && displayHDR && dolbyVision
         let present = displayHDR ? ["sdr", "pq", "hlg"] : ["sdr"]
@@ -162,6 +193,7 @@ enum Caps {
             // AVPlayer handles these audio codecs; DTS / TrueHD are
             // deliberately out.
             audio: ["aac", "ac3", "eac3", "alac", "mp3"],
+            audioSinks: audioRoute.map(audioSinks(route:)) ?? [],
             // Audio containers belong here too: omitting M4B made a playable
             // audiobook enter the video HLS copy path and fail before its
             // first frame-equivalent audio sample on physical devices.
@@ -182,6 +214,25 @@ enum Caps {
 
     static func query() -> [URLQueryItem] {
         snapshot().legacyQuery
+    }
+
+    /// Pure spelling of the route claim. AVPlayer decodes every listed codec
+    /// itself and resamples what it decodes, so each one reaches the route's
+    /// channel count (floored at stereo, capped at 7.1). AC-3/E-AC-3 are
+    /// marked passthrough only on a multichannel HDMI route, where a receiver
+    /// can take the bitstream — the plan's rule for the Apple claim.
+    static func audioSinks(route: AudioRouteFacts) -> [AudioSinkClaim] {
+        let channels = min(8, max(2, route.outputChannels))
+        let receiver = route.hdmi && channels > 2
+        let decoded = [44_100, 48_000, 88_200, 96_000]
+        let dolby = [32_000, 44_100, 48_000]
+        return [
+            AudioSinkClaim(codec: "aac", maxChannels: channels, passthrough: false, sampleRatesHz: decoded),
+            AudioSinkClaim(codec: "ac3", maxChannels: min(6, channels), passthrough: receiver, sampleRatesHz: dolby),
+            AudioSinkClaim(codec: "eac3", maxChannels: channels, passthrough: receiver, sampleRatesHz: dolby),
+            AudioSinkClaim(codec: "alac", maxChannels: channels, passthrough: false, sampleRatesHz: decoded),
+            AudioSinkClaim(codec: "mp3", maxChannels: min(2, channels), passthrough: false, sampleRatesHz: [32_000, 44_100, 48_000]),
+        ]
     }
 
     /// Pure spelling of the wire capabilities. Keeping AVFoundation outside

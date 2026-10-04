@@ -1465,6 +1465,16 @@ ui-golden: ## Rewrite tests/ui-structure.golden after an intended UI change
 # so a JS syntax error in it compiles, links, passes every Rust test, and then
 # serves a blank page; and the theme tables are data, so a token pair that
 # fails contrast is not a type error anywhere. Run this on any web change.
+.PHONY: effort-web-static-check
+effort-web-static-check: ## Lint current web source without behavior or browser fixtures
+	@scripts/js-check
+	@node scripts/web-jsconfig --check
+	@scripts/web-types
+	@node scripts/web-shape-check
+	@scripts/contrast-check --from-index crates/plurxd/src/web/core/theme.js \
+		--foregrounds='--text,--muted,--prose,--accent,--good,--warn,--bad' \
+		--allow scripts/contrast-allow.txt
+
 .PHONY: media-preparation-browser-check
 media-preparation-browser-check: ## Focused media-info browser regression (PLAYWRIGHT_MODULE may name an installed Playwright)
 	@node --test tests/web/media-preparation.browser.cjs
@@ -1534,6 +1544,18 @@ web-check: ## Test playback policy, embedded JS, and every shipped theme
 VERSION := $(shell sed -n '/^\[workspace.package\]/,/^\[/p' Cargo.toml | sed -n 's/^version = "\(.*\)"/\1/p' | head -1)
 BUILD_REF := $(shell git describe --tags --always --dirty 2>/dev/null || echo unknown)
 BUILD_SHA := $(shell git rev-parse HEAD 2>/dev/null)
+# The commit's committer time. Image builds pass it as SOURCE_DATE_EPOCH so the
+# binary's built_at stamp and BuildKit's image timestamps are the same on every
+# build of one commit (crates/plurxd/build_support/source_date.rs). `.git` is
+# outside the build context, so the build script cannot read it there itself.
+#
+# Empty for a `-dirty` tree: HEAD's time would date a binary that is not HEAD,
+# so the build script falls back to the clock. And `:=`, not `?=`: the image is
+# stamped with this checkout's BUILD_REF and BUILD_SHA, so its date comes from
+# the same checkout, never from a SOURCE_DATE_EPOCH some other tool left
+# exported in the shell. A deliberate override is still
+# `make docker SOURCE_DATE_EPOCH=<seconds>`, which Make lets win.
+SOURCE_DATE_EPOCH := $(if $(filter %-dirty,$(BUILD_REF)),,$(shell git log -1 --format=%ct 2>/dev/null))
 HOST_SHORTNAME := $(shell hostname -s 2>/dev/null || hostname 2>/dev/null || echo unknown-host)
 
 .PHONY: version
@@ -1542,7 +1564,7 @@ version: ## Print the version and git build stamp a build would report
 
 .PHONY: docker
 docker: ## Build the container image
-	docker build --build-arg PLURX_BUILD_REF="$(BUILD_REF)" --build-arg PLURX_BUILD_SHA="$(BUILD_SHA)" -t plurx/plurxd:latest .
+	docker build --build-arg PLURX_BUILD_REF="$(BUILD_REF)" --build-arg PLURX_BUILD_SHA="$(BUILD_SHA)" --build-arg SOURCE_DATE_EPOCH="$(SOURCE_DATE_EPOCH)" -t plurx/plurxd:latest .
 
 .PHONY: container-smoke
 container-smoke: docker ## Build, start, probe, restart, re-probe, then back up and restore the container
@@ -1610,7 +1632,7 @@ docker-startup-budget-check: ## Prove the resolved Compose startup budget before
 docker-up: ## Build + (re)start Compose after its startup budget passes
 	cd deploy && period="$$(python3 ../scripts/validate-docker-startup-budget --emit-start-period)" \
 	  && PLURX_HEALTH_START_PERIOD="$$period" python3 ../scripts/validate-docker-startup-budget \
-	  && PLURX_HEALTH_START_PERIOD="$$period" PLURX_BUILD_REF="$(BUILD_REF)" PLURX_BUILD_SHA="$(BUILD_SHA)" PLURX_NODE_HOSTNAME="$(HOST_SHORTNAME)" docker compose up -d --build
+	  && PLURX_HEALTH_START_PERIOD="$$period" PLURX_BUILD_REF="$(BUILD_REF)" PLURX_BUILD_SHA="$(BUILD_SHA)" SOURCE_DATE_EPOCH="$(SOURCE_DATE_EPOCH)" PLURX_NODE_HOSTNAME="$(HOST_SHORTNAME)" docker compose up -d --build
 	@echo "up: $(VERSION) ($(BUILD_REF))"
 
 # Fleet voters consume the already-qualified registry image. Pulling is safe

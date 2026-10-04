@@ -4,9 +4,12 @@ use super::*;
 /// cache's key discipline (plan §2.4).
 #[derive(Debug, Clone)]
 pub(super) struct Recipe {
+    pub(super) retained_logical: Option<super::retained_manifest::LogicalOutput>,
+    pub(super) measured_candidate: Option<RetainedCandidateBinding>,
     pub(super) file: MediaFile,
     pub(super) audio_index: Option<i64>,
     pub(super) aac: bool,
+    pub(super) audio_delivery: Option<plurx_core::playback::audio::AudioDelivery>,
     pub(super) video: CopyVideoOptions,
     /// Exact object version whose complete digest selected the cluster blob.
     /// None on the legacy node-local index path.

@@ -6,6 +6,7 @@ use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use axum::extract::{FromRef, Query, State};
 use axum::http::{HeaderMap, StatusCode};
+use axum::response::IntoResponse;
 use axum::Json;
 use plurx_core::auth;
 #[cfg(test)]
@@ -34,7 +35,8 @@ pub struct ServerInfo {
     pub version: &'static str,
     /// Git description of the exact build ("v0.1.0-14-gc0ffee"), for support.
     pub build: &'static str,
-    /// Compile time, always present — the fallback when `build` is "unknown".
+    /// Source date (SOURCE_DATE_EPOCH, else commit time, else compile time),
+    /// always present — the fallback when `build` is "unknown".
     pub built_at: &'static str,
     pub instance_id: String,
     /// Stable local identity used to distinguish this node's LAN records.
@@ -705,6 +707,9 @@ pub struct ClientLog {
     /// historically call this `session`; the alias keeps that field additive.
     #[serde(alias = "session")]
     pub session_id: Option<String>,
+    /// Exact local completed-body claim; never inferred from bandwidth or detail.
+    pub(crate) link_sample: Option<super::hls::link_receipts::ClientLinkSample>,
+    pub(crate) candidate_recovery: Option<super::hls::candidate_recovery::ClientRecoverySample>,
     /// Correlated AVPlayer and last-polled server state for stall attribution.
     pub snapshot: Option<ClientPlaybackSnapshot>,
     /// Client-reported last accepted protocol state preceding this event.
@@ -877,8 +882,8 @@ pub async fn client_log(
     State(state): State<AppState>,
     headers: HeaderMap,
     super::network::RemoteAddress(remote): super::network::RemoteAddress,
-    Json(ev): Json<ClientLog>,
-) -> StatusCode {
+    Json(mut ev): Json<ClientLog>,
+) -> axum::response::Response {
     let suppressed = match CLIENT_LOG_LIMITER.lock() {
         Ok(mut limiter) => limiter.admit(user.id, std::time::Instant::now()),
         // Fail open: a poisoned lock must not silence diagnostics.
@@ -887,7 +892,7 @@ pub async fn client_log(
     // Still 204 when dropped. The client is reporting, not asking, and an error
     // response would only give it something new to report about.
     let Some(suppressed) = suppressed else {
-        return StatusCode::NO_CONTENT;
+        return StatusCode::NO_CONTENT.into_response();
     };
     let line = client_log_line(&ev, suppressed);
 
@@ -928,6 +933,67 @@ pub async fn client_log(
             user.created_at,
             &user.password_hash,
         ));
+    }
+    let mut link_sample = ev.link_sample.take();
+    let acknowledged_link = if link_sample.as_ref().is_some_and(|sample| sample.negative) {
+        let sample = link_sample.take();
+        if let (Some(identity), Some(sample)) = (network.as_ref(), sample.as_ref()) {
+            state
+                .link_receipts
+                .accept_negative_for_ack(&state, identity, ev.session_id.as_deref(), sample)
+                .await
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+    let recovery_sample = ev.candidate_recovery.take();
+    let acknowledged_recovery =
+        if let (Some(identity), Some(sample)) = (network.as_ref(), recovery_sample.as_ref()) {
+            super::hls::candidate_recovery::accept_sample(
+                &state,
+                identity,
+                ev.session_id.as_deref(),
+                sample,
+            )
+            .await
+        } else {
+            None
+        };
+    if let Some(identity) = network.clone().filter(|_| link_sample.is_some()) {
+        let proof_state = state.clone();
+        let proof_session = ev.session_id.clone();
+        tokio::spawn(async move {
+            let enabled = proof_state
+                .store
+                .get_setting(plurx_core::store::keys::PLAYBACK_NETWORK_PRIORS)
+                .await
+                .ok()
+                .flatten()
+                .is_some_and(|value| value.trim() == "1");
+            if let Some(sample) = link_sample.filter(|_| enabled) {
+                if let Some(value) = proof_state
+                    .link_receipts
+                    .accept(&proof_state, &identity, proof_session.as_deref(), &sample)
+                    .await
+                {
+                    // A client-reported link sample is a prior, not a
+                    // record anything waits on: losing one costs a
+                    // slightly staler estimate, so the failure is counted
+                    // and rate-limit logged rather than propagated to a
+                    // detached task nobody joins.
+                    crate::store_result::observe(
+                        crate::store_result::Operation::ObserveCandidateLink,
+                        crate::store_result::Discard::BestEffort,
+                        proof_state
+                            .store
+                            .observe_candidate_link(&value, crate::media_sessions::unix_ms())
+                            .await,
+                    );
+                }
+            }
+        });
     }
     #[cfg(test)]
     let capture_hook = {
@@ -974,7 +1040,22 @@ pub async fn client_log(
         };
         emit_client_playback_event(store, event, info.as_ref(), network, Some(client));
     });
-    StatusCode::NO_CONTENT
+    let mut response = StatusCode::NO_CONTENT.into_response();
+    if let Some(value) =
+        acknowledged_recovery.and_then(|event| axum::http::HeaderValue::from_str(&event).ok())
+    {
+        response
+            .headers_mut()
+            .insert("x-plurx-recovery-accepted", value);
+    }
+    if let Some(value) =
+        acknowledged_link.and_then(|nonce| axum::http::HeaderValue::from_str(&nonce).ok())
+    {
+        response
+            .headers_mut()
+            .insert("x-plurx-link-accepted", value);
+    }
+    response
 }
 
 fn vod_marker_prewarm_placeholder(event: &PlaybackEvent) -> Option<(i64, &str)> {
@@ -1756,16 +1837,31 @@ pub struct SettingsDto {
     /// How fast a remux may be delivered, as a multiple of real time. "0" means
     /// unpaced — which lets a single stream take the whole link.
     pub stream_readrate: String,
-    /// Requested N1 rate control. The production-effective value may be VBR
-    /// when a family refuses quality mode; `/system` capabilities and boot
-    /// logs carry that validation result.
+    /// Requested N1 rate control. JSON `null` means the operator has not
+    /// chosen a mode, so each encoder family's code default applies; an
+    /// explicit `"bitrate"` is an override that survives a family default
+    /// flip. Reporting the unset pair as `"bitrate"` made every client that
+    /// wrote back what it read pin the cluster to an explicit bitrate, which
+    /// left a per-family default flip inert. The production-effective value
+    /// may still be VBR when a family refuses quality mode; `/system`
+    /// capabilities and boot logs carry that validation result.
+    pub transcode_rate_mode: Option<String>,
+    /// Requested content-aware encoding and its advisory scorer applicability.
     pub content_aware_encoding: bool,
     pub content_encoding_scorer_ready: Option<bool>,
     pub content_encoding_applicability: serde_json::Value,
     pub vod_reorder_frames: u8,
-    pub transcode_rate_mode: String,
     /// `None` means use the validated family-tuned default.
     pub transcode_quality: Option<u8>,
+    /// What an unset `transcode_rate_mode` resolves to on this node: the code
+    /// default of the encoder family this node's preference selects. Display
+    /// only — never write it back as a request.
+    pub transcode_rate_mode_default: String,
+    /// The family (`software`, `qsv`, ...) `transcode_rate_mode_default` and
+    /// `transcode_quality_default` describe.
+    pub transcode_rate_mode_default_encoder: String,
+    /// The family-tuned quality an unset `transcode_quality` resolves to.
+    pub transcode_quality_default: u8,
     /// How an HLS session (transcode or copy-video) is paced: the multiple of
     /// real time it settles at, how many seconds it may deliver flat-out first
     /// (that burst IS the viewer's opening buffer), and how far ahead of the
@@ -1880,6 +1976,11 @@ pub struct SettingsDto {
     /// Opt-in replacement of expired HLS owners. This remains independently
     /// gated after remote placement is enabled so operators can stage rollout.
     pub cluster_session_takeover_enabled: bool,
+    /// Whether the cluster clock guard refuses takeover, expiry scans,
+    /// membership changes and readiness when clock evidence is unbounded.
+    /// Off by default: the guard then only measures and reports. The
+    /// Developer readiness rows are advisory and never block this switch.
+    pub cluster_clock_guard_enforced: bool,
     /// Server-wide scheduled maintenance, in minutes; 0 is off (the default).
     /// Per-library scan/refresh intervals are on the library, not here.
     pub probe_retry_mins: i64,
@@ -2022,14 +2123,17 @@ async fn settings_dto(state: &AppState) -> Result<SettingsDto, ApiError> {
             transcode_rate_mode.as_deref(),
             transcode_quality.as_deref(),
         );
-    // The settings form keeps its existing compatibility value for an unset
-    // pair. The tri-state is an internal policy distinction: `/system`
-    // reports family defaults, while the form still presents the legacy
-    // bitrate choice until the operator explicitly changes it.
-    let transcode_rate_mode = transcode_rate_mode
-        .unwrap_or(plurx_core::transcode::RateMode::Bitrate)
-        .as_str()
-        .to_owned();
+    // Unset stays unset on the wire. Presenting the family default as if it
+    // were the stored request is what turned every read-modify-write client
+    // (the bench harness's restore, any form Save) into an explicit
+    // `bitrate` pin. The default is reported beside it, for display only.
+    let transcode_rate_mode = transcode_rate_mode.map(|mode| mode.as_str().to_owned());
+    let default_family = state
+        .transcode
+        .encoder_for_preference(setting(keys::HWACCEL).as_deref().unwrap_or_default());
+    let transcode_rate_mode_default = default_family.default_rate_mode().as_str().to_owned();
+    let transcode_rate_mode_default_encoder = default_family.family_name().to_owned();
+    let transcode_quality_default = default_family.default_quality();
     let text = |v: Option<String>, default: &str| -> String {
         v.map(|v| v.trim().to_owned())
             .filter(|v| !v.is_empty())
@@ -2149,6 +2253,10 @@ async fn settings_dto(state: &AppState) -> Result<SettingsDto, ApiError> {
     let cluster_media_pool_ready = state.media_pool.remote_rollout_ready().await;
     let cluster_session_takeover_enabled =
         setting(keys::CLUSTER_SESSION_TAKEOVER_ENABLED).as_deref() == Some("1");
+    let cluster_clock_guard_enforced = plurx_core::store::stored_switch(
+        setting(keys::CLUSTER_CLOCK_GUARD_ENFORCED).as_deref(),
+        false,
+    );
     let analysis_max_attempts = plurx_core::store::bounded_analysis_max_attempts(
         setting(keys::ANALYSIS_MAX_ATTEMPTS).as_deref(),
     );
@@ -2230,6 +2338,9 @@ async fn settings_dto(state: &AppState) -> Result<SettingsDto, ApiError> {
             .unwrap_or(0),
         transcode_rate_mode,
         transcode_quality,
+        transcode_rate_mode_default,
+        transcode_rate_mode_default_encoder,
+        transcode_quality_default,
         hls_readrate,
         hls_burst_secs,
         hls_ahead_max_secs,
@@ -2320,6 +2431,7 @@ async fn settings_dto(state: &AppState) -> Result<SettingsDto, ApiError> {
         cluster_media_pool_enabled,
         cluster_media_pool_ready,
         cluster_session_takeover_enabled,
+        cluster_clock_guard_enforced,
         probe_retry_mins,
         artwork_retry_mins,
         transcode_cleanup_mins,
@@ -2574,10 +2686,13 @@ pub struct UpdateSettings {
     /// N1 requested rate-control family. Whenever either rate-control field is
     /// sent, both are required so a replicated update is one complete pair.
     /// A quality request is behavior-probed before the effective snapshot
-    /// changes; a refused driver remains VBR.
+    /// changes; a refused driver remains VBR. JSON `null` clears the request
+    /// back to each encoder family's code default (absent = unchanged).
+    #[serde(default, deserialize_with = "deserialize_nullable")]
+    pub transcode_rate_mode: Option<Option<String>>,
+    /// Content-aware and reorder requests retain their independent validation.
     pub content_aware_encoding: Option<bool>,
     pub vod_reorder_frames: Option<u8>,
-    pub transcode_rate_mode: Option<String>,
     /// JSON null clears the override back to the family-tuned default.
     #[serde(default, deserialize_with = "deserialize_nullable")]
     pub transcode_quality: Option<Option<u8>>,
@@ -2598,6 +2713,9 @@ pub struct UpdateSettings {
     /// Replace an expired remote HLS owner while retaining the public session
     /// id. Requires remote placement to remain enabled and rollout-ready.
     pub cluster_session_takeover_enabled: Option<bool>,
+    /// Turn the cluster clock guard's refusals on or off cluster-wide. Never
+    /// refused: readiness prerequisites are advisory only.
+    pub cluster_clock_guard_enforced: Option<bool>,
     /// Server-wide job intervals in minutes; 0 turns one off.
     pub probe_retry_mins: Option<i64>,
     pub artwork_retry_mins: Option<i64>,
@@ -2742,6 +2860,7 @@ impl UpdateSettings {
             || self.hls_typeless_sliding.is_some()
             || self.cluster_media_pool_enabled.is_some()
             || self.cluster_session_takeover_enabled.is_some()
+            || self.cluster_clock_guard_enforced.is_some()
             || self.probe_retry_mins.is_some()
             || self.artwork_retry_mins.is_some()
             || self.transcode_cleanup_mins.is_some()
@@ -3045,9 +3164,17 @@ pub async fn update_settings(
     let rate_control = match (&req.transcode_rate_mode, req.transcode_quality) {
         (None, None) => None,
         (Some(requested_mode), Some(quality)) => {
-            let mode = plurx_core::transcode::RateMode::parse(requested_mode).ok_or_else(|| {
-                ApiError::BadRequest("transcode_rate_mode must be bitrate or quality".into())
-            })?;
+            // `null` is the explicit "use each family's default" request.
+            let mode = requested_mode
+                .as_deref()
+                .map(|requested_mode| {
+                    plurx_core::transcode::RateMode::parse(requested_mode).ok_or_else(|| {
+                        ApiError::BadRequest(
+                            "transcode_rate_mode must be bitrate, quality or null".into(),
+                        )
+                    })
+                })
+                .transpose()?;
             Some((mode, quality))
         }
         _ => {
@@ -3759,6 +3886,18 @@ pub async fn update_settings(
         // loop now. An "on" is never cached, so turning takeover off is seen
         // on the next 2 s tick here and on every other node.
         crate::media_sessions::takeover_settings_changed();
+    }
+    if let Some(enabled) = req.cluster_clock_guard_enforced {
+        state
+            .store
+            .put_setting(
+                keys::CLUSTER_CLOCK_GUARD_ENFORCED,
+                if enabled { "1" } else { "0" },
+            )
+            .await?;
+        // Apply on this node now; every other node picks the replicated value
+        // up on its next enforcement refresh (`clock_offset::run`).
+        state.membership.clock_guard().set_enforced(enabled);
     }
     if let Some(mode) = &req.sub_mode {
         // Normalize through the parser so only valid modes are stored.
@@ -5027,6 +5166,7 @@ pub async fn stop_offline_package(
 /// the handler cannot reach `AppState::store` through this type.
 #[derive(Clone)]
 pub(crate) struct MetricsState {
+    clock: Arc<plurx_core::cluster::clock::ClusterClockGuard>,
     started_at: Instant,
     transcode: crate::transcode::TranscodeMetrics,
     integration: Arc<IntegrationMetrics>,
@@ -5048,6 +5188,7 @@ pub(crate) struct MetricsState {
 impl FromRef<AppState> for MetricsState {
     fn from_ref(state: &AppState) -> Self {
         Self {
+            clock: state.membership.clock_guard(),
             started_at: state.started_at,
             transcode: state.transcode.metrics_handle(),
             integration: state.jobs.metrics_handle(),
@@ -5226,6 +5367,19 @@ fn render_passive_raft_metrics(
 }
 
 fn render_snapshot_metrics(out: &mut String, snapshot: DbSnapshotMetricsSnapshot) {
+    if let Some(required) = snapshot.required_storage_bytes {
+        out.push_str(&format!(
+            "# HELP plurx_raft_snapshot_required_storage_bytes Last target-local snapshot storage floor.\n\
+             # TYPE plurx_raft_snapshot_required_storage_bytes gauge\n\
+             plurx_raft_snapshot_required_storage_bytes {required}\n"
+        ));
+    }
+    out.push_str(&format!(
+        "# HELP plurx_raft_snapshot_deferrals_total Snapshot storage admission retries.\n\
+         # TYPE plurx_raft_snapshot_deferrals_total counter\n\
+         plurx_raft_snapshot_deferrals_total{{reason=\"storage\"}} {}\n",
+        snapshot.storage_deferrals_total,
+    ));
     out.push_str(
         "# HELP plurx_raft_snapshot_seconds Database Raft snapshot build and install duration.\n\
          # TYPE plurx_raft_snapshot_seconds histogram\n",
@@ -5523,8 +5677,8 @@ pub(crate) async fn metrics(
         state.plex_census.prometheus(),
         super::prometheus_http_request_metrics(),
         crate::panics::prometheus_panics(),
-        crate::state::fragment_index_validation_prometheus(),
-        crate::subtitle_source::prometheus() + &crate::background_jobs::prometheus(),
+        crate::state::fragment_index_validation_prometheus() + &super::browse::detail_projection_prometheus(),
+        crate::subtitle_source::prometheus() + &crate::background_jobs::prometheus() + &state.clock.prometheus(),
     );
     let analysis_runtime_metrics = state.analysis.prometheus(&state.node_id);
     let live_tv_metrics = state.live_tv.prometheus() + &state.live_tv_peers.prometheus();
@@ -5562,7 +5716,7 @@ pub(crate) async fn metrics(
          # HELP plurx_transcode_sessions_active Live transcode sessions.\n\
          # TYPE plurx_transcode_sessions_active gauge\n\
          plurx_transcode_sessions_active {sessions}\n\
-        {scans}{store_metrics}{analysis_runtime_metrics}{membership_metrics}{raft_metrics}{process_metrics}{codec_qualification_metrics}{decode_fact_metrics}{auth_revocation_metrics}{login_metrics}{live_tv_metrics}{backup_metrics}{library_channel_metrics}{takeover_metrics}{control_metrics}{playback_metrics}{blocked_get_metrics}{live_recovery_metrics}{probe_reporter_metrics}{interlace_metrics}{artwork_metrics}",
+        {scans}{store_metrics}{analysis_runtime_metrics}{membership_metrics}{raft_metrics}{process_metrics}{codec_qualification_metrics}{decode_fact_metrics}{auth_revocation_metrics}{login_metrics}{live_tv_metrics}{backup_metrics}{library_channel_metrics}{takeover_metrics}{control_metrics}{playback_metrics}{availability_metrics}{blocked_get_metrics}{live_recovery_metrics}{probe_reporter_metrics}{interlace_metrics}{artwork_metrics}",
         version = crate::version::SEMVER,
         build = crate::version::BUILD,
         // The takeover statics, then this node's route-cache instrumentation
@@ -5570,6 +5724,7 @@ pub(crate) async fn metrics(
         takeover_metrics = crate::media_sessions::prometheus() + &state.route_cache.prometheus(),
         control_metrics = crate::playback_control::prometheus(),
         playback_metrics = crate::telemetry::prometheus(),
+        availability_metrics = crate::availability::prometheus(),
         // The retained live-HLS engine spends real encode time. Zero on a node
         // whose VOD coverage is complete, which is the number that says the
         // fallback can be turned off.
@@ -5877,6 +6032,35 @@ mod tests {
                 "5", "10", "30", "60", "120", "300",
             ]
         );
+    }
+
+    #[test]
+    fn snapshot_storage_metrics_are_passive_fixed_label_and_unknown_is_absent() {
+        let zero = plurx_core::cluster::migration::status::DbSnapshotHistogram {
+            count: 0,
+            sum_nanos: 0,
+            cumulative_buckets: [0; 16],
+        };
+        let mut sample = DbSnapshotMetricsSnapshot {
+            storage_deferrals_total: 7,
+            required_storage_bytes: Some(123456),
+            build_ok: zero,
+            build_error: zero,
+            install_ok: zero,
+            install_error: zero,
+            last_build: None,
+            last_install: None,
+        };
+        let mut output = String::new();
+        render_snapshot_metrics(&mut output, sample);
+        assert!(output.contains("plurx_raft_snapshot_deferrals_total{reason=\"storage\"} 7\n"));
+        assert!(output.contains("plurx_raft_snapshot_required_storage_bytes 123456\n"));
+        assert!(!output.contains("node_id="));
+        sample.required_storage_bytes = None;
+        output.clear();
+        render_snapshot_metrics(&mut output, sample);
+        assert!(!output.contains("plurx_raft_snapshot_required_storage_bytes"));
+        assert!(output.contains("plurx_raft_snapshot_deferrals_total{reason=\"storage\"} 7\n"));
     }
 
     /// Every route that reads the roster's machine names, enumerated.
@@ -6253,6 +6437,8 @@ mod tests {
             watermark_local_reads_supported: true,
             watermark_errors: 5,
             snapshot_metrics: Some(DbSnapshotMetricsSnapshot {
+                storage_deferrals_total: 0,
+                required_storage_bytes: None,
                 build_ok: DbSnapshotHistogram {
                     count: 2,
                     sum_nanos: 1_250_000_000,
@@ -6394,6 +6580,8 @@ mod tests {
             decode_smooth: None,
             session_id: None,
             snapshot: None,
+            link_sample: None,
+            candidate_recovery: None,
             control: None,
             control_trigger: None,
             delivered_range: None,

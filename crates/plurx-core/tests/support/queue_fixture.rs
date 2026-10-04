@@ -533,7 +533,7 @@ pub(crate) trait QueueFixture: Store {
 impl<T: Store + ?Sized> QueueFixture for T {}
 
 #[allow(dead_code)]
-/// Remove what v92–v95 (Jellyfin compatibility) created, so a fixture that
+/// Remove what v98–v101 (Jellyfin compatibility) created, so a fixture that
 /// winds a current database back by hand replays those migrations against a
 /// database that does not already have them. Triggers go first: the watch
 /// triggers name the revision columns the last two statements drop.
@@ -554,7 +554,7 @@ pub(crate) fn remove_jellyfin_compatibility_schema(connection: &rusqlite::Connec
              ALTER TABLE watch_state DROP COLUMN manual_origin;
              ALTER TABLE watch_state DROP COLUMN manual_revision;",
         )
-        .expect("remove v92-v95 Jellyfin compatibility schema");
+        .expect("remove v98-v101 Jellyfin compatibility schema");
 }
 
 /// Wind a current test database back across the durable-queue introduction.

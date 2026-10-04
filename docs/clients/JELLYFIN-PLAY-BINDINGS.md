@@ -45,7 +45,7 @@ fail closed; adapters cannot guess a successor by user/item. UUIDs are generated
 by the server for new negotiations and are never reused. An ended UUID cannot
 be activated again. Ending metadata does not itself release native resources.
 
-SQLite migration 94 and replicated migration 72 install the same table and
+SQLite migration 100 and replicated migration 76 install the same table and
 indexes. Import preserves every payload, scope, state, manual revision and
 exact reference. The native incarnation column intentionally has no cascading
 foreign key to `media_sessions`: native terminal cleanup must not erase the

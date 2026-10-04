@@ -101,6 +101,7 @@
             &staged_candidate_request(),
             Some(&staged_source_file()),
             AcceptedAsk {
+                prepared_proof: None,
                 film_time_ms: STAGED_ACCEPTED_FILM_TIME_MS,
                 desired_digest: None,
             },
@@ -150,6 +151,7 @@
             &staged_candidate_request(),
             Some(&staged_source_file()),
             AcceptedAsk {
+                prepared_proof: None,
                 film_time_ms: STAGED_ACCEPTED_FILM_TIME_MS,
                 desired_digest: None,
             },
@@ -201,6 +203,7 @@
             &staged_candidate_request(),
             Some(&staged_source_file()),
             AcceptedAsk {
+                prepared_proof: None,
                 film_time_ms: STAGED_ACCEPTED_FILM_TIME_MS,
                 desired_digest: None,
             },
@@ -330,10 +333,12 @@
         staged_request.file_id = fixture.file_id();
         staged_request.request_id = Some(staged_incarnation_id.clone());
         let response = StartResponse {
+            delivered_audio: None,
         quality_catalog_status: None,
             display_aware_auto_protocol: Some("route-v1".to_owned()),
             quality_candidate_id: None,
             quality_candidates: None,
+            measured_candidate_outputs: None,
             session_id: staged_session_id.clone(),
             playlist_url: format!("//attacker.invalid/{staged_session_id}/index.m3u8"),
             duration_ms: Some(6_000_000),
@@ -367,6 +372,8 @@
             request_fingerprint: staged_request.durable_intent_fingerprint(route.user_id),
             owner_node_id: fixture.state.node_id.clone(),
             recipe_json: serde_json::to_string(&RemoteStartRequest {
+                retained_output: None,
+                retained_output_receiver: None,
                 candidate_catalog: None,
                 candidate_id: None,
                 presentation_target: None,
@@ -433,6 +440,7 @@
             &staged_candidate_request(),
             Some(&staged_source_file()),
             AcceptedAsk {
+                prepared_proof: None,
                 film_time_ms: STAGED_ACCEPTED_FILM_TIME_MS,
                 desired_digest: None,
             },
@@ -526,6 +534,7 @@
             &staged_candidate_request(),
             Some(&staged_source_file()),
             AcceptedAsk {
+                prepared_proof: None,
                 film_time_ms: STAGED_ACCEPTED_FILM_TIME_MS,
                 desired_digest: None,
             },
@@ -620,9 +629,12 @@
             fixture.state.clone(),
             PendingCandidateGuard::begin(&route.playback_id, "test-digest"),
             PreparationCandidateInputs {
+                accepted_observation: None,
                 session_id: session_id.clone(),
                 route: route.clone(),
                 recipe: RemoteStartRequest {
+                    retained_output: None,
+                    retained_output_receiver: None,
                     candidate_catalog: None,
                     candidate_id: None,
                     presentation_target: None,
@@ -908,6 +920,7 @@
             &staged_candidate_request(),
             Some(&staged_source_file()),
             AcceptedAsk {
+                prepared_proof: None,
                 film_time_ms: STAGED_ACCEPTED_FILM_TIME_MS,
                 desired_digest: None,
             },
@@ -930,6 +943,7 @@
             &staged_candidate_request(),
             Some(&staged_source_file()),
             AcceptedAsk {
+                prepared_proof: None,
                 film_time_ms: STAGED_ACCEPTED_FILM_TIME_MS,
                 desired_digest: None,
             },
@@ -965,6 +979,7 @@
             &staged_candidate_request(),
             Some(&staged_source_file()),
             AcceptedAsk {
+                prepared_proof: None,
                 film_time_ms: STAGED_ACCEPTED_FILM_TIME_MS,
                 desired_digest: None,
             },
@@ -997,6 +1012,7 @@
             &staged_candidate_request(),
             Some(&staged_source_file()),
             AcceptedAsk {
+                prepared_proof: None,
                 film_time_ms: STAGED_ACCEPTED_FILM_TIME_MS,
                 desired_digest: None,
             },
@@ -1226,6 +1242,7 @@
             &staged_candidate_request(),
             Some(&staged_source_file()),
             AcceptedAsk {
+                prepared_proof: None,
                 film_time_ms: STAGED_ACCEPTED_FILM_TIME_MS,
                 desired_digest: None,
             },
@@ -1316,6 +1333,7 @@
             &staged_candidate_request(),
             Some(&staged_source_file()),
             AcceptedAsk {
+                prepared_proof: None,
                 film_time_ms: STAGED_ACCEPTED_FILM_TIME_MS,
                 desired_digest: None,
             },
@@ -1448,6 +1466,7 @@
             &staged_candidate_request(),
             Some(&staged_source_file()),
             AcceptedAsk {
+                prepared_proof: None,
                 film_time_ms: STAGED_ACCEPTED_FILM_TIME_MS,
                 desired_digest: None,
             },
@@ -1535,6 +1554,7 @@
             &staged_candidate_request(),
             Some(&staged_source_file()),
             AcceptedAsk {
+                prepared_proof: None,
                 film_time_ms: STAGED_ACCEPTED_FILM_TIME_MS,
                 desired_digest: None,
             },
@@ -1624,6 +1644,7 @@
             &staged_candidate_request(),
             Some(&staged_source_file()),
             AcceptedAsk {
+                prepared_proof: None,
                 film_time_ms: STAGED_ACCEPTED_FILM_TIME_MS,
                 desired_digest: None,
             },
@@ -1679,6 +1700,7 @@
                     &staged_candidate_request(),
                     Some(&staged_source_file()),
                     AcceptedAsk {
+                        prepared_proof: None,
                         film_time_ms: STAGED_ACCEPTED_FILM_TIME_MS,
                         desired_digest: None,
                     },
@@ -1814,6 +1836,7 @@
                 &staged_candidate_request(),
                 Some(&staged_source_file()),
                 AcceptedAsk {
+                    prepared_proof: None,
                     film_time_ms: STAGED_ACCEPTED_FILM_TIME_MS,
                     desired_digest: None,
                 },
@@ -1959,6 +1982,7 @@
             &candidate,
             Some(&staged_source_file()),
             AcceptedAsk {
+                prepared_proof: None,
                 film_time_ms: STAGED_ACCEPTED_FILM_TIME_MS,
                 desired_digest: None,
             },
@@ -2115,6 +2139,7 @@
             &staged_candidate_request(),
             Some(&staged_source_file()),
             AcceptedAsk {
+                prepared_proof: None,
                 film_time_ms: STAGED_ACCEPTED_FILM_TIME_MS,
                 desired_digest: None,
             },
@@ -2262,6 +2287,7 @@
             &staged_candidate_request(),
             Some(&staged_source_file()),
             AcceptedAsk {
+                prepared_proof: None,
                 film_time_ms: STAGED_ACCEPTED_FILM_TIME_MS,
                 desired_digest: None,
             },
@@ -2380,6 +2406,7 @@
             &staged_candidate_request(),
             Some(&staged_source_file()),
             AcceptedAsk {
+                prepared_proof: None,
                 film_time_ms: STAGED_ACCEPTED_FILM_TIME_MS,
                 desired_digest: None,
             },

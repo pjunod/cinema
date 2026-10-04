@@ -1,6 +1,8 @@
 # Decode-fact gate and fallback — measure the lane, then classify what falls out of it
 
-**Status:** implementation blocked on fleet evidence · **Executes:** C13 (§3.3.2) from
+**Status:** open · M0–M2 merged (PR #424) · M0 and M1 owned-lab evidence recorded
+2026-10-02 on lab3 (§5.7) · M3 not opened, on a denominator decision for
+Paul (§5.4) · M4 closed with M3 · media1 reading still owed · **Executes:** C13 (§3.3.2) from
 [ARCHITECTURE-REVIEW-2026-09-20.md](../reviews/ARCHITECTURE-REVIEW-2026-09-20.md),
 with the assessment's correction 14 (F-stream-9 / F-stream-16: the
 complete probe identity stays in the key; the final source check is not
@@ -391,6 +393,13 @@ not built.
 
 ## 5. Milestones
 
+**2026-09-30 continuation:** the warning/latch regression continuation is a
+separate task PR into current `effort/architecture-review-2026-09-20`, not
+`main`. It owns `transcode/tests/chunk_01.rs`, the five narrowly scoped
+child-process census rows in `tests/playback/rolling-producer-owners.toml`,
+this plan's dated record and the S-13 workboard note; production fallback policy, latch and metrics
+are unchanged. Original milestone and author history below remains intact.
+
 One whole-plan draft PR into `main` under the fast lane. Milestones are
 logical commits in that PR, following the work board's canonical rule. M3 and
 M4 remain conditional on the fleet measurements named below; a source-only
@@ -408,8 +417,18 @@ Acceptance: `cargo test -p plurxd decode_facts::tests::metrics_count_each_phase_
 green; `make unit` green; `curl -s http://media1:32400/metrics | grep
 plurx_decode_facts_` shows all five phases with non-zero counts after the
 run, and the PR body carries p50/p95 for `gate_wait` and
-`identity_validation` on hits, with the ffprobe size from `ls -l
-$(readlink -f $(which ffprobe))`.
+`identity_validation` on hits — read them from
+`plurx_decode_facts_hit_phase_seconds`, the hit-only histogram the review
+round added, not from `plurx_decode_facts_phase_seconds`, which mixes misses
+in — with the identity of the **bound** ffprobe:
+`docker exec plurxd sh -c 'p=$PLURX_BOUND_FFPROBE; ls -l "$p"; sha256sum "$p"; "$p" -version | head -1'`.
+(Corrected 2026-10-02. The first text read `ls -l $(readlink -f $(which
+ffprobe))`, which names the Jellyfin ffprobe on `PATH` — dynamically linked,
+about 200 KB, and refused as a facts collector by
+`require_self_contained_linux_elf`. The collector is the static ffprobe the
+image builds separately for this purpose, `PLURX_BOUND_FFPROBE=/usr/local/lib/plurx/ffprobe`
+(`Dockerfile` `runtime-assets` stage, `scripts/build-static-ffprobe`;
+`ffmpeg::bound_ffprobe_bin`).)
 
 ### 5.2 M1 — classify the fallback (except the refusal)
 
@@ -421,9 +440,16 @@ result is a `CatalogRow` plan.
 
 Acceptance: `cargo test -p plurxd transcode::tests::held_plan_fallback_reasons`
 green; `plurx_decode_plan_fallbacks_total` present on `/metrics`; a
-deliberate `chmod`/`touch` of the configured ffprobe on a lab node
-(`lab2`) produces exactly one `warn` line in `journalctl -u plurxd` and
-`reason="probe_changed"` increments.
+deliberate `touch`, then `chmod`, of the **bound** ffprobe on a lab node
+(`docker exec -u 0 <container> touch /usr/local/lib/plurx/ffprobe` — the file
+is root's and the daemon runs as uid 1000) produces exactly one `warn` line
+in `docker logs <container>` and `reason="probe_changed"` increments on every
+following encoded-VOD start, mutation or not, until the daemon restarts (the
+refusal is latched per process; the warning is once per process).
+(Corrected 2026-10-02: the first text named `lab2`, which is not in the
+fleet, `journalctl -u plurxd`, which reads nothing from a Docker deployment,
+and "the configured ffprobe", which a reader takes to be `PLURX_FFPROBE`, the
+Jellyfin binary whose mutation this check never sees. Met on lab3, §5.7.)
 
 ### 5.3 M2 — refuse on `SourceChanged`
 
@@ -460,6 +486,39 @@ Acceptance: those tests green; `make unit` green; the M0 fleet
 measurement repeated shows `identity_validation` p95 on hits below 5 ms
 and `plurx_decode_facts_lookups_total{result="hit"}` unchanged in ratio.
 
+**Decision, 2026-10-02 — M3 is not opened. Taken by the coordinating
+session; recorded for Paul to review and overturn.** The threshold's
+denominator, "warm first-frame time", turned out to be ambiguous, and the
+owned lab (§5.7) gives two answers to it:
+
+| Denominator | Warm first-segment time | Hit `identity_validation` p50 ≈ 30 ms is |
+|---|---:|---:|
+| fresh-encode warm start (facts cached, segment not yet encoded) | median 861 ms (806–1044) | **3.5 %** |
+| warm start over already-materialised segments | median 118 ms | 25 % |
+
+The deciding denominator is the **fresh-encode warm start**. That is the case
+where identity validation sits on a path the user actually waits on and
+where removing it could change what they see; against it, 30 ms is 3.5 %,
+below 10 %, so M3 does not open. The cached-segment figure is recorded but
+does not decide: a 118 ms start is already well inside any start bar, so
+taking 30 ms out of it changes nothing a viewer sees.
+
+What M3 would cost is stated here as §3.3 defines it. It does **not** trust
+facts without validation: every lookup still checks the snapshot's seals and
+compares the seven-field `fstat` tuple of the held descriptor and the path,
+any tuple change forces a full content hash before the verdict, and a full
+hash runs at least once per `PROBE_REVALIDATION_INTERVAL` (30 s) regardless.
+Its cost is **refusal latency** — after an operator replaces ffprobe in a way
+the tuple does not show, bound facts can be used for up to one interval
+before `probe_changed` refuses them — plus a second validation regime to
+build and keep tested. Re-evaluated on that basis, the decision stands: the
+cost is modest, but the gain on the start a viewer waits on is 3.5 %, below
+the bar, and this plan opens M3 on the measured share, not on the cost being
+low. If Paul prefers the cached-segment denominator, M3 opens on the same
+evidence; nothing else in this plan changes. (Restated 2026-10-02 after
+review 76, P2-2: the first text called the trade "trusting cached facts
+without validating the probe's identity", which misstates §3.3.)
+
 ### 5.5 M4 — warm-hit admission (conditional on M0 and M3)
 
 Opens only if, after M3, `gate_wait` p95 on hits still exceeds the M3
@@ -470,14 +529,94 @@ the two new tests; the concurrent warm/cold run from M0 repeated shows
 hit `gate_wait` p95 independent of a concurrent cold start (numbers in
 the PR body).
 
+**Premise observation, 2026-10-02 (lab3, §5.7).** Under three concurrent
+warm starts with **no miss present**, hits waited 34–44 ms per round in
+`gate_wait` (p95 ≈ 44 ms) — queued behind each other's ~30 ms identity
+validation, not behind a miss's collection. So hits do queue on the gate, as
+M4 assumes, but the queue the lab saw is hit-behind-hit. §3.4 alone moves a
+hit from `probe_gate` to `identity_gate`, which still serialises the hashes,
+so it would not remove that wait; §3.3 (M3) is what takes the ~30 ms each hit
+holds. M4 stays closed with M3.
+
 ### 5.6 Acceptance with the production static binary
 
-Every fleet measurement above runs against the shipped jellyfin-ffmpeg 8
-static `ffprobe` on media1 (the production path refuses anything that is
-not a self-contained ELF, `require_self_contained_linux_elf`), never
-against the fixture scripts the unit tests use. The PR body for each
-milestone records `ffprobe -version | head -1`, the file size, and the
-node.
+Every fleet measurement above runs against the production image's bound
+static `ffprobe` — `PLURX_BOUND_FFPROBE=/usr/local/lib/plurx/ffprobe`, built
+by the image itself from `scripts/build-static-ffprobe`, **not** the Jellyfin
+`ffprobe` on `PATH`, which is dynamically linked and which the production
+path refuses (`require_self_contained_linux_elf`) — never against the
+fixture scripts the unit tests use. The PR body for each milestone records
+that binary's `-version | head -1`, size and SHA-256, and the node. On the
+2026-10-02 lab image it was ffprobe 8.1.3, 16 697 800 bytes. (Corrected
+2026-10-02: the first text called it "the shipped jellyfin-ffmpeg 8 static
+`ffprobe`".)
+
+### 5.7 Owned-lab evidence, 2026-10-02 (M0 and M1)
+
+**Where.** A throwaway container on **lab3**, from an image built from the
+effort branch with the P-02 reproducibility continuation (`9ed98a30c`):
+single-voter store pinned to loopback, no cluster, no peers, 8 CPUs, QSV and
+VA-API validated. Four library files (SDR H.264 1080p, HEVC 1080p with an
+ASS track, HEVC Main10 HDR10 2160p, H.264 1080i), sessions created over the
+API with a v2 caps document capped at H.264 so every start took the
+**encoded-VOD** route (`encoder:"vod"`, `vodserve: vod session attached`);
+first-segment times are session-create to first media segment, measured by
+the driver. Bound ffprobe: 8.1.3, 16 697 800 bytes. **Caveat:** an owned lab
+on lab3, not media1 and not a fleet service; the media1 reading §5.1 names
+is still owed, and these numbers are the lab's.
+
+**Runs.**
+
+| Run | What | create ms | first segment ms | lookup |
+|---|---|---:|---:|---|
+| A | first-ever start, SDR film, segment 0 (fresh encode) | 219.6 | 716.7 | miss_collected |
+| B1–B3 | warm, same title, segment 0 (already materialised) | 112.5 / 120.9 / 114.2 | 116.5 / 124.7 / 118.3 | hit |
+| B7–B9 | warm facts, same title, segments 300/450/520 (fresh encode) | 121.7 / 112.9 / 124.1 | 1043.9 / 861.3 / 805.6 | hit |
+| C | three concurrent cold starts, three other titles | 184.7 / 329.9 / 582.3 | 844.0 / 1918.2 / 3778.1 | 3 × miss |
+| D1 | three concurrent warm starts, segment 0 (cached) | 183.2 / 235.6 / 258.0 | 188.8 / 240.4 / 265.0 | 3 × hit |
+| D3 + D4 | warm facts, fresh segments, two concurrent plus one | 167.5 / 197.6 / 184.8 | 1503.8 / 2239.2 / 1207.7 | hit |
+
+(B4–B6 fetched segment 0 and are cache hits like B1–B3; a driver error asked
+one D-round file for a segment past its end. Neither is a server fault.)
+
+**Phases.** Exact `_sum` deltas for single runs; bucket-interpolated
+quantiles for the concurrent rounds.
+
+| Phase | cold miss (A) | warm hit (B1–B9, per run) | 3 concurrent cold (C) | 3 concurrent warm (D1 + D3) |
+|---|---|---|---|---|
+| `gate_wait` | 0.003 ms | 0.0026–0.0029 ms | sum 106.8 ms over 3; p50 ≈ 17.5 ms, p95 ≈ 92.5 ms | 33.7 / 20.5 / 42.7 ms per round of 3; p50 ≈ 3 ms, p95 ≈ 44 ms |
+| `identity_validation` | 33.4 ms | 29.4–32.1 ms (median 30.1) | ≈ 35 ms each | ≈ 33 ms each |
+| `source_observation` | 0.41 ms (2 observations) | 0.06–0.27 ms | 0.93 ms over 6 | ≈ 0.16 ms each |
+| `collection` | 24.9 ms | — | 275.3 ms over 3 (p95 ≈ 228 ms) | — |
+| `final_validation` | 32.1 ms | — | 105.2 ms over 3 | — |
+
+Over the whole run before M1 (4 misses, 19 hits) every `identity_validation`
+sample sits in the 25–50 ms bucket, and hit `gate_wait` reads p50 0.68 ms /
+p95 38 ms (interpolated). Counters then: `lookups_total` hit 19,
+miss_collected 4, refused 0; all five phases non-zero. The realtime
+`decode-fact probe for a session start` spawn count was 5 for 4 misses (one
+extra in the concurrent cold round). **M0: PASS.**
+
+**M1 — the mutation sequence**, inside the lab container only:
+
+1. `touch` the bound ffprobe (as root). The next encoded-VOD start still
+   planned from the catalogue and served (create 108.8 ms, first segment
+   111.6 ms), and the log carried exactly one line:
+   `WARN plurxd::transcode: the configured ffprobe changed on disk after startup; bound facts are refused until plurxd restarts file_id=… reason="probe_changed"`.
+   `plurx_decode_plan_fallbacks_total{reason="probe_changed"}` 0 → 1,
+   `lookups_total{result="refused"}` 0 → 1,
+   `phase_seconds_count{phase="identity_validation",outcome="changed"}` 0 → 1.
+2. `chmod 0700` then `chmod 0755` (ctime moved), start another title:
+   `probe_changed` 1 → 2, `refused` 1 → 2, no new WARN.
+3. No further change, start a third title: `probe_changed` 2 → 3 — the
+   refusal is **latched until restart**, as §3.2 says — and still no WARN.
+
+One WARN for the whole sequence; a `docker restart` cleared the latch.
+**M1: PASS.**
+
+**M3 threshold**: decided in §5.4 — 3.5 % against the fresh-encode warm
+start, so M3 does not open. **M4 premise**: §5.5 — hits queue 34–44 ms
+behind each other's identity validation with no miss present.
 
 ## 6. Verification and rollout
 
@@ -487,25 +626,35 @@ node.
   existing Ansible path; no setting, no migration.
 - Rollback: revert the milestone's PR. M2's refusal reverts to the
   catalogue fallback; nothing durable changes in either direction.
-- GPT prompt for the M0/M3/M4 concurrent measurement:
+- GPT prompt for the M0/M3/M4 concurrent measurement (corrected
+  2026-10-02: the first text's regex missed the hit-only series, read
+  `journalctl -u plurxd` — empty on a Docker node — with a pattern that
+  cannot match the `probe_changed` warning, and used a placeholder address;
+  the lab's evidence is §5.7, and this prompt is what the media1 reading
+  still owes):
 
 ```text
 On media1, with the current main deployed: start three encoded-VOD plays
 of different titles within five seconds of each other on three clients
 (any three of web, Apple TV, Android TV), let them run 30 s, stop all
 three, then start the same three again within five seconds. Before the
-first start and after the second stop, save
-`curl -s http://10.42.0.10:32400/metrics | grep -E
-'plurx_decode_facts_(phase_seconds|lookups_total)|plurx_decode_plan_fallbacks_total'`
-to two files and send both. Also send `journalctl -u plurxd --since
--10min | grep -E 'decoder planning|decode_facts'`. Do not restart plurxd
-between the two rounds.
+first start and after the second stop, run on media1's host
+`curl -s http://127.0.0.1:32400/metrics | grep -E
+'plurx_decode_facts_(phase_seconds|hit_phase_seconds|lookups_total)|plurx_decode_plan_fallbacks_total'`
+(use the published port from `docker port plurxd` if it is not 32400), save
+the two outputs to two files and send both. Also send `docker logs --since
+10m plurxd 2>&1 | grep -E 'configured ffprobe changed|bound decoder
+planning'`, and `docker exec plurxd sh -c 'p=$PLURX_BOUND_FFPROBE; ls -l
+"$p"; "$p" -version | head -1'`. Do not restart plurxd between the two
+rounds.
 ```
 
 ## 7. Open questions
 
 1. The 30 s `PROBE_REVALIDATION_INTERVAL` and the 10 % threshold in §5.4
-   are proposals; Paul sets both once M0's numbers exist.
+   are proposals; Paul sets both once M0's numbers exist. M0's lab numbers
+   exist now (§5.7); the threshold's denominator was decided on Paul's
+   behalf in §5.4 and is his to overturn.
 2. Whether the pretranscode caller should retry `refused_source_changed`
    automatically after a rescan or leave the job failed for the operator
    — M2 implements "failed with reason" and asks.
@@ -530,9 +679,13 @@ trailers `Agent-Model:` / `Agent-Session:` on every commit of the branch.
 
 | Date | Model | Session | Milestone | PR | Outcome / evidence |
 |---|---|---|---|---|---|
+| 2026-10-02 | claude-opus-5-5 | https://claude.ai/code/session_01CAyBrYCQ7PpAtuZwUxKfp7 | M0/M1 owned-lab evidence; M3 decision | branch `opus/encoder-lab-evidence` (evidence-only docs) | Owned lab on lab3 (not media1), bound static ffprobe 8.1.3 (16 697 800 B). M0 PASS: all five phases and all three results observed; warm-hit `identity_validation` median 30.1 ms, hit `gate_wait` p50 0.68 ms / p95 38 ms over the run. M1 PASS: touch, chmod, no change gave `probe_changed` 0→1→2→3 and `refused` with exactly one WARN, latched until restart. M3 not opened (§5.4): 30 ms is 3.5 % of the 861 ms fresh-encode warm start (25 % of a 118 ms cached-segment start, recorded, not deciding); decision for Paul to review. M4 premise: hits queue 34–44 ms behind each other with no miss present (§5.5). Plan text corrected: bound ffprobe path (§5.1, §5.6), M1 instructions (§5.2), §6 prompt regex, logs and address. Phases and runs in §5.7. |
+| 2026-09-30 | gpt-6.1-sol | agent:/root/p02_effort_sync_sol61 | M1 warning/latch coverage continuation | [draft #637](http://192.168.4.7:3000/noirr/plurx/pulls/637), `codex/s13-probe-warning-coverage` | Based on effort `86aca9863` after S09 #636. `probe_changed_warns_once_per_process_and_counts_every_fallback` exercises the existing actual fallback seam in a fresh test process: one real WARN across two managers, three DEBUG fallbacks, per-manager counters 2/1 and `CatalogRow` plans. WARN→DEBUG fails severity; a latch that never stores true fails warning count (3 versus 1). Production `manager/plan.rs` restored byte-identically (SHA-256 `0b431e6ffbce4cf90c795fc8985ba4ed23b559da11dcb1ccc03189b1b9784fb2`); no production seam/reset. Owned child has a 30-second bound, kill/reap on failure and explicit completed-assertions proof. Final restored-source test PASS (0.17 s); docs-index 4, canonical field and normal Rust 1.97.1 hook PASS (catalog 2573, fmt, workspace/all-target Clippy, 70 JS). No review or merge. Lab2 ffprobe mutation, production-static-binary media1 cold/warm latency and conditional M3/M4 remain unproved. |
 | 2026-09-21 | gpt-5.6-sol | agent:/root/s01_builder | claim | [#424](http://192.168.4.7:3000/noirr/plurx/pulls/424) | Claimed `plan/S-13` for one whole-plan draft PR. Rust 1.97.1 compiler loop established; M3/M4 remain closed until M0 fleet evidence opens them. |
 | 2026-09-21 | gpt-5.6-sol | agent:/root/s01_builder | M0 | [#424](http://192.168.4.7:3000/noirr/plurx/pulls/424) / `a4682e5d` | Added fixed-cardinality phase histograms and lookup counters to `/metrics`; the real miss-then-hit fixture asserts every phase and result. Focused test, Rust 1.97.1 check, format and Clippy are green. Needs: deploy this exact branch artifact on media1 and run the §6 production-static-binary cold/warm measurement; no p50/p95 or binary size was inferred locally. |
 | 2026-09-21 | gpt-5.6-sol | agent:/root/s01_builder | M1 | [#424](http://192.168.4.7:3000/noirr/plurx/pulls/424) / `8432e9bc` | Every `DecodeFactError` maps exhaustively to a bounded reason, severity and counter. `ProbeChanged` warns once per process, while existing catalogue fallback disposition remains unchanged. Focused classification test is green. Needs: the lab2 deliberate ffprobe-change log/counter observation. |
 | 2026-09-21 | gpt-5.6-sol | agent:/root/s01_builder | M2 | [#424](http://192.168.4.7:3000/noirr/plurx/pulls/424) / `8432e9bc` | `SourceChanged` alone now refuses the held plan with the rescan instruction and increments `refused_source_changed`; a deterministic real held-source mutation regression is green, together with the existing post-probe source fence and cancellation cleanup regressions. The VOD caller preserves `vod_decoder_plan_refused`; the pretranscode path propagates the actionable failure into its existing retry lifecycle. |
 | 2026-09-21 | gpt-5.6-sol | agent:/root/s01_builder | M3-M4 | [#424](http://192.168.4.7:3000/noirr/plurx/pulls/424) | Not opened. M3 requires M0's media1 result to exceed the 10% threshold; M4 additionally requires M3 and remaining hit gate wait above target. Source-only unit timings are not a substitute. |
 | 2026-09-21 | gpt-5.6-sol | agent:/root/s01_builder | review disposition | [#424 comment 3333](http://192.168.4.7:3000/noirr/plurx/pulls/424#issuecomment-3333) / `0abf5615` | Added a bounded hit-only phase histogram so fleet p50/p95 can be joined to cache hits without miss contamination; collection latency is now recorded inside the owned task after kill/reap and source restoration. The fallback table now drives the real disposition and proves every non-identity failure returns a `CatalogRow` plan, while the production caller seam proves VOD keeps `vod_decoder_plan_refused` and pretranscode keeps the actionable retry text. Rust 1.97.1 check, format, scoped Clippy, and the four named regressions are green. Fleet and lab evidence remain pending exactly as above. |
+| 2026-09-30 | gpt-6.1-sol | agent:/root/p02_effort_sync_sol61 | Sole review P2 disposition | [draft #637](http://192.168.4.7:3000/noirr/plurx/pulls/637#issuecomment-6526) | Review 10 found encoder-backed seed_file could outlive the 30-second child deadline. Replaced it with existing pure catalog seed_file_at at /s13/catalog-only.mkv, with no external process or source-file creation. Actual fallback, warning severity/latch/counter assertions and completion marker are unchanged; severity/latch mutation proof remains historical exact 57a799 source. One final focused test uses empty owned TMPDIR and unusable PLURX_FFMPEG; durable command output is retained privately. Production plan.rs remains byte-identical. No second formal review or physical acceptance is claimed. |
+| 2026-09-30 | gpt-6.1-sol | agent:/root/p02_effort_sync_sol61 | Ownership census reconciliation | [draft #637](http://192.168.4.7:3000/noirr/plurx/pulls/637) | Failed Effort gate API 3645/UI 3624 preflight 38840 skipped compilation: five exact census mismatches reproduced locally. Same reviewed bounded child accounts for method-spawn 51→52, command-construction 199→200, launch-method 406→407, lifecycle-method 240→245 (Drop kill/wait, deadline kill/wait, try_wait), and time-constructor 1118→1119 (10-ms std polling sleep). Updated only those five counts plus explicit owner reasons in rolling-producer-owners.toml; patterns, scopes, exclusions and equality policy unchanged. Focused ownership inventory now passes 7/7; warning-test behavior and catalog-only correction are unchanged, so no repeat Rust unit or mutants. Failed policy receipt retained; sole review 10/fix 6529 preserved. |

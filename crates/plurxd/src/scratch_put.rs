@@ -117,11 +117,14 @@ struct Shared {
     /// and the bookkeeping after it.
     commit: tokio::sync::Mutex<()>,
     state: Mutex<State>,
+    retained: Mutex<Option<Arc<crate::vodserve::retained::RollingCollection>>>,
     next_request: AtomicU64,
 }
 
 #[derive(Default)]
 struct State {
+    measurement: crate::rolling_output::RollingOutputMeasurement,
+    measured_playlist: Option<Vec<u8>>,
     /// The lane that is writing, once its first request has arrived.
     lane: Option<u32>,
     /// Every lane below this one has been replaced and is refused for good.
@@ -144,6 +147,7 @@ struct State {
 }
 
 struct PendingPlaylist {
+    measured_body: Option<Vec<u8>>,
     name: String,
     temporary: PathBuf,
     named: Vec<String>,
@@ -161,6 +165,8 @@ impl State {
         self.committed.clear();
         self.playlist_rank = None;
         self.failure = None;
+        self.measurement = Default::default();
+        self.measured_playlist = None;
         self.pending.take().map(|pending| pending.temporary)
     }
 }
@@ -248,6 +254,7 @@ impl PutSink {
             changed: tokio::sync::Notify::new(),
             commit: tokio::sync::Mutex::new(()),
             state: Mutex::new(State::default()),
+            retained: Mutex::new(None),
             next_request: AtomicU64::new(0),
         });
         let (drains, requests) = tokio::sync::mpsc::unbounded_channel();
@@ -303,6 +310,44 @@ impl PutSink {
     pub(crate) async fn drain(&self) {
         self.shared.exited.store(true, Ordering::Release);
         self.drain_queued().await;
+    }
+
+    /// Observation only: a successful exact-attempt owner must still retain
+    /// the artifact before publishing any reusable output facts.
+    pub(crate) fn observed_complete_output(
+        &self,
+    ) -> Option<plurx_core::output_measurement::CompleteOutputRates> {
+        self.observed_complete_inventory()
+            .map(|(rates, _, _)| rates)
+    }
+
+    pub(crate) fn bind_retained(
+        &self,
+        collector: Arc<crate::vodserve::retained::RollingCollection>,
+    ) {
+        *self
+            .shared
+            .retained
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner) = Some(collector);
+    }
+
+    pub(crate) fn observed_complete_inventory(
+        &self,
+    ) -> Option<crate::rolling_output::CompleteRollingInventory> {
+        if !self.shared.exited.load(Ordering::Acquire)
+            || self.shared.in_flight.load(Ordering::Acquire) != 0
+            || self.shared.is_closed()
+        {
+            return None;
+        }
+        let state = self.shared.lock();
+        if state.lane.is_none() || state.failure.is_some() || state.pending.is_some() {
+            return None;
+        }
+        state
+            .measurement
+            .complete_inventory(state.measured_playlist.as_deref()?)
     }
 
     async fn drain_queued(&self) {
@@ -508,7 +553,7 @@ where
     }
     let sequence = shared.next_request.fetch_add(1, Ordering::Relaxed);
     let temporary = shared.dir.join(format!("{}.{sequence}.tmp", request.name));
-    let copy = match write_body(shared, reader, &request, &temporary, playlist).await {
+    let (copy, observed) = match write_body(shared, reader, &request, &temporary, playlist).await {
         Ok(copy) => copy,
         Err(refused) => {
             let _ = tokio::fs::remove_file(&temporary).await;
@@ -518,7 +563,7 @@ where
     let committed = if playlist {
         commit_playlist(shared, &request, temporary.clone(), &copy).await
     } else {
-        commit_object(shared, &request, &temporary).await
+        commit_object(shared, &request, &temporary, observed).await
     };
     if committed.is_err() {
         let _ = tokio::fs::remove_file(&temporary).await;
@@ -686,7 +731,7 @@ async fn write_body<R>(
     request: &Request,
     temporary: &Path,
     playlist: bool,
-) -> Result<Vec<u8>, Refused>
+) -> Result<(Vec<u8>, crate::rolling_output::CommittedObject), Refused>
 where
     R: AsyncBufRead + Unpin,
 {
@@ -709,6 +754,9 @@ where
     let mut body = Body::new(request.body);
     let mut piece = vec![0_u8; PIECE_BYTES];
     let mut copy = Vec::new();
+    use sha2::{Digest, Sha256};
+    let mut hash = Sha256::new();
+    let mut observed_bytes = 0_u64;
     let result = async {
         loop {
             let read = tokio::select! {
@@ -748,6 +796,10 @@ where
                 shared.fail_lane(request.lane, refused.reason.clone());
                 return Err(refused);
             }
+            hash.update(&piece[..read]);
+            observed_bytes = observed_bytes.checked_add(read as u64).ok_or_else(|| {
+                Refused::new("413 Payload Too Large", "object byte count overflow")
+            })?;
             if playlist {
                 if copy.len().saturating_add(read) > MAX_PLAYLIST_BYTES {
                     return Err(Refused::new(
@@ -762,7 +814,15 @@ where
     }
     .await;
     drop(file);
-    result.map(|()| copy)
+    result.map(|()| {
+        (
+            copy,
+            crate::rolling_output::CommittedObject {
+                bytes: observed_bytes,
+                digest: hash.finalize().into(),
+            },
+        )
+    })
 }
 
 /// Resolves when the sink closes or `lane` stops being the writing lane, so
@@ -843,6 +903,7 @@ async fn commit_object(
     shared: &Arc<Shared>,
     request: &Request,
     temporary: &Path,
+    observed: crate::rolling_output::CommittedObject,
 ) -> Result<&'static str, Refused> {
     let promoted = {
         let _commit = shared.commit.lock().await;
@@ -852,8 +913,25 @@ async fn commit_object(
             shared.fail_lane(request.lane, reason.clone());
             return Err(Refused::new("500 Internal Server Error", reason));
         }
+        let collector = shared
+            .retained
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone();
+        if let Some(collector) = collector {
+            if request.lane == 0 {
+                collector.capture(
+                    shared.dir.join(&request.name),
+                    &request.name,
+                    observed.clone(),
+                );
+            } else {
+                collector.refuse();
+            }
+        }
         let pending = {
             let mut state = shared.lock();
+            state.measurement.committed(&request.name, observed);
             state.committed.insert(request.name.clone());
             let ready = state.pending.as_ref().is_some_and(|pending| {
                 pending
@@ -884,6 +962,7 @@ async fn commit_playlist(
     let text = std::str::from_utf8(body)
         .map_err(|_| Refused::new("400 Bad Request", "the playlist is not UTF-8"))?;
     let playlist = PendingPlaylist {
+        measured_body: (body.len() <= 1 << 20).then(|| body.to_vec()),
         name: request.name.clone(),
         temporary,
         named: playlist_references(text),
@@ -957,6 +1036,7 @@ async fn promote(
         return Err(Refused::new("500 Internal Server Error", reason));
     }
     let mut state = shared.lock();
+    state.measured_playlist = playlist.measured_body;
     state.committed.insert(playlist.name);
     state.playlist_rank = Some(playlist.rank);
     state.published = true;
@@ -1282,6 +1362,70 @@ mod tests {
         let mut stream = open_put(base, name, None).await;
         chunk(&mut stream, bytes).await;
         finish(stream).await
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn scratch_put_complete_mux_observation_uses_commits_not_queued_or_replaced_bodies() {
+        let fixture = fixture(64 << 20, 64 << 20);
+        let base = fixture.sink.base_url(0);
+        let playlist = b"#EXTM3U\n#EXT-X-TARGETDURATION:4\n#EXT-X-MAP:URI=\"init.mp4\"\n#EXTINF:4.000000,\nseg000000.m4s\n#EXTINF:2.000000,\nseg000001.m4s\n#EXT-X-ENDLIST\n";
+        assert!(put(&base, "index.m3u8", playlist)
+            .await
+            .starts_with("HTTP/1.1 202"));
+        assert!(fixture.sink.observed_complete_output().is_none());
+        assert!(put(&base, "init.mp4", &[1; 100])
+            .await
+            .starts_with("HTTP/1.1 201"));
+        assert!(put(&base, "seg000000.m4s", &[2; 1000])
+            .await
+            .starts_with("HTTP/1.1 201"));
+        assert!(!fixture.dir.join("index.m3u8").exists());
+        assert!(put(&base, "seg000001.m4s", &[3; 2000])
+            .await
+            .starts_with("HTTP/1.1 201"));
+        assert_eq!(
+            tokio::fs::read(fixture.dir.join("index.m3u8"))
+                .await
+                .expect("committed playlist fixture"),
+            playlist
+        );
+        assert!(
+            fixture.sink.observed_complete_output().is_none(),
+            "producer has not drained"
+        );
+        fixture.sink.drain().await;
+        let rates = fixture
+            .sink
+            .observed_complete_output()
+            .expect("successfully promoted full-mux tail");
+        assert_eq!(
+            (
+                rates.wire_bytes,
+                rates.duration_micros,
+                rates.average_bps,
+                rates.rfc_peak_bps
+            ),
+            (3000, 6_000_000, 4000, 8000)
+        );
+        // Ordinary historical body replacement remains playable, but cannot
+        // renew the earlier completed observation's incarnation authority.
+        assert!(put(&base, "seg000001.m4s", &[4; 2001])
+            .await
+            .starts_with("HTTP/1.1 201"));
+        fixture.sink.drain().await;
+        assert!(fixture.sink.observed_complete_output().is_none());
+        let successor = fixture.sink.base_url(1);
+        assert!(put(&successor, "init.mp4", &[5; 100])
+            .await
+            .starts_with("HTTP/1.1 201"));
+        assert!(put(&base, "seg000000.m4s", &[6; 1000])
+            .await
+            .starts_with("HTTP/1.1 409"));
+        fixture.sink.drain().await;
+        assert!(
+            fixture.sink.observed_complete_output().is_none(),
+            "new lane cannot reuse old tail"
+        );
     }
 
     fn regular_bytes(dir: &std::path::Path) -> u64 {

@@ -1331,3 +1331,266 @@ and iOS/tvOS build-for-testing passed without executing tests (versions 140/202)
 Final main integration, adversarial review and fast-lane qualification remain
 in progress. No physical D3,
 TCL playback, source-grade 1440 throughput or production deployment is claimed.
+
+### 9.9 A-05 measured-Link attribution foundation (2026-10-01)
+
+Frozen source `c0914fe7e` implements §3.3's attribution storage boundary:
+the measured-Link height/completion pair is independent of legacy supply
+negatives, and SQLite v89 / sidecar v11 initialize historical evidence to
+unattributed. A private typed proof requires a completed positive body,
+known network/cache/pacing provenance and at most 15 seconds of age.
+The fold rechecks freshness and keeps completion time independent of receipt.
+
+Five new focused regressions passed once on the precursor working tree;
+the subsequent test-only panic-diagnostic repair changed no successful path
+or assertion. The committed source passed pinned Rust 1.97.1 compilation
+and the normal hook. Sole review 38 approves the bounded foundation.
+Actual current-effort composition `7a3d75ee` after #675 retains those source
+bytes; final same-record review publication and its gate remain separate.
+
+Actual ClientLog intake cannot establish completed-body provenance and
+explicitly supplies no measured-Link proof. A reachable producer and
+candidate-aware negative-prior consumer remain required; neither is claimed
+by this foundation. Existing controllers and legacy readers remain intact.
+Typed recovery, authenticated decoder evidence and physical qualification
+remain open; this is not combined-feature completion.
+
+The bounded candidate-reader isolation follow-up refuses legacy starvation
+and coarse rate EWMA in actual enabled caps_v2 catalogs and actual HLS Auto
+candidate execution, including their `prior_kbps` hints. Legacy routes,
+explicit candidate lookup and manual 1440 selection remain unchanged.
+This does not yet apply a measured negative to a candidate: the stored pair
+has no failed recipe/route identity. Fresh transfer rate proof, candidate-aware
+negative selection and the reachable provenance producer remain required.
+
+### 9.10 A-05 ordinary completed-body producer and exact reader (2026-10-01)
+
+The ordinary Decision/Create follow-up binds optional HTTP-only incumbent
+receipts to the exact active attachment, authenticated credential/class/network
+namespace, serving owner and physical source version. Local authorized complete
+unpaced VOD responses issue bounded opaque nonces; accepted EOF precedes async
+authority settlement, and proof becomes visible only after settlement succeeds.
+One raw claim and one later Link-negative claim share immutable bytes/time and
+the original 15-second EOF freshness. Materialized VOD supplies actual immutable
+segment duration; rolling bodies without that fact remain Unknown for negatives.
+Historical negatives retain their separate TTL; restart or wall-clock rollback
+cannot recreate a fresh positive sample.
+
+Web and native completed-body adapters carry this response's nonce/ETag and
+server-observed duration. Warm candidate admission requires fresh exact incumbent
+Link evidence plus S-10's separately reacquired complete-full-mux cost/artifact
+proof. Optional public sidecars are advisory, omitted on durable replay, and do
+not change strict worker candidates or original intent fingerprints. Missing
+proof does not block ordinary cold/manual/recovery playback or Auto enablement.
+
+Prepared control remains a finite separate follow-up: optional independently
+authenticated HTTP observation context must survive accepted actor attachment,
+generation and deadline fences; local staged registration follows successful
+actual owner prime, not reservation. A trial may use incumbent evidence to start
+but must prove its own staged response before positive commit. Capability UUIDs
+are not credential/network authority; remote/unknown proof stays Unknown.
+Physical 14-versus-20 admission, typed recovery and complete A-05 qualification
+remain open; synthetic comparator cases and source builds do not satisfy them.
+
+### 9.11 A-05 local prepared observation (2026-10-01)
+
+The prepared follow-up carries an optional explicit per-call incumbent receipt
+in the HTTP header, never control JSON, relay envelopes or intent fingerprints.
+Independent ordinary authentication supplies its credential namespace; the
+control capability UUID does not. Without trusted-proxy evidence this ingress
+uses the actual remote address and ignores forwarding headers. A proxy namespace
+mismatch is Unknown, not a control refusal. Every optional query is bounded by
+its original exchange or preparation deadline and a short observation budget.
+
+Only an actually accepted local actor exchange can mint a private observational
+origin. Same-intent later polls retain that origin; desired-lifetime, owner or
+attachment changes invalidate it. The actual stage writer alone mints a separate
+stage-lifetime token, invalidated on abort, commit, replacement or retirement.
+VOD tombstone and locked registry-removal seams explicitly invalidate both
+observational lifetimes, even while an old incarnation snapshot remains held.
+Read-only queries neither reserve commit nor renew either lifetime. Registration
+follows successful local owner prime; final intake rechecks both tokens, physical
+source, serving route and original monotonic EOF after its last awaited read.
+
+The incumbent's fresh Link and independently qualified full-output cost can
+support an upward trial, but web/Apple/Android positive stage evidence comes only
+from that stage's own completed response, nonce, ETag and server duration. Remote
+or absent proof remains Unknown; ordinary manual, recovery and Auto enablement
+are unchanged. Real actor/intake regressions and source compilation establish
+these bounded contracts, not physical 14-versus-20, decoder, typed-recovery or
+complete A-05 acceptance. Formal review and the current effort gate remain
+separate from author development evidence.
+
+### 9.12 Native pacing and upgrade observation windows (2026-10-01)
+
+The next bounded A-05 source task uses the existing native film-clock stall
+observations and completed-transfer timestamps. Upgrade history belongs to the
+installed attachment/attempt: a new item or attempt cannot inherit it, and a
+re-read cliff sample cannot renew its original completion time. Native upgrades
+require 60 observed seconds from the later of attachment/attempt observation
+start and the last actual stall, and 90 seconds since a proved bandwidth cliff,
+in addition to the existing headroom/dwell/owner conditions. Missing observation
+start is Unknown; the independent 45-second headroom interval cannot replace
+the full quiet interval on a fresh attachment.
+Qualified headroom accumulates concurrently with these observation windows;
+quiet/cliff refusal delays the proposal, not the start of headroom measurement.
+
+Routine producer `held` state is not a stall verdict. Fresh exact-session and
+candidate active-production evidence can still attribute saturation while a
+producer is held; measured active 2x work behind paced 1x delivery is not
+pressure. Missing active timing is Unknown. Successor production, Link cost,
+decoder and continuity qualification remain independent. This source task
+does not close unknown-cost original trials, natural-boundary integration,
+typed recovery disposition or physical A-05 acceptance.
+
+### 9.13 A-05 unknown whole-output source-copy trial (2026-10-01)
+
+The server/web continuation separates private `QualifiedOutput` authority from
+`UnknownOriginalTrial`. A trial requires the exact compatible source-copy
+recipe, local serving owner, independently authenticated fresh incumbent
+receipt and live accepted actor. The current HLS stage resolver implements
+that original-video route as `Remux`/`Copy`; unstaged `Original` file delivery
+and arbitrary encodes do not acquire this exception. A known peak or known
+qualified complete-output cost cannot fall through to the unknown branch.
+Exact retained Link negatives still exclude a candidate. Compatible catalog
+exposure is distinct from a warm recommendation; a trial never populates
+`retained_output` or claims complete-full-mux qualification.
+
+The browser's staged loader binds each completed unpaced network response to
+its item, pipeline, stage object, session, candidate and full recipe digest.
+Its original trial requires distinct nonce/ETag-bearing segment objects with
+server-issued immutable-plan advertised durations, nonoverlapping media intervals, at least two
+segments and two seconds of media within the 15-second deadline. Conservative
+actual transfer must exceed 1.8 times their largest observed wire cost. That
+maximum remains empirical segment evidence, never a whole-title peak or
+reusable output sidecar. The qualified complete-output branch keeps its 1.8
+margin. Existing incumbent runway/pressure, preparation cancellation,
+five-minute failure backoff, presentation continuity and exposure rollback
+remain owned by the current controller.
+
+The old `aa0d6382b` browser source rejects the new focused trial regression;
+the changed browser source passes it once. The independent captured item/digest
+regression and both new authenticated-stage/catalog Rust regressions each pass
+once. Pinned Rust 1.97.1 all-target source checking passes. Final committed-tree
+checks, native composition, one formal review and the current effort gate
+remain pending at this author checkpoint.
+This records source work, not physical restoration, D3 or A-05 completion.
+
+**Native interval checkpoint:** Apple cannot infer segment starts from metric
+event `mediaTime`. Its stage captures the exact item, player, session and full
+recipe, and makes one bounded lookup of that item's actual media-playlist URL.
+Only a complete same-origin immutable VOD playlist with canonical unique
+`seg%05d.m4s` objects supplies advertised `EXTINF` intervals. The lookup refuses
+redirects, ranges, discontinuities, aliases, partial bodies, more than 1 MiB or
+8192 entries, and completion after the original observation deadline. Header
+duration agrees within outward-millisecond/six-decimal rounding; neither value
+claims packet-exact duration. Android retains actual completed-load start/end
+intervals and the exact staged pipeline. Duplicate objects, receipts, ETags,
+overlap and stale attachment evidence cannot qualify the empirical margin.
+Missing proof retains the healthy incumbent without reopening or renewing a
+deadline. The same task's native boundary implementation uses the existing
+accepted preparation at the final coalesced viewer seek target, including a
+backward target, or a resume after an attachment-bound explicit viewer pause
+of at least 60 seconds. It never calls ordinary optional create: predecessor
+activation can retire the healthy session before the response is returned.
+The optional part borrows the original transaction's remaining budget, capped
+at eight seconds from its first entry, and reserves two seconds for that same
+healthy seek/resume. Refusal, missing proof or supersession cannot create a
+second quality operation or renew the fallback deadline. Apple prepares the
+exact staged item's native/audio selection before switching. Android intercepts
+current MediaSession transport before delegate mutation through a private
+forwarding wrapper; a second explicit Pause still revokes an optional resume
+while the delegate is held paused, and its SDK consequence is not a new viewer
+edge. Stale wrappers cannot issue transport intent for a new attachment.
+
+Boundary admission still requires current authenticated completed-body proof,
+decoder/recipe/selection ownership, incumbent runway, exact staged body proof
+and presentation continuity. Only ordinary mid-play quiet/cliff eligibility is
+not used to pin the viewer boundary after a cliff expires. Ordinary mid-play
+45-second headroom, 60-second quiet, 90-second original-EOF cliff, 60-second
+evaluation cadence and five-minute failure backoff remain unchanged. Current
+native source/test compilation and the two new focused boundary cases are being
+qualified before the single coherent review. This remains source work, not
+device startup-cost acceptance, shaped-network restoration or A-05 completion.
+
+### 9.14 Durable candidate-recovery storage milestone (2026-10-02 UTC)
+
+The storage slice separates authenticated exact-recipe fault observations from
+the one decoder quality-response admission in a playback recovery lifetime.
+Current pointer, incarnation, owner, recipe and source-metadata predicates
+fence each fold; duplicate observations never refresh the original timestamp
+or rearm admission. SQLite92 and Hiqlite68 append after the existing COPY
+migrations. SQLite-to-Hiqlite import must retain both the session recovery
+epoch and rejected/spent candidate rows; older sources without that epoch
+remain explicitly empty rather than receiving an invented lifetime.
+
+The Store API trusts its caller to reconstruct credential, physical source
+version and full recipe from authenticated incumbent facts. This milestone
+does not yet wire that caller, the native typed-cause senders or sustained
+incumbent decode-pressure behavior. Those remain source work, alongside the
+original decoder/recovery and shaped-network physical acceptance. It does not
+close A-05 or restore the superseded numeric-height controller.
+
+### 9.15 Authenticated recovery consumers and native pressure (2026-10-02 UTC)
+
+The follow-on reconstructs credential generation, physical source version,
+full incumbent candidate and recovery lifetime from the authenticated current
+route. Private Auto create, Decision and preparation readers consult durable
+decoder rejection memory; the public/manual catalog remains unchanged. A
+fault observation does not spend the single decoder quality response. Its
+actual changed-candidate create claims that response atomically; replay or a
+second response cannot rearm it. This leaves further codec recovery with the
+existing compatibility owner rather than creating another height controller.
+
+Apple and Android send the closed Link, Encode, Decode, Hold and Authority
+cause vocabulary at their existing evidence writers. Hold and Authority are
+diagnostic deferrals/terminal observations, not quality failures. Encode needs
+fresh actual active producer pressure; Decode needs an actual decoder failure
+or sustained dropped-frame intervals while the incumbent advances with at
+least ten seconds of supply. Pause, seek, replacement, stagnant progress and
+clock rollback discard that pressure window. Legacy `stall` stays legacy.
+
+A native Link recovery awaits an exact nonce acknowledgement within its
+original recovery budget, capped at 250 milliseconds, and rechecks the
+captured attachment and attempt afterward. The ClientLog intake emits
+`X-Plurx-Link-Accepted` only after the authenticated completed-body negative
+was actually accepted and durably folded. Unknown, positive or duplicate
+claims remain ordinary 204 without that header. The immutable acknowledged
+nonce accompanies only its matching predecessor/candidate create; a newer
+sample cannot substitute for it. No acknowledgement renews the original EOF,
+recovery deadline or failure lifetime.
+
+Focused source cases exercise the native acknowledgement predicates and
+attachment tickets, real SQLite/route/body claim folding, and authenticated
+single-response decoder memory with manual catalog preservation. These are
+source proofs, not physical decoder or shaped-network qualification. Current
+committed-source checks, one independent review and the exact effort gate
+precede landing; the original 14-versus-20 Mbit/s, decoder/recovery and complete
+platform acceptance matrix remain open. No saved feature choice is gated.
+
+### 9.16 Viewer boundaries no longer hold Play or a seek (2026-10-04 UTC)
+
+Review finding (P2): after an explicit pause of at least 60 seconds the native
+clients did not write Play to the player until the optional original stage of
+§9.13 committed at the paused frame or exhausted its borrowed budget — up to
+about six seconds of a pressed Play doing nothing — and every viewer seek
+waited behind the same attempt. Apple ran that stage as 25 ms `Task.sleep`
+polling loops on the main actor.
+
+The boundary rule is now: the viewer action is applied to the incumbent at
+once, and the original-first re-plan it is owed is served afterwards by the
+ordinary Auto evaluation as an ordinary prepared replacement beside the
+playing incumbent (Android's rendezvous, Apple's aligned commit). A seek or a
+long-pause resume only arms a one-shot re-plan keyed by the viewer action that
+armed it (Android `AutoBoundaryReplan`, keyed by the transport lifetime; Apple
+`AutoBoundaryReplan`, fence `autoBoundaryReplanCurrent`), so any newer viewer
+action makes it stale without a timer. The first evaluation whose incumbent
+is established, playing and has 10 seconds of runway consumes it, and a fresh
+link proof still stands in for the mid-play quiet window for that one
+preparation. A superseded or refused boundary preparation is withdrawn without
+backoff; a failed one is an ordinary Auto failure. The borrowed transaction
+budget, the exact-target hold, the optional deadline, Apple's
+`AutoViewerBoundaryBudget`, the boundary resume owner and the selection
+pre-stage are gone. This changes when the original switch happens (after the
+viewer action, through a seamless handoff, rather than instead of it); it does
+not change which candidates qualify.

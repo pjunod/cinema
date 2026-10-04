@@ -524,6 +524,68 @@ To overturn it: choose (a), or add a shadow comparison, before the
 transition PR is opened. The projection and its test stay useful either
 way.
 
+**Decision D-M7-removal (2026-10-01, gpt-6.1-sol,
+agent:/root/s14_resume_sol61; Paul can overturn it).** The existing literal
+one-release prerequisite is satisfied, without a waiver. Corrected agreement
+commit `0b3283fa6` is an ancestor of delivered `1869871ce`; [#543 comment
+5296](http://192.168.4.7:3000/noirr/plurx/pulls/543#issuecomment-5296)
+records corrected agreement green on September 26 before that delivery.
+The original S-11 collector `pid.json` records build
+`v0.3.0-5216-g1869871ce` starting September 29 at 22:29:01 UTC
+(SHA-256 `c3de0fd8fc72308c77b2a4220275ca70aa4ef2a551a5bb7623419412b6aeb8ed`).
+Its retained `samples-20260929.jsonl.gz` first eight rows are two four-node
+ticks at 22:29:01 and 22:29:31 UTC: nynuc, m6, nuc4 and nuc3 each answer
+HTTP 200 with that exact observed build
+(SHA-256 `8919bbc6c0037715f3bccb27ec8e11f3eb5bef822d6e896faa131b31be060d49`).
+This proves an in-tree corrected test green before one subsequent real
+delivery. It does not prove an exact-delivered-tree full release qualification
+or an uninterrupted week; S-11's September 30 00:43:31 changed-build stop
+remains failed duration evidence.
+
+The first transition milestone is removal-only: an attempt-local pure
+proposal/survivor step, consumed by `remove_voter`, supplies ordered effects
+to the existing manager-owned exact-attempt rollback, uniform-survivor
+reconciliation and tombstone finalization. It does not make the row projection
+authoritative or adopt the promotion split that has no production reader.
+Joins remain a later milestone. SQL, schema, proposal transport and existing
+cancellation boundaries stay as before. The focused consumer regression is
+`cluster::membership::tests::removal_transition_preserves_proposal_outcomes`;
+its rejected, accepted and three ambiguous outcomes pin effect order,
+identity and error text. Indeterminate rollback and premature finalization
+negative controls both failed this actual consumer, then were restored.
+
+**M7 join continuation (2026-10-01, gpt-6.1-sol,
+agent:/root/p02_663_resume_sol61).** The removal implementation landed through
+[#666](http://192.168.4.7:3000/noirr/plurx/pulls/666). Its prerequisite evidence
+above remains the prerequisite for this continuation, not a new qualification
+claim. Based on effort `903201a24`, the manager consumes attempt-local join
+effects in `redeem_for_role` and `finalize_for_role`:
+
+- An unused credential must still be live; a reservation survives its TTL
+  only for its exact node. The existing staged-identity read precedes repair
+  of the HTTP-origin claim and hostname. A collision refuses; a missing
+  learner row refuses; only the historical voter crash shape resumes node
+  publication under its exact reservation.
+- Finalization validates token role and node/Raft identity before effects.
+  An already-redeemed token is idempotent without further I/O. Otherwise the
+  actual committed membership must prove the admitted role before the exact
+  token/node CAS. Metrics and CAS failures propagate; a lost CAS remains
+  `ReusedToken`. Neither an intermediate learner nor a failed observation
+  can consume a voter credential.
+
+The manager still owns the existing authoritative reads, HTTP claim repair
+and Raft transaction. SQL, protocol-range CAS, schema, rejection text and
+await order are unchanged. The fixture projection and its unchecked
+promotion split are not made authoritative; explicit learner promotion and
+Hiqlite proposal transport are unchanged. No feature switch, production
+cluster action or release qualification is added. The new reservation and
+role-step cases live under `lifecycle::join_transition_tests`; the actual
+finalization consumer's effect/error case is
+`cluster::membership::tests::join_finalization_consumer_preserves_failure_and_effect_order`.
+Focused pass receipts, exact current compiler evidence, independent review
+and the effort gate belong to the task PR; this paragraph does not claim
+those pending checks have passed.
+
 ### 3.9 Test-seam migration
 
 **Census script** (checked into `validation/cfg_test_census.py` by §5.1;
@@ -951,6 +1013,7 @@ trailers `Agent-Model:` / `Agent-Session:` on every commit of the branch.
 
 | Date | Model | Session | Milestone | PR | Outcome / evidence |
 |---|---|---|---|---|---|
+| 2026-10-01 | gpt-6.1-sol | agent:/root/s14_resume_sol61 | M7 removal transition | draft preparation, `codex/s14-removal-lifecycle` | D-M7-removal records positive prerequisite evidence and its limits. Removal-only pure effects feed the actual manager consumer; five outcome cases and existing projection/fence/quorum regressions pass. Initial pinned workspace check and strict Clippy passed; current-effort verification is recorded in the draft PR. One independent formal review and Effort development gate remain required; no main promotion or runtime mutation. Joins remain open. |
 | 2026-09-21 | gpt-5.6-sol | agent:/root/c02_builder | M0 | [#425](http://192.168.4.7:3000/noirr/plurx/pulls/425) | Pinned Rust 1.97.1 established. Census: module 183, fn 255, field 173, statement 156, type 31, impl 13, use 8, other 35 (all within the plan's ±5 bound). The parameterized identity template reports `OK` against the exact branch base/current parent source. |
 | 2026-09-21 | gpt-5.6-sol | agent:/root/c02_builder | M1 | [#425](http://192.168.4.7:3000/noirr/plurx/pulls/425) | Moved the `transcode`, `http::hls`, and `vodserve` inline test modules into same-path include chunks below 3,000 lines; moved `pretranscode_renewal_tests` alongside them. The exact base/head test-name lists are byte-identical at 2,454 tests. `scripts/split-identity 9deb58a2 --plan` expands each child manifest at an explicit parent marker, reverses only the five checked relative-path relocations, and reconstructs all three parents byte-for-byte; affected all-target check and one focused test from each moved region pass. The current one-plan/one-PR protocol chooses the plan's allowed combined-review form rather than three milestone PRs. |
 | 2026-09-21 | gpt-5.6-sol | agent:/root/c02_builder | M2 / T2 | [#425](http://192.168.4.7:3000/noirr/plurx/pulls/425) | Moved the complete segment-index leaf region to `transcode/rolling/segment_index.rs`. Parent access is restored only with 40 checked `pub(super)` additions; no crate visibility widened. The same marker-expanded identity command strips exactly the structural child header and those 40 additions, then reconstructs the complete base parent byte-for-byte. Pinned all-target check and the shrink, concurrent-observation, and prune/append regressions pass. |

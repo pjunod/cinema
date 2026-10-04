@@ -4,6 +4,9 @@ import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.suspendCancellableCoroutine
+import kotlinx.coroutines.withTimeoutOrNull
+import kotlin.coroutines.resume
 import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.encodeToString
@@ -37,6 +40,40 @@ internal data class PlaybackClientLog(
     val height: Int? = null,
     val encoder: String? = null,
     @SerialName("session_id") val sessionId: String? = null,
+    @SerialName("link_sample") val linkSample: CandidateLinkSample? = null,
+    @SerialName("candidate_recovery") val candidateRecovery: CandidateRecoverySample? = null,
+)
+
+/**
+ * The server's `ClientRecoverySample` requires every field. [Net.json] does
+ * not encode defaults, so no field here may carry one: a defaulted value
+ * would be omitted from the wire and the whole sample refused.
+ */
+@Serializable
+internal data class CandidateRecoverySample(
+    val cause: String, val event_id: String, val candidate_id: String,
+    val recipe_digest: List<Int>, val age_ms: Int, val decoder_failed: Boolean,
+    val rendered_elapsed_ms: Long, val position_progress_ms: Long,
+    val dropped_frames: Long, val runway_ms: Long,
+)
+
+@Serializable
+internal data class CandidateLinkSample(
+    val receipt: String,
+    @SerialName("object_name") val objectName: String,
+    val etag: String,
+    @SerialName("body_bytes") val bodyBytes: Long,
+    @SerialName("body_duration_ms") val bodyDurationMs: Long,
+    @SerialName("age_ms") val ageMs: Long,
+    @SerialName("network_load") val networkLoad: Boolean,
+    @SerialName("from_cache") val fromCache: Boolean,
+    @SerialName("producer_paced") val producerPaced: Boolean,
+    val cause: String,
+    val negative: Boolean,
+    @SerialName("media_duration_ms") val mediaDurationMs: Long?,
+    val presenting: Boolean,
+    val stalled: Boolean,
+    @SerialName("runway_ms") val runwayMs: Long,
 )
 
 internal class MarkerOfferLedger {
@@ -85,6 +122,55 @@ internal fun postPlaybackClientLog(
             // Telemetry is best effort and must never become a playback error.
         }
     }
+}
+
+/** One original-budget acknowledgement; no receipt guessing or detached wait. */
+internal fun autoNegativeLinkAcknowledgement(receipt: String, values: List<String>, status: Int,
+                                            sameEndpoint: Boolean, remainingMs: Long): Boolean =
+    remainingMs > 0 && status == 204 && sameEndpoint && values == listOf(receipt) &&
+        Regex("[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}").matches(receipt)
+
+internal suspend fun acknowledgeNegativeLink(event: PlaybackClientLog, receipt: String, remainingMs: Long): Boolean {
+    if (remainingMs <= 0 || event.linkSample?.negative != true || event.linkSample.receipt != receipt) return false
+    return acknowledgeClientEvidence(event, receipt, "X-Plurx-Link-Accepted", remainingMs)
+}
+
+/**
+ * A decoder failure the device observed is its own evidence: the failed
+ * candidate joins the local rejected set at once, with no wait on the server.
+ * The server's acceptance of the sample only authorizes server-side
+ * consequences, which the server verifies itself. False when this candidate
+ * was already rejected, so one failure is reported once.
+ */
+internal fun rejectFailedDecoderCandidate(rejected: MutableSet<String>, candidateId: String): Boolean =
+    rejected.add(candidateId)
+
+private suspend fun acknowledgeClientEvidence(event: PlaybackClientLog, receipt: String, header: String, remainingMs: Long): Boolean {
+    if (remainingMs <= 0) return false
+    val origin = Session.origin
+    val token = Session.token?.takeIf { it.isNotBlank() } ?: return false
+    if (origin.isBlank()) return false
+    val request = try { clientLogRequest(origin, event).newBuilder()
+        .header("Authorization", "Bearer $token").build() } catch (_: Exception) { return false }
+    return withTimeoutOrNull(minOf(remainingMs, 250L)) {
+        suspendCancellableCoroutine { continuation ->
+            val call = Net.capabilityClient.newCall(request)
+            continuation.invokeOnCancellation { call.cancel() }
+            call.enqueue(object : okhttp3.Callback {
+                override fun onFailure(call: okhttp3.Call, e: java.io.IOException) {
+                    if (continuation.isActive) continuation.resume(false)
+                }
+                override fun onResponse(call: okhttp3.Call, response: okhttp3.Response) {
+                    val accepted = response.use {
+                        autoNegativeLinkAcknowledgement(receipt, it.headers.values(header),
+                            it.code, it.request.url == request.url, remainingMs) &&
+                            Session.origin == origin && Session.token == token
+                    }
+                    if (continuation.isActive) continuation.resume(accepted)
+                }
+            })
+        }
+    } ?: false
 }
 
 /**
@@ -393,6 +479,10 @@ internal class OpenPlaybackStallTracker(
     private val startupDeadlineMs: Long = 30_000,
     private val progressThresholdMs: Long = 250,
 ) {
+    /** Original stagnant episode only; a proof wait cannot buy another budget. */
+    fun remainingRecoveryMs(event: Event, capturedAtMs: Long, nowMs: Long): Long =
+        if (!event.establishedPlayback || !event.controlMayDefer || nowMs < capturedAtMs) 0L
+        else (maximumDeferralMs - event.durationMs - (nowMs - capturedAtMs)).coerceAtLeast(0L)
     data class Event(
         val durationMs: Long,
         val positionMs: Long,
