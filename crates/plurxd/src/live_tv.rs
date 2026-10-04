@@ -3470,9 +3470,10 @@ impl FenceObserver {
 
 /// Live TV's view of serving authority.
 ///
-/// Admissions and commits use the fence exactly, through [`Self::admit`] and
-/// [`Self::is_current`]: a start, an ingress commit or a recording admitted
-/// under a generation that has since moved on refuses itself, as before.
+/// Admissions and commits use the fence exactly (an admission takes its
+/// generation from [`Self::admit`]; the ingress commit checks the fence
+/// itself): a start, an ingress commit or a recording admitted under a
+/// generation that has since moved on refuses itself, as before.
 ///
 /// Work that is already running — a viewer's session, a shared tuner
 /// transport, the recording sinks on it — is not an admission. It asks
@@ -3495,7 +3496,9 @@ impl FenceObserver {
 /// One loop decides ([`Self::serving_fence_loop`]): when a loss outlasts the
 /// grace it raises `running_floor` to the loss generation, and everything
 /// admitted before that loss stops at its next check (25 ms for a session,
-/// one tuner chunk for a transport).
+/// one tuner chunk for a transport). The loop is spawned once in `main.rs`;
+/// the owner ledger pins that spawn, because without the loop running work
+/// would outlive a sustained loss.
 #[derive(Clone)]
 pub(crate) struct LiveTvAuthority {
     serving: crate::serving_fence::ServingAuthority,
@@ -3519,11 +3522,6 @@ impl LiveTvAuthority {
     /// The generation a new admission is made under, while authority is held.
     pub(crate) fn admit(&self) -> Option<u64> {
         self.serving.admit()
-    }
-
-    /// Exact fence check for admissions and commits.
-    pub(crate) fn is_current(&self, admitted_generation: u64) -> bool {
-        self.serving.is_current(admitted_generation)
     }
 
     /// Serving authority is held right now.
@@ -3584,15 +3582,12 @@ impl LiveTvAuthority {
                                 "serving authority not regained within the session grace; running Live TV ended"
                             );
                         }
-                        // Everything admitted before this loss is ending. The
-                        // next loss is judged only once authority is back.
-                        while !serving.borrow_and_update().ready {
-                            if serving.changed().await.is_err() {
-                                self.end_running_before(u64::MAX);
-                                return;
-                            }
-                        }
-                        resolved = serving.borrow_and_update().loss_generation;
+                        // `resolved` stays where it was. Until authority is
+                        // seen back, every observation goes through
+                        // `resolve_loss` again with a fresh budget, so work
+                        // admitted in a ready window this loop never saw (a
+                        // recovery and a new loss coalesced into one
+                        // notification) is still ended within one grace.
                     }
                     crate::serving_fence::LossOutcome::Closed => {
                         self.end_running_before(u64::MAX);
@@ -10042,7 +10037,7 @@ mod tests {
             "a loss inside the grace must not end running Live TV"
         );
         assert!(
-            !authority.is_current(admitted),
+            !fence.authority().is_current(admitted),
             "admissions still see the generation move"
         );
         drop(fence);
@@ -10112,6 +10107,9 @@ mod tests {
         let grace = crate::serving_fence::SERVING_FENCE_SESSION_GRACE;
         let (fence, authority, _task) = live_tv_authority_under_test();
         let admitted = authority.admit().expect("authority at start");
+        // Let the loop take generation zero as resolved, so the coalesced
+        // loss and recovery below reach it as a bare generation bump.
+        tokio::task::yield_now().await;
         fence.validation_set_ready(false).await;
         fence.validation_set_ready(true).await;
         tokio::time::sleep(grace + grace / 2).await;

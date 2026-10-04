@@ -1074,12 +1074,14 @@ pattern = "ServingAuthority"
 # owner-relay tasks with durable ingest/finalizer leases and retaining main fixtures.
 # 35 -> 26 with Live TV's serving grace: Live TV now holds a `LiveTvAuthority`
 # that wraps the same projection (adding a reader of the running floor, not a
-# second authority). -13: LiveTvManager's field, the `run_transport` and
-# `pump_tuner_fanout` parameters, and the ten `live_tv::dvr::tests` fixtures
-# that now build `LiveTvAuthority::always_ready()`. +4: the wrapper's field,
-# its constructor parameter, its test-only `always_ready`, and the
-# `test_manager_with` fixture parameter that lets a Live TV test drive a real
-# `ServingFence`.
+# second authority). -14: LiveTvManager's field, the `run_transport` and
+# `pump_tuner_fanout` parameters, the ten `live_tv::dvr::tests` fixtures that
+# now build `LiveTvAuthority::always_ready()`, and the always-ready argument
+# in `test_manager_with_system`'s `LiveTvManager::new` call. +5: the
+# wrapper's field, its constructor parameter, its test-only `always_ready`,
+# the `test_manager_with` fixture parameter that lets a Live TV test drive a
+# real `ServingFence`, and `test_manager_with_system`'s always-ready argument
+# in its new position.
 expected_occurrences = 26
 
 [[module_symbols]]
@@ -3907,7 +3909,10 @@ pattern = "(?:[A-Za-z_]\\w*::)+(?:sleep|sleep_until|interval|interval_at|timeout
 # bounded sleeps that hold a loss or wait past the grace and three bounded
 # waits (the not-running poll, the loop join, the closed-fence join). The
 # production loop awaits `SessionGrace`, whose one timeout is counted above.
-expected_occurrences = 1253
+# 1253 -> 1257: `remux_owner_still_decides_for_the_body_after_a_natural_exit`
+# lets the stand-in exit with two bounded sleeps and joins the owner twice
+# under bounded waits. Test-only.
+expected_occurrences = 1257
 
 [[module_structures]]
 id = "bare-time-constructor"

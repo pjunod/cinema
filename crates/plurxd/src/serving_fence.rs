@@ -208,6 +208,11 @@ pub(crate) enum LossOutcome {
 /// The owner calls [`SessionGrace::resolve_loss`] from its own loop when it
 /// observes `authority_lost_since(generation)`; the bounded wait runs on that
 /// owner's task, so no separate timer task or watchdog exists for it.
+///
+/// A loss and recovery that reach the owner as one notification (only the
+/// generation moved) spend no budget: authority was held when the owner
+/// looked, and nothing was published in between because every publication
+/// checks the fence itself.
 #[derive(Debug, Default)]
 pub(crate) struct SessionGrace {
     outage_spent: Duration,

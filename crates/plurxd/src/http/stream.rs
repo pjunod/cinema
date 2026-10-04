@@ -3566,7 +3566,9 @@ impl Drop for RemuxProcessGuard {
 /// [`remux_may_publish`]); ffmpeg blocks on its pipe meanwhile. `fenced` is
 /// how the body learns the owner gave up: it fires only when the grace ran
 /// out or the fence closed, never on a natural exit, so a finished child's
-/// buffered output still drains.
+/// buffered output still drains. The owner keeps that decision after a
+/// natural exit, until the body is dropped, so a body waiting on authority
+/// always has someone to end its wait.
 fn spawn_remux_process_owner(
     mut child: tokio::process::Child,
     child_job: crate::process_control::ChildJob,
@@ -3587,9 +3589,14 @@ fn spawn_remux_process_owner(
         // Registration belongs to the process lifetime. It disappears on
         // natural exit, body drop, or serving loss—not merely when Hyper next
         // decides to poll a response body.
-        let _registry_guard = registry_guard;
+        let mut registry_guard = registry_guard;
         let mut grace = crate::serving_fence::SessionGrace::default();
         let mut generation = admitted_generation;
+        // After a natural exit the owner still owns the authority decision
+        // until the body is dropped: the body may still hold a buffered tail
+        // (or, at startup, a response not yet sent), and only this owner can
+        // tell it that a loss outlasted the grace.
+        let mut exited = false;
         // `Some(reason)`: the stream ends because authority is gone.
         let fenced_out: Option<&'static str> = loop {
             let authority = *serving.borrow_and_update();
@@ -3625,11 +3632,12 @@ fn spawn_remux_process_owner(
                 }
             }
             tokio::select! {
-                status = child.wait() => {
+                status = child.wait(), if !exited => {
                     if let Err(error) = status {
                         tracing::warn!(%error, "waiting for remux ffmpeg failed");
                     }
-                    return;
+                    exited = true;
+                    drop(registry_guard.take());
                 }
                 () = owner_cancel.cancelled() => break None,
                 changed = serving.changed() => {
@@ -3648,10 +3656,12 @@ fn spawn_remux_process_owner(
             );
             owner_fenced.cancel();
         }
-        if child.try_wait().ok().flatten().is_none() {
-            let _ = child.kill().await;
+        if !exited {
+            if child.try_wait().ok().flatten().is_none() {
+                let _ = child.kill().await;
+            }
+            let _ = child.wait().await;
         }
-        let _ = child.wait().await;
     });
     (RemuxProcessGuard { cancel }, fenced, task)
 }
@@ -5371,8 +5381,20 @@ mod tests {
         tokio_util::sync::CancellationToken,
         tokio::task::JoinHandle<()>,
     ) {
-        let mut command = tokio::process::Command::new("sleep");
-        command.arg("60").kill_on_drop(true);
+        remux_owner_around("sleep", &["60"])
+    }
+
+    fn remux_owner_around(
+        program: &str,
+        args: &[&str],
+    ) -> (
+        tokio::sync::watch::Sender<crate::serving_fence::ServingState>,
+        RemuxProcessGuard,
+        tokio_util::sync::CancellationToken,
+        tokio::task::JoinHandle<()>,
+    ) {
+        let mut command = tokio::process::Command::new(program);
+        command.args(args).kill_on_drop(true);
         let child = command.spawn().expect("spawn remux stand-in");
         let child_job = crate::process_control::ChildJob::attach(&child).expect("attach child job");
         let (serving_tx, serving_rx) =
@@ -5511,6 +5533,37 @@ mod tests {
             .expect("a closed fence reaps the child without waiting for the grace")
             .expect("owner task must not panic");
         assert!(fenced.is_cancelled(), "the body is ended with the child");
+    }
+
+    /// ffmpeg finished on its own, and the body may still hold its tail. The
+    /// owner keeps the authority decision until the body is dropped, so a
+    /// loss after the exit still ends the body within the grace instead of
+    /// leaving it waiting for authority forever.
+    #[tokio::test]
+    async fn remux_owner_still_decides_for_the_body_after_a_natural_exit() {
+        let grace = crate::serving_fence::SERVING_FENCE_SESSION_GRACE;
+        let (serving, guard, fenced, owner) = remux_owner_around("true", &[]);
+        tokio::time::sleep(grace / 4).await;
+        assert!(
+            !owner.is_finished(),
+            "a natural exit leaves the owner deciding for the body"
+        );
+        publish_serving(&serving, false, 1);
+        tokio::time::timeout(grace + std::time::Duration::from_secs(10), owner)
+            .await
+            .expect("a sustained loss after the exit still ends the owner")
+            .expect("owner task must not panic");
+        assert!(fenced.is_cancelled(), "and tells the body to stop waiting");
+        drop(guard);
+
+        let (_serving, guard, fenced, owner) = remux_owner_around("true", &[]);
+        tokio::time::sleep(grace / 4).await;
+        drop(guard);
+        tokio::time::timeout(std::time::Duration::from_secs(10), owner)
+            .await
+            .expect("dropping the body ends an owner whose child already exited")
+            .expect("owner task must not panic");
+        assert!(!fenced.is_cancelled(), "an ordinary end is not a fence");
     }
 
     /// The body publishes only under authority: bytes produced during a loss
