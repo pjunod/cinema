@@ -199,14 +199,16 @@ impl SourceViewerActor {
         if Instant::now() >= deadline {
             return Err(SourceWorkerError::Deadline);
         }
+        // A changed selection is accepted and recorded like any other ask.
+        // The Source never stages a successor, so the answer says
+        // `preparation: none` and a client waiting for a directed change
+        // reopens at once with a fresh Start. An acknowledgement can only
+        // name a slot this Source never offered, so it is refused exactly;
+        // a direct owner has no rendition to control.
         if request.demand == PlaybackDemand::End
             || request.acknowledgement.is_some()
             || request.intent.is_some()
-            || self
-                .0
-                .original_selection
-                .as_ref()
-                .is_none_or(|selection| *selection != request.selection.desired())
+            || self.0.direct.is_some()
         {
             return Err(SourceWorkerError::Unsupported);
         }
