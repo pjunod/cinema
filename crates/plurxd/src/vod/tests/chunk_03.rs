@@ -3840,10 +3840,72 @@
         assert_eq!(tokio::fs::read(&path).await.expect("original bytes"), original);
         assert_eq!(serve.shared.working_set.load(Relaxed), charged);
         assert_eq!(rendition.publication_serial.load(Relaxed), publication, "no false publication credit");
+        // The sink consults reservations only for continuous recipes, so the
+        // retained-publication check is exercised directly against this pin.
+        let dependencies = store.quality_reserved_intervals(&rendition.key).await.expect("dependencies");
+        verify_retained_publication(&path, &rendition.plan, 0, original.len() as u64, &dependencies)
+            .await.expect("exact reserved bytes");
         tokio::fs::write(&path, vec![0; original.len()]).await.expect("corrupt cached bytes");
-        assert!(restarted.materialize(0, original.to_vec()).await.is_err(), "corruption cannot be repaired under a live reservation");
+        assert!(verify_retained_publication(&path, &rendition.plan, 0, original.len() as u64, &dependencies)
+            .await.is_err(), "corruption cannot be repaired under a live reservation");
         tokio::fs::remove_file(&path).await.expect("remove cached bytes");
-        assert!(restarted.materialize(0, original.to_vec()).await.is_err(), "a missing reserved artifact cannot be silently replaced");
+        assert!(verify_retained_publication(&path, &rendition.plan, 0, original.len() as u64, &dependencies)
+            .await.is_err(), "a missing reserved artifact cannot be silently replaced");
+    }
+
+    #[tokio::test]
+    async fn ordinary_renditions_publish_without_consulting_continuous_reservations() {
+        use crate::vodgen::Sink;
+        use plurx_core::playback::continuous_quality::{QualityAttachment, QualityLedger,
+            QualityInterval, QualityOperation, QualityTransitionRequest};
+        let base = crate::test_tempdir().expect("ordinary publication");
+        let store = Arc::new(SqliteStore::open_in_memory().expect("store"));
+        let serve = local_serve(base.path().to_path_buf(), store.clone());
+        let mut rendition = synthetic_rendition(base.path()).await;
+        Arc::get_mut(&mut rendition).expect("private rendition").key = "b".repeat(64);
+        assert!(!quality_reservations_possible(&rendition.recipe), "a copy remux carries no pins");
+        // Make the reservation lookup for this key fail: two ledgers name one
+        // immutable artifact with different facts.
+        let entry = rendition.plan.entry(0).expect("entry");
+        for (session, byte_length) in [("ordinary-a", 10_u64), ("ordinary-b", 11)] {
+            let generation = uuid::Uuid::new_v4().to_string();
+            activate_control_route(&store, session, &generation).await;
+            let interval = QualityInterval { artifact_id: "d".repeat(64),
+                rendition_id: rendition.key.clone(), timescale: rendition.timescale,
+                from_tick: entry.start_ticks, through_tick: entry.end_ticks(), byte_length };
+            let attachment = QualityAttachment { client_instance_id: uuid::Uuid::new_v4().to_string(),
+                lifetime_id: session.into(), attachment_id: uuid::Uuid::new_v4().to_string(),
+                family_id: "c".repeat(64) };
+            let mut ledger = QualityLedger::new(generation.clone(), 1, attachment.clone()).expect("ledger");
+            let transaction = uuid::Uuid::new_v4().to_string();
+            let mut request = QualityTransitionRequest { version: 1, generation, control_epoch: 1,
+                sequence: 1, attachment, transaction_id: transaction.clone(),
+                operation: QualityOperation::Prepare { intent_revision: 1, target_rendition_id: rendition.key.clone() } };
+            ledger.apply(&request, now_ms()).expect("prepare");
+            ledger.ready(&transaction, vec![interval.clone()]).expect("ready");
+            request.sequence = 2; request.operation = QualityOperation::Scheduled { intervals: vec![interval] };
+            ledger.apply(&request, now_ms()).expect("scheduled");
+            assert!(store.write_quality_ledger(&ledger, "node-a", 0, now_ms()).await.expect("reserve"));
+        }
+        assert!(store.quality_reserved_intervals(&rendition.key).await.is_err(), "lookup is unavailable");
+        let sink = RenditionSink { shared: Arc::clone(&serve.shared),
+            rendition: Arc::clone(&rendition), epoch: rendition.gen_epoch.load(Relaxed) };
+        sink.materialize(0, b"ordinary-media".to_vec()).await
+            .expect("ordinary playback does not depend on the quality ledger");
+        assert!(rendition.failure().is_none());
+        assert_eq!(tokio::fs::read(rendition.dir.path().join(segment_name(0))).await.expect("published"),
+            b"ordinary-media");
+    }
+
+    #[test]
+    fn unknown_continuous_reservations_are_a_hold_not_a_write_fault() {
+        let unknown = quality_reservations_unknown_error("store timed out".into());
+        assert!(quality_reservations_unknown(&unknown));
+        assert!(unknown.to_string().contains("store timed out"));
+        for fault in [io::Error::other("disk full"), io::Error::from(io::ErrorKind::TimedOut),
+            io::Error::new(io::ErrorKind::InvalidData, "regenerated media differs")] {
+            assert!(!quality_reservations_unknown(&fault), "{fault}");
+        }
     }
 
     #[test]

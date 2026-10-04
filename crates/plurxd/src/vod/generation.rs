@@ -554,6 +554,16 @@ async fn on_generation_end(
         Outcome::Failed(Failure::InitDrift(cause)) => {
             on_init_drift(shared, rendition, cause).await;
         }
+        Outcome::Failed(Failure::Sink(error)) if quality_reservations_unknown(&error) => {
+            // Unknown is not a verdict on the rendition. Nothing was
+            // published, the producer is reaped, and the next demand respawns
+            // and asks the Store again.
+            tracing::warn!(
+                target: "plurxd::vodserve",
+                rendition = %rendition.key,
+                "holding publication because continuous dependencies are unknown: {error}"
+            );
+        }
         Outcome::Failed(failure) => {
             record_failure(
                 shared,
@@ -810,6 +820,71 @@ pub(super) async fn credit_marker_prewarm_publication(
     publication
 }
 
+/// Whether any continuous-quality ledger can name this rendition. The
+/// reservation publisher verifies every reserved video interval against a
+/// continuous AVC High recipe without input audio and every AAC interval
+/// against a shared-soundtrack recipe before committing it, and a rendition
+/// key hashes its recipe, so a copy remux or an ordinary transcode can never
+/// carry a pin. Those publish without a Store round trip.
+pub(super) fn quality_reservations_possible(recipe: &Recipe) -> bool {
+    recipe.encoding.as_ref().is_some_and(|encoding| {
+        encoding.shared_audio.is_some()
+            || (!encoding.plan.options().input_has_audio
+                && encoding.plan.options().video_sample_envelope
+                    == plurx_core::transcode::VideoSampleEnvelope::ContinuousAvcHigh50)
+    })
+}
+
+const QUALITY_RESERVATION_LOOKUP_ATTEMPTS: u32 = 3;
+
+/// The sink could not learn a continuous rendition's reserved intervals.
+/// Carried inside the sink's `io::Error` so the generation's end can tell it
+/// from a real write fault.
+#[derive(Debug)]
+struct QualityReservationsUnknown(String);
+
+impl std::fmt::Display for QualityReservationsUnknown {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "reserved media verification unavailable: {}", self.0)
+    }
+}
+
+impl std::error::Error for QualityReservationsUnknown {}
+
+pub(super) fn quality_reservations_unknown_error(cause: String) -> io::Error {
+    io::Error::other(QualityReservationsUnknown(cause))
+}
+
+pub(super) fn quality_reservations_unknown(error: &io::Error) -> bool {
+    error
+        .get_ref()
+        .is_some_and(|inner| inner.is::<QualityReservationsUnknown>())
+}
+
+/// A cached publication is traversed, never replaced: its bytes must still be
+/// exactly the manifest's, and any reservation must match them.
+pub(super) async fn verify_retained_publication(
+    path: &Path,
+    plan: &plurx_core::segplan::SegmentPlan,
+    entry: u32,
+    expected: u64,
+    dependencies: &[plurx_core::playback::continuous_quality::QualityInterval],
+) -> io::Result<()> {
+    let cached = super::vod_serve_serve::read_quality_artifact(
+        path,
+        expected.min(plurx_core::playback::continuous_quality::MAX_QUALITY_PINNED_BYTES),
+    )
+    .await
+    .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
+    if cached.len() as u64 != expected {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "reserved artifact differs from its manifest",
+        ));
+    }
+    verify_reserved_publication(plan, entry, &cached, dependencies)
+}
+
 /// An already reserved URI cannot acquire different bytes on regeneration.
 /// The caller holds the same exact-key gate as reservation and eviction.
 pub(super) fn verify_reserved_publication(
@@ -844,6 +919,62 @@ pub(super) fn verify_reserved_publication(
         }
     }
     Ok(())
+}
+
+impl RenditionSink {
+    /// The exact-key gate plus every reserved interval of this rendition.
+    ///
+    /// Only continuous renditions ask the Store. An unanswered lookup is
+    /// retried with the gate released, so reservation and eviction are never
+    /// queued behind an unavailable Store; if it stays unanswered the
+    /// publication is refused as unknown. That is the safe direction: an
+    /// unverified regeneration could replace bytes a client already
+    /// scheduled, while holding only delays a fragment the next generation
+    /// retries. It never retires the rendition.
+    async fn reserved_dependencies(
+        &self,
+    ) -> io::Result<(
+        tokio::sync::OwnedMutexGuard<()>,
+        Vec<plurx_core::playback::continuous_quality::QualityInterval>,
+    )> {
+        if !quality_reservations_possible(&self.rendition.recipe) {
+            let guard = self
+                .shared
+                .rendition_build_gate(&self.rendition.key)
+                .lock_owned()
+                .await;
+            return Ok((guard, Vec::new()));
+        }
+        let mut cause = String::new();
+        for attempt in 0..QUALITY_RESERVATION_LOOKUP_ATTEMPTS {
+            if attempt > 0 {
+                tokio::time::sleep(Duration::from_millis(250 << (attempt - 1))).await;
+            }
+            if self.rendition.closed.load(Relaxed)
+                || self.rendition.gen_epoch.load(Relaxed) != self.epoch
+            {
+                return Err(io::Error::from(io::ErrorKind::NotFound));
+            }
+            let guard = self
+                .shared
+                .rendition_build_gate(&self.rendition.key)
+                .lock_owned()
+                .await;
+            match tokio::time::timeout(
+                Duration::from_secs(1),
+                self.shared
+                    .store
+                    .quality_reserved_intervals(&self.rendition.key),
+            )
+            .await
+            {
+                Ok(Ok(dependencies)) => return Ok((guard, dependencies)),
+                Ok(Err(error)) => cause = error.to_string(),
+                Err(_) => cause = "the Store did not answer within one second".to_owned(),
+            }
+        }
+        Err(quality_reservations_unknown_error(cause))
+    }
 }
 
 impl vodgen::Sink for RenditionSink {
@@ -905,27 +1036,7 @@ impl vodgen::Sink for RenditionSink {
                 "continuous object exceeds its advertised container-inclusive delivery budget",
             ));
         }
-        let dependency_guard = self
-            .shared
-            .rendition_build_gate(&self.rendition.key)
-            .lock_owned()
-            .await;
-        let dependencies = tokio::time::timeout(
-            Duration::from_secs(1),
-            self.shared
-                .store
-                .quality_reserved_intervals(&self.rendition.key),
-        )
-        .await
-        .map_err(|_| {
-            io::Error::new(
-                io::ErrorKind::TimedOut,
-                "reserved media verification exceeded one second",
-            )
-        })?
-        .map_err(|error| {
-            io::Error::other(format!("reserved media verification failed: {error}"))
-        })?;
+        let (dependency_guard, dependencies) = self.reserved_dependencies().await?;
         let retained = {
             let manifest = self.rendition.manifest.lock().await;
             if self.rendition.gen_epoch.load(Relaxed) != self.epoch {
@@ -944,23 +1055,18 @@ impl vodgen::Sink for RenditionSink {
             // A restarted encoder can use different rate-control history.
             // Traverse the original publication instead of replacing it.
             let expected = retained.expect("materialized published interval");
-            let cached = super::vod_serve_serve::read_quality_artifact(
+            verify_retained_publication(
                 &self
                     .rendition
                     .dir
                     .path()
                     .join(segment_name(u64::from(entry))),
-                expected.min(plurx_core::playback::continuous_quality::MAX_QUALITY_PINNED_BYTES),
+                &self.rendition.plan,
+                entry,
+                expected,
+                &dependencies,
             )
-            .await
-            .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
-            if cached.len() as u64 != expected {
-                return Err(io::Error::new(
-                    io::ErrorKind::InvalidData,
-                    "reserved artifact differs from its manifest",
-                ));
-            }
-            verify_reserved_publication(&self.rendition.plan, entry, &cached, &dependencies)?;
+            .await?;
         } else {
             verify_reserved_publication(&self.rendition.plan, entry, &bytes, &dependencies)?;
         }
