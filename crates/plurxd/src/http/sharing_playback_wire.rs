@@ -957,4 +957,48 @@ mod tests {
         )
         .is_err());
     }
+
+    #[test]
+    fn sharing_protocol_fixture_hls_start_projection() {
+        use crate::sharing_protocol_fixture::{accepted, b_layer, fixture, mutated, rows};
+        let fixture = fixture();
+        let start = &fixture["hls_start"];
+        let uuid = |value: &serde_json::Value| {
+            Uuid::parse_str(value.as_str().expect("fixture uuid")).expect("fixture uuid")
+        };
+        let source_session = uuid(&start["source"]["session_id"]);
+        let receiver = uuid(&start["receiver"]["session_id"]);
+        let incarnation = uuid(&start["receiver"]["incarnation_id"]);
+        let epoch = start["receiver"]["control_epoch"]
+            .as_i64()
+            .expect("fixture epoch");
+        let project = |source: &serde_json::Value| {
+            serde_json::from_value::<StartResponse>(source.clone())
+                .ok()
+                .and_then(|response| {
+                    project_shared_start(response, source_session, receiver, incarnation, epoch)
+                        .ok()
+                })
+                .map(|public| serde_json::to_value(public).expect("public wire"))
+        };
+        assert_eq!(project(&start["source"]), Some(start["public"].clone()));
+        let mut checked = 0;
+        for row in rows(&start["mutations"], "Start mutation") {
+            if !b_layer(row) {
+                continue;
+            }
+            let projected = project(&mutated(&start["source"], row, &source_session.to_string()));
+            assert_eq!(projected.is_some(), accepted(row), "{}", row["id"]);
+            if row["layer"] == "both" && accepted(row) {
+                assert_eq!(
+                    projected,
+                    Some(mutated(&start["public"], row, &receiver.to_string())),
+                    "{}",
+                    row["id"]
+                );
+            }
+            checked += 1;
+        }
+        assert!(checked >= 14, "Start rows the receiver validates");
+    }
 }

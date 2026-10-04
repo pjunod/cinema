@@ -60,6 +60,8 @@ mod serving_fence;
 mod shared_cache;
 mod sharing;
 mod sharing_client;
+#[cfg(test)]
+mod sharing_protocol_fixture;
 mod source_probe;
 mod state;
 mod store_result;

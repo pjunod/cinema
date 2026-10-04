@@ -870,4 +870,39 @@ mod tests {
         }
         assert!(project_manifest(b"not json", &fixture.reference, &fixture.key).is_err());
     }
+
+    #[test]
+    fn sharing_protocol_fixture_asset_session_query() {
+        use crate::sharing_protocol_fixture::{accepted, fixture, rows};
+        let fixture = fixture();
+        let uuid = |value: &serde_json::Value| {
+            Uuid::parse_str(value.as_str().expect("fixture session")).expect("fixture session")
+        };
+        for row in rows(&fixture["asset_session_query"], "asset session query") {
+            let query = row["query"].as_str().expect("query");
+            let expected = accepted(row).then(|| row.get("session").map(uuid));
+            assert_eq!(session_query(Some(query)).ok(), expected, "{}", row["id"]);
+        }
+        // Before a session exists an asset is reached as the signed-in
+        // viewer (no session binding); after, through exactly B's session.
+        let assets = &fixture["presession_assets"];
+        let bound = assets["bound_query"].as_str().expect("bound query");
+        let b = uuid(&fixture["direct"]["b_session"]);
+        assert_eq!(session_query(Some(bound)).ok(), Some(Some(b)));
+        assert_eq!(session_query(None).ok(), Some(None));
+        for suffix in rows(&assets["suffixes"], "pre-session asset") {
+            let suffix = suffix.as_str().expect("asset suffix");
+            let resource = SharingFileResource::parse(suffix).expect("asset suffix parses");
+            assert!(
+                matches!(
+                    resource.kind(),
+                    SharingFileResourceKind::Subtitle { .. }
+                        | SharingFileResourceKind::SubtitleManifest { .. }
+                        | SharingFileResourceKind::SubtitleObject { .. }
+                        | SharingFileResourceKind::ChapterThumbnail { .. }
+                ),
+                "{suffix}"
+            );
+        }
+    }
 }

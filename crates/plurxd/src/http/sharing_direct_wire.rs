@@ -638,4 +638,45 @@ mod tests {
         );
         assert!(SharedDirectStart::new("/api/v1/files/1", b, &direct).is_err());
     }
+
+    #[test]
+    fn sharing_protocol_fixture_direct_start() {
+        use crate::sharing_protocol_fixture::{accepted, b_layer, fixture, mutated, rows};
+        let fixture = fixture();
+        let direct = &fixture["direct"];
+        let mimes = rows(&direct["mimes"], "direct MIME")
+            .iter()
+            .map(|mime| mime.as_str().expect("MIME"))
+            .collect::<Vec<_>>();
+        assert_eq!(mimes, DIRECT_MIMES);
+        let file_base = fixture["context"]["file_base"].as_str().expect("file base");
+        let b = direct["b_session"].as_str().expect("B session");
+        let session = Uuid::parse_str(b).expect("B session");
+        let public = |source: &serde_json::Value| {
+            serde_json::from_value::<SourceDirectStart>(source.clone())
+                .ok()
+                .and_then(|source| SharedDirectStart::new(file_base, session, &source).ok())
+                .map(|public| serde_json::to_value(public).expect("public wire"))
+        };
+        assert_eq!(public(&direct["source"]), Some(direct["public"].clone()));
+        let source_session = direct["source"]["session_id"].as_str().expect("session");
+        let mut checked = 0;
+        for row in rows(&direct["mutations"], "direct mutation") {
+            if !b_layer(row) {
+                continue;
+            }
+            let projected = public(&mutated(&direct["source"], row, source_session));
+            assert_eq!(projected.is_some(), accepted(row), "{}", row["id"]);
+            if row["layer"] == "both" && accepted(row) {
+                assert_eq!(
+                    projected,
+                    Some(mutated(&direct["public"], row, b)),
+                    "{}",
+                    row["id"]
+                );
+            }
+            checked += 1;
+        }
+        assert!(checked >= 9, "direct rows the receiver validates");
+    }
 }
