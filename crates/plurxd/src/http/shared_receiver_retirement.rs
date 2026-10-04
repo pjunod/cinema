@@ -101,6 +101,20 @@ struct ConfirmedRetirement {
     confirmation: String,
     _source: Option<Arc<crate::sharing_client::SourceEndReceipt>>,
 }
+// An End acknowledgement exists only after the private physical factory and
+// exact Store retirement Applied/Replay. It never contains an actor/registry
+// Arc, so caching it cannot create an ownership cycle or reopen admission.
+pub(super) struct ReceiverEndConfirmation {
+    session: Uuid,
+    _incarnation: Uuid,
+    _confirmation: String,
+    _source: Option<Arc<crate::sharing_client::SourceEndReceipt>>,
+}
+impl ReceiverEndConfirmation {
+    pub(super) fn session_id(&self) -> Uuid {
+        self.session
+    }
+}
 impl ReceiverRetirementWitness for ConfirmedRetirement {
     fn intent(&self) -> &ReceiverSessionIntent {
         &self.intent
@@ -150,6 +164,23 @@ impl ReceiverPendingRetirementWitness for ConfirmedPending {
 }
 
 impl ReceiverStartActor {
+    fn mark_confirmed_retired(&self, witness: &ConfirmedRetirement) {
+        let mut owned = self.0.state.lock().expect("receiver owner");
+        // A dispatched obligation requires the actual physical Source receipt.
+        // Never-dispatched proof is minted only after both independent joins.
+        if owned.dispatched.is_some() && witness._source.is_none() {
+            return;
+        }
+        owned.end_confirmation = Some(Arc::new(ReceiverEndConfirmation {
+            session: witness.owner.session_id,
+            _incarnation: witness.owner.incarnation_id,
+            _confirmation: witness.confirmation.clone(),
+            _source: witness._source.clone(),
+        }));
+        owned.retired = true;
+        drop(owned);
+        self.0.changed.notify_waiters();
+    }
     fn mark_retired(&self) {
         self.0.state.lock().expect("receiver owner").retired = true;
         self.0.changed.notify_waiters();
@@ -312,8 +343,7 @@ impl ReceiverStartActor {
             let refused = matches!(&outcome, Ok(ReceiverRetirementOutcome::Refused));
             match outcome {
                 Ok(ReceiverRetirementOutcome::Applied | ReceiverRetirementOutcome::Replay) => {
-                    self.0.state.lock().expect("receiver owner").retired = true;
-                    self.0.changed.notify_waiters();
+                    self.mark_confirmed_retired(&witness);
                     return;
                 }
                 Ok(ReceiverRetirementOutcome::Refused) if witness.binding.is_some() => {
@@ -325,8 +355,7 @@ impl ReceiverStartActor {
                         Ok(
                             ReceiverRetirementOutcome::Applied | ReceiverRetirementOutcome::Replay,
                         ) => {
-                            self.0.state.lock().expect("receiver owner").retired = true;
-                            self.0.changed.notify_waiters();
+                            self.mark_confirmed_retired(&witness);
                             return;
                         }
                         _ => witness.binding = binding,
