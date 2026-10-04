@@ -532,7 +532,7 @@ async fn login_jellyfin_user_inner(
     }
     // The pre-Begin ticket is invalidated. Authenticate under a fresh ticket
     // after End rather than publishing a stale proof across the exclusion.
-    let user = super::extract::authenticate_user_token(state, &token).await?;
+    let user = super::extract::authenticate_compatibility_token(state, &token).await?;
     record_login_success(state, &verified);
     Ok(AuthenticatedLogin { token, user })
 }

@@ -4313,8 +4313,22 @@ struct JellyfinArtworkWindow {
     last: Instant,
     count: u8,
 }
+/// One budget per IPv4 address and per IPv6 /64: a single host owns a whole
+/// /64, so keying full IPv6 addresses would let one host fill the table.
+fn artwork_budget_key(address: std::net::IpAddr) -> std::net::IpAddr {
+    match address {
+        std::net::IpAddr::V6(v6) => match v6.to_ipv4_mapped() {
+            Some(v4) => std::net::IpAddr::V4(v4),
+            None => std::net::IpAddr::V6(std::net::Ipv6Addr::from(
+                u128::from(v6) & !((1u128 << 64) - 1),
+            )),
+        },
+        v4 => v4,
+    }
+}
 impl JellyfinArtworkBudget {
     fn admit(&mut self, address: std::net::IpAddr, now: Instant) -> bool {
+        let address = artwork_budget_key(address);
         self.addresses
             .retain(|_, window| now.duration_since(window.last) < Duration::from_secs(60));
         if !self.addresses.contains_key(&address) && self.addresses.len() >= 4096 {
@@ -4354,6 +4368,7 @@ pub(super) async fn serve_jellyfin_artwork(
     backdrop: bool,
     width: u32,
     headers: &HeaderMap,
+    address: std::net::IpAddr,
 ) -> Result<Response, ApiError> {
     let size = match width {
         0..=300 => ArtworkSize::W300,
@@ -4384,6 +4399,9 @@ pub(super) async fn serve_jellyfin_artwork(
             }
         }
     }
+    // Warm hits do no work; only a miss, which enqueues materialization,
+    // spends this address's budget.
+    admit_jellyfin_artwork(state, address).await?;
     let key = format!(
         "{}:{}:{}:{}:{}",
         mapped.wire_id,
@@ -4422,7 +4440,7 @@ pub(super) async fn serve_jellyfin_artwork(
         .insert(header::RETRY_AFTER, HeaderValue::from_static("2"));
     Ok(response)
 }
-pub(super) async fn admit_jellyfin_artwork(
+async fn admit_jellyfin_artwork(
     state: &AppState,
     address: std::net::IpAddr,
 ) -> Result<(), ApiError> {
@@ -4561,6 +4579,33 @@ async fn jellyfin_artwork_pass(state: &AppState) -> bool {
 #[cfg(test)]
 mod jellyfin_artwork_tests {
     use super::*;
+    fn artwork_test_address(n: u32) -> std::net::IpAddr {
+        std::net::IpAddr::V4(std::net::Ipv4Addr::from(0x0a00_0000 + n))
+    }
+    #[test]
+    fn jellyfin_artwork_budget_keys_ipv6_per_64_and_ipv4_per_address() {
+        let mut budget = JellyfinArtworkBudget::default();
+        let now = Instant::now();
+        let host: std::net::IpAddr = "2001:db8:1:2::1".parse().expect("v6");
+        let same_64: std::net::IpAddr = "2001:db8:1:2:ffff::9".parse().expect("v6");
+        let other_64: std::net::IpAddr = "2001:db8:1:3::1".parse().expect("v6");
+        for _ in 0..20 {
+            assert!(budget.admit(host, now));
+        }
+        assert!(
+            !budget.admit(same_64, now),
+            "one /64 shares one miss budget"
+        );
+        assert!(budget.admit(other_64, now));
+        for v4 in ["192.0.2.1", "192.0.2.2"] {
+            assert!(budget.admit(v4.parse().expect("v4"), now));
+        }
+        let mapped: std::net::IpAddr = "::ffff:192.0.2.1".parse().expect("mapped");
+        assert_eq!(
+            artwork_budget_key(mapped),
+            "192.0.2.1".parse::<std::net::IpAddr>().expect("v4")
+        );
+    }
     #[tokio::test]
     async fn jellyfin_artwork_cold_demands_deduplicate_without_hashing_or_decoding_originals() {
         let state = super::tests::derivative_state();
@@ -4580,10 +4625,16 @@ mod jellyfin_artwork_tests {
             generation: uuid::Uuid::new_v4().simple().to_string(),
         };
         for _ in 0..4 {
-            let response =
-                serve_jellyfin_artwork(&state, mapped.clone(), false, 500, &HeaderMap::new())
-                    .await
-                    .expect("cold request");
+            let response = serve_jellyfin_artwork(
+                &state,
+                mapped.clone(),
+                false,
+                500,
+                &HeaderMap::new(),
+                artwork_test_address(0),
+            )
+            .await
+            .expect("cold request");
             assert_eq!(response.status(), StatusCode::NOT_FOUND);
             assert_eq!(response.headers()[header::CACHE_CONTROL], "no-store");
         }
@@ -4591,20 +4642,32 @@ mod jellyfin_artwork_tests {
         assert_eq!(state.artwork_fetch.derivations.load(Ordering::SeqCst), 0);
         assert_eq!(state.artwork_fetch.jellyfin_demands.lock().await.len(), 1);
         // Admission is refused at the fixed queue bound; existing work remains.
-        for _ in 1..256 {
+        for n in 1..256u32 {
             let mut another = mapped.clone();
             another.wire_id = uuid::Uuid::new_v4().simple().to_string();
-            serve_jellyfin_artwork(&state, another, false, 500, &HeaderMap::new())
-                .await
-                .expect("bounded demand");
+            serve_jellyfin_artwork(
+                &state,
+                another,
+                false,
+                500,
+                &HeaderMap::new(),
+                artwork_test_address(n),
+            )
+            .await
+            .expect("bounded demand");
         }
         let mut overflow = mapped;
         overflow.wire_id = uuid::Uuid::new_v4().simple().to_string();
-        assert!(
-            serve_jellyfin_artwork(&state, overflow, false, 500, &HeaderMap::new())
-                .await
-                .is_err()
-        );
+        assert!(serve_jellyfin_artwork(
+            &state,
+            overflow,
+            false,
+            500,
+            &HeaderMap::new(),
+            artwork_test_address(0)
+        )
+        .await
+        .is_err());
         assert_eq!(state.artwork_fetch.jellyfin_demands.lock().await.len(), 256);
         assert_eq!(state.artwork_fetch.hashes.load(Ordering::SeqCst), 0);
     }
@@ -4665,9 +4728,16 @@ mod jellyfin_artwork_tests {
             .await
             .expect("mapping")
             .expect("enabled mapping");
-        serve_jellyfin_artwork(&state, old.clone(), false, 500, &HeaderMap::new())
-            .await
-            .expect("queued miss");
+        serve_jellyfin_artwork(
+            &state,
+            old.clone(),
+            false,
+            500,
+            &HeaderMap::new(),
+            artwork_test_address(0),
+        )
+        .await
+        .expect("queued miss");
         assert_eq!(state.artwork_fetch.jellyfin_demands.lock().await.len(), 1);
         state
             .store
@@ -4753,9 +4823,16 @@ mod jellyfin_artwork_tests {
             "testsrc2=size=960x540",
             &["-frames:v", "1"],
         );
-        serve_jellyfin_artwork(&state, old.clone(), false, 500, &HeaderMap::new())
-            .await
-            .expect("cold miss");
+        serve_jellyfin_artwork(
+            &state,
+            old.clone(),
+            false,
+            500,
+            &HeaderMap::new(),
+            artwork_test_address(0),
+        )
+        .await
+        .expect("cold miss");
         assert_eq!(state.artwork_fetch.hashes.load(Ordering::SeqCst), 0);
         assert_eq!(state.artwork_fetch.derivations.load(Ordering::SeqCst), 0);
         assert!(jellyfin_artwork_pass(&state).await);
@@ -4764,9 +4841,16 @@ mod jellyfin_artwork_tests {
             .await
             .expect("native derivative owner"));
         let derivations = state.artwork_fetch.derivations.load(Ordering::SeqCst);
-        let warm = serve_jellyfin_artwork(&state, old.clone(), false, 500, &HeaderMap::new())
-            .await
-            .expect("warm derivative");
+        let warm = serve_jellyfin_artwork(
+            &state,
+            old.clone(),
+            false,
+            500,
+            &HeaderMap::new(),
+            artwork_test_address(0),
+        )
+        .await
+        .expect("warm derivative");
         assert_eq!(warm.status(), StatusCode::OK);
         assert_eq!(
             warm.headers()[header::CACHE_CONTROL],
@@ -4782,9 +4866,16 @@ mod jellyfin_artwork_tests {
         let hashes = state.artwork_fetch.hashes.load(Ordering::SeqCst);
         let mut conditional = HeaderMap::new();
         conditional.insert(header::IF_NONE_MATCH, etag);
-        let unchanged = serve_jellyfin_artwork(&state, old, false, 500, &conditional)
-            .await
-            .expect("conditional derivative");
+        let unchanged = serve_jellyfin_artwork(
+            &state,
+            old,
+            false,
+            500,
+            &conditional,
+            artwork_test_address(0),
+        )
+        .await
+        .expect("conditional derivative");
         assert_eq!(unchanged.status(), StatusCode::NOT_MODIFIED);
         assert_eq!(
             unchanged.headers()[header::CACHE_CONTROL],

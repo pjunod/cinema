@@ -717,9 +717,43 @@ pub(crate) async fn authenticate_user_token(
     state: &AppState,
     token: &str,
 ) -> Result<plurx_core::domain::User, ApiError> {
-    let hash = auth::hash_token(token);
+    authenticate_token_digest(
+        state,
+        auth::hash_token(token),
+        plurx_core::store::TokenAudience::Native,
+    )
+    .await
+}
+
+/// A Jellyfin compatibility login: valid only on the compatibility facade.
+pub(crate) async fn authenticate_compatibility_token(
+    state: &AppState,
+    token: &str,
+) -> Result<plurx_core::domain::User, ApiError> {
+    authenticate_token_digest(
+        state,
+        auth::hash_token(token),
+        plurx_core::store::TokenAudience::JellyfinCompatibility,
+    )
+    .await
+}
+
+/// The same expiry, revocation and cache-proof bookkeeping as a presented
+/// token, for a caller that holds only its digest (a scoped media link that
+/// resolved to the login it was issued under).
+pub(crate) async fn authenticate_token_digest(
+    state: &AppState,
+    hash: String,
+    audience: plurx_core::store::TokenAudience,
+) -> Result<plurx_core::domain::User, ApiError> {
     let ticket = state.cache_only_admin_proofs.authentication_ticket();
-    let user = match state.store.authenticate_token(&hash).await? {
+    let native = audience == plurx_core::store::TokenAudience::Native;
+    let verdict = if native {
+        state.store.authenticate_token(&hash).await?
+    } else {
+        state.store.authenticate_token_for(&hash, audience).await?
+    };
+    let user = match verdict {
         TokenAuthentication::Authenticated(user) => user,
         TokenAuthentication::Expired { idle_days } => {
             state.cache_only_admin_proofs.invalidate_digest(&hash);
@@ -730,9 +764,12 @@ pub(crate) async fn authenticate_user_token(
             return Err(ApiError::Unauthorized);
         }
     };
-    state
-        .cache_only_admin_proofs
-        .record_authenticated(ticket, hash, &user);
+    // Only a native bearer may stand in as a cached admin proof.
+    if native {
+        state
+            .cache_only_admin_proofs
+            .record_authenticated(ticket, hash, &user);
+    }
     Ok(user)
 }
 

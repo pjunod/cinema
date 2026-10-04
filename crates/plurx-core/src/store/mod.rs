@@ -46,7 +46,7 @@ mod jellyfin_watch;
 pub use jellyfin_play::{
     JellyfinPlay, JellyfinPlayActivation, JellyfinPlayScope, JellyfinPlayStore, NewJellyfinPlay,
     JELLYFIN_PENDING_PLAYS_PER_LOGIN, JELLYFIN_PENDING_PLAYS_SERVER, JELLYFIN_PENDING_PLAY_TTL_MS,
-    JELLYFIN_TERMINAL_PLAY_TTL_MS,
+    JELLYFIN_TERMINAL_PLAY_TTL_MS, JELLYFIN_TOMBSTONES_PER_LOGIN,
 };
 pub use jellyfin_watch::{JellyfinProgressProvenance, JellyfinProgressWrite};
 #[cfg(feature = "hiqlite-store")]
@@ -251,6 +251,23 @@ pub struct TokenSummary {
 /// the HTTP layer can tell a client "you were signed out after N idle days"
 /// instead of a bare 401; an expired token's activity is never refreshed, so
 /// presenting it cannot slide it back to life.
+/// Which surface a login token was issued for. A Jellyfin compatibility
+/// login authenticates only the compatibility facade; native and Plex
+/// surfaces refuse it, so a token pulled off a shared TV is not a native
+/// account bearer.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TokenAudience {
+    Native,
+    JellyfinCompatibility,
+}
+impl TokenAudience {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Native => "native",
+            Self::JellyfinCompatibility => "jellyfin",
+        }
+    }
+}
 #[derive(Clone, Debug)]
 pub enum TokenAuthentication {
     Authenticated(User),
@@ -2329,8 +2346,20 @@ pub trait UserStore: Send + Sync + 'static {
     /// the same snapshot as the token row. A live token's coalesced
     /// `last_seen_at` is refreshed exactly as before; an expired one is
     /// reported and left untouched.
-    async fn authenticate_token(&self, token_hash: &str)
-        -> Result<TokenAuthentication, StoreError>;
+    async fn authenticate_token(
+        &self,
+        token_hash: &str,
+    ) -> Result<TokenAuthentication, StoreError> {
+        self.authenticate_token_for(token_hash, TokenAudience::Native)
+            .await
+    }
+    /// As [`authenticate_token`](Self::authenticate_token), for one audience:
+    /// a token of the other audience is `Unknown`.
+    async fn authenticate_token_for(
+        &self,
+        token_hash: &str,
+        audience: TokenAudience,
+    ) -> Result<TokenAuthentication, StoreError>;
     /// Resolve a token hash to its user (touching `last_seen_at`). An expired
     /// token resolves to nobody, so every caller that predates expiry — the
     /// Plex facade, recovery reads — honours the policy without knowing it.

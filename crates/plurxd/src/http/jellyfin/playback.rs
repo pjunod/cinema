@@ -79,6 +79,19 @@ pub(super) async fn binding(
     item_id: &str,
     source_id: &str,
 ) -> Result<JellyfinPlay, ApiError> {
+    let play = own_binding(client, state, play_id, item_id, source_id).await?;
+    same_generation(&play, &client.generation)?;
+    Ok(play)
+}
+/// This login's exact play for the item/source, from any switch generation.
+/// Only cleanup (Stop) may act on a play from an earlier generation.
+async fn own_binding(
+    client: &ClientUser,
+    state: &AppState,
+    play_id: &str,
+    item_id: &str,
+    source_id: &str,
+) -> Result<JellyfinPlay, ApiError> {
     let scope = scope(client, state).await?;
     let play_id = wire_id(play_id)?.to_hex();
     let play = state
@@ -94,6 +107,17 @@ pub(super) async fn binding(
         ));
     }
     Ok(play)
+}
+/// A play belongs to the switch generation it was negotiated under. Turning
+/// compatibility off ends it, even if compatibility is on again by the time
+/// the client comes back with it.
+pub(super) fn same_generation(play: &JellyfinPlay, generation: &str) -> Result<(), ApiError> {
+    if play.negotiation.switch_generation != generation {
+        return Err(ApiError::Conflict(
+            "compatibility was turned off after this play was negotiated; renegotiate".into(),
+        ));
+    }
+    Ok(())
 }
 fn player_id(scope: &JellyfinPlayScope) -> String {
     format!(
@@ -120,7 +144,8 @@ fn direct_key(play: &JellyfinPlay) -> crate::delivery::Key {
 async fn release(state: &AppState, play: &JellyfinPlay) -> Result<(), ApiError> {
     if let Some(id) = play.native_incarnation_id.as_deref() {
         if let Some(route) = state.store.media_session_route_by_incarnation(id).await? {
-            if route.user_id == play.negotiation.scope.user_id
+            if route.state != "ended"
+                && route.user_id == play.negotiation.scope.user_id
                 && route.playback_id == play.negotiation.playback_id
             {
                 let status = super::super::hls::release_with_terminal(
@@ -162,66 +187,55 @@ pub(super) async fn activate(
         .map_err(|_| ApiError::Conflict("play selection changed; renegotiate".into()))?;
     if let Some(vod) = selection.get("vod").filter(|v| !v.is_null()) {
         let started = Box::pin(super::startup::create(state, &play, vod)).await?;
-        let route = state
-            .store
-            .media_session_route(&started.session_id)
-            .await?
-            .ok_or(ApiError::Conflict(
-                "native play activation unavailable".into(),
-            ))?;
-        if route.user_id != play.negotiation.scope.user_id
-            || route.playback_id != play.negotiation.playback_id
-        {
-            return Err(ApiError::Conflict("native play owner changed".into()));
-        }
-        state
-            .store
-            .activate_jellyfin_play(
-                &play.negotiation.play_id,
-                &play.negotiation.scope,
-                JellyfinPlayActivation::MediaIncarnation(route.incarnation_id.clone()),
-                now_ms()?,
-            )
-            .await?;
-        let bound = state
-            .store
-            .jellyfin_play(&play.negotiation.play_id, &play.negotiation.scope)
-            .await?;
-        if let Some(bound) = bound.filter(|bound| {
-            bound.state == "active"
-                && bound.native_incarnation_id.as_deref() == Some(route.incarnation_id.as_str())
-                && bound.negotiation.native_request_fingerprint == route.request_fingerprint
-                && bound.negotiation.source_origin_ms == route.media_origin_ms
-        }) {
-            // Another waiter may have bound the same canonical native result first.
-            // This waiter owns neither a replacement nor permission to release it.
+        let outcome = bind_native_start(state, &play, &started.session_id).await;
+        if let Ok(Some(bound)) = outcome {
+            release_superseded(state, &bound).await;
             return Ok(bound);
         }
-        super::super::hls::release_with_terminal(
-            state.clone(),
-            started.session_id,
-            crate::vodserve::Terminal::Deleted,
-            "compatibility activation refused",
-        )
-        .await;
-        return Err(ApiError::Conflict("native play activation refused".into()));
+        // Another waiter may have bound the same canonical native result:
+        // this waiter releases the start only when no binding claims it, and
+        // leaves it to native idle expiry when that cannot be established.
+        if matches!(
+            unclaimed_native_start(state, &play, &started.session_id).await,
+            Ok(true)
+        ) {
+            super::super::hls::release_with_terminal(
+                state.clone(),
+                started.session_id,
+                crate::vodserve::Terminal::Deleted,
+                "compatibility activation refused",
+            )
+            .await;
+        }
+        return Err(match outcome {
+            Err(error) => error,
+            Ok(_) => ApiError::Conflict("native play activation refused".into()),
+        });
     }
     let now = now_ms()?;
-    let id = uuid::Uuid::new_v4().to_string();
-    // This internal native reference is never returned as a public media capability.
-    let secret = uuid::Uuid::new_v4().to_string();
-    state
-        .store
-        .create_file_grant(NewFileGrant {
-            id: id.clone(),
-            token_hash: plurx_core::auth::hash_token(&secret),
-            file_id: play.negotiation.file_id,
-            user_id: play.negotiation.scope.user_id,
-            source_token_hash: play.negotiation.scope.token_digest.clone(),
-            created_at: now / 1000,
-            expires_at: now / 1000 + 86_400,
-        })
-        .await?;
+    let negotiated = play.direct_grant_id.clone();
+    let id = match negotiated.as_ref() {
+        Some(id) => id.clone(),
+        None => {
+            // A binding negotiated before scoped links existed: mint an internal
+            // reference whose secret is discarded, exactly as before.
+            let id = uuid::Uuid::new_v4().to_string();
+            let secret = uuid::Uuid::new_v4().to_string();
+            state
+                .store
+                .create_file_grant(NewFileGrant {
+                    id: id.clone(),
+                    token_hash: plurx_core::auth::hash_token(&secret),
+                    file_id: play.negotiation.file_id,
+                    user_id: play.negotiation.scope.user_id,
+                    source_token_hash: play.negotiation.scope.token_digest.clone(),
+                    created_at: now / 1000,
+                    expires_at: play.negotiation.created_at_ms / 1000 + MEDIA_LINK_TTL_SECS,
+                })
+                .await?;
+            id
+        }
+    };
     let result = state
         .store
         .activate_jellyfin_play(
@@ -233,6 +247,9 @@ pub(super) async fn activate(
         .await;
     match result {
         Ok(true) => {}
+        // A negotiated grant stays with its binding: a concurrent waiter may
+        // have activated it, and Stop/logout revoke it through the binding.
+        Ok(false) if negotiated.is_some() => {}
         Ok(false) => {
             state
                 .store
@@ -240,10 +257,12 @@ pub(super) async fn activate(
                 .await?;
         }
         Err(error) => {
-            let _ = state
-                .store
-                .revoke_file_grant(&id, play.negotiation.scope.user_id, now / 1000)
-                .await;
+            if negotiated.is_none() {
+                let _ = state
+                    .store
+                    .revoke_file_grant(&id, play.negotiation.scope.user_id, now / 1000)
+                    .await;
+            }
             return Err(error.into());
         }
     }
@@ -255,7 +274,115 @@ pub(super) async fn activate(
     if play.state != "active" {
         return Err(ApiError::Conflict("play activation refused".into()));
     }
+    release_superseded(state, &play).await;
     Ok(play)
+}
+/// Bind this play to the native start; `Some` only when the binding is this
+/// exact incarnation, recipe and clock (possibly bound by another waiter).
+async fn bind_native_start(
+    state: &AppState,
+    play: &JellyfinPlay,
+    session_id: &str,
+) -> Result<Option<JellyfinPlay>, ApiError> {
+    let route = state
+        .store
+        .media_session_route(session_id)
+        .await?
+        .ok_or(ApiError::Conflict(
+            "native play activation unavailable".into(),
+        ))?;
+    if route.user_id != play.negotiation.scope.user_id
+        || route.playback_id != play.negotiation.playback_id
+    {
+        return Err(ApiError::Conflict("native play owner changed".into()));
+    }
+    state
+        .store
+        .activate_jellyfin_play(
+            &play.negotiation.play_id,
+            &play.negotiation.scope,
+            JellyfinPlayActivation::MediaIncarnation(route.incarnation_id.clone()),
+            now_ms()?,
+        )
+        .await?;
+    let bound = state
+        .store
+        .jellyfin_play(&play.negotiation.play_id, &play.negotiation.scope)
+        .await?;
+    Ok(bound.filter(|bound| {
+        bound.state == "active"
+            && bound.native_incarnation_id.as_deref() == Some(route.incarnation_id.as_str())
+            && bound.negotiation.native_request_fingerprint == route.request_fingerprint
+            && bound.negotiation.source_origin_ms == route.media_origin_ms
+    }))
+}
+/// `true` only when the start exists and no binding of this play claims it.
+async fn unclaimed_native_start(
+    state: &AppState,
+    play: &JellyfinPlay,
+    session_id: &str,
+) -> Result<bool, ApiError> {
+    let Some(route) = state.store.media_session_route(session_id).await? else {
+        return Ok(false);
+    };
+    let bound = state
+        .store
+        .jellyfin_play(&play.negotiation.play_id, &play.negotiation.scope)
+        .await?;
+    Ok(!bound.is_some_and(|bound| {
+        bound.native_incarnation_id.as_deref() == Some(route.incarnation_id.as_str())
+    }))
+}
+/// Release the exact native session or direct grant of every play this
+/// activation ended. A client that replaces its play without Stopped (an
+/// app kill, a quality or method change) would otherwise leave the old
+/// native session current until idle expiry, or its direct presence listed.
+/// Release is idempotent, so a duplicate waiter repeating it is harmless.
+async fn release_superseded(state: &AppState, play: &JellyfinPlay) {
+    let superseded = match state
+        .store
+        .jellyfin_plays_superseded_by(&play.negotiation.play_id, &play.negotiation.scope)
+        .await
+    {
+        Ok(superseded) => superseded,
+        Err(error) => {
+            tracing::warn!(target: "plurxd::jellyfin", %error, "superseded compatibility plays could not be read for release");
+            return;
+        }
+    };
+    for old in superseded {
+        if let Err(error) = release(state, &old).await {
+            tracing::warn!(target: "plurxd::jellyfin", ?error, "superseded compatibility play release failed");
+        }
+    }
+}
+/// Authenticated current-play presence renews only the native passive grant
+/// of this exact play, on whichever node owns it. It is not a reader touch,
+/// a producer lease or rendered-frame evidence.
+async fn renew_passive_presence(state: &AppState, session_id: &str, play: &JellyfinPlay) {
+    // The native grant is keyed by the session request the owner created it
+    // under: the exact incarnation, not the reserved `jellyfin:` claim id.
+    let Some(request) = play.native_incarnation_id.as_deref() else {
+        return;
+    };
+    let user = serde_json::json!(["user_id", play.negotiation.scope.user_id]).to_string();
+    match super::super::hls::passive_presence(
+        state,
+        session_id,
+        &user,
+        &play.negotiation.playback_id,
+        request,
+    )
+    .await
+    {
+        Ok(true) => {}
+        Ok(false) => {
+            tracing::debug!(target: "plurxd::jellyfin", "passive presence found no live grant for the current play")
+        }
+        Err(error) => {
+            tracing::debug!(target: "plurxd::jellyfin", ?error, "passive presence could not reach the native owner")
+        }
+    }
 }
 
 #[derive(Deserialize, Default)]
@@ -821,6 +948,32 @@ async fn info(
             "source changed during negotiation; retry".into(),
         ));
     }
+    // A direct play's scoped media link: one unguessable secret for this title,
+    // issued only to this authenticated negotiation, expiring within 24 hours
+    // of it and revoked by Stop or by revoking the login. The secret is
+    // returned once (as the source ETag, which clients copy into the direct
+    // URL they build); only its digest is stored, in the native file grant.
+    let created_at_ms = now_ms()?;
+    let media_link = if direct {
+        let secret = plurx_core::auth::generate_token()
+            .map_err(|_| ApiError::ServiceUnavailable("media link unavailable".into()))?;
+        let id = uuid::Uuid::new_v4().to_string();
+        state
+            .store
+            .create_file_grant(NewFileGrant {
+                id: id.clone(),
+                token_hash: plurx_core::auth::hash_token(&secret),
+                file_id,
+                user_id: scope.user_id,
+                source_token_hash: scope.token_digest.clone(),
+                created_at: created_at_ms / 1000,
+                expires_at: created_at_ms / 1000 + MEDIA_LINK_TTL_SECS,
+            })
+            .await?;
+        Some((id, secret))
+    } else {
+        None
+    };
     let play = NewJellyfinPlay {
         play_id: play_id.clone(),
         scope: scope.clone(),
@@ -841,9 +994,19 @@ async fn info(
         } else {
             request.start_time_ticks.map_or(0, Ticks::milliseconds)
         },
-        created_at_ms: now_ms()?,
+        created_at_ms,
+        media_grant_id: media_link.as_ref().map(|(id, _)| id.clone()),
+        switch_generation: client.generation.clone(),
     };
-    if !state.store.create_jellyfin_play(play).await? {
+    let created = state.store.create_jellyfin_play(play).await;
+    if !matches!(created, Ok(true)) {
+        if let Some((id, _)) = media_link.as_ref() {
+            let _ = state
+                .store
+                .revoke_file_grant(id, scope.user_id, created_at_ms / 1000)
+                .await;
+        }
+        created?;
         return Err(ApiError::ServiceUnavailable(
             "negotiation capacity exhausted".into(),
         ));
@@ -854,11 +1017,21 @@ async fn info(
             .jellyfin_play(&wire_id(&previous)?.to_hex(), &scope)
             .await?
         {
-            if previous.state == "pending" {
-                state
+            if previous.state == "pending"
+                && state
                     .store
-                    .end_jellyfin_play(&previous.negotiation.play_id, &scope, now_ms()?)
-                    .await?;
+                    .withdraw_pending_jellyfin_play(
+                        &previous.negotiation.play_id,
+                        &scope,
+                        now_ms()?,
+                    )
+                    .await?
+            {
+                // Withdrawn while still pending, so the snapshot is exact: no
+                // native session can have been bound to it.
+                if let Err(error) = release(state, &previous).await {
+                    tracing::warn!(target: "plurxd::jellyfin", ?error, "abandoned negotiation release failed");
+                }
             }
         }
     }
@@ -885,6 +1058,9 @@ async fn info(
         });
         source["TranscodingSubProtocol"] = json!("hls");
     } else {
+        if let Some((_, secret)) = media_link.as_ref() {
+            source["ETag"] = json!(secret);
+        }
         source["DirectStreamUrl"] = json!(format!(
             "/jellyfin/Videos/{}/stream?MediaSourceId={}&PlaySessionId={play_id}&Static=true",
             item.id.to_hex(),
@@ -912,10 +1088,19 @@ async fn resolve_event(
     state: &AppState,
     event: &PlayingEvent,
 ) -> Result<JellyfinPlay, ApiError> {
+    let play = resolve_any_generation(client, state, event).await?;
+    same_generation(&play, &client.generation)?;
+    Ok(play)
+}
+async fn resolve_any_generation(
+    client: &ClientUser,
+    state: &AppState,
+    event: &PlayingEvent,
+) -> Result<JellyfinPlay, ApiError> {
     if let Some(uid) = event.user_id.as_deref() {
         check_user(client, uid)?;
     }
-    let play = binding(
+    let play = own_binding(
         client,
         state,
         &event.play_session_id,
@@ -924,12 +1109,19 @@ async fn resolve_event(
     )
     .await?;
     let selection: Value = serde_json::from_str(&play.negotiation.selection_json)?;
-    let expected = if selection.get("vod").is_some_and(|v| !v.is_null()) {
-        "Transcode"
-    } else {
-        "DirectPlay"
+    let hls = selection.get("vod").is_some_and(|v| !v.is_null());
+    // PlayMethod is the client's own label for what it is doing, not
+    // authority: the binding is. Infuse reports `DirectStream` for a static
+    // file it fetches with Range, and Android uses the same label for a copy
+    // through the transcoding URL. Refuse only a label that names the other
+    // delivery outright.
+    let contradicts = match event.play_method.as_deref() {
+        None | Some("DirectStream") => false,
+        Some("DirectPlay") => hls,
+        Some("Transcode") => !hls,
+        Some(_) => true,
     };
-    if event.play_method.as_deref().is_some_and(|m| m != expected) {
+    if contradicts {
         return Err(ApiError::BadRequest(
             "play method does not match negotiation".into(),
         ));
@@ -986,7 +1178,8 @@ pub(super) async fn progress(
     }
     current_file(&state, &play).await?;
     if play.native_incarnation_id.is_some() {
-        super::transport::route(&state, &play).await?;
+        let session = super::transport::route(&state, &play).await?;
+        renew_passive_presence(&state, &session, &play).await;
     }
     if let Some(write) = progress_write(&play, &report, false) {
         super::super::watch::apply_jellyfin_progress(
@@ -1010,15 +1203,18 @@ pub(super) async fn stopped(
     State(state): State<AppState>,
     Json(report): Json<PlayingEvent>,
 ) -> Result<StatusCode, ApiError> {
-    let play = resolve_event(&client, &state, &report).await?;
+    let play = resolve_any_generation(&client, &state, &report).await?;
     if play.state == "ended" {
         release(&state, &play).await?;
         return Ok(StatusCode::NO_CONTENT);
     }
+    // A play from before the switch was saved off is already over: Stop ends
+    // and releases it, but writes no progress through it.
+    let current = same_generation(&play, &client.generation).is_ok();
     // Cleanup follows every result, including durable failure. An active row is
     // retained on failure so a repeated stop can retry its terminal reconciliation.
     let result = async {
-        if play.state == "active" {
+        if current && play.state == "active" {
             if let Some(write) = progress_write(&play, &report, true) {
                 super::super::watch::apply_jellyfin_progress(
                     &state,
@@ -1044,7 +1240,16 @@ pub(super) async fn stopped(
         Ok::<(), ApiError>(())
     }
     .await;
-    let released = release(&state, &play).await;
+    // Release the row as END left it: a publication racing this Stop may have
+    // bound a native session after the read above.
+    let ended = state
+        .store
+        .jellyfin_play(&play.negotiation.play_id, &play.negotiation.scope)
+        .await
+        .ok()
+        .flatten()
+        .unwrap_or(play);
+    let released = release(&state, &ended).await;
     result?;
     released?;
     Ok(StatusCode::NO_CONTENT)
@@ -1056,27 +1261,154 @@ pub(super) struct DirectRequest {
     #[serde(rename = "PlaySessionId")]
     pub(super) play_session_id: String,
 }
+/// Jellyfin query names are case-insensitive. A client that builds its own
+/// direct URL (Android TV) sends `mediaSourceId` and `tag`, never a play id.
+#[derive(Default)]
+struct DirectQuery {
+    media_source_id: Option<String>,
+    play_session_id: Option<String>,
+    tag: Option<String>,
+}
+fn direct_query(raw: Option<&str>) -> Result<DirectQuery, ApiError> {
+    let mut query = DirectQuery::default();
+    for (key, value) in query_pairs(raw)? {
+        let slot = if key.eq_ignore_ascii_case("mediaSourceId") {
+            &mut query.media_source_id
+        } else if key.eq_ignore_ascii_case("playSessionId") {
+            &mut query.play_session_id
+        } else if key.eq_ignore_ascii_case("tag") {
+            &mut query.tag
+        } else {
+            continue;
+        };
+        if slot.as_ref().is_some_and(|old| *old != value) {
+            return Err(ApiError::BadRequest(format!("conflicting {key} values")));
+        }
+        *slot = Some(value);
+    }
+    Ok(query)
+}
+pub(super) const MEDIA_LINK_TTL_SECS: i64 = 86_400;
+fn media_link_gone() -> ApiError {
+    ApiError::typed(
+        StatusCode::GONE,
+        "media_link_gone",
+        "This playback link has expired or its playback was stopped.",
+    )
+}
+/// Resolve a scoped media link to its play and the login it was issued under.
+/// The link authorizes this one title's direct bytes; the login it names must
+/// still authenticate, so token revocation and idle expiry end it as well.
+async fn media_link_play(
+    state: &AppState,
+    generation: &str,
+    item_id: &str,
+    media_source_id: Option<&str>,
+    secret: &str,
+) -> Result<(ClientUser, JellyfinPlay), ApiError> {
+    if secret.len() != 64
+        || !secret
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    {
+        return Err(ApiError::NotFound("media link"));
+    }
+    let grant = state
+        .store
+        .file_grant_by_hash(&plurx_core::auth::hash_token(secret))
+        .await?
+        .ok_or(ApiError::NotFound("media link"))?;
+    if grant.revoked_at.is_some() || !grant.source_active || grant.expires_at <= now_ms()? / 1000 {
+        return Err(media_link_gone());
+    }
+    let play = state
+        .store
+        .jellyfin_play_for_direct_grant(&grant.id)
+        .await?
+        .ok_or_else(media_link_gone)?;
+    if play.state == "ended"
+        || play.negotiation.file_id != grant.file_id
+        || play.negotiation.scope.user_id != grant.user_id
+        || play.negotiation.switch_generation != generation
+    {
+        return Err(media_link_gone());
+    }
+    if wire_id(item_id)?.to_hex() != play.negotiation.item_wire_id
+        || media_source_id
+            .map(wire_id)
+            .transpose()?
+            .is_some_and(|source| source.to_hex() != play.negotiation.file_wire_id)
+    {
+        return Err(ApiError::BadRequest(
+            "item/source does not belong to play".into(),
+        ));
+    }
+    let digest = play.negotiation.scope.token_digest.clone();
+    let user = super::super::extract::authenticate_token_digest(
+        state,
+        digest.clone(),
+        plurx_core::store::TokenAudience::JellyfinCompatibility,
+    )
+    .await?;
+    if user.id != play.negotiation.scope.user_id {
+        return Err(ApiError::Unauthorized);
+    }
+    Ok((
+        ClientUser::for_login(state, digest, generation.to_owned()).await?,
+        play,
+    ))
+}
+async fn direct_play(
+    caller: MediaCaller,
+    state: &AppState,
+    item_id: &str,
+    raw: Option<&str>,
+) -> Result<(ClientUser, JellyfinPlay), ApiError> {
+    let query = direct_query(raw)?;
+    let caller_generation = caller.generation.clone();
+    match (
+        caller.client,
+        query.play_session_id.as_deref(),
+        query.tag.as_deref(),
+    ) {
+        (Some(client), Some(play_id), _) => {
+            let source = query
+                .media_source_id
+                .as_deref()
+                .ok_or_else(|| ApiError::BadRequest("MediaSourceId is required".into()))?;
+            let play = binding(&client, state, play_id, item_id, source).await?;
+            Ok((client, play))
+        }
+        (caller, _, Some(secret)) => {
+            let (link_client, play) = media_link_play(
+                state,
+                &caller_generation,
+                item_id,
+                query.media_source_id.as_deref(),
+                secret,
+            )
+            .await?;
+            // A presented login must be the one the link was issued to.
+            if caller.is_some_and(|client| client.token_hash != link_client.token_hash) {
+                return Err(ApiError::Unauthorized);
+            }
+            Ok((link_client, play))
+        }
+        (Some(_), None, None) => Err(ApiError::BadRequest("PlaySessionId is required".into())),
+        (None, _, None) => Err(ApiError::Unauthorized),
+    }
+}
 async fn serve_direct(
-    client: ClientUser,
+    caller: MediaCaller,
     state: AppState,
     item_id: String,
-    request: DirectRequest,
+    raw: Option<String>,
     method: Method,
     headers: HeaderMap,
 ) -> Result<Response, ApiError> {
+    let (client, play) = direct_play(caller, &state, &item_id, raw.as_deref()).await?;
     live_item(&client, &state, &item_id).await?;
-    let play = activate(
-        &state,
-        binding(
-            &client,
-            &state,
-            &request.play_session_id,
-            &item_id,
-            &request.media_source_id,
-        )
-        .await?,
-    )
-    .await?;
+    let play = activate(&state, play).await?;
     let grant = state
         .store
         .file_grant_by_id(
@@ -1112,20 +1444,19 @@ async fn serve_direct(
     .await
 }
 pub(super) async fn direct(
-    client: ClientUser,
+    caller: MediaCaller,
     State(state): State<AppState>,
     Path(item_id): Path<String>,
-    Query(request): Query<DirectRequest>,
+    RawQuery(raw): RawQuery,
     method: Method,
     headers: HeaderMap,
 ) -> Result<Response, ApiError> {
-    serve_direct(client, state, item_id, request, method, headers).await
+    serve_direct(caller, state, item_id, raw, method, headers).await
 }
 pub(super) async fn direct_extension(
-    client: ClientUser,
+    caller: MediaCaller,
     State(state): State<AppState>,
     Path((item_id, filename)): Path<(String, String)>,
-    Query(request): Query<DirectRequest>,
     RawQuery(raw): RawQuery,
     method: Method,
     headers: HeaderMap,
@@ -1141,6 +1472,11 @@ pub(super) async fn direct_extension(
                 ));
             }
         }
+        let client = caller.client.ok_or(ApiError::Unauthorized)?;
+        let request: DirectRequest = serde_urlencoded::from_str(raw.as_deref().unwrap_or(""))
+            .map_err(|_| {
+                ApiError::BadRequest("HLS parameters must match the negotiated play".into())
+            })?;
         return Box::pin(super::transport::root(
             client, state, item_id, request, filename, method, headers,
         ))
@@ -1152,7 +1488,7 @@ pub(super) async fn direct_extension(
     ) {
         return Err(ApiError::NotFound("media route"));
     }
-    serve_direct(client, state, item_id, request, method, headers).await
+    serve_direct(caller, state, item_id, raw, method, headers).await
 }
 async fn manual(
     client: ClientUser,
@@ -1212,10 +1548,14 @@ pub(super) async fn logout(
         .store
         .end_jellyfin_login_plays(&scope, now_ms()?)
         .await?;
-    for play in plays {
-        release(&state, &play).await?;
-    }
+    // Revocation never waits on media cleanup: a busy release slot or an
+    // unreachable owner must not leave a signed-out login valid.
     auth::revoke_token_under_exclusion(&state, &client.token_hash, exclusion).await?;
+    for play in plays {
+        if let Err(error) = release(&state, &play).await {
+            tracing::warn!(target: "plurxd::jellyfin", ?error, "logout release left to native expiry");
+        }
+    }
     Ok(StatusCode::NO_CONTENT)
 }
 

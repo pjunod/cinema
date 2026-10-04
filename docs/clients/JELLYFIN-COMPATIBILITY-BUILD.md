@@ -306,7 +306,7 @@ library ACLs: authentication admits all supported libraries. Do not claim
 library-level authorization exists. Still validate item/source/track
 membership and prevent cross-user watch or session mutation.
 
-**Proposed artwork ruling, finalized from J0 traces:** allow anonymous
+**Artwork ruling, approved by Paul on 2026-10-03 (built in J4):** allow anonymous
 GET/HEAD for mapped movie/TV item artwork only when needed for target-client
 parity. Upstream item image reads do not require authentication, and clients
 may construct the URL without a token. An unguessable UUID reduces enumeration

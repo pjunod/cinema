@@ -49,7 +49,7 @@ const CONSISTENT_READ_SITES: &[(&str, usize)] = &[
     ("hiqlite_jellyfin_catalog.rs", 3),
     ("hiqlite_jellyfin_identity.rs", 3),
     ("hiqlite_jellyfin_login.rs", 2),
-    ("hiqlite_jellyfin_play.rs", 1),
+    ("hiqlite_jellyfin_play.rs", 3),
     ("hiqlite_library_channels.rs", 13),
     ("hiqlite_live_tv_resource.rs", 1),
     ("hiqlite_media.rs", 69),

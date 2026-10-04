@@ -4810,9 +4810,10 @@ impl UserStore for HiqliteAuthStore {
             > 0)
     }
 
-    async fn authenticate_token(
+    async fn authenticate_token_for(
         &self,
         token_hash: &str,
+        audience: super::TokenAudience,
     ) -> Result<TokenAuthentication, StoreError> {
         // The expiry policy rides the same consistent read as the token row:
         // no extra round trip per request, and every voter judges a token
@@ -4826,7 +4827,9 @@ impl UserStore for HiqliteAuthStore {
                           (SELECT value FROM settings WHERE key = $2) AS expiry_idle_days, \
                           (SELECT value FROM settings WHERE key = $3) AS expiry_since \
                  FROM users u JOIN tokens t ON t.user_id = u.id \
-                 WHERE t.token_hash = $4";
+                 WHERE t.token_hash = $4 \
+                   AND ($5 = 'native') = NOT EXISTS ( \
+                     SELECT 1 FROM jellyfin_login_tokens l WHERE l.token_hash = t.token_hash)";
         validate_sql(sql)?;
         trace_statement("authenticate_token", sql);
         let mut rows = self
@@ -4837,7 +4840,8 @@ impl UserStore for HiqliteAuthStore {
                     keys::AUTH_TOKEN_EXPIRY_ENABLED,
                     keys::AUTH_TOKEN_IDLE_DAYS,
                     keys::AUTH_TOKEN_EXPIRY_SINCE,
-                    token_hash
+                    token_hash,
+                    audience.as_str()
                 ),
             )
             .await?;

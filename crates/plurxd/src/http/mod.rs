@@ -8914,21 +8914,39 @@ mod tests {
             auth::login_jellyfin_user(&state, None, &headers, bad, "device-one", family).await,
             Err(super::error::ApiError::Unauthorized)
         ));
-        extract::authenticate_user_token(&state, &first.token)
+        extract::authenticate_compatibility_token(&state, &first.token)
             .await
             .expect("failed password preserves old login");
+        // A compatibility login is not a native bearer.
+        assert!(matches!(
+            extract::authenticate_user_token(&state, &first.token).await,
+            Err(super::error::ApiError::Unauthorized)
+        ));
+        assert!(matches!(
+            extract::authenticate_compatibility_token(&state, &native).await,
+            Err(super::error::ApiError::Unauthorized)
+        ));
         let next =
             auth::login_jellyfin_user(&state, None, &headers, request(), "device-one", family)
                 .await
                 .expect("replacement login");
-        assert!(extract::authenticate_user_token(&state, &first.token)
-            .await
-            .is_err());
-        for token in [&native, &other.token, &android.token, &next.token] {
+        assert!(
+            extract::authenticate_compatibility_token(&state, &first.token)
+                .await
+                .is_err()
+        );
+        assert_eq!(
+            extract::authenticate_user_token(&state, &native)
+                .await
+                .expect("native token")
+                .id,
+            first.user.id
+        );
+        for token in [&other.token, &android.token, &next.token] {
             assert_eq!(
-                extract::authenticate_user_token(&state, token)
+                extract::authenticate_compatibility_token(&state, token)
                     .await
-                    .expect("unrelated or fresh token")
+                    .expect("unrelated or fresh compatibility token")
                     .id,
                 first.user.id
             );
@@ -8954,7 +8972,7 @@ mod tests {
             auth::login_jellyfin_user(&state, None, &headers, request(), "", family).await,
             Err(super::error::ApiError::BadRequest(_))
         ));
-        extract::authenticate_user_token(&state, &next.token)
+        extract::authenticate_compatibility_token(&state, &next.token)
             .await
             .expect("validation refusals preserve current login");
     }

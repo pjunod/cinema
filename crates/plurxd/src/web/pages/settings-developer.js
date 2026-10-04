@@ -574,7 +574,7 @@ function jellyfinCompatibilityCard(settings,readiness){
   return setCard(`${cardHead("Jellyfin client compatibility","Connect the tested Infuse and Jellyfin Android TV clients to this server.",`<span class="pill${on?" ok":""}">${on?"enabled":"off"}</span>`)}
     <label class="checkrow"><input type="checkbox" id="jellyfin-compatibility-enabled" ${on?"checked":""}><span>Allow Jellyfin clients</span></label>
     <p class="hint">Connection URL: <code>${esc(connection)}</code>. Sign in with a Plurx account.</p>
-    <p class="hint">Artwork currently requires authentication. Media and subtitles require authentication or an admitted playback capability.</p>
+    <p class="hint">Library posters and backdrops are served without sign-in while this is on: anyone who has an artwork link can read that image. A direct-play link for one title chosen after sign-in also works without a login header; it expires within 24 hours and stops working when playback stops or the login is revoked. Everything else requires sign-in.</p>
     <details class="setdetails" open><summary>Readiness</summary><div class="setdetails-body">
     ${devReq(readiness,"jellyfin_compatibility","client_qualification","Pinned clients qualified","The complete browsing, playback, track and recovery matrix must pass on the frozen candidate.")}
     <p class="devcheck-note">Readiness is advisory. Your saved choice controls the connection surface.</p></div></details>

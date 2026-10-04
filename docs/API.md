@@ -3224,15 +3224,15 @@ mint. Media resource cleanup belongs to the later playback adapter.
 | GET | `/jellyfin/Shows/NextUp` | Native next-episode predicate; series filtering before paging |
 | GET | `/jellyfin/Items` | Compatibility token; bounded catalog page |
 | GET | `/jellyfin/Users/{user_id}/Items` | Own user ID; bounded catalog page |
-| GET | `/jellyfin/Items/{item_id}/Images/{kind}` | Compatibility token; mapped movie/TV Primary or Backdrop; prepared derivative only |
-| GET | `/jellyfin/Items/{item_id}/Images/{kind}/{index}` | Same authenticated artwork surface; only index 0 |
+| GET | `/jellyfin/Items/{item_id}/Images/{kind}` | Enabled switch, no login; mapped movie/TV Primary or Backdrop; prepared derivative only; per-address miss budget |
+| GET | `/jellyfin/Items/{item_id}/Images/{kind}/{index}` | Same anonymous mapped artwork surface; only index 0 |
 | GET | `/jellyfin/Items/{item_id}` | Compatibility token; live permanent item ID |
 | GET | `/jellyfin/Users/{user_id}/Items/{item_id}` | Own user ID and live permanent item ID |
 | GET | `/jellyfin/Shows/{item_id}/Seasons` | Compatibility token; direct season children |
 | GET | `/jellyfin/Shows/{item_id}/Episodes` | Compatibility token; descendant episodes; optional season parent |
 
 | GET, POST | `/jellyfin/Items/{item_id}/PlaybackInfo` | Compatibility token; live source membership, checked times and independently eligible direct or finite native VOD profile; native prerequisite and output validation precede advertisement |
-| GET, HEAD | `/jellyfin/Videos/{item_id}/stream` | Compatibility token and exact play/source binding; native direct bytes, Range and HEAD; live native grant and source fingerprint |
+| GET, HEAD | `/jellyfin/Videos/{item_id}/stream` | Compatibility token with `PlaySessionId`, or the play's scoped link as `tag` (case-insensitive query names); exact play/source binding; native direct bytes, Range and HEAD; live native grant and source fingerprint |
 | GET, HEAD | `/jellyfin/Videos/{item_id}/{filename}` | Authenticated direct aliases or negotiated `master.m3u8` / `main.m3u8` entry; exact play/source binding |
 | GET, HEAD | `/jellyfin/Videos/{item_id}/{play_id}/hls/{*resource}` | Fresh compatibility login and exact current native incarnation; closed manifest/init/fragment/subtitle names; native reader and publication authority |
 | POST | `/jellyfin/Sessions/Logout` | Presented compatibility login only; native token exclusion, exact play release, other devices retained. |
@@ -3294,17 +3294,36 @@ and durable progress, so a rescan cannot change the negotiation's constraint
 basis while preserving size and modification time. Transcoded URLs are not
 advertised by this profile slice.
 
-Artwork currently requires the shared authenticated compatibility user guard.
-The anonymous access ruling remains pending explicit approval; target-client
-artwork parity is not qualified. Requests admit at most 20 per minute per resolved
-client address. The 4,096-address table refuses new addresses while full instead
+Mapped artwork needs no login while the switch is on (approved 2026-10-03):
+anyone who has a mapped artwork URL can read that poster or backdrop. Only
+mapped movie/TV items are served; there is no listing, avatar or path route.
+Target-client artwork parity is not yet qualified. Misses (requests that enqueue work) admit at most 20 per minute per resolved
+client address, an IPv6 client counting per /64; warm hits are not counted. The 4,096-address table refuses new addresses while full instead
 of evicting live budgets. Cold requests enqueue a bounded, deduplicated intent
 for the existing artwork owner and return an uncached JSON 404 with Retry-After.
 The request performs no original read, peer fetch or resize. The owner verifies
 source bytes and rechecks the exact item/source/switch generation before the
 existing durable derivative admission. Warm requests serve verified derivatives.
 
-This slice exposes connection/catalog and authenticated artwork behavior. Additional
+**Scoped media links.** A direct-play `PlaybackInfo` answer carries one
+unguessable 256-bit link secret in the source's `ETag`; Jellyfin Android TV
+copies it into the direct URL it builds as `tag`, with no credential and no
+`PlaySessionId`. The secret is the hashed secret of a native one-file grant for
+that title, issued only to the authenticated negotiation, expiring within 24
+hours of it, and refused once its play is stopped, superseded or from an
+earlier switch generation, or once its login is revoked or idle-expired. The
+link works only on `/Videos/{item}/stream` for its own item and source; a
+presented login must be the one it was issued under. It never appears in the
+authenticated `DirectStreamUrl`. A stopped or expired link answers typed
+`410 media_link_gone`; an unknown one `404`.
+
+Plays belong to the switch generation they were negotiated under: saving the
+switch off ends every in-flight play, and turning it back on does not revive
+them. Authenticated paused progress renews the current play's native passive
+grant on whichever node owns it; an activation that replaces a play without
+`Stopped` releases the predecessor's native session or direct grant.
+
+This slice exposes connection/catalog, anonymous mapped artwork and playback behavior. Additional
 playback negotiation and resource lifecycle remain under implementation; the
 current source capabilities and playback policy do not advertise delivery.
 Qualification progress is in
