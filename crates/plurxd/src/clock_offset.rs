@@ -546,12 +546,22 @@ impl Filter {
         if self.0.len() > CLOCK_FILTER_DEPTH {
             self.0.pop_front();
         }
-        self.0
+        let selected = self
+            .0
             .iter()
             .min_by_key(|sample| sample.round_trip_us)
             .copied()
-            .expect("candidate was inserted")
-            .observation()
+            .expect("candidate was inserted");
+        // The minimum-delay sample may be up to the window age old. Its offset
+        // is still the best estimate, but the publication is as fresh as the
+        // newest intersecting exchange that kept it selected; stamping it with
+        // the old sample's time made a fresh publication expire seconds later,
+        // before the next round could replace it.
+        Sample {
+            observed_at: candidate.observed_at,
+            ..selected
+        }
+        .observation()
     }
 }
 
@@ -803,6 +813,33 @@ mod tests {
         ));
         assert_eq!(filter.0.len(), 2);
         assert_eq!(filter.observe(None, now), PeerClockOffset::Unknown);
+    }
+
+    #[test]
+    fn publication_age_is_the_newest_exchange_not_the_selected_minimum() {
+        let start = Instant::now();
+        let mut filter = Filter::default();
+        let minimum = Sample::exchange(1000, 1000, 1000, 1000, start).expect("low-delay fixture");
+        filter.observe(Some(minimum), start);
+        let later = start + Duration::from_secs(20);
+        let newer = Sample::exchange(2000, 2000, 2000, 2002, later).expect("newer fixture");
+        let PeerClockOffset::Bounded {
+            offset_us,
+            uncertainty_us,
+            observed_at,
+        } = filter.observe(Some(newer), later)
+        else {
+            panic!("intersecting newer exchange keeps the bound");
+        };
+        assert_eq!(
+            (offset_us, uncertainty_us),
+            (minimum.offset_us, minimum.uncertainty_us),
+            "the minimum-delay sample still supplies the estimate"
+        );
+        assert_eq!(
+            observed_at, later,
+            "a fresh publication must not inherit the 20 s old sample's age"
+        );
     }
 
     #[test]
