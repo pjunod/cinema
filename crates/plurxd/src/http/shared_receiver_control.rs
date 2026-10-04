@@ -12,7 +12,7 @@ use crate::{
         sharing_playback_wire::{SharedControlRefusal, SharedControlRefusalCode},
     },
     playback_control::{ControlAction, ControlRelayRequest, ControlRequestV1, ControlResponseV1},
-    sharing_client::{PeerConnection, SharedVodStatus, SourcePeerLineage},
+    sharing_client::{PeerConnection, SharedVodStatus},
 };
 use axum::{
     http::StatusCode,
@@ -45,7 +45,7 @@ impl ReceiverStartActor {
         if owned.retirement_started {
             return Err(ReceiverStartError::Unresolved);
         }
-        let Some(Ok(start)) = owned.start.as_ref() else {
+        let Some(Ok(super::ReceiverPublished::Hls(start))) = owned.start.as_ref() else {
             return Err(ReceiverStartError::Unresolved);
         };
         let owner = owned.owner.as_ref().ok_or(ReceiverStartError::Unresolved)?;
@@ -121,7 +121,8 @@ impl ReceiverStartActor {
         let mut peer = self
             .verified_source_peer(state, &received, lifetime)
             .await?;
-        let known = SourcePeerLineage::from_start(received.incarnation, &received.response)
+        let known = received
+            .lineage()
             .map_err(|_| ReceiverStartError::Unresolved)?;
         let receipt = peer
             .file_vod_status(
@@ -172,7 +173,8 @@ impl ReceiverStartActor {
         lifetime: Arc<dyn Send + Sync>,
     ) -> Result<SharedControlAnswer, ReceiverStartError> {
         let (_, _, received) = self.current_delivery_attachment(state).await?;
-        let known = SourcePeerLineage::from_start(received.incarnation, &received.response)
+        let known = received
+            .lineage()
             .map_err(|_| ReceiverStartError::Unresolved)?;
         let forwarded = translate_to_source(request, &received)?;
         let mut peer = self
@@ -229,7 +231,8 @@ fn translate_to_source(
     received: &ReceivedSource,
 ) -> Result<ControlRequestV1, ReceiverStartError> {
     let bootstrap = received
-        .response
+        .hls()
+        .ok_or(ReceiverStartError::Unsupported)?
         .control
         .as_ref()
         .ok_or(ReceiverStartError::Unresolved)?;
@@ -639,7 +642,7 @@ mod tests {
                     spki_sha256: "b".repeat(64),
                 },
                 incarnation: source_incarnation,
-                response,
+                start: super::ReceivedStart::Hls(Box::new(response)),
             },
             source_session,
             source_incarnation,

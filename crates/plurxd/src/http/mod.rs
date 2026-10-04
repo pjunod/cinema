@@ -65,6 +65,7 @@ pub(crate) mod shared_source_playback;
 pub(crate) mod sharing;
 mod sharing_decision_decode;
 pub(crate) use sharing_decision_decode::bounded_decision_value;
+pub(crate) mod sharing_direct_wire;
 #[allow(dead_code)]
 pub(crate) mod sharing_playback_wire;
 #[allow(dead_code)]
@@ -1752,7 +1753,9 @@ pub fn router(state: AppState) -> Router {
         .route("/images/{filename}", get(images::serve))
         // Shared Start: the receiver actor owns dispatch, persistence and
         // physical cleanup; the request is deadline-free like a local create.
-        .merge(shared_receiver_ingress::start_router());
+        .merge(shared_receiver_ingress::start_router())
+        // Shared direct play: GET/HEAD bytes bound to an exact B session.
+        .merge(shared_receiver_playback::direct_router());
 
     let api = Router::new()
         .merge(json_short)

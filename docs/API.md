@@ -15,7 +15,7 @@ and the handlers on 2026-09-07. Where a plan document and the code disagreed,
 the code won and the disagreement is recorded in §23.
 
 The ordinary listener (`:32400` by default) serves the four surfaces below.
-plurx has 274 routes on that listener. Sharing uses a separate loopback TLS
+plurx has 275 routes on that listener. Sharing uses a separate loopback TLS
 listener with its own peer credentials (§24). Every path here is absolute; the native
 API is the only one under a version prefix, and §7-§18 state that prefix once
 per section rather than repeating it in every row.
@@ -3252,7 +3252,8 @@ item. File references add the Source file, revision and import lifecycle.
 | GET | `/api/v1/shared/imports/{import}/art/{resource}` | Fetch an advertised signed recipient art alias after current account, import and Source-scope checks; no arbitrary Source URL is accepted. |
 | POST | `/api/v1/shared/imports/{import}/files/{locator}/decision` | Negotiate the complete existing decision DTO from runtime v2 capabilities, a signed file locator and current account/import/Source authority. The request body is bounded to 128 KiB. |
 | POST | `/api/v1/shared/imports/{import}/files/{locator}/hls/sessions` | Start Shared HLS playback through B's receiver actor from the ordinary `CreateSession` body (at most 128 KiB, initial play/resume only). The answer is the ordinary Start envelope with B's own session, playlist and control URLs; the session then serves `/api/v1/hls/{session}/…`, `status` (the Shared grammar) and `control` (current rendition only). |
-| POST | `/api/v1/shared/imports/{import}/files/{locator}/playback` | The same Shared Start, at the typed playback alias. |
+| POST | `/api/v1/shared/imports/{import}/files/{locator}/playback` | The same Shared Start, at the typed playback alias. With `"presentation":"direct"` in the `CreateSession` body the Source recomputes the decision with the real caps and admits only direct play; the answer is `{presentation:"direct", session_id, url, length, mime}` where `url` is `{file_base}/direct?session=<B session>`. |
+| GET/HEAD | `/api/v1/shared/imports/{import}/files/{locator}/direct` | Shared direct-play bytes. Requires exactly one `session=<B session>` query naming a live direct session bound to this file alias, login and delivery grant; account headers are optional and, when present, must name the session's viewer. Range, If-Range, 206 and 416 behave exactly as `/api/v1/files/{id}/direct`. Never admits a session; an unknown session is 404, a missing one 400. |
 
 Captured recipient scope is revalidated through accepted metadata and
 decision bodies; content fetched from a Source also retains its Source-scope

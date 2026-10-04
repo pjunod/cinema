@@ -926,3 +926,330 @@ async fn b_request(
     let _ = driver.await;
     (parts.status, parts.headers, bytes)
 }
+
+#[tokio::test]
+#[ignore = "requires an isolated Linux CGNAT namespace and PLURX_SHARING_FIXTURE_IP"]
+async fn sharing_receiver_real_pinned_source_direct_range_head_through_b() {
+    let address: IpAddr = std::env::var("PLURX_SHARING_FIXTURE_IP")
+        .expect("explicit disposable CGNAT namespace")
+        .parse()
+        .expect("fixture IP");
+    assert!(plurx_core::sharing::is_tailnet_address(address));
+    for h2 in [false, true] {
+        tokio::time::timeout(
+            std::time::Duration::from_secs(330),
+            Box::pin(actual_pinned_direct(address, h2)),
+        )
+        .await
+        .expect("bounded real direct fixture");
+    }
+}
+
+/// Direct play through the real pinned B: one authenticated Start, then GET,
+/// HEAD, Range, 416 and If-Range relayed with Local's exact answers, all on
+/// one Source claim; foreign and missing bindings refused; logout ends an
+/// open body.
+async fn actual_pinned_direct(address: IpAddr, h2: bool) {
+    use axum::http::StatusCode;
+    use plurx_core::sharing_tls::{LiveNodeTls, SharingTlsListener};
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    let fixture = real_receiver_fixture(address, SourceFixtureMode::Direct).await;
+    let tls = Arc::new(
+        LiveNodeTls::open(
+            &fixture.directory().join("source-runtime-tls"),
+            crate::state::clock_ms() / 1000,
+        )
+        .expect("actual Source runtime TLS"),
+    );
+    let (pin, _) = tls.status().expect("actual Source runtime SPKI");
+    let source_listener = tokio::net::TcpListener::bind((address, 0))
+        .await
+        .expect("actual Source CGNAT listener");
+    let endpoint = Endpoint {
+        ipv4: match address {
+            IpAddr::V4(ip) => ip,
+            _ => panic!("IPv4 CGNAT fixture"),
+        },
+        ipv6: None,
+        ts_fqdn: "source.fixture.ts.net".into(),
+        port: source_listener.local_addr().expect("Source bind").port(),
+        spki_sha256: pin,
+    };
+    let source_starts = Arc::new(AtomicUsize::new(0));
+    let observed_starts = source_starts.clone();
+    // Armed only for the logout phase: parks the Source's next physical read.
+    let gate = Arc::new(super::shared_source_playback::SourceReadJobGate::default());
+    let armed = Arc::new(AtomicBool::new(false));
+    let (layer_gate, layer_armed) = (gate.clone(), armed.clone());
+    let source_app = super::sharing::peer_router((*fixture.source.state).clone()).layer(
+        axum::middleware::from_fn(
+            move |mut request: Request<Body>, next: axum::middleware::Next| {
+                let starts = observed_starts.clone();
+                let gate = layer_gate.clone();
+                let armed = layer_armed.clone();
+                async move {
+                    if request.method() == axum::http::Method::POST
+                        && request.uri().path().ends_with("/sessions")
+                    {
+                        starts.fetch_add(1, Ordering::Relaxed);
+                    }
+                    if armed.load(Ordering::SeqCst) {
+                        request.extensions_mut().insert(gate);
+                    }
+                    next.run(request).await
+                }
+            },
+        ),
+    );
+    let (source_stop, source_stopped) = tokio::sync::oneshot::channel();
+    let source_task = tokio::spawn(crate::serve_http(
+        SharingTlsListener::new(source_listener, tls),
+        source_app,
+        async move {
+            let _ = source_stopped.await;
+        },
+        crate::HTTP_TIMEOUTS,
+    ));
+    fixture.pair(endpoint).await;
+    let b_listener = tokio::net::TcpListener::bind((address, 0))
+        .await
+        .expect("actual B CGNAT listener");
+    let b_address = b_listener.local_addr().expect("B bind");
+    let (b_stop, b_stopped) = tokio::sync::oneshot::channel();
+    let b_task = tokio::spawn(crate::serve_http(
+        b_listener,
+        fixture_router(fixture.state.clone()),
+        async move {
+            let _ = b_stopped.await;
+        },
+        crate::HTTP_TIMEOUTS,
+    ));
+    let (status, _, bytes) = b_request(
+        b_address,
+        h2,
+        "GET",
+        &format!(
+            "/api/v1/shared/imports/{}/items/{}",
+            fixture.import_id,
+            fixture.source.reference.item_id.as_str(),
+        ),
+        &fixture.original_login,
+        Vec::new(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "actual details; H2={h2}");
+    let details: Value = serde_json::from_slice(&bytes).expect("details");
+    let base = details["files"][0]["file_base"]
+        .as_str()
+        .expect("signed B file alias")
+        .to_owned();
+    let original: Value = serde_json::from_slice(&fixture.source.request).expect("recipe");
+    let (status, _, bytes) = b_request(
+        b_address,
+        h2,
+        "POST",
+        &format!("{base}/playback"),
+        &fixture.original_login,
+        serde_json::to_vec(&original["session"]).expect("CreateSession"),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "direct Start; H2={h2}: {}",
+        String::from_utf8_lossy(&bytes)
+    );
+    let start: Value = serde_json::from_slice(&bytes).expect("direct reply");
+    assert_eq!(start["presentation"], "direct");
+    assert_eq!(start["mime"], "video/mp4");
+    let session = start["session_id"].as_str().expect("B session").to_owned();
+    let url = start["url"].as_str().expect("direct URL").to_owned();
+    assert_eq!(url, format!("{base}/direct?session={session}"));
+    assert!(!String::from_utf8_lossy(&bytes).contains("sharing/v1"));
+    let snapshot = fixture
+        .source
+        .state
+        .store
+        .playback_planning_snapshot(1, &crate::transcode::QUALITY_PLANNING_KEYS)
+        .await
+        .expect("Source planning read")
+        .expect("Source file");
+    let len = snapshot.file.size as u64;
+    assert_eq!(start["length"].as_u64(), Some(len));
+    for (method, range, if_range) in [
+        ("GET", None, false),
+        ("HEAD", None, false),
+        ("GET", Some("bytes=2-40".to_owned()), false),
+        ("GET", Some("bytes=-7".to_owned()), false),
+        ("GET", Some(format!("bytes={len}-")), false),
+        ("HEAD", Some("bytes=2-40".to_owned()), false),
+        ("GET", Some("bytes=2-40".to_owned()), true),
+        ("GET", Some("bytes=2-40".to_owned()), false),
+    ] {
+        let mut headers = vec![];
+        let mut local_headers = axum::http::HeaderMap::new();
+        if let Some(range) = &range {
+            headers.push(("range", range.clone()));
+            local_headers.insert("range", range.parse().expect("range"));
+        }
+        if if_range {
+            headers.push(("if-range", "\"anything\"".to_owned()));
+            local_headers.insert("if-range", "\"anything\"".parse().expect("if-range"));
+        }
+        // Native players send no account header: the B session binds.
+        let (status, response_headers, bytes) =
+            b_raw_request(b_address, h2, method, &url, &headers, Vec::new()).await;
+        let local = crate::http::stream::serve_file_range(
+            &snapshot.file.path,
+            &local_headers,
+            &method.parse().expect("method"),
+            Some(len),
+        )
+        .await
+        .expect("Local answer");
+        let label = format!("{method} {range:?} if_range={if_range} H2={h2}");
+        assert_eq!(status, local.status(), "{label}");
+        for name in [
+            "content-type",
+            "accept-ranges",
+            "content-range",
+            "content-length",
+        ] {
+            assert_eq!(
+                response_headers.get(name),
+                local.headers().get(name),
+                "{label} {name}"
+            );
+        }
+        assert_eq!(response_headers["cache-control"], "no-store");
+        let local = axum::body::to_bytes(local.into_body(), 4 * 1024 * 1024)
+            .await
+            .expect("Local bytes");
+        assert_eq!(bytes, local, "{label}");
+    }
+    // Repeated byte requests never create another Source producer.
+    assert_eq!(source_starts.load(Ordering::Relaxed), 1, "H2={h2}");
+    let foreign = format!("{base}/direct?session={}", Uuid::new_v4());
+    let (status, _, _) = b_raw_request(b_address, h2, "GET", &foreign, &[], Vec::new()).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    let (status, _, _) = b_raw_request(
+        b_address,
+        h2,
+        "HEAD",
+        &format!("{base}/direct"),
+        &[("range", "bytes=0-1".into())],
+        Vec::new(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    let (status, _, _) = b_raw_request(
+        b_address,
+        h2,
+        "GET",
+        &format!("/api/v1/hls/{session}/index.m3u8"),
+        &[],
+        Vec::new(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+    assert_eq!(source_starts.load(Ordering::Relaxed), 1);
+    // Logout ends an open body: park the Source read, then revoke the login.
+    armed.store(true, Ordering::SeqCst);
+    let body_url = url.clone();
+    let open = tokio::spawn(async move {
+        b_raw_request(b_address, h2, "GET", &body_url, &[], Vec::new()).await
+    });
+    tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        while !gate.entered.load(Ordering::SeqCst) {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("open body reached the parked Source read");
+    let (status, _, _) = b_request(
+        b_address,
+        h2,
+        "POST",
+        "/api/v1/auth/logout",
+        &fixture.original_login,
+        Vec::new(),
+    )
+    .await;
+    assert!(status.is_success(), "logout; H2={h2}");
+    let ended = tokio::time::timeout(std::time::Duration::from_secs(10), open).await;
+    gate.release();
+    let ended = ended
+        .expect("logout ended the open body")
+        .expect("reader task");
+    assert!(
+        ended.0 != StatusCode::OK || ended.2.len() as u64 != len,
+        "a revoked login never completes the body; H2={h2}"
+    );
+    let (status, _, _) = b_raw_request(b_address, h2, "GET", &url, &[], Vec::new()).await;
+    assert_ne!(status, StatusCode::OK);
+    let _ = b_stop.send(());
+    b_task.await.expect("B joined").expect("B result");
+    let _ = source_stop.send(());
+    source_task
+        .await
+        .expect("Source joined")
+        .expect("Source result");
+    fixture.shutdown().await;
+}
+
+/// A B request with exactly the given headers and no account credential.
+/// A body error after the head is reported as an empty body, so a revoked
+/// relay is observable as an incomplete answer.
+async fn b_raw_request(
+    address: std::net::SocketAddr,
+    h2: bool,
+    method: &str,
+    path: &str,
+    headers: &[(&str, String)],
+    body: Vec<u8>,
+) -> (
+    axum::http::StatusCode,
+    axum::http::HeaderMap,
+    axum::body::Bytes,
+) {
+    use http_body_util::BodyExt;
+    let socket = tokio::net::TcpStream::connect(address)
+        .await
+        .expect("actual B socket");
+    let mut request = Request::builder()
+        .method(method)
+        .uri(format!("http://{address}{path}"));
+    for (name, value) in headers {
+        request = request.header(*name, value);
+    }
+    let request = request.body(Body::from(body)).expect("actual B request");
+    let (response, driver) = if h2 {
+        let (mut sender, driver) =
+            hyper::client::conn::http2::Builder::new(hyper_util::rt::TokioExecutor::new())
+                .handshake::<_, Body>(hyper_util::rt::TokioIo::new(socket))
+                .await
+                .expect("actual B H2");
+        let driver = tokio::spawn(driver);
+        let response = sender.send_request(request).await.expect("B H2 response");
+        drop(sender);
+        (response, driver)
+    } else {
+        let (mut sender, driver) =
+            hyper::client::conn::http1::handshake::<_, Body>(hyper_util::rt::TokioIo::new(socket))
+                .await
+                .expect("actual B H1");
+        let driver = tokio::spawn(driver);
+        let response = sender.send_request(request).await.expect("B H1 response");
+        drop(sender);
+        (response, driver)
+    };
+    let (parts, body) = response.into_parts();
+    let bytes = http_body_util::Limited::new(body, 4 * 1024 * 1024)
+        .collect()
+        .await
+        .map(|collected| collected.to_bytes())
+        .unwrap_or_default();
+    driver.abort();
+    let _ = driver.await;
+    (parts.status, parts.headers, bytes)
+}

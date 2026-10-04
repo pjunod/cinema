@@ -24,7 +24,7 @@ use uuid::Uuid;
 #[path = "sharing_playback_client.rs"]
 mod playback;
 pub(crate) use playback::{
-    CleanupPeerConnection, SharedVodStatus, SourceEndReceipt, SourcePeerLineage,
+    CleanupPeerConnection, SharedVodStatus, SourceEndReceipt, SourcePeerDirect, SourcePeerLineage,
     SourcePeerResource, SourcePeerSession, SourceStatusReceipt,
 };
 
@@ -549,9 +549,16 @@ impl PeerConnection {
         expected: &crate::http::hls::SourcePlaybackTarget,
         viewer_hash: &str,
         request_json: &str,
-    ) -> Result<crate::http::DecodedSourceHlsStart, PeerError> {
+    ) -> Result<crate::http::sharing_direct_wire::DecodedSourceStart, PeerError> {
         crate::http::validate_source_start_request(request_json.as_bytes(), expected)
             .map_err(|_| PeerError::InvalidResponse)?;
+        // B decodes only the presentation its own canonical request names.
+        let direct = serde_json::from_str::<serde_json::Value>(request_json)
+            .ok()
+            .and_then(|value| value.get("session").cloned())
+            .is_some_and(|session| {
+                crate::http::sharing_direct_wire::session_presentation_is_direct(&session)
+            });
         if viewer_hash.len() != 64
             || !viewer_hash
                 .bytes()
@@ -614,7 +621,7 @@ impl PeerConnection {
             if !status.is_success() {
                 return Err(PeerError::Rejected(status));
             }
-            crate::http::decode_source_start_response(&bytes, expected)
+            crate::http::sharing_direct_wire::decode_source_start(&bytes, expected, direct)
                 .map_err(|_| PeerError::InvalidResponse)
         })
         .await

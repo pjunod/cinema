@@ -574,7 +574,9 @@ mod tests {
                                 .file_start(&credential, &expected, &"a".repeat(64), &canonical)
                                 .await
                             {
-                                Ok(decoded) => {
+                                Ok(crate::http::sharing_direct_wire::DecodedSourceStart::Hls(
+                                    decoded,
+                                )) => {
                                     assert!(decoded.reference() == &expected);
                                     assert_eq!(
                                         serde_json::to_value(decoded.response())
@@ -583,7 +585,7 @@ mod tests {
                                     );
                                     StatusCode::OK
                                 }
-                                Err(_) => StatusCode::BAD_GATEWAY,
+                                Ok(_) | Err(_) => StatusCode::BAD_GATEWAY,
                             }
                         }
                     }

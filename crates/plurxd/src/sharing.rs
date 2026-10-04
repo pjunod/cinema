@@ -104,7 +104,7 @@ pub(crate) struct ReceiverSourceStartResult {
     pub credential: plurx_core::secrets::Secret,
     pub viewer_hash: String,
     pub endpoint: plurx_core::sharing::Endpoint,
-    pub source: crate::http::DecodedSourceHlsStart,
+    pub source: crate::http::sharing_direct_wire::DecodedSourceStart,
 }
 pub(crate) async fn enabled(store: &dyn Store) -> Result<bool, StoreError> {
     let result = tokio::time::timeout(

@@ -102,6 +102,9 @@ pub(crate) mod status;
 #[path = "source_resource.rs"]
 pub(crate) mod resource;
 
+#[path = "source_direct.rs"]
+pub(crate) mod direct;
+
 use plurx_core::{
     domain::{
         MediaSessionActivation, MediaSessionEnd, MediaSessionRenewal, MediaSessionRoute,
@@ -163,6 +166,9 @@ struct SourceViewerInner {
     assignment: SourceDispatchAssignment,
     manager: std::sync::Weak<TranscodeManager>,
     gate: Arc<SourceProducerAuthority>,
+    /// Present only for a direct-play owner: the fenced file it serves. Such
+    /// an owner has no producer and never publishes an HLS Start.
+    direct: Option<Arc<direct::SourceDirectFile>>,
     state: std::sync::Mutex<SourceViewerState>,
     changed: tokio::sync::Notify,
 }
@@ -204,6 +210,11 @@ struct SourceViewerState {
     finished: bool,
     bodies: usize,
     planned_session: Option<String>,
+    /// A direct owner's published session, in place of `start`.
+    direct_start:
+        Option<Result<crate::http::sharing_direct_wire::SourceDirectStart, SourceWorkerError>>,
+    /// The last admitted direct byte open; status never moves it.
+    direct_activity: Option<Instant>,
 }
 
 /// A waiter for one actual registered owner. Dropping this value cannot cancel
@@ -282,6 +293,10 @@ impl SourceViewerActor {
         &self,
         deadline: Instant,
     ) -> Result<crate::http::hls::StartResponse, SourceWorkerError> {
+        // A direct owner has no HLS Start, status, control or resources.
+        if self.0.direct.is_some() {
+            return Err(SourceWorkerError::Unsupported);
+        }
         loop {
             let notification = self.0.changed.notified();
             tokio::pin!(notification);
@@ -412,6 +427,9 @@ impl SourceViewerActor {
     ) -> Result<SourceOpenedResource, SourceWorkerError> {
         if Instant::now() >= deadline {
             return Err(SourceWorkerError::Deadline);
+        }
+        if self.0.direct.is_some() {
+            return Err(SourceWorkerError::Unsupported);
         }
         let native = self
             .0
@@ -855,6 +873,7 @@ impl TranscodeManager {
                 membership: state.membership.clone(),
                 master: Arc::clone(&state.sharing.key),
             }),
+            direct: None,
             state: std::sync::Mutex::new(SourceViewerState {
                 start: None,
                 retirement_requested: false,
@@ -863,6 +882,8 @@ impl TranscodeManager {
                 bodies: 0,
                 planned_session: None,
                 native: None,
+                direct_start: None,
+                direct_activity: None,
             }),
             changed: tokio::sync::Notify::new(),
         });
@@ -1369,6 +1390,20 @@ impl TranscodeManager {
             work.cancel();
             preparations.native = Some(work.settle().await);
         }
+        self.finish_source_owner(&owner, shutdown, unowned_existing, reserved, preparations)
+            .await;
+    }
+    /// Settle a stopped Source owner, VOD or direct: release its physical
+    /// producer (if any) and its row through the bounded detached retry, then
+    /// leave the registry. The owner is finished on every exit.
+    async fn finish_source_owner(
+        &self,
+        owner: &Arc<SourceViewerInner>,
+        shutdown: tokio_util::sync::CancellationToken,
+        unowned_existing: bool,
+        mut reserved: Option<crate::vodserve::ReservedSourceVodRendition>,
+        mut preparations: SourcePreparationSettlements,
+    ) {
         let mut physical = None;
         let mut attempts = 0;
         let settlement = loop {
@@ -1378,7 +1413,7 @@ impl TranscodeManager {
                 Err(SourceSettlementFault::Mismatch)
             } else {
                 Box::pin(self.settle_source_owner(
-                    &owner,
+                    owner,
                     &mut reserved,
                     &mut physical,
                     &mut preparations,
@@ -1417,7 +1452,7 @@ impl TranscodeManager {
             .entries
             .lock()
             .expect("Source workers")
-            .retain(|entry| !Arc::ptr_eq(entry, &owner));
+            .retain(|entry| !Arc::ptr_eq(entry, owner));
         {
             let mut current = owner.state.lock().expect("Source worker state");
             current.settled = Some(settlement.map_err(|_| SourceWorkerError::Unresolved));
