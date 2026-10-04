@@ -346,7 +346,8 @@ pub(super) const LOCAL_MEDIA_BODY_CHANNEL_CAPACITY: usize = 1;
 
 pub(super) struct DrivenLocalChunk {
     pub(super) bytes: Bytes,
-    pub(super) accepted: tokio::sync::oneshot::Sender<()>,
+    /// Cumulative bytes taken by body polls within this storage read.
+    pub(super) accepted: tokio::sync::watch::Sender<usize>,
 }
 
 #[derive(Clone)]
@@ -394,13 +395,19 @@ pub(super) fn driven_local_body(
     body_deadline: tokio::time::Instant,
 ) -> Body {
     let stream = futures_util::stream::unfold(
-        (receiver, terminal, body_deadline, false),
-        |(mut receiver, terminal, body_deadline, finished)| async move {
+        (
+            receiver,
+            terminal,
+            body_deadline,
+            false,
+            None::<(DrivenLocalChunk, usize)>,
+        ),
+        |(mut receiver, terminal, body_deadline, finished, mut pending)| async move {
             if finished {
                 return None;
             }
             if let Some(error) = terminal.take_error() {
-                return Some((Err(error), (receiver, terminal, body_deadline, true)));
+                return Some((Err(error), (receiver, terminal, body_deadline, true, None)));
             }
             if tokio::time::Instant::now() >= body_deadline {
                 return Some((
@@ -408,37 +415,38 @@ pub(super) fn driven_local_body(
                         std::io::ErrorKind::TimedOut,
                         "media response exceeded its maximum admitted body lifetime",
                     )),
-                    (receiver, terminal, body_deadline, true),
+                    (receiver, terminal, body_deadline, true, None),
                 ));
             }
-            let chunk = tokio::select! {
-                biased;
-                _ = tokio::time::sleep_until(body_deadline) => {
-                    return Some((
-                        Err(std::io::Error::new(
-                            std::io::ErrorKind::TimedOut,
-                            "media response exceeded its maximum admitted body lifetime",
-                        )),
-                        (receiver, terminal, body_deadline, true),
-                    ));
-                }
-                () = terminal.signal.cancelled() => {
-                    let error = terminal
-                        .take_error()
-                        .unwrap_or_else(|| std::io::Error::other("media response producer failed"));
-                    return Some((Err(error), (receiver, terminal, body_deadline, true)));
-                }
-                chunk = receiver.recv() => chunk,
-            };
-            let Some(chunk) = chunk else {
-                if let Some(error) = terminal.take_error() {
-                    return Some((Err(error), (receiver, terminal, body_deadline, true)));
-                }
-                return None;
-            };
-            // Recheck both fences after wakeup and before acknowledging this
-            // exact chunk. If timeout/failure won concurrently with recv, the
-            // ack sender drops, so the pump cannot count or commit the bytes.
+            if pending.is_none() {
+                let chunk = tokio::select! {
+                    biased;
+                    _ = tokio::time::sleep_until(body_deadline) => {
+                        return Some((
+                            Err(std::io::Error::new(
+                                std::io::ErrorKind::TimedOut,
+                                "media response exceeded its maximum admitted body lifetime",
+                            )),
+                            (receiver, terminal, body_deadline, true, None),
+                        ));
+                    }
+                    () = terminal.signal.cancelled() => {
+                        let error = terminal.take_error().unwrap_or_else(||
+                            std::io::Error::other("media response producer failed"));
+                        return Some((Err(error), (receiver, terminal, body_deadline, true, None)));
+                    }
+                    chunk = receiver.recv() => chunk,
+                };
+                let Some(chunk) = chunk else {
+                    if let Some(error) = terminal.take_error() {
+                        return Some((Err(error), (receiver, terminal, body_deadline, true, None)));
+                    }
+                    return None;
+                };
+                pending = Some((chunk, 0));
+            }
+            // Check every poll, including pieces retained from an earlier read.
+            // A storage batch never broadens downstream delivery proof.
             if tokio::time::Instant::now() >= body_deadline || terminal.signal.is_cancelled() {
                 let error = terminal.take_error().unwrap_or_else(|| {
                     std::io::Error::new(
@@ -446,10 +454,19 @@ pub(super) fn driven_local_body(
                         "media response exceeded its maximum admitted body lifetime",
                     )
                 });
-                return Some((Err(error), (receiver, terminal, body_deadline, true)));
+                return Some((Err(error), (receiver, terminal, body_deadline, true, None)));
             }
-            let _ = chunk.accepted.send(());
-            Some((Ok(chunk.bytes), (receiver, terminal, body_deadline, false)))
+            let (mut chunk, mut accepted) = pending.take().expect("received storage batch");
+            let piece = chunk
+                .bytes
+                .split_to(chunk.bytes.len().min(MEDIA_BODY_ACK_GRANULARITY));
+            accepted += piece.len();
+            chunk.accepted.send_replace(accepted);
+            let pending = (!chunk.bytes.is_empty()).then_some((chunk, accepted));
+            Some((
+                Ok(piece),
+                (receiver, terminal, body_deadline, false, pending),
+            ))
         },
     );
     Body::from_stream(stream)

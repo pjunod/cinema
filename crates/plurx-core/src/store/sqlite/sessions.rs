@@ -2873,6 +2873,11 @@ impl MediaSessionStore for SqliteStore {
         .await
     }
 
+    // A starting request with a BLOCKED route still belongs to activation,
+    // even when its admission claim outlives the initial media lease. Otherwise
+    // inventory can admit it just before confirmation shortens that claim,
+    // and renewal interprets the resulting rejection as ownership loss.
+    // Confirmed finite handoffs must remain renewable while projection settles.
     async fn renew_media_sessions(
         &self,
         owner_node_id: &str,
@@ -2930,7 +2935,8 @@ impl MediaSessionStore for SqliteStore {
                               WHERE request.user_id = media_sessions.user_id
                                 AND request.incarnation_id = media_sessions.incarnation_id
                                 AND request.state = 'starting'
-                                AND request.claim_expires_at_ms <= media_sessions.lease_expires_at_ms))",
+                                AND (media_sessions.publication_ready_at_ms = ?7
+                                  OR request.claim_expires_at_ms <= media_sessions.lease_expires_at_ms)))",
                     params![
                         lease_expires_at_ms,
                         now_ms,
@@ -2959,7 +2965,8 @@ impl MediaSessionStore for SqliteStore {
                           WHERE request.user_id = media_sessions.user_id
                             AND request.incarnation_id = media_sessions.incarnation_id
                             AND request.state = 'starting'
-                            AND request.claim_expires_at_ms <= media_sessions.lease_expires_at_ms)
+                            AND (media_sessions.publication_ready_at_ms = ?10
+                              OR request.claim_expires_at_ms <= media_sessions.lease_expires_at_ms))
                         AND EXISTS (SELECT 1 FROM job_leases
                           WHERE resource = ?6 AND owner_node_id = ?4 AND fence = ?5
                             AND expires_at_ms = ?1)",
@@ -3006,7 +3013,8 @@ impl MediaSessionStore for SqliteStore {
                                      WHERE request.user_id = session.user_id
                                        AND request.incarnation_id = session.incarnation_id
                                        AND request.state = 'starting'
-                                       AND request.claim_expires_at_ms <= session.lease_expires_at_ms))",
+                                       AND (session.publication_ready_at_ms = ?6
+                                         OR request.claim_expires_at_ms <= session.lease_expires_at_ms)))",
                         params![
                             lease_expires_at_ms,
                             renewal.incarnation_id,
@@ -3465,6 +3473,12 @@ impl MediaSessionStore for SqliteStore {
             let failed_cutoff = now_ms.saturating_sub(FAILED_RETENTION_MS);
             let retained_cutoff = now_ms.saturating_sub(RESOLVED_RETENTION_MS);
             let retire_before = now_ms.saturating_sub(TAKEOVER_RECOVERY_MS);
+            // Compiling a media_sessions UPDATE expands its trigger graph even
+            // when no row qualifies. Claims run this cleanup before admission;
+            // concurrent cold starts must not spend their budget compiling
+            // three no-op updates. Check their candidates in this same
+            // transaction, preserving the cleanup order and original writes.
+
             // A preparation expires on **its own deadline**, and this is the
             // durable thing that enforces it. (It said "the only thing" until
             // 2026-09-08; `arm_preparation_deadline` in `http/hls.rs` also
@@ -3488,15 +3502,21 @@ impl MediaSessionStore for SqliteStore {
             // because that column *is* the contract: the owner wrote it, the
             // owner cannot renew past it, and a successor still wanted at that
             // moment has been committed already — commit deletes this row.
-            tx.execute(
-                "UPDATE media_sessions SET state = 'ended', terminal_reason = 'replaced', lease_expires_at_ms = ?1,
-                        publication_ready_at_ms = ?3, updated_at_ms = ?1
-                  WHERE incarnation_id IN (
-                    SELECT staged.staged_incarnation_id FROM media_session_preparations staged
-                     WHERE staged.deadline_ms <= ?1
-                     ORDER BY staged.deadline_ms, staged.staged_incarnation_id LIMIT ?2)",
-                params![now_ms, MAINTENANCE_BATCH, MEDIA_SESSION_PUBLICATION_BLOCKED],
-            )?;
+            if tx.query_row(
+                "SELECT EXISTS(SELECT 1 FROM media_session_preparations WHERE deadline_ms <= ?1)",
+                params![now_ms],
+                |row| row.get::<_, bool>(0),
+            )? {
+                tx.execute(
+                    "UPDATE media_sessions SET state = 'ended', terminal_reason = 'replaced', lease_expires_at_ms = ?1,
+                            publication_ready_at_ms = ?3, updated_at_ms = ?1
+                      WHERE incarnation_id IN (
+                        SELECT staged.staged_incarnation_id FROM media_session_preparations staged
+                         WHERE staged.deadline_ms <= ?1
+                         ORDER BY staged.deadline_ms, staged.staged_incarnation_id LIMIT ?2)",
+                    params![now_ms, MAINTENANCE_BATCH, MEDIA_SESSION_PUBLICATION_BLOCKED],
+                )?;
+            }
             // The cross-node backstop for a drain. The owner ends its own
             // draining rows on the three-second tick it already runs, so this
             // is only reached when that node stopped running — and then
@@ -3509,31 +3529,46 @@ impl MediaSessionStore for SqliteStore {
             // `superseded` because that is what happened: the successor took
             // the pointer. The same cause the owner's own end writes, so a
             // client cannot tell which of the two got there first.
-            tx.execute(
-                "UPDATE media_sessions SET state = 'ended', terminal_reason = 'superseded',
-                        lease_expires_at_ms = ?1, publication_ready_at_ms = ?3,
-                        updated_at_ms = ?1
-                  WHERE incarnation_id IN (
-                    SELECT incarnation_id FROM media_sessions
-                     WHERE state = 'active' AND drain_deadline_ms IS NOT NULL
-                       AND drain_deadline_ms <= ?1
-                     ORDER BY drain_deadline_ms, incarnation_id LIMIT ?2)",
-                params![now_ms, MAINTENANCE_BATCH, MEDIA_SESSION_PUBLICATION_BLOCKED],
-            )?;
-            tx.execute(
-                "UPDATE media_sessions SET state = 'ended', terminal_reason = 'replaced', lease_expires_at_ms = ?1,
-                        publication_ready_at_ms = ?4, updated_at_ms = ?1
-                  WHERE incarnation_id IN (
-                    SELECT incarnation_id FROM media_sessions
-                     WHERE state = 'active' AND lease_expires_at_ms <= ?3
-                     ORDER BY lease_expires_at_ms, incarnation_id LIMIT ?2)",
-                params![
-                    now_ms,
-                    MAINTENANCE_BATCH,
-                    retire_before,
-                    MEDIA_SESSION_PUBLICATION_BLOCKED,
-                ],
-            )?;
+            if tx.query_row(
+                "SELECT EXISTS(SELECT 1 FROM media_sessions
+                      WHERE state = 'active' AND drain_deadline_ms IS NOT NULL
+                        AND drain_deadline_ms <= ?1)",
+                params![now_ms],
+                |row| row.get::<_, bool>(0),
+            )? {
+                tx.execute(
+                    "UPDATE media_sessions SET state = 'ended', terminal_reason = 'superseded',
+                            lease_expires_at_ms = ?1, publication_ready_at_ms = ?3,
+                            updated_at_ms = ?1
+                      WHERE incarnation_id IN (
+                        SELECT incarnation_id FROM media_sessions
+                         WHERE state = 'active' AND drain_deadline_ms IS NOT NULL
+                           AND drain_deadline_ms <= ?1
+                         ORDER BY drain_deadline_ms, incarnation_id LIMIT ?2)",
+                    params![now_ms, MAINTENANCE_BATCH, MEDIA_SESSION_PUBLICATION_BLOCKED],
+                )?;
+            }
+            if tx.query_row(
+                "SELECT EXISTS(SELECT 1 FROM media_sessions
+                      WHERE state = 'active' AND lease_expires_at_ms <= ?1)",
+                params![retire_before],
+                |row| row.get::<_, bool>(0),
+            )? {
+                tx.execute(
+                    "UPDATE media_sessions SET state = 'ended', terminal_reason = 'replaced', lease_expires_at_ms = ?1,
+                            publication_ready_at_ms = ?4, updated_at_ms = ?1
+                      WHERE incarnation_id IN (
+                        SELECT incarnation_id FROM media_sessions
+                         WHERE state = 'active' AND lease_expires_at_ms <= ?3
+                         ORDER BY lease_expires_at_ms, incarnation_id LIMIT ?2)",
+                    params![
+                        now_ms,
+                        MAINTENANCE_BATCH,
+                        retire_before,
+                        MEDIA_SESSION_PUBLICATION_BLOCKED,
+                    ],
+                )?;
+            }
             tx.execute(
                 "DELETE FROM cache_consumer_pins
                   WHERE consumer_kind = 'media_session'
@@ -3681,7 +3716,8 @@ impl MediaSessionStore for SqliteStore {
                       WHERE request.user_id = media_sessions.user_id
                         AND request.incarnation_id = media_sessions.incarnation_id
                         AND request.state = 'starting'
-                        AND request.claim_expires_at_ms <= media_sessions.lease_expires_at_ms)
+                        AND (media_sessions.publication_ready_at_ms = ?4
+                          OR request.claim_expires_at_ms <= media_sessions.lease_expires_at_ms))
                   ORDER BY updated_at_ms, incarnation_id LIMIT ?3",
             )?;
             let leases = statement
@@ -3953,4 +3989,85 @@ fn read_recovery_row(
         updated_at_ms,
     )
     .map(Some)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn idle_session_maintenance_skips_updates_but_still_retires_expired_sessions() {
+        use rusqlite::trace::{TraceEvent, TraceEventCodes};
+        use std::sync::{LazyLock, Mutex};
+
+        // Only this fixture's connection installs the callback, so other
+        // concurrent tests cannot contribute statements to this log.
+        static UPDATES: LazyLock<Mutex<Vec<String>>> = LazyLock::new(|| Mutex::new(Vec::new()));
+        fn record(event: TraceEvent<'_>) {
+            if let TraceEvent::Stmt(_, sql) = event {
+                if sql.starts_with("UPDATE media_sessions") {
+                    UPDATES.lock().expect("trace log").push(sql.to_owned());
+                }
+            }
+        }
+        async fn measure(store: &SqliteStore, now_ms: i64) -> Vec<String> {
+            UPDATES.lock().expect("trace log").clear();
+            store
+                .conn
+                .lock()
+                .expect("connection")
+                .trace_v2(TraceEventCodes::SQLITE_TRACE_STMT, Some(record));
+            store
+                .maintain_media_sessions(now_ms)
+                .await
+                .expect("maintenance");
+            store
+                .conn
+                .lock()
+                .expect("connection")
+                .trace_v2(TraceEventCodes::SQLITE_TRACE_STMT, None);
+            UPDATES.lock().expect("trace log").clone()
+        }
+
+        let store = SqliteStore::open_in_memory().expect("store");
+        assert!(
+            measure(&store, 1_000).await.is_empty(),
+            "an empty store has no sessions to update"
+        );
+        store
+            .conn
+            .lock()
+            .expect("connection")
+            .execute(
+                "INSERT INTO media_sessions
+                (incarnation_id, session_id, user_id, playback_id, request_fingerprint,
+                 owner_node_id, owner_epoch, lease_expires_at_ms, state,
+                 recipe_json, response_json, updated_at_ms)
+             VALUES ('incarnation', 'session', 1, 'player', 'fingerprint',
+                     'owner', 1, 2000, 'active', '{}', '{}', 1000)",
+                [],
+            )
+            .expect("live session");
+        assert!(
+            measure(&store, 1_000).await.is_empty(),
+            "a current session needs no retirement update"
+        );
+
+        let updates = measure(&store, 2_000 + TAKEOVER_RECOVERY_MS).await;
+        assert!(
+            !updates.is_empty(),
+            "the eligibility check must not suppress due retirement"
+        );
+        let state: String = store
+            .conn
+            .lock()
+            .expect("connection")
+            .query_row(
+                "SELECT state FROM media_sessions WHERE incarnation_id = 'incarnation'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("retained session");
+        assert_eq!(state, "ended");
+    }
 }

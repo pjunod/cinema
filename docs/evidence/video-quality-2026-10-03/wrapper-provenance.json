@@ -1,0 +1,45 @@
+{
+  "source_commit": "bd24f27679faf68bf8815915b488a3e7ac2e7461",
+  "merge_base_commit": "3197d0c58c079e485667da20e949f7275cb92cb9",
+  "original_workflow": ".github/workflows/main-fast-lane.yml",
+  "original_workflow_sha256": "91545ce13ad41e39863fa25197c22cb815d668916a699dfc6efe3cf03d4d3cd8",
+  "copied_jobs": [
+    "rust_compile",
+    "windows_compile",
+    "web_compile"
+  ],
+  "original_job_blocks_sha256": {
+    "rust_compile": "ef1952cee3c6adc1c93e11f3bd36644f731aa23f387571fda957c7c2a34f7a66",
+    "windows_compile": "2b676c9c3e8ec989657124fa61226fafe1686e3251ac0534735baa9c7a193de3",
+    "web_compile": "3349ae9c596e53d415ce74cf8e8faa43c3e9c7c4cfc651ea41724828691dc744"
+  },
+  "allowed_changes": [
+    "remove job-level needs and if",
+    "pin checkout ref to source commit",
+    "pin web PR_BASE_SHA",
+    "push trigger restricted to disposable branch"
+  ],
+  "wrapper_sha256": "65f8bb6ccb58c89a23d563bfb47d4fd9e653562b7e88cfdbfeec44d99caf4810",
+  "permanent_merge": false,
+  "selective_operations_methods": [
+    "tests.operations.test_contracts.OperationsContractCase.test_ui_baseline_reserves_distinct_http_raft_and_api_ports",
+    "tests.operations.test_ship_status_probe.ShipStatusProbeCase.test_a_node_that_does_not_answer_is_named_not_skipped",
+    "tests.operations.test_ship_status_probe.ShipStatusProbeCase.test_a_ready_node_reports_its_build_and_its_load",
+    "tests.operations.test_ship_status_probe.ShipStatusProbeCase.test_a_split_fleet_is_called_out_rather_than_left_to_be_noticed",
+    "tests.operations.test_ship_status_probe.ShipStatusProbeCase.test_an_unready_node_still_reports_its_build",
+    "tests.operations.test_ship_status_probe.ShipStatusProbeCase.test_one_build_across_the_fleet_raises_nothing",
+    "tests.operations.test_ship_status_probe.ShipStatusProbeCase.test_ready_without_build_metrics_fails_verification",
+    "tests.operations.test_apple_runner_standby.AppleRunnerStandbyTests.test_installer_detects_bare_relative_absolute_and_versioned_daemons",
+    "tests.operations.test_ci_janitor.JanitorContractCase.test_a_docker_that_never_answers_costs_one_pass_and_not_the_janitor"
+  ],
+  "wrapper_commit": "ea687a8f9312a8c7470f37cad2dd6b2bbb49aa15",
+  "forgejo_run_id": 3993,
+  "ui_run_index": 3972,
+  "url": "http://192.168.4.7:3000/noirr/plurx/actions/runs/3972",
+  "jobs": {
+    "rust_compile": 41502,
+    "windows_compile": 41503,
+    "web_compile": 41504,
+    "operations_failed": 41505
+  }
+}

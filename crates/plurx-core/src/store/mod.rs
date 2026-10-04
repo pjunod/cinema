@@ -15,6 +15,10 @@
 //!   value is pending, and the response exposes only the durable state.
 //! - Implementations are shared via `Arc`, never cloned per-request.
 
+/// Application-owned measurement metadata grafted onto a stored FFprobe report.
+/// Source comparisons must omit this member; it is not emitted by FFprobe.
+pub const CONTENT_ENCODING_PROBE_KEY: &str = "plurx_content_encoding";
+
 pub mod classification;
 pub use classification::ClassificationStore;
 mod downloaded_subtitles;
@@ -1809,6 +1813,8 @@ pub mod keys {
     /// Requested rate-control family. Missing/`bitrate` preserves the legacy
     /// VBR path exactly; `quality` is validated against every usable encoder
     /// before an effective snapshot is published.
+    pub const VOD_REORDER_FRAMES: &str = "playback.vod_reorder_frames";
+    pub const CONTENT_AWARE_ENCODING: &str = "transcode.content_aware_encoding";
     pub const TRANSCODE_RATE_MODE: &str = "transcode.rate_mode";
     /// Optional integer quality override. Empty/absent means the calibrated
     /// per-family default; the value matters only when rate mode is quality.
@@ -3270,6 +3276,15 @@ pub trait MediaStore: Send + Sync + 'static {
         size: i64,
         mtime: i64,
         census_json: &str,
+    ) -> Result<bool, StoreError>;
+    /// Persist a bounded, measured encoding result only for the source revision
+    /// that was analyzed. Reprobing replaces the containing JSON and invalidates it.
+    async fn merge_file_probe_content_encoding(
+        &self,
+        file_id: i64,
+        size: i64,
+        mtime: i64,
+        report_json: &str,
     ) -> Result<bool, StoreError>;
     /// Files whose probe never succeeded (`probe_json IS NULL`), oldest scan
     /// first. `library_id` narrows to one library; `None` is server-wide. These

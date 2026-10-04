@@ -1,0 +1,459 @@
+#!/usr/bin/env python3
+"""Bounded SDR sample search; outputs evidence, never changes playback policy.
+
+Requires a built encoder-calibration-args production argument exporter and a
+libvmaf FFmpeg. Only tagged BT.709, square-pixel sources are accepted. The JSON
+is an offline sample recommendation, not full-title or fleet qualification.
+"""
+
+from __future__ import annotations
+
+import argparse
+import hashlib
+import json
+import math
+import os
+from pathlib import Path
+import shutil
+import signal
+import subprocess
+import sys
+import tempfile
+import time
+from fractions import Fraction
+
+
+SCHEMA = 1
+MODEL = "vmaf_v0.6.1"
+MAX_SOURCE_BYTES = 32 * 1024**3
+MAX_SCRATCH_BYTES = 2 * 1024**3
+
+
+class Inconclusive(Exception):
+    pass
+
+
+def finite(value, name, minimum=0, maximum=math.inf):
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise Inconclusive(f"{name} must be a finite number")
+    if not math.isfinite(value) or not minimum <= value <= maximum:
+        raise Inconclusive(f"{name} outside [{minimum}, {maximum}]")
+    return value
+
+
+def digest(value):
+    return hashlib.sha256(json.dumps(value, sort_keys=True, separators=(",", ":"),
+                                     allow_nan=False).encode()).hexdigest()
+
+
+def stat_identity(path):
+    stat = Path(path).stat()
+    return [stat.st_dev, stat.st_ino, stat.st_size, stat.st_mtime_ns, stat.st_ctime_ns]
+
+
+def unchanged(path, expected):
+    if stat_identity(path) != expected:
+        raise Inconclusive("source changed during analysis")
+
+
+def file_hash(path, runner, maximum=MAX_SOURCE_BYTES):
+    before = stat_identity(path)
+    if before[2] > maximum:
+        raise Inconclusive("input exceeds byte ceiling")
+    result = hashlib.sha256()
+    with Path(path).open("rb") as handle:
+        while chunk := handle.read(1024 * 1024):
+            runner.check()
+            result.update(chunk)
+    unchanged(path, before)
+    return result.hexdigest(), before
+
+
+class Runner:
+    """One deadline and scratch allowance, including logs, for the whole run."""
+
+    def __init__(self, root, seconds, scratch_bytes):
+        self.root = Path(root)
+        self.deadline = time.monotonic() + seconds
+        self.scratch_bytes = scratch_bytes
+        self.commands = []
+
+    def check(self):
+        if time.monotonic() >= self.deadline:
+            raise Inconclusive("total wall-clock budget exhausted")
+        if sum(path.stat().st_size for path in self.root.rglob("*")
+               if path.is_file()) > self.scratch_bytes:
+            raise Inconclusive("scratch byte ceiling exceeded")
+
+    def run(self, argv):
+        self.check()
+        argv = [str(value) for value in argv]
+        self.commands.append(argv)
+        output = self.root / ".stdout"
+        errors = self.root / ".stderr"
+        started = time.monotonic()
+        with output.open("wb") as out, errors.open("wb") as err:
+            process = subprocess.Popen(argv, stdout=out, stderr=err,
+                                       cwd=self.root, start_new_session=True)
+            try:
+                while process.poll() is None:
+                    self.check()
+                    time.sleep(0.025)
+                self.check()
+            finally:
+                if process.poll() is None:
+                    os.killpg(process.pid, signal.SIGKILL)
+                process.wait()
+        elapsed = time.monotonic() - started
+        if process.returncode:
+            detail = errors.read_text(errors="replace")[-1600:]
+            raise Inconclusive(f"{Path(argv[0]).name} exited {process.returncode}: {detail}")
+        return output.read_text(errors="replace"), elapsed
+
+
+def windows(duration, count, seconds, fps):
+    finite(duration, "source duration", 0.001)
+    finite(seconds, "window seconds", 0.001, 10)
+    finite(fps, "frame rate", 0.001, 60)
+    if isinstance(count, bool) or not isinstance(count, int) or not 1 <= count <= 3:
+        raise Inconclusive("window count must be 1..3")
+    # Equal cells do not overlap, including short sources. Discard fractional
+    # terminal frames instead of padding a short title into artificial evidence.
+    length = min(seconds, duration / count)
+    frames = math.floor(length * fps + 1e-8)
+    if frames < 2:
+        raise Inconclusive("source too short for requested sample count")
+    length = frames / fps
+    return [{"start_seconds": (index + 0.5) * duration / count - length / 2,
+             "duration_seconds": length, "frames": frames}
+            for index in range(count)]
+
+
+def probe(runner, ffprobe, path, *, count_frames=False):
+    text, _ = runner.run([ffprobe, "-v", "error"] + (["-count_frames"] if count_frames else [])
+                         + ["-select_streams", "v:0",
+                          "-show_streams", "-show_format", "-of", "json", path])
+    data = json.loads(text)
+    if len(data.get("streams", [])) != 1:
+        raise Inconclusive("expected one selected video stream")
+    return data["streams"][0], data.get("format", {})
+
+
+def verify_sample(stream, spec, frames):
+    if (stream.get("width") != spec["width"] or stream.get("height") != spec["height"]
+            or stream.get("nb_read_frames") != str(frames)
+            or stream.get("pix_fmt") != "yuv420p"
+            or stream.get("color_range") != "tv"
+            or any(stream.get(key) != "bt709" for key in
+                   ("color_transfer", "color_primaries", "color_space"))):
+        raise Inconclusive("sample frame count, geometry, pixel format or BT.709 metadata mismatch")
+
+
+def source_spec(stream, container, height):
+    if any(stream.get(key) != "bt709" for key in
+           ("color_transfer", "color_primaries", "color_space")):
+        raise Inconclusive("requires explicit SDR BT.709 transfer, primaries and matrix")
+    if stream.get("color_range") not in ("tv", "pc"):
+        raise Inconclusive("unknown source color range")
+    side_data = stream.get("side_data_list", [])
+    if any("dovi" in str(row).lower() or "dolby" in str(row).lower()
+           or row.get("rotation", 0) != 0 for row in side_data):
+        raise Inconclusive("Dolby Vision or rotated sources are not supported")
+    if stream.get("sample_aspect_ratio") not in ("1:1", "1/1"):
+        raise Inconclusive("requires explicit square-pixel source")
+    width = finite(stream.get("width"), "source width", 2, 4096)
+    source_height = finite(stream.get("height"), "source height", 2, 2160)
+    fps = Fraction(stream.get("avg_frame_rate", "0/1"))
+    finite(float(fps), "source frame rate", 0.001, 60)
+    duration = float(stream.get("duration", container.get("duration", "nan")))
+    finite(duration, "source duration", 0.001)
+    scale = min(1, height / source_height, 1920 / width)
+    out_width, out_height = int(width * scale) // 2 * 2, int(source_height * scale) // 2 * 2
+    if min(out_width, out_height) < 2:
+        raise Inconclusive("output geometry is too small")
+    return {"duration_seconds": duration, "fps": str(fps),
+            "source_width": width, "source_height": source_height,
+            "width": out_width, "height": out_height,
+            "input_range": "full" if stream["color_range"] == "pc" else "limited"}
+
+
+def export_recipes(runner, executable, bitrate, qualities, threads):
+    recipes = {}
+    exports = []
+    for quality in qualities:
+        text, _ = runner.run([executable, "--family", "software", "--bitrate-kbps",
+                              bitrate, "--quality", quality, "--threads", threads])
+        row = json.loads(text)
+        expected = {"schema_version": 1, "scope": "encoder_arguments_only",
+                    "family": "software", "bitrate_kbps": bitrate,
+                    "quality": quality, "software_threads": threads, "output_grade": "sdr"}
+        if any(row.get(key) != value for key, value in expected.items()):
+            raise Inconclusive("production argument exporter identity mismatch")
+        for name in ("vbr", "qvbr"):
+            mode = row["modes"][name]
+            args = mode["encoder_args"]
+            # The exporter supplies encoder options, never inputs, filters,
+            # outputs or arbitrary FFmpeg options that bypass our work bounds.
+            allowed = {"-c:v", "-preset", "-crf", "-b:v", "-maxrate", "-bufsize",
+                       "-profile:v", "-threads"}
+            if not isinstance(args, list) or len(args) % 2 or not args:
+                raise Inconclusive("invalid exported encoder arguments")
+            if any(not isinstance(value, str) for value in args):
+                raise Inconclusive("invalid exported encoder argument type")
+            pairs = dict(zip(args[::2], args[1::2]))
+            if (len(pairs) != len(args) // 2 or set(pairs) - allowed
+                    or pairs.get("-c:v") != "libx264"
+                    or pairs.get("-threads") != str(threads)):
+                raise Inconclusive("unsafe or incompatible exported encoder arguments")
+            expected_rc = ("vbr:maxrate1.5x:bufsize2x" if name == "vbr" else
+                           f"qvbr:q{quality}:maxrate1.5x:bufsize2x")
+            if mode.get("recipe_value") != expected_rc:
+                raise Inconclusive("exported rate-control identity mismatch")
+            if (pairs.get("-maxrate") != f"{bitrate * 3 // 2}k"
+                    or pairs.get("-bufsize") != f"{bitrate * 2}k"
+                    or (name == "vbr" and (pairs.get("-b:v") != f"{bitrate}k" or "-crf" in pairs))
+                    or (name == "qvbr" and (pairs.get("-crf") != str(quality) or "-b:v" in pairs))):
+                raise Inconclusive("exported arguments disagree with rate-control identity")
+            key = "vbr" if name == "vbr" else f"q{quality}"
+            if key in recipes and recipes[key] != mode:
+                raise Inconclusive("baseline changed between candidate exports")
+            recipes[key] = mode
+        exports.append(row)
+    return recipes, exports
+
+
+def vmaf_metrics(document, expected_frames):
+    frames = document.get("frames", [])
+    if len(frames) != expected_frames or [row.get("frameNum") for row in frames] != list(range(expected_frames)):
+        raise Inconclusive("VMAF frame count/order differs from materialized reference")
+    scores = [finite(row.get("metrics", {}).get("vmaf"), "frame VMAF", 0, 100)
+              for row in frames]
+    ordered = sorted(scores)
+    return {"mean": sum(scores) / len(scores),
+            "p10": ordered[math.ceil(0.1 * len(scores)) - 1], "frames": len(scores)}
+
+
+def recommend(rows, candidates, floor, max_ratio):
+    """Every window, including its lower tail, must survive independently."""
+    rejected = {}
+    accepted = []
+    for candidate in candidates:
+        reasons = []
+        baseline_bytes = candidate_bytes = 0
+        baseline_seconds = candidate_seconds = 0
+        for index, row in enumerate(rows):
+            base, current = row["modes"]["vbr"], row["modes"][candidate]
+            for mode in (base, current):
+                finite(mode["bytes"], "encoded bytes", 1)
+                finite(mode["encode_seconds"], "encode seconds", 0.000001)
+                for stat in ("mean", "p10"):
+                    finite(mode["vmaf"][stat], f"VMAF {stat}", 0, 100)
+                if mode["vmaf"]["frames"] != row["frames"]:
+                    raise Inconclusive("candidate frame coverage mismatch")
+            if current["vmaf"]["mean"] < floor:
+                reasons.append(f"window_{index}:below_mean_floor")
+            for stat in ("mean", "p10"):
+                if current["vmaf"][stat] < base["vmaf"][stat]:
+                    reasons.append(f"window_{index}:{stat}_regression")
+            baseline_bytes += base["bytes"]
+            candidate_bytes += current["bytes"]
+            baseline_seconds += base["encode_seconds"]
+            candidate_seconds += current["encode_seconds"]
+        if not rows:
+            raise Inconclusive("no sample measurements")
+        savings = 1 - candidate_bytes / baseline_bytes
+        if savings < 0.10:
+            reasons.append("aggregate_savings_below_10_percent")
+        if candidate_seconds > baseline_seconds * max_ratio:
+            reasons.append("aggregate_encode_time_regression")
+        if reasons:
+            rejected[candidate] = reasons
+        else:
+            accepted.append((candidate_bytes, candidate, savings))
+    if not accepted:
+        return {"mode": "vbr", "decision": "retain_baseline", "rejected": rejected}
+    _, selected, savings = min(accepted)
+    return {"mode": selected, "decision": "recommend_candidate",
+            "sample_byte_savings": savings, "rejected": rejected}
+
+
+def executable_identity(path, runner):
+    found = shutil.which(str(path))
+    if not found:
+        raise Inconclusive(f"executable not found: {path}")
+    resolved = Path(found).resolve()
+    sha, _ = file_hash(resolved, runner)
+    return str(resolved), sha
+
+
+def analyze(args, runner):
+    source = Path(args.input).resolve(strict=True)
+    if not source.is_file():
+        raise Inconclusive("source must be a local regular file")
+    if source == Path(args.json).resolve():
+        raise Inconclusive("report must not overwrite source")
+    sha, identity = file_hash(source, runner)
+    tools = {"analyzer": {"sha256": file_hash(Path(__file__).resolve(), runner)[0]}}
+    for name, requested in (("ffmpeg", args.ffmpeg), ("ffprobe", args.ffprobe),
+                            ("encoder_args", args.encoder_args)):
+        path, tool_hash = executable_identity(requested, runner)
+        tools[name] = {"path": path, "sha256": tool_hash}
+        if name != "encoder_args":
+            tools[name]["version"], _ = runner.run([path, "-version"])
+    ffmpeg, ffprobe = tools["ffmpeg"]["path"], tools["ffprobe"]["path"]
+    stream, container = probe(runner, ffprobe, source)
+    spec = source_spec(stream, container, args.height)
+    samples = windows(spec["duration_seconds"], args.windows, args.window_seconds,
+                      float(Fraction(spec["fps"])))
+    recipes, exports = export_recipes(runner, tools["encoder_args"]["path"],
+                                      args.bitrate_kbps, args.qualities, args.threads)
+    fps = float(Fraction(spec["fps"]))
+    gop = max(1, round(2 * fps))
+    sampling_args = ["-bf", "0", "-flags", "+cgop", "-g", str(gop),
+                     "-keyint_min", str(gop), "-sc_threshold", "0",
+                     "-force_key_frames", f"expr:eq(mod(n,{gop}),0)"]
+    policy = {"version": 1, "vmaf_model": MODEL, "min_window_mean": args.min_vmaf,
+              "p10": "nearest_rank_ceil_0.1n", "minimum_byte_savings": 0.10,
+              "max_total_encode_time_ratio": args.max_encode_ratio,
+              "threads": args.threads, "scratch_bytes": args.scratch_bytes,
+              "wall_seconds": args.budget_seconds, "samples": samples,
+              "limits": {"source_bytes": MAX_SOURCE_BYTES, "source_width": 4096,
+                         "source_height": 2160, "fps": 60, "output_width": 1920,
+                         "output_height": 1080, "windows": 3, "window_seconds": 10,
+                         "candidates": 3, "watchdog_poll_seconds": 0.025},
+              "output": spec, "recipes": recipes, "sampling_args": sampling_args}
+    report = {"schema_version": SCHEMA, "scope": "offline_sample_recommendation",
+              "production_qualified": False, "source": {"sha256": sha, "bytes": identity[2]},
+              "tools": tools, "policy": policy, "exported_recipes": exports,
+              "limitations": ["sampled SDR only; no whole-title guarantee",
+                              "CFR materialized samples; no production decode/segment/audio path",
+                              "container bytes, not served HLS peak bitrate",
+                              "single bounded encode timing per window, not fleet throughput"],
+              "windows": []}
+    report["evidence_identity"] = digest({"source": report["source"], "tools": tools,
+                                           "policy": policy})
+    common = [ffmpeg, "-nostdin", "-hide_banner", "-loglevel", "error", "-y",
+              "-threads", str(args.threads), "-filter_threads", str(args.threads),
+              "-filter_complex_threads", str(args.threads)]
+    color = ["-color_primaries", "bt709", "-color_trc", "bt709",
+             "-colorspace", "bt709", "-color_range", "tv"]
+    for sample in samples:
+        unchanged(source, identity)
+        reference = runner.root / "reference.mkv"
+        output = runner.root / "encoded.mkv"
+        scores = runner.root / "vmaf.json"
+        filtering = (f"scale={spec['width']}:{spec['height']}:flags=bicubic:"
+                     f"in_range={spec['input_range']}:out_range=limited,"
+                     f"fps={spec['fps']},format=yuv420p,setsar=1,setpts=PTS-STARTPTS")
+        runner.run(common + ["-ss", f"{sample['start_seconds']:.9f}", "-i", source,
+                             "-map", "0:v:0", "-an", "-sn", "-dn", "-vf", filtering,
+                             "-frames:v", str(sample["frames"]), "-c:v", "ffv1",
+                             "-threads", str(args.threads), "-map_metadata", "-1",
+                             "-map_chapters", "-1"] + color + [reference])
+        reference_stream, _ = probe(runner, ffprobe, reference, count_frames=True)
+        verify_sample(reference_stream, spec, sample["frames"])
+        row = dict(sample, modes={})
+        for mode, recipe in recipes.items():
+            _, elapsed = runner.run(common + ["-i", reference, "-map", "0:v:0",
+                                              "-an", "-sn", "-dn"]
+                                    + recipe["encoder_args"] + sampling_args + color
+                                    + ["-map_metadata", "-1", "-map_chapters", "-1",
+                                       "-fflags", "+bitexact", "-flags:v", "+bitexact", output])
+            encoded_stream, _ = probe(runner, ffprobe, output, count_frames=True)
+            verify_sample(encoded_stream, spec, sample["frames"])
+            graph = ("[0:v]setpts=PTS-STARTPTS[d];[1:v]setpts=PTS-STARTPTS[r];"
+                     f"[d][r]libvmaf=model=version={MODEL}:n_threads={args.threads}:"
+                     "n_subsample=1:log_fmt=json:log_path=vmaf.json:shortest=1:repeatlast=0")
+            runner.run(common + ["-i", output, "-threads", str(args.threads), "-i", reference,
+                                 "-lavfi", graph, "-an", "-f", "null", "-"])
+            row["modes"][mode] = {"bytes": output.stat().st_size, "encode_seconds": elapsed,
+                                  "sha256": file_hash(output, runner)[0],
+                                  "vmaf": vmaf_metrics(json.loads(scores.read_text()), sample["frames"])}
+            output.unlink()
+            scores.unlink()
+        report["windows"].append(row)
+        reference.unlink()
+    unchanged(source, identity)
+    # Timestamp granularity can hide a same-size rewrite. Re-read the bytes
+    # under the original deadline before publishing any recommendation; cheap
+    # per-window stat checks still stop ordinary changes promptly.
+    final_hash, _ = file_hash(source, runner)
+    unchanged(source, identity)
+    if final_hash != sha:
+        raise Inconclusive("source content changed during analysis")
+    report["source"]["revalidated_sha256"] = final_hash
+    report["recommendation"] = recommend(report["windows"], [f"q{q}" for q in args.qualities],
+                                         args.min_vmaf, args.max_encode_ratio)
+    report["outcome"] = "measured"
+    report["commands"] = runner.commands
+    return report
+
+
+def parser():
+    cli = argparse.ArgumentParser(description=__doc__)
+    cli.add_argument("--input", required=True)
+    cli.add_argument("--json", required=True)
+    cli.add_argument("--encoder-args", required=True, help="built encoder-calibration-args executable")
+    cli.add_argument("--ffmpeg", default="ffmpeg")
+    cli.add_argument("--ffprobe", default="ffprobe")
+    cli.add_argument("--height", type=int, required=True, help="maximum output height, 2..1080")
+    cli.add_argument("--bitrate-kbps", type=int, required=True)
+    cli.add_argument("--qualities", required=True, help="one to three distinct software CRF values, 0..51")
+    cli.add_argument("--min-vmaf", type=float, required=True, help="explicit screening floor for each window mean")
+    cli.add_argument("--max-encode-ratio", type=float, default=1.10)
+    cli.add_argument("--windows", type=int, default=3)
+    cli.add_argument("--window-seconds", type=float, default=4)
+    cli.add_argument("--threads", type=int, choices=(1, 2), default=1)
+    cli.add_argument("--budget-seconds", type=float, default=300, help="total wall budget, at most 600 seconds")
+    cli.add_argument("--scratch-bytes", type=int, default=100 * 1024**2,
+                     help="watchdog ceiling including process logs, at most 2 GiB; default 100 MiB")
+    cli.add_argument("--scratch-parent", help="existing directory for temporary media")
+    return cli
+
+
+def main(argv=None):
+    args = parser().parse_args(argv)
+    # Refuse this before writing even an error report.
+    if (Path(args.input).resolve() == Path(args.json).resolve()
+            or (Path(args.json).exists() and Path(args.input).exists()
+                and os.path.samefile(args.input, args.json))):
+        print("report must not overwrite source", file=sys.stderr)
+        return 2
+    runner = None
+    try:
+        args.qualities = [int(value) for value in args.qualities.split(",")]
+        if not 1 <= len(args.qualities) <= 3 or len(set(args.qualities)) != len(args.qualities):
+            raise Inconclusive("requires one to three distinct qualities")
+        for quality in args.qualities:
+            finite(quality, "quality", 0, 51)
+        finite(args.height, "height", 2, 1080)
+        finite(args.bitrate_kbps, "bitrate kbps", 1, 20000)
+        finite(args.min_vmaf, "VMAF floor", 0, 100)
+        finite(args.max_encode_ratio, "encode-time ratio", 0.01, 10)
+        finite(args.budget_seconds, "wall budget", 0.01, 600)
+        finite(args.scratch_bytes, "scratch bytes", 1024, MAX_SCRATCH_BYTES)
+        finite(args.window_seconds, "window seconds", 0.001, 10)
+        finite(args.windows, "window count", 1, 3)
+        with tempfile.TemporaryDirectory(prefix="plurx-content-aware-", dir=args.scratch_parent) as scratch:
+            runner = Runner(scratch, args.budget_seconds, args.scratch_bytes)
+            report = analyze(args, runner)
+        status = 0
+    except (Inconclusive, OSError, ValueError, KeyError, TypeError, ArithmeticError, KeyboardInterrupt) as error:
+        report = {"schema_version": SCHEMA, "scope": "offline_sample_recommendation",
+                  "production_qualified": False, "outcome": "inconclusive",
+                  "recommendation": None, "error": str(error) or "cancelled",
+                  "commands": runner.commands if runner else []}
+        status = 2
+    Path(args.json).write_text(json.dumps(report, sort_keys=True, indent=2, allow_nan=False) + "\n")
+    print(json.dumps({"outcome": report["outcome"], "recommendation": report.get("recommendation"),
+                      "report": args.json}, sort_keys=True))
+    return status
+
+
+def cancelled(_signal, _frame):
+    raise KeyboardInterrupt("cancelled")
+
+
+if __name__ == "__main__":
+    signal.signal(signal.SIGTERM, cancelled)
+    raise SystemExit(main())

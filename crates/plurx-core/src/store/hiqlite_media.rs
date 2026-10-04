@@ -3482,6 +3482,26 @@ impl MediaStore for HiqliteAuthStore {
         Ok(changed == 1)
     }
 
+    async fn merge_file_probe_content_encoding(
+        &self,
+        file_id: i64,
+        size: i64,
+        mtime: i64,
+        report_json: &str,
+    ) -> Result<bool, StoreError> {
+        let changed = self
+            .client()
+            .execute(
+                "UPDATE files \
+                    SET probe_json = json_set(probe_json, '$.plurx_content_encoding', json($1)) \
+                  WHERE id = $2 AND size = $3 AND mtime = $4 AND probe_json IS NOT NULL",
+                params!(report_json, file_id, size, mtime),
+            )
+            .await
+            .map_err(database_error)?;
+        Ok(changed == 1)
+    }
+
     async fn files_missing_probe(
         &self,
         library_id: Option<i64>,

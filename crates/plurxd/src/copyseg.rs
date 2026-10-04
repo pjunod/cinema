@@ -1299,6 +1299,7 @@ mod tests {
                 id: 1,
                 kind: TrackKind::Video,
                 timescale: 24_000,
+                has_edit_list: false,
                 codec: Some(VideoCodec::Hevc),
                 dolby_vision_config,
                 nal_length_size: 4,

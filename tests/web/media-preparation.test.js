@@ -83,3 +83,86 @@ test("a navigation discards the old preparation response",async()=>{
   const pending=ctx.hydrateMediaPreparation([file],1);ctx.PAGE_RENDER_GENERATION=2;
   resolve(complete());await pending;assert.equal(m.writes,0);
 });
+
+// Exercise the shipped preparation owner and page model together: metadata
+// warming must remain independent of the open player and its track choices.
+function nextEpisodeHarness(){
+  const {ctx}=harness();
+  const reads=[],settings=new Map();
+  const season={id:"10",kind:"season"},show={id:"20",kind:"show"};
+  const episode=id=>({item:{id,kind:"episode",title:`Episode ${id}`,library_id:"1"},
+    files:[{id:`f${id}`,available:true,duration_ms:100000}],ancestors:[show,season]});
+  const data={"/items/1":episode("1"),"/items/2":episode("2"),
+    "/items/10":{children:[{id:"1",kind:"episode"},{id:"2",kind:"episode"}]}};
+  Object.assign(ctx,{AbortController,setTimeout,clearTimeout,now:0,position:75,
+    performance:{now:()=>ctx.now},localStorage:{getItem:k=>settings.get(k),setItem:(k,v)=>settings.set(k,v)},
+    PLAYER:{fileId:"f1",meta:{kind:"episode"}},ITEM_FOR_FILE:{f1:"1"},WATCH:null,
+    playerMeta:it=>({kind:it.kind}),pbTotalSec:()=>100,pbPosSec:()=>ctx.position,
+    playbackOwnsAttachedMedia:()=>true,libsCached:async()=>[],
+    syncPlayerNextTrack:()=>{},toast:()=>{},api:async(path)=>{reads.push(path);assert.ok(data[path],path);return data[path];},
+  });
+  const measure=fs.readFileSync("crates/plurxd/src/web/player/measurements.js","utf8");
+  vm.runInContext(measure.slice(measure.indexOf("function beginPlaybackPreparation("),measure.indexOf("// Set by a caller")),ctx);
+  vm.runInContext(fs.readFileSync("crates/plurxd/src/web/player/autoplay-next.js","utf8"),ctx);
+  const video={paused:false,seeking:false};
+  return {ctx,reads,data,video,warm:()=>ctx.prepareNextEpisodeIfNearEnd(ctx.PLAYER,video)};
+}
+test("next episode prewarm is single flight and publishes no playback state",async()=>{
+  const {ctx,reads,warm}=nextEpisodeHarness();
+  vm.runInContext('PREPLAY={f1:{audio:3}}',ctx);
+  warm();const state=ctx.PLAYER.nextEpisodePreparation;
+  for(let i=0;i<10;i++)warm();
+  await state.promise;
+  assert.deepEqual(reads,["/items/1","/items/10","/items/2"]);
+  assert.equal(vm.runInContext("PREPLAY.f1.audio",ctx),3);
+  assert.equal(ctx.ITEM_FOR_FILE.f2,undefined);
+  assert.equal(ctx.PLAYER.fileId,"f1");
+  assert.equal(await ctx.playNextEpisode(),true);
+  assert.equal(ctx.location.hash,"#/item/2");
+  assert.equal(reads.length,3,"transition repeated successor metadata reads");
+  const prepared=ctx.takeAutoplayNextPreparation("2");
+  assert.equal(prepared.page.id,"2");
+  await ctx.loadItem("2",()=>true,prepared.page);
+  assert.equal(reads.length,3,"loadItem repeated a prepared item read");
+  assert.equal(ctx.ITEM_FOR_FILE.f2,"2");
+  assert.equal(vm.runInContext("Object.keys(PREPLAY).length",ctx),0);
+  assert.equal(ctx.takeAutoplayNextPreparation("2"),null);
+});
+test("next episode prewarm aborts on seek and autoplay off and drops late reads",async()=>{
+  for(const action of [ctx=>{ctx.PLAYER._seekToken=1;},ctx=>ctx.setAutoNext(false)]){
+    const {ctx,warm}=nextEpisodeHarness();let finish,signal;
+    ctx.api=(_path,options)=>{signal=options.signal;return new Promise(r=>finish=r);};
+    warm();const state=ctx.PLAYER.nextEpisodePreparation;
+    action(ctx);ctx.position=10;warm();
+    assert.equal(signal.aborted,true);
+    finish({item:{kind:"episode"}});
+    await state.promise;
+    assert.equal(state.page,null);
+    assert.equal(ctx.PLAYER.nextEpisodePreparation,null);
+  }
+});
+test("next episode metadata expires without background polling or stale acceptance",async()=>{
+  const {ctx,reads,warm}=nextEpisodeHarness();
+  warm();await ctx.PLAYER.nextEpisodePreparation.promise;
+  ctx.now=61000;
+  for(let i=0;i<20;i++)warm();
+  assert.equal(reads.length,3,"an expired warm result became a polling loop");
+  assert.equal(await ctx.playNextEpisode(),true);
+  assert.equal(reads.length,6,"expired metadata was accepted");
+});
+test("next episode preparation crosses seasons through the same bounded resolver",async()=>{
+  const {ctx,reads,data,warm}=nextEpisodeHarness();
+  data["/items/10"]={children:[{id:"1",kind:"episode"}]};
+  data["/items/20"]={children:[{id:"10",kind:"season"},{id:"11",kind:"season"}]};
+  data["/items/11"]={children:[{id:"2",kind:"episode"}]};
+  warm();await ctx.PLAYER.nextEpisodePreparation.promise;
+  assert.deepEqual(reads,["/items/1","/items/10","/items/20","/items/11","/items/2"]);
+  assert.equal(ctx.PLAYER.nextEpisodePreparation.page.id,"2");
+});
+test("next episode preparation skips distant paused seeking and non-episode playback",()=>{
+  for(const change of [h=>{h.ctx.position=10;},h=>{h.video.paused=true;},
+    h=>{h.video.seeking=true;},h=>{h.ctx.PLAYER.meta.kind="movie";},
+    h=>{h.ctx.PLAYER.libraryChannel={};},h=>h.ctx.setAutoNext(false)]){
+    const h=nextEpisodeHarness();change(h);h.warm();assert.equal(h.reads.length,0);
+  }
+});

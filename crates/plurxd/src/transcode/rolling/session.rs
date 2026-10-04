@@ -1094,13 +1094,30 @@ impl Session {
                 })
             });
             let Some(selected) = floor else {
-                if budget.demand_sequence.is_some()
-                    && index
+                if let Some(first_new) = budget.demand_sequence.and_then(|_| {
+                    index
                         .segs
                         .iter()
-                        .any(|segment| segment.index >= first_new_segment)
-                {
-                    return Err("rolling_window_budget_exhausted: next completed segment exceeds the active publication safety floor".to_owned());
+                        .find(|segment| segment.index >= first_new_segment)
+                }) {
+                    // The verdict ends the viewer's session, so it carries the
+                    // numbers that produced it. Without them a retirement at
+                    // 1x after a resume (2026-10-04, file 5208) could not be
+                    // told apart from the low-rate case this guard exists for.
+                    return Err(format!(
+                        "rolling_window_budget_exhausted: next completed segment exceeds the active publication safety floor \
+                         (consumed_end_ms={} desired_end_ms={} allowed_end_ms={} reserve_max_ms={} \
+                         first_new_segment={} first_new_end_ms={} served_end_ms={} demand_sequence={} observation_age_ms={})",
+                        budget.consumed_end_ms,
+                        budget.desired_end_ms,
+                        budget.allowed_end_ms,
+                        ROLLING_RESERVE_MAX_MS,
+                        first_new.index,
+                        first_new.end_ms,
+                        previous_served.as_ref().map_or(-1, |served| served.end_ms),
+                        budget.demand_sequence.unwrap_or_default(),
+                        budget.observation_age_ms.unwrap_or(-1),
+                    ));
                 }
                 return Ok(());
             };

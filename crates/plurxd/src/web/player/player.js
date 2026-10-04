@@ -84,6 +84,7 @@
  * @property {string|null} [attemptReason] cold-start | resume | seek | quality | …
  * @property {number} [attemptAt]          performance.now() at the attempt
  * @property {any} [openToken]             the open attempt's token (PLAY_OPEN_GATE)
+ * @property {{began:number,current:function():boolean,owner:any,promise:Promise<any>,page:any}|null} [nextEpisodePreparation] bounded read-only successor metadata
  * @property {any} [pendingOpenAttempt]    the open attempt this player was minted for, until it settles
  * @property {any} [retiringOpenAttempt]   an open attempt being retired by a reopen
  * @property {Player|null} [mediaPredecessor] the outgoing player kept until preparation succeeds
@@ -176,6 +177,7 @@
  * @property {number} [controlPresentedFrames]
  * @property {boolean} [controlHasFrameCallbacks]
  * @property {any} [controlFrameCancel]    cancels the frame-callback loop
+ * @property {()=>void} [controlFrameRearm] renews observation for the current seek
  * @property {any} [controlReporter]       the PlaybackControl reporter for this player
  * @property {any[]} [controlWaiters]      callers waiting for the reporter's next exchange
  * @property {number} [controlPresentationEpoch]
@@ -948,7 +950,7 @@ function constructHls(startup,tgt,video,startAt,observesCurrent){
   const attachedPlayer=startup.player;
   const playlistUrl=startup.playlistUrl;
   const StockLoader=Hls.DefaultConfig&&Hls.DefaultConfig.loader;
-  const hls=new Hls({
+  const hls=new Hls({preferManagedMediaSource:false,
     maxBufferLength:tgt.fwd,
     backBufferLength:tgt.back,
     ...(tgt.budgeted?{maxBufferSize:tgt.fwdBytes}:{}),

@@ -280,7 +280,7 @@ test("an uncovered VOD seek stays local for 20 seconds and seeked alone does not
   assert.equal(h.api.changes.length,1,"one local intent has one fallback");
 });
 
-test("target coverage or presentation retires the VOD fallback", async () => {
+test("target coverage retires delivery fallback but clock alone cannot claim presentation", async () => {
   let through=40;
   const covered=localSeekHarness({vod:true,
     buffered:{length:1,start:()=>30,end:()=>through},
@@ -301,10 +301,10 @@ test("target coverage or presentation retires the VOD fallback", async () => {
   presented.api.tick(100);
   assert.ok(presented.player.controlSeek,
     "control settlement can remain pending without a usable frame sequence");
-  assert.equal(presented.player.controlSeek.localVodPresented,true);
-  assert.deepEqual(presented.api.timerDelays(),[],"actual target progress clears the fallback");
+  assert.notEqual(presented.player.controlSeek.localVodPresented,true);
+  assert.deepEqual(presented.api.timerDelays(),[20_000],"assigned clock cannot cancel delivery protection");
   await presented.api.expire(20_000);
-  assert.equal(presented.api.changes.length,0,"actual presentation cannot reopen a playing stream");
+  assert.equal(presented.api.changes.length,1,"missing target bytes still have one bounded fallback");
 });
 
 test("a newer VOD seek fences the prior seek's fallback", async () => {

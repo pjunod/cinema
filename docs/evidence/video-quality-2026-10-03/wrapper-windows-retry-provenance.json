@@ -1,0 +1,10 @@
+{
+  "source_commit": "1cc9468936e3737a3e6993269cc18e06ace8e534",
+  "wrapper_commit": "07f631b3771f3d0c6ad797532e70ea0391f7fbc7",
+  "scope": "Windows compilation only",
+  "change_from_prior_windows_job": "Add baremetal and high-cpu runner labels; all other job settings/actions/commands unchanged.",
+  "workflow_sha256": "ac9fa867b59d1d27732de74fcb8bec71c9a733569b573c63238d063f7f0a2179",
+  "run_id": 4005,
+  "ui_index": 3984,
+  "url": "http://192.168.4.7:3000/noirr/plurx/actions/runs/3984"
+}

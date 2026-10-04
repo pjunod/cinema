@@ -776,7 +776,7 @@ async fn the_profile5_pixel_proof_takes_the_class_of_the_caller_waiting_on_it() 
     .with_dovi_reshape(true);
     let before = spawns_of(background);
     assert!(offline
-        .effective_rate_control_for_new_offline_package(&file)
+        .effective_rate_control_for_new_offline_package(&file, 1080, false)
         .await
         .is_err());
     assert!(

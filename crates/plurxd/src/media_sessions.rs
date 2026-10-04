@@ -3499,6 +3499,13 @@ async fn fence_and_reap_sessions(
     }
     futures_util::future::join_all(sessions.into_iter().map(
         |(incarnation_id, session_id, owner_epoch, known_vod, reason)| async move {
+            tracing::warn!(
+                session = %crate::transcode::session_log_id(&session_id),
+                %incarnation_id,
+                owner_epoch,
+                reason,
+                "media-session lease lifecycle fencing worker"
+            );
             if known_vod || state.transcode.vod_owns_or_preparing(&session_id).await {
                 // A lease-loss observation closes publication immediately,
                 // but it cannot choose a typed VOD tombstone ahead of the

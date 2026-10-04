@@ -433,6 +433,7 @@ const MEDIA_METHODS: &[&str] = &[
     "get_file_probe_chapters_json",
     "merge_file_probe_chapters",
     "merge_file_probe_hevc_parameter_sets",
+    "merge_file_probe_content_encoding",
     "files_missing_probe",
     "library_file_paths",
     "ensure_library_root_fingerprint",
@@ -4858,7 +4859,11 @@ async fn media_session_activation_prepare_settle_contract_runs_through_dyn_store
                     &activation.playback_id,
                     incarnation_id,
                     100,
-                    200,
+                    // Production admits creates for 60s but activates with a 12s
+                    // lease. Equal deadlines hid the prepare -> confirm race:
+                    // inventory admitted prepare, then the confirmation trigger
+                    // shortened the claim and renewal fenced that same worker.
+                    60_100,
                 )
                 .await
                 .unwrap_or_else(|error| panic!(
@@ -5004,6 +5009,25 @@ async fn media_session_activation_prepare_settle_contract_runs_through_dyn_store
                 .len(),
             1,
             "{backend}: published route enters owned inventory"
+        );
+        assert_eq!(
+            store
+                .renew_media_sessions(
+                    &activation.owner_node_id,
+                    &[MediaSessionRenewal {
+                        incarnation_id: incarnation_id.to_owned(),
+                        owner_epoch: 1,
+                        produced_playable_through_ms: 10,
+                        fetched_through_ms: 10,
+                        media_sequence: 1,
+                    }],
+                    152,
+                    240,
+                )
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: renew published route: {error}")),
+            vec![incarnation_id.to_owned()],
+            "{backend}: publication hands the worker to renewal"
         );
         let taken = store
             .claim_media_session_takeover(&MediaSessionTakeover {
@@ -18203,11 +18227,136 @@ fn contract_inventory_matches_every_store_method() {
     // Media info adds the source-aware preparation history projection.
     // +1: coherent playback file/probe/settings/generation snapshot, covered
     // by playback_planning_snapshot_retains_one_source_and_settings_revision.
-    assert_eq!(declared.len(), 452, "review the Store method count");
+    // +1: source-fenced content encoding report publication, covered by
+    // content_encoding_report_publication_is_source_fenced_on_every_backend.
+    assert_eq!(declared.len(), 453, "review the Store method count");
     assert_eq!(
         covered, declared,
         "the declared async method name inventory changed"
     );
+}
+
+#[tokio::test]
+async fn content_encoding_report_publication_is_source_fenced_on_every_backend() {
+    for_each_backend(|store, backend| async move {
+        let (_, file_id) = seed_file(&store, "content-report").await;
+        let file = store
+            .get_file(file_id)
+            .await
+            .expect("fixture file")
+            .expect("fixture exists");
+        let report = r#"{"outcome":"measured","context":{"version":1}}"#;
+        assert!(
+            !store
+                .merge_file_probe_content_encoding(file_id, file.size, file.mtime, report)
+                .await
+                .expect("unprobed publication"),
+            "{backend}: never invent probe facts"
+        );
+        assert!(store
+            .get_file_probe_json(file_id)
+            .await
+            .expect("unprobed row")
+            .is_none());
+
+        let original = serde_json::json!({"streams":[{"codec_name":"h264"}],"chapters":[]});
+        let probe = ProbeResult {
+            raw_json: Some(original.to_string()),
+            ..Default::default()
+        };
+        store
+            .upsert_file(
+                file.item_id,
+                file.path.to_str().expect("UTF-8 fixture path"),
+                file.size,
+                file.mtime,
+                &probe,
+            )
+            .await
+            .expect("probed fixture");
+        for (id, size, mtime) in [
+            (file_id, file.size + 1, file.mtime),
+            (file_id, file.size, file.mtime + 1),
+            (i64::MAX, file.size, file.mtime),
+        ] {
+            assert!(
+                !store
+                    .merge_file_probe_content_encoding(id, size, mtime, report)
+                    .await
+                    .expect("fenced publication"),
+                "{backend}: reject stale or absent source"
+            );
+        }
+        let unchanged: serde_json::Value = serde_json::from_str(
+            &store
+                .get_file_probe_json(file_id)
+                .await
+                .expect("probe row")
+                .expect("probe exists"),
+        )
+        .expect("probe JSON");
+        assert_eq!(
+            unchanged, original,
+            "{backend}: refused writes leave probe untouched"
+        );
+        assert!(
+            store
+                .merge_file_probe_content_encoding(file_id, file.size, file.mtime, report)
+                .await
+                .expect("current publication"),
+            "{backend}"
+        );
+        let grafted: serde_json::Value = serde_json::from_str(
+            &store
+                .get_file_probe_json(file_id)
+                .await
+                .expect("grafted probe row")
+                .expect("grafted probe exists"),
+        )
+        .expect("grafted JSON");
+        let mut expected = original.clone();
+        expected[plurx_core::store::CONTENT_ENCODING_PROBE_KEY] =
+            serde_json::from_str(report).expect("report JSON");
+        assert_eq!(grafted, expected, "{backend}: only the app report changes");
+
+        store
+            .upsert_file(
+                file.item_id,
+                file.path.to_str().expect("UTF-8 fixture path"),
+                file.size + 1,
+                file.mtime + 1,
+                &probe,
+            )
+            .await
+            .expect("source reprobe");
+        let refreshed: serde_json::Value = serde_json::from_str(
+            &store
+                .get_file_probe_json(file_id)
+                .await
+                .expect("refreshed probe row")
+                .expect("refreshed probe exists"),
+        )
+        .expect("refreshed JSON");
+        assert_eq!(
+            refreshed, original,
+            "{backend}: reprobe discards old evidence"
+        );
+        assert!(
+            !store
+                .merge_file_probe_content_encoding(file_id, file.size, file.mtime, report)
+                .await
+                .expect("late publication"),
+            "{backend}: old source cannot restore evidence"
+        );
+        assert!(
+            store
+                .merge_file_probe_content_encoding(file_id, file.size + 1, file.mtime + 1, report)
+                .await
+                .expect("new source publication"),
+            "{backend}"
+        );
+    })
+    .await;
 }
 
 #[tokio::test]
@@ -21146,6 +21295,143 @@ async fn analysis_source_invalidation_terminalizes_exact_attempt_through_dyn_sto
         assert_eq!(
             attempts[0].terminal_code, "source_deleted",
             "backend {backend}"
+        );
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn busy_analysis_worker_claims_only_live_viewers_without_spending_maintenance_attempts() {
+    for_each_backend(|store, backend| async move {
+        let (_, file_id) = seed_file(&store, "busy-analysis-viewer").await;
+        let user = store
+            .create_user("busy-analysis-viewer", "hash", false)
+            .await
+            .expect("user");
+        let request = store
+            .enqueue_analysis_request(&NewAnalysisRequest {
+                request_id: "busy-analysis-request".into(),
+                file_id,
+                source_size: 10_000,
+                source_mtime: 1,
+                component: "fragment_index".into(),
+                pipeline_version: "busy-engine".into(),
+                video_identity: String::new(),
+                requested_generation: "busy-generation".into(),
+                priority: "normal".into(),
+                trigger: "background".into(),
+                force_rebuild: false,
+                target_node_id: "busy-node".into(),
+                not_before_ms: 10,
+                created_at_ms: 10,
+            })
+            .await
+            .expect("request");
+        assert!(
+            store
+                .claim_analysis_request_for_capacity(
+                    "busy-node",
+                    Some("busy-engine"),
+                    11,
+                    1011,
+                    true
+                )
+                .await
+                .expect("busy claim")
+                .is_none(),
+            "{backend}: no maintenance while busy"
+        );
+        assert_eq!(
+            store
+                .analysis_request(&request.request_id)
+                .await
+                .expect("read")
+                .expect("row")
+                .attempts,
+            0
+        );
+        store
+            .join_analysis_viewer(plurx_core::store::AnalysisViewerInterest {
+                analysis_request_id: request.request_id.clone(),
+                requested_generation: request.requested_generation.clone(),
+                pipeline_version: request.pipeline_version.clone(),
+                video_identity: request.video_identity.clone(),
+                target_node_id: request.target_node_id.clone(),
+                user_id: user.id,
+                playback_id: "busy-viewer".into(),
+                now_ms: 12,
+            })
+            .await
+            .expect("viewer");
+        assert!(
+            store
+                .analysis_preparation_observation(&request.request_id, 13)
+                .await
+                .expect("observation")
+                .expect("row")
+                .has_live_viewer,
+            "{backend}"
+        );
+        assert!(
+            store
+                .claim_analysis_request_for_capacity(
+                    "busy-node",
+                    Some("other-engine"),
+                    13,
+                    1013,
+                    true
+                )
+                .await
+                .expect("wrong engine")
+                .is_none(),
+            "{backend}"
+        );
+        let claimed = store
+            .claim_analysis_request_for_capacity("busy-node", Some("busy-engine"), 14, 1014, true)
+            .await
+            .expect("viewer claim")
+            .expect("viewer source read admitted");
+        assert_eq!(claimed.request_id, request.request_id, "{backend}");
+        assert!(store
+            .retry_analysis_request(&claimed, "foreground_preempted", 15, 1015, false)
+            .await
+            .expect("return claim"));
+        assert!(
+            !store
+                .analysis_preparation_observation(&request.request_id, 120013)
+                .await
+                .expect("observation")
+                .expect("row")
+                .has_live_viewer,
+            "{backend}: expired viewers do not admit work"
+        );
+        assert!(
+            store
+                .claim_analysis_request_for_capacity(
+                    "busy-node",
+                    Some("busy-engine"),
+                    120013,
+                    121013,
+                    true
+                )
+                .await
+                .expect("expired viewer claim")
+                .is_none(),
+            "{backend}"
+        );
+        assert!(
+            store
+                .claim_analysis_request_for_capacity(
+                    "busy-node",
+                    Some("busy-engine"),
+                    120014,
+                    121014,
+                    false
+                )
+                .await
+                .expect("idle maintenance claim")
+                .is_some(),
+            "{backend}: idle maintenance still runs"
         );
     })
     .await;

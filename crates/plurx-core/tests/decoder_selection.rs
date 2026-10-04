@@ -614,21 +614,26 @@ fn operator_software_requirement_replaces_a_vendor_surface_graph() {
         "24/1",
         Some("smpte2084"),
     ));
-    let plan = resolve(
-        Encoder::Qsv,
-        Pipeline::VppQsv,
-        &input,
-        &capabilities(vec![]),
-        DecodePolicySnapshot::new(DecodePlanPolicy::Legacy, Some("off")),
-    )
-    .expect("CPU renderer preserves the SDR contract");
-    assert_eq!(plan.decode().backend(), DecodeBackend::Software);
-    assert_eq!(
-        plan.decode().reason(),
-        DecodeReason::OperatorSoftwareOverride
-    );
-    assert_eq!(plan.options().pipeline, Pipeline::Cpu);
-    assert_eq!(plan.output_contract().output_grade(), OutputGrade::Sdr);
+    for (encoder, pipeline) in [
+        (Encoder::Qsv, Pipeline::VppQsv),
+        (Encoder::Vaapi, Pipeline::LibplaceboVaapi),
+    ] {
+        let plan = resolve(
+            encoder,
+            pipeline,
+            &input,
+            &capabilities(vec![]),
+            DecodePolicySnapshot::new(DecodePlanPolicy::Legacy, Some("off")),
+        )
+        .expect("CPU renderer preserves the SDR contract");
+        assert_eq!(plan.decode().backend(), DecodeBackend::Software);
+        assert_eq!(
+            plan.decode().reason(),
+            DecodeReason::OperatorSoftwareOverride
+        );
+        assert_eq!(plan.options().pipeline, Pipeline::Cpu);
+        assert_eq!(plan.output_contract().output_grade(), OutputGrade::Sdr);
+    }
 }
 
 #[test]
@@ -2035,6 +2040,87 @@ fn surface_contracts_name_vendor_subtitle_vulkan_and_opencl_transitions() {
     assert_eq!(opencl.renderer_domain(), FrameDomain::OpenCl);
     assert_eq!(opencl.renderer_upload_format(), Some("p010le"));
     assert_eq!(opencl.renderer_download_format(), Some("nv12"));
+}
+
+#[test]
+fn vulkan_vaapi_plan_preserves_hardware_frames_and_subtitle_boundaries() {
+    let input = facts(video(
+        0,
+        Some("hevc"),
+        Some("main 10"),
+        3840,
+        2160,
+        Some("yuv420p10le"),
+        "24/1",
+        "24/1",
+        Some("smpte2084"),
+    ));
+    for burn in [None, Some(false), Some(true)] {
+        let mut media = options(Pipeline::LibplaceboVaapi);
+        media.subtitle_burn = burn.map(|bitmap| SubtitleBurn {
+            subtitle_index: 0,
+            bitmap,
+        });
+        let plan = resolve_transcode(
+            &TranscodeRequest::new(Encoder::Vaapi, media),
+            &input,
+            &capabilities(vec![]),
+            &DecodePolicySnapshot::new(DecodePlanPolicy::Legacy, None),
+            &AttemptRestrictions::none(),
+        )
+        .expect("VA-API Vulkan plan");
+        let mut opts = execution_options();
+        opts.subtitle_burn = plan.options().subtitle_burn.clone();
+        let file = execution_file("/fixture/source.mkv");
+        let execution =
+            TranscodeExecution::from_options(&file, &opts, Pacing::unpaced(), "/fixture/out")
+                .expect("execution");
+        let args = hls_args(&plan, &execution);
+        assert!(args
+            .windows(2)
+            .any(|p| p == ["-hwaccel_output_format", "vaapi"]));
+        let flag = if burn == Some(true) {
+            "-filter_complex"
+        } else {
+            "-vf"
+        };
+        let graph = &args[args.iter().position(|a| a == flag).expect("graph") + 1];
+        assert!(graph.contains("libplacebo="), "{graph}");
+        assert!(
+            graph.contains("hwmap=derive_device=vaapi,format=vaapi"),
+            "{graph}"
+        );
+        assert_eq!(
+            graph.matches("hwdownload").count(),
+            usize::from(burn.is_some()),
+            "{graph}"
+        );
+        assert_eq!(
+            graph.matches("hwupload").count(),
+            usize::from(burn.is_some()),
+            "{graph}"
+        );
+        let surface = DecodeSurfaceContract::for_plan(
+            DecodeBackend::Vaapi,
+            Pipeline::LibplaceboVaapi,
+            &input,
+            Encoder::Vaapi,
+            if burn.is_some() {
+                SubtitleRendering::BitmapBurn
+            } else {
+                SubtitleRendering::None
+            },
+        );
+        assert_eq!(surface.decode_domain(), FrameDomain::Vaapi);
+        assert_eq!(surface.decoder_download_format(), None);
+        assert_eq!(surface.renderer_domain(), FrameDomain::Vulkan);
+        assert_eq!(surface.renderer_upload_format(), None);
+        assert_eq!(surface.renderer_download_format(), burn.map(|_| "nv12"));
+        assert_eq!(
+            surface.encoder_upload_domain(),
+            burn.map(|_| FrameDomain::Vaapi)
+        );
+    }
 }
 
 #[test]

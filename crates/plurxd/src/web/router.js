@@ -54,6 +54,9 @@ function setPageTimer(fn,ms,generation=PAGE_RENDER_GENERATION){
   PAGE_TIMER=timer;
 }
 async function render(){
+  cancelNextEpisodePreparation(PLAYER);
+  if(AUTOPLAY_NEXT_PREPARED&&location.hash!==`#/item/${AUTOPLAY_NEXT_PREPARED.page.id}`)
+    clearAutoplayNextPreparation();
   const generation=++PAGE_RENDER_GENERATION;
   if(WATCH)closePlayer({routeLeave:true});
   if(!TOKEN||!ME) return boot();

@@ -679,6 +679,7 @@ async function play(fileId, title, resumeMs, knownDurMs, meta, reservedOpenAttem
 }
 function beginPlayAttempt(fileId,title,resumeMs,knownDurMs,meta,reservedOpenAttempt,retryIntent){
   WATCH_CLOSE_PROMISE=null;
+  cancelNextEpisodePreparation(PLAYER);
   // Live TV holds a physical tuner and, since the dock, keeps holding it on
   // every other route. Starting a film used to be the moment it was released
   // (the route change stopped it); now the dock survives, so two pictures
@@ -1534,7 +1535,9 @@ function mseCodecKey(srcCodec, bitDepth){
 // nothing here is ever told to the server. A no sends the remux down the
 // progressive path, which is where the `<video>` error handler's rescue lives.
 function mseCanTake(srcCodec, audioCodec, bitDepth){
-  const mediaSource=window.ManagedMediaSource||window.MediaSource;
+  // Match every Hls instance's explicit preferManagedMediaSource:false.
+  // The static Hls.getMediaSource() helper still defaults to MMS-first.
+  const mediaSource=window.MediaSource||window.ManagedMediaSource||window.WebKitMediaSource;
   if(!(mediaSource && mediaSource.isTypeSupported)) return false;
   const v=MSE_VIDEO[mseCodecKey(srcCodec, bitDepth)];
   if(!v) return false;                       // unknown codec: do not gamble
@@ -1661,8 +1664,9 @@ async function refreshSegTimes(){
 }
 // A frame callback registered before a new media execution belongs to the
 // predecessor, even if the browser delivers it after the source was replaced.
-function queuePlaybackFrame(v,p,callback){
+function queuePlaybackFrame(v,p,callback,renewingSeek=false){
   const epoch=p.controlPresentationEpoch||0;
+  const attachment=p.mediaAttachment, intent=p.controlSeek?.sequence;
   // One subscription belongs to this player and element. Retire it when an
   // element is adopted or reused, including callbacks already queued by the
   // browser before cancellation.
@@ -1680,7 +1684,7 @@ function queuePlaybackFrame(v,p,callback){
     v.removeEventListener("loadeddata",ready);
     v.removeEventListener("canplay",ready);
     v.removeEventListener("seeked",ready);
-    if(p.controlFrameCancel===clear) p.controlFrameCancel=null;
+    if(p.controlFrameCancel===clear){p.controlFrameCancel=null;p.controlFrameRearm=null;}
     if(v._plurxFrameCancel===clear) v._plurxFrameCancel=null;
   };
   const suspend=()=>{if(PLAYER!==p) clear();else cancel();};
@@ -1694,15 +1698,17 @@ function queuePlaybackFrame(v,p,callback){
     // frame, including when playback stays paused.
     // Readiness only permits registration; actual callbacks remain the proof
     // of presentation used by the existing progress detector.
-    if(id!=null||v.readyState<2||v.seeking) return;
+    if(id!=null||v.readyState<2||(v.seeking&&!renewingSeek)) return;
     const registration=++generation;
     id=v.requestVideoFrameCallback((now,meta)=>{
       if(registration!==generation) return;
       id=null;clear();
-      if(PLAYER===p) callback(now,meta,epoch);
+      if(PLAYER===p&&p.mediaAttachment===attachment) callback(now,meta,epoch,{attachment,intent,epoch});
     });
   };
   p.controlFrameCancel=clear;v._plurxFrameCancel=clear;
+  // Execution renews this same observer before assigning the target clock.
+  p.controlFrameRearm=()=>queuePlaybackFrame(v,p,callback,true);
   v.addEventListener("emptied",suspend);
   v.addEventListener("loadeddata",ready);
   // loadeddata is once per resource; canplay also covers buffer replenishment.
@@ -1780,7 +1786,7 @@ function armHitchDetector(v){
         : null;
     }
   };
-  const step=(now, meta, epoch)=>{
+  const step=(now, meta, epoch, observation)=>{
     // Bail the moment this playback is replaced, or the callback outlives its
     // PLAYER and starts recording another stream's frames as this one's. A
     // prepared switch keeps the same PLAYER while changing the video element;
@@ -1792,7 +1798,7 @@ function armHitchDetector(v){
     }
     p.controlPresentedFrames=(p.controlPresentedFrames||0)+1;
     if(epoch===(p.controlPresentationEpoch||0))
-      settlePlaybackControlSeek(v,p,meta.mediaTime,p.controlPresentedFrames);
+      settlePlaybackControlSeek(v,p,meta.mediaTime,p.controlPresentedFrames,observation);
     p.hitches.frames++;
     if(v.paused || v.seeking){
       // Clear the MEASUREMENT with the window: a rate left standing after a

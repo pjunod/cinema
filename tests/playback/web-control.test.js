@@ -28,6 +28,14 @@ function transportTelemetrySources(){
   return ["playbackTransportRecord","logPlaybackTransportRecord","queuePlaybackTransportCommand","playbackTransportMarker"].map(shippedSource).join("\n");
 }
 
+// Extracted intent owners retain the real next-episode invalidation edge.
+// Individual scenarios can install an owner.cancel spy on their player.
+function nextEpisodeCancellationSources(){
+  return ["let AUTOPLAY_NEXT_PREPARED=null;",
+    shippedSource("cancelNextEpisodePreparation"),
+    shippedSource("clearAutoplayNextPreparation")].join("\n");
+}
+
 // The sliced owners now call these production telemetry edges. Keep their
 // dependencies in each owner harness, rather than replacing the beacons by
 // no-ops that would hide command/presentation regressions.
@@ -87,6 +95,7 @@ function fullOpenHarness() {
   const policy = require("../../crates/plurxd/src/web/playback-policy.js");
   return new Function("PlaybackPolicy", [
     "const SERVER={playback_display_aware_auto:false};",
+    "const nextEpisodeTicks=[];function prepareNextEpisodeIfNearEnd(...args){nextEpisodeTicks.push(args);}",
     "let PLAYER=null,PENDING_ATTEMPT_REASON=null,PENDING_DEFAULT_SUB_OFF=false,PENDING_LIBRARY_CHANNEL_PLAYBACK=null,STATS_TIMER=null; const decisions=[],sessions=[],released=[],media=[];",
     "let quality='auto';const localStorage={getItem:()=>quality,setItem:(key,value)=>{quality=value;}}; const DECODE_LIMIT_TTL_MS=1,DECODE_LIMIT_RETEST_MS=1;",
     "let modalOpen=true; const node={classList:{contains:()=>modalOpen,add(){modalOpen=true;},toggle(){},remove(...names){if(names.includes('open'))modalOpen=false;}},style:{},dataset:{},focus(){},setAttribute(){}};",
@@ -132,7 +141,7 @@ function fullOpenHarness() {
     shippedSource("createPlaybackOpenGate"), "const PLAY_OPEN_GATE=createPlaybackOpenGate();",
     shippedSource("beginPlaybackPreparation"),
     shippedSource("takePlaybackAttemptReason"), shippedSource("playbackSelection"),
-    shippedSource("positionForPlaybackIntent"), shippedSource("supersedePlaybackControlIntent"),
+    shippedSource("positionForPlaybackIntent"), nextEpisodeCancellationSources(),shippedSource("supersedePlaybackControlIntent"),
     seekTelemetrySources(), shippedSource("beginPlaybackControlSeek"), shippedSource("rememberPlaybackSelection"),
     shippedSource("noSegments"), shippedSource("copyHlsMseOk"),
     shippedSource("playbackInitialRoute"), shippedSource("restartPendingPlaybackOpen"),
@@ -216,7 +225,7 @@ function fullOpenHarness() {
       shippedSource('wirePlayerMedia').match(/v\.addEventListener\("waiting",\(\)=>\{[\s\S]*?\n  \}\);/)[0]+"handler();}",
     "function incumbentError(){let handler;const v=Object.create(video);v.addEventListener=(_,fn)=>{handler=fn;};"+
       shippedSource('wirePlayerMedia').match(/v\.addEventListener\("error",(?:async)?\(\)=>\{[\s\S]*?\n  \}\);/)[0]+"handler();}",
-    "return {attach(p){PLAYER=p;},setOpen(value){modalOpen=value;},isOpen:()=>modalOpen,node,current:()=>PLAYER,decisions,sessions,released,media,loading,requestIds,surface:surfacePainted,stops:()=>surfaceStops.length,posted,video,play,setQuality:qualityMenuPick,seekTo,switchAudio,setSub,setSync,togglePlay,retryPlayback,closePlayer,incumbentError,incumbentWaiting,checkMarkers,skipCurrent,skipMarker,ttff,pbTick,reportProgress,attachHls:()=>attachHls(video,'/A/index.m3u8',10),installPlayerMediaSession,updatePlayerMediaSession,mediaHandlers,mediaLog,mediaSession:navigator.mediaSession,setInputState(value){inputState=value;},spendHlsRetry:()=>scheduleHlsNetworkRetry(video,PLAYER,'network'),hlsInstances,settle:()=>settlePlaybackControlSeek(video,PLAYER,video.currentTime,100),playing:()=>handlePlaybackPlaying(video,PLAYER),startTranscodeFallback,switchAutoRung,resetMediaSource,applyPlaybackTransportIntent,handlePlaybackTransportEvent,advance(ms){now+=ms;for(const [id,timer] of [...timers])if(timer.at<=now){timers.delete(id);timer.fn();}}};",
+    "return {attach(p){PLAYER=p;},setOpen(value){modalOpen=value;},isOpen:()=>modalOpen,node,current:()=>PLAYER,nextEpisodeTicks,decisions,sessions,released,media,loading,requestIds,surface:surfacePainted,stops:()=>surfaceStops.length,posted,video,play,setQuality:qualityMenuPick,seekTo,switchAudio,setSub,setSync,togglePlay,retryPlayback,closePlayer,incumbentError,incumbentWaiting,checkMarkers,skipCurrent,skipMarker,ttff,pbTick,reportProgress,attachHls:()=>attachHls(video,'/A/index.m3u8',10),installPlayerMediaSession,updatePlayerMediaSession,mediaHandlers,mediaLog,mediaSession:navigator.mediaSession,setInputState(value){inputState=value;},spendHlsRetry:()=>scheduleHlsNetworkRetry(video,PLAYER,'network'),hlsInstances,settle:()=>settlePlaybackControlSeek(video,PLAYER,video.currentTime,100,{epoch:PLAYER.controlPresentationEpoch||0,attachment:PLAYER.mediaAttachment,intent:PLAYER.controlSeek?.sequence}),playing:()=>handlePlaybackPlaying(video,PLAYER),startTranscodeFallback,switchAutoRung,resetMediaSource,applyPlaybackTransportIntent,handlePlaybackTransportEvent,advance(ms){now+=ms;for(const [id,timer] of [...timers])if(timer.at<=now){timers.delete(id);timer.fn();}}};",
   ].join("\n"))(policy);
 }
 
@@ -850,21 +859,27 @@ async function main() {
     surfaceSeam(),
     "function clearPlaybackControlWaiters(){}",
     "function notifyPlaybackControl(){notifications+=1;}",
-    shippedSource("supersedePlaybackControlIntent"),
+    nextEpisodeCancellationSources(),shippedSource("supersedePlaybackControlIntent"),
+    "AUTOPLAY_NEXT_PREPARED={page:{id:'next-episode'}};",
     seekTelemetrySources(), shippedSource("beginPlaybackControlSeek"),
     shippedSource("markPlaybackControlSeekExecuted"),
     shippedSource("samplePlaybackPresentationClock"),
     shippedSource("settlePlaybackControlSeek"),
     shippedSource("hasPendingPlaybackOpen"),shippedSource("playbackOwnsAttachedMedia"),
     "return {begin(p,target){PLAYER=p;return beginPlaybackControlSeek(p,target);},mark:markPlaybackControlSeekExecuted,"+
-      "settle:settlePlaybackControlSeek,sample:samplePlaybackPresentationClock,"+
-      "notifications:()=>notifications};",
+      "settle(v,p,time,frames){return settlePlaybackControlSeek(v,p,time,frames,{epoch:p.controlPresentationEpoch||0,attachment:p.mediaAttachment,intent:p.controlSeek?.sequence});},sample:samplePlaybackPresentationClock,"+
+      "notifications:()=>notifications,nextPrepared:()=>AUTOPLAY_NEXT_PREPARED};",
   ].join("\n"))({now:()=>presentationNow});
+  let nextEpisodeCancelled=0;
   const intentPlayer={started:true,offset:0,source:{video_codec:"h264"},
+    nextEpisodePreparation:{owner:{cancel(){nextEpisodeCancelled++;}}},
     controlPresentedFrames:0,controlHasFrameCallbacks:true};
   const intentVideo={currentTime:10,seeking:false,readyState:4,paused:false,playbackRate:1};
   const firstIntent=seekIntentAdapter.begin(intentPlayer,30);
   const finalIntent=seekIntentAdapter.begin(intentPlayer,90);
+  assert.equal(nextEpisodeCancelled,1,"the first directed seek cancels the obsolete episode preparation once");
+  assert.equal(intentPlayer.nextEpisodePreparation,null);
+  assert.equal(seekIntentAdapter.nextPrepared(),null);
   assert.equal(finalIntent.sequence,firstIntent.sequence+1,"later seeks supersede monotonically");
   assert.equal(seekIntentAdapter.settle(intentVideo,intentPlayer,90,1),false,
     "a target-looking frame before execution cannot settle the intent");
@@ -937,10 +952,9 @@ async function main() {
     seekIntentAdapter.begin(p,80); seekIntentAdapter.mark(p,80,v);
     callbacks[0](presentationNow,{mediaTime:80});
     queue(v,p,(_now,_meta,epoch)=>epochs.push(epoch));
-    callbacks[1](presentationNow,{mediaTime:80});
-    assert.notEqual(epochs[0],p.controlPresentationEpoch,
-      "a callback queued by the predecessor cannot settle the new execution");
-    assert.equal(epochs[1],p.controlPresentationEpoch);
+    callbacks[2](presentationNow,{mediaTime:80});
+    assert.deepEqual(epochs,[p.controlPresentationEpoch],
+      "execution cancels the old observer and renews the sole destination frame");
     presentationNow+=1000;
     assert.equal(seekIntentAdapter.settle(v,p,81,1),true,
       "delayed video presentation is checked against the active media timeline");
@@ -1094,7 +1108,7 @@ async function main() {
       "function releaseSession(id){released.push(id);}",
       "function attachSession(v,p,info,pos){markPlaybackControlSeekExecuted(p,pos);return pos;}",
       "function remuxUrl(path,audio,pos){calls.push({kind:'remux',position:pos*1000});return '/remux';}",
-      shippedSource("supersedePlaybackControlIntent"),
+      nextEpisodeCancellationSources(),shippedSource("supersedePlaybackControlIntent"),
       shippedSource("positionForPlaybackIntent"),
       seekTelemetrySources(), shippedSource("beginPlaybackControlSeek"),
       shippedSource("markPlaybackControlSeekExecuted"),
@@ -1376,6 +1390,7 @@ async function main() {
     assert.equal(h.decisions.length,2,'cold decision timeout has a working Retry without PLAYER');
     resolveDecision(h.decisions[1]);await retry;
     assert.equal(h.current().fileId,'cold');
+    assert.equal(h.nextEpisodeTicks.at(-1)[0],h.current(), 'the shipped progress tick prepares metadata only for its current player');
   }
   for(const prior of ['cold','different-title']){
     const h=fullOpenHarness();if(prior==='different-title')h.attach(fullPlayer());
@@ -1580,12 +1595,13 @@ async function main() {
       assert.equal((h.sessions[0]||h.decisions[0]).signal.aborted,true,'original preparation retains its20s bound');
     }
   }
-  for(const delayedBoundary of [0,1,2,3]){
+  for(const delayedBoundary of [0,1,2,3,4]){
     for(const interruption of ['title','seek','open']){
       const h=new Function([
         "let PLAYER={fileId:'f',attemptId:'a1'},AUTOPLAY=null,closed=0;const pending=[],loading=[],location={hash:''},ITEM_FOR_FILE={f:'e1'};",
         surfaceSeam(),
         "function api(){return new Promise(resolve=>pending.push(resolve));}function exactWireId(x){return x.id;}function toast(){}function autoNextOn(){return true;}function setLoading(value){loading.push(value);}function closePlayer(){closed++;}",
+        nextEpisodeCancellationSources(),shippedSource("resolveNextEpisodePage"),
         shippedSource("playbackContinuation"),shippedSource("playNextEpisode"),shippedSource("finishPlayback"),
         shippedSource("beginPlaybackPreparation"),
         "return {pending,location,loading,surface:surfacePainted,events:()=>surfaceEvents,start:()=>finishPlayback(true),result:()=>({AUTOPLAY,closed}),interrupt(kind){if(kind==='title')PLAYER={fileId:'other'};else if(kind==='seek')PLAYER.controlIntentGeneration=1;else PLAYER.pendingOpenAttempt={};}};",
@@ -1593,7 +1609,8 @@ async function main() {
       const replies=[{item:{kind:'episode'},ancestors:[{id:'show'},{id:'s1'}]},
         {children:[{id:'e1',kind:'episode'}]},
         {children:[{id:'s1',kind:'season'},{id:'s2',kind:'season'}]},
-        {children:[{id:'e2',kind:'episode',title:'Next'}]}];
+        {children:[{id:'e2',kind:'episode',title:'Next'}]},
+        {item:{id:'e2',kind:'episode',title:'Next'},files:[]}];
       const opening=h.start();
       for(let i=0;i<delayedBoundary;i++){h.pending[i](replies[i]);await flush();await flush();}
       h.interrupt(interruption);h.pending[delayedBoundary](replies[delayedBoundary]);await opening;
@@ -1607,20 +1624,22 @@ async function main() {
         'and cannot retire it either — the intent it belongs to never settled');
     }
   }
-  for(const delayedBoundary of [0,1,2,3])for(const boundary of ['headers','body']){
+  for(const delayedBoundary of [0,1,2,3,4])for(const boundary of ['headers','body']){
     const h=new Function([
       "let PLAYER={fileId:'f',attemptId:'a1'},AUTOPLAY=null,closed=0,now=0,timerId=0;const pending=[],loading=[],notices=[],timers=new Map(),location={hash:''},ITEM_FOR_FILE={f:'e1'};",
       surfaceSeam(),
       "const performance={now:()=>now};const API='/api',TOKEN=null,AUTH_GENERATION=0;function logout(){}function fetch(url,options){return new Promise(resolve=>pending.push({url,options,resolve}));}",
       "function setTimeout(fn,ms){const id=++timerId;timers.set(id,{fn,at:now+ms});return id;}function clearTimeout(id){timers.delete(id);}function exactWireId(x){return x.id;}function toast(text){notices.push(text);}function autoNextOn(){return true;}function setLoading(value){loading.push(value);}function closePlayer(){closed++;}",
       apiPrelude()+shippedSource('api'),shippedSource('beginPlaybackPreparation'),
+      nextEpisodeCancellationSources(),shippedSource('resolveNextEpisodePage'),
       shippedSource('playbackContinuation'),shippedSource('playNextEpisode'),shippedSource('finishPlayback'),
       "return {pending,loading,notices,surface:surfacePainted,events:()=>surfaceEvents,location,start:()=>finishPlayback(true),result:()=>({AUTOPLAY,closed}),advance(ms){now+=ms;for(const[id,t]of [...timers])if(t.at<=now){timers.delete(id);t.fn();}}};",
     ].join('\n'))();
     const replies=[{item:{kind:'episode'},ancestors:[{id:'show'},{id:'s1'}]},
       {children:[{id:'e1',kind:'episode'}]},
       {children:[{id:'s1',kind:'season'},{id:'s2',kind:'season'}]},
-      {children:[{id:'e2',kind:'episode',title:'Next'}]}];
+      {children:[{id:'e2',kind:'episode',title:'Next'}]},
+        {item:{id:'e2',kind:'episode',title:'Next'},files:[]}];
     const opening=h.start();
     for(let i=0;i<delayedBoundary;i++){
       if(i===0)h.advance(19_000);
@@ -2571,7 +2590,7 @@ async function main() {
         surfaceSeam(),
         shippedSource("createPlaybackOpenGate"),"const PLAY_OPEN_GATE=createPlaybackOpenGate();",
         askConstants,
-        shippedSource("supersedePlaybackControlIntent"),
+        nextEpisodeCancellationSources(),shippedSource("supersedePlaybackControlIntent"),
         shippedSource("holdReasonText"),
         shippedSource("controlVerdictText"),
         shippedSource("armedPlaybackControlVerdict"),
@@ -4080,7 +4099,7 @@ async function main() {
         shippedConst("PREPARED_OFFER_CADENCE_MS"),
         shippedSource("playbackControlSelection"),
         shippedSource("positionForPlaybackIntent"),
-        shippedSource("supersedePlaybackControlIntent"),
+        nextEpisodeCancellationSources(),shippedSource("supersedePlaybackControlIntent"),
         seekTelemetrySources(), shippedSource("beginPlaybackControlSeek"),
         shippedSource("clearPlaybackControlWaiters"),
         shippedSource("settlePlaybackControlWaiters"),
@@ -6891,7 +6910,7 @@ async function vendoredHlsStartupTests(){
         shippedSource("streamFailureResponseBodyNow"),shippedSource("streamFailureResponseBody"),
         shippedSource("observeStreamFailureResponse"),
         shippedSource("createHlsStartupLoader"),
-        shippedSource("supersedePlaybackControlIntent"),shippedSource("setSub"),
+        nextEpisodeCancellationSources(),shippedSource("supersedePlaybackControlIntent"),shippedSource("setSub"),
         shippedSource("scheduleHlsNetworkRetry"),
         "const Loader=createHlsStartupLoader(StockLoader,episode);const loader=new Loader({xhrSetup});",
         "loader.load({type:'manifest',url:'/delayed/index.m3u8',responseType:'text'},",

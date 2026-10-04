@@ -149,6 +149,8 @@ pub struct SystemInfo {
     /// `hevc_qsv` Main10. Separate from `dovi_passthrough_qsv`, which is
     /// gated behind a Dolby Vision filter this route does not use.
     pub hdr10_passthrough_qsv: bool,
+    /// Independent plain-HDR10 P010/Main10 VAAPI graph proof (1080p).
+    pub hdr10_passthrough_vaapi: bool,
     /// Whether this build converts Dolby Vision Profile 7 to Profile 8.1 on
     /// the way through a copy (PLAYBACK-CAPS-V2-PLAN §4.8).
     ///
@@ -1095,6 +1097,7 @@ impl AppState {
             .with_dovi_passthrough_qsv(system.dovi_passthrough_qsv)
             .with_hdr10_passthrough(system.hdr10_passthrough)
             .with_hdr10_passthrough_qsv(system.hdr10_passthrough_qsv)
+            .with_hdr10_passthrough_vaapi(system.hdr10_passthrough_vaapi)
             .with_cache_layout(
                 cache_dir.clone(),
                 runtime_cache.clone(),
@@ -1641,6 +1644,40 @@ pub struct AnalysisProgress {
     pub eta_ms: Option<i64>,
     #[serde(skip)]
     registry_epoch: u64,
+    /// The first byte count this attempt reported, and when. A resumed
+    /// whole-file attestation reports its resume offset first. An earlier
+    /// attempt read those bytes, so this attempt's rate is measured from here.
+    #[serde(skip)]
+    rate_origin: Option<(u64, i64)>,
+}
+
+/// This attempt's read rate and the time left at that rate. The rate counts
+/// only bytes read since `origin`. Before the first report, `origin` is
+/// `(0, started_at_ms)`.
+fn analysis_rate(
+    bytes_read: u64,
+    total_bytes: u64,
+    origin: (u64, i64),
+    now_ms: i64,
+) -> (u64, Option<i64>) {
+    let (origin_bytes, origin_ms) = origin;
+    let rate_ms = u64::try_from(now_ms.saturating_sub(origin_ms)).unwrap_or(0);
+    let throughput_bps = if rate_ms > 0 {
+        bytes_read
+            .saturating_sub(origin_bytes)
+            .saturating_mul(1_000)
+            .saturating_div(rate_ms)
+    } else {
+        0
+    };
+    let eta_ms = (bytes_read > 0 && total_bytes > bytes_read && throughput_bps > 0).then(|| {
+        total_bytes
+            .saturating_sub(bytes_read)
+            .saturating_mul(1_000)
+            .saturating_div(throughput_bps)
+            .min(i64::MAX as u64) as i64
+    });
+    (throughput_bps, eta_ms)
 }
 
 #[cfg(test)]
@@ -1669,7 +1706,35 @@ impl AnalysisProgress {
             throughput_bps: 1,
             eta_ms: Some(1),
             registry_epoch: 0,
+            rate_origin: None,
         }
+    }
+}
+
+#[cfg(test)]
+mod analysis_rate_tests {
+    /// A resumed attestation reports 60 GB in its first second. Those bytes
+    /// were read by earlier attempts. Counting them as this attempt's rate
+    /// would show an ETA of seconds for minutes of real work.
+    #[test]
+    fn a_resumed_attempt_is_timed_from_its_resume_point() {
+        let gb = 1_000_000_000_u64;
+        let started = 1_000_i64;
+        // Resumed at 60 GB at t=1 s, then read 1 GB in the next 10 s.
+        let (rate, eta) =
+            super::analysis_rate(61 * gb, 80 * gb, (60 * gb, started), started + 10_000);
+        assert_eq!(rate, 100_000_000, "1 GB in 10 s, not 61 GB in 10 s");
+        assert_eq!(eta, Some(190_000), "19 GB left at 100 MB/s");
+    }
+
+    #[test]
+    fn without_a_report_the_rate_is_measured_from_the_start() {
+        let (rate, eta) = super::analysis_rate(0, 100, (0, 5_000), 6_000);
+        assert_eq!((rate, eta), (0, None));
+        let (rate, eta) = super::analysis_rate(50, 100, (0, 5_000), 6_000);
+        assert_eq!((rate, eta), (50, Some(1_000)));
+        let (rate, _) = super::analysis_rate(50, 100, (50, 6_000), 6_000);
+        assert_eq!(rate, 0, "no time since the origin is no measurement");
     }
 }
 
@@ -2097,12 +2162,7 @@ fn ordered_cluster_index_paths(
 }
 
 fn setting_enabled(value: Option<String>) -> bool {
-    value.is_some_and(|value| {
-        matches!(
-            value.trim().to_ascii_lowercase().as_str(),
-            "1" | "true" | "yes" | "on"
-        )
-    })
+    plurx_core::store::stored_switch(value.as_deref(), false)
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -2227,6 +2287,27 @@ enum AnalysisResolutionError {
         charge_attempt: bool,
     },
     Terminal(&'static str),
+}
+
+/// Remember contention throughout a source read, even if playback ends before
+/// its deadline. A busy-viewer timeout must not exhaust the durable retry budget.
+#[derive(Default)]
+struct AnalysisAttestationBudget(std::sync::atomic::AtomicBool);
+
+impl AnalysisAttestationBudget {
+    fn observe_busy(&self, busy: bool) {
+        if busy {
+            self.0.store(true, std::sync::atomic::Ordering::Relaxed);
+        }
+    }
+
+    fn deadline_failure(&self, busy_now: bool) -> AnalysisResolutionError {
+        self.observe_busy(busy_now);
+        AnalysisResolutionError::Retry {
+            code: "source_attestation_timeout",
+            charge_attempt: !self.0.load(std::sync::atomic::Ordering::Relaxed),
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -4553,6 +4634,7 @@ impl JobManager {
                 throughput_bps: 0,
                 eta_ms: None,
                 registry_epoch,
+                rate_origin: None,
             },
         );
         if let Some(value) = replaced {
@@ -4598,6 +4680,13 @@ impl JobManager {
         };
         value.fragments_indexed = fragments_indexed;
         value.updated_at_ms = now;
+        // A later stage that counts from zero again starts a new origin.
+        if value
+            .rate_origin
+            .is_none_or(|(origin_bytes, _)| value.bytes_read < origin_bytes)
+        {
+            value.rate_origin = Some((value.bytes_read, now));
+        }
     }
 
     /// The progress callback both index paths hand a pass — the queue worker
@@ -4722,29 +4811,12 @@ impl JobManager {
             .collect::<Vec<_>>();
         for value in &mut values {
             value.elapsed_ms = now.saturating_sub(value.started_at_ms).max(0);
-            value.throughput_bps = if value.elapsed_ms > 0 {
-                value
-                    .bytes_read
-                    .saturating_mul(1_000)
-                    .saturating_div(u64::try_from(value.elapsed_ms).unwrap_or(u64::MAX))
-            } else {
-                0
-            };
-            value.eta_ms = if value.bytes_read > 0
-                && value.total_bytes > value.bytes_read
-                && value.throughput_bps > 0
-            {
-                Some(
-                    value
-                        .total_bytes
-                        .saturating_sub(value.bytes_read)
-                        .saturating_mul(1_000)
-                        .saturating_div(value.throughput_bps)
-                        .min(i64::MAX as u64) as i64,
-                )
-            } else {
-                None
-            };
+            (value.throughput_bps, value.eta_ms) = analysis_rate(
+                value.bytes_read,
+                value.total_bytes,
+                value.rate_origin.unwrap_or((0, value.started_at_ms)),
+                now,
+            );
         }
         values.sort_by(|left, right| {
             right
@@ -7924,7 +7996,7 @@ impl JobManager {
         /// budget and remain unverified, with bounded charged retries.
         const ATTEST_TIMEOUT: Duration = Duration::from_secs(10 * 60);
 
-        if !self.cluster_fragment_index_enabled().await || !transcode.pretranscode_worker_idle() {
+        if !self.cluster_fragment_index_enabled().await {
             return;
         }
         let node_id = self.coordinator.node_id().to_owned();
@@ -7932,18 +8004,18 @@ impl JobManager {
         let engine_sha256 = crate::ffmpeg::fragment_index_engine_digest().await;
         let have_dovi = transcode.dv_strippable();
         for _ in 0..MAX_REQUESTS_PER_PASS {
-            if !self.cluster_fragment_index_enabled().await || !transcode.pretranscode_worker_idle()
-            {
+            if !self.cluster_fragment_index_enabled().await {
                 break;
             }
             let now = clock_ms();
             let request = match self
                 .store
-                .claim_analysis_request_compatible(
+                .claim_analysis_request_for_capacity(
                     &node_id,
                     Some(&engine_sha256),
                     now,
                     now.saturating_add(retry_policy.lease_ms),
+                    !transcode.pretranscode_worker_idle(),
                 )
                 .await
             {
@@ -8780,6 +8852,8 @@ impl JobManager {
                 0,
             );
         };
+        let attestation_budget = AnalysisAttestationBudget::default();
+        attestation_budget.observe_busy(!transcode.pretranscode_worker_idle());
         let attested = tokio::select! {
             result = crate::fragment_index_cluster::attest_copy_source(
                 node_id,
@@ -8792,7 +8866,7 @@ impl JobManager {
                     charge_attempt: true,
                 })?
             }
-            () = self.wait_for_cluster_fragment_index_stop(transcode, lost) => {
+            () = self.wait_for_cluster_fragment_index_stop(transcode, Some(request), lost, &attestation_budget) => {
                 if lost.is_cancelled() {
                     return Err(AnalysisResolutionError::ClaimLost);
                 }
@@ -8802,18 +8876,19 @@ impl JobManager {
                 });
             }
             () = wait_analysis_deadline(attest_timeout) => {
-                // Charge timeout attempts so large/slow or unavailable sources
-                // back off and eventually stop instead of retrying forever.
-                return Err(AnalysisResolutionError::Retry {
-                    code: "source_attestation_timeout",
-                    charge_attempt: true,
-                });
+                // Playback contention must not turn a formerly deferred request
+                // into terminal attempt_limit. Idle-only reads retain the cap.
+                return Err(attestation_budget.deadline_failure(!transcode.pretranscode_worker_idle()));
             }
         };
         if lost.is_cancelled() {
             return Err(AnalysisResolutionError::ClaimLost);
         }
-        if !transcode.pretranscode_worker_idle() || !self.cluster_fragment_index_enabled().await {
+        if !self
+            .analysis_source_may_continue(transcode, Some(request))
+            .await
+            || !self.cluster_fragment_index_enabled().await
+        {
             return Err(AnalysisResolutionError::Retry {
                 code: "foreground_preempted",
                 charge_attempt: false,
@@ -9029,14 +9104,42 @@ impl JobManager {
         AnalysisRetryPolicy::from_settings(&settings)
     }
 
+    async fn analysis_source_may_continue(
+        &self,
+        transcode: &TranscodeManager,
+        request: Option<&AnalysisRequest>,
+    ) -> bool {
+        if transcode.pretranscode_worker_idle() {
+            return true;
+        }
+        let Some(request) = request else {
+            return false;
+        };
+        // Source attestation holds the Store's bounded source-I/O reservation,
+        // not an encoder slot. Any live playback waiter on this request permits
+        // the read while this node is busy. Expired/departed viewers and failed
+        // reads fail closed.
+        self.store
+            .analysis_preparation_observation(&request.request_id, clock_ms())
+            .await
+            .ok()
+            .flatten()
+            .is_some_and(|state| state.has_live_viewer)
+    }
+
     async fn wait_for_cluster_fragment_index_stop(
         &self,
         transcode: &TranscodeManager,
+        request: Option<&AnalysisRequest>,
         permit_lost: &tokio_util::sync::CancellationToken,
+        attestation_budget: &AnalysisAttestationBudget,
     ) {
         let mut ticks = 0_u8;
         loop {
-            if permit_lost.is_cancelled() || !transcode.pretranscode_worker_idle() {
+            attestation_budget.observe_busy(!transcode.pretranscode_worker_idle());
+            if permit_lost.is_cancelled()
+                || !self.analysis_source_may_continue(transcode, request).await
+            {
                 return;
             }
             if ticks == 0 && !self.cluster_fragment_index_enabled().await {
@@ -10661,6 +10764,169 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
+    async fn playback_preparation_wakes_busy_analysis_for_any_live_request_waiter() {
+        use plurx_core::store::{
+            BackgroundJobStore as _, ClusterFragmentIndexStore as _, UserStore as _,
+        };
+        use plurx_core::transcode::CopyVideoOptions;
+
+        let store = Arc::new(SqliteStore::open_in_memory().expect("store"));
+        store
+            .put_setting(keys::VOD_INDEX_CLUSTER_CACHE, "1")
+            .await
+            .expect("shared indexing on");
+        let library = store
+            .create_library(&NewLibrary {
+                name: "Movies".to_owned(),
+                kind: LibraryKind::Movies,
+                paths: Vec::new(),
+                anime: false,
+            })
+            .await
+            .expect("library");
+        let item = store
+            .insert_item(&NewItem {
+                library_id: library.id,
+                kind: ItemKind::Movie,
+                parent_id: None,
+                title: "Viewer demand".to_owned(),
+                year: None,
+                season_number: None,
+                episode_number: None,
+            })
+            .await
+            .expect("item");
+        let id = store
+            .upsert_file(
+                item,
+                "/absent/viewer-demand.mkv",
+                100,
+                1,
+                &ProbeResult {
+                    video_codec: Some("h264".to_owned()),
+                    ..Default::default()
+                },
+            )
+            .await
+            .expect("file");
+        let file = store.get_file(id).await.expect("read file").expect("file");
+        let artwork = tempfile::tempdir().expect("artwork");
+        let transcode_dir = crate::test_tempdir().expect("transcode");
+        let jobs = manager(store.clone(), artwork.path());
+        let transcode = Arc::new(TranscodeManager::new(
+            store.clone(),
+            transcode_dir.path().join("work"),
+            EncoderCaps::default(),
+            Pipeline::Cpu,
+        ));
+        let _playback = transcode.test_mark_live_waiting();
+        let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();
+        let consumer = tokio::spawn(
+            Arc::clone(&jobs)
+                .background_work_loop_with_ready(Arc::clone(&transcode), Some(ready_tx)),
+        );
+        // Measure the wake path from a subscribed worker.
+        ready_rx.await.expect("analysis worker subscribed");
+        let request = enqueue_copy_preparation(
+            store.as_ref(),
+            "test-node",
+            &file,
+            CopyVideoOptions::new(false, false),
+        )
+        .await
+        .expect("enqueue");
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert_eq!(
+            store
+                .analysis_request(&request.request_id)
+                .await
+                .expect("read")
+                .expect("row")
+                .attempts,
+            0,
+            "busy playback must leave maintenance unclaimed"
+        );
+        let user = store
+            .create_user("busy-source-viewer", "hash", false)
+            .await
+            .expect("viewer");
+        enqueue_copy_preparation_for_object_with_viewer(
+            store.as_ref(),
+            "test-node",
+            &file,
+            CopyVideoOptions::new(false, false),
+            None,
+            Some(&PlaybackViewerDemand {
+                user_id: user.id,
+                playback_id: "busy-source-playback".into(),
+            }),
+        )
+        .await
+        .expect("join requesting viewer");
+        assert!(
+            jobs.analysis_source_may_continue(&transcode, Some(&request))
+                .await,
+            "any live request waiter permits the source read on a busy node"
+        );
+        assert!(
+            !jobs.analysis_source_may_continue(&transcode, None).await,
+            "ordinary maintenance still yields"
+        );
+        let admitted = tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                let current = store
+                    .analysis_request(&request.request_id)
+                    .await
+                    .expect("request read")
+                    .expect("request kept");
+                if current.fence > 0 {
+                    break current;
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await;
+        consumer.abort();
+        let _ = consumer.await;
+        assert!(
+            admitted.is_ok(),
+            "a busy worker must admit a source read with any live request waiter: {:?}",
+            store.analysis_request(&request.request_id).await
+        );
+        let interest = plurx_core::store::AnalysisViewerInterest {
+            analysis_request_id: request.request_id.clone(),
+            requested_generation: request.requested_generation.clone(),
+            pipeline_version: request.pipeline_version.clone(),
+            video_identity: request.video_identity.clone(),
+            target_node_id: request.target_node_id.clone(),
+            user_id: user.id,
+            playback_id: "busy-source-playback".into(),
+            now_ms: clock_ms(),
+        };
+        store
+            .cancel_waiter(plurx_core::store::background_jobs::CancelWaiter {
+                scope: "playback-analysis".into(),
+                request_id: interest.consumer_id(),
+                now_ms: clock_ms(),
+            })
+            .await
+            .expect("retire viewer");
+        let lost = tokio_util::sync::CancellationToken::new();
+        tokio::time::timeout(
+            Duration::from_secs(1),
+            jobs.wait_for_cluster_fragment_index_stop(
+                &transcode,
+                Some(&request),
+                &lost,
+                &AnalysisAttestationBudget::default(),
+            ),
+        )
+        .await
+        .expect("departed viewer stops source attestation");
+        assert!(!lost.is_cancelled(), "viewer departure is not claim loss");
+    }
+
+    #[tokio::test(start_paused = true)]
     async fn playback_preparation_wakes_idle_analysis_within_two_seconds() {
         use plurx_core::store::ClusterFragmentIndexStore as _;
         use plurx_core::transcode::CopyVideoOptions;
@@ -10997,6 +11263,38 @@ mod tests {
         assert!(rendered.contains("plurx_analysis_lease_total{event=\"renewed\"} 1"));
         assert!(rendered.contains("plurx_analysis_lease_total{event=\"outcome_write_lost\"} 1"));
         assert!(rendered.contains("plurx_analysis_lease_total{event=\"lost\"} 0"));
+    }
+
+    #[test]
+    fn playback_contention_timeouts_do_not_exhaust_analysis_attempts() {
+        let budget = AnalysisAttestationBudget::default();
+        assert_eq!(
+            budget.deadline_failure(false),
+            AnalysisResolutionError::Retry {
+                code: "source_attestation_timeout",
+                charge_attempt: true,
+            }
+        );
+        budget.observe_busy(true);
+        budget.observe_busy(false);
+        for _ in 0..10 {
+            assert_eq!(
+                budget.deadline_failure(false),
+                AnalysisResolutionError::Retry {
+                    code: "source_attestation_timeout",
+                    charge_attempt: false,
+                },
+                "contention remains uncharged even after the viewer stops"
+            );
+        }
+        assert_eq!(
+            AnalysisAttestationBudget::default().deadline_failure(true),
+            AnalysisResolutionError::Retry {
+                code: "source_attestation_timeout",
+                charge_attempt: false,
+            },
+            "a newly busy node at the deadline also stays uncharged"
+        );
     }
 
     #[test]
@@ -11943,7 +12241,7 @@ mod tests {
         a_tick.expect("tick a");
         b_tick.expect("tick b");
         c_tick.expect("tick c");
-        tokio::time::timeout(std::time::Duration::from_secs(2), entered.notified())
+        tokio::time::timeout(PROVIDER_LIVENESS, entered.notified())
             .await
             .expect("winning provider pass started");
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
@@ -11953,7 +12251,7 @@ mod tests {
             "three real scheduler ticks must dispatch one provider pass"
         );
         release.notify_waiters();
-        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        tokio::time::timeout(PROVIDER_LIVENESS, async {
             while a.retrying_artwork.load(Ordering::Relaxed)
                 || b.retrying_artwork.load(Ordering::Relaxed)
                 || c.retrying_artwork.load(Ordering::Relaxed)
@@ -12167,6 +12465,14 @@ mod tests {
             }),
         )
     }
+
+    /// How long the blocking-provider tests wait for something that must
+    /// happen. Each wait is either liveness (the pass reached the provider,
+    /// the owner let go) or proves the other side was not held by a provider
+    /// that never answers until the test releases it, so a longer bound
+    /// proves the same thing. Two seconds failed on loaded CI runners, where
+    /// the whole suite took 900 s, while the same tests pass locally in 0.3 s.
+    const PROVIDER_LIVENESS: std::time::Duration = std::time::Duration::from_secs(30);
 
     fn blocking_season_tmdb(
         season_hits: Arc<AtomicUsize>,
@@ -13808,8 +14114,13 @@ mod tests {
             let transcode = Arc::clone(&transcode);
             let lost = lost.clone();
             tokio::spawn(async move {
-                jobs.wait_for_cluster_fragment_index_stop(&transcode, &lost)
-                    .await;
+                jobs.wait_for_cluster_fragment_index_stop(
+                    &transcode,
+                    None,
+                    &lost,
+                    &AnalysisAttestationBudget::default(),
+                )
+                .await;
                 lost.is_cancelled()
             })
         };
@@ -15082,15 +15393,12 @@ mod tests {
         let jobs = manager_with_tmdb(store, artwork.path(), &base);
 
         let first = tokio::spawn(Arc::clone(&jobs).artwork_retry_pass());
-        tokio::time::timeout(std::time::Duration::from_secs(2), entered.notified())
+        tokio::time::timeout(PROVIDER_LIVENESS, entered.notified())
             .await
             .expect("first pass reached provider");
-        tokio::time::timeout(
-            std::time::Duration::from_secs(2),
-            Arc::clone(&jobs).artwork_retry_pass(),
-        )
-        .await
-        .expect("second pass returned");
+        tokio::time::timeout(PROVIDER_LIVENESS, Arc::clone(&jobs).artwork_retry_pass())
+            .await
+            .expect("second pass returned");
         assert_eq!(hits.load(Ordering::SeqCst), 1);
         release.notify_waiters();
         first.await.expect("first pass task");
@@ -15127,14 +15435,11 @@ mod tests {
             Pipeline::Cpu,
         ));
 
-        tokio::time::timeout(
-            std::time::Duration::from_secs(2),
-            jobs.run_due_jobs(&transcode),
-        )
-        .await
-        .expect("scheduler returned while artwork was blocked")
-        .expect("scheduler tick");
-        tokio::time::timeout(std::time::Duration::from_secs(2), entered.notified())
+        tokio::time::timeout(PROVIDER_LIVENESS, jobs.run_due_jobs(&transcode))
+            .await
+            .expect("scheduler returned while artwork was blocked")
+            .expect("scheduler tick");
+        tokio::time::timeout(PROVIDER_LIVENESS, entered.notified())
             .await
             .expect("artwork reached provider");
         let cleanup_key = jobs.local_job_key(keys::JOB_LAST_TRANSCODE_CLEANUP);
@@ -15170,7 +15475,7 @@ mod tests {
         assert!(other.job_stamp(&other_key).await.is_some());
         assert_eq!(hits.load(Ordering::SeqCst), 1);
         release.notify_waiters();
-        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        tokio::time::timeout(PROVIDER_LIVENESS, async {
             while jobs.retrying_artwork.load(Ordering::Relaxed) {
                 tokio::task::yield_now().await;
             }
