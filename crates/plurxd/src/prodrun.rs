@@ -19,7 +19,8 @@
 //!   [`tokio::process::Child`] un-reaped — the kernel keeps the pid reserved
 //!   until `wait`. Retirement transfers it under that lock to one detached
 //!   owner, then keeps the slot reserved until successful wait and registered
-//!   writer settlement. Waiters never hold the slot lock across that barrier.
+//!   writer settlement, or the writer task ending without it. Waiters never
+//!   hold the slot lock across that barrier.
 //! - **Belief is recorded only after the operation succeeds.** A failed
 //!   `kill(2)` returns the error and changes nothing — a producer recorded as
 //!   stopped that is actually running produces past every horizon; one
@@ -71,8 +72,10 @@ struct GenerationLifetime {
     settled: Notify,
 }
 
-/// Owned only by the actual stdout/diagnostic task. Dropping without settlement
-/// deliberately leaves retirement unavailable, rather than certifying a panic.
+/// Owned only by the actual stdout/diagnostic task, so it lives and dies with
+/// that task and the pipes it writes from. Dropping without settlement means
+/// the task panicked or returned early: nothing of it can still be writing, so
+/// the reaper records the abandonment on the receipt and releases as usual.
 pub(crate) struct ProducerWriters(tokio::sync::oneshot::Sender<()>);
 impl ProducerWriters {
     pub(crate) fn settled(self) {
@@ -80,13 +83,32 @@ impl ProducerWriters {
     }
 }
 
-/// Minted inside the detached process owner after successful wait and joined
+/// How a registered generation's writer barrier ended. Either way the writer
+/// is gone; the difference is a failure of that writer, never a reason to keep
+/// holding the child's job or admission for an owner that no longer exists.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum WriterSettlement {
+    /// The writer task called [`ProducerWriters::settled`].
+    Settled,
+    /// The writer task dropped its barrier without settling.
+    Abandoned,
+}
+
+/// Minted inside the detached process owner after successful wait and ended
 /// writers. It proves one producer generation, not viewer or DB retirement.
 #[derive(Clone)]
-pub(crate) struct ConfirmedProducerReap(Arc<()>);
+pub(crate) struct ConfirmedProducerReap {
+    identity: Arc<()>,
+    writers: WriterSettlement,
+}
 impl ConfirmedProducerReap {
     pub(crate) fn matches(&self, generation: &ProducerRegistration) -> bool {
-        Arc::ptr_eq(&self.0, &generation.0.identity)
+        Arc::ptr_eq(&self.identity, &generation.0.identity)
+    }
+    /// Whether this generation's writer settled or was abandoned.
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(crate) fn writers(&self) -> WriterSettlement {
+        self.writers
     }
 }
 impl ProducerRegistration {
@@ -177,19 +199,25 @@ fn owned_reap(
                     }
                 }
             }
+            let mut writers=WriterSettlement::Settled;
             if let Some(generation)=generation.as_ref(){
                 let receiver=generation.0.writers.lock().await.take();
                 if let Some(receiver)=receiver {
+                    // A closed barrier is the writer task ending without
+                    // settling. Its sender went down with the task, so the
+                    // writer is as finished as a settled one; parking here
+                    // would hold the job, the admission and the slot for the
+                    // life of the process on behalf of nothing.
                     if receiver.await.is_err(){
-                        tracing::error!(target:"plurxd::prodrun","producer writer task did not confirm settlement; admission retained");
-                        std::future::pending::<()>().await;
+                        tracing::error!(target:"plurxd::prodrun","producer writer task ended without confirming settlement; releasing its reaped generation");
+                        writers=WriterSettlement::Abandoned;
                     }
                 }
             }
             drop(child_job);
             drop(resources);
             if let Some(generation)=generation {
-                *generation.0.receipt.lock().expect("producer receipt lock")=Some(ConfirmedProducerReap(Arc::clone(&generation.0.identity)));
+                *generation.0.receipt.lock().expect("producer receipt lock")=Some(ConfirmedProducerReap{identity:Arc::clone(&generation.0.identity),writers});
                 generation.0.settled.notify_waiters();
             }
             if let Some(inner)=inner.upgrade(){
@@ -688,6 +716,63 @@ mod tests {
         .await
         .expect("owned reaper releases capacity");
         assert!(is_reaped(pid).await);
+    }
+
+    #[tokio::test]
+    async fn an_abandoned_writer_barrier_still_releases_the_reaped_generation() {
+        let admissions = crate::admission::Admissions::new();
+        let slot = super::ProducerSlot::new();
+        let child = sleeper();
+        let pid = child.id().expect("child pid");
+        let child_job = crate::process_control::ChildJob::attach(&child).expect("child job");
+        let permit = admissions
+            .try_admit_software(2, 2, crate::admission::Priority::Live)
+            .expect("encoder permit");
+        let (generation, writers) = slot
+            .attach_registered_job_owned(child, child_job, 0, Some(Box::new(permit)))
+            .await;
+        // The writer task is gone without settling: a panic drops its barrier.
+        drop(writers);
+        assert!(slot
+            .request_registered_retirement(&generation)
+            .await
+            .expect("owned retirement"));
+        let receipt = tokio::time::timeout(
+            Duration::from_secs(5),
+            slot.wait_registered_retirement(&generation),
+        )
+        .await
+        .expect("an abandoned writer never parks the reaper")
+        .expect("reaped generation");
+        assert!(receipt.matches(&generation));
+        assert_eq!(receipt.writers(), super::WriterSettlement::Abandoned);
+        assert_eq!(admissions.software_in_use(), 0);
+        assert!(is_reaped(pid).await);
+        // The slot itself is free again: a respawn attaches instead of
+        // waiting on a reaper parked for an owner that no longer exists.
+        tokio::time::timeout(Duration::from_secs(5), slot.attach(sleeper(), 0))
+            .await
+            .expect("the slot is released for the next generation");
+        slot.perform(terminate(), || {}).await.expect("cleanup");
+    }
+
+    #[tokio::test]
+    async fn a_settled_writer_barrier_is_recorded_as_settled() {
+        let slot = super::ProducerSlot::new();
+        let child = sleeper();
+        let child_job = crate::process_control::ChildJob::attach(&child).expect("child job");
+        let (generation, writers) = slot
+            .attach_registered_job_owned(child, child_job, 0, None)
+            .await;
+        writers.settled();
+        slot.request_registered_retirement(&generation)
+            .await
+            .expect("owned retirement");
+        let receipt = slot
+            .wait_registered_retirement(&generation)
+            .await
+            .expect("reaped generation");
+        assert_eq!(receipt.writers(), super::WriterSettlement::Settled);
     }
 
     use super::*;

@@ -3653,9 +3653,9 @@ pub async fn update_settings(
             .store
             .put_setting(keys::SHARING_ENABLED, if on { "1" } else { "0" })
             .await?;
-        if !on {
-            state.sharing.disable_bodies();
-        }
+        // Off ends this node's bodies now; on wakes the idle listener and
+        // claim loops now. Other nodes see either write on their next poll.
+        state.sharing.enablement_written(on);
     }
     if let Some(on) = req.bounded_replica_reads {
         state

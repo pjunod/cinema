@@ -51,6 +51,32 @@ pub(crate) struct SharingManager {
     catalogue_admission: Arc<CatalogueAdmission>,
     catalogue_cache: Mutex<CatalogueCache>,
     scope_control: Arc<tokio::sync::Semaphore>,
+    wake: SharingWake,
+}
+/// How long the listener loop waits between looks while sharing is off,
+/// unqualified or failed. A local enable cuts it short; the bound is for an
+/// enable written on another node and for retrying a failed bind or TLS open.
+const LISTENER_IDLE_POLL: Duration = Duration::from_secs(5);
+/// The longest the claim loop sleeps when no import is due sooner. Matches the
+/// takeover gate's idle tick. Replicated settings and import rows have no
+/// change feed, so this is how an enable or an import written on another
+/// node reaches this one; local writes wake the loop through [`SharingWake`].
+const CLAIM_IDLE_POLL: Duration = plurx_core::store::watched_drain::IDLE_TICK_MAX;
+/// How long a responding active import waits before its next refresh against
+/// the Source. The same 60 s the failure backoff settles at, so a healthy
+/// peer is asked no more often than one that has stopped answering, on every
+/// node that runs the loop.
+const ACTIVE_IMPORT_REFRESH: Duration = Duration::from_secs(60);
+/// This node's sharing writes. Each loop has its own `Notify`, so
+/// `notify_one` keeps a permit for a loop that is busy when the write lands
+/// and the wake is never lost. A write made on another node is seen only on
+/// the bounded polls above.
+#[derive(Default)]
+struct SharingWake {
+    /// The listener loop, idle while sharing is off or unqualified.
+    listener: tokio::sync::Notify,
+    /// The claim loop, asleep until its next import is due.
+    claims: tokio::sync::Notify,
 }
 /// Server-only received facts, retained for cleanup before any B publication
 /// await. The authenticated credential is sealed into the upstream capsule;
@@ -212,6 +238,7 @@ impl SharingManager {
             catalogue_admission: Arc::new(CatalogueAdmission::default()),
             catalogue_cache: Mutex::new(CatalogueCache::default()),
             scope_control: Arc::new(tokio::sync::Semaphore::new(32)),
+            wake: SharingWake::default(),
         }
     }
     #[cfg(all(test, target_os = "linux"))]
@@ -233,6 +260,17 @@ impl SharingManager {
             .as_ref()
         {
             token.cancel();
+        }
+    }
+    /// The saved switch was written on this node. Disabling ends this node's
+    /// bodies at once; enabling wakes both idle loops, so a local enable never
+    /// waits out a poll that exists only for writes made on another node.
+    pub fn enablement_written(&self, enabled: bool) {
+        if enabled {
+            self.wake.listener.notify_one();
+            self.wake.claims.notify_one();
+        } else {
+            self.disable_bodies();
         }
     }
     fn begin_lifetime(&self) -> CancellationToken {
@@ -324,7 +362,18 @@ impl SharingManager {
                     }
                 }
             }
-            tokio::select! { () = shutdown.cancelled() => { self.disable_bodies(); return; }, () = tokio::time::sleep(Duration::from_secs(5)) => {} }
+            if !self.listener_idle(&shutdown).await {
+                self.disable_bodies();
+                return;
+            }
+        }
+    }
+    /// The listener loop's pause between looks; false means shutdown.
+    async fn listener_idle(&self, shutdown: &CancellationToken) -> bool {
+        tokio::select! {
+            () = shutdown.cancelled() => false,
+            () = tokio::time::sleep(LISTENER_IDLE_POLL) => true,
+            () = self.wake.listener.notified() => true,
         }
     }
     async fn observe_listener(
@@ -657,7 +706,19 @@ impl SharingManager {
         }
         Ok(())
     }
+    /// A resume asked for from outside the claim loop follows a local import
+    /// mutation (create, re-pair). The loop is woken so the import joins its
+    /// schedule now, not at the poll that exists for imports written elsewhere.
     pub async fn resume_import(
+        &self,
+        state: &AppState,
+        import: plurx_core::sharing::StoredImport,
+    ) -> Result<(), crate::sharing_client::PeerError> {
+        let result = self.resume_claim(state, import).await;
+        self.wake.claims.notify_one();
+        result
+    }
+    async fn resume_claim(
         &self,
         state: &AppState,
         import: plurx_core::sharing::StoredImport,
@@ -851,11 +912,18 @@ impl SharingManager {
     }
     pub async fn claim_loop(self: Arc<Self>, state: AppState, shutdown: CancellationToken) {
         use futures_util::{stream::FuturesUnordered, StreamExt};
-        let mut retry = std::collections::HashMap::<uuid::Uuid, (u32, tokio::time::Instant)>::new();
+        // Attempts, next due time, and the lifecycle generation the schedule
+        // belongs to: a re-paired import is a new claim and does not inherit
+        // its predecessor's backoff.
+        let mut retry =
+            std::collections::HashMap::<uuid::Uuid, (u32, tokio::time::Instant, i64)>::new();
         loop {
             if shutdown.is_cancelled() {
                 return;
             }
+            // Known only after a pass that read the imports; otherwise the
+            // loop sleeps the bounded poll, never on a stale schedule.
+            let mut next_due = None;
             if matches!(enabled(state.store.as_ref()).await, Ok(true)) {
                 if let Ok(imports) = state.store.sharing_imports().await {
                     self.status
@@ -871,9 +939,10 @@ impl SharingManager {
                                     && import.endpoint_generation == observation.endpoint_generation
                             })
                         });
-                    retry.retain(|id, _| {
+                    retry.retain(|id, (_, _, generation)| {
                         imports.iter().any(|import| {
                             import.id == *id
+                                && import.lifecycle_generation == *generation
                                 && matches!(
                                     import.state.as_str(),
                                     "claiming" | "pending" | "active"
@@ -888,11 +957,12 @@ impl SharingManager {
                     }) {
                         if retry
                             .get(&summary.id)
-                            .is_some_and(|(_, due)| *due > tokio::time::Instant::now())
+                            .is_some_and(|(_, due, _)| *due > tokio::time::Instant::now())
                         {
                             continue;
                         }
                         let id = summary.id;
+                        let generation = summary.lifecycle_generation;
                         let observed =
                             (summary.state == "active").then_some(ImportTransportStatus {
                                 import_id: id,
@@ -916,17 +986,18 @@ impl SharingManager {
                                         Err(error) => Err(error),
                                     }
                                 }
-                                Ok(Some(import)) => manager.resume_import(state, import).await,
+                                Ok(Some(import)) => manager.resume_claim(state, import).await,
                                 _ => Err(crate::sharing_client::PeerError::Unavailable),
                             };
-                            (id, result, observed)
+                            (id, generation, result, observed)
                         });
                     }
                     loop {
                         tokio::select! {
                             ()=shutdown.cancelled()=>return,
                             completed=requests.next()=>match completed {
-                                Some((id,result,observed))=> {
+                                Some((id,generation,result,observed))=> {
+                                    let active = observed.is_some();
                                     if let Some(mut observation) = observed {
                                         use crate::sharing_client::PeerError;
                                         observation.checked_at_ms = clock_ms();
@@ -942,20 +1013,53 @@ impl SharingManager {
                                         status.imports.retain(|old| old.import_id != id);
                                         if status.imports.len() < 32 { status.imports.push(observation); }
                                     }
-                                    let attempts=if result.is_ok(){0}else{retry.get(&id).map_or(1,|(attempts,_)|attempts.saturating_add(1))};
-                                    let seconds=(5u64.saturating_mul(1u64<<attempts.min(4))).min(60);
-                                    let jitter = if attempts==0 {0}else{uuid::Uuid::new_v4().as_u128() as u64 % 1000};
-                                    retry.insert(id,(attempts,tokio::time::Instant::now()+Duration::from_millis(seconds*1000+jitter)));
+                                    let attempts=if result.is_ok(){0}else{retry.get(&id).map_or(1,|(attempts,_,_)|attempts.saturating_add(1))};
+                                    retry.insert(id,(attempts,tokio::time::Instant::now()+claim_retry_delay(attempts,active),generation));
                                 },
                                 None=>break,
                             }
                         }
                     }
+                    next_due = retry.values().map(|(_, due, _)| *due).min();
                 }
             }
-            tokio::select! {()=shutdown.cancelled()=>return,()=tokio::time::sleep(Duration::from_secs(1))=>{}}
+            if !self.claims_idle(next_due, &shutdown).await {
+                return;
+            }
         }
     }
+    /// The claim loop's sleep: until the earliest import is due, a local
+    /// enable or import mutation, or the bounded poll, whichever comes first.
+    /// False means shutdown.
+    async fn claims_idle(
+        &self,
+        next_due: Option<tokio::time::Instant>,
+        shutdown: &CancellationToken,
+    ) -> bool {
+        let poll = tokio::time::Instant::now() + CLAIM_IDLE_POLL;
+        let until = next_due.map_or(poll, |due| due.min(poll));
+        tokio::select! {
+            () = shutdown.cancelled() => false,
+            () = tokio::time::sleep_until(until) => true,
+            () = self.wake.claims.notified() => true,
+        }
+    }
+}
+/// How long an import waits after a pass before it is looked at again.
+/// Failures back off from 10 s to a 60 s ceiling, jittered so the fleet does
+/// not retry a lost peer in step. A claim still in flight is followed every
+/// 5 s; a responding active import waits [`ACTIVE_IMPORT_REFRESH`].
+fn claim_retry_delay(attempts: u32, active: bool) -> Duration {
+    if attempts == 0 {
+        return if active {
+            ACTIVE_IMPORT_REFRESH
+        } else {
+            Duration::from_secs(5)
+        };
+    }
+    let seconds = (5u64.saturating_mul(1u64 << attempts.min(4))).min(60);
+    let jitter = uuid::Uuid::new_v4().as_u128() as u64 % 1000;
+    Duration::from_millis(seconds * 1000 + jitter)
 }
 impl SharingManager {
     pub async fn resume_rotation(
@@ -2249,5 +2353,81 @@ mod catalogue_cache_tests {
         task.abort();
         let _ = task.await;
         assert_eq!(controls.available_permits(), 32);
+    }
+}
+
+#[cfg(test)]
+mod loop_pacing_tests {
+    use super::*;
+    #[test]
+    fn sharing_claim_schedule_refreshes_healthy_active_imports_at_the_backoff_ceiling() {
+        assert_eq!(claim_retry_delay(0, true), ACTIVE_IMPORT_REFRESH);
+        assert_eq!(claim_retry_delay(0, false), Duration::from_secs(5));
+        for (attempts, base) in [(1, 10), (2, 20), (3, 40), (4, 60), (9, 60)] {
+            for active in [false, true] {
+                let delay = claim_retry_delay(attempts, active);
+                assert!(
+                    delay >= Duration::from_secs(base) && delay < Duration::from_secs(base + 1),
+                    "attempt {attempts}: {delay:?}"
+                );
+            }
+        }
+    }
+    #[tokio::test(start_paused = true)]
+    async fn sharing_local_enable_wakes_idle_loops_before_their_remote_polls() {
+        let directory = tempfile::tempdir().expect("wake fixture");
+        let manager = SharingManager::new(
+            Arc::new(CredentialKey::from_bytes([41; 32])),
+            directory.path().to_path_buf(),
+            Default::default(),
+        );
+        let shutdown = CancellationToken::new();
+        let within = |started: tokio::time::Instant, bound: Duration| {
+            let elapsed = started.elapsed();
+            elapsed >= bound && elapsed < bound + Duration::from_millis(10)
+        };
+        // Written before either loop waits: the permit is kept, not lost.
+        let started = tokio::time::Instant::now();
+        manager.enablement_written(true);
+        assert!(manager.listener_idle(&shutdown).await);
+        assert!(manager.claims_idle(None, &shutdown).await);
+        assert_eq!(started.elapsed(), Duration::ZERO);
+        // Written while the claim loop sleeps.
+        let started = tokio::time::Instant::now();
+        let (woken, ()) = tokio::join!(manager.claims_idle(None, &shutdown), async {
+            tokio::task::yield_now().await;
+            manager.enablement_written(true);
+        });
+        assert!(woken);
+        assert!(manager.listener_idle(&shutdown).await);
+        assert_eq!(started.elapsed(), Duration::ZERO);
+        // A disable cancels bodies and wakes nothing; only the polls end the
+        // wait, as they do for a write made on another node.
+        manager.enablement_written(false);
+        let started = tokio::time::Instant::now();
+        assert!(manager.listener_idle(&shutdown).await);
+        assert!(within(started, LISTENER_IDLE_POLL));
+        let started = tokio::time::Instant::now();
+        assert!(manager.claims_idle(None, &shutdown).await);
+        assert!(within(started, CLAIM_IDLE_POLL));
+        // A known due time sooner than the poll ends the sleep then, and one
+        // past it never stretches the poll.
+        let started = tokio::time::Instant::now();
+        assert!(
+            manager
+                .claims_idle(Some(started + Duration::from_secs(3)), &shutdown)
+                .await
+        );
+        assert!(within(started, Duration::from_secs(3)));
+        let started = tokio::time::Instant::now();
+        assert!(
+            manager
+                .claims_idle(Some(started + ACTIVE_IMPORT_REFRESH), &shutdown)
+                .await
+        );
+        assert!(within(started, CLAIM_IDLE_POLL));
+        shutdown.cancel();
+        assert!(!manager.listener_idle(&shutdown).await);
+        assert!(!manager.claims_idle(None, &shutdown).await);
     }
 }

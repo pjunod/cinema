@@ -442,9 +442,7 @@ async fn save_settings(
         )
         .await
         .map_err(authority)?;
-    if !update.enabled {
-        state.sharing.disable_bodies();
-    }
+    state.sharing.enablement_written(update.enabled);
     Ok(Json(json!({"enabled":update.enabled})))
 }
 async fn status(_admin: AdminUser, State(state): State<AppState>) -> Json<Value> {
