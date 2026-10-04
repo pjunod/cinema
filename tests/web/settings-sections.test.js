@@ -471,7 +471,7 @@ test("Developer keeps only experiments; everyday controls retain their saves and
   // `//` comment and swallow whatever follows it.
   const composedBody = [
       shippedSource("preparedHandoffEnabled"), shippedSource("liveTvSettingsCard"),
-      shippedSource("liveTvEnableCard"),
+      shippedSource("liveTvEnableCard"), shippedSource("jellyfinCompatibilityCard"),
       "const document={getElementById:()=>null};",
       shippedSource("verifiedDecodeCard"), shippedSource("decodeRecoveryCard"), shippedSource("hevcCopyCard"),
       // #309's sibling problem, twice over: a card or fragment `developerPanel`
@@ -533,7 +533,7 @@ test("Developer keeps only experiments; everyday controls retain their saves and
       `TOG:${id}|${label}|${note}|checked=${!!checked}|${attrs || ""}`,
     (fn) => `FOOT:${fn}`,
     esc,
-    { Hls: { DefaultConfig: { loader: function StockLoader() {} } } },
+    { location:{href:"https://plurx.example/"}, Hls: { DefaultConfig: { loader: function StockLoader() {} } } },
     { DefaultConfig: { loader: function StockLoader() {} } },
     () => ({ progressive_hevc_sample_entries: ["hvc1"], transports: ["progressive", "hls"] }),
   );
@@ -1416,6 +1416,19 @@ test("HEVC override saves either choice without consulting advisory readiness", 
     assert.deepEqual(calls, [["/settings",{hevc_unverified_copy:enabled}]]);
     assert.equal(card.outerHTML, `saved:${enabled}`);
     assert.equal(err.textContent, "");
+  }
+});
+
+test("Jellyfin compatibility saves both explicit choices without a readiness veto", async () => {
+  for(const enabled of [true,false]) {
+    const calls=[],err={textContent:""},btn={disabled:false};
+    const save=new Function("api","document","cacheSettings","toast","setCardSaved",
+      `${shippedSource("saveJellyfinCompatibility")}\nreturn saveJellyfinCompatibility;`)(
+        async(path,opts)=>{calls.push([path,opts.body]);return {jellyfin_compatibility_enabled:enabled};},
+        {getElementById:id=>id==="jellyfin-compatibility-error"?err:{checked:enabled}},()=>{},()=>{},()=>{});
+    await save(btn);
+    assert.deepEqual(calls,[["/settings",{jellyfin_compatibility_enabled:enabled}]]);
+    assert.equal(err.textContent,"");
   }
 });
 

@@ -2047,3 +2047,44 @@ async fn encoded_vod_text_burn_gets_keep_absolute_cue_time_after_seek() {
         assert!(bright > 0, "the selected absolute-time cue must be visible on the otherwise black band after seek {ordinal}: {bright} bright pixels, maximum {:?}", decoded.stdout.iter().max());
     }
 }
+
+/// A valid encoder recipe can bypass copy indexing, never the closed-film
+/// duration prerequisite. Refusal must leave no reader or producer attached.
+#[tokio::test]
+async fn copy_and_encoded_vod_refuse_missing_or_nonpositive_duration_without_attachment() {
+    let _campaign = ENCODED_INTEGRATION_CAMPAIGN.lock().await;
+    let base = crate::test_tempdir().expect("duration prerequisite");
+    let (mut file, encoding) = encoded_fixture(base.path()).await;
+    let serve = bare_serve(&base.path().join("renditions"));
+    for duration in [None, Some(0), Some(-1)] {
+        file.duration_ms = duration;
+        for encoded in [false, true] {
+            let session = format!("duration-{duration:?}-{encoded}");
+            let mut req = request(&session, 0.0);
+            if encoded {
+                req.kind = SessionKind::Transcode { height: 144 };
+            }
+            let refusal = serve
+                .try_create(
+                    VodRecipeRequest {
+                        measured_candidate: None, retained_capture: crate::vodserve::RetainedOutputCapture::New,
+                        request: &req,
+                        encoding: encoded.then(|| Arc::clone(&encoding)),
+                    },
+                    &file,
+                    &settings(),
+                    VodAttribution {
+                        user_name: "test",
+                        item_title: "duration prerequisite",
+                        supersession_user: "test",
+                    },
+                    session,
+                )
+                .await
+                .expect_err("no closed-film duration must refuse both recipes");
+            assert!(refusal.contains("vod_source_unsupported"), "{refusal}");
+            assert!(serve.shared.sessions.lock().await.is_empty());
+            assert!(serve.shared.renditions.lock().await.is_empty());
+        }
+    }
+}

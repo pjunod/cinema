@@ -52,6 +52,7 @@
         serve.shared.sessions.lock().await.insert(
             "sess-a".into(),
             Session {
+                passive_grant: None,
                 rendition: Some(Arc::clone(&rendition)),
                 retained_output: None,
                 rendition_key: rendition.key.clone(),
@@ -100,6 +101,7 @@
         serve.shared.sessions.lock().await.insert(
             "sess-a".into(),
             Session {
+                passive_grant: None,
                 rendition: Some(rendition),
                 rendition_key: replacement_key,
                 retained_output: None,
@@ -2860,6 +2862,7 @@
         serve.shared.sessions.lock().await.insert(
             "sess-a".into(),
             Session {
+                passive_grant: None,
                 rendition: Some(rendition),
                 rendition_key,
                 retained_output: None,
@@ -3691,6 +3694,127 @@
         assert!(serve.owns("sess-a").await, "tombstoned is still addressed");
         assert!(serve.frontier_ms("sess-x").await.is_none());
     }
+
+    #[tokio::test]
+    async fn passive_vod_idle_detaches_reader_resurrects_exact_grant_and_fences_stop() {
+        let base = crate::test_tempdir().expect("passive VOD base");
+        let (serve, file) = serve_on(base.path()).await;
+        let mut req = request("passive-player", 0.0);
+        req.presentation = crate::transcode::Presentation::Vod;
+        req.request_id = Some("passive-request".to_owned());
+        req.vod_only = true;
+        req.passive_vod = true;
+        let attribution = VodAttribution { user_name: "user", item_title: "fixture", supersession_user: "user" };
+        serve.try_create(&req, &file, &settings(), attribution, "passive-session".into()).await.expect("service create");
+        let (_, stale_owner) = serve.playlist("passive-session").await.expect("owned").expect("playlist");
+        assert!(serve.commit_resolved_media("passive-session", &stale_owner, Some(0)).await);
+        let frontier = serve.frontier_ms("passive-session").await.expect("real frontier");
+        let rendition = {
+            let sessions = serve.shared.sessions.lock().await;
+            Arc::clone(sessions.get("passive-session").expect("passive test fixture").live_rendition().expect("passive test fixture"))
+        };
+        serve.force_reader_idle_for_test("passive-session").await;
+        serve.maintain().await;
+        assert_eq!(serve.active_sessions().await, 0);
+        assert!(rendition.readers.lock().await.is_empty());
+        assert!(serve.playlist("passive-session").await.is_none());
+        assert_eq!(serve.frontier_ms("passive-session").await, Some(frontier));
+        assert!(serve.live_or_preparing_session_ids().await.contains(&"passive-session".to_owned()));
+        assert!(!serve.commit_resolved_media("passive-session", &stale_owner, Some(1)).await);
+        assert!(!serve.passive_presence("passive-session", "user", "passive-player", "old-request").await);
+        assert!(serve.passive_presence("passive-session", "user", "passive-player", "passive-request").await);
+        assert_eq!(serve.active_sessions().await, 0, "presence cannot attach a reader");
+        assert_eq!(serve.frontier_ms("passive-session").await, Some(frontier));
+        let released = AtomicBool::new(false);
+        let transition = Arc::new(Mutex::new(()));
+        serve.try_create_before_release(&req, &file, &settings(), attribution, "passive-session".into(),
+            VodReleaseFence::new(Arc::clone(&transition), &released)).await.expect("exact grant resurrection");
+        assert_eq!(serve.active_sessions().await, 1);
+        assert_eq!(rendition.readers.lock().await.len(), 1);
+        assert!(!serve.response_owner_is_live("passive-session", &stale_owner).await);
+        assert!(serve.end("passive-session", Terminal::Deleted).await);
+        assert!(!serve.passive_presence("passive-session", "user", "passive-player", "passive-request").await);
+        let error = serve.try_create_before_release(&req, &file, &settings(), attribution, "passive-session".into(),
+            VodReleaseFence::new(transition, &released)).await.expect_err("terminal recipe cannot mint grant");
+        assert_eq!(crate::transcode::vod_refusal(&error).expect("passive test fixture").0, "vod_passive_route_expired");
+    }
+
+    #[tokio::test]
+    async fn passive_vod_dormant_replacement_and_expiry_retire_presence() {
+        let base = crate::test_tempdir().expect("passive VOD base");
+        let (serve, file) = serve_on(base.path()).await;
+        let mut req = request("passive-player", 0.0);
+        req.presentation = crate::transcode::Presentation::Vod;
+        req.request_id = Some("passive-request".to_owned()); req.vod_only = true; req.passive_vod = true;
+        let attribution = VodAttribution { user_name: "user", item_title: "fixture", supersession_user: "user" };
+        serve.try_create(&req, &file, &settings(), attribution, "predecessor".into()).await.expect("create");
+        serve.force_reader_idle_for_test("predecessor").await; serve.maintain().await;
+        assert_eq!(serve.supersede_before("user", "passive-player", "successor", None).await.expect("replace dormant grant"), 1);
+        assert!(!serve.passive_presence("predecessor", "user", "passive-player", "passive-request").await);
+        assert!(!serve.live_or_preparing_session_ids().await.contains(&"predecessor".to_owned()));
+        req.request_id = Some("successor-request".to_owned());
+        serve.try_create(&req, &file, &settings(), attribution, "successor".into()).await.expect("successor");
+        serve.force_reader_idle_for_test("successor").await; serve.maintain().await;
+        serve.expire_passive_grant_for_test("successor").await;
+        assert!(!serve.passive_presence("successor", "user", "passive-player", "successor-request").await);
+        assert_eq!(serve.frontier_ms("successor").await, None);
+        assert!(!serve.live_or_preparing_session_ids().await.contains(&"successor".to_owned()));
+        serve.maintain().await;
+        assert!(matches!(serve.playlist("successor").await.map(|publication| publication.result), Some(Err(VodError::Gone(Terminal::PauseExpired)))));
+    }
+
+    #[tokio::test]
+    async fn passive_vod_cancelled_admission_releases_quota_before_any_reader_attachment() {
+        let base = crate::test_tempdir().expect("passive cancellation base");
+        let (serve, file) = serve_on(base.path()).await;
+        let mut retained = Vec::new();
+        for n in 0..63 {
+            retained.push(serve.shared.passive_grants.reserve(
+                &format!("retained-{n}"), "user", "retained-player", &format!("retained-request-{n}"), false,
+            ).expect("existing grant"));
+        }
+        let mut req = request("cancelled-player", 0.0);
+        req.presentation = crate::transcode::Presentation::Vod;
+        req.vod_only = true;
+        req.passive_vod = true;
+        req.request_id = Some("cancelled-request".to_owned());
+        // Hold the real attachment commit. Admission has to reserve its quota
+        // before it reaches this gate, and cancellation must drop that exact
+        // reservation even though source/rendition preparation already began.
+        let sessions = serve.shared.sessions.lock().await;
+        let pending = tokio::spawn({
+            let serve = Arc::clone(&serve);
+            let req = req.clone();
+            let file = file.clone();
+            async move {
+                serve.try_create(&req, &file, &settings(), VodAttribution {
+                    user_name: "user", item_title: "Fixture", supersession_user: "user",
+                }, "pending-cancel".to_owned()).await
+            }
+        });
+        wait_until("real create quota reservation", Duration::from_secs(2), || {
+            let serve = Arc::clone(&serve);
+            async move {
+                matches!(serve.shared.passive_grants.reserve("overflow", "user", "player", "request", false), Err(passive_grant::Refusal::Capacity))
+            }
+        }).await;
+        let error = serve.try_create(&req, &file, &settings(), VodAttribution {
+            user_name: "user", item_title: "Fixture", supersession_user: "user",
+        }, "overflow-create".to_owned()).await.expect_err("quota refusal precedes reader attachment gate");
+        assert_eq!(crate::transcode::vod_refusal(&error).expect("typed quota refusal").0, "vod_passive_capacity");
+        assert!(retained.iter().all(|grant| grant.live()), "admission must never evict another grant");
+        pending.abort();
+        assert!(pending.await.expect_err("cancelled create").is_cancelled());
+        assert!(sessions.is_empty(), "cancelled creation never attached a session");
+        drop(sessions);
+        serve.try_create(&req, &file, &settings(), VodAttribution {
+            user_name: "user", item_title: "Fixture", supersession_user: "user",
+        }, "pending-cancel".to_owned()).await.expect("cancelled quota is available to the retry");
+        assert_eq!(serve.active_sessions().await, 1);
+        assert!(serve.end("pending-cancel", Terminal::Deleted).await);
+        assert!(retained.iter().all(|grant| grant.live()));
+    }
+
     #[tokio::test]
     async fn a05_real_vod_terminal_or_idle_removal_during_route_result_await_invalidates_observation() {
         for terminal in [true, false] {

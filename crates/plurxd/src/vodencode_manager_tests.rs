@@ -43,6 +43,9 @@ async fn encoded_vod_manager_create_resolves_real_recipe_and_served_codecs() {
     let req = SessionRequest {
         quality_catalog: None,
             candidate_context: None,
+            vod_only: false,
+            passive_vod: false,
+            finite_bitrate_limit_bps: None,
         request_id: Some("qualification-vod".into()),
         previous_session_id: None,
         reopen_reason: None,
@@ -55,6 +58,9 @@ async fn encoded_vod_manager_create_resolves_real_recipe_and_served_codecs() {
     let missing = SessionRequest {
         quality_catalog: None,
             candidate_context: None,
+            vod_only: false,
+            passive_vod: false,
+            finite_bitrate_limit_bps: None,
         file_id: i64::MAX,
         request_id: Some("qualification-vod-missing".into()),
         ..req.clone()
@@ -255,6 +261,9 @@ async fn encoded_vod_manager_admits_a_reported_eac3_atmos_profile_the_node_omits
         let request = SessionRequest {
             quality_catalog: None,
             candidate_context: None,
+            vod_only: false,
+            passive_vod: false,
+            finite_bitrate_limit_bps: None,
             request_id: None,
             previous_session_id: None,
             reopen_reason: None,
@@ -392,6 +401,9 @@ async fn encoded_vod_manager_refuses_replaced_source_with_stale_probe() {
     let request = SessionRequest {
         quality_catalog: None,
             candidate_context: None,
+            vod_only: false,
+            passive_vod: false,
+            finite_bitrate_limit_bps: None,
         request_id: None,
         previous_session_id: None,
         reopen_reason: None,
@@ -485,6 +497,9 @@ async fn an_empty_stored_track_starts_an_encoded_session_without_the_overlay() {
     let req = SessionRequest {
         quality_catalog: None,
             candidate_context: None,
+            vod_only: false,
+            passive_vod: false,
+            finite_bitrate_limit_bps: None,
         request_id: Some("stored-empty-burn".into()),
         previous_session_id: None,
         reopen_reason: None,
@@ -526,6 +541,9 @@ async fn an_empty_stored_track_starts_an_encoded_session_without_the_overlay() {
             &SessionRequest {
                 quality_catalog: None,
             candidate_context: None,
+            vod_only: false,
+            passive_vod: false,
+            finite_bitrate_limit_bps: None,
                 request_id: Some("stored-empty-plain".into()),
                 subtitle_burn: None,
                 ..req.clone()
@@ -560,6 +578,9 @@ async fn an_empty_stored_track_starts_an_encoded_session_without_the_overlay() {
             &SessionRequest {
                 quality_catalog: None,
             candidate_context: None,
+            vod_only: false,
+            passive_vod: false,
+            finite_bitrate_limit_bps: None,
                 request_id: Some("stored-empty-control".into()),
                 ..req.clone()
             },
@@ -664,6 +685,9 @@ async fn a_source_encoder_selection_refuses_is_refused_before_any_burn_extractio
     let req = SessionRequest {
         quality_catalog: None,
             candidate_context: None,
+            vod_only: false,
+            passive_vod: false,
+            finite_bitrate_limit_bps: None,
         request_id: Some("refused-before-burn".into()),
         previous_session_id: None,
         reopen_reason: None,
@@ -748,6 +772,9 @@ async fn the_profile5_pixel_proof_takes_the_class_of_the_caller_waiting_on_it() 
     let req = SessionRequest {
         quality_catalog: None,
             candidate_context: None,
+            vod_only: false,
+            passive_vod: false,
+            finite_bitrate_limit_bps: None,
         request_id: Some("profile5-proof-class".into()),
         previous_session_id: None,
         reopen_reason: None,
@@ -840,6 +867,9 @@ async fn encoding_shipped_shape() {
     let req = SessionRequest {
         quality_catalog: None,
             candidate_context: None,
+            vod_only: false,
+            passive_vod: false,
+            finite_bitrate_limit_bps: None,
         request_id: Some("encoding-shipped-shape".into()),
         previous_session_id: None,
         reopen_reason: None,
@@ -861,4 +891,84 @@ async fn encoding_shipped_shape() {
     assert!(encoding.admissions.software_in_use() > 0, "the permit holds software capacity");
     drop(permit);
     assert_eq!(encoding.admissions.software_in_use(), 0);
+}
+
+#[tokio::test]
+async fn service_vod_only_refuses_unindexed_copy_before_rolling_allocation() {
+    use plurx_core::store::{SqliteStore, keys};
+    let base = crate::test_tempdir().expect("policy fixture");
+    let source = plurx_core::testfixtures::source("h264");
+    let probe = plurx_core::scan::probe::probe(&source).await.expect("probe");
+    let store: Arc<dyn Store> = Arc::new(SqliteStore::open_in_memory().expect("store"));
+    let file_id = seed_file_with_probe_at(&store, source.to_str().expect("path"), probe).await;
+    store.put_setting(keys::VOD_LIVE_RECOVERY, "true").await.expect("recovery on");
+    let manager = TranscodeManager::new(Arc::clone(&store), base.path().join("manager"), EncoderCaps::default(), Pipeline::Cpu);
+    let mut request = reopen_request(file_id, "service-policy", "unused", "unused");
+    request.request_id = Some("service-vod-only".into());
+    request.previous_session_id = None;
+    request.reopen_reason = None;
+    request.presentation = Presentation::Vod;
+    request.kind = SessionKind::Copy { aac: false, preserve_dolby_vision: false, convert_dolby_vision: false };
+    request.vod_only = true;
+    let error = manager.create_session(&request, "test").await.err().expect("unindexed VOD refusal");
+    assert_eq!(vod_refusal(&error).map(|(code, _)| code), Some("vod_index_pending"), "{error}");
+    assert!(manager.active_session_ids().await.is_empty(), "no rolling worker was allocated");
+    assert!(manager.vod.session_ids().await.is_empty(), "no VOD reader was attached");
+    assert!(manager.live_hls_recovery_enabled().await.expect("setting"), "service policy must not alter native recovery");
+    request.presentation = Presentation::Live;
+    request.request_id = Some("service-forbidden-live".into());
+    let error = manager.create_session(&request, "test").await.err().expect("explicit live also refused");
+    assert_eq!(vod_refusal(&error).map(|(code, _)| code), Some("vod_source_unsupported"));
+    assert!(manager.active_session_ids().await.is_empty());
+}
+
+
+#[tokio::test]
+async fn finite_vod_bitrate_ceiling_is_shared_by_native_recipe_and_worker_identity() {
+    let store: Arc<dyn Store> = Arc::new(plurx_core::store::SqliteStore::open_in_memory().expect("store"));
+    let id = seed_file_with_probe_at(&store, "/finite-budget-fixture.mp4", plurx_core::domain::ProbeResult {
+        audio_streams: vec![plurx_core::domain::AudioStream { index:0, codec:"aac".into(), channel_layout: None, channels:Some(2), sample_rate:Some(48_000), language:None, title:None, default:true }],
+        ..Default::default()
+    }).await;
+    let file = store.get_file(id).await.expect("file").expect("source");
+    let mut request = reopen_request(id, "finite-player", "unused", "unused");
+    request.kind = SessionKind::Transcode { height:720 };
+    request.previous_session_id = None;
+    request.reopen_reason = None;
+    request.request_id = Some("finite-attempt".into());
+    request.presentation = Presentation::Vod;
+    let mut options = plurx_core::transcode::TranscodeOptions::default();
+    let native_rate = options.video_bitrate_kbps;
+    super::manager_create::constrain_finite_vod_rate(&request, &file, &mut options).expect("native unchanged");
+    assert_eq!(options.video_bitrate_kbps,native_rate);
+    let native_fingerprint = request.durable_intent_fingerprint(1);
+    request.finite_bitrate_limit_bps = Some(750_000);
+    assert!(super::manager_create::constrain_finite_vod_rate(&request, &file, &mut options).is_err());
+    assert_eq!(options.video_bitrate_kbps,native_rate);
+    request.vod_only = true;
+    request.passive_vod = true;
+    super::manager_create::constrain_finite_vod_rate(&request, &file, &mut options).expect("bounded native recipe");
+    assert!(u64::from(options.video_bitrate_kbps)*1500+u64::from(options.audio_bitrate_kbps)*1000 <= 750_000);
+    assert_ne!(native_fingerprint,request.durable_intent_fingerprint(1));
+    let round_trip: SessionRequest = serde_json::from_str(&serde_json::to_string(&request).expect("worker serialization")).expect("worker request");
+    assert_eq!(round_trip.finite_bitrate_limit_bps,Some(750_000));
+    assert_eq!(round_trip.durable_intent_fingerprint(1),request.durable_intent_fingerprint(1));
+    assert!(crate::media_sessions::worker_session_request_is_valid(&round_trip));
+    request.finite_bitrate_limit_bps = Some(64_000);
+    let error = super::manager_create::constrain_finite_vod_rate(&request,&file,&mut options).expect_err("audio alone exceeds this ceiling");
+    assert_eq!(vod_refusal(&error).expect("typed").0,"vod_output_budget_refused");
+    let mut copy = request.clone();
+    copy.kind = SessionKind::Copy { aac: true, preserve_dolby_vision: false, convert_dolby_vision: false };
+    copy.finite_bitrate_limit_bps = Some(750_000);
+    let mut copy_file = file.clone();
+    copy_file.bitrate = Some(400_000);
+    super::manager_create::validate_finite_copy_rate(&copy, &copy_file).expect("source plus conservative audio fits");
+    copy_file.bitrate = Some(500_000);
+    assert!(super::manager_create::validate_finite_copy_rate(&copy, &copy_file).is_err());
+    copy.subtitle_burn = Some(0);
+    assert!(super::manager_create::validate_finite_copy_rate(&copy, &copy_file).is_err(), "a known empty burn track still needs the copy bitrate proof");
+    copy_file.bitrate = None;
+    assert!(super::manager_create::validate_finite_copy_rate(&copy, &copy_file).is_err());
+    request.passive_vod = false;
+    assert!(!crate::media_sessions::worker_session_request_is_valid(&request));
 }

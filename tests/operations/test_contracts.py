@@ -1682,6 +1682,9 @@ assert.equal(context.ACT_TIMER, null);
             "cargo xwin build --workspace --all-targets --locked", windows_action
         )
         self.assertIn("--target x86_64-pc-windows-msvc", windows_action)
+        self.assertIn('CARGO_BUILD_JOBS: "1"', windows_action)
+        self.assertIn('CARGO_PROFILE_DEV_DEBUG: "0"', windows_action)
+        self.assertIn('CARGO_PROFILE_TEST_DEBUG: "0"', windows_action)
         for workflow_path, gate_name in (
             (".github/workflows/ci.yml", "pr_gate"),
             (".github/workflows/main-fast-lane.yml", "promotion_gate"),

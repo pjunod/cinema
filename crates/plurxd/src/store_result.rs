@@ -100,6 +100,7 @@ operations! {
     RecordAnalysisRetryWaitPhase => "record_analysis_retry_wait_phase",
     RecordAnalysisFailedPhase => "record_analysis_failed_phase",
     TouchSharedOfflineCacheEntry => "touch_shared_offline_cache_entry",
+    RevokeUnboundJellyfinMediaLink => "revoke_unbound_jellyfin_media_link",
     ObserveCandidateLink => "observe_candidate_link",
 }
 
@@ -418,7 +419,8 @@ mod tests {
 
     #[test]
     fn every_classified_failure_has_a_bounded_metric_row() {
-        assert_eq!(Operation::ALL.len(), 46, "one fixed label per audited site");
+        // 46 on main plus the Jellyfin unbound media-link revocation.
+        assert_eq!(Operation::ALL.len(), 47, "one fixed label per audited site");
         let metrics = Metrics::default();
         for operation in Operation::ALL {
             for severity in Discard::ALL {

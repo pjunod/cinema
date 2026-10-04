@@ -2784,6 +2784,9 @@
         let mut recipe = crate::transcode::SessionRequest {
             quality_catalog: None,
             candidate_context: None,
+            vod_only: false,
+            passive_vod: false,
+            finite_bitrate_limit_bps: None,
             playback_id: playback_id.clone(),
             ..staged_candidate_request()
         };

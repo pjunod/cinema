@@ -311,6 +311,13 @@ const ROUTE_COLS: &str = "incarnation_id, session_id, user_id, playback_id,
     media_origin_ms, media_sequence, discontinuity_sequence, updated_at_ms, recovery_epoch,
     drain_deadline_ms";
 
+struct CompatibilityActivationAdmission(i64);
+impl From<&mut Row<'_>> for CompatibilityActivationAdmission {
+    fn from(row: &mut Row<'_>) -> Self {
+        Self(row.get("admitted"))
+    }
+}
+
 struct RouteRow(MediaSessionRoute);
 
 impl From<&mut Row<'_>> for RouteRow {
@@ -1546,6 +1553,31 @@ impl MediaSessionStore for HiqliteAuthStore {
             }
         }
         if current_pointer.as_deref() == Some(activation.incarnation_id.as_str()) {
+            if let Some(play_id) = activation
+                .request_id
+                .as_deref()
+                .and_then(|id| id.strip_prefix("jellyfin:"))
+            {
+                // authority: native replay must observe current negotiation cancellation and login revocation.
+                let rows = self.client().query_consistent_map::<CompatibilityActivationAdmission, _>(
+                "SELECT COUNT(*) AS admitted FROM jellyfin_plays WHERE play_id=$1 AND user_id=$2 AND playback_id=$3
+                 AND ((state='pending' AND expires_at_ms>$4) OR (state='active' AND native_incarnation_id=$5))
+                 AND json_extract(payload,'$.native_request_fingerprint')=$6
+                 AND json_extract(payload,'$.source_origin_ms')=$7
+                     AND EXISTS(SELECT 1 FROM jellyfin_login_tokens l JOIN tokens t ON t.token_hash=l.token_hash AND t.user_id=l.user_id
+                       WHERE l.token_hash=jellyfin_plays.token_digest AND l.user_id=jellyfin_plays.user_id
+                         AND l.device_digest=jellyfin_plays.device_digest AND l.client_family=jellyfin_plays.client_family)
+                     AND EXISTS(SELECT 1 FROM jellyfin_entity_ids WHERE wire_id=jellyfin_plays.item_wire_id AND retired=0)
+                     AND EXISTS(SELECT 1 FROM jellyfin_entity_ids WHERE wire_id=jellyfin_plays.file_wire_id AND retired=0)
+                     AND lower(trim(COALESCE((SELECT value FROM settings WHERE key='compat.jellyfin.enabled'),''),char(9)||char(10)||char(11)||char(12)||char(13)||' ')) IN ('1','true','yes','on') AND (SELECT value FROM settings WHERE key='compat.jellyfin.generation')=json_extract(jellyfin_plays.payload,'$.switch_generation')",
+                params!(play_id, activation.user_id, activation.playback_id.as_str(), activation.now_ms,
+                    activation.incarnation_id.as_str(), activation.request_fingerprint.as_str(), activation.media_origin_ms),
+            ).await?;
+                if rows.first().map(|row| row.0).unwrap_or(0) != 1 {
+                    return Ok(None);
+                }
+            }
+
             let route = route_by(self, "incarnation_id", &activation.incarnation_id)
                 .await?
                 .filter(|route| activation_route_matches(route, activation));
@@ -1621,6 +1653,17 @@ impl MediaSessionStore for HiqliteAuthStore {
                             AND incarnation_id != COALESCE((
                               SELECT current_incarnation_id FROM media_playback_pointers
                                WHERE user_id = $3 AND playback_id = $4), '')) < $14
+                    AND (substr($15,1,9) != 'jellyfin:' OR EXISTS (
+                      SELECT 1 FROM jellyfin_plays WHERE play_id=substr($15,10) AND user_id=$3 AND playback_id=$4
+                        AND ((state='pending' AND expires_at_ms>$11) OR (state='active' AND native_incarnation_id=$1))
+                        AND json_extract(payload,'$.native_request_fingerprint')=$5
+                        AND json_extract(payload,'$.source_origin_ms')=$10
+                     AND EXISTS(SELECT 1 FROM jellyfin_login_tokens l JOIN tokens t ON t.token_hash=l.token_hash AND t.user_id=l.user_id
+                       WHERE l.token_hash=jellyfin_plays.token_digest AND l.user_id=jellyfin_plays.user_id
+                         AND l.device_digest=jellyfin_plays.device_digest AND l.client_family=jellyfin_plays.client_family)
+                     AND EXISTS(SELECT 1 FROM jellyfin_entity_ids WHERE wire_id=jellyfin_plays.item_wire_id AND retired=0)
+                     AND EXISTS(SELECT 1 FROM jellyfin_entity_ids WHERE wire_id=jellyfin_plays.file_wire_id AND retired=0)
+                     AND lower(trim(COALESCE((SELECT value FROM settings WHERE key='compat.jellyfin.enabled'),''),char(9)||char(10)||char(11)||char(12)||char(13)||' ')) IN ('1','true','yes','on') AND (SELECT value FROM settings WHERE key='compat.jellyfin.generation')=json_extract(jellyfin_plays.payload,'$.switch_generation')))
                     AND ($15 = '' OR EXISTS (
                       SELECT 1 FROM media_session_requests
                        WHERE user_id = $3 AND request_id = $15 AND incarnation_id = $1
@@ -1850,6 +1893,12 @@ impl MediaSessionStore for HiqliteAuthStore {
                     activation.owner_node_id.as_str(),
                     activation.incarnation_id.as_str()
                 ),
+            ),
+            (
+                super::jellyfin_play::SUPERSEDE_AT_NATIVE_POINTER,
+                params!(activation.user_id, activation.playback_id.as_str(), activation.incarnation_id.as_str(),
+                    activation.now_ms.saturating_add(super::jellyfin_play::JELLYFIN_TERMINAL_PLAY_TTL_MS),
+                    activation.request_id.as_deref().unwrap_or("")),
             ),
         ];
         let statement_count = statements.len();
@@ -3034,8 +3083,11 @@ impl MediaSessionStore for HiqliteAuthStore {
                 "invalid media-session activation publication".to_owned(),
             ));
         }
-        self.client()
-            .txn([(
+        let nonce = uuid::Uuid::new_v4().to_string();
+        let results = self.client()
+            .txn([
+                (super::jellyfin_play::BIND_NATIVE_PUBLICATION, params!(user_id, request_id, incarnation_id, now_ms, nonce.as_str())),
+                (
                 "UPDATE media_session_requests SET state = 'resolved',
                         response_json = (SELECT route.response_json FROM media_sessions route
                           WHERE route.user_id = $1 AND $2 != '' AND route.incarnation_id = $3
@@ -3060,13 +3112,28 @@ impl MediaSessionStore for HiqliteAuthStore {
                         AND route.lease_expires_at_ms > $4
                         AND route.request_fingerprint = media_session_requests.request_fingerprint
                         AND route.playback_id = media_session_requests.playback_id
-                        AND route.owner_node_id = media_session_requests.owner_node_id)",
+                        AND route.owner_node_id = media_session_requests.owner_node_id)
+                    AND (substr($2,1,9)!='jellyfin:' OR EXISTS(
+                      SELECT 1 FROM jellyfin_plays j JOIN jellyfin_login_tokens l
+                        ON l.user_id=j.user_id AND l.token_hash=j.token_digest
+                        AND l.device_digest=j.device_digest AND l.client_family=j.client_family
+                      JOIN tokens t ON t.user_id=l.user_id AND t.token_hash=l.token_hash
+                      WHERE j.user_id=$1 AND j.play_id=substr($2,10) AND substr($2,1,9)='jellyfin:' AND j.state='active'
+                        AND j.native_incarnation_id=$3 AND j.playback_id=media_session_requests.playback_id
+                        AND json_extract(j.payload,'$.native_request_fingerprint')=media_session_requests.request_fingerprint
+                        AND EXISTS(SELECT 1 FROM jellyfin_entity_ids WHERE wire_id=j.item_wire_id AND retired=0)
+                        AND EXISTS(SELECT 1 FROM jellyfin_entity_ids WHERE wire_id=j.file_wire_id AND retired=0)))",
                 params!(user_id, request_id, incarnation_id, now_ms),
-            )])
+                ),
+                (super::jellyfin_play::SUPERSEDE_NATIVE_PUBLICATION, params!(user_id, request_id, incarnation_id, now_ms, nonce.as_str())),
+            ])
             .await?
             .into_iter()
             .collect::<Result<Vec<_>, _>>()
             .map_err(database_error)?;
+        if request_id.starts_with("jellyfin:") && results.first().copied() != Some(1) {
+            return Ok(None);
+        }
         let route = route_by(self, "incarnation_id", incarnation_id)
             .await?
             .filter(|route| {

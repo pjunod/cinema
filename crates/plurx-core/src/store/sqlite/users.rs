@@ -12,7 +12,9 @@ use crate::store::{
     TokenAuthentication, TokenSummary, UserStore, MAX_DEVICE_LABEL_BYTES, TOKEN_SUMMARY_MAX,
 };
 
-fn require_standalone_claim(claim: Option<&CacheAdminMutationClaim>) -> Result<(), StoreError> {
+pub(super) fn require_standalone_claim(
+    claim: Option<&CacheAdminMutationClaim>,
+) -> Result<(), StoreError> {
     if claim.is_some() {
         return Err(StoreError::Database(
             "cluster cache-admin mutation claim cannot be used by standalone SQLite".to_owned(),
@@ -355,10 +357,12 @@ impl UserStore for SqliteStore {
         .await
     }
 
-    async fn authenticate_token(
+    async fn authenticate_token_for(
         &self,
         token_hash: &str,
+        audience: crate::store::TokenAudience,
     ) -> Result<TokenAuthentication, StoreError> {
+        let audience = audience.as_str();
         let token_hash = token_hash.to_owned();
         let read_hash = token_hash.clone();
         // The read is on the read pool: an authenticated request no longer
@@ -377,7 +381,9 @@ impl UserStore for SqliteStore {
                             unixepoch()
                      FROM users u
                      JOIN tokens t ON t.user_id = u.id
-                     WHERE t.token_hash = ?1";
+                     WHERE t.token_hash = ?1
+                       AND (?5 = 'native') = NOT EXISTS (
+                         SELECT 1 FROM jellyfin_login_tokens l WHERE l.token_hash = t.token_hash)";
                 super::trace_statement("authenticate_token", SQL);
                 Ok(conn
                     .query_row(
@@ -386,7 +392,8 @@ impl UserStore for SqliteStore {
                             read_hash,
                             keys::AUTH_TOKEN_EXPIRY_ENABLED,
                             keys::AUTH_TOKEN_IDLE_DAYS,
-                            keys::AUTH_TOKEN_EXPIRY_SINCE
+                            keys::AUTH_TOKEN_EXPIRY_SINCE,
+                            audience
                         ],
                         |row| {
                             Ok((

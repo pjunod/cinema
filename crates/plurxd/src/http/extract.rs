@@ -707,24 +707,70 @@ impl FromRequestParts<AppState> for AuthUser {
         state: &AppState,
     ) -> Result<Self, Self::Rejection> {
         let token = token_from_parts(parts).ok_or(ApiError::Unauthorized)?;
-        let hash = auth::hash_token(&token);
-        let ticket = state.cache_only_admin_proofs.authentication_ticket();
-        let user = match state.store.authenticate_token(&hash).await? {
-            TokenAuthentication::Authenticated(user) => user,
-            TokenAuthentication::Expired { idle_days } => {
-                state.cache_only_admin_proofs.invalidate_digest(&hash);
-                return Err(session_expired(idle_days));
-            }
-            TokenAuthentication::Unknown => {
-                state.cache_only_admin_proofs.invalidate_digest(&hash);
-                return Err(ApiError::Unauthorized);
-            }
-        };
+        authenticate_user_token(state, &token).await.map(AuthUser)
+    }
+}
+
+/// Shared user-token authority, including typed idle expiry and proof fencing.
+/// A transport parser grants no authority until this function succeeds.
+pub(crate) async fn authenticate_user_token(
+    state: &AppState,
+    token: &str,
+) -> Result<plurx_core::domain::User, ApiError> {
+    authenticate_token_digest(
+        state,
+        auth::hash_token(token),
+        plurx_core::store::TokenAudience::Native,
+    )
+    .await
+}
+
+/// A Jellyfin compatibility login: valid only on the compatibility facade.
+pub(crate) async fn authenticate_compatibility_token(
+    state: &AppState,
+    token: &str,
+) -> Result<plurx_core::domain::User, ApiError> {
+    authenticate_token_digest(
+        state,
+        auth::hash_token(token),
+        plurx_core::store::TokenAudience::JellyfinCompatibility,
+    )
+    .await
+}
+
+/// The same expiry, revocation and cache-proof bookkeeping as a presented
+/// token, for a caller that holds only its digest (a scoped media link that
+/// resolved to the login it was issued under).
+pub(crate) async fn authenticate_token_digest(
+    state: &AppState,
+    hash: String,
+    audience: plurx_core::store::TokenAudience,
+) -> Result<plurx_core::domain::User, ApiError> {
+    let ticket = state.cache_only_admin_proofs.authentication_ticket();
+    let native = audience == plurx_core::store::TokenAudience::Native;
+    let verdict = if native {
+        state.store.authenticate_token(&hash).await?
+    } else {
+        state.store.authenticate_token_for(&hash, audience).await?
+    };
+    let user = match verdict {
+        TokenAuthentication::Authenticated(user) => user,
+        TokenAuthentication::Expired { idle_days } => {
+            state.cache_only_admin_proofs.invalidate_digest(&hash);
+            return Err(session_expired(idle_days));
+        }
+        TokenAuthentication::Unknown => {
+            state.cache_only_admin_proofs.invalidate_digest(&hash);
+            return Err(ApiError::Unauthorized);
+        }
+    };
+    // Only a native bearer may stand in as a cached admin proof.
+    if native {
         state
             .cache_only_admin_proofs
             .record_authenticated(ticket, hash, &user);
-        Ok(AuthUser(user))
     }
+    Ok(user)
 }
 
 /// Stable code every client matches to land on its sign-in screen with the

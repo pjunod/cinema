@@ -1322,7 +1322,12 @@ pub(crate) fn worker_session_request_is_valid(request: &SessionRequest) -> bool 
 }
 
 fn worker_session_request_fields_are_valid(request: &SessionRequest) -> bool {
-    request.file_id > 0
+    (!request.passive_vod
+        || (request.vod_only && request.request_id.as_deref().is_some_and(|id| !id.trim().is_empty())))
+        && (!request.vod_only || request.presentation == crate::transcode::Presentation::Vod)
+        && request.finite_bitrate_limit_bps.is_none_or(|limit|
+            request.passive_vod && request.vod_only && (64_000..=1_000_000_000).contains(&limit))
+        && request.file_id > 0
         && !request.playback_id.trim().is_empty()
         && request.playback_id.len() <= 128
         && !request
@@ -1615,6 +1620,12 @@ pub(crate) enum RelayResource {
         segment: String,
     },
     Delete,
+    /// Authenticated compatibility presence for one exact passive play.
+    PassivePresence {
+        user: String,
+        player: String,
+        request: String,
+    },
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
@@ -1710,6 +1721,15 @@ impl RelayResource {
                 (0..=1_024).contains(index) && valid_resource_name(segment)
             }
             Self::Segment { segment } => valid_resource_name(segment),
+            Self::PassivePresence {
+                user,
+                player,
+                request,
+            } => [user, player, request].iter().all(|value| {
+                !value.trim().is_empty()
+                    && value.len() <= 256
+                    && !value.chars().any(char::is_control)
+            }),
         }
     }
 
@@ -1720,7 +1740,10 @@ impl RelayResource {
             | Self::VideoPlaylist
             | Self::SubtitlePlaylist { .. } => RELAY_PLAYLIST_MAX_LIFETIME,
             Self::Segment { .. } => RELAY_SEGMENT_MAX_LIFETIME,
-            Self::Status | Self::SubtitleSegment { .. } | Self::Delete => RELAY_SHORT_MAX_LIFETIME,
+            Self::Status
+            | Self::SubtitleSegment { .. }
+            | Self::Delete
+            | Self::PassivePresence { .. } => RELAY_SHORT_MAX_LIFETIME,
         }
     }
 
@@ -5561,6 +5584,9 @@ pub(crate) fn takeover_eligible_route(session_id: &str, incarnation_id: &str) ->
         request: SessionRequest {
             quality_catalog: None,
             candidate_context: None,
+            vod_only: false,
+            passive_vod: false,
+            finite_bitrate_limit_bps: None,
             request_id: Some(incarnation_id.to_owned()),
             presentation: crate::transcode::Presentation::Live,
             ..base.request
@@ -6126,6 +6152,9 @@ mod tests {
             request: SessionRequest {
                 quality_catalog: None,
                 candidate_context: None,
+                vod_only: false,
+                passive_vod: false,
+                finite_bitrate_limit_bps: None,
                 control_sequence: None,
                 file_id: 11,
                 playback_id: "player-a".to_owned(),
@@ -6409,6 +6438,29 @@ mod tests {
             request.owner_budget_at(origin_deadline).is_none(),
             "publication cannot start after ingress abandonment"
         );
+    }
+
+    #[test]
+    fn passive_presence_relay_resource_round_trips_and_bounds_its_identity() {
+        let resource = RelayResource::PassivePresence {
+            user: "[\"user_id\",1]".into(),
+            player: "jellyfin:player".into(),
+            request: "11111111-1111-4111-8111-111111111111".into(),
+        };
+        let wire = serde_json::to_value(&resource).expect("relay resource");
+        assert_eq!(wire["resource"], "passive_presence");
+        let decoded: RelayResource = serde_json::from_value(wire).expect("round trip");
+        assert!(decoded.is_valid());
+        assert_eq!(decoded.max_lifetime(), RELAY_SHORT_MAX_LIFETIME);
+        let long = "x".repeat(257);
+        for bad in ["", "  ", "line\nbreak", long.as_str()] {
+            let invalid = RelayResource::PassivePresence {
+                user: "[\"user_id\",1]".into(),
+                player: bad.into(),
+                request: "request".into(),
+            };
+            assert!(!invalid.is_valid(), "{bad:?}");
+        }
     }
 
     #[test]
@@ -7226,6 +7278,9 @@ mod tests {
             request: SessionRequest {
                 quality_catalog: None,
                 candidate_context: None,
+                vod_only: false,
+                passive_vod: false,
+                finite_bitrate_limit_bps: None,
                 presentation: crate::transcode::Presentation::Vod,
                 ..eligible.request.clone()
             },
@@ -7372,6 +7427,9 @@ mod tests {
             request: SessionRequest {
                 quality_catalog: None,
                 candidate_context: None,
+                vod_only: false,
+                passive_vod: false,
+                finite_bitrate_limit_bps: None,
                 presentation: crate::transcode::Presentation::Vod,
                 ..eligible.request.clone()
             },
@@ -8410,6 +8468,44 @@ mod tests {
                 &HashSet::new(),
             ),
             "the exemption is exact and lasts only while the seed is fresh"
+        );
+    }
+
+    #[test]
+    fn service_vod_only_policy_survives_worker_and_durable_recipe_without_native_identity_change() {
+        let native = valid_start_request();
+        let native_value = serde_json::to_value(&native).expect("native envelope");
+        assert!(native_value["request"].get("vod_only").is_none());
+        assert!(native_value["request"].get("passive_vod").is_none());
+        let legacy: RemoteStartRequest =
+            serde_json::from_value(native_value).expect("legacy recipe");
+        assert!(!legacy.request.vod_only);
+
+        assert_eq!(
+            native.request.durable_intent_fingerprint(native.user_id),
+            legacy.request.durable_intent_fingerprint(legacy.user_id)
+        );
+        let mut service = native.clone();
+        service.request.vod_only = true;
+        service.request.passive_vod = true;
+        assert_ne!(
+            native.request.durable_intent_fingerprint(native.user_id),
+            service.request.durable_intent_fingerprint(service.user_id)
+        );
+        let encoded = serde_json::to_vec(&service).expect("worker and durable envelope");
+        let mut recovered: RemoteStartRequest =
+            serde_json::from_slice(&encoded).expect("policy round trip");
+        assert!(recovered.request.vod_only);
+        assert!(recovered.request.passive_vod);
+        let mut invalid = recovered.clone();
+        invalid.request.vod_only = false;
+        assert!(!invalid.is_valid());
+        assert!(recovered.is_valid());
+        recovered.request.presentation = crate::transcode::Presentation::Live;
+        assert!(!recovered.is_valid());
+        assert!(
+            !takeover_recipe_is_valid(&recovered),
+            "takeover cannot turn VOD-only into rolling"
         );
     }
 

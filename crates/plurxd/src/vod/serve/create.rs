@@ -1,5 +1,14 @@
 use super::*;
 
+/// One request's resolved native recipe, before any rendition is attached.
+struct PreparedVodRecipe {
+    identity: SourceIdentity,
+    index: Option<FragmentIndex>,
+    recipe: Recipe,
+    duration_ms: i64,
+    incoming_logical: Option<crate::vodserve::retained_manifest::LogicalOutput>,
+}
+
 impl VodServe {
     /// Finite background obligation in the existing rendition driver. This
     /// never registers a session, reader, wait-pool demand or synthetic GET.
@@ -372,7 +381,7 @@ impl VodServe {
             .lock()
             .await
             .iter()
-            .filter(|(_, session)| session.tombstone.is_none())
+            .filter(|(_, session)| session.renewable())
             .map(|(session_id, _)| session_id.clone())
             .collect::<Vec<_>>();
         ids.extend(
@@ -403,6 +412,56 @@ impl VodServe {
         String,
     > {
         self.shared.pool.set_global_cap(settings.blocked_get_cap);
+        let PreparedVodRecipe {
+            identity,
+            index,
+            recipe,
+            duration_ms,
+            incoming_logical,
+        } = self.prepare_recipe(prepared, file, viewer).await?;
+        let canonical_key = rendition_key(&recipe, &identity);
+        let key = private_preparation.map_or_else(
+            || canonical_key.clone(),
+            |nonce| {
+                let mut hash = Sha256::new();
+                hash.update(b"plurx:private-copy-preparation-incarnation:v1\0");
+                hash.update(canonical_key.as_bytes());
+                hash.update(nonce.as_bytes());
+                hex::encode(hash.finalize())
+            },
+        );
+        let attachment = self
+            .shared
+            .attach_rendition(&key, &identity, index, recipe, duration_ms, settings)
+            .await?
+            .ok_or_else(|| {
+                crate::transcode::vod_refusal_error(
+                    "vod_source_unsupported",
+                    "the fragment index produced an empty VOD plan",
+                )
+            })?;
+        Ok((attachment, incoming_logical))
+    }
+
+    /// Resolve native prerequisites without reserving a reader or attaching a
+    /// rendition. Existing preparation owners may receive copy-index demand.
+    pub(crate) async fn preview_recipe(
+        &self,
+        mut prepared: VodRecipeRequest<'_>,
+        file: &MediaFile,
+        viewer: Option<&crate::state::PlaybackViewerDemand>,
+    ) -> Result<Option<Arc<crate::vodencode::Encoding>>, String> {
+        self.prepare_recipe(&mut prepared, file, viewer)
+            .await
+            .map(|prepared| prepared.recipe.encoding)
+    }
+
+    async fn prepare_recipe(
+        &self,
+        prepared: &mut VodRecipeRequest<'_>,
+        file: &MediaFile,
+        viewer: Option<&crate::state::PlaybackViewerDemand>,
+    ) -> Result<PreparedVodRecipe, String> {
         let req = prepared.request;
         let (aac, preserve_dolby_vision, convert_dolby_vision) = match req.kind {
             SessionKind::Copy {
@@ -662,28 +721,13 @@ impl VodServe {
             cluster_cache_key,
             encoding: prepared.encoding.take(),
         };
-        let canonical_key = rendition_key(&recipe, &identity);
-        let key = private_preparation.map_or_else(
-            || canonical_key.clone(),
-            |nonce| {
-                let mut hash = Sha256::new();
-                hash.update(b"plurx:private-copy-preparation-incarnation:v1\0");
-                hash.update(canonical_key.as_bytes());
-                hash.update(nonce.as_bytes());
-                hex::encode(hash.finalize())
-            },
-        );
-        let attachment = self
-            .shared
-            .attach_rendition(&key, &identity, index, recipe, duration_ms, settings)
-            .await?
-            .ok_or_else(|| {
-                crate::transcode::vod_refusal_error(
-                    "vod_source_unsupported",
-                    "the fragment index produced an empty VOD plan",
-                )
-            })?;
-        Ok((attachment, incoming_logical))
+        Ok(PreparedVodRecipe {
+            identity,
+            index,
+            recipe,
+            duration_ms,
+            incoming_logical,
+        })
     }
 
     async fn try_create_with_release_fence(
@@ -703,6 +747,39 @@ impl VodServe {
         // would be frozen at whatever the node booted with — and applying it
         // at `try_create` alone reached no production path at all.
         let req = prepared.request;
+        let passive_grant = if req.passive_vod {
+            if !req.vod_only || req.presentation != crate::transcode::Presentation::Vod {
+                return Err(crate::transcode::vod_refusal_error(
+                    "vod_passive_policy_invalid",
+                    "passive retention requires VOD-only service policy",
+                ));
+            }
+            Some(
+                self.shared
+                    .passive_grants
+                    .reserve(
+                        &session_id,
+                        attribution.supersession_user,
+                        &req.playback_id,
+                        req.request_id.as_deref().unwrap_or(""),
+                        fences.release_fence.is_some(),
+                    )
+                    .map_err(|reason| {
+                        crate::transcode::vod_refusal_error(
+                            match reason {
+                                passive_grant::Refusal::Capacity => "vod_passive_capacity",
+                                passive_grant::Refusal::InvalidIdentity => {
+                                    "vod_passive_policy_invalid"
+                                }
+                                passive_grant::Refusal::Unavailable => "vod_passive_route_expired",
+                            },
+                            "passive VOD route admission refused",
+                        )
+                    })?,
+            )
+        } else {
+            None
+        };
         let (attachment, incoming_logical) = self
             .resolve_rendition(&mut prepared, file, settings, fences.viewer.as_ref(), None)
             .await?;
@@ -788,6 +865,7 @@ impl VodServe {
             ));
         }
         let replacement = Session {
+            passive_grant: passive_grant.clone(),
             retained_output,
             rendition: Some(Arc::clone(&rendition)),
             rendition_key: rendition.key.clone(),
@@ -879,6 +957,12 @@ impl VodServe {
         } else {
             None
         };
+        if passive_grant.as_ref().is_some_and(|grant| !grant.live()) {
+            return Err(crate::transcode::vod_refusal_error(
+                "vod_passive_route_expired",
+                "passive route expired during preparation",
+            ));
+        }
         if let Some(previous_readers) = previous_readers.as_mut() {
             previous_readers.remove(&session_id);
             if previous_readers.is_empty() {

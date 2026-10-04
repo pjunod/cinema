@@ -2246,6 +2246,9 @@ async fn the_blocked_get_cap_setting_is_read_and_bounded() {
     let req = SessionRequest {
         quality_catalog: None,
         candidate_context: None,
+        vod_only: false,
+        passive_vod: false,
+        finite_bitrate_limit_bps: None,
         control_sequence: None,
         file_id: 1,
         playback_id: "cap-probe".to_owned(),
@@ -2320,6 +2323,9 @@ async fn vod_settings_snapshot_preserves_budgets_and_maintenance_refusal() {
     let mut req = SessionRequest {
         quality_catalog: None,
         candidate_context: None,
+        vod_only: false,
+        passive_vod: false,
+        finite_bitrate_limit_bps: None,
         control_sequence: None,
         file_id: 1,
         playback_id: "snapshot-probe".to_owned(),
@@ -3471,6 +3477,9 @@ fn the_grade_is_part_of_a_request_identity() {
     let request = SessionRequest {
         quality_catalog: None,
         candidate_context: None,
+        vod_only: false,
+        passive_vod: false,
+        finite_bitrate_limit_bps: None,
         control_sequence: None,
         file_id: 5,
         playback_id: "player".into(),
@@ -3493,6 +3502,9 @@ fn the_grade_is_part_of_a_request_identity() {
     let hdr10 = SessionRequest {
         quality_catalog: None,
         candidate_context: None,
+        vod_only: false,
+        passive_vod: false,
+        finite_bitrate_limit_bps: None,
         hdr10: true,
         ..request.clone()
     };

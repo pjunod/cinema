@@ -204,6 +204,7 @@ impl VodServe {
         self.shared.sessions.lock().await.insert(
             session_id.to_owned(),
             Session {
+                passive_grant: None,
                 retained_output: None,
                 rendition: Some(Arc::clone(&rendition)),
                 rendition_key: rendition.key.clone(),
@@ -338,6 +339,7 @@ impl VodServe {
                 cluster_index_root,
                 cluster_membership,
                 sessions: Mutex::new(HashMap::new()),
+                passive_grants: passive_grant::Registry::default(),
                 preparing_sessions: StdMutex::new(HashMap::new()),
                 session_lifecycles: StdMutex::new(HashMap::new()),
                 rendition_builds: StdMutex::new(HashMap::new()),

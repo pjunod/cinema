@@ -30,7 +30,7 @@ pub async fn segment(
     .await
 }
 
-pub(super) fn requested_byte_range(
+pub(in crate::http) fn requested_byte_range(
     value: Option<&str>,
     len: u64,
 ) -> Result<Option<(u64, u64)>, ()> {
@@ -208,7 +208,22 @@ fn owner_loss_detail(
 /// without minting a second HTTP wait budget. Only an active, unexpired route
 /// this node owns qualifies; Store/attachment uncertainty remains retryable
 /// and must never be relabelled as authoritative absence.
-pub(super) async fn vod_resurrected_before(
+///
+/// The future is constructed outside the caller's polling frame. It holds a
+/// complete VOD create and runs beneath every segment, playlist and subtitle
+/// handler; built inline, unoptimized builds lay it out in each caller's
+/// stack frame, and a resumed segment overflowed a 2 MiB worker stack. This is
+/// the same pattern as the Jellyfin adapter's `native_segment`.
+#[inline(never)]
+pub(super) fn vod_resurrected_before<'a>(
+    state: &'a AppState,
+    session: &'a str,
+    deadline: Instant,
+) -> std::pin::Pin<Box<dyn std::future::Future<Output = VodResurrection> + Send + 'a>> {
+    Box::pin(resurrect_vod_before(state, session, deadline))
+}
+
+async fn resurrect_vod_before(
     state: &AppState,
     session: &str,
     deadline: Instant,
@@ -447,7 +462,7 @@ async fn vod_segment_response_before(
             ],
         )
             .into_response();
-        return complete_buffered_response_before(
+        return Box::pin(complete_buffered_response_before(
             state,
             session,
             &owner,
@@ -458,7 +473,7 @@ async fn vod_segment_response_before(
             true,
             response,
             publication_deadline,
-        )
+        ))
         .await;
     }
     let requested_range =
@@ -570,7 +585,7 @@ async fn vod_segment_response_before(
                 ],
             )
                 .into_response();
-            return complete_buffered_response_before(
+            return Box::pin(complete_buffered_response_before(
                 state,
                 session,
                 &owner,
@@ -581,7 +596,7 @@ async fn vod_segment_response_before(
                 true,
                 response,
                 publication_deadline,
-            )
+            ))
             .await;
         }
         let requested_range =
@@ -637,7 +652,7 @@ async fn vod_segment_response_before(
         if let Some(range) = content_range {
             headers_mut.insert(header::CONTENT_RANGE, range.parse().expect("range"));
         }
-        return complete_buffered_response_before(
+        return Box::pin(complete_buffered_response_before(
             state,
             session,
             &owner,
@@ -648,7 +663,7 @@ async fn vod_segment_response_before(
             range_covers_object(requested_range, ready.len),
             response,
             publication_deadline,
-        )
+        ))
         .await;
     }
     let etag = artifact_etag;

@@ -441,6 +441,7 @@ function developerPanel(settings,readiness){
       ${directedChangeDeveloperRows()}`,{local:true});
   return `${setHead("Developer","Experimental features still awaiting device qualification.")}
       ${destinations}
+      <div class="setsection"><h2>Client connections</h2><p>Compatibility awaiting complete client qualification.</p></div>${jellyfinCompatibilityCard(settings,readiness)}
       <div class="setsection" id="enable-live-tv"><h2>Enable Live TV</h2><p>Cluster use of the network tuner, with advisory prerequisites.</p></div>${liveTvEnableCard(settings)}
       <div class="setsection"><h2>Cluster work</h2><p>Remote media placement and replica catalogue reads.</p></div>${clusterPlacementCard(settings)}${boundedCatalogueCard(settings,readiness)}${clusterClockCard(settings,readiness)}
       <div class="setsection" id="enable-content-encoding"><h2>Content-aware encoding</h2><p>Measured choices for cached and offline video, with baseline fallback.</p></div>${contentEncodingCard(settings)}
@@ -587,6 +588,27 @@ async function saveHevcCopy(btn){
   }catch(error){if(err)err.textContent=error.message;if(btn)btn.disabled=false;}
 }
 
+function jellyfinCompatibilityCard(settings,readiness){
+  const on=!!settings.jellyfin_compatibility_enabled;
+  const connection=new URL("/jellyfin",window.location.href).href;
+  return setCard(`${cardHead("Jellyfin client compatibility","Connect the tested Infuse and Jellyfin Android TV clients to this server.",`<span class="pill${on?" ok":""}">${on?"enabled":"off"}</span>`)}
+    <label class="checkrow"><input type="checkbox" id="jellyfin-compatibility-enabled" ${on?"checked":""}><span>Allow Jellyfin clients</span></label>
+    <p class="hint">Connection URL: <code>${esc(connection)}</code>. Sign in with a Plurx account.</p>
+    <p class="hint">Library posters and backdrops are served without sign-in while this is on: anyone who has an artwork link can read that image. A direct-play link for one title chosen after sign-in also works without a login header; it expires within 24 hours and stops working when playback stops or the login is revoked. Everything else requires sign-in.</p>
+    <details class="setdetails" open><summary>Readiness</summary><div class="setdetails-body">
+    ${devReq(readiness,"jellyfin_compatibility","client_qualification","Pinned clients qualified","The complete browsing, playback, track and recovery matrix must pass on the frozen candidate.")}
+    <p class="devcheck-note">Readiness is advisory. Your saved choice controls the connection surface.</p></div></details>
+    ${devGraduation("J6 records the pinned Infuse and Android TV flows, source/profile refusals, identity and watch fences, cluster behavior and native regressions on the frozen candidate.","the permanent compatibility switch moves to Settings → Integrations beside connection settings.")}
+    <div class="err" id="jellyfin-compatibility-error" role="alert"></div>${setCardFoot("saveJellyfinCompatibility")}`,{id:"jellyfin-compatibility-settings"});
+}
+async function saveJellyfinCompatibility(btn){
+  const err=document.getElementById("jellyfin-compatibility-error");if(err)err.textContent="";
+  if(btn)btn.disabled=true;
+  try{
+    cacheSettings(await api("/settings",{method:"PUT",body:{jellyfin_compatibility_enabled:(/** @type {HTMLInputElement} */ (document.getElementById("jellyfin-compatibility-enabled"))).checked}}));
+    toast("Jellyfin compatibility saved");if(btn)setCardSaved(btn);
+  }catch(error){if(err)err.textContent=error.message;if(btn)btn.disabled=false;}
+}
 function contentEncodingCard(settings){
   const ready=settings.content_encoding_scorer_ready;
   const applicability=settings.content_encoding_applicability||{};

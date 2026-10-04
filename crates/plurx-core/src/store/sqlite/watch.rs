@@ -16,29 +16,6 @@ const WATCHED_THRESHOLD: f64 = 0.95;
 /// unwatched, since nothing ever marks a picture seen.
 const PLAYABLE_KINDS: &str = "'movie','episode','video','audiobook'";
 
-/// Every playable item at or under `item_id`, depth-first through whatever
-/// container chain sits above it — season → episode, show → season → episode,
-/// or the arbitrarily deep folder trees a home library mirrors from disk.
-/// A movie has no children and returns just itself.
-fn playable_leaves(conn: &rusqlite::Connection, item_id: i64) -> rusqlite::Result<Vec<i64>> {
-    let mut stmt = conn.prepare(&format!(
-        "WITH RECURSIVE tree(id) AS (
-             SELECT id FROM items WHERE id = ?1
-             -- UNION, not UNION ALL: it dedupes, so a corrupt parent cycle
-             -- terminates instead of spinning the recursion forever.
-             UNION
-             SELECT i.id FROM items i JOIN tree t ON i.parent_id = t.id
-         )
-         SELECT i.id FROM tree t JOIN items i ON i.id = t.id
-         WHERE i.kind IN ({PLAYABLE_KINDS})
-         ORDER BY i.id"
-    ))?;
-    let ids = stmt
-        .query_map(params![item_id], |row| row.get(0))?
-        .collect::<rusqlite::Result<Vec<i64>>>()?;
-    Ok(ids)
-}
-
 fn watch_from_row(row: &rusqlite::Row<'_>, base: usize) -> rusqlite::Result<WatchState> {
     Ok(WatchState {
         position_ms: row.get(base)?,
@@ -439,81 +416,119 @@ impl WatchStore for SqliteStore {
         .await
     }
 
+    async fn jellyfin_progress_is_current(
+        &self,
+        write: &crate::store::JellyfinProgressWrite,
+    ) -> Result<bool, StoreError> {
+        crate::store::jellyfin_play::validate_key(
+            &write.provenance.play_id,
+            &write.provenance.scope,
+        )?;
+        let item_id = write.item_id;
+        let p = write.provenance.clone();
+        self.with_conn(move |conn| {
+            let now: i64 = conn.query_row("SELECT unixepoch()", [], |row| row.get(0))?;
+            Ok(conn.query_row(
+                crate::store::jellyfin_watch::CURRENT,
+                params![
+                    p.play_id,
+                    p.scope.user_id,
+                    p.scope.token_digest,
+                    p.scope.device_digest,
+                    p.scope.client_family.as_str(),
+                    p.manual_revision,
+                    item_id,
+                    now
+                ],
+                |row| row.get(0),
+            )?)
+        })
+        .await
+    }
+    async fn put_jellyfin_progress(
+        &self,
+        write: crate::store::JellyfinProgressWrite,
+        expected: Option<&WatchState>,
+    ) -> Result<Option<WatchState>, StoreError> {
+        let expected = expected.copied();
+        self.with_conn(move |conn| {
+            let now: i64 = conn.query_row("SELECT unixepoch()", [], |row| row.get(0))?;
+            let (expected, context) =
+                crate::store::jellyfin_watch::progress_context(&write, now, expected.as_ref())?;
+            let p = &write.provenance;
+            Ok(conn
+                .query_row(
+                    crate::store::jellyfin_watch::PROGRESS,
+                    params![
+                        write.item_id,
+                        write.duration_ms,
+                        write.position_ms,
+                        p.scope.user_id,
+                        now,
+                        p.play_id,
+                        p.scope.token_digest,
+                        p.scope.device_digest,
+                        p.scope.client_family.as_str(),
+                        p.manual_revision,
+                        expected,
+                        context
+                    ],
+                    |row| watch_from_row(row, 0),
+                )
+                .optional()?)
+        })
+        .await
+    }
     async fn set_watched(
         &self,
         user_id: i64,
         item_id: i64,
         watched: bool,
     ) -> Result<(), StoreError> {
+        let sql = crate::store::jellyfin_watch::manual_sql(false, watched);
         self.with_conn(move |conn| {
-            if watched {
-                // Marking watched jumps the position to the end if known.
-                conn.execute(
-                    "INSERT INTO watch_state (user_id, item_id, position_ms, watched, updated_at)
-                     VALUES (?1, ?2, 0, 1, unixepoch())
-                     ON CONFLICT(user_id, item_id) DO UPDATE SET
-                         watched = 1, updated_at = unixepoch()",
-                    params![user_id, item_id],
-                )?;
-            } else {
-                // Un-watching clears progress so it leaves continue-watching.
-                conn.execute(
-                    "INSERT INTO watch_state (user_id, item_id, position_ms, watched, updated_at)
-                     VALUES (?1, ?2, 0, 0, unixepoch())
-                     ON CONFLICT(user_id, item_id) DO UPDATE SET
-                         watched = 0, position_ms = 0, updated_at = unixepoch()",
-                    params![user_id, item_id],
-                )?;
-            }
+            let now: i64 = conn.query_row("SELECT unixepoch()", [], |row| row.get(0))?;
+            let mut stmt = conn.prepare(&sql)?;
+            let rows = stmt.query_map(
+                params![item_id, user_id, now, Option::<String>::None],
+                |row| row.get::<_, i64>(0),
+            )?;
+            rows.collect::<rusqlite::Result<Vec<_>>>()?;
             Ok(())
         })
         .await
     }
-
     async fn set_watched_tree(
         &self,
         user_id: i64,
         item_id: i64,
         watched: bool,
     ) -> Result<Vec<i64>, StoreError> {
+        self.set_watched_tree_with_origin(user_id, item_id, watched, None)
+            .await
+    }
+    async fn set_watched_tree_with_origin(
+        &self,
+        user_id: i64,
+        item_id: i64,
+        watched: bool,
+        origin: Option<&crate::store::JellyfinPlayScope>,
+    ) -> Result<Vec<i64>, StoreError> {
+        let origin = origin.cloned();
+        let sql = crate::store::jellyfin_watch::manual_sql(true, watched);
         self.with_conn(move |conn| {
-            let tx = conn.unchecked_transaction()?;
-            let ids = playable_leaves(&tx, item_id)?;
-            // The upsert's DO UPDATE carries a WHERE, so a row already in the
-            // target state is left alone entirely — `execute` returns 0 and the
-            // id never enters `changed`. That is what keeps re-marking a
-            // finished series from re-notifying about all forty episodes, and
-            // it keeps `updated_at` honest: it means "when this changed", not
-            // "when someone last clicked the button".
-            let mut changed = Vec::new();
-            {
-                let mut stmt = if watched {
-                    tx.prepare(
-                        "INSERT INTO watch_state (user_id, item_id, position_ms, watched, updated_at)
-                         VALUES (?1, ?2, 0, 1, unixepoch())
-                         ON CONFLICT(user_id, item_id) DO UPDATE SET
-                             watched = 1, updated_at = unixepoch()
-                         WHERE watch_state.watched = 0",
-                    )?
-                } else {
-                    // Un-watching clears progress too, so a half-watched episode
-                    // counts as changed even though its flag was already 0 —
-                    // otherwise it would linger in continue-watching.
-                    tx.prepare(
-                        "INSERT INTO watch_state (user_id, item_id, position_ms, watched, updated_at)
-                         VALUES (?1, ?2, 0, 0, unixepoch())
-                         ON CONFLICT(user_id, item_id) DO UPDATE SET
-                             watched = 0, position_ms = 0, updated_at = unixepoch()
-                         WHERE watch_state.watched = 1 OR watch_state.position_ms <> 0",
-                    )?
-                };
-                for id in ids {
-                    if stmt.execute(params![user_id, id])? > 0 {
-                        changed.push(id);
-                    }
-                }
-            }
-            tx.commit()?;
+            let now: i64 = conn.query_row("SELECT unixepoch()", [], |row| row.get(0))?;
+            let origin = crate::store::jellyfin_watch::origin_json(user_id, origin.as_ref(), now)?;
+            let mut stmt = conn.prepare(&sql)?;
+            let rows = stmt.query_map(params![item_id, user_id, now, origin], |row| {
+                Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?))
+            })?;
+            let mut changed = rows
+                .collect::<rusqlite::Result<Vec<_>>>()?
+                .into_iter()
+                .filter_map(|(id, changed)| (changed != 0).then_some(id))
+                .collect::<Vec<_>>();
+            changed.sort_unstable();
             Ok(changed)
         })
         .await

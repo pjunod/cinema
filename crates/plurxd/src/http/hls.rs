@@ -154,7 +154,7 @@ pub(crate) mod link_receipts;
 mod prepared_link;
 #[path = "hls/response.rs"]
 mod response;
-use response::*;
+pub(in crate::http) use response::*;
 // split: end hls-response
 
 // split: begin hls-playlist

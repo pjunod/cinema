@@ -239,7 +239,8 @@ impl ServingFence {
     }
 
     pub(crate) fn requires_authority(path: &str) -> bool {
-        path.contains("/files/")
+        path.starts_with("/jellyfin")
+            || path.contains("/files/")
             || path.contains("/hls/")
             || path.ends_with("/stream.mp4")
             || path.ends_with("/offline-packages")

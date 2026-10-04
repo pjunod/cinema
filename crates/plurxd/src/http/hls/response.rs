@@ -100,7 +100,7 @@ pub(super) async fn authorize_attempt_status(
     Ok(())
 }
 
-pub(super) fn response_publication_deadline() -> Instant {
+pub(in crate::http) fn response_publication_deadline() -> Instant {
     tokio::time::Instant::now().into_std() + RESPONSE_PUBLICATION_LIFECYCLE_BUDGET
 }
 
@@ -763,7 +763,20 @@ pub(super) fn segment_publication_kind(
 /// Publish a response whose complete HTTP body has already been prepared in
 /// memory. Constructing the value is not visibility; returning it is, so the
 /// actor/registry fence and completion commit stay immediately before return.
-pub(super) fn bound_admitted_media_body(response: Response) -> Response {
+pub(super) fn bound_admitted_media_body(mut response: Response) -> Response {
+    use axum::body::HttpBody as _;
+    // Preserve a known buffered representation length before wrapping its body in a stream.
+    // Direct service callers need the same length the HTTP server would infer from that body.
+    if response.status().is_success()
+        && response.status() != StatusCode::NO_CONTENT
+        && !response.headers().contains_key(header::CONTENT_LENGTH)
+    {
+        if let Some(len) = response.body().size_hint().exact() {
+            response
+                .headers_mut()
+                .insert(header::CONTENT_LENGTH, len.into());
+        }
+    }
     // A prepared playlist/init/subtitle body still needs a post-header owner:
     // without this wrapper an unpolled in-memory Body could survive forever,
     // invalidating the shared admitted-media lifetime used by handoff and
@@ -802,7 +815,7 @@ pub(super) fn bound_admitted_media_body(response: Response) -> Response {
     Response::from_parts(parts, Body::from_stream(stream))
 }
 
-pub(super) async fn complete_buffered_response_before(
+pub(in crate::http) async fn complete_buffered_response_before(
     state: &AppState,
     session: &str,
     owner: &crate::transcode::MediaResponseOwner,
@@ -811,13 +824,19 @@ pub(super) async fn complete_buffered_response_before(
     response: Response,
     deadline: Instant,
 ) -> Result<Response, ApiError> {
-    let authorization =
-        authorize_response_publication(state, session, owner, publication, deadline).await?;
+    let authorization = Box::pin(authorize_response_publication(
+        state,
+        session,
+        owner,
+        publication,
+        deadline,
+    ))
+    .await?;
     commit_authorized_media(state, session, authorization, complete_object, deadline).await?;
     Ok(bound_admitted_media_body(response))
 }
 
-pub(super) async fn session_file(
+pub(in crate::http) async fn session_file(
     state: &AppState,
     session: &str,
     deadline: Instant,

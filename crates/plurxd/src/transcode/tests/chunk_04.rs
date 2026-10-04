@@ -1068,6 +1068,9 @@
         SessionRequest {
             quality_catalog: None,
             candidate_context: None,
+            vod_only: false,
+            passive_vod: false,
+            finite_bitrate_limit_bps: None,
             control_sequence: None,
             file_id,
             playback_id: playback_id.into(),

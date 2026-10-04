@@ -15,6 +15,35 @@ pub(crate) const SERVING_FENCE_SESSION_GRACE: std::time::Duration =
     std::time::Duration::from_secs(2);
 
 impl TranscodeManager {
+    /// Exact passive-grant presence on this node's VOD registry.
+    pub(crate) async fn passive_presence(
+        &self,
+        session_id: &str,
+        user: &str,
+        player: &str,
+        request: &str,
+    ) -> bool {
+        self.vod
+            .passive_presence(session_id, user, player, request)
+            .await
+    }
+    #[cfg(test)]
+    pub(crate) async fn passive_grant_remaining_for_test(
+        &self,
+        session_id: &str,
+    ) -> Option<std::time::Duration> {
+        self.vod.passive_grant_remaining_for_test(session_id).await
+    }
+    #[cfg(test)]
+    pub(crate) async fn shorten_passive_grant_for_test(
+        &self,
+        session_id: &str,
+        remaining: std::time::Duration,
+    ) {
+        self.vod
+            .shorten_passive_grant_for_test(session_id, remaining)
+            .await
+    }
     pub(crate) async fn cluster_index_available(
         &self,
         file: &plurx_core::domain::MediaFile,

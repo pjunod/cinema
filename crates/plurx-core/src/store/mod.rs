@@ -45,7 +45,35 @@ mod fragment_index_cluster;
 mod fragment_prune_tests;
 #[cfg(feature = "hiqlite-store")]
 mod hiqlite_classification;
+mod jellyfin_catalog;
+pub use jellyfin_catalog::{
+    JellyfinCatalogArtwork, JellyfinCatalogIdentity, JellyfinCatalogLibrary,
+    JellyfinCatalogMissing, JellyfinCatalogMode, JellyfinCatalogPage, JellyfinCatalogQuery,
+    JellyfinCatalogSort, JellyfinCatalogStore,
+};
+#[cfg(feature = "hiqlite-store")]
+mod hiqlite_jellyfin_catalog;
+mod jellyfin_identity;
+mod jellyfin_login;
+mod jellyfin_play;
+mod jellyfin_watch;
+pub use jellyfin_play::{
+    JellyfinPlay, JellyfinPlayActivation, JellyfinPlayScope, JellyfinPlayStore, NewJellyfinPlay,
+    JELLYFIN_PENDING_PLAYS_PER_LOGIN, JELLYFIN_PENDING_PLAYS_SERVER, JELLYFIN_PENDING_PLAY_TTL_MS,
+    JELLYFIN_TERMINAL_PLAY_TTL_MS, JELLYFIN_TOMBSTONES_PER_LOGIN,
+};
+pub use jellyfin_watch::{JellyfinProgressProvenance, JellyfinProgressWrite};
+#[cfg(feature = "hiqlite-store")]
+mod hiqlite_jellyfin_play;
+pub use jellyfin_login::{
+    JellyfinClientFamily, JellyfinCompatibilityState, JellyfinLoginStore, JellyfinLoginWrite,
+};
+#[cfg(feature = "hiqlite-store")]
+mod hiqlite_jellyfin_login;
 mod renditionplan;
+pub use jellyfin_identity::{JellyfinEntityId, JellyfinEntityKind, JellyfinIdentityStore};
+#[cfg(feature = "hiqlite-store")]
+mod hiqlite_jellyfin_identity;
 mod sqlite;
 mod telemetry;
 mod timeline_annotations;
@@ -242,6 +270,23 @@ pub struct TokenSummary {
 /// the HTTP layer can tell a client "you were signed out after N idle days"
 /// instead of a bare 401; an expired token's activity is never refreshed, so
 /// presenting it cannot slide it back to life.
+/// Which surface a login token was issued for. A Jellyfin compatibility
+/// login authenticates only the compatibility facade; native and Plex
+/// surfaces refuse it, so a token pulled off a shared TV is not a native
+/// account bearer.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TokenAudience {
+    Native,
+    JellyfinCompatibility,
+}
+impl TokenAudience {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Native => "native",
+            Self::JellyfinCompatibility => "jellyfin",
+        }
+    }
+}
 #[derive(Clone, Debug)]
 pub enum TokenAuthentication {
     Authenticated(User),
@@ -1700,6 +1745,7 @@ pub mod keys {
     pub const CLUSTER_RESTORE_GENERATION: &str = "cluster.restore_generation";
     /// Runtime Library-channel playback switch. The feature is always compiled;
     /// absence is off so an upgrade never starts scheduled playback implicitly.
+    pub const JELLYFIN_COMPATIBILITY_ENABLED: &str = "compat.jellyfin.enabled";
     pub const LIBRARY_CHANNELS_ENABLED: &str = "library_channels.enabled";
     /// Runtime-only HDHomeRun live-TV configuration. The values are read
     /// as one snapshot and written with a generation CAS; the enable bit is
@@ -2346,8 +2392,20 @@ pub trait UserStore: Send + Sync + 'static {
     /// the same snapshot as the token row. A live token's coalesced
     /// `last_seen_at` is refreshed exactly as before; an expired one is
     /// reported and left untouched.
-    async fn authenticate_token(&self, token_hash: &str)
-        -> Result<TokenAuthentication, StoreError>;
+    async fn authenticate_token(
+        &self,
+        token_hash: &str,
+    ) -> Result<TokenAuthentication, StoreError> {
+        self.authenticate_token_for(token_hash, TokenAudience::Native)
+            .await
+    }
+    /// As [`authenticate_token`](Self::authenticate_token), for one audience:
+    /// a token of the other audience is `Unknown`.
+    async fn authenticate_token_for(
+        &self,
+        token_hash: &str,
+        audience: TokenAudience,
+    ) -> Result<TokenAuthentication, StoreError>;
     /// Resolve a token hash to its user (touching `last_seen_at`). An expired
     /// token resolves to nobody, so every caller that predates expiry — the
     /// Plex facade, recovery reads — honours the policy without knowing it.
@@ -3427,6 +3485,26 @@ pub trait WatchStore: Send + Sync + 'static {
         user_id: i64,
         item_ids: &[i64],
     ) -> Result<Vec<(i64, WatchState)>, StoreError>;
+    /// Commit only the original play/revision provenance. Final commits also
+    /// terminalize that exact active play atomically with the durable row.
+    /// Admission check only; the eventual write repeats the atomic fence.
+    async fn jellyfin_progress_is_current(
+        &self,
+        _write: &JellyfinProgressWrite,
+    ) -> Result<bool, StoreError> {
+        Err(StoreError::Identity(
+            "compatibility progress unsupported by this Store".into(),
+        ))
+    }
+    async fn put_jellyfin_progress(
+        &self,
+        _write: JellyfinProgressWrite,
+        _expected: Option<&WatchState>,
+    ) -> Result<Option<WatchState>, StoreError> {
+        Err(StoreError::Identity(
+            "compatibility progress unsupported by this Store".into(),
+        ))
+    }
     /// Record playback progress; crossing 95% marks watched automatically.
     async fn put_progress(
         &self,
@@ -3492,6 +3570,22 @@ pub trait WatchStore: Send + Sync + 'static {
         item_id: i64,
         watched: bool,
     ) -> Result<Vec<i64>, StoreError>;
+    /// Trusted compatibility context permits only an unambiguous own-edit advance.
+    /// Native/Plex callers use `set_watched_tree`, whose origin is absent.
+    async fn set_watched_tree_with_origin(
+        &self,
+        user_id: i64,
+        item_id: i64,
+        watched: bool,
+        origin: Option<&JellyfinPlayScope>,
+    ) -> Result<Vec<i64>, StoreError> {
+        if origin.is_some() {
+            return Err(StoreError::Identity(
+                "manual origin unsupported by this Store".into(),
+            ));
+        }
+        self.set_watched_tree(user_id, item_id, watched).await
+    }
     /// Count the playable leaves under `item_id` and how many of them are
     /// watched. A playable item is its own leaf, so this answers for movies
     /// too — a movie is 1/1 or 0/1.
@@ -5426,6 +5520,10 @@ pub trait TimelineAnnotationStore: Send + Sync + 'static {
 pub trait Store:
     crate::live_tv_resource::LiveTvResourceStore
     + SettingsStore
+    + JellyfinCatalogStore
+    + JellyfinIdentityStore
+    + JellyfinLoginStore
+    + JellyfinPlayStore
     + BackgroundJobStore
     + DvConversionStore
     + MetricsStore
@@ -5463,6 +5561,10 @@ pub trait Store:
 impl<T> Store for T where
     T: crate::live_tv_resource::LiveTvResourceStore
         + SettingsStore
+        + JellyfinCatalogStore
+        + JellyfinIdentityStore
+        + JellyfinLoginStore
+        + JellyfinPlayStore
         + BackgroundJobStore
         + DvConversionStore
         + MetricsStore

@@ -19,6 +19,10 @@ mod file_grants;
 mod fragindex;
 mod fragment_index_cluster;
 mod housekeeping;
+mod jellyfin_catalog;
+mod jellyfin_identity;
+mod jellyfin_login;
+mod jellyfin_play;
 mod library;
 mod library_channels;
 mod live_tv_resource;
@@ -1251,6 +1255,14 @@ pub(crate) const MIGRATIONS: &[&str] = &[
     super::candidate_recovery::SCHEMA,
     // v97: exact encoded preparation shares source-revision cancellation.
     super::background_jobs::ENCODED_OUTPUT_SCHEMA,
+    // v98: permanent Jellyfin wire identities and deterministic retirement.
+    super::jellyfin_identity::JELLYFIN_IDENTITY_SCHEMA,
+    // v99: compatibility-only login scope and transactional replacement.
+    super::jellyfin_login::JELLYFIN_LOGIN_SCHEMA,
+    // v100: bounded compatibility negotiations and exact native references.
+    super::jellyfin_play::SCHEMA,
+    // v101: manual-edit revisions and trusted compatibility own-edit continuation.
+    super::jellyfin_watch::SCHEMA,
 ];
 
 /// Highest SQLite schema version this binary can read and migrate.
@@ -3228,8 +3240,12 @@ mod tests {
         // v91 records transactional planning generation.
         // v92–v97 append offline audio, independent Link columns/table,
         // copy preparation, candidate recovery and encoded preparation.
+
+        // v98–v101 add Jellyfin compatibility: permanent wire identities,
+        // compatibility-only logins, bounded negotiations with exact native
+        // references, and manual-edit watch revisions.
         assert_eq!(
-            version, 97,
+            version, 101,
             "a new migration must be a deliberate bump, not a surprise — \
              the list is append-only and every entry is one somebody shipped"
         );
