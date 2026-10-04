@@ -1397,11 +1397,35 @@ pub(crate) struct RealSourceStartFixture {
     pub headers: HeaderMap,
     pub request: Vec<u8>,
     pub grant: Uuid,
+    invitation: SourceFixtureInvitation,
     selected: plurx_core::cluster::migration::SelectedStore,
     _directory: tempfile::TempDir,
 }
 #[cfg(test)]
+struct SourceFixtureInvitation {
+    identity: plurx_core::sharing::SharingIdentity,
+    id: Uuid,
+    secret: plurx_core::secrets::Secret,
+    expires_at_ms: i64,
+}
+#[cfg(test)]
 impl RealSourceStartFixture {
+    /// Encode the actual invitation that produced this grant with the caller's
+    /// real runtime TLS endpoint. This grants no alternate approval or readiness.
+    pub fn invitation_for(
+        &self,
+        endpoint: plurx_core::sharing::Endpoint,
+    ) -> Result<plurx_core::sharing::Invitation, plurx_core::error::StoreError> {
+        endpoint.validate()?;
+        Ok(plurx_core::sharing::Invitation {
+            identity: self.invitation.identity.clone(),
+            name: self.state.server_name.clone(),
+            endpoints: vec![endpoint],
+            id: self.invitation.id,
+            secret: plurx_core::secrets::Secret::from_cleartext(self.invitation.secret.expose()),
+            expires_at_ms: self.invitation.expires_at_ms,
+        })
+    }
     pub async fn shutdown(self) {
         self.selected
             .shutdown()
@@ -1470,6 +1494,9 @@ async fn build_real_source_start_fixture(
     let state_mut = Arc::get_mut(&mut state).expect("sole initial State");
     state_mut.store = Arc::clone(&selected.store);
     state_mut.membership = selected.membership_manager();
+    state_mut.node_id = selected.identity.node_id.clone();
+    state_mut.catalogue = selected.catalogue_reader();
+    state_mut.replication = selected.replication_monitor();
     state_mut.sharing = Arc::new(crate::sharing::SharingManager::new(
         Arc::clone(&selected.credential_key),
         config.storage.data_dir.clone(),
@@ -1649,12 +1676,14 @@ async fn build_real_source_start_fixture(
     let now = crate::state::clock_ms();
     let grant = Uuid::new_v4();
     let invitation = Uuid::new_v4();
+    let invitation_secret = new_secret().expect("actual invitation secret");
+    let invitation_hash = secret_hash(SecretDomain::Invitation, &invitation_secret);
     let secret = new_secret().expect("credential");
     let hash = secret_hash(SecretDomain::Grant, &secret);
     store
         .create_share_invitation(InvitationRecord {
             id: invitation,
-            token_hash: "a".repeat(64),
+            token_hash: invitation_hash.clone(),
             library_ids: vec![library],
             created_at_ms: now,
             expires_at_ms: now + 60000,
@@ -1664,7 +1693,7 @@ async fn build_real_source_start_fixture(
     store
         .claim_share(ShareClaim {
             invitation_id: invitation,
-            invitation_hash: "a".repeat(64),
+            invitation_hash,
             claim_id: Uuid::new_v4(),
             grant_id: grant,
             recipient_server_id: recipient_server_id.unwrap_or_else(Uuid::new_v4),
@@ -1759,6 +1788,12 @@ async fn build_real_source_start_fixture(
         headers,
         request,
         grant,
+        invitation: SourceFixtureInvitation {
+            identity,
+            id: invitation,
+            secret: invitation_secret,
+            expires_at_ms: now + 60000,
+        },
         selected,
         _directory: directory,
     }
@@ -3015,6 +3050,84 @@ mod tests {
         assert!(current_reference(&fixture.state, &fixture.headers, &stale)
             .await
             .is_err());
+        fixture.shutdown().await;
+    }
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn sharing_source_http_genuine_invitation_replays_actual_claim_and_selected_identity() {
+        Box::pin(actual_source_genuine_invitation()).await;
+    }
+    async fn actual_source_genuine_invitation() {
+        use plurx_core::sharing::{
+            secret_hash, ClaimOutcome, Endpoint, GrantState, Invitation, SecretDomain, ShareClaim,
+        };
+        let recipient = Uuid::new_v4();
+        let fixture =
+            real_source_start_fixture_with(SourceFixtureMode::Copy, Some(recipient)).await;
+        assert_eq!(fixture.state.node_id, fixture.selected.identity.node_id);
+        let tls = plurx_core::sharing_tls::LiveNodeTls::open(
+            &fixture._directory.path().join("actual-peer-tls"),
+            crate::state::clock_ms() / 1000,
+        )
+        .expect("actual production TLS key");
+        let (pin, _) = tls.status().expect("actual SPKI");
+        let endpoint = Endpoint {
+            ipv4: "100.127.89.2".parse().expect("bounded endpoint"),
+            ipv6: None,
+            ts_fqdn: "source.fixture.ts.net".into(),
+            port: 32443,
+            spki_sha256: pin,
+        };
+        // This verifies the real invitation credential and TLS key material;
+        // an actual pinned network exchange belongs to the separate CGNAT drill.
+        let invitation = fixture
+            .invitation_for(endpoint.clone())
+            .expect("actual invitation");
+        let blob = invitation.encode().expect("real bootstrap blob");
+        let parsed = Invitation::parse(&blob).expect("closed actual invitation");
+        assert_eq!(parsed.identity.server_id, fixture.reference.server_id);
+        assert_eq!(
+            parsed.identity.catalogue_epoch,
+            fixture.reference.catalogue_epoch
+        );
+        assert_eq!(parsed.endpoints, vec![endpoint]);
+        let secret = plurx_core::secrets::Secret::from_cleartext(
+            fixture
+                .headers
+                .get("authorization")
+                .expect("actual grant credential")
+                .to_str()
+                .expect("closed header")
+                .strip_prefix("CinemaShare ")
+                .expect("actual scheme"),
+        );
+        let grant_hash = secret_hash(SecretDomain::Grant, &secret);
+        let status = fixture
+            .state
+            .store
+            .sharing_grant_status(&grant_hash)
+            .await
+            .expect("actual credential status")
+            .expect("actual active claim");
+        assert_eq!(status.invitation_id, parsed.id);
+        assert_eq!(status.grant.id, fixture.grant);
+        assert_eq!(status.grant.recipient_server_id, recipient);
+        assert_eq!(status.grant.state, GrantState::Active);
+        let replay = fixture
+            .state
+            .store
+            .claim_share(ShareClaim {
+                invitation_id: parsed.id,
+                invitation_hash: secret_hash(SecretDomain::Invitation, &parsed.secret),
+                claim_id: status.claim_id,
+                grant_id: status.grant.id,
+                recipient_server_id: recipient,
+                recipient_name: status.recipient_name.clone(),
+                credential_hash: grant_hash,
+                now_ms: crate::state::clock_ms(),
+            })
+            .await
+            .expect("real original claim replay");
+        assert!(matches!(replay,ClaimOutcome::Replay(grant) if grant==status.grant),"bootstrap secret must match the actual consumed invitation and unchanged approved grant");
         fixture.shutdown().await;
     }
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
