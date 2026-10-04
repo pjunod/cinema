@@ -14,15 +14,39 @@ const MAX_PARAMETER: usize = 65536;
 /// evidence; `parse` ignores the rest.
 const TRACE_PREFIX: &[u8] = b"[trace_headers @ ";
 
-/// Advance a match of [`TRACE_PREFIX`] by one byte. `[` occurs only at the
-/// start of the prefix, so a mismatch can restart only on `[` itself.
-fn advance_prefix(matched: usize, byte: u8) -> usize {
-    if byte == TRACE_PREFIX[matched] {
-        matched + 1
-    } else if byte == TRACE_PREFIX[0] {
-        1
-    } else {
-        0
+/// Streaming search of one line for anything that could be trace output:
+/// the [`TRACE_PREFIX`], or a trace field's ` = <integer>`. FFmpeg omits the
+/// prefix on a message that follows an unterminated one, so a field glued onto
+/// a foreign line has only its value to show for itself. The tee banner
+/// escapes every space and the progress line writes `q=-1.0`, so neither
+/// carries the field form.
+#[derive(Clone, Copy, Default)]
+struct Evidence {
+    prefix: usize,
+    field: usize,
+}
+
+impl Evidence {
+    /// Advance by one byte; true once either signature has been seen.
+    fn advance(&mut self, byte: u8) -> bool {
+        // `[` occurs only at the start of the prefix, so a mismatch can
+        // restart only on `[` itself.
+        self.prefix = if byte == TRACE_PREFIX[self.prefix] {
+            self.prefix + 1
+        } else if byte == TRACE_PREFIX[0] {
+            1
+        } else {
+            0
+        };
+        let field_value = self.field == 3 && (byte.is_ascii_digit() || byte == b'-');
+        self.field = match (self.field, byte) {
+            (_, _) if field_value => 0,
+            (1, b'=') | (3, b'=') => 2,
+            (2, b' ') => 3,
+            (_, b' ') => 1,
+            _ => 0,
+        };
+        field_value || self.prefix == TRACE_PREFIX.len()
     }
 }
 
@@ -101,9 +125,9 @@ pub struct Trace {
     packet_slices: u64,
     /// Discarding the rest of an over-long line that is not trace output.
     skipping: bool,
-    /// Progress through [`TRACE_PREFIX`] across the bytes of the current
-    /// over-long line, so trace content anywhere in it still fails closed.
-    prefix_matched: usize,
+    /// Search state across the bytes of the current over-long line, so trace
+    /// content anywhere in it still fails closed.
+    evidence: Evidence,
     refusal: Option<String>,
 }
 
@@ -125,7 +149,7 @@ impl Trace {
             if byte == b'\n' || byte == b'\r' {
                 if self.skipping {
                     self.skipping = false;
-                    self.prefix_matched = 0;
+                    self.evidence = Evidence::default();
                     continue;
                 }
                 let line = std::mem::take(&mut self.line);
@@ -134,8 +158,7 @@ impl Trace {
                     Err(_) => self.reject("invalid trace encoding"),
                 }
             } else if self.skipping {
-                self.prefix_matched = advance_prefix(self.prefix_matched, byte);
-                if self.prefix_matched == TRACE_PREFIX.len() {
+                if self.evidence.advance(byte) {
                     self.reject("trace line exceeds the parser limit");
                     return;
                 }
@@ -143,26 +166,24 @@ impl Trace {
                 self.line.push(byte);
             } else {
                 // The bound protects parsing work, and only trace lines are
-                // parsed. An over-long line that carries trace output is still
-                // refused; any other one -- FFmpeg's own output banner names
+                // parsed. An over-long line that could carry trace output is
+                // still refused; any other one -- FFmpeg's own output banner names
                 // every tee slave, one per subtitle track -- is not evidence
                 // either way, so it is dropped unbuffered instead of refusing
                 // the source.
-                let matched =
-                    self.line
-                        .iter()
-                        .chain(std::iter::once(&byte))
-                        .try_fold(0, |matched, &byte| {
-                            let matched = advance_prefix(matched, byte);
-                            (matched < TRACE_PREFIX.len()).then_some(matched)
-                        });
-                let Some(matched) = matched else {
+                let mut evidence = Evidence::default();
+                let found = self
+                    .line
+                    .iter()
+                    .chain(std::iter::once(&byte))
+                    .any(|&byte| evidence.advance(byte));
+                if found {
                     self.reject("trace line exceeds the parser limit");
                     return;
-                };
+                }
                 self.line.clear();
                 self.skipping = true;
-                self.prefix_matched = matched;
+                self.evidence = evidence;
             }
         }
     }
@@ -433,10 +454,28 @@ mod tests {
         let long_value = line(&format!("0 pps_cb_qp_offset 0 = {}", "9".repeat(MAX_LINE)));
         let straddling = format!("{}{}", "y".repeat(MAX_LINE - 5), line("Extradata"));
         let buried = format!("{}{}", "z".repeat(MAX_LINE * 2), line("Extradata"));
-        for bad in [long_value, straddling, buried, "w".repeat(MAX_LINE * 2)] {
+        // A `[` that does not start the prefix must not hide the one that does.
+        let restarted = format!("{}[{}", "z".repeat(MAX_LINE * 2), line("Extradata"));
+        // FFmpeg drops the prefix after an unterminated message, so a field
+        // can arrive glued to a foreign line with only its value to show.
+        let glued = format!("{}0 vps_video_parameter_set_id 0 = 1\n", "v".repeat(MAX_LINE));
+        let glued_negative = format!("{}8 pps_cb_qp_offset 0 = -1\n", "v".repeat(MAX_LINE * 2));
+        for (bad, chunk) in [
+            (long_value, 4096),
+            (straddling.clone(), 7),
+            (straddling, MAX_LINE * 4),
+            (buried.clone(), 7),
+            (buried, MAX_LINE * 4),
+            (restarted, 7),
+            (glued, 7),
+            (glued_negative, 4096),
+            ("w".repeat(MAX_LINE * 2), 13),
+        ] {
             let mut trace = Trace::default();
             trace.feed(fixture().as_bytes());
-            trace.feed(bad.as_bytes());
+            for part in bad.as_bytes().chunks(chunk) {
+                trace.feed(part);
+            }
             assert!(
                 !trace.finish("source".into(), 0).permits("source"),
                 "{}",
