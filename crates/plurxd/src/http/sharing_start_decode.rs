@@ -63,7 +63,7 @@ impl DecodedSourceHlsStart {
     pub(super) fn response(&self) -> &StartResponse {
         &self.0.response
     }
-    pub(super) fn into_parts(self) -> (SourcePlaybackTarget, Uuid, StartResponse) {
+    pub(crate) fn into_parts(self) -> (SourcePlaybackTarget, Uuid, StartResponse) {
         (self.0.reference, self.0.incarnation_id, self.0.response)
     }
 }

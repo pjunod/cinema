@@ -4487,3 +4487,21 @@ The inert preclaim test runs the actual owned task against the real fixture
 Store, waits for joined retirement and confirms that no route was created. It
 qualifies that early failure case; it does not claim full pinned B-to-Source
 playback or a physical Source cleanup result from registry absence.
+
+### S5 exact Source status and HTTP resource integration
+
+The receiver checks the retained Source session through a fixed authenticated
+status RPC before its first publication and each attached renewal. The bounded
+strict decoder requires the complete VOD Start response and the original
+Source incarnation, session and control epoch. Cleanup-only status, changed
+lineage and presentation origin cannot authorize publication. Each subsequent
+receiver writer still checks the original login and current receiver authority.
+
+On the integrated Source HTTP checkpoint `c8596f4b9` and receiver checkpoint
+`1621b4967`, pinned Rust 1.97.1 all-target check passed in 58.29 seconds after
+making only the decoded fact accessor crate-visible. Denied-warning feature
+Clippy passed in 63 seconds. The strict status wire test passed one test;
+actual Source HTTP passed sixteen in 38.26 seconds, receiver ownership eight
+in 0.14 seconds, strict Start decoding five and End decoding two, all zero
+ignored. These results qualify Source HTTP and receiver status seams. The
+receiver streaming relay and full physical B-to-Source playback remain open.

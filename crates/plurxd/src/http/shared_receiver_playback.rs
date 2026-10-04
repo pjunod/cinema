@@ -245,6 +245,55 @@ impl ReceiverStartRegistry {
     }
 }
 impl ReceiverStartActor {
+    async fn current_source_status(
+        &self,
+        state: &AppState,
+    ) -> Result<crate::sharing_client::SourceStatusReceipt, ReceiverStartError> {
+        if self.0.stop.is_cancelled() {
+            return Err(ReceiverStartError::Unresolved);
+        }
+        // Current B policy precedes the network operation; every following
+        // committing writer still obtains and repeats its own fresh guard.
+        state
+            .store
+            .prepare_receiver_session_authority(self.0.intent.clone())
+            .await
+            .map_err(|_| ReceiverStartError::Unresolved)?
+            .ok_or(ReceiverStartError::Unresolved)?;
+        let received = self
+            .0
+            .state
+            .lock()
+            .expect("receiver owner")
+            .received
+            .clone()
+            .ok_or(ReceiverStartError::Unresolved)?;
+        let expected = plurx_core::sharing::SharingIdentity {
+            server_id: self.0.intent.scope.source_server_id,
+            catalogue_epoch: self.0.intent.scope.catalogue_epoch,
+            created_at_ms: 0,
+        };
+        let (mut peer, _) = crate::sharing_client::PeerConnection::verified(
+            &state.sharing,
+            std::slice::from_ref(&received.endpoint),
+            &expected,
+        )
+        .await
+        .map_err(|_| ReceiverStartError::Unresolved)?;
+        let known = crate::sharing_client::SourcePeerLineage::from_start(
+            received.incarnation,
+            &received.response,
+        )
+        .map_err(|_| ReceiverStartError::Unresolved)?;
+        peer.file_status(
+            &received.credential,
+            &received.viewer_hash,
+            &self.0.peer_session,
+            &known,
+        )
+        .await
+        .map_err(|_| ReceiverStartError::Unresolved)
+    }
     fn close_dispatch(&self) {
         self.0.state.lock().expect("receiver owner").dispatch_closed = true;
         self.0.stop.cancel();
@@ -586,8 +635,11 @@ async fn run_owner(
     };
     // Retain the received physical lineage before any authority or Store await.
     entry.state.lock().expect("receiver owner").source = Some(attachment.clone());
+    let source_status = ReceiverStartActor(entry.clone())
+        .current_source_status(&state)
+        .await?;
     let projected = project_shared_start(
-        received.response.clone(),
+        source_status.response().clone(),
         source_session,
         attachment.owner.session_id,
         incarnation,
@@ -648,6 +700,9 @@ async fn run_owner(
             _ = entry.stop.cancelled() => return Err(ReceiverStartError::Unresolved),
             _ = timer.tick() => {}
         }
+        ReceiverStartActor(entry.clone())
+            .current_source_status(&state)
+            .await?;
         let authority = state
             .store
             .prepare_receiver_session_authority(intent.clone())

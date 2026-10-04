@@ -461,3 +461,176 @@ mod tests {
         .is_err());
     }
 }
+
+// Authenticated live metadata from the original retained Source session. This
+// receipt is neither physical settlement nor a receiver publication grant.
+pub(crate) struct SourceStatusReceipt {
+    response: StartResponse,
+}
+impl SourceStatusReceipt {
+    fn parse(
+        bytes: &[u8],
+        session: &SourcePeerSession,
+        known: &SourcePeerLineage,
+    ) -> Result<Self, PeerError> {
+        let decoded = crate::http::decode_source_start_response(bytes, &session.reference)
+            .map_err(|_| PeerError::InvalidResponse)?;
+        let (_, incarnation, response) = decoded.into_parts();
+        if &SourcePeerLineage::from_start(incarnation, &response)? != known
+            || !response.vod
+            || response.media_origin_ms != Some(0)
+        {
+            return Err(PeerError::InvalidResponse);
+        }
+        Ok(Self { response })
+    }
+    pub(crate) fn response(&self) -> &StartResponse {
+        &self.response
+    }
+}
+impl PeerConnection {
+    // Dedicated fixed-path POST; a terminal cleanup envelope cannot satisfy it.
+    pub(crate) async fn file_status(
+        &mut self,
+        credential: &Secret,
+        viewer_hash: &str,
+        session: &SourcePeerSession,
+        known: &SourcePeerLineage,
+    ) -> Result<SourceStatusReceipt, PeerError> {
+        if self.verified_endpoint.is_none()
+            || viewer_hash.len() != 64
+            || !viewer_hash
+                .bytes()
+                .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+        {
+            return Err(PeerError::InvalidResponse);
+        }
+        let body = session.end_body(Some(known))?;
+        tokio::time::timeout(Duration::from_secs(10), async {
+            let mut auth = HeaderValue::from_str(&format!("CinemaShare {}", credential.expose()))
+                .map_err(|_| PeerError::InvalidResponse)?;
+            auth.set_sensitive(true);
+            let mut viewer =
+                HeaderValue::from_str(viewer_hash).map_err(|_| PeerError::InvalidResponse)?;
+            viewer.set_sensitive(true);
+            let request = Request::builder()
+                .method(Method::POST)
+                .uri(format!(
+                    "/sharing/v1/items/{}/files/{}/sessions/{}/status",
+                    session.reference.item_id.as_str(),
+                    session.reference.file_id.as_str(),
+                    session.request_id
+                ))
+                .header(header::HOST, &self.host)
+                .header(header::CONTENT_TYPE, "application/json")
+                .header(header::ACCEPT, "application/json")
+                .header(header::AUTHORIZATION, auth)
+                .header("cinemashare-viewer", viewer)
+                .body(Body::from(body))
+                .map_err(|_| PeerError::InvalidResponse)?;
+            self.sender
+                .ready()
+                .await
+                .map_err(|_| PeerError::Unavailable)?;
+            let response = self
+                .sender
+                .send_request(request)
+                .await
+                .map_err(|_| PeerError::Unavailable)?;
+            let status = response.status();
+            let bytes = axum::body::to_bytes(
+                Body::new(
+                    response
+                        .into_body()
+                        .map_err(|_| std::io::Error::other("sharing peer status body")),
+                ),
+                if status == StatusCode::OK {
+                    4 * 1024 * 1024
+                } else {
+                    MAX_REPLY
+                },
+            )
+            .await
+            .map_err(|_| PeerError::InvalidResponse)?;
+            if status == StatusCode::UNAUTHORIZED {
+                return Err(PeerError::Authentication);
+            }
+            if status == StatusCode::UPGRADE_REQUIRED {
+                return Err(PeerError::ProtocolUnsupported);
+            }
+            if status != StatusCode::OK {
+                return Err(PeerError::Rejected(status));
+            }
+            SourceStatusReceipt::parse(&bytes, session, known)
+        })
+        .await
+        .map_err(|_| PeerError::Unavailable)?
+    }
+}
+#[cfg(test)]
+mod status_tests {
+    use super::*;
+    fn fixture() -> (SourcePeerSession, SourcePeerLineage, Value) {
+        let reference = SourcePlaybackTarget {
+            server_id: Uuid::new_v4(),
+            catalogue_epoch: Uuid::new_v4(),
+            library_id: SourceId::parse("0").expect("library"),
+            item_id: SourceId::parse("9007199254740993").expect("item"),
+            file_id: SourceId::parse("0").expect("file"),
+            revision: plurx_core::sharing_catalogue_details::FileRevision::parse(&"a".repeat(64))
+                .expect("revision"),
+        };
+        let lineage = SourcePeerLineage {
+            incarnation_id: Uuid::new_v4(),
+            session_id: Uuid::new_v4(),
+            control_epoch: 7,
+        };
+        let wrapper = json!({"reference":reference,"session":{"request_id":Uuid::new_v4(),"playback_id":"original","start":30.0,"copy":true}});
+        let session = SourcePeerSession::new(
+            reference.clone(),
+            &serde_json::to_vec(&wrapper).expect("request"),
+        )
+        .expect("session");
+        let mut response:StartResponse=serde_json::from_value(json!({
+            "session_id":lineage.session_id,"playlist_url":format!("/api/v1/hls/{}/index.m3u8",lineage.session_id),
+            "duration_ms":100000,"start_seconds":30.0,"media_origin_ms":0,"height":720,"encoder":"copy","vod":true,
+            "ladder":[],"plan_notes":[]
+        })).expect("actual response DTO");
+        response.control = crate::playback_control::ControlBootstrap::new(
+            &lineage.session_id.to_string(),
+            &lineage.incarnation_id.to_string(),
+            7,
+            crate::playback_control::VOD_LEASE_TIMEOUT_MS,
+        );
+        let value = json!({"reference":reference,"incarnation_id":lineage.incarnation_id,"response":response});
+        (session, lineage, value)
+    }
+    #[test]
+    fn source_status_requires_current_complete_exact_lineage() {
+        let (session, known, value) = fixture();
+        let encode = |v: &Value| serde_json::to_vec(v).expect("wire response");
+        let receipt =
+            SourceStatusReceipt::parse(&encode(&value), &session, &known).expect("actual shape");
+        assert_eq!(receipt.response().session_id, known.session_id.to_string());
+        for key in ["incarnation_id", "session_id", "control_epoch"] {
+            let mut foreign = known.clone();
+            match key {
+                "incarnation_id" => foreign.incarnation_id = Uuid::new_v4(),
+                "session_id" => foreign.session_id = Uuid::new_v4(),
+                _ => foreign.control_epoch += 1,
+            }
+            assert!(
+                SourceStatusReceipt::parse(&encode(&value), &session, &foreign).is_err(),
+                "{key}"
+            );
+        }
+        let mut drift = value.clone();
+        drift["reference"]["catalogue_epoch"] = json!(Uuid::new_v4());
+        assert!(SourceStatusReceipt::parse(&encode(&drift), &session, &known).is_err());
+        let mut drift = value.clone();
+        drift["response"]["media_origin_ms"] = json!(1);
+        assert!(SourceStatusReceipt::parse(&encode(&drift), &session, &known).is_err());
+        let cleanup = json!({"reference":session.reference,"request_id":session.request_id,"incarnation_id":known.incarnation_id,"state":"settled"});
+        assert!(SourceStatusReceipt::parse(&encode(&cleanup), &session, &known).is_err());
+    }
+}

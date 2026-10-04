@@ -140,15 +140,58 @@ def _nested_router_routes(segment: str) -> set[str]:
     return routes
 
 
+def _module_router_calls(segment: str) -> list[tuple[str, str]]:
+    """Read a module call inside an actual merge, including state arguments.
+
+    The caller supplies only a registered router chain. Balanced arguments are
+    skipped rather than searched for route declarations or unrelated modules.
+    Limits keep malformed input from silently expanding this inventory scan.
+    """
+    calls: list[tuple[str, str]] = []
+    start = re.compile(r"\.merge\(\s*((?:(?:crate|super|self)::)?[A-Za-z_]\w*)::([A-Za-z_]\w*)\(")
+    for match in start.finditer(segment):
+        depth = 1
+        quoted = False
+        escaped = False
+        end = None
+        for cursor in range(match.end(), min(len(segment), match.end() + 8192)):
+            char = segment[cursor]
+            if quoted:
+                if escaped:
+                    escaped = False
+                elif char == "\\":
+                    escaped = True
+                elif char == '"':
+                    quoted = False
+                continue
+            if char == '"':
+                quoted = True
+            elif char == "(":
+                depth += 1
+                if depth > 64:
+                    raise AssertionError("module router argument nesting exceeds inventory bound")
+            elif char == ")":
+                depth -= 1
+                if depth == 0:
+                    end = cursor + 1
+                    break
+        if end is None:
+            raise AssertionError("unbalanced or oversized module router arguments")
+        tail = end
+        while tail < len(segment) and segment[tail].isspace():
+            tail += 1
+        if tail >= len(segment) or segment[tail] != ")":
+            raise AssertionError("module router call does not close its merge")
+        calls.append((match.group(1), match.group(2)))
+    return calls
+
+
 def _merged_router_routes(segment: str) -> set[str]:
-    """Expand `.merge(module::named_router())` at the current prefix."""
+    """Expand actual module router merges at the current prefix."""
     routes: set[str] = set()
-    merged = re.compile(
-        r"\.merge\(\s*((?:crate::)?[A-Za-z_]\w*)::([A-Za-z_]\w*)\(\)\s*\)"
-    )
-    for module, function in merged.findall(segment):
+    for module, function in _module_router_calls(segment):
         base = ROUTER.parent.parent if module.startswith("crate::") else ROUTER.parent
-        source = (base / f"{module.removeprefix('crate::')}.rs").read_text(encoding="utf-8")
+        source = (base / f"{module.split('::')[-1]}.rs").read_text(encoding="utf-8")
         subrouter = re.search(
             rf"(?:pub(?:\(crate\))?\s+)?fn\s+{re.escape(function)}\([^)]*\)[^{{]*\{{(?P<body>.*?)^\}}",
             source,
@@ -262,6 +305,24 @@ def tabulated_paths() -> set[str]:
 
 
 class ApiDocRoutesTest(unittest.TestCase):
+    def test_module_merges_preserve_zero_args_and_expand_balanced_state_args_only(self) -> None:
+        zero = _merged_router_routes(".merge(sharing::admin_router())")
+        state = _merged_router_routes(".merge(sharing::admin_router(state.clone()))")
+        nested = _merged_router_routes('.merge(sharing::admin_router(choose(state.clone(), "literal ) (")))')
+        self.assertEqual(zero, state)
+        self.assertEqual(state, nested)
+        self.assertIn("/sharing/settings", state)
+        self.assertEqual(len(state), 16)
+        self.assertIn("/sharing/imports/{import}/libraries", state)
+        self.assertEqual(_merged_router_routes(".merge(super::shared_library::admin_library_router(state))"), {"/sharing/imports/{import}/libraries"})
+        self.assertFalse(any(path.startswith("/sharing/v1/") for path in state),
+                         "unregistered private peer routers are not swept from the module")
+        self.assertEqual(_module_router_calls("let candidate = sharing::peer_router(state.clone());"), [])
+        self.assertEqual(_module_router_calls(".merge(local_router)"), [])
+        for malformed in [".merge(sharing::admin_router(state.clone())", ".merge(sharing::admin_router(" + "(" * 65]:
+            with self.assertRaises(AssertionError):
+                _module_router_calls(malformed)
+
     def test_every_registered_route_is_documented(self) -> None:
         """A route nobody can find is a route that gets reimplemented."""
         documented = documented_paths()

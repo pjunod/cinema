@@ -25,6 +25,7 @@ use uuid::Uuid;
 mod playback;
 pub(crate) use playback::{
     CleanupPeerConnection, SourceEndReceipt, SourcePeerLineage, SourcePeerSession,
+    SourceStatusReceipt,
 };
 
 const MANAGEMENT_RESPONSE_BYTES: usize = 128 * 1024;
