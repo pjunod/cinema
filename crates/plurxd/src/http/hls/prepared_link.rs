@@ -40,8 +40,14 @@ pub(super) async fn authenticate(
     let mut request = axum::http::Request::new(());
     *request.headers_mut() = headers.clone();
     let (mut parts, _) = request.into_parts();
+    // The observation is optional advisory evidence riding on the control
+    // exchange: its credential read takes the exchange's advisory share, so
+    // a slow read can never spend the exchange the control answer needs.
     let user = tokio::time::timeout_at(
-        std::cmp::min(deadline, Instant::now() + Duration::from_millis(100)).into(),
+        crate::media_pool::advisory_share(
+            deadline.into(),
+            super::link_receipts::ADVISORY_EVIDENCE_STAGE,
+        ),
         AuthUser::from_request_parts(&mut parts, state),
     )
     .await
@@ -110,19 +116,21 @@ impl AcceptedObservation {
         state: &AppState,
         file: &plurx_core::domain::MediaFile,
         owner: &str,
+        deadline: tokio::time::Instant,
     ) -> Option<super::link_receipts::LiveLinkProof> {
         if !self.gate.observation_is_current(self.fence.clone()).await {
             return None;
         }
         let proof = state
             .link_receipts
-            .current_positive(
+            .current_positive_until(
                 state,
                 &self.http.network,
                 file,
                 Some(&self.http.nonce),
                 Some(&self.playback),
                 Some(owner),
+                deadline,
             )
             .await?;
         if proof.incumbent_session() != self.session
@@ -134,12 +142,16 @@ impl AcceptedObservation {
         Some(proof)
     }
 
+    /// Every read of the proof (prior, cost, live link, source fence) shares
+    /// the request's advisory `deadline`; a miss is Unknown and stages no
+    /// proof.
     pub(super) async fn proposed_proof(
         &self,
         state: &AppState,
         file: &plurx_core::domain::MediaFile,
         request: &mut crate::transcode::SessionRequest,
         candidate: &plurx_core::playback::candidate::QualityCandidate,
+        deadline: tokio::time::Instant,
     ) -> Option<PreparedProof> {
         if request.file_id != file.id {
             return None;
@@ -160,10 +172,11 @@ impl AcceptedObservation {
                 file,
                 &self.playback,
                 Some(&self.session),
+                deadline,
             )
             .await?;
-            let memory = tokio::time::timeout(
-                Duration::from_millis(100),
+            let memory = tokio::time::timeout_at(
+                deadline,
                 state.store.candidate_recovery_memory(&bound.scope),
             )
             .await
@@ -177,7 +190,7 @@ impl AcceptedObservation {
             .transcode
             .measured_candidate_cost(candidate, request, None)
             .await;
-        let link = self.current_link(state, file, owner).await?;
+        let link = self.current_link(state, file, owner, deadline).await?;
         // Fence the source once for this proof: the trial's recorded-negative
         // check and the staged binding both derive from the same identity.
         let identity =

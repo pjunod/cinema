@@ -2590,6 +2590,7 @@ pub async fn decision(
                 &file,
                 super::hls::link_receipts::requested_receipt(&headers),
                 catalog.clone(),
+                advisory,
             )
             .await;
             let catalog = super::hls::link_receipts::filter_catalog(

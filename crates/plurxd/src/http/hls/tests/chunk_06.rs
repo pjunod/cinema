@@ -3197,7 +3197,7 @@
         headers.insert("authorization", "Bearer invalid-observation-token".parse().expect("A05 prepared fixture"));
         let remote = Some("192.0.2.8:12345".parse().expect("A05 prepared fixture"));
         assert!(super::prepared_link::authenticate(&fixture.state, &headers, remote,
-            std::time::Instant::now() + Duration::from_millis(100)).await.is_none());
+            std::time::Instant::now() + crate::playback_control::EXCHANGE_DEADLINE).await.is_none());
         let response = super::control::control(State(fixture.state.clone()), AxPath(session),
             headers.clone(), crate::http::network::RemoteAddress(remote),
             Bytes::from(serde_json::to_vec(&request).expect("A05 prepared fixture"))).await;
@@ -3207,12 +3207,12 @@
         fixture.store.create_token(&plurx_core::auth::hash_token(token), route.user_id, None).await.expect("A05 prepared fixture");
         headers.insert("authorization", format!("Bearer {token}").parse().expect("A05 prepared fixture"));
         assert!(super::prepared_link::authenticate(&fixture.state, &headers, remote,
-            std::time::Instant::now() + Duration::from_millis(100)).await.is_some());
+            std::time::Instant::now() + crate::playback_control::EXCHANGE_DEADLINE).await.is_some());
         assert!(super::prepared_link::authenticate(&fixture.state, &headers, remote,
             std::time::Instant::now()).await.is_none(), "expired original deadline is not renewed");
         headers.remove("X-Plurx-Link-Receipt");
         assert!(super::prepared_link::authenticate(&fixture.state, &headers, remote,
-            std::time::Instant::now() + Duration::from_millis(100)).await.is_none());
+            std::time::Instant::now() + crate::playback_control::EXCHANGE_DEADLINE).await.is_none());
     }
     #[tokio::test]
     async fn a05_prepared_auth_ignores_all_forwarding_headers_and_requires_ipv4_socket() {
@@ -3230,17 +3230,17 @@
         headers.insert("x-real-ip", "192.0.99.9".parse().expect("real ip"));
         let remote = Some("192.0.2.8:12345".parse().expect("IPv4 socket"));
         let observation = super::prepared_link::authenticate(&fixture.state, &headers, remote,
-            std::time::Instant::now() + Duration::from_millis(100)).await.expect("actual IPv4 peer authority");
+            std::time::Instant::now() + crate::playback_control::EXCHANGE_DEADLINE).await.expect("actual IPv4 peer authority");
         assert_eq!(observation.network_fingerprint(), "192.0.2.0/24");
         for unsupported in [None, Some("[2001:db8::8]:12345".parse().expect("IPv6 socket"))] {
             assert!(super::prepared_link::authenticate(&fixture.state, &headers, unsupported,
-                std::time::Instant::now() + Duration::from_millis(100)).await.is_none(),
+                std::time::Instant::now() + crate::playback_control::EXCHANGE_DEADLINE).await.is_none(),
                 "forwarding headers cannot authorize a missing or unsupported socket");
         }
         headers.remove("forwarded");
         headers.remove("x-forwarded-for");
         assert!(super::prepared_link::authenticate(&fixture.state, &headers, None,
-            std::time::Instant::now() + Duration::from_millis(100)).await.is_none(),
+            std::time::Instant::now() + crate::playback_control::EXCHANGE_DEADLINE).await.is_none(),
             "X-Real-IP alone cannot authorize an absent socket");
     }
 
@@ -3273,7 +3273,7 @@
             cause:plurx_core::domain::NetworkPriorCause::Link, negative:false, media_duration_ms:Some(4000), presenting:true, stalled:false, runway_ms:12000};
         headers.insert("X-Plurx-Link-Receipt", nonce.parse().expect("nonce"));
         let http = super::prepared_link::authenticate(&fixture.state, &headers, remote,
-            std::time::Instant::now()+Duration::from_millis(100)).await.expect("ordinary auth");
+            std::time::Instant::now() + crate::playback_control::EXCHANGE_DEADLINE).await.expect("ordinary auth");
         let observation = super::prepared_link::capture(&fixture.state, &route, &control,
             crate::playback_control::ControlDisposition::Accepted, Some(http)).await.expect("accepted actor");
         let digest = [12;32];
@@ -3286,13 +3286,13 @@
             retained_output:None, canonical_caps:None, selected_candidate:candidate.clone(), planning_binding:None,
             owner_node_id:Some(fixture.state.node_id.clone()),
             candidate_id:candidate.id, recipe_digest:digest, normalized_geometry:true, grade:candidate.grade, profile:None}));
-        assert!(observation.proposed_proof(&fixture.state, &file, &mut request, &candidate).await.is_none(), "header without EOF cannot start a trial");
+        assert!(observation.proposed_proof(&fixture.state, &file, &mut request, &candidate, super::link_receipts::advisory_deadline()).await.is_none(), "header without EOF cannot start a trial");
         eof(std::time::Instant::now(), unix_ms());
         assert!(fixture.state.link_receipts.accept(&fixture.state, &network, Some(&session), &sample).await.is_some());
-        let proof = observation.proposed_proof(&fixture.state, &file, &mut request, &candidate).await.expect("authenticated unknown-cost copy trial");
+        let proof = observation.proposed_proof(&fixture.state, &file, &mut request, &candidate, super::link_receipts::advisory_deadline()).await.expect("authenticated unknown-cost copy trial");
         assert!(request.candidate_context.as_ref().expect("context").retained_output.is_none(), "trial never invents retained full output");
         let mut known = candidate.clone(); known.peak_bps = Some(90_000_000);
-        assert!(observation.proposed_proof(&fixture.state, &file, &mut request, &known).await.is_none(), "known cost cannot become unknown trial");
+        assert!(observation.proposed_proof(&fixture.state, &file, &mut request, &known, super::link_receipts::advisory_deadline()).await.is_none(), "known cost cannot become unknown trial");
         let staged = uuid::Uuid::new_v4().to_string();
         let incarnation = uuid::Uuid::new_v4().to_string();
         let deadline = unix_ms()+15000;
@@ -3416,8 +3416,8 @@
             fixture.state.link_receipts.settle_committed(&committed, &fixture.state.node_id);
             assert!(fixture.state.link_receipts.accept(&fixture.state, &network, Some(&staged), &sample).await.is_some(),
                 "the committed successor accepts its completed body as an ordinary binding");
-            assert!(fixture.state.link_receipts.current_positive(&fixture.state, &network, &file, Some(&sample.receipt),
-                Some(&playback), Some(&fixture.state.node_id)).await.is_some(),
+            assert!(fixture.state.link_receipts.current_positive_until(&fixture.state, &network, &file, Some(&sample.receipt),
+                Some(&playback), Some(&fixture.state.node_id), super::link_receipts::advisory_deadline()).await.is_some(),
                 "the committed successor proves like any registered session");
             assert!(fixture.state.link_receipts.mint(&staged, "seg00002.m4s", "etag2", 4096, Some(4000), true).is_some(),
                 "the committed successor keeps minting after its stage ends");
@@ -3454,7 +3454,7 @@
             fixture.state.link_receipts.replace_staged_gate_for_test(&staged, Arc::clone(&gate));
         }
         assert!(fixture.state.link_receipts.accept(&fixture.state, &network, Some(&staged), &sample).await.is_some(), "own completed body is observable before commit");
-        assert!(fixture.state.link_receipts.current_positive(&fixture.state, &network, &file, Some(&sample.receipt), Some(&playback), Some(&fixture.state.node_id)).await.is_none(), "staged proof cannot lend incumbent admission");
+        assert!(fixture.state.link_receipts.current_positive_until(&fixture.state, &network, &file, Some(&sample.receipt), Some(&playback), Some(&fixture.state.node_id), super::link_receipts::advisory_deadline()).await.is_none(), "staged proof cannot lend incumbent admission");
         let (second, complete) = fixture.state.link_receipts.mint(&staged, "seg00002.m4s", "etag2", 4096, Some(4000), true).expect("A05 prepared fixture");
         complete(std::time::Instant::now(), now);
         sample.receipt = second; sample.object_name = "seg00002.m4s".into(); sample.etag = "etag2".into();

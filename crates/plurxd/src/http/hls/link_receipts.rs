@@ -174,12 +174,14 @@ pub(crate) struct ClientLinkSample {
 /// Network priors, live receipts and measured output costs only narrow or
 /// widen an Auto choice; none of them can refuse playback, and a read that
 /// does not finish is Unknown. They still must not hold first frame
-/// indefinitely, so each decision takes ONE deadline from
+/// indefinitely, so each request takes ONE deadline from
 /// [`advisory_deadline`] and every read inside it shares that deadline. It is
 /// the same stage maximum the candidate catalogue uses for its own critical
-/// reads, and inside a create it is clamped to the request's remaining
-/// startup budget (see `media_pool::create_stage_deadline`), so advisory
-/// work can never spend the allowance the create needs to answer.
+/// reads. Inside a create the deadline is minted once per create, not once
+/// per call site, and it is at most half of the startup budget that remained
+/// when it was minted (see `media_pool::create_advisory_deadline`), so the
+/// create's advisory reads together can never spend the allowance its
+/// durable writes and dispatch need to answer.
 ///
 /// It replaces per-read 100 ms caps. Those made Auto timing-dependent: one
 /// source `open`+`fstat` on a NAS whose disks had spun down regularly took
@@ -187,10 +189,11 @@ pub(crate) struct ClientLinkSample {
 /// had a recorded negative.
 pub(crate) const ADVISORY_EVIDENCE_STAGE: Duration = Duration::from_secs(2);
 
-/// The deadline one advisory decision shares across all of its reads, derived
-/// from the request making it. Take it once per decision and pass it down.
+/// The deadline one request's advisory evidence shares across all of its
+/// reads. Inside a create every call returns the same per-create deadline;
+/// outside one, take it once per decision and pass it down.
 pub(crate) fn advisory_deadline() -> tokio::time::Instant {
-    crate::media_pool::create_stage_deadline(ADVISORY_EVIDENCE_STAGE)
+    crate::media_pool::create_advisory_deadline(ADVISORY_EVIDENCE_STAGE)
 }
 
 async fn network_priors_enabled(state: &AppState) -> bool {
@@ -245,6 +248,37 @@ impl SourceLinkIdentity {
         })
     }
 
+    /// The request's identity: inside a create the source is fenced once and
+    /// every later pre-start read of the same create reuses that fence;
+    /// outside one (or for another requester or file) this is [`Self::capture`].
+    ///
+    /// A check that must observe a source replaced DURING the create — the
+    /// post-acceptance comparison, the staged registration — uses
+    /// [`Self::capture`] (via [`binding`]) instead, so it fences again.
+    pub(crate) async fn for_request(network: &NetworkIdentity, file: &MediaFile) -> Option<Self> {
+        if let Some(identity) =
+            crate::media_pool::create_source_link(|identity| identity.describes(network, file))
+        {
+            return Some(identity);
+        }
+        let identity = Self::capture(network, file).await?;
+        crate::media_pool::remember_create_source_link(&identity);
+        Some(identity)
+    }
+
+    fn describes(&self, network: &NetworkIdentity, file: &MediaFile) -> bool {
+        Some(self.user_id) == network.user_id
+            && network
+                .credential_generation
+                .as_ref()
+                .is_some_and(|generation| generation.as_str() == self.credential_generation)
+            && self.client_class == network.client_class
+            && self.network_fingerprint == network.network_fingerprint
+            && self.file_id == file.id
+            && self.source_size == file.size
+            && self.source_mtime == file.mtime
+    }
+
     pub(crate) fn candidate(
         &self,
         recipe_digest: [u8; 32],
@@ -289,10 +323,33 @@ pub(crate) async fn binding_until(
     route: CandidateRoute,
     deadline: tokio::time::Instant,
 ) -> Option<CandidateLinkBinding> {
-    tokio::time::timeout_at(deadline, binding(network, file, recipe_digest, route))
-        .await
-        .ok()
-        .flatten()
+    within(deadline, binding(network, file, recipe_digest, route)).await
+}
+
+/// [`binding_until`] derived from the request's identity
+/// ([`SourceLinkIdentity::for_request`]): inside a create it reuses the
+/// create's one source fence instead of opening the source again.
+pub(crate) async fn request_binding_until(
+    network: &NetworkIdentity,
+    file: &MediaFile,
+    recipe_digest: [u8; 32],
+    route: CandidateRoute,
+    deadline: tokio::time::Instant,
+) -> Option<CandidateLinkBinding> {
+    within(deadline, async {
+        SourceLinkIdentity::for_request(network, file)
+            .await
+            .map(|source| source.candidate(recipe_digest, route))
+    })
+    .await
+}
+
+/// Advisory work that misses `deadline` is Unknown (`None`), never a refusal.
+async fn within<T>(
+    deadline: tokio::time::Instant,
+    work: impl std::future::Future<Output = Option<T>>,
+) -> Option<T> {
+    tokio::time::timeout_at(deadline, work).await.ok().flatten()
 }
 
 impl LinkReceipts {
@@ -389,19 +446,8 @@ impl LinkReceipts {
 
     /// A cause label cannot mint a Link fault. Only this incumbent's already
     /// accepted exact-negative claim qualifies, with its original live EOF.
-    pub(crate) async fn current_negative(
-        &self,
-        state: &AppState,
-        network: &NetworkIdentity,
-        file: &MediaFile,
-        nonce: Option<&str>,
-        playback: &str,
-    ) -> Option<LiveLinkProof> {
-        self.current_negative_until(state, network, file, nonce, playback, advisory_deadline())
-            .await
-    }
-
-    async fn current_negative_until(
+    /// Bounded by the caller's request advisory `deadline`.
+    pub(super) async fn current_negative_until(
         &self,
         state: &AppState,
         network: &NetworkIdentity,
@@ -434,29 +480,7 @@ impl LinkReceipts {
     }
     /// Read a live incumbent transfer, not a serialized network prior. Processing
     /// routes may differ for an upgrade, but its delivery owner must stay local.
-    pub(crate) async fn current_positive(
-        &self,
-        state: &AppState,
-        network: &NetworkIdentity,
-        file: &MediaFile,
-        incumbent_receipt: Option<&str>,
-        playback_id: Option<&str>,
-        proposed_owner: Option<&str>,
-    ) -> Option<LiveLinkProof> {
-        self.current_positive_until(
-            state,
-            network,
-            file,
-            incumbent_receipt,
-            playback_id,
-            proposed_owner,
-            advisory_deadline(),
-        )
-        .await
-    }
-
-    /// [`Self::current_positive`] inside a deadline the caller's advisory
-    /// decision already owns, so its reads share that one bound.
+    /// Every read shares the `deadline` the caller's advisory request owns.
     #[allow(clippy::too_many_arguments)]
     pub(crate) async fn current_positive_until(
         &self,
@@ -517,13 +541,9 @@ impl LinkReceipts {
             if playback_id.is_some_and(|playback| playback != route.playback_id) {
                 return None;
             }
-            let current_source = binding(
-                network,
-                file,
-                captured.source.recipe_digest,
-                captured.source.route,
-            )
-            .await?;
+            let current_source = SourceLinkIdentity::for_request(network, file)
+                .await?
+                .candidate(captured.source.recipe_digest, captured.source.route);
             if current_source != captured.source {
                 return None;
             }
@@ -1013,7 +1033,7 @@ pub(crate) async fn filter_catalog(
         if !network_priors_enabled(state).await {
             return;
         }
-        let Some(source) = SourceLinkIdentity::capture(network, file).await else {
+        let Some(source) = SourceLinkIdentity::for_request(network, file).await else {
             return;
         };
         for (candidate, slot) in catalog.iter().zip(rejected.iter_mut()) {
@@ -1604,6 +1624,7 @@ mod tests {
             &file,
             &request.playback_id,
             Some(&session),
+            advisory_deadline(),
         )
         .await
         .expect("authenticated full current candidate");
@@ -1792,6 +1813,7 @@ mod tests {
             &file,
             &request.playback_id,
             catalog.clone(),
+            advisory_deadline(),
         )
         .await;
         assert!(!private_auto.iter().any(|row| row.id == incumbent.id));
@@ -2686,13 +2708,110 @@ mod tests {
             "outside a create the advisory stage maximum applies"
         );
         let budget = crate::media_pool::CreateStartupBudget::new(1_000);
-        let inside = budget.scope(async { advisory_deadline() }).await;
+        let (inside, later) = budget
+            .scope(async {
+                let first = advisory_deadline();
+                tokio::time::advance(Duration::from_millis(300)).await;
+                (first, advisory_deadline())
+            })
+            .await;
         assert_eq!(
             inside,
-            budget.deadline - Duration::from_millis(250),
-            "inside a create advisory evidence cannot spend the startup tail"
+            now + Duration::from_millis(500),
+            "inside a create advisory evidence takes at most half of the startup budget"
         );
-        assert!(inside < now + ADVISORY_EVIDENCE_STAGE);
+        assert_eq!(
+            later, inside,
+            "a later advisory read of the same create shares its one deadline"
+        );
+        let roomy = crate::media_pool::CreateStartupBudget::new(10_000);
+        let start = tokio::time::Instant::now();
+        let capped = roomy.scope(async { advisory_deadline() }).await;
+        assert_eq!(
+            capped,
+            start + ADVISORY_EVIDENCE_STAGE,
+            "a roomy startup budget is still capped at the advisory stage"
+        );
+    }
+
+    /// Five advisory call sites taken one after another inside one create can
+    /// together spend no more than the create's single advisory window, so the
+    /// durable writes and dispatch keep at least half of the startup budget.
+    #[tokio::test(start_paused = true)]
+    async fn sequential_advisory_reads_in_one_create_share_one_window() {
+        let budget = crate::media_pool::CreateStartupBudget::new(4_000);
+        let spent = budget
+            .scope(async {
+                let started = tokio::time::Instant::now();
+                for _ in 0..5 {
+                    let deadline = advisory_deadline();
+                    // A read that never answers runs into the shared deadline.
+                    let _ = within(deadline, std::future::pending::<Option<()>>()).await;
+                }
+                started.elapsed()
+            })
+            .await;
+        assert_eq!(spent, Duration::from_millis(2_000));
+        assert!(tokio::time::Instant::now() + Duration::from_millis(2_000) <= budget.deadline);
+    }
+
+    /// Inside a create the pre-start reads reuse the create's one source
+    /// fence; the post-acceptance comparison (`binding`) fences again and so
+    /// still sees a source replaced during the create.
+    #[tokio::test]
+    async fn a_create_fences_its_source_once_and_the_post_acceptance_check_fences_again() {
+        let (_state, user, file, _root) = actual_intake_state().await;
+        let mut headers = axum::http::HeaderMap::new();
+        headers.insert("user-agent", "Mozilla/5.0".parse().expect("UA"));
+        let remote = "192.168.4.9:1234".parse().expect("peer");
+        let mut network = crate::http::network::identity(&headers, Some(remote)).expect("network");
+        network.user_id = Some(user.id);
+        network.credential_generation = Some(plurx_core::domain::CredentialGeneration::derive(
+            user.id,
+            user.created_at,
+            &user.password_hash,
+        ));
+        let route = CandidateRoute::Encode;
+        let budget = crate::media_pool::CreateStartupBudget::new(10_000);
+        let (first, reused, pre_start, post_acceptance) = budget
+            .scope(async {
+                let first = SourceLinkIdentity::for_request(&network, &file)
+                    .await
+                    .expect("the create fences its source");
+                {
+                    use std::io::Write;
+                    std::fs::OpenOptions::new()
+                        .append(true)
+                        .open(&file.path)
+                        .expect("open source")
+                        .write_all(b"replaced during the create")
+                        .expect("replace source");
+                }
+                let reused = SourceLinkIdentity::for_request(&network, &file).await;
+                let pre_start =
+                    request_binding_until(&network, &file, [7; 32], route, advisory_deadline())
+                        .await;
+                let post_acceptance =
+                    binding_until(&network, &file, [7; 32], route, advisory_deadline()).await;
+                (first, reused, pre_start, post_acceptance)
+            })
+            .await;
+        assert!(
+            reused.as_ref() == Some(&first),
+            "a later pre-start read of the same create reuses its one fence"
+        );
+        assert!(pre_start == Some(first.candidate([7; 32], route)));
+        assert!(
+            post_acceptance.is_some() && post_acceptance != pre_start,
+            "the post-acceptance comparison fences again and sees the replacement"
+        );
+        assert!(
+            SourceLinkIdentity::for_request(&network, &file)
+                .await
+                .as_ref()
+                != Some(&first),
+            "outside a create every request fences the source itself"
+        );
     }
 
     #[tokio::test]

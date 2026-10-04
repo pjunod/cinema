@@ -1414,9 +1414,10 @@ pub(super) async fn process_preparation_candidate(
             // Advisory link evidence: one shared advisory deadline for the
             // whole proof (prior, cost, live link, source fence), not a
             // short per-read cap. A miss is Unknown and stages no proof.
+            let advisory = super::link_receipts::advisory_deadline();
             tokio::time::timeout_at(
-                super::link_receipts::advisory_deadline(),
-                observation.proposed_proof(&state, source, &mut candidate, selected),
+                advisory,
+                observation.proposed_proof(&state, source, &mut candidate, selected, advisory),
             )
             .await
             .ok()

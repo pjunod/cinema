@@ -343,6 +343,14 @@ pub(crate) struct CreateStartupBudget {
     pub deadline: tokio::time::Instant,
     calls: std::sync::Arc<std::sync::atomic::AtomicU32>,
     binding: std::sync::Arc<std::sync::Mutex<Option<PlanningBinding>>>,
+    /// The ONE advisory-evidence deadline of this create, minted on first use
+    /// and shared by every later advisory read of the same request.
+    advisory: std::sync::Arc<std::sync::OnceLock<tokio::time::Instant>>,
+    /// The create's source link identity, fenced once and reused by every
+    /// pre-start advisory read that derives a candidate binding from it.
+    source_link: std::sync::Arc<
+        std::sync::Mutex<Option<crate::http::hls::link_receipts::SourceLinkIdentity>>,
+    >,
 }
 impl CreateStartupBudget {
     pub(crate) fn new(remaining_ms: u64) -> Self {
@@ -350,6 +358,8 @@ impl CreateStartupBudget {
             deadline: tokio::time::Instant::now() + Duration::from_millis(remaining_ms.min(10_000)),
             calls: Default::default(),
             binding: Default::default(),
+            advisory: Default::default(),
+            source_link: Default::default(),
         }
     }
     pub(crate) fn calls(&self) -> u32 {
@@ -385,6 +395,66 @@ pub(crate) fn create_stage_deadline(maximum: Duration) -> tokio::time::Instant {
     CREATE_STARTUP_BUDGET
         .try_with(|budget| deadline.min(budget.deadline - Duration::from_millis(250)))
         .unwrap_or(deadline)
+}
+
+/// The advisory share of a request that must answer by `deadline`: at most
+/// `maximum`, and never more than half of what remains, so the work that has
+/// to finish before the deadline (durable writes, dispatch, the answer)
+/// always keeps the majority of it.
+pub(crate) fn advisory_share(
+    deadline: tokio::time::Instant,
+    maximum: Duration,
+) -> tokio::time::Instant {
+    let now = tokio::time::Instant::now();
+    now + maximum.min(deadline.saturating_duration_since(now) / 2)
+}
+
+/// The advisory-evidence deadline of the request this task serves.
+///
+/// Inside a create it is minted ONCE, on first use, as [`advisory_share`] of
+/// the remaining startup budget, and every later advisory read of the same
+/// create shares it: advisory reads taken one after another can no longer
+/// each spend a fresh window and add up to the whole startup budget. Outside
+/// a create the caller's request takes one `maximum` window per decision.
+pub(crate) fn create_advisory_deadline(maximum: Duration) -> tokio::time::Instant {
+    CREATE_STARTUP_BUDGET
+        .try_with(|budget| {
+            *budget
+                .advisory
+                .get_or_init(|| advisory_share(budget.deadline, maximum))
+        })
+        .unwrap_or_else(|_| deadline_after(maximum))
+}
+
+/// The source link identity this create already fenced, if `matches` accepts
+/// it. `None` outside a create.
+pub(crate) fn create_source_link(
+    matches: impl FnOnce(&crate::http::hls::link_receipts::SourceLinkIdentity) -> bool,
+) -> Option<crate::http::hls::link_receipts::SourceLinkIdentity> {
+    CREATE_STARTUP_BUDGET
+        .try_with(|budget| {
+            budget
+                .source_link
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .as_ref()
+                .filter(|identity| matches(*identity))
+                .cloned()
+        })
+        .ok()
+        .flatten()
+}
+
+/// Remember the create's fenced source link identity; a no-op outside one.
+pub(crate) fn remember_create_source_link(
+    identity: &crate::http::hls::link_receipts::SourceLinkIdentity,
+) {
+    let _ = CREATE_STARTUP_BUDGET.try_with(|budget| {
+        *budget
+            .source_link
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(identity.clone());
+    });
 }
 
 pub(crate) fn capture_create_planning_binding(

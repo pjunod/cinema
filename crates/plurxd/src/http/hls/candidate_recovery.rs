@@ -78,7 +78,10 @@ pub(crate) async fn accept_sample(
     }
     let observed =
         std::time::Instant::now().checked_sub(Duration::from_millis(u64::from(sample.age_ms)))?;
-    tokio::time::timeout(Duration::from_millis(100), async {
+    // One advisory deadline for the whole acceptance: both incumbent proofs,
+    // the durable observation and the readbacks share it.
+    let deadline = super::link_receipts::advisory_deadline();
+    tokio::time::timeout_at(deadline, async {
         let session = session?;
         let route = state.store.media_session_route(session).await.ok()??;
         if route.user_id != network.user_id? || route.recipe_json.len() > 64 * 1024 {
@@ -86,7 +89,15 @@ pub(crate) async fn accept_sample(
         }
         let recipe: RemoteStartRequest = serde_json::from_str(&route.recipe_json).ok()?;
         let file = state.store.get_file(recipe.request.file_id).await.ok()??;
-        let bound = incumbent(state, network, &file, &route.playback_id, Some(session)).await?;
+        let bound = incumbent(
+            state,
+            network,
+            &file,
+            &route.playback_id,
+            Some(session),
+            deadline,
+        )
+        .await?;
         if bound.candidate.id != sample.candidate_id
             || bound.candidate.recipe_digest != sample.recipe_digest
         {
@@ -109,7 +120,15 @@ pub(crate) async fn accept_sample(
             .ok()??;
         // Reconstruct again after the durable await; stale accepted writes
         // remain memory, never a live admission proof for another attachment.
-        let current = incumbent(state, network, &file, &route.playback_id, Some(session)).await?;
+        let current = incumbent(
+            state,
+            network,
+            &file,
+            &route.playback_id,
+            Some(session),
+            deadline,
+        )
+        .await?;
         let proof = AcceptedDecoderProof {
             scope: bound.scope,
             session: bound.route.session_id,
@@ -157,8 +176,10 @@ impl CauseRecord {
 ///
 /// Missing/legacy/remote facts are Unknown, not an ordinary playback refusal:
 /// failure to authenticate a cause never changes media authority, it only
-/// leaves the cause unrecorded. Store work here is bounded by the create's
-/// own startup deadline, not by a private timeout.
+/// leaves the cause unrecorded. All of it -- the incumbent proofs, the decoder
+/// memory read and the durable observation -- shares the request's advisory
+/// deadline, so a slow store leaves the cause `Unrecorded("deadline")` instead
+/// of spending the startup allowance the create needs to answer.
 pub(super) async fn observe(
     state: &AppState,
     network: Option<&NetworkIdentity>,
@@ -167,10 +188,17 @@ pub(super) async fn observe(
     nonce: Option<&str>,
     event: &str,
 ) -> CauseRecord {
-    match authenticate_cause(state, network, file, request, nonce, event).await {
-        Ok(Some(cause)) => CauseRecord::Recorded(cause),
-        Ok(None) => CauseRecord::Untyped,
-        Err(reason) => CauseRecord::Unrecorded(reason),
+    let deadline = super::link_receipts::advisory_deadline();
+    match tokio::time::timeout_at(
+        deadline,
+        authenticate_cause(state, network, file, request, nonce, event, deadline),
+    )
+    .await
+    {
+        Ok(Ok(Some(cause))) => CauseRecord::Recorded(cause),
+        Ok(Ok(None)) => CauseRecord::Untyped,
+        Ok(Err(reason)) => CauseRecord::Unrecorded(reason),
+        Err(_) => CauseRecord::Unrecorded("deadline"),
     }
 }
 
@@ -181,6 +209,7 @@ async fn authenticate_cause(
     request: &crate::transcode::SessionRequest,
     nonce: Option<&str>,
     event: &str,
+    deadline: tokio::time::Instant,
 ) -> Result<Option<plurx_core::store::CandidateRecoveryCause>, &'static str> {
     use crate::transcode::ReopenReason;
     use plurx_core::store::{CandidateRecoveryCause as Cause, CandidateRecoveryObservation};
@@ -200,15 +229,22 @@ async fn authenticate_cause(
         .previous_session_id
         .as_deref()
         .ok_or("typed recovery has no incumbent")?;
-    let bound = incumbent(state, network, file, &request.playback_id, Some(previous))
-        .await
-        .ok_or("typed recovery incumbent proof is unavailable")?;
+    let bound = incumbent(
+        state,
+        network,
+        file,
+        &request.playback_id,
+        Some(previous),
+        deadline,
+    )
+    .await
+    .ok_or("typed recovery incumbent proof is unavailable")?;
     let changed = context.recipe_digest != bound.candidate.recipe_digest;
     let cause = match reason {
         ReopenReason::Link => {
             let proof = state
                 .link_receipts
-                .current_negative(state, network, file, nonce, &request.playback_id)
+                .current_negative_until(state, network, file, nonce, &request.playback_id, deadline)
                 .await
                 .ok_or("Link recovery has no fresh incumbent negative proof")?;
             if proof.incumbent_session() != previous
@@ -260,9 +296,16 @@ async fn authenticate_cause(
         // Link and producer evidence have their own live proof owners. Hold and
         // authority are not failure ceilings. Never spend decoder memory merely
         // to record another observational recovery with the same recipe.
-        let current = incumbent(state, network, file, &request.playback_id, Some(previous))
-            .await
-            .ok_or("typed recovery incumbent changed during proof validation")?;
+        let current = incumbent(
+            state,
+            network,
+            file,
+            &request.playback_id,
+            Some(previous),
+            deadline,
+        )
+        .await
+        .ok_or("typed recovery incumbent changed during proof validation")?;
         if current.scope != bound.scope
             || current.route.incarnation_id != bound.route.incarnation_id
             || current.route.owner_epoch != bound.route.owner_epoch
@@ -273,9 +316,16 @@ async fn authenticate_cause(
         return Ok(Some(cause));
     }
     let now = super::unix_ms();
-    let current = incumbent(state, network, file, &request.playback_id, Some(previous))
-        .await
-        .ok_or("decoder incumbent changed before response admission")?;
+    let current = incumbent(
+        state,
+        network,
+        file,
+        &request.playback_id,
+        Some(previous),
+        deadline,
+    )
+    .await
+    .ok_or("decoder incumbent changed before response admission")?;
     if !state.link_receipts.decoder_current(&current)
         || current.scope != bound.scope
         || current.route.incarnation_id != bound.route.incarnation_id
@@ -312,15 +362,16 @@ pub(crate) async fn auto_catalog(
     file: &MediaFile,
     playback: &str,
     catalog: Vec<QualityCandidate>,
+    deadline: tokio::time::Instant,
 ) -> Vec<QualityCandidate> {
     let Some(network) = network else {
         return catalog;
     };
-    let Some(bound) = incumbent(state, network, file, playback, None).await else {
+    let Some(bound) = incumbent(state, network, file, playback, None, deadline).await else {
         return catalog;
     };
-    let memory = tokio::time::timeout(
-        Duration::from_millis(100),
+    let memory = tokio::time::timeout_at(
+        deadline,
         state.store.candidate_recovery_memory(&bound.scope),
     )
     .await;
@@ -334,6 +385,7 @@ pub(crate) async fn auto_catalog(
         file,
         playback,
         Some(&bound.route.session_id),
+        deadline,
     )
     .await;
     if !current.is_some_and(|current| {
@@ -358,19 +410,28 @@ pub(crate) async fn decision_catalog(
     file: &MediaFile,
     nonce: Option<&str>,
     catalog: Vec<QualityCandidate>,
+    deadline: tokio::time::Instant,
 ) -> Vec<QualityCandidate> {
     let Some(network) = network else {
         return catalog;
     };
     let Some(proof) = state
         .link_receipts
-        .current_positive(state, network, file, nonce, None, Some(&state.node_id))
+        .current_positive_until(
+            state,
+            network,
+            file,
+            nonce,
+            None,
+            Some(&state.node_id),
+            deadline,
+        )
         .await
     else {
         return catalog;
     };
-    let Ok(Ok(Some(route))) = tokio::time::timeout(
-        Duration::from_millis(100),
+    let Ok(Ok(Some(route))) = tokio::time::timeout_at(
+        deadline,
         state.store.media_session_route(proof.incumbent_session()),
     )
     .await
@@ -386,17 +447,19 @@ pub(crate) async fn decision_catalog(
         file,
         &route.playback_id,
         catalog.clone(),
+        deadline,
     )
     .await;
     let Some(current) = state
         .link_receipts
-        .current_positive(
+        .current_positive_until(
             state,
             network,
             file,
             nonce,
             Some(&route.playback_id),
             Some(&state.node_id),
+            deadline,
         )
         .await
     else {
@@ -409,14 +472,16 @@ pub(crate) async fn decision_catalog(
 }
 
 /// Missing/legacy/remote facts are Unknown, not an ordinary playback refusal.
+/// Bounded by the caller's request advisory `deadline`, never a private cap.
 pub(super) async fn incumbent(
     state: &AppState,
     network: &NetworkIdentity,
     file: &MediaFile,
     playback: &str,
     previous: Option<&str>,
+    deadline: tokio::time::Instant,
 ) -> Option<BoundRecovery> {
-    tokio::time::timeout(Duration::from_millis(100), async {
+    tokio::time::timeout_at(deadline, async {
         let user = network.user_id?;
         let route = state
             .store
@@ -459,9 +524,9 @@ pub(super) async fn incumbent(
         if matches.next().is_some() || !candidate.identity_matches() {
             return None;
         }
-        let source =
-            super::link_receipts::binding(network, file, candidate.recipe_digest, candidate.route)
-                .await?;
+        let source = super::link_receipts::SourceLinkIdentity::for_request(network, file)
+            .await?
+            .candidate(candidate.recipe_digest, candidate.route);
         // Source work may await. A retired/replaced incumbent cannot mint memory.
         let current = state
             .store

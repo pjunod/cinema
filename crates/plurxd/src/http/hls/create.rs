@@ -1302,12 +1302,13 @@ pub(crate) async fn resolve_plan(
                     source,
                     &body.playback_id,
                     catalog,
+                    link_receipts::advisory_deadline(),
                 )
                 .await;
             }
             if requested.is_none() && body.candidate_auto_policy() {
-                // One advisory deadline, clamped to this create's startup
-                // budget, shared by every link-evidence read of this choice.
+                // This create's one advisory deadline (minted on its first
+                // advisory read), shared by every link-evidence read of it.
                 let advisory = link_receipts::advisory_deadline();
                 catalog = link_receipts::filter_catalog(
                     state,
@@ -1558,9 +1559,9 @@ pub(crate) async fn resolve_plan(
             source,
             request.candidate_context.as_ref(),
         ) {
-            // The cost read and the live link proof are one advisory
-            // decision: they share one deadline, clamped to this create's
-            // startup budget, and a miss leaves the choice unproven.
+            // The cost read and the live link proof are advisory: they share
+            // this create's one advisory deadline, and a miss leaves the
+            // choice unproven.
             let advisory = link_receipts::advisory_deadline();
             let cost = tokio::time::timeout_at(
                 advisory,
@@ -1994,6 +1995,9 @@ async fn create_with_purpose_inner(
     let mut request = resolved.request;
     // Capture before start and compare again after acceptance. A replacement
     // source must not turn an older completed output into a new-source proof.
+    // The pre-start half reuses the source fence this create's advisory reads
+    // already took (one fence per request); the post-acceptance half below
+    // fences the source again, because its whole point is to see a change.
     let link_source_binding = if candidate_auto_policy {
         if let (Some(identity), Some(source), Some(context), Some(route)) = (
             identity.as_ref(),
@@ -2001,7 +2005,7 @@ async fn create_with_purpose_inner(
             request.candidate_context.as_ref(),
             candidate_route,
         ) {
-            link_receipts::binding_until(
+            link_receipts::request_binding_until(
                 identity,
                 source,
                 context.recipe_digest,

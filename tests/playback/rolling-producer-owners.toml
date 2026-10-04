@@ -3813,7 +3813,14 @@ pattern = "(?:[A-Za-z_]\\w*::)+(?:sleep|sleep_until|interval|interval_at|timeout
 # `link_receipts::advisory_deadline()` (ADVISORY_EVIDENCE_STAGE, clamped to
 # the create startup budget); binding's own cap moves to `binding_until`.
 # Removed ten, added ten; all awaited in place, expiry is Unknown evidence.
-expected_occurrences = 1223
+# 1223 -> 1224 with the per-request advisory deadline: candidate_recovery's
+# remaining 100 ms caps (accept_sample, auto_catalog memory, decision route
+# read, incumbent) and prepared_link's two (optional auth, prepared memory)
+# become timeout_at on the request's ONE advisory deadline (net zero), and
+# candidate_recovery::observe gains one timeout_at on that same deadline (+1)
+# so its decoder memory read and durable write end Unrecorded("deadline")
+# instead of spending the create's startup budget. Awaited in place.
+expected_occurrences = 1224
 
 [[module_structures]]
 id = "bare-time-constructor"
