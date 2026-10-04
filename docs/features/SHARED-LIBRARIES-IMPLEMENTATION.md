@@ -4741,3 +4741,12 @@ physical Source playback, B relay, device hardware, or the unfinished controls.
 
 Regression-Test: clients/apple/Tests/SharedDecisionClientTests.swift::testAuthenticatedInitialStartRetainsWholeRequestAndBContext
 Regression-Test: clients/android/app/src/test/java/tv/plurx/app/data/SharedDecisionClientTest.kt::initialStartRetainsWholeRequestAndBoundBContext
+
+The Native Shared model also projects the frozen current-rendition selection
+from its retained raw Start request. Auto keeps an optional raw height without
+inventing a candidate; Manual keeps the original ask rather than delivered
+encoder dimensions; Original, raw audio, offset and native subtitle index stay
+explicit. Missing codec/range policies remain Auto. This is a pure projection,
+not a control dispatch or proof of server acceptance. The existing Local enums
+and guards remain unchanged. Current control grammar requires Manual height at
+least 144; the regression distinguishes raw 144 from delivered 72.

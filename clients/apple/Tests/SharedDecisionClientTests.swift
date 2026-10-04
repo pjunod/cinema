@@ -136,6 +136,15 @@ final class SharedDecisionClientTests: XCTestCase {
         let plan = try SharedPlaybackPlan(subject: subject, decision: sdrDecision, caps: request.caps!, request: request)
         XCTAssertEqual(plan.request.height, 720); XCTAssertEqual(plan.request.start, 12.5)
         XCTAssertEqual(plan.subject.context.sourceFileId, "9223372036854775807")
+        XCTAssertEqual(try plan.frozenControlSelection().object?["quality"], .object(["mode": .string("original")]))
+        var frozen = request; frozen.qualityAuto = true; frozen.nativeSubtitles = true; frozen.subtitle = 0
+        let autoPlan = try SharedPlaybackPlan(subject: subject, decision: sdrDecision, caps: request.caps!, request: frozen)
+        XCTAssertEqual(try autoPlan.frozenControlSelection().object?["quality"], .object(["mode": .string("auto"), "height": .integer(720)]))
+        XCTAssertEqual(try autoPlan.frozenControlSelection().object?["subtitle"], .object(["mode": .string("native"), "track": .integer(0)]))
+        let encodedDecision = try SharedDecision.decode(wire("9223372036854775807") { $0["method"] = "transcode"; $0["delivered_dynamic_range"] = "sdr"; $0["height"] = 72 })
+        frozen = request; frozen.height = 144; frozen.qualityAuto = false; frozen.copy = false
+        let manualPlan = try SharedPlaybackPlan(subject: subject, decision: encodedDecision, caps: request.caps!, request: frozen)
+        XCTAssertEqual(try manualPlan.frozenControlSelection().object?["quality"], .object(["mode": .string("manual"), "height": .integer(144)]))
         var wrong = request; wrong.copy = false
         XCTAssertThrowsError(try SharedPlaybackPlan(subject: subject, decision: sdrDecision, caps: request.caps!, request: wrong))
         wrong = request; wrong.previousSessionId = ""

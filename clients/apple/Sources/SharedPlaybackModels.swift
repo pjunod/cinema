@@ -333,3 +333,27 @@ struct SharedPlaybackPlan {
         self.subject = subject; self.decision = decision; self.caps = caps; self.request = request
     }
 }
+
+/// Current-rendition control selection comes from the original ask, never the
+/// delivered encoder height. Kept separate from Local auto-candidate enums.
+extension SharedPlaybackPlan {
+    func frozenControlSelection() throws -> SharedPlaybackJSON {
+        guard request.height.map({ (PlaybackControl.minimumHeight...PlaybackControl.maximumHeight).contains($0) }) ?? true,
+              request.audio.map({ (0...1024).contains($0) }) ?? true
+        else { throw APIError.transport("The original Shared selection is outside the control grammar.") }
+        var quality: [String: SharedPlaybackJSON]
+        if request.qualityAuto ?? (request.height == nil) {
+            quality = ["mode": .string("auto")]
+            if let height = request.height { quality["height"] = .integer(Int64(height)) }
+        } else if request.copy == true { quality = ["mode": .string("original")] }
+        else if let height = request.height, height > 0 { quality = ["mode": .string("manual"), "height": .integer(Int64(height))] }
+        else { throw APIError.transport("The original Shared selection is unavailable.") }
+        var subtitle: [String: SharedPlaybackJSON] = ["mode": .string("off")]
+        if request.nativeSubtitles == true, let track = request.subtitle {
+            guard (0...1024).contains(track) else { throw APIError.transport("The original Shared subtitle selection is unavailable.") }
+            subtitle = ["mode": .string("native"), "track": .integer(Int64(track))]
+        }
+        return .object(["quality": .object(quality), "audio_track": request.audio.map { .integer(Int64($0)) } ?? .null,
+            "audio_offset_ms": .integer(0), "subtitle": .object(subtitle), "codec": .string("auto"), "dynamic_range": .string("auto")])
+    }
+}

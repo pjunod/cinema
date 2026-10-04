@@ -309,3 +309,25 @@ internal class SharedPlaybackPlan(val subject: SharedPlaybackSubject, val decisi
         require(if (decision.method == "transcode") request.copy != true else request.copy == true)
     }
 }
+
+/** Exact original current-rendition selection, without Local candidate coercion. */
+internal fun SharedPlaybackPlan.frozenControlSelection(): JsonObject = buildJsonObject {
+    require(request.height?.let { it in tv.plurx.app.player.PlaybackControl.MIN_HEIGHT..tv.plurx.app.player.PlaybackControl.MAX_HEIGHT } != false)
+    require(request.audio?.let { it in 0..1024 } != false)
+    require((request.audio_offset_ms ?: 0) in -15000L..15000L)
+    put("quality", buildJsonObject {
+        when {
+            request.quality_auto ?: (request.height == null) -> { put("mode", "auto"); request.height?.let { put("height", it) } }
+            request.copy == true -> put("mode", "original")
+            else -> { val height = requireNotNull(request.height); require(height > 0); put("mode", "manual"); put("height", height) }
+        }
+    })
+    put("audio_track", request.audio?.let(::JsonPrimitive) ?: JsonNull)
+    put("audio_offset_ms", request.audio_offset_ms ?: 0)
+    put("subtitle", buildJsonObject {
+        if (request.native_subtitles == true && request.subtitle != null) {
+            require(request.subtitle in 0..1024); put("mode", "native"); put("track", request.subtitle)
+        } else put("mode", "off")
+    })
+    put("codec", "auto"); put("dynamic_range", "auto")
+}
