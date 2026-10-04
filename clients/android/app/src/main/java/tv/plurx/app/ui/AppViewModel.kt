@@ -896,15 +896,14 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
         require(detail.delivery_status == "available" && detail.files.any { it.file_id == fileId && it.file_base != null }) { "Playback is unavailable for this Shared title." }
         val context = PlaybackFileContext.authenticatedDetail(reference, fileId)
         require(context.lifecycleGeneration == detail.lifecycle_generation)
-        val quality = _preferences.value.playbackQuality
-        val query = when (quality) { PlaybackQuality.Auto -> emptyMap(); PlaybackQuality.Original -> mapOf("force" to "original"); else -> mapOf("force" to "transcode") }
-        val result = SharedDecisionClient.create().decision(context, getApplication<Application>(), query)
+        val selection = tv.plurx.app.data.SharedSelection(_preferences.value.playbackQuality)
+        val result = SharedDecisionClient.create().decision(context, getApplication<Application>(), selection.decisionQuery())
         val position = detail.watch?.let { if (it.watched) 0 else it.position_ms } ?: 0
         val subject = SharedPlaybackSubject(context, detail.item.title, position, detail.watch?.sequence ?: 0)
-        val body = CreateSessionReq(playback_id = java.util.UUID.randomUUID().toString(), request_id = java.util.UUID.randomUUID().toString(),
-            height = quality.rungHeight, quality_auto = quality == PlaybackQuality.Auto, start = position.toDouble() / 1000,
-            copy = result.decision.method != "transcode", aac = result.decision.presentation.transcode_audio, caps = result.caps)
-        return SharedPlaybackPlan(subject, result.decision, result.caps, body)
+        // Direct play when the Source's decision says these caps take the file
+        // as it is; Copy or encoded HLS otherwise.
+        return tv.plurx.app.data.sharedPlaybackPlan(subject, result, selection, java.util.UUID.randomUUID().toString(),
+            java.util.UUID.randomUUID().toString(), allowDirect = true)
     }
 
     suspend fun createHlsSession(fileId: Long, body: CreateSessionReq, fileContext: PlaybackFileContext = PlaybackFileContext.local(fileId)): HlsStart {
