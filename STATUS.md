@@ -1,8 +1,28 @@
 # Status — what the agent is working on and where it stands
 
-**Updated:** 2026-09-28 · Kept current by the working agent in the same
+**Updated:** 2026-10-04 · Kept current by the working agent in the same
 commit as the work it describes; a stale entry here is a bug. Newest effort
 first.
+
+## Jellyfin facade: both pinned clients can now finish a play (J5)
+
+**Branch `claude/jellyfin-facade-gaps`, one draft PR to `main`.** The
+2026-10-04 merge review listed six facade gaps; re-checking them against the
+J0 traces and the upstream sources found that neither Infuse nor Jellyfin for
+Android TV could finish a play on the facade: Infuse's direct request names no
+play and its HLS entry lower-cases query keys, Android TV's media requests
+carry only the URL's `ApiKey`, every returned URL doubled `/jellyfin`, and the
+five-segment subtitle route both request was missing. Fixed on the existing
+seams: Jellyfin's subtitle routes and cue window, per-stream `DeliveryMethod`
+and `DeliveryUrl` from each client's subtitle profile, base-relative URLs with
+the compatibility login as `ApiKey`, the newest-direct-play resolution for
+Infuse (a new Store read on both backends), the nine missing contract routes,
+one switch read per request, and `plurx_jellyfin_requests_total`. The leader
+restart gap was a misreading: `/jellyfin` is fenced like native media and an
+HLS play keeps #798's grace; a regression now proves it. Detail:
+[JELLYFIN-COMPATIBILITY-STATUS.md](docs/clients/JELLYFIN-COMPATIBILITY-STATUS.md) §12.
+Open: the physical check on both clients (a GPT prompt), and the `ApiKey`
+decision for Paul to look over.
 
 ## Content analysis stopped: the queue's receipt bound is the next cliff after #608
 

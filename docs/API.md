@@ -14,7 +14,7 @@ This file is the specification in the meantime, written by reading the routers
 and the handlers on 2026-09-07. Where a plan document and the code disagreed,
 the code won and the disagreement is recorded in §23.
 
-One binary serves everything on one port (`:32400` by default). plurx has 284
+One binary serves everything on one port (`:32400` by default). plurx has 294
 routes across the five surfaces below. Every path here is absolute; the native
 API is the only one under a version prefix, and §7-§18 state that prefix once
 per section rather than repeating it in every row.
@@ -3217,6 +3217,12 @@ mint. Media resource cleanup belongs to the later playback adapter.
 |---|---|---|
 | GET | `/jellyfin/` | JSON 404 |
 | GET | `/jellyfin/System/Info/Public` | Enabled switch; native server identity/name and setup status; `Version`/`ProductName` are the tested protocol baseline (Jellyfin Server 10.11.11, J0), never the Plurx build |
+| GET | `/jellyfin/System/Info` | Compatibility token; the public identity plus fixed state flags; `PackageName` is `plurx <build>`; no paths, encoder or update details |
+| GET | `/jellyfin/Users/Public` | Enabled switch, no login; always `[]` (no native policy lists users to anyone signed out) |
+| POST | `/jellyfin/Sessions/Capabilities` | Compatibility token; query report validated and accepted (204), not stored: the facade advertises no remote control |
+| POST | `/jellyfin/Sessions/Capabilities/Full` | Same, JSON object body up to 16 KiB |
+| GET | `/jellyfin/Search/Hints` | Compatibility token; required `searchTerm`; the catalog's literal title search as `SearchHints`; item types Plurx does not hold match nothing |
+| GET | `/jellyfin/Items/{item_id}/Download` | Compatibility token and live item; `403 download_not_offered` (every returned policy has `EnableContentDownloading: false`) |
 | POST | `/jellyfin/Users/AuthenticateByName` | Shared native password verification/throttle; `Username` and `Pw`; supported client metadata and device ID; exact enabled generation |
 | GET | `/jellyfin/Users/Me` | Compatibility token; authenticated user projection |
 | GET | `/jellyfin/Users/{user_id}` | Compatibility token; exact own permanent user ID |
@@ -3226,7 +3232,8 @@ mint. Media resource cleanup belongs to the later playback adapter.
 | GET | `/jellyfin/DisplayPreferences/{id}` | Initial client presentation; no native persisted per-client preferences |
 | GET | `/jellyfin/Items/{item_id}/Intros` | Authenticated live media item; empty native pre-roll collection |
 | GET | `/jellyfin/MediaSegments/{item_id}` | Authenticated native skip markers; bounded segment-type filter, source-relative ticks |
-| GET | `/jellyfin/Videos/{item_id}/{source_id}/Subtitles/{index}/{filename}` | Authentication on every request; exact source membership and global subtitle index; native extracted VTT or bounded SRT representation; extraction and bitmap failures propagate |
+| GET | `/jellyfin/Videos/{item_id}/{source_id}/Subtitles/{index}/{start_ticks}/{filename}` | The form `DeliveryUrl` names and both pinned clients request. Compatibility token in a header or `ApiKey`; exact source membership and global subtitle index; `Stream.vtt`/`Stream.webvtt` (native extracted VTT) or `Stream.srt`/`Stream.subrip` (bounded SRT representation); `start_ticks`, `EndPositionTicks` and `CopyTimestamps` apply Jellyfin's cue window; extraction and bitmap failures propagate |
+| GET | `/jellyfin/Videos/{item_id}/{source_id}/Subtitles/{index}/{filename}` | Same, with the start as an optional `StartPositionTicks` query value |
 | GET | `/jellyfin/Items/{item_id}/LocalTrailers` | Live item; empty array because native Movies/TV has no classified trailer records |
 | GET | `/jellyfin/Items/{item_id}/SpecialFeatures` | Live item; empty array because native Movies/TV has no classified extra records |
 | GET | `/jellyfin/UserViews` | Compatibility token; same library views |
@@ -3248,7 +3255,7 @@ mint. Media resource cleanup belongs to the later playback adapter.
 | GET | `/jellyfin/Shows/{item_id}/Episodes` | Compatibility token; descendant episodes; optional season parent |
 
 | GET, POST | `/jellyfin/Items/{item_id}/PlaybackInfo` | Compatibility token; live source membership, checked times and independently eligible direct or finite native VOD profile; native prerequisite and output validation precede advertisement |
-| GET, HEAD | `/jellyfin/Videos/{item_id}/stream` | Compatibility token with `PlaySessionId`, or the play's scoped link as `tag` (case-insensitive query names); exact play/source binding; native direct bytes, Range and HEAD; live native grant and source fingerprint |
+| GET, HEAD | `/jellyfin/Videos/{item_id}/stream` | Compatibility token with `PlaySessionId`; or the token alone with `MediaSourceId`, resolving that login's newest pending or active direct play of exactly that source (Infuse names no play); or the play's scoped link as `tag` (case-insensitive query names); exact play/source binding; native direct bytes, Range and HEAD; live native grant and source fingerprint |
 | GET, HEAD | `/jellyfin/Videos/{item_id}/{filename}` | Authenticated direct aliases or negotiated `master.m3u8` / `main.m3u8` entry; exact play/source binding |
 | GET, HEAD | `/jellyfin/Videos/{item_id}/{play_id}/hls/{*resource}` | Fresh compatibility login and exact current native incarnation; closed manifest/init/fragment/subtitle names; native reader and publication authority |
 | POST | `/jellyfin/Sessions/Logout` | Presented compatibility login only; native token exclusion, exact play release, other devices retained. |
@@ -3256,6 +3263,9 @@ mint. Media resource cleanup belongs to the later playback adapter.
 | POST | `/jellyfin/Sessions/Playing/Progress` | Exact active play; checked position ticks, original manual revision and shared native watch effects |
 | POST | `/jellyfin/Sessions/Playing/Stopped` | Forced durable final when supplied; no-position stop does not write zero; exact resource release and retry on storage failure |
 | POST, DELETE | `/jellyfin/Users/{user_id}/PlayedItems/{item_id}` | Own user and supported item; shared cascading watched/unwatched marks with trusted login origin |
+| POST, DELETE | `/jellyfin/UserPlayedItems/{item_id}` | Same marks; `userId` optional in the query and, when present, the caller's own |
+| POST | `/jellyfin/Sessions/Playing/Ping` | `PlaySessionId` required; this login's active play only; renews exactly what a position-less Progress renews; never activates or revives |
+| DELETE | `/jellyfin/Videos/ActiveEncodings` | `PlaySessionId` required (never by device alone; a `DeviceId` must be the login's); releases that play's native encoding and keeps its binding, so a later Stopped still commits; a direct play has none |
 
 Player identity is stable within the authenticated user/device/client family,
 including login replacement. Negotiation leaves an active play running.
@@ -3269,8 +3279,14 @@ prerequisites before its URL is returned. Its private recipe identity includes
 the trusted passive/VOD-only policy and optional bitrate ceiling. Older worker
 request schemas refuse unknown policy fields rather than dropping the ceiling.
 
-Every mapped HLS request requires a fresh login; generated URLs contain no
-credential. Native manifests retain the movie's original clock, with closed
+Every mapped HLS request requires a fresh login. URLs the facade returns
+(`TranscodingUrl`, `DirectStreamUrl`, subtitle `DeliveryUrl`) are relative to
+the client's configured server address, which already ends in `/jellyfin`, and
+carry the presented compatibility login as `ApiKey`, as Jellyfin's do:
+Jellyfin Android TV sends no header on media, HLS or subtitle requests. A
+manifest repeats that `ApiKey` on every child URI, because a player resolves a
+child without its playlist's query. The login authenticates nothing outside
+`/jellyfin`, and request logs omit the query. Native manifests retain the movie's original clock, with closed
 resource names rewritten to this mount and private native session IDs removed.
 The observed MPEG-TS declaration uses the measured init-prefix fMP4 transport:
 each fragment includes the exact native init bytes. Composite byte ranges map
@@ -3288,6 +3304,10 @@ Disabled requests, including unsupported mutations, answer JSON 404. Enabled
 unsupported methods answer JSON 405; unknown paths answer JSON 404. The
 native root still serves its app shell. Connection/catalog handlers use the
 existing JSON deadline and serving-authority layers and fixed route groups.
+The switch is read once per request, by the gate, and handlers use that
+snapshot. Every matched request counts in
+`plurx_jellyfin_requests_total{route,outcome}` under its route template, and a
+request no route matches under `route="unmatched"`.
 
 Bearer, `X-Emby-Token`, Emby authorization attributes, and the observed query
 token carriers share the bounded credential parser. Duplicates are preserved;
@@ -3304,6 +3324,17 @@ a fresh projection; allocated IDs are never attached to an older item body.
 Sources omit native paths/raw probes and retain actual global stream indices.
 Pages with more than 5,000 sources and bootstrap inventories above 500 supported
 libraries refuse rather than truncate.
+
+Each subtitle stream in a PlaybackInfo source carries `DeliveryMethod`,
+decided from the request's `SubtitleProfiles` the way Jellyfin 10.11.11
+decides it: an embedded entry for the track's own format (direct play only),
+then `External` or `Hls` entries in profile order for the track's format, then
+the same allowing conversion, then `Encode`. Sidecars are produced only as
+VTT or SRT and manifest renditions only as VTT; a bitmap track is embedded or
+burned, never a sidecar. `External` adds `DeliveryUrl` at the five-segment
+route with a zero start. A selected track that resolves to `Encode` makes the
+play a transcode. On HLS, the master carries subtitle renditions only for
+tracks that resolve to `Hls`.
 
 PlaybackInfo evaluates each direct profile independently, including bounded codec
 and container predicates, against the selected audio and coherent native probe.

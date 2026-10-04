@@ -1,6 +1,6 @@
 # Jellyfin compatibility — measured build progress and remaining gates
 
-**Status:** open · J0–J3 integrated; J4 service work complete pending integration; physical client matrix deferred · **Updated:** 2026-10-04 EDT.
+**Status:** open · J0–J4 on `main`; J5 protocol completion built (§12); physical client matrix (J6) open · **Updated:** 2026-10-04 EDT.
 
 Companion to [the reviewed build contract](JELLYFIN-COMPATIBILITY-BUILD.md)
 (what must be built and proved) — this records execution and evidence. The
@@ -869,3 +869,44 @@ eligibility check rejects High-tier declarations in a multivariant. Infuse
 would see a media playlist at the master URL for that file. Negotiation
 already refuses HDR copy, so it reaches only that source class; J6 decides it
 with the physical client.
+
+## 12. J5 — the facade gaps from the main merge review
+
+The 2026-10-04 main-week merge review (§4 of that project document, read at
+`b5e39b8bb`) reported six gaps. Re-verified on `724c8b37`, with the upstream rules read from
+Jellyfin 10.11.11 (`SubtitleController`, `StreamBuilder.GetSubtitleProfile`,
+`MediaInfoHelper`, `SubtitleEncoder.FilterEvents`) and Jellyfin Android TV
+0.19.10 (`VideoManager`, `PlaybackControllerHelper`, its device profile and the
+SDK URL builder). Re-verifying turned up four defects on the same flows, so they
+are fixed here too.
+
+| Gap | Cause | Fix |
+|---|---|---|
+| Sidecar subtitles 404 | Only Jellyfin's legacy four-segment route existed. Both clients request `…/Subtitles/{index}/{startTicks}/Stream.{format}` (Infuse builds it from the codec; Android TV takes it from `DeliveryUrl`) | The five-segment route, plus the four-segment one with a query start. `vtt`/`webvtt`/`srt`/`subrip`. A start applies Jellyfin's cue window (`FilterEvents`) to the native extraction |
+| No `DeliveryUrl`, so Android TV shows no subtitles | PlaybackInfo never decided a subtitle delivery. Android TV only side-loads `External` tracks and treats a missing method as off | Each subtitle stream gets `DeliveryMethod` from the client's `SubtitleProfiles` by Jellyfin's rule order, restricted to what Plurx produces; `External` gets `DeliveryUrl`. A selected track that needs a burn makes the play a transcode. HLS masters carry renditions only for tracks that resolve to `Hls` (both pinned clients resolve to `External`) |
+| Returned URLs doubled the base path | `TranscodingUrl`/`DirectStreamUrl` began `/jellyfin/`; both clients prefix their configured address, which already ends in `/jellyfin` | URLs are relative to the configured base, as Jellyfin's are |
+| Android TV HLS and subtitles could not authenticate | Its media requests carry no header, only the URL's `ApiKey` (J0 trace); returned URLs and manifest children carried none | Returned URLs and every manifest child carry the presented compatibility login as `ApiKey`. **Decision for review**, see below |
+| Infuse HLS entry refused | Infuse lower-cases the first letter of each query key; the entry parsed `MediaSourceId`/`PlaySessionId` case-sensitively | Case-insensitive, like the direct route |
+| Infuse direct play refused | Infuse requests `/Videos/{id}/stream?MediaSourceId=…&Static=true` with its login and no `PlaySessionId`; the route required one | The login's newest pending or active direct negotiation of exactly that source (new Store read on both backends; contract §7.3 allows an unambiguous binding of the authenticated login) |
+| `System/Info/Public` advertised the Plurx build | Fixed by #803 before this work; pinned by `jellyfin_connection_catalog_…` | Authenticated `System/Info` now also names the Plurx build in `PackageName` (§8.3: compatibility version separate from build) |
+| Nine contract routes missing | Not built | `Users/Public` (always `[]`), authenticated `System/Info`, `Sessions/Capabilities[/Full]` (validated, not stored: nothing reads them), `Sessions/Playing/Ping`, `DELETE Videos/ActiveEncodings` (one named play, binding kept for the final Stopped), `Search/Hints`, `UserPlayedItems/{id}`, `Items/{id}/Download` (`403 download_not_offered`) |
+| Every request a linearizable switch read | The gate and the handler each read the switch | One read, by the gate; the handler uses its snapshot |
+| Leader restart (merge review: fails Jellyfin media on every node) | Not a separate exposure: during authority loss the serving gate answers `/jellyfin` with 503 and `Retry-After` before any store read, as it does native media, and an HLS play is a native session under #798's grace | No new grace. A regression drives a fence loss and recovery in the HLS flow and checks the 503 and the play continuing |
+| No metrics | Not built | `plurx_jellyfin_requests_total{route,outcome}`: route template or `unmatched`, a closed outcome set |
+| Docs | Not written | CLIENTS, FEATURES, OPERATIONS, PLAYBACK, API, SECURITY |
+
+**Not built: `RandomSeriesItems`.** §2 names it in prose, but no retained trace
+shows the request. A guessed route would be a band-aid; the metrics now show
+any unmatched route the device check hits.
+
+**Decision for review — `ApiKey` in returned URLs.** The facade previously
+kept credentials out of URLs. Android TV cannot authenticate HLS or subtitle
+requests without one. Jellyfin puts the user's access token there; so does the
+facade now, the compatibility login only (refused everywhere outside
+`/jellyfin`), returned only to the caller that presented it, and omitted from
+request logs. A per-play capability would be tighter but needs new storage;
+it stays open as hardening (SECURITY.md).
+
+Still open (J6): the physical Infuse and Android TV matrix on this candidate,
+HDR/Dolby Vision, the multipage corpus, and the SDR HEVC High-tier master case.
+

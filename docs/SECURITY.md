@@ -369,7 +369,17 @@ the operator on 2026-10-03 and both off whenever the Developer switch is off:
   a credential for one title for at most a day; it grants nothing else.
 
 Streams for HLS and every subtitle still require the compatibility login on
-each request; account tokens are never echoed into generated URLs.
+each request. Since 2026-10-04 the URLs the facade returns (`TranscodingUrl`,
+`DirectStreamUrl`, subtitle `DeliveryUrl`, and every child URI in a facade
+manifest) carry that login as `ApiKey`, exactly as Jellyfin's own URLs do:
+Jellyfin for Android TV sends no header on media, HLS or subtitle requests
+(J0 trace), so without it those requests could not authenticate at all. The
+value is only ever the compatibility login the same request presented, never
+a native token, and it is returned only to that authenticated caller. Request
+logs omit the query. Treat such a URL as that login: it reaches `/jellyfin`
+until sign-out, revocation or idle expiry, and nothing else. A per-play
+capability in place of the login would be tighter; it needs new storage and
+remains open as hardening.
 
 A compatibility login is not a native bearer. The token Infuse or Jellyfin
 Android TV receives authenticates only `/jellyfin`; the native API, the Plex
