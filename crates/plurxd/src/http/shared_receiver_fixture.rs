@@ -350,7 +350,9 @@ async fn actual_pinned_playback(address: IpAddr, h2: bool) {
     fixture.pair(endpoint).await;
     // The live Start remains uninstalled in production. Only this disposable
     // fixture installs the typed candidate on the real B serving stack.
+    // The public router carries the Plex facade literal colon segments.
     let app = Router::new()
+        .without_v07_checks()
         .nest(
             "/api/v1",
             super::shared_receiver_ingress::candidate_router().with_state(fixture.state.clone()),
@@ -500,6 +502,146 @@ async fn actual_pinned_playback(address: IpAddr, h2: bool) {
                 .expect("decimal length"),
             bytes.len()
         );
+    }
+    // Shared status and current-rendition control through B's own tuple.
+    let generation = start["control"]["generation"]
+        .as_str()
+        .expect("B control generation")
+        .to_owned();
+    let epoch = start["control"]["control_epoch"]
+        .as_u64()
+        .expect("B control epoch");
+    let (status, headers, bytes) = b_request(
+        b_address,
+        h2,
+        "GET",
+        &format!("{prefix}status"),
+        &fixture.original_login,
+        Vec::new(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "actual Shared status; H2={h2}");
+    assert_eq!(headers["cache-control"], "no-store");
+    let observed: Value = serde_json::from_slice(&bytes).expect("Shared status JSON");
+    assert_eq!(observed["subject"], "shared");
+    assert_eq!(observed["session_id"], session);
+    assert_eq!(observed["incarnation_id"], generation.as_str());
+    assert_eq!(observed["control_epoch"], epoch);
+    assert_eq!(
+        observed["reference"]["item"]["import_id"],
+        fixture.import_id.to_string()
+    );
+    assert_eq!(
+        observed["reference"]["file_id"],
+        fixture.source.reference.file_id.as_str()
+    );
+    for forbidden in ["id", "file_id", "producer_failed"] {
+        assert!(observed["status"].get(forbidden).is_none(), "{forbidden}");
+    }
+    assert!(
+        serde_json::from_value::<crate::sharing_client::SharedVodStatus>(
+            observed["status"].clone()
+        )
+        .expect("closed Shared metrics")
+        .is_valid()
+    );
+    let control = |generation: &str, epoch: u64, sequence: u64| {
+        use crate::playback_control as pc;
+        serde_json::to_vec(&pc::ControlRequestV1 {
+            intent: None,
+            protocol: pc::PROTOCOL_V1.to_owned(),
+            generation: generation.to_owned(),
+            control_epoch: epoch,
+            client_instance_id: "6f1c2d1e-7f9a-4b8e-9d3c-2a1b0c9d8e7f".to_owned(),
+            sequence,
+            demand: pc::PlaybackDemand::Active,
+            position_ms: 0,
+            buffered_from_ms: Some(0),
+            buffered_through_ms: 1_000,
+            playback_rate: 1.0,
+            render_state: pc::RenderState::Rendering,
+            seek_target_ms: None,
+            observed_download_bps: None,
+            // The fixture asks copy:true, height:72, quality_auto:false.
+            selection: pc::ClientSelection {
+                quality: pc::QualitySelection::Original,
+                audio_track: None,
+                subtitle: pc::SubtitleSelection {
+                    mode: pc::SubtitleMode::Off,
+                    track: None,
+                },
+                audio_offset_ms: 0,
+                codec: pc::CodecPolicy::Auto,
+                dynamic_range: pc::DynamicRangePolicy::Auto,
+            },
+            capabilities: Some(pc::DynamicCapabilities {
+                presentation_target: None,
+                decoder_caps: None,
+                platform: pc::ClientPlatform::Web,
+                max_height: 1080,
+                codecs: vec![pc::CodecPolicy::H264],
+                dynamic_ranges: vec![pc::DynamicRangePolicy::Sdr],
+                dual_player_preparation: false,
+            }),
+            observation: None,
+            acknowledgement: None,
+            supported_actions: Some(vec![
+                "hold".to_owned(),
+                "retry_resource".to_owned(),
+                pc::PREPARE_REPLACEMENT_ACTION.to_owned(),
+            ]),
+        })
+        .expect("ordinary v1 control")
+    };
+    let control_path = format!("{prefix}control");
+    for attempt in 0..2 {
+        let (status, _, bytes) = b_request(
+            b_address,
+            h2,
+            "POST",
+            &control_path,
+            &fixture.original_login,
+            control(&generation, epoch, 1),
+        )
+        .await;
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "accepted control or exact replay {attempt}; H2={h2}: {}",
+            String::from_utf8_lossy(&bytes)
+        );
+        let accepted: crate::playback_control::ControlResponseV1 =
+            serde_json::from_slice(&bytes).expect("ordinary v1 control response");
+        assert_eq!(accepted.accepted_sequence, 1);
+        assert_eq!(accepted.generation, generation);
+        assert_eq!(accepted.control_epoch, epoch);
+        assert_eq!(accepted.delivery.owner_epoch, epoch);
+        assert_eq!(
+            accepted.delivery.owner_node_hash,
+            crate::playback_control::node_hash(&fixture.state.node_id)
+        );
+        assert!(!String::from_utf8_lossy(&bytes).contains("/api/v1/hls/"));
+    }
+    for (body, code) in [
+        (
+            control(&Uuid::new_v4().to_string(), epoch, 2),
+            "stale_control",
+        ),
+        (control(&generation, epoch + 1, 2), "owner_changed"),
+    ] {
+        let (status, _, bytes) = b_request(
+            b_address,
+            h2,
+            "POST",
+            &control_path,
+            &fixture.original_login,
+            body,
+        )
+        .await;
+        assert_eq!(status, StatusCode::CONFLICT, "{code}; H2={h2}");
+        let refusal: Value = serde_json::from_slice(&bytes).expect("control error body");
+        assert_eq!(refusal["code"], code);
+        assert_eq!(refusal["generation"], generation.as_str());
     }
     let end_path = format!("/api/v1/hls/{session}");
     for _ in 0..2 {
