@@ -2467,7 +2467,10 @@ pattern = "(?:[A-Za-z_]\\w*::)+spawn(?:_blocking|_local|_for_test)?\\s*\\("
 # daemon-owned receiver_recovery_loop beside the sharing claim loop; it ends on
 # the background drain token and holds no producer. Two test-only spawns run
 # one recovery attempt and one loop, each joined under a timeout after drain.
-expected_occurrences = 790
+# +2 for shared pre-session assets: two test-only in-memory HTTP/1 Source
+# stand-ins (the bounded-body fixture and the real Source router behind the
+# collision test), each aborted and joined at the end of its exchange.
+expected_occurrences = 792
 # E1 plus S-14 M8: both ownership sets retained and counted on the merged source.
 # 643 -> 647 with S-14 M8 (`plan/S-14-5`: `Encoding`, `RollingFlowSync`, `TerminalCleanup`,
 # `HeadChildOwner`, `VodServingAdmission` behind per-owner hooks), measured by
@@ -3643,7 +3646,11 @@ pattern = "(?:[A-Za-z_]\\w*::)+(?:sleep|sleep_until|interval|interval_at|timeout
 # sleep, raced with the drain token, owned by receiver_recovery_loop. Eight are
 # test-only bounded waits (four timeouts, three polls, one settle sleep) in
 # the joined recovery fixtures.
-expected_occurrences = 1291
+# +2 for shared pre-session assets: the receiver's 35 s bound around one
+# pinned Source asset read (`read_file_asset`) and the 32 s bound around its
+# single exchange (`PeerConnection::file_asset`). Both are awaited by the
+# requesting handler; neither owns a task, producer or process.
+expected_occurrences = 1293
 # +1 native-startup delayed-init fixture: its joined writer owns one bounded
 # six-second sleep, under the test request's unchanged twelve-second deadline.
 # No production timer or recovery clock is added.
@@ -4463,7 +4470,11 @@ pattern = "\\.(?:spawn|output|status)\\s*\\("
 # http/mod.rs owns accepted TLS fixture connections, aborted on Drop.
 # +6 test-only SharingManager::status() reads in the orphaned-receiver
 # recovery tests; they read process-local status and launch nothing.
-expected_occurrences = 523
+# +25 for shared pre-session assets: `Response::status()` reads and
+# `Response::builder().status(..)` in the Source and receiver asset code and
+# their tests. No OS process is launched; subtitle, overlay and thumbnail work
+# stays in the existing Local owners.
+expected_occurrences = 548
 # +2 native-startup delayed-init fixture: Axum Response::status() reads
 # assert the master and legacy bridge responses. Neither launches a process.
 

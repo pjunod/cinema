@@ -28,6 +28,10 @@ pub(crate) use playback::{
     SourcePeerResource, SourcePeerSession, SourceStatusReceipt,
 };
 
+#[path = "sharing_asset_client.rs"]
+mod asset;
+pub(crate) use asset::PeerFileAsset;
+
 const MANAGEMENT_RESPONSE_BYTES: usize = 128 * 1024;
 const CATALOGUE_RESPONSE_BYTES: usize = 4 * 1024 * 1024;
 #[derive(Clone, Copy)]

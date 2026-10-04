@@ -15,7 +15,7 @@ and the handlers on 2026-09-07. Where a plan document and the code disagreed,
 the code won and the disagreement is recorded in §23.
 
 The ordinary listener (`:32400` by default) serves the four surfaces below.
-plurx has 274 routes on that listener. Sharing uses a separate loopback TLS
+plurx has 280 routes on that listener. Sharing uses a separate loopback TLS
 listener with its own peer credentials (§24). Every path here is absolute; the native
 API is the only one under a version prefix, and §7-§18 state that prefix once
 per section rather than repeating it in every row.
@@ -3253,6 +3253,12 @@ item. File references add the Source file, revision and import lifecycle.
 | POST | `/api/v1/shared/imports/{import}/files/{locator}/decision` | Negotiate the complete existing decision DTO from runtime v2 capabilities, a signed file locator and current account/import/Source authority. The request body is bounded to 128 KiB. |
 | POST | `/api/v1/shared/imports/{import}/files/{locator}/hls/sessions` | Start Shared HLS playback through B's receiver actor from the ordinary `CreateSession` body (at most 128 KiB, initial play/resume only). The answer is the ordinary Start envelope with B's own session, playlist and control URLs; the session then serves `/api/v1/hls/{session}/…`, `status` (the Shared grammar) and `control` (current rendition only). |
 | POST | `/api/v1/shared/imports/{import}/files/{locator}/playback` | The same Shared Start, at the typed playback alias. |
+| GET | `/api/v1/shared/imports/{import}/files/{locator}/subs/{subtitle}` | One text subtitle track as WebVTT (`{n}` or `{n}.vtt`), read fresh from the pinned Source (at most 2 MiB, `text/vtt`, never cached on B). Caller: the signed-in viewer (header or `?token=`), or `?session=` naming a live Shared session that plays exactly this file revision; an account sent alongside a session must be that session's viewer. A bitmap track answers `422 sharing_asset_unsupported`. |
+| GET | `/api/v1/shared/imports/{import}/files/{locator}/subs/{index}/overlay.json` | The track's `pgs-v1` manifest with its generation, cue geometry, source-time intervals and relative object names preserved, the file ID replaced by the canonical Source string plus the full reference (Source body at most 1 MiB). `202 {"state":"preparing","retry_after_ms":1000}` while the Source prepares it. Same callers as the subtitle route. |
+| GET | `/api/v1/shared/imports/{import}/files/{locator}/subs/{index}/overlay/{generation}/objects/{object}` | One immutable overlay PNG (at most 1 MiB). A generation of another track or revision is `404 sharing_asset_not_found`. Same callers as the subtitle route. |
+| GET | `/api/v1/shared/imports/{import}/files/{locator}/chapters/{index}/thumb` | One chapter thumbnail JPEG (at most 1 MiB) made or read by the Source under its own chapter-thumbnail switch. Same callers as the subtitle route. |
+| any | `/api/v1/shared/imports/{import}/files/{locator}/stream.mp4` | Always `422 sharing_resource_unsupported`, for every method and before any import, account or Local lookup: progressive remux is not offered for shared files (Copy HLS covers it). |
+| any | `/api/v1/shared/imports/{import}/files/{locator}/direct` | `422 sharing_resource_unsupported` until the shared direct relay lands, under the same no-lookup rule. |
 
 Captured recipient scope is revalidated through accepted metadata and
 decision bodies; content fetched from a Source also retains its Source-scope
@@ -3261,3 +3267,13 @@ session authority: the decision route verifies its current import lifecycle
 and exact file/revision binding before contacting the pinned Source. Missing
 keys, revoked scope and unavailable Sources refuse delivery. No live Shared
 Start route is registered on this listener.
+
+The four pre-session asset routes answer `Cache-Control: no-store` and hold
+no B cache; each body is file-scoped and the current login, import,
+assignment and Source scope are re-observed before it leaves. Refusals are
+typed: `401` without an account or session, `403 sharing_asset_binding_refused`
+for a session that does not play this exact file revision, `400
+sharing_invalid_request` for any query key other than one `token` and one
+canonical `session`, `429 sharing_asset_capacity`, and `503
+sharing_asset_unavailable` when the Source, its grant or the viewer's
+assignment cannot authorize the read.

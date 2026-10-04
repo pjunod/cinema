@@ -393,7 +393,36 @@ impl ReceiverStartRegistry {
         Ok((entry, true))
     }
 }
+/// Whether a receiver session's recipe names exactly this signed file: import,
+/// lifecycle, Source item, file and revision. A session for another file, or
+/// for an earlier revision or lifecycle of this one, binds nothing here.
+pub(crate) fn recipe_binds_file(
+    intent: &ReceiverSessionIntent,
+    reference: &plurx_core::sharing_file_locators::FileLocatorReference,
+) -> bool {
+    let recipe = &intent.recipe;
+    intent.scope.import_id == reference.item.import_id
+        && recipe.reference == reference.item
+        && recipe.lifecycle_generation == reference.lifecycle_generation
+        && recipe.file_id == reference.file_id
+        && recipe.file_revision == reference.revision
+}
 impl ReceiverStartActor {
+    /// A file asset requested under `session=` is bound when this live
+    /// session plays exactly that file and its delivery attachment (original
+    /// login and delivery grant) is still current. Answers the session's
+    /// viewer and original login; it creates and changes nothing.
+    pub(crate) async fn bound_file_viewer(
+        &self,
+        state: &AppState,
+        reference: &plurx_core::sharing_file_locators::FileLocatorReference,
+    ) -> Result<(i64, String), ReceiverStartError> {
+        if !recipe_binds_file(&self.0.intent, reference) {
+            return Err(ReceiverStartError::Conflict);
+        }
+        self.current_delivery_attachment(state).await?;
+        Ok((self.0.intent.user_id, self.0.intent.login_hash.clone()))
+    }
     async fn current_delivery_attachment(
         &self,
         state: &AppState,

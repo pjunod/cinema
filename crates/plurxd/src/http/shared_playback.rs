@@ -84,21 +84,26 @@ async fn decision(
     .map_err(|_| refused())?
 }
 
-pub(super) async fn source_decision(
+/// Current Source authority over one complete shared file reference: an active
+/// grant, the grant-visible item/file witness and the exact signed revision.
+/// Decision and pre-session asset reads share it; neither fabricates a session.
+pub(super) struct SourceFileAuthority {
+    hash: String,
+    pub(super) grant: uuid::Uuid,
+    key: CatalogueRevisionKey,
+}
+
+pub(super) async fn source_file_authority(
     state: &AppState,
     headers: &HeaderMap,
-    input: SourceDecisionRequest,
-) -> Result<Response, ApiError> {
-    let target = input.reference;
+    target: &SourcePlaybackTarget,
+) -> Result<SourceFileAuthority, ApiError> {
     if target.server_id.is_nil()
         || target.catalogue_epoch.is_nil()
-        || input.caps.v != plurx_core::playback::DeviceCaps::VERSION
-        || input.caps.is_empty()
         || !crate::sharing::enabled(state.store.as_ref()).await?
     {
         return Err(refused());
     }
-    stream::validate_device_caps(&input.caps)?;
     let (hash, grant) = shared_library::authority(state, headers).await?;
     let SourceDetailsRead::Authorized(witness) = state
         .store
@@ -133,6 +138,57 @@ pub(super) async fn source_decision(
     if key.file_revision(&witness)? != target.revision {
         return Err(refused());
     }
+    Ok(SourceFileAuthority { hash, grant, key })
+}
+
+impl SourceFileAuthority {
+    /// Every check repeated after Source IO: the grant, item/file membership,
+    /// revision and switch may all have changed while the work ran.
+    pub(super) async fn still_current(
+        &self,
+        state: &AppState,
+        headers: &HeaderMap,
+        target: &SourcePlaybackTarget,
+    ) -> Result<(), ApiError> {
+        let SourceDetailsRead::Authorized(current) = state
+            .store
+            .source_item_file_witness(
+                &self.hash,
+                self.grant,
+                target.item_id.clone(),
+                target.file_id.clone(),
+            )
+            .await?
+        else {
+            return Err(refused());
+        };
+        if !current.matches_source_file(
+            target.server_id,
+            target.catalogue_epoch,
+            &target.library_id,
+            &target.item_id,
+            &target.file_id,
+        ) || self.key.file_revision(&current)? != target.revision
+            || !crate::sharing::enabled(state.store.as_ref()).await?
+            || shared_library::authority(state, headers).await? != (self.hash.clone(), self.grant)
+        {
+            return Err(refused());
+        }
+        Ok(())
+    }
+}
+
+pub(super) async fn source_decision(
+    state: &AppState,
+    headers: &HeaderMap,
+    input: SourceDecisionRequest,
+) -> Result<Response, ApiError> {
+    let target = input.reference;
+    if input.caps.v != plurx_core::playback::DeviceCaps::VERSION || input.caps.is_empty() {
+        return Err(refused());
+    }
+    stream::validate_device_caps(&input.caps)?;
+    let authority = source_file_authority(state, headers, &target).await?;
     // Only a current grant-authorized complete witness admits the ordinary
     // planning store; no B file identifier is ever treated as a Local ID.
     let snapshot = state
@@ -156,27 +212,9 @@ pub(super) async fn source_decision(
         ..Default::default()
     };
     let decision = stream::decision_for_source_file(state, snapshot.file, q).await?;
-    let SourceDetailsRead::Authorized(current) = state
-        .store
-        .source_item_file_witness(&hash, grant, target.item_id.clone(), target.file_id.clone())
-        .await?
-    else {
-        return Err(refused());
-    };
-    if !current.matches_source_file(
-        target.server_id,
-        target.catalogue_epoch,
-        &target.library_id,
-        &target.item_id,
-        &target.file_id,
-    ) || key.file_revision(&current)? != target.revision
-        || !crate::sharing::enabled(state.store.as_ref()).await?
-        || shared_library::authority(state, headers).await? != (hash, grant)
-    {
-        return Err(refused());
-    }
+    authority.still_current(state, headers, &target).await?;
     shared_library::source_file_json(
-        grant,
+        authority.grant,
         &target,
         json!({"protocol":1,"reference":target,"decision":decision}),
     )

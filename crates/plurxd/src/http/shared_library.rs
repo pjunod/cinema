@@ -1044,6 +1044,45 @@ pub(super) async fn attach_receiver_art_authority(
     response.extensions_mut().insert(authority);
     Ok(())
 }
+/// A pre-session file asset body: file-scoped like a decision, for the login
+/// that reached it (the viewer's own, or the exact session's original login).
+pub(super) async fn attach_receiver_file_authority(
+    state: &AppState,
+    login_hash: &str,
+    user: i64,
+    summary: &plurx_core::sharing::ImportSummary,
+    reference: &plurx_core::sharing_file_locators::FileLocatorReference,
+    response: &mut Response,
+) -> Result<(), ApiError> {
+    let source = receiver_scope(
+        summary,
+        vec![reference.item.library_id.clone()],
+        vec![(
+            reference.item.library_id.clone(),
+            reference.item.item_id.clone(),
+        )],
+        vec![(
+            reference.item.library_id.clone(),
+            reference.item.item_id.clone(),
+            reference.file_id.clone(),
+        )],
+    )?;
+    let authority = ReceiverContentAuthority {
+        access: ReceiverAccess::Viewer,
+        hash: login_hash.to_owned(),
+        user,
+        scopes: vec![source.scope.clone()],
+        sources: vec![source],
+    };
+    if !receiver_content_current(state, &authority).await {
+        return Err(fail(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "sharing_body_authority_unavailable",
+        ));
+    }
+    response.extensions_mut().insert(authority);
+    Ok(())
+}
 /// Every receiver catalogue and artwork body is complete in memory when its
 /// handler returns, so this pre-return check is its authority point and no
 /// monitor follows the response. Receiver media bodies are owned by the

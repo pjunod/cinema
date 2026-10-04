@@ -519,6 +519,57 @@ async fn actual_pinned_playback(address: IpAddr, h2: bool, mode: SourceFixtureMo
         "/api/v1/shared/imports/{}/files/",
         fixture.import_id
     )));
+    // Pre-session assets through B before any session exists: the actual
+    // embedded caption as WebVTT (native modes carry two SubRip tracks), a
+    // chapter the lavfi source does not have, and the typed progressive
+    // closure. None of these creates a session on either side.
+    if matches!(
+        mode,
+        SourceFixtureMode::NativeCopy | SourceFixtureMode::NativeEncoded
+    ) {
+        let (status, headers, bytes) = b_request(
+            b_address,
+            h2,
+            "GET",
+            &format!("{base}/subs/0.vtt"),
+            &fixture.original_login,
+            Vec::new(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "actual pre-session WebVTT; H2={h2}");
+        assert_eq!(headers["content-type"], "text/vtt; charset=utf-8");
+        assert_eq!(headers["cache-control"], "no-store");
+        assert!(String::from_utf8_lossy(&bytes).contains("Actual HTTP Source caption"));
+    }
+    let (status, _, bytes) = b_request(
+        b_address,
+        h2,
+        "GET",
+        &format!("{base}/chapters/0/thumb"),
+        &fixture.original_login,
+        Vec::new(),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::NOT_FOUND,
+        "no chapters in the source; H2={h2}"
+    );
+    assert!(String::from_utf8_lossy(&bytes).contains("sharing_asset_not_found"));
+    let (status, _, _) = b_request(
+        b_address,
+        h2,
+        "GET",
+        &format!("{base}/stream.mp4"),
+        &fixture.original_login,
+        Vec::new(),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::UNPROCESSABLE_ENTITY,
+        "typed progressive closure; H2={h2}"
+    );
     let original: Value =
         serde_json::from_slice(&fixture.source.request).expect("Source complete recipe fixture");
     let session =
