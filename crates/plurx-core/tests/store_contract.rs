@@ -723,6 +723,20 @@ const MEDIA_SESSION_METHODS: &[&str] = &[
     "settle_producer_recovery",
     "producer_recovery_for_epoch",
     "validation_corrupt_recovery_restriction",
+    // Continuous quality: the parent-fenced ledger, its reservations, the
+    // verified family binding and exact cancellation receipts. Covered by
+    // continuous_quality_ledger_cas_and_takeover_preserve_appended_dependencies,
+    // quality_cancellation_is_durable_exact_and_does_not_end_the_incumbent and
+    // quality_cancellations_outlast_128_changes_and_settle_after_takeover.
+    "bind_continuous_family",
+    "quality_ledger",
+    "write_quality_ledger",
+    "write_terminal_quality_transition",
+    "quality_reserved_intervals",
+    "request_quality_cancellation",
+    "quality_cancellation_receipt",
+    "settle_quality_cancellation",
+    "quality_intent_cancelled",
 ];
 const FENCED_PUBLICATION_METHODS: &[&str] = &[
     "add_downloaded_subtitle_fenced",
@@ -18241,7 +18255,10 @@ fn contract_inventory_matches_every_store_method() {
     // by playback_planning_snapshot_retains_one_source_and_settings_revision.
     // +1: source-fenced content encoding report publication, covered by
     // content_encoding_report_publication_is_source_fenced_on_every_backend.
-    assert_eq!(declared.len(), 453, "review the Store method count");
+    // +9: continuous quality's ledger, reservation, family-binding and
+    // cancellation-receipt methods on `MediaSessionStore`, listed in
+    // `MEDIA_SESSION_METHODS` with the scenarios that cover them.
+    assert_eq!(declared.len(), 462, "review the Store method count");
     assert_eq!(
         covered, declared,
         "the declared async method name inventory changed"
