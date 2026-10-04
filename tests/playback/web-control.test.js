@@ -205,7 +205,7 @@ function fullOpenHarness() {
     shippedSource("naturalBoundaryQualityCandidate"),
     shippedSource("seekTo"), shippedSource("switchAudio"), shippedSource("setSub"),shippedSource("burnSub"),
     shippedSource("offsetLabel"), shippedSource("setSync"),
-    shippedSource("playerWantsPlayback"), transportTelemetrySources(),shippedSource("togglePlay"),
+    shippedSource("playerWantsPlayback"), transportTelemetrySources(),shippedSource("resumeQualityBoundary"),shippedSource("togglePlay"),
     shippedSource("playerInputSurface"), shippedSource("watchRouteInput"),
     shippedSource("setPlayerMediaAction"), shippedSource("playerMediaPlayPause"), shippedSource("playerMediaSkip"),
     shippedSource("playerNextTrackOffered"), shippedSource("syncPlayerNextTrack"),
