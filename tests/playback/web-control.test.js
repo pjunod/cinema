@@ -3322,6 +3322,37 @@ async function main() {
       {waitAt:100,atMs:100,untilMs:20_100},
       "the paced verdict is scoped to this stalled ask");
   }
+
+  // One owner for "the server holds this stall": the bounded verdict, which is
+  // scoped to its wait and retired with it. A second, uncleared deadline
+  // (`stallVerdictUntilMs`, written beside it by a concurrent change) kept Auto
+  // suppressed until twenty seconds after a stall BEGAN — through the resume,
+  // and into whatever wait came next.
+  {
+    const classify = new Function("PlaybackPolicy", "STREAM_FAILURE", "Date",
+      `${shippedSource("autoCauseEvidence")}\nreturn autoCauseEvidence;`,
+    )(require("../../crates/plurxd/src/web/playback-policy.js"), null, Date);
+    const loaded = () => ({ waitStartedRunway: 22, abr: { stallEvents: { decode: [] } },
+      health: { producer_state: "held", recent_speed: 3 }, healthObservedAt: 100 });
+    for (const [label, action, options] of [
+      ["a paced stall", { type: "retry_resource", reason: "reader_failed", after_ms: 1_500 },
+        { player: { abr: { stallEvents: { decode: [] } } } }],
+      ["a held presentation stall", { type: "hold", reason: "no_room" },
+        { player: loaded(), video: bufferedVideo(22) }],
+    ]) {
+      const { h, player } = await askWith(action, options);
+      assert.equal(classify(player, 5_000).kind, "control-stall-verdict",
+        `${label}: the live deferral holds Auto`);
+      assert.equal(player.abr.stallVerdictUntilMs, undefined,
+        `${label}: no second deadline is written beside the verdict`);
+      h.stub.end(player, true);
+      assert.notEqual(classify(player, 5_000).kind, "control-stall-verdict",
+        `${label}: resuming releases Auto before the deferral deadline`);
+      player.waitAt = 6_000;
+      assert.notEqual(classify(player, 7_000).kind, "control-stall-verdict",
+        `${label}: the next wait is not judged by the previous wait's verdict`);
+    }
+  }
   {
     const { h, player } = await askWith({
       type: "retry_resource", reason: "reader_failed", after_ms: 1_000,
