@@ -346,6 +346,8 @@ fn http_route_group(path: &str) -> usize {
         | "/api/v1/files/{id}/subs/{index}/overlay.json"
         | "/api/v1/files/{id}/subs/{index}/overlay/{generation}/objects/{object}"
         | "/api/v1/files/{id}/hls/sessions"
+        | "/api/v1/files/{id}/hls/continuous-sessions"
+        | "/api/v1/files/{id}/hls/continuous-candidates"
         | "/api/v1/files/{id}/hls/start"
         | "/api/v1/offline/packages/{id}"
         | "/api/v1/offline/packages/{id}/lease"
@@ -364,6 +366,8 @@ fn http_route_group(path: &str) -> usize {
         | "/api/v1/hls/{session}/subs/{index}/{segment}"
         | "/api/v1/hls/{session}/status"
         | "/api/v1/hls/{session}/quality-control"
+        | "/api/v1/hls/{session}/quality-schedule"
+        | "/api/v1/hls/{session}/quality-family"
         | "/api/v1/hls/{session}/control"
         | "/api/v1/hls/{session}"
         | "/api/v1/hls/{session}/{segment}"
@@ -492,6 +496,7 @@ fn http_route_group(path: &str) -> usize {
         | crate::media_sessions::ABORT_PATH
         | crate::media_sessions::RELAY_PATH
         | hls::QUALITY_CONTROL_PATH
+        | hls::QUALITY_SCHEDULE_PATH
         | crate::media_sessions::CONTROL_PATH => 7,
         _ => 8,
     }

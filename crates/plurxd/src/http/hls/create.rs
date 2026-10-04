@@ -3246,6 +3246,7 @@ async fn create_with_purpose_inner(
             && route.publication_ready_at_ms == 0;
         if !exact {
             tracing::warn!(
+                target: "plurxd::http::hls",
                 state = %route.state,
                 owner_epoch = route.owner_epoch,
                 publication_ready_at_ms = route.publication_ready_at_ms,

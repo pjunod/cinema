@@ -256,7 +256,7 @@ async fn quality_schedule_routed(
         }
         Err(error) => {
             let failure = classify_quality_schedule_error(&error);
-            tracing::debug!(session, %error, ?failure, "quality schedule refused");
+            tracing::debug!(target: "plurxd::http::hls", session, %error, ?failure, "quality schedule refused");
             failure.response()
         }
     }

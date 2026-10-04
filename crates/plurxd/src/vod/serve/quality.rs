@@ -484,6 +484,7 @@ impl VodServe {
                     if error == QualityTransitionError::Capacity {
                         let usage = candidate.capacity_usage();
                         tracing::debug!(
+                            target: "plurxd::vodserve",
                             session_id,
                             transactions = usage.transactions,
                             unresolved = usage.unresolved_transactions,
@@ -652,7 +653,7 @@ impl VodServe {
                                 } else {
                                     "media_or_owner_unavailable"
                                 };
-                                tracing::debug!(session = %session_id, rendition = %target_rendition_id,
+                                tracing::debug!(target: "plurxd::vodserve", session = %session_id, rendition = %target_rendition_id,
                                     reason, frontier = binding.through_tick, "continuous preparation retained current");
                                 candidate
                                     .refuse_preparation(&transition.transaction_id)
