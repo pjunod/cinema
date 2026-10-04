@@ -124,7 +124,7 @@ fn encoded_vod_frozen_cpu_floor_preserves_empty_pool_and_lowered_policy() {
         1,
         3,
         &resources,
-        &options,
+        options.software_threads,
         Priority::Live,
         None,
     )
@@ -149,7 +149,7 @@ fn encoded_vod_frozen_cpu_floor_preserves_empty_pool_and_lowered_policy() {
                 1,
                 lowered,
                 &resources,
-                &options,
+                options.software_threads,
                 Priority::Live,
                 None
             ),
@@ -162,7 +162,7 @@ fn encoded_vod_frozen_cpu_floor_preserves_empty_pool_and_lowered_policy() {
         1,
         3,
         &resources,
-        &options,
+        options.software_threads,
         Priority::Live,
         None,
     )
@@ -178,7 +178,7 @@ fn encoded_vod_frozen_cpu_floor_preserves_empty_pool_and_lowered_policy() {
             1,
             3,
             &resources,
-            &unknown,
+            unknown.software_threads,
             Priority::Live,
             None
         ),
@@ -197,7 +197,7 @@ fn encoded_vod_frozen_cpu_floor_preserves_empty_pool_and_lowered_policy() {
     assert!(mixed.hardware_slot);
     assert_eq!(mixed.cpu_threads, 8);
     assert!(matches!(
-        try_admit_frozen_bundle(&admissions, 1, 3, &mixed, &options, Priority::Live, None),
+        try_admit_frozen_bundle(&admissions, 1, 3, &mixed, options.software_threads, Priority::Live, None),
         Err(true)
     ));
     assert_eq!(admissions.software_in_use(), 0);
@@ -207,7 +207,7 @@ fn encoded_vod_frozen_cpu_floor_preserves_empty_pool_and_lowered_policy() {
         1,
         0,
         &hardware_only,
-        &unknown,
+        unknown.software_threads,
         Priority::Live,
         None,
     )

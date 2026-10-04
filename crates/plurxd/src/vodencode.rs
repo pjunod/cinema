@@ -33,7 +33,7 @@ pub(crate) fn try_admit_frozen_bundle(
     hardware_limit: usize,
     software_budget: usize,
     resources: &TranscodeResourceEstimate,
-    options: &TranscodeOptions,
+    software_threads: Option<u32>,
     priority: Priority,
     claim: Option<u64>,
 ) -> Result<crate::admission::TranscodePermit, bool> {
@@ -42,11 +42,9 @@ pub(crate) fn try_admit_frozen_bundle(
         // and filter estimate remains the operative policy floor.
         resources.cpu_threads
     } else {
-        resources.cpu_threads.min(
-            options
-                .software_threads
-                .map_or(resources.cpu_threads, |threads| threads as usize),
-        )
+        resources
+            .cpu_threads
+            .min(software_threads.map_or(resources.cpu_threads, |threads| threads as usize))
     };
     if frozen_floor > software_budget {
         return Err(true);
@@ -594,7 +592,12 @@ impl Encoding {
             hardware_limit,
             software_budget,
             &self.resources(),
-            &self.options,
+            // The video recipe's software-encoder cap does not bound the AAC
+            // producer: shared audio's fixed estimate is its whole floor.
+            self.shared_audio
+                .is_none()
+                .then_some(self.options.software_threads)
+                .flatten(),
             priority,
             claim,
         ) {
