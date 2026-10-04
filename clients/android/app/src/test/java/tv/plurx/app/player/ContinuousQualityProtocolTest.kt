@@ -91,6 +91,46 @@ class ContinuousQualityProtocolTest {
         assertEquals(requests[0], requests[2])
     }
 
+    @Test fun refusalIsResolvedByOneLedgerReadAndNeverResent() = runBlocking {
+        // Applied before the owner refused: the ledger read settles it as accepted.
+        val requests = mutableListOf<JsonObject>()
+        var appliedFirst: JsonObject? = null
+        val applied = ContinuousQualityProtocol(identity, { request ->
+            requests += request
+            when (requests.size) {
+                1 -> { appliedFirst = request; throw ContinuousQualityHttpFailure(409) }
+                2 -> JsonObject(reply(requireNotNull(appliedFirst)) - "receipt")
+                else -> reply(request)
+            }
+        })
+        applied.transition(transaction, operation())
+        assertEquals(1L, applied.ledger?.number("accepted_sequence"))
+        applied.transition(nextTransaction, operation(2))
+        assertEquals(listOf(1L, null, 2L), requests.map { it.obj("transition")?.number("sequence") })
+        // Refused and absent: it throws once, and the next command does not replay it.
+        val refused = mutableListOf<JsonObject>()
+        val absent = ContinuousQualityProtocol(identity, { request ->
+            refused += request
+            if (refused.size == 1) throw ContinuousQualityHttpFailure(409)
+            reply(request)
+        })
+        assertTrue(runCatching { absent.transition(transaction, operation()) }.exceptionOrNull() is ContinuousQualityHttpFailure)
+        absent.settlePending()
+        absent.transition(nextTransaction, operation(2))
+        assertEquals(listOf(1L, null, 1L), refused.map { it.obj("transition")?.number("sequence") })
+        assertEquals(nextTransaction, refused.last().obj("transition")?.text("transaction_id"))
+        // An unreadable ledger leaves the refused command uncertain and replayable.
+        val unknown = mutableListOf<JsonObject>()
+        val unreadable = ContinuousQualityProtocol(identity, { request ->
+            unknown += request
+            when (unknown.size) { 1 -> throw ContinuousQualityHttpFailure(409); 2 -> throw IOException("ledger unreadable") }
+            reply(request)
+        })
+        assertTrue(runCatching { unreadable.transition(transaction, operation()) }.isFailure)
+        unreadable.settlePending()
+        assertEquals(unknown[0], unknown[2])
+    }
+
     @Test fun malformedReceiptsAndForeignAttachmentsCannotAdvanceTheLedger() = runBlocking {
         val requests = mutableListOf<JsonObject>()
         val protocol = ContinuousQualityProtocol(identity, { request ->

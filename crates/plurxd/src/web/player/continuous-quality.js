@@ -131,10 +131,25 @@ function continuousQualityProtocol(bootstrap,attachment,exchange=continuousQuali
       revision=response.revision;ledger=response.ledger;
       sequence=Math.max(sequence,ledger.accepted_sequence);pending=null;return response;
     }catch(error){
-      failure=error;if(error.status&&error.status<500&&error.status!==429)break;
+      failure=error;if(error.status&&error.status<500&&error.status!==429)return resolveRefusal(request,error);
       if(error.status===429&&attempt===0)await wait(Math.max(1,Math.min(1000,error.retryAfterMs||1000)));
     }
     throw failure;
+  }
+  // A refusal is not proof of absence: the owner can refuse after its durable
+  // write settled. One authoritative ledger read decides, and the attachment
+  // is the only writer, so an accepted sequence at or past ours means ours
+  // applied. The request is never resent; an unreadable ledger keeps it pending.
+  async function resolveRefusal(request,refusal){
+    const sent=request.transition?.sequence;
+    if(!sent){pending=null;throw refusal;}
+    const probe={...identity,transition:null,frontier:null};
+    const response=await exchange(bootstrap.schedule_url,probe);
+    if(!continuousQualityResponse(response,probe)||response.revision<revision)throw new Error('Continuous quality response identity');
+    revision=response.revision;ledger=response.ledger;
+    sequence=Math.max(sequence,ledger.accepted_sequence);pending=null;
+    if(sequence>=sent)return response;
+    throw refusal;
   }
   /**
    * @template T

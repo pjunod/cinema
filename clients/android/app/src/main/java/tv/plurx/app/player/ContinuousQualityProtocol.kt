@@ -91,12 +91,31 @@ internal class ContinuousQualityProtocol(
             } catch (error: Exception) {
                 failure = error
                 if (error is ContinuousQualityHttpFailure) {
-                    if (error.status in 400..499 && error.status != 429) throw error
+                    if (error.status in 400..499 && error.status != 429) return resolveRefusal(request, error)
                     if (error.status == 429 && attempt == 0) wait(error.retryAfterMs.coerceIn(1, 1000))
                 }
             }
         }
         throw requireNotNull(failure)
+    }
+
+    /** A refusal is not proof the command was absent: the owner can refuse
+     * after its durable write settled. One authoritative ledger read decides.
+     * The attachment is the only writer, so an accepted sequence at or past
+     * ours means ours was applied. Either way the uncertainty is resolved and
+     * the request is never resent; an unreadable ledger keeps it pending. */
+    private suspend fun resolveRefusal(request: JsonObject, refusal: ContinuousQualityHttpFailure): JsonObject {
+        val sent = request.obj("transition")?.number("sequence")
+        if (sent == null) {
+            pending = null // Snapshots and windows carry no durable ordering.
+            throw refusal
+        }
+        val probe = JsonObject(identity + mapOf("transition" to JsonNull, "frontier" to JsonNull))
+        val response = exchange(probe)
+        accept(response, probe)
+        pending = null
+        if (sequence >= sent) return response
+        throw refusal
     }
 
     private fun accept(response: JsonObject, request: JsonObject) {

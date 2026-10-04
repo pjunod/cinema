@@ -110,6 +110,42 @@ test('normal ninety-second video and AAC buffers fit the bounded receipt',()=>{
 });
 
 
+test('a refused command is settled by one ledger read and never resent',async()=>{
+ const prepare={kind:'prepare',intent_revision:1,target_rendition_id:interval.rendition_id};
+ const refused=status=>Object.assign(new Error(`refused ${status}`),{status});
+ // Applied before the owner refused: the ledger read proves acceptance.
+ let requests=[];let first=null;
+ let client=protocol(bootstrap,attachment,async(url,request)=>{
+  requests.push(clone(request));
+  if(requests.length===1){first=clone(request);throw refused(409);}
+  if(requests.length===2){const applied=answer(first,2);applied.receipt=null;return applied;}
+  return answer(request,requests.length+1);
+ });
+ await client.transition(uuid(4),prepare);
+ await client.transition(uuid(4),{kind:'scheduled',intervals:[interval]});
+ assert.deepEqual(requests.map(r=>r.transition?.sequence??null),[1,null,2]);
+ // Refused and absent: one failure, then the next command is not a replay.
+ requests=[];
+ client=protocol(bootstrap,attachment,async(url,request)=>{
+  requests.push(clone(request));if(requests.length===1)throw refused(409);return answer(request,requests.length);
+ });
+ await assert.rejects(client.transition(uuid(4),prepare),/refused 409/);
+ assert.equal(client.pending,null);
+ await client.transition(uuid(5),prepare);
+ assert.deepEqual(requests.map(r=>r.transition?.sequence??null),[1,null,1]);
+ assert.equal(requests[2].transition.transaction_id,uuid(5));
+ // An unreadable ledger keeps the command uncertain and replayable.
+ requests=[];
+ client=protocol(bootstrap,attachment,async(url,request)=>{
+  requests.push(clone(request));
+  if(requests.length===1)throw refused(409);if(requests.length===2)throw new Error('ledger unreadable');
+  return answer(request,requests.length);
+ });
+ await assert.rejects(client.transition(uuid(4),prepare),/ledger unreadable/);
+ assert.ok(client.pending);await client.recover();
+ assert.deepEqual(requests[2],requests[0]);
+});
+
 test('rate refusal waits for admission before retrying the identical reservation',async()=>{
  const events=[],requests=[];
  const client=protocol(bootstrap,attachment,async(url,request)=>{

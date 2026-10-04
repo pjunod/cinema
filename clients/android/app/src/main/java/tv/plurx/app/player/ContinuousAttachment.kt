@@ -130,7 +130,12 @@ internal class ContinuousAttachment(
                 withTimeoutOrNull(1000) { wake.receive() }
                 if (closed.get()) break
                 try { flushFacts() } catch (error: CancellationException) { throw error }
-                catch (error: Exception) { runCatching { failed(error) } }
+                catch (error: Exception) {
+                    runCatching { failed(error) }
+                    // Frame callbacks wake this loop at display rate; a failed
+                    // exchange is re-derived from current facts at most once a second.
+                    delay(1000)
+                }
             }
         }
         return registry.source(hls, selection) { periodReleaseRequested.set(true) }
@@ -185,28 +190,35 @@ internal class ContinuousAttachment(
             if (awaiting.size >= 128 && key !in awaiting) throw IOException("Continuous pending append bound")
             awaiting[key] = append
         }
-        for ((key, append) in awaiting.toMap()) {
+        // Every completed append observed since the last pass is one fact per
+        // owning transaction, so the durable command rate follows flushes,
+        // not segment count.
+        val appends = LinkedHashMap<String, LinkedHashSet<JsonObject>>()
+        for (append in awaiting.values) {
             if (append.video) for (id in append.transactions) {
                 val tx = transaction(id) ?: throw IOException("Continuous append transaction missing")
                 if (tx.getValue("appended").jsonArray.none { it.jsonObject == append.interval }) {
                     reportExpectedPresentation(tx, append.interval)
-                    protocol.transition(id, buildJsonObject { put("kind", "appended"); put("intervals", JsonArray(listOf(append.interval))) })
+                    appends.getOrPut(id) { LinkedHashSet() }.add(append.interval)
                 }
             }
-            awaiting.remove(key)
         }
+        reportAppended(appends)
+        awaiting.clear()
         // A newer same-rendition reservation may own samples already retained
         // in this attachment. Credit only the exact physically accepted span,
         // while its queue still retains ownership; no second append is invented.
+        val credited = LinkedHashMap<String, LinkedHashSet<JsonObject>>()
         for (load in queues.queuedArtifacts()) {
             val artifact = requireNotNull(load.authorized.interval.text("artifact_id"))
             if (load.resource.role != "video" || !queues.wasAppended(load.resource.rendition, artifact) ||
                 queues.queueRetired(load.resource.rendition, artifact)) continue
             for (id in currentOwners(load)) {
                 if (transaction(id)?.getValue("appended")?.jsonArray?.none { it.jsonObject == load.authorized.interval } == true)
-                    protocol.transition(id, buildJsonObject { put("kind", "appended"); put("intervals", JsonArray(listOf(load.authorized.interval))) })
+                    credited.getOrPut(id) { LinkedHashSet() }.add(load.authorized.interval)
             }
         }
+        reportAppended(credited)
         val observed = frame.get()
         if (observed != null) {
             val matching = queues.queuedArtifacts().filter { load ->
@@ -347,16 +359,31 @@ internal class ContinuousAttachment(
         return true
     }
 
+    private suspend fun reportAppended(facts: Map<String, Set<JsonObject>>) {
+        for ((id, intervals) in facts) for (batch in intervals.chunked(128))
+            protocol.transition(id, buildJsonObject { put("kind", "appended"); put("intervals", JsonArray(batch)) })
+    }
+
     private suspend fun finishDisposals() {
-        for ((resourceKey, disposal) in disposing.toMap()) {
+        val settled = disposing.toMap()
+        val facts = LinkedHashMap<String, LinkedHashSet<JsonPrimitive>>()
+        for (disposal in settled.values) {
             val load = disposal.load
-            val artifact = requireNotNull(load.authorized.interval.text("artifact_id"))
+            val artifact = JsonPrimitive(requireNotNull(load.authorized.interval.text("artifact_id")))
             for (id in disposal.owners) {
                 // Shared AAC can be reserved again under a transaction whose
                 // historical disposed list already contains this hash.
-                if (load.resource.role == "audio" || transaction(id)?.getValue("disposed")?.jsonArray?.contains(JsonPrimitive(artifact)) != true)
-                    protocol.transition(id, buildJsonObject { put("kind", "disposed"); put("artifacts", JsonArray(listOf(JsonPrimitive(artifact)))) })
+                if (load.resource.role == "audio" || transaction(id)?.getValue("disposed")?.jsonArray?.contains(artifact) != true)
+                    facts.getOrPut(id) { LinkedHashSet() }.add(artifact)
             }
+        }
+        // One disposal fact per owner per pass; physical bookkeeping follows
+        // only after every owner acknowledged its artifacts.
+        for ((id, artifacts) in facts) for (batch in artifacts.chunked(128))
+            protocol.transition(id, buildJsonObject { put("kind", "disposed"); put("artifacts", JsonArray(batch)) })
+        for ((resourceKey, disposal) in settled) {
+            val load = disposal.load
+            val artifact = requireNotNull(load.authorized.interval.text("artifact_id"))
             queues.disposed(load.resource.rendition, artifact)
             disposing.remove(resourceKey)
             disposalBarriers.retired(artifactKey(load.resource, artifact))
