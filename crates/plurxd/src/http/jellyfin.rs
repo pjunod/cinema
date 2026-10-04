@@ -1329,7 +1329,13 @@ mod tests {
                 .await
                 .expect("no copy index"));
         }
-        let (status, info) = json_call(&f.app, request("POST", &format!("/jellyfin/Items/{}/PlaybackInfo", f.item), Some(&f.token), json!({"EnableDirectPlay":false,"StartTimeTicks":20_000_000,"MaxStreamingBitrate":if encoded {750_000} else {2_000_000},"AllowVideoStreamCopy":!encoded,"DeviceProfile":{"TranscodingProfiles":[{"Type":"Video","Container":"ts","VideoCodec":"h264","AudioCodec":"aac","Protocol":"hls","MaxAudioChannels":"2","ManifestSubtitles":"vtt"}]}}))).await;
+        // The encoded run omits manifest subtitles, as Infuse's profile does:
+        // its master alias must still be a multivariant wrapper.
+        let mut transcoding = json!({"Type":"Video","Container":"ts","VideoCodec":"h264","AudioCodec":"aac","Protocol":"hls","MaxAudioChannels":"2"});
+        if !encoded {
+            transcoding["ManifestSubtitles"] = json!("vtt");
+        }
+        let (status, info) = json_call(&f.app, request("POST", &format!("/jellyfin/Items/{}/PlaybackInfo", f.item), Some(&f.token), json!({"EnableDirectPlay":false,"StartTimeTicks":20_000_000,"MaxStreamingBitrate":if encoded {750_000} else {2_000_000},"AllowVideoStreamCopy":!encoded,"DeviceProfile":{"TranscodingProfiles":[transcoding]}}))).await;
         assert_eq!(status, StatusCode::OK);
         assert!(
             info["ErrorCode"].is_null(),
@@ -1439,6 +1445,10 @@ mod tests {
             .expect("route")
             .expect("native");
         assert!(!master.contains(&route.session_id) && !master.contains("/api/v1/hls/"));
+        assert!(
+            master.contains("#EXT-X-STREAM-INF"),
+            "the master alias is a multivariant wrapper: {master}"
+        );
         let media_url = master
             .lines()
             .find(|line| line.ends_with("index.m3u8") && !line.starts_with('#'))

@@ -153,24 +153,18 @@ async fn serve(
         diagnostic: None,
     };
     let response = match &resource {
+        // Always the multivariant wrapper: Infuse fails on a media playlist
+        // at its master URL before requesting any fragment (J0), and its
+        // profile carries no manifest subtitles. The native master answers
+        // with or without a subtitle group.
         Resource::Master => {
-            if selection["vod"]["body"]["native_subtitles"] == true {
-                Box::pin(super::super::hls::master_playlist_response(
-                    State(state.clone()),
-                    Path(session.clone()),
-                    Query(query),
-                    headers,
-                ))
-                .await?
-            } else {
-                Box::pin(super::super::hls::playlist(
-                    State(state.clone()),
-                    Path(session.clone()),
-                    Query(query),
-                    headers,
-                ))
-                .await?
-            }
+            Box::pin(super::super::hls::master_playlist_response(
+                State(state.clone()),
+                Path(session.clone()),
+                Query(query),
+                headers,
+            ))
+            .await?
         }
         Resource::Media => {
             Box::pin(super::super::hls::playlist(
