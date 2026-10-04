@@ -708,7 +708,7 @@ to the requirement for an active grant.
 | GET `/playback/requests/{id}` | Recover exact start outcome, scoped by grant and viewer identity |
 | POST `/playback/{id}/control`, POST `/playback/{id}/selection` | Existing typed lifecycle and selection semantics |
 | GET/HEAD `/hls/{session}/...`, POST `/hls/{session}/control` | Closed existing HLS resource/control grammar; verify share principal before internal relay |
-| GET/HEAD `/items/{item}/files/{file}/...` | Typed subtitle/overlay/chapter suffixes before start; active grant and item/file/library membership, bounded extraction; no raw file lookup |
+| GET/HEAD `/items/{item}/files/{file}/subs/{n}[.vtt]`, `.../subs/{n}/overlay.json`, `.../subs/{n}/overlay/{generation}/objects/{png}`, `.../chapters/{n}/thumb` | Typed subtitle/overlay/chapter suffixes before start; the complete Source reference in one bounded `CinemaShare-Reference` header; active grant, item/file/library membership and exact revision before and after the Local per-file work; no raw file lookup, no session. `direct` and `stream.mp4` are not asset suffixes |
 | GET/HEAD `/playback/{session}/files/{file}/...` | Direct/progressive and other admitted file bytes under §7.3; exact principal/session/recipe |
 | GET/POST `/items/{item}/files/{file}/decision` | Existing decision request/response types, grant-check item/file relationship before invoking shared decision service |
 | DELETE `/playback/{id}` | Retire only this grant's session; repeated deletion succeeds |
@@ -5159,3 +5159,74 @@ Not qualified: a process-level SIGKILL of a published or pending B daemon
 followed by restart. `tests/sharing_daemon_restart.rs` restarts paired
 daemons but has no shared-playback harness. Clusters, NAT/DERP and devices
 remain open, as above.
+
+### Shared pre-session assets and typed file-suffix closure (2026-10-04)
+
+The Assets lane of the direct/progressive/pre-session design. Subtitles,
+PGS overlays and chapter thumbnails now reach a shared viewer before any
+session exists, and every shared file suffix B does not serve refuses typed.
+
+**Source (A).** `shared_source_assets` mounts the four asset suffixes of
+§5.4 on the peer router under `source_content_guard`, with the 30 s resource
+deadline and a 16-permit admission (429 `sharing_asset_capacity`). The
+complete `SourcePlaybackTarget` travels in one `cinemashare-reference` header
+of at most 1 KiB; path item/file must equal it. Authority is the decision's,
+now factored as `shared_playback::source_file_authority` /
+`SourceFileAuthority::still_current` and used by both: active grant,
+grant-visible item/file witness, signed revision, switch on — checked before
+the work and again after it, then `attach_source_file_authority` scopes the
+body to the file. Only an admitted witness turns the Source file number into
+a Local `get_file`. The work is the Local per-file code, split out without
+behaviour change for Local callers: `stream::subtitle_vtt_for_file` (bitmap
+tracks refused), `pgs_overlay::manifest_for_file`/`object_for_file` (switch,
+pgs-v1 track check, 202 while cold, generation bound to track and revision)
+and `chapter_thumbs::serve_for_file` (switch, cache, failure memo, permits).
+
+Design deviations, following the code:
+
+- The Source `MediaFile` comes from `get_file`, not
+  `playback_planning_snapshot`: assets need no planning settings, and the
+  pre/post witness already binds the revision.
+- No extra detached task was added. Subtitle extraction and overlay
+  preparation already run in owned, cached flights that outlive the request.
+  A chapter extraction is bounded in-request (10 s permit wait + 15 s
+  extraction) inside the 30 s route deadline, so it is never cut short by it.
+
+**Receiver (B).** `shared_receiver_assets` mounts the same four suffixes
+under each signed file base on the media group, under
+`receiver_content_guard`. The caller is the signed-in viewer (header or
+`?token=`) or `?session=` naming a live receiver session whose recipe binds
+exactly this import, lifecycle, item, file and revision
+(`recipe_binds_file`) and whose delivery attachment is current
+(`ReceiverStartActor::bound_file_viewer`); an account sent with a session
+must be that session's viewer. The query is closed (one `token`, one
+canonical `session`). `SharingManager::read_file_asset` shares the
+import/assignment/pinned-connection preflight with `read_file_decision`
+(`assigned_file_peer`) and asks the Source through
+`PeerConnection::file_asset`. That client accepts only 200 with exactly one
+`Content-Type` from the closed set and one `Content-Length` within the cap:
+
+- WebVTT: 2 MiB, `text/vtt; charset=utf-8`, leading `WEBVTT`, UTF-8.
+- Manifest: 1 MiB, `application/json`.
+- PNG objects and JPEG thumbnails: 1 MiB, with their magic bytes checked.
+
+Identity encoding only, exact length, and 202 only for a manifest. Refusal
+bodies are drained and never relayed. B projects the manifest through
+`project_shared_overlay`, which keeps the generation and relative object
+names and replaces the file ID. Bodies carry a file-scoped
+`ReceiverContentAuthority` for the reaching login
+(`attach_receiver_file_authority`) and `Cache-Control: no-store`. There is
+no B cache. B admission is its own 16-permit semaphore, not
+`catalogue_admission`, whose one-per-import rule would refuse a watch page's
+parallel chapter thumbnails.
+
+**Typed closure.** `shared_receiver_assets::closure_router` answers
+`stream.mp4` (permanently) and `direct` (one marked arm for the direct lane
+to replace) with `422 sharing_resource_unsupported`. It does so for every
+method, HEAD included, before any import, locator, account or Local lookup.
+
+Evidence on nuc4: see the commit message for the exact test run. The ignored
+CGNAT fixture (`actual_pinned_playback`) now also fetches a WebVTT through
+B in the native modes, a missing chapter thumbnail, and the `stream.mp4`
+closure; it was not run here.
+
