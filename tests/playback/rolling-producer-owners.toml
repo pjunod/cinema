@@ -373,7 +373,10 @@ also_in = ["crates/plurxd/src/transcode"]
 # `control_and_flow_points_bracket_producer_policy`, and in `transcode/tests/chunk_09.rs` the
 # path-owner reader, the compatibility publication, the playlist request, the refresh and the
 # activity read of the position tests. None owns a producer, a process or a recipe decision.
-expected_occurrences = 93
+# 93 -> 95: the brief-loss and flapping serving-fence tests each spawn the
+# real `serving_fence_loop` and join it (or wait for its retirement) before
+# they end. Test-only; the loop is the existing production owner.
+expected_occurrences = 95
 kind = "structural_task_scan"
 replacement = "every detached task requires ownership-catalog review; published failure, completion, and executor-loss cleanup transfer exact child ownership before awaiting, while the removed published-transcode watchdog contributes no task"
 
@@ -480,7 +483,10 @@ also_in = ["crates/plurxd/src/transcode"]
 # test-side: `session_shipped_shape`'s two polling sleeps (the playlist poll and the retirement
 # poll, each inside a bound) and the position test's `PLAYLIST_WAIT_POLL * 2` wait that shows a
 # playlist below the first-playlist gate has not reached its hook point. No production timer.
-expected_occurrences = 51
+# 51 -> 52: `serving_fence_flapping_losses_share_one_grace` holds each
+# simulated loss for a third of the grace. Test-only, bounded, and it decides
+# nothing about producers.
+expected_occurrences = 52
 kind = "structural_timer_scan"
 replacement = "every new sleep requires classification; actor-managed producer verdict polls are deleted, while failed exact reap attempts retain ownership across the bounded cleanup retry cadence"
 
@@ -2393,7 +2399,9 @@ pattern = "(?:[A-Za-z_]\\w*::)+spawn(?:_blocking|_local|_for_test)?\\s*\\("
 # awaited spawn_blocking. Two BoundedDiagnosticChild::spawn calls are existing
 # child-owner construction (one production sample and one cancellation fixture),
 # not detached recovery tasks; both collectors are awaited through reap.
-expected_occurrences = 689
+# 689 -> 691: the two serving-fence tests that spawn the real fence loop
+# (see `all-detached-tokio-tasks`).
+expected_occurrences = 691
 # E1 plus S-14 M8: both ownership sets retained and counted on the merged source.
 # 643 -> 647 with S-14 M8 (`plan/S-14-5`: `Encoding`, `RollingFlowSync`, `TerminalCleanup`,
 # `HeadChildOwner`, `VodServingAdmission` behind per-owner hooks), measured by
@@ -3557,7 +3565,10 @@ pattern = "(?:[A-Za-z_]\\w*::)+(?:sleep|sleep_until|interval|interval_at|timeout
 # 20-second timeout under status_job_owned. The admitted content phase owns an
 # offset-permit deadline, a cooperative yield/cancel interval and total deadline;
 # cancellation joins the child before releasing source, scratch or admission.
-expected_occurrences = 1139
+# 1139 -> 1143: `serving_fence_loop` waits for recovery under one bounded
+# `tokio::time::timeout` (the outage grace budget); the serving-fence tests add
+# the flapping sleep and bounded waits that assert rather than hang.
+expected_occurrences = 1143
 # +1 native-startup delayed-init fixture: its joined writer owns one bounded
 # six-second sleep, under the test request's unchanged twelve-second deadline.
 # No production timer or recovery clock is added.
