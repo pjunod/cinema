@@ -292,7 +292,47 @@ async fn sharing_receiver_fixture_uses_actual_factories_login_and_genuine_source
         .await
         .expect("actual viewer authority")
         .is_some());
+    // Construct the exact candidate/production merge: legacy production paths
+    // must remain accepted by this disposable outer router.
+    let _app = fixture_router(fixture.state.clone());
+    let recipe: Value =
+        serde_json::from_slice(&fixture.source.request).expect("actual Source recipe");
+    let observation = receiver_claim_observation(
+        &fixture,
+        recipe["session"]["request_id"]
+            .as_str()
+            .expect("actual request UUID"),
+    )
+    .await;
+    assert_eq!(
+        serde_json::from_str::<Value>(&observation).expect("bounded counts"),
+        json!({"claims":0,"assigned":0,"sessions":0,"upstream":0,"source_bound":0,"published":0,"resolved":0,"delivery":0})
+    );
     fixture.shutdown().await;
+}
+
+// Diagnostic observation only. Row absence never proves no physical owner.
+async fn receiver_claim_observation(fixture: &RealReceiverFixture, request: &str) -> String {
+    let client = fixture
+        .selected
+        .local_client()
+        .expect("actual B selected voter client");
+    let mut rows = client.query_consistent(
+        "SELECT json_object('claims',COUNT(*),'assigned',COALESCE(SUM(owner_node_id IS NOT NULL),0),'sessions',(SELECT COUNT(*) FROM media_sessions m WHERE m.incarnation_id IN (SELECT incarnation_id FROM media_session_requests WHERE request_id=$1 AND user_id=$2)),'upstream',(SELECT COUNT(*) FROM sharing_relay_upstream b WHERE b.incarnation_id IN (SELECT incarnation_id FROM media_session_requests WHERE request_id=$1 AND user_id=$2)),'source_bound',(SELECT COUNT(*) FROM sharing_relay_upstream b WHERE b.source_session_id IS NOT NULL AND b.source_incarnation_id IS NOT NULL AND b.capability_envelope IS NOT NULL AND b.incarnation_id IN (SELECT incarnation_id FROM media_session_requests WHERE request_id=$1 AND user_id=$2)),'published',(SELECT COUNT(*) FROM media_sessions m WHERE m.publication_ready_at_ms=0 AND m.incarnation_id IN (SELECT incarnation_id FROM media_session_requests WHERE request_id=$1 AND user_id=$2)),'resolved',COALESCE(SUM(state='resolved'),0),'delivery',(SELECT COUNT(*) FROM sharing_delivery_grants d WHERE d.incarnation_id IN (SELECT incarnation_id FROM media_session_requests WHERE request_id=$1 AND user_id=$2))) AS payload FROM media_session_requests WHERE request_id=$1 AND user_id=$2",
+        hiqlite::params!(request.to_owned(), fixture.viewer_id),
+    ).await.expect("actual B read-only claim-stage observation");
+    assert_eq!(rows.len(), 1);
+    rows[0].get("payload")
+}
+
+fn fixture_router(state: crate::state::AppState) -> axum::Router {
+    axum::Router::new()
+        .without_v07_checks()
+        .nest(
+            "/api/v1",
+            super::shared_receiver_ingress::candidate_router().with_state(state.clone()),
+        )
+        .merge(super::router(state).without_v07_checks())
 }
 
 #[tokio::test]
@@ -314,7 +354,7 @@ async fn sharing_receiver_real_pinned_source_h1_b_h1_h2_start_resources_and_conf
 }
 
 async fn actual_pinned_playback(address: IpAddr, h2: bool) {
-    use axum::{http::StatusCode, Router};
+    use axum::http::StatusCode;
     use plurx_core::sharing_tls::{LiveNodeTls, SharingTlsListener};
     let fixture = real_receiver_fixture(address, SourceFixtureMode::Copy).await;
     let tls = Arc::new(
@@ -338,10 +378,38 @@ async fn actual_pinned_playback(address: IpAddr, h2: bool) {
         port: source_listener.local_addr().expect("Source bind").port(),
         spki_sha256: pin,
     };
+    // Actual HTTP-arrival diagnostics only, never no-admission/settlement proof.
+    let source_starts = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let source_start_status = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let observed_starts = source_starts.clone();
+    let observed_status = source_start_status.clone();
+    let source_app = super::sharing::peer_router((*fixture.source.state).clone()).layer(
+        axum::middleware::from_fn(
+            move |request: Request<Body>, next: axum::middleware::Next| {
+                let starts = observed_starts.clone();
+                let status = observed_status.clone();
+                async move {
+                    let is_start = request.method() == axum::http::Method::POST
+                        && request.uri().path().ends_with("/sessions");
+                    if is_start {
+                        starts.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    }
+                    let response = next.run(request).await;
+                    if is_start {
+                        status.store(
+                            usize::from(response.status().as_u16()),
+                            std::sync::atomic::Ordering::Relaxed,
+                        );
+                    }
+                    response
+                }
+            },
+        ),
+    );
     let (source_stop, source_stopped) = tokio::sync::oneshot::channel();
     let source_task = tokio::spawn(crate::serve_http(
         SharingTlsListener::new(source_listener, tls),
-        super::sharing::peer_router((*fixture.source.state).clone()),
+        source_app,
         async move {
             let _ = source_stopped.await;
         },
@@ -350,14 +418,7 @@ async fn actual_pinned_playback(address: IpAddr, h2: bool) {
     fixture.pair(endpoint).await;
     // The live Start remains uninstalled in production. Only this disposable
     // fixture installs the typed candidate on the real B serving stack.
-    // The public router carries the Plex facade literal colon segments.
-    let app = Router::new()
-        .without_v07_checks()
-        .nest(
-            "/api/v1",
-            super::shared_receiver_ingress::candidate_router().with_state(fixture.state.clone()),
-        )
-        .merge(super::router(fixture.state.clone()));
+    let app = fixture_router(fixture.state.clone());
     let b_listener = tokio::net::TcpListener::bind((address, 0))
         .await
         .expect("actual B CGNAT listener");
@@ -402,6 +463,64 @@ async fn actual_pinned_playback(address: IpAddr, h2: bool) {
         serde_json::from_slice(&fixture.source.request).expect("Source complete recipe fixture");
     let session =
         serde_json::to_vec(&original["session"]).expect("complete ordinary CreateSession body");
+    let summary = fixture
+        .state
+        .store
+        .sharing_import(fixture.import_id)
+        .await
+        .expect("current import read")
+        .expect("current import")
+        .summary;
+    let key = super::shared_artwork::receiver_key(&fixture.state)
+        .await
+        .expect("actual B locator key read")
+        .expect("actual B locator key");
+    let reference = key
+        .verify(
+            base.rsplit('/').next().expect("actual locator"),
+            fixture.import_id,
+            summary.lifecycle_generation,
+        )
+        .expect("actual advertised locator verification");
+    let login_hash = plurx_core::auth::hash_token(&fixture.original_login);
+    let intent = plurx_core::sharing_receiver_sessions::ReceiverSessionIntent {
+        scope: plurx_core::store::sharing_catalogue::ReceiverCatalogueScope {
+            import_id: summary.id,
+            source_server_id: summary.source_server_id,
+            catalogue_epoch: summary.catalogue_epoch,
+            lifecycle_generation: summary.lifecycle_generation,
+            assignment_generation: summary.assignment_generation,
+            endpoint_generation: summary.endpoint_generation,
+            claim_id: summary.claim_id,
+            remote_grant_id: summary.remote_grant_id.expect("actual remote grant"),
+            libraries: vec![reference.item.library_id.clone()],
+        },
+        user_id: fixture.viewer_id,
+        login_hash: login_hash.clone(),
+        recipe: plurx_core::sharing_receiver_sessions::RemoteSourceRecipe {
+            kind: plurx_core::sharing_receiver_sessions::ReceiverProducerKind::RemoteSource,
+            version: 1,
+            reference: reference.item,
+            lifecycle_generation: reference.lifecycle_generation,
+            file_id: reference.file_id,
+            file_revision: reference.revision,
+            source_request_id: Uuid::new_v4(),
+            parent_login_hash: login_hash,
+            request_json: original["session"].to_string(),
+        },
+        source_position_ms: 0,
+    };
+    // This is only an actual read-only B metadata check, never Source admission.
+    assert!(
+        fixture
+            .state
+            .store
+            .prepare_receiver_session_authority(intent)
+            .await
+            .expect("actual B metadata authority read")
+            .is_some(),
+        "current original-login full-reference B metadata authority; H2={h2}"
+    );
     let (status, _, bytes) = b_request(
         b_address,
         h2,
@@ -411,10 +530,31 @@ async fn actual_pinned_playback(address: IpAddr, h2: bool) {
         session,
     )
     .await;
+    if status != StatusCode::OK {
+        eprintln!(
+            "actual Source HTTP diagnostic starts={}, last_status={}",
+            source_starts.load(std::sync::atomic::Ordering::Relaxed),
+            source_start_status.load(std::sync::atomic::Ordering::Relaxed)
+        );
+        eprintln!(
+            "actual B diagnostic claim-stage counts: {}",
+            receiver_claim_observation(
+                &fixture,
+                original["session"]["request_id"]
+                    .as_str()
+                    .expect("actual B request UUID")
+            )
+            .await
+        );
+    }
     assert_eq!(
         status,
         StatusCode::OK,
-        "actual B Start through real Source actor; H2={h2}"
+        "actual B Start through real Source actor; H2={h2}; code={}",
+        serde_json::from_slice::<Value>(&bytes)
+            .ok()
+            .and_then(|value| value.get("code").and_then(Value::as_str).map(str::to_owned))
+            .unwrap_or_else(|| "no_typed_error_code".into())
     );
     let start: Value = serde_json::from_slice(&bytes).expect("complete B Start DTO");
     let session = start["session_id"].as_str().expect("actual B session ID");
