@@ -295,6 +295,9 @@ pub(crate) fn project_shared_start(
         || !v4(receiver_incarnation)
         || !(1..=9_007_199_254_740_991).contains(&receiver_owner_epoch)
         || response.control.is_none()
+        // A shared Start is always a VOD presentation (B accepts only `vod`
+        // or `direct`, and direct play has its own reply).
+        || !response.vod
         || source_session == receiver_session
         || response.session_id != source_session.to_string()
     {
@@ -320,11 +323,7 @@ pub(crate) fn project_shared_start(
             || control.control_epoch == 0
             || control.control_epoch > 9_007_199_254_740_991
             || control.next_exchange_ms != crate::playback_control::NEXT_EXCHANGE_MS
-            || !matches!(
-                control.lease_timeout_ms,
-                crate::playback_control::ROLLING_LEASE_TIMEOUT_MS
-                    | crate::playback_control::VOD_LEASE_TIMEOUT_MS
-            )
+            || control.lease_timeout_ms != crate::playback_control::VOD_LEASE_TIMEOUT_MS
             || Uuid::parse_str(&control.generation)
                 .ok()
                 .is_none_or(|id| !v4(id) || id.to_string() != control.generation)
