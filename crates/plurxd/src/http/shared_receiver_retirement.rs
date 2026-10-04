@@ -15,6 +15,10 @@ pub(super) struct ReceiverBodyRegistry {
 struct BodyState {
     closed: bool,
     active: usize,
+    connections: Vec<(
+        std::sync::Weak<dyn Send + Sync>,
+        std::sync::Weak<ReceiverResourceGuard>,
+    )>,
 }
 pub(super) struct ReceiverResourceGuard(Arc<ReceiverBodyRegistry>);
 impl Drop for ReceiverResourceGuard {
@@ -42,6 +46,33 @@ impl ReceiverBodyRegistry {
         }
         state.active += 1;
         Ok(Arc::new(ReceiverResourceGuard(self.clone())))
+    }
+    pub(super) fn reserve_connection(
+        self: &Arc<Self>,
+        connection: &crate::SharingConnectionCancellation,
+    ) -> Result<(Arc<ReceiverResourceGuard>, bool), ReceiverStartError> {
+        let key = connection.ownership_key();
+        let mut state = self.state.lock().expect("receiver bodies");
+        if state.closed {
+            return Err(ReceiverStartError::Capacity);
+        }
+        state
+            .connections
+            .retain(|(key, guard)| key.strong_count() > 0 && guard.strong_count() > 0);
+        for (existing, guard) in &state.connections {
+            if std::sync::Weak::ptr_eq(existing, &key) {
+                if let Some(guard) = guard.upgrade() {
+                    return Ok((guard, false));
+                }
+            }
+        }
+        if state.active >= 32 {
+            return Err(ReceiverStartError::Capacity);
+        }
+        state.active += 1;
+        let guard = Arc::new(ReceiverResourceGuard(self.clone()));
+        state.connections.push((key, Arc::downgrade(&guard)));
+        Ok((guard, true))
     }
     fn close(&self) {
         self.state.lock().expect("receiver bodies").closed = true;
@@ -461,6 +492,42 @@ mod tests {
         let joined = cleanup.await.expect("cleanup owner");
         assert!(Arc::ptr_eq(&joined.0, &registry));
         assert_eq!(registry.state.lock().expect("registry").active, 0);
+    }
+    #[tokio::test]
+    async fn receiver_connection_registration_deduplicates_streams_and_keeps_join_pending() {
+        let registry = Arc::new(ReceiverBodyRegistry::default());
+        let connection = crate::SharingConnectionCancellation::new();
+        let (first, fresh) = registry
+            .reserve_connection(&connection)
+            .expect("connection");
+        assert!(fresh);
+        let (second, fresh) = registry
+            .reserve_connection(&connection.clone())
+            .expect("same connection");
+        assert!(!fresh);
+        assert!(Arc::ptr_eq(&first, &second));
+        assert_eq!(registry.state.lock().expect("registry").active, 1);
+        let other = crate::SharingConnectionCancellation::new();
+        let (third, fresh) = registry
+            .reserve_connection(&other)
+            .expect("other connection");
+        assert!(fresh);
+        assert_eq!(registry.state.lock().expect("registry").active, 2);
+        registry.close();
+        assert!(registry.reserve_connection(&connection).is_err());
+        drop(first);
+        drop(third);
+        assert_eq!(registry.state.lock().expect("registry").active, 1);
+        let owner = registry.clone();
+        let joining = tokio::spawn(async move { owner.join().await });
+        tokio::task::yield_now().await;
+        assert!(
+            !joining.is_finished(),
+            "body EOF cannot release retained writer guard"
+        );
+        drop(second);
+        let joined = joining.await.expect("actual ownership join");
+        assert!(Arc::ptr_eq(&joined.0, &registry));
     }
     #[tokio::test]
     async fn receiver_resource_retirement_remains_bounded_and_closes_empty_admissions() {
