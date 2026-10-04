@@ -24,8 +24,8 @@ use uuid::Uuid;
 #[path = "sharing_playback_client.rs"]
 mod playback;
 pub(crate) use playback::{
-    CleanupPeerConnection, SourceEndReceipt, SourcePeerLineage, SourcePeerSession,
-    SourceStatusReceipt,
+    CleanupPeerConnection, SourceEndReceipt, SourcePeerLineage, SourcePeerResource,
+    SourcePeerSession, SourceStatusReceipt,
 };
 
 const MANAGEMENT_RESPONSE_BYTES: usize = 128 * 1024;
@@ -95,6 +95,44 @@ pub(crate) struct PeerConnection {
     host: String,
     verified_endpoint: Option<Endpoint>,
 }
+
+// The socket future is dropped before its lifetime guard, including task
+// cancellation and unwinding. A JoinHandle abort request is not the receipt.
+type PeerDriverFuture =
+    std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), hyper::Error>> + Send>>;
+struct GuardedPeerDriver {
+    connection: Option<PeerDriverFuture>,
+    lifetime: Option<std::sync::Arc<dyn Send + Sync>>,
+}
+impl std::future::Future for GuardedPeerDriver {
+    type Output = ();
+    fn poll(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<()> {
+        match self
+            .connection
+            .as_mut()
+            .expect("owned peer connection")
+            .as_mut()
+            .poll(cx)
+        {
+            std::task::Poll::Pending => std::task::Poll::Pending,
+            std::task::Poll::Ready(_) => {
+                drop(self.connection.take());
+                drop(self.lifetime.take());
+                std::task::Poll::Ready(())
+            }
+        }
+    }
+}
+impl Drop for GuardedPeerDriver {
+    fn drop(&mut self) {
+        drop(self.connection.take());
+        drop(self.lifetime.take());
+    }
+}
+
 impl Drop for PeerConnection {
     fn drop(&mut self) {
         self.connection.abort();
@@ -114,12 +152,34 @@ impl PeerConnection {
         .await
         .map_err(|_| PeerError::Unavailable)?
     }
+    pub(crate) async fn verified_with_lifetime(
+        manager: &SharingManager,
+        endpoints: &[Endpoint],
+        expected: &SharingIdentity,
+        lifetime: std::sync::Arc<dyn Send + Sync>,
+    ) -> Result<(Self, Identity), PeerError> {
+        tokio::time::timeout(Duration::from_secs(5), async {
+            let mut peer =
+                Self::connect_pinned_with_lifetime(manager, endpoints, Some(lifetime)).await?;
+            let identity = peer.verify_identity(expected).await?;
+            Ok((peer, identity))
+        })
+        .await
+        .map_err(|_| PeerError::Unavailable)?
+    }
     // The cleanup-only wrapper may dial the retained approved pin while
     // identity reads are disabled. Only its authenticated exact End echo can
     // produce a cleanup receipt; this helper confers no content authority.
     async fn connect_pinned(
         manager: &SharingManager,
         endpoints: &[Endpoint],
+    ) -> Result<Self, PeerError> {
+        Self::connect_pinned_with_lifetime(manager, endpoints, None).await
+    }
+    async fn connect_pinned_with_lifetime(
+        manager: &SharingManager,
+        endpoints: &[Endpoint],
+        lifetime: Option<std::sync::Arc<dyn Send + Sync>>,
     ) -> Result<Self, PeerError> {
         use futures_util::{stream::FuturesUnordered, StreamExt};
         plurx_core::sharing::validate_endpoints(endpoints)
@@ -210,7 +270,7 @@ impl PeerConnection {
             while let Some(result) = attempts.next().await {
                 if let Ok((stream, host, endpoint)) = result {
                     drop(attempts);
-                    let mut peer = Self::from_stream(stream, host).await?;
+                    let mut peer = Self::from_stream_with_lifetime(stream, host, lifetime).await?;
                     peer.verified_endpoint = Some(endpoint);
                     return Ok(peer);
                 }
@@ -220,19 +280,30 @@ impl PeerConnection {
         .await
         .map_err(|_| PeerError::Unavailable)?
     }
+    #[cfg(test)]
     async fn from_stream<
         S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
     >(
         stream: S,
         host: String,
     ) -> Result<Self, PeerError> {
+        Self::from_stream_with_lifetime(stream, host, None).await
+    }
+    async fn from_stream_with_lifetime<
+        S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
+    >(
+        stream: S,
+        host: String,
+        lifetime: Option<std::sync::Arc<dyn Send + Sync>>,
+    ) -> Result<Self, PeerError> {
         let (sender, connection) = hyper::client::conn::http1::handshake(TokioIo::new(stream))
             .await
             .map_err(|_| PeerError::Unavailable)?;
         Ok(Self {
             sender,
-            connection: tokio::spawn(async move {
-                let _ = connection.await;
+            connection: tokio::spawn(GuardedPeerDriver {
+                connection: Some(Box::pin(connection)),
+                lifetime,
             }),
             host,
             verified_endpoint: None,
@@ -1199,5 +1270,95 @@ mod tests {
         drop(peer);
         server.abort();
         let _ = server.await;
+    }
+}
+
+#[cfg(test)]
+mod driver_lifetime_tests {
+    use super::*;
+    use std::sync::{Arc, Mutex};
+    struct LifetimeReceipt {
+        socket_fd: i32,
+        done: Mutex<Option<tokio::sync::oneshot::Sender<bool>>>,
+    }
+    impl Drop for LifetimeReceipt {
+        fn drop(&mut self) {
+            // No await/open/allocation separates the descriptor census from
+            // observing the guard's actual Drop after the Hyper driver.
+            let closed = unsafe { libc::fcntl(self.socket_fd, libc::F_GETFD) } == -1;
+            if let Some(done) = self.done.get_mut().expect("receipt").take() {
+                let _ = done.send(closed);
+            }
+        }
+    }
+    #[tokio::test]
+    async fn source_peer_guard_survives_body_eof_and_drops_after_actual_socket_close() {
+        use std::os::fd::AsRawFd;
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("listener");
+        let stream = tokio::net::TcpStream::connect(listener.local_addr().expect("address"))
+            .await
+            .expect("client");
+        let fd = stream.as_raw_fd();
+        let (server, _) = listener.accept().await.expect("server");
+        let served = tokio::spawn(async move {
+            hyper::server::conn::http1::Builder::new()
+                .serve_connection(
+                    TokioIo::new(server),
+                    hyper::service::service_fn(|_| async {
+                        Ok::<_, std::convert::Infallible>(axum::http::Response::new(Body::from(
+                            "actual resource bytes",
+                        )))
+                    }),
+                )
+                .await
+        });
+        let (done, mut receipt) = tokio::sync::oneshot::channel();
+        let lifetime: Arc<dyn Send + Sync> = Arc::new(LifetimeReceipt {
+            socket_fd: fd,
+            done: Mutex::new(Some(done)),
+        });
+        let mut peer =
+            PeerConnection::from_stream_with_lifetime(stream, "fixture".into(), Some(lifetime))
+                .await
+                .expect("driver");
+        let response = peer
+            .sender
+            .send_request(
+                Request::builder()
+                    .uri("/")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        let bytes = response
+            .into_body()
+            .collect()
+            .await
+            .expect("body")
+            .to_bytes();
+        assert_eq!(bytes.as_ref(), b"actual resource bytes");
+        assert!(
+            matches!(
+                receipt.try_recv(),
+                Err(tokio::sync::oneshot::error::TryRecvError::Empty)
+            ),
+            "body EOF must retain driver guard"
+        );
+        drop(peer);
+        assert!(
+            tokio::time::timeout(Duration::from_secs(5), receipt)
+                .await
+                .expect("actual guard drop")
+                .expect("receipt"),
+            "socket descriptor must close before guard Drop"
+        );
+        assert!(tokio::time::timeout(Duration::from_secs(5), served)
+            .await
+            .expect("server closure")
+            .expect("server task")
+            .is_ok());
     }
 }

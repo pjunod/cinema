@@ -634,3 +634,463 @@ mod status_tests {
         assert!(SourceStatusReceipt::parse(&encode(&cleanup), &session, &known).is_err());
     }
 }
+
+/// Validated Source response facts. This value does not authorize a B reader;
+/// that requires the original receiver login and its exact delivery grant.
+pub(crate) struct SourcePeerResource {
+    pub(crate) body: Body,
+    pub(crate) length: u64,
+    pub(crate) mime: &'static str,
+    pub(crate) etag: Option<String>,
+}
+struct SourceResourceHead {
+    length: u64,
+    mime: &'static str,
+    etag: Option<String>,
+    playlist: bool,
+}
+fn single_header<'a>(headers: &'a axum::http::HeaderMap, name: &str) -> Result<&'a str, PeerError> {
+    let mut values = headers.get_all(name).iter();
+    let value = values.next().ok_or(PeerError::InvalidResponse)?;
+    if values.next().is_some() {
+        return Err(PeerError::InvalidResponse);
+    }
+    value.to_str().map_err(|_| PeerError::InvalidResponse)
+}
+impl SourceResourceHead {
+    fn parse(
+        headers: &axum::http::HeaderMap,
+        session: &SourcePeerSession,
+        known: &SourcePeerLineage,
+        resource: &plurx_core::sharing_resources::SharingHlsResource,
+    ) -> Result<Self, PeerError> {
+        use plurx_core::sharing_resources::{
+            SharingHlsResourceKind as Kind, MAX_SHARING_PLAYLIST_BYTES,
+        };
+        let expected = [
+            (
+                "cinemashare-reference",
+                serde_json::to_string(&session.reference)
+                    .map_err(|_| PeerError::InvalidResponse)?,
+            ),
+            ("cinemashare-request-id", session.request_id.to_string()),
+            (
+                "cinemashare-incarnation-id",
+                known.incarnation_id.to_string(),
+            ),
+            ("cinemashare-session-id", known.session_id.to_string()),
+            ("cinemashare-control-epoch", known.control_epoch.to_string()),
+            ("cinemashare-resource", resource.as_str().to_owned()),
+        ];
+        for (name, value) in expected {
+            if single_header(headers, name)? != value {
+                return Err(PeerError::InvalidResponse);
+            }
+        }
+        if headers.contains_key(header::TRANSFER_ENCODING)
+            || headers.contains_key(header::CONTENT_ENCODING)
+            || single_header(headers, "cache-control")? != "no-store"
+        {
+            return Err(PeerError::InvalidResponse);
+        }
+        let length_text = single_header(headers, "content-length")?;
+        let length = length_text
+            .parse::<u64>()
+            .map_err(|_| PeerError::InvalidResponse)?;
+        if length == 0 || length.to_string() != length_text {
+            return Err(PeerError::InvalidResponse);
+        }
+        let (mime, maximum, playlist, file) = match resource.kind() {
+            Kind::Master | Kind::Index | Kind::Video | Kind::SubtitlePlaylist { .. } => (
+                "application/vnd.apple.mpegurl",
+                MAX_SHARING_PLAYLIST_BYTES as u64,
+                true,
+                false,
+            ),
+            Kind::Init => ("video/mp4", 256 * 1024 * 1024, false, true),
+            Kind::MediaSegment => ("video/iso.segment", 256 * 1024 * 1024, false, true),
+            Kind::SubtitleSegment { .. } => ("text/vtt", 2 * 1024 * 1024, false, false),
+        };
+        if length > maximum || single_header(headers, "content-type")? != mime {
+            return Err(PeerError::InvalidResponse);
+        }
+        let etag = if file {
+            let value = single_header(headers, "etag")?;
+            if value.is_empty()
+                || value.len() > 512
+                || !value.is_ascii()
+                || value.bytes().any(|b| b <= b' ' || b == 127)
+            {
+                return Err(PeerError::InvalidResponse);
+            }
+            Some(value.to_owned())
+        } else {
+            if headers.contains_key("etag") {
+                return Err(PeerError::InvalidResponse);
+            }
+            None
+        };
+        Ok(Self {
+            length,
+            mime,
+            etag,
+            playlist,
+        })
+    }
+}
+impl PeerConnection {
+    pub(crate) async fn file_resource(
+        mut self,
+        credential: &Secret,
+        viewer_hash: &str,
+        session: &SourcePeerSession,
+        known: &SourcePeerLineage,
+        resource: &plurx_core::sharing_resources::SharingHlsResource,
+    ) -> Result<SourcePeerResource, PeerError> {
+        if self.verified_endpoint.is_none()
+            || viewer_hash.len() != 64
+            || !viewer_hash
+                .bytes()
+                .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+        {
+            return Err(PeerError::InvalidResponse);
+        }
+        let mut value: Value = serde_json::from_slice(&session.end_body(Some(known))?)
+            .map_err(|_| PeerError::InvalidResponse)?;
+        value["resource"] = json!(resource.as_str());
+        let body = serde_json::to_vec(&value).map_err(|_| PeerError::InvalidResponse)?;
+        if body.len() > 128 * 1024 {
+            return Err(PeerError::InvalidResponse);
+        }
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+        let response = tokio::time::timeout_at(deadline, async {
+            let mut auth = HeaderValue::from_str(&format!("CinemaShare {}", credential.expose()))
+                .map_err(|_| PeerError::InvalidResponse)?;
+            auth.set_sensitive(true);
+            let mut viewer =
+                HeaderValue::from_str(viewer_hash).map_err(|_| PeerError::InvalidResponse)?;
+            viewer.set_sensitive(true);
+            let request = Request::builder()
+                .method(Method::POST)
+                .uri(format!(
+                    "/sharing/v1/items/{}/files/{}/sessions/{}/resources",
+                    session.reference.item_id.as_str(),
+                    session.reference.file_id.as_str(),
+                    session.request_id
+                ))
+                .header(header::HOST, &self.host)
+                .header(header::CONTENT_TYPE, "application/json")
+                .header(header::AUTHORIZATION, auth)
+                .header("cinemashare-viewer", viewer)
+                .body(Body::from(body))
+                .map_err(|_| PeerError::InvalidResponse)?;
+            self.sender
+                .ready()
+                .await
+                .map_err(|_| PeerError::Unavailable)?;
+            self.sender
+                .send_request(request)
+                .await
+                .map_err(|_| PeerError::Unavailable)
+        })
+        .await
+        .map_err(|_| PeerError::Unavailable)??;
+        match response.status() {
+            StatusCode::OK => {}
+            StatusCode::UNAUTHORIZED => return Err(PeerError::Authentication),
+            StatusCode::UPGRADE_REQUIRED => return Err(PeerError::ProtocolUnsupported),
+            status => return Err(PeerError::Rejected(status)),
+        }
+        let head = SourceResourceHead::parse(response.headers(), session, known, resource)?;
+        let body = if head.playlist {
+            let bytes = tokio::time::timeout_at(
+                deadline,
+                axum::body::to_bytes(Body::new(response.into_body()), head.length as usize),
+            )
+            .await
+            .map_err(|_| PeerError::Unavailable)?
+            .map_err(|_| PeerError::InvalidResponse)?;
+            if bytes.len() as u64 != head.length {
+                return Err(PeerError::InvalidResponse);
+            }
+            plurx_core::sharing_resources::validate_sharing_playlist(resource, &bytes)
+                .map_err(|_| PeerError::InvalidResponse)?;
+            // Close and join the actual upstream socket before returning the
+            // buffered playlist. Its EOF alone cannot release the task guard.
+            self.connection.abort();
+            let _ = (&mut self.connection).await;
+            Body::from(bytes)
+        } else {
+            bounded_resource_body(self, Body::new(response.into_body()), head.length, deadline)
+        };
+        Ok(SourcePeerResource {
+            body,
+            length: head.length,
+            mime: head.mime,
+            etag: head.etag,
+        })
+    }
+}
+
+struct ResourceStreamState {
+    _peer: PeerConnection,
+    incoming: Body,
+    remaining: u64,
+    pending: axum::body::Bytes,
+    deadline: tokio::time::Instant,
+}
+fn bounded_resource_body(
+    peer: PeerConnection,
+    incoming: Body,
+    remaining: u64,
+    deadline: tokio::time::Instant,
+) -> Body {
+    let stream = futures_util::stream::unfold(
+        Some(ResourceStreamState {
+            _peer: peer,
+            incoming,
+            remaining,
+            pending: axum::body::Bytes::new(),
+            deadline,
+        }),
+        |state| async move {
+            let mut state = state?;
+            loop {
+                if tokio::time::Instant::now() >= state.deadline {
+                    return Some((
+                        Err(std::io::Error::other("sharing resource deadline")),
+                        None,
+                    ));
+                }
+                if !state.pending.is_empty() {
+                    // Hyper may coalesce several original 64KiB Source writes.
+                    // Split its frame without copying or buffering the whole file.
+                    let bytes = state.pending.split_to(state.pending.len().min(64 * 1024));
+                    return Some((Ok(bytes), Some(state)));
+                }
+                let frame = tokio::time::timeout_at(state.deadline, state.incoming.frame()).await;
+                match frame {
+                    Ok(Some(Ok(frame))) => {
+                        let Ok(bytes) = frame.into_data() else {
+                            return Some((
+                                Err(std::io::Error::other("sharing resource trailers")),
+                                None,
+                            ));
+                        };
+                        if bytes.len() as u64 > state.remaining {
+                            return Some((
+                                Err(std::io::Error::other("sharing resource length")),
+                                None,
+                            ));
+                        }
+                        state.remaining -= bytes.len() as u64;
+                        state.pending = bytes;
+                    }
+                    Ok(None) if state.remaining == 0 => return None,
+                    _ => {
+                        return Some((
+                            Err(std::io::Error::other("sharing resource incomplete")),
+                            None,
+                        ))
+                    }
+                }
+            }
+        },
+    );
+    Body::from_stream(stream)
+}
+
+#[cfg(test)]
+mod resource_tests {
+    use super::*;
+    async fn wire_peer() -> (PeerConnection, tokio::io::DuplexStream) {
+        let (client, server) = tokio::io::duplex(4096);
+        (
+            PeerConnection::from_stream(client, "body-framing-fixture".into())
+                .await
+                .expect("actual Hyper driver"),
+            server,
+        )
+    }
+    #[tokio::test]
+    async fn source_resource_body_bounds_frames_bytes_and_original_deadline() {
+        let data = vec![b'x'; 3 * 64 * 1024 + 17];
+        let (peer, _server) = wire_peer().await;
+        let mut body = bounded_resource_body(
+            peer,
+            Body::from(data.clone()),
+            data.len() as u64,
+            tokio::time::Instant::now() + Duration::from_secs(5),
+        );
+        let mut received = Vec::new();
+        let mut frames = 0;
+        while let Some(frame) = body.frame().await {
+            let bytes = frame.expect("bounded body").into_data().expect("data");
+            assert!(bytes.len() <= 64 * 1024);
+            received.extend_from_slice(&bytes);
+            frames += 1;
+        }
+        assert_eq!(received, data);
+        assert_eq!(frames, 4);
+        for expected in [data.len() as u64 - 1, data.len() as u64 + 1] {
+            let (peer, _server) = wire_peer().await;
+            let body = bounded_resource_body(
+                peer,
+                Body::from(data.clone()),
+                expected,
+                tokio::time::Instant::now() + Duration::from_secs(5),
+            );
+            assert!(
+                body.collect().await.is_err(),
+                "exact declared length {expected}"
+            );
+        }
+        let (peer, _server) = wire_peer().await;
+        let body = bounded_resource_body(
+            peer,
+            Body::from(data.clone()),
+            data.len() as u64,
+            tokio::time::Instant::now(),
+        );
+        assert!(
+            body.collect().await.is_err(),
+            "even immediately ready bytes cannot reset the original deadline"
+        );
+        let (peer, _server) = wire_peer().await;
+        let frames =
+            futures_util::stream::iter([Ok::<_, std::convert::Infallible>(hyper::body::Frame::<
+                axum::body::Bytes,
+            >::trailers(
+                axum::http::HeaderMap::new(),
+            ))]);
+        let body = bounded_resource_body(
+            peer,
+            Body::new(http_body_util::StreamBody::new(frames)),
+            0,
+            tokio::time::Instant::now() + Duration::from_secs(5),
+        );
+        assert!(
+            body.collect().await.is_err(),
+            "closed resource representation has no trailers"
+        );
+    }
+    fn fixture() -> (
+        SourcePeerSession,
+        SourcePeerLineage,
+        plurx_core::sharing_resources::SharingHlsResource,
+        axum::http::HeaderMap,
+    ) {
+        use plurx_core::{sharing::SourceId, sharing_catalogue_details::FileRevision};
+        let reference = SourcePlaybackTarget {
+            server_id: Uuid::new_v4(),
+            catalogue_epoch: Uuid::new_v4(),
+            library_id: SourceId::parse("1").expect("library"),
+            item_id: SourceId::parse("9007199254740993").expect("item"),
+            file_id: SourceId::parse("9223372036854775807").expect("file"),
+            revision: FileRevision::parse(&"a".repeat(64)).expect("revision"),
+        };
+        let request_id = Uuid::new_v4();
+        let session=SourcePeerSession::new(reference.clone(),&serde_json::to_vec(&json!({"reference":reference,"session":{"request_id":request_id,"playback_id":"original-player","quality":"1080p","start_seconds":0,"caps":{"hevc":false}}})).expect("request")).expect("session");
+        let known = SourcePeerLineage {
+            incarnation_id: Uuid::new_v4(),
+            session_id: Uuid::new_v4(),
+            control_epoch: 7,
+        };
+        let resource =
+            plurx_core::sharing_resources::SharingHlsResource::parse("init.mp4").expect("resource");
+        let mut headers = axum::http::HeaderMap::new();
+        for (name, value) in [
+            (
+                "cinemashare-reference",
+                serde_json::to_string(&reference).expect("reference"),
+            ),
+            ("cinemashare-request-id", request_id.to_string()),
+            (
+                "cinemashare-incarnation-id",
+                known.incarnation_id.to_string(),
+            ),
+            ("cinemashare-session-id", known.session_id.to_string()),
+            ("cinemashare-control-epoch", known.control_epoch.to_string()),
+            ("cinemashare-resource", resource.as_str().to_owned()),
+            ("content-length", "8192".into()),
+            ("content-type", "video/mp4".into()),
+            ("etag", "immutable-file-8192".into()),
+            ("cache-control", "no-store".into()),
+        ] {
+            headers.insert(
+                axum::http::HeaderName::from_bytes(name.as_bytes()).expect("name"),
+                value.parse().expect("value"),
+            );
+        }
+        (session, known, resource, headers)
+    }
+    #[test]
+    fn source_resource_echo_requires_exact_lineage_single_headers_and_closed_representation() {
+        let (session, known, resource, headers) = fixture();
+        let parsed =
+            SourceResourceHead::parse(&headers, &session, &known, &resource).expect("exact head");
+        assert_eq!(parsed.length, 8192);
+        for (name, value) in [
+            ("cinemashare-request-id", Uuid::new_v4().to_string()),
+            ("cinemashare-incarnation-id", Uuid::new_v4().to_string()),
+            ("cinemashare-session-id", Uuid::new_v4().to_string()),
+            ("cinemashare-control-epoch", "8".into()),
+            ("cinemashare-resource", "seg00000.m4s".into()),
+            ("content-length", "08192".into()),
+            ("content-length", "0".into()),
+            ("content-length", (256_u64 * 1024 * 1024 + 1).to_string()),
+            ("content-type", "application/octet-stream".into()),
+            ("cache-control", "public".into()),
+            ("etag", "".into()),
+        ] {
+            let mut changed = headers.clone();
+            changed.insert(
+                axum::http::HeaderName::from_bytes(name.as_bytes()).expect("name"),
+                value.parse().expect("value"),
+            );
+            assert!(
+                SourceResourceHead::parse(&changed, &session, &known, &resource).is_err(),
+                "{name}"
+            );
+        }
+        for name in [
+            "cinemashare-reference",
+            "cinemashare-resource",
+            "content-length",
+            "content-type",
+            "etag",
+        ] {
+            let mut changed = headers.clone();
+            changed.append(
+                axum::http::HeaderName::from_bytes(name.as_bytes()).expect("name"),
+                headers[name].clone(),
+            );
+            assert!(
+                SourceResourceHead::parse(&changed, &session, &known, &resource).is_err(),
+                "duplicate {name}"
+            );
+        }
+        for name in ["transfer-encoding", "content-encoding"] {
+            let mut changed = headers.clone();
+            changed.insert(
+                axum::http::HeaderName::from_bytes(name.as_bytes()).expect("name"),
+                "identity".parse().expect("value"),
+            );
+            assert!(
+                SourceResourceHead::parse(&changed, &session, &known, &resource).is_err(),
+                "{name}"
+            );
+        }
+        let mut changed = headers;
+        let mut reference = serde_json::to_value(&session.reference).expect("reference");
+        reference["revision"] = json!("b".repeat(64));
+        changed.insert(
+            "cinemashare-reference",
+            serde_json::to_string(&reference)
+                .expect("reference")
+                .parse()
+                .expect("header"),
+        );
+        assert!(SourceResourceHead::parse(&changed, &session, &known, &resource).is_err());
+    }
+}

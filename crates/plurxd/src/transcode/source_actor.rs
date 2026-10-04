@@ -120,6 +120,7 @@ pub(super) struct SourceWorkerRegistry {
     entries: std::sync::Mutex<Vec<Arc<SourceViewerInner>>>,
     index_hooks: Arc<crate::fragindex::SourceIndexHookOwner>,
     probe_hooks: Arc<super::source_preparation::SourceProbeHookOwner>,
+    native_hooks: Arc<super::source_preparation::SourceProbeHookOwner>,
 }
 struct SourceViewerInner {
     assignment: SourceDispatchAssignment,
@@ -132,6 +133,7 @@ struct SourceViewerInner {
 struct SourcePreparationSettlements {
     index: Option<crate::fragindex::SourceIndexSettlement>,
     probe: Option<super::source_preparation::SourceProbeSettlement>,
+    native: Option<super::source_subtitles::SourceNativeSettlement>,
 }
 impl SourcePreparationSettlements {
     fn matches(&self, assignment: &SourceDispatchAssignment) -> bool {
@@ -140,6 +142,10 @@ impl SourcePreparationSettlements {
             .is_none_or(|receipt| receipt.matches(assignment))
             && self
                 .probe
+                .as_ref()
+                .is_none_or(|receipt| receipt.matches(assignment))
+            && self
+                .native
                 .as_ref()
                 .is_none_or(|receipt| receipt.matches(assignment))
     }
@@ -152,6 +158,7 @@ enum SourcePhysicalSettlement {
     ),
 }
 struct SourceViewerState {
+    native: Option<Arc<super::source_subtitles::SourceNativeTracks>>,
     start: Option<Result<crate::http::hls::StartResponse, SourceWorkerError>>,
     retirement_requested: bool,
     settled: Option<Result<(), SourceWorkerError>>,
@@ -166,6 +173,7 @@ pub(crate) struct SourceViewerActor(Arc<SourceViewerInner>);
 
 pub(crate) enum SourceResourcePayload {
     Playlist(Vec<u8>),
+    SubtitleText(Vec<u8>),
     File(crate::vodserve::SegmentReady),
 }
 pub(crate) struct SourceOpenedResource {
@@ -341,18 +349,40 @@ impl SourceViewerActor {
         resource: &SharingHlsResource,
         deadline: Instant,
     ) -> Result<SourceOpenedResource, SourceWorkerError> {
-        // Native wrappers, subtitles and diagnostics need their own admitted
-        // producers/representation builders; this first copy actor is plain VOD.
-        if resource.as_str().contains('?')
-            || !matches!(
+        let native = self
+            .0
+            .state
+            .lock()
+            .expect("Source native resource")
+            .native
+            .clone();
+        let query = resource.as_str().split_once('?').map(|(_, query)| query);
+        if query.is_some_and(|query| {
+            query.split('&').any(|part| match part.split_once('=') {
+                Some(("native", "1")) => false,
+                Some(("subtitle", value)) => native.as_ref().is_none_or(|tracks| {
+                    value.parse::<i64>().ok() != Some(tracks.selected().unwrap_or(-1))
+                }),
+                _ => true,
+            })
+        }) || (query.is_some() && native.is_none())
+            || (matches!(
                 resource.kind(),
-                SharingHlsResourceKind::Index
-                    | SharingHlsResourceKind::Init
-                    | SharingHlsResourceKind::MediaSegment
-            )
+                SharingHlsResourceKind::Master
+                    | SharingHlsResourceKind::Video
+                    | SharingHlsResourceKind::SubtitlePlaylist { .. }
+                    | SharingHlsResourceKind::SubtitleSegment { .. }
+            ) && native.is_none())
         {
             return Err(SourceWorkerError::Unsupported);
         }
+        let kind = if resource.kind() == SharingHlsResourceKind::Index
+            && query.is_some_and(|query| query.split('&').any(|part| part == "native=1"))
+        {
+            SharingHlsResourceKind::Master
+        } else {
+            resource.kind()
+        };
         let manager = self
             .0
             .manager
@@ -381,8 +411,8 @@ impl SourceViewerActor {
         initial
             .validate_observation_freshness(crate::fragment_index_cluster::unix_ms())
             .map_err(|_| SourceWorkerError::Unavailable)?;
-        let (payload, owner) = match resource.kind() {
-            SharingHlsResourceKind::Index => {
+        let (payload, owner) = match kind {
+            SharingHlsResourceKind::Index | SharingHlsResourceKind::Video => {
                 let publication = manager
                     .vod
                     .playlist(&session_id)
@@ -413,8 +443,83 @@ impl SourceViewerActor {
                     publication.owner,
                 )
             }
-            _ => return Err(SourceWorkerError::Unsupported),
+            SharingHlsResourceKind::Master
+            | SharingHlsResourceKind::SubtitlePlaylist { .. }
+            | SharingHlsResourceKind::SubtitleSegment { .. } => {
+                let tracks = native.as_ref().ok_or(SourceWorkerError::Unsupported)?;
+                let publication = manager
+                    .vod
+                    .playlist(&session_id)
+                    .await
+                    .ok_or(SourceWorkerError::Unavailable)?;
+                let video = publication
+                    .result
+                    .map_err(|_| SourceWorkerError::Unavailable)?;
+                let facts = manager
+                    .vod
+                    .hls_facts(&session_id)
+                    .await
+                    .ok_or(SourceWorkerError::Unavailable)?;
+                if facts.file.id.to_string() != self.0.assignment.binding().file_id().as_str()
+                    || !manager
+                        .vod
+                        .response_owner_is_live(&session_id, &facts.response_owner)
+                        .await
+                {
+                    return Err(SourceWorkerError::Unavailable);
+                }
+                let (file, context) = source_native_presentation(facts, tracks.probe());
+                let payload = match kind {
+                    SharingHlsResourceKind::Master => {
+                        SourceResourcePayload::Playlist(crate::http::hls::source_native_master(
+                            &file,
+                            tracks.selected(),
+                            &context,
+                            &tracks.indexes(),
+                        ))
+                    }
+                    SharingHlsResourceKind::SubtitlePlaylist { index } => {
+                        tracks.track(index).ok_or(SourceWorkerError::Unsupported)?;
+                        SourceResourcePayload::Playlist(crate::http::hls::source_native_playlist(
+                            &video,
+                        ))
+                    }
+                    SharingHlsResourceKind::SubtitleSegment { index } => {
+                        let track = tracks.track(index).ok_or(SourceWorkerError::Unsupported)?;
+                        let name = resource
+                            .as_str()
+                            .split('?')
+                            .next()
+                            .unwrap_or("")
+                            .rsplit('/')
+                            .next()
+                            .unwrap_or("");
+                        let sequence = name
+                            .strip_prefix("seg")
+                            .and_then(|name| name.strip_suffix(".vtt"))
+                            .and_then(|name| name.parse::<u64>().ok())
+                            .ok_or(SourceWorkerError::Unsupported)?;
+                        let bytes = crate::http::hls::source_native_segment(
+                            &video,
+                            track,
+                            sequence,
+                            context.media_origin_seconds,
+                        )
+                        .ok_or(SourceWorkerError::Unavailable)?;
+                        if bytes.len() > 2 * 1024 * 1024 {
+                            return Err(SourceWorkerError::Capacity);
+                        }
+                        SourceResourcePayload::SubtitleText(bytes)
+                    }
+                    _ => return Err(SourceWorkerError::Unsupported),
+                };
+                (payload, publication.owner)
+            }
         };
+        if let SourceResourcePayload::Playlist(bytes) = &payload {
+            plurx_core::sharing_resources::validate_sharing_playlist(resource, bytes)
+                .map_err(|_| SourceWorkerError::Unsupported)?;
+        }
         guard.source = Some(
             manager
                 .vod
@@ -422,6 +527,18 @@ impl SourceViewerActor {
                 .await
                 .map_err(|_| SourceWorkerError::Unavailable)?,
         );
+        if let Some(native) = native.as_ref() {
+            if !native.matches(
+                &self.0.assignment,
+                guard
+                    .source
+                    .as_ref()
+                    .ok_or(SourceWorkerError::Unavailable)?
+                    .object_version(),
+            ) {
+                return Err(SourceWorkerError::Unavailable);
+            }
+        }
         // A parked segment can outlive the first observation's five-second
         // window. Re-observe real membership/current binding after the wait.
         let proof = self.0.gate.current_owned(&self.0.assignment).await?;
@@ -603,6 +720,7 @@ impl TranscodeManager {
                 settled: None,
                 bodies: 0,
                 planned_session: None,
+                native: None,
             }),
             changed: tokio::sync::Notify::new(),
         });
@@ -731,6 +849,59 @@ impl TranscodeManager {
         Ok(())
     }
 
+    async fn prepare_source_native_tracks(
+        &self,
+        owner: &Arc<SourceViewerInner>,
+        prepared: &crate::http::hls::PreparedSourcePlayback,
+        deadline: Instant,
+        work: &mut Option<super::source_subtitles::SourceNativeOperation>,
+    ) -> Result<Arc<super::source_subtitles::SourceNativeTracks>, SourceWorkerError> {
+        super::source_subtitles::supported_tracks(prepared.file(), prepared.native_subtitles().1)
+            .map_err(|_| SourceWorkerError::Unsupported)?;
+        let admit_deadline = deadline.min(Instant::now() + crate::admission::QUEUE_WAIT);
+        let permit = loop {
+            if Instant::now() >= admit_deadline {
+                return Err(SourceWorkerError::Capacity);
+            }
+            match crate::vodencode::EncodePermit::try_source_copy(
+                &self.admissions,
+                self.store.as_ref(),
+            )
+            .await
+            {
+                crate::vodencode::SourceCopyPermitRead::Admitted(permit) => break permit,
+                crate::vodencode::SourceCopyPermitRead::Unavailable => {
+                    return Err(SourceWorkerError::Unavailable)
+                }
+                crate::vodencode::SourceCopyPermitRead::Capacity => {
+                    tokio::time::sleep(Duration::from_millis(100)).await
+                }
+            }
+        };
+        let source =
+            crate::fragment_index_cluster::open_source_playback_fence(prepared.file(), None)
+                .await
+                .map_err(|_| SourceWorkerError::Unavailable)?;
+        *work = Some(super::source_subtitles::start_source_native(
+            prepared.file().clone(),
+            source,
+            owner.assignment.clone(),
+            Arc::clone(&owner.gate),
+            prepared.native_subtitles().1,
+            permit,
+            Arc::clone(&self.store),
+            deadline,
+            Arc::clone(&self.source_workers.native_hooks),
+        ));
+        let tracks = work
+            .as_ref()
+            .expect("Source native owner")
+            .outcome()
+            .await
+            .map_err(|_| SourceWorkerError::Unavailable)?;
+        Ok(Arc::new(tracks))
+    }
+
     async fn prepare_source_encoded_recipe(
         &self,
         owner: &Arc<SourceViewerInner>,
@@ -798,6 +969,7 @@ impl TranscodeManager {
         let mut reserved: Option<crate::vodserve::ReservedSourceVodRendition> = None;
         let mut index_work = None;
         let mut probe_work = None;
+        let mut native_work = None;
         let mut unowned_existing = true;
         let start = tokio::time::timeout_at(
             tokio::time::Instant::from_std(deadline),
@@ -818,8 +990,7 @@ impl TranscodeManager {
                     return Err(SourceWorkerError::Unresolved);
                 }
                 unowned_existing = false;
-                if prepared.native_subtitles().0
-                    || prepared.native_subtitles().1.is_some()
+                if (!prepared.native_subtitles().0 && prepared.native_subtitles().1.is_some())
                     || prepared.request().subtitle_burn.is_some()
                     || prepared.request().previous_session_id.is_some()
                     || prepared.request().reopen_reason.is_some()
@@ -838,6 +1009,21 @@ impl TranscodeManager {
                     .await
                     .map_err(|_| SourceWorkerError::Unavailable)?
                     .ok_or(SourceWorkerError::Unavailable)?;
+                if prepared.native_subtitles().0 {
+                    if plurx_core::playback::hdr_route(prepared.file()).is_some()
+                        || plurx_core::playback::is_dolby_vision(prepared.file())
+                    {
+                        return Err(SourceWorkerError::Unsupported);
+                    }
+                    let tracks = Box::pin(self.prepare_source_native_tracks(
+                        &owner,
+                        &prepared,
+                        deadline,
+                        &mut native_work,
+                    ))
+                    .await?;
+                    owner.state.lock().expect("Source native actor").native = Some(tracks);
+                }
                 let encoding = if matches!(prepared.request().kind, SessionKind::Transcode { .. }) {
                     Some(
                         Box::pin(self.prepare_source_encoded_recipe(
@@ -1058,6 +1244,10 @@ impl TranscodeManager {
             work.cancel();
             preparations.probe = Some(work.settle().await);
         }
+        if let Some(work) = native_work.as_ref() {
+            work.cancel();
+            preparations.native = Some(work.settle().await);
+        }
         let mut physical = None;
         let settlement = loop {
             let result = if unowned_existing {
@@ -1193,5 +1383,67 @@ impl TranscodeManager {
         } else {
             Err(SourceWorkerError::Unresolved)
         }
+    }
+}
+
+/// Actual frozen VOD recipe facts plus SQL-bounded captured Source probe. This
+/// avoids the generic Copy metadata path's mutable unbounded probe read.
+fn source_native_presentation(
+    facts: crate::vodserve::VodHlsFacts,
+    probe: &str,
+) -> (plurx_core::domain::MediaFile, HlsContext) {
+    if let Some(encoding) = facts.encoding.as_ref() {
+        let file = encoded_vod_presentation_file(
+            facts.file,
+            encoding.options.target_height,
+            encoding.options.pipeline.output_grade(),
+            Some(encoding.plan.output_contract()),
+        );
+        let mut codecs = encoding
+            .plan
+            .output_contract()
+            .hls_codecs()
+            .unwrap_or_else(|| {
+                transcoded_hls_codecs(
+                    encoding.options.pipeline.output_grade(),
+                    encoding.options.target_height,
+                )
+            });
+        if file.audio_streams.is_empty() {
+            codecs.truncate(codecs.find(',').unwrap_or(codecs.len()));
+        }
+        let context = HlsContext {
+            bandwidth: encoding.plan.output_contract().output_bandwidth(),
+            file_id: file.id,
+            start_seconds: 0.0,
+            media_origin_seconds: 0.0,
+            codecs,
+            supplemental_codecs: None,
+            frame_rate: Some(
+                f64::from(encoding.grid.numerator) / f64::from(encoding.grid.denominator),
+            ),
+        };
+        (file, context)
+    } else {
+        let (codecs, supplemental_codecs) = copied_hls_codecs(
+            &facts.file,
+            facts.audio_index,
+            CopySessionOptions {
+                transcode_audio: facts.aac,
+                preserve_dolby_vision: facts.preserve_dolby_vision,
+                convert_dolby_vision: facts.convert_dolby_vision,
+            },
+            Some(probe),
+        );
+        let context = HlsContext {
+            bandwidth: None,
+            file_id: facts.file.id,
+            start_seconds: 0.0,
+            media_origin_seconds: 0.0,
+            codecs,
+            supplemental_codecs,
+            frame_rate: frozen_video_frame_rate(Some(probe)),
+        };
+        (facts.file, context)
     }
 }
