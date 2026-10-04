@@ -541,21 +541,36 @@ async fn renew_source<T: Backend>(
         return Ok(ReceiverSourceWrite::Refused);
     }
     values.push(renewal.lease_expires_at_ms.into());
+    let delivery_deadline = renewal.lease_expires_at_ms.min(
+        authority
+            .login_expires_at_s
+            .map(|s| s.saturating_mul(1000))
+            .unwrap_or(i64::MAX),
+    );
+    values.push(delivery_deadline.into());
     let state = format!("({BLOCKED}) OR ({PUBLISHED})");
-    let accepted=format!("{} AND EXISTS(SELECT 1 FROM job_leases WHERE resource='session:'||$6 AND revision<9223372036854775807) AND $20 >= $13",source_current(ATTACHED,&state).replace("s.lease_expires_at_ms=$13","(s.lease_expires_at_ms=$13 OR s.lease_expires_at_ms=$20)"));
+    let accepted=format!("{} AND $21>$14 AND $21<=$20 AND NOT EXISTS(SELECT 1 FROM sharing_delivery_grants g JOIN media_sessions gs ON gs.incarnation_id=g.incarnation_id WHERE g.incarnation_id=$6 AND g.state='active' AND (g.source_token_hash<>$1 OR length(CAST(g.token_hash AS BLOB))<>64 OR g.token_hash GLOB '*[^0-9a-f]*' OR g.deadline_ms<=0 OR g.deadline_ms>gs.lease_expires_at_ms)) AND EXISTS(SELECT 1 FROM job_leases WHERE resource='session:'||$6 AND revision<9223372036854775807) AND $20 >= $13",source_current(ATTACHED,&state).replace("s.lease_expires_at_ms=$13","(s.lease_expires_at_ms=$13 OR s.lease_expires_at_ms=$20)"));
     let owner = &attachment.owner;
     let statements=vec![
         source_assert(accepted,values.clone()),
         ("UPDATE media_session_requests SET claim_expires_at_ms=$1,updated_at_ms=$2 WHERE incarnation_id=$3 AND user_id=$4 AND request_id=$5 AND state='starting' AND claim_expires_at_ms<$1".into(),vec![renewal.lease_expires_at_ms.into(),owner.now_ms.into(),owner.incarnation_id.into(),authority.intent.user_id.into(),owner.request_id.clone().into()]),
         ("UPDATE job_leases SET expires_at_ms=$1,revision=revision+1,updated_at_ms=$2 WHERE resource='session:'||$3 AND expires_at_ms<$1".into(),vec![renewal.lease_expires_at_ms.into(),owner.now_ms.into(),owner.incarnation_id.into()]),
         ("UPDATE media_sessions SET lease_expires_at_ms=$1,updated_at_ms=$2 WHERE incarnation_id=$3 AND lease_expires_at_ms<$1".into(),vec![renewal.lease_expires_at_ms.into(),owner.now_ms.into(),owner.incarnation_id.into()]),
-        source_assert(format!("{} AND $20 >= $13",source_current(ATTACHED,&state).replace("s.lease_expires_at_ms=$13","s.lease_expires_at_ms=$20")),values),
+        ("UPDATE sharing_delivery_grants SET deadline_ms=$1 WHERE incarnation_id=$2 AND source_token_hash=$3 AND state='active' AND deadline_ms<>$1".into(),vec![delivery_deadline.into(),owner.incarnation_id.into(),authority.intent.login_hash.clone().into()]),
+        source_assert(format!("{} AND $20 >= $13 AND $21>$14 AND $21<=$20 AND NOT EXISTS(SELECT 1 FROM sharing_delivery_grants g WHERE g.incarnation_id=$6 AND g.state='active' AND (g.source_token_hash<>$1 OR g.deadline_ms<>$21))",source_current(ATTACHED,&state).replace("s.lease_expires_at_ms=$13","s.lease_expires_at_ms=$20")),values),
     ];
     match store.sharing_txn(statements).await {
-        Ok(counts) if counts == [0, 1, 1, 1, 0] || counts == [0, 0, 1, 1, 0] => {
+        Ok(counts)
+            if counts.len() == 6
+                && counts[0] == 0
+                && counts[5] == 0
+                && counts[1] <= 1
+                && ((counts[2] == 1 && counts[3] == 1)
+                    || (counts[1] == 0 && counts[2] == 0 && counts[3] == 0 && counts[4] > 0)) =>
+        {
             Ok(ReceiverSourceWrite::Applied)
         }
-        Ok(counts) if counts == [0, 0, 0, 0, 0] => Ok(ReceiverSourceWrite::Replay),
+        Ok(counts) if counts == [0, 0, 0, 0, 0, 0] => Ok(ReceiverSourceWrite::Replay),
         Ok(_) => Err(invalid()),
         Err(error) if source_write_refused(&error) => Ok(ReceiverSourceWrite::Refused),
         Err(error) => Err(error),
@@ -1013,6 +1028,12 @@ mod tests {
                                 .expect("no incarnation replacement"),
                             MediaSessionRequestClaim::Acquired { .. }
                         ));
+                        let retained = store
+                            .media_session_route_by_incarnation(&activation.incarnation_id)
+                            .await
+                            .expect("swept pending route")
+                            .expect("retained obligations");
+                        crate::store::sharing_receiver_retirement::pending_metadata_retirement_matrix(&store,crate::store::sharing_receiver_retirement::PendingMetadataFixture {intent:intent.clone(),disposition:if rebuilt {crate::sharing_receiver_retirement::ReceiverRetirementDisposition::SourceSettled}else{crate::sharing_receiver_retirement::ReceiverRetirementDisposition::NeverDispatched},owner:crate::sharing_receiver_sessions::ReceiverSourceOwner {incarnation_id:Uuid::parse_str(&retained.incarnation_id).expect("inc"),session_id:Uuid::parse_str(&retained.session_id).expect("session"),owner_node_id:retained.owner_node_id,owner_epoch:retained.owner_epoch,request_id:"B-request".into(),lease_expires_at_ms:retained.lease_expires_at_ms,now_ms:now}}).await;
                         // A missing adjunct after a prior activation is corruption,
                         // never a read-path opportunity to recreate authority.
                         store
@@ -1703,6 +1724,112 @@ mod tests {
                     .await
                     .expect("fresh progress authority")
                     .expect("original login");
+                let mut delivery =
+                    crate::sharing_receiver_delivery::assert_receiver_delivery_contract(
+                        &store,
+                        &current,
+                        &attachment,
+                    )
+                    .await;
+                use crate::sharing_receiver_delivery::ReceiverDeliveryWrite;
+                use crate::store::SharingReceiverDeliveryStore;
+                store.sharing_txn(vec![("CREATE TRIGGER delivery_ignore_update BEFORE UPDATE ON sharing_delivery_grants BEGIN SELECT RAISE(IGNORE); END".into(),vec![])]).await.expect("delivery trigger fixture");
+                assert_eq!(
+                    store
+                        .revoke_receiver_delivery(&current, &attachment, &delivery.token_hash)
+                        .await
+                        .expect("ignored revoke refuses"),
+                    ReceiverDeliveryWrite::Refused
+                );
+                assert_eq!(
+                    store
+                        .receiver_delivery(&current, &attachment, &delivery.token_hash)
+                        .await
+                        .expect("rollback keeps active"),
+                    Some(delivery.clone())
+                );
+                store
+                    .sharing_txn(vec![("DROP TRIGGER delivery_ignore_update".into(), vec![])])
+                    .await
+                    .expect("delivery trigger fixture");
+                store.sharing_txn(vec![("CREATE TRIGGER delivery_ignore_insert BEFORE INSERT ON sharing_delivery_grants BEGIN SELECT RAISE(IGNORE); END".into(),vec![])]).await.expect("delivery trigger fixture");
+                let denied_delivery = crate::sharing_receiver_delivery::ReceiverDeliveryGrant {
+                    token_hash: "d".repeat(64),
+                    deadline_ms: delivery.deadline_ms,
+                };
+                assert_eq!(
+                    store
+                        .issue_receiver_delivery(&current, &attachment, &denied_delivery)
+                        .await
+                        .expect("ignored insert refuses"),
+                    ReceiverDeliveryWrite::Refused
+                );
+                store
+                    .sharing_txn(vec![("DROP TRIGGER delivery_ignore_insert".into(), vec![])])
+                    .await
+                    .expect("delivery trigger fixture");
+                let delivery_renewal = crate::sharing_receiver_sessions::ReceiverSourceRenewal {
+                    attachment: attachment.clone(),
+                    lease_expires_at_ms: std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .expect("clock")
+                        .as_millis() as i64
+                        + 30000,
+                };
+                store.sharing_txn(vec![("CREATE TRIGGER delivery_ignore_deadline BEFORE UPDATE ON sharing_delivery_grants BEGIN SELECT RAISE(IGNORE); END".into(),vec![])]).await.expect("renewal trigger fixture");
+                assert_eq!(
+                    store
+                        .renew_receiver_source_session(&current, &delivery_renewal)
+                        .await
+                        .expect("ignored deadline rolls lease back"),
+                    ReceiverSourceWrite::Refused
+                );
+                assert_eq!(
+                    store
+                        .receiver_delivery(&current, &attachment, &delivery.token_hash)
+                        .await
+                        .expect("whole renewal rollback"),
+                    Some(delivery.clone())
+                );
+                store
+                    .sharing_txn(vec![(
+                        "DROP TRIGGER delivery_ignore_deadline".into(),
+                        vec![],
+                    )])
+                    .await
+                    .expect("renewal trigger fixture");
+                assert_eq!(
+                    store
+                        .renew_receiver_source_session(&current, &delivery_renewal)
+                        .await
+                        .expect("owner renewal extends active verifier"),
+                    ReceiverSourceWrite::Applied
+                );
+                attachment.owner.lease_expires_at_ms = delivery_renewal.lease_expires_at_ms;
+                attachment.owner.now_ms = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .expect("clock")
+                    .as_millis() as i64;
+                delivery.deadline_ms = delivery_renewal.lease_expires_at_ms;
+                assert_eq!(
+                    store
+                        .receiver_delivery(&current, &attachment, &delivery.token_hash)
+                        .await
+                        .expect("extended verifier current"),
+                    Some(delivery.clone())
+                );
+                assert!(store
+                    .receiver_delivery(&current, &attachment, &"e".repeat(64))
+                    .await
+                    .expect("revoked verifier never resurrects")
+                    .is_none());
+                assert_eq!(
+                    store
+                        .renew_receiver_source_session(&current, &delivery_renewal)
+                        .await
+                        .expect("exact renewed verifier replay"),
+                    ReceiverSourceWrite::Replay
+                );
                 let mut progress = ReceiverProgress {
                     attachment: attachment.clone(),
                     sequence: 10,
@@ -1894,6 +2021,9 @@ mod tests {
                 ] {
                     store.sharing_txn(vec![(change.clone(),vec![])]).await.expect("progress authority race");
                     store.sharing_txn(vec![("CREATE TRIGGER receiver_ignored_progress_assertion BEFORE INSERT ON sharing_relay_upstream BEGIN SELECT RAISE(IGNORE); END".into(),vec![])]).await.expect("suppressed assertion fixture");
+                    assert!(store.receiver_delivery(&current,&attachment,&delivery.token_hash).await.expect("scope reader refusal").is_none());
+                    assert_eq!(store.issue_receiver_delivery(&current,&attachment,&denied_delivery).await.expect("same-write grant refusal"),ReceiverDeliveryWrite::Refused);
+                    assert_eq!(store.revoke_receiver_delivery(&current,&attachment,&delivery.token_hash).await.expect("same-write revoke refusal"),ReceiverDeliveryWrite::Refused);
                     assert_eq!(store.save_receiver_progress(&current,&progress).await.expect("same-write authority refusal"),ReceiverProgressOutcome::Refused,"{change}");
                     assert_eq!(store.sharing_read(history,vec![]).await.expect("history unchanged"),before);
                     store.sharing_txn(vec![("DROP TRIGGER receiver_ignored_progress_assertion".into(),vec![]),(restore,vec![])]).await.expect("restore fixture");
@@ -2069,6 +2199,16 @@ mod tests {
                 );
                 assert!(race.advanced.load(std::sync::atomic::Ordering::SeqCst));
                 assert_eq!(store.sharing_read("SELECT json_array(count(*),max(sequence),max(position_ms)) AS payload FROM sharing_watch",vec![]).await.expect("newer history preserved"),vec!["[1,14,6000]".to_owned()]);
+                crate::store::sharing_receiver_retirement::metadata_retirement_matrix(
+                    &store,
+                    crate::store::sharing_receiver_retirement::MetadataRetirementFixture {
+                        intent: intent.clone(),
+                        attachment: progress.attachment.clone(),
+                        confirmation: "a".repeat(64),
+                    },
+                    rebuilt,
+                )
+                .await;
             }
         }
     }

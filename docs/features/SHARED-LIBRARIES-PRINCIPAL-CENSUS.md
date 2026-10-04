@@ -1776,3 +1776,47 @@ The final independent denied-warning daemon all-target Clippy passed in
 57.15 seconds. The normal tracked commit hook remains required; this is an
 independent native checkpoint until the latest Root and Source-only native
 fingerprint extension are integrated and requalified.
+Root combined-tree qualification: encoded checkpoint `28791fa6b` merged
+with receiver delivery integration `4e684d6a3` without conflicts. Rust 1.97.1
+Core/daemon all-target check with replicated-store contract features passed
+in 81 seconds. The actual encoded matrix passed nine tests, zero ignored,
+in 31.16 seconds; the actual copy/index matrix passed thirteen tests, zero
+ignored, in 43.70 seconds. The memory/pooled Source preparation guard passed
+one test in 1.03 seconds and the Local cached HEVC proof regression passed
+one test in 0.89 seconds. Documentation index checks passed four tests.
+Denied-warning lint and the normal tracked merge hook follow before commit.
+This receipt qualifies this combined source, without claiming live Tailscale
+or physical device playback.
+The exact combined denied-warning feature Clippy passed in 90 seconds;
+the Local resource-estimate regression passed one test, zero ignored,
+in 0.15 seconds.
+
+Exact native integration: independent checkpoint `142bf7107` merged with
+clean Root `1621b4967`; the only conflict was this additive receipt document,
+with both histories preserved. That base includes the Source-only v2 prepared
+fingerprint, so native boolean/normalized selected ordinal are part of durable
+Source identity while Local request hashes stay unchanged. The earlier
+persisted native-choice prerequisite is closed on this integrated tree.
+
+Cue validation now parses timing headers at cue-block boundaries, preserving
+literal arrows in ordinary caption text and cue identifiers. Its temporary
+parser memory is bounded by document bytes rather than allocating one entry
+per input line. CRLF and ordinary arrow text pass; malformed headers,
+backwards/out-of-range timestamps, document bytes and more than 50,000 cues
+refuse. Source-produced extraction headers remain the closed plain WebVTT
+shape. The exact integrated native filter passed ten tests, zero ignored,
+in 26.19 seconds on normal stacks, including actual copy/encoded caption
+media, selector fencing, held VTT retirement and all owned extraction races.
+Compatibility/compiler/denied-lint/normal-hook receipts follow below.
+
+On the exact integrated source, existing Source copy passed 13 tests, zero
+ignored, in 45.49 seconds and encoded passed nine tests, zero ignored, in
+32.50 seconds. The Source-native fingerprint and Local subtitle resume-timeline
+regressions each passed one test, zero ignored. The final pinned daemon
+all-target check passed in 51.14 seconds and denied-warning all-target Clippy
+in 84 seconds. Documentation index checks passed four tests; catalog lint
+covered 2,715 audited files. The normal tracked merge commit hook follows.
+This receipt qualifies the embedded plain-text/SDR Source actor slice; actual
+HTTP native transport is a separate S2 fixture, while directed control,
+burn/HDR/Dolby Vision, direct/progressive and physical restart recovery remain
+open. No ordinary Shared queue or generic Local control authority is enabled.

@@ -195,6 +195,25 @@ impl SourceEndReceipt {
     pub(crate) fn incarnation_id(&self) -> Uuid {
         self.0.incarnation_id
     }
+    pub(crate) fn retirement_confirmation(
+        &self,
+        session: &SourcePeerSession,
+    ) -> Result<String, PeerError> {
+        use sha2::{Digest, Sha256};
+        if self.0.reference != session.reference || self.0.request_id != session.request_id {
+            return Err(PeerError::InvalidResponse);
+        }
+        let identity = serde_json::to_vec(&json!({
+            "reference":self.0.reference,"request":self.0.request_id,
+            "incarnation":self.0.incarnation_id,"session":self.0.session_id,
+            "epoch":self.0.control_epoch,"confirmation":self.0.confirmation_id,
+        }))
+        .map_err(|_| PeerError::InvalidResponse)?;
+        let mut digest = Sha256::new();
+        digest.update(b"plurx.receiver.source-end-confirmation.v1\0");
+        digest.update(identity);
+        Ok(format!("{:x}", digest.finalize()))
+    }
 }
 fn v4(id: Uuid) -> bool {
     !id.is_nil() && id.get_version_num() == 4 && id.get_variant() == uuid::Variant::RFC4122

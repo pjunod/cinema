@@ -237,8 +237,33 @@ fn validate_text(bytes: &[u8]) -> Result<(), String> {
     if !text.starts_with("WEBVTT") || bytes.len() > TRACK_BYTES || text.contains('\0') {
         return Err("Source native document is unsupported".into());
     }
+    // Keep parser overhead bounded by document bytes, not one allocation
+    // per line in a deliberately newline-heavy document.
+    let normalized = text.replace("\r\n", "\n");
+    let mut blocks = normalized
+        .split("\n\n")
+        .filter(|block| !block.trim().is_empty());
+    let header = blocks
+        .next()
+        .ok_or_else(|| "Source native header missing".to_owned())?;
+    if header.trim() != "WEBVTT" {
+        return Err("Source native header unsupported".into());
+    }
     let mut count = 0usize;
-    for line in text.lines().filter(|line| line.contains("-->")) {
+    for block in blocks {
+        // Cue text may contain a literal arrow. Only the timing header (or
+        // the timing header following a cue identifier) is parsed as timing.
+        let mut lines = block.lines();
+        let first = lines
+            .next()
+            .ok_or_else(|| "Source native cue missing".to_owned())?;
+        let line = if first.contains("-->") {
+            first
+        } else {
+            lines
+                .next()
+                .ok_or_else(|| "Source native cue timing missing".to_owned())?
+        };
         count += 1;
         if count > CUES || line.len() > 4096 {
             return Err("Source native cue bound exceeded".into());
@@ -287,6 +312,14 @@ mod tests {
     #[test]
     fn source_native_text_refuses_malformed_and_excessive_cues() {
         assert!(validate_text(b"WEBVTT\n\n00:00:00.200 --> 00:00:01.800\nactual\n").is_ok());
+        assert!(
+            validate_text(b"WEBVTT\n\ncued-id\n00:00:00.200 --> 00:00:01.800\nGo --> home\n")
+                .is_ok()
+        );
+        assert!(
+            validate_text(b"WEBVTT\r\n\r\n00:00:00.200 --> 00:00:01.800\r\nGo --> home\r\n")
+                .is_ok()
+        );
         for malformed in ["00:00:NaN", "00:00:60", "00:60:00", "-1:00:00", "481:00:00"] {
             assert!(validate_text(
                 format!("WEBVTT\n\n{malformed} --> 00:00:02.000\ntext\n").as_bytes()
@@ -295,10 +328,11 @@ mod tests {
         }
         assert!(validate_text(b"WEBVTT\n\n00:00:02.000 --> 00:00:01.000\ntext\n").is_err());
         assert!(validate_text(b"WEBVTT\0").is_err());
+        assert!(validate_text(b"WEBVTT\n00:00:00.000 --> 00:00:01.000\n\n").is_err());
         assert!(validate_text(&vec![b'x'; TRACK_BYTES + 1]).is_err());
         let excessive = format!(
-            "WEBVTT\n{}",
-            "00:00:00.000 --> 00:00:01.000\n".repeat(CUES + 1)
+            "WEBVTT\n\n{}",
+            "00:00:00.000 --> 00:00:01.000\n\n".repeat(CUES + 1)
         );
         assert!(validate_text(excessive.as_bytes()).is_err());
     }
