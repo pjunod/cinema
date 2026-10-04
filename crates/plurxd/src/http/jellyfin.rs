@@ -138,9 +138,19 @@ pub(crate) fn standard_port_app(app: Router) -> Router {
     Router::new().fallback_service(tower::util::MapRequest::new(app, at_root))
 }
 
+// `OriginalUri` keeps the unmapped target on purpose: nothing in plurxd
+// reads it, and routing, gates, metrics and redaction all key on the mapped
+// URI and `MatchedPath`.
 fn at_root(mut request: axum::extract::Request) -> axum::extract::Request {
     let path = request.uri().path();
     if path == MOUNT || path.starts_with("/jellyfin/") {
+        return request;
+    }
+    // An asterisk-form target (`OPTIONS *`) has no leading slash, and
+    // prefixing it would name `/jellyfin*`, outside the nest and so the SPA.
+    if !path.starts_with('/') {
+        *request.uri_mut() = Uri::from_static("/jellyfin/");
+        request.extensions_mut().insert(RootMount);
         return request;
     }
     let target = match request.uri().query() {
@@ -1613,6 +1623,16 @@ mod tests {
                 .map(|child| format!("{MOUNT}{child}"))
                 .collect::<Vec<_>>()
         );
+        let child = super::standard_port_app(f.app.clone())
+            .oneshot(request(
+                "GET",
+                &root_children[0],
+                Some(&f.token),
+                Value::Null,
+            ))
+            .await
+            .expect("root-mounted child");
+        assert_eq!(child.status(), StatusCode::OK, "{}", root_children[0]);
         if encoded {
             assert!(
                 !master.contains("#EXT-X-MEDIA") && !master.contains("SUBTITLES="),
@@ -3331,7 +3351,8 @@ mod tests {
         let (status, me) =
             json_call(&root, request("GET", "/Users/Me", Some(token), Value::Null)).await;
         assert_eq!(status, StatusCode::OK, "{me}");
-        // The native API, the web app and the Plex routes are not on this port.
+        // The native API, the web app and the Plex routes are not on this
+        // port, whatever form the request target takes.
         for path in [
             "/",
             "/api/v1/server",
@@ -3339,6 +3360,12 @@ mod tests {
             "/web/index.html",
             "/identity",
             "/library/sections",
+            "*",
+            "http://elsewhere/api/v1/me",
+            "//api/v1/me",
+            "/%6Aellyfin/../api/v1/me",
+            "/Jellyfin/System/Info/Public",
+            "/jellyfinfoo",
         ] {
             let (status, _) =
                 json_call(&root, request("GET", path, Some(&admin), Value::Null)).await;

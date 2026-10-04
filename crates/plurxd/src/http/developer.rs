@@ -2175,7 +2175,7 @@ fn jellyfin_standard_port(state: &AppState) -> DeveloperRequirement {
         ),
         JellyfinStandardPort::Off => (
             RequirementStatus::Unmet,
-            "This process opened no Jellyfin standard-port listener (server.jellyfin_port is 0, or startup has not reached it). Clients need this server's /jellyfin address.".into(),
+            "This process opened no Jellyfin standard-port listener: server.jellyfin_port is 0 or names the main port, or startup has not reached it. Clients need this server's /jellyfin address.".into(),
         ),
     };
     DeveloperRequirement {

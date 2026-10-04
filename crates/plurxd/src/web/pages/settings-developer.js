@@ -594,7 +594,7 @@ function jellyfinCompatibilityCard(settings,readiness){
   const host=window.location.hostname;
   return setCard(`${cardHead("Jellyfin client compatibility","Connect the tested Infuse and Jellyfin Android TV clients to this server.",`<span class="pill${on?" ok":""}">${on?"enabled":"off"}</span>`)}
     <label class="checkrow"><input type="checkbox" id="jellyfin-compatibility-enabled" ${on?"checked":""}><span>Allow Jellyfin clients</span></label>
-    <p class="hint">In the client, enter just this server's address: <code>${esc(host)}</code>. Jellyfin clients add their standard port (8096) themselves. <code>${esc(connection)}</code> also works. Sign in with a Plurx account.</p>
+    <p class="hint">In the client, enter just this server's address: <code>${esc(host)}</code>. Jellyfin clients add their standard port (8096) themselves. If the readiness row below says that port is not reachable, use <code>${esc(connection)}</code>, which always works. Sign in with a Plurx account.</p>
     <p class="hint">Library posters and backdrops are served without sign-in while this is on: anyone who has an artwork link can read that image. A direct-play link for one title chosen after sign-in also works without a login header; it expires within 24 hours and stops working when playback stops or the login is revoked. Everything else requires sign-in.</p>
     <details class="setdetails" open><summary>Readiness</summary><div class="setdetails-body">
     ${devReq(readiness,"jellyfin_compatibility","client_qualification","Pinned clients qualified","The complete browsing, playback, track and recovery matrix must pass on the frozen candidate.")}
