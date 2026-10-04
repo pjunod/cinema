@@ -6753,3 +6753,25 @@ Auto on the emulator did not upgrade 480p→720p at a 100 Mb/s shaped link in
 240 s. The upgrade rule needs a completed-transfer link of 1.8× the bound
 720p delivery ceiling (17.8 Mb/s → 32 Mb/s), and emulator user-mode networking
 is the likely limit; this is recorded as unqualified, not as a policy fault.
+
+### 10.226 Android Auto had no link evidence on continuous attachments
+
+The emulator Auto runs above did not move in either direction: no upgrade at
+a 100 Mb/s shaped link in 240 s, and no downgrade from 720p at 13 Mb/s in
+150 s, although 13 Mb/s is below the mild-pressure line for the 17.8 Mb/s
+bound 720p cost. The cause is in the client, not the emulator. Auto decides
+only from a recent completed transfer, and `AutoTransferEvidence.complete`
+accepted a load as a link sample only when its last path segment matched the
+ordinary session name `seg<N>.m4s|ts`. Continuous video arrives from
+`…/video/<rendition>/segment/<N>.m4s`, so a continuous attachment never
+produced a sample, the link stayed unknown, and both the pressure and the
+upgrade branches returned without a decision. Continuous video segments are
+now link samples (`autoLinkMediaSegment`); shared AAC objects stay excluded as
+too small to measure a link, as do playlists and initialization maps.
+Authored regression: `AutoLinkMediaSegmentTest.kt::continuousVideoSegmentsAreLinkSamplesLikeOrdinarySegments`.
+
+**Host note.** nuc3's root filesystem reached 100% during this work: the
+default `dev` profile with full debug information grew this session's cargo
+target to 19 GB while another session also wrote there. The target, old
+binaries and lab runtimes were removed (37 GB free afterwards), and builds
+here now use `CARGO_PROFILE_DEV_DEBUG=0` and `CARGO_INCREMENTAL=0`.
