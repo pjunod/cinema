@@ -302,8 +302,8 @@ async fn system_info(
 ) -> Result<Json<wire::PublicSystemInfo>, ApiError> {
     Ok(Json(wire::PublicSystemInfo {
         server_name: server_name(&state).await?,
-        version: env!("CARGO_PKG_VERSION"),
-        product_name: "Plurx",
+        version: plurx_compat_jellyfin::catalog::PROTOCOL_BASELINE_VERSION,
+        product_name: plurx_compat_jellyfin::catalog::PROTOCOL_BASELINE_PRODUCT,
         id: server_id(&state).await?,
         startup_wizard_completed: state.store.count_users().await? > 0,
     }))
@@ -357,8 +357,13 @@ async fn login(
     let metadata = credentials::parse_client_identity(&refs)
         .map_err(|_| ApiError::BadRequest("invalid client metadata".into()))?
         .ok_or_else(|| ApiError::BadRequest("client metadata is required".into()))?;
+    // Infuse names its share mode in the client field (`Infuse-Direct` on
+    // the measured tvOS share; iPhone shares default to library mode). Every
+    // mode is the same app, so the family is the product, not the mode.
     let family = match metadata.client.as_deref() {
-        Some("Infuse-Direct") | Some("Infuse") => JellyfinClientFamily::Infuse,
+        Some(client) if client == "Infuse" || client.starts_with("Infuse-") => {
+            JellyfinClientFamily::Infuse
+        }
         Some("Jellyfin+Android+TV") | Some("Jellyfin Android TV") => {
             JellyfinClientFamily::AndroidTv
         }
@@ -3147,6 +3152,43 @@ mod tests {
         .await;
         assert_eq!(status, StatusCode::OK);
         assert_eq!(saved["jellyfin_compatibility_enabled"], true);
+        // Clients gate on the protocol version before they ever sign in: a
+        // Plurx build version here reads as an unsupported Jellyfin server.
+        let (status, info) = json_call(
+            &app,
+            request("GET", "/jellyfin/System/Info/Public", None, Value::Null),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(info["Version"], "10.11.11");
+        assert_eq!(info["ProductName"], "Jellyfin Server");
+        assert_eq!(info["StartupWizardCompleted"], true);
+        assert!(info["ServerName"]
+            .as_str()
+            .is_some_and(|name| !name.is_empty()));
+        assert!(info["Id"].as_str().is_some_and(|id| !id.is_empty()));
+        // Every Infuse share mode is the Infuse family; an unknown app is not.
+        for (client, expected) in [
+            ("Infuse-Library", StatusCode::OK),
+            ("Infuse-Direct", StatusCode::OK),
+            ("Infuse", StatusCode::OK),
+            ("Some Other App", StatusCode::BAD_REQUEST),
+        ] {
+            let mut login = request(
+                "POST",
+                "/jellyfin/Users/AuthenticateByName",
+                None,
+                json!({"Username":"catalog-admin","Pw":"supersecret"}),
+            );
+            login.headers_mut().insert(
+                "x-emby-authorization",
+                format!("MediaBrowser Client=\"{client}\", DeviceId=\"family-{expected}\", Version=\"8.5.6\"")
+                    .parse()
+                    .expect("metadata"),
+            );
+            let (status, _) = json_call(&app, login).await;
+            assert_eq!(status, expected, "{client}");
+        }
         let library = state
             .store
             .create_library(&NewLibrary {
