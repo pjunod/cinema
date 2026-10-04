@@ -12418,6 +12418,7 @@ mod tests {
                     )
                     .expect("seed token lifecycle");
                 let guard = ClusterClockGuard::new(true);
+                guard.set_enforced(true);
                 if !matches!(schedule, "completed retry" | "unknown entry recovers") {
                     publish(&guard);
                 }
@@ -17108,6 +17109,8 @@ mod tests {
 
         let connection = protocol_fixture(&["node-a", "node-b", "node-c"]);
         let guard = ClusterClockGuard::new(true);
+        // The operator-enabled guard; advisory mode never refuses this SQL.
+        guard.set_enforced(true);
         let publish = |guard: &ClusterClockGuard| {
             let roster = guard.roster(&["node-b".to_owned(), "node-c".to_owned()]);
             assert!(guard.publish(

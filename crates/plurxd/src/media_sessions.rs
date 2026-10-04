@@ -5995,6 +5995,9 @@ mod tests {
 
     fn clock_fixture(offset: Option<(i64, i64)>) -> Arc<ClusterClockGuard> {
         let guard = Arc::new(ClusterClockGuard::new(true));
+        // These fixtures exercise the operator-enabled guard; the default
+        // (advisory) mode is covered by the advisory test below.
+        guard.set_enforced(true);
         if let Some((offset_us, uncertainty_us)) = offset {
             let ticket = guard.roster(&["peer".into()]);
             assert!(guard.publish(
@@ -6060,6 +6063,48 @@ mod tests {
         .await
         .expect_err("existing inventory timeout remains finite")
         .contains("timed out"));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn takeover_clock_guard_is_advisory_while_enforcement_is_off() {
+        for offset in [None, Some((2_500_000, 1_000))] {
+            let clock = clock_fixture(offset);
+            clock.set_enforced(false);
+            assert!(
+                acquire_takeover_clock(&clock).is_ok(),
+                "an unbounded or unknown clock never blocks takeover while off: {offset:?}"
+            );
+            let called = AtomicU64::new(0);
+            let called_ref = &called;
+            assert!(clock_guarded_expiry_scan(&clock, |_| async move {
+                called_ref.fetch_add(1, Ordering::Relaxed);
+                Ok(Vec::new())
+            })
+            .await
+            .is_ok());
+            assert_eq!(called.load(Ordering::Relaxed), 1);
+            let metrics = clock.prometheus();
+            assert!(
+                metrics.contains("plurx_cluster_clock_refusals_total{decision=\"takeover\",cause=\"unknown\"} 0\n")
+                    && metrics.contains("plurx_cluster_clock_refusals_total{decision=\"takeover\",cause=\"offset\"} 0\n"),
+                "nothing is actually refused"
+            );
+            let cause = if offset.is_none() {
+                "unknown"
+            } else {
+                "offset"
+            };
+            for decision in ["takeover", "expiry_scan"] {
+                assert!(
+                    metrics.contains(&format!(
+                        "plurx_cluster_clock_advisory_refusals_total{{decision=\"{decision}\",cause=\"{cause}\"}} "
+                    )) && !metrics.contains(&format!(
+                        "plurx_cluster_clock_advisory_refusals_total{{decision=\"{decision}\",cause=\"{cause}\"}} 0\n"
+                    )),
+                    "{decision} records what enforcement would have refused"
+                );
+            }
+        }
     }
 
     pub(super) fn valid_start_request() -> RemoteStartRequest {

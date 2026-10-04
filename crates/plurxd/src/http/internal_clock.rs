@@ -545,7 +545,7 @@ mod causal_tests {
                 "fence does not fabricate membership reduction"
             );
             assert!(
-                leader.clock_guard().acquire().is_ok(),
+                leader.clock_guard().check_evidence().is_ok(),
                 "actual completed timing remains bounded; only sender authority was fenced"
             );
             assert!(leader

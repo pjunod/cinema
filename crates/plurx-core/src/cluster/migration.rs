@@ -425,17 +425,17 @@ async fn complete_startup_observation(
         .ok_or_else(|| {
             StoreError::Database("clock observation has no original startup deadline".into())
         })?;
-    tokio::time::timeout_at(
-        deadline,
-        observer.start(membership.clone(), identity.node_id.clone()),
-    )
-    .await
-    .map_err(|_| StoreError::Database("clock observation startup budget expired".into()))??;
+    // Starting the observer is a local bind and task spawn. It is not tied to
+    // the phased membership deadline: clock observation must never be what
+    // consumes (or is refused by) a startup budget that a long snapshot
+    // catch-up may already have spent.
+    observer
+        .start(membership.clone(), identity.node_id.clone())
+        .await?;
     let guard = membership.clock_guard();
-    // Readiness is not a proposal: no ticket is carried across this wait and
-    // no production refusal is counted. The actual operation below captures
-    // its own original proof only after observation becomes available.
-    wait_startup_clock_readiness(&guard, deadline).await?;
+    // Advisory only. The enforcement switch lives in the replicated store,
+    // which is not readable yet, so startup never waits on clock evidence.
+    startup_clock_advisory(&guard, "observation");
     if role == ClusterRole::Voter {
         client
             .promote_after_clock_observation(deadline)
@@ -457,9 +457,8 @@ async fn complete_startup_observation(
             }
             tokio::time::sleep(Duration::from_millis(100)).await;
         }
-        // Promotion changes the authoritative roster generation. It must be
-        // observed again; the learner-era proof cannot activate voter service.
-        wait_startup_clock_readiness(&guard, deadline).await?;
+        // Promotion changes the roster identity; report the evidence again.
+        startup_clock_advisory(&guard, "promotion");
     }
     membership
         .finish_clock_observation(deadline)
@@ -467,22 +466,30 @@ async fn complete_startup_observation(
         .map_err(|error| StoreError::Database(error.to_string()))
 }
 
+/// Log what the clock guard currently observes, without waiting or refusing.
+/// Startup runs before the replicated enforcement setting is readable, so the
+/// guard stays advisory here; the activation admission that follows counts an
+/// advisory refusal (`plurx_cluster_clock_advisory_refusals_total`) when the
+/// evidence is incomplete, and the daemon applies the stored setting later.
 #[cfg(feature = "hiqlite-store")]
-async fn wait_startup_clock_readiness(
+fn startup_clock_advisory(
     guard: &super::clock::ClusterClockGuard,
-    deadline: tokio::time::Instant,
-) -> Result<(), StoreError> {
-    loop {
-        if tokio::time::Instant::now() >= deadline {
-            return Err(StoreError::Database(
-                "authenticated startup clock evidence is unavailable before original deadline"
-                    .into(),
-            ));
+    phase: &'static str,
+) -> Option<super::clock::ClockRefusal> {
+    match guard.check_evidence() {
+        Ok(()) => {
+            tracing::info!(phase, "startup clock evidence is bounded");
+            None
         }
-        if guard.acquire().is_ok() && tokio::time::Instant::now() < deadline {
-            return Ok(());
+        Err(cause) => {
+            tracing::warn!(
+                phase,
+                %cause,
+                "startup clock evidence is not bounded; continuing because the clock guard \
+                 is advisory during startup"
+            );
+            Some(cause)
         }
-        tokio::time::sleep(Duration::from_millis(100)).await;
     }
 }
 
@@ -3603,27 +3610,28 @@ fn log_startup_transport_wait(
 mod startup_wait_logging_tests {
     use super::*;
 
-    /// Pure original-deadline ordering, not replicated or fleet evidence.
+    /// Startup never waits on or refuses for clock evidence: missing
+    /// coverage is reported and the activation admission still proceeds.
     #[cfg(feature = "hiqlite-store")]
-    #[tokio::test]
-    async fn k06_readiness_checks_original_deadline_before_standalone_clock_success() {
-        let guard = crate::cluster::clock::ClusterClockGuard::new(false);
+    #[test]
+    fn startup_clock_evidence_is_advisory_and_never_blocks_activation() {
+        use crate::cluster::clock::{ClockDecision, ClockRefusal, ClusterClockGuard};
+        let standalone = ClusterClockGuard::new(false);
+        assert_eq!(startup_clock_advisory(&standalone, "observation"), None);
+
+        // A replicated guard with an unreachable member has no coverage.
+        let guard = std::sync::Arc::new(ClusterClockGuard::new(true));
         assert_eq!(
-            guard.snapshot().state,
-            crate::cluster::clock::ClusterClockState::NoPeers
+            startup_clock_advisory(&guard, "observation"),
+            Some(ClockRefusal::Unknown)
         );
-        assert!(
-            guard.acquire().is_ok(),
-            "actual standalone guard needs no remote sample"
-        );
-        let expired = tokio::time::Instant::now() - Duration::from_secs(1);
-        let refusal = wait_startup_clock_readiness(&guard, expired)
-            .await
-            .expect_err("safe clock state cannot replenish an expired startup budget");
-        assert!(refusal.to_string().contains("original deadline"));
-        wait_startup_clock_readiness(&guard, tokio::time::Instant::now() + Duration::from_secs(1))
-            .await
-            .expect("within-deadline standalone readiness");
+        let admission = guard
+            .acquire_owned_for(ClockDecision::MembershipChange)
+            .expect("startup activation is not refused for clock evidence");
+        assert_eq!(admission.revalidate(), Ok(()));
+        assert!(guard.prometheus().contains(
+            "plurx_cluster_clock_advisory_refusals_total{decision=\"membership_change\",cause=\"unknown\"} 2\n"
+        ));
     }
 
     #[tokio::test(start_paused = true)]

@@ -207,7 +207,7 @@ impl StartupClockObserver for MeasuredObserver<'_> {
                             // exchange after applied membership changes. Never
                             // replace safe original tickets every polling tick.
                             if tokio::time::Instant::now() >= next_periodic
-                                || manager.clock_guard().acquire().is_err()
+                                || manager.clock_guard().check_evidence().is_err()
                             {
                                 measured_round(&manager).await;
                                 next_periodic = tokio::time::Instant::now()
@@ -227,7 +227,7 @@ impl StartupClockObserver for MeasuredObserver<'_> {
                     .lock()
                     .expect("test managers")
                     .iter()
-                    .all(|(_, manager)| manager.clock_guard().acquire().is_ok());
+                    .all(|(_, manager)| manager.clock_guard().check_evidence().is_ok());
                 if ready {
                     return Ok(());
                 }

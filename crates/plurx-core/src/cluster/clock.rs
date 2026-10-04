@@ -1,7 +1,7 @@
 //! Node-local clock evidence and typed consumer admission. No HTTP or Store calls.
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -41,6 +41,14 @@ pub enum PeerClockOffset {
 mod tests {
     use super::*;
 
+    /// The operator-enabled guard. `ClusterClockGuard::new` defaults to
+    /// advisory mode, covered by `enforcement_off_admits_and_counts_advisory`.
+    fn enforced() -> ClusterClockGuard {
+        let guard = ClusterClockGuard::new(true);
+        guard.set_enforced(true);
+        guard
+    }
+
     fn bounded(now: Instant) -> BTreeMap<String, PeerClockOffset> {
         BTreeMap::from([(
             "peer".into(),
@@ -62,7 +70,7 @@ mod tests {
             "after ticket",
             "common mode",
         ] {
-            let guard = ClusterClockGuard::new(true);
+            let guard = enforced();
             let ticket = guard.roster(&["peer".into()]);
             assert!(guard.publish(ticket, bounded(Instant::now())));
             let old = guard.ticket();
@@ -88,7 +96,7 @@ mod tests {
 
     #[test]
     fn fixed_anchor_and_unrepresentable_wall_invalidate() {
-        let guard = ClusterClockGuard::new(true);
+        let guard = enforced();
         let mut inner = guard.inner.lock().expect("clock state lock");
         let mono = inner.anchor_mono;
         let wall = inner.anchor_wall_ms.expect("fixture anchor");
@@ -104,7 +112,7 @@ mod tests {
 
     #[test]
     fn roster_failure_expiry_and_passive_metrics_preserve_unknown() {
-        let guard = ClusterClockGuard::new(true);
+        let guard = enforced();
         assert!(matches!(
             guard.snapshot().state,
             ClusterClockState::Incomplete { .. }
@@ -153,7 +161,7 @@ mod tests {
 
     #[test]
     fn prepared_admission_never_replaces_original_refusal_time_or_guard() {
-        let guard = ClusterClockGuard::new(true);
+        let guard = enforced();
         let initially_unknown = guard.acquire();
         assert!(guard.prometheus().contains(
             "plurx_cluster_clock_refusals_total{decision=\"membership_change\",cause=\"unknown\"} 0\n"
@@ -181,6 +189,7 @@ mod tests {
             Some(ClockRefusal::GenerationChanged)
         );
         let other = ClusterClockGuard::new(false);
+        other.set_enforced(true);
         assert_eq!(
             other
                 .admit_for(ClockDecision::MembershipChange, guard.acquire())
@@ -218,7 +227,7 @@ mod tests {
 
     #[test]
     fn consumer_refusals_count_only_typed_admission_not_policy_or_scrapes() {
-        let guard = ClusterClockGuard::new(true);
+        let guard = enforced();
         assert_eq!(guard.acquire().err(), Some(ClockRefusal::Unknown));
         assert_eq!(
             guard.acquire_for(ClockDecision::ExpiryScan).err(),
@@ -275,7 +284,7 @@ mod tests {
         assert_eq!(result, Ok(()));
 
         for cause in ["recovered generation", "local/common-mode step", "expiry"] {
-            let guard = Arc::new(ClusterClockGuard::new(true));
+            let guard = Arc::new(enforced());
             publish_offset(&guard, 0, 1_000);
             let proof = guard
                 .acquire_owned_for(ClockDecision::Takeover)
@@ -300,10 +309,12 @@ mod tests {
             }
             assert_eq!(
                 proof.revalidate(),
-                Err(if cause == "local/common-mode step" {
-                    ClockRefusal::LocalDiscontinuity
-                } else {
-                    ClockRefusal::GenerationChanged
+                Err(match cause {
+                    "local/common-mode step" => ClockRefusal::LocalDiscontinuity,
+                    // Expiry is not an identity change: the current policy
+                    // re-check refuses it as Unknown coverage.
+                    "expiry" => ClockRefusal::Unknown,
+                    _ => ClockRefusal::GenerationChanged,
                 }),
                 "{cause}"
             );
@@ -313,7 +324,7 @@ mod tests {
 
     #[test]
     fn acquisition_current_missing_peer_invalidates_atomically_but_stale_round_does_not() {
-        let guard = ClusterClockGuard::new(true);
+        let guard = enforced();
         publish_offset(&guard, 0, 1_000);
         let safe = guard.acquire().expect("safe prior evidence");
         let round = guard.roster(&["peer".into()]);
@@ -339,7 +350,7 @@ mod tests {
         assert!(ticket.now_ms() > 0);
         assert_eq!(standalone.revalidate(&ticket), Ok(()));
 
-        let guard = ClusterClockGuard::new(true);
+        let guard = enforced();
         assert_eq!(guard.acquire().err(), Some(ClockRefusal::Unknown));
         guard.roster(&[]);
         let empty = guard.acquire().expect("proved empty committed roster");
@@ -349,10 +360,7 @@ mod tests {
             inner.roster_observed_at = Some(Instant::now() - Duration::from_secs(26));
         }
         assert_eq!(guard.acquire().err(), Some(ClockRefusal::Unknown));
-        assert_eq!(
-            guard.revalidate(&empty),
-            Err(ClockRefusal::GenerationChanged)
-        );
+        assert_eq!(guard.revalidate(&empty), Err(ClockRefusal::Unknown));
 
         // Exact threshold includes uncertainty, on either side of zero.
         for offset in [1_999_000, -1_999_000] {
@@ -385,11 +393,11 @@ mod tests {
 
     #[test]
     fn acquisition_ticket_is_guard_bound_and_rechecks_both_generations() {
-        let guard = ClusterClockGuard::new(true);
+        let guard = enforced();
         publish_offset(&guard, 0, 1_000);
         let ticket = guard.acquire().expect("safe initial ticket");
         let original_now = ticket.now_ms();
-        let other = ClusterClockGuard::new(true);
+        let other = enforced();
         publish_offset(&other, 0, 1_000);
         assert_eq!(
             other.revalidate(&ticket),
@@ -398,11 +406,11 @@ mod tests {
         assert_eq!(guard.revalidate(&ticket), Ok(()));
         assert_eq!(ticket.now_ms(), original_now);
 
+        // An ordinary completed round (the prober's ~10 s cadence) is not
+        // decision evidence: the same ticket stays valid while the policy
+        // still admits, so a long startup/takeover tail is not refused.
         publish_offset(&guard, 0, 1_000);
-        assert_eq!(
-            guard.revalidate(&ticket),
-            Err(ClockRefusal::GenerationChanged)
-        );
+        assert_eq!(guard.revalidate(&ticket), Ok(()));
         let ticket = guard.acquire().expect("new safe ticket");
         guard.roster(&["peer".into(), "new-peer".into()]);
         assert_eq!(
@@ -418,16 +426,111 @@ mod tests {
             round,
             BTreeMap::from([("peer".into(), PeerClockOffset::Unknown)])
         ));
-        assert_eq!(
-            guard.revalidate(&ticket),
-            Err(ClockRefusal::GenerationChanged)
-        );
+        assert_eq!(guard.revalidate(&ticket), Err(ClockRefusal::Unknown));
         assert_eq!(guard.acquire().err(), Some(ClockRefusal::Unknown));
     }
 
     #[test]
+    fn completed_rounds_keep_tickets_but_policy_is_rechecked() {
+        let guard = Arc::new(enforced());
+        publish_offset(&guard, 0, 1_000);
+        let ticket = guard.acquire().expect("safe ticket");
+        let owned = guard
+            .acquire_owned_for(ClockDecision::Takeover)
+            .expect("safe owned ticket");
+        for _ in 0..5 {
+            publish_offset(&guard, 250_000, 1_000);
+        }
+        assert_eq!(guard.revalidate(&ticket), Ok(()));
+        assert_eq!(owned.revalidate(), Ok(()));
+        publish_offset(&guard, 2_500_000, 1_000);
+        assert_eq!(guard.revalidate(&ticket), Err(ClockRefusal::Offset));
+        assert_eq!(owned.revalidate(), Err(ClockRefusal::Offset));
+        publish_offset(&guard, 0, 1_000);
+        assert_eq!(
+            guard.revalidate(&ticket),
+            Ok(()),
+            "same identity, safe again"
+        );
+        guard.roster_failed();
+        publish_offset(&guard, 0, 1_000);
+        assert_eq!(
+            guard.revalidate(&ticket),
+            Err(ClockRefusal::GenerationChanged),
+            "roster failure is decision evidence"
+        );
+    }
+
+    #[test]
+    fn enforcement_off_admits_and_counts_advisory() {
+        let guard = Arc::new(ClusterClockGuard::new(true));
+        assert!(!guard.is_enforced(), "default is advisory");
+        assert_eq!(guard.check_evidence(), Err(ClockRefusal::Unknown));
+        let pure = guard.acquire().expect("uncounted capture admits while off");
+        assert_eq!(guard.revalidate(&pure), Ok(()));
+        let takeover = guard
+            .acquire_for(ClockDecision::Takeover)
+            .expect("takeover is never blocked while off");
+        let owned = guard
+            .acquire_owned_for(ClockDecision::ExpiryScan)
+            .expect("expiry is never blocked while off");
+        let membership = guard
+            .admit_for(ClockDecision::MembershipChange, Err(ClockRefusal::Unknown))
+            .expect("an originally refused capture is admitted while off");
+        assert!(membership.now_ms() > 0);
+        guard.roster_failed();
+        assert_eq!(
+            guard.revalidate_for(ClockDecision::Takeover, &takeover),
+            Ok(())
+        );
+        assert_eq!(owned.revalidate(), Ok(()));
+        let metrics = guard.prometheus();
+        assert!(metrics.contains("plurx_cluster_clock_enforced 0\n"));
+        assert!(
+            metrics
+                .lines()
+                .filter(|line| line.starts_with("plurx_cluster_clock_refusals_total{"))
+                .all(|line| line.ends_with(" 0")),
+            "nothing is actually refused while off"
+        );
+        for line in [
+            "plurx_cluster_clock_advisory_refusals_total{decision=\"takeover\",cause=\"unknown\"} 1\n",
+            "plurx_cluster_clock_advisory_refusals_total{decision=\"takeover\",cause=\"generation_changed\"} 1\n",
+            "plurx_cluster_clock_advisory_refusals_total{decision=\"expiry_scan\",cause=\"unknown\"} 1\n",
+            "plurx_cluster_clock_advisory_refusals_total{decision=\"expiry_scan\",cause=\"generation_changed\"} 1\n",
+            "plurx_cluster_clock_advisory_refusals_total{decision=\"membership_change\",cause=\"unknown\"} 1\n",
+        ] {
+            assert!(metrics.contains(line), "{line}");
+        }
+        assert_eq!(
+            metrics
+                .lines()
+                .filter(|line| line.starts_with("plurx_cluster_clock_advisory_refusals_total{"))
+                .count(),
+            12,
+            "advisory vocabulary is the same closed three by four"
+        );
+
+        // Turning it on applies the current policy to tickets minted while off.
+        guard.set_enforced(true);
+        assert_eq!(
+            guard.revalidate_for(ClockDecision::Takeover, &takeover),
+            Err(ClockRefusal::GenerationChanged)
+        );
+        assert_eq!(
+            guard.acquire_for(ClockDecision::Takeover).err(),
+            Some(ClockRefusal::Unknown)
+        );
+        publish_offset(&guard, 0, 1_000);
+        assert!(guard.acquire_for(ClockDecision::Takeover).is_ok());
+        assert!(guard
+            .prometheus()
+            .contains("plurx_cluster_clock_enforced 1\n"));
+    }
+
+    #[test]
     fn acquisition_refuses_common_mode_step_and_unrepresentable_wall() {
-        let guard = ClusterClockGuard::new(true);
+        let guard = enforced();
         publish_offset(&guard, 0, 1_000);
         let ticket = guard.acquire().expect("safe before common-mode step");
         {
@@ -456,7 +559,7 @@ mod tests {
 
     #[test]
     fn readiness_counts_completed_positive_rounds_and_resets_on_invalid_evidence() {
-        let guard = ClusterClockGuard::new(true);
+        let guard = enforced();
         assert!(!guard.snapshot().readiness.is_unbounded());
         publish_offset(&guard, 2_500_000, 1_000);
         for _ in 0..10 {
@@ -543,6 +646,7 @@ mod tests {
             voters: BTreeSet::from([1, 2]),
         };
         let guard = ClusterClockGuard::with_membership_source(Arc::new(Source(identity.clone())));
+        guard.set_enforced(true);
         let target = "00000000-0000-0000-0000-000000000002";
         let survivor = "00000000-0000-0000-0000-000000000003";
         let mut roster = super::super::membership::ClockPeerRoster {
@@ -636,6 +740,7 @@ mod tests {
         }
         let source = Arc::new(Source(Mutex::new(None)));
         let guard = ClusterClockGuard::with_membership_source(source.clone());
+        guard.set_enforced(true);
         assert_eq!(guard.acquire().err(), Some(ClockRefusal::Unknown));
         let unknown_empty = guard.roster(&[]);
         assert!(!guard.publish(unknown_empty, BTreeMap::new()));
@@ -803,10 +908,16 @@ impl ClockRefusal {
 
 /// An acquisition proof belongs to this exact shared guard, not another node's
 /// equal-looking generations. Unlike a measurement ticket it cannot be forged.
+///
+/// Its admission generation changes only on evidence that matters to the
+/// decision (local wall discontinuity, membership/roster identity change or
+/// roster failure). An ordinary completed measurement round does not
+/// invalidate it; revalidation re-checks the current policy instead.
 #[derive(Clone, Copy)]
 pub struct ClockAcquisitionTicket<'guard> {
     guard: &'guard ClusterClockGuard,
     decision: ClockDecisionTicket,
+    admission_generation: u64,
 }
 
 /// Original node-local observation for a reduction, not admission by itself.
@@ -815,9 +926,12 @@ pub struct ClockAcquisitionTicket<'guard> {
 pub struct ClockRemovalCapture<'guard> {
     guard: &'guard ClusterClockGuard,
     decision: ClockDecisionTicket,
-    membership: ClockMembershipIdentity,
+    admission_generation: u64,
+    /// None only for an advisory capture minted while enforcement is off and
+    /// coverage was unavailable; strict checks then refuse, and are softened.
+    membership: Option<ClockMembershipIdentity>,
     peers: BTreeMap<String, PeerClockOffset>,
-    directory: BTreeMap<String, (u64, String)>,
+    directory: Option<BTreeMap<String, (u64, String)>>,
     target: RemovalTarget,
     captured_at: Instant,
     reachability_stable: bool,
@@ -873,6 +987,7 @@ impl ClockAcquisitionTicket<'_> {
 pub struct OwnedClockAcquisitionTicket {
     guard: Arc<ClusterClockGuard>,
     decision: ClockDecisionTicket,
+    admission_generation: u64,
     consumer: ClockDecision,
 }
 
@@ -890,6 +1005,7 @@ impl OwnedClockAcquisitionTicket {
             &ClockAcquisitionTicket {
                 guard: &self.guard,
                 decision: self.decision,
+                admission_generation: self.admission_generation,
             },
         )
     }
@@ -921,6 +1037,10 @@ pub struct ClockSnapshot {
 
 struct ClockInner {
     snapshot: ClockSnapshot,
+    /// Bumped only by decision-relevant evidence: local discontinuity,
+    /// membership/roster identity change, or roster failure. Separate from
+    /// the per-round `state_generation` that measurement publication uses.
+    admission_generation: u64,
     roster_proved: bool,
     anchor_wall_ms: Option<i64>,
     anchor_mono: Instant,
@@ -935,7 +1055,11 @@ pub struct ClusterClockGuard {
     inner: Mutex<ClockInner>,
     membership_source: Option<Arc<dyn ClockMembershipSource>>,
     authority_reads: AtomicU64,
+    /// Operator switch (Developer settings), default off. While off, every
+    /// admission entry point admits and only records what it WOULD refuse.
+    enforced: AtomicBool,
     refusals: [[AtomicU64; 4]; 3],
+    advisory_refusals: [[AtomicU64; 4]; 3],
 }
 
 fn wall_ms() -> Option<i64> {
@@ -952,8 +1076,11 @@ impl ClusterClockGuard {
         Self {
             membership_source: None,
             authority_reads: AtomicU64::new(0),
+            enforced: AtomicBool::new(false),
             refusals: std::array::from_fn(|_| std::array::from_fn(|_| AtomicU64::new(0))),
+            advisory_refusals: std::array::from_fn(|_| std::array::from_fn(|_| AtomicU64::new(0))),
             inner: Mutex::new(ClockInner {
+                admission_generation: 0,
                 snapshot: ClockSnapshot {
                     state: if replicated {
                         ClusterClockState::Incomplete {
@@ -1003,12 +1130,85 @@ impl ClusterClockGuard {
             inner.peer_directory = None;
             inner.roster_observed_at = None;
             inner.snapshot.state_generation += 1;
+            inner.admission_generation += 1;
             inner.snapshot.readiness = ClockReadiness::default();
             for peer in inner.snapshot.peers.values_mut() {
                 *peer = PeerClockOffset::Unknown;
             }
             Self::recompute(inner);
         }
+    }
+
+    /// Apply the operator's enforcement setting. Off (the default) makes
+    /// every admission entry point admit; refusals it would have made are
+    /// counted in `plurx_cluster_clock_advisory_refusals_total` instead.
+    pub fn set_enforced(&self, enforced: bool) {
+        self.enforced.store(enforced, Ordering::SeqCst);
+    }
+
+    #[must_use]
+    pub fn is_enforced(&self) -> bool {
+        self.enforced.load(Ordering::SeqCst)
+    }
+
+    /// Pure, uncounted inspection of the current evidence against the
+    /// admission policy, regardless of enforcement. This mints nothing and is
+    /// what diagnostics and observation barriers use; consumers use
+    /// `acquire`/`acquire_for`/`admit_for`.
+    pub fn check_evidence(&self) -> Result<(), ClockRefusal> {
+        self.capture().1
+    }
+
+    /// Apply enforcement to a strict result. Only actual consumer entry
+    /// points pass a decision; pure inspection stays uncounted.
+    fn decide(
+        &self,
+        decision: Option<ClockDecision>,
+        strict: Result<(), ClockRefusal>,
+    ) -> Result<(), ClockRefusal> {
+        let Err(cause) = strict else {
+            return Ok(());
+        };
+        let enforced = self.is_enforced();
+        if let Some(decision) = decision {
+            let counters = if enforced {
+                &self.refusals
+            } else {
+                &self.advisory_refusals
+            };
+            counters[decision.index()][cause.index()].fetch_add(1, Ordering::Relaxed);
+        }
+        if enforced {
+            Err(cause)
+        } else {
+            Ok(())
+        }
+    }
+
+    /// One serialized continuity/state read: the ticket for the current
+    /// generations plus whether the strict policy admits it.
+    fn capture(&self) -> (ClockAcquisitionTicket<'_>, Result<(), ClockRefusal>) {
+        let mut inner = self
+            .inner
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        self.refresh_membership(&mut inner);
+        let generation = inner.snapshot.clock_generation;
+        let before = Instant::now();
+        let decision = Self::continuity(&mut inner, before, wall_ms(), Instant::now());
+        let strict = if decision.clock_generation == generation {
+            Self::acquisition_policy(&inner)
+        } else {
+            Err(ClockRefusal::LocalDiscontinuity)
+        };
+        (
+            ClockAcquisitionTicket {
+                guard: self,
+                decision,
+                admission_generation: inner.admission_generation,
+            },
+            strict,
+        )
     }
 
     /// Synchronously check fixed wall/monotonic continuity, serialized with evidence.
@@ -1029,23 +1229,11 @@ impl ClusterClockGuard {
     /// read. Future consumers must revalidate immediately before submission.
     /// This does not submit, count a production refusal, or cancel an existing
     /// commit-unknown proposal.
+    /// While enforcement is off this always admits (uncounted).
     pub fn acquire(&self) -> Result<ClockAcquisitionTicket<'_>, ClockRefusal> {
-        let mut inner = self
-            .inner
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        self.refresh_membership(&mut inner);
-        let generation = inner.snapshot.clock_generation;
-        let before = Instant::now();
-        let decision = Self::continuity(&mut inner, before, wall_ms(), Instant::now());
-        if decision.clock_generation != generation {
-            return Err(ClockRefusal::LocalDiscontinuity);
-        }
-        Self::acquisition_policy(&inner)?;
-        Ok(ClockAcquisitionTicket {
-            guard: self,
-            decision,
-        })
+        let (ticket, strict) = self.capture();
+        self.decide(None, strict)?;
+        Ok(ticket)
     }
 
     /// Capture before the manager resolves this UUID through any awaited read.
@@ -1083,18 +1271,25 @@ impl ClusterClockGuard {
         let generation = inner.snapshot.clock_generation;
         let before = Instant::now();
         let decision = Self::continuity(&mut inner, before, wall_ms(), Instant::now());
-        if decision.clock_generation != generation {
-            return Err(ClockRefusal::LocalDiscontinuity);
-        }
-        let membership = inner.membership.clone().ok_or(ClockRefusal::Unknown)?;
-        let directory = inner.peer_directory.clone().ok_or(ClockRefusal::Unknown)?;
-        if !inner.roster_proved
-            || membership.members.len() > 64
-            || !membership.members.contains(&membership.local_node)
-            || inner.snapshot.peers.len() != membership.members.len().saturating_sub(1)
-        {
-            return Err(ClockRefusal::Unknown);
-        }
+        let membership = inner.membership.clone();
+        let directory = inner.peer_directory.clone();
+        let strict = (|| {
+            if decision.clock_generation != generation {
+                return Err(ClockRefusal::LocalDiscontinuity);
+            }
+            let membership = membership.as_ref().ok_or(ClockRefusal::Unknown)?;
+            directory.as_ref().ok_or(ClockRefusal::Unknown)?;
+            if !inner.roster_proved
+                || membership.members.len() > 64
+                || !membership.members.contains(&membership.local_node)
+                || inner.snapshot.peers.len() != membership.members.len().saturating_sub(1)
+            {
+                return Err(ClockRefusal::Unknown);
+            }
+            Ok(())
+        })();
+        // Uncounted: the counted consumer boundary is `admit_fenced_removal`.
+        self.decide(None, strict)?;
         let reachability_stable = inner.last_discontinuity.is_none_or(|changed| {
             before
                 .checked_duration_since(changed)
@@ -1103,6 +1298,7 @@ impl ClusterClockGuard {
         Ok(ClockRemovalCapture {
             guard: self,
             decision,
+            admission_generation: inner.admission_generation,
             membership,
             peers: inner.snapshot.peers.clone(),
             directory,
@@ -1112,8 +1308,17 @@ impl ClusterClockGuard {
         })
     }
 
+    /// While enforcement is off this always admits (uncounted).
     #[cfg(feature = "hiqlite-store")]
     pub(crate) fn revalidate_removal_capture(
+        &self,
+        captured: &ClockRemovalCapture<'_>,
+    ) -> Result<(), ClockRefusal> {
+        self.decide(None, self.revalidate_removal_capture_strict(captured))
+    }
+
+    #[cfg(feature = "hiqlite-store")]
+    fn revalidate_removal_capture_strict(
         &self,
         captured: &ClockRemovalCapture<'_>,
     ) -> Result<(), ClockRefusal> {
@@ -1130,9 +1335,11 @@ impl ClusterClockGuard {
         if current.clock_generation != captured.decision.clock_generation {
             return Err(ClockRefusal::LocalDiscontinuity);
         }
-        if current.state_generation != captured.decision.state_generation
-            || inner.membership.as_ref() != Some(&captured.membership)
-            || inner.peer_directory.as_ref() != Some(&captured.directory)
+        if inner.admission_generation != captured.admission_generation
+            || captured.membership.is_none()
+            || captured.directory.is_none()
+            || inner.membership != captured.membership
+            || inner.peer_directory != captured.directory
         {
             return Err(ClockRefusal::GenerationChanged);
         }
@@ -1154,18 +1361,23 @@ impl ClusterClockGuard {
         captured: &ClockRemovalCapture<'_>,
         fence: &super::membership::AppliedRemovalFence,
     ) -> Result<(), ClockRefusal> {
+        let reference = fence.reference();
+        // Target identity is not clock evidence: a fence for another target
+        // is never redeemable, enforced or not.
+        if !captured.matches_target(&reference.target_node_id, reference.target_raft_id) {
+            return Err(ClockRefusal::GenerationChanged);
+        }
         let result = (|| {
-            self.revalidate_removal_capture(captured)?;
+            self.revalidate_removal_capture_strict(captured)?;
             if captured.remaining_removal_budget().is_none() {
                 return Err(ClockRefusal::Unknown);
             }
-            let reference = fence.reference();
-            if !captured.matches_target(&reference.target_node_id, reference.target_raft_id)
-                || !captured
-                    .membership
-                    .members
-                    .contains(&reference.target_raft_id)
-                || (reference.target_raft_id != captured.membership.local_node
+            let membership = captured
+                .membership
+                .as_ref()
+                .ok_or(ClockRefusal::GenerationChanged)?;
+            if !membership.members.contains(&reference.target_raft_id)
+                || (reference.target_raft_id != membership.local_node
                     && !captured.peers.contains_key(&reference.target_node_id))
             {
                 return Err(ClockRefusal::GenerationChanged);
@@ -1203,15 +1415,20 @@ impl ClusterClockGuard {
             }
             Ok(())
         })();
-        result.inspect_err(|cause| {
-            self.refusals[ClockDecision::MembershipChange.index()][cause.index()]
-                .fetch_add(1, Ordering::Relaxed);
-        })
+        self.decide(Some(ClockDecision::MembershipChange), result)
     }
 
     /// Close both generation races after awaited preparation. This is a local
     /// synchronous check only; it cannot establish whether a submitted CAS won.
+    /// While enforcement is off this always admits (uncounted).
     pub fn revalidate(&self, ticket: &ClockAcquisitionTicket<'_>) -> Result<(), ClockRefusal> {
+        self.decide(None, self.revalidate_strict(ticket))
+    }
+
+    /// Decision-relevant evidence only: the exact guard, unchanged local
+    /// continuity, unchanged admission generation, and the CURRENT policy.
+    /// A completed measurement round alone never invalidates the ticket.
+    fn revalidate_strict(&self, ticket: &ClockAcquisitionTicket<'_>) -> Result<(), ClockRefusal> {
         if !std::ptr::eq(self, ticket.guard) {
             return Err(ClockRefusal::GenerationChanged);
         }
@@ -1225,7 +1442,7 @@ impl ClusterClockGuard {
         if current.clock_generation != ticket.decision.clock_generation {
             return Err(ClockRefusal::LocalDiscontinuity);
         }
-        if current.state_generation != ticket.decision.state_generation {
+        if inner.admission_generation != ticket.admission_generation {
             return Err(ClockRefusal::GenerationChanged);
         }
         Self::acquisition_policy(&inner)
@@ -1235,19 +1452,25 @@ impl ClusterClockGuard {
     /// Consume a proof captured before awaited identity/preflight reads. An
     /// idempotent already-committed operation can discard that pure result;
     /// new authority must not replace an original refusal with a fresh proof.
+    /// While enforcement is off an originally refused capture is replaced by
+    /// a current ticket (counted as an advisory refusal), as if unguarded.
     pub fn admit_for<'guard>(
         &'guard self,
         decision: ClockDecision,
         prepared: Result<ClockAcquisitionTicket<'guard>, ClockRefusal>,
     ) -> Result<ClockAcquisitionTicket<'guard>, ClockRefusal> {
-        prepared
-            .and_then(|ticket| {
-                self.revalidate(&ticket)?;
-                Ok(ticket)
-            })
-            .inspect_err(|cause| {
-                self.refusals[decision.index()][cause.index()].fetch_add(1, Ordering::Relaxed);
-            })
+        let strict = match &prepared {
+            Ok(ticket) => self.revalidate_strict(ticket),
+            Err(cause) => Err(*cause),
+        };
+        let admitted = strict.is_ok();
+        self.decide(Some(decision), strict)?;
+        match prepared {
+            Ok(ticket) if admitted => Ok(ticket),
+            // Advisory admission: bind the operation to current generations
+            // so one stale capture is not re-counted at every later check.
+            _ => Ok(self.capture().0),
+        }
     }
 
     /// Actual consumer entry only; pure policy inspection remains uncounted.
@@ -1255,9 +1478,9 @@ impl ClusterClockGuard {
         &self,
         decision: ClockDecision,
     ) -> Result<ClockAcquisitionTicket<'_>, ClockRefusal> {
-        self.acquire().inspect_err(|cause| {
-            self.refusals[decision.index()][cause.index()].fetch_add(1, Ordering::Relaxed);
-        })
+        let (ticket, strict) = self.capture();
+        self.decide(Some(decision), strict)?;
+        Ok(ticket)
     }
 
     pub fn acquire_owned_for(
@@ -1268,6 +1491,7 @@ impl ClusterClockGuard {
         Ok(OwnedClockAcquisitionTicket {
             guard: Arc::clone(self),
             decision: ticket.decision,
+            admission_generation: ticket.admission_generation,
             consumer,
         })
     }
@@ -1279,9 +1503,7 @@ impl ClusterClockGuard {
         decision: ClockDecision,
         ticket: &ClockAcquisitionTicket<'_>,
     ) -> Result<(), ClockRefusal> {
-        self.revalidate(ticket).inspect_err(|cause| {
-            self.refusals[decision.index()][cause.index()].fetch_add(1, Ordering::Relaxed);
-        })
+        self.decide(Some(decision), self.revalidate_strict(ticket))
     }
 
     fn acquisition_policy(inner: &ClockInner) -> Result<(), ClockRefusal> {
@@ -1322,6 +1544,7 @@ impl ClusterClockGuard {
             inner.last_discontinuity = Some(after);
             inner.snapshot.clock_generation += 1;
             inner.snapshot.state_generation += 1;
+            inner.admission_generation += 1;
             inner.snapshot.discontinuities += 1;
             for peer in inner.snapshot.peers.values_mut() {
                 *peer = PeerClockOffset::Unknown;
@@ -1477,17 +1700,25 @@ impl ClusterClockGuard {
         target_raft: u64,
         local_node: &str,
     ) -> Result<(), ClockRefusal> {
-        if roster.membership.as_ref() != Some(&captured.membership)
-            || Self::peer_directory(roster)? != captured.directory
-            || if target_raft == captured.membership.local_node {
-                target_node != local_node
-            } else {
-                captured.directory.get(target_node).map(|entry| entry.0) != Some(target_raft)
+        let strict = (|| {
+            let (Some(membership), Some(directory)) =
+                (captured.membership.as_ref(), captured.directory.as_ref())
+            else {
+                return Err(ClockRefusal::GenerationChanged);
+            };
+            if roster.membership.as_ref() != Some(membership)
+                || Self::peer_directory(roster)? != *directory
+                || if target_raft == membership.local_node {
+                    target_node != local_node
+                } else {
+                    directory.get(target_node).map(|entry| entry.0) != Some(target_raft)
+                }
+            {
+                return Err(ClockRefusal::GenerationChanged);
             }
-        {
-            return Err(ClockRefusal::GenerationChanged);
-        }
-        self.revalidate_removal_capture(captured)
+            self.revalidate_removal_capture_strict(captured)
+        })();
+        self.decide(None, strict)
     }
 
     fn roster_with_directory(
@@ -1539,6 +1770,7 @@ impl ClusterClockGuard {
             }
             inner.roster_proved = true;
             inner.snapshot.state_generation += 1;
+            inner.admission_generation += 1;
             inner.snapshot.readiness = ClockReadiness::default();
         }
         inner.roster_observed_at = Some(Instant::now());
@@ -1580,6 +1812,7 @@ impl ClusterClockGuard {
                 *peer = PeerClockOffset::Unknown;
             }
             inner.snapshot.state_generation += 1;
+            inner.admission_generation += 1;
             inner.snapshot.unknown_rounds += 1;
             inner.snapshot.readiness = ClockReadiness::default();
             Self::recompute(&mut inner);
@@ -1592,7 +1825,9 @@ impl ClusterClockGuard {
         if failed {
             inner.snapshot.unknown_rounds += 1;
         }
-        // Every completed round invalidates tickets, including a newly failed peer.
+        // Every completed round advances the measurement generation. It does
+        // not touch the admission generation: a ticket is re-checked against
+        // the current policy, so a newly failed peer still refuses (enforced).
         inner.snapshot.state_generation += 1;
         Self::expire(&mut inner, Instant::now());
         Self::recompute(&mut inner);
@@ -1625,6 +1860,7 @@ impl ClusterClockGuard {
             *peer = PeerClockOffset::Unknown;
         }
         inner.snapshot.state_generation += 1;
+        inner.admission_generation += 1;
         inner.snapshot.unknown_rounds += 1;
         Self::recompute(&mut inner);
     }
@@ -1677,6 +1913,17 @@ impl ClusterClockGuard {
                 out.push_str(&format!("plurx_cluster_clock_refusals_total{{decision=\"{decision}\",cause=\"{cause}\"}} {count}\n"));
             }
         }
+        out.push_str("# HELP plurx_cluster_clock_advisory_refusals_total Decisions that enforcement would have refused while it was off (admitted anyway).\n# TYPE plurx_cluster_clock_advisory_refusals_total counter\n");
+        for decision in ClockDecision::ALL {
+            for cause in ClockRefusal::ALL {
+                let count =
+                    self.advisory_refusals[decision.index()][cause.index()].load(Ordering::Relaxed);
+                let decision = decision.label();
+                let cause = cause.label();
+                out.push_str(&format!("plurx_cluster_clock_advisory_refusals_total{{decision=\"{decision}\",cause=\"{cause}\"}} {count}\n"));
+            }
+        }
+        out.push_str(&format!("# HELP plurx_cluster_clock_enforced Whether the cluster clock guard refuses decisions (1) or is advisory only (0).\n# TYPE plurx_cluster_clock_enforced gauge\nplurx_cluster_clock_enforced {}\n", u8::from(self.is_enforced())));
         out
     }
 }
