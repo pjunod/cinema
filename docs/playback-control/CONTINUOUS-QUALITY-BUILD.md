@@ -6977,3 +6977,46 @@ on the same final source was sampled for host pressure and was clean. This is
 recorded as host contention, not proven: the held picture's mechanism inside
 Chrome was not captured. Physical-device checks after deploy remain the
 authority.
+
+### 10.234 Fast-lane preflight: contract debt the branch had accumulated
+
+The first fast-lane runs stopped in preflight. Every failure was confirmed
+against current main (where the same suites pass) and fixed at its cause:
+
+- **Regression-Test fields.** Three Android lines lacked `::name`, five named
+  `tests::`-qualified Rust tests the checker cannot resolve, and one named a
+  receipt test that cumulative acknowledgement replaced. Corrected in the PR
+  description.
+- **Rolling-producer ownership inventory.** The module-wide sentinel counts
+  for tasks, timers, processes and VOD-owner paths rose with controlled
+  admission, reservation publication and owner relays; the reviewed counts are
+  recorded. Three test bindings named `interval` matched the forbidden
+  timer-alias shape and now clone explicitly.
+- **Apple attempt census.** The commit path compared epochs by hand in nine
+  places and moved to a fence the census did not declare. The checks now go
+  through `AttemptFence.preparedCommit` / `.retainedQualityRestart`; what each
+  compares is unchanged, and a refusal logs `attempt_stale`. Two checks in
+  `retainManualQualityFailure` stay hand-written because they read epochs the
+  retention record carries across Play/Pause on purpose; they are listed on the
+  census's not-yet-migrated list. **For the human:** that list's header says it
+  only shrinks; these two rows grow it, with the reason beside them.
+- **Shipped-asset and build claims.** Two new player scripts made 68 web
+  assets; the architecture document and two test helpers still said 66. The
+  release counters (Apple 206, Android 144) were already above main; the
+  documents that quote them were regenerated with the validator's own
+  renderer.
+- **Exact-shape pins.** The Android builder and evidence-workflow tests pinned
+  pre-branch source lines (the builder now returns the continuous source
+  registry and output evidence; hold parking carries playback speed; release
+  ends through `releaseOwnedSession`). The pins name the current lines and keep
+  every earlier guarantee, including the `endHlsSession` fallback.
+- **API documentation.** Nine new routes (public and internal relays) are
+  documented with their limits and status semantics; the route count is 252.
+- **web-policy harness.** A copied function ending in a `//` comment swallowed
+  the call on the same line, and the Keep-waiting harness lacked the shipped
+  retained-quality functions.
+
+The preflight suites (history audit, validation-lint, `tests/validation`,
+`operations-check`, the player-contract node suites) and the web syntax/type
+gate were run once locally against the merge candidate before restarting the
+lane, so the lane would not cycle on them.
