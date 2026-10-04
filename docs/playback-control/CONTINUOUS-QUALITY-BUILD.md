@@ -7192,3 +7192,14 @@ the #793 integration was being re-qualified, so the batch merged main again
   with `passive_grant`). Worker request validation runs both sides' checks.
   When a session still held by a live passive grant goes idle, its child
   readers detach with its rendition, the same as when it is removed.
+
+Verification on the merged source `6da1d7634`, all on the lab host: Rust
+fmt and Clippy clean; Android production, unit-test and debug-APK
+compilation pass; the full Rust unit lane (`cargo test --workspace
+--exclude plurx-cluster-check`) and the restart check pass with no
+failures; Chrome full campaign **PASS** — fifteen manual and five actual Auto
+changes in one session and player, 50.1 ms maximum video gap (p95 50.1 ms),
+zero stalls, hitches and dropped frames over 21,181 frames, first frame
+2.7 s, clock 1.001×; host load ≤ 4.9, CPU PSI avg10 ≤ 15 %. Receipt
+`reports/continuous-chrome-mixed-6da1d7634-full20-merged797*`.
+
