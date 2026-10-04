@@ -4887,3 +4887,23 @@ server-accepted current-rendition controls and the Shared-only status reader
 remain the next adapters. Swift's current language mode reports a non-Sendable
 Start task-result warning; the next controller slice will retain an owned Void
 join rather than add an unchecked Sendable claim.
+
+### Native Shared status candidate
+
+The existing Shared models and clients now read only the agreed B status
+endpoint, `/api/v1/hls/{Bsid}/status`, with the original captured login. The
+closed `subject: shared` envelope must match the retained full file reference,
+B session, incarnation and control epoch. Telemetry accepts the bounded Source
+VOD fields; it rejects Local identity fields, producer-failure prose, unknown
+fields, malformed or negative counters, oversized bodies and foreign lineage.
+The renderer shows a passive Shared summary and does not enter Local starvation,
+recovery or rendition-change policy. The Apple Start owner now joins a `Void`
+task through completion rather than exporting a non-Sendable result.
+
+The final Apple status client/model/context filters passed 19 tests on each of
+iOS and tvOS, with zero failures, using the established simulator compiler.
+The prior Shared task-result concurrency warning is absent from these builds.
+These are synthetic authenticated protocol tests, not Source physical or
+hardware evidence. Android status compilation is pending the server fixture's
+reserved Docker window; the preceding clean Native checkpoint remains
+`ecebec1d6`. No directed controls or Local fallback are enabled by this slice.

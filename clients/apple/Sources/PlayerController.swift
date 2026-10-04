@@ -10894,9 +10894,10 @@ final class SharedPlayerController: ObservableObject {
     @Published private(set) var playback: SharedStartedPlayback?
     @Published private(set) var failure: String?
     @Published private(set) var starting = false
+    @Published private(set) var statusSummary: String?
     private var client: SharedDecisionClient?
     private var plan: SharedPlaybackPlan?
-    private var startTask: Task<SharedStartedPlayback, Error>?
+    private var startTask: Task<Void, Never>?
     private var progressTask: Task<Void, Never>?
     private var timeObserver: Any?
     private var authorizationObserver: UUID?
@@ -10905,11 +10906,16 @@ final class SharedPlayerController: ObservableObject {
     func start(_ plan: SharedPlaybackPlan) async {
         guard self.plan == nil else { return }
         self.plan = plan; starting = true; closing = false
+        let task = Task { await performStart(plan) }
+        startTask = task
+        await task.value
+        startTask = nil
+    }
+    private func performStart(_ plan: SharedPlaybackPlan) async {
         do {
             let client = try SharedDecisionClient(); self.client = client
-            let task = Task { try await client.start(context: plan.subject.context, request: plan.request) }
-            startTask = task
-            let started = try await task.value; startTask = nil; starting = false
+            let started = try await client.start(context: plan.subject.context, request: plan.request)
+            starting = false
             playback = started
             if closing { try? await client.end(playback: started); playback = nil; return }
             let url = try client.playlistURL(playback: started)
@@ -10930,7 +10936,7 @@ final class SharedPlayerController: ObservableObject {
                 Task { @MainActor in self?.reportProgress() }
             }
         } catch {
-            startTask = nil; starting = false
+            starting = false
             if !closing { failure = error.localizedDescription }
         }
     }
@@ -10945,6 +10951,7 @@ final class SharedPlayerController: ObservableObject {
         progressTask = Task { [weak self] in
             _ = try? await client.orderedProgress(playback: playback, initialWatchSequence: plan.subject.watchSequence,
                 positionMs: position, durationMs: playback.start.response.durationMs.map(Int64.init))
+            if self?.closing == false { self?.statusSummary = (try? await client.status(playback: playback))?.summary }
             self?.progressTask = nil
         }
     }
@@ -10954,7 +10961,7 @@ final class SharedPlayerController: ObservableObject {
         if let timeObserver { player.removeTimeObserver(timeObserver); self.timeObserver = nil }
         if let completionObserver { NotificationCenter.default.removeObserver(completionObserver); self.completionObserver = nil }
         if let authorizationObserver { Session.shared.removeAuthorizationObserver(authorizationObserver); self.authorizationObserver = nil }
-        startTask?.cancel(); _ = try? await startTask?.value
+        startTask?.cancel(); await startTask?.value
         await progressTask?.value
         if let client, let playback, let plan {
             if let position = positionMs() {
@@ -10968,6 +10975,6 @@ final class SharedPlayerController: ObservableObject {
             player.replaceCurrentItem(with: nil)
             try? await client.end(playback: playback)
         }
-        player.replaceCurrentItem(with: nil); playback = nil
+        player.replaceCurrentItem(with: nil); playback = nil; statusSummary = nil
     }
 }

@@ -331,3 +331,54 @@ internal fun SharedPlaybackPlan.frozenControlSelection(): JsonObject = buildJson
     })
     put("codec", "auto"); put("dynamic_range", "auto")
 }
+
+/** Shared telemetry cannot acquire numeric Local ownership or recovery policy. */
+internal class SharedPlaybackStatus private constructor(val wire: JsonObject, val targetHeight: Long, val encoder: String, val producerState: String) {
+    val summary: String get() = "Shared HLS · ${targetHeight}p · $encoder · $producerState"
+    companion object {
+        val requiredCounters = "target_height fetched_end_ms materialized_segments planned_segments materialized_bytes planned_bytes working_set_bytes working_set_budget_bytes completed_cache_bytes delivered_bytes delivered_idle_ms http_wait_count status_generated_unix_ms".split(" ").toSet()
+        val optionalCounters = "active_encode_milli_realtime active_encode_age_ms active_encode_active_ms active_encode_segments tone_map_peak_nits reported_position_ms client_runway_ms server_ready_anchor_ms server_ready_end_ms server_next_ready_start_ms server_next_ready_end_ms published_end_ms ready_ahead_end_ms fetched_segment ahead_seconds delivered_bps http_wait_oldest_ms http_wait_segment".split(" ").toSet()
+        val requiredWords = setOf("encoder", "playlist_shape", "producer_state", "server_ready_state")
+        val optionalWords = setOf("tone_map_peak_source", "producer_hold", "producer_decision", "control_demand", "render_state")
+        fun decode(bytes: ByteArray, playback: SharedStartedPlayback): SharedPlaybackStatus {
+            require(bytes.size <= 65_536)
+            val outer = Json.parseToJsonElement(bytes.decodeToString()).jsonObject
+            require(outer.keys == setOf("subject", "reference", "session_id", "incarnation_id", "control_epoch", "status"))
+            require(outer.strictString("subject") == "shared" && outer.strictString("session_id") == playback.start.response.session_id)
+            val control = requireNotNull(playback.start.response.control)
+            require(outer.strictString("incarnation_id") == control.generation)
+            val epoch = outer.getValue("control_epoch").jsonPrimitive
+            require(!epoch.isString && epoch.content.matches(Regex("[1-9][0-9]*")) && epoch.longOrNull == control.controlEpoch)
+            playback.start.validated(playback.context)
+            Json.decodeFromJsonElement<SharedPlaybackFileReference>(outer.getValue("reference")).validate(playback.context)
+            val status = outer.getValue("status").jsonObject
+            val booleans = setOf("admitted", "suspended", "final")
+            val required = requiredCounters + requiredWords + booleans
+            val allowed = required + optionalCounters + optionalWords + setOf("server_ready_seconds", "active_encode_candidate_id")
+            require(status.keys.all { it in allowed } && required.all { status[it] != null && status[it] != JsonNull })
+            (requiredCounters + optionalCounters).forEach { key ->
+                status[key]?.takeUnless { it == JsonNull }?.jsonPrimitive?.let {
+                    require(!it.isString && it.content.matches(Regex("0|[1-9][0-9]*")) && it.content.toULongOrNull() != null)
+                }
+            }
+            val u32Fields = setOf("active_encode_milli_realtime", "active_encode_age_ms", "active_encode_active_ms", "active_encode_segments", "tone_map_peak_nits")
+            val wideFields = setOf("materialized_segments", "planned_segments", "materialized_bytes", "planned_bytes", "working_set_bytes", "working_set_budget_bytes", "completed_cache_bytes", "http_wait_count")
+            (requiredCounters + optionalCounters).forEach { key -> status[key]?.takeUnless { it == JsonNull }?.jsonPrimitive?.content?.toULongOrNull()?.let {
+                require(key in wideFields || it <= Long.MAX_VALUE.toULong())
+                require(key !in u32Fields || it <= UInt.MAX_VALUE.toULong())
+            } }
+            (requiredWords + optionalWords).forEach { key -> status[key]?.takeUnless { it == JsonNull }?.let {
+                val text = status.strictString(key)
+                require(text.isNotEmpty() && text.toByteArray().size <= 32 && text.none { ch -> ch.code < 32 || ch.code == 127 })
+            } }
+            booleans.forEach { require(!status.getValue(it).jsonPrimitive.isString && status.getValue(it).jsonPrimitive.booleanOrNull != null) }
+            status["active_encode_candidate_id"]?.takeUnless { it == JsonNull }?.let { require(status.strictString("active_encode_candidate_id").matches(Regex("[0-9a-f]{32}"))) }
+            status["server_ready_seconds"]?.takeUnless { it == JsonNull }?.jsonPrimitive?.let {
+                val number = it.doubleOrNull; require(!it.isString && number != null && number.isFinite() && number >= 0)
+            }
+            val height = status.getValue("target_height").jsonPrimitive.longOrNull
+            require(height != null && height in 1..16384)
+            return SharedPlaybackStatus(status, height, status.strictString("encoder"), status.strictString("producer_state"))
+        }
+    }
+}

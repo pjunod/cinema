@@ -3531,6 +3531,7 @@ struct SharedPlayerView: View {
             Text(plan.subject.title).font(.headline)
             VideoPlayer(player: controller.player).allowsHitTesting(false)
             if controller.starting { ProgressView("Starting Shared playback") }
+            if let summary = controller.statusSummary { Text(summary).font(.caption).foregroundStyle(.secondary) }
             if let failure = controller.failure { Text(failure).foregroundStyle(.secondary) }
             Text("Playback controls, quality, audio, subtitles and recovery changes are unavailable for Shared playback.")
                 .font(.caption).foregroundStyle(.secondary)

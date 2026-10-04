@@ -357,3 +357,72 @@ extension SharedPlaybackPlan {
             "audio_offset_ms": .integer(0), "subtitle": .object(subtitle), "codec": .string("auto"), "dynamic_range": .string("auto")])
     }
 }
+
+/// Shared telemetry is presentation metadata, never a Local owner/status DTO.
+struct SharedPlaybackStatus {
+    let wire: [String: SharedPlaybackJSON]
+    let targetHeight: Int64
+    let encoder: String
+    let producerState: String
+    var summary: String { "Shared HLS · \(targetHeight)p · \(encoder) · \(producerState)" }
+    static let requiredCounters = Set("target_height fetched_end_ms materialized_segments planned_segments materialized_bytes planned_bytes working_set_bytes working_set_budget_bytes completed_cache_bytes delivered_bytes delivered_idle_ms http_wait_count status_generated_unix_ms".split(separator: " ").map(String.init))
+    static let optionalCounters = Set("active_encode_milli_realtime active_encode_age_ms active_encode_active_ms active_encode_segments tone_map_peak_nits reported_position_ms client_runway_ms server_ready_anchor_ms server_ready_end_ms server_next_ready_start_ms server_next_ready_end_ms published_end_ms ready_ahead_end_ms fetched_segment ahead_seconds delivered_bps http_wait_oldest_ms http_wait_segment".split(separator: " ").map(String.init))
+    static let requiredWords: Set<String> = ["encoder", "playlist_shape", "producer_state", "server_ready_state"]
+    static let optionalWords: Set<String> = ["tone_map_peak_source", "producer_hold", "producer_decision", "control_demand", "render_state"]
+    static func decode(_ data: Data, playback: SharedStartedPlayback) throws -> Self {
+        guard data.count <= 65_536,
+              let outer = try JSONDecoder().decode(SharedPlaybackJSON.self, from: data).object,
+              Set(outer.keys) == Set(["subject", "reference", "session_id", "incarnation_id", "control_epoch", "status"]),
+              outer["subject"] == .string("shared"),
+              outer["session_id"] == .string(playback.start.response.sessionId),
+              let control = playback.start.response.control,
+              outer["incarnation_id"] == .string(control.generation),
+              outer["control_epoch"] == .integer(Int64(control.controlEpoch)),
+              let status = outer["status"]?.object,
+              let original = try JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let rawStatus = original["status"] as? [String: Any]
+        else { throw APIError.badURL }
+        _ = try playback.start.validated(playback.context)
+        let decoder = JSONDecoder(); decoder.keyDecodingStrategy = .convertFromSnakeCase
+        guard let reference = outer["reference"] else { throw APIError.badURL }
+        try decoder.decode(SharedPlaybackFileReference.self, from: JSONEncoder().encode(reference)).validate(playback.context)
+        let booleans: Set<String> = ["admitted", "suspended", "final"]
+        let allowed = requiredCounters.union(optionalCounters).union(requiredWords).union(optionalWords).union(booleans).union(["server_ready_seconds", "active_encode_candidate_id"])
+        guard Set(status.keys).isSubset(of: allowed), requiredCounters.union(requiredWords).union(booleans).isSubset(of: Set(status.keys)) else { throw APIError.badURL }
+        guard requiredCounters.union(requiredWords).allSatisfy({ status[$0] != .null }) else { throw APIError.badURL }
+        for key in requiredCounters.union(optionalCounters) {
+            guard let value = status[key], value != .null else { continue }
+            guard let number = rawStatus[key] as? NSNumber, !["d", "f"].contains(String(cString: number.objCType)) else { throw APIError.badURL }
+            switch value {
+            case .integer(let n): guard n >= 0 else { throw APIError.badURL }
+            case .unsigned: break
+            default: throw APIError.badURL
+            }
+        }
+        let u32Fields: Set<String> = ["active_encode_milli_realtime", "active_encode_age_ms", "active_encode_active_ms", "active_encode_segments", "tone_map_peak_nits"]
+        let wideFields: Set<String> = ["materialized_segments", "planned_segments", "materialized_bytes", "planned_bytes", "working_set_bytes", "working_set_budget_bytes", "completed_cache_bytes", "http_wait_count"]
+        for key in requiredCounters.union(optionalCounters) {
+            if case .unsigned(let number) = status[key], !wideFields.contains(key), number > UInt64(Int64.max) { throw APIError.badURL }
+            if u32Fields.contains(key) {
+                switch status[key] { case .integer(let n) where n > Int64(UInt32.max): throw APIError.badURL; case .unsigned(let n) where n > UInt64(UInt32.max): throw APIError.badURL; default: break }
+            }
+        }
+        for key in requiredWords.union(optionalWords) {
+            guard let value = status[key], value != .null else { continue }
+            guard let text = value.string, !text.isEmpty, text.utf8.count <= 32,
+                  !text.unicodeScalars.contains(where: { $0.value < 32 || $0.value == 127 }) else { throw APIError.badURL }
+        }
+        for key in booleans { guard case .bool = status[key] else { throw APIError.badURL } }
+        if let candidate = status["active_encode_candidate_id"], candidate != .null {
+            guard let value = candidate.string, PlaybackFileContext.matches(value, "^[0-9a-f]{32}$") else { throw APIError.badURL }
+        }
+        if let seconds = status["server_ready_seconds"], seconds != .null {
+            let value: Double
+            switch seconds { case .number(let n): value = n; case .integer(let n): value = Double(n); case .unsigned(let n): value = Double(n); default: throw APIError.badURL }
+            guard value.isFinite, value >= 0 else { throw APIError.badURL }
+        }
+        guard case .integer(let height) = status["target_height"], (1...16384).contains(height),
+              let encoder = status["encoder"]?.string, let producer = status["producer_state"]?.string else { throw APIError.badURL }
+        return Self(wire: status, targetHeight: height, encoder: encoder, producerState: producer)
+    }
+}

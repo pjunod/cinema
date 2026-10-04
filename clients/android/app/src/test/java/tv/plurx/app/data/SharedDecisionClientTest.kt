@@ -185,6 +185,27 @@ class SharedDecisionClientTest {
         assertEquals(request, result.request); assertEquals(Net.json.encodeToJsonElement(request).jsonObject, Json.parseToJsonElement(sent!!).jsonObject)
         assertEquals(Long.MAX_VALUE, result.start.wire["future"]!!.jsonObject["exact"]!!.jsonPrimitive.long)
         assertTrue(runCatching { result.context.localId() }.isFailure)
+        val metrics = buildJsonObject {
+            SharedPlaybackStatus.requiredCounters.forEach { put(it, 0) }
+            put("target_height", 72); put("encoder", "libx264"); put("playlist_shape", "vod"); put("producer_state", "ready"); put("server_ready_state", "ready")
+            put("admitted", true); put("suspended", false); put("final", false); put("server_ready_seconds", 0.5)
+        }
+        val statusWire = buildJsonObject { put("subject", "shared"); put("reference", binding("9223372036854775807")); put("session_id", session)
+            put("incarnation_id", "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"); put("control_epoch", 1); put("status", metrics) }
+        val statusClient = SharedDecisionClient.forTest(OkHttpClient.Builder().addInterceptor { chain ->
+            assertEquals("/api/v1/hls/$session/status", chain.request().url.encodedPath)
+            assertEquals("Bearer decision-bearer", chain.request().header("Authorization"))
+            response(chain.request(), statusWire.toString())
+        }.build())
+        assertEquals("Shared HLS · 72p · libx264 · ready", statusClient.status(result).summary)
+        fun refuses(value: JsonObject) = assertTrue(runCatching { SharedPlaybackStatus.decode(value.toString().toByteArray(), result) }.isFailure)
+        listOf("file_id", "id", "producer_failed", "message").forEach { key -> refuses(JsonObject(statusWire + ("status" to JsonObject(metrics + (key to JsonPrimitive("/private/source/file")))))) }
+        listOf(JsonPrimitive(-1), JsonPrimitive(1.5), JsonPrimitive("0"), JsonNull).forEach { value -> refuses(JsonObject(statusWire + ("status" to JsonObject(metrics + ("delivered_bytes" to value))))) }
+        refuses(JsonObject(statusWire + ("control_epoch" to JsonPrimitive(2))))
+        refuses(JsonObject(statusWire + ("incarnation_id" to JsonPrimitive("dddddddd-dddd-4ddd-8ddd-dddddddddddd"))))
+        assertTrue(runCatching { SharedPlaybackStatus.decode(ByteArray(65_537) { 32 }, result) }.isFailure)
+        val foreignReference = JsonObject(binding("9223372036854775807") + ("item" to JsonObject(binding("9223372036854775807").getValue("item").jsonObject + ("catalogue_epoch" to JsonPrimitive("dddddddd-dddd-4ddd-8ddd-dddddddddddd")))))
+        refuses(JsonObject(statusWire + ("reference" to foreignReference)))
         val client = SharedDecisionClient.forTest(transport)
         val beat = SharedProgressBeat(session, 7, 0, 90_000, false)
         progressReply = "{\"code\":\"sharing_progress_stale\",\"current_sequence\":20}"
@@ -253,6 +274,7 @@ class SharedDecisionClientTest {
         endClient.end(otherPlayback)
         Session.token = "replacement-bearer"
         assertTrue(runCatching { endClient.end(otherPlayback) }.isFailure)
+        assertTrue(runCatching { statusClient.status(result) }.isFailure)
         assertEquals(1, ends)
 
 

@@ -3097,6 +3097,7 @@ internal fun PlayerScreen(vm: AppViewModel, plan: tv.plurx.app.data.SharedPlayba
     val controller = remember(vm, plan) { SharedPlayerController(context, vm) }
     val starting by controller.starting.collectAsStateWithLifecycle()
     val failure by controller.failure.collectAsStateWithLifecycle()
+    val statusSummary by controller.statusSummary.collectAsStateWithLifecycle()
     val scope = rememberCoroutineScope()
     BackHandler { scope.launch { controller.stop(); onExit() } }
     LaunchedEffect(plan) { controller.start(plan) }
@@ -3105,6 +3106,7 @@ internal fun PlayerScreen(vm: AppViewModel, plan: tv.plurx.app.data.SharedPlayba
         Text(plan.subject.title, style = MaterialTheme.typography.headlineSmall)
         AndroidView(factory = { androidx.media3.ui.PlayerView(it).apply { useController = false; player = controller.player } }, modifier = Modifier.weight(1f).fillMaxWidth())
         if (starting) Text("Starting Shared playback")
+        statusSummary?.let { Text(it, style = MaterialTheme.typography.bodySmall) }
         failure?.let { Text(it) }
         Text("Playback controls, quality, audio, subtitles and recovery changes are unavailable for Shared playback.")
         androidx.compose.material3.TextButton(onClick = { scope.launch { controller.stop(); onExit() } }) { Text("Close") }

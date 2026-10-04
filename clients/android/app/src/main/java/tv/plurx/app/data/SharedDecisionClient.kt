@@ -30,6 +30,14 @@ internal class SharedDecisionClient private constructor(private val auth: Sessio
         require(playback.context.sessionId == playback.start.response.session_id)
         return auth.origin + playback.start.response.playlist_url
     }
+    suspend fun status(playback: SharedStartedPlayback): SharedPlaybackStatus {
+        playlistUrl(playback)
+        val request = Request.Builder().url("${auth.origin}/api/v1/hls/${playback.start.response.session_id}/status")
+            .header("Authorization", "Bearer ${auth.token}").build()
+        val reply = readResponse(request, auth, transport, maxBytes = 65_536) { playlistUrl(playback) }
+        requireCurrent()
+        return SharedPlaybackStatus.decode(reply.bytes, playback)
+    }
     /** Best-effort B End reply is never a physical retirement proof. */
     suspend fun end(playback: SharedStartedPlayback) {
         playlistUrl(playback)

@@ -66,6 +66,17 @@ struct SharedDecisionClient {
         guard let url = URL(string: origin + playback.start.response.playlistUrl) else { throw APIError.badURL }
         return url
     }
+    func status(playback: SharedStartedPlayback) async throws -> SharedPlaybackStatus {
+        _ = try playlistURL(playback: playback)
+        guard let url = URL(string: origin + "/api/v1/hls/\(playback.start.response.sessionId)/status") else { throw APIError.badURL }
+        var request = URLRequest(url: url); request.timeoutInterval = 10
+        request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+        let data = try await SharedDecisionReadOperation(request: request, configuration: configuration, maxBytes: 65_536) {
+            _ = try playlistURL(playback: playback)
+        }.read()
+        try requireCurrent()
+        return try SharedPlaybackStatus.decode(data, playback: playback)
+    }
     /// Best-effort B End. A successful HTTP reply is never physical settlement
     /// evidence; the server's actual owner retains that obligation.
     func end(playback: SharedStartedPlayback) async throws {

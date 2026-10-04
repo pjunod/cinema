@@ -156,6 +156,41 @@ final class SharedDecisionClientTests: XCTestCase {
         let raw = try JSONSerialization.jsonObject(with: XCTUnwrap(sent)) as! [String: Any]
         XCTAssertEqual(raw["request_id"] as? String, request.requestId); XCTAssertNil(raw["intent"]); XCTAssertNil(raw["previous_session_id"])
         XCTAssertEqual(result.start.wire["future"]?.object?["exact"], .integer(Int64.max)); XCTAssertThrowsError(try result.context.localID())
+        var metrics: [String: Any] = Dictionary(uniqueKeysWithValues: SharedPlaybackStatus.requiredCounters.map { ($0, 0) })
+        metrics["target_height"] = 72; metrics["encoder"] = "libx264"; metrics["playlist_shape"] = "vod"
+        metrics["producer_state"] = "ready"; metrics["server_ready_state"] = "ready"
+        metrics["admitted"] = true; metrics["suspended"] = false; metrics["final"] = false
+        metrics["server_ready_seconds"] = 0.5
+        var statusWire: [String: Any] = ["subject": "shared", "reference": try binding("9223372036854775807"),
+            "session_id": session, "incarnation_id": "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb", "control_epoch": 1, "status": metrics]
+        let statusBytes = try JSONSerialization.data(withJSONObject: statusWire)
+        DecisionHTTP.answer = { request in
+            XCTAssertEqual(request.url?.path, "/api/v1/hls/\(session)/status")
+            XCTAssertEqual(request.value(forHTTPHeaderField: "Authorization"), "Bearer decision-bearer")
+            return (request.url!, 200, [:], statusBytes)
+        }
+        let telemetryClient = try SharedDecisionClient(testConfiguration: configuration)
+        let telemetry = try await telemetryClient.status(playback: result)
+        XCTAssertEqual(telemetry.targetHeight, 72); XCTAssertEqual(telemetry.summary, "Shared HLS · 72p · libx264 · ready")
+        for key in ["file_id", "id", "producer_failed", "message"] {
+            var bad = metrics; bad[key] = "/private/source/file"
+            statusWire["status"] = bad
+            XCTAssertThrowsError(try SharedPlaybackStatus.decode(JSONSerialization.data(withJSONObject: statusWire), playback: result))
+        }
+        for value in [-1, 1.5, "0", NSNull()] as [Any] {
+            var bad = metrics; bad["delivered_bytes"] = value; statusWire["status"] = bad
+            XCTAssertThrowsError(try SharedPlaybackStatus.decode(JSONSerialization.data(withJSONObject: statusWire), playback: result))
+        }
+        statusWire["status"] = metrics; statusWire["control_epoch"] = 2
+        XCTAssertThrowsError(try SharedPlaybackStatus.decode(JSONSerialization.data(withJSONObject: statusWire), playback: result))
+        statusWire["control_epoch"] = 1; statusWire["incarnation_id"] = "dddddddd-dddd-4ddd-8ddd-dddddddddddd"
+        XCTAssertThrowsError(try SharedPlaybackStatus.decode(JSONSerialization.data(withJSONObject: statusWire), playback: result))
+        XCTAssertThrowsError(try SharedPlaybackStatus.decode(Data(repeating: 32, count: 65_537), playback: result))
+        statusWire["incarnation_id"] = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"
+        var foreignReference = try binding("9223372036854775807")
+        var foreignItem = foreignReference["item"] as! [String: Any]; foreignItem["catalogue_epoch"] = "dddddddd-dddd-4ddd-8ddd-dddddddddddd"; foreignReference["item"] = foreignItem
+        statusWire["reference"] = foreignReference
+        XCTAssertThrowsError(try SharedPlaybackStatus.decode(JSONSerialization.data(withJSONObject: statusWire), playback: result))
         let client = try SharedDecisionClient(testConfiguration: configuration)
         let beat = SharedProgressBeat(sessionId: session, sequence: 7, positionMs: 0, durationMs: 90_000, watched: false)
         var progressSent: Data?
@@ -231,6 +266,7 @@ final class SharedDecisionClientTests: XCTestCase {
         try await client.end(playback: otherPlayback)
         Session.shared.setCredentials(origin: "https://new.test", token: "new-bearer")
         do { try await client.end(playback: otherPlayback); XCTFail("sent End with replaced account") } catch {}
+        do { _ = try await telemetryClient.status(playback: result); XCTFail("sent Shared status with replaced account") } catch {}
         XCTAssertEqual(ends, 1)
 
 

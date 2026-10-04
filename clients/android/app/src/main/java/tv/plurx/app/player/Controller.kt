@@ -5099,6 +5099,7 @@ internal class SharedPlayerController(context: android.content.Context, vm: AppV
     val player = buildPlayer(context, vm).player
     val failure = kotlinx.coroutines.flow.MutableStateFlow<String?>(null)
     val starting = kotlinx.coroutines.flow.MutableStateFlow(false)
+    val statusSummary = kotlinx.coroutines.flow.MutableStateFlow<String?>(null)
     private val scope = kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.SupervisorJob() + kotlinx.coroutines.Dispatchers.Main.immediate)
     private var client: tv.plurx.app.data.SharedDecisionClient? = null
     private var plan: tv.plurx.app.data.SharedPlaybackPlan? = null
@@ -5130,7 +5131,10 @@ internal class SharedPlayerController(context: android.content.Context, vm: AppV
                 progressJob = scope.launch {
                     while (!closing) {
                         kotlinx.coroutines.delay(10_000)
-                        if (!closing) runCatching { client.orderedProgress(started, plan.subject.watchSequence, player.currentPosition.coerceAtLeast(0), started.start.response.duration_ms) }
+                        if (!closing) {
+                            runCatching { client.orderedProgress(started, plan.subject.watchSequence, player.currentPosition.coerceAtLeast(0), started.start.response.duration_ms) }
+                            statusSummary.value = runCatching { client.status(started).summary }.getOrNull()
+                        }
                     }
                 }
             } catch (error: Exception) {
@@ -5154,7 +5158,7 @@ internal class SharedPlayerController(context: android.content.Context, vm: AppV
             player.stop(); player.release()
             runCatching { client.end(started) }
         } else { player.stop(); player.release() }
-        playback = null
+        playback = null; statusSummary.value = null
     }
     fun close() { scope.launch { stop() } }
 }
