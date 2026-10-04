@@ -383,8 +383,8 @@ impl SessionDir {
             .authorize_write(name, bytes.len().saturating_mul(2))
             .await?;
         let tmp = self.dir.join(format!("{name}.tmp"));
-        let measured = name != "index.m3u8"
-            && (self.measurement.is_some() || self.retained.is_some());
+        let measured =
+            name != "index.m3u8" && (self.measurement.is_some() || self.retained.is_some());
         let written = async {
             let owned = bytes.to_vec();
             let target = tmp.clone();
@@ -570,7 +570,11 @@ impl SessionDir {
             .map(|_| ())
     }
 
-    fn observe_object(&self, name: &str, committed: Option<crate::rolling_output::CommittedObject>) {
+    fn observe_object(
+        &self,
+        name: &str,
+        committed: Option<crate::rolling_output::CommittedObject>,
+    ) {
         let (Some(measurement), Some(committed)) = (&self.measurement, committed) else {
             return;
         };

@@ -582,8 +582,10 @@ impl TranscodeManager {
         // The retained lookup's captured production, kept for the producer
         // below when its logical graph is byte-identical: one source fence
         // and engine attestation per start, not one per consumer.
-        let mut retained_lookup: Option<(Vec<u8>, Arc<crate::rolling_provenance::RollingProduction>)> =
-            None;
+        let mut retained_lookup: Option<(
+            Vec<u8>,
+            Arc<crate::rolling_provenance::RollingProduction>,
+        )> = None;
         // A complete retained answer needs no producer resources. Derive the
         // exact preferred graph's thread weight from the same admission policy,
         // without taking a permit or installing a waiter. A later demotion is

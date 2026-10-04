@@ -652,7 +652,10 @@ impl RetainedArtifactRegistry {
         let Some(rates) = measurement.complete_rates() else {
             return false;
         };
-        let mut offered = rendition.retained_offer.lock().expect("retained offer lock");
+        let mut offered = rendition
+            .retained_offer
+            .lock()
+            .expect("retained offer lock");
         if *offered == Some(rates.identity) {
             return false;
         }
@@ -683,7 +686,10 @@ impl RetainedArtifactRegistry {
             if !published {
                 // Make an unassembled completion offerable again by the
                 // existing maintenance owner.
-                let mut offered = rendition.retained_offer.lock().expect("retained offer lock");
+                let mut offered = rendition
+                    .retained_offer
+                    .lock()
+                    .expect("retained offer lock");
                 if *offered == Some(identity) {
                     *offered = None;
                 }

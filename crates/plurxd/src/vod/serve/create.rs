@@ -133,9 +133,11 @@ impl VodServe {
             .ok_or(PreparationError::Yield("lease_lost"))?;
         let readers = rendition.readers.lock().await;
         let manifest = rendition.manifest.lock().await;
-        if !rendition.source.as_ref().is_some_and(|source| {
-            source.unchanged() && source.object_version() == source_version
-        }) {
+        if !rendition
+            .source
+            .as_ref()
+            .is_some_and(|source| source.unchanged() && source.object_version() == source_version)
+        {
             return Err(PreparationError::Stop("source_changed"));
         }
         if rendition.recipe.retained_logical.as_ref() != Some(&logical) {

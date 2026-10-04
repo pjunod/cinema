@@ -323,7 +323,10 @@ impl CopyPreparation {
     /// Why a preparation stopped being live. A production fault consumes an
     /// attempt, a changed source stops the job, and everything else (viewer
     /// attachment, admission yield, lease, deadline) is preemption.
-    pub(super) fn refusal(&self, rendition: &Rendition) -> crate::background_jobs::PreparationError {
+    pub(super) fn refusal(
+        &self,
+        rendition: &Rendition,
+    ) -> crate::background_jobs::PreparationError {
         use crate::background_jobs::PreparationError;
         if !rendition.source.as_ref().is_some_and(|source| {
             source.unchanged() && source.object_version() == self.source_version

@@ -706,7 +706,9 @@ impl TranscodeManager {
                 != crate::vodserve::retained::manual_copy_policy_generation(file, intent)
                     .ok_or(PreparationError::Fail("manual_source_metadata_unavailable"))?
         {
-            return Err(PreparationError::Fail("manual_copy_source_metadata_changed"));
+            return Err(PreparationError::Fail(
+                "manual_copy_source_metadata_changed",
+            ));
         }
         if file.id != *file_id
             || file.size != *source_size

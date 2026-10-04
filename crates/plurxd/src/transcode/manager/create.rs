@@ -1474,7 +1474,14 @@ impl TranscodeManager {
             .candidate_context
             .as_ref()
             .is_none_or(|context| context.retained_output.is_none()))
-        .then(|| (req.clone(), file.clone(), settings.clone(), encoding.clone()));
+        .then(|| {
+            (
+                req.clone(),
+                file.clone(),
+                settings.clone(),
+                encoding.clone(),
+            )
+        });
         let prepared = crate::vodserve::VodRecipeRequest {
             measured_candidate,
             retained_capture: match retained_capture {
@@ -1961,8 +1968,13 @@ impl TranscodeManager {
             let (kind, result) = match &work.encoding {
                 Some(encoding) => (
                     "encoded_output",
-                    self.enqueue_encoded_output(&work.request, &work.file, &work.settings, encoding)
-                        .await,
+                    self.enqueue_encoded_output(
+                        &work.request,
+                        &work.file,
+                        &work.settings,
+                        encoding,
+                    )
+                    .await,
                 ),
                 None => (
                     "copy_output",

@@ -1973,9 +1973,11 @@ mod tests {
             now,
         );
         let expected = now + retry_delay_ms(&job.id, job.failed_attempts);
-        assert!(matches!(settlement, JobSettlement::Retry { ref error_code, not_before_ms }
+        assert!(
+            matches!(settlement, JobSettlement::Retry { ref error_code, not_before_ms }
             if error_code == "copy_output_failed" && not_before_ms == expected),
-            "a transient fault consumes an attempt through the shared backoff");
+            "a transient fault consumes an attempt through the shared backoff"
+        );
         assert_eq!(reason, "retry");
         let (settlement, _) = PreparationError::from("io while a viewer attached").settlement(
             &job,
@@ -1987,8 +1989,12 @@ mod tests {
             matches!(settlement, JobSettlement::Yield { .. }),
             "observed preemption never charges an attempt"
         );
-        let (settlement, _) =
-            PreparationError::Stop("source_changed").settlement(&job, "copy_output_failed", true, now);
+        let (settlement, _) = PreparationError::Stop("source_changed").settlement(
+            &job,
+            "copy_output_failed",
+            true,
+            now,
+        );
         assert!(
             matches!(settlement, JobSettlement::Stop { .. }),
             "a deterministic refusal is not softened by concurrent preemption"

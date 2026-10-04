@@ -3727,8 +3727,7 @@ mod tests {
         assert_eq!((again, same_version), (first.clone(), version.clone()));
         // A replacement changes the cheap object version (size, ctime, inode).
         std::fs::write(&path, b"replaced engine object bytes").expect("replacement");
-        let (replaced, replaced_version) =
-            super::hash_engine_object(&path).await.expect("rehash");
+        let (replaced, replaced_version) = super::hash_engine_object(&path).await.expect("rehash");
         assert_ne!(replaced_version, version);
         assert_eq!(
             replaced,
