@@ -4939,3 +4939,86 @@ passed the final 19-test client/model/context filter. Logs are
 archive is `/private/tmp/plurx-sharing-s4-native-status-source.tar`. These checks
 qualify compilation and synthetic authenticated protocol behavior; the real B
 status relay, paired renderer, directed controls and hardware remain separate.
+
+### Root B status/control relay, public Start and real pinned qualification (2026-10-04)
+
+Root integrated S3's Source controls, status, resource custody and HTTP
+adapters (`0eec7beaa`) and S2's physical fixture (`379803e8d`). It then added
+the B half of §3.3:
+
+- strict bounded clients for `/vod-status` and `/control`;
+- an owned task per sent exchange, so a cancelled B waiter loses only the
+  answer;
+- original login and exact binding re-observed before and after Source IO;
+- the agreed Shared status grammar at `GET /api/v1/hls/{B}/status`;
+- control translated onto the received Source tuple and rebound to B.
+
+B offers the Source only the advisory actions it can rebind. A Prepare
+action, a Source owner hash or raw terminal prose never reaches the client.
+
+One amendment to the Source control adapter: a definitive actor refusal is
+answered with a closed `SharedControlRefusal` code in the body instead of a
+409, 429 or 503. That lets B tell an ended Source session (B retires and the
+client stops) from a stale fence or a rate limit. A client `End` control on a
+shared session goes through B's single retirement owner. B answers `410
+session_ended` only after the confirmed Source End.
+
+§3.4 installed the authenticated Shared Start on the public media group. A
+shared item detail read freshly from the Source reports `delivery_status:
+available` exactly when B issued a signed locator. That is launch
+capability, not producer readiness.
+
+The real pinned fixture found three defects. None could be reproduced by the
+component tests.
+
+1. **Same-owner Source lease renewals raced.** The renewal write guard and the
+   owned-route proof both pin the exact lease revision a read observed. Status,
+   resources, control and the actor heartbeat all renew the same session, so a
+   renewal or proof that lost to another renewal by the same owner was refused
+   as a loss of authority. Effects: every B Start answered `503
+   sharing_start_unresolved`, resource opens failed mid-playback, and the same
+   race in the heartbeat retires a healthy session.
+
+   The optimistic protocol now completes on both sides. It re-observes and
+   retries only when the route identity is unchanged and the lease revision
+   advanced (`6276ee34d` for the write, `49eb0352c` for the read). Regression:
+   `source_status_survives_a_concurrent_same_owner_lease_renewal`.
+2. **The receiver dispatch layer never saw a public path.** It sits under the
+   `/api/v1` nest, and axum strips the nest prefix from the URI a nested layer
+   sees. So every shared playlist, media, status and control request fell
+   through to the Local handlers and answered 404. It now matches the
+   original URI (`3cf89cbac`).
+3. **The fixture's own expectations.** The public router carries the Plex
+   colon routes, and segments use the Local `video/iso.segment` MIME.
+
+Evidence on nuc4 (Ubuntu 26.04, rustc 1.97.1) at `49eb0352c`:
+
+- `sharing_receiver_real_pinned_source_h1_b_h1_h2_start_resources_and_confirmed_end`
+  passed with one executed test, in a disposable Docker CGNAT namespace
+  (`100.127.90.2`), over both HTTP/1 and HTTP/2. It covered:
+  - fresh details reporting `available`;
+  - B Start through the real Source actor;
+  - playlist, init and segment relay with real FFmpeg boxes and exact lengths;
+  - the Shared status grammar;
+  - accepted control, its exact replay, and the stale and owner-changed
+    refusals;
+  - DELETE 204 and its exact retry.
+- Focused filters passed:
+  - the receiver control, ingress and fixture tests, plus the Source adapter
+    tests (11);
+  - Source status (8);
+  - Source resource custody (13).
+
+`source_resource_init_open_job_retains_actual_fd_and_guard_after_waiter_cancellation`
+passes alone but can fail beside other tests. It compares a raw descriptor
+number after close, which a concurrent test may reuse.
+
+This qualifies the Copy lane on one pinned Linux namespace. It does not
+qualify:
+
+- encoded or Native text lanes through B;
+- queued or backpressured writers;
+- revocation while writes are parked;
+- real Tailscale/NAT/DERP;
+- clusters;
+- devices.
