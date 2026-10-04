@@ -1206,6 +1206,7 @@ paths = [
   "crates/plurxd/src/transcode/source_actor.rs",
   "crates/plurxd/src/transcode/source_control.rs",
   "crates/plurxd/src/transcode/source_status.rs",
+  "crates/plurxd/src/http/sharing_source_adapter_tests.rs",
   "crates/plurxd/src/transcode/source_resource.rs",
   "crates/plurxd/src/transcode/source_preparation.rs",
   "crates/plurxd/src/transcode/source_subtitles.rs",

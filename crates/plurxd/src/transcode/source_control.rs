@@ -10,8 +10,33 @@ use crate::playback_control::{
 pub(crate) struct SourceOpenedControl {
     result: Result<LocalControlResult, ControlStateError>,
     guard: SourceResponseGuard,
+    projection: Box<(
+        MediaSessionRoute,
+        crate::http::hls::StartResponse,
+        crate::transcode::SessionRequest,
+    )>,
 }
 impl SourceOpenedControl {
+    pub(crate) fn into_response(
+        self,
+        request: &ControlRequestV1,
+    ) -> (
+        Result<crate::playback_control::ControlResponseV1, ControlStateError>,
+        SourceResponseGuard,
+    ) {
+        let (route, start, recipe) = *self.projection;
+        let response = self.result.map(|result| {
+            crate::http::hls::source_control_response(
+                &route,
+                &start,
+                &recipe,
+                request,
+                &result,
+                crate::media_sessions::unix_ms(),
+            )
+        });
+        (response, self.guard)
+    }
     #[allow(dead_code)] // Source HTTP control transport follows actual actor qualification.
     pub(crate) fn into_parts(
         self,
@@ -213,6 +238,16 @@ impl SourceViewerActor {
             .ok_or(SourceWorkerError::Unavailable)?;
         let proof = self.0.gate.current_owned(&self.0.assignment).await?;
         let route = self.0.gate.renew_with(&self.0.assignment, &proof).await?;
+        let recipe: crate::transcode::SessionRequest =
+            serde_json::from_str(&route.recipe_json).map_err(|_| SourceWorkerError::Unavailable)?;
+        if !crate::media_sessions::source_session_request_is_valid(
+            &recipe,
+            self.0.assignment.binding().principal(),
+        ) || recipe.playback_id != self.0.assignment.binding().playback_id()
+            || recipe.file_id.to_string() != self.0.assignment.binding().file_id().as_str()
+        {
+            return Err(SourceWorkerError::Unavailable);
+        }
         let mut authority = SourceControlAuthority {
             actor: self.clone(),
             source: guard
@@ -246,6 +281,10 @@ impl SourceViewerActor {
             .await
             .ok_or(SourceWorkerError::Unavailable)?;
         drop(authority);
-        Ok(SourceOpenedControl { result, guard })
+        Ok(SourceOpenedControl {
+            result,
+            guard,
+            projection: Box::new((route, current_response, recipe)),
+        })
     }
 }

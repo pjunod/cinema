@@ -1998,3 +1998,68 @@ are `/private/tmp/sharing-source-custody-combined-{name}.log`.
 Denied daemon all-target Clippy also passed on that exact combined tree in
 67.56 seconds; documentation index checks passed four tests and catalog lint
 covered 2,719 files.
+
+### Private Source control and VOD-status adapters
+
+This finite adapter checkpoint starts from the fully qualified custody
+integration `c43b6c795`. It adds fixed private POST operations alongside the
+existing resource lane at
+`/sharing/v1/items/{item}/files/{file}/sessions/{request}/control` and
+`/sharing/v1/items/{item}/files/{file}/sessions/{request}/vod-status`. The
+existing `/status` Start envelope is unchanged.
+
+Both operations require the complete original `session` request, full Source
+`reference`, and the known positive `control_epoch`, canonical Source
+`incarnation_id` and `session_id`. Control additionally requires its bounded
+`ControlRequestV1`, with the identical generation/epoch. Current full file
+authority and the exact retained request/recipe are checked before actor access
+and again before successful response publication. Neither operation falls back
+to cleanup authentication or an ordinary Local controller.
+
+Successful replies echo `reference`, `request_id`, `incarnation_id`,
+`session_id` and `control_epoch`, plus `status: SourceVodStatus` or
+`response: ControlResponseV1`. The control projection uses the actual current
+Source route, Start observation and validated retained normalized
+`SessionRequest`. The common pure response helper preserves the existing Local
+projection; no raw Local result, numeric Source file ID or private failure
+sentence enters either successful wire DTO. Both replies hold the actual
+Source response guard through Body and accepted connection writing. The owned
+control exchange survives HTTP waiter cancellation.
+
+The supported control lane remains current-rendition seek/play/pause with the
+complete original legacy selection. Directed quality/audio/subtitle changes,
+preparation/acknowledgement and End controls remain unsupported; End uses the
+separate actual terminal owner. State refusals return bounded Source machine
+errors, with rate limits classified as HTTP 429 capacity; the adapter does not
+invent an accepted sequence from a refusal.
+
+The exact VOD-status peer envelope is ten seconds around its nine-second actor
+observation, and control is five around its four-second owned exchange. Other
+peer budgets retain their existing values. A production-layout actor hook
+parks the real metadata observation for four seconds in the HTTP test, proving
+that it outlives the management deadline and obtains fresh current authority
+after the parked read.
+
+The final actual one-voter/FFmpeg H1/H2 adapter filter passed two tests, zero
+ignored, in 18.11 seconds on the default stack:
+`cargo test -p plurxd --bin plurxd sharing_source_actor_adapters_ -- --nocapture`.
+It covers both Copy and actual encoded retained recipes, complete typed reply
+projection, the four-second parked real metadata read, missing/foreign lineage,
+changed full original recipe and directed-audio refusal. The encoded case
+retains raw manual height 144 while checking the actual delivered height and
+`server_selected` recipe projection.
+
+The affected existing Source HTTP filter passed 13 tests in 48.41 seconds,
+Source actor controls six in 25.44 seconds and Local VOD controls two in
+0.65 seconds, all zero ignored. These were run before the final two exact
+peer-deadline arms and stronger adapter assertions; the final adapter tests
+qualify those arms. Final production daemon all-target check passed in
+52.28 seconds and denied all-target Clippy in 69.07 seconds. The normal tracked
+hook also checks the final test assertions. Documentation index tests passed
+four tests and catalog lint covered 2,720 files. Local logs use
+`/private/tmp/sharing-source-http-adapters-*.log`.
+
+B relay/client projection, native server-accepted controls, directed Source
+successors, precise negative factory receipts, crash physical recovery and
+remote worker forwarding remain separate qualification steps. This checkpoint
+does not retire those handoff items or authorize promotion to main.

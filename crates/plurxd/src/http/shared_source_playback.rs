@@ -515,6 +515,195 @@ fn parse_operation_request(
     };
     Ok(SourceOperationInput { start, known })
 }
+// Live telemetry/control always requires the exact already-published lineage.
+// Unlike End, neither operation may fall back to retained cleanup identity.
+fn parse_live_operation(
+    bytes: &[u8],
+    item: &str,
+    file: &str,
+    request: &str,
+    with_control: bool,
+) -> Result<
+    (
+        SourceOperationInput,
+        Option<crate::playback_control::ControlRequestV1>,
+    ),
+    ApiError,
+> {
+    if bytes.is_empty() || bytes.len() > 128 * 1024 {
+        return Err(invalid());
+    }
+    let mut decoder = serde_json::Deserializer::from_slice(bytes);
+    let value = super::sharing_decision_decode::bounded_decision_value(&mut decoder)
+        .map_err(|_| invalid())?;
+    decoder.end().map_err(|_| invalid())?;
+    let mut object = value.as_object().cloned().ok_or_else(invalid)?;
+    let control = if with_control {
+        Some(
+            serde_json::from_value(object.remove("control").ok_or_else(invalid)?)
+                .map_err(|_| invalid())?,
+        )
+    } else {
+        None
+    };
+    let operation = parse_operation_request(
+        &serde_json::to_vec(&object).map_err(|_| invalid())?,
+        item,
+        file,
+        request,
+    )?;
+    let known = operation.known.as_ref().ok_or_else(invalid)?;
+    if control
+        .as_ref()
+        .is_some_and(|control: &crate::playback_control::ControlRequestV1| {
+            control.generation != known.incarnation_id.to_string()
+                || i64::try_from(control.control_epoch).ok() != Some(known.control_epoch)
+        })
+    {
+        return Err(invalid());
+    }
+    Ok((operation, control))
+}
+async fn live_operation_owner(
+    state: &crate::state::AppState,
+    headers: &HeaderMap,
+    input: &SourceOperationInput,
+    deadline: std::time::Instant,
+) -> Result<(std::sync::Arc<SourceStartEntry>, SourceStartOwned), ApiError> {
+    let viewer = viewer_hash(headers)?;
+    let (hash, grant) = current_reference(state, headers, &input.start.reference).await?;
+    let entry = state
+        .transcode
+        .source_http_starts
+        .current_entry(grant, &hash, &viewer, &input.start)
+        .map_err(SourceStartFailure::response)?;
+    entry
+        .validate_known(input.known.as_ref())
+        .map_err(SourceStartFailure::response)?;
+    let owned = entry
+        .wait(deadline)
+        .await
+        .map_err(SourceStartFailure::response)?;
+    Ok((entry, owned))
+}
+async fn live_operation_response(
+    state: crate::state::AppState,
+    headers: &HeaderMap,
+    input: SourceOperationInput,
+    entry: &SourceStartEntry,
+    connection: Option<axum::Extension<crate::SharingConnectionCancellation>>,
+    content: (
+        &'static str,
+        Value,
+        crate::transcode::source_actor::SourceResponseGuard,
+    ),
+) -> Result<axum::response::Response, ApiError> {
+    let (field, value, guard) = content;
+    let (_, grant) = current_reference(&state, headers, &input.start.reference).await?;
+    if grant != entry.grant {
+        return Err(unavailable());
+    }
+    entry
+        .validate_known(input.known.as_ref())
+        .map_err(SourceStartFailure::response)?;
+    let known = input.known.ok_or_else(invalid)?;
+    let mut envelope = serde_json::json!({
+        "reference": input.start.reference, "request_id": input.start.request_id,
+        "incarnation_id": known.incarnation_id, "session_id": known.session_id,
+        "control_epoch": known.control_epoch,
+    });
+    envelope[field] = value;
+    let response =
+        super::shared_library::source_file_json(grant, &input.start.reference, envelope)?;
+    Ok(super::shared_library::guard_source_response(
+        state,
+        connection.map(|c| c.0),
+        hold_start_body(response, guard),
+    )
+    .await)
+}
+async fn vod_status(
+    axum::extract::State(state): axum::extract::State<crate::state::AppState>,
+    headers: HeaderMap,
+    axum::extract::Path((item, file, request)): axum::extract::Path<(String, String, String)>,
+    connection: Option<axum::Extension<crate::SharingConnectionCancellation>>,
+    body: axum::body::Body,
+) -> Result<axum::response::Response, ApiError> {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(9);
+    let bytes = axum::body::to_bytes(body, 128 * 1024)
+        .await
+        .map_err(|_| invalid())?;
+    let (input, _) = parse_live_operation(&bytes, &item, &file, &request, false)?;
+    let (entry, owned) = live_operation_owner(&state, &headers, &input, deadline).await?;
+    let (status, guard) = owned
+        .actor
+        .open_status(deadline)
+        .await
+        .map_err(SourceStartFailure::from)
+        .map_err(SourceStartFailure::response)?
+        .into_parts();
+    live_operation_response(
+        state,
+        &headers,
+        input,
+        &entry,
+        connection,
+        (
+            "status",
+            serde_json::to_value(status).map_err(|_| unavailable())?,
+            guard,
+        ),
+    )
+    .await
+}
+async fn control(
+    axum::extract::State(state): axum::extract::State<crate::state::AppState>,
+    headers: HeaderMap,
+    axum::extract::Path((item, file, request)): axum::extract::Path<(String, String, String)>,
+    connection: Option<axum::Extension<crate::SharingConnectionCancellation>>,
+    body: axum::body::Body,
+) -> Result<axum::response::Response, ApiError> {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(4);
+    let bytes = axum::body::to_bytes(body, 128 * 1024)
+        .await
+        .map_err(|_| invalid())?;
+    let (input, control) = parse_live_operation(&bytes, &item, &file, &request, true)?;
+    let request = control.ok_or_else(invalid)?;
+    let (entry, owned) = live_operation_owner(&state, &headers, &input, deadline).await?;
+    // A dropped HTTP waiter cannot discard an accepted actor exchange or its
+    // nested observations. The exact owned task retains the physical guard.
+    let command = request.clone();
+    let task = tokio::spawn(Box::pin(async move {
+        owned.actor.control(command, deadline).await
+    }));
+    let opened = tokio::time::timeout_at(tokio::time::Instant::from_std(deadline), task)
+        .await
+        .map_err(|_| SourceStartFailure::Deadline.response())?
+        .map_err(|_| SourceStartFailure::Unresolved.response())?
+        .map_err(SourceStartFailure::from)
+        .map_err(SourceStartFailure::response)?;
+    let (response, guard) = opened.into_response(&request);
+    let response = response.map_err(|error| match error {
+        crate::playback_control::ControlStateError::RateLimited(_) => {
+            SourceStartFailure::Capacity.response()
+        }
+        crate::playback_control::ControlStateError::Unavailable => unavailable(),
+        _ => SourceStartFailure::Conflict.response(),
+    })?;
+    live_operation_response(
+        state,
+        &headers,
+        input,
+        &entry,
+        connection,
+        (
+            "response",
+            serde_json::to_value(response).map_err(|_| unavailable())?,
+            guard,
+        ),
+    )
+    .await
+}
 async fn status(
     axum::extract::State(state): axum::extract::State<crate::state::AppState>,
     headers: HeaderMap,
@@ -695,6 +884,14 @@ pub(crate) fn peer_router(state: crate::state::AppState) -> axum::Router<crate::
                 .route(
                     "/sharing/v1/items/{item}/files/{file}/sessions/{request}/status",
                     axum::routing::post(status),
+                )
+                .route(
+                    "/sharing/v1/items/{item}/files/{file}/sessions/{request}/vod-status",
+                    axum::routing::post(vod_status),
+                )
+                .route(
+                    "/sharing/v1/items/{item}/files/{file}/sessions/{request}/control",
+                    axum::routing::post(control),
                 )
                 .route(
                     "/sharing/v1/items/{item}/files/{file}/sessions/{request}/resources",
@@ -1803,7 +2000,7 @@ async fn build_real_source_start_fixture(
 mod tests {
     use super::*;
     use serde_json::json;
-    async fn actual_resource_request(
+    pub(super) async fn actual_resource_request(
         address: std::net::SocketAddr,
         h2: bool,
         url: &str,
@@ -4205,3 +4402,7 @@ mod tests {
         assert_eq!(registry.entries.lock().expect("entries").len(), 8);
     }
 }
+
+#[cfg(test)]
+#[path = "sharing_source_adapter_tests.rs"]
+mod actor_adapter_tests;

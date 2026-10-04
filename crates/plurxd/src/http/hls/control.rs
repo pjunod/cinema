@@ -196,6 +196,52 @@ fn local_control_response(
     server_time_unix_ms: i64,
     subtitle_readiness: Option<String>,
 ) -> crate::playback_control::ControlResponseV1 {
+    control_response_with_selection(
+        route,
+        crate::playback_control::EffectiveSelection::from_recipe(
+            recipe,
+            start.height,
+            start.delivered_dynamic_range.clone(),
+        ),
+        request,
+        result,
+        server_time_unix_ms,
+        subtitle_readiness,
+    )
+}
+
+/// Pure bounded projection from an actual Source route and its retained recipe.
+/// This helper constructs no worker, account, admission or physical evidence.
+pub(crate) fn source_control_response(
+    route: &MediaSessionRoute,
+    start: &StartResponse,
+    recipe: &crate::transcode::SessionRequest,
+    request: &crate::playback_control::ControlRequestV1,
+    result: &crate::playback_control::LocalControlResult,
+    server_time_unix_ms: i64,
+) -> crate::playback_control::ControlResponseV1 {
+    control_response_with_selection(
+        route,
+        crate::playback_control::EffectiveSelection::from_request(
+            recipe,
+            start.height,
+            start.delivered_dynamic_range.clone(),
+        ),
+        request,
+        result,
+        server_time_unix_ms,
+        None,
+    )
+}
+
+fn control_response_with_selection(
+    route: &MediaSessionRoute,
+    effective_selection: crate::playback_control::EffectiveSelection,
+    request: &crate::playback_control::ControlRequestV1,
+    result: &crate::playback_control::LocalControlResult,
+    server_time_unix_ms: i64,
+    subtitle_readiness: Option<String>,
+) -> crate::playback_control::ControlResponseV1 {
     let owner_epoch = u64::try_from(route.owner_epoch).unwrap_or_default();
     let response = crate::playback_control::ControlResponseV1 {
         protocol: crate::playback_control::PROTOCOL_V1.to_owned(),
@@ -220,11 +266,7 @@ fn local_control_response(
             route.media_origin_ms,
             subtitle_readiness,
         ),
-        effective_selection: crate::playback_control::EffectiveSelection::from_recipe(
-            recipe,
-            start.height,
-            start.delivered_dynamic_range.clone(),
-        ),
+        effective_selection,
         action: crate::playback_control::ControlAction::None,
     };
     // The advisory hold is derived from the delivery this response is already
