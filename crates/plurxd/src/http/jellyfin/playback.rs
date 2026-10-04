@@ -405,6 +405,8 @@ pub(super) struct InfoRequest {
     audio_stream_index: Option<i64>,
     subtitle_stream_index: Option<i64>,
     device_profile: Option<Value>,
+    /// Bounded below; only `Http` has a meaning here.
+    direct_play_protocols: Option<Vec<String>>,
     max_streaming_bitrate: Option<i64>,
     current_play_session_id: Option<String>,
     #[serde(flatten)]
@@ -414,7 +416,7 @@ fn wire_track(stream: &wire::MediaStream) -> TrackFacts<'_> {
     TrackFacts {
         codec: &stream.codec,
         language: stream.language.as_deref(),
-        text: !plurx_core::tracks::subtitle_requires_burn(&stream.codec),
+        text: !plurx_core::tracks::is_bitmap_subtitle(&stream.codec),
     }
 }
 fn profiles(
@@ -759,9 +761,28 @@ fn merge_info_query(
                 &mut request.current_play_session_id,
                 wire_id(&value)?.to_hex(),
             )?,
+            "directplayprotocols" => assign(
+                &mut request.direct_play_protocols,
+                value.split(',').map(|p| p.trim().to_owned()).collect(),
+            )?,
             "api_key" | "apikey" | "isplayback" | "autoopenlivestream" => {}
             _ => return Err(ApiError::BadRequest("unsupported playback query".into())),
         }
+    }
+    // Jellyfin's MediaProtocol names; anything else is not a protocol.
+    if request
+        .direct_play_protocols
+        .as_ref()
+        .is_some_and(|protocols| {
+            protocols.len() > 8
+                || protocols.iter().any(|p| {
+                    !["File", "Http", "Rtmp", "Rtsp", "Udp", "Rtp", "Ftp"]
+                        .iter()
+                        .any(|known| known.eq_ignore_ascii_case(p))
+                })
+        })
+    {
+        return Err(ApiError::BadRequest("invalid direct play protocol".into()));
     }
     Ok(())
 }
@@ -894,26 +915,44 @@ async fn info(
             .as_ref()
             .and_then(|profile| profile.get("SubtitleProfiles")),
     )
-    .unwrap_or_default();
+    .unwrap_or_else(|_| {
+        tracing::debug!(target: "plurxd::jellyfin", "malformed SubtitleProfiles; no subtitle delivery granted");
+        Vec::new()
+    });
     let direct_transport = Transport::Direct {
         container: file.container.as_deref(),
     };
+    // A client that declares no DirectPlayProfiles but enables direct play
+    // over HTTP picks static delivery itself: Infuse sends exactly this and
+    // then requests `/Videos/{id}/stream?Static=true`, even where Jellyfin
+    // answered with a transcode (J0). It plays the file and its tracks as
+    // they are, so no subtitle choice turns that into a transcode.
+    let client_static = request.enable_direct_play == Some(true)
+        && request
+            .direct_play_protocols
+            .as_ref()
+            .is_some_and(|protocols| protocols.iter().any(|p| p.eq_ignore_ascii_case("http")))
+        && request
+            .device_profile
+            .as_ref()
+            .is_some_and(|profile| profile.get("DirectPlayProfiles").is_none_or(Value::is_null));
     // As in Jellyfin, a selected track the file cannot deliver to this client
     // as-is (Encode) makes the play a transcode.
-    let direct = direct
-        && request
-            .subtitle_stream_index
-            .filter(|index| *index >= 0)
-            .and_then(|index| {
-                source
-                    .media_streams
-                    .iter()
-                    .find(|s| s.stream_type == wire::StreamType::Subtitle && s.index == index)
-            })
-            .is_none_or(|stream| {
-                delivery(&subtitle_rules, wire_track(stream), direct_transport).method
-                    != DeliveryMethod::Encode
-            });
+    let direct = client_static
+        || direct
+            && request
+                .subtitle_stream_index
+                .filter(|index| *index >= 0)
+                .and_then(|index| {
+                    source
+                        .media_streams
+                        .iter()
+                        .find(|s| s.stream_type == wire::StreamType::Subtitle && s.index == index)
+                })
+                .is_none_or(|stream| {
+                    delivery(&subtitle_rules, wire_track(stream), direct_transport).method
+                        != DeliveryMethod::Encode
+                });
     let item_id = state
         .store
         .jellyfin_resolve_entity(JellyfinEntityKind::Item, &item.id.to_hex())
@@ -1081,22 +1120,22 @@ async fn info(
             }
         }
     }
-    let subtitle_transport = match vod.as_ref() {
-        Some(plan) => Transport::Hls {
-            manifest: plan.manifest_capable,
-        },
-        None => direct_transport,
-    };
     let deliveries = source
         .media_streams
         .iter()
         .filter(|s| s.stream_type == wire::StreamType::Subtitle)
         .map(|s| {
-            (
-                s.index,
-                !plurx_core::tracks::subtitle_requires_burn(&s.codec),
-                delivery(&subtitle_rules, wire_track(s), subtitle_transport),
-            )
+            let track = wire_track(s);
+            let choice = match vod.as_ref() {
+                Some(plan) => super::vod::hls_track_delivery(
+                    &subtitle_rules,
+                    track,
+                    plan.manifest_capable,
+                    plan.manifest_subtitles,
+                ),
+                None => delivery(&subtitle_rules, track, direct_transport),
+            };
+            (s.index, track.text, choice)
         })
         .collect::<Vec<_>>();
     // Returned URLs are relative to the client's configured server address,
@@ -1754,7 +1793,8 @@ pub(super) async fn active_encodings(
     RawQuery(raw): RawQuery,
 ) -> Result<StatusCode, ApiError> {
     let play = named_play(&client, &state, raw.as_deref()).await?;
-    if play.native_incarnation_id.is_some() {
+    // An ended play's encoding was released when it ended.
+    if play.state != "ended" && play.native_incarnation_id.is_some() {
         release(&state, &play).await?;
     }
     Ok(StatusCode::NO_CONTENT)

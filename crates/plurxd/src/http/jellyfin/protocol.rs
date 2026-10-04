@@ -44,13 +44,12 @@ pub(super) async fn capabilities(
     RawQuery(raw): RawQuery,
 ) -> Result<StatusCode, ApiError> {
     for (name, value) in query_pairs(raw.as_deref())? {
-        match name.to_ascii_lowercase().as_str() {
-            "supportsmediacontrol" | "supportspersistentidentifier" => {
-                if !matches!(value.to_ascii_lowercase().as_str(), "true" | "false") {
-                    return Err(ApiError::BadRequest("invalid capability flag".into()));
-                }
-            }
-            _ => {}
+        let flag = matches!(
+            name.to_ascii_lowercase().as_str(),
+            "supportsmediacontrol" | "supportspersistentidentifier"
+        );
+        if flag && !matches!(value.to_ascii_lowercase().as_str(), "true" | "false") {
+            return Err(ApiError::BadRequest("invalid capability flag".into()));
         }
     }
     Ok(StatusCode::NO_CONTENT)

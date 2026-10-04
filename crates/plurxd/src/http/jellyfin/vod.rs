@@ -32,15 +32,120 @@ pub(super) struct Plan {
     pub inline_init: bool,
     /// The chosen output can carry VTT renditions in its master.
     pub manifest_capable: bool,
+    /// The chosen output's master carries the source's text renditions.
+    pub manifest_subtitles: bool,
 }
 
-/// The decision facts of one native subtitle track.
+/// The decision facts of one native subtitle track. Text is anything the
+/// native extractor turns into WebVTT: every codec that is not a bitmap.
 pub(super) fn track_facts(track: &plurx_core::domain::SubtitleStream) -> TrackFacts<'_> {
     TrackFacts {
         codec: &track.codec,
         language: track.language.as_deref(),
-        text: !plurx_core::tracks::subtitle_requires_burn(&track.codec),
+        text: !plurx_core::tracks::is_bitmap_subtitle(&track.codec),
     }
+}
+
+/// The subtitle profile list an HLS output is judged by. A client that sends
+/// none, but whose output declares `ManifestSubtitles` or
+/// `EnableSubtitlesInManifest`, has said it wants VTT renditions there; that
+/// declaration stands in for an `Hls` entry. Any list the client did send is
+/// used as sent.
+fn hls_rules(
+    rules: &[SubtitleRule],
+    manifest_capable: bool,
+) -> std::borrow::Cow<'_, [SubtitleRule]> {
+    if rules.is_empty() && manifest_capable {
+        std::borrow::Cow::Owned(vec![SubtitleRule {
+            format: "vtt".into(),
+            method: Some(DeliveryMethod::Hls),
+            language: None,
+            container: None,
+        }])
+    } else {
+        std::borrow::Cow::Borrowed(rules)
+    }
+}
+
+/// One track's delivery on an HLS output. The native master carries every
+/// text track when it carries any, so then every text track is reported as
+/// the rendition it is, never also as a sidecar.
+pub(super) fn hls_track_delivery(
+    rules: &[SubtitleRule],
+    track: TrackFacts<'_>,
+    manifest_capable: bool,
+    manifest_subtitles: bool,
+) -> plurx_compat_jellyfin::subtitle::Delivery {
+    if manifest_subtitles && track.text {
+        return plurx_compat_jellyfin::subtitle::Delivery {
+            method: DeliveryMethod::Hls,
+            format: "vtt".into(),
+        };
+    }
+    delivery(
+        &hls_rules(rules, manifest_capable),
+        track,
+        Transport::Hls {
+            manifest: manifest_capable,
+        },
+    )
+}
+
+/// What one HLS output does with the source's subtitles.
+#[derive(Debug, PartialEq, Eq)]
+pub(super) struct RuleSubtitles {
+    /// The master carries the text renditions.
+    pub manifest: bool,
+    /// The selected track, as a manifest rendition.
+    pub subtitle: Option<i64>,
+    /// The selected track, burned in.
+    pub burn: Option<i64>,
+}
+
+/// `None` when this output cannot deliver the selected track: a text track
+/// that would have to be burned, which the facade does not offer.
+pub(super) fn rule_subtitles(
+    rules: &[SubtitleRule],
+    tracks: &[TrackFacts<'_>],
+    selected: Option<i64>,
+    manifest_capable: bool,
+) -> Option<RuleSubtitles> {
+    let effective = hls_rules(rules, manifest_capable);
+    let transport = Transport::Hls {
+        manifest: manifest_capable,
+    };
+    let manifest = tracks
+        .iter()
+        .any(|track| delivery(&effective, *track, transport).method == DeliveryMethod::Hls);
+    let Some(index) = selected else {
+        return Some(RuleSubtitles {
+            manifest,
+            subtitle: None,
+            burn: None,
+        });
+    };
+    let track = *usize::try_from(index).ok().and_then(|i| tracks.get(i))?;
+    Some(
+        match hls_track_delivery(rules, track, manifest_capable, manifest).method {
+            DeliveryMethod::Hls => RuleSubtitles {
+                manifest,
+                subtitle: Some(index),
+                burn: None,
+            },
+            // A sidecar the client fetches itself; the video carries none.
+            DeliveryMethod::External | DeliveryMethod::Embed => RuleSubtitles {
+                manifest,
+                subtitle: None,
+                burn: None,
+            },
+            DeliveryMethod::Encode if !track.text => RuleSubtitles {
+                manifest,
+                subtitle: None,
+                burn: Some(index),
+            },
+            DeliveryMethod::Encode => return None,
+        },
+    )
 }
 
 fn ceiling(profile: &Value, requested: Option<i64>) -> Option<Result<Option<u32>, ApiError>> {
@@ -181,9 +286,11 @@ pub(super) async fn negotiate(
         .audio
         .and_then(|index| file.audio_streams.get(index as usize))
         .or_else(|| file.audio_streams.first());
-    let selected = ask
-        .subtitle
-        .and_then(|index| file.subtitle_streams.get(index as usize));
+    let tracks = file
+        .subtitle_streams
+        .iter()
+        .map(track_facts)
+        .collect::<Vec<_>>();
     for rule in rules {
         if rule.protocol != "hls" || !matches!(rule.container.as_str(), "ts" | "mp4") {
             continue;
@@ -191,24 +298,15 @@ pub(super) async fn negotiate(
         // Jellyfin decides each track's delivery from the subtitle profiles
         // for this output: a manifest rendition only where an `Hls` entry
         // wins and the output can carry one, otherwise a sidecar or a burn.
-        let transport = Transport::Hls {
-            manifest: rule.enable_subtitles_in_manifest || rule.manifest_subtitles.is_some(),
-        };
-        let manifest_subtitles = file.subtitle_streams.iter().any(|track| {
-            delivery(ask.subtitle_rules, track_facts(track), transport).method
-                == DeliveryMethod::Hls
-        });
-        let (subtitle, burn) = match selected {
-            None => (None, None),
-            Some(track) => match delivery(ask.subtitle_rules, track_facts(track), transport).method
-            {
-                DeliveryMethod::Hls => (ask.subtitle, None),
-                // A sidecar the client fetches itself; the video carries none.
-                DeliveryMethod::External | DeliveryMethod::Embed => (None, None),
-                DeliveryMethod::Encode if !track_facts(track).text => (None, ask.subtitle),
-                // A text burn is not offered through this facade.
-                DeliveryMethod::Encode => continue,
-            },
+        let manifest_capable =
+            rule.enable_subtitles_in_manifest || rule.manifest_subtitles.is_some();
+        let Some(RuleSubtitles {
+            manifest: manifest_subtitles,
+            subtitle,
+            burn,
+        }) = rule_subtitles(ask.subtitle_rules, &tracks, ask.subtitle, manifest_capable)
+        else {
+            continue;
         };
         let caps = capabilities(&rule)?;
         super::super::stream::validate_device_caps(&caps)?;
@@ -366,7 +464,8 @@ pub(super) async fn negotiate(
                 fingerprint: resolved.intent_fingerprint,
                 bitrate,
                 inline_init: rule.container == "ts",
-                manifest_capable: matches!(transport, Transport::Hls { manifest: true }),
+                manifest_capable,
+                manifest_subtitles,
             }));
         }
     }
@@ -376,6 +475,118 @@ pub(super) async fn negotiate(
 #[cfg(test)]
 mod tests {
     use super::*;
+    fn rules(value: Value) -> Vec<SubtitleRule> {
+        plurx_compat_jellyfin::subtitle::subtitle_rules(Some(&value)).expect("rules")
+    }
+    const SRT: TrackFacts<'static> = TrackFacts {
+        codec: "subrip",
+        language: Some("eng"),
+        text: true,
+    };
+    const ASS: TrackFacts<'static> = TrackFacts {
+        codec: "ass",
+        language: Some("eng"),
+        text: true,
+    };
+    const PGS: TrackFacts<'static> = TrackFacts {
+        codec: "hdmv_pgs_subtitle",
+        language: None,
+        text: false,
+    };
+    #[test]
+    fn hls_subtitles_follow_the_profile_and_never_report_a_track_twice() {
+        let tracks = [SRT, ASS, PGS];
+        let outcome = |rules: &[SubtitleRule], selected, capable| {
+            rule_subtitles(rules, &tracks, selected, capable)
+        };
+        // Both pinned clients put External first: sidecars, no renditions.
+        let android = rules(
+            json!([{"Format":"vtt","Method":"Embed"},{"Format":"vtt","Method":"External"},{"Format":"vtt","Method":"Hls"}]),
+        );
+        assert_eq!(
+            outcome(&android, Some(0), true),
+            Some(RuleSubtitles {
+                manifest: false,
+                subtitle: None,
+                burn: None
+            })
+        );
+        // An Hls-first profile on a capable output: renditions, and the
+        // selection rides in the master.
+        let hls =
+            rules(json!([{"Format":"vtt","Method":"Hls"},{"Format":"vtt","Method":"External"}]));
+        assert_eq!(
+            outcome(&hls, Some(1), true),
+            Some(RuleSubtitles {
+                manifest: true,
+                subtitle: Some(1),
+                burn: None
+            })
+        );
+        // ...but not on an output that cannot carry them.
+        assert_eq!(
+            outcome(&hls, Some(0), false),
+            Some(RuleSubtitles {
+                manifest: false,
+                subtitle: None,
+                burn: None
+            })
+        );
+        // Mixed profiles: once the master carries renditions, every text
+        // track is reported as one, never also as a sidecar.
+        let mixed = rules(
+            json!([{"Format":"vtt","Method":"External","Language":"eng"},{"Format":"vtt","Method":"Hls"}]),
+        );
+        let french = TrackFacts {
+            language: Some("fre"),
+            ..SRT
+        };
+        let both = [SRT, french];
+        let decided = rule_subtitles(&mixed, &both, Some(0), true).expect("delivered");
+        assert_eq!(
+            decided,
+            RuleSubtitles {
+                manifest: true,
+                subtitle: Some(0),
+                burn: None
+            }
+        );
+        assert_eq!(
+            hls_track_delivery(&mixed, SRT, true, true).method,
+            DeliveryMethod::Hls
+        );
+        // A bitmap selection burns; a text track that could only be burned
+        // refuses this output.
+        assert_eq!(
+            outcome(&android, Some(2), true),
+            Some(RuleSubtitles {
+                manifest: false,
+                subtitle: None,
+                burn: Some(2)
+            })
+        );
+        let ttml_only = rules(json!([{"Format":"ttml","Method":"External"}]));
+        assert_eq!(outcome(&ttml_only, Some(0), false), None);
+        // No list at all: a manifest-capable output's own declaration stands
+        // in for an Hls entry; without one, text cannot be delivered.
+        assert_eq!(
+            outcome(&[], Some(0), true),
+            Some(RuleSubtitles {
+                manifest: true,
+                subtitle: Some(0),
+                burn: None
+            })
+        );
+        assert_eq!(outcome(&[], Some(0), false), None);
+        assert_eq!(
+            outcome(&[], None, false),
+            Some(RuleSubtitles {
+                manifest: false,
+                subtitle: None,
+                burn: None
+            })
+        );
+    }
     #[test]
     fn native_output_checks_keep_codec_predicates_and_channel_limits_on_one_rule() {
         let profile = json!({"CodecProfiles":[{"Type":"Video","Codec":"hevc","Conditions":[{"Property":"Height","Condition":"LessThanEqual","Value":"1080","IsRequired":true}]}],"TranscodingProfiles":[{"Type":"Video","Container":"ts","VideoCodec":"hevc,h264","AudioCodec":"aac","Protocol":"hls","MaxAudioChannels":"2"},{"Type":"Video","Container":"mp4","VideoCodec":"vp9","AudioCodec":"opus","Protocol":"hls"}]});

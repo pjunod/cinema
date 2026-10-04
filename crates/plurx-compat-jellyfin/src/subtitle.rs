@@ -155,7 +155,9 @@ fn vtt_time(ms: u64) -> String {
 /// native WebVTT: the leading run of cues that start or end before `start_ms`
 /// is dropped, cues after the first one starting past `end_ms` are dropped,
 /// and unless `preserve` (Jellyfin's `copyTimestamps`) every remaining cue is
-/// moved earlier by `start_ms`. A zero start with no end returns the input
+/// moved earlier by `start_ms`. A later cue still before the start (out of
+/// order) is dropped, or clamped to zero when it straddles it, where upstream
+/// would write a negative time. A zero start with no end returns the input
 /// unchanged. Header, NOTE, STYLE and REGION blocks and cue settings survive.
 pub fn window_vtt(
     bytes: &[u8],
@@ -210,11 +212,17 @@ pub fn window_vtt(
             break;
         }
         let shift = if preserve { 0 } else { start_ms };
+        // A later cue that ends before the start (out of order, or an
+        // overlap) has no place on a shifted timeline; one that straddles
+        // the start begins at zero rather than wrapping.
+        if end < shift {
+            continue;
+        }
         if let Some(identifier) = identifier {
             output.push_str(identifier);
             output.push('\n');
         }
-        output.push_str(&vtt_time(start - shift));
+        output.push_str(&vtt_time(start.saturating_sub(shift)));
         output.push_str(" --> ");
         output.push_str(&vtt_time(end - shift));
         if let Some(settings) = settings {
@@ -491,6 +499,18 @@ mod tests {
         )
         .expect("UTF8");
         assert_eq!(srt, "1\n00:01:00,000 --> 00:01:01,000\nx\n\n");
+        // Out of order after the leading run: dropped when wholly before the
+        // start, clamped to zero when it straddles it; never a wrapped time.
+        let unordered = "WEBVTT\n\n00:02:00.000 --> 00:02:01.000\nkept\n\n00:00:10.000 --> 00:00:11.000\nbefore\n\n00:00:59.000 --> 00:01:05.000\nstraddles\n";
+        let windowed = String::from_utf8(
+            window_vtt(unordered.as_bytes(), 60_000, None, false).expect("window"),
+        )
+        .expect("UTF8");
+        assert!(!windowed.contains("before"), "{windowed}");
+        assert!(
+            windowed.contains("00:00:00.000 --> 00:00:05.000\nstraddles"),
+            "{windowed}"
+        );
     }
 
     #[test]

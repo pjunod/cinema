@@ -1648,10 +1648,12 @@ mod tests {
             fresh.fetched_through_ms, 0,
             "a partial composite read cannot mark a full native fragment fetched"
         );
-        // A quorum leader restart: while serving authority is lost, the gate
-        // answers the facade as it answers native media (503 with
-        // Retry-After, no store read), and the same play continues once
-        // authority is back. The native session's own grace keeps it alive.
+        // While a node has lost serving authority (a quorum leader restart),
+        // the gate answers the facade as it answers native media: 503 with
+        // Retry-After, before any store read. The binding and route are
+        // untouched, so the same play answers once authority is back. That
+        // the native session itself outlives a short loss is the serving
+        // fence's own property (`serving_fence_flapping_losses_share_one_grace`).
         f.state.serving.validation_set_ready(false).await;
         let fenced = f
             .app
@@ -1782,12 +1784,52 @@ mod tests {
             1,
             "the resume resurrected the reader"
         );
-        for (endpoint, position) in [
-            ("/jellyfin/Sessions/Playing/Progress", 5000),
-            ("/jellyfin/Sessions/Playing/Stopped", 7000),
+        // Progress and Ping keep the play alive; ActiveEncodings releases its
+        // encoding but keeps the binding, so the final Stopped still commits.
+        for (method, endpoint, position) in [
+            (
+                "POST",
+                "/jellyfin/Sessions/Playing/Progress".to_owned(),
+                Some(5000),
+            ),
+            (
+                "POST",
+                format!("/jellyfin/Sessions/Playing/Ping?PlaySessionId={play_id}"),
+                None,
+            ),
+            (
+                "DELETE",
+                format!("/jellyfin/Videos/ActiveEncodings?PlaySessionId={play_id}"),
+                None,
+            ),
+            (
+                "POST",
+                "/jellyfin/Sessions/Playing/Stopped".to_owned(),
+                Some(7000),
+            ),
         ] {
-            let response = f.app.clone().oneshot(request("POST", endpoint, Some(&f.token), json!({"UserId":f.user,"ItemId":f.item,"MediaSourceId":f.source,"PlaySessionId":play_id,"PlayMethod":"Transcode","PositionTicks":position*10_000}))).await.expect("native watch event");
-            assert_eq!(response.status(), StatusCode::NO_CONTENT);
+            let body = position.map_or(Value::Null, |position: i64| json!({"UserId":f.user,"ItemId":f.item,"MediaSourceId":f.source,"PlaySessionId":play_id,"PlayMethod":"Transcode","PositionTicks":position*10_000}));
+            let response = f
+                .app
+                .clone()
+                .oneshot(request(method, &endpoint, Some(&f.token), body))
+                .await
+                .expect("native watch event");
+            assert_eq!(
+                response.status(),
+                StatusCode::NO_CONTENT,
+                "{method} {endpoint}"
+            );
+            if method == "DELETE" {
+                let released = f
+                    .state
+                    .store
+                    .media_session_route_by_incarnation(&route.incarnation_id)
+                    .await
+                    .expect("released")
+                    .expect("native row");
+                assert_eq!(released.state, "ended", "the encoding is released");
+            }
         }
         let watch = f
             .state
@@ -3631,13 +3673,18 @@ mod tests {
                 title: None,
                 default: true,
             }],
-            subtitle_streams: vec![track(2, "subrip"), track(3, "hdmv_pgs_subtitle")],
+            subtitle_streams: vec![
+                track(2, "subrip"),
+                track(3, "hdmv_pgs_subtitle"),
+                track(4, "ass"),
+            ],
             raw_json: Some(
                 json!({"streams":[
                     {"index":0,"codec_type":"audio","codec_name":"aac","channels":2,"sample_rate":"48000"},
                     {"index":1,"codec_type":"video","codec_name":"h264","width":1920,"height":1080},
                     {"index":2,"codec_type":"subtitle","codec_name":"subrip","tags":{"language":"eng"}},
-                    {"index":3,"codec_type":"subtitle","codec_name":"hdmv_pgs_subtitle","tags":{"language":"eng"}}]})
+                    {"index":3,"codec_type":"subtitle","codec_name":"hdmv_pgs_subtitle","tags":{"language":"eng"}},
+                    {"index":4,"codec_type":"subtitle","codec_name":"ass","tags":{"language":"eng"}}]})
                 .to_string(),
             ),
             ..Default::default()
@@ -3698,12 +3745,18 @@ mod tests {
         assert_eq!(status, StatusCode::OK, "{body}");
         assert_eq!(body["MediaSources"][0]["SupportsDirectPlay"], true);
         let tracks = streams(&body);
-        assert_eq!(tracks.len(), 2);
+        assert_eq!(tracks.len(), 3);
         assert!(
-            tracks.iter().all(|s| s["DeliveryMethod"] == "Embed"),
+            tracks[..2].iter().all(|s| s["DeliveryMethod"] == "Embed"),
             "{tracks:?}"
         );
-        assert!(tracks.iter().all(|s| s.get("DeliveryUrl").is_none()));
+        assert!(tracks[..2].iter().all(|s| s.get("DeliveryUrl").is_none()));
+        // Android TV cannot render ASS itself: a converted VTT sidecar.
+        assert_eq!(tracks[2]["DeliveryMethod"], "External", "{tracks:?}");
+        assert_eq!(tracks[2]["IsTextSubtitleStream"], true);
+        assert!(tracks[2]["DeliveryUrl"]
+            .as_str()
+            .is_some_and(|url| url.contains("/Subtitles/4/0/Stream.vtt?ApiKey=")));
         // Infuse 8.5.6: External VTT only. The text track becomes a sidecar at
         // the five-segment route both clients request; the bitmap one cannot.
         let infuse = json!([{"Format":"vtt","Method":"External","AllowChunkedResponse":true},
@@ -3723,11 +3776,31 @@ mod tests {
         );
         assert_eq!(tracks[1]["DeliveryMethod"], "Encode");
         assert!(tracks[1].get("DeliveryUrl").is_none());
+        // ASS is text the native extractor converts: a sidecar, not a burn.
+        assert_eq!(tracks[2]["DeliveryMethod"], "External");
+        let (status, body) = negotiate_with(ask(infuse.clone(), 4)).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(
+            body["MediaSources"][0]["SupportsDirectPlay"], true,
+            "a sidecar-capable selection keeps direct play: {body}"
+        );
         // Selecting a track the direct file cannot deliver makes the play a
         // transcode; this profile offers none, so negotiation refuses.
-        let (status, body) = negotiate_with(ask(infuse, 3)).await;
+        let (status, body) = negotiate_with(ask(infuse.clone(), 3)).await;
         assert_eq!(status, StatusCode::OK);
         assert_eq!(body["ErrorCode"], "NotSupported", "{body}");
+        // Infuse's own request (J0) declares no DirectPlayProfiles and asks
+        // for HTTP direct play: it streams the file itself, tracks and all,
+        // so even a bitmap selection stays a direct play.
+        let mut own = infuse_request(&f);
+        own["SubtitleStreamIndex"] = json!(3);
+        own["DeviceProfile"]["SubtitleProfiles"] = infuse;
+        let (status, body) = negotiate_with(own).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(
+            body["MediaSources"][0]["SupportsDirectPlay"], true,
+            "{body}"
+        );
         // No profile list grants nothing.
         let (_, body) = negotiate_with(ask(Value::Null, -1)).await;
         assert!(streams(&body)
@@ -3735,12 +3808,45 @@ mod tests {
             .all(|s| s["DeliveryMethod"] == "Encode"));
     }
 
+    /// Infuse 8.5.6's normal-play PlaybackInfo body (J0 `profiles[0]`).
+    fn infuse_request(f: &PlaybackFixture) -> Value {
+        json!({"AutoOpenLiveStream":true,"IsPlayback":true,"UserId":f.user,"EnableDirectPlay":true,
+            "MediaSourceId":f.source,"MaxStreamingBitrate":200_000_000,"DirectPlayProtocols":["Http"],
+            "DeviceProfile":{"MaxStreamingBitrate":200_000_000,"MaxStaticBitrate":200_000_000,
+                "MusicStreamingTranscodingBitrate":192_000,
+                "TranscodingProfiles":[
+                    {"MinSegments":1,"AudioCodec":"aac","Container":"aac","BreakOnNonKeyFrames":true,"MaxAudioChannels":"2","Type":"Audio","Context":"Streaming","Protocol":"hls"},
+                    {"AudioCodec":"aac","MinSegments":1,"Container":"ts","ManifestSubtitles":"vtt","MaxAudioChannels":"2","BreakOnNonKeyFrames":true,"Type":"Video","Context":"Streaming","VideoCodec":"hevc,h264,av1","Protocol":"hls"}],
+                "SubtitleProfiles":[{"AllowChunkedResponse":true,"Format":"vtt","Method":"External"},
+                    {"Format":"ass","Method":"External"},{"Format":"ssa","Method":"External"}]}})
+    }
     #[tokio::test]
     async fn jellyfin_infuse_direct_request_without_a_play_id_uses_its_own_newest_direct_play() {
         let f = playback_fixture().await;
-        let older = negotiate(&f).await;
-        let newer = negotiate(&f).await;
+        // Infuse's PlaybackInfo, as J0 captured it: no DirectPlayProfiles,
+        // `EnableDirectPlay` with `DirectPlayProtocols: ["Http"]`.
+        let infuse_info = |body: Value| {
+            let request = request(
+                "POST",
+                &format!("/jellyfin/Items/{}/PlaybackInfo", f.item),
+                Some(&f.token),
+                body,
+            );
+            let app = f.app.clone();
+            async move { json_call(&app, request).await }
+        };
+        let (status, older) = infuse_info(infuse_request(&f)).await;
+        assert_eq!(status, StatusCode::OK, "{older}");
+        assert_eq!(
+            older["MediaSources"][0]["SupportsDirectPlay"], true,
+            "{older}"
+        );
+        assert!(older["MediaSources"][0].get("TranscodingUrl").is_none());
+        let (_, newer) = infuse_info(infuse_request(&f)).await;
         let newest = newer["PlaySessionId"].as_str().expect("play");
+        let mut odd = infuse_request(&f);
+        odd["DirectPlayProtocols"] = json!(["Carrier-Pigeon"]);
+        assert_eq!(infuse_info(odd).await.0, StatusCode::BAD_REQUEST);
         // The direct URL Infuse builds: login header, `MediaSourceId`, `Static`.
         let infuse = format!(
             "/jellyfin/Videos/{}/stream?MediaSourceId={}&Static=true",
@@ -3944,6 +4050,19 @@ mod tests {
             StatusCode::FORBIDDEN
         );
         // Ping and ActiveEncodings act only on a named play of this login.
+        let mut second = request(
+            "POST",
+            "/jellyfin/Users/AuthenticateByName",
+            None,
+            json!({"Username":"catalog-admin","Pw":"supersecret"}),
+        );
+        second.headers_mut().insert("x-emby-authorization", "MediaBrowser Client=\"Jellyfin+Android+TV\", Device=\"other TV\", DeviceId=\"second-device\", Version=\"0.19.10\"".parse().expect("metadata"));
+        let (status, second) = json_call(&f.app, second).await;
+        assert_eq!(status, StatusCode::OK);
+        let other = second["AccessToken"]
+            .as_str()
+            .expect("second login")
+            .to_owned();
         let play = negotiate(&f).await["PlaySessionId"]
             .as_str()
             .expect("play")
@@ -4005,13 +4124,42 @@ mod tests {
             StatusCode::BAD_REQUEST,
             "never a kill by device alone"
         );
+        for (method, path) in [
+            (
+                "POST",
+                format!("/jellyfin/Sessions/Playing/Ping?playSessionId={play}"),
+            ),
+            (
+                "DELETE",
+                format!("/jellyfin/Videos/ActiveEncodings?playSessionId={play}"),
+            ),
+        ] {
+            assert_eq!(
+                call(method, &path, Some(&other), Value::Null).await.0,
+                StatusCode::NOT_FOUND,
+                "{method} {path}: another login's play is not this login's"
+            );
+        }
         assert_eq!(
             call("DELETE", &format!("/jellyfin/Videos/ActiveEncodings?deviceId=catalog-contract&playSessionId={play}"), token, Value::Null).await.0,
             StatusCode::NO_CONTENT
         );
         // Every request above is counted under its template; an unknown path
-        // under `unmatched`.
+        // under `unmatched` (a delta: the counter is process-wide).
+        let unmatched = || {
+            super::metrics::prometheus()
+                .lines()
+                .find_map(|line| {
+                    line.strip_prefix(
+                        "plurx_jellyfin_requests_total{route=\"unmatched\",outcome=\"not_found\"} ",
+                    )
+                    .map(|n| n.parse::<u64>().expect("count"))
+                })
+                .unwrap_or(0)
+        };
+        let before = unmatched();
         call("GET", "/jellyfin/No/Such/Route", token, Value::Null).await;
+        assert!(unmatched() > before, "an unknown route is counted");
         let text = super::metrics::prometheus();
         for line in [
             "route=\"/jellyfin/Search/Hints\",outcome=\"ok\"",

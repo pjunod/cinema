@@ -1,4 +1,5 @@
-//! Closed translation of native HLS resource names; no authentication material is added.
+//! Closed translation of native HLS resource names. The only thing added is the
+//! caller's own URL credential, when the handler passes one (`public_query`).
 use std::ops::Range;
 
 const MAX_MANIFEST_BYTES: usize = 8 * 1024 * 1024;
