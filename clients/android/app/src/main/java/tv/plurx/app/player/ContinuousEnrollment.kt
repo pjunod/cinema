@@ -1,5 +1,6 @@
 package tv.plurx.app.player
 
+import android.util.Log
 import java.io.IOException
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.NonCancellable
@@ -20,12 +21,34 @@ internal class ContinuousEnrollment(origin: String, token: String) : AutoCloseab
         val epoch: Long, val schedulePath: String, val primaryRendition: String, val intent: CreateSessionReq)
     private val attempts = LinkedHashMap<String, String>()
 
+    /** The bounded reason this start keeps the ordinary path, or null when a
+     * compatible encoded family may be negotiated. */
+    private fun declineReason(fileId: Long, body: CreateSessionReq): String? {
+        val intent = body.intent ?: return "no_intent"
+        return when {
+            fileId <= 0 -> "file"
+            body.caps == null -> "no_capabilities"
+            body.copy == true -> "copy"
+            body.hdr10 == true -> "hdr10"
+            body.subtitle_burn != null -> "burned_subtitles"
+            body.height == null || body.height <= 0 -> "no_height"
+            body.subtitle != null || intent.selection.subtitles.mode == SubtitleMode.NATIVE -> "native_subtitles"
+            body.previous_session_id != null -> "replacement"
+            body.presentation != "vod" -> "presentation"
+            intent.selection.quality == QualitySelection.Original -> "original"
+            intent.selection.codec !in setOf(CodecPolicy.AUTO, CodecPolicy.H264) -> "codec"
+            intent.selection.dynamic_range !in setOf(DynamicRangePolicy.AUTO, DynamicRangePolicy.SDR) -> "dynamic_range"
+            else -> null
+        }
+    }
+
     suspend fun open(fileId: Long, body: CreateSessionReq): Start? {
-        val intent = body.intent ?: return null
-        if (fileId <= 0 || body.caps == null || body.copy == true || body.hdr10 == true || body.subtitle_burn != null ||
-            body.height == null || body.height <= 0 || body.subtitle != null || intent.selection.subtitles.mode == SubtitleMode.NATIVE || body.previous_session_id != null || body.presentation != "vod" ||
-            intent.selection.quality == QualitySelection.Original || intent.selection.codec !in setOf(CodecPolicy.AUTO, CodecPolicy.H264) ||
-            intent.selection.dynamic_range !in setOf(DynamicRangePolicy.AUTO, DynamicRangePolicy.SDR)) return null
+        val declined = declineReason(fileId, body)
+        if (declined != null) {
+            Log.i("PlurxPlayback", "continuous enrollment declined: $declined")
+            return null
+        }
+        val intent = requireNotNull(body.intent)
         val request = Json.parseToJsonElement(Net.json.encodeToString(body)).jsonObject
         val catalog = try { profile.request("/api/v1/files/$fileId/hls/continuous-candidates", buildJsonObject {
             put("version", 1); put("start", request)
@@ -41,8 +64,9 @@ internal class ContinuousEnrollment(origin: String, token: String) : AutoCloseab
         val requested = (intent.selection.quality as? QualitySelection.AutoCandidate)?.candidateId
         val candidate = candidates.firstOrNull { it.id == requested && it.target_height == body.height }
             ?: candidates.firstOrNull { it.route == "encode" && it.target_height == body.height && it.grade == "sdr" && it.decoder_compatible }
-            ?: return null
-        val pair = pairs.firstOrNull { it.text("primary_candidate_id") == candidate.id } ?: return null
+            ?: return null.also { Log.i("PlurxPlayback", "continuous enrollment declined: no_candidate height=${body.height}") }
+        val pair = pairs.firstOrNull { it.text("primary_candidate_id") == candidate.id }
+            ?: return null.also { Log.i("PlurxPlayback", "continuous enrollment declined: no_pair candidates=${candidates.size}") }
         val companion = candidates.singleOrNull { it.id == pair.text("companion_candidate_id") } ?: throw IOException("Continuous companion candidate")
         if (companion.id == candidate.id || companion.route != "encode" || companion.grade != "sdr" || !companion.decoder_compatible ||
             candidate.route != "encode" || candidate.grade != "sdr" || !candidate.decoder_compatible) return null

@@ -329,6 +329,8 @@ class Controller internal constructor(
             throw java.io.IOException("Controlled parent failed after admission; a new request identity is required")
         }
         if (continuousUsed || player !== continuousPlayer || predecessorAttached() || plan.isAudioOnly) {
+            Log.i("PlurxPlayback", "continuous enrollment not offered: used=$continuousUsed ownPlayer=${player === continuousPlayer} " +
+                "predecessor=${predecessorAttached()} audioOnly=${plan.isAudioOnly}")
             return vm.createHlsSession(plan.fileId, body)
         }
         val enrollment = continuousAttempt ?: ContinuousEnrollment(Session.origin, Session.token.orEmpty()).also { continuousAttempt = it }
