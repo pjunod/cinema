@@ -318,7 +318,9 @@ class PlaybackSurfaceFenceTest(unittest.TestCase):
         # The Shared player owns its own fixed state and never reaches Local
         # recovery. Whether its `failure` text should render through the one
         # PlaybackSurfaceModel instead is an open question for its lane.
-        self.assertEqual(shared, ["failure", "playback", "starting", "statusSummary"])
+        # `busy`, `playing` and `plan` drive its server-accepted controls;
+        # `notice` is a refused control or change, never a playback fault.
+        self.assertEqual(shared, ["busy", "failure", "notice", "plan", "playback", "playing", "starting", "statusSummary"])
         self.assertEqual(published, [
             "currentMs", "decision", "deliveredDolbyVisionProfile", "deliveredRange",
             "encoder", "finished", "isChangingStream", "isPlaying", "isVOD",

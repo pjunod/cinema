@@ -3531,13 +3531,79 @@ struct SharedPlayerView: View {
             Text(plan.subject.title).font(.headline)
             VideoPlayer(player: controller.player).allowsHitTesting(false)
             if controller.starting { ProgressView("Starting Shared playback") }
-            if let summary = controller.statusSummary { Text(summary).font(.caption).foregroundStyle(.secondary) }
+            if controller.isDirect {
+                Text("Shared direct play").font(.caption).foregroundStyle(.secondary)
+            } else if let summary = controller.statusSummary {
+                Text(summary).font(.caption).foregroundStyle(.secondary)
+            }
+            if let notice = controller.notice { Text(notice).font(.caption).foregroundStyle(.secondary) }
             if let failure = controller.failure { Text(failure).foregroundStyle(.secondary) }
-            Text("Playback controls, quality, audio, subtitles and recovery changes are unavailable for Shared playback.")
-                .font(.caption).foregroundStyle(.secondary)
+            if controller.playback != nil, let current = controller.plan { SharedPlayerControls(controller: controller, plan: current) }
             Button("Close") { Task { await controller.stop(); dismiss() } }
         }
         .task { await controller.start(plan) }
         .onDisappear { Task { await controller.stop() } }
+    }
+}
+
+/// Seek, pause and play act only once B accepts them; quality, audio and
+/// subtitle changes reopen the shared session. Nothing here touches Local
+/// playback state.
+struct SharedPlayerControls: View {
+    @ObservedObject var controller: SharedPlayerController
+    let plan: SharedPlaybackPlan
+    var body: some View {
+        HStack(spacing: 16) {
+            Button { seek(by: -10_000) } label: { Image(systemName: "gobackward.10") }
+                .accessibilityLabel("Back 10 seconds").accessibilityIdentifier("shared-seek-back")
+            Button {
+                Task { await controller.control(controller.playing ? .pause : .play) }
+            } label: { Image(systemName: controller.playing ? "pause.fill" : "play.fill") }
+                .accessibilityLabel(controller.playing ? "Pause" : "Play").accessibilityIdentifier("shared-play-pause")
+            Button { seek(by: 10_000) } label: { Image(systemName: "goforward.10") }
+                .accessibilityLabel("Forward 10 seconds").accessibilityIdentifier("shared-seek-forward")
+            Menu("Quality") {
+                ForEach(PlaybackQuality.allCases) { quality in
+                    Button { Task { await controller.change(SharedDirectedChange(quality: quality)) } } label: {
+                        mark(quality.label, plan.rawQuality == quality)
+                    }
+                }
+            }.accessibilityIdentifier("shared-quality")
+            if let tracks = plan.decision.presentation.audio, tracks.count > 1 {
+                Menu("Audio") {
+                    ForEach(tracks) { track in
+                        Button { Task { await controller.change(SharedDirectedChange(audioIndex: .some(track.index))) } } label: {
+                            mark(Self.label(track.title, track.language, fallback: "Track \(track.index)"),
+                                 (plan.rawAudioIndex ?? plan.decision.presentation.delivery?.audio) == track.index)
+                        }
+                    }
+                }.accessibilityIdentifier("shared-audio")
+            }
+            let natives = (plan.decision.presentation.subtitles ?? []).filter(\.isNativeHLS)
+            if !natives.isEmpty {
+                Menu("Subtitles") {
+                    Button { Task { await controller.change(SharedDirectedChange(subtitleIndex: .some(nil))) } } label: {
+                        mark("Off", plan.rawSubtitleIndex == nil)
+                    }
+                    ForEach(natives) { track in
+                        Button { Task { await controller.change(SharedDirectedChange(subtitleIndex: .some(track.index))) } } label: {
+                            mark(Self.label(track.title, track.language, fallback: "Subtitle \(track.index)"), plan.rawSubtitleIndex == track.index)
+                        }
+                    }
+                }.accessibilityIdentifier("shared-subtitles")
+            }
+        }
+        .disabled(controller.busy)
+    }
+    private func seek(by deltaMs: Int) {
+        let target = max(0, controller.currentPositionMs() + deltaMs)
+        Task { await controller.control(.seek(targetMs: target)) }
+    }
+    @ViewBuilder private func mark(_ text: String, _ selected: Bool) -> some View {
+        if selected { Label(text, systemImage: "checkmark") } else { Text(text) }
+    }
+    static func label(_ title: String?, _ language: String?, fallback: String) -> String {
+        let parts = [title, language].compactMap { $0?.trimmingCharacters(in: .whitespacesAndNewlines) }.filter { !$0.isEmpty }
+        return parts.isEmpty ? fallback : String(parts.joined(separator: " · ").prefix(80))
     }
 }

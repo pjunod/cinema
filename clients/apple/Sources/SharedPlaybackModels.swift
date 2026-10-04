@@ -321,16 +321,62 @@ struct SharedPlaybackPlan {
     let request: CreateSessionRequest
     init(subject: SharedPlaybackSubject, decision: SharedDecision, caps: DeviceCaps, request: CreateSessionRequest) throws {
         try subject.validate(); _ = try decision.validated(subject.context)
+        let direct = request.presentation == "direct"
         guard caps.v == 2, caps.transports.contains("hls"), request.caps == caps,
-              request.presentation == "vod", request.intent == nil,
+              request.presentation == "vod" || direct, request.intent == nil,
               request.previousSessionId == nil, request.controlSequence == nil, request.reopenReason == nil,
               request.subtitleBurn == nil, request.preserveDolbyVision != true, request.hdr10 != true,
-              decision.presentation.deliveredDynamicRange.map({ $0 == "sdr" }) ?? true,
               (request.start ?? 0) == Double(subject.resumeMs) / 1000,
               request.height.map({ $0 > 0 && $0 <= 8192 }) ?? true,
-              decision.method == "transcode" ? request.copy != true : request.copy == true
+              direct ? Self.directEligible(decision) && request.copy == nil && request.height == nil && request.aac == nil
+                    && request.audio == nil && request.nativeSubtitles == nil && request.subtitle == nil
+                : decision.presentation.deliveredDynamicRange.map({ $0 == "sdr" }) ?? true
+                    && (decision.method == "transcode" ? request.copy != true : request.copy == true)
         else { throw APIError.transport("This Shared HLS plan is not available yet.") }
         self.subject = subject; self.decision = decision; self.caps = caps; self.request = request
+    }
+
+    /// Shared direct play: the Source decided direct play for these caps and
+    /// AVPlayer can take the bytes as they are. A Dolby Vision source stays on
+    /// copy HLS for the reason Local gives (`PlayerController.playbackMode`:
+    /// AVPlayer renders a black plane for progressive DV). A planned
+    /// non-default audio track or an A/V offset needs a session, not raw bytes.
+    static func directEligible(_ decision: SharedDecision) -> Bool {
+        let presentation = decision.presentation
+        let plannedAudio = presentation.delivery?.audio
+        let defaultAudio = plannedAudio.map { index in presentation.audio?.first(where: { $0.index == index })?.default == true } ?? true
+        return decision.method == "direct_play" && presentation.delivery?.mode == "direct"
+            && presentation.source?.hdr?.lowercased() != "dolby_vision"
+            && presentation.deliveredDynamicRange != "dolby_vision"
+            && presentation.preserveDolbyVision != true && presentation.delivery?.preserveDolbyVision != true
+            && (presentation.audioOffsetMs ?? 0) == 0 && defaultAudio
+    }
+
+    /// The one place a shared Start request is composed from a decision: the
+    /// initial play and every reopen. A reopen keeps the player's playback id,
+    /// so B supersedes the predecessor once the new session publishes.
+    static func make(subject: SharedPlaybackSubject, decision: SharedDecision, caps: DeviceCaps,
+                     quality: PlaybackQuality, audioIndex: Int? = nil, subtitleIndex: Int? = nil,
+                     playbackId: String = UUID().uuidString.lowercased()) throws -> Self {
+        let start = Double(subject.resumeMs) / 1000
+        let requestId = UUID().uuidString.lowercased()
+        let subtitle = subtitleIndex.flatMap { index in
+            index >= 0 && decision.presentation.subtitles?.contains(where: { $0.index == index && $0.isNativeHLS }) == true ? index : nil
+        }
+        if subtitleIndex.map({ $0 >= 0 }) == true && subtitle == nil {
+            throw APIError.transport("This Shared subtitle needs a burn-in, which is not available.")
+        }
+        var request: CreateSessionRequest
+        if audioIndex == nil, subtitle == nil, quality == .auto || quality == .original, directEligible(decision) {
+            request = CreateSessionRequest(playbackId: playbackId, requestId: requestId, start: start, caps: caps)
+            request.presentation = "direct"
+        } else {
+            request = CreateSessionRequest(playbackId: playbackId, requestId: requestId,
+                height: quality.rungHeight, qualityAuto: quality == .auto, start: start, audio: audioIndex,
+                nativeSubtitles: subtitle == nil ? nil : true, subtitle: subtitle,
+                copy: decision.method != "transcode", aac: decision.presentation.transcodeAudio, caps: caps)
+        }
+        return try Self(subject: subject, decision: decision, caps: caps, request: request)
     }
 }
 
