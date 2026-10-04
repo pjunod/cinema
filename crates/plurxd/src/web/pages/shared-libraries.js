@@ -185,15 +185,49 @@ const SHARED_CATALOGUE_REOPEN=Object.freeze(["sharing_cursor_expired","sharing_q
 // Fresh B details mint the opaque context. Displayed cached file facts never
 // become a Play authority, and Source numbers never enter the Local router.
 async function sharedCataloguePlay(reference,fileId,capture){
-  const ref=sharedCatalogueReference(reference),id=sharedCatalogueId(fileId);
-  if(!sharedCatalogueCurrent(capture))throw new Error("Shared page changed.");
+  return sharedCatalogueLaunch(reference,sharedCatalogueId(fileId),()=>sharedCatalogueCurrent(capture));
+}
+// A null file selects the first file of the fresh details (next episode).
+async function sharedCatalogueLaunch(reference,fileId,stillCurrent){
+  const ref=sharedCatalogueReference(reference),id=fileId===null?null:sharedCatalogueId(fileId);
+  if(!stillCurrent())throw new Error("Shared page changed.");
   const fresh=await SHARED_DECISION.details(ref);
-  if(!sharedCatalogueCurrent(capture)||fresh.detail.delivery_status!=="available")throw new Error("Shared playback is not available yet.");
-  const selected=fresh.files.find(entry=>entry.context.source_file_id===id);
+  if(!stillCurrent()||fresh.detail.delivery_status!=="available")throw new Error("Shared playback is not available yet.");
+  const selected=id===null?fresh.files[0]:fresh.files.find(entry=>entry.context.source_file_id===id);
   if(!selected)throw new Error("Shared file changed.");
   const watch=fresh.detail.watch;
   const resume=watch&&!watch.watched?watch.position_ms:0,duration=selected.file.duration_ms??0;
   if(!Number.isSafeInteger(resume)||resume<0||!Number.isSafeInteger(duration)||duration<0)throw new Error("Shared timeline unavailable.");
-  return play(id,fresh.detail.item.title||"Shared item",resume,duration,
+  return play(selected.context.source_file_id,fresh.detail.item.title||"Shared item",resume,duration,
     {...fresh.detail.item,fileContext:selected.context,sharedReference:ref});
+}
+// Next episode follows Source hierarchy and order through B: next in the
+// season, else the first episode of the next season. It returns a full Shared
+// reference for a new authorized start and never derives a Local item ID.
+async function sharedCatalogueNextEpisode(reference,read){
+  const ref=sharedCatalogueReference(reference),base=`/shared/imports/${ref.import_id}`,group=sharedCatalogueGroupKey(ref);
+  const owned=value=>{const r=sharedCatalogueReference(value);if(sharedCatalogueGroupKey(r)!==group)throw new Error("Shared source changed");return r;};
+  const detail=async id=>{const item=(await read(`${base}/items/${sharedCatalogueId(id)}`))?.item;
+    if(!item||owned(item.reference).item_id!==id)throw new Error("Shared source changed");return item;};
+  const children=async(id,kind)=>{
+    const rows=[],ids=new Set();let cursor=null;
+    for(let page=0;page<10;page++){
+      const reply=await read(`${base}/items/${sharedCatalogueId(id)}/children?limit=200`+(cursor?`&cursor=${encodeURIComponent(cursor)}`:""));
+      if(!Array.isArray(reply?.items)||reply.items.length>200)throw new Error("Shared children unavailable");
+      for(const row of reply.items){const r=owned(row.reference);if(row.kind===kind&&!ids.has(r.item_id)){ids.add(r.item_id);rows.push(r);}}
+      cursor=reply.next_cursor||null;if(!cursor)return rows;
+    }
+    throw new Error("Shared season unavailable");
+  };
+  const current=await detail(ref.item_id);
+  if(current.kind!=="episode"||!current.parent)return null;
+  const season=owned(current.parent),episodes=await children(season.item_id,"episode");
+  const at=episodes.findIndex(row=>row.item_id===ref.item_id);
+  if(at>=0&&episodes[at+1])return episodes[at+1];
+  const seasonItem=await detail(season.item_id);
+  if(!seasonItem.parent)return null;
+  const seasons=await children(owned(seasonItem.parent).item_id,"season");
+  const index=seasons.findIndex(row=>row.item_id===season.item_id),next=index<0?null:seasons[index+1];
+  if(!next)return null;
+  return (await children(next.item_id,"episode"))[0]||null;
 }

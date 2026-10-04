@@ -76,7 +76,7 @@ function callerHarness(capQuery="vcodec=h264,hevc&acodec=aac&container=mp4&hdr=0
     ["player/audio-sync.js",["subUrl"]],
     ["detail/watch-browser.js",["watchChapterThumbUrl"]],
     ["player/stats.js",["reportProgress"]],
-    ["player/autoplay-next.js",["playNextEpisode","playNextAudiobookPart","playbackContinuation"]],
+    ["player/autoplay-next.js",["playNextEpisode","playNextSharedEpisode","playNextAudiobookPart","playbackContinuation"]],
   ].flatMap(([file,names])=>names.map(name=>shippedFunction(file,name))).join("\n");
   vm.runInContext(source+`\nlet PREPLAY={},PLAYER=null,STREAM_SEQ=0;
     const PLAYBACK_ID="aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",SERVER=null;
@@ -103,6 +103,8 @@ function callerHarness(capQuery="vcodec=h264,hevc&acodec=aac&container=mp4&hdr=0
     subtitle:subUrl,thumb:watchChapterThumbUrl,remux:remuxUrl,
     progress(){return reportProgress("7");},next:playNextEpisode,bookNext:playNextAudiobookPart,
     contract(session){vodClientContract=()=>({session});},
+    stub(name,fn){globalThis[name]=fn;},
+    attachShared(c,sharedReference){PLAYER={fileId:"7",fileContext:c,meta:{fileContext:c,kind:"episode",sharedReference},aoffset:0};},
     requests};`,ctx);
   return ctx.calls;
 }
@@ -355,4 +357,21 @@ test("Shared direct attachment polls no status, starts no control, DELETEs its B
   assert.match(shippedFunction("player/stats.js","closePlayer"),/releaseSharedDirect\(PLAYER\)/);
   assert.match(shippedFunction("player/decode-margin.js","retirePlaybackPredecessor"),/releaseSharedDirect\(predecessor\)/);
   assert.match(shippedFunction("player/decode-tiers.js","preparePlayOutgoing"),/releaseSharedDirect\(outgoing\)/);
+});
+test("Shared next episode dispatches to the Source-order resolver and a fresh authorized start, never a Local route",async()=>{
+  const h=callerHarness(),shared=h.shared(reference,detail()),calls=[];
+  const next={...reference,item_id:"9007199254740994"};
+  h.stub("toast",()=>{});
+  h.stub("beginPlaybackPreparation",()=>({run:fn=>fn(null),finish(){calls.push("finish");}}));
+  h.stub("sharedCatalogueNextEpisode",async(ref,read)=>{calls.push(["resolve",ref.item_id]);await read("/shared/imports/"+ref.import_id+"/items/"+ref.item_id);return next;});
+  h.stub("sharedCatalogueLaunch",async(ref,file,current)=>{calls.push(["launch",ref.item_id,file,current()]);});
+  h.attachShared(shared,reference);
+  assert.equal(await h.next(),true);
+  assert.deepEqual(calls,[["resolve","9"],"finish",["launch","9007199254740994",null,true]]);
+  assert.deepEqual(h.requests.map(r=>r.url),["/shared/imports/"+reference.import_id+"/items/9"]);
+  // The end of the series, or a resolver refusal, ends without any start.
+  calls.length=0;h.stub("sharedCatalogueNextEpisode",async()=>null);
+  assert.equal(await h.next(),false);assert.deepEqual(calls,["finish"]);
+  calls.length=0;h.stub("sharedCatalogueNextEpisode",async()=>{throw new Error("Shared source changed");});
+  assert.equal(await h.next(),false);assert.deepEqual(calls,["finish"]);
 });
