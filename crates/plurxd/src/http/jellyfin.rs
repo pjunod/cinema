@@ -1256,6 +1256,10 @@ mod tests {
     }
     async fn native_hls_copy_flow(duplicate: bool, encoded: bool) {
         let f = playback_fixture().await;
+        // Production renews the native route's 12-second lease from the
+        // owner loop. Without it, a flow slower than one lease (a loaded CI
+        // runner) sees its own route expire and every request answer 409.
+        let lease_owner = tokio::spawn(crate::media_sessions::lease_loop(f.state.clone()));
         let path = f
             .root
             .path()
@@ -1697,6 +1701,8 @@ mod tests {
             .await
             .expect("late child");
         assert_ne!(response.status(), StatusCode::OK);
+        lease_owner.abort();
+        assert!(lease_owner.await.is_err_and(|error| error.is_cancelled()));
     }
 
     struct PlaybackFixture {

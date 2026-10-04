@@ -9987,6 +9987,9 @@ mod tests {
         assert_eq!(
             ids,
             vec![
+                // Jellyfin compatibility: one advisory row (pinned-client
+                // qualification) that never gates the switch.
+                "jellyfin_compatibility",
                 "durable_cluster_work",
                 "bounded_catalogue_reads",
                 "cluster_backup",

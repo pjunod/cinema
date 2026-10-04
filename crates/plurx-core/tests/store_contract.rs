@@ -291,6 +291,7 @@ const USER_METHODS: &[&str] = &[
     "create_token",
     "create_token_if_password_matches",
     "authenticate_token",
+    "authenticate_token_for",
     "user_for_token",
     "delete_token",
     "delete_token_with_cache_admin_claim",
@@ -444,6 +445,9 @@ const MEDIA_METHODS: &[&str] = &[
     "prune_empty_items",
 ];
 const WATCH_METHODS: &[&str] = &[
+    "jellyfin_progress_is_current",
+    "put_jellyfin_progress",
+    "set_watched_tree_with_origin",
     "watch_state",
     "watch_map",
     "put_progress",
@@ -18229,7 +18233,11 @@ fn contract_inventory_matches_every_store_method() {
     // by playback_planning_snapshot_retains_one_source_and_settings_revision.
     // +1: source-fenced content encoding report publication, covered by
     // content_encoding_report_publication_is_source_fenced_on_every_backend.
-    assert_eq!(declared.len(), 453, "review the Store method count");
+    // +4 for Jellyfin compatibility: audience-scoped token authentication
+    // (jellyfin_login_token_audience_separates_native_and_compatibility), and
+    // the origin-stamped watch tree plus the fenced compatibility progress
+    // write and its currency check (store_contract/jellyfin_play.rs).
+    assert_eq!(declared.len(), 457, "review the Store method count");
     assert_eq!(
         covered, declared,
         "the declared async method name inventory changed"
