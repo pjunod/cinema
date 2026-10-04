@@ -776,89 +776,98 @@ async fn join_fresh_store(
         true,
     )
     .await?;
-    let store = open_joined_store(client.clone(), &active.join("telemetry.db")).await?;
-    verify_store_identity(&store, payload.cluster_id()).await?;
-    let mut activation_marker = payload.activation_marker().clone();
-    activation_marker.admitted_role = Some(role);
+    // Every handled error below awaits the voter's drain before returning.
+    let result: Result<SelectedStore, StoreError> = async {
+        let store = open_joined_store(client.clone(), &active.join("telemetry.db")).await?;
+        verify_store_identity(&store, payload.cluster_id()).await?;
+        let mut activation_marker = payload.activation_marker().clone();
+        activation_marker.admitted_role = Some(role);
 
-    // Keep the caught-up voter alive. No stop/rebind boundary is needed because
-    // every durable file already lives at the final path. Pending ownership
-    // remains armed until the final publication/finalization awaits complete.
-    let credential_key = open_active_credential_key(config, &store).await?;
-    let concrete_store = Arc::new(store);
-    let store: Arc<dyn Store> = concrete_store.clone();
-    let replication = status::ReplicationMonitor::replicated(
-        client.clone(),
-        active.clone(),
-        HIQLITE_DATABASE_FILENAME,
-    );
-    let catalogue = CatalogueReader::replicated(
-        Arc::clone(&store),
-        concrete_store,
-        replication.metrics_handle(),
-        config.cluster.bounded_replica_reads,
-        config.cluster.bounded_replica_max_lag_entries,
-    );
-    let membership_manager = MembershipManager::clock_observation(
-        client.clone(),
-        replication.clone(),
-        Arc::clone(&store),
-        identity.clone(),
-        local,
-        configured_join_url(config)?,
-        configured_artwork_url(config)?,
-        JoinSecrets {
-            raft: secrets.raft,
-            api: secrets.api,
-            credential_key: read_secret(
-                &config.cluster.credential_key_path(&config.storage.data_dir),
-            )?,
-        },
-        load_or_create_activity_signing_key(&config.storage.data_dir)?,
-        activation_marker.clone(),
-        role,
-        config.storage.data_dir.clone(),
-    )
-    .await
-    .map_err(|error| StoreError::Database(error.to_string()))?;
-    let (membership_manager, activation_admission) =
-        complete_startup_observation(&client, membership_manager, &identity, role, observer)
-            .await?;
-    activation_admission
-        .revalidate()
+        // Keep the caught-up voter alive. No stop/rebind boundary is needed because
+        // every durable file already lives at the final path. Pending ownership
+        // remains armed until the final publication/finalization awaits complete.
+        let credential_key = open_active_credential_key(config, &store).await?;
+        let concrete_store = Arc::new(store);
+        let store: Arc<dyn Store> = concrete_store.clone();
+        let replication = status::ReplicationMonitor::replicated(
+            client.clone(),
+            active.clone(),
+            HIQLITE_DATABASE_FILENAME,
+        );
+        let catalogue = CatalogueReader::replicated(
+            Arc::clone(&store),
+            concrete_store,
+            replication.metrics_handle(),
+            config.cluster.bounded_replica_reads,
+            config.cluster.bounded_replica_max_lag_entries,
+        );
+        let membership_manager = MembershipManager::clock_observation(
+            client.clone(),
+            replication.clone(),
+            Arc::clone(&store),
+            identity.clone(),
+            local,
+            configured_join_url(config)?,
+            configured_artwork_url(config)?,
+            JoinSecrets {
+                raft: secrets.raft,
+                api: secrets.api,
+                credential_key: read_secret(
+                    &config.cluster.credential_key_path(&config.storage.data_dir),
+                )?,
+            },
+            load_or_create_activity_signing_key(&config.storage.data_dir)?,
+            activation_marker.clone(),
+            role,
+            config.storage.data_dir.clone(),
+        )
+        .await
         .map_err(|error| StoreError::Database(error.to_string()))?;
-    publish_join_activation(
-        &config.storage.data_dir,
-        &active,
-        &activation_marker,
-        &membership,
-        JoinActivationFailpoint::None,
-    )?;
-    ensure_activated_source_record(&config.storage.data_dir, &activation_marker)?;
-    if role == ClusterRole::Voter {
+        let (membership_manager, activation_admission) =
+            complete_startup_observation(&client, membership_manager, &identity, role, observer)
+                .await?;
         activation_admission
             .revalidate()
             .map_err(|error| StoreError::Database(error.to_string()))?;
-        client
-            .finish_clock_observation()
-            .map_err(|error| StoreError::Database(error.to_string()))?;
+        publish_join_activation(
+            &config.storage.data_dir,
+            &active,
+            &activation_marker,
+            &membership,
+            JoinActivationFailpoint::None,
+        )?;
+        ensure_activated_source_record(&config.storage.data_dir, &activation_marker)?;
+        if role == ClusterRole::Voter {
+            activation_admission
+                .revalidate()
+                .map_err(|error| StoreError::Database(error.to_string()))?;
+            client
+                .finish_clock_observation()
+                .map_err(|error| StoreError::Database(error.to_string()))?;
+        }
+        let selected = SelectedStore {
+            store,
+            identity,
+            credential_key,
+            backend: SelectedBackend::Replicated,
+            membership: membership_manager,
+            replication,
+            catalogue,
+            local_client: Some(client),
+            _daemon_lock: daemon_lock,
+        };
+        finalize_pending_join_best_effort(config, &selected).await;
+        Ok(selected)
     }
-    let selected = SelectedStore {
-        store,
-        identity,
-        credential_key,
-        backend: SelectedBackend::Replicated,
-        membership: membership_manager,
-        replication,
-        catalogue,
-        local_client: Some(client),
-        _daemon_lock: daemon_lock,
-    };
-    finalize_pending_join_best_effort(config, &selected).await;
+    .await;
     if let Some(pending) = pending_client.as_mut() {
-        pending.handoff();
+        if result.is_ok() {
+            pending.handoff();
+        } else {
+            pending.drain_now().await;
+        }
     }
-    Ok(selected)
+    result
 }
 
 /// Finish opening an admitted voter across the brief no-quorum window that
@@ -2828,9 +2837,11 @@ async fn open_active_store_with_key(
         })
     }
     .await;
-    if result.is_ok() {
-        if let Some(pending) = pending_client.as_mut() {
+    if let Some(pending) = pending_client.as_mut() {
+        if result.is_ok() {
             pending.handoff();
+        } else {
+            pending.drain_now().await;
         }
     }
     result
@@ -3232,6 +3243,18 @@ impl PendingStartupClient {
 
     fn handoff(&mut self) {
         self.owned.take();
+    }
+
+    /// A handled post-start error is a live runtime, so the drain can be
+    /// awaited here: the caller returns only after the voter's listeners and
+    /// storage lock are released, exactly as a pre-K06 `shutdown_voter` did.
+    /// `Drop` stays the fallback for cancellation, panic and teardown.
+    async fn drain_now(&mut self) {
+        if let Some(owned) = self.owned.take() {
+            RetainedStartupResources { owned: Some(owned) }
+                .drain()
+                .await;
+        }
     }
 }
 
@@ -5667,36 +5690,59 @@ mod tests {
     /// state-machine crash sentinel present and the next boot destroys the
     /// local state machine to rebuild it from peers.
     #[cfg(feature = "hiqlite-store")]
-    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-    async fn a_post_start_initialization_failure_leaves_no_crash_sentinel() {
-        install_default_crypto_provider();
+    #[test]
+    fn a_post_start_initialization_failure_leaves_no_crash_sentinel() {
+        // The owned 8 MiB stack convention the other full-startup tests use:
+        // a whole daemon selection is deeper than a 2 MiB debug test thread.
+        std::thread::Builder::new()
+            .stack_size(8 * 1024 * 1024)
+            .spawn(|| {
+                tokio::runtime::Builder::new_multi_thread()
+                    .worker_threads(4)
+                    .thread_stack_size(8 * 1024 * 1024)
+                    .enable_all()
+                    .build()
+                    .expect("build post-start failure runtime")
+                    .block_on(Box::pin(async {
+                        install_default_crypto_provider();
 
-        let dir = tempfile::tempdir().expect("post-start failure data dir");
-        let config = membership_test_config(dir.path());
-        drop(SqliteStore::open(&dir.path().join(SQLITE_FILENAME)).expect("source SQLite"));
-        write_private_file(
-            &dir.path().join(ACTIVITY_SIGNING_KEY_FILENAME),
-            b"not-hexadecimal\n",
-        )
-        .expect("write invalid activity key");
+                        let dir = tempfile::tempdir().expect("post-start failure data dir");
+                        let config = membership_test_config(dir.path());
+                        drop(
+                            SqliteStore::open(&dir.path().join(SQLITE_FILENAME))
+                                .expect("source SQLite"),
+                        );
+                        write_private_file(
+                            &dir.path().join(ACTIVITY_SIGNING_KEY_FILENAME),
+                            b"not-hexadecimal\n",
+                        )
+                        .expect("write invalid activity key");
 
-        let error = select_daemon_store(&config)
-            .await
-            .err()
-            .expect("the invalid post-start key must refuse activation")
-            .to_string();
-        assert!(
-            error.contains(ACTIVITY_SIGNING_KEY_FILENAME) && error.contains("is malformed"),
-            "the refusal must occur after the voter starts: {error}"
-        );
-        assert!(
-            !dir.path()
-                .join(HIQLITE_ACTIVE_DIRNAME)
-                .join("state_machine")
-                .join("lock")
-                .exists(),
-            "a handled initialization error must not look like a process crash"
-        );
+                        // Boxed like production's `open_active_store`: the full selection
+                        // state machine is deeper than a 2 MiB debug test thread allows.
+                        let error = Box::pin(select_daemon_store(&config))
+                            .await
+                            .err()
+                            .expect("the invalid post-start key must refuse activation")
+                            .to_string();
+                        assert!(
+                            error.contains(ACTIVITY_SIGNING_KEY_FILENAME)
+                                && error.contains("is malformed"),
+                            "the refusal must occur after the voter starts: {error}"
+                        );
+                        assert!(
+                            !dir.path()
+                                .join(HIQLITE_ACTIVE_DIRNAME)
+                                .join("state_machine")
+                                .join("lock")
+                                .exists(),
+                            "a handled initialization error must not look like a process crash"
+                        );
+                    }));
+            })
+            .expect("spawn post-start failure thread")
+            .join()
+            .expect("post-start failure thread");
     }
 
     #[cfg(feature = "hiqlite-store")]
@@ -5920,7 +5966,7 @@ mod tests {
             .expect("daemon selection boundary")
             .0;
         assert!(
-            selection.contains("let selected = open_active_store")
+            selection.contains("let selected = Box::pin(open_active_store(")
                 && selection.contains("finish_readdress(&config.storage.data_dir)?"),
             "readdress cleanup must remain after the snapshot-owning active-store open"
         );

@@ -1940,21 +1940,24 @@
             subtitle: None,
             diagnostic: None,
         };
+        // Each request runs as its own heap-allocated task in production.
+        // Joining both handler state machines inline on a 2 MiB debug test
+        // thread overflows it, so box them the way a spawned task holds them.
         let (master, legacy) = tokio::join!(
-            master_playlist_response_local_before(
+            Box::pin(master_playlist_response_local_before(
                 &fixture.state,
                 "delayed-native-init",
                 query(),
                 deadline,
                 deadline
-            ),
-            playlist_local_before(
+            )),
+            Box::pin(playlist_local_before(
                 &fixture.state,
                 "delayed-native-init",
                 query(),
                 deadline,
                 deadline
-            ),
+            )),
         );
         assert_eq!(
             master.expect("master waits through preparation").status(),

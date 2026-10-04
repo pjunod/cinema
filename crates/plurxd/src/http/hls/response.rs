@@ -1139,11 +1139,10 @@ mod batching_tests {
             4096
         );
         // The second storage read takes 20 s, then the consumer waits 20 s
-        // more before accepting anything from the new batch.
-        tokio::time::advance(Duration::from_secs(20)).await;
-        for _ in 0..8 {
-            tokio::task::yield_now().await;
-        }
+        // more before accepting anything from the new batch. A paused-clock
+        // sleep (not `advance` plus yields) lets the pump finish that read and
+        // hand the batch over before the consumer's own wait starts.
+        tokio::time::sleep(Duration::from_secs(20)).await;
         tokio::time::advance(Duration::from_secs(20)).await;
         assert_eq!(
             body.frame()

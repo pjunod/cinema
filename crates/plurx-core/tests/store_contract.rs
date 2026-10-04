@@ -12564,6 +12564,19 @@ async fn assert_migrated_fragment_prune_budget(client: &Client) {
     );
 }
 
+/// A fixture rewound to a pre-v92 marker must not keep the composed v92/v93
+/// shapes a fresh chain created (`offline_packages.audio_recipe` and the two
+/// Link columns on `network_priors`): `ADD COLUMN` replays are not idempotent,
+/// and a real database at that marker never had them.
+fn drop_composed_v92_v93_columns(conn: &rusqlite::Connection) {
+    conn.execute_batch(
+        "ALTER TABLE offline_packages DROP COLUMN audio_recipe;
+         ALTER TABLE network_priors DROP COLUMN link_worst_rung_height;
+         ALTER TABLE network_priors DROP COLUMN link_starved_at_ms;",
+    )
+    .expect("remove composed v92/v93 columns before rewinding");
+}
+
 #[test]
 fn sqlite_fresh_and_upgrade_fragment_prune_plans_and_work_are_bounded() {
     let directory = tempfile::tempdir().expect("upgrade fixture");
@@ -12578,6 +12591,7 @@ fn sqlite_fresh_and_upgrade_fragment_prune_plans_and_work_are_bounded() {
         );
         conn.execute_batch(include_str!("fixtures/fragment-prune-worst.sql"))
             .expect("populated upgrade workload");
+        drop_composed_v92_v93_columns(&conn);
         conn.execute_batch(
             "DROP INDEX analysis_requests_result_target_force;
              ALTER TABLE dv_conversions DROP COLUMN requested_manually;
@@ -36128,6 +36142,7 @@ async fn sqlite_v70_migration_adds_the_read_indexes_and_keeps_the_catalogue() {
         conn.execute_batch(&format!("DROP INDEX {index};"))
             .expect("remove v70-only shape");
     }
+    drop_composed_v92_v93_columns(&conn);
     conn.pragma_update(None, "user_version", 69)
         .expect("mark the v69 predecessor");
     drop(conn);
@@ -36372,6 +36387,7 @@ async fn sqlite_v69_migration_from_v68_preserves_file_grants_and_live_analysis_r
         .expect("restore v68 attempt table");
     // A literal, not `SQLITE_SCHEMA_VERSION - 1`: the fixture is the v68
     // shape, and later migrations (v70's indexes) must replay after v69.
+    drop_composed_v92_v93_columns(&conn);
     conn.pragma_update(None, "user_version", 68)
         .expect("mark true v68 predecessor");
     drop(conn);
