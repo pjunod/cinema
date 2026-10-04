@@ -20,7 +20,7 @@ feeding an AVR keeps lossless TrueHD instead of a 256 kb/s AAC downmix: the box
 has no TrueHD decoder, the receiver does, and the claim follows the route. It is
 recomputed on every decision, because unplugging HDMI changes the answer.
 
-> Status: **v0.3.0**, build `143` — decoder envelopes compact conservatively
+> Status: **v0.3.0**, build `144` — decoder envelopes compact conservatively
 > while preserving crossing limits, profiles and display grades. The bounded
 > contract is negotiated with the server; no evidence is truncated. Physical
 > TCL/Streamer acceptance remains outstanding.

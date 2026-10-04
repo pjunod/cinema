@@ -2,7 +2,7 @@
 
 **Status:** 2026-09-30 — draft A05 M2; no native playback enablement or device acceptance.
 
-Build: 202
+Build: 206
 Issue: #634
 
 The Apple and Android clients now contain pure ports of the current browser

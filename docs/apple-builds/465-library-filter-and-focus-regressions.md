@@ -3,7 +3,7 @@
 **Status:** open — source branches integrated; this batch's single review,
 focused execution and qualification remain pending.
 
-Build: 200
+Build: 206
 Issue: #465
 
 The Apple library view delegates its existing page, query and filter task
