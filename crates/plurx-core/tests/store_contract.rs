@@ -16195,6 +16195,7 @@ fn make_trakt_fixture_row_cleartext(path: &std::path::Path) {
 fn populated_v14_import_fixture(data_dir: &std::path::Path) -> PathBuf {
     let path = populated_current_import_fixture(data_dir);
     let connection = rusqlite::Connection::open(&path).expect("open current SQLite fixture");
+    queue_fixture::remove_jellyfin_compatibility_schema(&connection);
     queue_fixture::remove_common_queue_schema(&connection);
     connection
         .execute_batch(
@@ -16416,7 +16417,9 @@ async fn populated_v14_sqlite_import_has_exact_three_voter_parity() {
     // is over what the import *plans*, not over what the source happened to
     // hold. The subtitle-source ledgers are node-held facts about local files
     // and are deliberately not imported, so they are not counted here.
-    assert_eq!(report.tables.len(), 70);
+    // 73 with Jellyfin compatibility's wire identities, compatibility logins
+    // and bounded negotiations (SQLite v92–v94).
+    assert_eq!(report.tables.len(), 73);
     assert_eq!(report.search_rows, 2);
     assert_eq!(
         report
@@ -17943,9 +17946,32 @@ async fn a_lost_replicated_target_refuses_to_reimport_the_retained_source() {
 }
 
 #[cfg(feature = "hiqlite-contract-tests")]
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[test]
 #[ignore = "spawned by the one-voter activation contract"]
-async fn hiqlite_activation_node_process() {
+fn hiqlite_activation_node_process() {
+    // A whole daemon selection migrates the replicated schema from its first
+    // version, and `HiqliteAuthStore::migrate_schema`'s unoptimized frame
+    // outgrows a 2 MiB thread (see `on_startup_stack` in cluster/migration.rs).
+    // The same owned 8 MiB stack the full-startup tests use.
+    let owned = std::thread::Builder::new()
+        .stack_size(8 * 1024 * 1024)
+        .spawn(|| {
+            tokio::runtime::Builder::new_multi_thread()
+                .worker_threads(2)
+                .thread_stack_size(8 * 1024 * 1024)
+                .enable_all()
+                .build()
+                .expect("build activation node runtime")
+                .block_on(Box::pin(hiqlite_activation_node_fixture()))
+        })
+        .expect("spawn owned activation node thread");
+    if let Err(panic) = owned.join() {
+        std::panic::resume_unwind(panic);
+    }
+}
+
+#[cfg(feature = "hiqlite-contract-tests")]
+async fn hiqlite_activation_node_fixture() {
     install_contract_crypto_provider();
     let launch: ActivationNodeLaunch = serde_json::from_str(
         &std::env::var("PLURX_ACTIVATION_NODE_LAUNCH").expect("activation launch"),

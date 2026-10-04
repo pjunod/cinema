@@ -2972,8 +2972,11 @@ mod tests {
         // unconditional result-key/target/force index for bounded cleanup.
         // v89 indexes preparation history; v90 records explicit DV requests;
         // v91 records transactional planning generation.
+        // v92–v95 add Jellyfin compatibility: permanent wire identities,
+        // compatibility-only logins, bounded negotiations with exact native
+        // references, and manual-edit watch revisions.
         assert_eq!(
-            version, 91,
+            version, 95,
             "a new migration must be a deliberate bump, not a surprise — \
              the list is append-only and every entry is one somebody shipped"
         );

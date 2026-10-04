@@ -175,6 +175,17 @@ pub const SQLITE_TRANSACTION_SITES: &[SqliteTransactionSite] = &[
         mechanism: TransactionMechanism::RusqliteTransaction,
         shape: TransactionShape::BatchWrite,
     },
+    // Activation binds the native reference only while the exact pending row
+    // remains, and supersedes the scope's older rows only when that
+    // conditional update wrote one; the supersede matches this activation's
+    // nonce. The replicated twin runs both in one transaction.
+    SqliteTransactionSite {
+        module: "jellyfin_play.rs",
+        method: "activate_jellyfin_play",
+        is_async: true,
+        mechanism: TransactionMechanism::RusqliteTransaction,
+        shape: TransactionShape::BranchOnRowsAffected,
+    },
     // The password-matched mint admits both replacement writes; a collision
     // or later statement failure rolls the whole scoped replacement back.
     SqliteTransactionSite {
@@ -1244,7 +1255,9 @@ mod tests {
         // links together so a failed delete remains retryable.
         // Reconciliation adds one atomic successor-insert / predecessor-retire
         // batch. Its SQL predicates own all branching, as in the replicated twin.
-        assert_eq!(methods.len(), 99);
+        // Jellyfin play activation binds and conditionally supersedes in one
+        // boundary that branches on the binding's rows affected.
+        assert_eq!(methods.len(), 100);
     }
 
     #[test]
