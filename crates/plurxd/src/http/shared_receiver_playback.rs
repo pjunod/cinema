@@ -23,6 +23,8 @@ mod retirement;
 pub(crate) use retirement::receiver_recovery_loop;
 #[path = "shared_receiver_direct.rs"]
 mod direct;
+#[path = "shared_receiver_successor.rs"]
+mod successor;
 
 /// Shared direct play on the public media group, beside the Shared start:
 /// GET/HEAD bytes for the exact B session bound to this file alias.
@@ -57,6 +59,11 @@ struct SettledReceiverAttempt {
     login_hash: String,
     fingerprint: String,
     end_confirmation: Option<Arc<retirement::ReceiverEndConfirmation>>,
+    /// The retired B session, and the exact acknowledgement answers it gave:
+    /// a commit retires the session it was sent to, so a client whose commit
+    /// answer was lost replays it against this tombstone.
+    session_id: Option<Uuid>,
+    acknowledgement_replies: successor::AckReplies,
 }
 struct ReceiverStartInner {
     intent: ReceiverSessionIntent,
@@ -104,6 +111,10 @@ struct ReceiverStartState {
     retirement_started: bool,
     retired: bool,
     end_confirmation: Option<Arc<retirement::ReceiverEndConfirmation>>,
+    /// Present on a session B started as a prepared successor.
+    prepared: Option<successor::PreparedRole>,
+    /// Directed-change bookkeeping and the one prepared successor slot.
+    handoff: successor::HandoffState,
 }
 // The only constructor joins the exact registry-owned Start task. This is
 // neither Source settlement nor accepted B body/writer completion.
@@ -316,6 +327,29 @@ impl ReceiverStartRegistry {
                     && !entry.state.lock().expect("receiver owner").retired
             })
     }
+    /// The exact answer a retired, pruned B session gave this acknowledgement
+    /// exchange, if it retained one. Read-only: it never names an owner.
+    fn settled_acknowledgement_replay(
+        &self,
+        session: Uuid,
+        request: &crate::playback_control::ControlRequestV1,
+    ) -> Option<successor::AckReplay> {
+        self.settled
+            .lock()
+            .expect("settled receiver attempts")
+            .iter()
+            .filter(|attempt| attempt.session_id == Some(session))
+            .find_map(|attempt| attempt.acknowledgement_replies.replay(request))
+    }
+    fn settled_acknowledgement_replies(&self, session: Uuid) -> bool {
+        self.settled
+            .lock()
+            .expect("settled receiver attempts")
+            .iter()
+            .any(|attempt| {
+                attempt.session_id == Some(session) && !attempt.acknowledgement_replies.is_empty()
+            })
+    }
     pub(crate) fn by_session(&self, session: Uuid) -> Option<ReceiverStartActor> {
         self.entries
             .lock()
@@ -386,6 +420,15 @@ impl ReceiverStartRegistry {
         if !created {
             return Ok(ReceiverStartActor(entry));
         }
+        Ok(self.spawn_owner(state, entry, source_wrapper))
+    }
+    /// Spawn the one owner task of a just-registered attempt.
+    fn spawn_owner(
+        &self,
+        state: Arc<AppState>,
+        entry: Arc<ReceiverStartInner>,
+        source_wrapper: String,
+    ) -> ReceiverStartActor {
         // The owner is inserted before the first claim, activation or Source send.
         // Dropping an HTTP waiter never drops the owned producer obligation.
         let owner = entry.clone();
@@ -397,17 +440,21 @@ impl ReceiverStartRegistry {
             }
             let result = run_owner(state.clone(), owner.clone(), source_wrapper).await;
             if let Err(error) = result {
+                // An uncommitted prepared successor that failed or reached its
+                // deadline is withdrawn, as a Local aborted successor is.
+                let reason = if owner.awaiting_commit() {
+                    plurx_core::sharing_receiver_retirement::ReceiverRetirementReason::Replaced
+                } else {
+                    plurx_core::sharing_receiver_retirement::ReceiverRetirementReason::Revoked
+                };
                 owner.state.lock().expect("receiver owner").start = Some(Err(error));
                 owner.changed.notify_waiters();
-                ReceiverStartActor(owner).begin_retirement(
-                    state,
-                    plurx_core::sharing_receiver_retirement::ReceiverRetirementReason::Revoked,
-                );
+                ReceiverStartActor(owner).begin_retirement(state, reason);
             }
         });
         *entry.start_task.lock().expect("receiver start task") = Some(task);
         let _ = installed.send(());
-        Ok(ReceiverStartActor(entry))
+        ReceiverStartActor(entry)
     }
     fn register(
         &self,
@@ -457,7 +504,8 @@ impl ReceiverStartRegistry {
         // an already ended actor; only a confirmed one carries an End receipt.
         let mut settled = self.settled.lock().expect("settled receiver attempts");
         entries.retain(|entry| {
-            if !entry.state.lock().expect("receiver owner").retired {
+            let mut owned = entry.state.lock().expect("receiver owner");
+            if !owned.retired {
                 return true;
             }
             if settled.len() == 64 {
@@ -468,12 +516,9 @@ impl ReceiverStartRegistry {
                 request_id: entry.request_id.clone(),
                 login_hash: entry.intent.login_hash.clone(),
                 fingerprint: entry.fingerprint.clone(),
-                end_confirmation: entry
-                    .state
-                    .lock()
-                    .expect("receiver owner")
-                    .end_confirmation
-                    .clone(),
+                end_confirmation: owned.end_confirmation.clone(),
+                session_id: owned.owner.as_ref().map(|owner| owner.session_id),
+                acknowledgement_replies: std::mem::take(&mut owned.handoff.replies),
             });
             false
         });
@@ -646,10 +691,13 @@ impl ReceiverStartActor {
         ),
         ReceiverStartError,
     > {
+        // A prepared successor is not what the viewer watches until the
+        // client commits to it: beats keep naming the predecessor until then.
         if self.0.intent.user_id != user_id
             || self.0.intent.login_hash != login_hash
             || self.0.intent.recipe.reference.import_id != import
             || &self.0.intent.recipe.reference.item_id != item
+            || self.0.awaiting_commit()
         {
             return Err(ReceiverStartError::Unavailable);
         }
@@ -1350,11 +1398,12 @@ async fn run_owner(
     }
     entry.changed.notify_waiters();
     // Published: only now may this session replace the one its player is
-    // leaving (make-before-break).
+    // leaving (make-before-break). A prepared successor waits for the
+    // client's commit instead; its predecessor keeps serving until then.
     state
         .sharing
         .receiver_starts
-        .supersede_predecessors(&state, &entry);
+        .supersede_on_publication(&state, &entry);
     // One Source round trip per lease period. The 30 s lease exchange is what
     // answers "is the Source alive"; local revocation is enforced by each
     // accepted connection's monitor and every viewer-visible byte by
@@ -1368,6 +1417,11 @@ async fn run_owner(
             _ = entry.stop.cancelled() => return Err(ReceiverStartError::Unresolved),
             () = state.shutdown.cancelled() => return Err(ReceiverStartError::Unresolved),
             _ = renewal.tick() => {}
+        }
+        // An uncommitted successor ends at its deadline on this same tick:
+        // the owner returns and the begin wrapper withdraws it.
+        if entry.prepared_expired(clock_ms()) {
+            return Err(ReceiverStartError::Deadline);
         }
         let actor = ReceiverStartActor(entry.clone());
         actor
@@ -1438,7 +1492,7 @@ impl ReceiverProgressBeat {
 /// recipe cannot recreate the physical actor or authorize a Local producer.
 pub(crate) async fn receiver_media(
     axum::extract::State(state): axum::extract::State<AppState>,
-    request: axum::extract::Request,
+    mut request: axum::extract::Request,
     next: axum::middleware::Next,
 ) -> axum::response::Response {
     use axum::{
@@ -1466,6 +1520,29 @@ pub(crate) async fn receiver_media(
         return next.run(request).await;
     }
     let actor = state.sharing.receiver_starts.by_session(session_id);
+    if actor.is_none()
+        && suffix == "control"
+        && request.method() == Method::POST
+        && request.uri().query().is_none()
+        && state
+            .sharing
+            .receiver_starts
+            .settled_acknowledgement_replies(session_id)
+    {
+        // The commit that retired this session may have lost its answer.
+        let (parts, body) = request.into_parts();
+        let Ok(bytes) = axum::body::to_bytes(body, 64 * 1024).await else {
+            return control::invalid_control_body();
+        };
+        if let Some(replay) = control::settled_acknowledgement_replay(
+            &state.sharing.receiver_starts,
+            session_id,
+            &bytes,
+        ) {
+            return replay;
+        }
+        request = axum::extract::Request::from_parts(parts, axum::body::Body::from(bytes));
+    }
     if actor.is_none() {
         if suffix.is_empty()
             && request.method() == Method::DELETE
@@ -1529,15 +1606,30 @@ pub(crate) async fn receiver_media(
         else {
             return StatusCode::SERVICE_UNAVAILABLE.into_response();
         };
+        let method = request.method().clone();
+        let control_body = if suffix == "control" && method == Method::POST {
+            let Ok(bytes) = axum::body::to_bytes(request.into_body(), 64 * 1024).await else {
+                return control::invalid_control_body();
+            };
+            // A lost acknowledgement answer replays exactly, even after the
+            // commit it carried retired this session.
+            if let Some(replay) = control::acknowledgement_replay(&actor, &bytes) {
+                return replay;
+            }
+            Some(bytes)
+        } else {
+            None
+        };
         if actor.current_delivery_attachment(&state).await.is_err() {
             return StatusCode::SERVICE_UNAVAILABLE.into_response();
         }
         let state = Arc::new(state);
-        let method = request.method().clone();
-        return match (suffix, &method) {
-            ("status", &Method::GET) => control::receiver_status(actor, state, &connection).await,
-            ("control", &Method::POST) => {
-                control::receiver_control(actor, state, &connection, request.into_body()).await
+        return match (suffix, &method, control_body) {
+            ("status", &Method::GET, _) => {
+                control::receiver_status(actor, state, &connection).await
+            }
+            ("control", &Method::POST, Some(bytes)) => {
+                control::receiver_control(actor, state, &connection, bytes).await
             }
             _ => StatusCode::METHOD_NOT_ALLOWED.into_response(),
         };
@@ -1610,7 +1702,7 @@ mod tests {
         sharing_receiver_sessions::{ReceiverProducerKind, RemoteSourceRecipe},
         store::sharing_catalogue::ReceiverCatalogueScope,
     };
-    fn intent(request: &str) -> ReceiverSessionIntent {
+    pub(super) fn intent(request: &str) -> ReceiverSessionIntent {
         let reference = SharedReference {
             import_id: Uuid::new_v4(),
             server_id: Uuid::new_v4(),
@@ -1649,7 +1741,7 @@ mod tests {
             },
         }
     }
-    fn wrapper(intent: &ReceiverSessionIntent) -> String {
+    pub(super) fn wrapper(intent: &ReceiverSessionIntent) -> String {
         let recipe = &intent.recipe;
         let target = super::super::hls::SourcePlaybackTarget {
             server_id: recipe.reference.server_id,
@@ -2004,7 +2096,7 @@ mod tests {
         // Absence of a task is unresolved, never a constructed join receipt.
     }
 
-    async fn retired_within(actor: &ReceiverStartActor, limit: Duration) -> bool {
+    pub(super) async fn retired_within(actor: &ReceiverStartActor, limit: Duration) -> bool {
         tokio::time::timeout(limit, async {
             loop {
                 let changed = actor.0.changed.notified();
@@ -2118,7 +2210,7 @@ mod tests {
         ));
     }
 
-    fn player_intent(request: &str, playback: &str, user: i64) -> ReceiverSessionIntent {
+    pub(super) fn player_intent(request: &str, playback: &str, user: i64) -> ReceiverSessionIntent {
         let mut requested = intent(request);
         requested.user_id = user;
         let mut original: serde_json::Value =
@@ -2127,7 +2219,7 @@ mod tests {
         requested.recipe.request_json = original.to_string();
         requested
     }
-    fn registered(
+    pub(super) fn registered(
         registry: &ReceiverStartRegistry,
         request: &str,
         playback: &str,
@@ -2154,7 +2246,7 @@ mod tests {
             },
         )));
     }
-    fn superseding(entry: &Arc<ReceiverStartInner>) -> bool {
+    pub(super) fn superseding(entry: &Arc<ReceiverStartInner>) -> bool {
         entry.state.lock().expect("owner").retirement_started
     }
 

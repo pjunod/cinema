@@ -39,6 +39,13 @@ requires = "Linux disposable CGNAT namespace; PLURX_SHARING_FIXTURE_IP"
 command = "PLURX_SHARING_FIXTURE_IP=100.127.89.2 cargo test --locked -p plurxd --bin plurxd http::shared_receiver_fixture::sharing_receiver_real_pinned_quality_reopen_preserves_position_and_releases_slot -- --ignored --exact --nocapture"
 
 [[fixtures]]
+test = "crates/plurxd/src/http/shared_receiver_fixture.rs::http::shared_receiver_fixture::sharing_receiver_real_pinned_prepared_handoff_commit_and_abort"
+owner = "sharing"
+reason = "A prepared directed change through the real pinned B over H1 and H2 (B stages its own successor as a second Source session, offers prepare naming only B URLs after publication, serves its playlist before commit, replays a commit byte-identical and retires the predecessor with a confirmed Source End, and an abort frees the successor's Source slot and refuses a late commit) requires a disposable pinned TLS CGNAT namespace."
+requires = "Linux disposable CGNAT namespace; PLURX_SHARING_FIXTURE_IP"
+command = "PLURX_SHARING_FIXTURE_IP=100.127.89.2 cargo test --locked -p plurxd --bin plurxd http::shared_receiver_fixture::sharing_receiver_real_pinned_prepared_handoff_commit_and_abort -- --ignored --exact --nocapture"
+
+[[fixtures]]
 test = "crates/plurxd/src/http/mod.rs::http::tests::sharing_pinned_transport_recovers_committed_claim_and_rotation_after_restart"
 owner = "sharing"
 reason = "Pinned transport response-loss recovery requires an isolated numeric CGNAT fixture, not the host network."

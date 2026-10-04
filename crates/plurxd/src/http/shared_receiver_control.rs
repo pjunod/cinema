@@ -5,6 +5,11 @@
 //! the exchange onto the received Source tuple, owns the sent exchange
 //! independently of the HTTP waiter, and rebinds the accepted answer to B.
 //! No Source identity, URL or prose crosses back to the client.
+//!
+//! A directed change is prepared by B itself (`successor`): the Source is
+//! never offered `prepare_replacement`, and a `Prepare` action names only B's
+//! own successor session, playlist and control bootstrap.
+use super::successor::{AckPlan, AckReplay};
 use super::*;
 use crate::{
     http::{
@@ -224,8 +229,9 @@ impl ReceiverStartActor {
 
 /// B's request on B's tuple becomes the same request on the received Source
 /// tuple. Sequence, client identity, capabilities and the frozen desired
-/// selection are kept exactly; B never offers the Source a preparation it
-/// cannot carry back.
+/// selection are kept exactly. B never offers the Source a preparation: the
+/// successor is B's own, so an acknowledgement is B's to settle and never
+/// reaches the Source.
 fn translate_to_source(
     request: &ControlRequestV1,
     received: &ReceivedSource,
@@ -244,6 +250,7 @@ fn translate_to_source(
         // preparation transaction names a Source session and URL.
         actions.retain(|action| crate::playback_control::is_advisory_action_name(action));
     }
+    forwarded.acknowledgement = None;
     Ok(forwarded)
 }
 
@@ -258,10 +265,11 @@ fn rebind_to_receiver(
     response.control_epoch = tuple.owner_epoch;
     response.delivery.owner_node_hash = crate::playback_control::node_hash(&tuple.owner_node_id);
     response.delivery.owner_epoch = tuple.owner_epoch;
-    // B offers the Source no preparation and cannot carry a Source successor
-    // to this client, so any evaluated answer is a decline here: a client
-    // waiting on a directed change reopens with a fresh Start. Absence (an
-    // older Source that did not evaluate the field) stays absence.
+    // B offers the Source no preparation, so a Source answer is never about a
+    // successor this client could use: any evaluated answer is a decline
+    // here. For a client that accepts `prepare_replacement` B then answers
+    // for its own successor (`compose_preparation`). Absence (an older
+    // Source that did not evaluate the field) stays absence.
     if response.delivery.preparation.is_some() {
         response.delivery.preparation = Some("none".to_owned());
     }
@@ -272,15 +280,135 @@ fn rebind_to_receiver(
         ControlAction::Prepare { .. } => return None,
         ControlAction::None | ControlAction::Hold { .. } | ControlAction::RetryResource { .. } => {}
     }
-    let relay = ControlRelayRequest {
+    valid_for_receiver(&response, tuple, original).then_some(response)
+}
+
+/// The relay contract against B's own tuple and the client's own request.
+fn valid_for_receiver(
+    response: &ControlResponseV1,
+    tuple: &ReceiverTuple,
+    original: &ControlRequestV1,
+) -> bool {
+    let Ok(expected_owner_epoch) = i64::try_from(tuple.owner_epoch) else {
+        return false;
+    };
+    response.is_valid_for(&ControlRelayRequest {
         session_id: tuple.session.to_string(),
         generation: tuple.incarnation.to_string(),
         expected_owner_node_id: tuple.owner_node_id.clone(),
-        expected_owner_epoch: i64::try_from(tuple.owner_epoch).ok()?,
+        expected_owner_epoch,
         deadline_unix_ms: 0,
         control: original.clone(),
-    };
-    response.is_valid_for(&relay).then_some(response)
+    })
+}
+
+/// Settle B's side of one Source-accepted exchange: an acknowledgement's
+/// commit or abort, or the ask that may stage a successor; then B's own
+/// preparation answer, re-validated against the relay contract.
+async fn finish_accepted(
+    actor: &ReceiverStartActor,
+    state: &Arc<AppState>,
+    tuple: &ReceiverTuple,
+    request: &ControlRequestV1,
+    plan: Option<AckPlan>,
+    response: &mut ControlResponseV1,
+) -> Result<(), ReceiverStartError> {
+    match plan {
+        Some(AckPlan::Commit(action_id)) => {
+            actor.commit_successor(state, &state.sharing.receiver_starts, &action_id)?;
+        }
+        Some(AckPlan::Abort(action_id)) => {
+            actor.abort_successor(state, &action_id);
+        }
+        Some(AckPlan::Report) => {}
+        None => {
+            let enabled = match state
+                .store
+                .get_setting(plurx_core::store::keys::PREPARED_QUALITY_HANDOFF)
+                .await
+            {
+                Ok(value) => plurx_core::store::stored_switch(value.as_deref(), true),
+                Err(_) => false,
+            };
+            if let Some(digest) = actor.observe_ask(state, request, enabled) {
+                actor.stage_successor(state, request, tuple.duration_ms, digest);
+            }
+        }
+    }
+    actor.compose_preparation(response, request, clock_ms());
+    if valid_for_receiver(response, tuple, request) {
+        Ok(())
+    } else {
+        Err(ReceiverStartError::Unresolved)
+    }
+}
+
+fn json_body(body: Vec<u8>) -> Response {
+    (
+        StatusCode::OK,
+        [
+            (axum::http::header::CACHE_CONTROL, "no-store"),
+            (axum::http::header::CONTENT_TYPE, "application/json"),
+        ],
+        body,
+    )
+        .into_response()
+}
+
+/// The exact earlier answer to an acknowledgement exchange. Served before any
+/// authority read, because a commit retires the session it was sent to; it
+/// writes nothing and sends nothing to the Source. A changed body under an
+/// answered sequence is a stale exchange.
+pub(super) fn acknowledgement_replay(actor: &ReceiverStartActor, bytes: &[u8]) -> Option<Response> {
+    if !actor.has_acknowledgement_replies() {
+        return None;
+    }
+    let request = serde_json::from_slice::<ControlRequestV1>(bytes).ok()?;
+    Some(replay_response(
+        actor.acknowledgement_replay(&request)?,
+        &request,
+    ))
+}
+
+/// The same replay after the retired session left the registry: answered
+/// from its tombstone, or `None` and the request takes its ordinary path.
+pub(super) fn settled_acknowledgement_replay(
+    registry: &ReceiverStartRegistry,
+    session: Uuid,
+    bytes: &[u8],
+) -> Option<Response> {
+    let request = serde_json::from_slice::<ControlRequestV1>(bytes).ok()?;
+    Some(replay_response(
+        registry.settled_acknowledgement_replay(session, &request)?,
+        &request,
+    ))
+}
+
+fn replay_response(replay: AckReplay, request: &ControlRequestV1) -> Response {
+    match replay {
+        AckReplay::Exact(body) => json_body(body),
+        AckReplay::Changed => control_error(
+            StatusCode::CONFLICT,
+            "stale_control",
+            "the generation, client instance, or sequence fence is stale",
+            Some(request.generation.clone()),
+            Some(request.control_epoch),
+            None,
+            None,
+        ),
+    }
+}
+
+pub(super) fn invalid_control_body() -> Response {
+    control_error(
+        StatusCode::BAD_REQUEST,
+        "invalid_control",
+        "the control body is not a bounded v1 request",
+        None,
+        None,
+        None,
+        None,
+    )
 }
 
 fn refusal_response(refusal: &SharedControlRefusal, tuple: &ReceiverTuple) -> Response {
@@ -414,29 +542,10 @@ pub(super) async fn receiver_control(
     actor: ReceiverStartActor,
     state: Arc<AppState>,
     connection: &crate::SharingConnectionCancellation,
-    body: axum::body::Body,
+    bytes: axum::body::Bytes,
 ) -> Response {
-    let Ok(bytes) = axum::body::to_bytes(body, 64 * 1024).await else {
-        return control_error(
-            StatusCode::BAD_REQUEST,
-            "invalid_control",
-            "the control body is not a bounded v1 request",
-            None,
-            None,
-            None,
-            None,
-        );
-    };
     let Ok(request) = serde_json::from_slice::<ControlRequestV1>(&bytes) else {
-        return control_error(
-            StatusCode::BAD_REQUEST,
-            "invalid_control",
-            "the control body is not a bounded v1 request",
-            None,
-            None,
-            None,
-            None,
-        );
+        return invalid_control_body();
     };
     let Ok(tuple) = actor.receiver_tuple() else {
         return unavailable_without_tuple();
@@ -478,20 +587,27 @@ pub(super) async fn receiver_control(
             None,
         );
     }
-    if request.acknowledgement.is_some() {
-        // B never offers `prepare_replacement` (see `translate_to_source`), so
-        // an acknowledgement names a successor that does not exist. Refused
-        // before any Source exchange is owned or sent.
-        return control_error(
-            StatusCode::UNPROCESSABLE_ENTITY,
-            "shared_control_unsupported",
-            "this shared session has no prepared successor to acknowledge",
-            generation,
-            epoch,
-            None,
-            Some("acknowledgement"),
-        );
-    }
+    // An acknowledgement settles B's own successor slot. One naming an action
+    // this slot never offered, or arriving past its deadline, is refused
+    // before any Source exchange is owned or sent.
+    let plan = if request.acknowledgement.is_some() {
+        match actor.plan_acknowledgement(&state, &request, clock_ms()) {
+            Ok(plan) => Some(plan),
+            Err(()) => {
+                return control_error(
+                    StatusCode::CONFLICT,
+                    "stale_control",
+                    "the acknowledgement names no current prepared successor",
+                    generation,
+                    epoch,
+                    None,
+                    None,
+                )
+            }
+        }
+    } else {
+        None
+    };
     if request.demand == crate::playback_control::PlaybackDemand::End {
         // A terminal exchange ends B's own session through the one retirement
         // owner: it answers only after the actual confirmed Source End.
@@ -544,12 +660,41 @@ pub(super) async fn receiver_control(
         }),
     };
     let response = match answer {
-        SharedControlAnswer::Accepted(response) => (
-            StatusCode::OK,
-            [(axum::http::header::CACHE_CONTROL, "no-store")],
-            axum::Json(*response),
-        )
-            .into_response(),
+        SharedControlAnswer::Accepted(mut response) => {
+            if finish_accepted(&actor, &state, &tuple, &request, plan, &mut response)
+                .await
+                .is_err()
+            {
+                return with_writer(
+                    control_error(
+                        StatusCode::CONFLICT,
+                        "stale_control",
+                        "the acknowledgement lost its prepared successor",
+                        generation,
+                        epoch,
+                        None,
+                        None,
+                    ),
+                    guard,
+                );
+            }
+            let Ok(body) = serde_json::to_vec(&*response) else {
+                return with_writer(
+                    refusal_response(
+                        &SharedControlRefusal {
+                            code: SharedControlRefusalCode::Unavailable,
+                            retry_after_ms: Some(500),
+                        },
+                        &tuple,
+                    ),
+                    guard,
+                );
+            };
+            if request.acknowledgement.is_some() {
+                actor.retain_acknowledgement_reply(&request, &body);
+            }
+            json_body(body)
+        }
         SharedControlAnswer::Refused(refusal) => {
             if matches!(
                 refusal.code,
@@ -693,6 +838,27 @@ mod tests {
         restored.control_epoch = original.control_epoch;
         restored.supported_actions = original.supported_actions.clone();
         assert_eq!(restored, original, "only the tuple and offer may change");
+    }
+
+    #[test]
+    fn sharing_receiver_control_never_forwards_an_acknowledgement() {
+        use crate::playback_control as pc;
+        let tuple = tuple();
+        let mut original = request(&tuple);
+        original.acknowledgement = Some(pc::ActionAcknowledgement {
+            action_id: Uuid::new_v4().to_string(),
+            state: pc::AcknowledgementState::Committed,
+            buffered_through_ms: None,
+            committed_media_origin_ms: Some(0),
+            first_frame_unix_ms: Some(1_800_000_000_000),
+        });
+        let (received, _, _) = received(11);
+        let forwarded = translate_to_source(&original, &received).expect("translated");
+        // The successor is B's own: its commit or abort is settled at B, and
+        // the Source sees the same sequence as an ordinary exchange.
+        assert_eq!(forwarded.acknowledgement, None);
+        assert_eq!(forwarded.sequence, original.sequence);
+        assert_eq!(forwarded.selection, original.selection);
     }
 
     fn accepted(source: &ControlRequestV1, source_epoch: u64) -> ControlResponseV1 {

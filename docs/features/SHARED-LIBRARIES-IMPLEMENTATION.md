@@ -5648,3 +5648,177 @@ Evidence on nuc3 (pinned `plurx-android-build` image, JDK 25):
 Not qualified here: a physical Android device against a real pinned
 Source/B pair, the native subtitle rendition on reopen, rate limiting under a
 real seek storm, and the Apple half of these slices.
+
+### Shared prepared successor — P1/P2 (2026-10-04)
+
+A directed change on a shared HLS session can now be a prepared handoff: B
+builds the successor beside the session the viewer is watching, offers a
+`prepare` naming only its own URLs once that successor is published, and
+settles the client's commit or abort exactly. A client that does not ask for
+it keeps the P0 reopen.
+
+**Deviation: B owns the successor; the Source is unchanged.** The design
+staged the successor on the Source (a `media_session_preparations` row for the
+Source session, a new `…/sessions/{pred}/successor` route, a B↔Source mapping
+row). The code says otherwise. Since P0 every B session is its own Store and
+Source playback (`shared-<source_request_id>`), and every Source guard (claim,
+worker authorization, owned routes, settlement and retirement in
+`store/sharing_source_sessions.rs`) refuses any preparation row naming the
+incarnation and requires the session's own playback pointer. A Source-staged
+successor would have meant reopening every one of those guards on both Store
+backends. Instead the successor is what the P0 reopen already is, an ordinary
+second B session of the same viewer, file and player playback id, started by
+B through the same owner, claim, Source Start, attachment, publication and
+delivery grant as any shared Start. That one path already counts the Source
+slot, the grant slot and the B slot, replays a lost Start by request id,
+renews the Source lease every period, and retires through the single
+retirement owner with a confirmed Source End. No Store schema, Source route or
+Source code changed. "P1" (Source staging) therefore has no code of its own;
+both halves land as one B change.
+
+**Negotiation.** A client asks for a Shared successor by declaring
+`shared_prepare_replacement` beside `prepare_replacement`, plus
+`dual_player_preparation`. The Local promise alone is not enough. Today's web
+client declares `prepare_replacement` everywhere, but it would keep beating
+Shared progress on the bound context of the session it left (and Apple and
+Android Shared channels declare no actions). Without the new name those
+clients get `preparation: "none"` and reopen exactly as in P0. The name
+follows the precedent of `prepare_replacement`: the server half ships first,
+and an older server ignores an unknown action name. B never forwards either
+name, or any acknowledgement, to the Source. The `PREPARED_QUALITY_HANDOFF`
+switch is read exactly as Local reads it (default on); off means `none`. There
+is no new gate.
+
+**Staging (`shared_receiver_successor.rs`).** For each Source-accepted
+exchange B applies Local's dispatch rule (`take_preparation_dispatch`). The
+first exchange records the ask the session was created for. A different ask
+dispatches once. An ask that arrives while the slot is busy waits for the
+first exchange after the slot frees. A staged successor for an ask the client
+has since left is withdrawn (reason `Replaced`), and the new ask is dispatched
+only once that successor has fully retired and freed its slots, so one player
+never holds three Source sessions. The successor request is the predecessor's
+retained request with the new selection, a fresh request id, the sampled
+film position (clamped to the film) and no lineage fields. A selection a
+shared Start cannot carry (a burn, an explicit codec or grade, a negotiated
+candidate, direct play) is a typed decline. So is a full B registry, or a
+Source that refuses the Start (cap full): no slot, `none`, and the client
+reopens. Nothing answers 5xx for it. An uncommitted successor stages nothing
+of its own.
+
+**Offer.** While the successor is unpublished the answer is `staging`. Once it
+is published, and no outranking action is on the exchange, it is `offered`
+with `Prepare { action_id, session_id, playlist_url, control, media_origin_ms,
+effective_selection }`, taken only from the successor's own projected B Start.
+The B session, `/api/v1/hls/{B}/index.m3u8` and B's control bootstrap
+(generation = the successor's B incarnation) are the only identities named.
+One action id is minted per staging and reused by every later offer. The
+response is re-validated against the relay contract before it leaves. The
+successor's playlist, segments, status and control dispatch through
+`by_session` like any published B session, so its media is served before
+commit.
+
+**Settlement.** An acknowledgement is decided against the slot before
+anything is sent to the Source. These are refused `409 stale_control`, with
+no Source exchange:
+
+- an action id the slot never offered;
+- an acknowledgement past the deadline (VOD lease + 30 s; this also withdraws
+  the successor);
+- a commit whose `committed_media_origin_ms` or current ask no longer matches
+  the offer;
+- a second commit.
+
+The exchange then goes to the Source as an ordinary one: same sequence, no
+acknowledgement. Only after the Source accepts it does B settle. A commit
+marks the successor committed and supersedes the predecessor, plus any older
+attempt of the same player, through the make-before-break path. The
+predecessor's retirement owner sends the Source its End. An abort or failure
+withdraws the successor, and its owner frees both slots. A deadline is
+enforced on the successor owner's existing renewal tick (no new timer).
+Retiring the predecessor for any reason withdraws an uncommitted successor.
+Progress beats on an uncommitted successor are refused; after commit the
+predecessor is retiring and refuses them.
+
+**Exact replay.** The exact answer bytes of each acknowledgement exchange are
+kept per session (bounded to eight). They are served before any authority
+read, because a commit retires the session it was sent to. The same request
+replays byte-identical; a changed body under an answered sequence is
+`stale_control`; neither writes or sends anything. When the retired
+predecessor is pruned from the registry, its answers move to its bounded
+tombstone, so a lost commit answer still replays. A waiter cancelled between
+the Source's acceptance and B's settlement leaves nothing half done. The
+client's retry is a same-sequence Source replay, and B settles then.
+
+**Proof boundaries.** The successor relation is process-local, like every
+other piece of B playback state. B playback does not survive a B restart:
+orphan recovery retires both routes with their owed Source Ends and never
+adopts. That is why no durable mapping row is written, and why "restart
+between commits recovers the same incarnation" does not apply. Supersession
+and withdrawal are decided from B's registry, never from row absence or lease
+expiry. Retirement still needs the confirmed Source End.
+
+Evidence on nuc4 (rustc 1.97.1):
+
+- New B tests, all passing: fourteen in `shared_receiver_successor_tests.rs`
+  and `sharing_receiver_control_never_forwards_an_acknowledgement`.
+  - Request building:
+    `sharing_receiver_successor_request_carries_the_ask_at_the_sampled_position`.
+  - Publication and commit: `…_prepared_publication_never_supersedes_its_predecessor`,
+    `…_commit_supersedes_exact_predecessor_and_settles_the_slot`.
+  - Withdrawal: `…_abort_withdraws_successor_and_keeps_predecessor`,
+    `…_predecessor_retirement_withdraws_uncommitted_successor`.
+  - Offer: `sharing_receiver_prepare_names_only_b_urls_and_bootstrap`, including
+    the Local-only client that keeps `none`;
+    `…_prepare_offered_only_after_successor_publication`.
+  - Replay: `…_ack_replays_exactly_and_refuses_a_changed_replay`,
+    `…_lost_commit_reconciles_after_predecessor_retired`.
+  - Stale and dispatch: `…_stale_acknowledgements_are_refused_before_the_source`,
+    `…_observe_ask_dispatches_once_and_withdraws_a_left_ask`.
+  - Deadline and media: `…_successor_deadline_and_progress_follow_the_commit`,
+    `…_successor_media_relays_before_commit`.
+  - Capacity: `sharing_receiver_viewer_cap_declines_typed`.
+- Affected daemon filters (`sharing`, `source_`, `direct_range`, `receiver_`):
+  333 passed, 10 ignored (the opt-in CGNAT fixtures), 4 failed. None of the
+  four is in code this change touches. Three were load or host-port flakes
+  that passed on an exact rerun: a Source voter's API port in use, a Source
+  actor Deadline, and an fd-close race. The fourth,
+  `sharing_artwork_blocked_http1_http2_bytes_own_their_lease_without_a_monitor`,
+  answered 503 for 429 under load, as in P0, and passed alone.
+- Clippy with denied warnings on plurxd and plurx-core, all targets.
+- `tests/validation` (253, including the ownership inventory: +1 test-only
+  spawn, +3 test-only fixture waits), `make validation-lint`,
+  `tests.operations.test_docs_index` and `tests.operations.test_known_red`
+  pass. `make history-check` cannot read history in this partial clone (a
+  promisor blob of an earlier commit); these commits are not corrective.
+
+Not qualified here:
+`sharing_receiver_real_pinned_prepared_handoff_commit_and_abort` is
+registered as an opt-in fixture and has not run, because it needs the
+disposable CGNAT namespace. Over H1 and H2 it covers:
+
+- staging, then an offer naming only B URLs;
+- two Source sessions;
+- the successor playlist served before commit;
+- a byte-identical commit replay, before and after the predecessor retired;
+- the predecessor's confirmed End;
+- an abort freeing the successor's Source slot;
+- a late commit refused.
+
+It shares its pair setup with the P0 reopen fixture, which now declares only
+`prepare_replacement` and so still exercises the reopen.
+
+Client work still owed before a client may declare
+`shared_prepare_replacement`:
+
+- **Web.** On commit, rebind `t.fileContext` to a bound context for the
+  successor B session (`SHARED_DECISION` `bases`/`accepted` keyed by it), so
+  progress beats and any later reopen name the successor. Then send the next
+  beat with the next sequence, and drop the P0 predecessor DELETE for a
+  committed handoff, since B supersedes it. Then add
+  `shared_prepare_replacement` to `SUPPORTED_ACTIONS` for Shared sessions
+  only.
+- **Apple/Android.** Shared channels declare no actions and no dual-player
+  preparation today. They need a second player on the offered B playlist, the
+  acknowledgement sequence on the predecessor channel, a switch of the Shared
+  control channel and progress pool to the successor's tuple after commit,
+  and then the two action names.
