@@ -18,6 +18,28 @@ import androidx.media3.exoplayer.trackselection.DefaultTrackSelector
 /** The caller supplies the transport; the role selects only player behavior. */
 internal enum class PlayerRole { Finite, Successor, LiveTv, LibraryChannel, Offline, Audio }
 
+/** One audible owner holds audio focus. A staged successor plays muted and
+ * must not request focus: the incumbent would receive a focus loss and pause
+ * while it is still the picture the viewer sees. Focus moves at the commit. */
+internal val PLAYBACK_AUDIO_ATTRIBUTES: AudioAttributes = AudioAttributes.Builder()
+    .setUsage(C.USAGE_MEDIA)
+    .setContentType(C.AUDIO_CONTENT_TYPE_MOVIE)
+    .build()
+
+internal fun interface AudioFocusHandling { fun handle(owned: Boolean) }
+
+/** Audio focus ownership across a prepared handoff. Release precedes the
+ * request, so neither player is ever delivered a focus loss by its partner. */
+internal object PreparedAudioFocus {
+    fun stage(successor: AudioFocusHandling) = successor.handle(false)
+    fun move(from: AudioFocusHandling, to: AudioFocusHandling) {
+        from.handle(false)
+        to.handle(true)
+    }
+}
+
+internal fun ExoPlayer.audioFocusHandling() = AudioFocusHandling { setAudioAttributes(PLAYBACK_AUDIO_ATTRIBUTES, it) }
+
 /**
  * One construction path for every player. In particular, Offline still has a
  * cache-only source with no account-bearing upstream, and only finite players
@@ -75,13 +97,7 @@ internal class PlurxPlayerBuilder(private val context: Context, private val role
             .setTrackSelector(selector)
             .setRenderersFactory(renderers)
             .setMediaSourceFactory(DefaultMediaSourceFactory(source))
-            .setAudioAttributes(
-                AudioAttributes.Builder()
-                    .setUsage(C.USAGE_MEDIA)
-                    .setContentType(C.AUDIO_CONTENT_TYPE_MOVIE)
-                    .build(),
-                /* handleAudioFocus = */ true,
-            )
+            .setAudioAttributes(PLAYBACK_AUDIO_ATTRIBUTES, /* handleAudioFocus = */ true)
             .setHandleAudioBecomingNoisy(true)
             .build()
         if (role == PlayerRole.Audio) player.setWakeMode(C.WAKE_MODE_NETWORK)

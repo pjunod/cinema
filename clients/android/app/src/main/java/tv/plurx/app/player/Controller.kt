@@ -4525,6 +4525,9 @@ class Controller internal constructor(
 
         successor.volume = previousVolume
         successor.playbackParameters = previousPlaybackParameters
+        // Audio focus follows the audible owner: release it from the retiring
+        // player before the successor requests it, so neither receives a loss.
+        PreparedAudioFocus.move(previous.audioFocusHandling(), successor.audioFocusHandling())
         successor.playWhenReady = previousPlayWhenReady
         preparedOrigin?.let { progressiveMediaOrigin = it }
 
@@ -4689,6 +4692,7 @@ class Controller internal constructor(
         // ON_STOP still suppresses output without replacing standing Play intent.
         predecessor.player.volume = failedSuccessor.volume
         predecessor.player.playbackParameters = failedSuccessor.playbackParameters
+        PreparedAudioFocus.move(failedSuccessor.audioFocusHandling(), predecessor.player.audioFocusHandling())
         predecessor.player.playWhenReady = effectivePlayWhenReady()
 
         preparedPredecessor = null
@@ -5164,6 +5168,7 @@ fun buildSuccessorPlayer(context: Context, vm: AppViewModel, audioOnly: Boolean 
     // rather than relied on from the composition not rendering it: a prepared
     // successor that is merely off-screen is still an audio stream.
     built.player.volume = 0f
+    PreparedAudioFocus.stage(built.player.audioFocusHandling())
     built.player.setVideoSurface(null)
     built.player.playWhenReady = true
     return built
