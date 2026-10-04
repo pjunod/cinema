@@ -354,8 +354,9 @@ the operator on 2026-10-03 and both off whenever the Developer switch is off:
   enumeration but is not access control. There is no listing route, no user
   avatar, no arbitrary path or size: widths quantize to the existing
   derivative set, a miss enqueues bounded deduplicated work for the existing
-  artwork owner, and each client address admits at most 20 misses a minute
-  from a fixed 4,096-entry table that refuses rather than evicts.
+  artwork owner, and each client (an IPv4 address or an IPv6 /64) admits at
+  most 20 misses a minute from a fixed 4,096-entry table that refuses rather
+  than evicts. Warm images do no work and are not counted.
 - **One-title media links.** A direct-play negotiation, made with a login,
   returns one 256-bit secret as the source `ETag`. It is the token of a native
   one-file grant (only its SHA-256 is stored) for that title and that play.
@@ -367,6 +368,13 @@ the operator on 2026-10-03 and both off whenever the Developer switch is off:
 
 Streams for HLS and every subtitle still require the compatibility login on
 each request; account tokens are never echoed into generated URLs.
+
+A compatibility login is not a native bearer. The token Infuse or Jellyfin
+Android TV receives authenticates only `/jellyfin`; the native API, the Plex
+facade and the cached admin proof all refuse it, so a token copied off a shared
+TV cannot reach settings or mint keys. It still appears in the account's device
+list, where it can be revoked. Signing out of the facade revokes the token
+before any media cleanup, so a busy release cannot leave it valid.
 
 ## Live TV capabilities — one tuner, one URL, no account bearer
 

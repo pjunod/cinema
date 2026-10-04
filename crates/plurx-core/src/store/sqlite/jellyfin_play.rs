@@ -53,6 +53,15 @@ impl JellyfinPlayStore for SqliteStore {
             let tx = conn.unchecked_transaction()?;
             tx.execute(jp::CLEANUP, params![play.created_at_ms])?;
             tx.execute(jp::RETIRE_ORPHANED_ACTIVE, params![play.created_at_ms])?;
+            tx.execute(
+                jp::TRIM_LOGIN_TOMBSTONES,
+                params![
+                    play.scope.user_id,
+                    play.scope.token_digest,
+                    play.scope.device_digest,
+                    play.scope.client_family.as_str()
+                ],
+            )?;
             let created = tx.execute(
                 jp::CREATE,
                 params![

@@ -9,6 +9,10 @@ pub const JELLYFIN_PENDING_PLAY_TTL_MS: i64 = 600_000;
 pub const JELLYFIN_TERMINAL_PLAY_TTL_MS: i64 = 86_400_000;
 pub const JELLYFIN_PENDING_PLAYS_PER_LOGIN: usize = 64;
 pub const JELLYFIN_PENDING_PLAYS_SERVER: usize = 4096;
+/// Terminal tombstones retained per login beyond the newest ones are
+/// trimmed at admission, so a login that negotiates and stops in a loop
+/// cannot grow the table at its request rate for a whole day.
+pub const JELLYFIN_TOMBSTONES_PER_LOGIN: usize = 256;
 
 #[derive(Clone, Serialize, Deserialize)]
 pub struct JellyfinPlayScope {
@@ -231,13 +235,16 @@ pub(crate) const CLEANUP: &str =
 /// so terminal retention can delete it; within the window a failed final Stop
 /// can still retry through the binding. Runs in the admission transaction, so
 /// active metadata is bounded by negotiation rather than by a timer.
+/// Keep only this login's newest tombstones; parameters are the scope.
+pub(crate) const TRIM_LOGIN_TOMBSTONES: &str = "DELETE FROM jellyfin_plays WHERE state='ended' AND user_id=$1 AND token_digest=$2 AND device_digest=$3 AND client_family=$4
+AND play_id NOT IN (SELECT play_id FROM jellyfin_plays WHERE state='ended' AND user_id=$1 AND token_digest=$2 AND device_digest=$3 AND client_family=$4 ORDER BY expires_at_ms DESC, play_id LIMIT 256)";
 pub(crate) const RETIRE_ORPHANED_ACTIVE: &str = r#"
 UPDATE jellyfin_plays SET state='ended',expires_at_ms=$1+86400000
 WHERE state='active' AND (
  (native_incarnation_id IS NOT NULL AND NOT EXISTS(SELECT 1 FROM media_sessions m WHERE m.incarnation_id=jellyfin_plays.native_incarnation_id
    AND (m.state IN ('starting','active') OR m.updated_at_ms>$1-86400000)))
  OR (direct_grant_id IS NOT NULL AND NOT EXISTS(SELECT 1 FROM file_grants g WHERE g.id=jellyfin_plays.direct_grant_id
-   AND ((g.revoked_at IS NULL AND g.expires_at>$1/1000) OR g.revoked_at>$1/1000-86400))))
+   AND ((g.revoked_at IS NULL AND g.expires_at>$1/1000-86400) OR g.revoked_at>$1/1000-86400))))
 "#;
 // The transaction assigns private ordering metadata; equal wall-clock times
 // cannot make a later pending ask look older. Legacy rows precede new asks.

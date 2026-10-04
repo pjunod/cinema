@@ -792,5 +792,27 @@ a subtitle playlist naming another track's cue. A direct representation test
 pins native truth through the facade: 416 with `bytes */len`, suffix ranges,
 no invented validator, `If-Range` serving the whole file, and HEAD.
 
+**Pre-promotion review fixes.** Three scoped reviewers read the trial merge
+of current `main` into the effort (shared native seams, facade security, play
+lifecycle). What they found and what changed:
+
+| Finding | Root cause | Fix |
+|---|---|---|
+| A compatibility login was a full native bearer, including admin | The login row is an ordinary `tokens` row and native authentication never asked which surface it was issued for | Token audience: native, Plex and cached admin proofs refuse compatibility logins in the same authentication statement; the facade accepts only them |
+| Sign-out could leave the token valid | Logout released media before revoking, and a busy release returned 503 first | Revoke first; release best-effort afterwards |
+| Old-generation HLS kept serving after off/on, and its Stop was refused | HLS resources skipped the generation check that Stop enforced | Resources check the generation; Stop ends and releases a play from any generation without writing progress |
+| Stop could leave a just-published native session | Release used the pre-END snapshot | Release re-reads the row END produced |
+| A renegotiation left the abandoned direct grant live until expiry | The pending play was ended but not released | Released with it |
+| Real clients would hit 429 on poster grids, and one IPv6 host could fill the table | The per-address budget counted warm hits and keyed full IPv6 addresses | Only misses spend budget; IPv6 counts per /64 |
+| A direct play whose grant expired overnight lost its final Stop | The retirement window applied to revoked grants only | Expired grants keep the same 24 h window |
+| Tombstones grew at a login's request rate | Only the 24 h TTL bounded ended rows | Admission keeps a login's newest 256 tombstones |
+
+Recorded as design choices rather than defects: a manual mark now bumps every
+row's manual revision even when unchanged (the compatibility fence relies on
+an external no-op mark); a native beat labelled `transcode` no longer touches
+direct-play presence; a failed immediate progress write keeps the older queued
+beat. A same-login manual edit made between `PlaybackInfo` and the first media
+request still fences that one play's progress; the window is seconds long.
+
 Still open: the physical Infuse and Android matrix on the frozen candidate,
 HDR/Dolby Vision, the multipage corpus, and the effort's promotion.

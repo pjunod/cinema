@@ -401,6 +401,86 @@ async fn fixture_reuse(store: &Arc<dyn Store>, base: &NewJellyfinPlay) -> NewJel
     play
 }
 #[tokio::test]
+async fn jellyfin_tombstones_are_bounded_per_login_and_expired_grants_keep_the_retry_window() {
+    for_each_backend(|store, backend| async move {
+        let base = fixture(&store).await;
+        // An active direct play whose grant expired (never revoked) keeps its
+        // binding for the tombstone window, so a late final Stop still counts.
+        let mut expiring = base.clone();
+        expiring.play_id = uuid::Uuid::new_v4().simple().to_string();
+        let mut grant = link_grant(&expiring, "expiring-grant", expiring.file_id);
+        grant.expires_at = 100;
+        store.create_file_grant(grant).await.expect("grant");
+        expiring.media_grant_id = Some("expiring-grant".into());
+        assert!(store
+            .create_jellyfin_play(expiring.clone())
+            .await
+            .expect("create"));
+        assert!(store
+            .activate_jellyfin_play(
+                &expiring.play_id,
+                &expiring.scope,
+                Activation::DirectGrant("expiring-grant".into()),
+                5_000
+            )
+            .await
+            .expect("activate"));
+        let state_after = |created_at_ms: i64| {
+            let store = store.clone();
+            let mut probe = base.clone();
+            let expiring = expiring.clone();
+            async move {
+                probe.play_id = uuid::Uuid::new_v4().simple().to_string();
+                probe.created_at_ms = created_at_ms;
+                assert!(store.create_jellyfin_play(probe).await.expect("probe"));
+                store
+                    .jellyfin_play(&expiring.play_id, &expiring.scope)
+                    .await
+                    .expect("read")
+                    .expect("row")
+                    .state
+            }
+        };
+        assert_eq!(
+            state_after((100 + 86_000) * 1000).await,
+            "active",
+            "{backend}"
+        );
+        assert_eq!(
+            state_after((100 + 86_400) * 1000 + 1_000).await,
+            "ended",
+            "{backend}"
+        );
+
+        // Negotiate-and-stop in a loop: only the newest tombstones survive.
+        for n in 0..(plurx_core::store::JELLYFIN_TOMBSTONES_PER_LOGIN + 4) {
+            let mut play = base.clone();
+            play.play_id = uuid::Uuid::new_v4().simple().to_string();
+            play.created_at_ms = 200_000_000 + n as i64;
+            assert!(store
+                .create_jellyfin_play(play.clone())
+                .await
+                .expect("loop create"));
+            assert!(store
+                .end_jellyfin_play(&play.play_id, &play.scope, play.created_at_ms)
+                .await
+                .expect("loop stop"));
+        }
+        let ended = store
+            .end_jellyfin_login_plays(&base.scope, 300_000_000)
+            .await
+            .expect("login rows")
+            .into_iter()
+            .filter(|play| play.state == "ended")
+            .count();
+        assert!(
+            ended <= plurx_core::store::JELLYFIN_TOMBSTONES_PER_LOGIN + 2,
+            "{backend}: {ended} tombstones retained"
+        );
+    })
+    .await;
+}
+#[tokio::test]
 async fn jellyfin_pending_admission_expiry_and_terminal_fences_preserve_active_play() {
     for_each_backend(|store, backend| async move {
         let active = fixture(&store).await;

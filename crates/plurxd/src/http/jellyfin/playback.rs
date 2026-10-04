@@ -79,6 +79,19 @@ pub(super) async fn binding(
     item_id: &str,
     source_id: &str,
 ) -> Result<JellyfinPlay, ApiError> {
+    let play = own_binding(client, state, play_id, item_id, source_id).await?;
+    same_generation(&play, &client.generation)?;
+    Ok(play)
+}
+/// This login's exact play for the item/source, from any switch generation.
+/// Only cleanup (Stop) may act on a play from an earlier generation.
+async fn own_binding(
+    client: &ClientUser,
+    state: &AppState,
+    play_id: &str,
+    item_id: &str,
+    source_id: &str,
+) -> Result<JellyfinPlay, ApiError> {
     let scope = scope(client, state).await?;
     let play_id = wire_id(play_id)?.to_hex();
     let play = state
@@ -86,7 +99,6 @@ pub(super) async fn binding(
         .jellyfin_play(&play_id, &scope)
         .await?
         .ok_or(ApiError::NotFound("play binding"))?;
-    same_generation(&play, &client.generation)?;
     if wire_id(item_id)?.to_hex() != play.negotiation.item_wire_id
         || wire_id(source_id)?.to_hex() != play.negotiation.file_wire_id
     {
@@ -99,7 +111,7 @@ pub(super) async fn binding(
 /// A play belongs to the switch generation it was negotiated under. Turning
 /// compatibility off ends it, even if compatibility is on again by the time
 /// the client comes back with it.
-fn same_generation(play: &JellyfinPlay, generation: &str) -> Result<(), ApiError> {
+pub(super) fn same_generation(play: &JellyfinPlay, generation: &str) -> Result<(), ApiError> {
     if play.negotiation.switch_generation != generation {
         return Err(ApiError::Conflict(
             "compatibility was turned off after this play was negotiated; renegotiate".into(),
@@ -973,6 +985,9 @@ async fn info(
                     .store
                     .end_jellyfin_play(&previous.negotiation.play_id, &scope, now_ms()?)
                     .await?;
+                if let Err(error) = release(state, &previous).await {
+                    tracing::warn!(target: "plurxd::jellyfin", ?error, "abandoned negotiation release failed");
+                }
             }
         }
     }
@@ -1029,10 +1044,19 @@ async fn resolve_event(
     state: &AppState,
     event: &PlayingEvent,
 ) -> Result<JellyfinPlay, ApiError> {
+    let play = resolve_any_generation(client, state, event).await?;
+    same_generation(&play, &client.generation)?;
+    Ok(play)
+}
+async fn resolve_any_generation(
+    client: &ClientUser,
+    state: &AppState,
+    event: &PlayingEvent,
+) -> Result<JellyfinPlay, ApiError> {
     if let Some(uid) = event.user_id.as_deref() {
         check_user(client, uid)?;
     }
-    let play = binding(
+    let play = own_binding(
         client,
         state,
         &event.play_session_id,
@@ -1135,15 +1159,18 @@ pub(super) async fn stopped(
     State(state): State<AppState>,
     Json(report): Json<PlayingEvent>,
 ) -> Result<StatusCode, ApiError> {
-    let play = resolve_event(&client, &state, &report).await?;
+    let play = resolve_any_generation(&client, &state, &report).await?;
     if play.state == "ended" {
         release(&state, &play).await?;
         return Ok(StatusCode::NO_CONTENT);
     }
+    // A play from before the switch was saved off is already over: Stop ends
+    // and releases it, but writes no progress through it.
+    let current = same_generation(&play, &client.generation).is_ok();
     // Cleanup follows every result, including durable failure. An active row is
     // retained on failure so a repeated stop can retry its terminal reconciliation.
     let result = async {
-        if play.state == "active" {
+        if current && play.state == "active" {
             if let Some(write) = progress_write(&play, &report, true) {
                 super::super::watch::apply_jellyfin_progress(
                     &state,
@@ -1169,7 +1196,16 @@ pub(super) async fn stopped(
         Ok::<(), ApiError>(())
     }
     .await;
-    let released = release(&state, &play).await;
+    // Release the row as END left it: a publication racing this Stop may have
+    // bound a native session after the read above.
+    let ended = state
+        .store
+        .jellyfin_play(&play.negotiation.play_id, &play.negotiation.scope)
+        .await
+        .ok()
+        .flatten()
+        .unwrap_or(play);
+    let released = release(&state, &ended).await;
     result?;
     released?;
     Ok(StatusCode::NO_CONTENT)
@@ -1264,7 +1300,12 @@ async fn media_link_play(
         ));
     }
     let digest = play.negotiation.scope.token_digest.clone();
-    let user = super::super::extract::authenticate_token_digest(state, digest.clone()).await?;
+    let user = super::super::extract::authenticate_token_digest(
+        state,
+        digest.clone(),
+        plurx_core::store::TokenAudience::JellyfinCompatibility,
+    )
+    .await?;
     if user.id != play.negotiation.scope.user_id {
         return Err(ApiError::Unauthorized);
     }
@@ -1463,10 +1504,14 @@ pub(super) async fn logout(
         .store
         .end_jellyfin_login_plays(&scope, now_ms()?)
         .await?;
-    for play in plays {
-        release(&state, &play).await?;
-    }
+    // Revocation never waits on media cleanup: a busy release slot or an
+    // unreachable owner must not leave a signed-out login valid.
     auth::revoke_token_under_exclusion(&state, &client.token_hash, exclusion).await?;
+    for play in plays {
+        if let Err(error) = release(&state, &play).await {
+            tracing::warn!(target: "plurxd::jellyfin", ?error, "logout release left to native expiry");
+        }
+    }
     Ok(StatusCode::NO_CONTENT)
 }
 

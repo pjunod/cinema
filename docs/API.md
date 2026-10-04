@@ -3297,8 +3297,8 @@ advertised by this profile slice.
 Mapped artwork needs no login while the switch is on (approved 2026-10-03):
 anyone who has a mapped artwork URL can read that poster or backdrop. Only
 mapped movie/TV items are served; there is no listing, avatar or path route.
-Target-client artwork parity is not yet qualified. Requests admit at most 20 per minute per resolved
-client address. The 4,096-address table refuses new addresses while full instead
+Target-client artwork parity is not yet qualified. Misses (requests that enqueue work) admit at most 20 per minute per resolved
+client address, an IPv6 client counting per /64; warm hits are not counted. The 4,096-address table refuses new addresses while full instead
 of evicting live budgets. Cold requests enqueue a bounded, deduplicated intent
 for the existing artwork owner and return an uncached JSON 404 with Retry-After.
 The request performs no original read, peer fetch or resize. The owner verifies

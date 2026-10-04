@@ -52,6 +52,15 @@ impl JellyfinPlayStore for HiqliteAuthStore {
                 (jp::CLEANUP, params!(play.created_at_ms)),
                 (jp::RETIRE_ORPHANED_ACTIVE, params!(play.created_at_ms)),
                 (
+                    jp::TRIM_LOGIN_TOMBSTONES,
+                    params!(
+                        play.scope.user_id,
+                        play.scope.token_digest.clone(),
+                        play.scope.device_digest.clone(),
+                        play.scope.client_family.as_str()
+                    ),
+                ),
+                (
                     jp::CREATE,
                     params!(
                         play.play_id,
@@ -74,7 +83,7 @@ impl JellyfinPlayStore for HiqliteAuthStore {
             .into_iter()
             .collect::<Result<Vec<_>, _>>()
             .map_err(database_error)?;
-        Ok(results[2] == 1)
+        Ok(results[3] == 1)
     }
     async fn jellyfin_play(
         &self,

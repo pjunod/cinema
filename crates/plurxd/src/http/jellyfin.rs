@@ -200,7 +200,7 @@ async fn presented_client(
     else {
         return Ok((generation, None));
     };
-    super::extract::authenticate_user_token(state, token.expose()).await?;
+    super::extract::authenticate_compatibility_token(state, token.expose()).await?;
     let client = ClientUser::for_login(
         state,
         plurx_core::auth::hash_token(token.expose()),
@@ -1071,14 +1071,20 @@ async fn mapped_image(
         }
     }
     let address = auth::client_ip(headers, peer, &state.trusted_proxies);
-    super::images::admit_jellyfin_artwork(state, address).await?;
     let mapped = state
         .store
         .jellyfin_catalog_artwork(id, backdrop)
         .await?
         .ok_or(ApiError::NotFound("image"))?;
-    super::images::serve_jellyfin_artwork(state, mapped, backdrop, width.unwrap_or(500), headers)
-        .await
+    super::images::serve_jellyfin_artwork(
+        state,
+        mapped,
+        backdrop,
+        width.unwrap_or(500),
+        headers,
+        address,
+    )
+    .await
 }
 
 pub(super) async fn cache_policy(
@@ -2289,6 +2295,50 @@ mod tests {
             play_event(&f, "/jellyfin/Sessions/Playing", play, Some(1000)).await,
             StatusCode::CONFLICT
         );
+        // Stop still cleans an old-generation play up: it ends and releases
+        // it, but writes no progress through it.
+        assert_eq!(
+            play_event(&f, "/jellyfin/Sessions/Playing/Stopped", play, Some(4000)).await,
+            StatusCode::NO_CONTENT
+        );
+        let scope = f
+            .state
+            .store
+            .jellyfin_login_scope(plurx_core::auth::hash_token(&f.token))
+            .await
+            .expect("scope")
+            .expect("login");
+        let stopped = f
+            .state
+            .store
+            .jellyfin_play(play, &scope)
+            .await
+            .expect("read")
+            .expect("tombstone");
+        assert_eq!(stopped.state, "ended");
+        let grant = f
+            .state
+            .store
+            .file_grant_by_id(stopped.direct_grant_id.as_deref().expect("grant"))
+            .await
+            .expect("grant")
+            .expect("grant");
+        assert!(grant.revoked_at.is_some());
+        assert!(f
+            .state
+            .store
+            .watch_state(scope.user_id, f.native_item)
+            .await
+            .expect("watch")
+            .is_none_or(|watch| watch.position_ms != 4000));
+        // A facade login is not a native bearer.
+        let native = f
+            .app
+            .clone()
+            .oneshot(request("GET", "/api/v1/me", Some(&f.token), Value::Null))
+            .await
+            .expect("native call");
+        assert_eq!(native.status(), StatusCode::UNAUTHORIZED);
         // A fresh negotiation under the current generation plays normally.
         let fresh = negotiate(&f).await;
         let fresh_url = fresh["MediaSources"][0]["DirectStreamUrl"]

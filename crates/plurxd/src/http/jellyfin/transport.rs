@@ -104,6 +104,7 @@ pub(super) async fn resource(
     {
         return Err(ApiError::NotFound("play binding"));
     }
+    playback::same_generation(&play, &client.generation)?;
     let selection: Value = serde_json::from_str(&play.negotiation.selection_json)?;
     let inline = selection["vod"]["inline_init"] == true;
     let native_path = if inline && path.ends_with(".ts") {

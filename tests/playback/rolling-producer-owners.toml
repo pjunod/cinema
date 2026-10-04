@@ -4381,7 +4381,9 @@ pattern = "\\.(?:spawn|output|status)\\s*\\("
 # `Response::status()` read of the owner's passive-presence relay answer, and
 # nine test `Response::status()` assertions (scoped link, paused presence,
 # PlayMethod labels, direct range matrix). None launches a process.
-expected_occurrences = 463
+# 463 -> 464 with the review fixes: one test `Response::status()` assertion
+# that a facade login is refused on the native API. No process.
+expected_occurrences = 464
 # +2 native-startup delayed-init fixture: Axum Response::status() reads
 # assert the master and legacy bridge responses. Neither launches a process.
 
