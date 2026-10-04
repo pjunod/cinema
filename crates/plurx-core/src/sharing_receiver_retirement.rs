@@ -34,3 +34,19 @@ pub enum ReceiverRetirementOutcome {
     Replay,
     Refused,
 }
+
+/// Captured claim ownership. Unassigned is a real retained NULL owner, not a
+/// wildcard; Assigned must come from the successful exact assignment result.
+pub enum ReceiverPendingOwner {
+    Unassigned,
+    Assigned(String),
+}
+/// Private daemon evidence requires the owned no-send CAS and joined Start,
+/// accepted bodies and independent jobs. No route or Source proof is fabricated.
+pub trait ReceiverPendingRetirementWitness: Send + Sync {
+    fn intent(&self) -> &ReceiverSessionIntent;
+    fn request_id(&self) -> &str;
+    fn playback_id(&self) -> &str;
+    fn owner(&self) -> &ReceiverPendingOwner;
+    fn confirmation_id(&self) -> &str;
+}

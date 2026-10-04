@@ -4340,3 +4340,56 @@ plurx-core/hiqlite-store,plurx-core/hiqlite-contract-tests --all-targets -- -D
 warnings` in 1 minute 35 seconds. The normal tracked hook also runs before the
 finite checkpoint. Moving the intended base requires the exact combined tree
 qualification again.
+
+### Exact pending request cleanup before B route creation
+
+`ReceiverPendingRetirementWitness` is an immutable interface implemented by the
+private daemon factory after the owned no-send CAS and actual Start/body/job
+joins. It exposes the retained full receiver intent, original request/playback
+IDs, exact captured request owner (`Unassigned` or `Assigned(node)`), and bounded
+canonical confirmation identity. There is no concrete production constructor,
+wire encoding, Debug output or boolean physical assertion in Core.
+
+`retire_pending_receiver_request` repeats the exact original positive B user,
+request fingerprint (including original login and whole recipe), private
+incarnation, playback ID, owner node and null reply in one transaction. NULL
+owner is exact, never a wildcard. Every route, current pointer, session job
+lease, upstream attachment, media pin, delivery grant and terminal acknowledgment
+for that incarnation must be absent. Even an expired lease refuses cleanup.
+The actual owned starting claim becomes failed with the trusted Store clock;
+postconditions verify both state and written deadlines/timestamp. An exact failed
+retry is assertion-only and cannot rewrite a reply or timestamp.
+
+This cleanup alone bypasses current-login enablement, so logout, import
+revocation and deletion of the original user do not strand a safely joined
+no-send owner. A foreign takeover, partial resource, resolved reply or missing
+claim refuses; no successor is deleted. Commit-unknown remains an error and the
+caller must retain its private witness. A failed row or empty route lookup never
+constructs the witness or proves Source termination. Generic Local failure APIs
+remain insufficient for this exact ownership settlement.
+
+Pinned Rust 1.97.1 focused qualification on the finite ingress ancestor:
+
+```sh
+cargo test -p plurx-core --features hiqlite-store,hiqlite-contract-tests --lib sharing_receiver_pending_retirement -- --nocapture
+cargo test -p plurx-core --features hiqlite-store,hiqlite-contract-tests --test store_contract sharing_receiver_pending_retirement_three_voters_refuses_takeover_and_ignored_writes -- --nocapture
+cargo clippy -p plurx-core -p plurxd --features plurx-core/hiqlite-store,plurx-core/hiqlite-contract-tests --all-targets -- -D warnings
+```
+
+The SQLite regression reports 1 passed, zero ignored in 3.29 seconds, exercising
+eight memory/pooled × legacy/rebuilt × unassigned/assigned combinations. It covers
+original-login/whole-recipe mismatch, actual claim/assignment, foreign takeover,
+ignored assertion and UPDATE rollback, expired resource refusal, real B
+import/assignment revocation, logout and original-user deletion, successful
+starting settlement and exact read-only failed retry. The layout-specific user
+deletion triggers may leave starting metadata or fail it already; the fixture
+also uses the actual generic failure writer to qualify the failed-state retry.
+That state never supplies physical evidence.
+
+The registered actual three-voter regression reports 1 passed, zero ignored in
+9.15 seconds, covering real retained NULL/assigned claims, foreign takeover,
+ignored assertion/UPDATE, expired-resource refusal, logout and exact read-only
+retry. Both tests explicitly use metadata-only witness implementations; they
+cannot qualify the daemon's owned no-send CAS or joined jobs. Feature Clippy
+passes in 1 minute 36 seconds. The normal tracked hook remains mandatory, and
+moving the intended base requires exact combined ingress/cleanup qualification.

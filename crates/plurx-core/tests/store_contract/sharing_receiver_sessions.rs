@@ -1122,3 +1122,225 @@ async fn sharing_receiver_three_voters_atomic_admission_replay_scope_and_unresol
         }
     }
 }
+
+/// This witness exercises metadata only; it never represents a Source producer
+/// or creates the private daemon's joined no-send evidence.
+struct PendingClaimMetadata {
+    intent: ReceiverSessionIntent,
+    owner: plurx_core::sharing_receiver_retirement::ReceiverPendingOwner,
+}
+impl plurx_core::sharing_receiver_retirement::ReceiverPendingRetirementWitness
+    for PendingClaimMetadata
+{
+    fn intent(&self) -> &ReceiverSessionIntent {
+        &self.intent
+    }
+    fn request_id(&self) -> &str {
+        "pending-retirement"
+    }
+    fn playback_id(&self) -> &str {
+        "pending-player"
+    }
+    fn owner(&self) -> &plurx_core::sharing_receiver_retirement::ReceiverPendingOwner {
+        &self.owner
+    }
+    fn confirmation_id(&self) -> &str {
+        "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    }
+}
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn sharing_receiver_pending_retirement_three_voters_refuses_takeover_and_ignored_writes() {
+    use plurx_core::{
+        domain::MediaSessionRequestClaim,
+        sharing_receiver_retirement::{ReceiverPendingOwner, ReceiverRetirementOutcome},
+        store::SharingReceiverRetirementStore,
+    };
+    let _case = HIQLITE_CASE.lock().await;
+    let cluster = ContractCluster::start().await;
+    let store = open_contract_hiqlite_store(&cluster).await;
+    let client = Client::remote(
+        cluster.addresses.clone(),
+        true,
+        true,
+        CONTRACT_API_SECRET.to_owned(),
+        false,
+        None,
+    )
+    .await
+    .expect("actual voter observer");
+    assert_eq!(
+        client
+            .metrics_db()
+            .await
+            .expect("real roster")
+            .membership_config
+            .voter_ids()
+            .count(),
+        3
+    );
+    for s in MEDIA_SESSION_PRINCIPAL_REBUILD_SCHEMA.split("-- next statement\n") {
+        client
+            .execute(s.trim().trim_end_matches(';'), hiqlite::params!())
+            .await
+            .expect("exact principal layout");
+    }
+    for assigned in [false, true] {
+        let user = store
+            .create_user(&format!("pending-{assigned}"), "hash", false)
+            .await
+            .expect("real B user");
+        let hash = if assigned { "b" } else { "c" }.repeat(64);
+        store
+            .create_token(&hash, user.id, None)
+            .await
+            .expect("actual login");
+        let scope = ReceiverCatalogueScope {
+            import_id: Uuid::new_v4(),
+            source_server_id: Uuid::new_v4(),
+            catalogue_epoch: Uuid::new_v4(),
+            lifecycle_generation: 1,
+            assignment_generation: 1,
+            endpoint_generation: 1,
+            claim_id: Uuid::new_v4(),
+            remote_grant_id: Uuid::new_v4(),
+            libraries: vec![SourceId::parse("0").expect("zero")],
+        };
+        let recipe = RemoteSourceRecipe {
+            kind: ReceiverProducerKind::RemoteSource,
+            version: 1,
+            reference: SharedReference {
+                import_id: scope.import_id,
+                server_id: scope.source_server_id,
+                catalogue_epoch: scope.catalogue_epoch,
+                library_id: scope.libraries[0].clone(),
+                item_id: SourceId::parse("9223372036854775807").expect("item"),
+            },
+            lifecycle_generation: 1,
+            file_id: SourceId::parse("0").expect("file"),
+            file_revision: FileRevision::parse(&"d".repeat(64)).expect("revision"),
+            source_request_id: Uuid::new_v4(),
+            parent_login_hash: hash.clone(),
+            request_json: "{\"start\":17}".into(),
+        };
+        let mut w = PendingClaimMetadata {
+            intent: ReceiverSessionIntent {
+                scope,
+                user_id: user.id,
+                login_hash: hash,
+                recipe,
+                source_position_ms: 0,
+            },
+            owner: ReceiverPendingOwner::Unassigned,
+        };
+        let principal = PlaybackPrincipal::LocalUser { user_id: user.id };
+        let inc = w.intent.recipe.source_request_id.to_string();
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("clock")
+            .as_millis() as i64;
+        assert!(matches!(
+            store
+                .claim_media_session_request(
+                    &principal,
+                    "pending-retirement",
+                    &w.intent.recipe.request_fingerprint().expect("fp"),
+                    "pending-player",
+                    &inc,
+                    now,
+                    now + 30000
+                )
+                .await
+                .expect("real claim"),
+            MediaSessionRequestClaim::Acquired { .. }
+        ));
+        if assigned {
+            assert!(store
+                .assign_media_session_request_owner(
+                    &principal,
+                    "pending-retirement",
+                    &inc,
+                    "owned-B",
+                    now
+                )
+                .await
+                .expect("real assignment"));
+            w.owner = ReceiverPendingOwner::Assigned("owned-B".into());
+        }
+        client.execute("CREATE TRIGGER pending_ignore_assertion BEFORE INSERT ON sharing_relay_upstream BEGIN SELECT RAISE(IGNORE); END",hiqlite::params!()).await.expect("ignored assertion cannot mask refusal");
+        client.execute("UPDATE media_session_requests SET owner_node_id='foreign-B' WHERE incarnation_id=$1",hiqlite::params!(inc.clone())).await.expect("foreign takeover");
+        assert_eq!(
+            store
+                .retire_pending_receiver_request(&w)
+                .await
+                .expect("foreign refuses"),
+            ReceiverRetirementOutcome::Refused
+        );
+        client.execute("UPDATE media_session_requests SET owner_node_id=json_extract($1,'$') WHERE incarnation_id=$2",hiqlite::params!(if assigned {"\"owned-B\""}else{"null"},inc.clone())).await.expect("restore captured owner");
+        client.execute("CREATE TRIGGER pending_ignore_update BEFORE UPDATE ON media_session_requests BEGIN SELECT RAISE(IGNORE); END",hiqlite::params!()).await.expect("ignored UPDATE");
+        assert_eq!(
+            store
+                .retire_pending_receiver_request(&w)
+                .await
+                .expect("suppressed update refuses"),
+            ReceiverRetirementOutcome::Refused
+        );
+        let row = client
+            .query_consistent_map::<SchemaText, _>(
+                "SELECT state AS value FROM media_session_requests WHERE incarnation_id=$1",
+                hiqlite::params!(inc.clone()),
+            )
+            .await
+            .expect("whole rollback");
+        assert_eq!(row[0].value, "starting");
+        client
+            .execute("DROP TRIGGER pending_ignore_update", hiqlite::params!())
+            .await
+            .expect("release trigger");
+        client
+            .execute(
+                "INSERT INTO job_leases VALUES($1,'owned-B',1,1,1,1)",
+                hiqlite::params!(format!("session:{inc}")),
+            )
+            .await
+            .expect("expired lease retained");
+        assert_eq!(
+            store
+                .retire_pending_receiver_request(&w)
+                .await
+                .expect("expiry not evidence"),
+            ReceiverRetirementOutcome::Refused
+        );
+        client
+            .execute(
+                "DELETE FROM job_leases WHERE resource=$1",
+                hiqlite::params!(format!("session:{inc}")),
+            )
+            .await
+            .expect("fixture release");
+        assert!(store
+            .delete_token(&w.intent.login_hash)
+            .await
+            .expect("actual logout"));
+        assert_eq!(
+            store
+                .retire_pending_receiver_request(&w)
+                .await
+                .expect("joined metadata fixture after logout"),
+            ReceiverRetirementOutcome::Applied
+        );
+        let before=client.query_consistent_map::<SchemaText,_>("SELECT json_array(state,response_json,claim_expires_at_ms,updated_at_ms) AS value FROM media_session_requests WHERE incarnation_id=$1",hiqlite::params!(inc.clone())).await.expect("terminal snapshot");
+        assert_eq!(
+            store
+                .retire_pending_receiver_request(&w)
+                .await
+                .expect("exact retry"),
+            ReceiverRetirementOutcome::Replay
+        );
+        let after=client.query_consistent_map::<SchemaText,_>("SELECT json_array(state,response_json,claim_expires_at_ms,updated_at_ms) AS value FROM media_session_requests WHERE incarnation_id=$1",hiqlite::params!(inc.clone())).await.expect("read-only");
+        assert_eq!(before[0].value, after[0].value);
+        client
+            .execute("DROP TRIGGER pending_ignore_assertion", hiqlite::params!())
+            .await
+            .expect("next case");
+    }
+}
