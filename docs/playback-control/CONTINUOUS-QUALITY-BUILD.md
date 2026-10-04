@@ -7055,3 +7055,66 @@ once on the lab host (only the failed tests were rerun after each fix):
   an ended session id was reused; the worker-role test built a manager without
   the cache, bound-FFprobe identity and resolved audio index a real create has;
   and the schedule owner differed from the serving node.
+
+### 10.236 Integrating main #793 before the fast lane
+
+Main promoted the 2026-09-20 architecture review effort (#793, 635 commits)
+while this batch waited for its fast lane, so the batch merged main again
+(45 conflicted files). Decisions, each keeping both designs:
+
+- **Schema numbers.** Main shipped hiqlite 70–73 and SQLite v94–v97 first.
+  Quality cancellation and the quality ledger move to hiqlite 74/75 and
+  SQLite v98/v99, after main's chain. Main's lineage bridge stamped the
+  newest schema it knew; it now stamps main's canonical end (hiqlite 73,
+  SQLite 97), so a bridged store still runs our two additive steps. Our
+  hiqlite step uses main's source-guarded atomic step shape and stays boxed
+  for debug-build stack depth. No store outside isolated lab runtimes ever
+  held this branch's old numbers (the batch was never deployed).
+- **Continuous parents and main's output reuse.** A continuous parent does
+  not take a measured candidate, an output-enqueue slot or a retained
+  output: its video, soundtrack and companion roles are not a complete
+  output, and main's digest check would refuse the video-only plan. Ordinary
+  creates keep all three.
+- **Candidate recovery.** Main's recovery filter also applies when a
+  continuous family names its primary, so a recently failed primary is
+  refused with the same typed conflict as an ordinary create.
+- **Link evidence.** Continuous child segments are served through the same
+  VOD segment response as ordinary segments, so they carry main's link
+  receipt and ETag and remain Auto link samples.
+- **Measured cost catalogs.** Main's measured-cost model would null the peak
+  of a live continuous member; web and Android keep the family-bound peak for
+  members of the live family.
+- **Peer transport.** Main's clock guard and our Retry-After answer share one
+  request function.
+- **Clients.** Android uses main's audio-focus handover with our prepared
+  silencing and attempt fences; Apple keeps the `.preparedCommit` fence over
+  main's staged film-local VOD. Main also claimed Android 144 and Apple 206,
+  so the batch claims 145 and 207.
+
+Compile-only gaps after the textual merge were request literals that one side
+created before the other side's fields existed (`continuous_media`,
+`audio_claim`/`audio_delivery`, retained output and measured-candidate
+fields). The merged workspace suite then failed five tests on the lab host
+(only those were rerun after the fixes):
+
+- **Shared-audio admission (a real integration bug).** Main's frozen-floor
+  check bounds a software recipe by the recipe's software-encoder thread cap.
+  A shared-AAC producer inherits the video recipe's options, so that cap
+  lowered the AAC producer's fixed three-thread floor and it was admitted as
+  the pool's oversize exception under a two-thread budget. The floor helper
+  now takes the cap explicitly, and shared audio passes none: its fixed
+  estimate is its whole floor.
+- **Immutable publication versus main's retained-output tests.** This batch
+  makes a published URI immutable: a repeated write traverses the original
+  publication instead of replacing it. Two of main's new tests assumed a
+  rematerialization replaces the live bytes. They now assert the immutable
+  behaviour (served and measured bytes are unchanged, so measurement keeps
+  its authority) and produce different live bytes only by out-of-band
+  replacement, which still cannot repair an issued proof; exact bytes still
+  repair it.
+- **Planning binding.** Main's worker refuses a selected candidate whose
+  context is not bound to its planning inputs. The continuous worker-role
+  test built contexts without that binding; it now binds them the way HLS
+  create does.
+- **Chain end.** One of main's tests asserted that a reopened v96 store
+  stops at v97; it now asserts the end of the chain, since our steps follow.
