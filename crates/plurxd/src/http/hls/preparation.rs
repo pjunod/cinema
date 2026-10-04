@@ -755,19 +755,24 @@ pub(super) fn preserve_prepared_audio(
             candidate.audio_offset_ms,
         ));
     }
+    // Compare what the incumbent's playlist told the client's audio decoder,
+    // not the encoder's bytes. A full-encode VOD successor can never copy
+    // audio, so a byte comparison refused every Original→rung switch from a
+    // copy session even when both deliver stereo AAC. The splice is a
+    // discontinuity; only a codec or channel-count change is unsafe there.
     if candidate
         .audio_delivery
         .as_ref()
-        .map(|audio| audio.byte_identity())
+        .and_then(|audio| audio.presentation_identity())
         != predecessor
             .audio_delivery
             .as_ref()
-            .map(|audio| audio.byte_identity())
+            .and_then(|audio| audio.presentation_identity())
     {
         return Err(ApiError::typed(
             StatusCode::UNPROCESSABLE_ENTITY,
             "prepared_output_unsupported",
-            "the audio delivery changed; reopen instead of switching a prepared successor",
+            "the audio codec or channel count changed; reopen instead of switching a prepared successor",
         ));
     }
     if let (crate::transcode::SessionKind::Copy { aac, .. }, Some(audio)) =

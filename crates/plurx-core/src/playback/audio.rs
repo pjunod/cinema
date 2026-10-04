@@ -222,6 +222,21 @@ impl AudioDelivery {
             .expect("audio delivery contains only serializable values")
     }
 
+    /// What a client's audio decoder is configured for: codec and channel
+    /// count. A prepared quality handoff splices at a discontinuity, so the
+    /// encoder's bitrate, copy-versus-encode and sample rate may change there,
+    /// but the decoder configuration the incumbent's playlist advertised must
+    /// not. `None` is a silent delivery.
+    pub fn presentation_identity(&self) -> Option<(&str, u8)> {
+        match &self.action {
+            AudioAction::None => None,
+            AudioAction::Copy { codec, channels }
+            | AudioAction::Encode {
+                codec, channels, ..
+            } => Some((codec.as_str(), *channels)),
+        }
+    }
+
     pub fn bitrate_kbps(&self) -> Option<u32> {
         match self.action {
             AudioAction::None => Some(0),

@@ -2023,6 +2023,25 @@
     }
 
     #[test]
+    fn prepared_full_encode_successor_of_a_copied_stereo_track_stages() {
+        use plurx_core::playback::audio::{AudioAction, AudioClaim, AudioDelivery, AudioSink};
+        let mut source = staged_source_file();
+        source.audio_streams = vec![plurx_core::domain::AudioStream { index: 0, codec: "aac".into(), channels: Some(2), sample_rate: Some(48_000), ..Default::default() }];
+        let mut predecessor = staged_candidate_request();
+        predecessor.kind = crate::transcode::SessionKind::Copy { aac: false, preserve_dolby_vision: false, convert_dolby_vision: false };
+        predecessor.presentation = crate::transcode::Presentation::Vod;
+        predecessor.audio_index = Some(0);
+        predecessor.audio_claim = Some(AudioClaim { decoders: vec!["aac".into()], sinks: vec![AudioSink { codec: "aac".into(), max_channels: 2, passthrough: false, sample_rates_hz: vec![48_000] }] });
+        predecessor.audio_delivery = Some(AudioDelivery { action: AudioAction::Copy { codec: "aac".into(), channels: 2 }, downmix: None, reason: "copied".into() });
+        let mut candidate = predecessor.clone();
+        candidate.kind = crate::transcode::SessionKind::Transcode { height: 720 };
+        preserve_prepared_audio(&predecessor, &mut candidate, &source).expect("stereo AAC copy to stereo AAC encode is decoder-identical");
+        let audio = candidate.audio_delivery.as_ref().expect("re-resolved audio");
+        assert!(audio.transcodes(), "a full-encode VOD successor encodes its audio");
+        assert_eq!(audio.presentation_identity(), Some(("aac", 2)));
+    }
+
+    #[test]
     fn create_cannot_accept_a_client_authored_audio_delivery() {
         let body: CreateSession = serde_json::from_value(serde_json::json!({"playback_id":"audio-authority", "audio_delivery":{"action":{"kind":"copy","codec":"eac3","channels":6},"reason":"forged"}})).expect("legacy-compatible unknown field handling");
         let request = body.into_request(1, 720);
