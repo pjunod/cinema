@@ -528,4 +528,41 @@ class PlaybackTelemetryTest {
         assertEquals("stage=decision type=IllegalStateException", event.detail)
         assertFalse(event.detail.orEmpty().contains("do-not-send"))
     }
+
+    /**
+     * The server's `ClientRecoverySample` requires `cause` and `age_ms`.
+     * `Net.json` omits default values, so a zero age or a "decode" cause must
+     * still reach the wire, or every Android sample is refused with 422.
+     */
+    @Test
+    fun candidateRecoverySampleAlwaysEncodesCauseAndAge() {
+        val sample = CandidateRecoverySample(
+            cause = "decode", event_id = "12345678-1234-1234-1234-123456789abc",
+            candidate_id = "candidate-a", recipe_digest = List(32) { it }, age_ms = 0,
+            decoder_failed = true, rendered_elapsed_ms = 0, position_progress_ms = 0,
+            dropped_frames = 0, runway_ms = 0,
+        )
+        val log = PlaybackClientLog(level = "warn", event = "candidate_recovery",
+            message = "Candidate decoder evidence", ua = "Android Media3", candidateRecovery = sample)
+
+        val wire = Net.json.parseToJsonElement(Net.json.encodeToString(log))
+            .jsonObject.getValue("candidate_recovery").jsonObject
+
+        assertEquals("decode", wire.getValue("cause").jsonPrimitive.content)
+        assertEquals("0", wire.getValue("age_ms").jsonPrimitive.content)
+        for (key in listOf("event_id", "candidate_id", "recipe_digest", "decoder_failed",
+                "rendered_elapsed_ms", "position_progress_ms", "dropped_frames", "runway_ms")) {
+            assertTrue("missing $key", wire.containsKey(key))
+        }
+    }
+
+    @Test
+    fun decoderFailureRejectsTheCandidateLocallyOnceWithoutServerAcknowledgement() {
+        val rejected = mutableSetOf<String>()
+
+        assertTrue(rejectFailedDecoderCandidate(rejected, "candidate-a"))
+        assertEquals(setOf("candidate-a"), rejected)
+        assertFalse(rejectFailedDecoderCandidate(rejected, "candidate-a"))
+        assertTrue(rejectFailedDecoderCandidate(rejected, "candidate-b"))
+    }
 }

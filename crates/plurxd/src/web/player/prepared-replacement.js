@@ -292,6 +292,8 @@ function beginPreparedReplacement(p,action){
     Math.max(0,Math.round((bufferRunway(v)-3)*1000)));
   const stageAtMs=performance.now();
   const state={actionId:action.action_id,sessionId:action.session_id,
+    fileId:p.fileId,
+    candidateRecipeDigest:(p.qualityCandidates||[]).find(row=>row.id===action.effective_selection?.candidate_id)?.recipe_digest?.slice(),
     playlistUrl:action.playlist_url,controlBootstrap:action.control||null,
     mediaOriginMs:originMs,offeredOriginMs,
     selection:action.effective_selection,
@@ -480,15 +482,32 @@ function createPreparedHlsLoader(StockLoader,p,state){
 function notePreparedHlsFragmentLoaded(p,state,d){
   if(preparedState(p)===state&&d&&d.frag&&d.frag.type==='main'){
     const stats=d.frag.stats||d.stats||{};
-    const proof=completedQualityTransfer(d.networkDetails,d.frag.url,stats.loading,performance.now());
+    const proof=completedQualityTransfer(d.networkDetails,d.frag.url,stats.loading,performance.now(),stats.loaded);
     if(proof){
-      state.qualityTransfer=proof;
-      const samples=state.qualityTransfers||[];
-      const segmentId=String(d.frag.url||'');
-      state.qualityTransfers=samples.filter(row=>row.segment_id!==segmentId
-        &&proof.atMs-row.atMs<=15000).slice(-7);
-      state.qualityTransfers.push({...proof,segment_id:segmentId,media_duration_ms:d.frag.duration*1000});
-      notePreparedBuffer(p,state);
+      const owned=candidateTransferOriginCurrent(proof)&&proof.receipt&&proof.etag
+        &&new URL(d.frag.url,location.href).pathname.split('/').includes(state.sessionId)
+        &&PlaybackPolicy.qualityTransferBps({...proof,age_ms:performance.now()-proof.atMs})>0;
+      if(owned){
+        state.linkReportedReceipts=state.linkReportedReceipts||new Set();
+        if(state.linkReportedReceipts.size<8&&!state.linkReportedReceipts.has(proof.receipt)){
+          clientLog({event:'candidate_link_sample',message:'Completed staged candidate body',session_id:state.sessionId,
+            link_sample:{receipt:proof.receipt,object_name:proof.object_name,etag:proof.etag,
+              body_bytes:proof.bytes,body_duration_ms:Math.round(proof.elapsed_ms),age_ms:Math.round(performance.now()-proof.atMs),
+              network_load:true,from_cache:false,producer_paced:false,cause:'link',negative:false,
+              media_duration_ms:proof.server_media_duration_ms??null,presenting:false,stalled:false,runway_ms:0}});
+          state.linkReportedReceipts.add(proof.receipt);
+        }
+        const sample={...proof,stage:state,pipeline:state.hls,file_id:state.fileId,session_id:state.sessionId,
+          candidate_id:state.selection?.candidate_id,recipe_digest:state.candidateRecipeDigest?.slice(),
+          segment_id:String(d.frag.url||''),media_duration_ms:proof.server_media_duration_ms,
+          media_start_ms:Number.isFinite(d.frag.start)?d.frag.start*1000:null};
+        state.qualityTransfer=sample;
+        const samples=state.qualityTransfers||[];
+        state.qualityTransfers=samples.filter(row=>row.segment_id!==sample.segment_id
+          &&proof.atMs-row.atMs<=15000).slice(-7);
+        state.qualityTransfers.push(sample);
+        notePreparedBuffer(p,state);
+      }
     }
   }
   if(!attachedPreparedHls(p,state)||!p.abr) return;
@@ -573,14 +592,40 @@ function preparedQualityProofReady(p,state){
   const now=performance.now(), proof=state.qualityTransfer;
   const bps=PlaybackPolicy.qualityTransferBps(proof?{...proof,age_ms:now-proof.atMs}:null);
   if(!candidate) return false;
-  if(candidate.peak_bps>0){
-    if(!(bps>=candidate.peak_bps*1.8)) return false;
-  }else if(candidate.route==="encode"||!PlaybackPolicy.qualityOriginalTrialMargin(
-    (state.qualityTransfers||[]).map(row=>({...row,age_ms:now-row.atMs})))) return false;
+  if(!preparedTransferOwned(p,state,candidate,proof,now)) return false;
+  const output=measuredCandidateOutput(p,candidate);
+  if(!output){
+    if(!unknownStageableOriginal(p,candidate)||now-state.stageAtMs<0||now-state.stageAtMs>15000) return false;
+    const samples=(state.qualityTransfers||[]).filter(row=>preparedTransferOwned(p,state,candidate,row,now)
+      &&Number.isFinite(row.media_start_ms)&&row.media_start_ms>=0
+      &&row.media_duration_ms>0&&row.media_duration_ms===row.server_media_duration_ms
+      &&/^seg[0-9]+\.m4s$/.test(row.object_name));
+    const receipts=new Set(),objects=new Set();
+    const ordered=samples.slice().sort((a,b)=>a.media_start_ms-b.media_start_ms);
+    for(let index=0;index<ordered.length;index++){
+      const row=ordered[index];
+      if(receipts.has(row.receipt)||objects.has(row.object_name)
+        ||index>0&&ordered[index-1].media_start_ms+ordered[index-1].media_duration_ms>row.media_start_ms+1) return false;
+      receipts.add(row.receipt);objects.add(row.object_name);
+    }
+    return PlaybackPolicy.qualityOriginalTrialMargin(ordered.map(row=>({...row,age_ms:now-row.atMs})));
+  }
+  if(!(bps>=output.peak_bps*1.8)) return false;
   return candidate.route!=="encode"||candidate.complete_cache===true
     ||state.qualityHealthAtMs!=null
       &&PlaybackPolicy.qualityEncodeProof(state.qualityHealth,id,now-state.qualityHealthAtMs)
       &&state.qualityHealth.active_encode_milli_realtime>=1150;
+}
+function preparedTransferOwned(p,state,candidate,proof,now){
+  return !!(proof&&PLAYER===p&&preparedState(p)===state&&proof.stage===state
+    &&proof.pipeline===state.hls&&proof.file_id===state.fileId&&state.fileId===p.fileId&&proof.session_id===state.sessionId
+    &&proof.candidate_id===candidate.id&&Array.isArray(proof.recipe_digest)
+    &&proof.recipe_digest.length===32&&proof.recipe_digest.every((byte,index)=>byte===candidate.recipe_digest[index])
+    &&Array.isArray(state.candidateRecipeDigest)&&state.candidateRecipeDigest.length===32
+    &&state.candidateRecipeDigest.every((byte,index)=>byte===candidate.recipe_digest[index])
+    &&candidateTransferOriginCurrent(proof)&&typeof proof.receipt==='string'
+    &&/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(proof.receipt)
+    &&proof.etag&&PlaybackPolicy.qualityTransferBps({...proof,age_ms:now-proof.atMs})>0);
 }
 // Reuse the existing health timer only while a voluntary successor is staged.
 // Receipt and exact staging identity fence every response; incumbent health

@@ -1715,6 +1715,7 @@ mod tests {
             .await
             .expect("user");
         let package = NewOfflinePackage {
+            audio_recipe: None,
             id: format!("package-{recipe}"),
             request_id: format!("request-{recipe}"),
             user_id: user.id,
@@ -3155,6 +3156,7 @@ mod tests {
                 .expect("complete cache");
 
             let package = |id: &str, request: &str| NewOfflinePackage {
+                audio_recipe: None,
                 id: id.into(),
                 request_id: request.into(),
                 user_id: user.id,

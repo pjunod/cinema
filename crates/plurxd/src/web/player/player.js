@@ -125,6 +125,7 @@
  * Quality ladder and adaptive bitrate
  * @property {any[]} [ladder]              the quality rungs on offer
  * @property {any[]|null} [qualityCandidates] source- and decoder-specific server catalog; null uses legacy rungs
+ * @property {any[]|null} [measuredCandidateOutputs] bounded HTTP-only full-output cost provenance
  * @property {string|null} [qualityCandidateId] the server-confirmed active route
  * @property {string|null} [qualityProtocol] protocol negotiated with the actual session owner
  * @property {number|null} [priorKbps]     the bandwidth estimate carried from the last playback
@@ -701,10 +702,11 @@ function noteCompletedAutoTransfer(p,bytes,loading,now,networkDetails=null,url=n
   p.abr.completedTransfers=recent;
   const video=/** @type {HTMLVideoElement|null} */ (document.getElementById("video"));
   if(document.hidden||!video||video.paused||video.seeking||p.controlSeek) return;
-  const evidence=completedQualityTransfer(networkDetails,url,loading,now);
-  if(evidence) p.abr.qualityTransfer={...evidence,media_duration_ms:mediaDurationMs,attachment:p.mediaAttachment};
+  const evidence=completedQualityTransfer(networkDetails,url,loading,now,bytes);
+  if(evidence) p.abr.qualityTransfer={...evidence,media_duration_ms:mediaDurationMs,attachment:p.mediaAttachment,
+    session_id:p.sessionId,candidate_id:p.qualityCandidateId};
 }
-function completedQualityTransfer(networkDetails,url,loading,now){
+function completedQualityTransfer(networkDetails,url,loading,now,bytes){
   // Upgrade evidence needs a completed network body from bytes already sealed
   // by the server. hls.js load averages alone cannot distinguish cache hits,
   // producer waits or revalidated bodies from a fresh link measurement.
@@ -712,14 +714,29 @@ function completedQualityTransfer(networkDetails,url,loading,now){
     if(!networkDetails||networkDetails.status!==200
       ||networkDetails.getResponseHeader("X-Plurx-Producer-Paced")!=="0"||!url) return;
     const name=new URL(url,location.href).href;
-    const entries=performance.getEntriesByName(name,"resource");
-    const timing=/** @type {PerformanceResourceTiming|undefined} */ (entries.at(-1));
-    if(!timing||!(timing.encodedBodySize>0&&timing.transferSize>=timing.encodedBodySize)
-      ||!(timing.responseEnd>timing.responseStart)
-      ||Math.abs(timing.responseEnd-now)>1000
-      ||Math.abs(timing.startTime-Number(loading.start))>1000) return;
-    return {bytes:timing.encodedBodySize,
-      elapsed_ms:timing.responseEnd-timing.responseStart,atMs:now,completed:true,
+    if(new URL(name).origin!==new URL(location.href).origin) return;
+    const started=Number(loading.start), ended=Number(loading.end);
+    if(!Number.isSafeInteger(Number(bytes))||!(Number(bytes)>0)
+      ||!Number.isFinite(started)||!Number.isFinite(ended)||!(ended>started)) return;
+    // The API's explicit resource entry-type filter narrows its broad DOM type.
+    const entries=/** @type {PerformanceResourceTiming[]} */
+      (performance.getEntriesByName(name,"resource"));
+    // Never borrow the latest same-URL request. Coarse or ambiguous timer
+    // joins cannot prove which completed response supplied this nonce.
+    const matches=entries.filter(timing=>timing.encodedBodySize===Number(bytes)
+      &&timing.transferSize>=timing.encodedBodySize&&timing.responseEnd>timing.responseStart
+      &&Math.abs(timing.responseEnd-ended)<=5&&Math.abs(timing.startTime-started)<=5
+      &&now>=timing.responseEnd&&now-timing.responseEnd<=15000);
+    if(matches.length!==1) return;
+    const timing=matches[0];
+    const mediaHeader=networkDetails.getResponseHeader("X-Plurx-Link-Media-Duration-Ms");
+    const mediaDuration=typeof mediaHeader==='string'&&/^[1-9][0-9]{0,9}$/.test(mediaHeader)
+      &&Number(mediaHeader)<=4294967295?Number(mediaHeader):null;
+    return {bytes:timing.encodedBodySize,origin:new URL(name).origin,
+      receipt:networkDetails.getResponseHeader("X-Plurx-Link-Receipt"),
+      server_media_duration_ms:mediaDuration,
+      etag:networkDetails.getResponseHeader("ETag"),object_name:new URL(name).pathname.split('/').at(-1),
+      elapsed_ms:timing.responseEnd-timing.responseStart,atMs:timing.responseEnd,completed:true,
       from_cache:false,producer_paced:false};
   }catch(e){}
 }

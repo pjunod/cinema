@@ -13,14 +13,17 @@
 //! **When there is no commit to name, say when instead of saying nothing.**
 //! `"unknown"` was the old fallback and it is useless in the one situation it
 //! occurs in: somebody has just deployed and wants to know whether their change
-//! is running. It cannot answer that. A build timestamp can — it does not name
-//! the commit, but it distinguishes this deploy from the last one, which is the
-//! actual question. So [`BUILT_AT`] is stamped unconditionally, from the clock
-//! at compile time, and the UI falls back to it whenever the commit is unknown.
+//! is running. It cannot answer that. A date can -- it does not name the
+//! commit, but it distinguishes this deploy from the last one, which is the
+//! actual question. So [`BUILT_AT`] is stamped unconditionally and the UI falls
+//! back to it whenever the commit is unknown.
 //!
-//! The timestamp does not make the build unreproducible in any way that
-//! matters: this script only re-runs when the sources or `.git` change, so the
-//! stamp moves exactly when the binary does.
+//! The stamp is the build's *source date* (`build_support/source_date.rs`):
+//! `SOURCE_DATE_EPOCH` when set, else the `HEAD` commit time, else the clock.
+//! It used to be the clock always, which made every build of one commit a
+//! different binary and an image impossible to reproduce. A malformed
+//! `SOURCE_DATE_EPOCH` is the one thing here that fails the build, because a
+//! fallback would silently undo what setting it asked for.
 
 // A build script, never a daemon child: the launcher rule in clippy.toml is for
 // production code.
@@ -30,8 +33,13 @@ use std::path::PathBuf;
 use std::process::Command;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+#[path = "build_support/source_date.rs"]
+mod source_date;
+
 fn main() {
     println!("cargo:rerun-if-env-changed=PLURX_BUILD_REF");
+    println!("cargo:rerun-if-env-changed=SOURCE_DATE_EPOCH");
+    println!("cargo:rerun-if-changed=build_support/source_date.rs");
     watch_git_head();
 
     let build = std::env::var("PLURX_BUILD_REF")
@@ -41,7 +49,10 @@ fn main() {
         .or_else(git_describe)
         .unwrap_or_else(|| "unknown".to_owned());
     println!("cargo:rustc-env=PLURX_BUILD={build}");
-    println!("cargo:rustc-env=PLURX_BUILT_AT={}", built_at());
+    println!(
+        "cargo:rustc-env=PLURX_BUILT_AT={}",
+        built_at(build.ends_with("-dirty"))
+    );
     embed_windows_manifest();
 }
 
@@ -61,31 +72,30 @@ fn embed_windows_manifest() {
     );
 }
 
-/// Compile time as `YYYY-MM-DDTHH:MM:SSZ`.
-///
-/// Hand-rolled rather than pulling a date crate into the build graph: this is
-/// the only place the daemon needs to format a wall clock at build time, and a
-/// dependency that exists to print seven numbers is a dependency that has to be
-/// audited, updated and explained forever.
-fn built_at() -> String {
-    let secs = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_secs() as i64)
-        .unwrap_or(0);
-    let (days, rem) = (secs.div_euclid(86_400), secs.rem_euclid(86_400));
-    let (h, mi, s) = (rem / 3600, (rem % 3600) / 60, rem % 60);
-    // Civil-from-days (Howard Hinnant's algorithm), shifted to a March-based
-    // year so the leap day lands at the end and needs no special case.
-    let z = days + 719_468;
-    let era = z.div_euclid(146_097);
-    let doe = z.rem_euclid(146_097);
-    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
-    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
-    let mp = (5 * doy + 2) / 153;
-    let d = doy - (153 * mp + 2) / 5 + 1;
-    let m = if mp < 10 { mp + 3 } else { mp - 9 };
-    let y = era * 400 + yoe + i64::from(m <= 2);
-    format!("{y:04}-{m:02}-{d:02}T{h:02}:{mi:02}:{s:02}Z")
+/// The source date as `YYYY-MM-DDTHH:MM:SSZ`; see `build_support/source_date.rs`.
+fn built_at(dirty: bool) -> String {
+    let epoch = std::env::var("SOURCE_DATE_EPOCH").ok();
+    let secs = source_date::resolve_source_date(epoch.as_deref(), dirty, git_commit_time, || {
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_secs() as i64)
+            .unwrap_or(0)
+    })
+    .unwrap_or_else(|err| panic!("{err}"));
+    source_date::format_utc(secs)
+}
+
+/// Committer time of `HEAD`, in Unix seconds, when built from a checkout.
+fn git_commit_time() -> Option<i64> {
+    let out = Command::new("git")
+        .args(["log", "-1", "--format=%ct", "HEAD"])
+        .current_dir(std::env::var("CARGO_MANIFEST_DIR").ok()?)
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    String::from_utf8(out.stdout).ok()?.trim().parse().ok()
 }
 
 /// Re-run when HEAD moves (a commit, a checkout, a new tag) so the stamp does

@@ -36,7 +36,7 @@ use super::placeholder_census::STORE_SOURCES;
 
 /// Consistent-read call sites per replicated slice, production code only.
 const CONSISTENT_READ_SITES: &[(&str, usize)] = &[
-    ("hiqlite.rs", 27),
+    ("hiqlite.rs", 32),
     ("hiqlite_background_jobs.rs", 1),
     ("hiqlite_catalog.rs", 2),
     ("hiqlite_classification.rs", 1),
@@ -48,11 +48,11 @@ const CONSISTENT_READ_SITES: &[(&str, usize)] = &[
     ("hiqlite_import.rs", 3),
     ("hiqlite_library_channels.rs", 13),
     ("hiqlite_live_tv_resource.rs", 1),
-    ("hiqlite_media.rs", 68),
+    ("hiqlite_media.rs", 69),
     ("hiqlite_pretranscode.rs", 2),
     ("hiqlite_publication.rs", 5),
     ("hiqlite_reading.rs", 2),
-    ("hiqlite_sessions.rs", 18),
+    ("hiqlite_sessions.rs", 19),
     ("hiqlite_shared_cache.rs", 4),
     ("hiqlite_timeline_annotations.rs", 2),
 ];
@@ -69,7 +69,13 @@ const CONSISTENT_READ_SITES: &[(&str, usize)] = &[
 // authority bridge is separately inventoried and carries its reason.
 // E0 removes the legacy subtitle ownership read as well.
 // E2 retires the old unfenced manifest-candidate query.
-const UNANNOTATED_CEILING: usize = 236;
+// The architecture effort's authority-read scope split adds two unannotated
+// sites that are not reads of their own: `query_consistent_map_scoped`'s
+// definition and the unscoped wrapper forwarding to it, both plumbing for the
+// one physical read in `hiqlite.rs` that was already counted. Its new reads
+// (the audio_recipe shape probe, the two schema-lineage reads, candidate
+// recovery memory, the unobserved-file cursor) each carry a reason.
+const UNANNOTATED_CEILING: usize = 238;
 
 const SITE: &str = "query_consistent";
 const REASON: &str = "// authority:";

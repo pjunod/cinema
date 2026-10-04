@@ -41,7 +41,12 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use hiqlite::tls::ServerTlsConfig;
 #[cfg(feature = "hiqlite-contract-tests")]
 use hiqlite::{Client, Node, NodeConfig, Row};
+#[cfg(feature = "hiqlite-contract-tests")]
+use plurx_core as observer_core;
 use plurx_core::cluster::coordination::{Lease, LeaseClaim};
+#[cfg(feature = "hiqlite-contract-tests")]
+#[path = "fixtures/startup_observer.rs"]
+pub mod startup_observer;
 #[cfg(feature = "hiqlite-contract-tests")]
 use plurx_core::cluster::migration::{
     connect_activated_store, prepare_sqlite_import, select_daemon_store, ActivationMarker,
@@ -419,6 +424,8 @@ const MEDIA_METHODS: &[&str] = &[
     "set_file_field_order",
     "files_missing_luminance",
     "set_file_luminance",
+    "files_without_luminance_facts",
+    "set_file_frame_luminance",
     "set_file_dolby_vision",
     "get_file_probe_json",
     "playback_planning_snapshot",
@@ -517,6 +524,8 @@ const SHARED_CACHE_METHODS: &[&str] = &[
     "finalize_retired_shared_cache_generation",
 ];
 const BACKGROUND_JOB_METHODS: &[&str] = &[
+    "publish_copy_output_job",
+    "publish_encoded_output_job",
     "media_preparation_history",
     "join_analysis_viewer",
     "join_artifact_viewer",
@@ -634,6 +643,7 @@ const TELEMETRY_METHODS: &[&str] = &[
     "playback_events",
 ];
 const FRAGMENT_INDEX_METHODS: &[&str] = &[
+    "fragment_index_status",
     "put_fragment_index",
     "fragment_index",
     "forget_fragment_index",
@@ -674,6 +684,8 @@ const TIMELINE_ANNOTATION_METHODS: &[&str] = &[
     "discard_manual_timeline_annotation",
 ];
 const NETWORK_PRIOR_METHODS: &[&str] = &[
+    "observe_candidate_link",
+    "candidate_link_prior",
     "observe_network_prior",
     "network_prior",
     "prune_network_priors",
@@ -685,6 +697,8 @@ const COORDINATION_METHODS: &[&str] = &[
     "lease_expiry_hint",
 ];
 const MEDIA_SESSION_METHODS: &[&str] = &[
+    "observe_candidate_recovery",
+    "candidate_recovery_memory",
     "record_desired_selection",
     "desired_selection",
     // Test-only in intent, declared on the trait because the fence it proves
@@ -797,6 +811,96 @@ where
             .await
             .expect("reset replicated contract state");
         contract(Arc::new(store), "hiqlite-3-voter").await;
+    }
+}
+
+/// A raw handle onto a backend's `files` table, for writing the `NULL` field
+/// order a pre-`unknown` binary left on probed rows. Every write path of this
+/// binary refuses to produce that state, which is the point; the backfill that
+/// repairs it still has to be proved against it.
+enum StrandedFieldOrder {
+    Sqlite(PathBuf),
+    #[cfg(feature = "hiqlite-contract-tests")]
+    Hiqlite(Client),
+}
+
+impl StrandedFieldOrder {
+    async fn strand(&self, file_id: i64) {
+        match self {
+            Self::Sqlite(path) => {
+                let connection = rusqlite::Connection::open(path).expect("open raw SQLite handle");
+                connection
+                    .busy_timeout(Duration::from_secs(5))
+                    .expect("raw SQLite busy timeout");
+                assert_eq!(
+                    connection
+                        .execute(
+                            "UPDATE files SET field_order = NULL WHERE id = ?1",
+                            rusqlite::params![file_id],
+                        )
+                        .expect("strand SQLite field order"),
+                    1
+                );
+            }
+            #[cfg(feature = "hiqlite-contract-tests")]
+            Self::Hiqlite(client) => {
+                assert_eq!(
+                    client
+                        .execute(
+                            "UPDATE files SET field_order = NULL WHERE id = $1",
+                            hiqlite::params!(file_id),
+                        )
+                        .await
+                        .expect("strand replicated field order"),
+                    1
+                );
+            }
+        }
+    }
+}
+
+/// [`for_each_backend`] for the backends a raw handle can reach: the
+/// file-backed SQLite store and, with the feature, the three-voter cluster.
+async fn for_each_strandable_backend<F, Fut>(mut contract: F)
+where
+    F: FnMut(Arc<dyn Store>, &'static str, Arc<StrandedFieldOrder>) -> Fut,
+    Fut: Future<Output = ()>,
+{
+    let directory = tempfile::tempdir().expect("strandable SQLite directory");
+    let path = directory.path().join("plurx.db");
+    let store = SqliteStore::open(&path).expect("strandable SQLite store");
+    contract(
+        Arc::new(store),
+        "file",
+        Arc::new(StrandedFieldOrder::Sqlite(path)),
+    )
+    .await;
+
+    #[cfg(feature = "hiqlite-contract-tests")]
+    {
+        let _case = HIQLITE_CASE.lock().await;
+        let cluster = ContractCluster::start().await;
+        let store = open_contract_hiqlite_store(&cluster).await;
+        store
+            .validation_reset_contract_state()
+            .await
+            .expect("reset replicated contract state");
+        let raw = Client::remote(
+            cluster.addresses.clone(),
+            true,
+            true,
+            CONTRACT_API_SECRET.to_owned(),
+            true,
+            None,
+        )
+        .await
+        .expect("connect raw replicated client");
+        contract(
+            Arc::new(store),
+            "hiqlite-3-voter",
+            Arc::new(StrandedFieldOrder::Hiqlite(raw)),
+        )
+        .await;
     }
 }
 
@@ -1235,6 +1339,153 @@ fn analysis_queue_slot(component: &str, state: &str, priority: &str, trigger: &s
         + priority)
         * ANALYSIS_METRIC_TRIGGERS.len()
         + trigger
+}
+
+#[tokio::test]
+async fn a05_candidate_decode_memory_is_exact_lifetime_and_replay_cannot_rearm() {
+    use plurx_core::store::{
+        CandidateRecoveryCause, CandidateRecoveryObservation, CandidateRecoveryScope,
+    };
+    for_each_backend(|store, backend| async move {
+        let (user_id, file_id) = seed_file(&store, "a05-candidate-memory").await;
+        let activation = MediaSessionActivation {
+            expected_desired_revision: None,
+            recovery_epoch: "b3000000-1111-4111-8111-111111111111".into(),
+            incarnation_id: "b1000000-1111-4111-8111-111111111111".into(),
+            session_id: "b2000000-1111-4111-8111-111111111111".into(),
+            user_id,
+            playback_id: "a05-exact-player".into(),
+            expected_predecessor_incarnation_id: None,
+            fence_predecessor: true,
+            request_id: None,
+            request_fingerprint: "a".repeat(64),
+            owner_node_id: "local-owner".into(),
+            recipe_json: "{}".into(),
+            response_json: "{}".into(),
+            publication_ready_at_ms: MEDIA_SESSION_PUBLICATION_BLOCKED,
+            media_origin_ms: 0,
+            now_ms: 1_000,
+            lease_expires_at_ms: 900_000,
+        };
+        store
+            .activate_media_session(&activation)
+            .await
+            .expect("activate")
+            .expect("actual active route");
+        let route = confirm_media_activation(store.as_ref(), &activation, 0, backend).await;
+        let scope = CandidateRecoveryScope {
+            user_id,
+            playback_id: route.playback_id.clone(),
+            recovery_epoch: route.recovery_epoch.clone(),
+            file_id,
+            source_size: 10_000,
+            source_mtime: 1,
+            source_object_version: "actual-fixture-object-v1".into(),
+            credential_generation: "c".repeat(64),
+            client_class: "android".into(),
+        };
+        let observation = CandidateRecoveryObservation {
+            scope: scope.clone(),
+            route: route.clone(),
+            recipe_digest: [3; 32],
+            event_id: "bounded-public-request-id".into(),
+            cause: CandidateRecoveryCause::Decode,
+            quality_step: true,
+        };
+        assert!(
+            scope.valid(),
+            "{backend}: scope epoch {:?}",
+            scope.recovery_epoch
+        );
+        let actual_file = store
+            .get_file(file_id)
+            .await
+            .expect("fixture file")
+            .expect("fixture file");
+        assert_eq!(
+            (actual_file.size, actual_file.mtime),
+            (scope.source_size, scope.source_mtime)
+        );
+        assert_eq!(route.state, "active");
+        assert_eq!(route.publication_ready_at_ms, 0);
+        let first = store
+            .observe_candidate_recovery(&observation, 2_000)
+            .await
+            .expect("fold")
+            .unwrap_or_else(|| panic!("{backend}: actual route must qualify"));
+        assert_eq!(first.decode_step_recipe, Some([3; 32]));
+        assert!(store
+            .observe_candidate_recovery(&observation, 3_000)
+            .await
+            .expect("replay")
+            .is_none());
+        assert_eq!(
+            store
+                .candidate_recovery_memory(&scope)
+                .await
+                .expect("memory"),
+            first
+        );
+        let mut other = scope.clone();
+        other.credential_generation = "d".repeat(64);
+        assert!(store
+            .candidate_recovery_memory(&other)
+            .await
+            .expect("other credential")
+            .rejected_recipes
+            .is_empty());
+        other = scope.clone();
+        other.source_object_version = "replacement-object".into();
+        assert!(store
+            .candidate_recovery_memory(&other)
+            .await
+            .expect("other physical source")
+            .rejected_recipes
+            .is_empty());
+        other = scope.clone();
+        other.playback_id = "other-player".into();
+        assert!(store
+            .candidate_recovery_memory(&other)
+            .await
+            .expect("other player")
+            .rejected_recipes
+            .is_empty());
+        let mut stale = observation.clone();
+        stale.route.owner_epoch += 1;
+        stale.recipe_digest = [4; 32];
+        assert!(store
+            .observe_candidate_recovery(&stale, 4_000)
+            .await
+            .expect("foreign owner")
+            .is_none());
+        stale = observation.clone();
+        stale.scope.source_mtime += 1;
+        stale.recipe_digest = [4; 32];
+        assert!(store
+            .observe_candidate_recovery(&stale, 4_000)
+            .await
+            .expect("changed source")
+            .is_none());
+        let mut hold = observation.clone();
+        hold.cause = CandidateRecoveryCause::Hold;
+        hold.quality_step = false;
+        hold.recipe_digest = [5; 32];
+        assert_eq!(
+            store
+                .observe_candidate_recovery(&hold, 5_000)
+                .await
+                .expect("hold"),
+            Some(first.clone())
+        );
+        assert_eq!(
+            store
+                .candidate_recovery_memory(&scope)
+                .await
+                .expect("decode stays spent"),
+            first
+        );
+    })
+    .await;
 }
 
 fn analysis_lifecycle_slot(event: &str, reason: &str) -> usize {
@@ -5549,6 +5800,85 @@ async fn prometheus_store_snapshot_is_one_backend_neutral_aggregate() {
 }
 
 #[tokio::test]
+async fn source_audio_layout_facts_round_trip_without_inventing_legacy_layout() {
+    for_each_backend(|store, backend| async move {
+        let library = store
+            .create_library(&NewLibrary {
+                name: format!("Source audio layout {backend}"),
+                kind: LibraryKind::Movies,
+                paths: Vec::new(),
+                anime: false,
+            })
+            .await
+            .expect("create source-layout library");
+        let item = store
+            .insert_item(&NewItem {
+                library_id: library.id,
+                kind: ItemKind::Movie,
+                parent_id: None,
+                title: "Source layouts".to_owned(),
+                year: None,
+                season_number: None,
+                episode_number: None,
+            })
+            .await
+            .expect("create source-layout item");
+        let legacy = serde_json::json!({"index": 2, "codec": "aac", "channels": 6,
+            "language": null, "title": null, "default": false});
+        let legacy: plurx_core::domain::AudioStream =
+            serde_json::from_value(legacy).expect("legacy audio JSON");
+        let streams = vec![
+            plurx_core::domain::AudioStream {
+                index: 0,
+                channels: Some(6),
+                channel_layout: Some("5.1".to_owned()),
+                ..Default::default()
+            },
+            plurx_core::domain::AudioStream {
+                index: 1,
+                channels: Some(6),
+                channel_layout: Some("5.1(side)".to_owned()),
+                ..Default::default()
+            },
+            legacy,
+            plurx_core::domain::AudioStream {
+                index: 3,
+                channel_layout: Some("future-layout".to_owned()),
+                ..Default::default()
+            },
+        ];
+        let file_id = store
+            .upsert_file(
+                item,
+                &format!("/{backend}/layouts.mkv"),
+                1_024,
+                1,
+                &ProbeResult {
+                    audio_streams: streams.clone(),
+                    ..Default::default()
+                },
+            )
+            .await
+            .expect("store source-layout facts");
+        let file = store
+            .get_file(file_id)
+            .await
+            .expect("read source-layout facts")
+            .expect("source-layout file");
+        assert_eq!(file.audio_streams, streams, "{backend}");
+        assert_eq!(file.audio_streams[2].channel_layout, None, "{backend}");
+        assert!(
+            serde_json::to_value(&file.audio_streams[2])
+                .expect("serialize legacy source-layout fact")
+                .get("channel_layout")
+                .is_none(),
+            "{backend}"
+        );
+    })
+    .await;
+}
+
+#[tokio::test]
 async fn stored_chapter_projection_does_not_materialize_unrelated_probe_metadata() {
     for_each_backend(|store, backend| async move {
         let library = store
@@ -7879,6 +8209,38 @@ async fn fenced_publication_contract_runs_through_dyn_store() {
             .await
             .unwrap_or_else(|error| panic!("{backend}: baseline fenced file: {error}"));
         current = replacement;
+        // A fenced publication of probed facts without a field order (an
+        // older probe worker's shape) stores `unknown`; the unprobed baseline
+        // above keeps `NULL`.
+        let replacement = publication_successor(&current);
+        let probed_file = store
+            .upsert_file_fenced(
+                baseline_book,
+                "/contract/fenced/probed.epub",
+                43,
+                8,
+                &ProbeResult {
+                    raw_json: Some("{}".into()),
+                    ..Default::default()
+                },
+                &current,
+                &replacement,
+            )
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: probed fenced file: {error}"));
+        current = replacement;
+        for (file_id, expected) in [(baseline_file, None), (probed_file, Some("unknown"))] {
+            assert_eq!(
+                store
+                    .get_file(file_id)
+                    .await
+                    .unwrap_or_else(|error| panic!("{backend}: fenced file read: {error}"))
+                    .and_then(|file| file.field_order)
+                    .as_deref(),
+                expected,
+                "{backend}: fenced field-order write boundary"
+            );
+        }
         let replacement = publication_successor(&current);
         assert_eq!(
             store
@@ -12202,6 +12564,19 @@ async fn assert_migrated_fragment_prune_budget(client: &Client) {
     );
 }
 
+/// A fixture rewound to a pre-v92 marker must not keep the composed v92/v93
+/// shapes a fresh chain created (`offline_packages.audio_recipe` and the two
+/// Link columns on `network_priors`): `ADD COLUMN` replays are not idempotent,
+/// and a real database at that marker never had them.
+fn drop_composed_v92_v93_columns(conn: &rusqlite::Connection) {
+    conn.execute_batch(
+        "ALTER TABLE offline_packages DROP COLUMN audio_recipe;
+         ALTER TABLE network_priors DROP COLUMN link_worst_rung_height;
+         ALTER TABLE network_priors DROP COLUMN link_starved_at_ms;",
+    )
+    .expect("remove composed v92/v93 columns before rewinding");
+}
+
 #[test]
 fn sqlite_fresh_and_upgrade_fragment_prune_plans_and_work_are_bounded() {
     let directory = tempfile::tempdir().expect("upgrade fixture");
@@ -12216,6 +12591,7 @@ fn sqlite_fresh_and_upgrade_fragment_prune_plans_and_work_are_bounded() {
         );
         conn.execute_batch(include_str!("fixtures/fragment-prune-worst.sql"))
             .expect("populated upgrade workload");
+        drop_composed_v92_v93_columns(&conn);
         conn.execute_batch(
             "DROP INDEX analysis_requests_result_target_force;
              ALTER TABLE dv_conversions DROP COLUMN requested_manually;
@@ -15617,22 +15993,22 @@ impl ContractCluster {
                         Ok(0) => {
                             break Err(ContractStartError::Failed(format!(
                                 "contract voter {node_id} exited before ready"
-                            )))
+                            )));
                         }
                         Ok(_) if line.trim() == format!("PLURX_CONTRACT_NODE_READY {node_id}") => {
-                            break Ok(())
+                            break Ok(());
                         }
                         Ok(_) if line.starts_with("PLURX_CONTRACT_NODE_PORT_COLLISION ") => {
-                            break Err(ContractStartError::PortCollision)
+                            break Err(ContractStartError::PortCollision);
                         }
                         Ok(_) if line.starts_with("PLURX_CONTRACT_NODE_START_FAILED ") => {
-                            break Err(ContractStartError::Failed(line.trim().to_owned()))
+                            break Err(ContractStartError::Failed(line.trim().to_owned()));
                         }
                         Ok(_) => {}
                         Err(error) => {
                             break Err(ContractStartError::Failed(format!(
                                 "read contract voter {node_id} startup: {error}"
-                            )))
+                            )));
                         }
                     }
                 };
@@ -16253,6 +16629,14 @@ fn populated_v14_import_fixture(data_dir: &std::path::Path) -> PathBuf {
              DROP TABLE IF EXISTS library_channel_generations;
              DROP TABLE IF EXISTS library_channels;
              ALTER TABLE transcode_cache_locations DROP COLUMN publication_generation;
+             -- v96's candidate failures and v94's node-local Link samples.
+             -- Both are CREATE TABLE IF NOT EXISTS, so leaving them would be
+             -- silent: a v14 fixture that still held them.
+             DROP TABLE IF EXISTS candidate_recovery;
+             DROP TABLE IF EXISTS candidate_link_priors;
+             -- v92 adds this column; leaving it on a stamped-v14 fixture
+             -- makes the actual ordinary upgrade repeat ADD COLUMN.
+             ALTER TABLE offline_packages DROP COLUMN audio_recipe;
              ALTER TABLE offline_packages DROP COLUMN alternate_recipe_hash;
              ALTER TABLE offline_packages DROP COLUMN decoder_recovery_state;
              ALTER TABLE offline_packages DROP COLUMN claim_generation;
@@ -17631,8 +18015,16 @@ async fn populated_v14_and_current_sources_activate_once_and_reopen_replicated()
 /// key-resolution refusal leaves no incoming target, then the same directory
 /// activates and its replicated envelope still opens under the node-local key.
 #[cfg(feature = "hiqlite-contract-tests")]
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn direct_upgrade_seals_legacy_trakt_before_any_import_state_exists() {
+#[test]
+fn direct_upgrade_seals_legacy_trakt_before_any_import_state_exists() {
+    startup_observer::run_full_hiqlite_fixture(
+        "k06-r1-legacy-sealing",
+        legacy_sealing_observation_fixture,
+    );
+}
+
+#[cfg(feature = "hiqlite-contract-tests")]
+async fn legacy_sealing_observation_fixture() {
     let _case = HIQLITE_CASE.lock().await;
     install_contract_crypto_provider();
 
@@ -17666,7 +18058,7 @@ async fn direct_upgrade_seals_legacy_trakt_before_any_import_state_exists() {
     );
     std::fs::remove_dir(&key_path).expect("unblock credential-key loading");
 
-    let selected = select_daemon_store(&config)
+    let selected = startup_observer::select_applied_singleton(&config)
         .await
         .expect("direct legacy upgrade must activate after key recovery");
     assert_eq!(selected.backend, SelectedBackend::Replicated);
@@ -17931,15 +18323,23 @@ async fn a_lost_replicated_target_refuses_to_reimport_the_retained_source() {
 }
 
 #[cfg(feature = "hiqlite-contract-tests")]
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[test]
 #[ignore = "spawned by the one-voter activation contract"]
-async fn hiqlite_activation_node_process() {
+fn hiqlite_activation_node_process() {
+    startup_observer::run_full_hiqlite_fixture(
+        "k06-r1-contract-node",
+        activation_node_observation_fixture,
+    );
+}
+
+#[cfg(feature = "hiqlite-contract-tests")]
+async fn activation_node_observation_fixture() {
     install_contract_crypto_provider();
     let launch: ActivationNodeLaunch = serde_json::from_str(
         &std::env::var("PLURX_ACTIVATION_NODE_LAUNCH").expect("activation launch"),
     )
     .expect("decode activation launch");
-    let selected = select_daemon_store(&launch.config())
+    let selected = startup_observer::select_applied_singleton(&launch.config())
         .await
         .expect("select one-voter store");
     assert_eq!(selected.backend, SelectedBackend::Replicated);
@@ -18216,12 +18616,21 @@ fn contract_inventory_matches_every_store_method() {
     // E2 removes two unfenced legacy scrub methods.
     // Safari seek adds viewer joins and two source-I/O observations.
     // DVR physical cleanup adds the atomic linked-catalog purge.
+    // 450 -> 452 for S-07's first-frame luminance backfill on `MediaStore`:
+    // `files_without_luminance_facts` lists HDR rows the stored-document walk
+    // classified `none`, and `set_file_frame_luminance` records what the first
+    // frame carried, fenced to that snapshot and to the row still being
+    // `none`. Both are named in `MEDIA_METHODS` above and covered on both
+    // backends by `frame_luminance_candidates_and_writes_are_exactly_fenced`.
+    // No new trait or supertrait of `Store`.
     // Media info adds the source-aware preparation history projection.
     // +1: coherent playback file/probe/settings/generation snapshot, covered
     // by playback_planning_snapshot_retains_one_source_and_settings_revision.
     // +1: source-fenced content encoding report publication, covered by
     // content_encoding_report_publication_is_source_fenced_on_every_backend.
-    assert_eq!(declared.len(), 453, "review the Store method count");
+    // The current effort declares 459 methods; these three main additions
+    // are distinct from its luminance and cluster-observation operations.
+    assert_eq!(declared.len(), 462, "review the Store method count");
     assert_eq!(
         covered, declared,
         "the declared async method name inventory changed"
@@ -18848,7 +19257,7 @@ async fn video_codec_tag_round_trips_and_backfill_updates_are_exactly_fenced() {
 
 #[tokio::test]
 async fn field_order_round_trips_and_backfill_updates_are_exactly_fenced() {
-    for_each_backend(|store, backend| async move {
+    for_each_strandable_backend(|store, backend, stranded| async move {
         let library = store
             .create_library(&NewLibrary {
                 name: "Field order".into(),
@@ -18912,6 +19321,9 @@ async fn field_order_round_trips_and_backfill_updates_are_exactly_fenced() {
             )
             .await
             .unwrap_or_else(|error| panic!("{backend}: legacy file: {error}"));
+        // This binary stores `unknown` for a probed row; the first-pass
+        // backfill existed for rows written before the column did.
+        stranded.strand(legacy).await;
         let pending = store
             .files_missing_field_order(0, 1)
             .await
@@ -18946,6 +19358,7 @@ async fn field_order_round_trips_and_backfill_updates_are_exactly_fenced() {
             )
             .await
             .unwrap_or_else(|error| panic!("{backend}: replacement seed: {error}"));
+        stranded.strand(replacement).await;
         let stale = store
             .files_missing_field_order(legacy, 1)
             .await
@@ -18983,6 +19396,236 @@ async fn field_order_round_trips_and_backfill_updates_are_exactly_fenced() {
                 .and_then(|file| file.field_order),
             Some("progressive".into()),
             "{backend}: stale snapshot cannot overwrite a newer scan"
+        );
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn probed_rows_without_a_field_order_store_unknown_at_the_write_boundary() {
+    for_each_backend(|store, backend| async move {
+        let library = store
+            .create_library(&NewLibrary {
+                name: "Field order boundary".into(),
+                kind: LibraryKind::Movies,
+                paths: vec!["/field-order-boundary".into()],
+                anime: false,
+            })
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: library: {error}"));
+        let item = store
+            .insert_item(&NewItem {
+                library_id: library.id,
+                kind: ItemKind::Movie,
+                parent_id: None,
+                title: "Write boundary".into(),
+                year: Some(2026),
+                season_number: None,
+                episode_number: None,
+            })
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: item: {error}"));
+        for (path, probe, expected) in [
+            // An older probe worker's facts: a document, no token.
+            (
+                "/field-order-boundary/older-worker.mkv",
+                ProbeResult {
+                    raw_json: Some(
+                        r#"{"streams":[{"codec_type":"video","codec_name":"hevc"}]}"#.into(),
+                    ),
+                    ..Default::default()
+                },
+                Some("unknown"),
+            ),
+            // A reporter token is stored verbatim.
+            (
+                "/field-order-boundary/interlaced.ts",
+                ProbeResult {
+                    field_order: Some("tt".into()),
+                    raw_json: Some(
+                        r#"{"streams":[{"codec_type":"video","field_order":"tt"}]}"#.into(),
+                    ),
+                    ..Default::default()
+                },
+                Some("tt"),
+            ),
+            // No document: never probed (or a failed probe) stays NULL.
+            (
+                "/field-order-boundary/unprobed.mkv",
+                ProbeResult::default(),
+                None,
+            ),
+        ] {
+            let file = store
+                .upsert_file(item, path, 1, 1, &probe)
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: upsert {path}: {error}"));
+            assert_eq!(
+                store
+                    .get_file(file)
+                    .await
+                    .unwrap_or_else(|error| panic!("{backend}: read {path}: {error}"))
+                    .and_then(|file| file.field_order)
+                    .as_deref(),
+                expected,
+                "{backend}: {path}"
+            );
+        }
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn rearmed_field_order_backfill_converges_null_rows_left_by_the_first_pass() {
+    for_each_strandable_backend(|store, backend, stranded| async move {
+        let library = store
+            .create_library(&NewLibrary {
+                name: "Field order re-arm".into(),
+                kind: LibraryKind::Movies,
+                paths: vec!["/field-order-rearm".into()],
+                anime: false,
+            })
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: library: {error}"));
+        let item = store
+            .insert_item(&NewItem {
+                library_id: library.id,
+                kind: ItemKind::Movie,
+                parent_id: None,
+                title: "Re-armed backfill".into(),
+                year: Some(2026),
+                season_number: None,
+                episode_number: None,
+            })
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: item: {error}"));
+        // FFprobe omits `field_order` for this HEVC stream.
+        let hevc = r#"{"streams":[{"codec_type":"video","codec_name":"hevc","width":3840,"height":2160}]}"#;
+        let hevc_value: serde_json::Value = serde_json::from_str(hevc).expect("hevc json");
+
+        // The current scanner's write for that document.
+        let scanned = store
+            .upsert_file(
+                item,
+                "/field-order-rearm/scanned.mkv",
+                10,
+                100,
+                &plurx_core::scan::probe::parse_probe_json(&hevc_value),
+            )
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: scanned file: {error}"));
+        // The pre-fix scanner's write for the same document: probed, NULL.
+        // This binary's write boundary stores `unknown` even for a result
+        // that lacks the token, so the stranded state is written raw.
+        let stranded_file = store
+            .upsert_file(
+                item,
+                "/field-order-rearm/stranded.mkv",
+                20,
+                200,
+                &ProbeResult {
+                    raw_json: Some(hevc.into()),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: stranded file: {error}"));
+        assert_eq!(
+            store
+                .get_file(stranded_file)
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: boundary read: {error}"))
+                .and_then(|file| file.field_order)
+                .as_deref(),
+            Some("unknown"),
+            "{backend}: the write boundary does not strand a probed row"
+        );
+        stranded.strand(stranded_file).await;
+        // A probed row with a reporter token, which the pass must not touch.
+        let progressive = store
+            .upsert_file(
+                item,
+                "/field-order-rearm/progressive.mkv",
+                30,
+                300,
+                &plurx_core::scan::probe::parse_probe_json(&serde_json::json!({
+                    "streams": [{"codec_type":"video","codec_name":"h264","field_order":"progressive"}]
+                })),
+            )
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: progressive file: {error}"));
+        // A row never probed stays NULL: there is no document to answer from.
+        let unprobed = store
+            .upsert_file(
+                item,
+                "/field-order-rearm/unprobed.mkv",
+                40,
+                400,
+                &ProbeResult::default(),
+            )
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: unprobed file: {error}"));
+
+        // The first pass already stamped itself done; that stamp must not stop
+        // the second pass, and the second pass leaves it where it is.
+        store
+            .put_setting("jobs.field_order_backfilled", "1")
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: seed first-pass stamp: {error}"));
+
+        let field_order = |id: i64| {
+            let store = Arc::clone(&store);
+            async move {
+                store
+                    .get_file(id)
+                    .await
+                    .unwrap_or_else(|error| panic!("{backend}: read {id}: {error}"))
+                    .and_then(|file| file.field_order)
+            }
+        };
+        assert_eq!(field_order(scanned).await.as_deref(), Some("unknown"), "{backend}");
+        assert_eq!(field_order(stranded_file).await, None, "{backend}");
+
+        let first = plurx_core::store::field_order_backfill_page(store.as_ref(), 0, 256)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: first page: {error}"));
+        assert!(!first.complete, "{backend}");
+        assert!(first.write_error.is_none(), "{backend}");
+        assert_eq!((first.updated, first.fenced), (1, 0), "{backend}");
+        assert_eq!(first.cursor, stranded_file, "{backend}");
+        assert_eq!(
+            field_order(stranded_file).await,
+            field_order(scanned).await,
+            "{backend}: identical media now stores one token whichever path wrote it"
+        );
+        assert_eq!(field_order(progressive).await.as_deref(), Some("progressive"), "{backend}");
+        assert_eq!(field_order(unprobed).await, None, "{backend}");
+        assert_eq!(
+            store
+                .get_setting(plurx_core::store::keys::JOB_FIELD_ORDER_BACKFILL_DONE)
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: stamp read: {error}")),
+            None,
+            "{backend}: a page that wrote rows is not the completing page"
+        );
+
+        let last = plurx_core::store::field_order_backfill_page(store.as_ref(), first.cursor, 256)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: completing page: {error}"));
+        assert!(last.complete, "{backend}");
+        let settings = store
+            .settings_snapshot()
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: snapshot: {error}"));
+        assert_eq!(
+            settings.get(plurx_core::store::keys::JOB_FIELD_ORDER_BACKFILL_DONE).map(String::as_str),
+            Some("1"),
+            "{backend}"
+        );
+        assert_eq!(
+            settings.get("jobs.field_order_backfilled").map(String::as_str),
+            Some("1"),
+            "{backend}: the first pass's stamp is left in place, like every superseded backfill's"
         );
     })
     .await;
@@ -19059,6 +19702,153 @@ async fn luminance_round_trips_and_backfill_updates_are_exactly_fenced() {
                 .await
                 .unwrap_or_else(|error| panic!("{backend}: stale write: {error}")),
             "{backend}: a classified row refuses a repeated stale update"
+        );
+    })
+    .await;
+}
+
+/// The first-frame backfill sees only HDR rows the stored-document walk left
+/// `none`, walks them by id, and its write lands only on the exact snapshot it
+/// listed while that row is still `none`.
+#[tokio::test]
+async fn frame_luminance_candidates_and_writes_are_exactly_fenced() {
+    for_each_backend(|store, backend| async move {
+        let library = store
+            .create_library(&NewLibrary {
+                name: "HDR frame luminance".into(),
+                kind: LibraryKind::Movies,
+                paths: vec!["/hdr-frame".into()],
+                anime: false,
+            })
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: library: {error}"));
+        let item = store
+            .insert_item(&NewItem {
+                library_id: library.id,
+                kind: ItemKind::Movie,
+                parent_id: None,
+                title: "HDR frame fixture".into(),
+                year: Some(2026),
+                season_number: None,
+                episode_number: None,
+            })
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: item: {error}"));
+        let seed = |path: &'static str, hdr: Option<&'static str>, source: Option<&'static str>| {
+            let store = Arc::clone(&store);
+            async move {
+                store
+                    .upsert_file(
+                        item,
+                        path,
+                        10,
+                        20,
+                        &ProbeResult {
+                            hdr: hdr.map(str::to_owned),
+                            luminance_source: source.map(str::to_owned),
+                            raw_json: Some(format!(r#"{{"streams":[],"p":"{path}"}}"#)),
+                            ..Default::default()
+                        },
+                    )
+                    .await
+                    .unwrap_or_else(|error| panic!("{backend}: file {path}: {error}"))
+            }
+        };
+        let first = seed("/hdr-frame/a.mkv", Some("hdr10"), Some("none")).await;
+        seed("/hdr-frame/b.mkv", Some("hdr10"), Some("stream")).await;
+        seed("/hdr-frame/c.mkv", Some("hdr10"), None).await;
+        seed("/hdr-frame/d.mkv", None, Some("none")).await;
+        let second = seed("/hdr-frame/e.mkv", Some("hlg"), Some("none")).await;
+
+        let page = store
+            .files_without_luminance_facts(0, 1)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: first page: {error}"));
+        assert_eq!(
+            page.iter().map(|row| row.id).collect::<Vec<_>>(),
+            vec![first],
+            "{backend}: bounded, ascending"
+        );
+        let after = store
+            .files_without_luminance_facts(first, 16)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: next page: {error}"));
+        assert_eq!(
+            after.iter().map(|row| row.id).collect::<Vec<_>>(),
+            vec![second],
+            "{backend}: only HDR rows classified none, strictly after the cursor"
+        );
+
+        let candidate = page.into_iter().next().expect("candidate");
+        // Each identity field fences the write on its own.
+        let mut stale_mtime = candidate.clone();
+        stale_mtime.mtime += 1;
+        let mut stale_size = candidate.clone();
+        stale_size.size += 1;
+        let mut stale_path = candidate.clone();
+        stale_path.path = "/hdr-frame/elsewhere.mkv".into();
+        let mut stale_probe = candidate.clone();
+        stale_probe.probe_json = r#"{"streams":[],"p":"rescanned"}"#.into();
+        for (field, stale) in [
+            ("mtime", stale_mtime),
+            ("size", stale_size),
+            ("path", stale_path),
+            ("probe_json", stale_probe),
+        ] {
+            assert!(
+                !store
+                    .set_file_frame_luminance(&stale, Some(1), None, None)
+                    .await
+                    .unwrap_or_else(|error| panic!("{backend}: stale {field}: {error}")),
+                "{backend}: a snapshot differing only in {field} is refused"
+            );
+            assert_eq!(
+                store
+                    .get_file(first)
+                    .await
+                    .unwrap_or_else(|error| panic!("{backend}: read: {error}"))
+                    .expect("stored file")
+                    .luminance_source
+                    .as_deref(),
+                Some("none"),
+                "{backend}: a refused {field} write left the row alone"
+            );
+        }
+        assert!(store
+            .set_file_frame_luminance(&candidate, Some(2008), Some(612), Some(4000))
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: write: {error}")));
+        let stored = store
+            .get_file(first)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: read: {error}"))
+            .expect("stored file");
+        assert_eq!(
+            (
+                stored.max_cll,
+                stored.max_fall,
+                stored.mastering_max_luminance,
+                stored.luminance_source.as_deref()
+            ),
+            (Some(2008), Some(612), Some(4000), Some("frame"))
+        );
+        assert!(
+            !store
+                .set_file_frame_luminance(&candidate, None, None, None)
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: repeated write: {error}")),
+            "{backend}: a row no longer none refuses a repeated write"
+        );
+        assert_eq!(
+            store
+                .files_without_luminance_facts(0, 16)
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: final page: {error}"))
+                .iter()
+                .map(|row| row.id)
+                .collect::<Vec<_>>(),
+            vec![second],
+            "{backend}: an observed row leaves the candidate set"
         );
     })
     .await;
@@ -24664,6 +25454,7 @@ async fn playback_telemetry_contract_runs_through_dyn_store() {
             throughput_kbps: Some(6_000),
             starved_rung_height: None,
             observed_at_ms: 1_700_000_100_000,
+            measured_link: None,
         }];
         assert_eq!(
             store
@@ -24764,6 +25555,7 @@ async fn network_prior_contract_runs_through_dyn_store() {
                 throughput_kbps: Some(8_000),
                 starved_rung_height: Some(1080),
                 observed_at_ms: 1_700_000_000_000,
+                measured_link: None,
             })
             .await
             .unwrap_or_else(|error| panic!("{backend}: observe prior: {error}"));
@@ -30813,6 +31605,7 @@ async fn offline_lifecycles_pin_shared_generations_through_dyn_store() {
 
 fn offline_request(id: &str, request_id: &str, user_id: i64, file_id: i64) -> NewOfflinePackage {
     NewOfflinePackage {
+        audio_recipe: None,
         id: id.into(),
         request_id: request_id.into(),
         user_id,
@@ -30834,6 +31627,99 @@ fn offline_request(id: &str, request_id: &str, user_id: i64, file_id: i64) -> Ne
         reserved_bytes: 5_000,
         expires_at: 10_000,
     }
+}
+
+#[tokio::test]
+async fn offline_audio_snapshot_survives_claim_and_server_policy_retry() {
+    for_each_backend(|store, backend| async move {
+        let (user_id, file_id) = seed_file(&store, "offline-audio-snapshot").await;
+        let audio = plurx_core::playback::audio::AudioDelivery {
+            action: plurx_core::playback::audio::AudioAction::Encode { codec: "aac".into(), channels: 6, layout: Some("5.1".into()), bitrate_kbps: 320, sample_rate: 48_000 },
+            downmix: None, reason: "accepted audio route".into(),
+        };
+        let mut first = offline_request("audio-package", "audio-request", user_id, file_id);
+        first.audio_recipe = Some(serde_json::to_string(&audio).expect("offline audio contract operation"));
+        let OfflineCreateOutcome::Created(created) = store.create_offline_package(&first, 10, 100_000, 100_000).await.expect("offline audio contract operation") else { panic!("{backend}: create"); };
+        assert_eq!(created.audio_recipe, first.audio_recipe);
+        let mut retried = first.clone();
+        retried.audio_recipe = None;
+        let OfflineCreateOutcome::Existing(existing) = store.create_offline_package(&retried, 10, 100_000, 100_000).await.expect("offline audio contract operation") else { panic!("{backend}: retry changed server snapshot"); };
+        assert_eq!(existing.audio_recipe, first.audio_recipe);
+        let claimed = store.claim_next_offline_package("offline-node").await.expect("offline audio contract operation").expect("claim");
+        assert_eq!(claimed.audio_recipe, first.audio_recipe);
+        let mut invalid = offline_request("bad-audio-package", "bad-audio-request", user_id, file_id);
+        invalid.audio_recipe = Some("{\"action\":{\"kind\":\"encode\",\"codec\":\"eac3\",\"channels\":6,\"bitrate_kbps\":640,\"sample_rate\":48000},\"reason\":\"not the AAC lattice\"}".into());
+        assert!(store.create_offline_package(&invalid, 10, 100_000, 100_000).await.is_err(), "{backend}: invalid VOD audio accepted");
+    }).await;
+}
+
+#[cfg(feature = "hiqlite-contract-tests")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn replicated_v65_offline_audio_migration_preserves_legacy_packages() {
+    let _case = HIQLITE_CASE.lock().await;
+    let cluster = ContractCluster::start().await;
+    let current: Arc<dyn Store> = Arc::new(open_contract_hiqlite_store(&cluster).await);
+    let (user_id, file_id) = seed_file(&current, "offline-audio-v65").await;
+    let legacy = offline_request("legacy-audio", "legacy-audio-request", user_id, file_id);
+    current
+        .create_offline_package(&legacy, 10, 100_000, 100_000)
+        .await
+        .expect("offline audio contract operation");
+    drop(current);
+    let client = Client::remote(
+        cluster.addresses.clone(),
+        true,
+        true,
+        CONTRACT_API_SECRET.to_owned(),
+        false,
+        None,
+    )
+    .await
+    .expect("offline audio contract operation");
+    client
+        .txn([
+            (
+                "ALTER TABLE offline_packages DROP COLUMN audio_recipe",
+                hiqlite::params!(),
+            ),
+            (
+                "UPDATE cluster_meta SET schema_version = $1 WHERE singleton = 1",
+                hiqlite::params!(65_i64),
+            ),
+        ])
+        .await
+        .expect("offline audio contract operation")
+        .into_iter()
+        .collect::<Result<Vec<_>, _>>()
+        .expect("offline audio contract operation");
+    let telemetry = cluster._root.path().join("offline-audio-v65-telemetry.db");
+    let migrated = HiqliteAuthStore::open_or_migrate(client.clone(), &telemetry)
+        .await
+        .expect("offline audio contract operation");
+    assert_eq!(replicated_schema_marker(&client).await, 66);
+    let stored = migrated
+        .offline_package_for_user(&legacy.id, user_id)
+        .await
+        .expect("offline audio contract operation")
+        .expect("offline audio contract operation");
+    assert_eq!(stored.audio_recipe, None);
+    assert_eq!(stored.source_path, legacy.source_path);
+    assert_eq!(stored.effective_rate_control, legacy.effective_rate_control);
+    drop(migrated);
+    client
+        .txn([(
+            "UPDATE cluster_meta SET schema_version = $1 WHERE singleton = 1",
+            hiqlite::params!(65_i64),
+        )])
+        .await
+        .expect("offline audio contract operation")
+        .into_iter()
+        .collect::<Result<Vec<_>, _>>()
+        .expect("offline audio contract operation");
+    HiqliteAuthStore::open_or_migrate(client.clone(), &telemetry)
+        .await
+        .expect("additive column replay");
+    assert_eq!(replicated_schema_marker(&client).await, 66);
 }
 
 #[tokio::test]
@@ -35261,6 +36147,7 @@ async fn sqlite_v70_migration_adds_the_read_indexes_and_keeps_the_catalogue() {
         conn.execute_batch(&format!("DROP INDEX {index};"))
             .expect("remove v70-only shape");
     }
+    drop_composed_v92_v93_columns(&conn);
     conn.pragma_update(None, "user_version", 69)
         .expect("mark the v69 predecessor");
     drop(conn);
@@ -35505,6 +36392,7 @@ async fn sqlite_v69_migration_from_v68_preserves_file_grants_and_live_analysis_r
         .expect("restore v68 attempt table");
     // A literal, not `SQLITE_SCHEMA_VERSION - 1`: the fixture is the v68
     // shape, and later migrations (v70's indexes) must replay after v69.
+    drop_composed_v92_v93_columns(&conn);
     conn.pragma_update(None, "user_version", 68)
         .expect("mark true v68 predecessor");
     drop(conn);

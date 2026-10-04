@@ -138,8 +138,12 @@ pub(super) async fn spawn_generation(
             run_generation(shared, rendition, stdout, at, epoch),
             crate::ffmpeg::drain_diagnostics(stderr),
         );
-        if !diagnostic.trim().is_empty() {
-            tracing::warn!(target: "plurxd::vodserve", rendition = %key, generation = epoch, %diagnostic, "VOD producer diagnostic");
+        let diagnostic = crate::ffmpeg::classify_diagnostic(&diagnostic);
+        if !diagnostic.informational.is_empty() {
+            tracing::debug!(target: "plurxd::vodserve", rendition = %key, generation = epoch, informational = %diagnostic.informational, "VOD producer informational output");
+        }
+        if !diagnostic.actionable.is_empty() {
+            tracing::warn!(target: "plurxd::vodserve", rendition = %key, generation = epoch, diagnostic = %diagnostic.actionable, "VOD producer diagnostic");
         }
     });
     tracing::info!(
@@ -212,13 +216,14 @@ pub(super) fn recipe_pipe_args(recipe: &Recipe, start_seconds: f64, attested: bo
         }
         args
     } else {
-        let mut args = copy_pipe_args_with_dolby_vision(
+        let mut args = plurx_core::transcode::copy_pipe_args_with_audio_delivery(
             &recipe.file,
             start_seconds,
             recipe.audio_index,
             recipe.aac,
             Pacing::unpaced(),
             recipe.video,
+            recipe.audio_delivery.as_ref(),
         );
         if attested {
             replace_inputs_with_attested_descriptor(&mut args);
@@ -442,12 +447,33 @@ async fn establish_or_verify(
                 let served = identity
                     .served_init_for(muxer)
                     .expect("an identity just established from this muxer init serves it");
-                if let Err(error) = store_identity(&rendition.identity_path(), &identity).await {
+                let preparation = rendition.preparation();
+                if let Err(error) = store_identity_observed(
+                    &rendition.identity_path(),
+                    &identity,
+                    preparation
+                        .as_ref()
+                        .map(|preparation| &preparation.allowance),
+                )
+                .await
+                {
                     tracing::warn!(
                         target: "plurxd::vodserve",
                         rendition = %rendition.key,
                         "persisting identity.json: {error}"
                     );
+                    if preparation.is_some() {
+                        rendition.revoke_preparation();
+                        drop(state);
+                        on_generation_end(
+                            shared,
+                            rendition,
+                            Outcome::Failed(Failure::Sink(error)),
+                            epoch,
+                        )
+                        .await;
+                        return false;
+                    }
                 }
                 *state = IdentityState {
                     identity: Some(identity),
@@ -456,6 +482,25 @@ async fn establish_or_verify(
                 served
             }
         }
+    };
+    let preparation = rendition.preparation();
+    let pending = if let Some(preparation) = preparation.as_ref() {
+        match preparation.allowance.begin(served.bytes.len() as u64) {
+            Some(pending) => Some(pending),
+            None => {
+                rendition.revoke_preparation();
+                on_generation_end(
+                    shared,
+                    rendition,
+                    Outcome::Failed(Failure::Sink(io::ErrorKind::OutOfMemory.into())),
+                    epoch,
+                )
+                .await;
+                return false;
+            }
+        }
+    } else {
+        None
     };
     if let Err(error) = rendition.dir.write_init(&served.bytes).await {
         on_generation_end(
@@ -466,6 +511,9 @@ async fn establish_or_verify(
         )
         .await;
         return false;
+    }
+    if let Some(pending) = pending {
+        pending.commit(false);
     }
     rendition.clear_demand(INIT_DEMAND_INDEX);
     rendition.init_notify.notify_waiters();
@@ -479,6 +527,14 @@ async fn on_generation_end(
     outcome: Outcome,
     epoch: u64,
 ) {
+    if rendition.cancelled_preparation_epoch.load(Acquire) == epoch.saturating_add(1) {
+        // Background cancellation is not a foreground producer verdict. The
+        // key/readers fence refuses to terminate an epoch acquired by a live
+        // reader; its existing driver owns subsequent reconciliation.
+        super::copy_preparation::fence_cancelled_epoch(shared, rendition, epoch).await;
+        rendition.kick();
+        return;
+    }
     if rendition.closed.load(Relaxed) {
         return;
     }
@@ -746,6 +802,44 @@ pub(super) async fn credit_marker_prewarm_publication(
 }
 
 impl vodgen::Sink for RenditionSink {
+    async fn completed_output(&self) {
+        if !recipe_engine_is_current(&self.rendition.recipe).await {
+            return;
+        }
+        let manifest = self.rendition.manifest.lock().await;
+        // Only vodgen's verified normal trailer reaches this callback. The
+        // driver may already have retired an all-done child, but that cannot
+        // invalidate its successfully published bytes. The observer still
+        // checks the original Sink epoch; mixed/repeated writes lose proof.
+        if !self.rendition.closed.load(Relaxed)
+            && self
+                .rendition
+                .source
+                .as_ref()
+                .is_some_and(|source| source.unchanged())
+        {
+            let mut measurement = self
+                .rendition
+                .output_measurement
+                .lock()
+                .expect("output measurement lock");
+            measurement.complete(
+                self.epoch,
+                !manifest.is_empty() && manifest.next_gap(0).is_none(),
+            );
+            if let Some(rates) = measurement.complete_rates() {
+                tracing::debug!(target: "plurxd::vodserve",
+                    output_identity = %hex::encode(rates.identity),
+                    wire_bytes = rates.wire_bytes, duration_micros = rates.duration_micros,
+                    average_bps = rates.average_bps, rfc_peak_bps = rates.rfc_peak_bps,
+                    segment_burst_bps = rates.segment_burst_bps,
+                    "complete full-mux VOD measurement; retained wire consumer not issued");
+            }
+            drop(measurement);
+            drop(manifest);
+            super::retained::RetainedArtifactRegistry::offer(&self.shared, &self.rendition);
+        }
+    }
     async fn materialize(&self, entry: u32, bytes: Vec<u8>) -> io::Result<()> {
         if self.rendition.closed.load(Relaxed) {
             // The quiet teardown: `NotFound` is how vodgen learns the session
@@ -790,6 +884,8 @@ impl vodgen::Sink for RenditionSink {
             return Err(io::Error::new(io::ErrorKind::InvalidData, cause));
         }
         let len = bytes.len() as u64;
+        let digest: [u8; 32] = Sha256::digest(&bytes).into();
+        let init = self.rendition.identity.lock().await.identity.clone();
         {
             let mut manifest = self.rendition.manifest.lock().await;
             // Checked under the manifest lock, so a driver bumping the epoch
@@ -798,20 +894,60 @@ impl vodgen::Sink for RenditionSink {
                 return Err(io::Error::from(io::ErrorKind::NotFound));
             }
             let before = manifest.state(entry).map(|s| s.bytes()).unwrap_or(0);
+            let preparation = self.rendition.preparation();
+            let pending = if let Some(preparation) = preparation.as_ref() {
+                if before != 0 || manifest.is_admitted() {
+                    self.rendition.revoke_preparation();
+                    return Err(io::ErrorKind::InvalidData.into());
+                }
+                match preparation.allowance.begin(len) {
+                    Some(pending) => Some(pending),
+                    None => {
+                        self.rendition.revoke_preparation();
+                        return Err(io::ErrorKind::OutOfMemory.into());
+                    }
+                }
+            } else {
+                None
+            };
             self.rendition
                 .dir
                 .materialize(&mut manifest, entry, &bytes, now_ms())
                 .await?;
+            let publication =
+                credit_marker_prewarm_publication(&self.rendition, self.epoch, entry).await;
+            if let Some(init) = init.as_ref() {
+                self.rendition
+                    .output_measurement
+                    .lock()
+                    .expect("output measurement lock")
+                    .observe(
+                        &self.rendition,
+                        init,
+                        self.epoch,
+                        entry,
+                        output_measurement::ObservedOutputMember {
+                            bytes: len,
+                            digest,
+                            publication,
+                        },
+                    );
+            }
             // Publication and provenance linearize under the same manifest
             // lock. A skip can therefore observe neither fact or both, never
             // real prewarm bytes with a missing credit.
-            credit_marker_prewarm_publication(&self.rendition, self.epoch, entry).await;
             if !manifest.is_admitted() {
                 sub_saturating(&self.shared.working_set, before);
                 self.shared.working_set.fetch_add(len, Relaxed);
             }
-            if manifest.next_gap(0).is_none() {
+            if let Some(pending) = pending {
+                pending.commit(true);
+            }
+            if manifest.next_gap(0).is_none() && preparation.is_none() {
                 self.shared.try_admit(&self.rendition, &mut manifest).await;
+            }
+            if let Some(preparation) = preparation {
+                preparation.progress.notify_waiters();
             }
             self.rendition.clear_demand(entry);
         }

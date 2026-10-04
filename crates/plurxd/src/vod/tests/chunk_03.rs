@@ -1,4 +1,48 @@
 
+
+    #[tokio::test]
+    async fn a05_real_vod_staged_observation_is_not_commit_authority_and_cannot_follow_replacement() {
+        let base = crate::test_tempdir().expect("base");
+        let store = Arc::new(SqliteStore::open_in_memory().expect("store"));
+        let session_id = uuid::Uuid::new_v4().to_string();
+        let generation = uuid::Uuid::new_v4().to_string();
+        activate_control_route(store.as_ref(), &session_id, &generation).await;
+        let serve = local_serve(base.path().to_path_buf(), store);
+        let rendition = synthetic_rendition(base.path()).await;
+        insert_control_session(&serve, &session_id, Arc::clone(&rendition), Instant::now()).await;
+
+        let mut snapshot = crate::playback_control::PlaybackDemandSnapshot::test_default(crate::playback_control::ClientPlatform::Web);
+        snapshot.request_fingerprint = Some("origin".into());
+        let desired = snapshot.selection.desired().digest();
+        let client = uuid::Uuid::new_v4().to_string();
+
+        let accepted = serve.control(crate::playback_control::LocalControlRequest {
+            session_id: &session_id, generation: &generation, owner_node_id: "node-a", owner_epoch: 1,
+            client_instance_id: &client, sequence: 1, snapshot,
+            prepared_successor: crate::playback_control::PreparedSuccessorObservation::NotRequested,
+        }).await.expect("VOD worker").expect("accepted");
+        assert_eq!(accepted.disposition, crate::playback_control::ControlDisposition::Accepted);
+
+        let gate = serve.preparation_gate(&session_id).await.expect("real VOD gate");
+        let identity = crate::playback_control::AcceptedControlIdentity {
+            generation: generation.clone(), owner_epoch: 1, client_instance_id: client.clone(),
+            sequence: 1, fingerprint: "origin".into(), desired_digest: desired.clone(),
+        };
+        let proof = gate.accepted_observation(identity).await.expect("real accepted actor origin");
+        let staged = uuid::Uuid::new_v4().to_string();
+        let deadline = crate::media_sessions::unix_ms() + 60_000;
+        assert!(gate.staged_observation_is_current(proof.clone(), staged.clone(), deadline).await.is_none(), "reservation absent");
+        assert!(gate.stage_preparation_for_owner(staged.clone(), generation.clone(), deadline, 1, Some(desired)).await);
+        assert!(!gate.may_commit_preparation_for_owner(&staged, 1).await, "no commit reservation");
+        assert!(gate.staged_observation_is_current(proof.clone(), staged.clone(), deadline).await.is_some(), "real Staged is observable before commit");
+        assert!(gate.begin_abort_preparation_for_owner(&staged, 1).await);
+        assert!(gate.staged_observation_is_current(proof.clone(), staged.clone(), deadline).await.is_none(), "aborting is not observation authority");
+        serve.shared.sessions.lock().await.remove(&session_id);
+        insert_control_session(&serve, &session_id, rendition, Instant::now()).await;
+        assert!(!gate.observation_is_current(proof).await, "retired exact attachment cannot be followed");
+
+    }
+
     #[tokio::test]
     async fn resolved_vod_owner_cannot_commit_after_tombstone_or_reattachment() {
         let base = crate::test_tempdir().expect("base");
@@ -9,6 +53,7 @@
             "sess-a".into(),
             Session {
                 rendition: Some(Arc::clone(&rendition)),
+                retained_output: None,
                 rendition_key: rendition.key.clone(),
                 file: Arc::new(rendition.recipe.file.clone()),
                 playback_id: "play-a".into(),
@@ -57,6 +102,7 @@
             Session {
                 rendition: Some(rendition),
                 rendition_key: replacement_key,
+                retained_output: None,
                 file: replacement_file,
                 playback_id: "play-b".into(),
                 user_name: "paul".into(),
@@ -1687,10 +1733,13 @@
                 "shipped-shape",
                 None,
                 Recipe {
+                    retained_logical: None,
+                    measured_candidate: None,
                     file,
                     audio_index: None,
-                    aac: true,
-                    video: CopyVideoOptions::new(false, false),
+                   aac: true,
+                    audio_delivery: None,
+                   video: CopyVideoOptions::new(false, false),
                     source_object_version: Some(encoding.source_object_version.clone()),
                     cluster_cache_key: None,
                     encoding: Some(Arc::clone(&encoding)),
@@ -2813,6 +2862,7 @@
             Session {
                 rendition: Some(rendition),
                 rendition_key,
+                retained_output: None,
                 file,
                 playback_id: "play-a".into(),
                 user_name: "paul".into(),
@@ -2950,10 +3000,13 @@
     fn the_plan_derives_video_from_the_index_and_audio_from_the_container() {
         let index = synthetic_index(24);
         let recipe = Recipe {
+            retained_logical: None,
+            measured_candidate: None,
             file: media_file_at(PathBuf::from("unused.mkv"), 0),
             audio_index: None,
-            aac: true,
-            video: CopyVideoOptions::new(false, false),
+           aac: true,
+            audio_delivery: None,
+           video: CopyVideoOptions::new(false, false),
             source_object_version: None,
             cluster_cache_key: None,
             encoding: None,
@@ -3173,6 +3226,115 @@
         // identity and serves.
         let ready = fetch(&second, "sess-b", "seg00000.m4s").await;
         assert!(ready.len > 0);
+    }
+
+    #[tokio::test]
+    async fn full_output_sink_observes_only_committed_current_epoch_bytes_and_complete_tail() {
+        use crate::vodgen::Sink;
+        let temp = crate::test_tempdir().expect("measurement fixture");
+        let serve = bare_serve(temp.path());
+        let mut rendition = synthetic_rendition(temp.path()).await;
+        let path = temp.path().join("source.bin");
+        tokio::fs::write(&path, b"held source version").await.expect("source fixture");
+        let file = media_file_at(path, 10_000);
+        let source = crate::fragment_index_cluster::open_source_fence(&file, None)
+            .await.expect("held source fence");
+        let owned = Arc::get_mut(&mut rendition).expect("unshared fixture");
+        owned.source = Some(source);
+        *owned.identity.get_mut() = IdentityState {
+            identity: Some(InitIdentity {
+                muxer_init: "fixture-muxer".to_owned(),
+                served_init: "fixture-served".to_owned(),
+                promotion: Default::default(),
+            }),
+            from_disk: false,
+        };
+        let sink = RenditionSink {
+            shared: Arc::clone(&serve.shared),
+            rendition: Arc::clone(&rendition),
+            epoch: 0,
+        };
+        let stale = RenditionSink {
+            shared: Arc::clone(&serve.shared),
+            rendition: Arc::clone(&rendition),
+            epoch: 1,
+        };
+        assert_eq!(stale.materialize(0, vec![7; 999]).await
+            .expect_err("stale write").kind(), io::ErrorKind::NotFound);
+        for entry in 0..rendition.plan.len() {
+            sink.materialize(entry as u32, vec![7; 1000 + entry]).await
+                .expect("successful actual directory commit");
+        }
+        assert!(rendition.output_measurement.lock().expect("observer")
+            .complete_rates().is_none(), "entries alone are not a completed trailer");
+        sink.completed_output().await;
+        let rates = rendition.output_measurement.lock().expect("observer")
+            .complete_rates().expect("complete full-output observation");
+        assert_eq!(rates.wire_bytes, (0..rendition.plan.len()).map(|i| 1000 + i as u64).sum::<u64>());
+        sink.materialize(0, vec![7; 1000]).await.expect("legacy repeat remains playable");
+        assert!(rendition.output_measurement.lock().expect("observer")
+            .complete_rates().is_none(), "duplicate publication loses measurement authority");
+    }
+
+    #[tokio::test]
+    async fn retained_complete_output_pins_exact_init_media_and_refuses_conflicting_repair() {
+        use crate::vodgen::Sink;
+        let temp = crate::test_tempdir().expect("retained fixture");
+        let serve = bare_serve(temp.path());
+        let mut rendition = synthetic_rendition(temp.path()).await;
+        let source_path = temp.path().join("held-source.bin");
+        tokio::fs::write(&source_path, b"original source").await.expect("source");
+        let file = media_file_at(source_path, 10_000);
+        let source = crate::fragment_index_cluster::open_source_fence(&file, None).await.expect("source fence");
+        let init = b"original immutable init";
+        let served_init = hex::encode(Sha256::digest(init));
+        let owned = Arc::get_mut(&mut rendition).expect("unshared fixture");
+        owned.source = Some(source);
+        owned.recipe.file = file;
+        *owned.identity.get_mut() = IdentityState {
+            identity: Some(InitIdentity { muxer_init: served_init.clone(), served_init, promotion: Default::default() }),
+            from_disk: false,
+        };
+        tokio::fs::write(rendition.dir.path().join(INIT_NAME), init).await.expect("init");
+        serve.shared.retained_artifacts.collect(temp.path()).await;
+        let sink = RenditionSink { shared: Arc::clone(&serve.shared), rendition: Arc::clone(&rendition), epoch: 0 };
+        for entry in 0..rendition.plan.len() {
+            sink.materialize(entry as u32, vec![7; 1000 + entry]).await.expect("actual publication");
+        }
+        sink.completed_output().await;
+        let identity = rendition.output_measurement.lock().expect("observer").complete_rates().expect("complete").identity;
+        wait_until("retained assembly", Duration::from_secs(5), || {
+            let serve = Arc::clone(&serve);
+            async move { serve.shared.retained_artifacts.acquire(&identity).is_some() }
+        }).await;
+        let artifact = serve.shared.retained_artifacts.acquire(&identity).expect("retained artifact");
+        let meter = Arc::new(crate::meter::Meter::default());
+        let mut init_ready = artifact.open(None, &meter, &serve.shared, &rendition, Duration::from_secs(1)).await.expect("retained init");
+        let mut init_bytes = Vec::new();
+        init_ready.file.read_to_end(&mut init_bytes).await.expect("read init");
+        assert_eq!(init_bytes, init);
+        assert!(init_ready.observed_media_duration_ms.is_none());
+        let mut ready = artifact.open(Some(0), &meter, &serve.shared, &rendition, Duration::from_secs(1)).await.expect("retained segment");
+        assert!(ready.retained_lease.is_some());
+        assert_eq!(ready.observed_media_duration_ms, plan_media_duration_ms(&rendition, 0));
+        // The ordinary recipe names change, but already-issued hardlink and
+        // open body leases continue to name precisely the original bytes.
+        sink.materialize(0, vec![9; 1000]).await.expect("ordinary rematerialization");
+        let mut original = Vec::new();
+        ready.file.read_to_end(&mut original).await.expect("open body remains readable");
+        assert_eq!(original, vec![7; 1000]);
+        let private = temp.path().join(".retained").join(artifact.facts().artifact_id);
+        tokio::fs::remove_file(private.join(segment_name(0))).await.expect("missing-object fixture");
+        assert!(matches!(artifact.open(Some(0), &meter, &serve.shared, &rendition, Duration::from_secs(1)).await,
+            Err(VodError::ProducerFailed(_))), "different live bytes cannot repair an issued proof");
+        assert!(rendition.failed.lock().expect("failure lock").is_none(), "artifact-local refusal cannot poison the rendition");
+        sink.materialize(0, vec![7; 1000]).await.expect("exact replacement bytes");
+        let repaired = artifact.open(Some(0), &meter, &serve.shared, &rendition, Duration::from_secs(1)).await.expect("exact repair");
+        assert_eq!(repaired.len, 1000);
+        assert!(serve.shared.retained_artifacts.acquire_expected(&artifact.facts(), &rendition).is_some());
+        let mut wrong = artifact.facts();
+        wrong.average_bps += 1;
+        assert!(serve.shared.retained_artifacts.acquire_expected(&wrong, &rendition).is_none());
     }
 
     /// Fix 4: a stale generation's queued materialize — landing after the
@@ -3528,4 +3690,65 @@
         assert!(serve.reopen_facts("sess-a").await.is_none());
         assert!(serve.owns("sess-a").await, "tombstoned is still addressed");
         assert!(serve.frontier_ms("sess-x").await.is_none());
+    }
+    #[tokio::test]
+    async fn a05_real_vod_terminal_or_idle_removal_during_route_result_await_invalidates_observation() {
+        for terminal in [true, false] {
+            let base = crate::test_tempdir().expect("base");
+            let store = Arc::new(SqliteStore::open_in_memory().expect("store"));
+            let session_id = uuid::Uuid::new_v4().to_string();
+            let generation = uuid::Uuid::new_v4().to_string();
+            activate_control_route(store.as_ref(), &session_id, &generation).await;
+            let serve = local_serve(base.path().to_path_buf(), store.clone());
+            let rendition = synthetic_rendition(base.path()).await;
+            insert_control_session(&serve, &session_id, rendition, Instant::now()).await;
+            let mut snapshot = crate::playback_control::PlaybackDemandSnapshot::test_default(crate::playback_control::ClientPlatform::Web);
+            snapshot.request_fingerprint = Some("vod-origin".into());
+            let desired = snapshot.selection.desired().digest();
+            let client = uuid::Uuid::new_v4().to_string();
+            let accepted = serve.control(crate::playback_control::LocalControlRequest {
+                session_id: &session_id, generation: &generation, owner_node_id: "node-a", owner_epoch: 1,
+                client_instance_id: &client, sequence: 1, snapshot,
+                prepared_successor: crate::playback_control::PreparedSuccessorObservation::NotRequested,
+            }).await.expect("VOD worker").expect("accepted");
+            assert_eq!(accepted.disposition, crate::playback_control::ControlDisposition::Accepted);
+            let gate = serve.preparation_gate(&session_id).await.expect("real VOD gate");
+            let origin = gate.accepted_observation(crate::playback_control::AcceptedControlIdentity {
+                generation: generation.clone(), owner_epoch: 1, client_instance_id: client,
+                sequence: 1, fingerprint: "vod-origin".into(), desired_digest: desired.clone(),
+            }).await.expect("accepted origin");
+            let staged = uuid::Uuid::new_v4().to_string();
+            let deadline = crate::media_sessions::unix_ms() + 60_000;
+            assert!(gate.stage_preparation_for_owner(staged.clone(), generation, deadline, 1, Some(desired)).await);
+            let stage = gate.staged_observation_is_current(origin.clone(), staged, deadline).await.expect("actual stage token");
+            let held_incarnation = Arc::clone(&serve.shared.sessions.lock().await.get(&session_id).expect("session").incarnation);
+            let read_ready = tokio::sync::Notify::new();
+            let release = tokio::sync::Notify::new();
+            let route_result = async {
+                let route = store.media_session_route(&session_id).await.expect("real route query").expect("route");
+                read_ready.notify_one();
+                release.notified().await;
+                route
+            };
+            tokio::pin!(route_result);
+            tokio::select! {
+                () = read_ready.notified() => {},
+                _ = &mut route_result => panic!("final route result must remain awaited"),
+            }
+            if terminal {
+                assert!(serve.begin_end_detached(&session_id, Terminal::Deleted).await);
+            } else {
+                *serve.shared.sessions.lock().await.get(&session_id).expect("live session").last_touch.lock().expect("touch") =
+                    Instant::now() - SESSION_IDLE_TTL - Duration::from_secs(1);
+                serve.maintain().await;
+                assert!(!serve.shared.sessions.lock().await.contains_key(&session_id));
+            }
+            release.notify_one();
+            let old_route = route_result.await;
+            assert_eq!(old_route.state, "active", "the already-read durable response still looks active");
+            assert!(Arc::strong_count(&held_incarnation) >= 1, "old weak identity can still upgrade");
+            assert!(!stage.still_live(), "actual VOD terminal/removal invalidates stage before claim");
+            assert!(!origin.still_live(), "actual VOD attachment retirement invalidates desired origin");
+            assert!(!gate.observation_is_current(origin).await);
+        }
     }

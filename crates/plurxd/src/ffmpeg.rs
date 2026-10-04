@@ -179,6 +179,61 @@ pub(crate) async fn drain_diagnostics(mut input: impl AsyncRead + Unpin) -> Stri
     String::from_utf8_lossy(&tail).into_owned()
 }
 
+/// A producer's drained stderr tail, split into the lines an operator should
+/// see and the informational lines a library prints on every start.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub(crate) struct ProducerDiagnostic {
+    /// Everything not known to be informational, in order. A warning's worth.
+    pub(crate) actionable: String,
+    /// Known informational lines, in order. Debug detail only.
+    pub(crate) informational: String,
+}
+
+/// Line prefixes that are never a producer diagnostic. libva writes its own
+/// `libva info:` lines (the VA-API version, the driver it tries to open, the
+/// init function it found, `va_openDriver() returns 0`) straight to stderr,
+/// whatever FFmpeg's `-loglevel` says, once for every VA-API or QSV device a
+/// child opens; a healthy QSV generation therefore always had a "diagnostic".
+/// `libva error:` is not on this list and stays actionable.
+const INFORMATIONAL_DIAGNOSTIC_PREFIXES: &[&str] = &["libva info:"];
+
+/// Whether one stderr line is informational output rather than a diagnostic:
+/// it starts, after leading whitespace, with one of
+/// [`INFORMATIONAL_DIAGNOSTIC_PREFIXES`]. The one rule every ffmpeg stderr
+/// consumer uses, line by line ([`classify_diagnostic`], the rolling
+/// transcode's stderr log, the Live TV readiness error).
+pub(crate) fn is_informational_diagnostic(line: &str) -> bool {
+    let trimmed = line.trim_start();
+    INFORMATIONAL_DIAGNOSTIC_PREFIXES
+        .iter()
+        .any(|prefix| trimmed.starts_with(prefix))
+}
+
+/// Classify a [`drain_diagnostics`] tail line by line. Blank lines are
+/// dropped; a line is informational only when it starts with one of
+/// [`INFORMATIONAL_DIAGNOSTIC_PREFIXES`], so anything unrecognised stays
+/// actionable.
+pub(crate) fn classify_diagnostic(tail: &str) -> ProducerDiagnostic {
+    let mut actionable = Vec::new();
+    let mut informational = Vec::new();
+    for line in tail.lines() {
+        let line = line.trim_end_matches('\r');
+        let trimmed = line.trim_start();
+        if trimmed.trim_end().is_empty() {
+            continue;
+        }
+        if is_informational_diagnostic(trimmed) {
+            informational.push(line);
+        } else {
+            actionable.push(line);
+        }
+    }
+    ProducerDiagnostic {
+        actionable: actionable.join("\n"),
+        informational: informational.join("\n"),
+    }
+}
+
 /// A file-producing child with no captured stdout and one bounded stderr
 /// reader. Cancellation transfers the exact child to a reap owner, never a
 /// detached diagnostic reader. Used by whole-track burn extraction.
@@ -402,6 +457,11 @@ pub(crate) struct EncodedExecutable {
 }
 
 impl EncodedExecutable {
+    pub(crate) async fn capture_program(program: &str) -> Result<Self, String> {
+        let path =
+            resolve_executable_path(program).ok_or("cannot resolve the producer executable")?;
+        Self::capture_at(path).await
+    }
     pub async fn capture() -> Result<Self, String> {
         let path = encoder_executable_path().ok_or("cannot resolve the encoder executable")?;
         Self::capture_at(path).await
@@ -2618,6 +2678,38 @@ async fn read_bounded_with_limit(
     Ok(bytes)
 }
 
+/// Digests of engine objects keyed by path and the cheap object version
+/// (`engine_object_version`: device, inode, size, mtime and ctime). The same
+/// version identity already decides whether a hash raced a replacement, so a
+/// matching version proves the bytes are the ones hashed. A replaced or
+/// touched object has a new version and is hashed again. The key set is the
+/// resolved encoder and its loaded dependencies, so it stays small.
+/// Digest per engine object path, tagged with the object version it was taken at.
+type EngineObjectDigests =
+    std::sync::Mutex<std::collections::HashMap<std::path::PathBuf, (String, Vec<u8>)>>;
+static ENGINE_OBJECT_DIGESTS: std::sync::LazyLock<EngineObjectDigests> =
+    std::sync::LazyLock::new(Default::default);
+
+fn cached_engine_digest(path: &std::path::Path, version: &str) -> Option<Vec<u8>> {
+    ENGINE_OBJECT_DIGESTS
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .get(path)
+        .filter(|(cached, _)| cached == version)
+        .map(|(_, digest)| digest.clone())
+}
+
+fn remember_engine_digest(path: &std::path::Path, version: &str, digest: &[u8]) {
+    ENGINE_OBJECT_DIGESTS
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .insert(path.to_owned(), (version.to_owned(), digest.to_vec()));
+}
+
+/// SHA-256 of one engine object plus its object version. Only the first
+/// capture of an object version reads the bytes; every start path captures
+/// the executable several times, and hashing a ~100 MB binary each time cost
+/// seconds of disk read per playback start.
 async fn hash_engine_object(path: &std::path::Path) -> Result<(Vec<u8>, String), String> {
     #[cfg(unix)]
     let metadata = tokio::fs::metadata(path)
@@ -2647,6 +2739,9 @@ async fn hash_engine_object(path: &std::path::Path) -> Result<(Vec<u8>, String),
     let version = engine_object_version(&metadata)?;
     #[cfg(windows)]
     let version = windows_engine_object_version(&source)?;
+    if let Some(digest) = cached_engine_digest(path, &version) {
+        return Ok((digest, version));
+    }
     #[cfg(unix)]
     let mut file = tokio::fs::File::open(path)
         .await
@@ -2684,7 +2779,9 @@ async fn hash_engine_object(path: &std::path::Path) -> Result<(Vec<u8>, String),
             path.display()
         ));
     }
-    Ok((object.finalize().to_vec(), version))
+    let digest = object.finalize().to_vec();
+    remember_engine_digest(path, &version, &digest);
+    Ok((digest, version))
 }
 
 pub(crate) fn engine_path_version(path: &std::path::Path) -> Result<String, String> {
@@ -3614,6 +3711,31 @@ async fn probe_burst() -> Result<Duration, String> {
 
 #[cfg(test)]
 mod tests {
+
+    #[tokio::test]
+    async fn engine_object_digest_is_reused_per_version_and_rehashed_on_change() {
+        use sha2::Digest as _;
+        let directory = tempfile::tempdir().expect("directory");
+        let path = directory.path().join("engine-object");
+        std::fs::write(&path, b"first engine bytes").expect("object");
+        let (first, version) = super::hash_engine_object(&path).await.expect("first hash");
+        assert_eq!(first, sha2::Sha256::digest(b"first engine bytes").to_vec());
+        assert_eq!(
+            super::cached_engine_digest(&path, &version),
+            Some(first.clone()),
+            "a captured version is served without reading the object again"
+        );
+        let (again, same_version) = super::hash_engine_object(&path).await.expect("cached");
+        assert_eq!((again, same_version), (first.clone(), version.clone()));
+        // A replacement changes the cheap object version (size, ctime, inode).
+        std::fs::write(&path, b"replaced engine object bytes").expect("replacement");
+        let (replaced, replaced_version) = super::hash_engine_object(&path).await.expect("rehash");
+        assert_ne!(replaced_version, version);
+        assert_eq!(
+            replaced,
+            sha2::Sha256::digest(b"replaced engine object bytes").to_vec()
+        );
+    }
 
     #[cfg(unix)]
     #[tokio::test]
@@ -5139,6 +5261,39 @@ mod tests {
                 "{pointer}"
             );
         }
+    }
+
+    /// Owned-lab receipt 2026-10-02, defect 3: every QSV VOD generation logged
+    /// `WARN VOD producer diagnostic ... libva info: VA-API version 1.24.0`.
+    /// libva's start-up lines are informational; FFmpeg's own diagnostics and
+    /// `libva error:` lines stay actionable, in order.
+    #[test]
+    fn libva_info_lines_are_informational_not_producer_diagnostics() {
+        let qsv_start = "libva info: VA-API version 1.24.0\n\
+                         libva info: Trying to open /usr/lib/jellyfin-ffmpeg/lib/dri/iHD_drv_video.so\n\
+                         libva info: Found init function __vaDriverInit_1_24\n\
+                         libva info: va_openDriver() returns 0\n";
+        let healthy = classify_diagnostic(qsv_start);
+        assert_eq!(healthy.actionable, "");
+        assert_eq!(healthy.informational.lines().count(), 4);
+        assert!(healthy
+            .informational
+            .starts_with("libva info: VA-API version 1.24.0"));
+
+        let decoder = "[h264 @ 0x5f5b2ef0c780] number of reference frames (0+5) exceeds max (4; probably corrupt input), discarding one";
+        let driver = "libva error: /usr/lib/jellyfin-ffmpeg/lib/dri/iHD_drv_video.so init failed";
+        let mixed = classify_diagnostic(&format!("{qsv_start}{decoder}\r\n\n{driver}\n"));
+        assert_eq!(mixed.actionable, format!("{decoder}\n{driver}"));
+        assert_eq!(mixed.informational, healthy.informational);
+
+        // A recognised prefix later in a line is not the line's start.
+        assert!(is_informational_diagnostic(
+            "  libva info: VA-API version 1.24.0"
+        ));
+        assert!(!is_informational_diagnostic(driver));
+        let quoted = "[mov @ 0x1] could not open 'libva info: x.mkv'";
+        assert_eq!(classify_diagnostic(quoted).actionable, quoted);
+        assert_eq!(classify_diagnostic(" \n\n"), ProducerDiagnostic::default());
     }
 
     #[tokio::test]

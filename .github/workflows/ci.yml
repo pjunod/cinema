@@ -7,6 +7,19 @@ on:
   push:
     tags: ["v*"]
   workflow_dispatch:
+    inputs:
+      promotion_pr:
+        description: "Optional open same-repo effort/integration promotion PR to main"
+        required: false
+        default: ""
+      promotion_head_sha:
+        description: "Immutable promotion head SHA; dispatch on that head branch"
+        required: false
+        default: ""
+      promotion_base_sha:
+        description: "Immutable current main SHA already merged into the promotion head"
+        required: false
+        default: ""
 
 env:
   CARGO_TERM_COLOR: always
@@ -54,11 +67,25 @@ jobs:
       docs_only: ${{ steps.scope.outputs.docs_only }}
       qualification: ${{ steps.scope.outputs.qualification }}
       execution_mode: ${{ steps.execution_mode.outputs.mode }}
+      promotion_binding: ${{ steps.promotion.outputs.promotion_binding }}
+      promotion_pr: ${{ steps.promotion.outputs.promotion_pr }}
+      promotion_base_sha: ${{ steps.promotion.outputs.promotion_base_sha }}
     steps:
       - uses: https://data.forgejo.org/actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           persist-credentials: false
           fetch-depth: 0
+      - name: Bind the manual qualification to its actual promotion PR
+        id: promotion
+        if: >-
+          github.event_name == 'workflow_dispatch' &&
+          (inputs.promotion_pr != '' || inputs.promotion_head_sha != '' || inputs.promotion_base_sha != '')
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          PLURX_PROMOTION_PR: ${{ inputs.promotion_pr }}
+          PLURX_PROMOTION_HEAD_SHA: ${{ inputs.promotion_head_sha }}
+          PLURX_PROMOTION_BASE_SHA: ${{ inputs.promotion_base_sha }}
+        run: python3 -m validation.qualification --bind-manual >> "$GITHUB_OUTPUT"
       - name: Select affected CI surfaces
         id: scope
         env:
@@ -66,9 +93,16 @@ jobs:
           VALIDATION_BASE: ${{ github.event.pull_request.base.sha || github.event.before }}
           HEAD_REF: ${{ github.event.pull_request.head.ref }}
           BASE_REF: ${{ github.event.pull_request.base.ref }}
+          PROMOTION_BINDING: ${{ steps.promotion.outputs.promotion_binding }}
+          PROMOTION_BASE_SHA: ${{ steps.promotion.outputs.promotion_base_sha }}
         run: |
           scope_event="$EVENT_NAME"
           qualification=false
+          if [ -n "$PROMOTION_BINDING" ]; then
+            scope_event=effort_qualification
+            qualification=true
+            VALIDATION_BASE="$PROMOTION_BASE_SHA"
+          fi
           if [ "$EVENT_NAME" = pull_request ] \
             && [ "$BASE_REF" = main ]; then
             case "$HEAD_REF" in
@@ -111,19 +145,27 @@ jobs:
       # actually ships, while the recorded base still scopes which release
       # inputs this branch touched.
       - name: Resolve the current merge target
-        if: github.event_name == 'pull_request'
+        if: github.event_name == 'pull_request' || needs.scope.outputs.qualification == 'true'
         env:
           BASE_REF: ${{ github.event.pull_request.base.ref }}
           GITHUB_TOKEN: ${{ github.token }}
+          BOUND_BASE_SHA: ${{ needs.scope.outputs.promotion_base_sha }}
         run: |
+          set -euo pipefail
+          if [ -n "$BOUND_BASE_SHA" ]; then BASE_REF=main; fi
           auth="$(printf 'x-access-token:%s' "$GITHUB_TOKEN" | base64 | tr -d '\n')"
           git -c http.extraheader="AUTHORIZATION: basic $auth" fetch --no-tags --force origin \
             "+refs/heads/$BASE_REF:refs/remotes/origin/$BASE_REF"
+          if [ -n "$BOUND_BASE_SHA" ]; then
+            test "$(git rev-parse "origin/$BASE_REF")" = "$BOUND_BASE_SHA"
+          fi
           echo "MERGE_TARGET=origin/$BASE_REF" >> "$GITHUB_ENV"
       - name: Check mobile release hygiene
         env:
           VALIDATION_BASE: ${{ github.event.pull_request.base.sha || github.event.before }}
+          BOUND_BASE_SHA: ${{ needs.scope.outputs.promotion_base_sha }}
         run: |
+          if [ -n "$BOUND_BASE_SHA" ]; then VALIDATION_BASE="$BOUND_BASE_SHA"; fi
           if [ -n "$VALIDATION_BASE" ] \
             && git cat-file -e "$VALIDATION_BASE^{commit}" 2>/dev/null; then
             PLURX_VALIDATION_MODE=changed-from \
@@ -142,7 +184,9 @@ jobs:
     name: fast policy and contract preflight
     needs: scope
     runs-on: [self-hosted, Linux, X64, lab, general]
-    timeout-minutes: 3
+    # The same history/contract sweep runs in the effort and main fast lanes.
+    # Use their ten-minute budget rather than timing out a qualified release.
+    timeout-minutes: 10
     steps:
       - uses: https://data.forgejo.org/actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
@@ -264,9 +308,26 @@ jobs:
     # only runs when the diff can reach it; qualification and queue runs force
     # the complete fan-out.
     if: needs.scope.outputs.rust == 'true'
-    runs-on: [self-hosted, Linux, X64, lab, general, high-cpu, ffmpeg-6]
+    runs-on: [self-hosted, Linux, X64, lab, general, high-cpu]
+    # Private, smoke-tested CI target; never expose the management credential.
+    container:
+      image: ${{ vars.FLEET_REGISTRY || 'fleet-registry.unset.invalid' }}/noirr/plurx-ci@sha256:3d84b711936233da699308d0301ac1e91f12e76c6b928967c41817e841f5e855
+      credentials:
+        username: noirr
+        password: ${{ secrets.CI_REGISTRY_PULL_TOKEN }}
     timeout-minutes: 30
     steps:
+      - name: Capture mounted runner workspace owner
+        run: |
+          owner="$(stat -c '%u:%g' "$(dirname -- "$GITHUB_WORKSPACE")")"
+          if [ "${owner%%:*}" = 0 ] || [ "${owner##*:}" = 0 ]; then
+            owner="$(stat -c '%u:%g' "$GITHUB_WORKSPACE")"
+          fi
+          if [ "${owner%%:*}" = 0 ] || [ "${owner##*:}" = 0 ]; then
+            echo '::error::No non-root mounted workspace owner; refusing to leave root-owned runner files' >&2
+            exit 1
+          fi
+          echo "HOST_WORKSPACE_OWNER=$owner" >> "$GITHUB_ENV"
       - uses: https://data.forgejo.org/actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           persist-credentials: false
@@ -275,7 +336,8 @@ jobs:
           components: rustfmt, clippy
       - uses: ./.github/actions/ffmpeg
         with:
-          major: "6"
+          major: "8"
+          binary: /usr/lib/jellyfin-ffmpeg/ffmpeg
       - id: cargo-cache
         uses: ./.github/actions/cargo-cache
         with:
@@ -289,6 +351,13 @@ jobs:
           cache-root: ${{ steps.cargo-cache.outputs.cache-root }}
           budget-gb: ${{ steps.cargo-cache.outputs.budget-gb }}
           last-used: ${{ steps.cargo-cache.outputs.last-used }}
+
+      - name: Restore persistent runner workspace ownership
+        if: always()
+        run: |
+          if [ -n "${HOST_WORKSPACE_OWNER:-}" ]; then
+            chown -R "$HOST_WORKSPACE_OWNER" "$GITHUB_WORKSPACE"
+          fi
 
   cluster_store_legacy:
     name: replicated Store contracts (legacy)
@@ -845,9 +914,25 @@ jobs:
     name: cluster daemon contracts
     needs: [scope, preflight]
     if: needs.scope.outputs.cluster_auth == 'true'
-    runs-on: [self-hosted, Linux, X64, lab, general, high-cpu, ffmpeg-6]
+    runs-on: [self-hosted, Linux, X64, lab, general, high-cpu]
+    container:
+      image: ${{ vars.FLEET_REGISTRY || 'fleet-registry.unset.invalid' }}/noirr/plurx-ci@sha256:3d84b711936233da699308d0301ac1e91f12e76c6b928967c41817e841f5e855
+      credentials:
+        username: noirr
+        password: ${{ secrets.CI_REGISTRY_PULL_TOKEN }}
     timeout-minutes: 30
     steps:
+      - name: Capture mounted runner workspace owner
+        run: |
+          owner="$(stat -c '%u:%g' "$(dirname -- "$GITHUB_WORKSPACE")")"
+          if [ "${owner%%:*}" = 0 ] || [ "${owner##*:}" = 0 ]; then
+            owner="$(stat -c '%u:%g' "$GITHUB_WORKSPACE")"
+          fi
+          if [ "${owner%%:*}" = 0 ] || [ "${owner##*:}" = 0 ]; then
+            echo '::error::No non-root mounted workspace owner; refusing to leave root-owned runner files' >&2
+            exit 1
+          fi
+          echo "HOST_WORKSPACE_OWNER=$owner" >> "$GITHUB_ENV"
       - uses: https://data.forgejo.org/actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           persist-credentials: false
@@ -858,7 +943,8 @@ jobs:
           lane: cluster-daemon
       - uses: ./.github/actions/ffmpeg
         with:
-          major: "6"
+          major: "8"
+          binary: /usr/lib/jellyfin-ffmpeg/ffmpeg
       - name: Verify the cluster fixture generator
         run: |
           command -v ffmpeg
@@ -873,15 +959,38 @@ jobs:
           budget-gb: ${{ steps.cargo-cache.outputs.budget-gb }}
           last-used: ${{ steps.cargo-cache.outputs.last-used }}
 
+      - name: Restore persistent runner workspace ownership
+        if: always()
+        run: |
+          if [ -n "${HOST_WORKSPACE_OWNER:-}" ]; then
+            chown -R "$HOST_WORKSPACE_OWNER" "$GITHUB_WORKSPACE"
+          fi
+
   web_layout:
     name: web layout and accessibility
     needs: [scope, preflight]
     if: needs.scope.outputs.web_layout == 'true'
     # Pinned for the same reason as `check`: a browser sweep still plays media
     # through ffmpeg. See .github/actions/ffmpeg.
-    runs-on: [self-hosted, Linux, X64, lab, general, ffmpeg-6]
+    runs-on: [self-hosted, Linux, X64, lab, general]
+    container:
+      image: ${{ vars.FLEET_REGISTRY || 'fleet-registry.unset.invalid' }}/noirr/plurx-ci@sha256:3d84b711936233da699308d0301ac1e91f12e76c6b928967c41817e841f5e855
+      credentials:
+        username: noirr
+        password: ${{ secrets.CI_REGISTRY_PULL_TOKEN }}
     timeout-minutes: 30
     steps:
+      - name: Capture mounted runner workspace owner
+        run: |
+          owner="$(stat -c '%u:%g' "$(dirname -- "$GITHUB_WORKSPACE")")"
+          if [ "${owner%%:*}" = 0 ] || [ "${owner##*:}" = 0 ]; then
+            owner="$(stat -c '%u:%g' "$GITHUB_WORKSPACE")"
+          fi
+          if [ "${owner%%:*}" = 0 ] || [ "${owner##*:}" = 0 ]; then
+            echo '::error::No non-root mounted workspace owner; refusing to leave root-owned runner files' >&2
+            exit 1
+          fi
+          echo "HOST_WORKSPACE_OWNER=$owner" >> "$GITHUB_ENV"
       - uses: https://data.forgejo.org/actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           persist-credentials: false
@@ -899,7 +1008,8 @@ jobs:
           key: playwright-${{ runner.os }}-1.62.0
       - uses: ./.github/actions/ffmpeg
         with:
-          major: "6"
+          major: "8"
+          binary: /usr/lib/jellyfin-ffmpeg/ffmpeg
       - uses: ./.github/actions/playwright
         with:
           version: "1.62.0"
@@ -918,6 +1028,13 @@ jobs:
           budget-gb: ${{ steps.cargo-cache.outputs.budget-gb }}
           last-used: ${{ steps.cargo-cache.outputs.last-used }}
 
+      - name: Restore persistent runner workspace ownership
+        if: always()
+        run: |
+          if [ -n "${HOST_WORKSPACE_OWNER:-}" ]; then
+            chown -R "$HOST_WORKSPACE_OWNER" "$GITHUB_WORKSPACE"
+          fi
+
   vod_web:
     name: film-addressed VOD browser acceptance
     # The eligible lab6 runners are separate VMs on one physical host. Running
@@ -927,9 +1044,25 @@ jobs:
     # concurrency group on both siblings but still executed them together.
     needs: [scope, preflight, web_layout]
     if: needs.scope.outputs.web_layout == 'true'
-    runs-on: [self-hosted, Linux, X64, lab, general, ffmpeg-6]
+    runs-on: [self-hosted, Linux, X64, lab, general]
+    container:
+      image: ${{ vars.FLEET_REGISTRY || 'fleet-registry.unset.invalid' }}/noirr/plurx-ci@sha256:3d84b711936233da699308d0301ac1e91f12e76c6b928967c41817e841f5e855
+      credentials:
+        username: noirr
+        password: ${{ secrets.CI_REGISTRY_PULL_TOKEN }}
     timeout-minutes: 25
     steps:
+      - name: Capture mounted runner workspace owner
+        run: |
+          owner="$(stat -c '%u:%g' "$(dirname -- "$GITHUB_WORKSPACE")")"
+          if [ "${owner%%:*}" = 0 ] || [ "${owner##*:}" = 0 ]; then
+            owner="$(stat -c '%u:%g' "$GITHUB_WORKSPACE")"
+          fi
+          if [ "${owner%%:*}" = 0 ] || [ "${owner##*:}" = 0 ]; then
+            echo '::error::No non-root mounted workspace owner; refusing to leave root-owned runner files' >&2
+            exit 1
+          fi
+          echo "HOST_WORKSPACE_OWNER=$owner" >> "$GITHUB_ENV"
       - uses: https://data.forgejo.org/actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           persist-credentials: false
@@ -952,7 +1085,8 @@ jobs:
           key: playwright-${{ runner.os }}-1.62.0
       - uses: ./.github/actions/ffmpeg
         with:
-          major: "6"
+          major: "8"
+          binary: /usr/lib/jellyfin-ffmpeg/ffmpeg
       - uses: ./.github/actions/playwright
         with:
           version: "1.62.0"
@@ -975,6 +1109,13 @@ jobs:
           cache-root: ${{ steps.cargo-cache.outputs.cache-root }}
           budget-gb: ${{ steps.cargo-cache.outputs.budget-gb }}
           last-used: ${{ steps.cargo-cache.outputs.last-used }}
+
+      - name: Restore persistent runner workspace ownership
+        if: always()
+        run: |
+          if [ -n "${HOST_WORKSPACE_OWNER:-}" ]; then
+            chown -R "$HOST_WORKSPACE_OWNER" "$GITHUB_WORKSPACE"
+          fi
 
   android_jvm:
     name: Android JVM tests and lint
@@ -1263,9 +1404,11 @@ jobs:
         with:
           lane: package-smoke-${{ matrix.arch }}
       - name: Derive the binary-only Bookworm build
-        run: >-
-          python3 -m validation.release_dockerfile --binary-export
-          Dockerfile Dockerfile.binaries
+        id: binary-build
+        run: |
+          python3 -m validation.release_dockerfile --binary-export \
+            Dockerfile Dockerfile.binaries
+          echo "source_date_epoch=$(git log -1 --format=%ct HEAD)" >> "$GITHUB_OUTPUT"
       - name: Compile and export the exact candidate binaries
         uses: https://github.com/docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
         with:
@@ -1277,6 +1420,7 @@ jobs:
           build-args: |
             PLURX_BUILD_REF=${{ github.sha }}
             PLURX_BUILD_SHA=${{ github.sha }}
+            SOURCE_DATE_EPOCH=${{ steps.binary-build.outputs.source_date_epoch }}
           cache-from: ${{ steps.buildx-cache.outputs.local != 'true' && format('type=gha,scope=package-compile-{0}', matrix.arch) || '' }}
           cache-to: ${{ steps.buildx-cache.outputs.local != 'true' && format('type=gha,mode=max,scope=package-compile-{0}', matrix.arch) || '' }}
       - name: Bind the binary set to this candidate tree
@@ -1345,6 +1489,7 @@ jobs:
           path: |
             release-bin/plurxd
             release-bin/plurx-cluster-check
+            release-bin/*.dwp
             release-bin/build-manifest.json
             release-bin/*.sha256
           if-no-files-found: error
@@ -1358,6 +1503,7 @@ jobs:
           path: |
             release-bin/plurxd
             release-bin/plurx-cluster-check
+            release-bin/*.dwp
             release-bin/build-manifest.json
             release-bin/*.sha256
           if-no-files-found: error
@@ -1373,16 +1519,20 @@ jobs:
   # workflow. A cancelled tag run can therefore be recovered without moving it.
   publish:
     name: publish image (local registry)
-    needs: [check, package_smoke]
-    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [scope, check, package_smoke]
+    if: >-
+      startsWith(github.ref, 'refs/tags/v') && inputs.promotion_pr == '' &&
+      inputs.promotion_head_sha == '' && inputs.promotion_base_sha == '' &&
+      needs.scope.outputs.qualification != 'true'
     uses: ./.github/workflows/publish-release.yml
     with:
       release_tag: ${{ github.ref_name }}
 
-  # A merged main commit is already qualified by its pull request, but the
-  # post-merge run still has to prove the merge tree before changing the fleet
-  # image alias. Build on one X64 runner because every deployed voter is X64;
-  # versioned release tags keep their separate multi-architecture publisher.
+  # Only an operator's manual dispatch on main may publish a sha- image.
+  # Merging allocates no runtime sweep or image build (P-01 option (a)); the
+  # dispatch proves that exact main tree before moving the fleet image alias.
+  # Build on one X64 runner because every deployed voter is X64; versioned
+  # release tags keep their separate multi-architecture publisher.
   publish_main:
     name: publish merged image (Forgejo registry)
     needs:
@@ -1403,8 +1553,10 @@ jobs:
       - android_device
       - package_smoke
     if: >-
-      always() && github.event_name == 'push' &&
-      github.ref == 'refs/heads/main'
+      always() && github.event_name == 'workflow_dispatch' &&
+      github.ref == 'refs/heads/main' && inputs.promotion_pr == '' &&
+      inputs.promotion_head_sha == '' && inputs.promotion_base_sha == '' &&
+      needs.scope.outputs.qualification != 'true'
     runs-on: [self-hosted, Linux, X64, lab, general, high-cpu]
     timeout-minutes: 90
     concurrency:
@@ -1477,7 +1629,10 @@ jobs:
   # its surface was unaffected.
   pr_gate:
     name: Main promotion gate
-    if: always() && github.event_name == 'pull_request'
+    if: >-
+      always() && (github.event_name == 'pull_request' ||
+        (github.event_name == 'workflow_dispatch' &&
+          (inputs.promotion_pr != '' || inputs.promotion_head_sha != '' || inputs.promotion_base_sha != '')))
     needs:
       - scope
       - mobile_version
@@ -1537,7 +1692,7 @@ jobs:
           persist-credentials: false
           fetch-depth: 0
       - name: Resolve the current qualification refs
-        if: needs.scope.outputs.qualification == 'true'
+        if: needs.scope.outputs.qualification == 'true' && github.event_name == 'pull_request'
         env:
           HEAD_REF: ${{ github.event.pull_request.head.ref }}
           BASE_REF: ${{ github.event.pull_request.base.ref }}
@@ -1558,16 +1713,29 @@ jobs:
           PLURX_PULL_REQUEST: ${{ github.event.pull_request.number }}
           PLURX_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
           PLURX_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          GITHUB_TOKEN: ${{ github.token }}
+          PLURX_PROMOTION_PR: ${{ inputs.promotion_pr }}
+          PLURX_PROMOTION_HEAD_SHA: ${{ inputs.promotion_head_sha }}
+          PLURX_PROMOTION_BASE_SHA: ${{ inputs.promotion_base_sha }}
+          PLURX_PROMOTION_BINDING: ${{ needs.scope.outputs.promotion_binding }}
           PLURX_QUALIFICATION_RESULTS: >-
-            {"scope":"${{ needs.scope.result }}","mobile_version":"${{ needs.mobile_version.result }}","preflight":"${{ needs.preflight.result }}","rust":"${{ needs.check.result }}","cluster_store":"${{ needs.cluster_store.result }}","cluster_topology":"${{ needs.cluster_topology.result }}","cluster_transport_recovery":"${{ needs.cluster_transport_recovery.result }}","cluster_wal":"${{ needs.cluster_wal.result }}","cluster_daemon":"${{ needs.cluster_daemon.result }}","web_layout":"${{ needs.web_layout.result }}","vod_web":"${{ needs.vod_web.result }}","android_jvm":"${{ needs.android_jvm.result }}","apple":"${{ needs.apple.result }}","android_device":"${{ needs.android_device.result }}","package_smoke":"${{ needs.package_smoke.result }}"}
+            {"scope":"${{ needs.scope.result }}","mobile_version":"${{ needs.mobile_version.result }}","preflight":"${{ needs.preflight.result }}","rust":"${{ needs.check.result }}","windows_compile":"${{ needs.windows_compile.result }}","cluster_store":"${{ needs.cluster_store.result }}","cluster_topology":"${{ needs.cluster_topology.result }}","cluster_transport_recovery":"${{ needs.cluster_transport_recovery.result }}","cluster_wal":"${{ needs.cluster_wal.result }}","cluster_daemon":"${{ needs.cluster_daemon.result }}","web_layout":"${{ needs.web_layout.result }}","vod_web":"${{ needs.vod_web.result }}","android_jvm":"${{ needs.android_jvm.result }}","apple":"${{ needs.apple.result }}","android_device":"${{ needs.android_device.result }}","package_smoke":"${{ needs.package_smoke.result }}"}
         run: >-
           python3 -m validation.qualification
           --output target/validation/qualification-receipt.json
       - name: Retain the effort qualification record
-        if: needs.scope.outputs.qualification == 'true'
+        if: needs.scope.outputs.qualification == 'true' && github.event_name == 'pull_request'
         uses: https://data.forgejo.org/forgejo/upload-artifact@16871d9e8cfcf27ff31822cac382bbb5450f1e1e # v4
         with:
           name: effort-qualification-${{ github.event.pull_request.number }}
+          path: target/validation/qualification-receipt.json
+          if-no-files-found: error
+          retention-days: 14
+      - name: Retain the authenticated manual qualification record
+        if: needs.scope.outputs.qualification == 'true' && github.event_name == 'workflow_dispatch'
+        uses: https://data.forgejo.org/forgejo/upload-artifact@16871d9e8cfcf27ff31822cac382bbb5450f1e1e # v4
+        with:
+          name: effort-qualification-${{ needs.scope.outputs.promotion_pr }}
           path: target/validation/qualification-receipt.json
           if-no-files-found: error
           retention-days: 14

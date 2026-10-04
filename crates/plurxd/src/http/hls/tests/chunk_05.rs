@@ -54,6 +54,8 @@
             kind: crate::transcode::SessionKind::Transcode { height: 720 },
             start_seconds: 0.0,
             audio_index: None,
+            audio_delivery: None,
+            audio_claim: None,
             subtitle_burn: None,
             audio_offset_ms: 0,
             hdr10: false,
@@ -203,6 +205,8 @@
             kind: crate::transcode::SessionKind::Transcode { height: 720 },
             start_seconds: 0.0,
             audio_index: None,
+            audio_delivery: None,
+            audio_claim: None,
             subtitle_burn: None,
             audio_offset_ms: 0,
             hdr10: false,
@@ -611,7 +615,9 @@
         delivery: std::sync::Arc<crate::meter::Meter>,
     ) -> crate::vodserve::SegmentReady {
         crate::vodserve::SegmentReady {
+            observed_media_duration_ms: None,
             delivery,
+            retained_lease: None,
             file: tokio::fs::File::open(path)
                 .await
                 .expect("open VOD response object"),
@@ -737,6 +743,39 @@
             "exactly the bytes the viewer took — a reader that counted at read \
              time would be ahead of this, and one that never counted behind it"
         );
+    }
+
+    #[tokio::test]
+    async fn a_short_vod_body_logs_its_sanitized_failure_and_accepted_prefix() {
+        use tracing_subscriber::prelude::*;
+        let logs = std::sync::Arc::new(crate::logbuf::LogBuffer::new(16));
+        let _guard = crate::test_tracing_default(tracing_subscriber::registry()
+            .with(crate::logbuf::BufferLayer(std::sync::Arc::clone(&logs))));
+        let dir = crate::test_tempdir().expect("VOD HTTP directory");
+        let fixture = HlsDeliveryFixture::publish(dir.path(), "rolling-unused").await;
+        let session_id = "vod-private-session-never-log-verbatim";
+        let owner = install_vod_http_session(&fixture, dir.path(), session_id).await;
+        let path = dir.path().join("short.m4s");
+        tokio::fs::write(&path, vec![7_u8; 8192]).await.expect("VOD object");
+        let delivery = std::sync::Arc::new(crate::meter::Meter::new());
+        let response = vod_segment_response(&fixture.state, session_id, "seg00005.m4s",
+            &RelayHeaders::default(),
+            vod_ready_metered(&path, 16384, std::sync::Arc::clone(&delivery)).await, owner)
+            .await.expect("VOD response");
+        assert!(axum::body::to_bytes(response.into_body(), 16385).await.is_err());
+        let entries: Vec<_> = logs.tail("warn", 16).into_iter()
+            .filter(|entry| entry.message.contains("VOD response failed before its advertised length"))
+            .collect();
+        assert_eq!(entries.len(), 1);
+        let warning = &entries[0];
+        assert_eq!(warning.target, "plurxd::http::hls");
+        assert!(warning.message.contains("delivered_bytes=8192"), "{}", warning.message);
+        assert!(warning.message.contains("expected_bytes=16384"), "{}", warning.message);
+        assert!(warning.message.contains("storage_error"));
+        assert!(warning.message.contains("UnexpectedEof"));
+        assert!(warning.message.contains(&crate::transcode::session_log_id(session_id)));
+        assert!(!warning.message.contains(session_id));
+        assert_eq!(delivery.total_bytes(), 8192);
     }
 
     /// Decision 1 of docs/streaming/MEDIA-BODY-BUFFERS.md, taken on the §5.1.1
@@ -1636,6 +1675,7 @@
             .expect("oversized init");
 
         let context = crate::transcode::HlsContext {
+            codec_facts: None,
             bandwidth: None,
             file_id: 1,
             start_seconds: 0.0,
@@ -1677,6 +1717,7 @@
             .expect("unreadable init");
 
         let context = crate::transcode::HlsContext {
+            codec_facts: None,
             bandwidth: None,
             file_id: 1,
             start_seconds: 0.0,
@@ -2923,12 +2964,12 @@
     async fn storage_batch_drains_without_a_producer_round_trip_per_proof_unit() {
         use futures_util::StreamExt;
         let (sender, receiver) = tokio::sync::mpsc::channel(1);
-        let (accepted, mut acknowledgements) = tokio::sync::watch::channel(0usize);
         let size = MEDIA_BODY_ACK_GRANULARITY * 3 + 17;
-        sender.send(DrivenLocalChunk { bytes: Bytes::from(vec![7; size]), accepted })
+        let (batch, accepted_bytes) = test_resident_chunk(Bytes::from(vec![7; size]));
+        sender.send(batch)
             .await.expect("batch queued");
         drop(sender);
-        let mut body = driven_local_body(receiver, StreamedBodyTerminal::new(),
+        let mut body = resident_local_body(receiver, StreamedBodyTerminal::new(),
             tokio::time::Instant::now() + Duration::from_secs(60)).into_data_stream();
         // No producer or acknowledgement receiver is polled between pieces.
         for expected in [MEDIA_BODY_ACK_GRANULARITY, MEDIA_BODY_ACK_GRANULARITY,
@@ -2936,27 +2977,23 @@
             let piece = body.next().await.expect("piece").expect("body data");
             assert_eq!(piece.len(), expected);
         }
-        acknowledgements.changed().await.expect("last count survives sender drop");
-        assert_eq!(*acknowledgements.borrow_and_update(), size);
-        assert!(acknowledgements.changed().await.is_err());
+        assert_eq!(accepted_bytes(), size, "last count survives sender drop");
         assert!(body.next().await.is_none());
+        drop(body);
+        assert_eq!(accepted_bytes(), size, "the final prefix survives body drop");
     }
 
     #[tokio::test]
     async fn storage_batch_drop_retains_only_the_polled_prefix() {
         use futures_util::StreamExt;
         let (sender, receiver) = tokio::sync::mpsc::channel(1);
-        let (accepted, mut acknowledgements) = tokio::sync::watch::channel(0usize);
-        sender.send(DrivenLocalChunk {
-            bytes: Bytes::from(vec![7; MEDIA_BODY_READ_BUFFER]), accepted,
-        }).await.expect("batch queued");
-        let mut body = driven_local_body(receiver, StreamedBodyTerminal::new(),
+        let (batch, accepted_bytes) = test_resident_chunk(Bytes::from(vec![7; MEDIA_BODY_READ_BUFFER]));
+        sender.send(batch).await.expect("batch queued");
+        let mut body = resident_local_body(receiver, StreamedBodyTerminal::new(),
             tokio::time::Instant::now() + Duration::from_secs(60)).into_data_stream();
         assert_eq!(body.next().await.expect("body piece").expect("body data").len(), MEDIA_BODY_ACK_GRANULARITY);
         drop(body);
-        acknowledgements.changed().await.expect("accepted prefix survives body drop");
-        assert_eq!(*acknowledgements.borrow_and_update(), MEDIA_BODY_ACK_GRANULARITY);
-        assert!(acknowledgements.changed().await.is_err());
+        assert_eq!(accepted_bytes(), MEDIA_BODY_ACK_GRANULARITY, "accepted prefix survives body drop");
         assert!(sender.is_closed());
     }
 
@@ -2964,19 +3001,17 @@
     async fn terminal_failure_discards_the_unpolled_part_of_a_storage_batch() {
         use futures_util::StreamExt;
         let (sender, receiver) = tokio::sync::mpsc::channel(1);
-        let (accepted, mut acknowledgements) = tokio::sync::watch::channel(0usize);
-        sender.send(DrivenLocalChunk {
-            bytes: Bytes::from(vec![7; MEDIA_BODY_READ_BUFFER]), accepted,
-        }).await.expect("batch queued");
+        let (batch, accepted_bytes) = test_resident_chunk(Bytes::from(vec![7; MEDIA_BODY_READ_BUFFER]));
+        sender.send(batch).await.expect("batch queued");
         let terminal = StreamedBodyTerminal::new();
-        let mut body = driven_local_body(receiver, terminal.clone(),
+        let mut body = resident_local_body(receiver, terminal.clone(),
             tokio::time::Instant::now() + Duration::from_secs(60)).into_data_stream();
         assert_eq!(body.next().await.expect("body piece").expect("body data").len(), MEDIA_BODY_ACK_GRANULARITY);
-        acknowledgements.changed().await.expect("prefix acknowledgement");
-        assert_eq!(*acknowledgements.borrow_and_update(), MEDIA_BODY_ACK_GRANULARITY);
+        assert_eq!(accepted_bytes(), MEDIA_BODY_ACK_GRANULARITY, "prefix acknowledgement");
         terminal.fail(std::io::ErrorKind::TimedOut, "producer expired".to_owned());
         assert!(body.next().await.expect("terminal frame").is_err());
         assert!(body.next().await.is_none());
-        assert!(acknowledgements.changed().await.is_err());
-        assert_eq!(*acknowledgements.borrow(), MEDIA_BODY_ACK_GRANULARITY);
+        drop(body);
+        assert!(sender.is_closed());
+        assert_eq!(accepted_bytes(), MEDIA_BODY_ACK_GRANULARITY);
     }

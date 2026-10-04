@@ -406,9 +406,42 @@ pub struct AudioStream {
     /// absence is not proof that a route can reproduce the stream unchanged.
     #[serde(default)]
     pub sample_rate: Option<i64>,
+    /// Bounded, opaque ffprobe source spelling, not a supported speaker map.
+    /// Never inferred from channel count; `5.1` and `5.1(side)` are distinct.
+    #[serde(
+        default,
+        deserialize_with = "deserialize_source_channel_layout",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub channel_layout: Option<String>,
     pub language: Option<String>,
     pub title: Option<String>,
     pub default: bool,
+}
+
+/// Retain a source fact without interpreting positions or inventing support.
+pub(crate) fn normalize_source_channel_layout(value: &str) -> Option<String> {
+    if value.chars().any(char::is_control) {
+        return None;
+    }
+    let value = value.trim();
+    if value.is_empty()
+        || value.len() > 256
+        || value.eq_ignore_ascii_case("unknown")
+        || value.eq_ignore_ascii_case("n/a")
+    {
+        None
+    } else {
+        Some(value.to_owned())
+    }
+}
+
+fn deserialize_source_channel_layout<'de, D>(deserializer: D) -> Result<Option<String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = serde_json::Value::deserialize(deserializer)?;
+    Ok(value.as_str().and_then(normalize_source_channel_layout))
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
@@ -471,6 +504,13 @@ impl DolbyVisionFacts {
     }
 }
 
+/// The stored token for "probed, and the probe reported no field order".
+///
+/// [`crate::scan::probe::parse_probe_json`] is its single owner: every parsed
+/// probe carries either FFprobe's token or this one, so a `NULL` field order
+/// in the catalogue means only that the row has never been probed.
+pub const FIELD_ORDER_UNKNOWN: &str = "unknown";
+
 /// The ordering FFprobe reports for an interlaced video stream.
 ///
 /// The spelling remains separate from [`MediaFile::field_order`]: storage
@@ -529,8 +569,10 @@ pub struct MediaFile {
     /// stream (`hvc1`, `hev1`, `dvh1`, `dvhe`, `avc1`, …). This is packaging
     /// identity, not a second spelling of the codec family.
     pub video_codec_tag: Option<String>,
-    /// FFprobe's field-order token for the selected playable video stream.
-    /// Decisions must use [`ScanType::from_field_order`], not string inequality.
+    /// FFprobe's field-order token for the selected playable video stream,
+    /// [`FIELD_ORDER_UNKNOWN`] for a probed row that reported none, `None`
+    /// only for a row never probed. Decisions must use
+    /// [`ScanType::from_field_order`], not string inequality.
     pub field_order: Option<String>,
     pub video_profile: Option<String>,
     pub width: Option<i64>,
@@ -635,6 +677,10 @@ pub struct ProbeResult {
     pub container: Option<String>,
     pub video_codec: Option<String>,
     pub video_codec_tag: Option<String>,
+    /// FFprobe's token for the selected playable video stream, or
+    /// [`FIELD_ORDER_UNKNOWN`] when the probe was parsed and reported none
+    /// (including audio-only files). `None` only on a result that was never
+    /// parsed from a probe document.
     pub field_order: Option<String>,
     pub video_profile: Option<String>,
     pub width: Option<i64>,
@@ -659,6 +705,23 @@ pub struct ProbeResult {
     /// it the best home-video date short of an NFO — see
     /// docs/features/HOMEVIDEO-PLAN.md §4.4.
     pub creation_time: Option<String>,
+}
+
+impl ProbeResult {
+    /// The field-order value a catalogue write stores for this result.
+    ///
+    /// A parsed probe already carries a token ([`FIELD_ORDER_UNKNOWN`] when
+    /// FFprobe reported none), but a result can reach a write boundary from a
+    /// binary that predates that rule — an older probe worker's published
+    /// facts during a rolling deploy. A result with a probe document is a
+    /// probed row, so it is stored as `unknown` rather than stranded as
+    /// `NULL`; only a result with no document (never probed, or a failed
+    /// probe) stores `NULL`.
+    pub fn stored_field_order(&self) -> Option<&str> {
+        self.field_order
+            .as_deref()
+            .or_else(|| self.raw_json.is_some().then_some(FIELD_ORDER_UNKNOWN))
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1542,6 +1605,8 @@ pub struct OfflinePackage {
     /// A queued package may yield and resume after the global setting changes,
     /// so its recipe must never be rebuilt from mutable policy.
     pub effective_rate_control: String,
+    /// Canonical server-resolved audio snapshot; None preserves pre-S09 jobs.
+    pub audio_recipe: Option<String>,
     pub target_height: i64,
     /// Exact even-sized output frame computed with the transcoder's scaler
     /// arithmetic. Optional only for legacy/unprobed sources.
@@ -1651,6 +1716,7 @@ pub struct NewOfflinePackage {
     pub source_mtime: i64,
     /// Canonical [`crate::transcode::EffectiveRateControl::snapshot_value`].
     pub effective_rate_control: String,
+    pub audio_recipe: Option<String>,
     pub target_height: i64,
     pub output_width: Option<i64>,
     pub output_height: Option<i64>,
@@ -1876,12 +1942,76 @@ pub struct NetworkPrior {
     /// within the verdict's lifetime. Always written together with
     /// [`NetworkPrior::starved_at_ms`].
     pub worst_rung_height: Option<i64>,
+    /// Separately attributed completed-transfer Link verdict. Legacy inferred
+    /// supply negatives never populate or refresh this pair.
+    pub link_worst_rung_height: Option<i64>,
+    pub link_starved_at_ms: Option<i64>,
     /// When the most recent starvation was observed. The verdict ages out
     /// from this stamp, not from `updated_at_ms`, which every healthy
     /// observation refreshes.
     pub starved_at_ms: Option<i64>,
     pub sample_count: u32,
     pub updated_at_ms: i64,
+}
+
+/// Internal-only exact source/recipe and credential namespace. Never client wire.
+#[derive(Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct CandidateLinkBinding {
+    pub user_id: i64,
+    pub credential_generation: String,
+    pub client_class: String,
+    pub network_fingerprint: String,
+    pub file_id: i64,
+    pub source_size: i64,
+    pub source_mtime: i64,
+    pub source_object_version: String,
+    pub recipe_digest: [u8; 32],
+    pub route: crate::playback::candidate::CandidateRoute,
+}
+
+#[derive(Clone)]
+pub struct CandidateLinkObservation {
+    pub binding: CandidateLinkBinding,
+    pub body_bytes: u64,
+    pub body_duration_ms: u32,
+    pub completed_at_ms: i64,
+    pub negative: bool,
+}
+impl CandidateLinkObservation {
+    pub fn valid_at(&self, now: i64) -> bool {
+        self.binding.user_id > 0
+            && self.binding.file_id > 0
+            && !self.binding.source_object_version.is_empty()
+            && self.binding.source_object_version.len() <= 256
+            && self.binding.credential_generation.len() == 64
+            && !self.binding.client_class.is_empty()
+            && self.binding.client_class.len() <= 16
+            && !self.binding.network_fingerprint.is_empty()
+            && self.binding.network_fingerprint.len() <= 64
+            && self.body_bytes > 0
+            && self.body_bytes <= 1_073_741_824
+            && (1..=120_000).contains(&self.body_duration_ms)
+            && now
+                .checked_sub(self.completed_at_ms)
+                .is_some_and(|age| (0..=15_000).contains(&age))
+    }
+}
+
+#[derive(Clone)]
+pub struct CandidateLinkPrior {
+    pub binding: CandidateLinkBinding,
+    pub body_bytes: u64,
+    pub body_duration_ms: u32,
+    pub completed_at_ms: i64,
+    pub negative_at_ms: Option<i64>,
+}
+impl CandidateLinkPrior {
+    pub fn negative_active(&self, now: i64) -> bool {
+        self.negative_at_ms
+            .and_then(|at| now.checked_sub(at))
+            .is_some_and(|age| (0..=7 * 24 * 60 * 60 * 1000).contains(&age))
+    }
 }
 
 /// How long a supply-starvation verdict is believed after the starvation that
@@ -1898,6 +2028,16 @@ pub struct NetworkPrior {
 pub const NETWORK_PRIOR_STARVED_TTL_MS: i64 = 7 * 24 * 60 * 60 * 1_000;
 
 impl NetworkPrior {
+    /// A measured Link verdict for a new-policy consumer. Existing consumers
+    /// continue to use [`Self::active_starved_rung`].
+    pub fn active_link_starved_rung(&self, now_ms: i64) -> Option<i64> {
+        let height = self.link_worst_rung_height.filter(|height| *height > 0)?;
+        let age = now_ms.checked_sub(self.link_starved_at_ms?)?;
+        (0..=NETWORK_PRIOR_STARVED_TTL_MS)
+            .contains(&age)
+            .then_some(height)
+    }
+
     /// The starvation verdict if it is still recent enough to believe.
     ///
     /// A verdict with no stamp is treated as expired: the two are written
@@ -2006,6 +2146,69 @@ pub struct NetworkPriorObservation {
     pub throughput_kbps: Option<u32>,
     pub starved_rung_height: Option<i64>,
     pub observed_at_ms: i64,
+    /// Validated completed-body evidence, available only to an attributed
+    /// Link producer. The legacy client telemetry converter has no such facts.
+    pub measured_link: Option<MeasuredLinkObservation>,
+}
+
+/// Closed cause vocabulary for network-prior attribution, separate from the
+/// legacy telemetry strings. Only Link can establish measured negative proof.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum NetworkPriorCause {
+    Link,
+    Encode,
+    Decode,
+    Hold,
+    Authority,
+}
+
+/// Evidence about one completed network body, not a smoothed bandwidth meter
+/// or time spent waiting for a producer. Construction fails closed when any
+/// provenance is unknown. Completion and receipt use the same server clock.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MeasuredLinkObservation {
+    completed_at_ms: i64,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct CompletedNetworkTransfer {
+    pub body_bytes: u64,
+    pub body_duration_ms: u64,
+    pub completed_at_ms: i64,
+    pub network_load: Option<bool>,
+    pub from_local_cache: Option<bool>,
+    pub producer_paced: Option<bool>,
+}
+
+impl MeasuredLinkObservation {
+    pub fn from_completed_transfer(
+        cause: NetworkPriorCause,
+        transfer: CompletedNetworkTransfer,
+        observed_at_ms: i64,
+    ) -> Option<Self> {
+        let evidence = Self {
+            completed_at_ms: transfer.completed_at_ms,
+        };
+        (cause == NetworkPriorCause::Link
+            && transfer.body_bytes > 0
+            && transfer.body_duration_ms > 0
+            && transfer.network_load == Some(true)
+            && transfer.from_local_cache == Some(false)
+            && transfer.producer_paced == Some(false)
+            && evidence.fresh_at(observed_at_ms))
+        .then_some(evidence)
+    }
+
+    pub(crate) fn fresh_at(&self, observed_at_ms: i64) -> bool {
+        observed_at_ms
+            .checked_sub(self.completed_at_ms)
+            .is_some_and(|age| (0..=15_000).contains(&age))
+    }
+
+    pub(crate) fn completed_at_ms(&self) -> i64 {
+        self.completed_at_ms
+    }
 }
 
 /// The set of fields that must be supplied to build a

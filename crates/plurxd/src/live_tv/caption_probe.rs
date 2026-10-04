@@ -248,6 +248,20 @@ fn fixture_truth() -> (Vec<CaptionCue>, Vec<CaptionCue>) {
 const CAPTION_PROBE: crate::process_control::ChildWork =
     crate::process_control::ChildWork::background("Live TV caption probe");
 
+/// The production source probe as the boot caption probe runs it: the helper
+/// a viewer's start uses, at the self-test's background class and readiness
+/// budget, because nobody is waiting on a self-test (owned-lab receipt
+/// 2026-10-02, defect 1: it ran at the realtime class on every boot; review
+/// 76, P2-1: and must not keep a viewer's two-second budget at nice 15). This
+/// is the module's only call of the shared probe; a test holds it to that.
+async fn caption_source_facts(
+    system: &SystemInfo,
+    directory: &Path,
+    prefix: &[u8],
+) -> Result<LiveSourceFacts, LiveTvError> {
+    probe_live_source(system, directory, prefix, SourceProbeWork::SELF_TEST).await
+}
+
 async fn media_command(command: &mut tokio::process::Command) -> std::process::Output {
     command.kill_on_drop(true);
     let output = tokio::time::timeout(
@@ -666,21 +680,25 @@ struct GraphRun {
 ///
 /// `a53cc_override` rewrites the value after `-a53cc` and nothing else; it
 /// exists for the VideoToolbox re-proof run and is `None` everywhere else.
+///
+/// A source probe that fails is an `Err` naming the cause, not a panic: the
+/// boot probe then skips that one graph with a warning instead of losing the
+/// task (review 76, P2-1).
 async fn run_live_graph(
     system: &SystemInfo,
     source: &Path,
     case: GraphCase,
     a53cc_override: Option<&str>,
-) -> GraphRun {
+) -> Result<GraphRun, String> {
     let bytes = tokio::fs::read(source).await.expect("source bytes");
     let root = tempfile::tempdir().expect("graph root");
-    let facts = probe_live_source(
+    let facts = caption_source_facts(
         system,
         root.path(),
         &bytes[..bytes.len().min(SOURCE_PREFIX_BYTES)],
     )
     .await
-    .expect("production source probe");
+    .map_err(|error| format!("the production source probe failed: {error}"))?;
     let client = h264_copy_client();
     let mut delivery = resolve_live_delivery(
         &facts,
@@ -774,14 +792,14 @@ async fn run_live_graph(
             .lines()
             .filter(|line| !line.trim().is_empty())
             .collect();
-        return GraphRun {
+        return Ok(GraphRun {
             status: finished.status,
             deinterlace_output: plan.delivery.deinterlace_output,
             diagnostic,
             failure: Some(lines[lines.len().saturating_sub(3)..].join(" / ")),
             argv,
             track: None,
-        };
+        });
     }
     let playlist = tokio::fs::read_to_string(output.join("index.m3u8"))
         .await
@@ -819,14 +837,14 @@ async fn run_live_graph(
         .await
         .expect("joined segments");
     let track = caption_track(&system, &media).await;
-    GraphRun {
+    Ok(GraphRun {
         status: finished.status,
         deinterlace_output: plan.delivery.deinterlace_output,
         diagnostic,
         failure: None,
         argv,
         track: Some(track),
-    }
+    })
 }
 
 /// A proof belongs to this process's FFmpeg build and this exact live graph.
@@ -888,15 +906,29 @@ pub(super) async fn probe_available_graphs(system: Arc<SystemInfo>) -> Vec<Capti
                             async move { run_live_graph(&system, &fixture, case, None).await },
                         )
                         .await;
-                    let Ok(run) = result else {
-                        tracing::warn!(
-                            ?encoder,
-                            ?packaging,
-                            ?deinterlace,
-                            output_height,
-                            "caption graph probe failed"
-                        );
-                        continue;
+                    let run = match result {
+                        Ok(Ok(run)) => run,
+                        Ok(Err(cause)) => {
+                            tracing::warn!(
+                                ?encoder,
+                                ?packaging,
+                                ?deinterlace,
+                                output_height,
+                                %cause,
+                                "caption graph probe skipped"
+                            );
+                            continue;
+                        }
+                        Err(_) => {
+                            tracing::warn!(
+                                ?encoder,
+                                ?packaging,
+                                ?deinterlace,
+                                output_height,
+                                "caption graph probe failed"
+                            );
+                            continue;
+                        }
                     };
                     if run.deinterlace_output != deinterlace {
                         tracing::warn!(?encoder, ?packaging, ?deinterlace, observed_deinterlace = ?run.deinterlace_output, output_height, "caption fixture selected an unexpected graph");
@@ -1008,6 +1040,94 @@ fn test_system() -> SystemInfo {
         ffprobe: plurx_core::testfixtures::ffprobe(),
         ..SystemInfo::default()
     }
+}
+
+/// The boot caption probe's source probe is background work. Before the
+/// owned-lab fix `probe_live_source` hard-coded the realtime class, so the
+/// startup self-test counted its ffprobe children as
+/// `class="realtime",purpose="Live TV source probe"` and ran them at nice 5 /
+/// OOM +500. Only this module asks for the background class of that purpose,
+/// so a parallel viewer-path test cannot satisfy the assertion.
+#[cfg(unix)]
+#[tokio::test]
+async fn the_boot_caption_probe_runs_its_source_probe_as_background_work() {
+    let background = crate::process_control::ChildWork::background("Live TV source probe");
+    assert_eq!(
+        CAPTION_PROBE.class,
+        crate::process_control::ChildClass::Background
+    );
+    let system = SystemInfo {
+        // Any executable will do: the assertion is the spawn's class, not the
+        // facts, and `true` prints no JSON so the probe answers an error.
+        ffprobe: "true".to_owned(),
+        ..SystemInfo::default()
+    };
+    let root = crate::test_tempdir().expect("caption source probe root");
+    let before = crate::process_control::priority::spawns_of(background);
+    let facts = caption_source_facts(&system, root.path(), b"not a transport stream").await;
+    assert!(
+        facts.is_err(),
+        "an empty probe document is not source facts"
+    );
+    assert!(
+        crate::process_control::priority::spawns_of(background) > before,
+        "the boot caption probe's ffprobe must be counted at the background class"
+    );
+}
+
+/// Review 76, P2-1: the boot caption probe's source probe has the readiness
+/// budget, so a background ffprobe the scheduler holds past a viewer's two
+/// seconds still returns facts (the live module's
+/// `a_viewer_source_probe_still_gives_up_after_two_seconds` shows the same
+/// stub times out at the viewer budget).
+#[cfg(unix)]
+#[tokio::test]
+async fn the_boot_caption_probe_waits_past_the_viewer_budget() {
+    let root = crate::test_tempdir().expect("slow probe root");
+    let answer = root.path().join("probe.json");
+    std::fs::write(
+        &answer,
+        r#"{"streams":[{"codec_type":"video","codec_name":"mpeg2video","width":1920,"height":1080},{"codec_type":"audio","codec_name":"ac3","channels":2}]}"#,
+    )
+    .expect("probe answer");
+    let script = root.path().join("slow-ffprobe");
+    crate::write_test_executable(
+        &script,
+        format!("#!/bin/sh\nsleep 3\nexec /bin/cat '{}'\n", answer.display()),
+        0o755,
+    );
+    let system = SystemInfo {
+        ffprobe: script.to_string_lossy().into_owned(),
+        ..SystemInfo::default()
+    };
+    let facts = caption_source_facts(&system, root.path(), b"prefix")
+        .await
+        .expect("a slow background source probe still answers");
+    assert_eq!(facts.height, Some(1080));
+}
+
+/// Review 76, P3-2: `run_live_graph` and the rest of this module reach the
+/// shared source probe only through `caption_source_facts`, so the boot path
+/// cannot slip back to a viewer's class and budget without this failing.
+#[test]
+fn the_caption_module_probes_sources_only_through_its_self_test_helper() {
+    let source = include_str!("caption_probe.rs");
+    let call = concat!("probe_live_", "source(");
+    let helper = source
+        .find(concat!("async fn caption_", "source_facts("))
+        .expect("caption_source_facts");
+    let end = helper + source[helper..].find("\n}\n").expect("end of the helper");
+    let body = &source[helper..end];
+    assert_eq!(body.matches(call).count(), 1, "{body}");
+    assert!(
+        body.contains(concat!("SourceProbeWork::", "SELF_TEST")),
+        "{body}"
+    );
+    assert_eq!(
+        source.matches(call).count(),
+        1,
+        "caption_probe.rs calls the shared source probe outside caption_source_facts"
+    );
 }
 
 #[tokio::test]
@@ -1137,7 +1257,9 @@ async fn the_software_live_graph_carries_608_and_708_through_both_deinterlace_mo
             deinterlace,
             max_height: 720,
         };
-        let run = run_live_graph(&system, &fixture, case, None).await;
+        let run = run_live_graph(&system, &fixture, case, None)
+            .await
+            .expect("caption graph source probe");
         assert!(run.status.success(), "{}", run.argv.join(" "));
         assert!(run
             .argv
@@ -1175,7 +1297,9 @@ async fn the_progressive_live_graph_proves_and_advertises_608_and_708() {
         deinterlace: LiveDeinterlaceOutput::Field,
         max_height: 720,
     };
-    let run = run_live_graph(&system, &fixture, case, None).await;
+    let run = run_live_graph(&system, &fixture, case, None)
+        .await
+        .expect("caption graph source probe");
     assert!(run.status.success(), "{}", run.argv.join(" "));
     assert_eq!(run.deinterlace_output, None);
     let track = run.track.expect("progressive HLS captions");
@@ -1186,7 +1310,7 @@ async fn the_progressive_live_graph_proves_and_advertises_608_and_708() {
     );
 
     let bytes = tokio::fs::read(&fixture).await.expect("fixture bytes");
-    let source = probe_live_source(
+    let source = caption_source_facts(
         &system,
         root.path(),
         &bytes[..bytes.len().min(SOURCE_PREFIX_BYTES)],
@@ -1267,7 +1391,9 @@ async fn a_copied_h264_route_carries_608_and_708() {
         deinterlace: LiveDeinterlaceOutput::Field,
         max_height: 1080,
     };
-    let run = run_live_graph(&system, &source, case, None).await;
+    let run = run_live_graph(&system, &source, case, None)
+        .await
+        .expect("caption graph source probe");
     assert!(run.status.success(), "{}", run.argv.join(" "));
     assert!(run
         .argv
@@ -1400,7 +1526,9 @@ async fn live_caption_audit_on_this_node() {
                     deinterlace,
                     max_height: if encoder.is_some() { 720 } else { 1080 },
                 };
-                let run = run_live_graph(&system, &source, case, override_value).await;
+                let run = run_live_graph(&system, &source, case, override_value)
+                    .await
+                    .expect("caption graph source probe");
                 let label = match override_value {
                     Some(value) => format!("{name}(a53cc={value})"),
                     None => name.to_owned(),

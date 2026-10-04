@@ -67,6 +67,15 @@ missing = "fail"
 timeout_seconds = 120
 
 [[checks]]
+id = "audio-synthetic-receipt"
+title = "Retained shipped-engine downmix synthetic measurements"
+command = "python3 -m unittest tests.operations.test_audio_downmix_qualification"
+profiles = ["commit", "ci", "full", "nightly"]
+requires = ["python3"]
+missing = "fail"
+timeout_seconds = 30
+
+[[checks]]
 id = "mobile-version"
 title = "Changed mobile apps advance their store build numbers"
 command = "python3 -m validation.mobile_versions"
@@ -428,8 +437,8 @@ paths = [
   "crates/plurx-core/src/store/sqlite/dv_conversion.rs",
   "crates/plurx-core/src/store/sqlite/{cache,pretranscode}.rs",
   "crates/plurx-core/src/store/hiqlite_pretranscode.rs",
-  "crates/plurx-core/src/store/background_jobs{,_tests,_maintenance,_publication,_pretranscode,_fragment,_delivery,_fragment_admission,_observation,_migration,_offline,_domain,_library,_resources,_provider,_subtitle,_artwork,_transcode,_preparation,_predictions,_embeddings,_probe,_integrity}.rs",
-  "crates/plurx-core/src/store/background_jobs{_schema,_domain,_library,_resources,_provider,_subtitle,_subtitle_reconcile,_retention,_receipt_pressure,_viewer_analysis,_artwork,_transcode,_predictions,_embeddings,_probe,_integrity}.sql",
+  "crates/plurx-core/src/store/background_jobs{,_tests,_maintenance,_publication,_copy_output,_pretranscode,_fragment,_delivery,_fragment_admission,_observation,_migration,_offline,_domain,_library,_resources,_provider,_subtitle,_artwork,_transcode,_preparation,_predictions,_embeddings,_probe,_integrity}.rs",
+  "crates/plurx-core/src/store/background_jobs{_schema,_domain,_library,_resources,_provider,_subtitle,_subtitle_reconcile,_retention,_receipt_pressure,_viewer_analysis,_copy_output,_encoded_output,_artwork,_transcode,_predictions,_embeddings,_probe,_integrity}.sql",
   "crates/plurx-core/src/store/hiqlite_background_jobs.rs",
   "crates/plurx-core/src/store/sqlite/background_jobs.rs",
   "crates/plurx-core/src/store/hiqlite_sessions.rs",
@@ -442,6 +451,8 @@ paths = [
   "crates/plurx-core/src/store/sqlite/sessions.rs",
   "crates/plurx-core/src/store/sqlite/shared_cache.rs",
   "crates/plurx-core/src/store/telemetry.rs",
+  "crates/plurx-core/src/store/candidate_link.rs",
+  "crates/plurx-core/src/store/candidate_recovery.rs",
   "crates/plurx-core/src/store/fragindex.rs",
   "crates/plurx-core/src/store/fragment_index_cluster.rs",
   "crates/plurx-core/src/store/analysis_reconcile.sql",
@@ -452,6 +463,7 @@ paths = [
   "crates/plurx-core/tests/store_contract.rs",
   "crates/plurx-core/tests/store_contract/background_jobs.rs",
   "crates/plurx-core/tests/support/queue_fixture.rs",
+  "crates/plurx-core/tests/fixtures/startup_observer.rs",
   "crates/plurx-core/tests/support/fragment_prune_budget.rs",
   "crates/plurx-core/tests/fixtures/fragment-prune-retention.sql",
   "crates/plurx-core/tests/fixtures/fragment-prune-worst.sql",
@@ -467,6 +479,8 @@ title = "Persistent database compatibility"
 contract = "Existing libraries upgrade without losing data; a newer unsupported database is refused without changing staging state; clustering publishes a durable content-addressed SQLite backup, imports v14 through current durable rows into a fresh one-voter Hiqlite target, rebuilds derived FTS, and returns only after exact per-table parity. A fsynced completion marker and atomic rename make the verified target active; a failed or interrupted pre-rename attempt is cleaned before one unchanged-SQLite recovery boot, while post-rename recovery selects only the completed target. An ambiguous active target refuses the boot instead of reverting to SQLite, an activated directory that lost its target refuses to re-import the retained source, and retained source backups are bounded. Synchronous source reads stay on one blocking worker, while target parity uses bounded primary-key pages and an incremental digest."
 paths = [
   "crates/plurx-core/src/cluster/migration.rs",
+  "crates/plurx-core/src/store/schema_lineage.rs",
+  "crates/plurx-core/tests/schema_lineage_upgrade.rs",
   "crates/plurx-core/src/store/hiqlite_import.rs",
   "crates/plurx-core/src/store/sqlite/mod.rs",
   # K-05 section 3.9: poisoned-connection recovery and the boot integrity
@@ -511,8 +525,8 @@ paths = [
   "crates/plurx-core/src/store/hiqlite_media.rs",
   "crates/plurx-core/src/store/hiqlite_publication.rs",
   "crates/plurx-core/src/store/hiqlite_pretranscode.rs",
-  "crates/plurx-core/src/store/background_jobs{,_tests,_maintenance,_publication,_pretranscode,_fragment,_delivery,_fragment_admission,_observation,_migration,_offline,_domain,_library,_resources,_provider,_subtitle,_artwork,_transcode,_preparation,_predictions,_embeddings,_probe,_integrity}.rs",
-  "crates/plurx-core/src/store/background_jobs{_schema,_domain,_library,_resources,_provider,_subtitle,_subtitle_reconcile,_retention,_receipt_pressure,_viewer_analysis,_artwork,_transcode,_predictions,_embeddings,_probe,_integrity}.sql",
+  "crates/plurx-core/src/store/background_jobs{,_tests,_maintenance,_publication,_copy_output,_pretranscode,_fragment,_delivery,_fragment_admission,_observation,_migration,_offline,_domain,_library,_resources,_provider,_subtitle,_artwork,_transcode,_preparation,_predictions,_embeddings,_probe,_integrity}.rs",
+  "crates/plurx-core/src/store/background_jobs{_schema,_domain,_library,_resources,_provider,_subtitle,_subtitle_reconcile,_retention,_receipt_pressure,_viewer_analysis,_copy_output,_encoded_output,_artwork,_transcode,_predictions,_embeddings,_probe,_integrity}.sql",
   "crates/plurx-core/src/store/hiqlite_background_jobs.rs",
   "crates/plurx-core/src/store/sqlite/background_jobs.rs",
   "crates/plurx-core/src/store/hiqlite_reading.rs",
@@ -535,6 +549,7 @@ paths = [
   "crates/plurx-core/src/store/sql_source.rs",
   "crates/plurx-core/src/transcode/{encoder,manifest}.rs",
   "crates/plurx-core/tests/hiqlite_tls_provider.rs",
+  "crates/plurx-core/tests/hiqlite_encoded_bootstrap.rs",
   "crates/plurx-core/tests/rustls_single_provider.rs",
   "crates/plurx-core/tests/store_contract.rs",
   "crates/plurx-core/tests/store_contract/background_jobs.rs",
@@ -586,6 +601,23 @@ paths = [
 ]
 checks = ["rust-gate", "rust-gate-ci", "cluster-auth", "cluster-transport-recovery", "security-boundaries"]
 depends_on = ["cluster.auth", "identity.access"]
+
+[[points]]
+id = "cluster.clock-measurement"
+title = "Authenticated clock measurement and local continuity"
+contract = "Automatic four-timestamp peer probes retain the exact signed request time, capture bounded-body receipt before response/member verification, and preserve unchanged request freshness, nonce, method, route, body and target proofs. The exact committed roster includes stale and pending-removal members and fails closed on omission. Eight-sample filtering retains half milliseconds, caps RTT, floors delay comparisons, expires evidence monotonically and resets disjoint intervals. One serialized core handle invalidates evidence on local/common-mode wall steps, roster changes, failures and expiry. Passive bounded-label metrics preserve Unknown versus zero and remove departed peers; Developer facts are read-only and advisory. Measurement itself never mutates ownership or membership. Private consumer preparation counts only typed actual admission refusals, not pure inspections or scrapes, and readiness consumes two completed positive violating rounds while preserving Unknown and existing failure precedence. Consumer integration still requires a separate identified successful measurement receipt; takeover, membership and fenced-target wiring remain open until individually implemented and proved."
+paths = [
+  "crates/plurx-core/src/cluster/clock.rs",
+  "crates/plurxd/src/clock_offset.rs",
+  "crates/plurxd/src/http/internal_clock.rs",
+  "tests/operations/test_clock_skew_guard_design.py",
+  "scripts/k06-owned-lab.py",
+  "tests/operations/test_k06_owned_lab.py",
+  "tests/operations/test_k06_owned_lab_review.py",
+  "tests/operations/test_k06_transport_diagnostics.py",
+]
+checks = ["rust-gate", "rust-gate-ci", "operations-contract"]
+depends_on = ["cluster.membership"]
 
 [[points]]
 id = "cluster.operations"
@@ -677,6 +709,7 @@ title = "Native server API and runtime"
 contract = "The single server binary exposes stable native endpoints, coordinates background work safely, carries authenticated cluster media control without widening household credentials, and publishes a permanent Dolby Vision replacement only after exact media verification and a final source-identity fence."
 paths = [
   "crates/plurxd/Cargo.toml",
+  "crates/plurxd/src/availability.rs",
   "crates/plurxd/src/{cachekeep,logbuf,main,panics,redact,schedule,state,storeprobe,telemetry}.rs",
   "crates/plurxd/src/dv_disk.rs",
   "crates/plurxd/src/media_sessions.rs",
@@ -717,6 +750,9 @@ title = "Library discovery and catalog maintenance"
 contract = "Scans find supported media, update existing items idempotently, and preserve user-owned files."
 paths = [
   "crates/plurx-core/src/scan/**",
+  # S-08's stored-probe field-order backfill page: catalogue maintenance that
+  # gives probed rows the token the scanner writes for the same document.
+  "crates/plurx-core/src/store/field_order_backfill.rs",
   "crates/plurx-core/src/store/sqlite/library.rs",
   "crates/plurx-core/src/store/sqlite/media.rs",
   "crates/plurxd/src/http/{browse,comingsoon,images,images_worker,items,libraries,photos,scan}.rs",
@@ -785,6 +821,7 @@ paths = [
   "crates/plurx-core/src/playback/**",
   "crates/plurx-core/src/tracks.rs",
   "crates/plurx-core/src/segplan.rs",
+  "crates/plurx-core/src/output_measurement.rs",
   "crates/plurx-core/src/transcode/**",
   "crates/plurx-core/tests/decoder_selection.rs",
   "crates/plurx-pgs/**",
@@ -793,7 +830,7 @@ paths = [
   "scripts/fuzz-seeds",
   "vendor/dolby_vision/**",
   "vendor/bitvec_helpers/**",
-  "crates/plurxd/src/{admission,bounded_process,copyseg,decode_facts,decoder_health,delivery,dvpipe,ffmpeg,fontenv,fontenv_tests,fragindex,fragment_index_cluster,hevc_census,meter,pgs_overlay,pipeprobe,playback_control,playstart,process_control,prodexec,prodrun,prodsched,produce,producer_spawn,progressive,renditiondir,scratch_ledger,scratch_put,seam_hooks,subtitle_ride_along,subtitle_ranges,subtitle_source,subtitles,titlestore,transcode,vodencode,vodencode_manager_tests,vodencode_tests,vodgen,vodserve,waitpool}.rs",
+  "crates/plurxd/src/{admission,bounded_process,copyseg,decode_facts,decoder_health,delivery,dvpipe,ffmpeg,fontenv,fontenv_tests,fragindex,fragment_index_cluster,hevc_census,meter,pgs_overlay,pipeprobe,playback_control,playstart,process_control,prodexec,prodrun,prodsched,produce,producer_spawn,progressive,renditiondir,rolling_output,rolling_provenance,scratch_ledger,scratch_put,seam_hooks,subtitle_ride_along,subtitle_ranges,subtitle_source,subtitles,titlestore,transcode,vodencode,vodencode_manager_tests,vodencode_tests,vodgen,vodserve,waitpool}.rs",
   "crates/plurxd/src/transcode/**",
   "crates/plurxd/src/vod/**",
   "crates/plurxd/src/online_subtitles.rs",
@@ -804,6 +841,7 @@ paths = [
   "crates/plurxd/src/http/internal_media_sessions.rs",
   "crates/plurxd/src/http/{hls,network,pgs_overlay,stream}.rs",
   "crates/plurxd/src/http/hls/**",
+  "crates/plurxd/src/http/tests/public_copy_wire.rs",
   "crates/plurxd/src/web/playback-policy.js",
   "crates/plurxd/src/web/playback-control.js",
   "docs/PLAYBACK.md",
@@ -823,6 +861,8 @@ paths = [
   "scripts/verify-dv-timeline",
   "scripts/dv-timeline-check",
   "scripts/playback-lab",
+  "scripts/audio-downmix-qualification/**",
+  "tests/fixtures/audio-downmix/**",
   "scripts/playback-startup-lab",
   "scripts/playback-startup-trace",
   "scripts/web-hls-startup-browser-check",
@@ -835,7 +875,7 @@ paths = [
   "scripts/vod-probe-stub",
   "tests/playback/**",
 ]
-checks = ["rust-gate", "rust-gate-ci", "web-static", "player-input-fence", "playback-surface-fence", "playback-shaping", "playback-smoke", "playback-recovery", "resource-bounds", "playback-exhaustive", "playback-auto-cliff"]
+checks = ["rust-gate", "rust-gate-ci", "web-static", "player-input-fence", "playback-surface-fence", "playback-shaping", "playback-smoke", "playback-recovery", "resource-bounds", "playback-exhaustive", "playback-auto-cliff", "audio-synthetic-receipt"]
 depends_on = ["core.media", "server.api", "library.catalog"]
 
 [[points]]
@@ -867,7 +907,7 @@ paths = [
   "crates/plurxd/src/live_tv/guide.rs",
   "crates/plurxd/src/live_tv/videotoolbox_tests.rs",
   "crates/plurxd/src/live_tv/atsc_audio_tests.rs",
-  "crates/plurxd/src/live_tv/caption_audit_tests.rs",
+  "crates/plurxd/src/live_tv/caption_probe.rs",
   "crates/plurxd/src/http/live_tv.rs",
   "crates/plurxd/src/http/internal_live_tv.rs",
   "crates/plurxd/src/web/live-tv.js",
@@ -980,10 +1020,11 @@ depends_on = [
 [[points]]
 id = "plex.compatibility"
 title = "Plex-compatible discovery and API surface"
-contract = "Direct-connection Plex clients receive compatible discovery, metadata, playback, and timeline responses."
+contract = "Direct-connection Plex clients receive compatible discovery, metadata, playback, and timeline responses, and every node keeps a census of those requests by handler and outcome that survives restarts, counts each unclean stop and its window, and starts a new census rather than failing when its file is missing or unusable."
 paths = [
   "crates/plurx-compat-plex/**",
   "crates/plurxd/src/http/plex.rs",
+  "crates/plurxd/src/http/plex_census.rs",
 ]
 checks = ["rust-gate", "rust-gate-ci"]
 depends_on = ["server.api", "api.contract", "playback.pipeline"]
@@ -1008,6 +1049,7 @@ paths = [
   "scripts/subtitle-readiness-browser-check",
   "scripts/js-check",
   "scripts/web-jsconfig",
+  "scripts/web-shape-check",
   "scripts/web-types",
   "scripts/reader-browser",
   "scripts/themes-proposed.json",
@@ -1076,6 +1118,7 @@ paths = [
   "Dockerfile.store-shard",
   "deploy/**",
   "crates/plurxd/build.rs",
+  "crates/plurxd/build_support/**",
   "crates/plurxd/plurxd.manifest",
   "crates/plurxd/src/windows_service.rs",
   "crates/plurxd/src/version.rs",
@@ -1083,6 +1126,8 @@ paths = [
   "scripts/ci-cargo-cache-prepare",
   "scripts/ci-cargo-cache-refresh",
   "scripts/image-base-drift",
+  "scripts/p02-release-cost.py",
+  "scripts/p02-release-cost.Dockerfile",
   "scripts/build-static-ffprobe",
   "scripts/build-static-vmaf-scorer",
   "scripts/ci-cache-prune",
@@ -1092,7 +1137,7 @@ paths = [
   "scripts/ci-runner-cache-audit",
   "scripts/release-package-candidate",
   "scripts/package-windows",
-  "scripts/{bench,dv-evidence,gop-census,mkpgs,perf-report,perf2-rate-control-n1-corpus.json,perf2-rate-control-n2-corpus.json,perf2-rate-control-smoke-corpus.json,ship,ship-physical}",
+  "scripts/{bench,codec-qualification-corpus.json,codec-hdr-score,dv-evidence,gop-census,rolling-grid-census,rolling-grid-acquire,mkpgs,perf-report,perf2-rate-control-n1-corpus.json,perf2-rate-control-n2-corpus.json,perf2-rate-control-smoke-corpus.json,ship,ship-physical}",
   "scripts/encoder-calibration-screen",
   "scripts/content-aware-encoding",
   "scripts/tone-map-calibration",

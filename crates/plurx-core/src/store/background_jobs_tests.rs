@@ -1069,8 +1069,16 @@ async fn background_subtitles_reconcile_historical_ready_demand_without_overwrit
             rusqlite::Connection::open(&path).expect("subtitle reconciliation fixture");
         connection
             .execute_batch(
+                // Everything above v83 that a replay cannot meet twice: v90's
+                // provenance column, v92's audio snapshot column, v93's Link
+                // pair, and the v94/v96 tables, so the reopen is a v83 shape.
                 "DROP TRIGGER background_subtitle_settled;
-                ALTER TABLE dv_conversions DROP COLUMN requested_manually;",
+                ALTER TABLE dv_conversions DROP COLUMN requested_manually;
+                ALTER TABLE offline_packages DROP COLUMN audio_recipe;
+                ALTER TABLE network_priors DROP COLUMN link_starved_at_ms;
+                ALTER TABLE network_priors DROP COLUMN link_worst_rung_height;
+                DROP TABLE candidate_link_priors;
+                DROP TABLE candidate_recovery;",
             )
             .expect("subtitle reconciliation fixture");
         connection

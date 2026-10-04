@@ -159,7 +159,7 @@
     /// added to `http/hls/` without being listed here fails each scan instead
     /// of going unread by it. Test children (`tests.rs`, `tests/`) quote
     /// production code as literals and are not product sources.
-    const HLS_PRODUCT_SOURCES: [(&str, &str); 16] = [
+    const HLS_PRODUCT_SOURCES: [(&str, &str); 19] = [
         ("../hls.rs", include_str!("../../hls.rs")),
         ("hooks.rs", include_str!("../hooks.rs")),
         ("session_guard.rs", include_str!("../session_guard.rs")),
@@ -179,6 +179,12 @@
         ("subtitle_names.rs", include_str!("../subtitle_names.rs")),
         ("playlist_text.rs", include_str!("../playlist_text.rs")),
         ("segment.rs", include_str!("../segment.rs")),
+        (
+            "candidate_recovery.rs",
+            include_str!("../candidate_recovery.rs"),
+        ),
+        ("link_receipts.rs", include_str!("../link_receipts.rs")),
+        ("prepared_link.rs", include_str!("../prepared_link.rs")),
     ];
 
     fn hls_product_source() -> String {
@@ -737,14 +743,8 @@
     #[tokio::test]
     async fn driven_local_body_rejects_queued_data_after_terminal_failure() {
         let (sender, receiver) = tokio::sync::mpsc::channel(1);
-        let (accepted, mut rejected) = tokio::sync::watch::channel(0usize);
-        sender
-            .send(DrivenLocalChunk {
-                bytes: Bytes::from_static(b"stale-chunk"),
-                accepted,
-            })
-            .await
-            .expect("body receiver");
+        let (chunk, accepted_bytes) = test_resident_chunk(Bytes::from_static(b"stale-chunk"));
+        sender.send(chunk).await.expect("body receiver");
         let terminal = StreamedBodyTerminal::new();
         terminal.fail(
             std::io::ErrorKind::TimedOut,
@@ -752,7 +752,7 @@
         );
         drop(sender);
 
-        let mut body = driven_local_body(
+        let mut body = resident_local_body(
             receiver,
             terminal,
             tokio::time::Instant::now() + Duration::from_secs(60),
@@ -764,10 +764,7 @@
             .expect_err("the driven body must expose the producer failure");
         assert!(error.to_string().contains("body deadline expired"));
         assert!(body.frame().await.is_none());
-        assert!(
-            rejected.changed().await.is_err(),
-            "stale bytes must not be acknowledged"
-        );
+        assert_eq!(accepted_bytes(), 0, "stale bytes must not be acknowledged");
     }
 
     #[test]
@@ -912,6 +909,8 @@
         let session_id = uuid::Uuid::new_v4().to_string();
         let generation = uuid::Uuid::new_v4().to_string();
         let recipe = RemoteStartRequest {
+            retained_output: None,
+            retained_output_receiver: None,
             candidate_catalog: None,
             candidate_id: None,
             presentation_target: None,
@@ -936,6 +935,8 @@
                 kind: crate::transcode::SessionKind::Transcode { height: 720 },
                 start_seconds: 0.0,
                 audio_index: None,
+                audio_delivery: None,
+                audio_claim: None,
                 subtitle_burn: None,
                 audio_offset_ms: 0,
                 hdr10: false,
@@ -945,10 +946,12 @@
             },
         };
         let start = StartResponse {
+            delivered_audio: None,
         quality_catalog_status: None,
             display_aware_auto_protocol: Some("route-v1".to_owned()),
             quality_candidate_id: None,
             quality_candidates: None,
+            measured_candidate_outputs: None,
             session_id: session_id.clone(),
             playlist_url: format!("/api/v1/hls/{session_id}/index.m3u8"),
             duration_ms: Some(60_000),
@@ -1802,10 +1805,12 @@
             .recipe_json
             .replace("\"user_id\":7", &format!("\"user_id\":{}", user.id));
         let start = StartResponse {
+            delivered_audio: None,
         quality_catalog_status: None,
             display_aware_auto_protocol: Some("route-v1".to_owned()),
             quality_candidate_id: None,
             quality_candidates: None,
+            measured_candidate_outputs: None,
             session_id: session_id.clone(),
             playlist_url: format!("/api/v1/hls/{session_id}/index.m3u8"),
             duration_ms: Some(60_000),
@@ -2080,6 +2085,8 @@
             .await
             .expect("terminal cancellation user");
         let recipe = RemoteStartRequest {
+            retained_output: None,
+            retained_output_receiver: None,
             candidate_catalog: None,
             candidate_id: None,
             presentation_target: None,
@@ -2104,6 +2111,8 @@
                 kind: crate::transcode::SessionKind::Transcode { height: 720 },
                 start_seconds: 0.0,
                 audio_index: None,
+                audio_delivery: None,
+                audio_claim: None,
                 subtitle_burn: None,
                 audio_offset_ms: 0,
                 hdr10: false,
@@ -2113,10 +2122,12 @@
             },
         };
         let start = StartResponse {
+            delivered_audio: None,
         quality_catalog_status: None,
             display_aware_auto_protocol: Some("route-v1".to_owned()),
             quality_candidate_id: None,
             quality_candidates: None,
+            measured_candidate_outputs: None,
             session_id: session_id.clone(),
             playlist_url: format!("/api/v1/hls/{session_id}/index.m3u8"),
             duration_ms: Some(60_000),
@@ -2347,6 +2358,8 @@
             let generation = uuid::Uuid::new_v4().to_string();
             let client_instance_id = uuid::Uuid::new_v4().to_string();
             let recipe = RemoteStartRequest {
+                retained_output: None,
+                retained_output_receiver: None,
                 candidate_catalog: None,
                 candidate_id: None,
                 presentation_target: None,
@@ -2371,6 +2384,8 @@
                     kind: crate::transcode::SessionKind::Transcode { height: 720 },
                     start_seconds: 0.0,
                     audio_index: None,
+                    audio_delivery: None,
+                    audio_claim: None,
                     subtitle_burn: None,
                     audio_offset_ms: 0,
                     hdr10: false,
@@ -2380,10 +2395,12 @@
                 },
             };
             let start = StartResponse {
+                delivered_audio: None,
         quality_catalog_status: None,
                 display_aware_auto_protocol: Some("route-v1".to_owned()),
                 quality_candidate_id: None,
                 quality_candidates: None,
+                measured_candidate_outputs: None,
                 session_id: session_id.clone(),
                 playlist_url: format!("/api/v1/hls/{session_id}/index.m3u8"),
                 duration_ms: Some(60_000),

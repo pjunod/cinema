@@ -1,6 +1,6 @@
 # Bounded replica reads rollout — a consistency-policy change, one route at a time
 
-**Status:** M0–M3 server implementation merged; web echo and normal default in E1 construction (`codex/cluster-cache-preparation`), final review/validation pending · **Executes:** S1, F-sc-1, F-core-4 from
+**Status:** M0–M3, the web echo, and the normal default merged; M4 watch failure coverage and named lab/rolling-upgrade acceptance remain open · **Executes:** S1, F-sc-1, F-core-4 from
 [ARCHITECTURE-REVIEW-2026-09-20.md](../reviews/ARCHITECTURE-REVIEW-2026-09-20.md)
 · **Written:** 2026-09-20 against `main` @ `88a3957a`
 
@@ -8,24 +8,28 @@
 
 Read [CLUSTER-PERFORMANCE-PLAN.md](CLUSTER-PERFORMANCE-PLAN.md) §3.2–§3.4
 (the four consistency classes and the `BoundedReplica` proof) and §6.4 (what
-P3 built) before this. Then §2 here for what the tree does today, and §3 for
-the order: measure, widen coverage, fence write-followed-by-read, and only
-then flip the default. If a step seems to require caching an ordinary
+P3 built) before this. Then §2 here for the starting snapshot, and §3 for
+the original order: measure, widen coverage, fence write-followed-by-read,
+and then flip the default. If a step seems to require caching an ordinary
 authentication result, serving a watch-state read locally without a fence,
-or turning `bounded_replica_reads` on before a route's fallback has a test,
-stop and flag it.
+or claiming M4 acceptance without the route's failure proof and named lab
+readout, stop and flag it.
 
-**2026-09-26 continuation:** the durable-cluster-work E1 build now owns the web
-echo and normal bounded-read default. It adds a replicated Developer preference
-with advisory observations; absent/stale replica proof and unknown watch-write
-positions still use Authority. The browser uses decimal u64 indexes, a monotonic
-60-second window, auth-generation isolation and invalidation of in-flight
-receipts after an unknown write. Existing fallback/parity contracts are extended
-for live preference changes. No authentication cache is introduced. Tests run
-only after E1's completed-PR adversarial review, per the user's delivery order;
-no production rollout or fleet benchmark is claimed by construction checks.
-Earlier “not built” and default-false entries below are the historical M2–M3
-record. Current build evidence lives in [DURABLE-WORK-QUEUE-STATUS.md](DURABLE-WORK-QUEUE-STATUS.md).
+**2026-09-29 source correction:** [PR #572](http://192.168.4.7:3000/noirr/plurx/pulls/572)
+merged E1's web echo and on-by-default bounded-read preference (`5ba02212f`)
+to `main` as `82df7f59e`. The Developer switch saves the replicated preference
+with advisory readiness; absent or stale replica proof and unknown watch-write
+positions still use Authority. The browser keeps decimal u64 indexes intact,
+echoes for a monotonic 60-second window, and discards receipts across an auth
+change or an unknown write. Its focused contracts are
+`tests/web/read-after.test.js`; the config default assertion is in
+`crates/plurx-core/src/config.rs`. Separately, `9aeafe86` consolidated the
+item page's three playback-language setting reads into one `get_settings`
+call. These are merged source facts, not the §5.1 lab readout, watch-method
+paused/partitioned-follower proof, rolling-upgrade observation, or fleet
+acceptance. Earlier “not built” and default-false entries below record the
+M2–M3 state at their dated snapshots. The E1 build record is
+[DURABLE-WORK-QUEUE-STATUS.md](DURABLE-WORK-QUEUE-STATUS.md).
 
 **Correction to the review:** none on the facts. Two clarifications the
 plan depends on. First, `search_items` is already a local read on hiqlite
@@ -47,9 +51,10 @@ Authority whenever that proof cannot be shown; and `bounded_replica_reads`
 defaults to `true` only after each eligible route has that coverage proven
 by a test and the per-route measurement shows the saving.
 
-## 2. Contract today
+## 2. Contract at the 2026-09-20 baseline
 
-Re-verify at build time.
+This section records the starting source snapshot. Use the dated corrections
+in §2.6 and the 2026-09-29 source correction above for the merged state.
 
 ### 2.1 The switch and the reader
 
@@ -177,15 +182,14 @@ What the M2-M4 continuation found when it re-read the tree:
   text count could no longer see. The census now counts each call that
   passes `WatchRead::Authority` to that helper as a site (§3.4 *As built*),
   and stands at 241 after merging `main` at `448e803da`.
-- **The item page pays three consistent settings reads before any watch
-  read.** `item_detail` calls `TranscodeManager::lang_prefs`
-  ([browse.rs:389](../../crates/plurxd/src/http/browse.rs)), which reads
+- **At this 2026-09-24 snapshot, the item page paid three consistent settings
+  reads before any watch read.** `item_detail` called `TranscodeManager::lang_prefs`
+  ([browse.rs:389](../../crates/plurxd/src/http/browse.rs)), which read
   `AUDIO_LANG`, `SUB_LANG` and `SUB_MODE` one `get_setting` at a time
-  ([transcode.rs:21070-21080](../../crates/plurxd/src/transcode.rs)). §3.4's
-  settings bullet names exactly this class; it is not changed yet (see the
-  Execution log).
-- **Everything else in §2 still holds**: `bounded_replica_reads` defaults to
-  `false` and the lag budget to 64 (`config.rs`), `run_bounded_replica`
+  (then in `transcode.rs`). `9aeafe86` later replaced those three calls with
+  one `get_settings` snapshot; see §3.4.
+- **Everything else in §2 held at that snapshot**: `bounded_replica_reads`
+  defaulted to `false` and the lag budget to 64 (`config.rs`), `run_bounded_replica`
   issues and revalidates one permit per local read
   ([migration.rs:8068-8085](../../crates/plurx-core/src/cluster/migration.rs)),
   and authentication is one consistent read per request.
@@ -314,12 +318,12 @@ Authority: it precedes a mutation.
     left the client echoing its previous, older index past a write it had
     just been told succeeded.)* A client that echoes `unknown` verbatim
     sends a malformed fence, which is also Authority.
-- *Not built here*: the web client's echo (`node tests/web/read-after.test.js`
-  in §5.3). It is client code and is left to the session that owns web
-  client work; until it lands no client sends the header, so **no node
-  serves watch state locally**, even with `bounded_replica_reads=true`: M2's
-  local path is exercised by the contracts and is dormant in production
-  until a client echoes. Apple and Android are §7 question 1.
+- *Not built in #504*: the web client's echo (`node tests/web/read-after.test.js`
+  in §5.3). It was client code left to the web owner; until #572 landed,
+  no client sent the header, so **no node served watch state locally**, even
+  with `bounded_replica_reads=true`. The local path was exercised by the
+  contracts but dormant without a client echo. Apple and Android are §7
+  question 1.
 - *Not fenced*: `publish_identity_repair`'s watch-row copies
   (`hiqlite_publication.rs`) are a catalogue repair under a job lease, not
   a user's write; the rows move with the items they describe and are
@@ -349,9 +353,11 @@ one connection and `progress_rails` runs the same shared statement
 `list_items`, `item_detail` and `home_previews` read watch state once each;
 `hubs` reads its two progress rails once and keeps a separate lookup for the
 recently-added rail's cards, which depend on the catalogue rows it
-annotates. The settings bullet is **not** done: the only handler-path case
-found is `lang_prefs`' three reads (§2.6), and `get_setting_pair` would take
-it to two, not one; which shape to use is left to the M0 readout.
+annotates. The settings bullet subsequently landed in `9aeafe86`:
+`try_lang_prefs` now calls `get_settings(&[AUDIO_LANG, SUB_LANG, SUB_MODE])`
+once on both backends, so the item page no longer pays three separate
+settings reads. This is a source-level read count, not a measured page-latency
+saving.
 
 Census: `crates/plurx-core/src/store/consistent_read_census.rs` counts
 `query_consistent` per `hiqlite*.rs` against a checked-in table, fails when
@@ -393,12 +399,36 @@ request on a voter and the expected count after; (d) readiness already drops
 a node that lost its serving proof (`serving_fence.rs`); the lag budget
 `bounded_replica_max_lag_entries = 64` is kept.
 
-Then `bounded_replica_reads` default becomes `true` in `config.rs:170`, with
-the env/TOML key retained as the kill switch and OPERATIONS.md's rollout
-note ("identical on every voter during rollout and rollback") kept. The
-setting is node-local config by necessity (it is read before the store
-exists); the Developer readiness page lists, advisory only, whether every
-committed voter reports the same value in its heartbeat capability set.
+**Merged source state (2026-09-29).** #572 changed the config default to
+`true` and added a replicated Developer preference whose readiness is
+advisory. The env/TOML value seeds the initial preference; after a Developer
+choice is saved, that replicated value overrides the seed. The source and
+focused web/config contracts are present. On merged `main`, precondition (b)
+has not been extended to the watch methods; the K-04 branch proof below covers
+that extension. Precondition (c) has no
+named §5.1 lab readout in this record. The changed default is therefore a
+merged behavior, not evidence that every M4 acceptance step passed.
+
+**2026-09-29 focused source proof.** The separate K-04 branch extends
+`plurx-cluster-check`'s existing three-process apply-pause and follower-
+partition case through `watch_map`, `watch_rollup`, `watch_summary`, and
+`progress_rails`. It seeds a real watch write, carries the acknowledged Raft
+index into each read, checks Authority fallback and the returned watch state
+while apply is paused, then checks that a partitioned follower cannot return
+its stale local state after the one-second watermark lease expires. The
+focused harness mode is `cargo run --locked -p plurx-cluster-check --
+bounded-watch-failure`. On the `9c094da0` source checkpoint plus the harness
+count correction, Rust 1.97.1 (`8bab26f4f`) compiled the crate and this focused
+mode passed. Healthy reads issue two local statements: the replicated
+preference lookup and the catalogue/watch query. Paused or expired proof
+still issues no local SQL and attempts one Authority statement. This is a
+source-level failure proof, not the named lab or rolling-upgrade acceptance.
+The K-04 candidate targets `effort/architecture-review-2026-09-20`, whose
+2026-09-30 base is `38c91722`. Repeat the pinned checks against that exact
+candidate before pushing. Independent seek PR #623 still targets `main`;
+its eventual merge must be synchronized into the effort and the resulting
+tree qualified before final promotion. Earlier snapshot evidence cannot
+qualify a moved base.
 
 ## 4. Guardrails (non-goals)
 
@@ -415,8 +445,9 @@ committed voter reports the same value in its heartbeat capability set.
   but never replace.
 - **No wall-clock freshness.** The bounded permit's lease is monotonic; M2's
   fence is an index comparison. Neither reads `SystemTime`.
-- **The default does not flip before M0–M3.** Flipping it is the
-  consistency-policy change the assessment names; it is the last PR.
+- **The normal default flipped after M0–M3 server work merged.** #572 made
+  that consistency-policy change; the missing watch failure and lab proofs
+  stay open in §3.5 rather than being inferred from the default.
 - **The census is not evidence of latency**, and the plan never presents it
   as such.
 - **No change to `bounded_replica_max_lag_entries`** without a lab
@@ -466,35 +497,48 @@ extra `query_consistent` in a fixture copy of `hiqlite_reading.rs`.
 
 ### 5.5 M4 — default flip
 
-Acceptance: `config.rs` test asserts the new default; `make cluster-check`
-green; the M0 readout repeated on the lab shows `home`'s authority reads per
-request ≤ 2 and `library`/`item` ≤ 1 with the switch at its new default;
-OPERATIONS.md and CLUSTER-PERFORMANCE-PLAN.md §6.4 updated in the same PR.
+Acceptance: the `config.rs` test asserts the merged default; the
+watch-method paused/partitioned-follower `cluster-check` case must pass;
+the M0 readout repeated on the lab must show `home`'s authority reads per
+request ≤ 2 and `library`/`item` ≤ 1 with the switch at its normal default.
+The first is merged source evidence. The K-04 branch's cluster-check
+extension passed the focused pinned-toolchain mode recorded in §3.5; that
+branch proof does not yet describe merged `main`. The named lab readout
+remains open. Rollout and
+rolling-upgrade observations are
+separate from source acceptance.
 
 ## 6. Verification and rollout
 
-Fast lane per PR: `make unit`; M2/M3/M4 also `make cluster-store-check`
+The 2026-09-30 effort integration override on the work board governs remaining
+plan PRs: use the focused `bounded-watch-failure` regression and the blocking
+Effort development gate, without task-to-main unit sweeps. The final effort
+promotion requires qualification of the synchronized tree and its receipt.
+
+Historical main fast lane per PR: `make unit`; M2/M3/M4 also `make cluster-store-check`
 (the P3 contracts live there). Node gate for M2's client change:
-`node tests/web/read-after.test.js`. Rollout: M0–M3 are behaviour-neutral
-with the switch off. M4 rolls voter by voter with the env kill switch set
-`false` on each node first, then removed; rollback is setting it back, and
-the mixed state is safe because the reader falls back per request.
+`node tests/web/read-after.test.js`. The normal default and Developer
+preference are merged; the saved preference can turn bounded reads off or on
+without a restart and overrides the env/TOML seed. Every read still checks
+its own consistency proof and falls back per request. Record the §5.1 lab
+readout and rolling-upgrade observation separately before claiming rollout
+acceptance.
 
 ## 7. Open questions
 
 1. Whether Apple and Android should adopt the `X-Plurx-Read-After` echo in
    the same quarter; until then their Home rails are Authority on
    non-writing nodes, which is today's behaviour.
-2. The 60 s TTL on the per-user write index and the header window — a
-   proposal; a longer window only costs Authority reads.
+2. Whether to lengthen the implemented 60 s per-user write index and header
+   window; a longer window only costs Authority reads.
 3. Should `route_group` include `reader` (ebooks) as its own value? Nine
    groups are proposed; the table is the place to add one.
 4. *(Raised by the M2 build, for Paul; narrowed by the review of #504.)* A
    watch read is local only for a client that echoes an
    `X-Plurx-Read-After` from the last 60 s. A node's own write record no
-   longer counts on its own (§3.3 *As built*), so until the web echo lands
-   **no watch read is local anywhere**, and afterwards Apple and Android
-   (question 1) and an idle web session stay on Authority for watch state.
+   longer counts on its own (§3.3 *As built*). The web echo landed in #572;
+   Apple and Android (question 1) and an idle web session stay on Authority
+   for watch state.
    That is what makes the fence sound without a replicated per-user
    revision, and M3 already takes that Authority cost from two reads to one.
    The header also gives per-client, not per-user, consistency: a second

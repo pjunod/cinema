@@ -3,6 +3,7 @@
 #![cfg_attr(test, allow(clippy::disallowed_methods))]
 
 mod admission;
+mod availability;
 use plurx_core::process::bounded as bounded_process;
 #[cfg(test)]
 #[path = "../../plurx-core/tests/support/queue_fixture.rs"]
@@ -13,6 +14,7 @@ mod background_jobs;
 mod backup;
 mod cachekeep;
 mod channel_subjects;
+mod clock_offset;
 mod copyseg;
 mod decode_facts;
 mod decoder_health;
@@ -52,6 +54,8 @@ mod progressive;
 mod reader_formats;
 mod redact;
 mod renditiondir;
+mod rolling_output;
+mod rolling_provenance;
 mod schedule;
 mod scratch_ledger;
 mod scratch_put;
@@ -97,7 +101,7 @@ use hyper_util::server::graceful::GracefulShutdown;
 use hyper_util::service::TowerToHyperService;
 use plurx_core::cluster::coordination::StoreCoordinator;
 use plurx_core::cluster::migration::{
-    connect_activated_store, select_daemon_store, SelectedBackend,
+    connect_activated_store, select_daemon_store_observing, SelectedBackend, StartupClockObserver,
 };
 use plurx_core::config::{Config, StorageConfig};
 use plurx_core::domain::LibraryKind;
@@ -1693,9 +1697,16 @@ async fn run(config: Config) -> anyhow::Result<()> {
     // one of them first.
     let shutdown = ShutdownWatch::observing(shutdown_signal());
 
-    let selected = select_daemon_store(&config)
-        .await
-        .with_context(|| format!("selecting store in {}", config.storage.data_dir.display()))?;
+    let observation = Arc::new(StartupObservationHttp::new(config.server.bind));
+    let selected = match select_daemon_store_observing(&config, Some(observation.as_ref())).await {
+        Ok(selected) => selected,
+        Err(error) => {
+            observation.stop_and_drain().await;
+            return Err(error).with_context(|| {
+                format!("selecting store in {}", config.storage.data_dir.display())
+            });
+        }
+    };
     // Which backend is serving is not otherwise observable. A recovery boot
     // binds and serves normally on unreplicated SQLite, so a persistently
     // failing activation otherwise looks only like a flapping container, with
@@ -1752,9 +1763,17 @@ async fn run(config: Config) -> anyhow::Result<()> {
             system,
             logs,
         };
-        boot(config, parts, start_mdns_advertiser, shutdown.signalled()).await
+        boot_observing(
+            config,
+            parts,
+            start_mdns_advertiser,
+            shutdown.signalled(),
+            Some(Arc::clone(&observation)),
+        )
+        .await
     };
     let result = serving.await;
+    observation.stop_and_drain().await;
     let shutdown = selected
         .shutdown()
         .await
@@ -1779,6 +1798,190 @@ struct Boot {
     logs: logbuf::LogBuffers,
 }
 
+/// One public socket owner spanning clock-only observation and normal HTTP.
+/// Routing is selected per request, so already-open keepalive connections
+/// cannot retain the pending router after activation.
+struct StartupObservationHttp {
+    bind: SocketAddr,
+    router: Arc<std::sync::RwLock<axum::Router>>,
+    tasks: tokio::sync::Mutex<Option<StartupObservationTasks>>,
+    stop: tokio_util::sync::CancellationToken,
+}
+
+struct StartupObservationTasks {
+    server: tokio::task::JoinHandle<anyhow::Result<HttpDrain>>,
+    observer: crate::clock_offset::ClockObserver,
+    probe: Option<tokio::task::JoinHandle<()>>,
+    probe_stop: tokio_util::sync::CancellationToken,
+}
+
+impl StartupObservationHttp {
+    fn new(bind: SocketAddr) -> Self {
+        Self {
+            bind,
+            router: Arc::new(std::sync::RwLock::new(axum::Router::new())),
+            tasks: tokio::sync::Mutex::new(None),
+            stop: tokio_util::sync::CancellationToken::new(),
+        }
+    }
+
+    async fn stop_probe(&self) {
+        let mut tasks = self.tasks.lock().await;
+        if let Some(tasks) = tasks.as_mut() {
+            tasks.probe_stop.cancel();
+            if let Some(mut probe) = tasks.probe.take() {
+                if tokio::time::timeout(SHUTDOWN_DRAIN_TIMEOUT, &mut probe)
+                    .await
+                    .is_err()
+                {
+                    probe.abort();
+                    let _ = probe.await;
+                }
+            }
+        }
+    }
+
+    async fn observer(&self) -> Option<crate::clock_offset::ClockObserver> {
+        self.tasks
+            .lock()
+            .await
+            .as_ref()
+            .map(|tasks| tasks.observer.clone())
+    }
+
+    async fn stop_and_drain(&self) {
+        self.stop.cancel();
+        self.stop_probe().await;
+        if let Some(mut tasks) = self.tasks.lock().await.take() {
+            if tokio::time::timeout(
+                SHUTDOWN_DRAIN_TIMEOUT + Duration::from_secs(1),
+                &mut tasks.server,
+            )
+            .await
+            .is_err()
+            {
+                tasks.server.abort();
+                let _ = tasks.server.await;
+            }
+        }
+    }
+
+    async fn serve_normal(
+        &self,
+        app: axum::Router,
+        shutdown: impl std::future::Future<Output = ()> + Send,
+    ) -> anyhow::Result<HttpDrain> {
+        *self
+            .router
+            .write()
+            .map_err(|_| anyhow::anyhow!("startup router ownership poisoned"))? = app;
+        let mut tasks = self
+            .tasks
+            .lock()
+            .await
+            .take()
+            .ok_or_else(|| anyhow::anyhow!("startup observation socket was not installed"))?;
+        tokio::pin!(shutdown);
+        let result = tokio::select! {
+            result = &mut tasks.server => result.context("startup HTTP task").and_then(|result| result),
+            () = &mut shutdown => {
+                self.stop.cancel();
+                (&mut tasks.server).await.context("startup HTTP task").and_then(|result| result)
+            }
+        };
+        self.stop.cancel();
+        tasks.probe_stop.cancel();
+        if let Some(mut probe) = tasks.probe.take() {
+            if tokio::time::timeout(SHUTDOWN_DRAIN_TIMEOUT, &mut probe)
+                .await
+                .is_err()
+            {
+                probe.abort();
+                let _ = probe.await;
+            }
+        }
+        result
+    }
+}
+
+impl Drop for StartupObservationHttp {
+    fn drop(&mut self) {
+        self.stop.cancel();
+    }
+}
+
+impl StartupClockObserver for StartupObservationHttp {
+    fn start(
+        &self,
+        membership: plurx_core::cluster::membership::MembershipManager,
+        node_id: String,
+    ) -> std::pin::Pin<
+        Box<
+            dyn std::future::Future<Output = Result<(), plurx_core::error::StoreError>> + Send + '_,
+        >,
+    > {
+        Box::pin(async move {
+            let mut tasks = self.tasks.lock().await;
+            if tasks.is_some() {
+                return Err(plurx_core::error::StoreError::Database(
+                    "clock observation socket already owned".into(),
+                ));
+            }
+            let listener = bind_listener(self.bind)
+                .await
+                .map_err(|error| plurx_core::error::StoreError::Database(error.to_string()))?;
+            let observer = crate::clock_offset::ClockObserver::new(membership.clone());
+            let pending = axum::Router::new()
+                .route(
+                    http::internal_clock::PATH,
+                    axum::routing::get(http::internal_clock::observation_snapshot),
+                )
+                .with_state(http::internal_clock::ObservationContext {
+                    membership: membership.clone(),
+                    node_id,
+                    observer: observer.clone(),
+                });
+            *self.router.write().map_err(|_| {
+                plurx_core::error::StoreError::Database("startup router ownership poisoned".into())
+            })? = pending;
+            let router = Arc::clone(&self.router);
+            let dispatch = axum::Router::new().fallback(axum::routing::any(
+                move |request: axum::http::Request<axum::body::Body>| {
+                    let router = Arc::clone(&router);
+                    async move {
+                        let app = router
+                            .read()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner)
+                            .clone();
+                        match tower::ServiceExt::oneshot(app, request).await {
+                            Ok(response) => response,
+                            Err(never) => match never {},
+                        }
+                    }
+                },
+            ));
+            let stop = self.stop.clone();
+            let server = tokio::spawn(serve_http(
+                listener,
+                dispatch,
+                async move { stop.cancelled().await },
+                HTTP_TIMEOUTS,
+            ));
+            let probe_stop = self.stop.child_token();
+            let probe_owner = observer.clone();
+            let probe_shutdown = probe_stop.clone();
+            let probe = tokio::spawn(async move { probe_owner.run(probe_shutdown).await });
+            *tasks = Some(StartupObservationTasks {
+                server,
+                observer,
+                probe: Some(probe),
+                probe_stop,
+            });
+            Ok(())
+        })
+    }
+}
+
 /// Everything from a measured node to a served, drained shutdown.
 ///
 /// Separated from [`run`] at exactly the line where startup stops reaching
@@ -1786,12 +1989,27 @@ struct Boot {
 /// is wiring. Taking the shutdown future and the advertiser rather than
 /// installing a signal handler and registering on the LAN is what lets the
 /// whole sequence run in a test, on a temporary directory and a loopback port.
+#[cfg(test)]
 async fn boot(
-    mut config: Config,
+    config: Config,
     parts: Boot,
     advertiser: MdnsAdvertiser,
     shutdown: impl std::future::Future<Output = ()> + Send + 'static,
 ) -> anyhow::Result<()> {
+    boot_observing(config, parts, advertiser, shutdown, None).await
+}
+
+async fn boot_observing(
+    mut config: Config,
+    parts: Boot,
+    advertiser: MdnsAdvertiser,
+    shutdown: impl std::future::Future<Output = ()> + Send + 'static,
+    observation: Option<Arc<StartupObservationHttp>>,
+) -> anyhow::Result<()> {
+    let observation = match observation {
+        Some(owner) if owner.tasks.lock().await.is_some() => Some(owner),
+        _ => None,
+    };
     let Boot {
         store,
         replication,
@@ -1824,7 +2042,7 @@ async fn boot(
 
     let instance_id = identity.cluster_id;
     let node_id = identity.node_id;
-    let state = build_state(
+    let mut state = build_state(
         &config,
         node_id.clone(),
         instance_id.clone(),
@@ -1839,6 +2057,16 @@ async fn boot(
         system,
         logs,
     );
+    if let Some(owner) = &observation {
+        let observer = owner.observer().await.ok_or_else(|| {
+            anyhow::anyhow!("startup observation owner disappeared before activation")
+        })?;
+        anyhow::ensure!(
+            observer.belongs_to(&state.membership),
+            "foreign startup clock owner"
+        );
+        state.clock_observer = observer;
+    }
     // The stored request is not an ffmpeg contract. Exercise the exact
     // production rate-control arguments against this boot's real drivers and
     // publish only the effective result before any session can start.
@@ -1857,6 +2085,18 @@ async fn boot(
     crate::telemetry::initialize(Arc::clone(&state.store))
         .await
         .context("seed playback telemetry settings")?;
+    // The Plex façade census continues across restarts (C-07 §8.5). Restored
+    // before the listener accepts; an unusable file is a new census, never a
+    // refusal to start.
+    state
+        .plex_census
+        .restore_durable(
+            &config.storage.data_dir,
+            http::plex_census::unix_now_s(),
+            http::plex_census::build_source_floor().unwrap_or(0),
+        )
+        .await;
+    let plex_census = Arc::clone(&state.plex_census);
     let background_loops = BackgroundLoopGuard::new();
     spawn_background_loops(&state, background_loops.token());
 
@@ -1869,7 +2109,11 @@ async fn boot(
     tokio::task::spawn_blocking(http::web::warm_static_assets)
         .await
         .context("precompute embedded web assets")?;
-    let listener = bind_listener(config.server.bind).await?;
+    let listener = if observation.is_none() {
+        Some(bind_listener(config.server.bind).await?)
+    } else {
+        None
+    };
     #[cfg(windows)]
     crate::windows_service::report_listener_ready()?;
     trigger_shutdown_registration_failpoint("after-listener-bind");
@@ -1877,7 +2121,7 @@ async fn boot(
         (!config.cluster.advertise_host.trim().is_empty()).then_some(node_id.as_str());
     let mdns = start_discovery(&config, &instance_id, discovery_node_id, advertiser);
 
-    serve(listener, app, progress, mdns, async move {
+    let shutdown = async move {
         tokio::select! {
             () = shutdown => {}
             () = leave_shutdown.cancelled() => {
@@ -1898,8 +2142,37 @@ async fn boot(
         if let Err(error) = live_tv_shutdown.shutdown().await {
             tracing::warn!(%error, "Live TV shutdown could not confirm complete cleanup");
         }
-    })
-    .await
+    };
+    let served = if let Some(owner) = observation {
+        match owner.serve_normal(app, shutdown).await {
+            Ok(drain) => drain_serving_state(progress, mdns).await.map(|()| drain),
+            Err(error) => Err(error),
+        }
+    } else {
+        serve(
+            listener.expect("normal startup owns its listener"),
+            app,
+            progress,
+            mdns,
+            shutdown,
+        )
+        .await
+    };
+    // The last census write. It is marked clean only when the HTTP server
+    // stopped with every connection drained: then no façade request can still
+    // be counted, and the clean mark tells the next start that nothing was
+    // lost. A drain that timed out leaves connections that may still finish
+    // and be counted after this write, and a serving error says nothing about
+    // them, so both write an unclean final record and the next start counts an
+    // unclean stop. A failed write is read the same way, which is honest too.
+    let clean = matches!(served, Ok(HttpDrain::Complete));
+    if let Err(error) = plex_census
+        .flush_durable(http::plex_census::unix_now_s(), clean)
+        .await
+    {
+        tracing::warn!(%error, "could not record the Plex façade census at shutdown");
+    }
+    served.map(|_| ())
 }
 
 /// How a Bonjour record gets published. A parameter rather than a direct call
@@ -2757,6 +3030,10 @@ fn spawn_background_loops(
     state: &AppState,
     background_shutdown: tokio_util::sync::CancellationToken,
 ) {
+    tokio::spawn(crate::clock_offset::run(
+        state.clone(),
+        background_shutdown.clone(),
+    ));
     tokio::spawn(http::file_grants::prune_loop(
         state.clone(),
         background_shutdown.clone(),
@@ -2766,6 +3043,10 @@ fn spawn_background_loops(
         background_shutdown.clone(),
     ));
     tokio::spawn(state.clone().store_metrics_loop());
+    tokio::spawn(http::plex_census::flush_loop(
+        Arc::clone(&state.plex_census),
+        background_shutdown.clone(),
+    ));
     tokio::spawn(Arc::clone(&state.backup).schedule_loop(background_shutdown.clone()));
     tokio::spawn(
         crate::http::cluster_operations::membership_status_cache_loop(
@@ -2896,6 +3177,8 @@ fn spawn_background_loops(
     // Reap idle transcode sessions in the background.
     tokio::spawn(std::sync::Arc::clone(&state.transcode).reap_loop());
     tokio::spawn(std::sync::Arc::clone(&state.transcode).vod_maintain_loop());
+    // Post-start complete-output queue publication; VOD create only hands off.
+    tokio::spawn(std::sync::Arc::clone(&state.transcode).output_enqueue_loop(background_shutdown));
     // The expiry sweep in here is a cluster-wide idempotent sweep and stays
     // ungated; claiming the next queued package is not, and takes the same
     // live membership check the other cluster-wide loops do.
@@ -2988,8 +3271,27 @@ async fn serve(
     progress: Arc<crate::progress::ProgressCoalescer>,
     mdns: Option<mdns_sd::ServiceDaemon>,
     shutdown: impl std::future::Future<Output = ()> + Send + 'static,
+) -> anyhow::Result<HttpDrain> {
+    let drain = serve_http(listener, app, shutdown, HTTP_TIMEOUTS).await?;
+    drain_serving_state(progress, mdns).await?;
+    Ok(drain)
+}
+
+/// How `serve_http`'s shutdown drain ended. Only `Complete` proves that no
+/// request can still be running in this process; the Plex census marks its
+/// last write clean on exactly that.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum HttpDrain {
+    /// Every open connection finished inside the drain window.
+    Complete,
+    /// The window passed with connections still open; they were abandoned.
+    TimedOut,
+}
+
+async fn drain_serving_state(
+    progress: Arc<crate::progress::ProgressCoalescer>,
+    mdns: Option<mdns_sd::ServiceDaemon>,
 ) -> anyhow::Result<()> {
-    serve_http(listener, app, shutdown, HTTP_TIMEOUTS).await?;
     match tokio::time::timeout(PROGRESS_DRAIN_TIMEOUT, progress.drain()).await {
         Ok(Ok(flushed)) if flushed > 0 => {
             tracing::info!(
@@ -3087,7 +3389,7 @@ async fn serve_http<A: HttpAcceptor>(
     app: axum::Router,
     shutdown: impl std::future::Future<Output = ()> + Send + 'static,
     timeouts: HttpTimeouts,
-) -> anyhow::Result<()> {
+) -> anyhow::Result<HttpDrain> {
     let (drain_started, drain_signal) = tokio::sync::oneshot::channel();
     let mut builder = ConnectionBuilder::new(TokioExecutor::new());
     builder
@@ -3150,9 +3452,10 @@ async fn serve_http<A: HttpAcceptor>(
     let _ = drain_started.send(());
     let connections_drained = graceful.shutdown();
     tokio::pin!(connections_drained);
-    tokio::select! {
+    let drain = tokio::select! {
         () = &mut connections_drained => {
             tracing::info!("shutdown complete");
+            HttpDrain::Complete
         }
         // Only starts counting once the signal has actually arrived: if the
         // channel never fires, this branch stays pending and the server runs.
@@ -3164,9 +3467,10 @@ async fn serve_http<A: HttpAcceptor>(
                 after = ?timeouts.shutdown_drain,
                 "drain timed out with connections still open; exiting anyway"
             );
+            HttpDrain::TimedOut
         }
-    }
-    Ok(())
+    };
+    Ok(drain)
 }
 
 /// How long to wait for open connections to finish after a shutdown signal.
@@ -4011,7 +4315,7 @@ mod startup_tests {
     ) -> (
         SocketAddr,
         tokio::sync::oneshot::Sender<()>,
-        tokio::task::JoinHandle<anyhow::Result<()>>,
+        tokio::task::JoinHandle<anyhow::Result<HttpDrain>>,
     ) {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
             .await
@@ -4081,6 +4385,308 @@ mod startup_tests {
             accept_error_backoff: Duration::from_millis(20),
             shutdown_drain: Duration::from_millis(200),
         }
+    }
+
+    /// Real pending listener boundary and in-place transfer, not proof that
+    /// a learner has completed clock observation or voter promotion.
+    #[tokio::test]
+    async fn k06_clock_only_socket_denies_application_and_transfers_existing_keepalive() {
+        use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
+        async fn request(stream: &mut BufReader<tokio::net::TcpStream>, path: &str) -> String {
+            stream
+                .get_mut()
+                .write_all(format!("GET {path} HTTP/1.1\r\nHost: localhost\r\n\r\n").as_bytes())
+                .await
+                .expect("request");
+            let mut status = String::new();
+            stream.read_line(&mut status).await.expect("status");
+            let mut bytes = 0;
+            loop {
+                let mut line = String::new();
+                stream.read_line(&mut line).await.expect("header");
+                assert!(!line.is_empty(), "response must not close before headers");
+                if line == "\r\n" {
+                    break;
+                }
+                if let Some(value) = line.to_ascii_lowercase().strip_prefix("content-length:") {
+                    bytes = value.trim().parse::<usize>().expect("length");
+                }
+            }
+            let mut body = vec![0; bytes];
+            stream.read_exact(&mut body).await.expect("body");
+            status
+        }
+        let reservation = std::net::TcpListener::bind("127.0.0.1:0").expect("reserve");
+        let address = reservation.local_addr().expect("address");
+        drop(reservation);
+        let owner = Arc::new(StartupObservationHttp::new(address));
+        owner
+            .start(
+                plurx_core::cluster::membership::MembershipManager::unavailable(),
+                "pending-node".into(),
+            )
+            .await
+            .expect("pending socket");
+        assert!(
+            tokio::net::TcpListener::bind(address).await.is_err(),
+            "pending phase owns the one bound socket"
+        );
+        let mut stream = BufReader::new(
+            tokio::net::TcpStream::connect(address)
+                .await
+                .expect("connect"),
+        );
+        assert!(
+            request(&mut stream, "/_internal/v1/clock")
+                .await
+                .contains("401"),
+            "unsigned observation refuses"
+        );
+        assert!(
+            request(&mut stream, "/active").await.contains("404"),
+            "no application route while pending"
+        );
+        let (shutdown, stopped) = tokio::sync::oneshot::channel();
+        let normal_owner = Arc::clone(&owner);
+        let normal = tokio::spawn(async move {
+            normal_owner
+                .serve_normal(
+                    axum::Router::new().route("/active", axum::routing::get(|| async { "active" })),
+                    async move {
+                        let _ = stopped.await;
+                    },
+                )
+                .await
+        });
+        tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                if request(&mut stream, "/active").await.contains("200") {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("same keepalive observes transferred router");
+        assert!(
+            tokio::net::TcpListener::bind(address).await.is_err(),
+            "activation did not release/rebind the socket"
+        );
+        shutdown.send(()).expect("shutdown");
+        drop(stream);
+        tokio::time::timeout(Duration::from_secs(2), normal)
+            .await
+            .expect("drain budget")
+            .expect("task")
+            .expect("normal drain");
+        assert!(
+            owner.tasks.lock().await.is_none(),
+            "server/probe ownership consumed exactly once"
+        );
+        assert!(
+            tokio::net::TcpListener::bind(address).await.is_ok(),
+            "drained listener releases the port"
+        );
+    }
+
+    /// Real learner/catchup -> authenticated observation -> committed vote.
+    /// This is not a physical restart/qualification receipt.
+    #[cfg(feature = "cluster-integration-tests")]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn k06_actual_voter_join_observes_committed_learner_before_promotion() {
+        use axum::{extract::State, response::IntoResponse, Json};
+        use plurx_core::cluster::membership::{
+            FinalizeJoinRequest, MembershipManager, RedeemJoinRequest,
+        };
+        use plurx_core::cluster::migration::select_daemon_store_observing;
+        fn config(root: &std::path::Path) -> Config {
+            let listeners: Vec<_> = (0..3)
+                .map(|_| std::net::TcpListener::bind("127.0.0.1:0").expect("port"))
+                .collect();
+            let addresses: Vec<_> = listeners
+                .iter()
+                .map(|listener| listener.local_addr().expect("address"))
+                .collect();
+            let mut config = Config::default();
+            config.storage.data_dir = root.into();
+            config.server.bind = addresses[0];
+            config.cluster.raft_bind = addresses[1];
+            config.cluster.api_bind = addresses[2];
+            config.cluster.advertise_host = "localhost".into();
+            config.cluster.join_url = format!("http://{}", config.server.bind);
+            config.cluster.artwork_url = config.cluster.join_url.clone();
+            config
+        }
+        async fn redeem(
+            State(manager): State<MembershipManager>,
+            Json(request): Json<RedeemJoinRequest>,
+        ) -> axum::response::Response {
+            match manager.redeem(&request).await {
+                Ok(()) => axum::http::StatusCode::NO_CONTENT.into_response(),
+                Err(error) => (
+                    axum::http::StatusCode::CONFLICT,
+                    Json(serde_json::json!({"code":error.code(),"message":error.to_string()})),
+                )
+                    .into_response(),
+            }
+        }
+        async fn finalize(
+            State(manager): State<MembershipManager>,
+            Json(request): Json<FinalizeJoinRequest>,
+        ) -> axum::response::Response {
+            match manager.finalize(&request).await {
+                Ok(()) => axum::http::StatusCode::NO_CONTENT.into_response(),
+                Err(error) => (
+                    axum::http::StatusCode::CONFLICT,
+                    Json(serde_json::json!({"code":error.code(),"message":error.to_string()})),
+                )
+                    .into_response(),
+            }
+        }
+        struct AuditObserver {
+            owner: Arc<StartupObservationHttp>,
+            source: MembershipManager,
+            raft_id: u64,
+            observed: Arc<AtomicBool>,
+            origin: String,
+        }
+        impl StartupClockObserver for AuditObserver {
+            fn start(
+                &self,
+                membership: MembershipManager,
+                node_id: String,
+            ) -> std::pin::Pin<
+                Box<
+                    dyn std::future::Future<Output = Result<(), plurx_core::error::StoreError>>
+                        + Send
+                        + '_,
+                >,
+            > {
+                Box::pin(async move {
+                    let roster = membership
+                        .clock_peers()
+                        .await
+                        .map_err(|error| {
+                            plurx_core::error::StoreError::Database(error.to_string())
+                        })?
+                        .membership
+                        .expect("actual applied startup roster");
+                    assert!(roster.members.contains(&self.raft_id));
+                    assert!(
+                        !roster.voters.contains(&self.raft_id),
+                        "desired voter must still be a committed learner at observation entry"
+                    );
+                    self.owner.start(membership, node_id.clone()).await?;
+                    let response =
+                        crate::http::peer_transport::PeerTransport::new(self.source.clone())
+                            .clock_request(&node_id, &self.origin)
+                            .await
+                            .map_err(|error| {
+                                plurx_core::error::StoreError::Database(format!("{error:?}"))
+                            })?;
+                    assert_eq!(
+                        response.status,
+                        reqwest::StatusCode::OK,
+                        "pending learner serves authenticated clock observation before promotion"
+                    );
+                    self.observed.store(true, Ordering::SeqCst);
+                    Ok(())
+                })
+            }
+        }
+        let source_root = crate::test_tempdir().expect("source");
+        let source_config = config(source_root.path());
+        drop(
+            plurx_core::store::SqliteStore::open(&source_root.path().join("plurx.db"))
+                .expect("SQLite source"),
+        );
+        let source_owner = Arc::new(StartupObservationHttp::new(source_config.server.bind));
+        let source = select_daemon_store_observing(&source_config, Some(source_owner.as_ref()))
+            .await
+            .expect("source activation");
+        let manager = source.membership_manager();
+        let clock = axum::Router::new()
+            .route(
+                http::internal_clock::PATH,
+                axum::routing::get(http::internal_clock::observation_snapshot),
+            )
+            .with_state(http::internal_clock::ObservationContext {
+                membership: manager.clone(),
+                node_id: source.identity.node_id.clone(),
+                observer: source_owner.observer().await.expect("source clock owner"),
+            });
+        let app = axum::Router::new()
+            .route("/api/v1/cluster/join/redeem", axum::routing::post(redeem))
+            .route(
+                "/api/v1/cluster/join/finalize",
+                axum::routing::post(finalize),
+            )
+            .with_state(manager.clone())
+            .merge(clock);
+        let (stop, stopped) = tokio::sync::oneshot::channel();
+        let source_http = Arc::clone(&source_owner);
+        let server = tokio::spawn(async move {
+            source_http
+                .serve_normal(app, async move {
+                    let _ = stopped.await;
+                })
+                .await
+        });
+        let original = manager
+            .clock_guard()
+            .acquire_owned_for(plurx_core::cluster::clock::ClockDecision::MembershipChange)
+            .expect("actual singleton clock proof");
+        let token = manager
+            .issue_token(Duration::from_secs(120))
+            .await
+            .expect("voter intent");
+        let joining_root = crate::test_tempdir().expect("joiner");
+        let mut joining_config = config(joining_root.path());
+        let token_path = joining_root.path().join("join.token");
+        std::fs::write(&token_path, format!("{}\n", token.token)).expect("test token");
+        joining_config.cluster.join_token_file = token_path.clone();
+        let joining_owner = Arc::new(StartupObservationHttp::new(joining_config.server.bind));
+        let observed = Arc::new(AtomicBool::new(false));
+        let observer = AuditObserver {
+            owner: Arc::clone(&joining_owner),
+            source: manager.clone(),
+            raft_id: token.raft_id,
+            observed: Arc::clone(&observed),
+            origin: joining_config.cluster.artwork_url.clone(),
+        };
+        let joined = tokio::time::timeout(
+            Duration::from_secs(90),
+            select_daemon_store_observing(&joining_config, Some(&observer)),
+        )
+        .await
+        .expect("bounded actual join")
+        .expect("joined voter");
+        assert!(observed.load(Ordering::SeqCst));
+        let applied = joined
+            .local_client()
+            .expect("local client")
+            .local_db_raft_metrics()
+            .expect("watch")
+            .membership_snapshot();
+        assert!(applied.committed && applied.voters.contains(&token.raft_id));
+        assert!(
+            original.revalidate().is_err(),
+            "actual member/promotion changes invalidate the original singleton proof"
+        );
+        assert!(
+            !token_path.exists(),
+            "finalization follows actual applied vote"
+        );
+        assert!(
+            joining_root.path().join("hiqlite/activation.json").exists(),
+            "activation must be published after vote"
+        );
+        joining_owner.stop_and_drain().await;
+        let joined_shutdown = joined.shutdown().await;
+        stop.send(()).expect("source stop");
+        server.await.expect("HTTP task").expect("HTTP drain");
+        source.shutdown().await.expect("source Raft drain");
+        joined_shutdown.expect("joined Raft drain");
     }
 
     struct FailFirstAccept {
@@ -4169,7 +4775,7 @@ mod startup_tests {
 
     async fn stop_timeout_test_server(
         stop: tokio::sync::oneshot::Sender<()>,
-        served: tokio::task::JoinHandle<anyhow::Result<()>>,
+        served: tokio::task::JoinHandle<anyhow::Result<HttpDrain>>,
     ) {
         stop.send(()).expect("stop server");
         tokio::time::timeout(Duration::from_secs(1), served)
@@ -5956,7 +6562,11 @@ mod startup_tests {
             .await
             .expect("serve must finish inside the drain window")
             .expect("join");
-        outcome.expect("an orderly shutdown is exit 0, not an error");
+        assert_eq!(
+            outcome.expect("an orderly shutdown is exit 0, not an error"),
+            HttpDrain::Complete,
+            "every connection finished, so the drain says so"
+        );
 
         // And the listener really is gone: an orchestrator that restarts the
         // container must not race a socket that is still bound.
@@ -6368,6 +6978,47 @@ mod startup_tests {
                 .as_deref(),
             Some("1000"),
             "a second boot keeps the first start of the clock"
+        );
+    }
+
+    /// The Plex façade census (C-07 §8.7) is wired into the daemon, not only
+    /// into its own module: boot restores it from the data directory before
+    /// serving, and the drained shutdown writes it once more, marked clean. A
+    /// boot that dropped the restore leaves no file; one that dropped the
+    /// final write leaves the startup write's `stopped_cleanly: false`, and the
+    /// second boot then counts an unclean stop.
+    #[tokio::test]
+    async fn a_drained_boot_records_a_clean_plex_census_stop() {
+        let tmp = crate::test_tempdir().expect("tempdir");
+        let config = config_in(tmp.path());
+        let census_path = tmp.path().join(http::plex_census::CENSUS_FILE);
+        let read_census = || -> serde_json::Value {
+            serde_json::from_slice(&std::fs::read(&census_path).expect("the census file"))
+                .expect("census json")
+        };
+
+        drop(boot_serve_and_drain(&config, tmp.path()).await);
+        let first = read_census();
+        assert_eq!(
+            first["stopped_cleanly"],
+            serde_json::Value::Bool(true),
+            "a drained shutdown marks the census stop clean: {first}"
+        );
+        assert_eq!(first["unclean_stops"], 0);
+        let started = first["started_unix_s"].as_u64().expect("a start time");
+        assert!(started > 0);
+
+        drop(boot_serve_and_drain(&config, tmp.path()).await);
+        let second = read_census();
+        assert_eq!(
+            second["unclean_stops"], 0,
+            "the second boot continued a cleanly stopped census: {second}"
+        );
+        assert_eq!(second["stopped_cleanly"], serde_json::Value::Bool(true));
+        assert_eq!(
+            second["started_unix_s"].as_u64(),
+            Some(started),
+            "one census across both boots"
         );
     }
 
@@ -7429,7 +8080,12 @@ mod startup_tests {
         .await
         .expect("the drain must be bounded, not indefinite")
         .expect("join");
-        outcome.expect("a timed-out drain is still an orderly exit 0");
+        // Still exit 0, but reported as timed out: the Plex census must not
+        // mark a stop clean while this connection could still be counted.
+        assert_eq!(
+            outcome.expect("a timed-out drain is still an orderly exit 0"),
+            HttpDrain::TimedOut
+        );
         hanging.abort();
     }
 

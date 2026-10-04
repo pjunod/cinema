@@ -611,6 +611,18 @@ pub const SQLITE_TRANSACTION_SITES: &[SqliteTransactionSite] = &[
         mechanism: TransactionMechanism::RusqliteTransaction,
         shape: TransactionShape::WriteReadBack,
     },
+    // Prune, then the fenced attribution insert; a zero count means the
+    // observation did not apply and nothing is returned. Only an applied
+    // observation reads the scope's memory back. The replicated twin commits
+    // the same two writes in one `txn`, branches on the insert's count, and
+    // issues the read as a separate consistent read.
+    SqliteTransactionSite {
+        module: "sessions.rs",
+        method: "observe_candidate_recovery",
+        is_async: true,
+        mechanism: TransactionMechanism::RusqliteTransaction,
+        shape: TransactionShape::BranchOnRowsAffected,
+    },
     SqliteTransactionSite {
         module: "sessions.rs",
         method: "claim_media_session_request",
@@ -751,11 +763,15 @@ pub const SQLITE_TRANSACTION_SITES: &[SqliteTransactionSite] = &[
         mechanism: TransactionMechanism::RusqliteTransaction,
         shape: TransactionShape::ReadBranchWrite,
     },
+    // One migration step: its DDL, the foreign-key integrity read that
+    // decides whether it may commit, and the `user_version` stamp, in one
+    // transaction. `migrate` itself no longer opens one; it calls this per
+    // step, so the marker can never commit apart from the shape it names.
     SqliteTransactionSite {
         module: "mod.rs",
-        method: "migrate",
+        method: "apply_migration_step",
         is_async: false,
-        mechanism: TransactionMechanism::RawBeginBatch,
+        mechanism: TransactionMechanism::RusqliteTransaction,
         shape: TransactionShape::ReadBranchWrite,
     },
     SqliteTransactionSite {
@@ -1201,7 +1217,13 @@ mod tests {
         // links together so a failed delete remains retryable.
         // Reconciliation adds one atomic successor-insert / predecessor-retire
         // batch. Its SQL predicates own all branching, as in the replicated twin.
-        assert_eq!(methods.len(), 96);
+        //
+        // 97 with authenticated candidate recovery: `observe_candidate_recovery`
+        // prunes and inserts in one boundary and returns the scope's memory
+        // only when the fenced insert applied. The migration boundary moved
+        // from `migrate` into `apply_migration_step` without changing the
+        // count: one boundary per step, now stamping `user_version` inside it.
+        assert_eq!(methods.len(), 97);
     }
 
     #[test]

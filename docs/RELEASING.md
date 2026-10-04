@@ -118,8 +118,9 @@ CI passes the tag name automatically when it publishes an image.
    tag once, builds x86-64 and aarch64 binaries inside the pinned Bookworm
    toolchain, and stamps both with the validated tag. It packages and smoke
    tests each platform by digest before assigning the local Forgejo registry
-   tags `{version}`, `{major}.{minor}`, and `latest`. Pushes to `main` build but
-   do not publish, so releases are always deliberate.
+   tags `{version}`, `{major}.{minor}`, and `latest`. A merge to `main` does
+   not build or publish; the separate `sha-` fleet image requires a manual
+   full-CI dispatch on `main`, so releases remain deliberate.
 
 ### The weekly release tag
 
@@ -155,14 +156,16 @@ tags.
 A week with nothing to release is a green run and no tag. Preparing the week's
 release is landing one `scripts/release-cut` pull request before Monday.
 
-**Not yet in use.** The fleet's deploy identity is the `sha-<12hex>` image,
-and at the time of writing nothing produces one: `ci.yml` runs on `v*` tags
-and manual dispatch only, while its `publish_main` job requires a push to
-`main` ([LEDGER-TEXT-CONTRACTS-AND-RELEASE-TAGS.md](ci/LEDGER-TEXT-CONTRACTS-AND-RELEASE-TAGS.md)
-correction 1; [RUST-TEST-EXECUTION-POLICY.md](ci/RUST-TEST-EXECUTION-POLICY.md)
-§3.1(b) owns the fix). The first release after `v0.3.0` waits for that, so
-no release pull request should merge before it; the schedule tags nothing
-until one does.
+**First-tag prerequisite.** The fleet's deploy identity is the
+`sha-<12hex>` image. An operator may dispatch `ci.yml` on `main`; only a
+green full run reaches `publish_main` and moves that image's `main` alias.
+Neither a merge nor the Monday release-readiness schedule publishes it.
+Before merging the first release pull request after `v0.3.0`, verify the
+qualified `sha-` image exists and arrange the `RELEASE_TAG_TOKEN` repository
+secret. The weekly tag job fails closed without that secret; this source
+change supplies neither the secret nor a first tag. See
+[LEDGER-TEXT-CONTRACTS-AND-RELEASE-TAGS.md](ci/LEDGER-TEXT-CONTRACTS-AND-RELEASE-TAGS.md)
+correction 1 for the trigger decision.
 
 ### The release pull request is the gate the cut depends on
 

@@ -92,6 +92,7 @@ async fn encoded_vod_manager_create_resolves_real_recipe_and_served_codecs() {
     assert_eq!(start.encoder, Encoder::Software.label());
     assert!(start.vod);
     let mut bytes = Vec::new();
+    let mut init_len = None;
     for name in ["init.mp4", "seg00000.m4s"] {
         let response = manager
             .vod_segment(&start.session_id, name)
@@ -106,7 +107,21 @@ async fn encoded_vod_manager_create_resolves_real_recipe_and_served_codecs() {
             .read_to_end(&mut bytes)
             .await
             .expect("actual GET file");
+        if init_len.is_none() {
+            init_len = Some(bytes.len());
+        }
     }
+    let served_init = {
+        let mut reader = plurx_core::fmp4::FragmentReader::new();
+        reader.push(&bytes[..init_len.expect("init served")]);
+        match reader.next_unit() {
+            Ok(Some(plurx_core::fmp4::Unit::Init(init))) => init,
+            other => panic!("the served init.mp4 is one init unit: {other:?}"),
+        }
+    };
+    let served_video = plurx_core::fmp4::avc_rfc6381_codec(&served_init)
+        .expect("valid served AVC sample entry")
+        .expect("the served init carries AVC");
     let output = base.path().join("manager-get.mp4");
     tokio::fs::write(&output, bytes)
         .await
@@ -130,7 +145,22 @@ async fn encoded_vod_manager_create_resolves_real_recipe_and_served_codecs() {
     else {
         panic!("frozen HLS presentation");
     };
-    assert!(context.codecs.starts_with("avc1."));
+    // No node-local SDR AVC experiment qualifies this manager (default caps,
+    // and no qualification cell is 240p), so the frozen context defers the
+    // profile and level to the init it serves: it names the bare sample
+    // entry, which the HLS wrapper replaces with the served init's
+    // `avc1.PPCCLL` (`http::hls` reads the same init object). The served
+    // half is checked on the bytes this manager actually returned.
+    assert_eq!(
+        context.codecs.split(',').next(),
+        Some("avc1"),
+        "an unqualified SDR encode defers its AVC profile to the served init: {}",
+        context.codecs
+    );
+    assert!(
+        served_video.starts_with("avc1."),
+        "the served init names its RFC 6381 AVC profile: {served_video}"
+    );
     assert_eq!(file.height, Some(240));
     assert_eq!(file.hdr, None);
     assert_eq!(context.frame_rate, Some(24.0));

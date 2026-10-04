@@ -432,6 +432,7 @@ const CAPS_DOCUMENT_PRELUDE = [
   "function decodeLimits(){return {};}",
   `function capsDocument(){return ${JSON.stringify(USABLE_CAPS_DOCUMENT)};}`,
   "const SERVER={playback_display_aware_auto:false}; function measuredPresentationTarget(){return null;}",
+  "function browserOutputChannelsCached(){return 2;} function browserAudioSinks(){return [];}",
       shippedSource("currentCapsDocument"),
   shippedSource("capsDocumentIsUsable"),
 ].join("\n");
@@ -462,6 +463,7 @@ function buildOpenSession(overrides) {
     [
       'const PLAYBACK_ID="playback-1";',
       "const SERVER={playback_display_aware_auto:false}; function measuredPresentationTarget(){return null;} function qualityForce(){return 'auto';}",
+      "function browserOutputChannelsCached(){return 2;} function browserAudioSinks(){return [];}",
       shippedSource("currentCapsDocument"),
       shippedSource("capsDocumentIsUsable"),
       shippedSource("openSession"),
@@ -570,6 +572,7 @@ asyncTest("the decision and the create it acts on ask one question", async () =>
     [
       'const PLAYBACK_ID="playback-1";',
       "const SERVER={playback_display_aware_auto:false}; function measuredPresentationTarget(){return null;}",
+      "function browserOutputChannelsCached(){return 2;} function browserAudioSinks(){return [];}",
       shippedSource("currentCapsDocument"),
       shippedSource("capsDocumentIsUsable"),
       shippedSource("askDecision"),
@@ -616,6 +619,7 @@ asyncTest("the decision and the create it acts on ask one question", async () =>
     [
       'const PLAYBACK_ID="playback-1";',
       "const SERVER={playback_display_aware_auto:false}; function measuredPresentationTarget(){return null;}",
+      "function browserOutputChannelsCached(){return 2;} function browserAudioSinks(){return [];}",
       shippedSource("currentCapsDocument"),
       shippedSource("capsDocumentIsUsable"),
       shippedSource("openSession"),
@@ -2717,6 +2721,7 @@ test("native element transfer errors never spend a compatibility transcode", () 
       "const document={getElementById(){return {};}};",
       "const console={warn(){}};",
       "function playbackOwnsAttachedMedia(){return true;} function notifyPlaybackControl(){} function clearStall(){}",
+      "function autoDecodeMediaError(){return false;}",
       "function finishStallRecovery(){return false;} function playbackIsReal(){return false;}",
       "function streamRejectionFacts(){return {};} function streamRejectionNote(){return '';} function streamRejectionReport(){return {};} function streamRejectionMessage(){return '';}",
       "function clientLog(){} function raisePlaybackSurface(){} function toast(){} function pbTick(){} function pbSyncPlayIcon(){}",
@@ -2731,6 +2736,39 @@ test("native element transfer errors never spend a compatibility transcode", () 
     assert.equal(result.tried, decode, "transfer failure must retain the compatible-rescue credit");
     assert.equal(result.stopped, decode ? 0 : 1, "nondecode terminal errors use the existing failure owner");
   }
+});
+
+test("a typed media decoder error reaches Auto policy before terminal handling", () => {
+  const run = new Function("PlaybackPolicy", "ladder", "quality", "blocked", "consumed", "code", [
+    "const callbacks={},switches=[]; let stopped=0;",
+    "const PLAYER={method:'transcode',autoHeight:1080,ladder,abr:{failedHeights:new Set(blocked),decodeStepConsumed:consumed}};",
+    "const document={getElementById(){return {};}}; const performance={now(){return 1000;}};",
+    "const console={warn(){}}; function qualityForce(){return quality;}",
+    "function hasPendingPlaybackOpen(){return false;} function playbackOwnsAttachedMedia(){return true;}",
+    "function switchAutoRung(from,decision){switches.push({from,decision});return Promise.resolve();}",
+    "function notifyPlaybackControl(){} function clearStall(){} function finishStallRecovery(){return false;}",
+    "function playbackIsReal(){return false;} function clientLog(){} function raisePlaybackSurface(){} function toast(){} function pbTick(){} function pbSyncPlayIcon(){}",
+    "function stopPlayerForExhaustion(){stopped++;} function startTranscodeFallback(){}",
+    "function streamRejectionFacts(){return {};} function streamRejectionNote(){return '';} function streamRejectionReport(){return {};} function streamRejectionMessage(){return '';}",
+    shippedSource("autoDecodeMediaError"), shippedSource("wirePlayerMedia"),
+    "const v={error:{code},videoHeight:1080,currentSrc:'/media',getAttribute(){return '/media';},addEventListener(name,fn){callbacks[name]=fn;}};",
+    "wirePlayerMedia(v); callbacks.error(); return {switches,stopped,consumed:PLAYER.abr.decodeStepConsumed,blocked:[...PLAYER.abr.failedHeights]};",
+  ].join("\n"));
+  const first = run(policy, serverLadder, "auto", [720], false, 3);
+  assert.equal(first.stopped, 0, "Auto owns the first typed decoder failure");
+  assert.equal(first.switches.length, 1, "the shipped error listener invokes policy's one step");
+  assert.equal(first.switches[0].from, 1080);
+  assert.equal(first.switches[0].decision.height, 720);
+  assert.equal(first.switches[0].decision.reason, "decode");
+  assert.equal(first.consumed, true);
+  assert.deepEqual(first.blocked.sort((a,b)=>a-b), [720, 1080]);
+  const second = run(policy, serverLadder, "auto", [720, 1080], true, 3);
+  assert.equal(second.switches.length, 0, "a second decoder failure cannot step again");
+  assert.equal(second.stopped, 1, "the compatibility owner handles the second failure");
+  const manual = run(policy, serverLadder, "1080", [], false, 3);
+  assert.equal(manual.switches.length, 0, "an explicit rung is never changed by Auto");
+  const network = run(policy, serverLadder, "auto", [], false, 2);
+  assert.equal(network.switches.length, 0, "a network error is not decoder evidence");
 });
 
 test("a rejected cheap stream gets one compatibility transcode", () => {
@@ -6551,6 +6589,7 @@ const autoQuality = require("./auto-quality-policy.json");
 const AUTO_DECISION_KEYS = new Set([
   "height", "reason", "emergency", "action", "evidence", "mildSamples",
   "upgradeSinceMs",
+  "blockedHeights",
 ]);
 
 // Design section 3.5's table, verbatim in its first column. Pinned here and
@@ -6650,6 +6689,47 @@ test("the Auto-quality fixture drives decideRung, and records every disagreement
   }
 });
 
+test("a stall-scoped verdict and a typed decode stall reach the shipped classifier", () => {
+  const classify = new Function(
+    "PlaybackPolicy", "STREAM_FAILURE", "Date",
+    `${shippedSource("autoCauseEvidence")}\nreturn autoCauseEvidence;`,
+  )(policy, null, Date);
+  const now = 10_000;
+  const p = {
+    mediaAttachment: "a1", waitAt: 1_000,
+    health: {producer_state: "held", recent_speed: 3},
+    healthObservedAt: now,
+    abr: {stallEvents: {decode: []}, recentEstimateAtMs: null,
+      controlStallVerdict: {waitAt: 1_000, atMs: 9_000, untilMs: 21_000}},
+  };
+  assert.equal(classify(p, now).kind, "control-stall-verdict");
+  p.waitAt = 2_000;
+  assert.notEqual(classify(p, now).kind, "control-stall-verdict",
+    "a verdict from the previous wait cannot suppress this one");
+  p.waitAt = 1_000;
+  assert.notEqual(classify(p, 21_000).kind, "control-stall-verdict",
+    "the verdict expires at the absolute stall deferral deadline");
+  p.abr.controlStallVerdict = null;
+  p.abr.stallEvents.decode.push(9_500);
+  assert.equal(classify(p, now).kind, "decode-failed");
+  p.abr.stallEvents.decode = [];
+  assert.notEqual(classify(p, now).kind, "control-stall-verdict",
+    "the healthy producer-paced hold is not a stall verdict");
+});
+
+test("ending a wait retires its stall-scoped verdict", () => {
+  const p = {waitAt: 1_000, waitReported: false,
+    abr: {controlStallVerdict: {waitAt: 1_000, untilMs: 21_000}}};
+  const end = new Function("PLAYER", "performance", "clearTimeout",
+    "STALL_MIN_MS", "recordWaitStall", "clientLog", "playbackContext",
+    "bufferRunway", "persistentWaitEvidence",
+    `${shippedSource("endWait")}\nreturn endWait;`,
+  )(p, {now: () => 2_000}, () => {}, 2_000, () => {}, () => {}, () => ({}),
+    () => 0, () => ({kind: "supply"}));
+  end(false);
+  assert.equal(p.abr.controlStallVerdict, null);
+});
+
 test("every controller gate the fixture names is still in the shipped tick", () => {
   const tick = shippedSource("autoControllerTick");
   // Each gate is asserted on its own side of the awaited health poll. A whole-
@@ -6665,6 +6745,14 @@ test("every controller gate the fixture names is still in the shipped tick", () 
   for (const row of autoQuality.controller_gates) {
     if (!row.viewer_state) continue;
     if (row.web_gate == null) {
+      if (row.viewer_state === "A stall-scoped control verdict") {
+        assert.match(shippedSource("autoControllerTick"),
+          /const causeEvidence=autoCauseEvidence\(p,now\)/,
+          "the tick must still pass classified stall evidence to decideRung");
+        assert.match(shippedSource("persistentWait"), /controlStallVerdict=/,
+          "a stalled ask must publish its bounded verdict to Auto");
+        continue;
+      }
       assert.ok(
         typeof row.finding === "string" && row.finding.length >= 200,
         `${row.viewer_state}: a gate the browser does not have needs a finding`,
@@ -6911,6 +6999,51 @@ test("peer VOD Activity cell preserves measured control and producer facts",()=>
     assert.ok(html.includes(fact),`peer VOD cell omits ${fact}`);
   }
   assert.ok(!html.includes("Live scratch"));
+});
+
+test("the browser claims its output's channels for the codecs it decodes, never passthrough", () => {
+  const helpers = new Function(
+    "window",
+    [
+      shippedSource("browserOutputChannels"),
+      shippedSource("browserAudioSinks"),
+      "return {browserOutputChannels, browserAudioSinks};",
+    ].join("\n"),
+  );
+  let closed = 0;
+  const surround = helpers({
+    AudioContext: function () {
+      this.destination = { maxChannelCount: 6 };
+      this.close = () => { closed += 1; return Promise.resolve(); };
+    },
+  });
+  assert.equal(surround.browserOutputChannels(), 6);
+  assert.equal(closed, 1, "the probe context is closed again");
+  assert.equal(helpers({}).browserOutputChannels(), 2, "no AudioContext is stereo");
+  assert.equal(
+    helpers({ AudioContext: function () { throw new Error("blocked"); } }).browserOutputChannels(),
+    2,
+  );
+  const sinks = surround.browserAudioSinks("aac,mp3,opus,flac,eac3", 6);
+  assert.deepEqual(sinks.map((sink) => sink.codec), ["aac", "mp3", "flac", "eac3"]);
+  for (const sink of sinks) {
+    assert.equal(sink.max_channels, 6);
+    assert.equal(sink.passthrough, false);
+    assert.deepEqual(sink.sample_rates_hz, [44100, 48000]);
+  }
+  assert.equal(surround.browserAudioSinks("aac", 1)[0].max_channels, 2);
+  assert.equal(surround.browserAudioSinks("aac", 32)[0].max_channels, 8);
+  assert.equal(surround.browserAudioSinks("aac", NaN)[0].max_channels, 2);
+
+  const capsDocument = new Function(
+    "SERVER",
+    "navigator",
+    `${shippedSource("capsDocument")}\nreturn capsDocument;`,
+  )({ build: "test" }, { userAgent: "test" });
+  const claimed = capsDocument({ vcodec: "h264", acodec: "aac", container: "mp4", audioSinks: sinks }, {});
+  assert.deepEqual(claimed.audio_sinks, sinks);
+  const legacy = capsDocument({ vcodec: "h264", acodec: "aac", container: "mp4", audioSinks: [] }, {});
+  assert.equal("audio_sinks" in legacy, false, "an empty claim stays the legacy contract");
 });
 
 test("fenced retirement followed by native error 3 reopens once without codec blame", () => {

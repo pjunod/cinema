@@ -181,9 +181,15 @@ pub(crate) async fn start(
         .ok_or(StatusCode::NOT_FOUND)?;
     state
         .transcode
-        .restore_candidate_context(&mut request)
+        .restore_candidate_context_with_deadline(&mut request, start_deadline)
         .await
-        .map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?;
+        .map_err(|error| {
+            if error.is_incompatible() {
+                StatusCode::CONFLICT
+            } else {
+                StatusCode::SERVICE_UNAVAILABLE
+            }
+        })?;
     let negotiated_ownership = remote_start_ownership_v1(&headers);
     // The worker publication and its activation-confirmation watcher are one
     // owned operation. If the peer disconnects after ffmpeg starts, dropping
@@ -193,8 +199,12 @@ pub(crate) async fn start(
         let _restart_admission = restart_admission;
         let started = start_state
             .transcode
-            .create_cluster_session(
-                &request.request,
+            .create_cluster_session_for_receiver(
+                (
+                    &request.request,
+                    request.retained_output_receiver,
+                    request.retained_output.as_ref(),
+                ),
                 // A relayed worker start carries no epoch: `RemoteStartRequest`
                 // is the recipe the owning node sends, and the epoch is not on
                 // it. Adding one is a change to a relayed type and therefore a
@@ -1115,10 +1125,12 @@ mod tests {
 
     fn relay_start_response(session_id: &str, incarnation_id: &str) -> String {
         serde_json::to_string(&crate::http::hls::StartResponse {
+            delivered_audio: None,
             quality_catalog_status: None,
             display_aware_auto_protocol: Some("route-v1".to_owned()),
             quality_candidate_id: None,
             quality_candidates: None,
+            measured_candidate_outputs: None,
             session_id: session_id.to_owned(),
             playlist_url: format!("/api/v1/hls/{session_id}/index.m3u8"),
             duration_ms: Some(60_000),

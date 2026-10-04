@@ -723,6 +723,7 @@ mod tests {
             .await
             .expect("claim");
         let package = NewOfflinePackage {
+            audio_recipe: None,
             id: "package".into(),
             request_id: "request".into(),
             user_id: user.id,
@@ -785,6 +786,7 @@ mod tests {
             .await
             .expect("complete");
         let package = NewOfflinePackage {
+            audio_recipe: None,
             id: "package".into(),
             request_id: "request".into(),
             user_id: user.id,
@@ -903,6 +905,7 @@ mod tests {
             .await
             .expect("complete");
         let package = NewOfflinePackage {
+            audio_recipe: None,
             id: "package".into(),
             request_id: "request".into(),
             user_id: user.id,

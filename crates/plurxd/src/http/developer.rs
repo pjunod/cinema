@@ -107,6 +107,111 @@ pub(crate) struct DeveloperReadiness {
     pub items: Vec<DeveloperEnableItem>,
 }
 
+/// The clock guard's enable switch. Every row is advisory: an operator can
+/// turn enforcement on with any of them unmet, and off at any time.
+fn clock_measurement(state: &AppState, enforced: bool) -> DeveloperEnableItem {
+    use plurx_core::cluster::clock::{ClusterClockState, CLOCK_OFFSET_REFUSAL_MS};
+    let guard = state.membership.clock_guard();
+    let snapshot = guard.snapshot();
+    let would_refuse = guard.check_evidence().err();
+    let peers = snapshot.peers.len();
+    let (coverage_status, coverage, worst) = match snapshot.state {
+        ClusterClockState::NoPeers => (
+            RequirementStatus::Met,
+            "No committed remote members to observe".to_owned(),
+            None,
+        ),
+        ClusterClockState::Bounded { worst_abs_upper_us } => (
+            RequirementStatus::Met,
+            format!("{peers} / {peers} committed remote members reachable and bounded"),
+            Some(worst_abs_upper_us),
+        ),
+        ClusterClockState::Incomplete {
+            unknown_peers,
+            worst_abs_upper_us,
+        } => (
+            RequirementStatus::Unmet,
+            format!(
+                "{} / {peers} committed remote members bounded; {unknown_peers} unreachable, \
+                 unanswered or roster unproved",
+                peers.saturating_sub(unknown_peers)
+            ),
+            (peers > unknown_peers).then_some(worst_abs_upper_us),
+        ),
+    };
+    let limit_us = CLOCK_OFFSET_REFUSAL_MS * 1_000;
+    let (bound_status, bound) = match worst {
+        Some(value) => (
+            if value <= limit_us {
+                RequirementStatus::Met
+            } else {
+                RequirementStatus::Unmet
+            },
+            format!(
+                "{} ms worst |offset| + uncertainty among bounded members; the limit is \
+                 {CLOCK_OFFSET_REFUSAL_MS} ms",
+                value as f64 / 1_000.0
+            ),
+        ),
+        None => (
+            RequirementStatus::Unobservable,
+            "No member offset observation applies; an unknown member has no numeric offset"
+                .to_owned(),
+        ),
+    };
+    let current = match would_refuse {
+        None => "current evidence would admit every guarded decision".to_owned(),
+        Some(cause) => format!("current evidence would refuse guarded decisions ({cause})"),
+    };
+    DeveloperEnableItem {
+        id: "cluster_clock",
+        title: "Cluster clock guard enforcement",
+        enabled: Some(enforced),
+        setting: Some("cluster_clock_guard_enforced"),
+        requirements: vec![
+            DeveloperRequirement {
+                id: "coverage",
+                title: "Every member reachable and observed",
+                status: coverage_status,
+                evidence: coverage,
+            },
+            DeveloperRequirement {
+                id: "upper_bound",
+                title: "Worst observed offset within 2 s",
+                status: bound_status,
+                evidence: bound,
+            },
+            DeveloperRequirement {
+                id: "ntp",
+                title: "NTP running on every node",
+                status: RequirementStatus::Unobservable,
+                evidence: "This process measures offsets but does not read any node's time \
+                           synchronisation daemon; check chronyd or systemd-timesyncd on each \
+                           node"
+                    .to_owned(),
+            },
+            DeveloperRequirement {
+                id: "consequence",
+                title: "What enforcement refuses",
+                status: if would_refuse.is_none() {
+                    RequirementStatus::Met
+                } else {
+                    RequirementStatus::Unmet
+                },
+                evidence: format!(
+                    "While enforced, one down or unreachable member makes coverage unknown, \
+                     which refuses session takeover, the expired-session scan and membership \
+                     changes on every node (fenced removal of that member still works), and \
+                     two consecutive rounds above {CLOCK_OFFSET_REFUSAL_MS} ms make /readyz \
+                     answer 503. Startup is never refused. Now: {current}; \
+                     plurx_cluster_clock_advisory_refusals_total counts what it would have \
+                     refused while off"
+                ),
+            },
+        ],
+    }
+}
+
 /// `GET /api/v1/developer/readiness` — admin, read-only, advisory.
 pub(crate) async fn readiness(
     _admin: AdminUser,
@@ -201,6 +306,12 @@ pub(crate) async fn readiness(
             .map(String::as_str),
         false,
     );
+    let clock_guard_enforced = plurx_core::store::stored_switch(
+        settings
+            .get(plurx_core::store::keys::CLUSTER_CLOCK_GUARD_ENFORCED)
+            .map(String::as_str),
+        false,
+    );
     let display_mode_events = state
         .store
         .playback_events(&PlaybackEventQuery {
@@ -215,6 +326,7 @@ pub(crate) async fn readiness(
     Ok(Json(DeveloperReadiness {
         observed_at_ms: crate::state::clock_ms(),
         items: vec![
+            clock_measurement(&state, clock_guard_enforced),
             durable_cluster_work(&state).await,
             bounded_catalogue_reads(
                 &state,

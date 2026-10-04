@@ -246,6 +246,14 @@ fn master_playlist_with_shape(
                 ));
             }
         }
+    } else if shape.codecs {
+        if let Some(codecs) = context
+            .codec_facts
+            .as_ref()
+            .and_then(crate::transcode::FrozenHlsCodecFacts::complete_sdr_codecs)
+        {
+            out.push_str(&format!(",CODECS=\"{}\"", quoted(&codecs)));
+        }
     }
     // Unconditional. None of these variants carries a caption track, and
     // Apple's authoring rules say a variant with no captions must say so.

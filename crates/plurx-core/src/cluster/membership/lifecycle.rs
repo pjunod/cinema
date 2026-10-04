@@ -42,11 +42,322 @@
 //!   nothing reads `barrier_index` back. The test pins that split to §3.8's
 //!   specification, which is not an agreement with production.
 //!
-//! Nothing in the daemon reads this projection yet; a transition function is
-//! a later milestone, written only after the projection has agreed with
-//! production for a release.
+//! The daemon still does not read this row projection. The attempt-local join
+//! and removal transitions below model authoritative read outcomes instead;
+//! the manager retains its authoritative reads and executes the effects. It
+//! does not adopt unchecked promotion dimensions. The canonical plan's
+//! one-release agreement prerequisite and its retained delivery evidence are
+//! recorded by Decision D-M7-removal; that is not full release qualification.
 
 use std::collections::BTreeSet;
+
+use super::{role_is_admitted, ClusterRole, MembershipError};
+
+/// Attempt-local join effects. Authoritative token, node and Raft reads stay
+/// in the manager; this step neither flattens their independent dimensions nor
+/// invents an admission proof from the fixture projection below.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum JoinEffect {
+    InspectStagedIdentity,
+    RepairPublishedNode,
+    PublishStagedNode { resume_legacy_partial: bool },
+    ObserveCommittedRole,
+    RedeemToken,
+    Complete,
+}
+
+// The bearer digest must not become printable through an automatic Debug impl.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(super) struct JoinTransition<'a> {
+    pub token_digest: &'a str,
+    pub node_id: &'a str,
+    pub raft_id: u64,
+    pub role: ClusterRole,
+    pub effect: JoinEffect,
+}
+
+impl<'a> JoinTransition<'a> {
+    pub fn reservation(
+        token_digest: &'a str,
+        node_id: &'a str,
+        raft_id: u64,
+        role: ClusterRole,
+        state: &str,
+        reserved_node_id: Option<&str>,
+        expired: bool,
+    ) -> Result<Self, MembershipError> {
+        let effect = match state {
+            "redeemed" => return Err(MembershipError::ReusedToken),
+            "redeeming" if reserved_node_id != Some(node_id) => {
+                return Err(MembershipError::ReservedToken);
+            }
+            // A reservation survives its original TTL only for the same node.
+            "redeeming" => JoinEffect::InspectStagedIdentity,
+            "issued" if expired => return Err(MembershipError::ExpiredToken),
+            "issued" => JoinEffect::PublishStagedNode {
+                resume_legacy_partial: false,
+            },
+            _ => return Err(MembershipError::InvalidToken),
+        };
+        Ok(Self {
+            token_digest,
+            node_id,
+            raft_id,
+            role,
+            effect,
+        })
+    }
+
+    pub fn staged_identity(self, matches: Option<bool>) -> Result<Self, MembershipError> {
+        if self.effect != JoinEffect::InspectStagedIdentity {
+            return Err(MembershipError::Internal(
+                "invalid join identity transition".to_owned(),
+            ));
+        }
+        let effect = match matches {
+            Some(false) => return Err(MembershipError::NodeIdentityInUse),
+            Some(true) => JoinEffect::RepairPublishedNode,
+            None if self.role.is_learner() => {
+                return Err(MembershipError::Internal(
+                    "learner token reservation has no staged node".to_owned(),
+                ))
+            }
+            None => JoinEffect::PublishStagedNode {
+                resume_legacy_partial: true,
+            },
+        };
+        Ok(Self { effect, ..self })
+    }
+
+    pub fn finalization(
+        token_digest: &'a str,
+        node_id: &'a str,
+        raft_id: u64,
+        role: ClusterRole,
+        redeemed: bool,
+    ) -> Self {
+        Self {
+            token_digest,
+            node_id,
+            raft_id,
+            role,
+            effect: if redeemed {
+                JoinEffect::Complete
+            } else {
+                JoinEffect::ObserveCommittedRole
+            },
+        }
+    }
+
+    pub fn committed_role(self, member: bool, voter: bool) -> Result<Self, MembershipError> {
+        if self.effect != JoinEffect::ObserveCommittedRole {
+            return Err(MembershipError::Internal(
+                "invalid join membership transition".to_owned(),
+            ));
+        }
+        if !role_is_admitted(self.role, member, voter) {
+            return Err(MembershipError::Internal(format!(
+                "joining node has not committed {} membership",
+                self.role.as_str()
+            )));
+        }
+        Ok(Self {
+            effect: JoinEffect::RedeemToken,
+            ..self
+        })
+    }
+
+    pub fn redeemed(self, changed: usize) -> Result<Self, MembershipError> {
+        if self.effect != JoinEffect::RedeemToken {
+            return Err(MembershipError::Internal(
+                "invalid join token transition".to_owned(),
+            ));
+        }
+        if changed != 1 {
+            return Err(MembershipError::ReusedToken);
+        }
+        Ok(Self {
+            effect: JoinEffect::Complete,
+            ..self
+        })
+    }
+}
+
+#[cfg(test)]
+mod join_transition_tests {
+    use super::*;
+
+    #[test]
+    fn join_reservation_orders_exact_identity_repair_before_publication() {
+        let reservation = |role, state, owner, expired| {
+            JoinTransition::reservation("digest", "node", 41, role, state, owner, expired)
+        };
+        assert!(matches!(
+            reservation(ClusterRole::Voter, "redeemed", Some("other"), true),
+            Err(MembershipError::ReusedToken)
+        ));
+        assert!(matches!(
+            reservation(ClusterRole::Voter, "redeeming", Some("other"), true),
+            Err(MembershipError::ReservedToken)
+        ));
+        assert!(matches!(
+            reservation(ClusterRole::Voter, "issued", None, true),
+            Err(MembershipError::ExpiredToken)
+        ));
+        assert!(matches!(
+            reservation(ClusterRole::Voter, "unknown", None, false),
+            Err(MembershipError::InvalidToken)
+        ));
+        for role in [ClusterRole::Voter, ClusterRole::Learner] {
+            let issued = reservation(role, "issued", None, false).expect("live issued token");
+            assert_eq!(
+                issued.effect,
+                JoinEffect::PublishStagedNode {
+                    resume_legacy_partial: false
+                }
+            );
+            assert!(issued.staged_identity(Some(true)).is_err());
+            let reserved =
+                reservation(role, "redeeming", Some("node"), true).expect("same-node reservation");
+            assert_eq!(reserved.effect, JoinEffect::InspectStagedIdentity);
+            assert_eq!(
+                (
+                    reserved.token_digest,
+                    reserved.node_id,
+                    reserved.raft_id,
+                    reserved.role
+                ),
+                ("digest", "node", 41, role)
+            );
+            assert!(matches!(
+                reserved.staged_identity(Some(false)),
+                Err(MembershipError::NodeIdentityInUse)
+            ));
+            let published = reserved
+                .staged_identity(Some(true))
+                .expect("matching staged identity");
+            assert_eq!(published.effect, JoinEffect::RepairPublishedNode);
+            assert!(published.staged_identity(None).is_err());
+            if role.is_learner() {
+                assert!(
+                    matches!(reserved.staged_identity(None), Err(MembershipError::Internal(message)) if message == "learner token reservation has no staged node")
+                );
+            } else {
+                assert_eq!(
+                    reserved
+                        .staged_identity(None)
+                        .expect("legacy voter partial")
+                        .effect,
+                    JoinEffect::PublishStagedNode {
+                        resume_legacy_partial: true
+                    }
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn join_finalization_requires_committed_role_before_exact_token_cas() {
+        for role in [ClusterRole::Voter, ClusterRole::Learner] {
+            let pending = JoinTransition::finalization("digest", "node", 41, role, false);
+            assert_eq!(pending.effect, JoinEffect::ObserveCommittedRole);
+            assert!(pending.redeemed(1).is_err());
+            for (member, voter) in [(false, false), (true, false), (true, true), (false, true)] {
+                let outcome = pending.committed_role(member, voter);
+                let admitted_expected = if role.is_learner() {
+                    member && !voter
+                } else {
+                    voter
+                };
+                if admitted_expected {
+                    let admitted = outcome.expect("committed admitted role");
+                    assert_eq!(admitted.effect, JoinEffect::RedeemToken);
+                    assert_eq!(
+                        (
+                            admitted.token_digest,
+                            admitted.node_id,
+                            admitted.raft_id,
+                            admitted.role
+                        ),
+                        ("digest", "node", 41, role)
+                    );
+                    for count in [0, 2] {
+                        assert!(matches!(
+                            admitted.redeemed(count),
+                            Err(MembershipError::ReusedToken)
+                        ));
+                    }
+                    let complete = admitted.redeemed(1).expect("successful token CAS");
+                    assert_eq!(complete.effect, JoinEffect::Complete);
+                    assert!(complete.redeemed(1).is_err());
+                } else {
+                    assert!(
+                        matches!(outcome, Err(MembershipError::Internal(message)) if message == format!("joining node has not committed {} membership", role.as_str()))
+                    );
+                }
+            }
+            let complete = JoinTransition::finalization("digest", "node", 41, role, true);
+            assert_eq!(complete.effect, JoinEffect::Complete);
+            assert!(complete.committed_role(true, true).is_err());
+        }
+    }
+}
+
+/// Attempt-local removal progress, not an authoritative projection of rows or
+/// Raft membership. Only an accepted proposal or survivor proof can finalize.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum RemovalProposalOutcome {
+    Rejected,
+    Accepted,
+    Ambiguous,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum RemovalEffect {
+    RollbackExactAttempt,
+    ReconcileSurvivors,
+    FinalizeTombstone,
+    RetainFence,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) struct RemovalTransition<'a> {
+    pub node_id: &'a str,
+    pub attempt_id: &'a str,
+    pub effect: RemovalEffect,
+}
+
+impl<'a> RemovalTransition<'a> {
+    pub fn proposal(
+        node_id: &'a str,
+        attempt_id: &'a str,
+        outcome: RemovalProposalOutcome,
+    ) -> Self {
+        let effect = match outcome {
+            RemovalProposalOutcome::Rejected => RemovalEffect::RollbackExactAttempt,
+            RemovalProposalOutcome::Accepted => RemovalEffect::FinalizeTombstone,
+            RemovalProposalOutcome::Ambiguous => RemovalEffect::ReconcileSurvivors,
+        };
+        Self {
+            node_id,
+            attempt_id,
+            effect,
+        }
+    }
+
+    /// The manager supplies the existing uniform-survivor-quorum proof. An
+    /// unrelated or indeterminate outcome cannot release the removal fence.
+    pub fn survivors(self, removed: bool) -> Option<Self> {
+        (self.effect == RemovalEffect::ReconcileSurvivors).then_some(Self {
+            effect: if removed {
+                RemovalEffect::FinalizeTombstone
+            } else {
+                RemovalEffect::RetainFence
+            },
+            ..self
+        })
+    }
+}
 
 /// One `cluster_nodes` row, as the membership predicates read it.
 #[derive(Debug, Clone, PartialEq, Eq)]

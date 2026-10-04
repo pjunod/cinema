@@ -405,7 +405,7 @@ use crate::queue_fixture::QueueFixture;
 
     include!("../../vodencode_tests.rs");
 
-    fn media_file_at(path: PathBuf, duration_ms: i64) -> MediaFile {
+    pub(super) fn media_file_at(path: PathBuf, duration_ms: i64) -> MediaFile {
         let metadata = std::fs::metadata(&path).ok();
         let size = metadata.as_ref().map(|m| m.len() as i64).unwrap_or(1);
         let mtime = metadata.and_then(|m| m.modified().ok()).and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok()).map(|t| t.as_secs() as i64).unwrap_or(1);
@@ -459,6 +459,8 @@ use crate::queue_fixture::QueueFixture;
             },
             start_seconds,
             audio_index: None,
+            audio_delivery: None,
+            audio_claim: None,
             subtitle_burn: None,
             audio_offset_ms: 0,
             hdr10: false,
@@ -581,7 +583,7 @@ use crate::queue_fixture::QueueFixture;
 
     /// A `VodServe` with an empty store, for tests that drive internals
     /// directly against a hand-built rendition.
-    fn bare_serve(base: &Path) -> Arc<VodServe> {
+    pub(super) fn bare_serve(base: &Path) -> Arc<VodServe> {
         let store: Arc<dyn Store> = Arc::new(SqliteStore::open_in_memory().expect("store"));
         local_serve(base.to_path_buf(), store)
     }
@@ -672,6 +674,7 @@ use crate::queue_fixture::QueueFixture;
             session_id.to_owned(),
             Session {
                 rendition: Some(rendition),
+                retained_output: None,
                 rendition_key,
                 file,
                 playback_id: "vod-control".into(),
@@ -721,6 +724,7 @@ use crate::queue_fixture::QueueFixture;
             session_id.to_owned(),
             Session {
                 rendition: None,
+                retained_output: None,
                 rendition_key,
                 file,
                 playback_id: "vod-terminal".into(),
@@ -775,7 +779,7 @@ use crate::queue_fixture::QueueFixture;
 
     /// A rendition built by hand — no driver, no store, no producer — for
     /// tests that exercise one internal mechanism deterministically.
-    async fn synthetic_rendition(base: &Path) -> Arc<Rendition> {
+    pub(super) async fn synthetic_rendition(base: &Path) -> Arc<Rendition> {
         let index = synthetic_index(240);
         let policy = CutPolicy::new(6, 2, 64 * 1024 * 1024, 15, 16_000);
         let ms = index_video_ms(&index);
@@ -795,10 +799,13 @@ use crate::queue_fixture::QueueFixture;
             key: "synthetic-rendition".to_string(),
             dir,
             recipe: Recipe {
+                retained_logical: None,
+                measured_candidate: None,
                 file: media_file_at(PathBuf::from("unused.mkv"), ms),
                 audio_index: None,
-                aac: true,
-                video: CopyVideoOptions::new(false, false),
+               aac: true,
+                audio_delivery: None,
+               video: CopyVideoOptions::new(false, false),
                 source_object_version: None,
                 cluster_cache_key: None,
                 encoding: None,
@@ -815,6 +822,11 @@ use crate::queue_fixture::QueueFixture;
             completed_cache_budget: 50 << 30,
             materialize_budget: Duration::from_secs(30),
             manifest: Mutex::new(Manifest::new(plan.clone())),
+            output_measurement: StdMutex::new(PublishedOutputMeasurement::default()),
+            copy_preparation: StdMutex::new(None),
+            preparation_epoch: AtomicU64::new(0),
+            retained_offer: StdMutex::new(None),
+            cancelled_preparation_epoch: AtomicU64::new(0),
             plan,
             identity: Mutex::new(IdentityState::default()),
             slot: ProducerSlot::new(),

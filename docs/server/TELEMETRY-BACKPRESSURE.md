@@ -557,6 +557,36 @@ wall time as before the change (three runs, reported in the PR body).
 
 ## 6. Verification and rollout
 
+**2026-09-30 local-proof continuation:** coordinator assignment reuses the
+merged M1–M4 implementation and original authors. A separate draft task targets
+current `effort/architecture-review-2026-09-20`, overriding historical main
+routing for this continuation. Owned files: `telemetry.rs` test module, necessary
+explicit child/process census rows in `tests/playback/rolling-producer-owners.toml`,
+the cfg(test)-only process-free variant in `transcode/test_support.rs`, this
+existing plan and the C-06 workboard note. No production visibility, reset,
+API, queue/batch behavior or HLS change is authorized. Coordinator authorized
+the fifth file after source inspection showed the historical producer-less
+fixture still launches an idle sleep child; the new variant shares Session
+construction with child=None, preserving all existing constructors' exact
+stand-in behavior. This fixture mode is not a shipped feature switch.
+Intended proof is §6.2 actual segment handler and fully drained body under
+entered-write controlled sleep→error, bounded allocation capacities and counted
+drops/recovery, plus the existing enabled three-voter batch contract. These
+tests are planned, not executed evidence; final execution waits for current
+K-07 integration. Fleet §6.3 and restart/RSS/device acceptance remain open.
+
+**2026-09-30 execution update:** the continuation is synchronized onto actual
+K-07 landing `7b9b9a8a4`. Named actual-handler and enabled three-voter batch
+tests below now pass; the earlier claim/preparation remains historical. No
+production behavior changed. The allocation proof uses visible queue and
+in-flight capacities and bounded fixture payloads, not process RSS. Eight
+equal baseline/blocked/recovery deliveries report the local distribution;
+the upper-median increase of 64 µs is inside the observed 92 µs baseline span.
+That noise comparison is diagnostic rather than a timing-only CI assertion;
+every fully drained response also satisfies its 500 ms hard bound while the
+writer is demonstrably blocked. This warmed 12 KiB in-process fixture does
+not establish device, network, cold-filesystem or fleet acceptance.
+
 ### 6.1 Lanes
 
 Per milestone the focused `cargo test` above, then `make unit` once before
@@ -653,3 +683,5 @@ trailers `Agent-Model:` / `Agent-Session:` on every commit of the branch.
 | 2026-09-21 | gpt-5.6-sol | agent:/root/c02_builder | M2 | [PR #434](http://192.168.4.7:3000/noirr/plurx/pulls/434) | Seeded the paired effective settings before listener acceptance, cached them for 30 seconds, preserved the last good values on refresh failure, and invalidated the cache immediately after either local telemetry setting changes; focused tests cover seed, cache window, and invalidation. |
 | 2026-09-21 | gpt-5.6-sol | agent:/root/c02_builder | M3 | [PR #434](http://192.168.4.7:3000/noirr/plurx/pulls/434) | Moved bounded playback metric recording ahead of queue admission and retention decisions. The focused regression disables retention, emits TTFF, proves the metric rises, and proves no raw playback row is stored. |
 | 2026-09-21 | gpt-5.6-sol | agent:/root/c02_builder | M4 | [PR #434](http://192.168.4.7:3000/noirr/plurx/pulls/434) | Added the 128-slot terminal reserve, exhaustive current durable-outcome/error classification, consecutive-sample coalescing, all four fixed drop reasons, and a two-second shutdown drain wired before Live TV cleanup. Focused tests cover classification, terminal non-coalescing, sample replacement, and the drain bound. Fleet restart timing and injected real-playback sidecar-stall evidence remain pending under §6.3. |
+| 2026-09-30 | gpt-6.1-sol | agent:/root/p02_effort_sync_sol61 | §6.2 local-proof claim | [draft #639](http://192.168.4.7:3000/noirr/plurx/pulls/639) | Assigned by coordinator on Paul's behalf from effort bc39bcb31, preserving merged M1–M4 and original Sol/Opus authors. Four-file narrow ownership above. Pinned 1.97.1 pre-edit compiler loop established; no new behavioral test or three-voter execution yet. Final proof waits for K-07 current-base integration; no fleet/qualification claim. |
+| 2026-09-30 | gpt-6.1-sol | agent:/root/p02_effort_sync_sol61 | §6.2 local handler and replicated batch proof | [draft #639](http://192.168.4.7:3000/noirr/plurx/pulls/639) | Exact current effort base 7b9b9a8a4. Actual public HLS handler drains exact 12 KiB body/status200 under entered-write controlled wait→Err: equal eight baseline/blocked/recovery samples; queue capacity1024, in-flight capacity1<=64, serialized fixture payload<=512B, drops4104/error1/written896 and bounded drain/closure before successful reaped child/completion marker. Baseline wall_us [185,204,277,242,212,193,203,198], blocked [234,335,263,269,268,245,281,252], recovered [225,250,248,286,244,245,248,252]; median increase64us within observed span92us. Named hls_segment_delivery_stays_bounded_under_slow_and_failed_writer PASS parent0.20s/child0.18s with unusable FFmpeg. Process-free cfg(test) variant preserves all historical fixture constructors and launches no descendant. Separate playback_telemetry_contract_runs_through_dyn_store PASS9.21s with hiqlite-store,hiqlite-contract-tests: real three-voter arm plus both SQLite modes, retained/folded-prior/prior-only batches; existing ready/stop/reap contract executes. No broad units or fleet acceptance; §6.3 remains owed. |

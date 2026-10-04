@@ -14,7 +14,7 @@ This file is the specification in the meantime, written by reading the routers
 and the handlers on 2026-09-07. Where a plan document and the code disagreed,
 the code won and the disagreement is recorded in §23.
 
-One binary serves everything on one port (`:32400` by default). plurx has 243
+One binary serves everything on one port (`:32400` by default). plurx has 244
 routes across the four surfaces below. Every path here is absolute; the native
 API is the only one under a version prefix, and §7-§18 state that prefix once
 per section rather than repeating it in every row.
@@ -446,9 +446,16 @@ key/token split in §2.3: an admin token handed to a neighbouring application
 also hands over every secret on this route.
 
 `PUT` is PATCH-shaped: **absent means unchanged**, and for credential fields
-an **empty string clears**. `transcode_quality` is the one field that
-distinguishes absent from explicit `null`; `null` restores the family-tuned
-default. Every fallible field is validated and normalized *before* the first
+an **empty string clears**. `transcode_rate_mode` and `transcode_quality`
+distinguish absent from explicit `null`: `null` mode returns the request to
+each encoder family's code default (unset, distinct from an explicit
+`"bitrate"` that survives a default change), and `null` quality restores the
+family-tuned value. `GET` reports an unset mode as `null`, never as the default
+it resolves to; `transcode_rate_mode_default`,
+`transcode_rate_mode_default_encoder` and `transcode_quality_default` show what
+this node's selected family resolves unset values to, for display only. A
+client that writes back what it read must send those `null`s back, not the
+defaults. Every fallible field is validated and normalized *before* the first
 write, because settings are persisted one at a time and a later bad field must
 not leave an earlier policy change in force —
 `dv_disk_keep_original = false` is the destructive case that forced the rule.
@@ -466,9 +473,9 @@ having already committed.
 
 Refusals worth knowing, each a 400 unless noted:
 
-- `transcode_rate_mode must be bitrate or quality` — and whenever either
-  rate-control field is sent, both are required, so a replicated update is one
-  complete pair.
+- `transcode_rate_mode must be bitrate, quality or null` — and whenever
+  either rate-control field is sent (including as `null`), both are required,
+  so a replicated update is one complete pair.
 - `vod_working_set_bytes must be a number`, and a parsed **0** is refused
   rather than stored: 0 means "not configured" to the serving layer, so an
   operator who typed it would silently get a default.
@@ -741,8 +748,16 @@ subtitles" instead of guessing. `playback_defaults` is computed from the
 stored stream rows plus one settings snapshot — never from a playback decision
 and never from a live probe — so an unmounted file still reports its tracks.
 
-Also per file: `available` is one `stat` at request time, and `missing_path`
-is added **only for admins**, and only when `available` is false.
+Also per file: `availability` is `available` · `unavailable` · `unknown`,
+with `availability_observed_at_ms` giving the Unix-millisecond time of the
+observation, or `null` if no usable observation exists. A cached answer is
+returned immediately for 15 seconds; up to 120 seconds it is returned while
+a refresh starts. Older observations answer `unknown`. New probes share one
+250 ms page budget, so a blocked mount cannot hold the item response.
+The legacy `available` boolean is false only for `unavailable`; `unknown`
+allows the client to attempt playback, where the source open makes the final
+decision. `missing_path` is added **only for admins**, and only for an
+observed `unavailable` file.
 `part_offset_ms` is the running offset within a multi-file audiobook, whose
 files are sorted in natural numeric order so `Part 2` precedes `Part 10`.
 `vod_index_status` is `indexed` · `partial` · `pending` · `refused` ·
@@ -3041,6 +3056,7 @@ streaming, and refuses a response signed for the wrong node or nonce.
 | Method | Path | Body limit | What it does |
 |---|---|---|---|
 | GET | `/_internal/v1/activity-snapshot` | — | Node-local delivery snapshot |
+| GET | `/_internal/v1/clock` | — (empty exact request) | Signed `{node_id, received_unix_ms, sent_unix_ms}` for four-timestamp clock observation. Any exact committed member, including a learner; unchanged 30 s auth window. The prober captures the exact signed request timestamp and bounded-body receipt before verifying the response; 1 KiB response budget and 2 s peer deadline. Measurement only, with no takeover, membership or readiness consequence. |
 | GET | `/api/v1/internal/cluster/operations-status` | — | This node's own operations status, for the aggregate |
 | POST | `/api/v1/internal/auth/cache-revocation` | 256 B | Propagates one credential-revocation phase |
 | GET | `/internal/v1/media/snapshot` | — | This node's media-pool snapshot |
