@@ -933,9 +933,21 @@ async fn continuous_worker_roles_resolve_video_only_and_one_cpu_soundtrack() {
     // HLS create resolves the concrete soundtrack before it asks for the
     // catalog and carries that same index in the session request.
     request.audio_index = TranscodeManager::candidate_audio_from_snapshot(&planning, request.audio_index);
+    // A browser declares an audio sink, so the catalog and HLS create both
+    // carry an audio claim; the muxed catalog recipe includes its delivery.
+    let caps = plurx_core::playback::DeviceCaps {
+        v: 2,
+        audio: vec!["aac".into()],
+        audio_sinks: vec![plurx_core::playback::AudioSink {
+            codec: "aac".into(), max_channels: 2, passthrough: false, sample_rates_hz: vec![48_000],
+        }],
+        ..Default::default()
+    };
+    request.audio_claim = plurx_core::playback::audio::AudioClaim::from_caps(&caps)
+        .expect("valid audio sinks");
+    assert!(request.audio_claim.is_some());
     let catalog = manager.quality_candidates_from_snapshot_progress(&planning,
-        &plurx_core::playback::DeviceCaps { v: 2, ..Default::default() },
-        request.audio_index, 0, None, Presentation::Vod, None, None, None).await;
+        &caps, request.audio_index, 0, None, Presentation::Vod, None, None, None).await;
     // A real create binds every selected row to the planning inputs it was
     // built from (`PlanningBinding`); the worker refuses an unbound row.
     let bound = |candidate: &plurx_core::playback::candidate::QualityCandidate| {

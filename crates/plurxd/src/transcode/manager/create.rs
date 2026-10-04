@@ -1230,6 +1230,9 @@ impl TranscodeManager {
                 Some(software_threads),
                 OutputGrade::Sdr,
             );
+            // The catalog row was resolved with the request's audio claim,
+            // so its muxed recipe carries the same audio delivery.
+            catalog_options = self.encoded_start_audio_options(req, file, catalog_options)?;
             catalog_options.normalized_geometry = context.normalized_geometry;
             if let Some(profile) = context.profile {
                 catalog_options.auto_quality_rate_profile = Some(profile);
