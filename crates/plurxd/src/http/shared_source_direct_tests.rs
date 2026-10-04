@@ -466,6 +466,8 @@ async fn sharing_source_direct_read_join_before_end_receipt() {
     fixture.shutdown().await;
 }
 
+// Creating a symlink is a Unix fixture step (Windows needs a privilege).
+#[cfg(unix)]
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn sharing_source_direct_symlink_or_resized_file_refuses() {
     let fixture = real_source_start_fixture_with(SourceFixtureMode::Direct, None).await;
