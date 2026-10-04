@@ -392,9 +392,9 @@ async fn source_copy_preadmission_fixture(mode: u8) {
         .expect("actual planning read")
         .is_some());
     let mut body:CreateSession = serde_json::from_value(serde_json::json!({"playback_id":"copy-source","request_id":"copy-source-request","copy":true,"height":72,"quality_auto":false,"presentation":"vod","caps":{"v":2,"video":[{"codec":"h264","max_height":2160,"present":["sdr"]}],"audio":["aac"],"containers":["mp4"],"transports":["hls","progressive"]}})).expect("actual Source request");
-    if (12..=20).contains(&mode) || mode == 29 {
+    if (12..=20).contains(&mode) || mode == 29 || mode == 31 {
         body.copy = Some(false);
-        body.height = Some(36);
+        body.height = Some(if mode == 31 { 144 } else { 36 });
     }
     if mode >= 21 {
         body.native_subtitles = Some(true);
@@ -422,7 +422,7 @@ async fn source_copy_preadmission_fixture(mode: u8) {
         std::mem::size_of_val(preparation.as_ref().get_ref())
     );
     let prepared = preparation.await.expect("actual Source engine preparation");
-    if (12..=20).contains(&mode) || mode == 29 {
+    if (12..=20).contains(&mode) || mode == 29 || mode == 31 {
         assert!(
             matches!(prepared.request().kind, SessionKind::Transcode { .. }),
             "actual common preparation resolves an encoded recipe"
@@ -881,7 +881,7 @@ async fn source_actual_actor(
             .is_none());
         let pid = if mode >= 21 {
             manager.source_workers.native_hooks.spawned_pid()
-        } else if (12..=20).contains(&mode) || mode == 29 {
+        } else if (12..=20).contains(&mode) || mode == 29 || mode == 31 {
             manager.source_workers.probe_hooks.spawned_pid()
         } else {
             manager.source_workers.index_hooks.spawned_pid()
@@ -1017,7 +1017,7 @@ async fn source_actual_actor(
         .await
         .expect("actual published actor");
     assert!(response.control.is_some());
-    if (12..=20).contains(&mode) || mode == 29 {
+    if (12..=20).contains(&mode) || mode == 29 || mode == 31 {
         let value = serde_json::to_value(&response).expect("complete encoded response");
         assert_eq!(value["height"], 72);
         assert_eq!(
@@ -1092,6 +1092,171 @@ async fn source_actual_actor(
             .expect("actual retained DTO"),
         serde_json::to_value(&response).expect("actual complete DTO")
     );
+    if (30..=35).contains(&mode) {
+        use crate::playback_control::*;
+        let bootstrap = response
+            .control
+            .as_ref()
+            .expect("actual Source control tuple");
+        let quality = if mode == 31 {
+            serde_json::json!({"mode":"manual","height":144})
+        } else {
+            serde_json::json!({"mode":"original"})
+        };
+        let request:ControlRequestV1 = serde_json::from_value(serde_json::json!({
+            "protocol":PROTOCOL_V1,"generation":bootstrap.generation,"control_epoch":bootstrap.control_epoch,
+            "client_instance_id":uuid::Uuid::new_v4().to_string(),"sequence":1,"demand":"active",
+            "position_ms":0,"buffered_from_ms":0,"buffered_through_ms":1000,"playback_rate":1.0,
+            "render_state":"seeking","seek_target_ms":1000,
+            "selection":{"quality":quality,"audio_track":null,"subtitle":{"mode":"native","track":0},"audio_offset_ms":0,"codec":"auto","dynamic_range":"auto"},
+            "capabilities":{"platform":"web","max_height":2160,"codecs":["h264"],"dynamic_ranges":["sdr"],"dual_player_preparation":false},
+            "supported_actions":[],"intent":null
+        })).expect("actual legacy no-intent Source seek");
+        let control_deadline = || Instant::now() + Duration::from_secs(10);
+        if (32..=35).contains(&mode) {
+            let baseline = manager
+                .vod
+                .source_control_observation_for_test(&response.session_id)
+                .await
+                .expect("actual before-control activity");
+            let pause = actor.0.control_hooks.pause(matches!(mode, 32 | 33));
+            let owned = actor.clone();
+            let called = request.clone();
+            let call = tokio::spawn(Box::pin(async move {
+                owned
+                    .control(called, Instant::now() + Duration::from_secs(12))
+                    .await
+            }));
+            let held_pause = pause.reached().await;
+            match mode {
+                32 => {
+                    client
+                        .execute(
+                            "DELETE FROM cluster_node_capabilities WHERE capability=$1",
+                            hiqlite::params!(
+                                plurx_core::cluster::membership::SHARING_PURPOSE_KEYS_CAPABILITY
+                            ),
+                        )
+                        .await
+                        .expect("actual floor loss after observation");
+                }
+                33 => {
+                    state
+                        .store
+                        .put_setting(keys::SHARING_ENABLED, "false")
+                        .await
+                        .expect("actual saved switch race");
+                }
+                34 => tokio::time::sleep(Duration::from_millis(5100)).await,
+                35 => {
+                    let actual = state
+                        .store
+                        .get_file(1)
+                        .await
+                        .expect("actual Source file")
+                        .expect("file");
+                    std::fs::write(&actual.path, b"changed physical control Source")
+                        .expect("actual physical drift");
+                }
+                _ => unreachable!(),
+            }
+            drop(held_pause);
+            let result = call.await.expect("owned control task");
+            if let Ok(opened) = result {
+                let (result, guard) = opened.into_parts();
+                assert!(matches!(result, Err(ControlStateError::Unavailable)));
+                drop(guard);
+            } else {
+                assert!(matches!(result, Err(SourceWorkerError::Unavailable)));
+            }
+            assert_eq!(
+                manager
+                    .vod
+                    .source_control_observation_for_test(&response.session_id)
+                    .await
+                    .expect("retained actual control/activity evidence"),
+                baseline,
+                "refused Source control must not accept sequence/activity"
+            );
+            actor
+                .retire()
+                .await
+                .expect("actual refused-control retirement");
+            return;
+        }
+        let (accepted, held) = actor
+            .control(request.clone(), control_deadline())
+            .await
+            .expect("owned Source seek")
+            .into_parts();
+        let accepted = accepted.expect("accepted seek");
+        assert_eq!(accepted.disposition, ControlDisposition::Accepted);
+        assert_eq!(accepted.accepted_sequence, 1);
+        assert!(accepted.preparation_directive.is_none());
+        let (replay, replay_guard) = actor
+            .control(request.clone(), control_deadline())
+            .await
+            .expect("exact Source replay")
+            .into_parts();
+        assert_eq!(
+            replay.expect("replay").disposition,
+            ControlDisposition::Replay
+        );
+        drop(replay_guard);
+        let mut wrong = request.clone();
+        wrong.control_epoch += 1;
+        assert!(matches!(
+            actor.control(wrong, control_deadline()).await,
+            Err(SourceWorkerError::Conflict)
+        ));
+        let mut wrong = request.clone();
+        wrong.generation = uuid::Uuid::new_v4().to_string();
+        assert!(matches!(
+            actor.control(wrong, control_deadline()).await,
+            Err(SourceWorkerError::Conflict)
+        ));
+        let mut directed = request.clone();
+        directed.selection.audio_track = Some(0);
+        assert!(matches!(
+            actor.control(directed, control_deadline()).await,
+            Err(SourceWorkerError::Unsupported)
+        ));
+        let mut pause = request.clone();
+        pause.sequence = 2;
+        pause.demand = PlaybackDemand::Hold;
+        pause.render_state = RenderState::Rendering;
+        pause.seek_target_ms = None;
+        let (result, pause_guard) = actor
+            .control(pause.clone(), control_deadline())
+            .await
+            .expect("owned Source pause")
+            .into_parts();
+        let (result, pause_guard) = if let Err(ControlStateError::RateLimited(ms)) = result {
+            drop(pause_guard);
+            tokio::time::sleep(Duration::from_millis(u64::from(ms) + 1)).await;
+            actor
+                .control(pause, control_deadline())
+                .await
+                .expect("actual rate-limited Source retry")
+                .into_parts()
+        } else {
+            (result, pause_guard)
+        };
+        assert_eq!(result.expect("pause").accepted_sequence, 2);
+        drop(pause_guard);
+        actor.request_retirement();
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert!(
+            actor.settlement_status().is_none(),
+            "actual control response body retains physical owner"
+        );
+        drop(held);
+        actor
+            .retire()
+            .await
+            .expect("retire after held actual control body");
+        return;
+    }
     if mode == 4 {
         manager
             .vod
@@ -1433,4 +1598,30 @@ async fn source_preparation_closes_actual_parent_descriptors_before_settlement()
     Box::pin(source_copy_preadmission_fixture(5)).await;
     Box::pin(source_copy_preadmission_fixture(12)).await;
     Box::pin(source_copy_preadmission_fixture(21)).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn source_control_legacy_copy_seek_replay_pause_and_counted_body() {
+    Box::pin(source_copy_preadmission_fixture(30)).await;
+}
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn source_control_legacy_encoded_seek_replay_pause_and_counted_body() {
+    Box::pin(source_copy_preadmission_fixture(31)).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn source_control_refuses_same_write_purpose_floor_loss_without_activity() {
+    Box::pin(source_copy_preadmission_fixture(32)).await;
+}
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn source_control_refuses_same_write_saved_switch_loss_without_activity() {
+    Box::pin(source_copy_preadmission_fixture(33)).await;
+}
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn source_control_refuses_expired_original_clock_without_activity() {
+    Box::pin(source_copy_preadmission_fixture(34)).await;
+}
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn source_control_refuses_changed_held_file_without_activity() {
+    Box::pin(source_copy_preadmission_fixture(35)).await;
 }

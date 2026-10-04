@@ -1851,3 +1851,55 @@ Denied-lint and normal tracked-hook validation complete the checkpoint.
 The exact pinned denied-warning daemon all-target Clippy check also passed
 in 66 seconds. Production closes the descriptor without publishing a diagnostic
 boolean as authority; only test observers record the descriptor census.
+
+### Candidate current-rendition Source control authority
+
+The next isolated slice starts from descriptor checkpoint
+`d7352bf759d1d299ffadcd48eafdbb7e8544e0e4`. Its private actor factory retains
+an explicit original legacy selection before the common engine normalizes
+the recipe. Auto retains the raw optional height; explicit Original and
+Manual remain distinct. Audio, offset and native/burn selection retain the
+original ask. Legacy create has no directed codec or dynamic-range policy,
+so their absent-policy semantics are Auto. A current control must match the
+complete frozen desired selection; response height and encoder are never
+used to reconstruct it. Initial legacy starts without an intent envelope
+remain reachable. Directed rendition changes, prepared-successor actions,
+acknowledgements and End through this control method remain unavailable;
+End continues through the independently owned actor retirement path.
+
+`SourceViewerActor::control` returns an opaque `SourceOpenedControl` carrying
+the existing process-local control result and an actual counted Source body
+guard. `SourceControlAuthority` has no caller constructor or wire decoder.
+The existing VOD sequence/reader/activity algorithm acquires its actual
+session lifecycle gate, then obtains a fresh Source member/key/file/owned
+route observation and executes the guarded renewal in that gate. It compares
+the exact session/incarnation/node/epoch and requires a live full immutable
+assignment in the rendition association ledger. Held-file, original
+observation time and actor-retirement checks run again after reader-lock
+acquisition immediately before sequence acceptance. The Source branch
+suppresses generic marker prewarm and accepts no preparation admission.
+Ordinary Local controls retain their existing authority and behavior.
+
+The candidate fixtures use actual legacy no-intent Source copy and encoded
+starts, exact seek replay and pause, wrong generation/epoch and directed-audio
+refusal, and an actual held control-response guard across retirement. Separate
+production-layout hooks park the control after observation or immediately
+before acceptance to exercise same-write purpose-floor/saved-switch refusal,
+original-clock expiry and real held-file drift without advancing viewer
+sequence/activity. Qualification receipts will follow actual test results;
+private HTTP control and native client adapters are separate slices.
+
+The control matrix passed six tests, zero ignored, in 28.04 seconds on normal
+stacks. The encoded fixture retains raw Manual 144 while its actual engine
+output is 72; it therefore proves that controls compare the original ask,
+not normalized output. Existing Local VOD control/activity and terminal replay
+passed two tests, zero ignored, in 0.76 seconds. A rapid new sequence follows
+the existing real rate-limit response before retrying; the Source branch does
+not bypass that policy. Wrong immutable generation/epoch and invalid controls
+are checked before any authority extension. Validation uses the actual
+admitted Copy/Transcode segment allowance. The final pinned daemon all-target
+check passed in 50.62 seconds and denied all-target Clippy in 65 seconds
+(after removing an unnecessary clone of a Copy selection). Documentation
+index checks passed four tests and catalog lint covered 2,716 files. The
+normal tracked hook completes the isolated checkpoint; latest Root-base
+integration still requires its own exact qualification.
