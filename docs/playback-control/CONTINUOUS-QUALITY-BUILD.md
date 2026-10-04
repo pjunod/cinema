@@ -6289,3 +6289,103 @@ surviving nodes while all daemons remain alive, then restores the voter
 roster. This is partition/presentation-state mechanics, not an assertion of
 seamless takeover or physical multi-host/display/audio qualification. No
 units or final adversarial review have run.
+
+### 10.217 Default-condition full campaign and fresh Android runtime preparation
+
+Status commit `9e0a32796` passed the normal hook (Clippy 35.73s; 72 served
+JavaScript scripts) and is pushed to draft #774. Main remains fully integrated.
+All 221 regression fields resolve statically. Its source-only pinned Linux
+build passed in 1m32s, after all previous private runtimes retired.
+
+The default-condition full Firefox campaign is running on that exact source:
+fifteen manual transitions followed by five actual Auto transitions, one
+X11 observer, no affinity overrides or explicit pool override. Both the full
+post-warmup and exact-request capture windows must satisfy the unchanged
+completeness/counter/100ms hold bounds. The owned camera lasts at most 1950s,
+supervisor at most 2100s; at least 3.5GB free was required before launch.
+All other lab workloads remain off this host during capture. No pass is
+claimed yet. Physical display/audio remain unmeasured.
+
+The private three-voter playback probe **FAILED** before controlled initial
+1080p playback (no presented first frame); it never cut B's network link.
+All owned nodes, bridge and runtime retired. It proves no partitioned
+playback. The next harness revision records bounded response classes and
+startup body/player state so this failure can be diagnosed before repetition.
+
+A fresh temporary API36 arm64 Android device is being prepared on the Mac,
+with separate AVD/storage/emulator home and ADB port 5041/device 5580. The
+user's existing AVDs and physical devices are untouched. The branch's debug
+APK assembled in 46s with `:app:assembleDebug`; no unit task was invoked.
+Emulator boot is bounded to 180s and lifetime to 2100s after boot, with owned
+process/server retirement. It is a software-runtime opportunity while the
+human is away, not physical-device or audible-output acceptance. Playback
+will wait until the Linux capture retires. No units or final review ran.
+
+### 10.218 Quota failure preserved; captures archived and compressed in flight
+
+The first default full campaign on `9e0a32796` **FAILED** with a Node writable
+stream EDQUOT error (-122) before producing its final JSON/JUnit receipt.
+Supervisor exit 1, display retirement and runtime removal are recorded;
+no manual/Auto count or continuity success is inferred from that incomplete
+run. Global free `/tmp` space alone did not predict its write quota.
+
+Forty-five owned RGB/timestamp files (1,467,150,783 bytes) were streamed into
+a 20,255,368-byte compressed Mac archive. Every member's byte count and
+SHA-256 matched its manifest before cleanup; every remote file was rechecked
+against the same manifest before deletion. The archive is retained in the
+independent clone's ignored reports. Its SHA-256 is
+`bda402154a698cf0442bfbf8b455f89a0912f0fc7de97b0ece2f7ab5bfd13bce`.
+No failed receipt was deleted or rescored.
+
+The separately identified `optical-default-full2` campaign is running with
+lossless streaming gzip storage. Each decompressed RGB packet is still
+matched to its original paired MD5; incomplete packets/counts fail. The
+measurement windows, cadence and completeness/counter/hold limits are
+unchanged. Capture output grows in compressed form, reducing the space
+needed while retaining original pixels. No other lab workload runs on its
+host.
+
+The fresh Android emulator booted in about 27s. Debug build 144 installed and
+reached server discovery; no production login occurred. The APK is
+83,809,218 bytes, SHA-256
+`7e7a4203dbaf7a7d49bacfc653ff35474b4f14acf29aa6399afc976cd500b70c`.
+Its isolated runtime startup receipt is retained. Playback remains queued
+until the full capture retires. No units or final adversarial review ran.
+
+### 10.219 Default Firefox failure preserved; Android player construction repaired
+
+The second default Firefox campaign on `9e0a32796` **FAILED** after all
+fifteen manual targets presented; no Auto stage ran. Callback p95/max was
+170.080ms with eleven dropped frames and no hitches/stalls. The independent
+request-window capture had 213,429 samples, zero unknown samples, seven
+capture holes and eleven skipped counter values. Its largest held-counter
+lower/upper bounds were 189.148/197.614ms. Both excessive callback intervals
+occurred during target preparation, before target presentation; this is not
+evidence of a failed resolution-change join. All owned display/runtime
+resources retired. Original compressed pixels and paired MD5 rows are
+retained; this receipt remains failed.
+
+The fresh Android emulator connected only to the isolated generated-media
+backend, opened its fixture and crashed on Play before session creation.
+Its crash log identifies `getBackBufferDurationUs not implemented` in
+Media3 player construction. Kotlin interface delegation left Java default
+methods on the wrapper rather than forwarding to `DefaultLoadControl`.
+The wrapper now explicitly forwards the current Media3 lifecycle, track
+selection, back-buffer, startup and preload methods, preserving its existing
+allocator ownership and controlled twelve-second loading budget.
+
+A regression covering delegated lifecycle and startup/preload decisions was
+authored. Production Kotlin, unit-test Kotlin compilation and debug APK
+assembly passed in 14s; **no unit test executed**. The previous owned emulator
+retired at its deadline, and a separate bounded emulator run is starting for
+runtime verification. Its backend remains exact compiled Linux source
+`9e0a32796`; the APK contains the Android-only uncommitted fix. Physical
+output/audio remain unmeasured. Final adversarial review has not started.
+
+The repaired APK enters the player and leaves the crash buffer empty, but its
+controlled initial session then refuses before media presentation. The owned
+backend's health endpoint returns 200. This is a separate failure, not a
+playback pass. A separately identified temporary diagnostic APK records only
+bounded app class/method/line identifiers; it contains no exception message,
+URL, credential or media path. Its temporary source instrumentation was
+restored immediately after assembly and will not land in the PR.
