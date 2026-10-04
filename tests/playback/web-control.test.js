@@ -2630,6 +2630,9 @@ async function main() {
         shippedSource("stallRecoverySnapshot"),
         shippedSource("persistentWait"),
         "function settlePlaybackControlSeek(){} function completeHlsStartup(){} function clearStall(){} function finishStallRecovery(){return false;}",
+        // The control send now attaches the Auto link receipt. Auto's link
+        // evidence is not what this harness drives, so the stalled player has none.
+        "function candidateLinkReceipt(){return null;}",
         "function playbackExhaustedActions(){return ['keep_waiting','retry','close'];}",
         shippedSource("streamHasVideo"),
         shippedSource("samplePlaybackPresentationClock"),
@@ -3615,6 +3618,9 @@ async function main() {
         shippedSource("clearPlaybackControlWaiters"),
         shippedSource("stopPlaybackControl"),
         shippedSource("startPlaybackControl"),
+        // The control send attaches the Auto link receipt; the ended-stream
+        // verdicts this harness drives carry none.
+        "function candidateLinkReceipt(){return null;}",
         shippedSource("endedStillOurs"),
         shippedSource("handleEnded"),
         shippedSource("hasPendingPlaybackOpen"),shippedSource("playbackOwnsAttachedMedia"),
