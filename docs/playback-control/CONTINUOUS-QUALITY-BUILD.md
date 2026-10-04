@@ -6458,3 +6458,170 @@ server were retired, then another bounded emulator run started. Initial
 playback evidence, compact-refusal wire data and original thread measurements
 are copied into the independent clone's ignored reports. No user AVD or
 physical-device data was changed.
+
+### 10.222 Handoff — unfinished work at the human's request (2026-10-03)
+
+**State:** implementation and qualification are incomplete. Draft
+[PR #774](http://192.168.4.7:3000/noirr/plurx/pulls/774) holds the single
+CQ0–CQ8 batch. Latest implementation is `ff87c371dc97a7a3958e8772cb516482192b777f`
+on `codex/continuous-quality-cq0`, pushed from the independent clone at
+`/Users/pjunod/code/plurx-agent/continuous-quality`. Main `342521018` was
+integrated and had no new commits at the last fetch. There are 224 statically
+resolved regression fields. **No unit test has executed; the final
+adversarial review has not started.** Historical passing runs do not qualify
+the current full candidate.
+
+**Immediate failure to diagnose:** the clean period-binding APK started and
+played, then stopped around film 1:23. The server returned HTTP 409 with
+`continuous quality transition: Capacity`; this happened before the next
+manual change, so that change supplies no continuous-switch pass. Distinguish
+receipt-count exhaustion (128 receipts within a 90s replay horizon), ledger
+serialized-byte exhaustion (128KiB), and interval/pinned-byte limits before
+changing code. Do not widen a bound or fabricate disposal to make the run
+pass. The retained log is
+`target/playback-lab/reports/continuous-android-bc1600ee2-backend.log`.
+The run paired Android code `ff87c371d` with unchanged Rust backend code
+`bc1600ee2`. The old backend and emulator have been retired. The source-only
+Linux build of exact `ff87c371d` verified Rust 1.97.1 and PASSED in 1m33s.
+The backend log is saved in the ignored reports directory. The emulator
+supervisor confirms retirement; no qualification runtime remains active.
+
+**Next steps, in order:**
+
+1. Reproduce the Android capacity failure once with bounded diagnostics.
+   Inspect only the owned lab's `continuous_quality_ledgers` row in a
+   read-only SQLite connection before runtime cleanup. Record receipt count
+   and ages, serialized ledger bytes, video/shared-audio pin counts/bytes,
+   transaction/append/disposed counts, and command cadence. The table's
+   `ledger_json` is the source of truth; do not transfer a whole database or
+   expose account data. Alternatively retain the last accepted Android
+   protocol ledger on the first 409. The old runtime/database is removed,
+   so the next run needs a fresh isolated backend and disposable lab login.
+2. Fix the measured cause. Candidates to investigate include unbatched
+   append/disposal commands, redundant reservations, physical retirement
+   that never completes, and refusal retries triggered excessively by the
+   attachment wake channel. Preserve replay ordering, exact media pins and
+   real queue/decoder/AudioTrack disposal proof. Add a meaningful focused
+   regression, compile it without executing it, commit normally, and verify
+   actual initial playback plus within-family manual switches and Auto.
+   The previous initial Auto family was 480p/720p; saved manual 480p then
+   starts a different family. Verify the actual family rather than assuming
+   720p/1080p. A checked settings choice is intent, not presentation proof.
+3. Finish default-condition Firefox qualification. Latest full2 on
+   `9e0a32796` failed after all fifteen manual targets; no Auto stages ran.
+   Callback p95/max was 170.080ms, with eleven drops and no hitches/stalls.
+   Request-window optical capture had 213,429 samples, zero unknowns, seven
+   capture holes and eleven skipped counters; conservative maximum hold
+   bounds were 189.148/197.614ms. Both excessive callback intervals preceded
+   target presentation. Keep this failed receipt failed. Direct framebuffer
+   sampling was discarded because fast reads still captured partial paints.
+4. Investigate the video pipeline thread budget before another full Firefox
+   campaign. A 120s owned sample measured 27/30 FFmpeg threads for 480p/720p
+   with output `-threads 2`/`3` and no input/filter cap on sixteen allowed
+   CPUs. Shared AAC had all three caps set to one. This proves uncontrolled
+   thread creation, not Firefox causation. Measure CPU activity/flags and
+   implement a justified decoder/filter/resource-accounting fix if needed.
+   Start with a focused default-condition probe after a material fix, then
+   obtain the fifteen-manual/five-actual-Auto campaign with complete X11
+   evidence. No CPU-affinity or explicit 32-credit experiment qualifies
+   defaults. Requalify current Chrome as well; its earlier full pass was on
+   an older source.
+5. Finish server/cluster qualification. Private namespace three-voter
+   bootstrap, actual B link isolation/recovery, and quorum settings writes
+   passed. The actual partitioned-playback probe failed before first frame
+   and never cut B. Upload/use the prepared bounded proxy-response/startup
+   diagnostic revision before repeating it. Single-host namespaces are not
+   physical multi-host evidence. Complete real network partition/owner
+   change and explicit Retry, broader cancellation/disconnect/late producer
+   and mixed-version matrix, shared-reader fairness/physical disk pressure,
+   source shapes (VFR, seek/tail, subtitles/rates), exact audio and encoded
+   boundary/publisher binding. Older scoped passes remain useful evidence
+   but are not substitutes for missing rows.
+6. Resolve Apple ownership policy before implementing another native adapter.
+   Existing prepared handoffs remain in place. The proposed autonomous
+   AVPlayer path conflicts with the native policy and still needs the
+   human's decision. Complete macOS native Safari, iOS Safari, iOS/tvOS app,
+   Android phone/TV and low-end device/high-bitrate real-title evidence.
+   The human is away, and physical-phone/Mac unlock retries are suspended.
+   Do not repeatedly ask or retry while they are unavailable. Separate
+   software-emulator pixels from physical display/audio acceptance.
+7. Complete the documented acceptance matrix: normal/fullscreen,
+   muted/unmuted, subtitles, 0.5×/1×/2×, long prebuffer, rapid choices,
+   pause/resume, seek collision, background/foreground, end-of-title,
+   decoder-limited and network-cliff cases. Retain receipts by source and
+   explicit scope. Graduate completed Developer cards to their proper
+   settings or remove their temporary toggle; unfinished switches remain
+   advisory and cannot be disabled, Save-refused or overridden.
+8. Freeze the candidate, integrate fresh main, and obtain one final
+   adversarial agent review **only when the PR is ready for main**.
+   Immediately stop and notify the human for external Fable reviews.
+   Do not execute fast-lane units or merge before that pause is released.
+   After the human resumes, address review findings and run only the required
+   fast-lane units. Each must pass once on the merging code; rerun failed
+   tests only, not every passing test. Full-unit failure batches belong to
+   another process. Obtain the current-tree Main promotion gate and
+   qualification receipt. If main/candidate moves, qualify the new tree.
+   Merge with the regression lines in Forgejo `MergeMessageField`, then
+   clean owned artifacts and obsolete branches/runtimes.
+
+**Working locations and commands:**
+
+- Never use `/Users/pjunod/code/plurx`, even though it is the default cwd.
+  Every command must set the independent clone or an owned temporary cwd.
+- Token file: `/Users/pjunod/code/plurx-agent/forgejo_token`; never print it.
+  Forgejo is `http://192.168.4.7:3000/noirr/plurx`; origin is
+  `ssh://git@192.168.4.7:222/noirr/plurx.git`. Established normal Git auth
+  works. Do not substitute the deploy key for Git's working authentication.
+- Deploy key: `/Users/pjunod/code/plurx-agent/.ssh-deploy-key`.
+  Explicitly approved source-only destination:
+  `pjunod@192.168.4.7:/tmp/plurx-cq-cd9bb38ad/`.
+  Use committed `git archive` source only, never `.git` or repository
+  credentials. Do not change production services/global networking.
+- `/private/tmp/plurx-cq-approved-linux-build.sh` runs the exact-HEAD pinned
+  Rust1.97.1 build through that source-only loop and keeps target warm.
+  Never replace its source/binary while a lab backend is using it.
+- Normal commit hook:
+  `CARGO='rustup run 1.97.1 cargo' CARGO_BUILD_JOBS=1 git commit ...`.
+  It checks catalog, formatting, all-target Clippy and served JavaScript
+  syntax, without units. Do not edit tracked files while the hook runs.
+- Android compile-only/assembly environment: JDK
+  `/Users/pjunod/Library/Java/JavaVirtualMachines/jbr-21.0.11/Contents/Home`,
+  SDK `/Users/pjunod/Library/Android/sdk`, Gradle home
+  `clients/android/.gradle-validation`. Run `clients/android/gradlew -p
+  clients/android --no-daemon :app:compileDebugKotlin
+  :app:compileDebugUnitTestKotlin :app:assembleDebug` with those environment
+  variables. `compileDebugUnitTestKotlin` compiles, not executes tests.
+- Owned Android helpers/receipts:
+  `/private/tmp/plurx-cq-owned-android/`; ADB port5041, emulator5580.
+  Never touch default ADB5037, user AVDs or physical-device app data.
+  Check the supervisor's booted state before ADB actions; use bounded ADB
+  subprocess timeouts so a retired device cannot leave a waiting command.
+- Owned backend helpers:
+  `/private/tmp/plurx-cq-native-linux-server-bc1600ee2.cjs` and
+  `/private/tmp/plurx-cq-android-backend-bc1600ee2.cjs`. Derive a helper for
+  the actual compiled ref and preserve its bounded lifetime/cleanup and
+  exact `/system` build check. Add a safe log-save signal if live diagnosis
+  needs the wrapper's retained log before shutdown. Its account is the
+  disposable `playback-lab` generated-media account, never production.
+- Draft body `/private/tmp/plurx-cq-draft-pr-body.md`; verified landing lines
+  `/private/tmp/plurx-cq-verified-landing-regressions.txt`. Validate fields
+  statically with `python3 -m validation.regression_field --body-file
+  /private/tmp/plurx-cq-draft-pr-body.md --landing-lines`; no unit execution.
+- Private partition diagnostics:
+  `/private/tmp/plurx-cq-private-cluster-partition-playback.py` and
+  `/private/tmp/plurx-cq-private-partition-playback.cjs`; the latter's
+  prepared local diagnostic revision was not uploaded/run.
+
+**Evidence and cleanup:** authoritative plan is this document, with status
+in `CONTINUOUS-QUALITY-STATUS.html` and validation rules in the indexed
+pipeline documents. Runtime evidence lives in the independent clone's
+ignored `target/playback-lab/reports/` and the approved remote reports area.
+The verified old raw-history archive is
+`plurx-cq-optical-raw-history-20261003.tgz`, SHA-256
+`bda402154a698cf0442bfbf8b455f89a0912f0fc7de97b0ece2f7ab5bfd13bce`.
+All 45 members were individually verified before remote raw cleanup. Full2
+compressed RGB and paired MD5 are retained separately. Do not discard or
+rescore failed evidence. Owned generated fixtures, browser bundles, warm
+compiler target and temporary helpers remain for continuation; remove them
+once no longer needed. The discarded native framebuffer-reader prototype
+must not land. No production service/network or user repository was changed.
