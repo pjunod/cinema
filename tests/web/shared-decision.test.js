@@ -153,9 +153,41 @@ test("an expired direct play restarts as a fresh Start of its base file under th
  assert.equal(h.requests.at(-1).url,'https://b.test'+base+'/hls/sessions');assert.equal(next.session_id,second);assert.equal(h.key(next),h.key(c));
  assert.equal(await h.progress(next,2000,90000,false),true);
  assert.deepEqual(h.requests.filter(r=>r.url.endsWith('/progress')).map(r=>JSON.parse(r.options.body).session_id),[dsid,second]);
- // A compatibility move from direct to Copy HLS is also a fresh Start; an
- // HLS-bound context is not a direct session and gets no generic replacement.
+ // A compatibility move from direct to Copy HLS is also a fresh Start, and
+ // so is the next move from that HLS session; an account change ends both.
  const hls=(await h.start(next,startBody(h)))._sharedContext;assert.equal(hls.session_id,sid);
- const n=h.requests.length;await assert.rejects(h.start(hls,startBody(h)));assert.equal(h.requests.length,n);
- h.change();await assert.rejects(h.start(next,directBody(h)));assert.equal(h.requests.length,n);
+ h.change();const n=h.requests.length;await assert.rejects(h.start(next,directBody(h)));await assert.rejects(h.start(hls,startBody(h)));assert.equal(h.requests.length,n);
+});
+// P0 reopen: B answers a directed change on a shared HLS session with
+// `preparation: none`, and the client reopens with a fresh Start of the same
+// file at the sampled position. Synthetic envelopes, as above.
+test("a declined shared HLS change reopens as a fresh Start of its base file and carries the progress sequence",async()=>{
+ const second='ffffffff-ffff-4fff-8fff-ffffffffffff';let starts=0,gets=0;
+ const h=harness((u,o)=>{
+  if(o.method==='GET'){gets++;return response(detail('9007199254740993','1').slice(0,-1)+',"watch":{"sequence":4}}',u);}
+  if(u.endsWith('/hls/sessions')){const r=startReply();if(++starts===2){r.session_id=second;r.playlist_url=r.playlist_url.replaceAll(sid,second);r.control.url=r.control.url.replaceAll(sid,second);r.start_seconds=42.5;}return response(JSON.stringify(r),u);}
+  if(u.includes("/decision?"))return response(wire("9007199254740993","1"),u);
+  return response('{}',u);
+ });
+ const c=(await h.details(ref)).files[0].context,first=(await h.start(c,startBody(h)))._sharedContext;
+ assert.equal(await h.progress(first,1000,90000,false),true);
+ // The watch modal is not the detail page: the reopen runs under the
+ // accepted login, not the page that launched it.
+ h.leave();
+ const d=await h.decision(first,{force:'transcode'});assert.equal(d.file_id,'9007199254740993');
+ assert.equal(h.requests.at(-1).url,'https://b.test'+base+'/decision?force=transcode');
+ const reopen={...startBody(h),request_id:'dddddddd-dddd-4ddd-8ddd-dddddddddddd',start:42.5,force:'transcode',height:480};
+ const next=(await h.start(first,reopen))._sharedContext;
+ const sent=JSON.parse(h.requests.at(-1).options.body);assert.equal(h.requests.at(-1).url,'https://b.test'+base+'/hls/sessions');
+ for(const field of ['previous_session_id','control_sequence','reopen_reason','intent'])assert.equal(sent[field],null,field);
+ assert.equal(sent.start,42.5);assert.equal(sent.playback_id,'browser-fixture');
+ assert.equal(next.session_id,second);assert.equal(h.key(next),h.key(c));
+ // The ordered sequence continues from the same watch state: no detail
+ // re-read, no re-seed, the next beat names the new B session.
+ assert.equal(await h.progress(next,42500,90000,false),true);
+ const beats=h.requests.filter(r=>r.url.endsWith('/progress')).map(r=>JSON.parse(r.options.body));
+ assert.deepEqual(beats.map(r=>[r.sequence,r.session_id,r.position_ms]),[[5,sid,1000],[6,second,42500]]);assert.equal(gets,1);
+ // A lineage field is still refused for a reopen, before any request.
+ const n=h.requests.length;await assert.rejects(h.start(next,{...reopen,previous_session_id:second}),e=>e.code==='sharing_start_unsupported');assert.equal(h.requests.length,n);
+ h.change();await assert.rejects(h.decision(next));await assert.rejects(h.start(next,reopen));assert.equal(h.requests.length,n);
 });
