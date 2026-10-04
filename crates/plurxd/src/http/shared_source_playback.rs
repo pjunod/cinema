@@ -816,6 +816,16 @@ async fn resources(
                 "application/vnd.apple.mpegurl",
             )
         }
+        crate::transcode::source_actor::SourceResourcePayload::SubtitleText(bytes) => {
+            if !matches!(
+                input.resource.kind(),
+                SharingHlsResourceKind::SubtitleSegment { .. }
+            ) {
+                return Err(unavailable());
+            }
+            let len = bytes.len() as u64;
+            (axum::body::Body::from(bytes), len, None, "text/vtt")
+        }
         crate::transcode::source_actor::SourceResourcePayload::File(ready) => {
             let mime = if input.resource.kind() == SharingHlsResourceKind::Init {
                 "video/mp4"
@@ -1274,10 +1284,28 @@ impl RealSourceStartFixture {
 #[cfg(test)]
 pub(crate) fn real_source_start_fixture(
 ) -> std::pin::Pin<Box<dyn std::future::Future<Output = RealSourceStartFixture> + Send>> {
-    Box::pin(build_real_source_start_fixture())
+    real_source_start_fixture_with(SourceFixtureMode::Copy, None)
 }
 #[cfg(test)]
-async fn build_real_source_start_fixture() -> RealSourceStartFixture {
+#[derive(Clone, Copy)]
+pub(crate) enum SourceFixtureMode {
+    Copy,
+    Encoded,
+    NativeCopy,
+    NativeEncoded,
+}
+#[cfg(test)]
+pub(crate) fn real_source_start_fixture_with(
+    mode: SourceFixtureMode,
+    recipient_server_id: Option<Uuid>,
+) -> std::pin::Pin<Box<dyn std::future::Future<Output = RealSourceStartFixture> + Send>> {
+    Box::pin(build_real_source_start_fixture(mode, recipient_server_id))
+}
+#[cfg(test)]
+async fn build_real_source_start_fixture(
+    mode: SourceFixtureMode,
+    recipient_server_id: Option<Uuid>,
+) -> RealSourceStartFixture {
     use plurx_core::{
         cluster::migration::select_daemon_store,
         config::Config,
@@ -1350,7 +1378,17 @@ async fn build_real_source_start_fixture() -> RealSourceStartFixture {
         })
         .await
         .expect("item");
-    let file = directory.path().join("source.mp4");
+    let native = matches!(
+        mode,
+        SourceFixtureMode::NativeCopy | SourceFixtureMode::NativeEncoded
+    );
+    let encoded = matches!(
+        mode,
+        SourceFixtureMode::Encoded | SourceFixtureMode::NativeEncoded
+    );
+    let file = directory
+        .path()
+        .join(if native { "source.mkv" } else { "source.mp4" });
     let generated = tokio::process::Command::new(crate::ffmpeg::ffmpeg_bin())
         .args([
             "-v",
@@ -1376,6 +1414,42 @@ async fn build_real_source_start_fixture() -> RealSourceStartFixture {
         "{}",
         String::from_utf8_lossy(&generated.stderr)
     );
+    if native {
+        let caption = directory.path().join("actual.srt");
+        std::fs::write(
+            &caption,
+            "1\n00:00:00,200 --> 00:00:01,800\nActual HTTP Source caption\n\n",
+        )
+        .expect("actual subtitle input");
+        let alternative = directory.path().join("alternative.srt");
+        std::fs::write(
+            &alternative,
+            "1\n00:00:00,200 --> 00:00:01,800\nAlternative HTTP Source caption\n\n",
+        )
+        .expect("actual alternative subtitle input");
+        let muxed = directory.path().join("captioned.mkv");
+        let result = tokio::process::Command::new(crate::ffmpeg::ffmpeg_bin())
+            .arg("-i")
+            .arg(&file)
+            .arg("-i")
+            .arg(&caption)
+            .arg("-i")
+            .arg(&alternative)
+            .args([
+                "-map", "0:v:0", "-map", "1:s:0", "-map", "2:s:0", "-c:v", "copy", "-c:s",
+                "subrip", "-y",
+            ])
+            .arg(&muxed)
+            .output()
+            .await
+            .expect("actual subtitle mux");
+        assert!(
+            result.status.success(),
+            "{}",
+            String::from_utf8_lossy(&result.stderr)
+        );
+        std::fs::rename(muxed, &file).expect("actual captioned Source");
+    }
     let metadata = std::fs::metadata(&file).expect("actual file");
     let mtime = metadata
         .modified()
@@ -1398,7 +1472,52 @@ async fn build_real_source_start_fixture() -> RealSourceStartFixture {
         .await
         .expect("actual probe");
     assert!(probe.status.success());
+    let native_tracks = if native {
+        let observed: serde_json::Value =
+            serde_json::from_slice(&probe.stdout).expect("actual native scan JSON");
+        let tracks: Vec<_> = observed["streams"]
+            .as_array()
+            .expect("actual streams")
+            .iter()
+            .filter(|stream| stream["codec_type"] == "subtitle")
+            .collect();
+        assert_eq!(tracks.len(), 2, "actual generated embedded track count");
+        assert!(
+            tracks.iter().all(|track| track["codec_name"] == "subrip"),
+            "facts must match actual ffprobe"
+        );
+        Some(
+            tracks
+                .iter()
+                .enumerate()
+                .map(|(index, track)| plurx_core::domain::SubtitleStream {
+                    index: index as i64,
+                    codec: track["codec_name"]
+                        .as_str()
+                        .expect("actual codec")
+                        .to_owned(),
+                    language: track["tags"]["language"].as_str().map(str::to_owned),
+                    title: track["tags"]["title"].as_str().map(str::to_owned),
+                    default: track["disposition"]["default"].as_i64() == Some(1),
+                    forced: track["disposition"]["forced"].as_i64() == Some(1),
+                    hearing_impaired: track["disposition"]["hearing_impaired"].as_i64() == Some(1),
+                })
+                .collect::<Vec<_>>(),
+        )
+    } else {
+        None
+    };
     client.execute("INSERT INTO files(id,item_id,path,size,mtime,duration_ms,container,video_codec,width,height,bit_depth,bitrate,probe_json,scanned_at) VALUES(1,$1,$2,$3,$4,2000,'mp4','h264',128,72,8,100000,$5,$6)",hiqlite::params!(item,file.to_string_lossy().to_string(),metadata.len() as i64,mtime,String::from_utf8(probe.stdout).expect("scan JSON"),crate::state::clock_ms()/1000)).await.expect("actual scanned file facts");
+    if let Some(native_tracks) = native_tracks {
+        let tracks = serde_json::to_string(&native_tracks).expect("actual embedded subtitle facts");
+        client
+            .execute(
+                "UPDATE files SET container='matroska',subtitle_streams=$1 WHERE id=1",
+                hiqlite::params!(tracks),
+            )
+            .await
+            .expect("actual scanned Source subtitle");
+    }
     let now = crate::state::clock_ms();
     let grant = Uuid::new_v4();
     let invitation = Uuid::new_v4();
@@ -1420,7 +1539,7 @@ async fn build_real_source_start_fixture() -> RealSourceStartFixture {
             invitation_hash: "a".repeat(64),
             claim_id: Uuid::new_v4(),
             grant_id: grant,
-            recipient_server_id: Uuid::new_v4(),
+            recipient_server_id: recipient_server_id.unwrap_or_else(Uuid::new_v4),
             recipient_name: "Actual B".into(),
             credential_hash: hash.clone(),
             now_ms: now + 1,
@@ -1458,21 +1577,23 @@ async fn build_real_source_start_fixture() -> RealSourceStartFixture {
         file_id: SourceId::parse("1").expect("file"),
         revision: key.file_revision(&witness).expect("actual revision"),
     };
-    let media = store.get_file(1).await.expect("file read").expect("file");
-    let crate::fragindex::IndexOutcome::Built(index) = Box::pin(crate::fragindex::build(
-        &media,
-        plurx_core::transcode::CopyVideoOptions::new(false, false),
-        directory.path(),
-        std::time::Duration::from_secs(30),
-    ))
-    .await
-    else {
-        panic!("actual fragment scan")
-    };
-    store
-        .put_fragment_index(1, &index)
+    if !native && !encoded {
+        let media = store.get_file(1).await.expect("file read").expect("file");
+        let crate::fragindex::IndexOutcome::Built(index) = Box::pin(crate::fragindex::build(
+            &media,
+            plurx_core::transcode::CopyVideoOptions::new(false, false),
+            directory.path(),
+            std::time::Duration::from_secs(30),
+        ))
         .await
-        .expect("actual fragment scan committed");
+        else {
+            panic!("actual fragment scan")
+        };
+        store
+            .put_fragment_index(1, &index)
+            .await
+            .expect("actual fragment scan committed");
+    }
     Arc::get_mut(&mut state)
         .expect("sole State before listeners")
         .transcode = Arc::new(crate::transcode::TranscodeManager::new(
@@ -1493,6 +1614,17 @@ async fn build_real_source_start_fixture() -> RealSourceStartFixture {
         "c".repeat(64).parse().expect("viewer"),
     );
     let request=serde_json::to_vec(&serde_json::json!({"reference":reference,"session":{"playback_id":"actual-http-client","request_id":Uuid::new_v4(),"copy":true,"height":72,"quality_auto":false,"presentation":"vod","caps":{"v":2,"video":[{"codec":"h264","max_height":2160,"present":["sdr"]}],"audio":["aac"],"containers":["mp4"],"transports":["hls","progressive"]}}})).expect("canonical complete recipe");
+    let mut recipe: serde_json::Value =
+        serde_json::from_slice(&request).expect("full fixture recipe");
+    if encoded {
+        recipe["session"]["copy"] = serde_json::json!(false);
+        recipe["session"]["height"] = serde_json::json!(36);
+    }
+    if native {
+        recipe["session"]["native_subtitles"] = serde_json::json!(true);
+        recipe["session"]["subtitle"] = serde_json::json!(0);
+    }
+    let request = serde_json::to_vec(&recipe).expect("canonical full fixture recipe");
     RealSourceStartFixture {
         state,
         reference,
@@ -1819,11 +1951,33 @@ mod tests {
     }
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn sharing_source_http_real_h1_h2_playlist_init_and_segment_echo_exact_lineage() {
-        Box::pin(actual_source_resource_delivery()).await;
+        Box::pin(actual_source_resource_delivery(SourceFixtureMode::Copy)).await;
     }
-    async fn actual_source_resource_delivery() {
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn sharing_source_http_real_encoded_h1_h2_playlist_init_and_segment() {
+        Box::pin(actual_source_resource_delivery(SourceFixtureMode::Encoded)).await;
+    }
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn sharing_source_http_native_copy_h1_h2_vtt_and_held_body_end() {
+        Box::pin(actual_source_resource_delivery(
+            SourceFixtureMode::NativeCopy,
+        ))
+        .await;
+    }
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn sharing_source_http_native_encoded_h1_h2_vtt_and_held_body_end() {
+        Box::pin(actual_source_resource_delivery(
+            SourceFixtureMode::NativeEncoded,
+        ))
+        .await;
+    }
+    async fn actual_source_resource_delivery(mode: SourceFixtureMode) {
         use std::time::{Duration, Instant};
-        let fixture = real_source_start_fixture().await;
+        let fixture = real_source_start_fixture_with(mode, None).await;
+        let native = matches!(
+            mode,
+            SourceFixtureMode::NativeCopy | SourceFixtureMode::NativeEncoded
+        );
         let mut unsupported: Value = serde_json::from_slice(&fixture.request).expect("recipe");
         unsupported["session"]["previous_session_id"] = json!(Uuid::new_v4());
         let denied = start(
@@ -1902,7 +2056,7 @@ mod tests {
             fixture.reference.file_id.as_str()
         );
         for h2 in [false, true] {
-            recipe["resource"] = json!("index.m3u8");
+            recipe["resource"] = json!(if native { "video.m3u8" } else { "index.m3u8" });
             let response = actual_resource_request(
                 address,
                 h2,
@@ -1928,8 +2082,12 @@ mod tests {
                 .await
                 .expect("real playlist bytes");
             plurx_core::sharing_resources::validate_sharing_playlist(
-                &plurx_core::sharing_resources::SharingHlsResource::parse("index.m3u8")
-                    .expect("path"),
+                &plurx_core::sharing_resources::SharingHlsResource::parse(if native {
+                    "video.m3u8"
+                } else {
+                    "index.m3u8"
+                })
+                .expect("path"),
                 &playlist,
             )
             .expect("closed actual playlist");
@@ -1971,6 +2129,80 @@ mod tests {
                     "actual FFmpeg MP4 object"
                 );
             }
+            if native {
+                for resource in [
+                    "master.m3u8?subtitle=0",
+                    "subs/0/index.m3u8",
+                    "subs/0/seg00000.vtt",
+                    "subs/1/index.m3u8",
+                    "subs/1/seg00000.vtt",
+                ] {
+                    recipe["resource"] = json!(resource);
+                    let response = actual_resource_request(
+                        address,
+                        h2,
+                        &url,
+                        fixture.headers.clone(),
+                        serde_json::to_vec(&recipe).expect("native request"),
+                    )
+                    .await;
+                    assert_eq!(response.status(), StatusCode::OK, "native {resource}");
+                    assert_eq!(response.headers()["cinemashare-resource"], resource);
+                    let mime = response.headers()["content-type"]
+                        .to_str()
+                        .expect("actual MIME")
+                        .to_owned();
+                    let bytes = axum::body::to_bytes(response.into_body(), 4 * 1024 * 1024)
+                        .await
+                        .expect("actual native bytes");
+                    if resource.ends_with(".vtt") {
+                        assert_eq!(mime, "text/vtt");
+                        let text = std::str::from_utf8(&bytes).expect("actual VTT UTF8");
+                        assert!(text.starts_with("WEBVTT"));
+                        assert!(text.contains("X-TIMESTAMP-MAP"));
+                        assert!(text.contains(if resource.starts_with("subs/1/") {
+                            "Alternative HTTP Source caption"
+                        } else {
+                            "Actual HTTP Source caption"
+                        }));
+                    } else {
+                        if resource.starts_with("master.") {
+                            assert!(
+                                std::str::from_utf8(&bytes)
+                                    .expect("actual master")
+                                    .contains("subs/1/index.m3u8"),
+                                "wrong selected track exists and is actually advertised"
+                            );
+                        }
+                        assert_eq!(mime, "application/vnd.apple.mpegurl");
+                        plurx_core::sharing_resources::validate_sharing_playlist(
+                            &plurx_core::sharing_resources::SharingHlsResource::parse(resource)
+                                .expect("closed native path"),
+                            &bytes,
+                        )
+                        .expect("closed actual native playlist");
+                    }
+                }
+                for resource in [
+                    "master.m3u8?subtitle=1",
+                    "subs/2/index.m3u8",
+                    "subs/2/seg00000.vtt",
+                ] {
+                    recipe["resource"] = json!(resource);
+                    assert_eq!(
+                        actual_resource_request(
+                            address,
+                            h2,
+                            &url,
+                            fixture.headers.clone(),
+                            serde_json::to_vec(&recipe).expect("wrong frozen selector")
+                        )
+                        .await
+                        .status(),
+                        StatusCode::UNPROCESSABLE_ENTITY
+                    );
+                }
+            }
             recipe["resource"] = json!("../init.mp4");
             assert_eq!(
                 actual_resource_request(
@@ -1999,6 +2231,9 @@ mod tests {
             .wait(Instant::now() + Duration::from_secs(1))
             .await
             .expect("owner");
+        if native {
+            actual_vtt_writer_end(&fixture, &entry, &owned, &recipe, &request).await;
+        }
         tokio::time::timeout(Duration::from_secs(15), owned.actor.retire())
             .await
             .expect("actual bodies/writers settle")
@@ -2008,6 +2243,152 @@ mod tests {
         server.await.expect("server").expect("shutdown");
         drop(owned);
         fixture.shutdown().await;
+    }
+    async fn actual_vtt_writer_end(
+        fixture: &RealSourceStartFixture,
+        entry: &std::sync::Arc<SourceStartEntry>,
+        owned: &SourceStartOwned,
+        recipe: &Value,
+        request_id: &str,
+    ) {
+        use std::{
+            sync::{atomic::Ordering, Arc},
+            time::Duration,
+        };
+        let probe = Arc::new(AcceptedWriterProbe::default());
+        probe.gate.store(true, Ordering::SeqCst);
+        probe.vtt.store(true, Ordering::SeqCst);
+        *probe.actor.lock().expect("actual actor") = Some(owned.actor.clone());
+        let (capture, captured) = tokio::sync::oneshot::channel();
+        let capture = Arc::new(std::sync::Mutex::new(Some(capture)));
+        let app = super::super::sharing::peer_router((*fixture.state).clone()).layer(
+            axum::middleware::from_fn(
+                move |request: axum::extract::Request, next: axum::middleware::Next| {
+                    let capture = Arc::clone(&capture);
+                    async move {
+                        if request.uri().path().ends_with("/resources") {
+                            capture
+                                .lock()
+                                .expect("capture")
+                                .take()
+                                .expect("one actual VTT")
+                                .send(
+                                    request
+                                        .extensions()
+                                        .get::<crate::SharingConnectionCancellation>()
+                                        .expect("actual accepted transport")
+                                        .clone(),
+                                )
+                                .ok();
+                        }
+                        next.run(request).await
+                    }
+                },
+            ),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("VTT listener");
+        let address = listener.local_addr().expect("address");
+        let (stop, stopped) = tokio::sync::oneshot::channel();
+        let server = tokio::spawn(crate::serve_http(
+            GatedStartListener {
+                listener,
+                probe: Arc::clone(&probe),
+            },
+            app,
+            async move {
+                let _ = stopped.await;
+            },
+            crate::HTTP_TIMEOUTS,
+        ));
+        let path = format!(
+            "/sharing/v1/items/{}/files/{}/sessions/{request_id}",
+            fixture.reference.item_id.as_str(),
+            fixture.reference.file_id.as_str()
+        );
+        let mut recipe = recipe.clone();
+        recipe["resource"] = json!("subs/0/seg00000.vtt");
+        let socket = tokio::net::TcpStream::connect(address)
+            .await
+            .expect("real VTT TCP");
+        let (mut sender, driver) =
+            hyper::client::conn::http2::Builder::new(hyper_util::rt::TokioExecutor::new())
+                .handshake::<_, axum::body::Body>(hyper_util::rt::TokioIo::new(socket))
+                .await
+                .expect("actual H2");
+        let driver = tokio::spawn(driver);
+        let mut request = axum::http::Request::builder()
+            .method("POST")
+            .uri(format!("http://fixture{path}/resources"))
+            .body(axum::body::Body::from(
+                serde_json::to_vec(&recipe).expect("actual VTT request"),
+            ))
+            .expect("request");
+        *request.headers_mut() = fixture.headers.clone();
+        let send = tokio::spawn(async move { sender.send_request(request).await });
+        let connection = captured.await.expect("actual accepted VTT connection");
+        tokio::time::timeout(Duration::from_secs(10), async {
+            while !probe.blocked.load(Ordering::SeqCst) {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("actual VTT DATA at blocked accepted writer");
+        assert!(probe.queued_start.load(Ordering::SeqCst));
+        assert!(!probe.dropped.load(Ordering::SeqCst));
+        assert!(!connection.closed().is_closed());
+        assert_eq!(owned.actor.settlement_status(), None);
+        recipe.as_object_mut().expect("recipe").remove("resource");
+        let end_url = format!("http://{address}{path}/end");
+        let headers = fixture.headers.clone();
+        let ending = tokio::spawn(async move {
+            reqwest::Client::builder()
+                .http1_only()
+                .redirect(reqwest::redirect::Policy::none())
+                .build()
+                .expect("End client")
+                .post(end_url)
+                .headers(headers)
+                .header("connection", "close")
+                .body(serde_json::to_vec(&recipe).expect("exact End recipe"))
+                .send()
+                .await
+                .expect("actual End response")
+        });
+        let response = tokio::time::timeout(Duration::from_secs(15), ending)
+            .await
+            .expect("actual VTT writer and physical settlement")
+            .expect("End task");
+        assert_eq!(response.status(), StatusCode::OK);
+        assert!(entry
+            .ending
+            .lock()
+            .expect("retained actual End owner")
+            .is_some());
+        assert!(
+            connection.closed().is_closed(),
+            "actual VTT accepted writer joined before End receipt"
+        );
+        assert!(probe.dropped.load(Ordering::SeqCst));
+        assert!(
+            !probe.settled_before_drop.load(Ordering::SeqCst),
+            "Source must not settle while real VTT IO is still owned"
+        );
+        assert_eq!(owned.actor.settlement_status(), Some(Ok(())));
+        let receipt: Value = response.json().await.expect("actual terminal receipt");
+        assert_eq!(receipt["settled"], true);
+        assert_eq!(receipt["request_id"], request_id);
+        assert_eq!(
+            receipt["incarnation_id"],
+            owned.assignment.binding().incarnation_id().to_string()
+        );
+        send.abort();
+        let _ = send.await;
+        driver.abort();
+        let _ = driver.await;
+        let _ = stop.send(());
+        server.await.expect("VTT server").expect("shutdown");
     }
     #[test]
     fn sharing_source_first_start_refuses_foreign_predecessor_and_control_recipe_before_prepare() {
@@ -2703,17 +3084,36 @@ mod tests {
     }
     #[derive(Default)]
     struct AcceptedWriterProbe {
+        vtt: std::sync::atomic::AtomicBool,
+        actor: std::sync::Mutex<Option<crate::transcode::source_actor::SourceViewerActor>>,
+        settled_before_drop: std::sync::atomic::AtomicBool,
         gate: std::sync::atomic::AtomicBool,
         blocked: std::sync::atomic::AtomicBool,
         queued_start: std::sync::atomic::AtomicBool,
         dropped: std::sync::atomic::AtomicBool,
     }
     struct GatedStartStream {
-        stream: tokio::net::TcpStream,
+        stream: Option<tokio::net::TcpStream>,
+        data_blocked: bool,
         probe: std::sync::Arc<AcceptedWriterProbe>,
     }
     impl Drop for GatedStartStream {
         fn drop(&mut self) {
+            if self.data_blocked {
+                if let Some(actor) = self
+                    .probe
+                    .actor
+                    .lock()
+                    .expect("actual Source actor probe")
+                    .as_ref()
+                {
+                    self.probe.settled_before_drop.store(
+                        actor.settlement_status() == Some(Ok(())),
+                        std::sync::atomic::Ordering::SeqCst,
+                    );
+                }
+            }
+            drop(self.stream.take());
             self.probe
                 .dropped
                 .store(true, std::sync::atomic::Ordering::SeqCst);
@@ -2725,7 +3125,8 @@ mod tests {
             cx: &mut std::task::Context<'_>,
             buffer: &mut tokio::io::ReadBuf<'_>,
         ) -> std::task::Poll<std::io::Result<()>> {
-            std::pin::Pin::new(&mut self.stream).poll_read(cx, buffer)
+            std::pin::Pin::new(self.stream.as_mut().expect("actual accepted IO"))
+                .poll_read(cx, buffer)
         }
     }
     impl tokio::io::AsyncWrite for GatedStartStream {
@@ -2734,16 +3135,17 @@ mod tests {
             cx: &mut std::task::Context<'_>,
             bytes: &[u8],
         ) -> std::task::Poll<std::io::Result<usize>> {
-            let source_data = bytes
-                .windows(b"incarnation_id".len())
-                .any(|part| part == b"incarnation_id");
+            let marker: &[u8] = if self.probe.vtt.load(std::sync::atomic::Ordering::SeqCst) {
+                b"Actual HTTP Source caption"
+            } else {
+                b"incarnation_id"
+            };
+            let source_data = bytes.windows(marker.len()).any(|part| part == marker);
             if self.probe.gate.load(std::sync::atomic::Ordering::SeqCst)
-                && (source_data || self.probe.blocked.load(std::sync::atomic::Ordering::SeqCst))
+                && (source_data || self.data_blocked)
             {
-                if bytes
-                    .windows(b"incarnation_id".len())
-                    .any(|part| part == b"incarnation_id")
-                {
+                self.data_blocked = true;
+                if source_data {
                     self.probe
                         .queued_start
                         .store(true, std::sync::atomic::Ordering::SeqCst);
@@ -2754,19 +3156,20 @@ mod tests {
                     .store(true, std::sync::atomic::Ordering::SeqCst);
                 return std::task::Poll::Pending;
             }
-            std::pin::Pin::new(&mut self.stream).poll_write(cx, bytes)
+            std::pin::Pin::new(self.stream.as_mut().expect("actual accepted IO"))
+                .poll_write(cx, bytes)
         }
         fn poll_flush(
             mut self: std::pin::Pin<&mut Self>,
             cx: &mut std::task::Context<'_>,
         ) -> std::task::Poll<std::io::Result<()>> {
-            std::pin::Pin::new(&mut self.stream).poll_flush(cx)
+            std::pin::Pin::new(self.stream.as_mut().expect("actual accepted IO")).poll_flush(cx)
         }
         fn poll_shutdown(
             mut self: std::pin::Pin<&mut Self>,
             cx: &mut std::task::Context<'_>,
         ) -> std::task::Poll<std::io::Result<()>> {
-            std::pin::Pin::new(&mut self.stream).poll_shutdown(cx)
+            std::pin::Pin::new(self.stream.as_mut().expect("actual accepted IO")).poll_shutdown(cx)
         }
     }
     struct GatedStartListener {
@@ -2779,7 +3182,8 @@ mod tests {
             let (stream, address) = self.listener.accept().await?;
             Ok((
                 GatedStartStream {
-                    stream,
+                    stream: Some(stream),
+                    data_blocked: false,
                     probe: self.probe.clone(),
                 },
                 address,
