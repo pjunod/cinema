@@ -1939,6 +1939,7 @@ impl MediaSessionStore for HiqliteAuthStore {
         }) {
             return Ok(None);
         }
+        // authority: a committed quality cancellation must fence this preparation before it is admitted
         let bindings = timeout_store(self.client().query_consistent_map::<PreparationCancellationBinding, _>(
             "SELECT cancellation_key FROM quality_preparation_owners WHERE staged_incarnation_id = $1", params!(preparation.incarnation_id.as_str()))).await?;
         if bindings.first().is_some_and(|binding| {
@@ -2148,6 +2149,7 @@ impl MediaSessionStore for HiqliteAuthStore {
                     == preparation.expected_predecessor_incarnation_id
         });
         if exact_replay {
+            // authority: a committed quality cancellation must fence the staged successor before it commits
             let bindings = timeout_store(self.client().query_consistent_map::<PreparationCancellationBinding, _>(
                 "SELECT cancellation_key FROM quality_preparation_owners WHERE staged_incarnation_id = $1",
                 params!(preparation.incarnation_id.as_str()))).await?;
@@ -3522,6 +3524,7 @@ impl MediaSessionStore for HiqliteAuthStore {
         );
         let rows = timeout_store(
             self.client()
+                // authority: the ledger CAS compares against the committed revision; a stale replica would lose the write
                 .query_consistent_map::<QualityLedgerRow, _>(sql, params!(generation)),
         )
         .await?;
@@ -3543,6 +3546,7 @@ impl MediaSessionStore for HiqliteAuthStore {
         &self,
         rendition_id: &str,
     ) -> Result<Vec<crate::playback::continuous_quality::QualityInterval>, StoreError> {
+        // authority: eviction may not miss a committed continuous reservation of the media it would delete
         let rows = timeout_store(self.client().query_consistent_map::<QualityIntervalRow, _>(
             crate::store::quality_ledger::RESERVED_INTERVALS,
             params!(rendition_id),
@@ -3680,6 +3684,7 @@ impl MediaSessionStore for HiqliteAuthStore {
         );
         let rows = timeout_store(
             self.client()
+                // authority: receipt replay must answer from the committed receipt, never a lagging replica
                 .query_consistent_map::<QualityCancellationRow, _>(sql, params!(receipt_key)),
         )
         .await?;
@@ -3700,6 +3705,7 @@ impl MediaSessionStore for HiqliteAuthStore {
         .await?;
         Ok(timeout_store(
             self.client()
+                // authority: settlement must observe the committed staged-child state it is fencing
                 .query_consistent_map::<CancellationSettledRow, _>(
                     crate::store::quality_cancellation::CANCELLATION_SETTLED_FOR,
                     params!(receipt_key, owner_node_id, owner_epoch),
@@ -3718,6 +3724,7 @@ impl MediaSessionStore for HiqliteAuthStore {
         lifetime_id: &str,
         recipe_revision: i64,
     ) -> Result<bool, StoreError> {
+        // authority: an intent's cancellation must be observed exactly once the cancel is committed
         let rows = timeout_store(self.client().query_consistent_map::<QualityCancellationRow, _>(
             format!("SELECT {} FROM quality_cancellation_receipts WHERE generation = $1 AND client_instance_id = $2 AND lifetime_id = $3 AND recipe_revision = $4 LIMIT 1", crate::store::quality_cancellation::CANCELLATION_COLS),
             params!(generation, client_instance_id, lifetime_id, recipe_revision))).await?;
@@ -5205,8 +5212,16 @@ mod tests {
         let statements = prepare_statements(&preparation);
         assert_eq!(
             statements.len(),
-            3,
-            "preparation is exactly lease, session, then ledger"
+            4,
+            "preparation is exactly lease, session, ledger, then the quality \
+             cancellation owner binding"
+        );
+        assert!(
+            statements[3]
+                .0
+                .contains("INSERT OR IGNORE INTO quality_preparation_owners"),
+            "the fourth statement binds the staged successor to its quality \
+             cancellation key in the same transaction"
         );
         assert!(
             statements[0].0.contains("INSERT INTO job_leases")

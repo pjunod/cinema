@@ -52,7 +52,7 @@ const CONSISTENT_READ_SITES: &[(&str, usize)] = &[
     ("hiqlite_pretranscode.rs", 2),
     ("hiqlite_publication.rs", 5),
     ("hiqlite_reading.rs", 2),
-    ("hiqlite_sessions.rs", 18),
+    ("hiqlite_sessions.rs", 25),
     ("hiqlite_shared_cache.rs", 4),
     ("hiqlite_timeline_annotations.rs", 2),
 ];

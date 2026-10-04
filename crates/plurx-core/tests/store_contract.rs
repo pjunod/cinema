@@ -16226,6 +16226,14 @@ fn populated_v14_import_fixture(data_dir: &std::path::Path) -> PathBuf {
              ",
         )
         .expect("remove v91 planning generation");
+    connection
+        .execute_batch(
+            "DROP TABLE IF EXISTS continuous_quality_ledgers;
+             DROP TABLE IF EXISTS quality_preparation_owners;
+             DROP TABLE IF EXISTS quality_cancellation_receipts;
+             ",
+        )
+        .expect("remove v92 cancellation and v93 continuous dependencies");
     // Recreate the exact post-v14 schema differences so this is also a valid
     // input to ordinary SQLite startup migration, not merely a current-schema
     // database carrying an older user_version. The activation coordinator now

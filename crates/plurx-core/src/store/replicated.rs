@@ -751,6 +751,23 @@ pub const SQLITE_TRANSACTION_SITES: &[SqliteTransactionSite] = &[
         mechanism: TransactionMechanism::RusqliteTransaction,
         shape: TransactionShape::ReadBranchWrite,
     },
+    // Continuous quality: prune superseded settled receipts, insert this one
+    // `ON CONFLICT DO NOTHING`, then read the winning receipt back.
+    SqliteTransactionSite {
+        module: "sessions.rs",
+        method: "request_quality_cancellation",
+        is_async: true,
+        mechanism: TransactionMechanism::RusqliteTransaction,
+        shape: TransactionShape::WriteReadBack,
+    },
+    // Fenced settle, then read whether the receipt is settled for this owner.
+    SqliteTransactionSite {
+        module: "sessions.rs",
+        method: "settle_quality_cancellation",
+        is_async: true,
+        mechanism: TransactionMechanism::RusqliteTransaction,
+        shape: TransactionShape::WriteReadBack,
+    },
     SqliteTransactionSite {
         module: "mod.rs",
         method: "migrate",

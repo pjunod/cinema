@@ -911,7 +911,12 @@ fn is_sqlite_candidate(text: &str) -> bool {
 // analysis_reconciliation_preserves_work_and_fences_changed_requests executes
 // the paginated query; the separate preparation keeps its arity out of this
 // same-statement scanner's reach.
-const EXPECTED_UNCHECKED_SQLITE_ARITY: usize = 92;
+// 92 -> 95: three continuous-quality SQLite statements bind their values
+// away from the literal's own statement, where this scanner cannot count them.
+// They are this branch's ledger, reservation and cancellation-receipt paths;
+// the continuous_quality_ledger_* and quality_cancellation_* store contracts
+// execute every one of them on both backends.
+const EXPECTED_UNCHECKED_SQLITE_ARITY: usize = 95;
 
 #[test]
 fn every_sqlite_placeholder_and_local_binding_arity_is_valid() {

@@ -1290,6 +1290,14 @@ mod tests {
             .expect("remove v91 planning generation");
         connection
             .execute_batch(
+                "DROP TABLE IF EXISTS continuous_quality_ledgers;
+                 DROP TABLE IF EXISTS quality_preparation_owners;
+                 DROP TABLE IF EXISTS quality_cancellation_receipts;
+                 ",
+            )
+            .expect("remove v92 cancellation and v93 continuous dependencies");
+        connection
+            .execute_batch(
                 // Everything v44 and later built has to go, or the replayed
                 // migration meets its own leftovers instead of a v43 database:
                 // v44's recovery guards, v45's negative index, v46's attempt
@@ -1477,7 +1485,7 @@ mod tests {
     #[test]
     fn the_downgrade_fixture_undoes_every_migration_after_the_guard() {
         const GUARD_SCHEMA_VERSION: i64 = 44;
-        const DROPPED_BY_THE_FIXTURE: [&str; 47] = [
+        const DROPPED_BY_THE_FIXTURE: [&str; 49] = [
             "fragment_index_outcomes",
             "attempt_errors",
             "video_identity",
@@ -1566,6 +1574,10 @@ mod tests {
             "CREATE INDEX IF NOT EXISTS background_jobs_file_source",
             "ADD COLUMN requested_manually",
             "CREATE TABLE IF NOT EXISTS playback_input_generation",
+            // v92 and v93: continuous quality. Both fixtures drop the three
+            // tables (their indexes go with them) before replay.
+            "CREATE TABLE IF NOT EXISTS quality_cancellation_receipts",
+            "CREATE TABLE IF NOT EXISTS continuous_quality_ledgers",
         ];
 
         assert!(
