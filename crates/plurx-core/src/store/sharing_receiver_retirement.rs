@@ -7,8 +7,9 @@ use crate::{
     error::StoreError,
     sharing::{invalid, is_hash},
     sharing_receiver_retirement::{
-        ReceiverPendingOwner, ReceiverPendingRetirementWitness, ReceiverRetirementDisposition,
-        ReceiverRetirementOutcome, ReceiverRetirementReason, ReceiverRetirementWitness,
+        ReceiverOrphan, ReceiverOrphanClaimOutcome, ReceiverPendingOwner,
+        ReceiverPendingRetirementWitness, ReceiverRetirementDisposition, ReceiverRetirementOutcome,
+        ReceiverRetirementReason, ReceiverRetirementWitness,
     },
 };
 use async_trait::async_trait;
@@ -28,9 +29,38 @@ pub trait SharingReceiverRetirementStore: Send + Sync {
         &self,
         witness: &dyn ReceiverRetirementWitness,
     ) -> Result<ReceiverRetirementOutcome, StoreError>;
+    /// Read-only keyset inventory of RemoteSource routes whose owner stopped
+    /// renewing them. Inventory is never settlement evidence.
+    async fn orphaned_receiver_sessions(
+        &self,
+        after: Option<&str>,
+        limit: usize,
+    ) -> Result<super::sharing_receiver_orphans::ReceiverOrphanPage, StoreError>;
+    /// Exclusive takeover of one exact observed orphan: owner, epoch and
+    /// lease move to `next_owner_node_id` at epoch+1, fencing every old-epoch
+    /// writer. Does not need sharing on, the original login or the import.
+    async fn claim_orphaned_receiver_session(
+        &self,
+        orphan: &ReceiverOrphan,
+        next_owner_node_id: &str,
+    ) -> Result<ReceiverOrphanClaimOutcome, StoreError>;
 }
 #[async_trait]
 impl<T: Backend> SharingReceiverRetirementStore for T {
+    async fn orphaned_receiver_sessions(
+        &self,
+        after: Option<&str>,
+        limit: usize,
+    ) -> Result<super::sharing_receiver_orphans::ReceiverOrphanPage, StoreError> {
+        super::sharing_receiver_orphans::inventory(self, after, limit).await
+    }
+    async fn claim_orphaned_receiver_session(
+        &self,
+        orphan: &ReceiverOrphan,
+        next_owner_node_id: &str,
+    ) -> Result<ReceiverOrphanClaimOutcome, StoreError> {
+        super::sharing_receiver_orphans::claim(self, orphan, next_owner_node_id).await
+    }
     async fn retire_pending_receiver_request(
         &self,
         w: &dyn ReceiverPendingRetirementWitness,
@@ -223,7 +253,9 @@ impl<T: Backend> SharingReceiverRetirementStore for T {
         let request="r.incarnation_id=s.incarnation_id AND r.user_id=s.user_id AND r.request_id=json_extract($1,'$.request') AND r.owner_node_id=s.owner_node_id AND r.playback_id=s.playback_id AND r.request_fingerprint=s.request_fingerprint AND r.response_json IS json_extract($1,'$.request_response')";
         let upstream="b.incarnation_id=s.incarnation_id AND b.import_id=json_extract($1,'$.import') AND b.lifecycle_generation=json_extract($1,'$.lifecycle') AND b.assignment_generation=json_extract($1,'$.assignment') AND b.endpoint_revision=json_extract($1,'$.endpoint') AND b.remote_library_id=json_extract(s.recipe_json,'$.reference.library_id') AND b.remote_item_id=json_extract(s.recipe_json,'$.reference.item_id') AND b.remote_file_id=json_extract(s.recipe_json,'$.file_id') AND b.remote_revision=json_extract(s.recipe_json,'$.file_revision') AND b.source_request_id=json_extract(s.recipe_json,'$.source_request_id') AND b.source_position_ms=s.media_origin_ms AND ((json_extract($1,'$.binding') IS NULL AND b.source_session_id IS NULL AND b.source_incarnation_id IS NULL AND b.capability_envelope IS NULL AND r.state IN('starting','failed') AND r.response_json IS NULL) OR (json_extract($1,'$.binding') IS NOT NULL AND b.source_session_id=json_extract($1,'$.binding.session') AND b.source_incarnation_id=json_extract($1,'$.binding.incarnation') AND b.capability_envelope=json_extract($1,'$.binding.envelope') AND ((r.state='resolved' AND r.response_json=s.response_json AND (s.publication_ready_at_ms=0 OR s.state='ended')) OR (r.state IN('starting','failed') AND r.response_json IS NULL))))";
         let resources="NOT EXISTS(SELECT 1 FROM job_leases j WHERE j.resource='session:'||s.incarnation_id AND (j.owner_node_id<>s.owner_node_id OR j.fence<>s.owner_epoch OR (j.expires_at_ms<>s.lease_expires_at_ms AND (s.state<>'ended' OR j.expires_at_ms>s.lease_expires_at_ms)))) AND NOT EXISTS(SELECT 1 FROM cache_consumer_pins p WHERE p.consumer_kind='media_session' AND p.consumer_id=s.incarnation_id AND p.consumer_epoch<>s.owner_epoch) AND NOT EXISTS(SELECT 1 FROM media_playback_pointers p WHERE p.current_incarnation_id=s.incarnation_id AND (p.user_id<>s.user_id OR p.playback_id<>s.playback_id))";
-        let before=format!("EXISTS(SELECT 1 FROM media_sessions s JOIN media_session_requests r ON {request} JOIN sharing_relay_upstream b ON {upstream} WHERE {identity} AND s.state IN('active','ended') AND ({resources}))");
+        // A never-dispatched disposition additionally requires the durable
+        // `none` dispatch marker: a recorded (or unknown) dispatch owes End.
+        let before=format!("EXISTS(SELECT 1 FROM media_sessions s JOIN media_session_requests r ON {request} JOIN sharing_relay_upstream b ON {upstream} WHERE {identity} AND s.state IN('active','ended') AND (json_extract($2,'$.disposition')<>'never_dispatched' OR b.dispatch_envelope='none') AND ({resources}))");
         let after=format!("EXISTS(SELECT 1 FROM media_sessions s JOIN media_session_requests r ON {request} WHERE {identity} AND s.state='ended' AND s.response_json=$2 AND s.terminal_reason IS NOT NULL AND s.publication_ready_at_ms=0 AND r.state IN('resolved','failed') AND NOT EXISTS(SELECT 1 FROM sharing_delivery_grants g WHERE g.incarnation_id=s.incarnation_id AND g.state<>'revoked') AND NOT EXISTS(SELECT 1 FROM sharing_relay_upstream b WHERE b.incarnation_id=s.incarnation_id) AND NOT EXISTS(SELECT 1 FROM job_leases j WHERE j.resource='session:'||s.incarnation_id) AND NOT EXISTS(SELECT 1 FROM cache_consumer_pins p WHERE p.consumer_kind='media_session' AND p.consumer_id=s.incarnation_id) AND NOT EXISTS(SELECT 1 FROM media_playback_pointers p WHERE p.current_incarnation_id=s.incarnation_id))");
         let read = retirement_ordered(
             &format!("SELECT 'replay' AS payload WHERE ({after})"),

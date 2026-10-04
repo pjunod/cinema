@@ -100,6 +100,17 @@ pub struct ReceiverPendingRenewal {
     pub lease_expires_at_ms: i64,
 }
 
+/// Sealed Source Start dispatch facts (credential, pseudonymous viewer,
+/// pinned endpoint and Source request) that B persists before its first Start
+/// byte, so a crashed owner's End obligation stays authenticatable. Store
+/// checks the exact blocked owner only; the capsule is opaque to it and grants
+/// no Source authority. There is no cleartext credential representation.
+#[derive(Clone)]
+pub struct ReceiverDispatchRecord {
+    pub owner: ReceiverPendingRenewal,
+    pub envelope: crate::secrets::SealedSecret,
+}
+
 /// Exact B owner captured by the receiver actor. This is metadata identity,
 /// not evidence that Source has admitted or published a producer.
 #[derive(Clone)]

@@ -916,7 +916,8 @@ impl<T: Backend> SharingStore for T {
     async fn sharing_sealed_census(&self) -> Result<SealedRowCensus, StoreError> {
         let rows = self.sharing_read("SELECT json_object('purpose','credential','values',json_array(credential_envelope,claim_envelope)) AS payload FROM sharing_imports
             UNION ALL SELECT json_object('purpose','rotation','values',json_array(credential_envelope)) AS payload FROM sharing_import_rotations
-            UNION ALL SELECT json_object('purpose','upstream','values',json_array(capability_envelope)) AS payload FROM sharing_relay_upstream WHERE capability_envelope IS NOT NULL",vec![]).await?;
+            UNION ALL SELECT json_object('purpose','upstream','values',json_array(capability_envelope)) AS payload FROM sharing_relay_upstream WHERE capability_envelope IS NOT NULL
+            UNION ALL SELECT json_object('purpose','upstream','values',json_array(dispatch_envelope)) AS payload FROM sharing_relay_upstream WHERE dispatch_envelope IS NOT NULL AND dispatch_envelope<>'none'",vec![]).await?;
         let mut census = SealedRowCensus::default();
         for row in rows {
             let v: serde_json::Value = decode(&row)?;
