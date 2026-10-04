@@ -729,6 +729,135 @@ mod tests {
         }
     }
     #[tokio::test]
+    async fn sharing_catalogue_source_keyset_survives_boundary_deletion_and_moves_with_exact_huge_ties(
+    ) {
+        let s = SqliteStore::open_in_memory().expect("source fixture");
+        let (library, _, grant) = setup(&s).await;
+        install(&s).await;
+        // Four equal sort keys on adjacent IDs above 2^53: an f64 or text
+        // tie-breaker would collapse or misorder them.
+        let first = 9_007_199_254_740_993_i64;
+        let mut statements = Vec::new();
+        for n in 0..10_i64 {
+            let sort = if n < 4 {
+                "same".to_owned()
+            } else {
+                format!("t{n}")
+            };
+            statements.push((
+                "INSERT INTO items(id,library_id,kind,title,sort_title) VALUES($1,$2,'movie',$3,$4)"
+                    .into(),
+                vec![(first + n).into(), library.into(), format!("Movie {n}").into(), sort.into()],
+            ));
+        }
+        s.sharing_txn(statements).await.expect("finite fixture");
+        let ids = |page: &SourceCataloguePage| {
+            page.records
+                .iter()
+                .map(|r| {
+                    r.item
+                        .item_id
+                        .as_str()
+                        .parse::<i64>()
+                        .expect("canonical ID")
+                        - first
+                })
+                .collect::<Vec<_>>()
+        };
+        let mut r = request(library, grant, None);
+        r.limit = 3;
+        let page = s
+            .source_catalogue_page(r.clone())
+            .await
+            .expect("first page")
+            .expect("authorized");
+        assert_eq!(ids(&page), [0, 1, 2]);
+        assert!(page.has_more);
+        let last = page.records.last().expect("boundary");
+        let boundary = CatalogueBoundary {
+            sort_key: last.boundary_sort_key.clone(),
+            item_id: last.item.item_id.clone(),
+        };
+        // Delete the boundary item itself, move an already-seen item ahead of
+        // the boundary and an unseen item behind it.
+        s.sharing_txn(vec![
+            (
+                "DELETE FROM items WHERE id=$1".into(),
+                vec![(first + 2).into()],
+            ),
+            (
+                "UPDATE items SET sort_title=$1 WHERE id=$2".into(),
+                vec!["t5x".to_owned().into(), first.into()],
+            ),
+            (
+                "UPDATE items SET sort_title=$1 WHERE id=$2".into(),
+                vec!["a".to_owned().into(), (first + 9).into()],
+            ),
+        ])
+        .await
+        .expect("membership and order mutations");
+        r.boundary = Some(boundary);
+        r.limit = 60;
+        let next = s
+            .source_catalogue_page(r.clone())
+            .await
+            .expect("resume from the signed value boundary")
+            .expect("authorized");
+        assert!(next.counters.library_revision > page.counters.library_revision);
+        // The deleted boundary does not stall the scan; the moved-ahead item
+        // is sent again (B suppresses it by full reference); the moved-behind
+        // item waits for the next open. Nothing unchanged is skipped.
+        assert_eq!(ids(&next), [3, 4, 5, 0, 6, 7, 8]);
+        assert!(!next.has_more);
+        let mut seen = crate::sharing_catalogue::BrowseSeen::default();
+        let reference = |id: &SourceId| crate::sharing_catalogue::SharedReference {
+            import_id: Uuid::from_u128(1),
+            server_id: Uuid::from_u128(2),
+            catalogue_epoch: Uuid::from_u128(3),
+            library_id: SourceId::parse(&library.to_string()).expect("library"),
+            item_id: id.clone(),
+        };
+        let displayed = page
+            .records
+            .iter()
+            .chain(&next.records)
+            .filter(|r| seen.insert(reference(&r.item.item_id)))
+            .count();
+        assert_eq!(displayed, 9, "the moved-ahead repeat is displayed once");
+        r.boundary = None;
+        let reopened = s
+            .source_catalogue_page(r.clone())
+            .await
+            .expect("fresh open")
+            .expect("authorized");
+        assert_eq!(ids(&reopened), [9, 1, 3, 4, 5, 0, 6, 7, 8]);
+        // The top of the identity space: ties at i64::MAX-1 and i64::MAX keep
+        // exact integer order and the boundary at i64::MAX neither wraps nor
+        // repeats.
+        s.sharing_txn(vec![(
+            "INSERT INTO items(id,library_id,kind,title,sort_title) VALUES($1,$3,'movie','Top 1','same'),($2,$3,'movie','Top 2','same')".into(),
+            vec![(i64::MAX - 1).into(), i64::MAX.into(), library.into()],
+        )])
+        .await
+        .expect("maximum identities");
+        let mut top = String::from("9223372036854775806");
+        for expected in ["9223372036854775807", &(first + 4).to_string()] {
+            r.boundary = Some(CatalogueBoundary {
+                sort_key: "same".into(),
+                item_id: SourceId::parse(&top).expect("exact maximum boundary"),
+            });
+            r.limit = 1;
+            let page = s
+                .source_catalogue_page(r.clone())
+                .await
+                .expect("maximum boundary page")
+                .expect("authorized");
+            assert_eq!(page.records.len(), 1);
+            assert_eq!(page.records[0].item.item_id.as_str(), expected);
+            top = expected.to_owned();
+        }
+    }
+    #[tokio::test]
     async fn sharing_catalogue_source_revalidates_batch_scope_and_numeric_child_order() {
         let s = SqliteStore::open_in_memory().expect("source fixture");
         let (library, private, grant) = setup(&s).await;
