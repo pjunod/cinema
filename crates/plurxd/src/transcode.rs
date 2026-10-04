@@ -663,9 +663,9 @@ pub struct TranscodeManager {
     /// starts before they reach the manager; this second edge closes the
     /// transition race between that check and publishing a spawned child.
     serving_ready: AtomicBool,
-    /// Monotonic counterpart to `serving_ready`. Recovery may reopen the
-    /// process, but it cannot erase a loss observed by a session admitted
-    /// under an older generation.
+    /// Monotonic counterpart to `serving_ready`: the generation the fence
+    /// loop last resolved. Recovery may reopen the process, but registrations
+    /// admitted under an older generation still refuse themselves.
     serving_loss_generation: AtomicU64,
     /// Lock-free projection for Prometheus. The session map remains the
     /// authority; every production insert/removal publishes its resulting

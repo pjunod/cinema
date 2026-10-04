@@ -1,8 +1,7 @@
 # Apple TV interruptions on a 79.5 GB remux: why they happened and what fixes them
 
-**Status:** finding 4 fixed (resumable whole-file attestation); finding 5 now
-logs its numbers. Findings 1–3 and 5 are
-open, with recommendations. **Written:** 2026-10-04 EDT. **Incident build:**
+**Status:** findings 3, 4 and 5 fixed (fence grace, resumable attestation,
+rolling deferral); findings 1 and 2 are deploy-procedure recommendations. **Written:** 2026-10-04 EDT. **Incident build:**
 `aa3d77101` (PR #788) on all three voters. **Title:** *Bad Boys: Ride or Die*
 (2024), catalog file 5208, a 79.5 GB 2160p HEVC remux, played on the Apple TV
 from media1.
@@ -53,7 +52,7 @@ least never on the current leader, and transfer leadership away from a voter
 before its restart. Run the leader last. This is ansible work, outside this
 repository.
 
-### Finding 3 — a sub-second fence retires every session, even after authority returns
+### Finding 3 — a sub-second fence retires every session, even after authority returns (FIXED)
 
 At 04:12:58.828 media1 logs `serving authority expired; mutable media is
 self-fenced`. Authority returns at **04:12:59.063**, 234 ms later. The
@@ -64,13 +63,43 @@ viewer's session is retired at **04:12:59.111**, 48 ms *after* recovery
 retires them. It does not ask again whether authority came back before the
 teardown finished.
 
-This is deliberate: a node that lost authority may have lost ownership of its
-sessions. It is also why any replicated write slower than ~500 ms on the leader
-interrupts every viewer in the cluster. **Ruling for Paul:** keep the current
-rule, or let a session survive when authority returns within a short grace and
-its ownership epoch has not moved. The Heated Rivalry review warns that
-removing the apply wait from the serving proof is the wrong way to do this; a
-grace on retirement is a different change.
+Why a leader restart reaches other nodes at all: each node's serving
+authority is a one-second lease on the quorum watermark, and followers obtain
+the watermark through the leader. While the leader restarts there is no leader
+until an election finishes (1.7 s here), so every voter loses authority at the
+same moment, and the fence loop retired every session on every node.
+
+**Fix.** `serving_fence_loop` still closes the registration gate on any loss,
+but retires existing sessions only once authority has been lost for longer than
+`SERVING_FENCE_SESSION_GRACE` (5 s) in one outage. Losses that return within a
+grace of the last recovery share the same budget, so a flapping quorum still
+retires. Keeping a session through a brief loss is safe:
+
+- Nothing it holds is served while fenced. The router answers
+  `serving_fenced` for media paths, and every response admits against the
+  generation current at the time.
+- Another node can claim a session only after its 12 s replicated lease has
+  expired. Renewals run every 3 s, so in normal operation more than the grace
+  is left when authority is lost. That holds even when only this node lost it
+  and the rest of the cluster keeps quorum.
+- If a claim did commit, the kept session still could not serve it. After
+  recovery, a request is served locally only while the replicated route names
+  this node (read through a one-second cache), and the lease loop reaps a
+  session whose lease is gone. So the "ownership epoch has not moved"
+  condition from the earlier ruling question is enforced by route resolution
+  and the lease loop, not re-checked at recovery.
+- In the incident window media1 logged no lease-loop reaps; both deaths came
+  from the fence loop alone.
+
+During the outage itself, requests on the session's media paths are still
+answered 503. Serving reads from existing sessions through the outage is a
+possible follow-up.
+
+Regressions in `transcode/tests/chunk_06.rs`:
+
+- `serving_fence_keeps_sessions_through_a_brief_loss`
+- `serving_fence_flapping_losses_share_one_grace`
+- `serving_fence_retires_sessions_after_a_sustained_loss_and_refuses_late_children`
 
 ### Finding 4 — a large HEVC source is never attested, so it never leaves rolling HLS (FIXED)
 
@@ -123,7 +152,7 @@ Regressions, in `crates/plurxd/src/fragment_index_cluster.rs`:
 - `the_checkpoint_table_is_bounded_and_keeps_one_entry_per_file`
 - `crates/plurxd/src/state.rs`: `a_resumed_attempt_is_timed_from_its_resume_point`
 
-### Finding 5 — resuming from pause retired a rolling session (open, mechanism unconfirmed)
+### Finding 5 — any pause longer than about a minute retired a rolling session (FIXED)
 
 - 04:19:49: the producer held at `ahead_seconds=80` (`hold_reason=Demand`).
 - 04:20:14.40: the client logged `resume started: buffered-immediate`, with
@@ -141,17 +170,41 @@ moment of retirement are not recoverable. The likely shape is that
 `consumed_end_ms` on resume sat more than 124 s behind the next completed
 segment. A 2160p remux running at ~2× while paused could get there.
 
-**Done in the same change:** the retirement reason now carries
-`consumed_end_ms`, `desired_end_ms`, `allowed_end_ms`, `reserve_max_ms`, the
-first new segment and its end, the served end, the demand sequence and the
-observation age (`rolling_publication_budget_low_rate_retires_before_the_window_can_skip`
-pins the fields).
+**Mechanism (reproduced in a test).** While a viewer is paused, the
+publication clock keeps publishing one segment per 16 s cycle. That continues
+until the lead over the frozen position reaches the 124 s reserve ceiling,
+about a minute into the pause. The next segment then fails the safety floor,
+and that branch retired the session: deterministically, paused or not. The
+resume at 04:20:14 played no part.
 
-**Recommendation, once those numbers confirm the shape.** Make "no segment fits
-the floor" mean "nothing to publish yet" while the client's runway is still
-healthy, and retire only when the client is actually starving. Once
-finding 4 lets the VOD index exist, this path no longer serves the title, but
-it still serves every title that is waiting for one.
+**Fix.** Publishing nothing never moves the served window, so the protected
+segment stays served. Publication now waits for the viewer instead of retiring
+it in three cases:
+
+- the viewer is not consuming (paused, waiting or seeking);
+- it is consuming at 1x or faster;
+- a slower viewer's wait still fits the hard deadline measured from the last
+  publication.
+
+Every deferral episode is bounded by `ROLLING_PAUSE_GRACE` (180 s). Past that,
+the session is retired with `deferred_for_ms` in its reason. Only a slow viewer
+who would wait past the hard deadline is retired immediately, which is the case
+the guard exists for.
+
+**Open, needs devices.** At the ceiling the live playlist stops changing for as
+long as the deferral lasts. RFC 8216 expects a live playlist to change within
+1.5× target duration. AVPlayer can report -12888, and Media3 raises
+`PlaylistStuckException` after 3.5× (56 s). If a client does that while paused,
+it reopens, which is what the retirement forced before, so the change is never
+worse. Whether pauses longer than a minute now resume cleanly on Apple TV and
+Android still has to be checked on physical devices.
+
+Regressions in `transcode/tests/chunk_03.rs`:
+
+- `rolling_publication_budget_pause_then_resume_at_one_x_is_not_retired`
+- `rolling_publication_budget_wedged_waiting_viewer_is_retired_after_the_pause_grace`
+- `rolling_publication_budget_low_rate_retires_before_the_window_can_skip`
+  (unchanged, still retires)
 
 ## 3. Evidence sources
 
