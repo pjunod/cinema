@@ -178,11 +178,13 @@ impl SourceStartRegistry {
             recipe_hash: sha2::Sha256::digest(&input.canonical_recipe).into(),
         };
         let mut entries = self.entries.lock().expect("Source HTTP starts");
-        // Only the actual actor's terminal physical/body/SQL settlement can
-        // release bookkeeping capacity. Unknown/failed outcomes stay retained.
+        // Bookkeeping capacity follows in-process ownership. An entry leaves
+        // it once nothing here still works for it: a joined start that failed
+        // before any actor existed, or an actor that has finished. Its receipt
+        // stays in the bounded settled cache for replay and End lookup.
         let mut settled = self.settled.lock().expect("Source settled HTTP receipts");
         entries.retain(|entry| {
-            if entry.actual_settled() {
+            if entry.actual_finished() {
                 settled.push_back(std::sync::Arc::clone(entry));
                 while settled.len() > 64 {
                     settled.pop_front();
@@ -275,6 +277,21 @@ impl SourceStartEntry {
                 result
                     .as_ref()
                     .is_ok_and(|owned| owned.actor.settlement_status() == Some(Ok(())))
+            })
+    }
+    /// Nothing in this process still owns work for this start. The outcome
+    /// is published only after the worker joined, so a failure handed no
+    /// actor to this entry; durable claim and assignment rows it may have
+    /// left are reclaimed by their own lease expiry. A started actor counts
+    /// once it has finished settlement, successfully or not.
+    fn actual_finished(&self) -> bool {
+        self.result
+            .lock()
+            .expect("Source HTTP outcome")
+            .as_ref()
+            .is_some_and(|result| match result {
+                Ok(owned) => owned.actor.settlement_final(),
+                Err(_) => true,
             })
     }
     fn remember_authenticated_hash(&self, hash: &str) -> Result<(), SourceStartFailure> {
@@ -2267,14 +2284,17 @@ mod tests {
                     .incarnation(),
                 Some(incarnation)
             );
-            let after = fixture
-                .state
-                .transcode
-                .source_http_starts
-                .entries
+            // The joined failure owns no in-process work, so it leaves start
+            // capacity; its receipt stays in the settled cache, where the exact
+            // retry above found it instead of dispatching again.
+            let registry = &fixture.state.transcode.source_http_starts;
+            assert!(registry.entries.lock().expect("start capacity").is_empty());
+            let after = registry
+                .settled
                 .lock()
-                .expect("retained entry")
-                .first()
+                .expect("settled receipts")
+                .iter()
+                .find(|settled| std::sync::Arc::ptr_eq(settled, &entry))
                 .cloned()
                 .expect("same entry");
             assert!(std::sync::Arc::ptr_eq(&entry, &after));
@@ -4586,6 +4606,48 @@ mod tests {
             Err(SourceStartFailure::Capacity)
         ));
         assert_eq!(registry.entries.lock().expect("entries").len(), 8);
+    }
+    #[test]
+    fn sharing_source_start_registry_moves_a_joined_failed_start_to_the_settled_cache() {
+        let registry = SourceStartRegistry::default();
+        let grant = Uuid::new_v4();
+        let viewer = "a".repeat(64);
+        let mut value = fixture();
+        let mut retained = Vec::new();
+        for _ in 0..8 {
+            value["session"]["request_id"] = json!(Uuid::new_v4());
+            let input = parse(&value).expect("request");
+            let (entry, new) = registry
+                .register(grant, &viewer, &input, &"d".repeat(64))
+                .expect("bounded entry");
+            assert!(new);
+            retained.push((input, entry));
+        }
+        let (failed_input, failed) = retained.remove(0);
+        // The supervisor publishes an outcome only after its worker joined.
+        // A failure there handed no actor to this entry, so nothing in this
+        // process still works for it.
+        *failed.result.lock().expect("Source HTTP outcome") =
+            Some(Err(SourceStartFailure::Unavailable));
+        value["session"]["request_id"] = json!(Uuid::new_v4());
+        assert!(
+            registry
+                .register(
+                    grant,
+                    &viewer,
+                    &parse(&value).expect("ninth"),
+                    &"d".repeat(64)
+                )
+                .expect("the failed start's slot is free")
+                .1
+        );
+        assert_eq!(registry.entries.lock().expect("entries").len(), 8);
+        assert_eq!(registry.settled.lock().expect("cache").len(), 1);
+        let (replay, new) = registry
+            .register(grant, &viewer, &failed_input, &"d".repeat(64))
+            .expect("the failed receipt still answers its request");
+        assert!(!new);
+        assert!(std::sync::Arc::ptr_eq(&replay, &failed));
     }
 }
 

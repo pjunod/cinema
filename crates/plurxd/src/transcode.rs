@@ -117,7 +117,7 @@ mod planning;
 pub(crate) use planning::*;
 // split: end planning
 
-const ADMISSION_POLL: Duration = Duration::from_millis(250);
+pub(crate) const ADMISSION_POLL: Duration = Duration::from_millis(250);
 const SCRATCH_SAMPLE_INTERVAL: Duration = Duration::from_secs(30);
 const SCRATCH_SAMPLE_MAX_AGE: Duration = Duration::from_secs(45);
 const CACHE_OFFER_VERDICT_TTL: Duration = Duration::from_secs(30);

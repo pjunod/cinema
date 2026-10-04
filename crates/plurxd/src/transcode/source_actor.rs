@@ -124,6 +124,29 @@ pub(crate) enum SourceWorkerError {
     Unsupported,
 }
 
+/// How long a Source owner waits before retrying a settlement that a Store or
+/// physical fault left unresolved, and how many attempts it makes in all. The
+/// same bounded detached-owner shape as the rolling scratch conversion. Past
+/// the bound the owner has already stopped renewing, so the media-session
+/// lease sweep reclaims the row; holding a registry slot for it would only
+/// refuse every later shared start on this node.
+const SOURCE_SETTLEMENT_RETRY: Duration = Duration::from_secs(5);
+const SOURCE_SETTLEMENT_ATTEMPTS: u32 = 24;
+
+/// Why one settlement attempt did not release this owner's Source row.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SourceSettlementFault {
+    /// A Store or physical-retirement fault. The retained witness is still
+    /// this owner's, and a later attempt can succeed with it.
+    Transient,
+    /// The retained witness can never settle: the durable route names another
+    /// planned session, owner epoch, node or principal; a physical or
+    /// preparation receipt belongs to another assignment; or the Store refused
+    /// this exact immutable release. Retrying the same witness cannot change
+    /// any of these.
+    Mismatch,
+}
+
 #[derive(Default)]
 pub(super) struct SourceWorkerRegistry {
     entries: std::sync::Mutex<Vec<Arc<SourceViewerInner>>>,
@@ -176,6 +199,9 @@ struct SourceViewerState {
     start: Option<Result<crate::http::hls::StartResponse, SourceWorkerError>>,
     retirement_requested: bool,
     settled: Option<Result<(), SourceWorkerError>>,
+    /// The owner has stopped for good and left the worker registry. Until
+    /// then an unresolved `settled` may still be retried.
+    finished: bool,
     bodies: usize,
     planned_session: Option<String>,
 }
@@ -245,6 +271,12 @@ impl SourceViewerActor {
     /// result; a missing actor, lease expiry or acknowledgement cannot mint it.
     pub(crate) fn settlement_status(&self) -> Option<Result<(), SourceWorkerError>> {
         self.0.state.lock().expect("Source worker state").settled
+    }
+    /// Whether the owner has stopped for good: settled, refused a witness that
+    /// can never settle, or exhausted its bounded retries. Nothing in this
+    /// process still works for it once this is true.
+    pub(crate) fn settlement_final(&self) -> bool {
+        self.0.state.lock().expect("Source worker state").finished
     }
     pub(crate) async fn wait_ready(
         &self,
@@ -827,6 +859,7 @@ impl TranscodeManager {
                 start: None,
                 retirement_requested: false,
                 settled: None,
+                finished: false,
                 bodies: 0,
                 planned_session: None,
                 native: None,
@@ -843,6 +876,30 @@ impl TranscodeManager {
                 .await;
         }));
         Ok(actor)
+    }
+
+    /// The Source preparation permit: one live wait, bounded by the start
+    /// deadline and the foreground queue wait together, holding its waiter
+    /// for the whole wait so background work yields and cannot refill the
+    /// pool between attempts.
+    async fn admit_source_copy(
+        &self,
+        deadline: Instant,
+    ) -> Result<crate::vodencode::EncodePermit, SourceWorkerError> {
+        let admit_deadline = deadline.min(Instant::now() + crate::admission::QUEUE_WAIT);
+        match crate::vodencode::EncodePermit::admit_source_copy(
+            &self.admissions,
+            self.store.as_ref(),
+            admit_deadline,
+        )
+        .await
+        {
+            crate::vodencode::SourceCopyPermitRead::Admitted(permit) => Ok(permit),
+            crate::vodencode::SourceCopyPermitRead::Unavailable => {
+                Err(SourceWorkerError::Unavailable)
+            }
+            crate::vodencode::SourceCopyPermitRead::Capacity => Err(SourceWorkerError::Capacity),
+        }
     }
 
     /// Index cache bytes are inert evidence. Actual Source permission and the
@@ -882,25 +939,10 @@ impl TranscodeManager {
         {
             return Ok(());
         }
-        let permit = loop {
-            if Instant::now() >= deadline {
-                return Err(SourceWorkerError::Deadline);
-            }
-            match crate::vodencode::EncodePermit::try_source_copy(
-                &self.admissions,
-                self.store.as_ref(),
-            )
-            .await
-            {
-                crate::vodencode::SourceCopyPermitRead::Admitted(permit) => break permit,
-                crate::vodencode::SourceCopyPermitRead::Unavailable => {
-                    return Err(SourceWorkerError::Unavailable)
-                }
-                crate::vodencode::SourceCopyPermitRead::Capacity => {
-                    tokio::time::sleep(Duration::from_millis(100)).await;
-                }
-            }
-        };
+        if Instant::now() >= deadline {
+            return Err(SourceWorkerError::Deadline);
+        }
+        let permit = self.admit_source_copy(deadline).await?;
         let source = crate::fragment_index_cluster::open_source_playback_fence(file, None)
             .await
             .map_err(|_| SourceWorkerError::Unavailable)?;
@@ -967,26 +1009,7 @@ impl TranscodeManager {
     ) -> Result<Arc<super::source_subtitles::SourceNativeTracks>, SourceWorkerError> {
         super::source_subtitles::supported_tracks(prepared.file(), prepared.native_subtitles().1)
             .map_err(|_| SourceWorkerError::Unsupported)?;
-        let admit_deadline = deadline.min(Instant::now() + crate::admission::QUEUE_WAIT);
-        let permit = loop {
-            if Instant::now() >= admit_deadline {
-                return Err(SourceWorkerError::Capacity);
-            }
-            match crate::vodencode::EncodePermit::try_source_copy(
-                &self.admissions,
-                self.store.as_ref(),
-            )
-            .await
-            {
-                crate::vodencode::SourceCopyPermitRead::Admitted(permit) => break permit,
-                crate::vodencode::SourceCopyPermitRead::Unavailable => {
-                    return Err(SourceWorkerError::Unavailable)
-                }
-                crate::vodencode::SourceCopyPermitRead::Capacity => {
-                    tokio::time::sleep(Duration::from_millis(100)).await
-                }
-            }
-        };
+        let permit = self.admit_source_copy(deadline).await?;
         let source =
             crate::fragment_index_cluster::open_source_playback_fence(prepared.file(), None)
                 .await
@@ -1018,26 +1041,7 @@ impl TranscodeManager {
         deadline: Instant,
         work: &mut Option<super::source_preparation::SourceProbeOperation>,
     ) -> Result<Arc<crate::vodencode::Encoding>, SourceWorkerError> {
-        let admit_deadline = deadline.min(Instant::now() + crate::admission::QUEUE_WAIT);
-        let permit = loop {
-            if Instant::now() >= admit_deadline {
-                return Err(SourceWorkerError::Capacity);
-            }
-            match crate::vodencode::EncodePermit::try_source_copy(
-                &self.admissions,
-                self.store.as_ref(),
-            )
-            .await
-            {
-                crate::vodencode::SourceCopyPermitRead::Admitted(permit) => break permit,
-                crate::vodencode::SourceCopyPermitRead::Unavailable => {
-                    return Err(SourceWorkerError::Unavailable)
-                }
-                crate::vodencode::SourceCopyPermitRead::Capacity => {
-                    tokio::time::sleep(Duration::from_millis(100)).await
-                }
-            }
-        };
+        let permit = self.admit_source_copy(deadline).await?;
         let source =
             crate::fragment_index_cluster::open_source_playback_fence(prepared.file(), None)
                 .await
@@ -1264,7 +1268,7 @@ impl TranscodeManager {
                 ))
                 .await
                 .map_err(|_| SourceWorkerError::Unavailable)?;
-                let physical = Box::pin(reservation.wait_ready(deadline))
+                let physical = Box::pin(reservation.wait_ready(&self.vod, deadline))
                     .await
                     .map_err(|_| SourceWorkerError::Unavailable)?;
                 if !physical.matches(&owner.assignment) {
@@ -1308,7 +1312,13 @@ impl TranscodeManager {
         .unwrap_or(Err(SourceWorkerError::Deadline));
         owner.state.lock().expect("Source worker state").start = Some(start.clone());
         owner.changed.notify_waiters();
-        if start.is_ok() {
+        // A graceful drain ends this owner the way retirement does: stop
+        // renewing, settle the physical producer, release the row.
+        let shutdown = state.shutdown.clone();
+        if let (Ok(_), Some(reservation)) = (&start, reserved.as_ref()) {
+            // The tick is the lease heartbeat. A rendition failure is
+            // published on the rendition itself and retires this owner at
+            // once rather than at the next renewal.
             let mut renewal = tokio::time::interval(Duration::from_secs(10));
             renewal.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
             renewal.tick().await;
@@ -1326,6 +1336,8 @@ impl TranscodeManager {
                 }
                 tokio::select! {
                     _ = notification => {},
+                    () = shutdown.cancelled() => break,
+                    _ = reservation.failed() => break,
                     _ = renewal.tick() => {
                         let session_id = owner.state.lock().expect("Source worker state").start.as_ref().and_then(|start| start.as_ref().ok()).map(|response| response.session_id.clone());
                         if let Some(session_id) = session_id {
@@ -1358,9 +1370,12 @@ impl TranscodeManager {
             preparations.native = Some(work.settle().await);
         }
         let mut physical = None;
+        let mut attempts = 0;
         let settlement = loop {
+            attempts += 1;
+            // A route this owner did not activate is never its to release.
             let result = if unowned_existing {
-                Err(SourceWorkerError::Unresolved)
+                Err(SourceSettlementFault::Mismatch)
             } else {
                 Box::pin(self.settle_source_owner(
                     &owner,
@@ -1370,24 +1385,45 @@ impl TranscodeManager {
                 ))
                 .await
             };
-            owner.state.lock().expect("Source worker state").settled = Some(result);
-            owner.changed.notify_waiters();
-            if result.is_ok() || unowned_existing {
+            if result != Err(SourceSettlementFault::Transient)
+                || attempts >= SOURCE_SETTLEMENT_ATTEMPTS
+            {
                 break result;
             }
+            owner.state.lock().expect("Source worker state").settled =
+                Some(Err(SourceWorkerError::Unresolved));
+            owner.changed.notify_waiters();
             // A Store fault retains the actual owner and sealed physical
             // settlement evidence. Retry SQL without inventing a new producer.
-            tokio::time::sleep(Duration::from_secs(5)).await;
+            tokio::select! {
+                () = shutdown.cancelled() => break result,
+                () = tokio::time::sleep(SOURCE_SETTLEMENT_RETRY) => {}
+            }
         };
-        // Genuine unknown outcomes remain bounded in the registry. Neither
-        // caller cancellation nor absent in-memory producers releases a row.
-        if settlement.is_ok() {
-            self.source_workers
-                .entries
-                .lock()
-                .expect("Source workers")
-                .retain(|entry| !Arc::ptr_eq(entry, &owner));
+        if let Err(fault) = settlement {
+            // Renewal ended with retirement, so the media-session lease sweep
+            // reclaims the row; this owner only stops claiming it.
+            tracing::warn!(
+                target: "plurxd::transcode",
+                incarnation = %owner.assignment.binding().incarnation_id(),
+                attempts,
+                reason = ?fault,
+                "Source owner left its settlement unresolved; the session lease sweep reclaims its row"
+            );
         }
+        // The owner is finished either way. Its registry slot is not capacity
+        // the stopped owner can still use.
+        self.source_workers
+            .entries
+            .lock()
+            .expect("Source workers")
+            .retain(|entry| !Arc::ptr_eq(entry, &owner));
+        {
+            let mut current = owner.state.lock().expect("Source worker state");
+            current.settled = Some(settlement.map_err(|_| SourceWorkerError::Unresolved));
+            current.finished = true;
+        }
+        owner.changed.notify_waiters();
     }
     async fn settle_source_owner(
         &self,
@@ -1395,14 +1431,14 @@ impl TranscodeManager {
         reserved: &mut Option<crate::vodserve::ReservedSourceVodRendition>,
         physical: &mut Option<SourcePhysicalSettlement>,
         preparations: &mut SourcePreparationSettlements,
-    ) -> Result<(), SourceWorkerError> {
+    ) -> Result<(), SourceSettlementFault> {
         if physical.is_none() {
             *physical = Some(if let Some(reserved) = reserved.as_mut() {
                 let receipt = Box::pin(reserved.retire(&self.vod))
                     .await
-                    .map_err(|_| SourceWorkerError::Unresolved)?;
+                    .map_err(|_| SourceSettlementFault::Transient)?;
                 if !receipt.matches(&owner.assignment) {
-                    return Err(SourceWorkerError::Unresolved);
+                    return Err(SourceSettlementFault::Mismatch);
                 }
                 SourcePhysicalSettlement::Registered(
                     Box::new(receipt),
@@ -1414,21 +1450,21 @@ impl TranscodeManager {
         }
         if matches!(physical, Some(SourcePhysicalSettlement::Registered(receipt, _)) if !receipt.matches(&owner.assignment))
         {
-            return Err(SourceWorkerError::Unresolved);
+            return Err(SourceSettlementFault::Mismatch);
         }
         let preparations = match physical.as_ref().expect("Source physical settlement") {
             SourcePhysicalSettlement::NoProducer(preparations)
             | SourcePhysicalSettlement::Registered(_, preparations) => preparations,
         };
         if !preparations.matches(&owner.assignment) {
-            return Err(SourceWorkerError::Unresolved);
+            return Err(SourceSettlementFault::Mismatch);
         }
         let incarnation = owner.assignment.binding().incarnation_id().to_string();
         let route = self
             .store
             .media_session_route_by_incarnation(&incarnation)
             .await
-            .map_err(|_| SourceWorkerError::Unresolved)?;
+            .map_err(|_| SourceSettlementFault::Transient)?;
         let terminal = if let Some(route) = route {
             if Some(&route.session_id)
                 != owner
@@ -1441,7 +1477,7 @@ impl TranscodeManager {
                 || route.owner_node_id != owner.assignment.owner_node_id()
                 || route.principal != *owner.assignment.binding().principal()
             {
-                return Err(SourceWorkerError::Unresolved);
+                return Err(SourceSettlementFault::Mismatch);
             }
             if route.state == "ended" {
                 Some(route)
@@ -1458,8 +1494,10 @@ impl TranscodeManager {
                             now_ms: crate::fragment_index_cluster::unix_ms(),
                         })
                         .await
-                        .map_err(|_| SourceWorkerError::Unresolved)?
-                        .ok_or(SourceWorkerError::Unresolved)?,
+                        .map_err(|_| SourceSettlementFault::Transient)?
+                        // The guarded End lost to a lease change; the next
+                        // attempt re-reads the route it raced.
+                        .ok_or(SourceSettlementFault::Transient)?,
                 )
             }
         } else {
@@ -1483,14 +1521,10 @@ impl TranscodeManager {
                 .settle_source_assigned_without_activation(&owner.assignment)
                 .await
         }
-        .map_err(|_| SourceWorkerError::Unresolved)?;
-        if matches!(
-            released,
-            SourceReleaseOutcome::Released | SourceReleaseOutcome::ExactReplay
-        ) {
-            Ok(())
-        } else {
-            Err(SourceWorkerError::Unresolved)
+        .map_err(|_| SourceSettlementFault::Transient)?;
+        match released {
+            SourceReleaseOutcome::Released | SourceReleaseOutcome::ExactReplay => Ok(()),
+            SourceReleaseOutcome::Refused => Err(SourceSettlementFault::Mismatch),
         }
     }
 }

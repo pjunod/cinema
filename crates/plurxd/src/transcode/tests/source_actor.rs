@@ -665,9 +665,10 @@ async fn source_actual_copy_attachment(
     .await
     .expect("actual admitted attachment");
     assert_eq!(start.session_id, session_id);
-    let physical = Box::pin(reserved.wait_ready(Instant::now() + Duration::from_secs(10)))
-        .await
-        .expect("actual registered init readiness");
+    let physical =
+        Box::pin(reserved.wait_ready(&manager.vod, Instant::now() + Duration::from_secs(10)))
+            .await
+            .expect("actual registered init readiness");
     assert!(physical.matches(assignment));
     let members = membership
         .observe_source_admission_members()

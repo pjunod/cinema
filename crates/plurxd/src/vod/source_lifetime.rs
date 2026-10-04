@@ -298,6 +298,12 @@ impl SourceRenditionOwner {
             changed.await;
         }
     }
+    /// Woken whenever one of this owner's dispatches settles. Registration
+    /// records the token before its dispatch is dropped, so a producer that
+    /// [`Self::registered_readiness`] can observe has always woken this.
+    pub(crate) fn dispatch_settled(&self) -> tokio::sync::futures::Notified<'_> {
+        self.changed.notified()
+    }
     /// A registered producer for this immutable rendition is physical evidence.
     /// The worker still requires current file/floor authority before publishing.
     pub(crate) fn registered_readiness(&self) -> Option<ProducerRegistration> {

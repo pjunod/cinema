@@ -112,11 +112,33 @@ impl ReservedSourceVodRendition {
         })
     }
 
+    /// Wait for the registered producer's init, on the rendition's own signals.
+    ///
+    /// The init demand is registered the way an init GET registers it, so
+    /// the driver has been kicked once and the materialize clock bounds the
+    /// wait. Init landing, a recorded failure and that clock's expiry all wake
+    /// `init_notify`; a producer registration wakes the owner when its
+    /// dispatch settles. Both are armed before the checks, so a wake between
+    /// a check and the wait is not lost. Every wake re-checks the physical
+    /// fence; the init is re-read only when it may have changed, which is an
+    /// identity this wait has not yet compared or a fresh init landing.
     pub(crate) async fn wait_ready(
         &self,
+        serve: &VodServe,
         deadline: Instant,
     ) -> Result<SourceCopyReadiness, String> {
+        let demand = serve
+            .shared
+            .arm_materialize_watchdog(&self.rendition, INIT_DEMAND_INDEX);
+        self.rendition.kick();
+        let mut compared: Option<String> = None;
         loop {
+            let landed = self.rendition.init_notify.notified();
+            tokio::pin!(landed);
+            landed.as_mut().enable();
+            let registered = self.owner.dispatch_settled();
+            tokio::pin!(registered);
+            registered.as_mut().enable();
             if Instant::now() >= deadline {
                 return Err("Source materialization timed out".into());
             }
@@ -131,17 +153,10 @@ impl ReservedSourceVodRendition {
             {
                 return Err("Source physical identity changed before readiness".into());
             }
+            if demand.expired() {
+                return Err("materializing init.mp4 exceeded the producer deadline".into());
+            }
             if let Some(registration) = self.owner.registered_readiness() {
-                let held = self
-                    .rendition
-                    .source
-                    .as_ref()
-                    .ok_or_else(|| "Source physical fence is absent".to_owned())?;
-                let source = crate::fragment_index_cluster::open_source_playback_fence(
-                    &self.rendition.recipe.file,
-                    Some(held.object_version()),
-                )
-                .await?;
                 let identity = self
                     .rendition
                     .identity
@@ -149,33 +164,76 @@ impl ReservedSourceVodRendition {
                     .await
                     .identity
                     .as_ref()
-                    .map(|identity| identity.served_init.clone());
+                    .map(|identity| identity.served_init.clone())
+                    .filter(|identity| compared.as_ref() != Some(identity));
                 if let Some(identity) = identity {
-                    let path = self.rendition.dir.path().join(INIT_NAME);
-                    if let Ok(metadata) = tokio::fs::metadata(&path).await {
-                        if metadata.is_file()
-                            && metadata.len() > 0
-                            && metadata.len() <= HEAD_REGENERATION_MAX_BYTES as u64
-                        {
-                            if let Ok(bytes) = tokio::fs::read(&path).await {
-                                if hex::encode(Sha256::digest(&bytes)) == identity {
-                                    return Ok(SourceCopyReadiness {
-                                        assignment: self.assignment.clone(),
-                                        _registration: registration,
-                                        _init_identity: identity,
-                                        _source: source,
-                                    });
-                                }
-                            }
-                        }
+                    if self.init_matches(&identity).await {
+                        let held = self
+                            .rendition
+                            .source
+                            .as_ref()
+                            .ok_or_else(|| "Source physical fence is absent".to_owned())?;
+                        let source = crate::fragment_index_cluster::open_source_playback_fence(
+                            &self.rendition.recipe.file,
+                            Some(held.object_version()),
+                        )
+                        .await?;
+                        return Ok(SourceCopyReadiness {
+                            assignment: self.assignment.clone(),
+                            _registration: registration,
+                            _init_identity: identity,
+                            _source: source,
+                        });
                     }
+                    compared = Some(identity);
                 }
             }
-            self.rendition.kick();
-            tokio::time::sleep_until(tokio::time::Instant::from_std(
-                deadline.min(Instant::now() + Duration::from_millis(100)),
-            ))
+            let woke = tokio::time::timeout_at(tokio::time::Instant::from_std(deadline), async {
+                tokio::select! {
+                    () = &mut landed => true,
+                    () = &mut registered => false,
+                }
+            })
             .await;
+            match woke {
+                Err(_) => return Err("Source materialization timed out".into()),
+                // New init bytes may carry an identity already compared.
+                Ok(true) => compared = None,
+                Ok(false) => {}
+            }
+        }
+    }
+
+    /// Whether the rendition's `init.mp4` on disk is exactly `identity`.
+    async fn init_matches(&self, identity: &str) -> bool {
+        let path = self.rendition.dir.path().join(INIT_NAME);
+        match tokio::fs::metadata(&path).await {
+            Ok(metadata)
+                if metadata.is_file()
+                    && metadata.len() > 0
+                    && metadata.len() <= HEAD_REGENERATION_MAX_BYTES as u64 =>
+            {
+                tokio::fs::read(&path)
+                    .await
+                    .is_ok_and(|bytes| hex::encode(Sha256::digest(&bytes)) == identity)
+            }
+            _ => false,
+        }
+    }
+
+    /// Resolves with the cause once this rendition records a failure.
+    ///
+    /// `record_failure` publishes the cause and then wakes `init_notify`; init
+    /// landing and init-demand expiry wake it too, so each wake re-checks.
+    pub(crate) async fn failed(&self) -> String {
+        loop {
+            let notified = self.rendition.init_notify.notified();
+            tokio::pin!(notified);
+            notified.as_mut().enable();
+            if let Some(cause) = self.rendition.failure_cause() {
+                return cause;
+            }
+            notified.await;
         }
     }
 
@@ -322,40 +380,45 @@ impl VodServe {
                 "Source VOD preparation requires its exact unburned recipe assignment".into(),
             );
         }
+        // One live wait, bounded by the start deadline and the foreground
+        // queue wait together. Either way the waiter stays registered across
+        // attempts: the copy wait holds its own guard, and an encoding keeps
+        // the waiter `try_permit` registered until it is granted.
         let admission_deadline = deadline.min(Instant::now() + crate::admission::QUEUE_WAIT);
-        let permit = loop {
-            let attempt = tokio::time::timeout_at(
-                tokio::time::Instant::from_std(admission_deadline),
-                async {
-                    if let Some(encoding) = &encoding {
-                        match encoding.try_permit().await {
-                            Some(permit) => {
-                                crate::vodencode::SourceCopyPermitRead::Admitted(permit)
-                            }
-                            None => crate::vodencode::SourceCopyPermitRead::Capacity,
-                        }
-                    } else {
-                        crate::vodencode::EncodePermit::try_source_copy(admissions, store).await
+        let admission =
+            tokio::time::timeout_at(tokio::time::Instant::from_std(admission_deadline), async {
+                let Some(encoding) = &encoding else {
+                    return crate::vodencode::EncodePermit::admit_source_copy(
+                        admissions,
+                        store,
+                        admission_deadline,
+                    )
+                    .await;
+                };
+                loop {
+                    if let Some(permit) = encoding.try_permit().await {
+                        return crate::vodencode::SourceCopyPermitRead::Admitted(permit);
                     }
-                },
-            )
-            .await;
-            match attempt {
-                Ok(crate::vodencode::SourceCopyPermitRead::Admitted(permit)) => break permit,
-                Ok(crate::vodencode::SourceCopyPermitRead::Unavailable) => {
-                    return Err("Source physical admission policy is unavailable".into());
-                }
-                Ok(crate::vodencode::SourceCopyPermitRead::Capacity) => {
-                    if Instant::now() >= admission_deadline {
-                        return Err("Source physical VOD capacity is unavailable".into());
+                    let now = Instant::now();
+                    if now >= admission_deadline {
+                        return crate::vodencode::SourceCopyPermitRead::Capacity;
                     }
-                    tokio::time::sleep_until(tokio::time::Instant::from_std(
-                        admission_deadline.min(Instant::now() + Duration::from_millis(100)),
-                    ))
+                    tokio::time::sleep(
+                        crate::transcode::ADMISSION_POLL.min(admission_deadline - now),
+                    )
                     .await;
                 }
-                Err(_) => return Err("Source physical VOD admission timed out".into()),
+            })
+            .await;
+        let permit = match admission {
+            Ok(crate::vodencode::SourceCopyPermitRead::Admitted(permit)) => permit,
+            Ok(crate::vodencode::SourceCopyPermitRead::Unavailable) => {
+                return Err("Source physical admission policy is unavailable".into());
             }
+            Ok(crate::vodencode::SourceCopyPermitRead::Capacity) => {
+                return Err("Source physical VOD capacity is unavailable".into());
+            }
+            Err(_) => return Err("Source physical VOD admission timed out".into()),
         };
         let pending = tokio::time::timeout_at(
             tokio::time::Instant::from_std(deadline),
