@@ -81,10 +81,10 @@ impl Drop for RestartAdmission {
 /// never does: an admission or commit made under generation N must refuse
 /// itself when it observes any generation greater than N, even if a fast
 /// loss/recovery was coalesced into one watch notification before that
-/// consumer was scheduled. Existing rolling sessions are not admissions:
-/// they survive a loss that recovers within
-/// `transcode::manager_control::SERVING_FENCE_SESSION_GRACE`, because every
-/// response they publish admits against the generation current at the time.
+/// consumer was scheduled. Work that is already running is not an admission:
+/// rolling sessions and progressive remuxes survive a loss that recovers
+/// within [`SERVING_FENCE_SESSION_GRACE`] (see [`SessionGrace`]), because
+/// nothing they hold is published while authority is lost.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) struct ServingState {
     pub(crate) ready: bool,
@@ -159,6 +159,117 @@ impl ServingAuthority {
 impl ServingState {
     pub(crate) fn authority_lost_since(self, admitted_generation: u64) -> bool {
         !self.ready || self.loss_generation != admitted_generation
+    }
+}
+
+/// How long running media work outlives a loss of serving authority, summed
+/// over one outage, before it is ended. Elections and one-second leader
+/// stalls recover well inside it (234 ms and 1.7 s on 2026-10-04). It also
+/// stays inside the window in which a rolling session's twelve-second
+/// replicated lease can still be renewed (a renewal needs four seconds left,
+/// and the last one is at most a tick and a renewal deadline old), so a loss
+/// longer than this would end that session through the lease loop anyway.
+///
+/// One policy for every owner of running work: the rolling-session registry
+/// (`TranscodeManager::serving_fence_loop`) and each progressive remux owner
+/// (`http::stream`) resolve a loss through [`SessionGrace`] against this one
+/// bound. New admissions and commits never get it; they refuse a stale
+/// generation exactly as before.
+#[cfg(not(test))]
+pub(crate) const SERVING_FENCE_SESSION_GRACE: Duration = Duration::from_secs(5);
+#[cfg(test)]
+pub(crate) const SERVING_FENCE_SESSION_GRACE: Duration = Duration::from_secs(2);
+
+/// How one loss of serving authority ended for an owner of running work.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum LossOutcome {
+    /// Authority came back inside what was left of the grace. The owner keeps
+    /// its work and adopts the generation that is current now.
+    Recovered {
+        /// How long this loss lasted.
+        outage: Duration,
+        /// The outage budget spent so far, this loss included.
+        budget_spent: Duration,
+    },
+    /// The grace ran out first. The owner ends its work.
+    Expired,
+    /// The fence is gone (shutdown). The owner ends its work.
+    Closed,
+}
+
+/// One owner's outage budget against [`SERVING_FENCE_SESSION_GRACE`].
+///
+/// The grace is a budget for one outage, not per loss: losses that follow
+/// each other within a grace of the last recovery spend the same budget, so a
+/// quorum that keeps flapping cannot keep work alive forever. A node that has
+/// truly lost authority therefore ends every owner's work within one grace of
+/// the loss.
+///
+/// The owner calls [`SessionGrace::resolve_loss`] from its own loop when it
+/// observes `authority_lost_since(generation)`; the bounded wait runs on that
+/// owner's task, so no separate timer task or watchdog exists for it.
+#[derive(Debug, Default)]
+pub(crate) struct SessionGrace {
+    outage_spent: Duration,
+    last_recovered_at: Option<tokio::time::Instant>,
+}
+
+impl SessionGrace {
+    /// Wait, at most for what is left of this outage's grace, for `serving`
+    /// to report ready again. Returns at once when it already does (a loss and
+    /// recovery that were coalesced into one notification).
+    ///
+    /// Not cancel-safe with respect to the budget: an owner must not race it
+    /// against anything that would drop the wait and then call it again for
+    /// the same loss. Racing it against the owner's own cancellation, which
+    /// ends the owner, is fine.
+    pub(crate) async fn resolve_loss(
+        &mut self,
+        serving: &mut tokio::sync::watch::Receiver<ServingState>,
+    ) -> LossOutcome {
+        if self
+            .last_recovered_at
+            .is_some_and(|recovered| recovered.elapsed() >= SERVING_FENCE_SESSION_GRACE)
+        {
+            self.outage_spent = Duration::ZERO;
+        }
+        let remaining = SERVING_FENCE_SESSION_GRACE.saturating_sub(self.outage_spent);
+        let lost_at = tokio::time::Instant::now();
+        // `Some(true)`: authority came back inside the grace; `Some(false)`:
+        // the grace ran out; `None`: the fence is gone.
+        let recovered = if serving.borrow_and_update().ready {
+            Some(true)
+        } else {
+            tokio::time::timeout(remaining, async {
+                loop {
+                    if serving.changed().await.is_err() {
+                        return None;
+                    }
+                    if serving.borrow_and_update().ready {
+                        return Some(true);
+                    }
+                }
+            })
+            .await
+            .unwrap_or(Some(false))
+        };
+        match recovered {
+            Some(true) => {
+                let outage = lost_at.elapsed();
+                self.outage_spent = self.outage_spent.saturating_add(outage);
+                self.last_recovered_at = Some(tokio::time::Instant::now());
+                LossOutcome::Recovered {
+                    outage,
+                    budget_spent: self.outage_spent,
+                }
+            }
+            Some(false) => {
+                self.outage_spent = Duration::ZERO;
+                self.last_recovered_at = None;
+                LossOutcome::Expired
+            }
+            None => LossOutcome::Closed,
+        }
     }
 }
 
