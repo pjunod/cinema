@@ -21,7 +21,10 @@ internal class ContinuousReservations(
     private var wanted = video.single { it.text("rendition_id") == initialRendition }
     private var transaction: String? = null
     private var automatic = false
-    data class Retained(val failedRow: JsonObject, val request: Long)
+    /** The previous choice was restored after [failedRow] failed. [cancelProven]
+     * says whether the target was also proven cancelled before any exposure;
+     * either way the change that asked for it is over. */
+    data class Retained(val failedRow: JsonObject, val request: Long, val cancelProven: Boolean = true)
     private data class Previous(val row: JsonObject, val automatic: Boolean, val request: Long)
     private var optionalPrevious: Previous? = null
     private data class FailedChange(val row: JsonObject, val previous: Previous, val through: Long,
@@ -90,7 +93,11 @@ internal class ContinuousReservations(
         if (existing == null) prepare(failed.previous.row, failed.through)
         reserveWindow(failed.through)
         failedChange = null
-        if (unexposed) Retained(failed.row, failed.previous.request) else null
+        // The previous rendition is restored on every path that reaches here,
+        // so the change is always reported settled. Returning nothing when the
+        // cancel was unproven left the controller's Auto preparation or
+        // directed change pending for the rest of the session.
+        Retained(failed.row, failed.previous.request, cancelProven = unexposed)
     }
 
     suspend fun reserve(resource: ContinuousQualityMedia.Resource, bytes: ByteArray?) = lock.withLock {

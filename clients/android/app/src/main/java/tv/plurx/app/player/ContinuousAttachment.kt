@@ -28,7 +28,9 @@ internal class ContinuousAttachment(
     private val presented: (JsonObject, Long) -> Unit,
     private val observationUnknown: (JsonObject) -> Unit,
     private val expectedPresentation: (JsonObject, Long, Long, Long?) -> Unit,
-    private val retained: (JsonObject, Long) -> Unit,
+    /** Previous choice restored for the failed target row and its request;
+     * the flag says whether the target was proven cancelled before exposure. */
+    private val retained: (JsonObject, Long, Boolean) -> Unit,
     private val failed: (Exception) -> Unit,
 ) {
     private val owner = Any()
@@ -89,6 +91,10 @@ internal class ContinuousAttachment(
     private val finishing = AtomicBoolean()
     private val finished = CompletableDeferred<Unit>()
 
+    /** True once admission is fenced (End, release, or leaving continuous HLS);
+     * a closed attachment can only refuse a change. */
+    val isClosed: Boolean get() = closed.get()
+
     fun rendition(height: Int, candidateId: String? = null): JsonObject? = rows.singleOrNull {
         it.number("height") == height.toLong() && (candidateId == null || it.text("candidate_id") == candidateId)
     }
@@ -111,7 +117,7 @@ internal class ContinuousAttachment(
                     queues.opened(load)
                 }, { resource ->
                     val result = reservations.retainUnexposed(resource)
-                    if (result != null) retained(result.failedRow, result.request)
+                    if (result != null) retained(result.failedRow, result.request, result.cancelProven)
                     result != null
                 }, { resource, bytes -> disposalBarriers.await(artifactKey(resource, ContinuousQualityMedia.digest(bytes))) })
         }
@@ -178,47 +184,70 @@ internal class ContinuousAttachment(
     }
 
     private suspend fun flushFacts() {
+        // An uncertain request must replay before anything newer can enter the
+        // owner's ordering; every later transition would replay it first, so a
+        // pass that cannot settle it has nothing durable to do.
         protocol.settlePending()
-        reservations.recoverFailedChange()?.let { retained(it.failedRow, it.request) }
-        loads.whenQuiescent { exposure.retain(transactions().mapNotNull { it.text("transaction_id") }.toSet()) }
-        finishDisposals()
-        queues.observeResets()
-        output.audioOutputs.collectReleased()
-        while (true) {
-            val append = pending.tryReceive().getOrNull() ?: break
-            val key = key(append.interval)
-            if (awaiting.size >= 128 && key !in awaiting) throw IOException("Continuous pending append bound")
-            awaiting[key] = append
+        // Each fact category below fails on its own. One refused fact used to
+        // abort the whole pass before presentation, retirement and the
+        // deadlines ran, so nothing disposed again and pins climbed to the bound.
+        val stages = ContinuousFlushStages()
+        stages.stage { reservations.recoverFailedChange()?.let { retained(it.failedRow, it.request, it.cancelProven) } }
+        stages.stage { loads.whenQuiescent { exposure.retain(transactions().mapNotNull { it.text("transaction_id") }.toSet()) } }
+        stages.stage { finishDisposals() }
+        stages.stage { queues.observeResets() }
+        stages.stage { output.audioOutputs.collectReleased() }
+        // An append no owner can still accept is dropped, not retried forever:
+        // a refusal is settled by a ledger read, so the next pass sees why.
+        awaiting.values.removeAll { ContinuousAppendFacts.owed(it, transactions()).isEmpty() }
+        stages.stage {
+            while (true) {
+                val append = pending.tryReceive().getOrNull() ?: break
+                val key = key(append.interval)
+                if (awaiting.size >= 128 && key !in awaiting) throw IOException("Continuous pending append bound")
+                awaiting[key] = append
+            }
         }
         // Every completed append observed since the last pass is one fact per
         // owning transaction, so the durable command rate follows flushes,
         // not segment count.
         val appends = LinkedHashMap<String, LinkedHashSet<JsonObject>>()
+        val ledgerTransactions = transactions()
         for (append in awaiting.values) {
-            if (append.video) for (id in append.transactions) {
-                val tx = transaction(id) ?: throw IOException("Continuous append transaction missing")
-                if (tx.getValue("appended").jsonArray.none { it.jsonObject == append.interval }) {
-                    reportExpectedPresentation(tx, append.interval)
-                    appends.getOrPut(id) { LinkedHashSet() }.add(append.interval)
-                }
+            for (fact in ContinuousAppendFacts.owed(append, ledgerTransactions)) {
+                reportExpectedPresentation(fact.transaction, fact.interval)
+                appends.getOrPut(requireNotNull(fact.transaction.text("transaction_id"))) { LinkedHashSet() }.add(fact.interval)
             }
         }
-        reportAppended(appends)
-        awaiting.clear()
+        reportAppended(appends, stages)
+        // Reported facts are now in the ledger; a failed owner keeps only the
+        // appends it can still accept, for the next pass.
+        awaiting.values.removeAll { ContinuousAppendFacts.owed(it, transactions()).isEmpty() }
         // A newer same-rendition reservation may own samples already retained
         // in this attachment. Credit only the exact physically accepted span,
         // while its queue still retains ownership; no second append is invented.
-        val credited = LinkedHashMap<String, LinkedHashSet<JsonObject>>()
-        for (load in queues.queuedArtifacts()) {
-            val artifact = requireNotNull(load.authorized.interval.text("artifact_id"))
-            if (load.resource.role != "video" || !queues.wasAppended(load.resource.rendition, artifact) ||
-                queues.queueRetired(load.resource.rendition, artifact)) continue
-            for (id in currentOwners(load)) {
-                if (transaction(id)?.getValue("appended")?.jsonArray?.none { it.jsonObject == load.authorized.interval } == true)
-                    credited.getOrPut(id) { LinkedHashSet() }.add(load.authorized.interval)
+        stages.stage {
+            val credited = LinkedHashMap<String, LinkedHashSet<JsonObject>>()
+            for (load in queues.queuedArtifacts()) {
+                val artifact = requireNotNull(load.authorized.interval.text("artifact_id"))
+                if (load.resource.role != "video" || !queues.wasAppended(load.resource.rendition, artifact) ||
+                    queues.queueRetired(load.resource.rendition, artifact)) continue
+                for (id in currentOwners(load)) {
+                    if (transaction(id)?.getValue("appended")?.jsonArray?.none { it.jsonObject == load.authorized.interval } == true)
+                        credited.getOrPut(id) { LinkedHashSet() }.add(load.authorized.interval)
+                }
             }
+            reportAppended(credited, stages)
         }
-        reportAppended(credited)
+        stages.stage { reportPresented() }
+        stages.stage { retirePassedMedia() }
+        stages.stage { retireUnexposedTargets() }
+        stages.stage { checkControlDeadline() }
+        stages.stage { checkObservation() }
+        stages.finish()
+    }
+
+    private suspend fun reportPresented() {
         val observed = frame.get()
         if (observed != null) {
             val matching = queues.queuedArtifacts().filter { load ->
@@ -248,10 +277,6 @@ internal class ContinuousAttachment(
                 }
             }
         }
-        retirePassedMedia()
-        retireUnexposedTargets()
-        checkControlDeadline()
-        checkObservation()
     }
 
     private suspend fun checkControlDeadline() {
@@ -264,7 +289,7 @@ internal class ContinuousAttachment(
         val pin = tx.getValue("ready").jsonArray.firstOrNull()?.jsonObject ?: return
         val entry = requireNotNull(pin.number("from_tick")) / requireNotNull(row.number("segment_ticks"))
         val result = reservations.retainUnexposed(ContinuousQualityMedia.Resource("video", row, false, entry))
-        if (result != null) retained(result.failedRow, result.request)
+        if (result != null) retained(result.failedRow, result.request, result.cancelProven)
     }
 
     private fun checkObservation() {
@@ -356,9 +381,12 @@ internal class ContinuousAttachment(
         return true
     }
 
-    private suspend fun reportAppended(facts: Map<String, Set<JsonObject>>) {
-        for ((id, intervals) in facts) for (batch in intervals.chunked(128))
-            protocol.transition(id, buildJsonObject { put("kind", "appended"); put("intervals", JsonArray(batch)) })
+    /** One owner's refusal never withholds another owner's appended facts. */
+    private suspend fun reportAppended(facts: Map<String, Set<JsonObject>>, stages: ContinuousFlushStages) {
+        for ((id, intervals) in facts) stages.stage {
+            for (batch in intervals.chunked(128))
+                protocol.transition(id, buildJsonObject { put("kind", "appended"); put("intervals", JsonArray(batch)) })
+        }
     }
 
     private suspend fun finishDisposals() {

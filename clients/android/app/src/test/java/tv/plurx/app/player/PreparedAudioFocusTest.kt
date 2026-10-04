@@ -22,4 +22,13 @@ class PreparedAudioFocusTest {
         PreparedAudioFocus.move(successor, incumbent)
         assertEquals(listOf("successor:release", "incumbent:request"), events)
     }
+
+    @Test fun rollbackSilencesTheFailedSuccessorBeforeFocusMovesBack() {
+        // The failed successor stays parked until collected (up to the overlap
+        // bound). It used to lose focus but keep playing, audible over the
+        // restored player.
+        val incumbent = player("incumbent"); val successor = player("successor")
+        PreparedAudioFocus.rollback(successor, PlaybackSilencing { events += "successor:silence" }, incumbent)
+        assertEquals(listOf("successor:silence", "successor:release", "incumbent:request"), events)
+    }
 }

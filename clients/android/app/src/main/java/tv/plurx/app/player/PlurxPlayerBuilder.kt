@@ -36,9 +36,23 @@ internal object PreparedAudioFocus {
         from.handle(false)
         to.handle(true)
     }
+
+    /** A rolled-back successor stays parked behind the surface overlap until
+     * it is collected, up to the overlap bound. Losing focus alone left it
+     * playing and audible over the restored player, so it is paused and muted
+     * before focus moves back. The caller reads any viewer volume it carries
+     * over before this runs. */
+    fun rollback(failed: AudioFocusHandling, failedOutput: PlaybackSilencing, restored: AudioFocusHandling) {
+        failedOutput.silence()
+        move(failed, restored)
+    }
 }
 
+internal fun interface PlaybackSilencing { fun silence() }
+
 internal fun ExoPlayer.audioFocusHandling() = AudioFocusHandling { setAudioAttributes(PLAYBACK_AUDIO_ATTRIBUTES, it) }
+
+internal fun ExoPlayer.playbackSilencing() = PlaybackSilencing { volume = 0f; playWhenReady = false }
 
 /**
  * One construction path for every player. In particular, Offline still has a

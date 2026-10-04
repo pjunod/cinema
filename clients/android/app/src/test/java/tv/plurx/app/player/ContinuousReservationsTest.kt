@@ -104,7 +104,12 @@ class ContinuousReservationsTest {
         assertTrue(runCatching { reservations.change("b".repeat(64), 96, false, setOf("b".repeat(64), "c".repeat(64))) }.isFailure)
         failedRestoreCalls = 2
         assertTrue(runCatching { reservations.recoverFailedChange() }.isFailure)
-        reservations.recoverFailedChange()
+        // The incumbent (high) was never presented, so the cancel cannot be
+        // proven; the restore still happened and must still be reported, or
+        // the controller's pending change never settles.
+        val restored = reservations.recoverFailedChange()
+        assertEquals(low, restored?.failedRow)
+        assertFalse(requireNotNull(restored).cancelProven)
         // Replay the uncertain low target first, then restore high using a
         // newer intent; its actual scheduled choice remains usable.
         assertEquals(6L, protocol.ledger?.number("latest_intent_revision"))
@@ -125,6 +130,7 @@ class ContinuousReservationsTest {
         val recovered = reservations.recoverFailedChange()
         assertEquals(low, recovered?.failedRow)
         assertEquals(42L, recovered?.request)
+        assertTrue(requireNotNull(recovered).cancelProven)
         assertEquals(listOf("prepare", "cancel_unappended", "prepare", "scheduled"), requests.drop(cancellationRecovery).mapNotNull {
             it.obj("transition")?.obj("operation")?.text("kind")
         })

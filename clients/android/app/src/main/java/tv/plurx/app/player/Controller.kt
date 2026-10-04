@@ -350,8 +350,12 @@ class Controller internal constructor(
                     continuousQualityPresented(row)
                 }
             } },
-            retained = { row, request -> scope.launch {
+            // Reported whenever the previous choice was restored, whether or not
+            // the target was proven cancelled; either way this change is over and
+            // its Auto preparation or directed change must not stay pending.
+            retained = { row, request, cancelProven -> scope.launch {
                 if (continuousAttachment === attachment && player === continuousPlayer && playbackControlBootstrapFence.isActive()) {
+                    Log.i("PlurxPlayback", "continuous previous quality restored request=$request cancelProven=$cancelProven")
                     if (request < 0 && request == continuousAutoRequest && continuousAutoEpoch == mediaMutationEpoch &&
                         playbackIntent.desiredQuality == PlaybackQuality.Auto && autoDesiredCandidate?.id == row.text("candidate_id")) {
                         failAutoPreparation()
@@ -421,9 +425,33 @@ class Controller internal constructor(
     }
 
     private fun continuousOwnsQuality(quality: PlaybackQuality): Boolean {
-        val attachment = continuousAttachment ?: return false
-        if (player !== continuousPlayer) return false
-        return quality == PlaybackQuality.Auto || quality.rungHeight?.let { attachment.rendition(it) != null } == true
+        val attachment = continuousAttachment
+        return ContinuousQualityOwnership.owns(attached = attachment != null, closed = attachment?.isClosed == true,
+            ownPlayer = player === continuousPlayer, quality = quality) { attachment?.rendition(it) != null }
+    }
+
+    /** The attachment that may still execute a change: attached to the player
+     * the viewer sees and not yet fenced. */
+    private fun liveContinuous(): ContinuousAttachment? =
+        continuousAttachment?.takeIf { player === continuousPlayer && !it.isClosed }
+
+    /**
+     * Leaving continuous HLS for Direct play or the progressive remux retires
+     * the attachment rather than only ending its session. Otherwise it stayed
+     * attached to the same player, kept claiming every quality change it could
+     * only refuse, pinned [currentRecipe] to its last executed rung, and held
+     * its scope and output subscription for the rest of the title.
+     *
+     * Only on its own player: once a prepared successor is the picture, the
+     * parked continuous player is retired by [collectRetiredPlayer], which
+     * releases it before finishing the attachment.
+     */
+    private fun retireContinuousForTransportChange(): ContinuousAttachment? {
+        val attachment = continuousAttachment ?: return null
+        if (player !== continuousPlayer) return null
+        continuousAttachment = null
+        attachment.finishAfterRelease()
+        return attachment
     }
 
     private fun continuousQualityPresented(row: JsonObject) {
@@ -1700,7 +1728,7 @@ class Controller internal constructor(
             val change = DirectedChange(epoch = publicationEpoch, quality = quality,
                 pending = pending, incumbentSelection = incumbentSelection)
             directedChange = change
-            val continuous = continuousAttachment?.takeIf { player === continuousPlayer }
+            val continuous = liveContinuous()
             val row = quality.rungHeight?.let { continuous?.rendition(it) }
                 ?: if (quality == PlaybackQuality.Auto) continuous?.rendition(player.videoSize.height) else null
             if (continuous != null && row != null) {
@@ -2762,7 +2790,15 @@ class Controller internal constructor(
     private fun leaveSessionPlayback() {
         stallGuard.invalidateForUserAction()
         val endingSession = sessionId
-        endPlaybackControl { endingSession?.let(::releaseOwnedSession) }
+        // The final control exchange may release the session after the
+        // attachment slot is already empty; the retired attachment still owns
+        // that session's End, so it is never ended a second time by id.
+        val retired = retireContinuousForTransportChange()
+        endPlaybackControl {
+            endingSession?.let { id ->
+                if (retired != null && retired.start.playback.session_id == id) retired.end() else releaseOwnedSession(id)
+            }
+        }
         sessionId = null
         clearStatusPolling()
         encoder = null
@@ -3398,7 +3434,7 @@ class Controller internal constructor(
         continuousAutoEpoch = epoch
         scope.launch {
             playbackControl.reportIntent()
-            val continuous = continuousAttachment?.takeIf { player === continuousPlayer }
+            val continuous = liveContinuous()
             val row = continuous?.rendition(chosen.height, chosen.id)
             if (continuous != null && row != null) {
                 if (mediaMutationEpoch != epoch || player !== incumbent || playbackIntent.desiredQuality != PlaybackQuality.Auto || autoDesiredCandidate?.id != chosen.id) return@launch
@@ -4705,7 +4741,8 @@ class Controller internal constructor(
         // ON_STOP still suppresses output without replacing standing Play intent.
         predecessor.player.volume = failedSuccessor.volume
         predecessor.player.playbackParameters = failedSuccessor.playbackParameters
-        PreparedAudioFocus.move(failedSuccessor.audioFocusHandling(), predecessor.player.audioFocusHandling())
+        PreparedAudioFocus.rollback(failedSuccessor.audioFocusHandling(), failedSuccessor.playbackSilencing(),
+            predecessor.player.audioFocusHandling())
         predecessor.player.playWhenReady = effectivePlayWhenReady()
 
         preparedPredecessor = null
