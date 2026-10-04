@@ -2678,6 +2678,36 @@ async fn read_bounded_with_limit(
     Ok(bytes)
 }
 
+/// Digests of engine objects keyed by path and the cheap object version
+/// (`engine_object_version`: device, inode, size, mtime and ctime). The same
+/// version identity already decides whether a hash raced a replacement, so a
+/// matching version proves the bytes are the ones hashed. A replaced or
+/// touched object has a new version and is hashed again. The key set is the
+/// resolved encoder and its loaded dependencies, so it stays small.
+static ENGINE_OBJECT_DIGESTS: std::sync::LazyLock<
+    std::sync::Mutex<std::collections::HashMap<std::path::PathBuf, (String, Vec<u8>)>>,
+> = std::sync::LazyLock::new(Default::default);
+
+fn cached_engine_digest(path: &std::path::Path, version: &str) -> Option<Vec<u8>> {
+    ENGINE_OBJECT_DIGESTS
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .get(path)
+        .filter(|(cached, _)| cached == version)
+        .map(|(_, digest)| digest.clone())
+}
+
+fn remember_engine_digest(path: &std::path::Path, version: &str, digest: &[u8]) {
+    ENGINE_OBJECT_DIGESTS
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .insert(path.to_owned(), (version.to_owned(), digest.to_vec()));
+}
+
+/// SHA-256 of one engine object plus its object version. Only the first
+/// capture of an object version reads the bytes; every start path captures
+/// the executable several times, and hashing a ~100 MB binary each time cost
+/// seconds of disk read per playback start.
 async fn hash_engine_object(path: &std::path::Path) -> Result<(Vec<u8>, String), String> {
     #[cfg(unix)]
     let metadata = tokio::fs::metadata(path)
@@ -2707,6 +2737,9 @@ async fn hash_engine_object(path: &std::path::Path) -> Result<(Vec<u8>, String),
     let version = engine_object_version(&metadata)?;
     #[cfg(windows)]
     let version = windows_engine_object_version(&source)?;
+    if let Some(digest) = cached_engine_digest(path, &version) {
+        return Ok((digest, version));
+    }
     #[cfg(unix)]
     let mut file = tokio::fs::File::open(path)
         .await
@@ -2744,7 +2777,9 @@ async fn hash_engine_object(path: &std::path::Path) -> Result<(Vec<u8>, String),
             path.display()
         ));
     }
-    Ok((object.finalize().to_vec(), version))
+    let digest = object.finalize().to_vec();
+    remember_engine_digest(path, &version, &digest);
+    Ok((digest, version))
 }
 
 pub(crate) fn engine_path_version(path: &std::path::Path) -> Result<String, String> {
@@ -3674,6 +3709,32 @@ async fn probe_burst() -> Result<Duration, String> {
 
 #[cfg(test)]
 mod tests {
+
+    #[tokio::test]
+    async fn engine_object_digest_is_reused_per_version_and_rehashed_on_change() {
+        use sha2::Digest as _;
+        let directory = tempfile::tempdir().expect("directory");
+        let path = directory.path().join("engine-object");
+        std::fs::write(&path, b"first engine bytes").expect("object");
+        let (first, version) = super::hash_engine_object(&path).await.expect("first hash");
+        assert_eq!(first, sha2::Sha256::digest(b"first engine bytes").to_vec());
+        assert_eq!(
+            super::cached_engine_digest(&path, &version),
+            Some(first.clone()),
+            "a captured version is served without reading the object again"
+        );
+        let (again, same_version) = super::hash_engine_object(&path).await.expect("cached");
+        assert_eq!((again, same_version), (first.clone(), version.clone()));
+        // A replacement changes the cheap object version (size, ctime, inode).
+        std::fs::write(&path, b"replaced engine object bytes").expect("replacement");
+        let (replaced, replaced_version) =
+            super::hash_engine_object(&path).await.expect("rehash");
+        assert_ne!(replaced_version, version);
+        assert_eq!(
+            replaced,
+            sha2::Sha256::digest(b"replaced engine object bytes").to_vec()
+        );
+    }
 
     #[cfg(unix)]
     #[tokio::test]

@@ -579,6 +579,11 @@ impl TranscodeManager {
                 return Ok(info);
             }
         }
+        // The retained lookup's captured production, kept for the producer
+        // below when its logical graph is byte-identical: one source fence
+        // and engine attestation per start, not one per consumer.
+        let mut retained_lookup: Option<(Vec<u8>, Arc<crate::rolling_provenance::RollingProduction>)> =
+            None;
         // A complete retained answer needs no producer resources. Derive the
         // exact preferred graph's thread weight from the same admission policy,
         // without taking a permit or installing a waiter. A later demotion is
@@ -676,6 +681,7 @@ impl TranscodeManager {
                         {
                             return Ok(info);
                         }
+                        retained_lookup = Some((logical, production));
                     }
                 }
             }
@@ -879,15 +885,22 @@ impl TranscodeManager {
             && self.rolling_retained_budget().await.is_some()
         {
             match logical {
-                Some(logical) => {
-                    crate::rolling_provenance::RollingProduction::capture(
-                        &file,
-                        &logical,
-                        false,
-                        &producer_ffmpeg_bin(),
-                    )
-                    .await
-                }
+                Some(logical) => match retained_lookup.take() {
+                    Some((looked_up, production))
+                        if looked_up == logical && production.unbound() =>
+                    {
+                        Some(production)
+                    }
+                    _ => {
+                        crate::rolling_provenance::RollingProduction::capture(
+                            &file,
+                            &logical,
+                            false,
+                            &producer_ffmpeg_bin(),
+                        )
+                        .await
+                    }
+                },
                 None => None,
             }
         } else {

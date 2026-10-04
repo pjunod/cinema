@@ -137,4 +137,10 @@ impl RollingProduction {
     pub(crate) fn binding(&self) -> [u8; 32] {
         self.binding
     }
+
+    /// Captured but never bound to a producer attempt or refused, so the same
+    /// start may hand it to its producer instead of capturing again.
+    pub(crate) fn unbound(&self) -> bool {
+        !self.refused.load(Ordering::Acquire) && self.attempt.load(Ordering::Acquire) == u64::MAX
+    }
 }
