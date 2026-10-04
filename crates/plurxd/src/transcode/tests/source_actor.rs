@@ -1040,6 +1040,23 @@ async fn source_actual_actor(
         drop(guard);
     }
 
+    #[cfg(unix)]
+    match mode {
+        5 => manager
+            .source_workers
+            .index_hooks
+            .assert_closed_parent_settlements(),
+        12 => manager
+            .source_workers
+            .probe_hooks
+            .assert_closed_parent_settlements(),
+        21 => manager
+            .source_workers
+            .native_hooks
+            .assert_closed_parent_settlements(),
+        _ => {}
+    }
+
     if mode == 5 {
         let file = state
             .store
@@ -1409,4 +1426,11 @@ async fn source_native_requires_actual_cpu_admission() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn source_native_encoded_embedded_text_actual_media_and_body_retirement() {
     Box::pin(source_copy_preadmission_fixture(29)).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn source_preparation_closes_actual_parent_descriptors_before_settlement() {
+    Box::pin(source_copy_preadmission_fixture(5)).await;
+    Box::pin(source_copy_preadmission_fixture(12)).await;
+    Box::pin(source_copy_preadmission_fixture(21)).await;
 }
