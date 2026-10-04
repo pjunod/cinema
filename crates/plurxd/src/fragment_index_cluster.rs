@@ -21,6 +21,17 @@ use crate::http::peer_transport::{PeerAuthMode, PeerTransport};
 pub(crate) const PEER_PATH_PREFIX: &str = "/internal/media/fragment-index/";
 const PEER_DEADLINE: Duration = Duration::from_secs(8);
 const HASH_CHUNK: usize = 256 * 1024;
+/// How far a whole-file digest reads between checkpoints a later attempt may
+/// resume from. At the ~105 MB/s a NAS mount gives, that is under a second of
+/// rereading after a preemption.
+#[cfg(not(test))]
+const FULL_DIGEST_CHECKPOINT_BYTES: u64 = 64 * 1024 * 1024;
+#[cfg(test)]
+const FULL_DIGEST_CHECKPOINT_BYTES: u64 = 4 * 1024 * 1024;
+/// Only a handful of HEVC sources are ever part-way through attestation on one
+/// node, so this bound is never reached in practice; it keeps the table from
+/// growing without limit if sources keep changing under their attempts.
+const FULL_DIGEST_CHECKPOINT_LIMIT: usize = 16;
 
 /// One sampled extent. A megabyte is long enough that the seek in front of it
 /// is amortised on a NAS rather than dominating the read.
@@ -661,28 +672,163 @@ pub(crate) fn copy_attestation_read_bytes(file: &MediaFile) -> u64 {
     }
 }
 
+/// The object a whole-file digest is being computed for. A checkpoint is
+/// only ever resumed by an attempt whose freshly observed key is identical.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct FullDigestKey {
+    node_id: String,
+    file_id: i64,
+    /// The full-regime `object_version` (device, inode, size, mtime and ctime
+    /// to the nanosecond) taken before the checkpointed bytes were read.
+    object_version: String,
+    size: u64,
+}
+
+/// How far a whole-file HEVC digest had got when its attempt was dropped.
+#[derive(Clone)]
+struct FullDigestCheckpoint {
+    key: FullDigestKey,
+    offset: u64,
+    digest: Sha256,
+}
+
+/// Progress of whole-file digests whose attempts were preempted.
+///
+/// A background attestation stops whenever this node starts playback that is
+/// not waiting on it, and the attempt's future is simply dropped. Before this
+/// table the next attempt began again at byte 0, so a source that takes longer
+/// to read than the gap between two playbacks never finished. File 5208, a
+/// 79.5 GB remux at ~105 MB/s (12.6 minutes), was preempted 53 times without
+/// once completing, and every play of it fell back to rolling HLS.
+///
+/// Resuming does not weaken what is attested. Every byte is still hashed, in
+/// order, into one SHA-256 state. A checkpoint is accepted only by an attempt
+/// whose own `object_version`, taken when it opens the file and checked again
+/// after its last byte, equals the version the checkpointing attempt saw when
+/// it opened the file. Any write in between moves ctime, so the resume is
+/// refused. That is the same premise an uninterrupted read relies on between
+/// its first and last byte.
+///
+/// A finished digest is kept as a checkpoint at the end of the file. The
+/// caller can still discard the result after the hash completes: playback
+/// may preempt it before it is recorded, or the claim may be lost. The retry
+/// then reruns both identity checks and skips the read. Once the result is
+/// recorded, the source memo serves later attempts and the entry ages out of
+/// the bound. The table lives in memory, so a restarted daemon starts over.
+#[derive(Default)]
+struct FullDigestCheckpoints {
+    entries: Vec<FullDigestCheckpoint>,
+}
+
+impl FullDigestCheckpoints {
+    /// A copy of the checkpoint for exactly this object, if there is one.
+    ///
+    /// The entry stays in place: an attempt that is itself preempted before
+    /// its first save must not take the earlier progress down with it. An
+    /// entry for the same node and file under a different identity can never
+    /// be resumed and is dropped.
+    fn load(&mut self, key: &FullDigestKey) -> Option<FullDigestCheckpoint> {
+        self.entries.retain(|entry| {
+            entry.key == *key
+                || entry.key.node_id != key.node_id
+                || entry.key.file_id != key.file_id
+        });
+        self.entries
+            .iter()
+            .find(|entry| entry.key == *key)
+            .filter(|entry| entry.offset <= key.size)
+            .cloned()
+    }
+
+    fn save(&mut self, checkpoint: FullDigestCheckpoint) {
+        // Two attempts at one identity at once each hold a valid state. Keep
+        // the one that has read further.
+        if self
+            .entries
+            .iter()
+            .any(|entry| entry.key == checkpoint.key && entry.offset >= checkpoint.offset)
+        {
+            return;
+        }
+        self.entries.retain(|entry| {
+            entry.key.node_id != checkpoint.key.node_id
+                || entry.key.file_id != checkpoint.key.file_id
+        });
+        if self.entries.len() >= FULL_DIGEST_CHECKPOINT_LIMIT {
+            self.entries.remove(0);
+        }
+        self.entries.push(checkpoint);
+    }
+
+    fn clear(&mut self, key: &FullDigestKey) {
+        self.entries.retain(|entry| entry.key != *key);
+    }
+}
+
+static FULL_DIGEST_CHECKPOINTS: std::sync::LazyLock<std::sync::Mutex<FullDigestCheckpoints>> =
+    std::sync::LazyLock::new(Default::default);
+
+fn full_digest_checkpoints() -> std::sync::MutexGuard<'static, FullDigestCheckpoints> {
+    FULL_DIGEST_CHECKPOINTS
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
 async fn full_source_digest(
     source: &mut tokio::fs::File,
-    size: u64,
+    key: &FullDigestKey,
     progress: &(dyn Fn(u64) + Sync),
 ) -> Result<String, String> {
-    let mut digest = Sha256::new();
-    digest.update(b"plurx/source-attestation/hevc-full-v1\0");
-    digest.update(size.to_be_bytes());
-    let mut buffer = vec![0; HASH_CHUNK];
-    let mut remaining = size;
-    while remaining > 0 {
-        let want = remaining.min(HASH_CHUNK as u64) as usize;
-        let read = source
-            .read(&mut buffer[..want])
-            .await
-            .map_err(|e| format!("hashing complete HEVC source: {e}"))?;
-        if read == 0 {
-            return Err("source ended before full attestation".into());
+    let size = key.size;
+    let resume = full_digest_checkpoints().load(key);
+    let (mut digest, mut offset) = match resume {
+        Some(checkpoint) => {
+            source
+                .seek(SeekFrom::Start(checkpoint.offset))
+                .await
+                .map_err(|e| format!("resuming complete HEVC source digest: {e}"))?;
+            tracing::info!(
+                file_id = key.file_id,
+                offset = checkpoint.offset,
+                size,
+                "resuming a preempted whole-file source attestation"
+            );
+            progress(checkpoint.offset);
+            (checkpoint.digest, checkpoint.offset)
         }
+        None => {
+            let mut digest = Sha256::new();
+            digest.update(b"plurx/source-attestation/hevc-full-v1\0");
+            digest.update(size.to_be_bytes());
+            (digest, 0)
+        }
+    };
+    let mut buffer = vec![0; HASH_CHUNK];
+    let mut next_checkpoint = offset.saturating_add(FULL_DIGEST_CHECKPOINT_BYTES);
+    while offset < size {
+        let want = (size - offset).min(HASH_CHUNK as u64) as usize;
+        let read = match source.read(&mut buffer[..want]).await {
+            Ok(0) => {
+                full_digest_checkpoints().clear(key);
+                return Err("source ended before full attestation".into());
+            }
+            Ok(read) => read,
+            // The bytes already hashed are still the bytes of this identity,
+            // and the next attempt re-checks the identity before using them.
+            // A transient NFS error must not throw away tens of gigabytes.
+            Err(e) => return Err(format!("hashing complete HEVC source: {e}")),
+        };
         digest.update(&buffer[..read]);
-        remaining -= read as u64;
-        progress(size - remaining);
+        offset += read as u64;
+        progress(offset);
+        if offset >= next_checkpoint || offset == size {
+            full_digest_checkpoints().save(FullDigestCheckpoint {
+                key: key.clone(),
+                offset,
+                digest: digest.clone(),
+            });
+            next_checkpoint = offset.saturating_add(FULL_DIGEST_CHECKPOINT_BYTES);
+        }
     }
     Ok(hex::encode(digest.finalize()))
 }
@@ -739,7 +885,13 @@ async fn attest_source_mode(
         memo.source_sha256.clone()
     } else {
         let digest = if full {
-            full_source_digest(&mut source, before.len(), progress).await?
+            let key = FullDigestKey {
+                node_id: node_id.to_owned(),
+                file_id: file.id,
+                object_version: version.clone(),
+                size: before.len(),
+            };
+            full_source_digest(&mut source, &key, progress).await?
         } else {
             sampled_source_digest(&mut source, before.len(), &file.path, progress).await?
         };
@@ -1688,5 +1840,214 @@ mod tests {
             "object_version must be regime-scoped, got {version}"
         );
         assert_eq!(ATTESTATION_REGIME, "s1");
+    }
+
+    fn full_key(node_id: &str, file: &MediaFile) -> FullDigestKey {
+        #[cfg(unix)]
+        let version =
+            object_version(&std::fs::metadata(&file.path).expect("stat")).expect("object version");
+        #[cfg(windows)]
+        let version = windows_object_version(&std::fs::File::open(&file.path).expect("open"))
+            .expect("object version");
+        FullDigestKey {
+            node_id: node_id.to_owned(),
+            file_id: file.id,
+            object_version: format!("{FULL_COPY_PREFIX}{version}"),
+            size: file.size as u64,
+        }
+    }
+
+    /// Run a whole-file attestation and drop it once it has read `past` bytes,
+    /// the way a playback preemption drops the attempt future.
+    async fn preempt_full_attestation(node_id: &str, file: &MediaFile, past: u64) {
+        let stop = tokio::sync::Notify::new();
+        let report = |bytes: u64| {
+            if bytes >= past {
+                stop.notify_one();
+            }
+        };
+        tokio::select! {
+            biased;
+            () = stop.notified() => {}
+            result = attest_copy_source(node_id, file, None, &report) => panic!(
+                "the attempt was meant to be preempted, but it finished: {:?}",
+                result.map(|attested| attested.observation.source_sha256)
+            ),
+        }
+    }
+
+    /// Records the first progress report, which on a resumed attempt is the
+    /// offset it resumed from.
+    async fn first_progress_and_digest(node_id: &str, file: &MediaFile) -> (u64, String) {
+        let first = std::sync::Mutex::new(None);
+        let attested = attest_copy_source(node_id, file, None, &|bytes| {
+            first.lock().expect("progress lock").get_or_insert(bytes);
+        })
+        .await
+        .expect("whole-file attestation");
+        let first = first
+            .into_inner()
+            .expect("progress values")
+            .expect("at least one progress report");
+        (first, attested.observation.source_sha256)
+    }
+
+    /// The incident shape: a 79.5 GB source preempted every few minutes never
+    /// finished, because each attempt began again at byte 0. A resumed
+    /// attempt starts from the last checkpoint and still produces exactly the
+    /// digest an uninterrupted read of every byte produces.
+    #[tokio::test]
+    async fn a_preempted_full_attestation_resumes_and_matches_an_uninterrupted_read() {
+        let dir = tempfile::tempdir().expect("resume fixture");
+        let path = dir.path().join("resume.bin");
+        let size = 6 * FULL_DIGEST_CHECKPOINT_BYTES as usize + 1_234;
+        tokio::fs::write(&path, filler(size))
+            .await
+            .expect("resume fixture");
+        let file = sampled_file(path);
+        let (from_zero, reference) =
+            first_progress_and_digest("resume-reference-node", &file).await;
+        assert!(
+            from_zero <= HASH_CHUNK as u64,
+            "a fresh attempt starts at 0"
+        );
+
+        let node = "resume-node";
+        let past = 2 * FULL_DIGEST_CHECKPOINT_BYTES + HASH_CHUNK as u64;
+        preempt_full_attestation(node, &file, past).await;
+        let (resumed_from, resumed) = first_progress_and_digest(node, &file).await;
+        assert!(
+            resumed_from >= 2 * FULL_DIGEST_CHECKPOINT_BYTES && resumed_from < size as u64,
+            "the second attempt resumes at the checkpoint, not byte 0: {resumed_from}"
+        );
+        assert_eq!(
+            resumed, reference,
+            "resuming must not change what the digest covers"
+        );
+
+        // The caller may still discard a finished digest (playback preempts it
+        // before it is recorded). The retry re-checks identity and reads nothing.
+        let (again_from, again) = first_progress_and_digest(node, &file).await;
+        assert_eq!(
+            again_from, size as u64,
+            "a finished digest is resumed at the end of the file"
+        );
+        assert_eq!(again, reference);
+    }
+
+    /// Two preemptions in a row: the second attempt is dropped before it
+    /// reaches a checkpoint of its own, and the third must still resume from
+    /// the first attempt's progress rather than from 0.
+    #[tokio::test]
+    async fn an_attempt_preempted_before_its_first_checkpoint_keeps_the_earlier_one() {
+        let dir = tempfile::tempdir().expect("resume fixture");
+        let path = dir.path().join("twice.bin");
+        let size = 6 * FULL_DIGEST_CHECKPOINT_BYTES as usize + 77;
+        tokio::fs::write(&path, filler(size))
+            .await
+            .expect("resume fixture");
+        let file = sampled_file(path);
+        let node = "twice-node";
+        preempt_full_attestation(node, &file, 2 * FULL_DIGEST_CHECKPOINT_BYTES + 1).await;
+        // Resumes at >= 2 checkpoints and is dropped one chunk later, well
+        // before 3 checkpoints.
+        preempt_full_attestation(node, &file, 2 * FULL_DIGEST_CHECKPOINT_BYTES + 1).await;
+        let (resumed_from, digest) = first_progress_and_digest(node, &file).await;
+        assert!(
+            resumed_from >= 2 * FULL_DIGEST_CHECKPOINT_BYTES,
+            "the earlier progress survived the second preemption: {resumed_from}"
+        );
+        let (_, reference) = first_progress_and_digest("twice-reference-node", &file).await;
+        assert_eq!(digest, reference);
+    }
+
+    /// A source rewritten between attempts has a different identity, so the
+    /// checkpoint for the old bytes is refused and the new bytes are hashed
+    /// from the start.
+    #[tokio::test]
+    async fn a_checkpoint_is_refused_once_the_source_identity_moves() {
+        let dir = tempfile::tempdir().expect("resume fixture");
+        let path = dir.path().join("rewritten.bin");
+        let size = 6 * FULL_DIGEST_CHECKPOINT_BYTES as usize + 9;
+        let original = filler(size);
+        tokio::fs::write(&path, &original)
+            .await
+            .expect("resume fixture");
+        let file = sampled_file(path.clone());
+        let node = "rewrite-node";
+        preempt_full_attestation(node, &file, 3 * FULL_DIGEST_CHECKPOINT_BYTES).await;
+        let stale = full_key(node, &file);
+        assert!(
+            full_digest_checkpoints().load(&stale).is_some(),
+            "the preempted attempt left a checkpoint"
+        );
+
+        // Same size, different bytes in the region the checkpoint already
+        // covers. Only the identity can tell the attempt not to trust it.
+        let mut rewritten = original;
+        rewritten[17] ^= 0xff;
+        tokio::fs::write(&path, &rewritten)
+            .await
+            .expect("rewrite fixture");
+        let file = sampled_file(path);
+        assert_ne!(full_key(node, &file), stale, "a rewrite moves the identity");
+
+        let (resumed_from, digest) = first_progress_and_digest(node, &file).await;
+        assert!(
+            resumed_from <= HASH_CHUNK as u64,
+            "the stale checkpoint must not be resumed: {resumed_from}"
+        );
+        let (_, reference) = first_progress_and_digest("rewrite-reference-node", &file).await;
+        assert_eq!(digest, reference, "the new bytes are what is attested");
+        assert!(
+            full_digest_checkpoints().load(&stale).is_none(),
+            "the unusable checkpoint is gone"
+        );
+    }
+
+    #[test]
+    fn the_checkpoint_table_is_bounded_and_keeps_one_entry_per_file() {
+        let key = |file_id: i64, version: &str| FullDigestKey {
+            node_id: "bound-node".to_owned(),
+            file_id,
+            object_version: version.to_owned(),
+            size: 100,
+        };
+        let checkpoint = |key: FullDigestKey, offset: u64| FullDigestCheckpoint {
+            key,
+            offset,
+            digest: Sha256::new(),
+        };
+        let mut table = FullDigestCheckpoints::default();
+        table.save(checkpoint(key(1, "v1"), 10));
+        table.save(checkpoint(key(1, "v1"), 20));
+        assert_eq!(
+            table.entries.len(),
+            1,
+            "a later save replaces the earlier one"
+        );
+        assert_eq!(
+            table.load(&key(1, "v1")).map(|entry| entry.offset),
+            Some(20)
+        );
+        table.save(checkpoint(key(1, "v1"), 15));
+        assert_eq!(
+            table.load(&key(1, "v1")).map(|entry| entry.offset),
+            Some(20),
+            "a slower concurrent attempt does not undo the faster one's progress"
+        );
+
+        table.save(checkpoint(key(1, "v2"), 5));
+        assert_eq!(table.entries.len(), 1, "one file has one current identity");
+        assert!(table.load(&key(1, "v1")).is_none());
+
+        for file_id in 2..=(FULL_DIGEST_CHECKPOINT_LIMIT as i64 + 1) {
+            table.save(checkpoint(key(file_id, "v1"), 1));
+        }
+        assert_eq!(table.entries.len(), FULL_DIGEST_CHECKPOINT_LIMIT);
+        assert!(
+            table.load(&key(1, "v2")).is_none(),
+            "the oldest entry is the one evicted"
+        );
     }
 }

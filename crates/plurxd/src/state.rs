@@ -1644,6 +1644,40 @@ pub struct AnalysisProgress {
     pub eta_ms: Option<i64>,
     #[serde(skip)]
     registry_epoch: u64,
+    /// The first byte count this attempt reported, and when. A resumed
+    /// whole-file attestation reports its resume offset first. An earlier
+    /// attempt read those bytes, so this attempt's rate is measured from here.
+    #[serde(skip)]
+    rate_origin: Option<(u64, i64)>,
+}
+
+/// This attempt's read rate and the time left at that rate. The rate counts
+/// only bytes read since `origin`. Before the first report, `origin` is
+/// `(0, started_at_ms)`.
+fn analysis_rate(
+    bytes_read: u64,
+    total_bytes: u64,
+    origin: (u64, i64),
+    now_ms: i64,
+) -> (u64, Option<i64>) {
+    let (origin_bytes, origin_ms) = origin;
+    let rate_ms = u64::try_from(now_ms.saturating_sub(origin_ms)).unwrap_or(0);
+    let throughput_bps = if rate_ms > 0 {
+        bytes_read
+            .saturating_sub(origin_bytes)
+            .saturating_mul(1_000)
+            .saturating_div(rate_ms)
+    } else {
+        0
+    };
+    let eta_ms = (bytes_read > 0 && total_bytes > bytes_read && throughput_bps > 0).then(|| {
+        total_bytes
+            .saturating_sub(bytes_read)
+            .saturating_mul(1_000)
+            .saturating_div(throughput_bps)
+            .min(i64::MAX as u64) as i64
+    });
+    (throughput_bps, eta_ms)
 }
 
 #[cfg(test)]
@@ -1672,7 +1706,35 @@ impl AnalysisProgress {
             throughput_bps: 1,
             eta_ms: Some(1),
             registry_epoch: 0,
+            rate_origin: None,
         }
+    }
+}
+
+#[cfg(test)]
+mod analysis_rate_tests {
+    /// A resumed attestation reports 60 GB in its first second. Those bytes
+    /// were read by earlier attempts. Counting them as this attempt's rate
+    /// would show an ETA of seconds for minutes of real work.
+    #[test]
+    fn a_resumed_attempt_is_timed_from_its_resume_point() {
+        let gb = 1_000_000_000_u64;
+        let started = 1_000_i64;
+        // Resumed at 60 GB at t=1 s, then read 1 GB in the next 10 s.
+        let (rate, eta) =
+            super::analysis_rate(61 * gb, 80 * gb, (60 * gb, started), started + 10_000);
+        assert_eq!(rate, 100_000_000, "1 GB in 10 s, not 61 GB in 10 s");
+        assert_eq!(eta, Some(190_000), "19 GB left at 100 MB/s");
+    }
+
+    #[test]
+    fn without_a_report_the_rate_is_measured_from_the_start() {
+        let (rate, eta) = super::analysis_rate(0, 100, (0, 5_000), 6_000);
+        assert_eq!((rate, eta), (0, None));
+        let (rate, eta) = super::analysis_rate(50, 100, (0, 5_000), 6_000);
+        assert_eq!((rate, eta), (50, Some(1_000)));
+        let (rate, _) = super::analysis_rate(50, 100, (50, 6_000), 6_000);
+        assert_eq!(rate, 0, "no time since the origin is no measurement");
     }
 }
 
@@ -4577,6 +4639,7 @@ impl JobManager {
                 throughput_bps: 0,
                 eta_ms: None,
                 registry_epoch,
+                rate_origin: None,
             },
         );
         if let Some(value) = replaced {
@@ -4622,6 +4685,13 @@ impl JobManager {
         };
         value.fragments_indexed = fragments_indexed;
         value.updated_at_ms = now;
+        // A later stage that counts from zero again starts a new origin.
+        if value
+            .rate_origin
+            .is_none_or(|(origin_bytes, _)| value.bytes_read < origin_bytes)
+        {
+            value.rate_origin = Some((value.bytes_read, now));
+        }
     }
 
     /// The progress callback both index paths hand a pass — the queue worker
@@ -4746,29 +4816,12 @@ impl JobManager {
             .collect::<Vec<_>>();
         for value in &mut values {
             value.elapsed_ms = now.saturating_sub(value.started_at_ms).max(0);
-            value.throughput_bps = if value.elapsed_ms > 0 {
-                value
-                    .bytes_read
-                    .saturating_mul(1_000)
-                    .saturating_div(u64::try_from(value.elapsed_ms).unwrap_or(u64::MAX))
-            } else {
-                0
-            };
-            value.eta_ms = if value.bytes_read > 0
-                && value.total_bytes > value.bytes_read
-                && value.throughput_bps > 0
-            {
-                Some(
-                    value
-                        .total_bytes
-                        .saturating_sub(value.bytes_read)
-                        .saturating_mul(1_000)
-                        .saturating_div(value.throughput_bps)
-                        .min(i64::MAX as u64) as i64,
-                )
-            } else {
-                None
-            };
+            (value.throughput_bps, value.eta_ms) = analysis_rate(
+                value.bytes_read,
+                value.total_bytes,
+                value.rate_origin.unwrap_or((0, value.started_at_ms)),
+                now,
+            );
         }
         values.sort_by(|left, right| {
             right
