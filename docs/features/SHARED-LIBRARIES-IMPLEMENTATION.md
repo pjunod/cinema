@@ -4625,7 +4625,9 @@ requires fresh authorized detail/watch state before a new session beat.
 Actual iOS simulator tests pass 12 with zero failures on the bounded-pool source,
 including separate authenticated imports/libraries/B sessions for the same
 Source item observing sequences 8, 9 and 10 rather than restarting the order.
-Android pool qualification remains pending its exact committed-source run.
+The corrected pool and tagged plan pass their exact source-only Android run
+on `091415fbe`: Kotlin main/unit compilation, 43 tests with zero
+failures/errors/skips, and lint pass in 5 minutes 17 seconds.
 This bounded metadata journal never grants Source production or retirement.
 
 
@@ -4643,7 +4645,18 @@ that original ask rather than normalized Start output dimensions.
 The actual iOS simulator client/model filter passes 12 tests with zero failures,
 including retained raw 720-height/12.5-second resume, largest signed-i64 Source
 file string, and refusal of Local context/wrong copy/predecessor plans. The
-corrected progress pool plus tagged plan requires its exact Android run next.
+corrected progress pool plus tagged plan pass their exact Android run above.
 Explicit native controller/view/browser handoff remains unfinished; Shared
 status must use a tagged B-bound common-VOD adapter, never the numeric Local
 status decoder. No physical producer or hardware qualification is implied.
+
+
+The same frozen Native runtime source `091415fbe` passes both actual iOS and tvOS
+Debug simulator client/model filters: 12 tests each, zero failures. Both iOS
+and tvOS Release simulator builds succeed using Xcode 27 / Swift 6.4 and owned
+DerivedData. The prior Android pool snapshot failed compilation on the
+fresh-detail auth/transport argument order; the corrected exact snapshot is the
+qualified result, not the failed run. The normal tracked hook passes for each
+finite source checkpoint. These tests use synthetic authenticated B DTOs and
+actual native HTTP clients; physical Source playback, native hardware and the
+unfinished controller/browser handoff remain separate qualification boundaries.
