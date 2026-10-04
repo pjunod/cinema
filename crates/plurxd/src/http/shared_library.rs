@@ -534,6 +534,14 @@ pub(super) fn source_file_json(
     value: Value,
 ) -> Result<Response, ApiError> {
     let mut response = bounded_json(value)?;
+    attach_source_file_authority(&mut response, grant, target);
+    Ok(response)
+}
+pub(super) fn attach_source_file_authority(
+    response: &mut Response,
+    grant: uuid::Uuid,
+    target: &super::hls::SourcePlaybackTarget,
+) {
     response.extensions_mut().insert(SourceContentAuthority {
         grant,
         server: target.server_id,
@@ -546,8 +554,8 @@ pub(super) fn source_file_json(
             target.file_id.clone(),
         )],
     });
-    Ok(response)
 }
+
 async fn source_content_current(state: &AppState, authority: &SourceContentAuthority) -> bool {
     tokio::time::timeout(std::time::Duration::from_secs(1), async {
         if !crate::sharing::enabled(state.store.as_ref()).await.ok()? {
@@ -622,6 +630,15 @@ pub(super) async fn source_content_guard(
         .get::<crate::SharingConnectionCancellation>()
         .cloned();
     let response = next.run(request).await;
+    guard_source_response(state, connection, response).await
+}
+/// Source status can return either guarded live Start content or bounded
+/// cleanup-only facts. Only the former passes this same accepted-writer guard.
+pub(super) async fn guard_source_response(
+    state: AppState,
+    connection: Option<crate::SharingConnectionCancellation>,
+    response: Response,
+) -> Response {
     if !response.status().is_success() {
         return response;
     }
