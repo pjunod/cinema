@@ -1755,6 +1755,10 @@ pub fn router(state: AppState) -> Router {
         .merge(media)
         .layer(axum::middleware::from_fn_with_state(
             state.clone(),
+            shared_receiver_playback::receiver_media,
+        ))
+        .layer(axum::middleware::from_fn_with_state(
+            state.clone(),
             mutable_media_serving_gate,
         ));
 
