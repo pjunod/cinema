@@ -4778,7 +4778,11 @@ pattern = "\\.(?:spawn|output|status)\\s*\\("
 # remain non-process observations; collected commands retain the owners above.
 # Continuous-quality (#774) and main (#797 Jellyfin facade) union, measured on
 # the merged tree (equals ours + main - merge base).
-expected_occurrences = 515
+# 515 -> 520 (#808 Jellyfin facade gaps): six Axum Response::status() reads
+# (one in the facade request metrics outcome, five in the facade tests) minus
+# one replaced test read. HTTP status codes on in-process responses; none
+# launches a process or owns a producer.
+expected_occurrences = 520
 
 [[module_structures]]
 id = "process-command-ufcs-launch"
