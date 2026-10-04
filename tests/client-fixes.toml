@@ -4104,3 +4104,24 @@ source = "crates/plurxd/src/web/player/stall-diagnosis.js"
 source_anchor = "if(family!=null&&continuousFamilyPeak(p,p.qualityCandidateId)!=null) return own&&link>=family*1.8;"
 test = "tests/playback/current-main-effort-quality.test.js"
 test_anchor = "continuous family upgrades use the enforced family budget and the family's own objects"
+
+[[fixes]]
+# iOS does not promise an `.ended` for every `.began`. A hold raised on
+# `.began` that only `.ended` could clear stayed up for an hour over a picture
+# the viewer had resumed (iPad Pro, 2026-10-04), with the stall monitor off.
+# The viewer's press, and film actually playing, now end it, and a `.began`
+# while the viewer has already paused holds nothing.
+id = "apple.system-hold-ends-without-ended"
+commits = ["969aba483299e9293ec3ffc5fc9bc40b2ef0da67"]
+source = "clients/apple/Sources/PlayerController.swift"
+source_anchor = "if systemPaused, viewerOrigin { endSystemHoldForViewer(play: requested) }"
+test = "clients/apple/Tests/AppleClientTests.swift"
+test_anchor = "func testViewerPlayEndsASystemHoldThatIOSNeverEnded()"
+
+[[fixes]]
+id = "apple.live-tv-system-hold-ends-without-ended"
+commits = ["969aba483299e9293ec3ffc5fc9bc40b2ef0da67"]
+source = "clients/apple/Sources/LiveTvView.swift"
+source_anchor = "setPaused(!(paused || systemPaused))"
+test = "clients/apple/Tests/LiveTvTests.swift"
+test_anchor = "func testLiveTvViewerPlayEndsASystemHoldThatIOSNeverEnded() async"
