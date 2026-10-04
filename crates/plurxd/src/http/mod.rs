@@ -10352,7 +10352,11 @@ mod tests {
                 "subtitle_not_ready_503",
                 "chapter_thumbnails",
                 "dolby_vision_convert",
-                "source_probe_comparison"
+                "source_probe_comparison",
+                "output_preparation",
+                "rolling_retention",
+                "display_aware_auto",
+                "network_priors"
             ],
             "every Developer card with prerequisites needs a row here: {body}"
         );
@@ -10412,6 +10416,8 @@ mod tests {
                         | "local_cache"
                         | "free_space"
                         | "chapter_thumbs_cache_space"
+                        | "output_node_idle"
+                        | "retention_same_filesystem"
                 )
             })
             .collect::<Vec<_>>();
@@ -10464,6 +10470,21 @@ mod tests {
                 "coverage",
                 "durable_queue",
                 "durable_role",
+                // Display-aware Auto on a single node owns every session.
+                "local_session_owner",
+                // Output preparation and rolling retention: the budget is the
+                // 50 GB unset default; the job list, mode, Stop and live
+                // bytes are statements of what this node reads.
+                "output_budget",
+                "output_jobs",
+                "output_mode",
+                "output_stop",
+                // Network priors' two rows say what the switch does.
+                "priors_cold_start",
+                "priors_history",
+                "retention_budget",
+                "retention_cleanup_pending",
+                "retention_live_bytes",
                 "rolling_contract_built",
                 "runtime",
                 "server_preparation_is_real",

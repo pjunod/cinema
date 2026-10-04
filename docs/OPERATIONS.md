@@ -3713,8 +3713,8 @@ they live in that voter's own SQLite sidecar and never pass through Raft.
 | `telemetry.retain_days` | 30 | Days to keep raw playback rows. `0` disables raw row writes and their pruning while preserving the existing client log lines. It does **not** disable network priors — see the note below |
 | `playback.network_priors` | off | Whether to accumulate per-network playback history and let it choose Auto's starting rung |
 
-`playback.network_priors` has no Settings control yet. The only way to change
-it is the API:
+Settings → Developer → **Network priors** turns it on and off (2026-10-04;
+before that it had no control). The API does the same:
 
 ```
 curl -X PUT http://<server>:32400/api/v1/settings \
@@ -3743,6 +3743,18 @@ evening does not cap a link permanently.
 Priors are node-local. In a Hiqlite cluster they live in the voter's own
 sidecar and are not replicated, so a client that reaches a different node
 starts cold there. That is accepted, not a defect.
+
+**Priors are also a prerequisite for Fit Auto to display.** Link receipts —
+the server's acknowledgement that a stall was the network's fault, and the
+proof a voluntary upgrade needs — are accepted only while priors are on. With
+the Developer switch for Fit Auto on and priors off, a native client's Auto
+can still step down for producer pressure, decoder failure and link pressure
+it sees before a stall, but it never upgrades, and a link-caused stall
+reopens the same quality until the stall budget runs out. Two cases never get
+link evidence even with priors on: a session whose create was handled by a
+peer node (receipts are registered only where the handling node owns the
+session) and an IPv6 client (no network identity). The Developer card lists
+all three as advisory rows. This is documented, not changed, in this build.
 
 The `/24` is taken from `Forwarded`, `X-Forwarded-For`, or `X-Real-IP` when
 present, and otherwise from the socket peer. plurx does not maintain a
