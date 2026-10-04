@@ -119,16 +119,21 @@ struct AutoBoundaryReplan {
 
     mutating func clear() { owner = nil }
 
-    /// The armed owner, exactly once, when `runwaySeconds` can carry it.
-    mutating func take(runwaySeconds: Double?, isCurrent: (Attempt) -> Bool) -> Attempt? {
+    /// The candidate `produce` names, exactly once per armed boundary, when
+    /// `runwaySeconds` can carry it. A boundary is spent only on a candidate:
+    /// with none (no fresh link proof yet, every original blocked) it stays
+    /// owed until it is served, superseded or cleared.
+    mutating func take<Candidate>(runwaySeconds: Double?, isCurrent: (Attempt) -> Bool,
+                                  produce: () -> Candidate?) -> Candidate? {
         guard let owner else { return nil }
         guard isCurrent(owner) else {
             self.owner = nil
             return nil
         }
         guard (runwaySeconds ?? 0) >= AutoViewerBoundary.handoffRunwaySeconds else { return nil }
+        guard let chosen = produce() else { return nil }
         self.owner = nil
-        return owner
+        return chosen
     }
 }
 
@@ -6682,6 +6687,10 @@ final class PlayerController: ObservableObject {
               started,
               stallRecoveryStillEligible
         else { return }
+        // The incumbent stalled: whatever recovery follows (a hold, a
+        // downgrade, a reopen), the original-first re-plan a viewer boundary
+        // armed is evidence-free now and is not carried into it.
+        autoBoundaryReplan.clear()
         if let verdict,
            applyStallVerdict(verdict, event: event, deferralDeadline: deferralDeadline) {
             return
@@ -10771,7 +10780,7 @@ extension PlayerController {
         }
         let originals = offered.filter {
             $0.id != current.id && $0.hasValidIdentity && $0.decoderCompatible && $0.route == "remux" &&
-                !autoDecoderRejected.contains($0.id) &&
+                !autoDecoderRejected.contains($0.id) && (autoBlockedUntil[$0.id] ?? 0) <= now &&
                 (measuredCandidatePeak($0, outputs: decision?.measuredCandidateOutputs).map { link >= Double($0) * 1.8 }
                     ?? autoUnknownOriginalTrial($0, outputs: decision?.measuredCandidateOutputs))
         }
@@ -11002,9 +11011,12 @@ extension PlayerController {
         // A viewer boundary re-plans original first, once, on the first
         // evaluation where the playing incumbent has the runway a handoff
         // needs. The incumbent was never held for it.
-        if autoBoundaryReplan.take(runwaySeconds: bufferedRunwaySeconds(),
-                                   isCurrent: { attemptStillCurrent($0, fence: .autoBoundaryReplanCurrent) }) != nil,
-           let chosen = autoOriginalBoundaryCandidate(now: now),
+        // Without a fresh link proof there is no candidate, and the boundary
+        // stays owed for the next evaluation rather than being spent on nothing.
+        let runway = bufferedRunwaySeconds()
+        if let chosen = autoBoundaryReplan.take(runwaySeconds: runway,
+                                                isCurrent: { attemptStillCurrent($0, fence: .autoBoundaryReplanCurrent) },
+                                                produce: { autoOriginalBoundaryCandidate(now: now) }),
            beginAutoBoundaryPreparation(chosen, target: target) {
             return
         }

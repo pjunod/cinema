@@ -1626,25 +1626,88 @@ final class DisplayAwareAutoEvidenceTests: XCTestCase {
         let isCurrent: (Attempt) -> Bool = {
             $0.stillCurrent(armed, scopes: AttemptFence.autoBoundaryReplanCurrent.scopes)
         }
+        var asked = 0
+        let produce: () -> String? = { asked += 1; return "original" }
         var replan = AutoBoundaryReplan()
-        XCTAssertNil(replan.take(runwaySeconds: 60, isCurrent: isCurrent), "nothing armed, nothing owed")
+        XCTAssertNil(replan.take(runwaySeconds: 60, isCurrent: isCurrent, produce: produce), "nothing armed, nothing owed")
         replan.arm(armed)
         // The incumbent is already playing; the re-plan waits for handoff
         // runway on the ordinary Auto evaluation, not on the viewer.
-        XCTAssertNil(replan.take(runwaySeconds: AutoViewerBoundary.handoffRunwaySeconds - 0.001, isCurrent: isCurrent))
-        XCTAssertNil(replan.take(runwaySeconds: nil, isCurrent: isCurrent))
+        XCTAssertNil(replan.take(runwaySeconds: AutoViewerBoundary.handoffRunwaySeconds - 0.001,
+                                 isCurrent: isCurrent, produce: produce))
+        XCTAssertNil(replan.take(runwaySeconds: nil, isCurrent: isCurrent, produce: produce))
         XCTAssertTrue(replan.isArmed, "short runway keeps the boundary owed")
-        XCTAssertEqual(replan.take(runwaySeconds: AutoViewerBoundary.handoffRunwaySeconds, isCurrent: isCurrent), armed)
+        XCTAssertEqual(asked, 0, "no candidate is asked for without runway")
+        XCTAssertEqual(replan.take(runwaySeconds: AutoViewerBoundary.handoffRunwaySeconds,
+                                   isCurrent: isCurrent, produce: produce), "original")
         XCTAssertFalse(replan.isArmed)
-        XCTAssertNil(replan.take(runwaySeconds: 60, isCurrent: isCurrent), "served exactly once")
+        XCTAssertNil(replan.take(runwaySeconds: 60, isCurrent: isCurrent, produce: produce), "served exactly once")
+        XCTAssertEqual(asked, 1)
 
         // A newer viewer action makes the armed boundary stale without a timer.
         replan.arm(attempt(viewer: 2))
-        XCTAssertNil(replan.take(runwaySeconds: 60, isCurrent: isCurrent))
+        XCTAssertNil(replan.take(runwaySeconds: 60, isCurrent: isCurrent, produce: produce))
         XCTAssertFalse(replan.isArmed)
         replan.arm(armed)
         replan.clear()
-        XCTAssertNil(replan.take(runwaySeconds: 60, isCurrent: isCurrent))
+        XCTAssertNil(replan.take(runwaySeconds: 60, isCurrent: isCurrent, produce: produce))
+    }
+
+    func testBoundaryReplanIsSpentOnlyOnACandidate() {
+        // Runway alone does not consume the boundary: with no fresh transfer
+        // sample (or every original blocked) there is no candidate, and the
+        // re-plan stays owed for the next evaluation.
+        let armed = Attempt(lifecycle: 1, open: 2, viewerAction: 3, initialDecision: 4, createRetry: 5,
+                            preparedAlignment: 6, seek: 7, pgsSelection: 8, pgsItem: 9, item: nil)
+        let isCurrent: (Attempt) -> Bool = {
+            $0.stillCurrent(armed, scopes: AttemptFence.autoBoundaryReplanCurrent.scopes)
+        }
+        var replan = AutoBoundaryReplan()
+        replan.arm(armed)
+        for _ in 0..<3 {
+            XCTAssertNil(replan.take(runwaySeconds: 60, isCurrent: isCurrent, produce: { nil as String? }))
+            XCTAssertTrue(replan.isArmed, "no candidate, nothing spent")
+        }
+        XCTAssertEqual(replan.take(runwaySeconds: 60, isCurrent: isCurrent, produce: { "original" }), "original")
+        XCTAssertFalse(replan.isArmed)
+        // What ends an unserved boundary is an event, not a clock.
+        replan.arm(armed)
+        XCTAssertNil(replan.take(runwaySeconds: 60, isCurrent: isCurrent, produce: { nil as String? }))
+        replan.clear()
+        XCTAssertNil(replan.take(runwaySeconds: 60, isCurrent: isCurrent, produce: { "original" }))
+    }
+
+    func testArmedBoundaryReplanEndsWithStallRecoveryAndSkipsBlockedCandidates() throws {
+        let sourceURL = URL(fileURLWithPath: #filePath).deletingLastPathComponent()
+            .deletingLastPathComponent().appendingPathComponent("Sources/PlayerController.swift")
+        let source = try String(contentsOf: sourceURL, encoding: .utf8)
+        func body(_ start: String, until end: String) throws -> String {
+            let lower = try XCTUnwrap(source.range(of: start))
+            let upper = try XCTUnwrap(source.range(of: end, range: lower.upperBound..<source.endIndex))
+            return String(source[lower.upperBound..<upper.lowerBound])
+        }
+        // Every stall recovery (hold, downgrade, reopen) ends the armed re-plan
+        // before it acts.
+        let stall = try body("private func retrySameDeliveryAfterStall(",
+                             until: "await selectAutoStallRecoveryCandidate(attempt: stallAttempt")
+        let cleared = try XCTUnwrap(stall.range(of: "autoBoundaryReplan.clear()"))
+        let verdict = try XCTUnwrap(stall.range(of: "applyStallVerdict(verdict, event: event"))
+        XCTAssertLessThan(cleared.lowerBound, verdict.lowerBound)
+        // A blocked original is not offered by a boundary either.
+        let candidate = try body("private func autoOriginalBoundaryCandidate(now: Int)",
+                                 until: "private func beginAutoBoundaryPreparation(")
+        XCTAssertTrue(candidate.contains("(autoBlockedUntil[$0.id] ?? 0) <= now"))
+        // The tick asks for the candidate inside take, so only a produced
+        // candidate spends the boundary.
+        let tick = try body("private func tickDisplayAwareAuto() {", until: "let link: Double? = {")
+        XCTAssertTrue(tick.contains("produce: { autoOriginalBoundaryCandidate(now: now) }"))
+        // A viewer quality change bumps the viewer action the re-plan fence reads.
+        let quality = try body("func selectQuality(_ height: Int?) {", until: "selectedHeight = height")
+        XCTAssertTrue(quality.contains("beginViewerAction()"))
+        XCTAssertTrue(AttemptFence.autoBoundaryReplanCurrent.scopes.contains(.viewerAction))
+        // An offer that does not own the change withdraws the boundary.
+        let begin = try body("private func beginAutoBoundaryPreparation(", until: "private func withdrawAutoBoundary(")
+        XCTAssertTrue(begin.contains("if !offered { self.withdrawAutoBoundary(boundary) }"))
     }
 
     func testA05UpgradeEvidenceCliffIsNotRenewedByRereading() {
