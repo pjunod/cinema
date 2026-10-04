@@ -73,6 +73,14 @@ function playbackFileSuffix(suffix){
     ||new RegExp(`^chapters/${index}/thumb$`).test(suffix)) return suffix;
   playbackFileReject();
 }
+// The Shared file grammar (plurx_core::sharing_resources::SharingFileResource)
+// bounds track and chapter indexes at 4095; Local keeps its own wider bound.
+function sharedPlaybackFileSuffix(suffix){
+  playbackFileSuffix(suffix);
+  const index=/^(?:subs|chapters)\/([0-9]+)/.exec(suffix);
+  if(index&&Number(index[1])>4095) playbackFileReject();
+  return suffix;
+}
 function playbackFileQuery(suffix,query){
   if(!query||typeof query!=="object"||Array.isArray(query)) playbackFileReject();
   // Actual Caps and StreamQuery fields, including named-profile/native
@@ -123,7 +131,8 @@ function playbackFileQuery(suffix,query){
   }).join("&");
 }
 function playbackFileUrl(value,suffix,query={}){
-  const context=playbackFileContext(value); playbackFileSuffix(suffix);
+  const context=playbackFileContext(value);
+  if(context.source_ref.kind==="local") playbackFileSuffix(suffix); else sharedPlaybackFileSuffix(suffix);
   let q=playbackFileQuery(suffix,query);
   if(context.session_id&&!["decision","hls/sessions"].includes(suffix))
     q+=(q?"&":"")+`session=${context.session_id}`;
@@ -217,10 +226,18 @@ function sharedPlaybackSessionPlaylist(url,id){
   return true;
 }
 
+// B's status word rule (sharing_playback_client::status_token): short machine
+// vocabulary, never prose, a path or markup.
+const SHARED_STATUS_WORDS=Object.freeze(["encoder","playlist_shape","producer_state","producer_hold",
+  "producer_decision","control_demand","render_state","server_ready_state","tone_map_peak_source"]);
+function sharedPlaybackStatusToken(value){
+  return typeof value==="string"&&/^[A-Za-z0-9_.-]{1,32}$/.test(value);
+}
 // B's Shared status grammar for this context's started session. Only the
 // nested Source metrics come back, and only when the outer subject, session,
-// item and file revision are this context's; anything else is no sample at
-// all, never something to read as Local status.
+// item and file revision are this context's and every word field is a status
+// token; anything else is no sample at all, never something to read as Local
+// status.
 function sharedPlaybackStatusMetrics(value,reply){
   const c=playbackFileContext(value);
   if(c.source_ref.kind==="local"||!c.session_id||!reply||typeof reply!=="object"||Array.isArray(reply)) return null;
@@ -228,7 +245,8 @@ function sharedPlaybackStatusMetrics(value,reply){
   if(reply.subject!=="shared"||reply.session_id!==c.session_id||!r||typeof r!=="object"
     ||r.item?.import_id!==c.source_ref.import_id||r.item?.item_id!==c.source_ref.item_id
     ||r.file_id!==c.source_file_id||r.revision!==c.file_revision
-    ||!status||typeof status!=="object"||Array.isArray(status)) return null;
+    ||!status||typeof status!=="object"||Array.isArray(status)
+    ||SHARED_STATUS_WORDS.some(k=>status[k]!=null&&!sharedPlaybackStatusToken(status[k]))) return null;
   return status;
 }
 // Ordinary complete B Start reply, bound to the authenticated signed-file
