@@ -116,6 +116,72 @@ pub(super) async fn resource(
     Box::pin(serve(&client, &state, play, resource, method, headers)).await
 }
 
+type NativeResponse =
+    std::pin::Pin<Box<dyn std::future::Future<Output = Result<Response, ApiError>> + Send>>;
+
+// Construct the native handler future outside the polling frame of `serve`, as
+// `representation::native_segment` does. Native handler futures are large in
+// unoptimized builds; built inline, every arm's temporary stayed in the frame
+// of `serve` for the whole request, and a resumed segment that resurrects an
+// idle-reaped VOD reader beneath it overflowed a 2 MiB worker stack.
+#[inline(never)]
+fn native_resource(
+    state: &AppState,
+    session: &str,
+    resource: &Resource,
+    inline: bool,
+    query: super::super::hls::PlaylistQuery,
+    headers: HeaderMap,
+) -> NativeResponse {
+    let state = state.clone();
+    let session = session.to_owned();
+    match resource {
+        // Always the multivariant wrapper: Infuse fails on a media playlist
+        // at its master URL before requesting any fragment (J0), and its
+        // profile carries no manifest subtitles. The native master answers
+        // with or without a subtitle group.
+        Resource::Master => Box::pin(super::super::hls::master_playlist_response(
+            State(state),
+            Path(session),
+            Query(query),
+            headers,
+        )),
+        Resource::Media => Box::pin(super::super::hls::playlist(
+            State(state),
+            Path(session),
+            Query(query),
+            headers,
+        )),
+        Resource::Init => Box::pin(super::super::hls::segment(
+            State(state),
+            Path((session, "init.mp4".into())),
+            headers,
+        )),
+        Resource::Segment(index) if inline => {
+            let segment = format!("seg{index}.m4s");
+            Box::pin(async move {
+                super::representation::inline_native_fragment(&state, &session, &segment, &headers)
+                    .await
+            })
+        }
+        Resource::Segment(index) => Box::pin(super::super::hls::segment(
+            State(state),
+            Path((session, format!("seg{index}.m4s"))),
+            headers,
+        )),
+        Resource::SubtitlePlaylist(track) => Box::pin(super::super::hls::subtitle_playlist(
+            State(state),
+            Path((session, i64::from(*track))),
+            headers,
+        )),
+        Resource::SubtitleSegment(track, index) => Box::pin(super::super::hls::subtitle_vtt(
+            State(state),
+            Path((session, i64::from(*track), format!("seg{index}.vtt"))),
+            headers,
+        )),
+    }
+}
+
 async fn serve(
     client: &ClientUser,
     state: &AppState,
@@ -152,81 +218,7 @@ async fn serve(
         subtitle: selection["vod"]["body"]["subtitle"].as_i64(),
         diagnostic: None,
     };
-    let response = match &resource {
-        Resource::Master => {
-            if selection["vod"]["body"]["native_subtitles"] == true {
-                Box::pin(super::super::hls::master_playlist_response(
-                    State(state.clone()),
-                    Path(session.clone()),
-                    Query(query),
-                    headers,
-                ))
-                .await?
-            } else {
-                Box::pin(super::super::hls::playlist(
-                    State(state.clone()),
-                    Path(session.clone()),
-                    Query(query),
-                    headers,
-                ))
-                .await?
-            }
-        }
-        Resource::Media => {
-            Box::pin(super::super::hls::playlist(
-                State(state.clone()),
-                Path(session.clone()),
-                Query(query),
-                headers,
-            ))
-            .await?
-        }
-        Resource::Init => {
-            Box::pin(super::super::hls::segment(
-                State(state.clone()),
-                Path((session.clone(), "init.mp4".into())),
-                headers,
-            ))
-            .await?
-        }
-        Resource::Segment(index) if inline => {
-            Box::pin(super::representation::inline_native_fragment(
-                state,
-                &session,
-                &format!("seg{index}.m4s"),
-                &headers,
-            ))
-            .await?
-        }
-        Resource::Segment(index) => {
-            Box::pin(super::super::hls::segment(
-                State(state.clone()),
-                Path((session.clone(), format!("seg{index}.m4s"))),
-                headers,
-            ))
-            .await?
-        }
-        Resource::SubtitlePlaylist(track) => {
-            Box::pin(super::super::hls::subtitle_playlist(
-                State(state.clone()),
-                Path((session.clone(), i64::from(*track))),
-                headers,
-            ))
-            .await?
-        }
-        Resource::SubtitleSegment(track, index) => {
-            Box::pin(super::super::hls::subtitle_vtt(
-                State(state.clone()),
-                Path((
-                    session.clone(),
-                    i64::from(*track),
-                    format!("seg{index}.vtt"),
-                )),
-                headers,
-            ))
-            .await?
-        }
-    };
+    let response = native_resource(state, &session, &resource, inline, query, headers).await?;
     // Native errors are typed locally; private capability-bearing response bodies are never relayed.
     if !response.status().is_success() && response.status() != StatusCode::NOT_MODIFIED {
         return Err(ApiError::ServiceUnavailable(

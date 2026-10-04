@@ -1329,7 +1329,13 @@ mod tests {
                 .await
                 .expect("no copy index"));
         }
-        let (status, info) = json_call(&f.app, request("POST", &format!("/jellyfin/Items/{}/PlaybackInfo", f.item), Some(&f.token), json!({"EnableDirectPlay":false,"StartTimeTicks":20_000_000,"MaxStreamingBitrate":if encoded {750_000} else {2_000_000},"AllowVideoStreamCopy":!encoded,"DeviceProfile":{"TranscodingProfiles":[{"Type":"Video","Container":"ts","VideoCodec":"h264","AudioCodec":"aac","Protocol":"hls","MaxAudioChannels":"2","ManifestSubtitles":"vtt"}]}}))).await;
+        // The encoded run omits manifest subtitles, as Infuse's profile does:
+        // its master alias must still be a multivariant wrapper.
+        let mut transcoding = json!({"Type":"Video","Container":"ts","VideoCodec":"h264","AudioCodec":"aac","Protocol":"hls","MaxAudioChannels":"2"});
+        if !encoded {
+            transcoding["ManifestSubtitles"] = json!("vtt");
+        }
+        let (status, info) = json_call(&f.app, request("POST", &format!("/jellyfin/Items/{}/PlaybackInfo", f.item), Some(&f.token), json!({"EnableDirectPlay":false,"StartTimeTicks":20_000_000,"MaxStreamingBitrate":if encoded {750_000} else {2_000_000},"AllowVideoStreamCopy":!encoded,"DeviceProfile":{"TranscodingProfiles":[transcoding]}}))).await;
         assert_eq!(status, StatusCode::OK);
         assert!(
             info["ErrorCode"].is_null(),
@@ -1439,6 +1445,10 @@ mod tests {
             .expect("route")
             .expect("native");
         assert!(!master.contains(&route.session_id) && !master.contains("/api/v1/hls/"));
+        assert!(
+            master.contains("#EXT-X-STREAM-INF"),
+            "the master alias is a multivariant wrapper: {master}"
+        );
         let media_url = master
             .lines()
             .find(|line| line.ends_with("index.m3u8") && !line.starts_with('#'))
@@ -1578,6 +1588,36 @@ mod tests {
             renewed > std::time::Duration::from_secs(500),
             "paused presence must renew the passive grant, left {renewed:?}"
         );
+        // Past the reader idle TTL the reader is reaped; the paused client's
+        // resume is a later segment, which must resurrect the same route
+        // through the facade (the long-pause path a real client takes).
+        let vod = f.state.transcode.vod_for_test();
+        vod.force_reader_idle_for_test(&route.session_id).await;
+        vod.maintain().await;
+        let resume_url = media
+            .lines()
+            .rfind(|line| !line.is_empty() && !line.starts_with("#"))
+            .expect("last segment");
+        let resumed = f
+            .app
+            .clone()
+            .oneshot(request("GET", resume_url, Some(&f.token), Value::Null))
+            .await
+            .expect("resume after idle reap");
+        let resumed_status = resumed.status();
+        let resumed_bytes = resumed
+            .into_body()
+            .collect()
+            .await
+            .expect("resumed body")
+            .to_bytes();
+        assert_eq!(
+            resumed_status,
+            StatusCode::OK,
+            "{}",
+            String::from_utf8_lossy(&resumed_bytes)
+        );
+        assert!(!resumed_bytes.is_empty());
         for (endpoint, position) in [
             ("/jellyfin/Sessions/Playing/Progress", 5000),
             ("/jellyfin/Sessions/Playing/Stopped", 7000),
