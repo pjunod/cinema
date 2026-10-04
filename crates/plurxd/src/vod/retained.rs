@@ -564,7 +564,15 @@ impl Drop for PreparationAssemblyOutcome {
 #[derive(Default)]
 pub(super) struct RetainedArtifactRegistry {
     state: StdMutex<RetainedState>,
+    /// Serialises collection, assembly and the AWAITED half of a lazy
+    /// validation. Only async owners hold it, so it is always released when
+    /// its holder returns or times out.
     collector: Arc<Mutex<()>>,
+    /// The single blocking lazy-validation slot. The blocking reader owns it
+    /// for as long as its thread runs, so a storage read that hangs past its
+    /// request's timeout pins only this slot (later validations refuse
+    /// instead of piling up blocked threads), never the collector.
+    validation: Arc<Mutex<()>>,
 }
 
 impl RetainedArtifactRegistry {
@@ -1086,7 +1094,14 @@ impl RetainedArtifactRegistry {
             return None;
         }
         let deadline = Instant::now().checked_add(budget)?;
-        let validator = Arc::clone(&self.collector).try_lock_owned().ok()?;
+        // A previous validation's blocking read may still be running past its
+        // own timeout; refuse rather than start a second blocked thread.
+        let validator = Arc::clone(&self.validation).try_lock_owned().ok()?;
+        // The collector is held by this awaiting request only, and dropped
+        // the moment it returns, including when its timeout below fires. The
+        // blocking reader's artifact lease (not the collector) is what keeps
+        // `collect` from deleting the bytes it is still reading.
+        let _collector = self.collector.try_lock().ok()?;
         if !self.own_namespace(&shared.base).await {
             return None;
         }
@@ -1120,8 +1135,10 @@ impl RetainedArtifactRegistry {
         let validated = tokio::time::timeout(
             remaining,
             tokio::task::spawn_blocking(move || {
-                // Timeout/cancellation cannot release the single validation owner
-                // while blocking file reads still hold their artifact lease.
+                // Timeout/cancellation cannot release the single validation slot
+                // while blocking file reads still hold their artifact lease;
+                // the collector is not held here, so a hung read cannot keep
+                // assembly or collection waiting behind it.
                 let _reservation = validator;
                 let manifest = super::retained_manifest::ArtifactManifest::read(&lease.directory)?;
                 if !manifest.matches_request(&expected_rendition, &expected_logical)
@@ -1890,6 +1907,49 @@ mod tests {
             .retained_artifacts
             .acquire(&identity)
             .is_none());
+    }
+
+    /// A lazy validation whose blocking read is still running (here: its slot
+    /// is held, as a read hung past its timeout would hold it) pins only the
+    /// validation slot. The collector stays free, so assembly and collection
+    /// do not wait behind storage, and a second validation refuses at once
+    /// instead of starting another blocked thread.
+    #[tokio::test]
+    async fn a_hung_lazy_validation_pins_its_slot_not_the_collector() {
+        let (temp, old, rendition, facts) = durable_fixture().await;
+        drop(old);
+        let fresh = crate::vodserve::tests::bare_serve(temp.path());
+        fresh.shared.retained_artifacts.collect(temp.path()).await;
+        let hung = Arc::clone(&fresh.shared.retained_artifacts.validation)
+            .try_lock_owned()
+            .expect("the blocking slot is free");
+        let started = Instant::now();
+        assert!(fresh
+            .shared
+            .retained_artifacts
+            .reacquire_expected(&facts, &fresh.shared, &rendition, Duration::from_secs(5))
+            .await
+            .is_none());
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "a second validation refuses instead of waiting for the hung one"
+        );
+        assert!(
+            fresh.shared.retained_artifacts.collector.try_lock().is_ok(),
+            "a hung validation never holds the collector assembly waits on"
+        );
+        drop(hung);
+        let artifact = fresh
+            .shared
+            .retained_artifacts
+            .reacquire_expected(&facts, &fresh.shared, &rendition, Duration::from_secs(5))
+            .await
+            .expect("validates once the slot is free");
+        assert_eq!(artifact.facts(), facts);
+        assert!(
+            fresh.shared.retained_artifacts.collector.try_lock().is_ok(),
+            "the awaiting request released the collector when it returned"
+        );
     }
 
     #[tokio::test]
