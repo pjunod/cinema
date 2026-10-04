@@ -114,4 +114,46 @@ final class SharedDecisionClientTests: XCTestCase {
         XCTAssertEqual(calls, 0)
     }
 
+    // Synthetic ordinary B reply through actual authenticated URLProtocol I/O;
+    // this is client protocol evidence, not physical Source playback.
+    func testAuthenticatedInitialStartRetainsWholeRequestAndBContext() async throws {
+        let context = try await context("9223372036854775807"), session = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
+        let reply: [String: Any] = ["session_id": session, "playlist_url": "/api/v1/hls/\(session)/master.m3u8?native=1&subtitle=2", "vod": true,
+            "start_seconds": 0.0, "duration_ms": 90_000, "control": ["protocol": "plurx-playback-control-v1", "url": "/api/v1/hls/\(session)/control",
+            "generation": "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb", "control_epoch": 1, "next_exchange_ms": 5_000, "lease_timeout_ms": 300_000],
+            "future": ["exact": Int64.max]]
+        let bytes = try JSONSerialization.data(withJSONObject: reply)
+        var sent: Data?
+        DecisionHTTP.answer = { request in
+            XCTAssertEqual(request.url?.path, self.base + "/hls/sessions"); XCTAssertEqual(request.value(forHTTPHeaderField: "Authorization"), "Bearer decision-bearer")
+            XCTAssertEqual(request.timeoutInterval, 310); sent = try self.body(request)
+            return (request.url!, 200, [:], bytes)
+        }
+        let request = CreateSessionRequest(playbackId: "shared-browser", requestId: "cccccccc-cccc-4ccc-8ccc-cccccccccccc", height: 720, start: 12.5, audio: 2, copy: true, caps: Caps.snapshot().document)
+        let result = try await SharedDecisionClient(testConfiguration: configuration).start(context: context, request: request)
+        XCTAssertEqual(result.context.sourceFileId, "9223372036854775807"); XCTAssertEqual(result.context.reference, ref); XCTAssertEqual(result.context.sessionId, session)
+        XCTAssertEqual(result.request.start, 12.5); XCTAssertEqual(result.request.height, 720); XCTAssertEqual(result.request.caps, request.caps)
+        let raw = try JSONSerialization.jsonObject(with: XCTUnwrap(sent)) as! [String: Any]
+        XCTAssertEqual(raw["request_id"] as? String, request.requestId); XCTAssertNil(raw["intent"]); XCTAssertNil(raw["previous_session_id"])
+        XCTAssertEqual(result.start.wire["future"]?.object?["exact"], .integer(Int64.max)); XCTAssertThrowsError(try result.context.localID())
+    }
+    func testInitialStartRefusesUnsupportedOriginalFieldsBeforeNetwork() async throws {
+        let context = try await context(), client = try SharedDecisionClient(testConfiguration: configuration); var calls = 0
+        DecisionHTTP.answer = { _ in calls += 1; return nil }
+        let base = CreateSessionRequest(playbackId: "shared", requestId: "cccccccc-cccc-4ccc-8ccc-cccccccccccc", caps: Caps.snapshot().document)
+        for index in 0..<6 {
+            var request = base
+            switch index {
+            case 0: request.previousSessionId = ""
+            case 1: request.controlSequence = 0
+            case 2: request.reopenReason = "stall"
+            case 3: request.subtitleBurn = 0
+            case 4: request.preserveDolbyVision = true
+            default: request.requestId = request.requestId!.uppercased()
+            }
+            do { _ = try await client.start(context: context, request: request); XCTFail("accepted unsupported initial Start") } catch {}
+        }
+        XCTAssertEqual(calls, 0)
+    }
+
 }

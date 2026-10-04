@@ -108,3 +108,12 @@ test("two imports of the same Source item share ordered beats across B sessions"
  const beats=h.requests.filter(r=>r.url.endsWith('/progress')).map(r=>JSON.parse(r.options.body));
  assert.deepEqual(beats.map(r=>r.sequence),[5,6]);assert.deepEqual(beats.map(r=>r.session_id),[sid,second]);
 });
+
+test("ordinary B Start playlist retains only closed unique native subtitle diagnostic query",async()=>{
+ for(const query of ['?native=1&subtitle=2&diagnostic=video-only','?subtitle=-1','?native=0','?subtitle=00','?token=x','?native=1&native=0','?native=%31','?subtitle=4096','?','?diagnostic=upstream','\n']){
+  const reply=startReply();reply.playlist_url+=query;
+  const h=harness((u,o)=>response(o.method==='GET'?detail():JSON.stringify(reply),u)),c=(await h.details(ref)).files[0].context;
+  if(['?native=1&subtitle=2&diagnostic=video-only','?subtitle=-1','?native=0'].includes(query))assert.equal((await h.start(c,startBody(h))).playlist_url,reply.playlist_url);
+  else await assert.rejects(h.start(c,startBody(h)));
+ }
+});

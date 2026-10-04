@@ -4560,3 +4560,31 @@ The actual daemon ingress filter reports four passed, zero ignored in 0.19
 seconds, preserving complete request fields, recovery refusal, account-authenticated
 aliases and the unregistered public route. The normal merge hook remains
 required for the exact resulting tree.
+
+### Native authenticated initial Start adapter
+
+Apple and Android retain the complete ordinary CreateSession request through an
+authenticated initial Shared Start, with the original v2 caps, resume, quality
+and canonical client request UUID. They post only to the captured signed opaque
+B file base. Non-null predecessor, control sequence, reopen reason and initial
+intent are refused before network dispatch, as are unsupported burn/HDR/DV
+requests. Original Local API guards remain intact.
+
+The complete ordinary B reply binds a new context only after current account,
+B session playlist/control paths, finite VOD timeline, incarnation, epoch and
+bootstrap cadence validation. Additive reply fields remain available alongside
+the ordinary playback projection. No numeric Source ID is converted into a
+Local file identity. Playlist query permits only unique bounded native,
+canonical subtitle and closed diagnostic values. The web caller accepts this
+same ordinary closed query grammar; arbitrary, duplicate and encoded fields
+refuse.
+
+The established native baseline uses Xcode 27 / Swift 6.4 and the pinned Android
+JDK 25 image. iOS Debug builds pass. The actual iOS simulator Shared client/model
+filter reports 11 passed, zero failures, including complete synthetic B Start
+through authenticated URLProtocol I/O. The source-only Android baseline reports
+40 passed across six Shared/context suites, zero failures/skips, with Kotlin
+compilation and lint passing in 4 minutes 30 seconds. Android adapter changes
+still require their exact committed-source compiler run. These are protocol
+fixtures, not physical Source production or hardware playback qualification.
+Native player launch and ordered B progress remain the next integration slice.

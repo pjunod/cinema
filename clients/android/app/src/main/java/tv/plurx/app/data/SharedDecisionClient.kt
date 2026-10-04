@@ -24,6 +24,26 @@ internal class SharedDecisionClient private constructor(private val auth: Sessio
         val caps = Caps.snapshot(device).document
         return execute(context, caps, query)
     }
+    /** Initial authenticated Shared Start; unsupported Local control fields are
+     * refused without rewriting the original request or issuing a network call. */
+    suspend fun start(context: PlaybackFileContext, body: CreateSessionReq): SharedStartedPlayback {
+        coroutineContext.ensureActive(); requireCurrent()
+        val reference = requireNotNull(context.reference)
+        require(context.sessionId == null && requireNotNull(context.lifecycleGeneration) > 0)
+        context.validateSharedReference(reference, context.sourceFileId, requireNotNull(context.revision))
+        require(body.intent == null && body.previous_session_id == null && body.control_sequence == null && body.reopen_reason == null
+            && body.subtitle_burn == null && body.hdr10 != true && body.preserve_dolby_vision != true) { "This Shared playback change is not available yet." }
+        require(body.caps?.v == 2 && body.presentation == "vod" && body.playback_id.isNotEmpty()
+            && body.playback_id.toByteArray().size <= 128 && body.playback_id.none { it.code < 32 || it.code == 127 })
+        require(body.request_id?.let { Regex("[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}").matches(it) } == true)
+        val encoded = Net.json.encodeToString(body); require(encoded.toByteArray().size <= 24_576)
+        val retained = Net.json.decodeFromString<CreateSessionReq>(encoded)
+        val request = Request.Builder().url(auth.origin + context.path("hls/sessions"))
+            .header("Authorization", "Bearer ${auth.token}").post(encoded.toRequestBody("application/json".toMediaType())).build()
+        val bytes = read(request, auth, transport, initialStart = true) { requireCurrent(); context.path("hls/sessions") }
+        coroutineContext.ensureActive(); requireCurrent()
+        return SharedStart.decode(strictUtf8(bytes)).bindInitial(context, retained)
+    }
     suspend fun decisionForTest(context: PlaybackFileContext, caps: DeviceCaps, query: Map<String, String> = emptyMap()): Result {
         check(BuildConfig.DEBUG); return execute(context, caps, query)
     }
@@ -79,10 +99,12 @@ internal class SharedDecisionClient private constructor(private val auth: Sessio
         private fun strictUtf8(bytes: ByteArray): String = Charsets.UTF_8.newDecoder().onMalformedInput(CodingErrorAction.REPORT)
             .onUnmappableCharacter(CodingErrorAction.REPORT).decode(ByteBuffer.wrap(bytes)).toString()
         @OptIn(InternalCoroutinesApi::class)
-        private suspend fun read(request: Request, auth: Session.PlaybackAuthorization, transport: OkHttpClient, current: () -> Unit): ByteArray = withContext(Dispatchers.IO) {
+        private suspend fun read(request: Request, auth: Session.PlaybackAuthorization, transport: OkHttpClient, initialStart: Boolean = false, current: () -> Unit): ByteArray = withContext(Dispatchers.IO) {
             ensureActive(); current()
-            val client = transport.newBuilder().followRedirects(false).followSslRedirects(false).cache(null)
-                .cookieJar(okhttp3.CookieJar.NO_COOKIES).authenticator(okhttp3.Authenticator.NONE).build()
+            val builder = transport.newBuilder().followRedirects(false).followSslRedirects(false).cache(null)
+                .cookieJar(okhttp3.CookieJar.NO_COOKIES).authenticator(okhttp3.Authenticator.NONE)
+            if (initialStart) builder.callTimeout(310, java.util.concurrent.TimeUnit.SECONDS).readTimeout(310, java.util.concurrent.TimeUnit.SECONDS)
+            val client = builder.build()
             val call = client.newCall(request)
             val registration = Session.observeAuthorizationChanges { call.cancel() }
             val cancellation = coroutineContext[Job]?.invokeOnCompletion(onCancelling = true, invokeImmediately = true) { if (it != null) call.cancel() }

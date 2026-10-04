@@ -27,6 +27,37 @@ struct SharedDecisionClient {
         return try await execute(context: context, caps: document,
             query: quality.decisionQueryItems + selection.queryItems + [URLQueryItem(name: "audio_offset_ms", value: String(audioOffsetMs))])
     }
+    /// Authenticated initial Start only. Local recovery/control fields are never
+    /// erased or forwarded to Source as a guessed predecessor identity.
+    func start(context: PlaybackFileContext, request body: CreateSessionRequest) async throws -> SharedStartedPlayback {
+        try Task.checkCancellation(); try requireCurrent()
+        guard let reference = context.reference, let revision = context.revision,
+              context.sessionId == nil, (context.lifecycleGeneration ?? 0) > 0
+        else { throw APIError.badURL }
+        try context.validateSharedReference(reference, file: context.sourceFileId, revision: revision)
+        guard body.intent == nil, body.previousSessionId == nil, body.controlSequence == nil,
+              body.reopenReason == nil, body.subtitleBurn == nil, body.hdr10 != true,
+              body.preserveDolbyVision != true
+        else { throw APIError.transport("This Shared playback change is not available yet.") }
+        guard body.caps?.v == 2, body.presentation == "vod", !body.playbackId.isEmpty,
+              body.playbackId.utf8.count <= 128,
+              !body.playbackId.unicodeScalars.contains(where: { $0.value < 32 || $0.value == 127 }),
+              let requestID = body.requestId,
+              PlaybackFileContext.matches(requestID, "^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$")
+        else { throw APIError.badURL }
+        let encoder = JSONEncoder(); encoder.keyEncodingStrategy = .convertToSnakeCase
+        let encoded = try encoder.encode(body); guard encoded.count <= 24_576 else { throw APIError.badURL }
+        let decoder = JSONDecoder(); decoder.keyDecodingStrategy = .convertFromSnakeCase
+        let retained = try decoder.decode(CreateSessionRequest.self, from: encoded)
+        guard let url = URL(string: origin + (try context.path("hls/sessions"))) else { throw APIError.badURL }
+        var request = URLRequest(url: url); request.httpMethod = "POST"; request.httpBody = encoded; request.timeoutInterval = 310
+        request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization"); request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        let data = try await SharedDecisionReadOperation(request: request, configuration: configuration) {
+            try requireCurrent(); _ = try context.path("hls/sessions")
+        }.read()
+        try Task.checkCancellation(); try requireCurrent()
+        return try SharedStart.decode(data).bindInitial(context, request: retained)
+    }
     #if DEBUG
     func decisionForTest(context: PlaybackFileContext, caps: DeviceCaps, query: [URLQueryItem] = []) async throws -> (decision: SharedDecision, caps: DeviceCaps) {
         try await execute(context: context, caps: caps, query: query)

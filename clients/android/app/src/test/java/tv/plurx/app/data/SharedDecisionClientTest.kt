@@ -139,4 +139,35 @@ class SharedDecisionClientTest {
         Session.token = "replaced"; assertTrue(runCatching { SharedDecisionClient.forTest(transport).decisionForTest(context, caps()) }.isFailure)
         assertEquals(0, calls)
     }
+    // Synthetic complete B response through the actual authenticated client;
+    // this does not qualify a physical Source producer or device playback.
+    @Test fun initialStartRetainsWholeRequestAndBoundBContext(): Unit = runBlocking {
+        login(); val context = context("9223372036854775807"); val session = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
+        val reply = buildJsonObject {
+            put("session_id", session); put("playlist_url", "/api/v1/hls/$session/master.m3u8?native=1&subtitle=2"); put("vod", true); put("start_seconds", 0); put("duration_ms", 90_000)
+            put("control", buildJsonObject { put("protocol", "plurx-playback-control-v1"); put("url", "/api/v1/hls/$session/control"); put("generation", "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"); put("control_epoch", 1); put("next_exchange_ms", 5_000); put("lease_timeout_ms", 300_000) })
+            put("future", buildJsonObject { put("exact", Long.MAX_VALUE) })
+        }.toString()
+        var sent: String? = null
+        val transport = OkHttpClient.Builder().addInterceptor { chain ->
+            assertEquals("$base/hls/sessions", chain.request().url.encodedPath); assertEquals("Bearer decision-bearer", chain.request().header("Authorization"))
+            val buffer = Buffer(); chain.request().body!!.writeTo(buffer); sent = buffer.readUtf8(); response(chain.request(), reply)
+        }.build()
+        val request = CreateSessionReq(playback_id = "shared-browser", request_id = "cccccccc-cccc-4ccc-8ccc-cccccccccccc", start = 12.5, height = 720, copy = true, caps = caps())
+        val result = SharedDecisionClient.forTest(transport).start(context, request)
+        assertEquals("9223372036854775807", result.context.sourceFileId); assertEquals(reference, result.context.reference); assertEquals(session, result.context.sessionId)
+        assertEquals(request, result.request); assertEquals(Net.json.encodeToJsonElement(request).jsonObject, Json.parseToJsonElement(sent!!).jsonObject)
+        assertEquals(Long.MAX_VALUE, result.start.wire["future"]!!.jsonObject["exact"]!!.jsonPrimitive.long)
+        assertTrue(runCatching { result.context.localId() }.isFailure)
+    }
+    @Test fun initialStartRefusesUnsupportedFieldsBeforeNetwork(): Unit = runBlocking {
+        login(); val context = context(); var calls = 0
+        val client = SharedDecisionClient.forTest(OkHttpClient.Builder().addInterceptor { calls++; response(it.request(), "{}") }.build())
+        val base = CreateSessionReq(playback_id = "shared", request_id = "cccccccc-cccc-4ccc-8ccc-cccccccccccc", caps = caps())
+        for (request in listOf(base.copy(previous_session_id = ""), base.copy(control_sequence = 0), base.copy(reopen_reason = ReopenReason.Stall), base.copy(subtitle_burn = 0), base.copy(preserve_dolby_vision = true), base.copy(request_id = base.request_id!!.uppercase()))) {
+            assertTrue(runCatching { client.start(context, request) }.isFailure)
+        }
+        assertEquals(0, calls)
+    }
+
 }

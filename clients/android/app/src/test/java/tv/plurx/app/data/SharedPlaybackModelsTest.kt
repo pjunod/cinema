@@ -132,7 +132,7 @@ class SharedPlaybackModelsTest {
         assertEquals(4294967295L, sharedStart.wire.getValue("prior_kbps").jsonPrimitive.long)
         assertEquals("retained", sharedStart.wire.getValue("plan_notes").jsonArray.single().jsonPrimitive.content)
         assertThrows(IllegalArgumentException::class.java) { SharedStartValidation.validated(start, context) }
-        for (query in listOf("?token=x", "?native=1&native=0", "?subtitle=4096", "?diagnostic=upstream", "?native=%31", "?")) {
+        for (query in listOf("?token=x", "?native=1&native=0", "?subtitle=4096", "?subtitle=00", "?diagnostic=upstream", "?native=%31", "?")) {
             assertThrows(IllegalArgumentException::class.java) { SharedStartValidation.validated(start.copy(playlist_url = "/api/v1/hls/$session/index.m3u8$query"), bound) }
         }
         assertThrows(IllegalArgumentException::class.java) { SharedStartValidation.validated(start.copy(control = start.control!!.copy(url = "/api/v1/hls/55555555-5555-4555-8555-555555555555/control")), bound) }

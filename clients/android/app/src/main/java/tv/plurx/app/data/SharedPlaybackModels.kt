@@ -138,6 +138,21 @@ internal class SharedStart private constructor(val response: HlsStart, val wire:
     }
 }
 
+/** Authenticated ordinary B Start metadata, never Source physical evidence. */
+internal class SharedStartedPlayback(val start: SharedStart, val context: PlaybackFileContext, val request: CreateSessionReq)
+
+internal fun SharedStart.bindInitial(context: PlaybackFileContext, request: CreateSessionReq): SharedStartedPlayback {
+    require(context.reference != null && context.sessionId == null)
+    require(response.vod == true && response.start_seconds.isFinite() && response.start_seconds >= 0 && response.start_seconds <= 9_007_199_254_740.0)
+    require(response.duration_ms?.let { it >= 0 } != false)
+    val control = requireNotNull(response.control)
+    require(Regex("[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}").matches(control.generation))
+    require(control.nextExchangeMs == 5_000L && control.leaseTimeoutMs == 300_000L)
+    val bound = context.withSession(response.session_id)
+    validated(bound)
+    return SharedStartedPlayback(this, bound, request)
+}
+
 internal object SharedStartValidation {
     fun validated(start: HlsStart, context: PlaybackFileContext): HlsStart {
         context.validateSessionPlaylist(start.playlist_url, start.session_id)

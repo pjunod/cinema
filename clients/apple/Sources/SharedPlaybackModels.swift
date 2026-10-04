@@ -136,6 +136,30 @@ struct SharedStart {
     }
 }
 
+/// Ordinary complete B Start retained with its authenticated signed-file context.
+/// This is routing metadata; it never asserts Source physical production.
+struct SharedStartedPlayback {
+    let start: SharedStart
+    let context: PlaybackFileContext
+    let request: CreateSessionRequest
+}
+
+extension SharedStart {
+    func bindInitial(_ context: PlaybackFileContext, request: CreateSessionRequest) throws -> SharedStartedPlayback {
+        guard context.reference != nil, context.sessionId == nil,
+              response.vod == true, let position = response.startSeconds,
+              position.isFinite, position >= 0, position <= 9_007_199_254_740,
+              response.durationMs.map({ $0 >= 0 }) ?? true,
+              let control = response.control,
+              PlaybackFileContext.matches(control.generation, "^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"),
+              control.nextExchangeMs == 5_000, control.leaseTimeoutMs == 300_000
+        else { throw APIError.badURL }
+        let bound = try context.withSession(response.sessionId)
+        _ = try validated(bound)
+        return SharedStartedPlayback(start: self, context: bound, request: request)
+    }
+}
+
 /// B session authority must already be admitted; a metadata response cannot bind it.
 enum SharedStartValidation {
     static func validated(_ start: HlsStart, context: PlaybackFileContext) throws -> HlsStart {

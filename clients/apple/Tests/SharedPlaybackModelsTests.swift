@@ -124,7 +124,7 @@ final class SharedPlaybackModelsTests: XCTestCase {
         let start = sharedStart.response
         XCTAssertNoThrow(try SharedStartValidation.validated(start, context: bound))
         XCTAssertThrowsError(try SharedStartValidation.validated(start, context: context))
-        for query in ["?token=x", "?native=1&native=0", "?subtitle=4096", "?diagnostic=upstream", "?native=%31", "?"] {
+        for query in ["?token=x", "?native=1&native=0", "?subtitle=4096", "?subtitle=00", "?diagnostic=upstream", "?native=%31", "?"] {
             var object = try JSONSerialization.jsonObject(with: data) as! [String: Any]
             object["playlist_url"] = "/api/v1/hls/" + session + "/index.m3u8" + query
             let invalid = try decoder.decode(HlsStart.self, from: JSONSerialization.data(withJSONObject: object))
