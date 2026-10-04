@@ -16,6 +16,8 @@ use std::{
     time::{Duration, Instant},
 };
 use uuid::Uuid;
+#[path = "shared_receiver_retirement.rs"]
+mod retirement;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum ReceiverStartError {
@@ -28,6 +30,13 @@ pub(crate) enum ReceiverStartError {
 #[derive(Default)]
 pub(crate) struct ReceiverStartRegistry {
     entries: Mutex<Vec<Arc<ReceiverStartInner>>>,
+    settled: Mutex<Vec<SettledReceiverAttempt>>,
+}
+struct SettledReceiverAttempt {
+    user_id: i64,
+    request_id: String,
+    login_hash: String,
+    fingerprint: String,
 }
 struct ReceiverStartInner {
     intent: ReceiverSessionIntent,
@@ -37,6 +46,8 @@ struct ReceiverStartInner {
     state: Mutex<ReceiverStartState>,
     start_task: Mutex<Option<tokio::task::JoinHandle<()>>>,
     stop: tokio_util::sync::CancellationToken,
+    bodies: Arc<retirement::ReceiverBodyRegistry>,
+    retirement_task: Mutex<Option<tokio::task::JoinHandle<()>>>,
     changed: tokio::sync::Notify,
 }
 #[derive(Default)]
@@ -50,6 +61,8 @@ struct ReceiverStartState {
     dispatch_closed: bool,
     owner: Option<ReceiverSourceOwner>,
     planned_activation: Option<MediaSessionActivation>,
+    retirement_started: bool,
+    retired: bool,
 }
 // The only constructor joins the exact registry-owned Start task. This is
 // neither Source settlement nor accepted B body/writer completion.
@@ -146,6 +159,38 @@ impl ReceiverStartRegistry {
             .request_fingerprint()
             .map_err(|_| ReceiverStartError::Conflict)?;
         let mut entries = self.entries.lock().expect("receiver starts");
+        // Only the detached retirement owner can mark an entry retired after
+        // actual joins and Applied/Replay. Keep bounded non-authorizing
+        // tombstones so exact retries cannot recreate an already ended actor.
+        let mut settled = self.settled.lock().expect("settled receiver attempts");
+        entries.retain(|entry| {
+            if !entry.state.lock().expect("receiver owner").retired {
+                return true;
+            }
+            if settled.len() == 64 {
+                settled.remove(0);
+            }
+            settled.push(SettledReceiverAttempt {
+                user_id: entry.intent.user_id,
+                request_id: entry.request_id.clone(),
+                login_hash: entry.intent.login_hash.clone(),
+                fingerprint: entry.fingerprint.clone(),
+            });
+            false
+        });
+        if let Some(previous) = settled
+            .iter()
+            .find(|s| s.user_id == intent.user_id && s.request_id == request_id)
+        {
+            return Err(
+                if previous.fingerprint == fingerprint && previous.login_hash == intent.login_hash {
+                    ReceiverStartError::Unresolved
+                } else {
+                    ReceiverStartError::Conflict
+                },
+            );
+        }
+        drop(settled);
         if let Some(entry) = entries
             .iter()
             .find(|entry| entry.intent.user_id == intent.user_id && entry.request_id == request_id)
@@ -166,6 +211,8 @@ impl ReceiverStartRegistry {
             state: Mutex::new(ReceiverStartState::default()),
             start_task: Mutex::new(None),
             stop: tokio_util::sync::CancellationToken::new(),
+            bodies: Arc::new(retirement::ReceiverBodyRegistry::default()),
+            retirement_task: Mutex::new(None),
             changed: tokio::sync::Notify::new(),
         });
         entries.push(entry.clone());
@@ -250,6 +297,9 @@ impl ReceiverStartActor {
         deadline: Instant,
     ) -> Result<StartResponse, ReceiverStartError> {
         loop {
+            if self.0.stop.is_cancelled() {
+                return Err(ReceiverStartError::Unresolved);
+            }
             let changed = self.0.changed.notified();
             tokio::pin!(changed);
             changed.as_mut().enable();
@@ -547,7 +597,13 @@ async fn run_owner(
     {
         return Err(ReceiverStartError::Unresolved);
     }
-    entry.state.lock().expect("receiver owner").start = Some(Ok(projected));
+    {
+        let mut owned = entry.state.lock().expect("receiver owner");
+        if owned.dispatch_closed {
+            return Err(ReceiverStartError::Unresolved);
+        }
+        owned.start = Some(Ok(projected));
+    }
     entry.changed.notify_waiters();
     loop {
         tokio::select! {

@@ -4161,3 +4161,113 @@ The receiver ownership fixture proves the real spawned task remains joined
 behind its release signal; it does not model a physical Source producer.
 The production B ingress, accepted B body/read/writer joins and private Core
 retirement witness integration remain outstanding.
+### B confirmed retirement metadata (S4 follow-up)
+
+The receiver retirement Store takes a `ReceiverRetirementWitness` implemented
+by a private daemon factory. That factory must retain an actual settled Source
+End lineage receipt, or an owned never-dispatched compare-and-set, and join all
+accepted B bodies and tasks before presenting the witness. Core fixtures
+implement metadata witnesses only; they do not qualify physical termination.
+Expiry, terminal JSON, missing pointers and missing leases cannot manufacture
+this witness. Daemon factory and HTTP wiring remain separate outstanding work.
+
+The cleanup transaction repeats the original RemoteSource recipe and login
+hash, B request/session/incarnation/node/epoch, captured lease and retained full
+Source attachment. An all-NULL pending attachment accepts either confirmed
+Source request retirement or an owned no-send disposition; a partial attachment
+refuses. Current login enablement and import assignment are deliberately not
+required for this exact cleanup, so logout, import revocation and the existing
+user-delete trigger cannot strand confirmed obligations. Foreign pins, lease
+owners and pointers refuse; a displaced successor is preserved.
+
+A bounded canonical terminal receipt replaces only the ended RemoteSource
+route response. It binds a purpose-separated context digest, the stable actual
+confirmation identity, disposition and reason. It is terminal metadata, never
+Source proof or a live Start/delivery response. The original resolved Start
+request reply and terminal acknowledgement remain intact; a starting request
+becomes failed, while existing trigger-produced NULL replies stay NULL. Matching
+lease, pins, old pointer and upstream adjunct are removed atomically. Exact
+receipt retry uses assertions only and does not mutate timestamps; a different
+context or confirmation refuses. Commit-unknown is returned as an error and the
+actor must retain its receipt for retry. Local route responses are unaffected.
+
+After confirmed Source/body/task settlement the daemon may refresh terminal B
+route metadata, checking the same original incarnation, session, node, epoch
+and recipe. This refresh is metadata only, never settlement evidence. A live
+route requires lease deadline equality; an already-ended route permits only a
+matching-owner/fence job deadline at or before the captured terminal route
+deadline. The actual maintenance sweep advances the terminal route timestamp
+while retaining an older expired job deadline, and user deletion can set both
+to zero. Future lease extensions and foreign owners remain refusal. The first
+existing terminal cause is preserved.
+
+The focused Core matrix uses actual guarded same-playback successor activation
+before retiring the old owner, and compares every other route/request/lease and
+pointer before and after cleanup. It also retains an acknowledgement written by
+the real terminal-ack API, then checks that Source-confirmed metadata retirement
+and retry preserve it. A later user-delete trigger may clear the original Start
+reply; that current reply is repeated as a transaction preimage and is never
+restored. The receipt identity binds immutable lineage rather than this mutable
+trigger result.
+
+Qualification uses pinned Rust 1.97.1 on the exact `06c3f4c60` intended ancestor:
+
+- `cargo test -p plurx-core --features hiqlite-store,hiqlite-contract-tests --lib sharing_receiver -- --nocapture`:
+  three tests, zero ignored; pending and attached retirement matrices run in
+  memory/pooled SQLite with both retained and rebuilt principal layouts.
+- `cargo test -p plurx-core --features hiqlite-store,hiqlite-contract-tests --test store_contract sharing_receiver_three_voters_atomic_admission_replay_scope_and_unresolved_retention -- --nocapture`:
+  actual three-voter metadata matrix. Both features are required for test
+  registration; a zero-test filter is not qualification.
+- Core/daemon feature compilation, all-target Core feature Clippy with denied
+  warnings, documentation index and catalog lint precede the normal tracked
+  commit hook. These checks do not qualify the private physical witness
+  factory, HTTP retirement wiring, production deployment or a two-NAT fleet.
+
+Final native receipt: Core receiver filter **3 PASS, 0 ignored, 22.66s**;
+actual three-voter receiver filter **1 PASS, 0 ignored, 9.85s**. Core/daemon
+feature check passed in 48.45s and all-target Core feature Clippy in 33.83s.
+Documentation index passed four tests; catalog lint covered 2708 files. The
+same-playback successor, real terminal acknowledgement, trigger-cleared reply,
+partial pending attachment, foreign pin epoch and ignored cleanup-write cases
+are inside the named Core receiver regressions above.
+
+### S5 private receiver retirement owner and resource admission boundary
+
+The receiver now has a private detached retirement owner. It closes dispatch
+and resource admissions, joins the exact owned Start task, waits for the last
+registered resource/job guard, and then obtains the authenticated Source End
+confirmation. A never-dispatched outcome requires the same closed gate and
+joins. Neither a timer, a stored response nor registry absence creates either
+outcome. The confirmation is purpose-hashed with the full Source reference,
+private request and actual Source lineage before the private Core witness is
+constructed. Known-source confirmations and sealed bindings remain retained
+across Store errors and uncertain commits.
+
+Cleanup captures the actual B route only after these joins and checks its
+original session/incarnation, principal, playback, owner node/epoch, recovery
+epoch, complete recipe, fingerprint and source timeline. Terminal lease
+metadata can refresh only after Refused and through the same immutable checks.
+The exact retained binding is tried first. Only Refused permits the separate
+all-NULL pending transaction; an error never means no attachment. Successful
+retirement is the only path marking an activated entry retired. Later registry
+registration evicts such completed entries into a bounded non-authorizing
+retry tombstone list; unresolved entries continue to consume the eight slots.
+
+The resource registry allows at most 32 active opens per receiver actor.
+Admissions close before cleanup waits. Each accepted response, independent
+read and upstream client job must retain its actual guard through completion;
+body EOF cannot release a guard still held by a job or writer. The ownership
+test uses a real spawned job held behind a release signal and proves cleanup
+waits after the response's guard is dropped. This is an ownership regression,
+not an HTTP or physical Source fixture.
+
+Pinned Rust 1.97.1 Core/daemon all-target compilation passed in 75 seconds
+and affected feature-enabled Clippy passed in 95 seconds. Two resource
+ownership tests and the six-test receiver ownership group passed with zero
+ignored. The combined Core receiver group passed three tests (21.33 seconds)
+and the actual three-voter contract passed one test (9.88 seconds), zero
+ignored. Public receiver ingress remains unregistered. Actual accepted B
+response/read/client-job guard wiring, authenticated pinned End exchange,
+request-only no-activation cleanup and automatic failure-triggered retirement
+must be qualified before it opens. Core metadata and the ownership fixtures
+alone do not qualify physical end-to-end playback.

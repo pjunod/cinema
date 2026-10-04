@@ -1013,6 +1013,12 @@ mod tests {
                                 .expect("no incarnation replacement"),
                             MediaSessionRequestClaim::Acquired { .. }
                         ));
+                        let retained = store
+                            .media_session_route_by_incarnation(&activation.incarnation_id)
+                            .await
+                            .expect("swept pending route")
+                            .expect("retained obligations");
+                        crate::store::sharing_receiver_retirement::pending_metadata_retirement_matrix(&store,crate::store::sharing_receiver_retirement::PendingMetadataFixture {intent:intent.clone(),disposition:if rebuilt {crate::sharing_receiver_retirement::ReceiverRetirementDisposition::SourceSettled}else{crate::sharing_receiver_retirement::ReceiverRetirementDisposition::NeverDispatched},owner:crate::sharing_receiver_sessions::ReceiverSourceOwner {incarnation_id:Uuid::parse_str(&retained.incarnation_id).expect("inc"),session_id:Uuid::parse_str(&retained.session_id).expect("session"),owner_node_id:retained.owner_node_id,owner_epoch:retained.owner_epoch,request_id:"B-request".into(),lease_expires_at_ms:retained.lease_expires_at_ms,now_ms:now}}).await;
                         // A missing adjunct after a prior activation is corruption,
                         // never a read-path opportunity to recreate authority.
                         store
@@ -2069,6 +2075,16 @@ mod tests {
                 );
                 assert!(race.advanced.load(std::sync::atomic::Ordering::SeqCst));
                 assert_eq!(store.sharing_read("SELECT json_array(count(*),max(sequence),max(position_ms)) AS payload FROM sharing_watch",vec![]).await.expect("newer history preserved"),vec!["[1,14,6000]".to_owned()]);
+                crate::store::sharing_receiver_retirement::metadata_retirement_matrix(
+                    &store,
+                    crate::store::sharing_receiver_retirement::MetadataRetirementFixture {
+                        intent: intent.clone(),
+                        attachment: progress.attachment.clone(),
+                        confirmation: "a".repeat(64),
+                    },
+                    rebuilt,
+                )
+                .await;
             }
         }
     }
