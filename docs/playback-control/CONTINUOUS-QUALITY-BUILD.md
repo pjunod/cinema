@@ -6116,3 +6116,176 @@ false-back prevention, genuine backward frames, unsettled uncertain frames,
 and a real late frame across a rejected outlier. Script syntax and diff
 whitespace checks pass. Runtime qualification is pending; no units or final
 adversarial review ran.
+
+### 10.210 Exact measurement-fix replay: browser pass, capture incomplete
+
+Committed/pushed `f7a6363a6` passed the normal hook (Clippy 38.06s, 72
+served scripts), exact pinned Linux build (1m33s), and static resolution of
+all 221 declared regressions. No units executed. Draft #774 has the current
+source, evidence limits and new regression field.
+
+`continuous-firefox-f7a6363a6-optical-late-switch1` **FAILED** because the
+independent switch window had one capture hole above its strict 12.5ms
+limit. Browser checks passed with zero hitches/drops; no future metadata
+anomaly occurred, so runtime exercise of the new rejection is not claimed.
+The 19,903-sample optical window contained zero unreadable/backward/skipped
+counters and a 91.73/99.89ms held-picture lower/upper bound. End 0/0/0/0,
+helper exit 1 and owned display/runtime cleanup confirmed. The failed
+receipt remains failed while capture scheduling is investigated.
+
+Private network mechanics also passed in three ephemeral user/network
+namespaces: all three echo endpoints reachable, only B unreachable after
+its private bridge link was cut, all reachable after restoration. Every
+endpoint and bridge retired. This proves partition tooling only, not plurx
+playback, physical multi-host behavior, or cluster recovery. Host networking
+and production containers/services were untouched; Docker was not used.
+No final adversarial review ran.
+
+### 10.211 Capture scheduling calibration; framebuffer comparison running
+
+The exact f7 replay's sole sampling hole was 24.711ms at +1.061s after
+its first quality request. A separate no-switch calibration pinned only
+owned camera CPU 0 and Xvfb CPU 2; all browser/daemon/workload affinity and
+pool limits remained unchanged. Browser playback passed, but independent
+capture remained **INCOMPLETE** on three sampling holes (zero unknown,
+backward or skipped counters; 71.51ms upper picture-hold bound). End and
+owned cleanup passed. This unsuccessful affinity approach is discarded.
+
+A separate bounded paired baseline now compares X11 capture with read-only
+sampling of the owned Xvfb XWD framebuffer. The latter reads actual pixel
+coordinates, records real sample timestamps and checksum-paired RGB packets,
+and bypasses synchronous X11 capture requests. No synthetic samples or
+conditional waiting for passing counters are introduced. Both methods keep
+startup uncertainty, capture holes and invalid counters visible. This is
+software-display calibration only; physical output remains unmeasured.
+No units or final adversarial review ran.
+
+### 10.212 Private voter bootstrap passes; framebuffer calibration remains incomplete
+
+Three actual `f7a6363a6` daemons bootstrapped as reachable voters in separate
+private network namespaces on one physical host. Cutting only B's private
+bridge port made B unreachable while A/C remained reachable; restoring the
+port restored all three voters. All owned daemons, bridge and runtime were
+removed. This is topology/bootstrap evidence only: it has not yet proved a
+write through surviving quorum or playback under partition. A bounded
+quorum-write/restoration probe is prepared and will start after display
+calibration retires, keeping that calibration free from this startup load.
+
+The paired framebuffer baseline completed with both methods **INCOMPLETE**:
+X11 had one capture hole but no unreadable counters; read-only mmap had no
+capture holes but 103 unreadable samples while painting was in progress.
+Both had zero backward/skipped counters. The mmap upper hold bound includes
+unknown-region uncertainty and is not a physical hold measurement. End,
+helpers and owned cleanup passed; no failed capture was rescored.
+
+The next paired baseline requires two identical raw pixel reads within a
+fixed 2ms budget, independent of decoded counter validity. An unstable pair
+is recorded explicitly as unknown; a stable corrupt counter is also unknown.
+Raw pixel/timestamp/checksum evidence remains retained. No conditional wait
+for a passing decoded counter is used. No units or final adversarial review
+ran.
+
+### 10.213 Consistent framebuffer baseline and actual private quorum write
+
+The consistent-pixel framebuffer baseline completed with **COMPLETE** steady
+capture: 10,805 measured samples, zero unknown pixels, capture holes,
+backward counters or skipped counter values; 66.89ms conservative hold
+bound. Its fixed retry budget is 2ms **after the first read**; the recorded
+startup prefix remains separate. All helpers/display/runtime retired.
+This is calibration evidence, not physical output or the full switch series.
+
+The actual private three-voter quorum-write probe **PASSED**: while B's
+private bridge link was down, A/C remained reachable and a replicated
+settings change completed in 183ms. C observed it during partition; after
+restoration B observed the same committed value and all voters were
+reachable. Every daemon, bridge and runtime retired. No production host
+networking/settings or other containers changed. This is real private
+network/quorum evidence on one physical host, not playback under partition
+or physical multi-host qualification.
+
+After that cluster cleanup, a focused exact-f7 framebuffer switch probe is
+running. It records before/after read timestamps, treats any whole read over
+4ms as unknown, and conservatively adds measured read-span uncertainty to
+picture-hold upper bounds. Both full post-warmup and exact-request windows,
+as well as the paired X11 diagnostics, remain retained. Browser checks and
+independent zero-skip/backstep/unknown/capture-hole and 100ms hold limits
+must pass together. No units or final adversarial review ran.
+
+### 10.214 Bracketed switch failure is during preparation, not decoder join
+
+`optical-framebuffer-switch1` **FAILED**: browser quality-cycle p95/max
+135.26ms exceeded 100ms; X11 pixels recorded a 141.14ms lower/150.14ms upper
+hold and one skipped counter. Bracketed framebuffer capture was incomplete
+on 22 unknown samples and one skipped counter; its whole-read maximum was
+8.027ms, over the explicit 4ms budget. Its inflated upper bound includes
+unknown-region uncertainty and is not a picture-hold measurement. Browser
+reported one drop, zero ordinary hitches and zero metadata anomalies.
+End 1/0/0/0, helper exit 1 and owned cleanup confirmed.
+
+The X11 hold was at film 766.541667s, about four seconds after the 1080p
+request at 762.500653s, while old 720p was still presented. Actual 1080p
+presentation was at 824.125s, almost a minute later. This rules out that
+particular hold being the decoder's resolution-change join. Event-loop lag
+peaked at 16ms. The receipt remains a real unresolved software-display
+continuity failure; it is not explained away by the earlier metadata fix.
+
+A controlled private CPU-set experiment gives browser/display/capture
+0–3,8–9 and the owned backend 4–7,10–15. Its first attempt **FAILED** before
+media creation (uncalibrated video geometry, zero VOD creates), so it proves
+no continuity outcome. The next attempt explicitly sets a 32-credit isolated
+software pool, matching earlier scoped load probes, because visible CPU
+count can affect automatic budgets. It records capacity and startup body/
+player/video diagnostics. This is a distinct resource-condition experiment;
+no production host affinity, configuration or acceptance threshold changes.
+No units or final adversarial review ran.
+
+### 10.215 CPU-separated switch passes X11 evidence; native sampler replaces slow observer
+
+The exact-f7 second CPU-separated probe created playback and presented both
+720p/1080p targets in one session/player. Browser checks passed: 85.50ms
+maximum gap, zero hitches/stalls/drops. Paired X11 switch-window capture was
+**COMPLETE**: 19,430 samples, zero unreadable pixels, holes, backward or
+skipped counters, 83.26ms conservative picture-hold bound.
+
+The overall receipt remains **FAILED** because the primary Python framebuffer
+observer recorded 17 uncertain samples and a 6.236ms maximum whole read, over
+the unchanged 4ms observer limit. Its inflated hold upper bound includes
+unknown-region uncertainty and does not measure a physical hold. The isolated
+pool was explicitly 32 credits; backend/client CPU sets were separated. This
+is scoped resource-condition evidence and does not qualify default conditions.
+End retired the final zombie by one second; all display/runtime resources
+retired. No startup-state receipt was needed because startup succeeded.
+
+A bounded native C observer now samples the same actual XWD RGB coordinates
+with volatile reads, two identical byte reads within the fixed 2ms retry
+budget, before/after timestamps and checksum-paired raw packets. Its whole
+read limit remains 4ms; uncertain pixels remain unknown. It compiles with
+existing host libraries under `-Wall -Wextra -Werror`, requires owned input/
+output paths, captures at most 95 seconds and retires on SIGTERM. The focused
+paired switch probe is running; it has not yet passed. No production setting,
+acceptance threshold, unit test or final adversarial review changed.
+
+### 10.216 Direct framebuffer observer is discarded; private ingress is proved
+
+The bounded native observer reduced maximum whole-read duration to 0.099ms,
+but still recorded 17 unreadable partially painted samples. The overall
+focused receipt therefore remains **FAILED**. Browser checks passed at
+85.52ms with no drops; paired X11 capture was **COMPLETE**, 19,895 samples,
+zero holes/unknown/backward/skipped counters and 71.81ms conservative hold
+bound. End 2/0/0/0 and all display/runtime cleanup passed. Neither failed
+observer receipt is rescored. Read-only direct framebuffer sampling is
+discarded as an acceptance method because byte stability cannot establish
+paint completion. These passes remain scoped to explicit CPU/pool conditions.
+
+A separate private-network ingress mechanics probe **PASSED**: a host
+loopback-only socket inherited into a private network namespace forwarded
+to its owned internal echo service. The exact response was received and
+its child retired. No production interface, service or route changed.
+
+The next bounded probe runs shipped Firefox playback inside a wholly private
+network with three actual voters. It deliberately starts on B through mixed
+ingress, cuts only B's network link, observes the saved manual choice and
+surviving nodes while all daemons remain alive, then restores the voter
+roster. This is partition/presentation-state mechanics, not an assertion of
+seamless takeover or physical multi-host/display/audio qualification. No
+units or final adversarial review have run.
