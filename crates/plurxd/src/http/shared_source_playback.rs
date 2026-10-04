@@ -7,6 +7,9 @@ use axum::http::{HeaderMap, StatusCode};
 use serde_json::Value;
 use uuid::Uuid;
 
+#[path = "shared_source_direct.rs"]
+pub(crate) mod direct;
+
 struct SourceStartInput {
     reference: SourcePlaybackTarget,
     session: CreateSession,
@@ -764,6 +767,26 @@ async fn status(
         .wait(deadline)
         .await
         .map_err(SourceStartFailure::response)?;
+    if let (Ok((_, current_grant)), true) = (current.as_ref(), owned.actor.is_direct()) {
+        if let Ok(response) = direct::published_reply(
+            &state,
+            &headers,
+            &entry,
+            &owned,
+            &input.start.reference,
+            *current_grant,
+            deadline,
+        )
+        .await
+        {
+            return Ok(super::shared_library::guard_source_response(
+                state,
+                connection.map(|c| c.0),
+                response,
+            )
+            .await);
+        }
+    }
     if current.is_ok() {
         if let Ok((response, guard)) = owned.actor.open_start_response(deadline).await {
             entry
@@ -918,15 +941,19 @@ pub(crate) fn peer_router(state: crate::state::AppState) -> axum::Router<crate::
                 .route(
                     "/sharing/v1/items/{item}/files/{file}/sessions/{request}/resources",
                     axum::routing::post(resources),
+                )
+                .route(
+                    "/sharing/v1/items/{item}/files/{file}/sessions/{request}/direct",
+                    axum::routing::post(direct::direct_bytes),
                 ),
         )
 }
 #[cfg(test)]
 #[derive(Default)]
-struct SourceReadJobGate {
-    entered: std::sync::atomic::AtomicBool,
-    complete: std::sync::atomic::AtomicBool,
-    file_closed: std::sync::atomic::AtomicBool,
+pub(crate) struct SourceReadJobGate {
+    pub(crate) entered: std::sync::atomic::AtomicBool,
+    pub(crate) complete: std::sync::atomic::AtomicBool,
+    pub(crate) file_closed: std::sync::atomic::AtomicBool,
     released: std::sync::Mutex<bool>,
     release: std::sync::Condvar,
 }
@@ -951,7 +978,7 @@ impl SourceReadJobGate {
         }
         Ok(())
     }
-    fn release(&self) {
+    pub(crate) fn release(&self) {
         *self.released.lock().expect("read gate") = true;
         self.release.notify_all();
     }
@@ -986,6 +1013,7 @@ async fn source_file_body(
     file: tokio::fs::File,
     guard: std::sync::Arc<crate::transcode::source_actor::SourceResponseGuard>,
     len: u64,
+    start: Option<u64>,
     #[cfg(test)] gate: Option<std::sync::Arc<SourceReadJobGate>>,
 ) -> Result<axum::body::Body, ApiError> {
     let conversion_guard = std::sync::Arc::clone(&guard);
@@ -993,19 +1021,23 @@ async fn source_file_body(
     // task is detached from waiter cancellation and holds the real barrier until
     // into_std has actually joined it; dropping a JoinHandle is not a join.
     let conversion = tokio::spawn(async move {
-        let file = file.into_std().await;
-        std::sync::Arc::new(SourceFileReader {
+        let mut file = file.into_std().await;
+        if let Some(start) = start {
+            // A seek is an lseek on the owned descriptor: no disk wait.
+            std::io::Seek::seek(&mut file, std::io::SeekFrom::Start(start))?;
+        }
+        Ok::<_, std::io::Error>(std::sync::Arc::new(SourceFileReader {
             file: std::sync::Mutex::new(SourceReadFile {
                 file: Some(file),
                 #[cfg(test)]
                 gate,
             }),
             guard: conversion_guard,
-        })
+        }))
     });
     let reader = tokio::select! {biased;
         ()=guard.cancelled()=>return Err(unavailable()),
-        result=conversion=>result.map_err(|_|unavailable())?,
+        result=conversion=>result.map_err(|_|unavailable())?.map_err(|_|unavailable())?,
     };
     let stream = futures_util::stream::try_unfold(
         (reader, len),
@@ -1013,9 +1045,13 @@ async fn source_file_body(
             if remaining == 0 {
                 return Ok(None);
             }
-            let permit = std::sync::Arc::clone(&SOURCE_READ_JOBS)
-                .try_acquire_owned()
-                .map_err(|_| std::io::Error::other("Source read capacity"))?;
+            // Wait for a read slot rather than failing a live body: a long
+            // direct body and a segment share these slots. Retirement still
+            // ends the wait at once.
+            let permit = tokio::select! {biased;
+                ()=reader.guard.cancelled()=>return Err(std::io::Error::new(std::io::ErrorKind::PermissionDenied,"Source body retired")),
+                permit=std::sync::Arc::clone(&SOURCE_READ_JOBS).acquire_owned()=>permit.map_err(|_| std::io::Error::other("Source read capacity"))?,
+            };
             let job_reader = std::sync::Arc::clone(&reader);
             let size = remaining.min(64 * 1024) as usize;
             let job = tokio::task::spawn_blocking(move || {
@@ -1170,6 +1206,7 @@ async fn resources(
                     ready.file,
                     std::sync::Arc::clone(&guard),
                     ready.len,
+                    None,
                     #[cfg(test)]
                     read_gate.map(|gate| gate.0),
                 )
@@ -1258,6 +1295,10 @@ async fn start(
         .wait(deadline)
         .await
         .map_err(SourceStartFailure::response)?;
+    if owned.actor.is_direct() {
+        return direct::published_reply(&state, &headers, &entry, &owned, &target, grant, deadline)
+            .await;
+    }
     let (response, guard) = owned
         .actor
         .open_start_response(deadline)
@@ -1345,14 +1386,15 @@ async fn own_start(
     validate_initial_source_start(&input.session)?;
     let reference = input.reference.clone();
     entry.retain_stage(SourceStartTaskStage::Preparing);
-    let prepared = Box::pin(super::hls::prepare_source_playback(
+    // The presentation branches only here: direct play recomputes the actual
+    // decision and refuses anything but direct play of this exact file.
+    let prepared = Box::pin(direct::prepare_source_start(
         &state,
         &headers,
         reference.clone(),
         input.session,
     ))
-    .await
-    .map_err(|_| SourceStartFailure::Unavailable)?;
+    .await?;
     entry.retain_stage(SourceStartTaskStage::Prepared);
     let (hash, current_grant) = current_reference(&state, &headers, &reference)
         .await
@@ -1376,7 +1418,7 @@ async fn own_start(
                 principal: prepared.principal().clone(),
                 request_id: input.request_id.to_string(),
                 request_fingerprint: prepared.fingerprint().into(),
-                playback_id: prepared.request().playback_id.clone(),
+                playback_id: prepared.playback_id().to_owned(),
                 incarnation_id: planned_incarnation,
                 now_ms: now,
                 claim_expires_at_ms: now + remaining,
@@ -1457,17 +1499,15 @@ async fn own_start(
         SourceWriteAuthorityRead::Capacity => return Err(SourceStartFailure::Capacity),
     };
     entry.retain_stage(SourceStartTaskStage::InvokingFactory(assignment.clone()));
-    let actor = state
-        .transcode
-        .start_source_worker(
-            std::sync::Arc::clone(&state),
-            assignment.clone(),
-            activation,
-            prepared,
-            deadline,
-        )
-        .await
-        .map_err(SourceStartFailure::from)?;
+    let actor = direct::start_prepared_worker(
+        std::sync::Arc::clone(&state),
+        assignment.clone(),
+        activation,
+        prepared,
+        deadline,
+    )
+    .await
+    .map_err(SourceStartFailure::from)?;
     Ok(SourceStartOwned { actor, assignment })
 }
 
@@ -1664,6 +1704,8 @@ pub(crate) enum SourceFixtureMode {
     Encoded,
     NativeCopy,
     NativeEncoded,
+    /// The Copy fixture's MP4 started as direct play.
+    Direct,
 }
 #[cfg(test)]
 pub(crate) fn real_source_start_fixture_with(
@@ -2003,6 +2045,13 @@ async fn build_real_source_start_fixture(
     if native {
         recipe["session"]["native_subtitles"] = serde_json::json!(true);
         recipe["session"]["subtitle"] = serde_json::json!(0);
+    }
+    if matches!(mode, SourceFixtureMode::Direct) {
+        let session = recipe["session"].as_object_mut().expect("session");
+        session.insert("presentation".into(), serde_json::json!("direct"));
+        for field in ["copy", "height", "quality_auto"] {
+            session.remove(field);
+        }
     }
     let request = serde_json::to_vec(&recipe).expect("canonical full fixture recipe");
     RealSourceStartFixture {

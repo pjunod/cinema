@@ -70,11 +70,6 @@ pub(crate) fn closure_router() -> Router<AppState> {
             "/shared/imports/{import}/files/{locator}/stream.mp4",
             any(resource_unsupported),
         )
-        // DIRECT LANE: this arm is replaced by the shared direct relay.
-        .route(
-            "/shared/imports/{import}/files/{locator}/direct",
-            any(resource_unsupported),
-        )
 }
 
 pub(crate) async fn resource_unsupported() -> ApiError {
@@ -584,7 +579,7 @@ mod tests {
         let fixture = receiver_fixture().await;
         let unknown = format!("/api/v1/shared/imports/{}/files/unsigned", Uuid::new_v4());
         for base in [fixture.base.as_str(), unknown.as_str()] {
-            for suffix in ["stream.mp4", "stream.mp4?audio=1", "direct"] {
+            for suffix in ["stream.mp4", "stream.mp4?audio=1"] {
                 for method in ["GET", "HEAD", "POST"] {
                     let uri = format!("{base}/{suffix}");
                     let (status, body) = call(&fixture.state, method, &uri, None).await;

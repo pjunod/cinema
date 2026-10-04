@@ -383,7 +383,12 @@ also_in = ["crates/plurxd/src/transcode"]
 # cold-index workers belong to an Operation with a cancellation token the
 # actor cancels and settles on every path; pipe readers are abort-and-joined.
 # Test additions are awaited, or aborted and joined. None elects recovery.
-expected_occurrences = 104
+# +2 for Shared direct play (transcode/source_direct.rs): the detached
+# direct Source owner, which ends on retirement, idle (300 s with no body and
+# no byte open), lease loss or drain and always settles its row and leaves the
+# registry; and the owned direct-open task, joined by its waiter under the
+# request deadline and otherwise run to completion holding its body credit.
+expected_occurrences = 106
 kind = "structural_task_scan"
 replacement = "every detached task requires ownership-catalog review; published failure, completion, and executor-loss cleanup transfer exact child ownership before awaiting, while the removed published-transcode watchdog contributes no task"
 
@@ -1286,7 +1291,10 @@ pattern = "publication_ready_at_ms"
 # 105 -> 107 for orphaned-receiver recovery tests: one test-only blocked B
 # activation and one read-only route census column. Recovery never writes the
 # fence itself; the Store retirement it reuses already zeroes it.
-expected_occurrences = 107
+# +3 for Shared direct play: the direct Source owner activates its route
+# blocked, completes publication and requires `publication_ready_at_ms == 0`,
+# and its Start/status replay checks the same. No handoff or predecessor.
+expected_occurrences = 110
 
 [[module_symbols]]
 id = "m4-durable-projection-safety-window"
@@ -1329,7 +1337,9 @@ pattern = "MEDIA_SESSION_PUBLICATION_BLOCKED"
 # 35 -> 37 for orphaned-receiver recovery tests: the test-only blocked B
 # activation and an assertion that recovery leaves the sentinel untouched
 # before retirement (it never publishes an adopted producer).
-expected_occurrences = 37
+# +1: the direct Source owner activates its route publication-blocked before
+# completing publication, exactly as the VOD Source owner does.
+expected_occurrences = 38
 
 [[module_symbols]]
 id = "m4-terminal-projection-safety-window"
@@ -2470,7 +2480,13 @@ pattern = "(?:[A-Za-z_]\\w*::)+spawn(?:_blocking|_local|_for_test)?\\s*\\("
 # +2 for shared pre-session assets: two test-only in-memory HTTP/1 Source
 # stand-ins (the bounded-body fixture and the real Source router behind the
 # collision test), each aborted and joined at the end of its exchange.
-expected_occurrences = 792
+# +11 for Shared direct play. Production: the detached direct Source owner
+# (ends on retirement/idle/lease loss/drain, always settles), the owned direct
+# open (Source) and the owned B direct relay open (bounded by the receiver body
+# registry, run to completion so a sent Source request is never abandoned).
+# Test-only: three direct-test servers/readers and five pinned CGNAT fixture
+# servers/readers, each joined or aborted and awaited before the test ends.
+expected_occurrences = 803
 # E1 plus S-14 M8: both ownership sets retained and counted on the merged source.
 # 643 -> 647 with S-14 M8 (`plan/S-14-5`: `Encoding`, `RollingFlowSync`, `TerminalCleanup`,
 # `HeadChildOwner`, `VodServingAdmission` behind per-owner hooks), measured by
@@ -3650,7 +3666,13 @@ pattern = "(?:[A-Za-z_]\\w*::)+(?:sleep|sleep_until|interval|interval_at|timeout
 # pinned Source asset read (`read_file_asset`) and the 32 s bound around its
 # single exchange (`PeerConnection::file_asset`). Both are awaited by the
 # requesting handler; neither owns a task, producer or process.
-expected_occurrences = 1293
+# +17 for Shared direct play. source_direct.rs: the ready wait, the open
+# wait and the publication deadline (timeout_at) plus the owner's 10 s
+# lease/idle interval, which ends with the owner. sharing_direct_client.rs: the
+# 30 s head deadline, the per-frame idle deadline, the empty-body drain bound
+# and two paused-clock fixture sleeps. Test-only: five direct-test waits and
+# three CGNAT fixture waits, all bounded. No recovery timer is added.
+expected_occurrences = 1310
 # +1 native-startup delayed-init fixture: its joined writer owns one bounded
 # six-second sleep, under the test request's unchanged twelve-second deadline.
 # No production timer or recovery clock is added.
@@ -4474,7 +4496,10 @@ pattern = "\\.(?:spawn|output|status)\\s*\\("
 # `Response::builder().status(..)` in the Source and receiver asset code and
 # their tests. No OS process is launched; subtitle, overlay and thumbnail work
 # stays in the existing Local owners.
-expected_occurrences = 548
+# +19 for Shared direct play: every one is an HTTP `.status()` read on a
+# request/response builder or a reply (4 in the B direct relay, 1 in the
+# direct client, 12 in the direct tests, 2 in the CGNAT fixture). No process.
+expected_occurrences = 567
 # +2 native-startup delayed-init fixture: Axum Response::status() reads
 # assert the master and legacy bridge responses. Neither launches a process.
 
@@ -4711,7 +4736,9 @@ pattern = "\\.(?:kill|start_kill|wait|try_wait|exec)\\s*\\("
 # not processes: SharingConnectionClosure::wait, SourceStartEntry and
 # SourceEndOwner::wait(deadline), and test gates. Test `child.wait()` reaps
 # the fixture sleeper.
-expected_occurrences = 283
+# +1: the Source direct byte route awaits its Start entry (`entry.wait`), the
+# same in-process outcome wait every Source operation uses. No child process.
+expected_occurrences = 284
 
 [[module_structures]]
 id = "free-or-ufcs-process-lifecycle"

@@ -117,6 +117,13 @@ fn parse_request(bytes: &[u8]) -> Result<RetainedRequest, ApiError> {
     {
         return Err(invalid());
     }
+    // Closed presentation: the ordinary VOD Start, or direct play. Anything
+    // else is refused here rather than forwarded for the Source to refuse.
+    if typed.presentation.as_deref().is_some_and(|value| {
+        value != "vod" && value != super::sharing_direct_wire::DIRECT_PRESENTATION
+    }) {
+        return Err(invalid());
+    }
     let caps = typed.caps.ok_or_else(invalid)?;
     super::stream::validate_device_caps(&caps)?;
     if caps.v != plurx_core::playback::DeviceCaps::VERSION || caps.is_empty() {

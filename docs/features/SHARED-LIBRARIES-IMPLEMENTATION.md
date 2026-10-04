@@ -710,6 +710,9 @@ to the requirement for an active grant.
 | GET/HEAD `/hls/{session}/...`, POST `/hls/{session}/control` | Closed existing HLS resource/control grammar; verify share principal before internal relay |
 | GET/HEAD `/items/{item}/files/{file}/subs/{n}[.vtt]`, `.../subs/{n}/overlay.json`, `.../subs/{n}/overlay/{generation}/objects/{png}`, `.../chapters/{n}/thumb` | Typed subtitle/overlay/chapter suffixes before start; the complete Source reference in one bounded `CinemaShare-Reference` header; active grant, item/file/library membership and exact revision before and after the Local per-file work; no raw file lookup, no session. `direct` and `stream.mp4` are not asset suffixes |
 | GET/HEAD `/playback/{session}/files/{file}/...` | Direct/progressive and other admitted file bytes under §7.3; exact principal/session/recipe |
+
+| GET/HEAD `/items/{item}/files/{file}/...` | Typed subtitle/overlay/chapter suffixes before start; active grant and item/file/library membership, bounded extraction; no raw file lookup |
+| POST `/items/{item}/files/{file}/sessions/{request}/direct` | Admitted direct-play bytes under §7.3, following the `resources` precedent: the exact published Start lineage plus `{method GET\|HEAD, range, if_range}`; Local's 200/206/416 plan and header set. Progressive `stream.mp4` is not served for shared files |
 | GET/POST `/items/{item}/files/{file}/decision` | Existing decision request/response types, grant-check item/file relationship before invoking shared decision service |
 | DELETE `/playback/{id}` | Retire only this grant's session; repeated deletion succeeds |
 
@@ -5230,3 +5233,114 @@ CGNAT fixture (`actual_pinned_playback`) now also fetches a WebVTT through
 B in the native modes, a missing chapter thumbnail, and the `stream.mp4`
 closure; it was not run here.
 
+
+### Shared direct play lane (2026-10-04)
+
+Direct play of a shared file now runs through the Source session machinery
+and is relayed by B with the same Range and HEAD behaviour as Local direct
+play. Progressive `stream.mp4` stays unsupported for shared files (Root
+decision; the assets lane answers it with a typed 422).
+
+**Start.** A viewer asks with the ordinary `CreateSession` body and
+`"presentation":"direct"`. B accepts only `vod` or `direct`. Because the value
+lives inside the retained request, it is part of B's recipe fingerprint and
+of the Source's canonical request identity: the same request ID can never
+replay as HLS (409).
+
+On the Source, `own_start` branches only at preparation.
+`prepare_source_direct` repeats the HLS authority reads (grant, item/file
+witness, revision, planning snapshot) and runs
+`stream::decision_for_source_file` with the player's real caps. Anything but
+`DirectPlay`, a burn or native-subtitle ask, or a media type outside Local's
+audio/video table is refused with `422 sharing_start_unsupported`. B is never
+trusted. Intent, claim, assignment and activation authority are the HLS path's
+own code, so a direct session takes the same per-grant 4 and Source 8 slots.
+
+The owner (`transcode/source_direct.rs`) is a `SourceViewerInner` with a
+`direct` file and no producer. It shares the registry, body ledger,
+`SourceResponseGuard`, retirement and settlement with VOD owners. The
+settlement tail of `run_source_owner` became `finish_source_owner`, used by
+both. It activates and publishes its route like the VOD owner. Its 10 s tick
+renews the lease and retires the session after 300 s with no open body and no
+byte open (the VOD idle bound). Status renews the lease but never counts as
+activity.
+
+The fence is the file. `open_source_playback_fence` opens without following
+links, requires a regular file with the scanner's size and mtime, and pins the
+object version (dev, inode, size, mtime, ctime). Every byte open and every
+Start or status replay re-proves that exact object, and the guard holds the
+fence, so a change mid-body ends the body. A relinked file is refused even when
+its bytes are unchanged; a fresh start plans the new object.
+
+**Source byte route.** `POST …/sessions/{request}/direct` follows the
+`resources` precedent: the exact published lineage plus
+`direct: {method, range, if_range}`. `stream::plan_file_range` and
+`file_range_head` were extracted from `serve_file_range`; Local and Source
+both use them, so 200/206/416 and "If-Range present means ignore Range" cannot
+drift. The exchange is a POST, so the planned Content-Length rides in
+`cinemashare-content-length` and the real Content-Length is the body sent
+(zero for HEAD and 416). The body is `source_file_body` with a start offset
+behind `hold_source_body` and `guard_source_response`. Its read slots
+(`SOURCE_READ_JOBS`) are now awaited rather than tried: a long direct body
+beside segments must queue, not fail mid-stream. Retirement still ends the
+wait at once. A watch state is never written.
+
+**B relay.** `GET/HEAD {file_base}/direct?session=<B UUID>` sits on the public
+media group. The only accepted query is one canonical `session`; a missing
+one is 400 and an unknown one 404. Nothing on this route admits a session or
+dials a Source. The actor must be a direct actor whose recipe equals the
+verified locator's import, lifecycle, item, file and revision. Account headers
+are optional; when present they must authenticate as the intent's viewer. Then
+the HLS relay's own gates apply: `current_delivery_attachment` (original login
+and delivery grant), `retain_accepted_connection`, and an owned counted open
+task. `SourceDirectHead::parse` recomputes B's own plan from the viewer's
+request and the published length, and requires the Source head to equal it
+exactly, lineage echo included. The relayed body has a 30 s idle deadline per
+frame, not a fixed total. It re-chunks to 64 KiB and pulls one upstream frame
+only after the last is handed on. A direct session answers its HLS paths,
+status and control with `422 sharing_resource_unsupported`; DELETE retires it
+as usual.
+
+Range values relay exactly as Local parses them. A value that is not visible
+ASCII travels as the empty value, which Local's parser refuses the same way.
+Only the first two values travel, because a second one already makes a bytes
+Range invalid.
+
+**Deviations from the design, with reasons:**
+
+- No RemoteSourceRecipe v2. The presentation is already in the recipe's
+  `request_json`. A version bump would touch both Core backends and the
+  retirement witness for no new fact.
+- No ControlBootstrap in the direct reply. No control route exists for direct
+  play, Local or shared, so advertising one would be false. The reply carries
+  `session_id` and `control_epoch`, which is all the lineage needs.
+- B refuses a Range value over 16 KiB with 431 before any Source IO. Local
+  would parse it. This is pathological input only.
+- The peer link is HTTP/1, so it has no h2 window. B's public HTTP/2 send
+  buffer is Hyper's default, 400 KiB per stream.
+
+**Proof boundaries.** No settlement is inferred from body EOF, abort or row
+absence; End still waits for the actor's body ledger. A parked read job keeps
+its guard after the response is dropped. A cancelled B waiter loses only the
+answer; the open task keeps the sent request. Status never moves activity.
+
+Evidence on nuc4 (rustc 1.97.1):
+
+- New focused tests, 15 passed, 0 failed:
+  - Source: actual decision required, grant/Source slots,
+    Range parity with Local, If-Range parity, revocation mid-body, read join
+    before the End receipt, symlink/relink/resize refusal (7);
+  - wire: relay preserves Local's plan over 0/1/10/4096-byte files,
+    206/416/HEAD heads exact, closed Start envelope (3);
+  - B: exact session query, binding required, HEAD/Range cannot bypass,
+    idle-deadline body outlives the 30 s resource deadline, slow reader
+    memory bound (5).
+- Affected existing filters (`sharing`, `source_`, `direct_range`,
+  `receiver_`): 306 passed, 8 ignored (the opt-in CGNAT fixtures).
+- Clippy with denied warnings on plurxd and plurx-core, all targets.
+
+Not qualified here: `sharing_receiver_real_pinned_source_direct_range_head_through_b`
+(registered as an opt-in fixture) covers the real pinned B relay, the single
+Source claim across repeated ranges, and logout ending an open body. It needs
+the disposable CGNAT namespace and has not run. Clients, clusters, NAT/DERP
+and devices remain open.

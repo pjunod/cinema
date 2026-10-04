@@ -67,6 +67,7 @@ pub(crate) mod shared_source_playback;
 pub(crate) mod sharing;
 mod sharing_decision_decode;
 pub(crate) use sharing_decision_decode::bounded_decision_value;
+pub(crate) mod sharing_direct_wire;
 #[allow(dead_code)]
 pub(crate) mod sharing_playback_wire;
 #[allow(dead_code)]
@@ -1764,7 +1765,9 @@ pub fn router(state: AppState) -> Router {
         // Shared pre-session file assets, relayed fresh from the Source, and
         // the typed refusal for every shared file suffix B does not serve.
         .merge(shared_receiver_assets::viewer_router(state.clone()))
-        .merge(shared_receiver_assets::closure_router());
+        .merge(shared_receiver_assets::closure_router())
+        // Shared direct play: GET/HEAD bytes bound to an exact B session.
+        .merge(shared_receiver_playback::direct_router());
 
     let api = Router::new()
         .merge(json_short)
