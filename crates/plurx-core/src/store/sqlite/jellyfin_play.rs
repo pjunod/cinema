@@ -257,4 +257,29 @@ impl JellyfinPlayStore for SqliteStore {
         })
         .await
     }
+    async fn withdraw_pending_jellyfin_play(
+        &self,
+        play_id: &str,
+        scope: &JellyfinPlayScope,
+        now_ms: i64,
+    ) -> Result<bool, StoreError> {
+        jp::validate_key(play_id, scope)?;
+        let expiry = jp::terminal_expiry(now_ms)?;
+        let id = play_id.to_owned();
+        let scope = scope.clone();
+        self.with_conn(move |conn| {
+            Ok(conn.execute(
+                jp::WITHDRAW_PENDING,
+                params![
+                    expiry,
+                    id,
+                    scope.user_id,
+                    scope.token_digest,
+                    scope.device_digest,
+                    scope.client_family.as_str()
+                ],
+            )? == 1)
+        })
+        .await
+    }
 }

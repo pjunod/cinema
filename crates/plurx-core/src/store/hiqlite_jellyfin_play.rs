@@ -219,4 +219,28 @@ impl JellyfinPlayStore for HiqliteAuthStore {
             .await?
             == 1)
     }
+    async fn withdraw_pending_jellyfin_play(
+        &self,
+        play_id: &str,
+        scope: &JellyfinPlayScope,
+        now_ms: i64,
+    ) -> Result<bool, StoreError> {
+        jp::validate_key(play_id, scope)?;
+        let expiry = jp::terminal_expiry(now_ms)?;
+        Ok(self
+            .client()
+            .execute(
+                jp::WITHDRAW_PENDING,
+                params!(
+                    expiry,
+                    play_id,
+                    scope.user_id,
+                    &scope.token_digest,
+                    &scope.device_digest,
+                    scope.client_family.as_str()
+                ),
+            )
+            .await?
+            == 1)
+    }
 }

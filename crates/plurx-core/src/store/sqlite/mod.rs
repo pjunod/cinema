@@ -1580,6 +1580,18 @@ impl SqliteStore {
         Ok(count == 1)
     }
 
+    /// v95 adds both watch revision columns and their triggers in one
+    /// transaction, so the first column is evidence for all of it.
+    fn watch_manual_revision_column_exists(conn: &Connection) -> Result<bool, StoreError> {
+        Ok(conn
+            .query_row(
+                "SELECT 1 FROM pragma_table_info('watch_state') WHERE name = 'manual_revision'",
+                [],
+                |_| Ok(()),
+            )
+            .optional()?
+            .is_some())
+    }
     fn dv_request_provenance_column_exists(conn: &Connection) -> Result<bool, StoreError> {
         let shape = conn
             .query_row(
@@ -1644,6 +1656,7 @@ impl SqliteStore {
                 || (version == 47 && Self::video_identity_column_exists(conn)?)
                 || (version == 51 && Self::drain_deadline_column_exists(conn)?)
                 || (version == 90 && Self::dv_request_provenance_column_exists(conn)?)
+                || (version == 95 && Self::watch_manual_revision_column_exists(conn)?)
             {
                 Ok(())
             } else {

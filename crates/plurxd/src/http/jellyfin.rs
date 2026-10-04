@@ -2144,6 +2144,21 @@ mod tests {
             .0,
             StatusCode::NOT_FOUND
         );
+        // The native open-in grant route refuses a Jellyfin link outright.
+        assert_eq!(
+            status_of(
+                &f,
+                request(
+                    "GET",
+                    &format!("/api/v1/grants/{tag}/content"),
+                    None,
+                    Value::Null
+                )
+            )
+            .await
+            .0,
+            StatusCode::NOT_FOUND
+        );
         // A presented login must be the one the link was issued under.
         assert_eq!(
             status_of(&f, request("GET", &url, Some(&f.token), Value::Null))

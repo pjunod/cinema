@@ -190,6 +190,19 @@ async fn jellyfin_scoped_link_grant_resolves_only_its_exact_play_and_observes_st
                 .state,
             "active"
         );
+        // A renegotiation withdraws only an unactivated ask.
+        assert!(!store
+            .withdraw_pending_jellyfin_play(&play.play_id, &play.scope, 2_500)
+            .await
+            .expect("withdraw active"));
+        let mut ask = play.clone();
+        ask.play_id = uuid::Uuid::new_v4().simple().to_string();
+        ask.media_grant_id = None;
+        assert!(store.create_jellyfin_play(ask.clone()).await.expect("ask"));
+        assert!(store
+            .withdraw_pending_jellyfin_play(&ask.play_id, &ask.scope, 2_600)
+            .await
+            .expect("withdraw pending"));
         assert!(store
             .end_jellyfin_play(&play.play_id, &play.scope, 3_000)
             .await

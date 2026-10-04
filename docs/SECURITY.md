@@ -360,10 +360,12 @@ the operator on 2026-10-03 and both off whenever the Developer switch is off:
 - **One-title media links.** A direct-play negotiation, made with a login,
   returns one 256-bit secret as the source `ETag`. It is the token of a native
   one-file grant (only its SHA-256 is stored) for that title and that play.
-  It expires within 24 hours of the negotiation and stops working on `Stop`,
-  on replacement by a newer play, when the switch is saved off, or when its
-  login is revoked or idle-expires (the request re-authenticates that login's
-  digest). It opens only that item's direct bytes. Treat a URL carrying it as
+  It expires within 24 hours of the negotiation, and new requests stop
+  working on `Stop`, on replacement by a newer play, when the switch is saved
+  off, or when its login is revoked or idle-expires (each request
+  re-authenticates that login's digest, which also counts as activity). A
+  response already streaming finishes. The native open-in grant route
+  refuses it. It opens only that item's direct bytes. Treat a URL carrying it as
   a credential for one title for at most a day; it grants nothing else.
 
 Streams for HLS and every subtitle still require the compatibility login on

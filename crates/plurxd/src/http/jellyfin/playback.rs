@@ -144,7 +144,8 @@ fn direct_key(play: &JellyfinPlay) -> crate::delivery::Key {
 async fn release(state: &AppState, play: &JellyfinPlay) -> Result<(), ApiError> {
     if let Some(id) = play.native_incarnation_id.as_deref() {
         if let Some(route) = state.store.media_session_route_by_incarnation(id).await? {
-            if route.user_id == play.negotiation.scope.user_id
+            if route.state != "ended"
+                && route.user_id == play.negotiation.scope.user_id
                 && route.playback_id == play.negotiation.playback_id
             {
                 let status = super::super::hls::release_with_terminal(
@@ -186,50 +187,30 @@ pub(super) async fn activate(
         .map_err(|_| ApiError::Conflict("play selection changed; renegotiate".into()))?;
     if let Some(vod) = selection.get("vod").filter(|v| !v.is_null()) {
         let started = Box::pin(super::startup::create(state, &play, vod)).await?;
-        let route = state
-            .store
-            .media_session_route(&started.session_id)
-            .await?
-            .ok_or(ApiError::Conflict(
-                "native play activation unavailable".into(),
-            ))?;
-        if route.user_id != play.negotiation.scope.user_id
-            || route.playback_id != play.negotiation.playback_id
-        {
-            return Err(ApiError::Conflict("native play owner changed".into()));
-        }
-        state
-            .store
-            .activate_jellyfin_play(
-                &play.negotiation.play_id,
-                &play.negotiation.scope,
-                JellyfinPlayActivation::MediaIncarnation(route.incarnation_id.clone()),
-                now_ms()?,
-            )
-            .await?;
-        let bound = state
-            .store
-            .jellyfin_play(&play.negotiation.play_id, &play.negotiation.scope)
-            .await?;
-        if let Some(bound) = bound.filter(|bound| {
-            bound.state == "active"
-                && bound.native_incarnation_id.as_deref() == Some(route.incarnation_id.as_str())
-                && bound.negotiation.native_request_fingerprint == route.request_fingerprint
-                && bound.negotiation.source_origin_ms == route.media_origin_ms
-        }) {
-            // Another waiter may have bound the same canonical native result first.
-            // This waiter owns neither a replacement nor permission to release it.
+        let outcome = bind_native_start(state, &play, &started.session_id).await;
+        if let Ok(Some(bound)) = outcome {
             release_superseded(state, &bound).await;
             return Ok(bound);
         }
-        super::super::hls::release_with_terminal(
-            state.clone(),
-            started.session_id,
-            crate::vodserve::Terminal::Deleted,
-            "compatibility activation refused",
-        )
-        .await;
-        return Err(ApiError::Conflict("native play activation refused".into()));
+        // Another waiter may have bound the same canonical native result:
+        // this waiter releases the start only when no binding claims it, and
+        // leaves it to native idle expiry when that cannot be established.
+        if matches!(
+            unclaimed_native_start(state, &play, &started.session_id).await,
+            Ok(true)
+        ) {
+            super::super::hls::release_with_terminal(
+                state.clone(),
+                started.session_id,
+                crate::vodserve::Terminal::Deleted,
+                "compatibility activation refused",
+            )
+            .await;
+        }
+        return Err(match outcome {
+            Err(error) => error,
+            Ok(_) => ApiError::Conflict("native play activation refused".into()),
+        });
     }
     let now = now_ms()?;
     let negotiated = play.direct_grant_id.clone();
@@ -295,6 +276,62 @@ pub(super) async fn activate(
     }
     release_superseded(state, &play).await;
     Ok(play)
+}
+/// Bind this play to the native start; `Some` only when the binding is this
+/// exact incarnation, recipe and clock (possibly bound by another waiter).
+async fn bind_native_start(
+    state: &AppState,
+    play: &JellyfinPlay,
+    session_id: &str,
+) -> Result<Option<JellyfinPlay>, ApiError> {
+    let route = state
+        .store
+        .media_session_route(session_id)
+        .await?
+        .ok_or(ApiError::Conflict(
+            "native play activation unavailable".into(),
+        ))?;
+    if route.user_id != play.negotiation.scope.user_id
+        || route.playback_id != play.negotiation.playback_id
+    {
+        return Err(ApiError::Conflict("native play owner changed".into()));
+    }
+    state
+        .store
+        .activate_jellyfin_play(
+            &play.negotiation.play_id,
+            &play.negotiation.scope,
+            JellyfinPlayActivation::MediaIncarnation(route.incarnation_id.clone()),
+            now_ms()?,
+        )
+        .await?;
+    let bound = state
+        .store
+        .jellyfin_play(&play.negotiation.play_id, &play.negotiation.scope)
+        .await?;
+    Ok(bound.filter(|bound| {
+        bound.state == "active"
+            && bound.native_incarnation_id.as_deref() == Some(route.incarnation_id.as_str())
+            && bound.negotiation.native_request_fingerprint == route.request_fingerprint
+            && bound.negotiation.source_origin_ms == route.media_origin_ms
+    }))
+}
+/// `true` only when the start exists and no binding of this play claims it.
+async fn unclaimed_native_start(
+    state: &AppState,
+    play: &JellyfinPlay,
+    session_id: &str,
+) -> Result<bool, ApiError> {
+    let Some(route) = state.store.media_session_route(session_id).await? else {
+        return Ok(false);
+    };
+    let bound = state
+        .store
+        .jellyfin_play(&play.negotiation.play_id, &play.negotiation.scope)
+        .await?;
+    Ok(!bound.is_some_and(|bound| {
+        bound.native_incarnation_id.as_deref() == Some(route.incarnation_id.as_str())
+    }))
 }
 /// Release the exact native session or direct grant of every play this
 /// activation ended. A client that replaces its play without Stopped (an
@@ -980,11 +1017,18 @@ async fn info(
             .jellyfin_play(&wire_id(&previous)?.to_hex(), &scope)
             .await?
         {
-            if previous.state == "pending" {
-                state
+            if previous.state == "pending"
+                && state
                     .store
-                    .end_jellyfin_play(&previous.negotiation.play_id, &scope, now_ms()?)
-                    .await?;
+                    .withdraw_pending_jellyfin_play(
+                        &previous.negotiation.play_id,
+                        &scope,
+                        now_ms()?,
+                    )
+                    .await?
+            {
+                // Withdrawn while still pending, so the snapshot is exact: no
+                // native session can have been bound to it.
                 if let Err(error) = release(state, &previous).await {
                     tracing::warn!(target: "plurxd::jellyfin", ?error, "abandoned negotiation release failed");
                 }

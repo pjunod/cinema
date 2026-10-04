@@ -807,6 +807,22 @@ lifecycle). What they found and what changed:
 | A direct play whose grant expired overnight lost its final Stop | The retirement window applied to revoked grants only | Expired grants keep the same 24 h window |
 | Tombstones grew at a login's request rate | Only the 24 h TTL bounded ended rows | Admission keeps a login's newest 256 tombstones |
 
+A Fable 5.1 review of the main-merged candidate verified every fix above and
+found five more, all fixed:
+
+| Finding | Root cause | Fix |
+|---|---|---|
+| A renegotiation could end an incumbent that activated during startup and strand its native session | The Rust `pending` check was not in the SQL, and release used the pre-END snapshot | `withdraw_pending_jellyfin_play` ends only a still-pending ask, so the snapshot it releases is exact |
+| A standalone node crashing in v95's commit window could never start again | v95 lacked the restartable `ADD COLUMN` guard v41–v90 carry | The guard checks the revision column |
+| `/api/v1/grants/{token}/content` answered a Jellyfin link (a validity oracle) | Links share the native one-file grant table | The open-in route refuses any grant a Jellyfin play owns before saying whether it is live |
+| A failed VOD bind stranded the native start until idle expiry | Only the refused path released | A start no binding claims is released; a claimed or unknowable one is left to its owner |
+| Logout re-released every retained tombstone | Release ran for already-ended native sessions | Release skips a native route that is already ended |
+
+Lower findings kept as documented behavior: using a link counts as activity
+for its login (bounded by the link's 24 h life); a direct grant is minted
+before the pending cap refuses its play and is then revoked; a response already
+streaming finishes after the switch is saved off.
+
 Recorded as design choices rather than defects: a manual mark now bumps every
 row's manual revision even when unchanged (the compatibility fence relies on
 an external no-op mark); a native beat labelled `transcode` no longer touches

@@ -111,6 +111,14 @@ pub trait JellyfinPlayStore: Send + Sync {
         scope: &JellyfinPlayScope,
         now_ms: i64,
     ) -> Result<bool, StoreError>;
+    /// Withdraw an unactivated ask. A play that activated (or published)
+    /// meanwhile is left alone: a renegotiation never ends an incumbent.
+    async fn withdraw_pending_jellyfin_play(
+        &self,
+        play_id: &str,
+        scope: &JellyfinPlayScope,
+        now_ms: i64,
+    ) -> Result<bool, StoreError>;
 }
 fn invalid() -> StoreError {
     StoreError::Identity("invalid compatibility play binding".into())
@@ -356,6 +364,7 @@ AND EXISTS(SELECT 1 FROM jellyfin_entity_ids WHERE wire_id=jellyfin_plays.file_w
 AND EXISTS(SELECT 1 FROM file_grants g WHERE g.id=$1 AND g.user_id=$4 AND g.file_id=jellyfin_plays.file_id AND g.source_token_hash=$5 AND g.revoked_at IS NULL AND g.expires_at>$8/1000)
 "#;
 pub(crate) const END: &str = "UPDATE jellyfin_plays SET state='ended',expires_at_ms=$1 WHERE play_id=$2 AND user_id=$3 AND token_digest=$4 AND device_digest=$5 AND client_family=$6 AND state IN ('pending','active')";
+pub(crate) const WITHDRAW_PENDING: &str = "UPDATE jellyfin_plays SET state='ended',expires_at_ms=$1 WHERE play_id=$2 AND user_id=$3 AND token_digest=$4 AND device_digest=$5 AND client_family=$6 AND state='pending'";
 
 pub(crate) struct RawPlay {
     pub payload: String,
