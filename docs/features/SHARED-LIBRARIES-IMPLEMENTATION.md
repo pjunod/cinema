@@ -4907,3 +4907,17 @@ These are synthetic authenticated protocol tests, not Source physical or
 hardware evidence. Android status compilation is pending the server fixture's
 reserved Docker window; the preceding clean Native checkpoint remains
 `ecebec1d6`. No directed controls or Local fallback are enabled by this slice.
+
+Native status qualification: frozen `1e4b05b39` passed the exact source-only
+Android main/unit/instrumentation Kotlin compiler, all 47 focused Shared,
+context and Local player-policy/surface tests (zero failures, errors or skipped),
+and lint in 5m43. The owned Docker container was released afterward. Both Apple
+Release simulator builds also reported `BUILD SUCCEEDED`; iOS and tvOS each
+passed the final 19-test client/model/context filter. Logs are
+`/private/tmp/sharing-s4-native-status-android.log`,
+`/private/tmp/sharing-s4-native-status-final-ios.log`,
+`/private/tmp/sharing-s4-native-status-final-tvos.log`, and the two
+`/private/tmp/sharing-s4-native-status-release-{ios,tvos}.log` files. The source
+archive is `/private/tmp/plurx-sharing-s4-native-status-source.tar`. These checks
+qualify compilation and synthetic authenticated protocol behavior; the real B
+status relay, paired renderer, directed controls and hardware remain separate.
