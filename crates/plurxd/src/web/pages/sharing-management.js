@@ -143,7 +143,15 @@ function sharingManagementRead(path){return sharingRequest(path).then(v=>path===
 function sharingManagementPanel(data){
   sharingRows(data.sharingImports,"imports",sharingImport);sharingRows(data.sharingExports,"exports",sharingExport);
   if(!SHARING_MANAGEMENT||!sharingCurrent(SHARING_MANAGEMENT.capture))SHARING_MANAGEMENT={capture:sharingCapture(),alive:true,revision:0,editor:null,invitation:null,imports:data.sharingImports.imports,exports:data.sharingExports.exports,next:data.sharingExports.next??null,error:"",busy:false};
-  return setHead("Sharing","Share selected libraries with another Cinema.","")+setCard(`<div id="sharing-management">${sharingManagementHTML()}</div>`)+setCard(`${cardHead("This node","Readiness is advisory. The saved switch remains available in Developer.","")}<p>${esc(data.sharingStatus?.listener||"Readiness unavailable")}</p><a href="#/settings/developer/cinema-sharing-settings">Enable shared libraries in Developer</a>`);
+  return setHead("Sharing","Share selected libraries with another Cinema.","")+setCard(`<div id="sharing-management">${sharingManagementHTML()}</div>`)+setCard(`${cardHead("This node","Readiness is advisory. The saved switch remains available in Developer.","")}<p>${esc(data.sharingStatus?.listener||"Readiness unavailable")}</p>${sharingRecoveryHTML(data.sharingStatus)}<a href="#/settings/developer/cinema-sharing-settings">Enable shared libraries in Developer</a>`);
+}
+// Orphaned shared-playback routes this node recovers after a crash. An
+// observation of this node only; a stranded route keeps its exact lineage.
+function sharingRecoveryHTML(status){
+  const r=status&&status.receiver_recovery;if(!r||typeof r!=="object")return "";
+  const scanned=r.last_scan_at_ms==null?"not yet scanned":"last scan "+new Date(Number(r.last_scan_at_ms)).toLocaleTimeString();
+  const stranded=Array.isArray(r.stranded)?r.stranded:[],flight=Array.isArray(r.in_flight)?r.in_flight.length:0;
+  return `<p>Playback recovery: ${esc(scanned)} · ${esc(String(r.retired_total??0))} retired · ${esc(String(flight))} in progress · ${esc(String(stranded.length))} stranded</p>`+(stranded.length?`<ul>${stranded.map(s=>`<li>${esc(String(s.incarnation_id))}: ${esc(String(s.reason).replaceAll("_"," "))}</li>`).join("")}</ul>`:"");
 }
 function sharingButton(label,action,disabled=false){return `<button class="ghost sm" onclick="${action}"${disabled?" disabled":""}>${esc(label)}</button>`;}
 function sharingInput(label,key,value,kind="text"){

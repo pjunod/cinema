@@ -1961,11 +1961,12 @@ const TABLES: &[TablePlan] = &[
             "endpoint_revision",
             "capability_envelope",
             "source_position_ms",
+            "dispatch_envelope",
         ],
         order_by: "incarnation_id",
         minimum_schema: 92,
         import_filter: None,
-        sealed_columns: &["capability_envelope"],
+        sealed_columns: &["capability_envelope", "dispatch_envelope"],
         parent_first: false,
     },
     TablePlan {
@@ -2851,9 +2852,13 @@ fn unsealed_credential_rows(source: &Connection, table: TablePlan) -> Result<u64
                 value.map_or(
                     matches!(
                         table.sealed_columns[index],
-                        "claim_envelope" | "capability_envelope"
+                        "claim_envelope" | "capability_envelope" | "dispatch_envelope"
                     ),
-                    |value| SealedSecret::from_stored(value).is_wrapped(),
+                    |value| {
+                        // The not-dispatched marker is not a credential.
+                        (table.sealed_columns[index] == "dispatch_envelope" && value == "none")
+                            || SealedSecret::from_stored(value).is_wrapped()
+                    },
                 )
             })
         });

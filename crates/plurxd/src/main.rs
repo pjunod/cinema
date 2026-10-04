@@ -2809,6 +2809,13 @@ fn spawn_background_loops(
 ) {
     tokio::spawn(Arc::clone(&state.sharing).run(state.clone(), background_shutdown.clone()));
     tokio::spawn(Arc::clone(&state.sharing).claim_loop(state.clone(), background_shutdown.clone()));
+    // Crash recovery for orphaned shared-playback receiver routes; ends on drain.
+    tokio::spawn(
+        crate::http::shared_receiver_playback::receiver_recovery_loop(
+            state.clone(),
+            background_shutdown.clone(),
+        ),
+    );
     tokio::spawn(http::file_grants::prune_loop(
         state.clone(),
         background_shutdown.clone(),

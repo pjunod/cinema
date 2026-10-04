@@ -120,7 +120,10 @@ CREATE TABLE sharing_relay_upstream (
     source_incarnation_id TEXT,
     endpoint_revision INTEGER NOT NULL CHECK (endpoint_revision > 0),
     capability_envelope TEXT,
-    source_position_ms INTEGER NOT NULL CHECK (source_position_ms >= 0)
+    source_position_ms INTEGER NOT NULL CHECK (source_position_ms >= 0),
+    -- Durable Source Start dispatch record: activation writes none; a sealed
+    -- Upstream capsule replaces it before the first Start byte; NULL is unknown.
+    dispatch_envelope TEXT
 ) STRICT;
 CREATE TABLE sharing_delivery_grants (
     token_hash TEXT PRIMARY KEY,

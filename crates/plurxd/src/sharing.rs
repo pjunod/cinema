@@ -39,6 +39,22 @@ pub(crate) struct SharingStatus {
     pub tailscale_node_key_expiry: &'static str,
     pub topology_qualification: &'static str,
     pub imports: Vec<ImportTransportStatus>,
+    pub receiver_recovery: ReceiverRecoveryStatus,
+}
+/// What this node's orphaned-receiver recovery owner is doing. Observations
+/// of this process only; a stranded row keeps its durable lineage.
+#[derive(Clone, Default, Serialize)]
+pub(crate) struct ReceiverRecoveryStatus {
+    pub last_scan_at_ms: Option<i64>,
+    pub in_flight: Vec<uuid::Uuid>,
+    pub retired_total: u64,
+    pub stranded: Vec<StrandedReceiver>,
+}
+#[derive(Clone, Serialize)]
+pub(crate) struct StrandedReceiver {
+    pub incarnation_id: String,
+    pub reason: &'static str,
+    pub observed_at_ms: i64,
 }
 pub(crate) struct SharingManager {
     #[allow(dead_code)] // Receiver HTTP registration follows relay qualification.
@@ -52,6 +68,7 @@ pub(crate) struct SharingManager {
     catalogue_cache: Mutex<CatalogueCache>,
     scope_control: Arc<tokio::sync::Semaphore>,
     wake: SharingWake,
+    pub(crate) receiver_recovery: Mutex<ReceiverRecoveryStatus>,
 }
 /// How long the listener loop waits between looks while sharing is off,
 /// unqualified or failed. A local enable cuts it short; the bound is for an
@@ -87,7 +104,7 @@ pub(crate) struct ReceiverSourceStartResult {
     pub credential: plurx_core::secrets::Secret,
     pub viewer_hash: String,
     pub endpoint: plurx_core::sharing::Endpoint,
-    pub source: crate::http::DecodedSourceHlsStart,
+    pub source: crate::http::sharing_direct_wire::DecodedSourceStart,
 }
 pub(crate) async fn enabled(store: &dyn Store) -> Result<bool, StoreError> {
     let result = tokio::time::timeout(
@@ -199,6 +216,43 @@ impl SharingManager {
             .ok_or(PeerError::IdentityMismatch)?
             .clone();
         retain_dispatch(&credential.credential, &viewer, &endpoint)?;
+        // Durable before the first Start byte: a crash after this point must
+        // still be able to authenticate the owed End. Only the exact live
+        // owner can record it; a refusal or an uncertain commit sends nothing.
+        let envelope = crate::http::shared_receiver_playback::seal_dispatch_capsule(
+            &self.key,
+            local.server_id,
+            intent,
+            &credential.credential,
+            &viewer,
+            &endpoint,
+        )
+        .map_err(|_| PeerError::Unavailable)?;
+        let authority = state
+            .store
+            .prepare_receiver_session_authority(intent.clone())
+            .await
+            .map_err(|_| PeerError::Unavailable)?
+            .ok_or(PeerError::Authentication)?;
+        fresh_owner.now_ms = clock_ms();
+        match state
+            .store
+            .record_receiver_dispatch(
+                &authority,
+                &plurx_core::sharing_receiver_sessions::ReceiverDispatchRecord {
+                    owner: fresh_owner,
+                    envelope,
+                },
+            )
+            .await
+            .map_err(|_| PeerError::Unavailable)?
+        {
+            plurx_core::sharing_receiver_sessions::ReceiverSourceWrite::Applied
+            | plurx_core::sharing_receiver_sessions::ReceiverSourceWrite::Replay => {}
+            plurx_core::sharing_receiver_sessions::ReceiverSourceWrite::Refused => {
+                return Err(PeerError::Authentication)
+            }
+        }
         let reply = peer
             .file_start(&credential.credential, &expected, &viewer, request_json)
             .await?;
@@ -232,6 +286,7 @@ impl SharingManager {
                 tailscale_node_key_expiry: "unknown",
                 topology_qualification: "pending",
                 imports: Vec::new(),
+                receiver_recovery: ReceiverRecoveryStatus::default(),
             }),
             network,
             lifetime: Mutex::new(None),
@@ -239,6 +294,7 @@ impl SharingManager {
             catalogue_cache: Mutex::new(CatalogueCache::default()),
             scope_control: Arc::new(tokio::sync::Semaphore::new(32)),
             wake: SharingWake::default(),
+            receiver_recovery: Mutex::new(ReceiverRecoveryStatus::default()),
         }
     }
     #[cfg(all(test, target_os = "linux"))]
@@ -250,7 +306,13 @@ impl SharingManager {
         self.catalogue_cache.lock().expect("cache").entries.len()
     }
     pub fn status(&self) -> SharingStatus {
-        self.status.read().expect("sharing status lock").clone()
+        let mut status = self.status.read().expect("sharing status lock").clone();
+        status.receiver_recovery = self
+            .receiver_recovery
+            .lock()
+            .expect("receiver recovery status")
+            .clone();
+        status
     }
     pub fn disable_bodies(&self) {
         if let Some(token) = self
@@ -491,6 +553,34 @@ pub(crate) fn receiver_source_request(
         return Err(PeerError::InvalidResponse);
     }
     Ok(expected)
+}
+
+/// The canonical private Source Start wrapper for a retained recipe: the
+/// original complete client request with only `request_id` replaced by the
+/// retained Source request UUID. Ingress and crash recovery share it, so the
+/// End a recovered owner sends names exactly the Start that was dispatched.
+pub(crate) fn receiver_source_wrapper(
+    recipe: &plurx_core::sharing_receiver_sessions::RemoteSourceRecipe,
+) -> Result<String, crate::sharing_client::PeerError> {
+    use crate::sharing_client::PeerError;
+    let target = crate::http::hls::SourcePlaybackTarget {
+        server_id: recipe.reference.server_id,
+        catalogue_epoch: recipe.reference.catalogue_epoch,
+        library_id: recipe.reference.library_id.clone(),
+        item_id: recipe.reference.item_id.clone(),
+        file_id: recipe.file_id.clone(),
+        revision: recipe.file_revision.clone(),
+    };
+    let mut session: serde_json::Value =
+        serde_json::from_str(&recipe.request_json).map_err(|_| PeerError::InvalidResponse)?;
+    session
+        .as_object_mut()
+        .ok_or(PeerError::InvalidResponse)?
+        .insert(
+            "request_id".into(),
+            recipe.source_request_id.to_string().into(),
+        );
+    Ok(serde_json::json!({"reference":target,"session":session}).to_string())
 }
 
 /// Versioned ciphertext payload retains the non-secret pairing identity after
@@ -1452,8 +1542,73 @@ fn catalogue_cache_key(
     Ok(writer.0.finalize().into())
 }
 impl SharingManager {
+    /// The current active import, the viewer's assignment to the file's
+    /// library and a verified pinned connection to its Source. Shared by every
+    /// pre-session file read; no offline reply, Local Source ID, B account
+    /// identity or session is sent.
+    async fn assigned_file_peer(
+        &self,
+        state: &AppState,
+        user: i64,
+        reference: &plurx_core::sharing_file_locators::FileLocatorReference,
+    ) -> Result<
+        (
+            plurx_core::sharing::ImportSummary,
+            ImportCredential,
+            crate::sharing_client::PeerConnection,
+        ),
+        crate::sharing_client::PeerError,
+    > {
+        use crate::sharing_client::{PeerConnection, PeerError};
+        if user <= 0 {
+            return Err(PeerError::Authentication);
+        }
+        let import = state
+            .store
+            .sharing_import(reference.item.import_id)
+            .await
+            .map_err(|_| PeerError::Unavailable)?
+            .ok_or(PeerError::Unavailable)?;
+        let summary = &import.summary;
+        if summary.state != "active"
+            || summary.lifecycle_generation != reference.lifecycle_generation
+            || summary.source_server_id != reference.item.server_id
+            || summary.catalogue_epoch != reference.item.catalogue_epoch
+        {
+            return Err(PeerError::Authentication);
+        }
+        self.ensure_current(state, summary).await?;
+        let assigned = state
+            .store
+            .assigned_catalogue_libraries(
+                summary.id,
+                user,
+                summary.lifecycle_generation,
+                summary.assignment_generation,
+            )
+            .await
+            .map_err(|_| PeerError::Unavailable)?;
+        if !assigned.contains(&reference.item.library_id) {
+            return Err(PeerError::Authentication);
+        }
+        let local = state
+            .store
+            .sharing_identity(clock_ms())
+            .await
+            .map_err(|_| PeerError::Unavailable)?;
+        let credentials = ImportCredential::open(self, local.server_id, &import)
+            .map_err(|_| PeerError::Unavailable)?;
+        let expected = plurx_core::sharing::SharingIdentity {
+            server_id: summary.source_server_id,
+            catalogue_epoch: summary.catalogue_epoch,
+            created_at_ms: 0,
+        };
+        let (peer, _) = PeerConnection::verified(self, &summary.endpoints, &expected).await?;
+        self.ensure_current(state, summary).await?;
+        Ok((summary.clone(), credentials, peer))
+    }
+
     /// Fresh assigned-file preflight through the approved pinned Source only.
-    /// No offline reply, Local Source ID, B account identity or session is sent.
     pub async fn read_file_decision(
         &self,
         state: &AppState,
@@ -1467,58 +1622,45 @@ impl SharingManager {
         ),
         crate::sharing_client::PeerError,
     > {
-        use crate::sharing_client::{PeerConnection, PeerError};
+        use crate::sharing_client::PeerError;
         tokio::time::timeout(Duration::from_secs(15), async {
-            if user <= 0 {
-                return Err(PeerError::Authentication);
-            }
             let _permit = self.catalogue_admission.acquire(reference.item.import_id)?;
-            let import = state
-                .store
-                .sharing_import(reference.item.import_id)
-                .await
-                .map_err(|_| PeerError::Unavailable)?
-                .ok_or(PeerError::Unavailable)?;
-            let summary = &import.summary;
-            if summary.state != "active"
-                || summary.lifecycle_generation != reference.lifecycle_generation
-                || summary.source_server_id != reference.item.server_id
-                || summary.catalogue_epoch != reference.item.catalogue_epoch
-            {
-                return Err(PeerError::Authentication);
-            }
-            self.ensure_current(state, summary).await?;
-            let assigned = state
-                .store
-                .assigned_catalogue_libraries(
-                    summary.id,
-                    user,
-                    summary.lifecycle_generation,
-                    summary.assignment_generation,
-                )
-                .await
-                .map_err(|_| PeerError::Unavailable)?;
-            if !assigned.contains(&reference.item.library_id) {
-                return Err(PeerError::Authentication);
-            }
-            let local = state
-                .store
-                .sharing_identity(clock_ms())
-                .await
-                .map_err(|_| PeerError::Unavailable)?;
-            let credentials = ImportCredential::open(self, local.server_id, &import)
-                .map_err(|_| PeerError::Unavailable)?;
-            let expected = plurx_core::sharing::SharingIdentity {
-                server_id: summary.source_server_id,
-                catalogue_epoch: summary.catalogue_epoch,
-                created_at_ms: 0,
-            };
-            let (mut peer, _) =
-                PeerConnection::verified(self, &summary.endpoints, &expected).await?;
-            self.ensure_current(state, summary).await?;
+            let (summary, credentials, mut peer) =
+                self.assigned_file_peer(state, user, reference).await?;
             let reply = peer.file_decision(&credentials.credential, request).await?;
-            self.ensure_current(state, summary).await?;
-            Ok((summary.clone(), reply))
+            self.ensure_current(state, &summary).await?;
+            Ok((summary, reply))
+        })
+        .await
+        .map_err(|_| PeerError::Unavailable)?
+    }
+
+    /// A fresh pinned read of one closed pre-session file asset (subtitle
+    /// WebVTT, PGS overlay manifest or object, chapter thumbnail). The caller
+    /// owns admission; nothing here caches or writes B state.
+    pub(crate) async fn read_file_asset(
+        &self,
+        state: &AppState,
+        user: i64,
+        reference: &plurx_core::sharing_file_locators::FileLocatorReference,
+        target: &crate::http::hls::SourcePlaybackTarget,
+        resource: &plurx_core::sharing_resources::SharingFileResource,
+    ) -> Result<
+        (
+            plurx_core::sharing::ImportSummary,
+            crate::sharing_client::PeerFileAsset,
+        ),
+        crate::sharing_client::PeerError,
+    > {
+        use crate::sharing_client::PeerError;
+        tokio::time::timeout(Duration::from_secs(35), async {
+            let (summary, credentials, mut peer) =
+                self.assigned_file_peer(state, user, reference).await?;
+            let asset = peer
+                .file_asset(&credentials.credential, target, resource)
+                .await?;
+            self.ensure_current(state, &summary).await?;
+            Ok((summary, asset))
         })
         .await
         .map_err(|_| PeerError::Unavailable)?

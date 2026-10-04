@@ -6,7 +6,7 @@ const {test}=require("node:test");
 const source=fs.readFileSync("crates/plurxd/src/web/core/file-context.js","utf8");
 function harness(){
   const context=vm.createContext({AUTH_GENERATION:0});
-  vm.runInContext(source+"\nthis.helper={sharedPlaybackStatusMetrics,localPlaybackFileContext,sharedPlaybackFileContextFromDetail,playbackFileKey,playbackFileUrl,playbackFileApiPath,withPlaybackFileSession,playbackFileDecisionMediaUrl,playbackFileContext,logout(){AUTH_GENERATION++;}};",context);
+  vm.runInContext(source+"\nthis.helper={sharedPlaybackDirectStartContext,sharedPlaybackStatusMetrics,localPlaybackFileContext,sharedPlaybackFileContextFromDetail,playbackFileKey,playbackFileUrl,playbackFileApiPath,withPlaybackFileSession,playbackFileDecisionMediaUrl,playbackFileContext,logout(){AUTH_GENERATION++;}};",context);
   return context.helper;
 }
 const reference={import_id:"11111111-1111-4111-8111-111111111111",server_id:"22222222-2222-4222-8222-222222222222",catalogue_epoch:"33333333-3333-4333-8333-333333333333",library_id:"7",item_id:"9"};
@@ -102,6 +102,7 @@ function callerHarness(capQuery="vcodec=h264,hevc&acodec=aac&container=mp4&hdr=0
     attach(c){PLAYER={fileId:"7",fileContext:c,meta:{fileContext:c},aoffset:0};},
     subtitle:subUrl,thumb:watchChapterThumbUrl,remux:remuxUrl,
     progress(){return reportProgress("7");},next:playNextEpisode,bookNext:playNextAudiobookPart,
+    contract(session){vodClientContract=()=>({session});},
     requests};`,ctx);
   return ctx.calls;
 }
@@ -229,20 +230,28 @@ test("shipped remux and session-start callers preserve legitimate full engine ca
   assert.throws(()=>h.url(shared,"stream.mp4",{vmaxheight:"hevc:999999"}));
 });
 
-test("Shared initial route is session-first HLS and refuses burn HDR or absent capability",()=>{
- const ctx=vm.createContext({AUTH_GENERATION:0,window:{Hls:{isSupported:()=>true}},PLAYER:{},failed:[]});
+test("Shared initial route is direct only for an actual direct decision, else session-first HLS refusing burn HDR or absent capability",()=>{
+ const ctx=vm.createContext({AUTH_GENERATION:0,window:{Hls:{isSupported:()=>true}},PLAYER:{},failed:[],ROUTE:"direct"});
  vm.runInContext(source+`
  const Hls=window.Hls;
  const useNativeHls=()=>false,segmentedRemuxOk=()=>true,copyHlsMseOk=()=>true,noSegments=()=>false;
- const playbackInitialRoute=()=>"direct_play";
+ const playbackInitialRoute=()=>ROUTE;
  `+shippedFunction("player/decode-tiers.js","choosePlayRoute")+`
  this.run=(c,method,grade,burn)=>choosePlayRoute({fileContext:c,video:{},sessionAudioOffset:0,libraryChannel:false,failPreparation:e=>failed.push(e.code)},{decision:{method,delivered_dynamic_range:grade}},{preBurn:burn},null);
- this.shared=sharedPlaybackFileContextFromDetail;`,ctx);
+ this.shared=sharedPlaybackFileContextFromDetail;this.local=localPlaybackFileContext;`,ctx);
  const c=ctx.shared(reference,detail());
- assert.equal(ctx.run(c,"direct_play","sdr",null),"copy_hls");assert.equal(ctx.run(c,"transcode","sdr",null),"transcode_hls");
+ // The browser plays the original container: the Shared route is direct,
+ // whatever the grade, because raw bytes need no Source HDR capability.
+ assert.equal(ctx.run(c,"direct_play","sdr",null),"shared_direct");assert.equal(ctx.run(c,"direct_play","hdr10",null),"shared_direct");
+ assert.equal(ctx.run(ctx.local("7"),"direct_play","sdr",null),"direct");
+ // A direct decision the browser cannot take as a raw file (a non-default
+ // audio track) is Copy HLS, never a progressive remux, for a Shared file.
+ ctx.ROUTE="progressive_remux";assert.equal(ctx.run(c,"direct_play","sdr",null),"copy_hls");ctx.ROUTE="direct";
+ assert.equal(ctx.run(c,"direct_play","sdr",2),null);
+ assert.equal(ctx.run(c,"transcode","sdr",null),"transcode_hls");
  assert.equal(ctx.run(c,"transcode","hdr10",null),null);assert.equal(ctx.run(c,"remux","sdr",0),null);
  ctx.window.Hls.isSupported=()=>false;assert.equal(ctx.run(c,"transcode","sdr",null),null);
- assert.deepEqual(Array.from(ctx.failed),Array(3).fill("sharing_start_unsupported"));
+ assert.deepEqual(Array.from(ctx.failed),Array(4).fill("sharing_start_unsupported"));
 });
 test("shared status metrics are read only from the bound Shared grammar",()=>{
   const h=harness(),id="55555555-5555-4555-8555-555555555555";
@@ -262,4 +271,88 @@ test("shared status metrics are read only from the bound Shared grammar",()=>{
   ]) assert.equal(h.sharedPlaybackStatusMetrics(started,wrong),null);
   assert.equal(h.sharedPlaybackStatusMetrics(h.sharedPlaybackFileContextFromDetail(reference,detail()),reply),null);
   assert.equal(h.sharedPlaybackStatusMetrics(h.localPlaybackFileContext(7),reply),null);
+});
+
+function directReply(id){return {presentation:"direct",session_id:id,url:`${detail().file_base}/direct?session=${id}`,length:4096,mime:"video/mp4"};}
+test("a Shared direct Start reply binds only its own file alias and session",()=>{
+  const h=harness(),c=h.sharedPlaybackFileContextFromDetail(reference,detail()),id="aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+  const bound=h.sharedPlaybackDirectStartContext(c,directReply(id));
+  assert.equal(bound.session_id,id);assert.equal(c.session_id,null);assert.equal(h.playbackFileKey(bound),h.playbackFileKey(c));
+  assert.equal(h.playbackFileUrl(bound,"direct"),directReply(id).url);
+  for(const mutate of [r=>r.presentation="vod",r=>r.url=r.url.replace(id,"bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"),r=>r.url="/api/v1/files/7/direct?session="+id,
+    r=>r.url+="&token=x",r=>r.url=r.url.replace("/direct?","/stream.mp4?"),r=>r.url="https://source"+r.url,r=>r.session_id=id.toUpperCase(),
+    r=>r.length=-1,r=>r.length=Number.MAX_SAFE_INTEGER+1,r=>r.length="4096",r=>r.mime="text/html",r=>r.mime=undefined,
+    r=>r.extra=1,r=>delete r.length,r=>r.playlist_url=`/api/v1/hls/${id}/master.m3u8`])
+  {const r=directReply(id);mutate(r);assert.throws(()=>h.sharedPlaybackDirectStartContext(c,r));}
+  assert.throws(()=>h.sharedPlaybackDirectStartContext(bound,directReply(id)));
+  assert.throws(()=>h.sharedPlaybackDirectStartContext(h.localPlaybackFileContext(7),directReply(id)));
+});
+test("shipped Start caller asks Shared direct play without HLS-only or subtitle fields",async()=>{
+  const h=callerHarness(),shared=h.shared(reference,detail());h.attach(shared);
+  h.contract({presentation:"vod",block_budget_secs:8});
+  await h.start(shared,{presentation:"direct",start:3,audio:0,native_subtitles:true,subtitle:1,copy:true,height:720});
+  const r=h.requests[0];assert.equal(r.url,detail().file_base.slice(7)+"/hls/sessions");
+  assert.equal(r.options.body.presentation,"direct");assert.equal(r.options.body.start,3);assert.equal(r.options.body.audio,0);
+  for(const field of ["block_budget_secs","transport","height","copy","native_subtitles","subtitle"])assert.ok(!Object.hasOwn(r.options.body,field),field);
+  await h.start(shared,{start:3,copy:true});assert.equal(h.requests[1].options.body.presentation,"vod");
+});
+test("Shared direct attachment polls no status, starts no control, DELETEs its B session and restarts once",async()=>{
+  const ctx=vm.createContext({AUTH_GENERATION:0,console});
+  const functions=[["player/directed-change.js",["releaseSession","releaseSharedDirect","attachSharedDirect","restartSharedDirectAfterError"]],
+    ["player/decode-margin.js",["beginPlaybackMediaAttachment"]],["player/stats.js",["pollSessionHealth"]]]
+    .flatMap(([file,names])=>names.map(name=>shippedFunction(file,name))).join("\n");
+  vm.runInContext(source+"\n"+functions+`
+    const API="/api/v1",TOKEN="t",log=[],deletes=[],apis=[],changes=[];let PLAYER=null;
+    const document={getElementById(){return null;}};
+    function fetch(url,o){deletes.push({url,method:o.method,keepalive:o.keepalive});return Promise.resolve();}
+    async function api(url){apis.push(url);return {};}
+    function playbackOwnsAttachedMedia(p){return !!p;}function playbackWaitSurfaceLive(){return false;}function updateStats(){}
+    function stopPlaybackControl(){log.push("stop-control");}function startPlaybackControl(){log.push("start-control");}
+    function renderPlayerInfo(){}function resetMediaSource(){log.push("reset");}function setPlaybackMediaSource(v,url){v.src=url;}
+    function markPlaybackControlSeekExecuted(){}function applyPlaybackTransportIntent(){}
+    function applyPlaybackAttachmentPosition(v,t,a,at){if(a.current())log.push("position:"+at);}
+    function playbackSurfaceStep(){}function playbackSurfaceGeneration(){return 1;}
+    function positionForPlaybackIntent(v){return v.currentTime;}function beginPlaybackControlSeek(){}
+    function clientLog(){}function playbackContext(){return {};}
+    function requestPlaybackMediaChange(p,change){changes.push(change);return Promise.resolve(true);}
+    this.t={shared:sharedPlaybackFileContextFromDetail,local:localPlaybackFileContext,bind:sharedPlaybackDirectStartContext,
+      attach:attachSharedDirect,restart:restartSharedDirectAfterError,release:releaseSharedDirect,poll:pollSessionHealth,
+      set(p){PLAYER=p;},log,deletes,apis,changes};`,ctx);
+  const t=ctx.t,c=t.shared(reference,detail()),sid="aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",sid2="bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
+  const info=id=>{const r=directReply(id);Object.defineProperty(r,"_sharedContext",{value:t.bind(c,r)});return r;};
+  const p={fileId:"7",fileContext:c,meta:{fileContext:c},method:"direct_play",sessionId:null,streamId:null};t.set(p);
+  const v={src:"",currentTime:42,onloadedmetadata:null};
+  assert.equal(t.attach(v,p,info(sid),42),42);
+  assert.equal(v.src,directReply(sid).url);assert.equal(p.sessionId,null);assert.equal(p.vod,false);assert.equal(p.copyHls,false);
+  assert.equal(p.fileContext.session_id,sid);assert.equal(p.meta.fileContext,p.fileContext);assert.equal(p.sharedDirect.session_id,sid);
+  assert.ok(t.log.includes("stop-control"));assert.ok(!t.log.includes("start-control"));
+  await t.poll(true);assert.equal(t.apis.length,0);
+  // No restart before the attachment reached a timeline, nor on a decode or
+  // format error, which keep the compatibility rescue.
+  assert.equal(t.restart(v,p,2),false);
+  v.onloadedmetadata();assert.ok(t.log.includes("position:42"));
+  assert.equal(t.restart(v,p,3),false);assert.equal(t.restart(v,p,4),false);
+  v.currentTime=1234.5;assert.equal(t.restart(v,p,2),true);assert.equal(t.restart(v,p,2),false);
+  assert.equal(t.changes.length,1);assert.equal(t.changes[0].sharedDirect,true);assert.equal(t.changes[0].method,"direct_play");
+  assert.equal(t.deletes.length,0);
+  // The fresh session's attachment retires the unreadable one exactly once,
+  // and fails before metadata without another restart.
+  t.attach(v,p,info(sid2),1234.5);
+  assert.deepEqual(Array.from(t.deletes,d=>[d.url,d.method,d.keepalive]),[[`/api/v1/hls/${sid}`,"DELETE",true]]);
+  assert.equal(p.sharedDirect.session_id,sid2);assert.equal(t.restart(v,p,2),false);assert.equal(t.changes.length,1);
+  await t.poll(true);assert.equal(t.apis.length,0);
+  // Stop releases the live session once.
+  t.release(p);t.release(p);
+  assert.deepEqual(Array.from(t.deletes,d=>d.url),[`/api/v1/hls/${sid}`,`/api/v1/hls/${sid2}`]);assert.equal(p.sharedDirect,null);
+  // An unbound, retargeted or HLS reply, and a Local player, are refused.
+  const q={fileId:"7",fileContext:c,meta:{}};t.set(q);
+  assert.throws(()=>t.attach(v,q,{...directReply(sid)},0));
+  const moved=info(sid);moved.url=detail().file_base+"/direct";assert.throws(()=>t.attach(v,q,moved,0));
+  const hls=info(sid);hls.presentation="vod";assert.throws(()=>t.attach(v,q,hls,0));
+  const local={fileId:"7",fileContext:t.local("7"),meta:{}};t.set(local);assert.throws(()=>t.attach(v,local,info(sid),0));
+  assert.equal(t.deletes.length,2);
+  // Every owner that ends a player or its media releases the direct session.
+  assert.match(shippedFunction("player/stats.js","closePlayer"),/releaseSharedDirect\(PLAYER\)/);
+  assert.match(shippedFunction("player/decode-margin.js","retirePlaybackPredecessor"),/releaseSharedDirect\(predecessor\)/);
+  assert.match(shippedFunction("player/decode-tiers.js","preparePlayOutgoing"),/releaseSharedDirect\(outgoing\)/);
 });

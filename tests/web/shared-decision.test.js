@@ -117,3 +117,45 @@ test("ordinary B Start playlist retains only closed unique native subtitle diagn
   else await assert.rejects(h.start(c,startBody(h)));
  }
 });
+
+// Shared direct play: the same Start route, `presentation:"direct"`, and B's
+// closed five-field reply. Synthetic envelopes, as above.
+const dsid="eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee";
+function directReply(id=dsid){return {presentation:"direct",session_id:id,url:`${base}/direct?session=${id}`,length:9007199254740991,mime:"video/mp4"};}
+function directBody(h){return {...startBody(h),presentation:"direct"};}
+test("synthetic direct Start binds only the exact five-field B reply to its own file alias",async()=>{
+ const h=harness((u,o)=>response(o.method==='GET'?detail():JSON.stringify(directReply()),u)),c=(await h.details(ref)).files[0].context,r=await h.start(c,directBody(h));
+ assert.equal(h.requests[1].url,'https://b.test'+base+'/hls/sessions');assert.equal(JSON.parse(h.requests[1].options.body).presentation,'direct');
+ assert.equal(r._sharedContext.session_id,dsid);assert.equal(r.url,base+'/direct?session='+dsid);assert.equal(r.length,9007199254740991);assert.equal(c.session_id,null);
+ assert.equal(h.key(r._sharedContext),h.key(c));
+ for(const mutate of [r=>r.presentation='vod',r=>r.url=`${base}/direct?session=${sid}`,r=>r.url=`/api/v1/files/7/direct?session=${dsid}`,
+   r=>r.url=`${base}/direct?session=${dsid}&token=x`,r=>r.url=`https://source.test${base}/direct?session=${dsid}`,r=>r.url=`${base}/stream.mp4?session=${dsid}`,
+   r=>r.session_id=dsid.toUpperCase(),r=>r.session_id=dsid.replace('4eee','1eee'),r=>r.length=-1,r=>r.length=1.5,r=>r.length='7',r=>r.length=9007199254740992,
+   r=>r.mime='text/html',r=>r.control={url:`/api/v1/hls/${dsid}/control`},r=>delete r.mime,r=>r.playlist_url=`/api/v1/hls/${dsid}/master.m3u8`]){
+  const reply=directReply();mutate(reply);const x=harness((u,o)=>response(o.method==='GET'?detail():JSON.stringify(reply),u)),xc=(await x.details(ref)).files[0].context;
+  await assert.rejects(x.start(xc,directBody(x)));assert.equal(xc.session_id,null);
+ }
+ // A direct ask never accepts an HLS reply, and an HLS ask never a direct one.
+ const a=harness((u,o)=>response(o.method==='GET'?detail():JSON.stringify(startReply()),u));await assert.rejects(a.start((await a.details(ref)).files[0].context,directBody(a)));
+ const b=harness((u,o)=>response(o.method==='GET'?detail():JSON.stringify(directReply()),u));await assert.rejects(b.start((await b.details(ref)).files[0].context,startBody(b)));
+ // Closed presentation vocabulary and no subtitle ask on raw bytes, refused before any request.
+ const d=harness(),dc=(await d.details(ref)).files[0].context;
+ for(const body of [{...directBody(d),presentation:'live'},{...directBody(d),native_subtitles:true}])await assert.rejects(d.start(dc,body),e=>e.code==='sharing_start_unsupported');
+ assert.equal(d.requests.length,1);
+});
+test("an expired direct play restarts as a fresh Start of its base file under the accepted login only",async()=>{
+ const second='ffffffff-ffff-4fff-8fff-ffffffffffff';let starts=0;
+ const h=harness((u,o)=>{if(o.method==='GET')return response(detail('9007199254740993','1'),u);if(u.endsWith('/hls/sessions'))return response(JSON.stringify(++starts===1?directReply():starts===2?directReply(second):startReply()),u);return response('{}',u);});
+ const c=(await h.details(ref)).files[0].context,first=(await h.start(c,directBody(h)))._sharedContext;
+ assert.equal(await h.progress(first,1000,90000,false),true);
+ h.leave();
+ const next=(await h.start(first,{...directBody(h),request_id:'dddddddd-dddd-4ddd-8ddd-dddddddddddd'}))._sharedContext;
+ assert.equal(h.requests.at(-1).url,'https://b.test'+base+'/hls/sessions');assert.equal(next.session_id,second);assert.equal(h.key(next),h.key(c));
+ assert.equal(await h.progress(next,2000,90000,false),true);
+ assert.deepEqual(h.requests.filter(r=>r.url.endsWith('/progress')).map(r=>JSON.parse(r.options.body).session_id),[dsid,second]);
+ // A compatibility move from direct to Copy HLS is also a fresh Start; an
+ // HLS-bound context is not a direct session and gets no generic replacement.
+ const hls=(await h.start(next,startBody(h)))._sharedContext;assert.equal(hls.session_id,sid);
+ const n=h.requests.length;await assert.rejects(h.start(hls,startBody(h)));assert.equal(h.requests.length,n);
+ h.change();await assert.rejects(h.start(next,directBody(h)));assert.equal(h.requests.length,n);
+});

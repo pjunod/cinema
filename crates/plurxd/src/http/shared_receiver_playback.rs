@@ -20,6 +20,18 @@ use uuid::Uuid;
 mod control;
 #[path = "shared_receiver_retirement.rs"]
 mod retirement;
+pub(crate) use retirement::receiver_recovery_loop;
+#[path = "shared_receiver_direct.rs"]
+mod direct;
+
+/// Shared direct play on the public media group, beside the Shared start:
+/// GET/HEAD bytes for the exact B session bound to this file alias.
+pub(crate) fn direct_router() -> axum::Router<AppState> {
+    axum::Router::new().route(
+        "/shared/imports/{import}/files/{locator}/direct",
+        axum::routing::get(direct::receiver_direct).head(direct::receiver_direct),
+    )
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum ReceiverStartError {
@@ -44,6 +56,9 @@ struct SettledReceiverAttempt {
 }
 struct ReceiverStartInner {
     intent: ReceiverSessionIntent,
+    /// The retained recipe asks for direct play: no HLS relay, status or
+    /// control; only the `{file_base}/direct` byte relay.
+    direct: bool,
     peer_session: crate::sharing_client::SourcePeerSession,
     request_id: String,
     fingerprint: String,
@@ -67,7 +82,7 @@ enum ReceiverClaimStage {
 #[derive(Default)]
 struct ReceiverStartState {
     claim: ReceiverClaimStage,
-    start: Option<Result<StartResponse, ReceiverStartError>>,
+    start: Option<Result<ReceiverPublished, ReceiverStartError>>,
     // Never discarded on publication failure or loss of the original login.
     source: Option<ReceiverSourceAttachment>,
     received: Option<Arc<ReceivedSource>>,
@@ -101,12 +116,168 @@ struct DispatchedSource {
     viewer_hash: String,
     endpoint: plurx_core::sharing::Endpoint,
 }
+/// Upstream capability sealed into the attached binding (Upstream purpose,
+/// B-server/import AAD). It exists in cleartext only inside the capsule.
+#[derive(serde::Serialize)]
+struct UpstreamCapsuleOut<'a> {
+    version: u8,
+    reference: &'a plurx_core::sharing_catalogue::SharedReference,
+    file_id: &'a plurx_core::sharing::SourceId,
+    file_revision: &'a plurx_core::sharing_catalogue_details::FileRevision,
+    source_request_id: Uuid,
+    source_session_id: Uuid,
+    source_incarnation_id: Uuid,
+    source_owner_epoch: u64,
+    viewer_hash: &'a str,
+    endpoint: &'a plurx_core::sharing::Endpoint,
+    credential: &'a str,
+}
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct UpstreamCapsule {
+    version: u8,
+    reference: plurx_core::sharing_catalogue::SharedReference,
+    file_id: plurx_core::sharing::SourceId,
+    file_revision: plurx_core::sharing_catalogue_details::FileRevision,
+    #[serde(deserialize_with = "plurx_core::sharing::canonical_uuid")]
+    source_request_id: Uuid,
+    #[serde(deserialize_with = "plurx_core::sharing::canonical_uuid")]
+    source_session_id: Uuid,
+    #[serde(deserialize_with = "plurx_core::sharing::canonical_uuid")]
+    source_incarnation_id: Uuid,
+    source_owner_epoch: u64,
+    viewer_hash: String,
+    endpoint: plurx_core::sharing::Endpoint,
+    #[serde(deserialize_with = "plurx_core::sharing::wire_secret")]
+    credential: plurx_core::secrets::Secret,
+}
+/// Dispatch facts sealed before the first Start byte (same purpose and AAD
+/// as the upstream capsule; the closed `kind` keeps the two apart).
+#[derive(serde::Serialize)]
+struct DispatchCapsuleOut<'a> {
+    version: u8,
+    kind: &'static str,
+    reference: &'a plurx_core::sharing_catalogue::SharedReference,
+    file_id: &'a plurx_core::sharing::SourceId,
+    file_revision: &'a plurx_core::sharing_catalogue_details::FileRevision,
+    source_request_id: Uuid,
+    viewer_hash: &'a str,
+    endpoint: &'a plurx_core::sharing::Endpoint,
+    credential: &'a str,
+}
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct DispatchCapsule {
+    version: u8,
+    kind: String,
+    reference: plurx_core::sharing_catalogue::SharedReference,
+    file_id: plurx_core::sharing::SourceId,
+    file_revision: plurx_core::sharing_catalogue_details::FileRevision,
+    #[serde(deserialize_with = "plurx_core::sharing::canonical_uuid")]
+    source_request_id: Uuid,
+    viewer_hash: String,
+    endpoint: plurx_core::sharing::Endpoint,
+    #[serde(deserialize_with = "plurx_core::sharing::wire_secret")]
+    credential: plurx_core::secrets::Secret,
+}
+const DISPATCH_CAPSULE_KIND: &str = "receiver_dispatch";
+/// Seal the facts a recovered owner needs to send the End this dispatch owes.
+pub(crate) fn seal_dispatch_capsule(
+    key: &plurx_core::secrets::CredentialKey,
+    server: Uuid,
+    intent: &ReceiverSessionIntent,
+    credential: &plurx_core::secrets::Secret,
+    viewer_hash: &str,
+    endpoint: &plurx_core::sharing::Endpoint,
+) -> Result<plurx_core::secrets::SealedSecret, ReceiverStartError> {
+    let recipe = &intent.recipe;
+    let capsule = plurx_core::secrets::Secret::from_cleartext(
+        serde_json::to_string(&DispatchCapsuleOut {
+            version: 1,
+            kind: DISPATCH_CAPSULE_KIND,
+            reference: &recipe.reference,
+            file_id: &recipe.file_id,
+            file_revision: &recipe.file_revision,
+            source_request_id: recipe.source_request_id,
+            viewer_hash,
+            endpoint,
+            credential: credential.expose(),
+        })
+        .map_err(|_| ReceiverStartError::Unresolved)?,
+    );
+    key.seal_sharing(
+        SharingSecretPurpose::Upstream,
+        server,
+        intent.scope.import_id,
+        capsule.expose(),
+    )
+    .map_err(|_| ReceiverStartError::Unresolved)
+}
 struct ReceivedSource {
     credential: plurx_core::secrets::Secret,
     viewer_hash: String,
     endpoint: plurx_core::sharing::Endpoint,
     incarnation: Uuid,
-    response: StartResponse,
+    start: ReceivedStart,
+}
+/// The Source Start B received, of the presentation its recipe names.
+enum ReceivedStart {
+    Hls(Box<StartResponse>),
+    Direct(crate::http::sharing_direct_wire::SourceDirectStart),
+}
+impl ReceivedSource {
+    fn hls(&self) -> Option<&StartResponse> {
+        match &self.start {
+            ReceivedStart::Hls(response) => Some(response.as_ref()),
+            ReceivedStart::Direct(_) => None,
+        }
+    }
+    fn direct(&self) -> Option<&crate::http::sharing_direct_wire::SourceDirectStart> {
+        match &self.start {
+            ReceivedStart::Direct(direct) => Some(direct),
+            ReceivedStart::Hls(_) => None,
+        }
+    }
+    fn lineage(
+        &self,
+    ) -> Result<crate::sharing_client::SourcePeerLineage, crate::sharing_client::PeerError> {
+        match &self.start {
+            ReceivedStart::Hls(response) => {
+                crate::sharing_client::SourcePeerLineage::from_start(self.incarnation, response)
+            }
+            ReceivedStart::Direct(direct) => {
+                crate::sharing_client::SourcePeerLineage::from_direct(self.incarnation, direct)
+            }
+        }
+    }
+    /// The received Source session UUID and owner epoch.
+    fn source_tuple(&self) -> Result<(Uuid, u64), ReceiverStartError> {
+        let (session, epoch) = match &self.start {
+            ReceivedStart::Hls(response) => (
+                response.session_id.as_str(),
+                response
+                    .control
+                    .as_ref()
+                    .ok_or(ReceiverStartError::Unresolved)?
+                    .control_epoch,
+            ),
+            ReceivedStart::Direct(direct) => (
+                direct.session_id.as_str(),
+                u64::try_from(direct.control_epoch).map_err(|_| ReceiverStartError::Unresolved)?,
+            ),
+        };
+        Ok((
+            Uuid::parse_str(session).map_err(|_| ReceiverStartError::Unresolved)?,
+            epoch,
+        ))
+    }
+}
+/// What B published to its viewer: the ordinary Start or the direct reply.
+#[derive(Clone, serde::Serialize)]
+#[serde(untagged)]
+pub(crate) enum ReceiverPublished {
+    Hls(Box<StartResponse>),
+    Direct(crate::http::sharing_direct_wire::SharedDirectStart),
 }
 #[derive(Clone)]
 pub(crate) struct ReceiverStartActor(Arc<ReceiverStartInner>);
@@ -121,6 +292,18 @@ impl ReceiverStartRegistry {
                     .end_confirmation
                     .as_ref()
                     .is_some_and(|proof| proof.session_id() == session)
+            })
+    }
+    /// A live (not yet retired) local actor owns this Source request. Crash
+    /// recovery never claims such a route: that actor is its owner.
+    fn holds(&self, incarnation: Uuid) -> bool {
+        self.entries
+            .lock()
+            .expect("receiver registry")
+            .iter()
+            .any(|entry| {
+                entry.intent.recipe.source_request_id == incarnation
+                    && !entry.state.lock().expect("receiver owner").retired
             })
     }
     pub(crate) fn by_session(&self, session: Uuid) -> Option<ReceiverStartActor> {
@@ -267,8 +450,10 @@ impl ReceiverStartRegistry {
         if entries.len() >= 8 {
             return Err(ReceiverStartError::Capacity);
         }
+        let direct = peer_session.is_direct();
         let entry = Arc::new(ReceiverStartInner {
             intent,
+            direct,
             peer_session,
             request_id,
             fingerprint,
@@ -283,7 +468,36 @@ impl ReceiverStartRegistry {
         Ok((entry, true))
     }
 }
+/// Whether a receiver session's recipe names exactly this signed file: import,
+/// lifecycle, Source item, file and revision. A session for another file, or
+/// for an earlier revision or lifecycle of this one, binds nothing here.
+pub(crate) fn recipe_binds_file(
+    intent: &ReceiverSessionIntent,
+    reference: &plurx_core::sharing_file_locators::FileLocatorReference,
+) -> bool {
+    let recipe = &intent.recipe;
+    intent.scope.import_id == reference.item.import_id
+        && recipe.reference == reference.item
+        && recipe.lifecycle_generation == reference.lifecycle_generation
+        && recipe.file_id == reference.file_id
+        && recipe.file_revision == reference.revision
+}
 impl ReceiverStartActor {
+    /// A file asset requested under `session=` is bound when this live
+    /// session plays exactly that file and its delivery attachment (original
+    /// login and delivery grant) is still current. Answers the session's
+    /// viewer and original login; it creates and changes nothing.
+    pub(crate) async fn bound_file_viewer(
+        &self,
+        state: &AppState,
+        reference: &plurx_core::sharing_file_locators::FileLocatorReference,
+    ) -> Result<(i64, String), ReceiverStartError> {
+        if !recipe_binds_file(&self.0.intent, reference) {
+            return Err(ReceiverStartError::Conflict);
+        }
+        self.current_delivery_attachment(state).await?;
+        Ok((self.0.intent.user_id, self.0.intent.login_hash.clone()))
+    }
     async fn current_delivery_attachment(
         &self,
         state: &AppState,
@@ -550,11 +764,9 @@ impl ReceiverStartActor {
         )
         .await
         .map_err(|_| ReceiverStartError::Unresolved)?;
-        let known = crate::sharing_client::SourcePeerLineage::from_start(
-            received.incarnation,
-            &received.response,
-        )
-        .map_err(|_| ReceiverStartError::Unresolved)?;
+        let known = received
+            .lineage()
+            .map_err(|_| ReceiverStartError::Unresolved)?;
         let opened = peer
             .file_resource(
                 &received.credential,
@@ -614,11 +826,9 @@ impl ReceiverStartActor {
         )
         .await
         .map_err(|_| ReceiverStartError::Unresolved)?;
-        let known = crate::sharing_client::SourcePeerLineage::from_start(
-            received.incarnation,
-            &received.response,
-        )
-        .map_err(|_| ReceiverStartError::Unresolved)?;
+        let known = received
+            .lineage()
+            .map_err(|_| ReceiverStartError::Unresolved)?;
         peer.file_status(
             &received.credential,
             &received.viewer_hash,
@@ -670,12 +880,7 @@ impl ReceiverStartActor {
         };
         let known = received
             .as_ref()
-            .map(|source| {
-                crate::sharing_client::SourcePeerLineage::from_start(
-                    source.incarnation,
-                    &source.response,
-                )
-            })
+            .map(|source| source.lineage())
             .transpose()
             .map_err(|_| RetirementStep::Refused)?;
         let mut connection = crate::sharing_client::CleanupPeerConnection::connect(
@@ -702,7 +907,7 @@ impl ReceiverStartActor {
     pub(crate) async fn wait_ready(
         &self,
         deadline: Instant,
-    ) -> Result<StartResponse, ReceiverStartError> {
+    ) -> Result<ReceiverPublished, ReceiverStartError> {
         loop {
             if self.0.stop.is_cancelled() {
                 return Err(ReceiverStartError::Unresolved);
@@ -892,43 +1097,55 @@ async fn run_owner(
             }
         }
     };
-    let (_, source_incarnation, response) = result.source.into_parts();
+    let (source_incarnation, start) = match result.source {
+        crate::http::sharing_direct_wire::DecodedSourceStart::Hls(decoded) => {
+            let (_, incarnation, response) = (*decoded).into_parts();
+            (incarnation, ReceivedStart::Hls(Box::new(response)))
+        }
+        crate::http::sharing_direct_wire::DecodedSourceStart::Direct(decoded) => {
+            let (_, incarnation, direct) = decoded.into_parts();
+            (incarnation, ReceivedStart::Direct(direct))
+        }
+    };
     let received = Arc::new(ReceivedSource {
         credential: result.credential,
         viewer_hash: result.viewer_hash,
         endpoint: result.endpoint,
         incarnation: source_incarnation,
-        response,
+        start,
     });
     entry.state.lock().expect("receiver owner").received = Some(received.clone());
     if entry.stop.is_cancelled() {
         return Err(ReceiverStartError::Unresolved);
     }
-    if received.response.media_origin_ms != Some(0) || !received.response.vod {
+    // The presentation received must be the one this recipe asked for.
+    if entry.direct != received.direct().is_some()
+        || received
+            .hls()
+            .is_some_and(|response| response.media_origin_ms != Some(0) || !response.vod)
+    {
         return Err(ReceiverStartError::Unresolved);
     }
-    let source_session = Uuid::parse_str(&received.response.session_id)
-        .map_err(|_| ReceiverStartError::Unresolved)?;
-    let source_epoch = received
-        .response
-        .control
-        .as_ref()
-        .ok_or(ReceiverStartError::Unresolved)?
-        .control_epoch;
+    let (source_session, source_epoch) = received.source_tuple()?;
     let local = state
         .store
         .sharing_identity(clock_ms())
         .await
         .map_err(|_| ReceiverStartError::Unresolved)?;
     let capability = plurx_core::secrets::Secret::from_cleartext(
-        serde_json::to_string(&serde_json::json!({
-            "version":1, "reference":intent.recipe.reference, "file_id":intent.recipe.file_id,
-            "file_revision":intent.recipe.file_revision, "source_request_id":incarnation,
-            "source_session_id":source_session, "source_incarnation_id":source_incarnation,
-            "source_owner_epoch":source_epoch, "viewer_hash":received.viewer_hash,
-            "endpoint":received.endpoint,
-            "credential":received.credential.expose(),
-        }))
+        serde_json::to_string(&UpstreamCapsuleOut {
+            version: 1,
+            reference: &intent.recipe.reference,
+            file_id: &intent.recipe.file_id,
+            file_revision: &intent.recipe.file_revision,
+            source_request_id: incarnation,
+            source_session_id: source_session,
+            source_incarnation_id: source_incarnation,
+            source_owner_epoch: source_epoch,
+            viewer_hash: &received.viewer_hash,
+            endpoint: &received.endpoint,
+            credential: received.credential.expose(),
+        })
         .map_err(|_| ReceiverStartError::Unresolved)?,
     );
     let envelope = state
@@ -973,14 +1190,29 @@ async fn run_owner(
     let source_status = ReceiverStartActor(entry.clone())
         .current_source_status_owned(&state, connection_lifetime.clone())
         .await?;
-    let projected = project_shared_start(
-        source_status.response().clone(),
-        source_session,
-        attachment.owner.session_id,
-        incarnation,
-        attachment.owner.owner_epoch,
-    )
-    .map_err(|_| ReceiverStartError::Unresolved)?;
+    let projected = match (received.direct(), source_status.response()) {
+        (Some(direct), None) => {
+            // Status must still name the received direct session exactly.
+            if source_status.direct() != Some(direct) {
+                return Err(ReceiverStartError::Unresolved);
+            }
+            ReceiverPublished::Direct(
+                direct::project_direct_start(&state, intent, attachment.owner.session_id, direct)
+                    .await?,
+            )
+        }
+        (None, Some(response)) => ReceiverPublished::Hls(Box::new(
+            project_shared_start(
+                response.clone(),
+                source_session,
+                attachment.owner.session_id,
+                incarnation,
+                attachment.owner.owner_epoch,
+            )
+            .map_err(|_| ReceiverStartError::Unresolved)?,
+        )),
+        _ => return Err(ReceiverStartError::Unresolved),
+    };
     let authority = state
         .store
         .prepare_receiver_session_authority(intent.clone())
@@ -1201,6 +1433,20 @@ pub(crate) async fn receiver_media(
         return next.run(request).await;
     }
     let actor = actor.expect("actual receiver actor");
+    // A direct session is retired here like any session, but it has no HLS
+    // playlist, segment, status or control to relay.
+    if actor.0.direct
+        && !(suffix.is_empty()
+            && request.method() == Method::DELETE
+            && request.uri().query().is_none())
+    {
+        return super::error::ApiError::typed(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "sharing_resource_unsupported",
+            "This shared playback is direct play",
+        )
+        .into_response();
+    }
     if suffix.is_empty() && request.method() == Method::DELETE && request.uri().query().is_none() {
         actor.begin_retirement(
             Arc::new(state),

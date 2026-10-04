@@ -1310,6 +1310,34 @@ pub(crate) fn record_background_overrun(pool: &str) {
     }
 }
 
+/// Orphaned shared-playback receiver recovery outcomes, in index order.
+pub(crate) const RECEIVER_ORPHAN_OUTCOMES: [&str; 3] = ["retired", "stranded", "lost"];
+
+static RECEIVER_ORPHANS: [AtomicU64; RECEIVER_ORPHAN_OUTCOMES.len()] =
+    [const { AtomicU64::new(0) }; RECEIVER_ORPHAN_OUTCOMES.len()];
+
+/// Count one orphaned receiver route outcome: retired after a confirmed
+/// Source End, newly stranded (kept and reported), or lost to another owner.
+pub(crate) fn record_receiver_orphan(outcome: &str) {
+    if let Some(index) = RECEIVER_ORPHAN_OUTCOMES
+        .iter()
+        .position(|label| *label == outcome)
+    {
+        RECEIVER_ORPHANS[index].fetch_add(1, Ordering::Relaxed);
+    }
+}
+
+fn render_receiver_orphans(out: &mut String) {
+    render_counters(
+        out,
+        "plurx_sharing_receiver_orphan_total",
+        "Orphaned shared-playback receiver routes by recovery outcome: retired after a confirmed Source End, newly stranded and kept, or lost to another owner.",
+        "outcome",
+        &RECEIVER_ORPHAN_OUTCOMES,
+        &RECEIVER_ORPHANS,
+    );
+}
+
 fn render_background_overruns(out: &mut String) {
     render_counters(
         out,
@@ -2042,6 +2070,7 @@ pub fn prometheus() -> String {
     metrics.push_str(&SUBTITLE_SOURCE_METRICS.render());
     metrics.push_str(&START_OUTCOME_COUNTERS.render());
     render_background_overruns(&mut metrics);
+    render_receiver_orphans(&mut metrics);
     metrics
 }
 

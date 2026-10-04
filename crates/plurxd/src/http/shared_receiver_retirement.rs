@@ -5,6 +5,9 @@ use plurx_core::sharing_receiver_retirement::{
     ReceiverRetirementOutcome, ReceiverRetirementReason, ReceiverRetirementWitness,
 };
 use sha2::{Digest, Sha256};
+#[path = "shared_receiver_orphans.rs"]
+mod orphans;
+pub(crate) use orphans::receiver_recovery_loop;
 
 /// How many failed attempts one retirement owner makes before it stops.
 /// Bounded work on a detached owner, never on an admission path.

@@ -2738,6 +2738,18 @@ pub async fn subtitles_vtt(
         .parse::<i64>()
         .map_err(|_| ApiError::NotFound("subtitle track"))?;
     let file = load_file(&state, id).await?;
+    subtitle_vtt_for_file(&state, &file, index).await
+}
+
+/// One text track of an already-resolved file as WebVTT. Local callers resolve
+/// the file by ID after login; the shared Source resolves it only after its
+/// grant/item/file/revision witness.
+pub(crate) async fn subtitle_vtt_for_file(
+    state: &AppState,
+    file: &MediaFile,
+    index: i64,
+) -> Result<Response, ApiError> {
+    let id = file.id;
     let stream = file
         .subtitle_streams
         .get(index as usize)
@@ -2752,7 +2764,7 @@ pub async fn subtitles_vtt(
 
     let bytes = crate::subtitles::ensure_vtt_bytes_with_store(
         &state.subs_dir,
-        &file,
+        file,
         index,
         &state.subtitle_source_access(),
         SUBTITLE_TRACK_FOR_A_VIEWER,
@@ -3359,6 +3371,74 @@ fn range_decimal(value: &str) -> Result<u64, ()> {
     }))
 }
 
+/// The byte answer one raw-file request receives. Local direct play and the
+/// shared Source direct lane derive it from the same inputs with the same
+/// function, so their 200/206/416 and If-Range behaviour cannot drift.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum FileRangePlan {
+    /// The whole representation (also every HEAD and every ignored Range).
+    Full,
+    /// One satisfiable inclusive byte range.
+    Partial { start: u64, end: u64 },
+    /// A Range this file cannot satisfy (416).
+    Unsatisfiable,
+}
+
+/// Plan a raw-file response. HEAD never ranges; an If-Range precondition
+/// cannot authorize a partial response because these routes publish no
+/// strong validator, so the Range is ignored and the whole file is sent.
+pub(crate) fn plan_file_range(headers: &HeaderMap, method: &Method, len: u64) -> FileRangePlan {
+    if method != Method::GET {
+        return FileRangePlan::Full;
+    }
+    match parse_range(headers, len) {
+        Err(()) => FileRangePlan::Unsatisfiable,
+        Ok(Some((start, end))) => FileRangePlan::Partial { start, end },
+        Ok(None) => FileRangePlan::Full,
+    }
+}
+
+/// The exact status and header set a planned raw-file response carries.
+/// Shared by Local direct play and the Source direct lane.
+pub(crate) fn file_range_head(
+    plan: FileRangePlan,
+    len: u64,
+    ctype: &str,
+) -> (StatusCode, Vec<(header::HeaderName, String)>) {
+    match plan {
+        FileRangePlan::Unsatisfiable => (
+            StatusCode::RANGE_NOT_SATISFIABLE,
+            vec![
+                (header::CONTENT_RANGE, format!("bytes */{len}")),
+                (header::ACCEPT_RANGES, "bytes".to_owned()),
+                (header::CONTENT_LENGTH, "0".to_owned()),
+            ],
+        ),
+        FileRangePlan::Partial { start, end } => (
+            StatusCode::PARTIAL_CONTENT,
+            vec![
+                (header::CONTENT_TYPE, ctype.to_owned()),
+                (header::ACCEPT_RANGES, "bytes".to_owned()),
+                (header::CONTENT_LENGTH, (end - start + 1).to_string()),
+                (header::CONTENT_RANGE, format!("bytes {start}-{end}/{len}")),
+            ],
+        ),
+        FileRangePlan::Full => (
+            StatusCode::OK,
+            vec![
+                (header::CONTENT_TYPE, ctype.to_owned()),
+                (header::ACCEPT_RANGES, "bytes".to_owned()),
+                (header::CONTENT_LENGTH, len.to_string()),
+            ],
+        ),
+    }
+}
+
+/// The media type a raw-file response names for `path`.
+pub(crate) fn file_content_type(path: &Path) -> &'static str {
+    content_type(path)
+}
+
 /// HTTP range serving of a file (direct play). Shared by the native part
 /// endpoint and the Plex-compat `/library/parts/...` endpoint.
 pub(crate) async fn serve_file_range(
@@ -3379,65 +3459,33 @@ pub(crate) async fn serve_file_range(
         return Err(ApiError::NotFound("file on disk"));
     }
     let ctype = content_type(path);
-
-    let range = if method == Method::GET {
-        parse_range(headers, len)
-    } else {
-        Ok(None)
-    };
-    match range {
-        Err(()) => Ok((
-            StatusCode::RANGE_NOT_SATISFIABLE,
-            [
-                (header::CONTENT_RANGE, format!("bytes */{len}")),
-                (header::ACCEPT_RANGES, "bytes".to_owned()),
-                (header::CONTENT_LENGTH, "0".to_owned()),
-            ],
-            Body::empty(),
-        )
-            .into_response()),
-        Ok(Some((start, end))) => {
-            let count = end - start + 1;
+    let plan = plan_file_range(headers, method, len);
+    let body = match plan {
+        FileRangePlan::Unsatisfiable => Body::empty(),
+        FileRangePlan::Partial { start, end } => {
             fh.seek(std::io::SeekFrom::Start(start))
                 .await
                 .map_err(|e| ApiError::Internal(e.to_string()))?;
-            let stream = tokio_util::io::ReaderStream::with_capacity(
-                fh.take(count),
+            Body::from_stream(tokio_util::io::ReaderStream::with_capacity(
+                fh.take(end - start + 1),
                 crate::media_sessions::MEDIA_BODY_READ_BUFFER,
-            );
-            Ok((
-                StatusCode::PARTIAL_CONTENT,
-                [
-                    (header::CONTENT_TYPE, ctype.to_owned()),
-                    (header::ACCEPT_RANGES, "bytes".to_owned()),
-                    (header::CONTENT_LENGTH, count.to_string()),
-                    (header::CONTENT_RANGE, format!("bytes {start}-{end}/{len}")),
-                ],
-                Body::from_stream(stream),
-            )
-                .into_response())
+            ))
         }
-        Ok(None) => {
-            let body = if method == Method::HEAD {
-                Body::empty()
-            } else {
-                Body::from_stream(tokio_util::io::ReaderStream::with_capacity(
-                    fh,
-                    crate::media_sessions::MEDIA_BODY_READ_BUFFER,
-                ))
-            };
-            Ok((
-                StatusCode::OK,
-                [
-                    (header::CONTENT_TYPE, ctype.to_owned()),
-                    (header::ACCEPT_RANGES, "bytes".to_owned()),
-                    (header::CONTENT_LENGTH, len.to_string()),
-                ],
-                body,
-            )
-                .into_response())
-        }
+        FileRangePlan::Full if method == Method::HEAD => Body::empty(),
+        FileRangePlan::Full => Body::from_stream(tokio_util::io::ReaderStream::with_capacity(
+            fh,
+            crate::media_sessions::MEDIA_BODY_READ_BUFFER,
+        )),
+    };
+    let (status, headers) = file_range_head(plan, len, ctype);
+    let mut response = (status, body).into_response();
+    for (name, value) in headers {
+        response.headers_mut().insert(
+            name,
+            HeaderValue::from_str(&value).map_err(|e| ApiError::Internal(e.to_string()))?,
+        );
     }
+    Ok(response)
 }
 
 // --- remux ------------------------------------------------------------------

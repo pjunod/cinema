@@ -1,7 +1,12 @@
 //! Closed Source session RPC data. Constructors convey no producer authority.
 use super::*;
 use crate::http::hls::{SourcePlaybackTarget, StartResponse};
+use crate::http::sharing_direct_wire::SourceDirectStart;
 use serde_json::{json, Value};
+
+#[path = "sharing_direct_client.rs"]
+mod direct;
+pub(crate) use direct::SourcePeerDirect;
 
 const MAX_REPLY: usize = 16 * 1024;
 const MAX_EPOCH: i64 = 9_007_199_254_740_991;
@@ -67,6 +72,10 @@ impl SourcePeerSession {
             session,
         })
     }
+    /// Whether this exact Source request is a direct-play start.
+    pub(crate) fn is_direct(&self) -> bool {
+        crate::http::sharing_direct_wire::session_presentation_is_direct(&self.session)
+    }
     fn end_body(&self, lineage: Option<&SourcePeerLineage>) -> Result<Vec<u8>, PeerError> {
         let mut value = json!({"reference":self.reference,"session":self.session});
         if let Some(lineage) = lineage {
@@ -108,6 +117,40 @@ impl SourcePeerLineage {
             || session_id.to_string() != response.session_id
             || !(1..=MAX_EPOCH).contains(&control_epoch)
         {
+            return Err(PeerError::InvalidResponse);
+        }
+        Ok(Self {
+            incarnation_id,
+            session_id,
+            control_epoch,
+        })
+    }
+}
+
+impl SourcePeerLineage {
+    /// The lineage of a published Source direct session.
+    pub(crate) fn from_direct(
+        incarnation_id: Uuid,
+        direct: &SourceDirectStart,
+    ) -> Result<Self, PeerError> {
+        direct.validate().map_err(|_| PeerError::InvalidResponse)?;
+        let session_id =
+            Uuid::parse_str(&direct.session_id).map_err(|_| PeerError::InvalidResponse)?;
+        Self::from_capsule(
+            incarnation_id,
+            session_id,
+            u64::try_from(direct.control_epoch).map_err(|_| PeerError::InvalidResponse)?,
+        )
+    }
+    /// The same lineage checks as [`Self::from_start`], applied to the facts
+    /// a recovered owner opened from its sealed upstream capsule.
+    pub(crate) fn from_capsule(
+        incarnation_id: Uuid,
+        session_id: Uuid,
+        control_epoch: u64,
+    ) -> Result<Self, PeerError> {
+        let control_epoch = i64::try_from(control_epoch).map_err(|_| PeerError::InvalidResponse)?;
+        if !v4(incarnation_id) || !v4(session_id) || !(1..=MAX_EPOCH).contains(&control_epoch) {
             return Err(PeerError::InvalidResponse);
         }
         Ok(Self {
@@ -471,7 +514,8 @@ mod tests {
 // Authenticated live metadata from the original retained Source session. This
 // receipt is neither physical settlement nor a receiver publication grant.
 pub(crate) struct SourceStatusReceipt {
-    response: StartResponse,
+    response: Option<StartResponse>,
+    direct: Option<SourceDirectStart>,
 }
 impl SourceStatusReceipt {
     fn parse(
@@ -479,6 +523,21 @@ impl SourceStatusReceipt {
         session: &SourcePeerSession,
         known: &SourcePeerLineage,
     ) -> Result<Self, PeerError> {
+        if session.is_direct() {
+            let decoded = crate::http::sharing_direct_wire::DecodedSourceDirectStart::parse(
+                bytes,
+                &session.reference,
+            )
+            .map_err(|_| PeerError::InvalidResponse)?;
+            let (_, incarnation, direct) = decoded.into_parts();
+            if &SourcePeerLineage::from_direct(incarnation, &direct)? != known {
+                return Err(PeerError::InvalidResponse);
+            }
+            return Ok(Self {
+                response: None,
+                direct: Some(direct),
+            });
+        }
         let decoded = crate::http::decode_source_start_response(bytes, &session.reference)
             .map_err(|_| PeerError::InvalidResponse)?;
         let (_, incarnation, response) = decoded.into_parts();
@@ -488,10 +547,16 @@ impl SourceStatusReceipt {
         {
             return Err(PeerError::InvalidResponse);
         }
-        Ok(Self { response })
+        Ok(Self {
+            response: Some(response),
+            direct: None,
+        })
     }
-    pub(crate) fn response(&self) -> &StartResponse {
-        &self.response
+    pub(crate) fn response(&self) -> Option<&StartResponse> {
+        self.response.as_ref()
+    }
+    pub(crate) fn direct(&self) -> Option<&SourceDirectStart> {
+        self.direct.as_ref()
     }
 }
 impl PeerConnection {
@@ -617,7 +682,10 @@ mod status_tests {
         let encode = |v: &Value| serde_json::to_vec(v).expect("wire response");
         let receipt =
             SourceStatusReceipt::parse(&encode(&value), &session, &known).expect("actual shape");
-        assert_eq!(receipt.response().session_id, known.session_id.to_string());
+        assert_eq!(
+            receipt.response().expect("HLS status").session_id,
+            known.session_id.to_string()
+        );
         for key in ["incarnation_id", "session_id", "control_epoch"] {
             let mut foreign = known.clone();
             match key {

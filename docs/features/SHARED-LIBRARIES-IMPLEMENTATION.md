@@ -708,8 +708,11 @@ to the requirement for an active grant.
 | GET `/playback/requests/{id}` | Recover exact start outcome, scoped by grant and viewer identity |
 | POST `/playback/{id}/control`, POST `/playback/{id}/selection` | Existing typed lifecycle and selection semantics |
 | GET/HEAD `/hls/{session}/...`, POST `/hls/{session}/control` | Closed existing HLS resource/control grammar; verify share principal before internal relay |
-| GET/HEAD `/items/{item}/files/{file}/...` | Typed subtitle/overlay/chapter suffixes before start; active grant and item/file/library membership, bounded extraction; no raw file lookup |
+| GET/HEAD `/items/{item}/files/{file}/subs/{n}[.vtt]`, `.../subs/{n}/overlay.json`, `.../subs/{n}/overlay/{generation}/objects/{png}`, `.../chapters/{n}/thumb` | Typed subtitle/overlay/chapter suffixes before start; the complete Source reference in one bounded `CinemaShare-Reference` header; active grant, item/file/library membership and exact revision before and after the Local per-file work; no raw file lookup, no session. `direct` and `stream.mp4` are not asset suffixes |
 | GET/HEAD `/playback/{session}/files/{file}/...` | Direct/progressive and other admitted file bytes under §7.3; exact principal/session/recipe |
+
+| GET/HEAD `/items/{item}/files/{file}/...` | Typed subtitle/overlay/chapter suffixes before start; active grant and item/file/library membership, bounded extraction; no raw file lookup |
+| POST `/items/{item}/files/{file}/sessions/{request}/direct` | Admitted direct-play bytes under §7.3, following the `resources` precedent: the exact published Start lineage plus `{method GET\|HEAD, range, if_range}`; Local's 200/206/416 plan and header set. Progressive `stream.mp4` is not served for shared files |
 | GET/POST `/items/{item}/files/{file}/decision` | Existing decision request/response types, grant-check item/file relationship before invoking shared decision service |
 | DELETE `/playback/{id}` | Retire only this grant's session; repeated deletion succeeds |
 
@@ -5043,7 +5046,7 @@ as by a committed cluster leave, so these owners observe one drain token.
 
 Open after this review:
 
-- Nothing sweeps an expired receiver row that still has a relay binding; maintenance keeps such rows on purpose. This is part of the section 4 crash and restart work.
+- Nothing sweeps an expired receiver row that still has a relay binding; maintenance keeps such rows on purpose. This is part of the section 4 crash and restart work. Addressed by "B orphaned receiver crash recovery" below.
 - `WriterSettlement::Abandoned` is recorded but not yet read. A panicked writer should become a rendition failure.
 - A stuck retirement or settlement is reported only in the log. It belongs in Settings, Developer.
 
@@ -5051,3 +5054,353 @@ The Encoded and Native text lanes now run through the real pinned B
 (`sharing_receiver_real_pinned_source_encoded_and_native_lanes_through_b`). The
 Source fixture media is 320x180, so both recipes stay inside the v1 control
 height contract (144 to 2160).
+
+### B orphaned receiver crash recovery (2026-10-04)
+
+Closes the first open item of the ownership review above. A receiver owner
+that crashed, or whose in-process retirement stalled, left its RemoteSource
+route, relay binding, job lease and request behind for good. Maintenance keeps
+bound rows on purpose. The local takeover CAS excludes `remote_source` recipes.
+The credential, viewer and endpoint needed to authenticate the owed Source End
+lived only in the dead process.
+
+**Durable dispatch record.** `sharing_relay_upstream.dispatch_envelope` is new
+in the unreleased sharing schema (no marker bump; v70/v92 are not on `main`).
+Activation writes `none`. `start_file_source` seals `{credential, viewer,
+endpoint, Source request}` under the Upstream purpose and B-server/import AAD.
+`record_receiver_dispatch` stores it after `retain_dispatch` and before
+`file_start`. The record needs fresh original-login authority and the exact
+live blocked owner, epoch and lease. It replaces `none` once, replays exactly
+and refuses anything else. A refusal or an error sends nothing. NULL means
+unknown. The sealed census, cluster import plan and migration census carry the
+column; `none` is not a credential. A never-dispatched retirement now also
+requires the durable `none`.
+
+**Inventory and claim (Core, both backends).** `orphaned_receiver_sessions`
+is a read-only keyset page (at most 16) of routes whose lease is 60 s past
+expiry, or whose owner node carries a removal key, with a matching job lease
+and pending or attached binding. Partial bindings, unknown dispatch and
+undecodable rows are reported and never claimed.
+
+`claim_orphaned_receiver_session` asserts the exact observed row, then moves
+owner, epoch+1 and a 180 s lease onto this node in one transaction. It
+revokes delivery grants and drops old-epoch pins. It never changes state,
+publication or the discontinuity sequence. Commit-unknown is decided by an
+exact re-read. Every old-epoch writer matches node and epoch, so the claim
+fences them all:
+
+- pending renewal;
+- dispatch record;
+- attach, publish and renew;
+- retirement.
+
+**Retirement reuse, not adoption.** `receiver_recovery_loop` is spawned
+beside the claim loop, not in the maintenance tick. It runs with sharing off,
+ticks every 30 s, takes batches of 8 and runs two attempts at a time. Drain is
+observed between attempts. For each orphan:
+
+1. A live local registry actor for the same Source request is its owner, so the
+   loop skips the route.
+2. End material is opened **before** claiming, so a node that cannot open a
+   capsule never takes a route it cannot settle.
+   - Attached: the upstream capsule's Source session and incarnation must equal
+     the binding columns. `SourcePeerLineage::from_capsule` applies the
+     `from_start` checks.
+   - Pending with a sealed dispatch: a lost-Start End without lineage.
+   - Pending with `none`: the committed claim is the no-send proof, because the
+     dead owner's record needs its own epoch.
+3. The claim runs.
+4. `CleanupPeerConnection::end` runs, with `RetirementBudget` and
+   `RetirementStep::from_source_end` as the live owner uses them.
+5. The exact `retire_receiver_session` witness is applied. A refusal refreshes
+   only a lease that maintenance moved while node, epoch and session stay ours.
+
+Recovery never calls `start_file_source`, never creates a registry actor and
+never attaches, publishes, renews or delivers. A Source refusal, an exhausted
+budget, an unopenable capsule or unknown dispatch keeps the rows and reports
+them as stranded.
+
+`receiver_source_wrapper` is shared by ingress and recovery, so a recovered End
+names exactly the dispatched Start.
+
+**Visibility.** `/sharing/status` gains `receiver_recovery`:
+
+- `last_scan_at_ms`;
+- `in_flight`;
+- `retired_total`;
+- `stranded`, with incarnation and reason, bounded at 32.
+
+The Sharing settings "This node" card renders it. The new metric is
+`plurx_sharing_receiver_orphan_total{outcome=retired|stranded|lost}`. A
+stranded route is logged once as a warning, with no credential material. The
+design's pause setting is deliberately absent.
+
+Evidence on nuc4 (rustc 1.97.1):
+
+- Core `--lib sharing_receiver_orphan`/`sharing_receiver_dispatch`: six tests
+  over memory/pooled SQLite × retained/rebuilt principal layouts (grace and
+  removal key, foreign fence and recipe, exclusive claim and fenced old-epoch
+  writers, maintenance-ended row, dispatch record replay/refusal and census,
+  attached retirement with other routes unchanged and read-only replay,
+  keyset paging and stranded/unreadable rows).
+- `--test store_contract sharing_receiver_orphan_three_voters_exclusive_claim_fence_and_confirmed_retire`:
+  two concurrent claims through the actual Raft log, exactly one wins; old
+  renewal, dispatch record and retirement refuse; confirmed retirement and
+  read-only replay.
+- Daemon: `receiver_source_wrapper_matches_ingress_prepare`,
+  `receiver_orphan_capsule_rejects_foreign_aad_and_lineage`,
+  `receiver_orphan_sweeper_skips_live_local_actor`,
+  `receiver_orphan_sweeper_never_retires_without_end_receipt` (claimed, End
+  unanswered, drain: binding and lease kept), `receiver_orphan_sweeper_never_adopts_producer`
+  (never-dispatched route retired with no actor, publication or delivery;
+  unknown dispatch kept and reported), `receiver_orphan_sweeper_observes_drain`.
+- The real pinned CGNAT fixtures (`..._h1_b_h1_h2_start_resources_and_confirmed_end`,
+  `..._encoded_and_native_lanes_through_b`) pass with the dispatch record in
+  the Start path.
+
+Not qualified: a process-level SIGKILL of a published or pending B daemon
+followed by restart. `tests/sharing_daemon_restart.rs` restarts paired
+daemons but has no shared-playback harness. Clusters, NAT/DERP and devices
+remain open, as above.
+
+### Shared pre-session assets and typed file-suffix closure (2026-10-04)
+
+The Assets lane of the direct/progressive/pre-session design. Subtitles,
+PGS overlays and chapter thumbnails now reach a shared viewer before any
+session exists, and every shared file suffix B does not serve refuses typed.
+
+**Source (A).** `shared_source_assets` mounts the four asset suffixes of
+§5.4 on the peer router under `source_content_guard`, with the 30 s resource
+deadline and a 16-permit admission (429 `sharing_asset_capacity`). The
+complete `SourcePlaybackTarget` travels in one `cinemashare-reference` header
+of at most 1 KiB; path item/file must equal it. Authority is the decision's,
+now factored as `shared_playback::source_file_authority` /
+`SourceFileAuthority::still_current` and used by both: active grant,
+grant-visible item/file witness, signed revision, switch on — checked before
+the work and again after it, then `attach_source_file_authority` scopes the
+body to the file. Only an admitted witness turns the Source file number into
+a Local `get_file`. The work is the Local per-file code, split out without
+behaviour change for Local callers: `stream::subtitle_vtt_for_file` (bitmap
+tracks refused), `pgs_overlay::manifest_for_file`/`object_for_file` (switch,
+pgs-v1 track check, 202 while cold, generation bound to track and revision)
+and `chapter_thumbs::serve_for_file` (switch, cache, failure memo, permits).
+
+Design deviations, following the code:
+
+- The Source `MediaFile` comes from `get_file`, not
+  `playback_planning_snapshot`: assets need no planning settings, and the
+  pre/post witness already binds the revision.
+- No extra detached task was added. Subtitle extraction and overlay
+  preparation already run in owned, cached flights that outlive the request.
+  A chapter extraction is bounded in-request (10 s permit wait + 15 s
+  extraction) inside the 30 s route deadline, so it is never cut short by it.
+
+**Receiver (B).** `shared_receiver_assets` mounts the same four suffixes
+under each signed file base on the media group, under
+`receiver_content_guard`. The caller is the signed-in viewer (header or
+`?token=`) or `?session=` naming a live receiver session whose recipe binds
+exactly this import, lifecycle, item, file and revision
+(`recipe_binds_file`) and whose delivery attachment is current
+(`ReceiverStartActor::bound_file_viewer`); an account sent with a session
+must be that session's viewer. The query is closed (one `token`, one
+canonical `session`). `SharingManager::read_file_asset` shares the
+import/assignment/pinned-connection preflight with `read_file_decision`
+(`assigned_file_peer`) and asks the Source through
+`PeerConnection::file_asset`. That client accepts only 200 with exactly one
+`Content-Type` from the closed set and one `Content-Length` within the cap:
+
+- WebVTT: 2 MiB, `text/vtt; charset=utf-8`, leading `WEBVTT`, UTF-8.
+- Manifest: 1 MiB, `application/json`.
+- PNG objects and JPEG thumbnails: 1 MiB, with their magic bytes checked.
+
+Identity encoding only, exact length, and 202 only for a manifest. Refusal
+bodies are drained and never relayed. B projects the manifest through
+`project_shared_overlay`, which keeps the generation and relative object
+names and replaces the file ID. Bodies carry a file-scoped
+`ReceiverContentAuthority` for the reaching login
+(`attach_receiver_file_authority`) and `Cache-Control: no-store`. There is
+no B cache. B admission is its own 16-permit semaphore, not
+`catalogue_admission`, whose one-per-import rule would refuse a watch page's
+parallel chapter thumbnails.
+
+**Typed closure.** `shared_receiver_assets::closure_router` answers
+`stream.mp4` (permanently) and `direct` (one marked arm for the direct lane
+to replace) with `422 sharing_resource_unsupported`. It does so for every
+method, HEAD included, before any import, locator, account or Local lookup.
+
+Evidence on nuc4: see the commit message for the exact test run. The ignored
+CGNAT fixture (`actual_pinned_playback`) now also fetches a WebVTT through
+B in the native modes, a missing chapter thumbnail, and the `stream.mp4`
+closure; it was not run here.
+
+
+### Shared direct play lane (2026-10-04)
+
+Direct play of a shared file now runs through the Source session machinery
+and is relayed by B with the same Range and HEAD behaviour as Local direct
+play. Progressive `stream.mp4` stays unsupported for shared files (Root
+decision; the assets lane answers it with a typed 422).
+
+**Start.** A viewer asks with the ordinary `CreateSession` body and
+`"presentation":"direct"`. B accepts only `vod` or `direct`. Because the value
+lives inside the retained request, it is part of B's recipe fingerprint and
+of the Source's canonical request identity: the same request ID can never
+replay as HLS (409).
+
+On the Source, `own_start` branches only at preparation.
+`prepare_source_direct` repeats the HLS authority reads (grant, item/file
+witness, revision, planning snapshot) and runs
+`stream::decision_for_source_file` with the player's real caps. Anything but
+`DirectPlay`, a burn or native-subtitle ask, or a media type outside Local's
+audio/video table is refused with `422 sharing_start_unsupported`. B is never
+trusted. Intent, claim, assignment and activation authority are the HLS path's
+own code, so a direct session takes the same per-grant 4 and Source 8 slots.
+
+The owner (`transcode/source_direct.rs`) is a `SourceViewerInner` with a
+`direct` file and no producer. It shares the registry, body ledger,
+`SourceResponseGuard`, retirement and settlement with VOD owners. The
+settlement tail of `run_source_owner` became `finish_source_owner`, used by
+both. It activates and publishes its route like the VOD owner. Its 10 s tick
+renews the lease and retires the session after 300 s with no open body and no
+byte open (the VOD idle bound). Status renews the lease but never counts as
+activity.
+
+The fence is the file. `open_source_playback_fence` opens without following
+links, requires a regular file with the scanner's size and mtime, and pins the
+object version (dev, inode, size, mtime, ctime). Every byte open and every
+Start or status replay re-proves that exact object, and the guard holds the
+fence, so a change mid-body ends the body. A relinked file is refused even when
+its bytes are unchanged; a fresh start plans the new object.
+
+**Source byte route.** `POST …/sessions/{request}/direct` follows the
+`resources` precedent: the exact published lineage plus
+`direct: {method, range, if_range}`. `stream::plan_file_range` and
+`file_range_head` were extracted from `serve_file_range`; Local and Source
+both use them, so 200/206/416 and "If-Range present means ignore Range" cannot
+drift. The exchange is a POST, so the planned Content-Length rides in
+`cinemashare-content-length` and the real Content-Length is the body sent
+(zero for HEAD and 416). The body is `source_file_body` with a start offset
+behind `hold_source_body` and `guard_source_response`. Its read slots
+(`SOURCE_READ_JOBS`) are now awaited rather than tried: a long direct body
+beside segments must queue, not fail mid-stream. Retirement still ends the
+wait at once. A watch state is never written.
+
+**B relay.** `GET/HEAD {file_base}/direct?session=<B UUID>` sits on the public
+media group. The only accepted query is one canonical `session`; a missing
+one is 400 and an unknown one 404. Nothing on this route admits a session or
+dials a Source. The actor must be a direct actor whose recipe equals the
+verified locator's import, lifecycle, item, file and revision. Account headers
+are optional; when present they must authenticate as the intent's viewer. Then
+the HLS relay's own gates apply: `current_delivery_attachment` (original login
+and delivery grant), `retain_accepted_connection`, and an owned counted open
+task. `SourceDirectHead::parse` recomputes B's own plan from the viewer's
+request and the published length, and requires the Source head to equal it
+exactly, lineage echo included. The relayed body has a 30 s idle deadline per
+frame, not a fixed total. It re-chunks to 64 KiB and pulls one upstream frame
+only after the last is handed on. A direct session answers its HLS paths,
+status and control with `422 sharing_resource_unsupported`; DELETE retires it
+as usual.
+
+Range values relay exactly as Local parses them. A value that is not visible
+ASCII travels as the empty value, which Local's parser refuses the same way.
+Only the first two values travel, because a second one already makes a bytes
+Range invalid.
+
+**Deviations from the design, with reasons:**
+
+- No RemoteSourceRecipe v2. The presentation is already in the recipe's
+  `request_json`. A version bump would touch both Core backends and the
+  retirement witness for no new fact.
+- No ControlBootstrap in the direct reply. No control route exists for direct
+  play, Local or shared, so advertising one would be false. The reply carries
+  `session_id` and `control_epoch`, which is all the lineage needs.
+- B refuses a Range value over 16 KiB with 431 before any Source IO. Local
+  would parse it. This is pathological input only.
+- The peer link is HTTP/1, so it has no h2 window. B's public HTTP/2 send
+  buffer is Hyper's default, 400 KiB per stream.
+
+**Proof boundaries.** No settlement is inferred from body EOF, abort or row
+absence; End still waits for the actor's body ledger. A parked read job keeps
+its guard after the response is dropped. A cancelled B waiter loses only the
+answer; the open task keeps the sent request. Status never moves activity.
+
+Evidence on nuc4 (rustc 1.97.1):
+
+- New focused tests, 15 passed, 0 failed:
+  - Source: actual decision required, grant/Source slots,
+    Range parity with Local, If-Range parity, revocation mid-body, read join
+    before the End receipt, symlink/relink/resize refusal (7);
+  - wire: relay preserves Local's plan over 0/1/10/4096-byte files,
+    206/416/HEAD heads exact, closed Start envelope (3);
+  - B: exact session query, binding required, HEAD/Range cannot bypass,
+    idle-deadline body outlives the 30 s resource deadline, slow reader
+    memory bound (5).
+- Affected existing filters (`sharing`, `source_`, `direct_range`,
+  `receiver_`): 306 passed, 8 ignored (the opt-in CGNAT fixtures).
+- Clippy with denied warnings on plurxd and plurx-core, all targets.
+
+Not qualified here: `sharing_receiver_real_pinned_source_direct_range_head_through_b`
+(registered as an opt-in fixture) covers the real pinned B relay, the single
+Source claim across repeated ranges, and logout ending an open body. It needs
+the disposable CGNAT namespace and has not run. Clients, clusters, NAT/DERP
+and devices remain open.
+
+### Shared web direct play (2026-10-04)
+
+The web client now uses the direct play lane above. Copy HLS stays the route
+for everything else, and Local paths are unchanged.
+
+**Route.** `choosePlayRoute` picks `shared_direct` only when the Shared
+decision's method is `direct_play` and the ordinary initial route is `direct`.
+That means the container is in this browser's own caps, the audio is the
+default track, there is no A/V offset and no burn. A direct decision the
+browser cannot take as a raw file, such as a non-default audio track, goes
+to Copy HLS, never a progressive remux. The grade does not matter here: the
+bytes are untouched, and the Source repeats the decision with the same caps
+at Start.
+
+**Start.** `openSession` sends the ordinary `CreateSession` with
+`presentation:"direct"`. It drops the HLS-only fields (segment budget,
+transport, rung, `copy`) and the subtitle ask, because the Source refuses
+those for raw bytes. `SHARED_DECISION.start` accepts only `vod` or `direct`.
+It validates the reply with `sharedPlaybackDirectStartContext`
+(`core/file-context.js`), which requires exactly five fields:
+
+- `presentation:"direct"`;
+- a lowercase v4 B session;
+- a safe, non-negative `length`;
+- one of B's `DIRECT_MIMES`;
+- a `url` equal to this context's own `{file_base}/direct?session=<id>`.
+
+An HLS reply to a direct ask is refused, and so is a direct reply to an HLS
+ask.
+
+**Attach.** `attachSharedDirect` binds the player to the returned context
+and puts the URL on the element with no `token` query. It keeps the B session
+in `PLAYER.sharedDirect`, owned by the attachment it creates. `sessionId`
+stays null, so no status poll runs and no control reporter starts, the same
+as Local direct play. Progress uses the existing Shared beat path through
+the bound context.
+
+**Release.** `DELETE /api/v1/hls/{session}` is sent when a new attachment
+begins on the player (`beginPlaybackMediaAttachment`), when the predecessor
+player is retired, and on close.
+
+**Expiry.** B retires a direct session after 300 s with no byte request.
+When the element raises a network error (code 2) on a Shared direct
+attachment that has reached its metadata, it starts one fresh direct play at
+the current position through `requestPlaybackMediaChange`. Doing so uses up
+the allowance. The new attachment earns another only when it reaches its own
+timeline, so there is no timer and no loop. The stall Try again on a Shared
+direct play uses the same fresh Start instead of the old URL. A direct-bound
+context may start again, direct or Copy HLS, under the accepted login, the
+same rule progress follows. Other route changes on a direct play (audio,
+quality, decode rescue) go to Copy or encoded HLS. An HLS-bound context still
+has no generic replacement.
+
+Evidence on nuc4 (node 22.22.1): `tests/web/file-context.test.js` passes 17
+of 17 and `tests/web/shared-decision.test.js` passes 16 of 16, including the
+new direct cases. `make web-check` passes, and `scripts/web-types` is
+unchanged at 518 diagnostics. Two browser checks in that lane skip because
+Playwright is not installed on nuc4. None of this has been checked in a
+physical browser against a real pinned Source/B pair.

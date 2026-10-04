@@ -596,6 +596,13 @@ async function openSession(fileId, opts, signal=null, requestId=null){
   if(fileContext.source_ref.kind!=="local"){
     // Shared initial Start never inherits a Local control/recovery envelope.
     // Actual supplied unsupported fields are refused by the typed adapter.
+    if(opts&&opts.presentation==="direct"){
+      // Original bytes: no segment budget, HLS transport, rung or native
+      // subtitle group exists for them, and the Source refuses a subtitle ask.
+      body.presentation="direct";
+      for(const field of ["block_budget_secs","transport","height","copy","native_subtitles","subtitle"]) delete body[field];
+      return SHARED_DECISION.start(fileContext,body,signal);
+    }
     const player=typeof PLAYER!=="undefined"?PLAYER:null;
     const natives=(player&&player.subs||[]).filter(sub=>sub.native===true);
     if(natives.length){body.native_subtitles=true;if(natives.some(sub=>sub.index===player.curSub))body.subtitle=player.curSub;}
@@ -895,4 +902,67 @@ function releaseSession(sessionId){
     fetch(API+`/hls/${sessionId}`,{method:"DELETE",keepalive:true,
       headers:TOKEN?{"authorization":"Bearer "+TOKEN}:{}}).catch(()=>{});
   }catch(e){}
+}
+// A Shared direct session ends with the attachment that reads it: the same
+// DELETE retires it. B also retires it after 300 s with no open body and no
+// byte request, which is why a resume after a long pause can find it gone.
+function releaseSharedDirect(p){
+  const direct=p&&p.sharedDirect;
+  if(!direct) return;
+  p.sharedDirect=null;
+  releaseSession(direct.session_id);
+}
+// Take on a Shared direct session and attach its byte URL. Direct play has no
+// playlist, status or control exchange, Local or Shared, so nothing here names
+// an HLS session or starts a reporter: the B session lives in `sharedDirect`,
+// owned by the attachment minted below, and the URL carries its binding.
+function attachSharedDirect(v,t,info,wantSec){
+  const context=playbackFileContext(t.fileContext),bound=info&&info._sharedContext;
+  if(context.source_ref.kind==="local"||!bound||info.presentation!=="direct"
+    ||playbackFileKey(bound)!==playbackFileKey(context)||bound.session_id!==info.session_id
+    ||info.url!==playbackFileUrl(bound,"direct")) playbackFileReject();
+  const at=Math.max(0,wantSec||0);
+  stopPlaybackControl(t);
+  t.controlRenderOverride=null;
+  t.controlObservationOverride=null;
+  t.fileContext=bound;
+  t.meta={...(t.meta||{}),fileContext:bound};
+  t.sessionId=null; t.streamId=null; t.vod=false; t.offset=0;
+  t.method='direct_play'; t.copyHls=false; t.started=false;
+  t.directUrl=info.url; t.probeUrl=info.url;
+  if(t===PLAYER) renderPlayerInfo();
+  resetMediaSource(v);
+  const attachment=beginPlaybackMediaAttachment(t);
+  const direct={session_id:info.session_id,attachment,timeline:false};
+  t.sharedDirect=direct;
+  setPlaybackMediaSource(v,info.url);
+  markPlaybackControlSeekExecuted(t,at);
+  v.onloadedmetadata=()=>{
+    if(!attachment.current()) return;
+    v.onloadedmetadata=null;
+    direct.timeline=true;
+    applyPlaybackAttachmentPosition(v,t,attachment,at); };
+  applyPlaybackTransportIntent(v,t);
+  return at;
+}
+// The element could not read its Shared direct session: B retired it after a
+// long pause, or the transfer failed. Answered once, through the ordinary
+// media-change owner, by a fresh direct Start at the current position. The
+// allowance belongs to an attachment that reached a timeline, so a successor
+// that fails before its metadata cannot restart again: its error takes the
+// ordinary failure path. Only a network error (2) — what a refused byte range
+// is — qualifies; a decode or format error is not an expiry and keeps the
+// compatibility rescue.
+function restartSharedDirectAfterError(v,p,code){
+  const direct=p&&p.sharedDirect;
+  if(!direct||!direct.timeline||!direct.attachment.current()||code!==2) return false;
+  direct.timeline=false;
+  const pos=positionForPlaybackIntent(v,p);
+  beginPlaybackControlSeek(p,pos,false);
+  clientLog(Object.assign({level:"info",event:"shared_direct_restart",detail:"media_error_"+code,
+    message:"the shared direct session could not be read — starting a fresh one at the saved position"},
+    playbackContext()));
+  requestPlaybackMediaChange(p,{method:'direct_play',copyHls:false,sharedDirect:true,reason:"direct-expired"})
+    .catch(()=>{});
+  return true;
 }

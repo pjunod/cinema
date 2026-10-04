@@ -97,3 +97,12 @@ test("complete4096 actual Local library DTOs with paths remain within the bounde
  const wire=stringify(libraries);assert.ok(Buffer.byteLength(wire)<4194304);
  const h=harness(async()=>reply(libraries));await h.m.open("invite");const e=h.m.state().editor;assert.equal(e.ready,true);assert.equal(e.libraries.length,4096);assert.equal(e.libraries[4095].library_id,(large+4095n).toString());h.m.select(4095,true);assert.equal(e.selected[0],(large+4095n).toString());
 });
+test("sharing node card reports orphaned playback recovery without inventing state",()=>{
+ const {m}=harness();
+ const base={sharingImports:{imports:[imported()]},sharingExports:{exports:[exported()],next:null}};
+ assert.doesNotMatch(m.panel({...base,sharingStatus:{listener:"ready"}}),/Playback recovery/);
+ const html=m.panel({...base,sharingStatus:{listener:"ready",receiver_recovery:{last_scan_at_ms:null,in_flight:[id],retired_total:3n,stranded:[{incarnation_id:id,reason:"dispatch_unknown",observed_at_ms:1}]}}});
+ assert.match(html,/Playback recovery: not yet scanned · 3 retired · 1 in progress · 1 stranded/);
+ assert.match(html,new RegExp(id+": dispatch unknown"));
+ assert.doesNotMatch(m.panel({...base,sharingStatus:{listener:"ready",receiver_recovery:{last_scan_at_ms:5,in_flight:[],retired_total:0,stranded:[]}}}),/<ul>/);
+});

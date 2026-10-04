@@ -26,12 +26,7 @@ async fn file_and_track(state: &AppState, id: i64, index: i64) -> Result<MediaFi
             .store
             .get_file(id)
             .await?
-            .and_then(|file| {
-                file.subtitle_streams
-                    .get(usize::try_from(index).ok()?)
-                    .map(|stream| is_pgs_subtitle(&stream.codec))
-            })
-            .unwrap_or(false);
+            .is_some_and(|file| refusable(&file, index));
         if refusable {
             OVERLAY_REFUSED_OFF.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         }
@@ -45,6 +40,18 @@ async fn file_and_track(state: &AppState, id: i64, index: i64) -> Result<MediaFi
         .get_file(id)
         .await?
         .ok_or(ApiError::NotFound("file"))?;
+    pgs_track(&file, index)?;
+    Ok(file)
+}
+
+fn refusable(file: &MediaFile, index: i64) -> bool {
+    usize::try_from(index)
+        .ok()
+        .and_then(|index| file.subtitle_streams.get(index))
+        .is_some_and(|stream| is_pgs_subtitle(&stream.codec))
+}
+
+fn pgs_track(file: &MediaFile, index: i64) -> Result<(), ApiError> {
     let stream = file
         .subtitle_streams
         .get(index as usize)
@@ -54,7 +61,22 @@ async fn file_and_track(state: &AppState, id: i64, index: i64) -> Result<MediaFi
             "subtitle track is not supported by pgs-v1".into(),
         ));
     }
-    Ok(file)
+    Ok(())
+}
+
+/// The same switch and track checks as [`file_and_track`] for a file the
+/// shared Source already resolved under its grant/item/file/revision witness.
+async fn resolved_track(state: &AppState, file: &MediaFile, index: i64) -> Result<(), ApiError> {
+    if !state.pgs_overlay_enabled().await? {
+        if refusable(file, index) {
+            OVERLAY_REFUSED_OFF.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        }
+        return Err(ApiError::NotFound("PGS overlay"));
+    }
+    if index < 0 {
+        return Err(ApiError::NotFound("subtitle track"));
+    }
+    pgs_track(file, index)
 }
 
 /// Overlay manifests served since this process started, and refusals because
@@ -85,14 +107,28 @@ pub async fn manifest(
     AxPath((id, index)): AxPath<(i64, i64)>,
 ) -> Result<Response, ApiError> {
     let file = file_and_track(&state, id, index).await?;
-    match pgs_overlay::prepare(
-        &state.subs_dir,
-        &file,
-        index,
-        state.subtitle_source_access(),
-    )
-    .await
-    .map_err(map_overlay_error)?
+    manifest_for_track(&state, &file, index).await
+}
+
+/// The manifest of a shared Source file already resolved under current grant
+/// authority. Switch, track and cold-prepare answers are the Local ones.
+pub(crate) async fn manifest_for_file(
+    state: &AppState,
+    file: &MediaFile,
+    index: i64,
+) -> Result<Response, ApiError> {
+    resolved_track(state, file, index).await?;
+    manifest_for_track(state, file, index).await
+}
+
+async fn manifest_for_track(
+    state: &AppState,
+    file: &MediaFile,
+    index: i64,
+) -> Result<Response, ApiError> {
+    match pgs_overlay::prepare(&state.subs_dir, file, index, state.subtitle_source_access())
+        .await
+        .map_err(map_overlay_error)?
     {
         // A 202 is not a serving. The client polls this every second while a
         // cold prepare runs, so counting here would record sixty servings and
@@ -109,12 +145,12 @@ pub async fn manifest(
                 Err(error) => {
                     tracing::warn!(error = %error, "published PGS manifest vanished; rebuilding");
                     if let Some(generation_dir) = path.parent() {
-                        reprepare(&state, &file, index, generation_dir).await?;
+                        reprepare(state, file, index, generation_dir).await?;
                     }
                     return Ok(preparing_response());
                 }
             };
-            let etag = format!("\"{}\"", pgs_overlay::generation(&file, index));
+            let etag = format!("\"{}\"", pgs_overlay::generation(file, index));
             let mut response = (
                 StatusCode::OK,
                 [(header::CONTENT_TYPE, "application/json")],
@@ -141,15 +177,38 @@ pub async fn object(
     AxPath((id, index, generation, object)): AxPath<(i64, i64, String, String)>,
 ) -> Result<Response, ApiError> {
     let file = file_and_track(&state, id, index).await?;
-    if generation != pgs_overlay::generation(&file, index) {
+    object_for_track(&state, &file, index, &generation, &object).await
+}
+
+/// One immutable object of a shared Source file already resolved under current
+/// grant authority. A generation of another track or revision is not found.
+pub(crate) async fn object_for_file(
+    state: &AppState,
+    file: &MediaFile,
+    index: i64,
+    generation: &str,
+    object: &str,
+) -> Result<Response, ApiError> {
+    resolved_track(state, file, index).await?;
+    object_for_track(state, file, index, generation, object).await
+}
+
+async fn object_for_track(
+    state: &AppState,
+    file: &MediaFile,
+    index: i64,
+    generation: &str,
+    object: &str,
+) -> Result<Response, ApiError> {
+    if generation != pgs_overlay::generation(file, index) {
         return Err(ApiError::NotFound("PGS overlay generation"));
     }
     let hash = object
         .strip_suffix(".png")
         .ok_or(ApiError::NotFound("PGS overlay object"))?;
-    let path = pgs_overlay::object_path(&state.subs_dir, &file, index, hash)
+    let path = pgs_overlay::object_path(&state.subs_dir, file, index, hash)
         .ok_or(ApiError::NotFound("PGS overlay object"))?;
-    if tokio::fs::metadata(pgs_overlay::manifest_path(&state.subs_dir, &file, index))
+    if tokio::fs::metadata(pgs_overlay::manifest_path(&state.subs_dir, file, index))
         .await
         .is_err()
     {
@@ -162,8 +221,8 @@ pub async fn object(
         Ok(bytes) => bytes,
         Err(error) => {
             tracing::warn!(error = %error, "published PGS object vanished; rebuilding generation");
-            let generation_dir = pgs_overlay::generation_dir(&state.subs_dir, &file, index);
-            reprepare(&state, &file, index, &generation_dir).await?;
+            let generation_dir = pgs_overlay::generation_dir(&state.subs_dir, file, index);
+            reprepare(state, file, index, &generation_dir).await?;
             return Err(ApiError::ServiceUnavailable(
                 "PGS overlay generation is being rebuilt".into(),
             ));

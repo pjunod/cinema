@@ -2187,7 +2187,10 @@ fn verify_backup_key(
     for (table, columns) in [
         ("sharing_imports", "credential_envelope,claim_envelope"),
         ("sharing_import_rotations", "credential_envelope"),
-        ("sharing_relay_upstream", "capability_envelope"),
+        (
+            "sharing_relay_upstream",
+            "capability_envelope,dispatch_envelope",
+        ),
     ] {
         let exists: i64 = connection.query_row(
             "SELECT count(*) FROM sqlite_master WHERE type='table' AND name=?1",

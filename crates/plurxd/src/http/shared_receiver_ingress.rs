@@ -3,7 +3,7 @@
 use super::{
     error::ApiError,
     extract::{AuthUser, RawToken},
-    hls::{CreateSession, SourcePlaybackTarget},
+    hls::CreateSession,
     shared_receiver_playback::ReceiverStartError,
 };
 use crate::state::AppState;
@@ -117,6 +117,13 @@ fn parse_request(bytes: &[u8]) -> Result<RetainedRequest, ApiError> {
     {
         return Err(invalid());
     }
+    // Closed presentation: the ordinary VOD Start, or direct play. Anything
+    // else is refused here rather than forwarded for the Source to refuse.
+    if typed.presentation.as_deref().is_some_and(|value| {
+        value != "vod" && value != super::sharing_direct_wire::DIRECT_PRESENTATION
+    }) {
+        return Err(invalid());
+    }
     let caps = typed.caps.ok_or_else(invalid)?;
     super::stream::validate_device_caps(&caps)?;
     if caps.v != plurx_core::playback::DeviceCaps::VERSION || caps.is_empty() {
@@ -180,20 +187,7 @@ fn prepare(
         recipe,
         source_position_ms: 0,
     };
-    let target = SourcePlaybackTarget {
-        server_id: reference.item.server_id,
-        catalogue_epoch: reference.item.catalogue_epoch,
-        library_id: reference.item.library_id,
-        item_id: reference.item.item_id,
-        file_id: reference.file_id,
-        revision: reference.revision,
-    };
-    let mut session = request.value.clone();
-    session
-        .as_object_mut()
-        .ok_or_else(invalid)?
-        .insert("request_id".into(), source_request_id.to_string().into());
-    let wrapper = serde_json::json!({"reference":target,"session":session}).to_string();
+    let wrapper = crate::sharing::receiver_source_wrapper(&intent.recipe).map_err(|_| invalid())?;
     crate::sharing::receiver_source_request(&intent, &wrapper).map_err(|_| invalid())?;
     Ok((intent, wrapper))
 }
@@ -380,6 +374,48 @@ mod tests {
         let mut wrong = reference.clone();
         wrong.lifecycle_generation += 1;
         assert!(prepare(scope, wrong, 7, "b".repeat(64), &request).is_err());
+    }
+    #[test]
+    fn receiver_source_wrapper_matches_ingress_prepare() {
+        let mut value = request();
+        for key in [
+            "previous_session_id",
+            "control_sequence",
+            "reopen_reason",
+            "intent",
+        ] {
+            value[key] = Value::Null;
+        }
+        let request =
+            parse_request(&serde_json::to_vec(&value).expect("encode")).expect("whole DTO");
+        let (scope, reference) = context();
+        let (intent, wrapper) = prepare(scope, reference.clone(), 7, "b".repeat(64), &request)
+            .expect("captured context");
+        // Independent construction from the live client request, as ingress
+        // built it before the wrapper was shared with crash recovery.
+        let target = super::super::hls::SourcePlaybackTarget {
+            server_id: reference.item.server_id,
+            catalogue_epoch: reference.item.catalogue_epoch,
+            library_id: reference.item.library_id.clone(),
+            item_id: reference.item.item_id.clone(),
+            file_id: reference.file_id.clone(),
+            revision: reference.revision.clone(),
+        };
+        let mut session = request.value.clone();
+        session["request_id"] = intent.recipe.source_request_id.to_string().into();
+        let original = serde_json::json!({"reference":target,"session":session}).to_string();
+        assert_eq!(wrapper, original);
+        // Recovery has only the durable recipe; it rebuilds the same bytes.
+        let durable: RemoteSourceRecipe =
+            serde_json::from_str(&serde_json::to_string(&intent.recipe).expect("persist"))
+                .expect("durable recipe");
+        assert_eq!(
+            crate::sharing::receiver_source_wrapper(&durable).expect("recovered wrapper"),
+            original
+        );
+        let target = crate::sharing::receiver_source_request(&intent, &original)
+            .expect("exact private Source request");
+        assert!(crate::sharing_client::SourcePeerSession::new(target, original.as_bytes()).is_ok());
     }
     #[test]
     fn sharing_receiver_ingress_refuses_recovery_controls_without_erasing_intent() {

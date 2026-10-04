@@ -51,6 +51,15 @@ pub trait SharingReceiverSessionStore: Send + Sync {
         authority: &ReceiverSessionWriteAuthority,
         renewal: &crate::sharing_receiver_sessions::ReceiverPendingRenewal,
     ) -> Result<bool, StoreError>;
+    /// Fresh original-login proof; durably replaces the activation's `none`
+    /// dispatch marker with the sealed dispatch capsule for the exact live
+    /// blocked owner. Refused or an error means nothing may be sent: a claim
+    /// that advanced the owner epoch fences this writer.
+    async fn record_receiver_dispatch(
+        &self,
+        authority: &ReceiverSessionWriteAuthority,
+        record: &crate::sharing_receiver_sessions::ReceiverDispatchRecord,
+    ) -> Result<ReceiverSourceWrite, StoreError>;
     /// Fresh B-only snapshot; no cleanup, key repair or Source authority.
     async fn receiver_source_binding(
         &self,
@@ -110,6 +119,13 @@ impl<T: Backend> SharingReceiverSessionStore for T {
         renewal: &crate::sharing_receiver_sessions::ReceiverPendingRenewal,
     ) -> Result<bool, StoreError> {
         renew_pending(self, authority, renewal).await
+    }
+    async fn record_receiver_dispatch(
+        &self,
+        authority: &ReceiverSessionWriteAuthority,
+        record: &crate::sharing_receiver_sessions::ReceiverDispatchRecord,
+    ) -> Result<ReceiverSourceWrite, StoreError> {
+        record_dispatch(self, authority, record).await
     }
 
     async fn prepare_receiver_session_authority(
@@ -206,6 +222,12 @@ impl<T: Backend> SharingReceiverSessionStore for T {
     }
 }
 
+// Exact blocked B owner with an unresolved pending request, matching lease,
+// pointer and all-NULL Source binding. Parameters: $2 user, $3 scope, $6
+// incarnation, $7 node, $8 epoch, $9 request, $10 recipe, $11 fingerprint,
+// $12 now, $15 Source position.
+const PENDING_CURRENT: &str = "EXISTS(SELECT 1 FROM media_sessions s JOIN sharing_relay_upstream b ON b.incarnation_id=s.incarnation_id JOIN job_leases j ON j.resource='session:'||s.incarnation_id JOIN media_session_requests r ON r.incarnation_id=s.incarnation_id AND r.user_id=s.user_id WHERE s.incarnation_id=$6 AND s.user_id=$2 AND s.owner_node_id=$7 AND s.owner_epoch=$8 AND s.recipe_json=$10 AND s.state='active' AND s.publication_ready_at_ms=9223372036854775807 AND s.media_origin_ms=$15 AND s.lease_expires_at_ms>$12 AND j.owner_node_id=$7 AND j.fence=$8 AND j.expires_at_ms=s.lease_expires_at_ms AND r.request_id=$9 AND r.owner_node_id=$7 AND r.request_fingerprint=$11 AND r.playback_id=s.playback_id AND r.state='starting' AND r.claim_expires_at_ms>$12 AND b.import_id=json_extract($3,'$.import_id') AND b.lifecycle_generation=json_extract($3,'$.lifecycle_generation') AND b.assignment_generation<=json_extract($3,'$.assignment_generation') AND b.endpoint_revision<=json_extract($3,'$.endpoint_generation') AND b.remote_library_id=json_extract($10,'$.reference.library_id') AND b.remote_item_id=json_extract($10,'$.reference.item_id') AND b.remote_file_id=json_extract($10,'$.file_id') AND b.remote_revision=json_extract($10,'$.file_revision') AND b.source_request_id=json_extract($10,'$.source_request_id') AND b.source_position_ms=$15 AND b.source_session_id IS NULL AND b.source_incarnation_id IS NULL AND b.capability_envelope IS NULL AND EXISTS(SELECT 1 FROM media_playback_pointers p WHERE p.user_id=s.user_id AND p.playback_id=s.playback_id AND p.current_incarnation_id=s.incarnation_id))";
+
 /// Pending Source response is an obligation, not permission to replace it.
 /// Renew only an existing blocked B owner and its original request together.
 async fn renew_pending<T: Backend>(
@@ -248,7 +270,7 @@ async fn renew_pending<T: Backend>(
     ]);
     // Both supported principal layouts retain Local user_id. Exact pending
     // request, pointer, recipe, owner epoch and upstream identity are mandatory.
-    let current = "EXISTS(SELECT 1 FROM media_sessions s JOIN sharing_relay_upstream b ON b.incarnation_id=s.incarnation_id JOIN job_leases j ON j.resource='session:'||s.incarnation_id JOIN media_session_requests r ON r.incarnation_id=s.incarnation_id AND r.user_id=s.user_id WHERE s.incarnation_id=$6 AND s.user_id=$2 AND s.owner_node_id=$7 AND s.owner_epoch=$8 AND s.recipe_json=$10 AND s.state='active' AND s.publication_ready_at_ms=9223372036854775807 AND s.media_origin_ms=$15 AND s.lease_expires_at_ms>$12 AND j.owner_node_id=$7 AND j.fence=$8 AND j.expires_at_ms=s.lease_expires_at_ms AND r.request_id=$9 AND r.owner_node_id=$7 AND r.request_fingerprint=$11 AND r.playback_id=s.playback_id AND r.state='starting' AND r.claim_expires_at_ms>$12 AND b.import_id=json_extract($3,'$.import_id') AND b.lifecycle_generation=json_extract($3,'$.lifecycle_generation') AND b.assignment_generation<=json_extract($3,'$.assignment_generation') AND b.endpoint_revision<=json_extract($3,'$.endpoint_generation') AND b.remote_library_id=json_extract($10,'$.reference.library_id') AND b.remote_item_id=json_extract($10,'$.reference.item_id') AND b.remote_file_id=json_extract($10,'$.file_id') AND b.remote_revision=json_extract($10,'$.file_revision') AND b.source_request_id=json_extract($10,'$.source_request_id') AND b.source_position_ms=$15 AND b.source_session_id IS NULL AND b.source_incarnation_id IS NULL AND b.capability_envelope IS NULL AND EXISTS(SELECT 1 FROM media_playback_pointers p WHERE p.user_id=s.user_id AND p.playback_id=s.playback_id AND p.current_incarnation_id=s.incarnation_id))";
+    let current = PENDING_CURRENT;
     let valid = format!(
         "{} AND {current} AND NOT EXISTS(SELECT 1 FROM settings WHERE key=$14) AND $13>$12",
         authority_predicate()
@@ -269,6 +291,62 @@ async fn renew_pending<T: Backend>(
         Err(error) if receiver_write_refused(&error) => Ok(false),
         Err(error) => Err(error),
     }
+}
+
+/// Same exact live blocked owner and fresh original-login authority as
+/// `renew_pending`. `none` becomes the sealed capsule once; an identical
+/// capsule is a read-only replay; any other value refuses.
+async fn record_dispatch<T: Backend>(
+    store: &T,
+    authority: &ReceiverSessionWriteAuthority,
+    record: &crate::sharing_receiver_sessions::ReceiverDispatchRecord,
+) -> Result<ReceiverSourceWrite, StoreError> {
+    let renewal = &record.owner;
+    let envelope = source_envelope(&record.envelope)?.to_owned();
+    let actual_now = now_ms()?;
+    if renewal.incarnation_id != authority.intent.recipe.source_request_id.to_string()
+        || renewal.owner_node_id.is_empty()
+        || renewal.owner_node_id.len() > 128
+        || renewal.owner_node_id.chars().any(char::is_control)
+        || renewal.owner_epoch <= 0
+        || !(1..=128).contains(&renewal.request_id.len())
+        || renewal.request_id.chars().any(char::is_control)
+        || renewal.now_ms > actual_now
+        || actual_now.saturating_sub(renewal.now_ms) > 5000
+        || actual_now.saturating_sub(authority.observed_at_ms) > 5000
+        || renewal.lease_expires_at_ms <= actual_now
+        || authority
+            .login_expires_at_s
+            .is_some_and(|deadline| actual_now / 1000 >= deadline)
+    {
+        return Ok(ReceiverSourceWrite::Refused);
+    }
+    let mut values = values(authority)?;
+    values.extend([
+        renewal.incarnation_id.clone().into(),
+        renewal.owner_node_id.clone().into(),
+        renewal.owner_epoch.into(),
+        renewal.request_id.clone().into(),
+        serde_json::to_string(&authority.intent.recipe)
+            .map_err(|_| invalid())?
+            .into(),
+        authority.intent.recipe.request_fingerprint()?.into(),
+        renewal.now_ms.into(),
+        renewal.lease_expires_at_ms.into(),
+        crate::cluster::coordination::removed_job_owner_key(&renewal.owner_node_id).into(),
+        authority.intent.source_position_ms.into(),
+        envelope.clone().into(),
+    ]);
+    let valid = format!(
+        "{} AND {PENDING_CURRENT} AND NOT EXISTS(SELECT 1 FROM settings WHERE key=$14) AND $13>$12",
+        authority_predicate()
+    );
+    let statements = vec![
+        source_assert(format!("{valid} AND EXISTS(SELECT 1 FROM sharing_relay_upstream WHERE incarnation_id=$6 AND (dispatch_envelope='none' OR dispatch_envelope=$16))"), values.clone()),
+        ("UPDATE sharing_relay_upstream SET dispatch_envelope=$1 WHERE incarnation_id=$2 AND dispatch_envelope='none'".into(), vec![envelope.into(), renewal.incarnation_id.clone().into()]),
+        source_assert(format!("{valid} AND EXISTS(SELECT 1 FROM sharing_relay_upstream WHERE incarnation_id=$6 AND dispatch_envelope=$16)"), values),
+    ];
+    source_result(store, statements, &[0, 1, 0]).await
 }
 
 // Every Source-bound writer repeats the actual B login/policy/import predicate
@@ -667,7 +745,9 @@ pub(crate) fn receiver_activation_binding(
     let exact = "b.incarnation_id=$1 AND b.import_id=$2 AND b.lifecycle_generation=$3 AND b.assignment_generation=$4 AND b.remote_library_id=$5 AND b.remote_item_id=$6 AND b.remote_file_id=$7 AND b.remote_revision=$8 AND b.source_request_id=$9 AND b.endpoint_revision=$10 AND b.source_position_ms=$11 AND b.source_session_id IS NULL AND b.source_incarnation_id IS NULL AND b.capability_envelope IS NULL";
     let route = "EXISTS(SELECT 1 FROM media_sessions s WHERE s.incarnation_id=$1 AND s.user_id=$12 AND s.recipe_json=$13 AND s.session_id=$14 AND s.state='active' AND s.publication_ready_at_ms=9223372036854775807 AND EXISTS(SELECT 1 FROM media_playback_pointers p WHERE p.user_id=$12 AND p.current_incarnation_id=s.incarnation_id))";
     Ok(vec![
-        (format!("INSERT INTO sharing_relay_upstream(incarnation_id,import_id,lifecycle_generation,assignment_generation,remote_library_id,remote_item_id,remote_file_id,remote_revision,source_request_id,endpoint_revision,source_position_ms) SELECT $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11 WHERE {route} ON CONFLICT(incarnation_id) DO NOTHING"), values.clone()),
+        // `none` is the durable proof that nothing was dispatched yet; only
+        // the exact live owner can replace it, before its first Start byte.
+        (format!("INSERT INTO sharing_relay_upstream(incarnation_id,import_id,lifecycle_generation,assignment_generation,remote_library_id,remote_item_id,remote_file_id,remote_revision,source_request_id,endpoint_revision,source_position_ms,dispatch_envelope) SELECT $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,'none' WHERE {route} ON CONFLICT(incarnation_id) DO NOTHING"), values.clone()),
         (format!("INSERT INTO sharing_relay_upstream(incarnation_id,import_id,lifecycle_generation,assignment_generation,remote_library_id,remote_item_id,remote_file_id,remote_revision,source_request_id,endpoint_revision,source_position_ms) SELECT json_extract('receiver_source_authority_refused','$'),$2,$3,$4,$5,$6,$7,$8,$9,$10,$11 WHERE NOT EXISTS(SELECT 1 FROM sharing_relay_upstream b WHERE {exact} AND {route})"), values),
     ])
 }
