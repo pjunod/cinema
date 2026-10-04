@@ -2348,6 +2348,170 @@ mod tests {
         }
     }
 
+    /// Export actual GOP-aware writer output for the loopback Safari reach
+    /// experiment. This lab policy is deliberately not production admission.
+    #[tokio::test]
+    #[ignore = "native Safari media export; set PLURX_NATIVE_SEEK_MEDIA"]
+    async fn native_seek_short_gop_media_export() {
+        let root =
+            PathBuf::from(std::env::var("PLURX_NATIVE_SEEK_MEDIA").expect("export directory"));
+        std::fs::create_dir_all(&root).expect("export directory");
+        let source = root.join("source.mkv");
+        let output = std::process::Command::new(plurx_core::testfixtures::ffmpeg())
+            .args([
+                "-hide_banner",
+                "-loglevel",
+                "error",
+                "-y",
+                "-f",
+                "lavfi",
+                "-i",
+                "testsrc2=size=320x180:rate=24",
+                "-f",
+                "lavfi",
+                "-i",
+                "sine=frequency=440:sample_rate=48000",
+                "-t",
+                "900",
+                "-c:v",
+                "libx264",
+                "-preset",
+                "ultrafast",
+                "-g",
+                "48",
+                "-keyint_min",
+                "48",
+                "-sc_threshold",
+                "0",
+                "-c:a",
+                "aac",
+            ])
+            .arg(&source)
+            .output()
+            .expect("fixture encoder");
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let (mut file, video) = plain();
+        file.path = source.clone();
+        file.video_codec = Some("h264".into());
+        for (name, limits) in [
+            ("baseline", Limits::default()),
+            (
+                "short",
+                Limits {
+                    floor_seconds: 2,
+                    first_floor_seconds: 2,
+                    max_seconds: 2,
+                    target_seconds: 3,
+                    ..Limits::default()
+                },
+            ),
+        ] {
+            let dir = root.join(name);
+            tokio::fs::create_dir_all(&dir)
+                .await
+                .expect("variant directory");
+            let args = plurx_core::transcode::copy_pipe_args_with_dolby_vision(
+                &file,
+                0.0,
+                Some(0),
+                true,
+                plurx_core::transcode::Pacing::unpaced(),
+                video,
+            );
+            let mut child = tokio::process::Command::new(plurx_core::testfixtures::ffmpeg())
+                .args(args)
+                .stdin(std::process::Stdio::null())
+                .stdout(std::process::Stdio::piped())
+                .stderr(std::process::Stdio::null())
+                .kill_on_drop(true)
+                .spawn()
+                .expect("copy pipe");
+            let outcome = run(
+                child.stdout.take().expect("pipe"),
+                dir.clone(),
+                name,
+                limits,
+                &file,
+                video,
+                None,
+            )
+            .await;
+            assert!(child.wait().await.expect("copy result").success());
+            let Outcome::Completed(counts) = outcome else {
+                panic!("{outcome:?}")
+            };
+            assert_eq!(counts.unparseable, 0);
+            // AVC has no HEVC leading-picture classification, so the
+            // ceiling counter cannot prove frame preservation. Decode and
+            // compare every video frame instead.
+            let mut concatenated = std::fs::read(dir.join("init.mp4")).expect("init");
+            for index in 0..counts.segments {
+                concatenated.extend(
+                    std::fs::read(dir.join(format!("seg{index:05}.m4s"))).expect("segment"),
+                );
+            }
+            let combined = dir.join("comparison.mp4");
+            std::fs::write(&combined, concatenated).expect("comparison media");
+            let hashes = |path: &Path| {
+                let output = std::process::Command::new(plurx_core::testfixtures::ffmpeg())
+                    .args(["-v", "error", "-i"])
+                    .arg(path)
+                    .args(["-map", "0:v:0", "-f", "framemd5", "-"])
+                    .output()
+                    .expect("frame comparison");
+                assert!(
+                    output.status.success(),
+                    "{}",
+                    String::from_utf8_lossy(&output.stderr)
+                );
+                String::from_utf8_lossy(&output.stdout)
+                    .lines()
+                    .filter(|line| !line.starts_with('#'))
+                    .map(|line| {
+                        line.rsplit(',')
+                            .next()
+                            .expect("frame hash")
+                            .trim()
+                            .to_owned()
+                    })
+                    .collect::<Vec<_>>()
+            };
+            assert_eq!(
+                hashes(&combined),
+                hashes(&source),
+                "every copied video frame must survive"
+            );
+            std::fs::remove_file(combined).expect("remove disposable comparison");
+            let text = playlist(&dir);
+            let durations: Vec<f64> = text
+                .lines()
+                .filter_map(|line| line.strip_prefix("#EXTINF:"))
+                .map(|value| {
+                    value
+                        .split(',')
+                        .next()
+                        .expect("duration")
+                        .parse()
+                        .expect("duration")
+                })
+                .collect();
+            assert!(durations
+                .iter()
+                .all(|duration| *duration <= f64::from(limits.target_seconds)));
+            if name == "short" {
+                assert!(durations.len() > 400, "actual cuts must change");
+                assert!(durations
+                    .iter()
+                    .take(durations.len() - 1)
+                    .all(|duration| *duration <= 2.05));
+            }
+        }
+    }
+
     #[test]
     fn only_codecs_whose_keyframes_can_be_read_are_attempted() {
         assert!(supports(Some("hevc")));

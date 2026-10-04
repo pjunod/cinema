@@ -55,7 +55,10 @@ class KnownRedContractTest(unittest.TestCase):
         # needs the pinned model files its ignore reason names.
         # K-08 M5 adds embed_thread_scaling, the inference thread-count
         # measurement behind EMBED_THREADS, which needs the same model files.
-        self.assertEqual(len(ignored), 20)
+        # Native rolling seek adds one operator-run media export, driven by
+        # PLURX_NATIVE_SEEK_MEDIA and requiring the fixture ffmpeg named in
+        # its reason. It passed explicitly; this is not a known-red waiver.
+        self.assertEqual(len(ignored), 21)
         self.assertTrue(all(item.reason for item in ignored))
         self.assertTrue(all(item.path in item.identity for item in ignored))
         self.assertTrue(all(item.cargo_name in item.identity for item in ignored))

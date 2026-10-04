@@ -2552,7 +2552,11 @@ pattern = "\\.spawn(?:_blocking|_local)?\\s*\\("
 # Queued-publication regression: the test owns one finite sleep child,
 # uses exec to avoid descendants, enables kill-on-drop, and verifies run_part
 # terminated and reaped it for foreground, download, ownership and deadline yields.
-expected_occurrences = 52
+# +1 native seek lab: the ignored copyseg exporter owns one Tokio ffmpeg
+# copy child, transfers stdout solely to run(), and awaits Child::wait before
+# interpreting the outcome. kill-on-drop fences cancellation/unwind; no
+# production process owner changes. These are call sites, not executions.
+expected_occurrences = 53
 
 [[module_structures]]
 id = "bare-task-spawn"
@@ -3874,7 +3878,12 @@ pattern = "(?:[A-Za-z_]\\w*::)*Command::new\\s*\\("
 # Both existing Tools calls still await output_job_owned, which retains the
 # child job and enables kill-on-drop. The HOME=/ regression uses this same
 # constructor and awaits its finite shell child; no new detached owner exists.
-expected_occurrences = 200
+# +3 native seek lab: ignored copyseg exporter call sites construct a finite
+# 900 s lavfi generator, the decoded-frame hash helper, and the copy pipe.
+# Synchronous output() drains/reaps generator/hash children before return;
+# the Tokio copy child is awaited and kill-on-drop protected. Finite input
+# is not a wall-clock deadline. No production command is added.
+expected_occurrences = 203
 
 [[module_structures]]
 id = "process-capable-launch-method"
@@ -4336,7 +4345,11 @@ pattern = "\\.(?:spawn|output|status)\\s*\\("
 # Combined current-main 409 plus the queued-publication test child = 410.
 # +1 TCL legacy admission fixture: Response::status() asserts typed Auto/1440
 # overflow versus ordinary copy/manual admission. This does not launch a child.
-expected_occurrences = 413
+# +3 native seek lab: two synchronous output() call sites reap their finite
+# generator/hash children, and one spawn() hands the copy child to the ignored
+# exporter until its explicit awaited reap. The hash helper executes twice
+# per arm; the census counts syntax, not child executions.
+expected_occurrences = 416
 # +2 native-startup delayed-init fixture: Axum Response::status() reads
 # assert the master and legacy bridge responses. Neither launches a process.
 
@@ -4565,7 +4578,9 @@ pattern = "\\.(?:kill|start_kill|wait|try_wait|exec)\\s*\\("
 # Queued-publication regression: the test owns one finite sleep child,
 # uses exec to avoid descendants, enables kill-on-drop, and verifies run_part
 # terminated and reaped it for foreground, download, ownership and deadline yields.
-expected_occurrences = 242
+# +1 native seek lab: ignored exporter Child::wait explicitly reaps its copy
+# pipe after run() finishes and before asserting the segmenter outcome.
+expected_occurrences = 243
 
 [[module_structures]]
 id = "free-or-ufcs-process-lifecycle"
@@ -4733,7 +4748,9 @@ pattern = "kill_on_drop\\s*\\("
 # Queued-publication regression: the test owns one finite sleep child,
 # uses exec to avoid descendants, enables kill-on-drop, and verifies run_part
 # terminated and reaped it for foreground, download, ownership and deadline yields.
-expected_occurrences = 93
+# +1 native seek lab: ignored exporter copy child retains kill-on-drop as
+# cancellation/unwind protection in addition to normal awaited reap.
+expected_occurrences = 94
 
 [[module_structures]]
 id = "rolling-supervisor-construction"

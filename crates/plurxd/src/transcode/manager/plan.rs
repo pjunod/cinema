@@ -552,6 +552,25 @@ impl TranscodeManager {
         Self::select_tracks_with_prefs(file, audio_override, subtitle_override, &prefs, base_is_hdr)
     }
 
+    /// Copy never burns a subtitle. With an explicit audio choice there is
+    /// no automatic track decision left that can consult language defaults.
+    /// Keep the usual selection for an unspecified track, including anime.
+    pub(super) async fn copy_audio_index(
+        &self,
+        file: &plurx_core::domain::MediaFile,
+        audio_override: Option<i64>,
+        base_is_hdr: bool,
+    ) -> Option<i64> {
+        match audio_override {
+            Some(index) => Some(index),
+            None => {
+                self.select_tracks(file, None, None, base_is_hdr)
+                    .await
+                    .audio_index
+            }
+        }
+    }
+
     /// `base_is_hdr` is whether the session this request would build delivers
     /// HDR **without** a subtitle burn — see
     /// [`plurx_core::playback::burn_would_discard_hdr`]. It is what stops the
