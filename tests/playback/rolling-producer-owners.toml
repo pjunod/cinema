@@ -1619,7 +1619,8 @@ pattern = "(?:VodPreparationGuard|preparing_sessions|begin_preparing_session|own
 # J4 adds three test-only preparation registry/empty-session assertions.
 # Recipe preview reuses the existing preparation queue and creates no reader
 # or rendition producer; it introduces no preparation owner.
-expected_occurrences = 38
+# J4 shared startup: One test-only registry read proves concurrent compatibility entries share one preparing/active native session; no new owner.
+expected_occurrences = 39
 
 [[module_symbols]]
 id = "m4-cancellation-independent-vod-build-owner"
@@ -3551,7 +3552,8 @@ pattern = "(?:[A-Za-z_]\\w*::)+(?:sleep|sleep_until|interval|interval_at|timeout
 # J4 adds one awaited 15-second compatibility-start timeout and one
 # 120-second real native index fixture deadline. Neither spawns a task.
 # Native start/release and serving retain their existing cleanup owners.
-expected_occurrences = 1134
+# J4 shared startup: Shared startup adds one bounded route lookup and two awaited backoff sleeps. The outer timeout replaces its predecessor; every wait inherits the caller deadline, and none spawns a task.
+expected_occurrences = 1137
 # +1 native-startup delayed-init fixture: its joined writer owns one bounded
 # six-second sleep, under the test request's unchanged twelve-second deadline.
 # No production timer or recovery clock is added.
@@ -3563,7 +3565,8 @@ expected_occurrences = 1134
 [[module_structures]]
 id = "bare-time-constructor"
 pattern = "(?<![:.\\w])(?:sleep|sleep_until|interval|interval_at|timeout|timeout_at)\\s*\\("
-expected_occurrences = 1
+# J4 shared startup: Two calls to the local timeout error factory in the shared-start observer return ApiError only; they construct no timer.
+expected_occurrences = 3
 
 [[module_structures]]
 id = "tokio-time-import"
@@ -4371,7 +4374,8 @@ pattern = "\\.(?:spawn|output|status)\\s*\\("
 # J4 adds nineteen HTTP Response::status() reads in authenticated HLS,
 # composite range and fixture assertions. These do not launch a process.
 # Native handler delegation introduces no Command or spawn owner.
-expected_occurrences = 449
+# J4 shared startup: Two in-process HTTP status reads verify duplicate entry success and sanitized startup failure; neither launches a child.
+expected_occurrences = 451
 # +2 native-startup delayed-init fixture: Axum Response::status() reads
 # assert the master and legacy bridge responses. Neither launches a process.
 

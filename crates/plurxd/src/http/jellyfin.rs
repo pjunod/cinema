@@ -2,6 +2,7 @@
 mod ancillary;
 mod playback;
 mod representation;
+mod startup;
 mod transport;
 mod vod;
 use super::{auth, error::ApiError};
@@ -1188,6 +1189,14 @@ mod tests {
 
     #[tokio::test]
     async fn jellyfin_native_hls_copy_preserves_original_time_auth_and_inline_fragment_ranges() {
+        Box::pin(native_hls_copy_flow(false)).await;
+    }
+    #[tokio::test]
+    async fn jellyfin_native_hls_duplicate_entries_share_one_activation_and_preserve_ranges_and_stop(
+    ) {
+        Box::pin(native_hls_copy_flow(true)).await;
+    }
+    async fn native_hls_copy_flow(duplicate: bool) {
         let f = playback_fixture().await;
         let path = f
             .root
@@ -1253,12 +1262,47 @@ mod tests {
             .await
             .expect("unauthenticated root");
         assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
-        let response = f
-            .app
-            .clone()
-            .oneshot(request("GET", url, Some(&f.token), Value::Null))
-            .await
-            .expect("root");
+        let response = if duplicate {
+            let (first, second) = tokio::join!(
+                f.app
+                    .clone()
+                    .oneshot(request("GET", url, Some(&f.token), Value::Null)),
+                f.app
+                    .clone()
+                    .oneshot(request("GET", url, Some(&f.token), Value::Null)),
+            );
+            let first = first.expect("first canonical root");
+            let second = second.expect("duplicate canonical root");
+            let duplicate_status = second.status();
+            let duplicate_bytes = second
+                .into_body()
+                .collect()
+                .await
+                .expect("duplicate manifest")
+                .to_bytes();
+            assert_eq!(
+                duplicate_status,
+                StatusCode::OK,
+                "{}",
+                String::from_utf8_lossy(&duplicate_bytes)
+            );
+            assert_eq!(
+                f.state
+                    .transcode
+                    .vod_live_or_preparing_session_ids()
+                    .await
+                    .len(),
+                1,
+                "duplicate entries attach one native reader identity"
+            );
+            first
+        } else {
+            f.app
+                .clone()
+                .oneshot(request("GET", url, Some(&f.token), Value::Null))
+                .await
+                .expect("native root")
+        };
         let status = response.status();
         let bytes = response
             .into_body()

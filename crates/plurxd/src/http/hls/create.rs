@@ -1737,6 +1737,62 @@ async fn create_with_purpose(
     })?
 }
 
+/// Duplicate compatibility entries wait on the exact existing native claim. This
+/// holds only the caller's bounded create context, not a task or a second owner.
+async fn wait_for_compatibility_activation(
+    state: &AppState,
+    user_id: i64,
+    playback_id: &str,
+    fingerprint: &str,
+    incarnation_id: &str,
+) -> Result<(), ApiError> {
+    let deadline = crate::media_pool::create_stage_deadline(std::time::Duration::from_secs(15));
+    let timeout = || {
+        ApiError::typed(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "startup_timeout",
+            "the shared native start did not publish before its remaining deadline",
+        )
+    };
+    let mut backoff = std::time::Duration::from_millis(25);
+    loop {
+        let route = tokio::time::timeout_at(
+            deadline,
+            state
+                .store
+                .media_session_route_by_incarnation(incarnation_id),
+        )
+        .await
+        .map_err(|_| timeout())?
+        .map_err(|error| session_store_error("observing the shared start", error))?;
+        if let Some(route) = route {
+            if route.user_id != user_id
+                || route.playback_id != playback_id
+                || route.request_fingerprint != fingerprint
+            {
+                return Err(ApiError::Conflict(
+                    "the shared native start changed identity".into(),
+                ));
+            }
+            if route.state == "ended" {
+                return Err(ApiError::typed(
+                    StatusCode::GONE,
+                    "media_session_ended",
+                    "the shared native start ended",
+                ));
+            }
+            if resolved_replay_is_live(&route, unix_ms()) {
+                return Ok(());
+            }
+        }
+        if tokio::time::Instant::now() >= deadline {
+            return Err(timeout());
+        }
+        tokio::time::sleep_until((tokio::time::Instant::now() + backoff).min(deadline)).await;
+        backoff = (backoff * 2).min(std::time::Duration::from_millis(500));
+    }
+}
+
 async fn create_with_purpose_inner(
     user: plurx_core::domain::User,
     state: AppState,
@@ -2084,6 +2140,16 @@ async fn create_with_purpose_inner(
             incarnation_id: in_flight_incarnation,
             ..
         } => {
+            if matches!(&purpose, ServiceCreatePurpose::PassiveCompatibility { .. }) {
+                wait_for_compatibility_activation(
+                    &state,
+                    user.id,
+                    &request.playback_id,
+                    &fingerprint,
+                    &in_flight_incarnation,
+                )
+                .await?;
+            }
             let observed_at_ms = unix_ms();
             let route = tokio::time::timeout(
                 ACTIVATION_STORE_DEADLINE,
