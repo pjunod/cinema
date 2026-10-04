@@ -5056,6 +5056,13 @@ internal fun autoTrialMayCommit(requestedId: String?, offeredId: String?, reques
         requestedTargetRevision == targetRevision && requestedViewerEpoch == viewerEpoch &&
         automatic && presenting && !seeking
 
+/** A completed body that measures the link: an ordinary session segment, or a
+ * continuous family's video segment. Shared AAC objects are too small to be a
+ * link sample, and playlists, initialization maps and subtitles are excluded. */
+internal fun autoLinkMediaSegment(path: String): Boolean =
+    Regex("seg[0-9]+\\.(m4s|ts)").matches(path.substringAfterLast('/')) ||
+        Regex(".*/video/[0-9a-f]{64}/segment/[0-9]+\\.m4s").matches(path)
+
 /** Bounded per-pipeline evidence; a failed/closed transfer is not completion.
  * The existing HTTP factory has no local HTTP cache. A nonnetwork source is
  * nonetheless unknown cache provenance rather than a network-link measurement. */
@@ -5073,10 +5080,9 @@ internal class AutoTransferEvidence(private val delegate: TransferListener) : Tr
     @Synchronized fun discard(uri: String) { ended.remove(uri) }
     @Synchronized fun complete(load: LoadEventInfo, media: MediaLoadData) {
         val sample = ended.remove(load.uri.toString()) ?: return
-        val path = load.uri.lastPathSegment.orEmpty()
         // Exclude playlists, initialization maps, subtitles and progressive
         // resources. These are server media segments, not arbitrary requests.
-        if (!Regex("seg[0-9]+\\.(m4s|ts)").matches(path) || load.bytesLoaded <= 0 ||
+        if (!autoLinkMediaSegment(load.uri.path.orEmpty()) || load.bytesLoaded <= 0 ||
             sample.bodyBytes != load.bytesLoaded) return
         val duration = if (media.mediaStartTimeMs != C.TIME_UNSET && media.mediaEndTimeMs != C.TIME_UNSET)
             (media.mediaEndTimeMs - media.mediaStartTimeMs).takeIf { it > 0 } else null
