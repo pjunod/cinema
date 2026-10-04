@@ -458,7 +458,10 @@ mod tests {
         let restarted = format!("{}[{}", "z".repeat(MAX_LINE * 2), line("Extradata"));
         // FFmpeg drops the prefix after an unterminated message, so a field
         // can arrive glued to a foreign line with only its value to show.
-        let glued = format!("{}0 vps_video_parameter_set_id 0 = 1\n", "v".repeat(MAX_LINE));
+        let glued = format!(
+            "{}0 vps_video_parameter_set_id 0 = 1\n",
+            "v".repeat(MAX_LINE)
+        );
         let glued_negative = format!("{}8 pps_cb_qp_offset 0 = -1\n", "v".repeat(MAX_LINE * 2));
         for (bad, chunk) in [
             (long_value, 4096),
