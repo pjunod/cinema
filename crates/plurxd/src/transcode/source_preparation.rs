@@ -69,6 +69,8 @@ struct PausingSourceProbeHooks {
     evidence: crate::seam_hooks::PauseSlot,
     failed_wait: std::sync::atomic::AtomicBool,
     spawned_pid: std::sync::atomic::AtomicU32,
+    closed_parents: std::sync::atomic::AtomicUsize,
+    open_parent_at_settlement: std::sync::atomic::AtomicBool,
 }
 #[cfg(test)]
 impl SourceProbeHooks for PausingSourceProbeHooks {
@@ -95,6 +97,16 @@ impl SourceProbeHooks for PausingSourceProbeHooks {
     }
 }
 impl SourceProbeHookOwner {
+    pub(crate) fn record_parent_closed(&self, _closed: bool) {
+        #[cfg(all(test, unix))]
+        {
+            let hooks = self.test_hooks();
+            hooks
+                .open_parent_at_settlement
+                .fetch_or(!_closed, Ordering::Release);
+            hooks.closed_parents.fetch_add(1, Ordering::Release);
+        }
+    }
     pub(crate) async fn after_evidence(&self) {
         self.slot.get().after_evidence().await;
     }
@@ -129,6 +141,40 @@ impl SourceProbeHookOwner {
         self.test_hooks()
             .spawned_pid
             .load(std::sync::atomic::Ordering::Acquire)
+    }
+}
+
+/// Close the worker's final parent descriptor before publishing a settlement.
+/// Child and pipe joins have already completed; returned evidence is data only.
+pub(crate) fn close_source_before_settlement(
+    source: crate::fragment_index_cluster::SourceFence,
+    record: impl FnOnce(bool),
+) {
+    #[cfg(all(test, unix))]
+    let fd = {
+        use std::os::fd::AsRawFd;
+        source.handle.as_raw_fd()
+    };
+    drop(source);
+    #[cfg(all(test, unix))]
+    let closed = unsafe { libc::fcntl(fd, libc::F_GETFD) } == -1;
+    #[cfg(not(all(test, unix)))]
+    let closed = true;
+    record(closed);
+}
+
+#[cfg(all(test, unix))]
+impl SourceProbeHookOwner {
+    pub(crate) fn assert_closed_parent_settlements(&self) {
+        let hooks = self.test_hooks();
+        assert!(
+            hooks.closed_parents.load(Ordering::Acquire) > 0,
+            "actual Source preparation must have closed its parent descriptor"
+        );
+        assert!(
+            !hooks.open_parent_at_settlement.load(Ordering::Acquire),
+            "Source settlement was published with its parent descriptor open"
+        );
     }
 }
 
@@ -236,6 +282,7 @@ pub(crate) fn start_source_probe(
         )
         .await;
         *owned.result.lock().expect("Source probe result") = Some(result);
+        close_source_before_settlement(source, |closed| hooks.record_parent_closed(closed));
         // Only confirmed child/job and pipe settlement lets this permit drop.
         drop(owned.permit.lock().expect("Source probe permit").take());
         owned.settled.store(true, Ordering::Release);
@@ -360,7 +407,7 @@ async fn run_probe(
     })
 }
 #[allow(clippy::too_many_arguments)]
-async fn run_child(
+pub(super) async fn run_child(
     file: &MediaFile,
     source: &crate::fragment_index_cluster::SourceFence,
     proof: &SourceSessionWriteAuthority,

@@ -4545,6 +4545,23 @@ Store, waits for joined retirement and confirms that no route was created. It
 qualifies that early failure case; it does not claim full pinned B-to-Source
 playback or a physical Source cleanup result from registry absence.
 
+### S5 exact Source status and HTTP resource integration
+
+The receiver checks the retained Source session through a fixed authenticated
+status RPC before its first publication and each attached renewal. The bounded
+strict decoder requires the complete VOD Start response and the original
+Source incarnation, session and control epoch. Cleanup-only status, changed
+lineage and presentation origin cannot authorize publication. Each subsequent
+receiver writer still checks the original login and current receiver authority.
+
+On the integrated Source HTTP checkpoint `c8596f4b9` and receiver checkpoint
+`1621b4967`, pinned Rust 1.97.1 all-target check passed in 58.29 seconds after
+making only the decoded fact accessor crate-visible. Denied-warning feature
+Clippy passed in 63 seconds. The strict status wire test passed one test;
+actual Source HTTP passed sixteen in 38.26 seconds, receiver ownership eight
+in 0.14 seconds, strict Start decoding five and End decoding two, all zero
+ignored. These results qualify Source HTTP and receiver status seams. The
+receiver streaming relay and full physical B-to-Source playback remain open.
 The caller is also qualified on the complete joined-pending receiver ancestor
 `1621b4967`. Additive integration retains its independent Unsupported refusal
 and private cleanup factory. The exact combined focused web run reports 36
@@ -4660,3 +4677,43 @@ qualified result, not the failed run. The normal tracked hook passes for each
 finite source checkpoint. These tests use synthetic authenticated B DTOs and
 actual native HTTP clients; physical Source playback, native hardware and the
 unfinished controller/browser handoff remain separate qualification boundaries.
+
+Root integration of web/delivery checkpoint `b2da6e0e7` onto Source HTTP/status
+checkpoint `850bd67c5` passed pinned all-target check in 79 seconds and denied
+feature Clippy in 88 seconds. The three Shared web suites passed 33 tests,
+file-context passed 13, receiver ingress four in 0.19 seconds and the replicated
+feature delivery deadline unit one, all zero skipped/ignored. The normal tracked
+hook and documentation index checks run before the merge commit. This remains
+a caller/authority checkpoint; full receiver streaming is still under construction.
+
+### S5 guarded Source resource client and native HTTP integration
+
+The receiver's fixed Source resource RPC retains the complete original private
+request and exact Source reference/session/incarnation/epoch. Replies must echo
+that whole tuple and the requested closed resource, use single canonical length
+and MIME headers, and have no content encoding, transfer encoding or trailers.
+Playlists are bounded and validated as relative HLS before publication. Media
+streams preserve exact declared length and the original finite deadline, split
+coalesced transport frames into at most 64KiB chunks without copying the whole
+file, and retain the actual upstream connection driver.
+
+The driver's private lifetime guard survives response EOF and drops only after
+the socket future is destroyed, including cancellation. Actual receiver Source
+Start and status calls carry the same kind of owned connection barrier. After
+B publication, the actor issues the hash of its actual B session UUID under
+fresh original-login authority with a finite Store-derived deadline. It retains
+the exact lease used by attachment/publication before readers can run. The
+candidate resource opener checks the original B login, exact published route,
+full retained binding and delivery grant both before Source IO and after it.
+It remains unregistered pending accepted B writer and physical relay tests.
+
+Native Source HTTP checkpoint `1d290681d` is integrated with these changes.
+Pinned Rust 1.97.1 denied-warning feature Clippy passed on the final tree in
+65 seconds. Strict resource headers and bounded framing passed two tests;
+the real Hyper/socket lifetime test passed one; receiver ownership passed eight,
+all zero ignored. Actual Source HTTP passed nineteen in 45.78 seconds, Native
+Copy/encoded actors ten in 33.63 seconds, and the actual three-family preparation
+FD-close regression one in 33.95 seconds, all zero ignored. These tests qualify
+Source resources and client/ownership seams; they do not qualify full physical
+B playback, accepted B writers, controls or live Tailscale/hardware behavior.
+Documentation checks and the normal tracked hook remain required before commit.

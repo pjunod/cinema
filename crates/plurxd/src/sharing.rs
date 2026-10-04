@@ -83,6 +83,7 @@ impl SharingManager {
         intent: &plurx_core::sharing_receiver_sessions::ReceiverSessionIntent,
         owner: &plurx_core::sharing_receiver_sessions::ReceiverPendingRenewal,
         request_json: &str,
+        connection_lifetime: std::sync::Arc<dyn Send + Sync>,
         retain_dispatch: impl FnOnce(
                 &plurx_core::secrets::Secret,
                 &str,
@@ -128,7 +129,13 @@ impl SharingManager {
             catalogue_epoch: expected.catalogue_epoch,
             created_at_ms: 0,
         };
-        let (mut peer, _) = PeerConnection::verified(self, &summary.endpoints, &source).await?;
+        let (mut peer, _) = PeerConnection::verified_with_lifetime(
+            self,
+            &summary.endpoints,
+            &source,
+            connection_lifetime,
+        )
+        .await?;
         // The handshake can park. Reobserve the original login and committed
         // blocked owner immediately before the first non-idempotent send.
         self.ensure_current(state, summary).await?;
