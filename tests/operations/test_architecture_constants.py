@@ -5,7 +5,11 @@ from __future__ import annotations
 from pathlib import Path
 import unittest
 
-from validation.doc_versions import validate_documented_constants
+from validation.doc_versions import (
+    _spell_cardinal,
+    _web_asset_count,
+    validate_documented_constants,
+)
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -71,9 +75,10 @@ class ArchitectureConstantCase(unittest.TestCase):
             "tests/web/shell-source.js",
         ):
             self.assertIn(path, failure)
-        # W-01 adds `web/core/errors.js`, so `WEB_ASSETS` is sixty-six at HEAD
-        # and the duplicated row above makes the synthetic read sixty-seven.
-        self.assertIn('must say "sixty-seven"', failure)
+        # The duplicated row above makes the synthetic read one more than
+        # HEAD, whatever HEAD's count is.
+        head = _web_asset_count(repository_read("crates/plurxd/src/http/web.rs"))
+        self.assertIn(f'must say "{_spell_cardinal(head + 1)}"', failure)
 
 
 if __name__ == "__main__":
