@@ -3780,10 +3780,22 @@ pattern = "(?:[A-Za-z_]\\w*::)+(?:sleep|sleep_until|interval|interval_at|timeout
 # wrapper and directly checks Pending before releasing cleanup. The real
 # gate future retains its production deadline; no production timer changed.
 # Combined native fixture addition and main cleanup fixture removal.
-# Main/effort source union: 1219 exact qualified time constructors. Existing
-# request, child and test owners retain their original bounds; the borrowed
-# snapshot projection uses the same clamped 100ms deadline, not a timer task.
-expected_occurrences = 1219
+# Main/effort source union: 1223 exact qualified time constructors. Additive
+# parent arithmetic (effort 1206 + main 1139 - base 1126 = 1219) missed four
+# constructors the union resolution itself wrote (0b100f1c, unchanged at
+# 901e38cb). All four are awaited in place; none is spawned, periodic, or
+# renews a playback/producer budget:
+# - http/stream.rs decision (the measured_candidate_outputs assignment): the
+#   request awaits one timeout_at(create_stage_deadline(100 ms)) over the
+#   borrowed snapshot projection; expiry yields None (advisory cost only).
+# - transcode/manager/candidates.rs restore_catalog_context: one timeout_at on
+#   the caller's own restoration deadline; expiry returns Unavailable.
+# - transcode/manager/create.rs vod_preparation_snapshot: the fallback
+#   snapshot read awaits timeout_at(create_stage_deadline(2 s)), clamped to the
+#   create startup budget; expiry is a catalog input error.
+# - vod/retained.rs test_reorder_candidate_cost_isolation (#[cfg(test)]): one
+#   in-place 20 ms poll loop ended by the fixture's five-second proof deadline.
+expected_occurrences = 1223
 
 [[module_structures]]
 id = "bare-time-constructor"
