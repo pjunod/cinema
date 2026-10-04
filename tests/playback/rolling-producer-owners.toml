@@ -2493,7 +2493,14 @@ pattern = "(?:[A-Za-z_]\\w*::)+spawn(?:_blocking|_local|_for_test)?\\s*\\("
 # stand-in Start task the B supersession tests join, and the reopen CGNAT
 # fixture's Source and B servers, each stopped and joined at its end. The
 # supersession itself reuses the existing single retirement owner.
-expected_occurrences = 806
+# +1 for the shared prepared successor (P1/P2), test-only: the completed
+# stand-in Start task of a registered successor, joined by its retirement owner
+# in the successor tests. A staged successor is started through the existing
+# registry owner (`spawn_owner`, the same spawn moved out of `begin`) and
+# withdrawn or superseded through the existing retirement owner. The prepared
+# handoff CGNAT fixture shares the reopen fixture's two servers (`PinnedPair`),
+# each stopped and joined in `finish`.
+expected_occurrences = 807
 # E1 plus S-14 M8: both ownership sets retained and counted on the merged source.
 # 643 -> 647 with S-14 M8 (`plan/S-14-5`: `Encoding`, `RollingFlowSync`, `TerminalCleanup`,
 # `HeadChildOwner`, `VodServingAdmission` behind per-owner hooks), measured by

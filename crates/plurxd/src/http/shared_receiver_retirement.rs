@@ -326,17 +326,25 @@ impl ReceiverStartActor {
             owned.retirement_started = true;
             owned.dispatch_closed = true;
         }
+        // An uncommitted prepared successor has no viewer once the session it
+        // was prepared for retires; it is withdrawn through its own owner.
+        let withdrawn = self.0.take_uncommitted_successor();
         self.0.bodies.close();
         self.0.stop.cancel();
         let actor = self.clone();
+        let owner_state = state.clone();
         let task = tokio::spawn(async move {
-            actor.retire_owned(state, reason).await;
+            actor.retire_owned(owner_state, reason).await;
         });
         *self
             .0
             .retirement_task
             .lock()
             .expect("receiver retirement task") = Some(task);
+        if let Some(successor) = withdrawn {
+            ReceiverStartActor(successor)
+                .begin_retirement(state, ReceiverRetirementReason::Replaced);
+        }
     }
     async fn retire_owned(self, state: Arc<AppState>, reason: ReceiverRetirementReason) {
         let mut budget = RetirementBudget::new(state.shutdown.clone());
