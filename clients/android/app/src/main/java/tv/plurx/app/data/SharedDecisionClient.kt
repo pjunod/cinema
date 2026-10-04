@@ -44,7 +44,7 @@ internal class SharedDecisionClient private constructor(private val auth: Sessio
         }
         try {
             if (entry.order.needsResync || entry.order.pending?.let { it.session_id != playback.context.sessionId } == true) {
-                val text = detail(reference, transport, auth); requireCurrent()
+                val text = detail(reference, auth, transport); requireCurrent()
                 val detail = Net.json.decodeFromString<SharedLibraryDetail>(text); detail.validate(reference)
                 require(detail.lifecycle_generation == playback.context.lifecycleGeneration)
                 val fresh = detail.watch?.sequence ?: 0
