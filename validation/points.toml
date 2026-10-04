@@ -421,6 +421,7 @@ paths = [
   # adds a newly-required column breaks it, so it belongs with the model whose
   # persistence it reproduces.
   "crates/plurx-core/examples/catalogue_fixture.rs",
+  "crates/plurx-core/examples/encoder-calibration-args.rs",
   # K-05's query-plan tool over that fixture: it drives the real stores'
   # hot catalogue reads, captures the statements they trace, and records
   # each plan and its cold and warm timings on both backends' schemas.
@@ -454,6 +455,7 @@ paths = [
   "crates/plurx-core/src/store/candidate_recovery.rs",
   "crates/plurx-core/src/store/fragindex.rs",
   "crates/plurx-core/src/store/fragment_index_cluster.rs",
+  "crates/plurx-core/src/store/analysis_reconcile.sql",
   "crates/plurx-core/src/store/hiqlite_fragment_index_cluster.rs",
   "crates/plurx-core/src/store/hiqlite_timeline_annotations.rs",
   "crates/plurx-core/src/store/timeline_annotations.rs",
@@ -462,6 +464,9 @@ paths = [
   "crates/plurx-core/tests/store_contract/background_jobs.rs",
   "crates/plurx-core/tests/support/queue_fixture.rs",
   "crates/plurx-core/tests/fixtures/startup_observer.rs",
+  "crates/plurx-core/tests/support/fragment_prune_budget.rs",
+  "crates/plurx-core/tests/fixtures/fragment-prune-retention.sql",
+  "crates/plurx-core/tests/fixtures/fragment-prune-worst.sql",
   "crates/plurx-core/tests/support/subtitle_jobs.rs",
   "spikes/hiqlite-m0/{Cargo.toml,Cargo.lock,src/lib.rs,tests/hiqlite_m0.rs}",
   "rust-toolchain.toml",
@@ -474,6 +479,8 @@ title = "Persistent database compatibility"
 contract = "Existing libraries upgrade without losing data; a newer unsupported database is refused without changing staging state; clustering publishes a durable content-addressed SQLite backup, imports v14 through current durable rows into a fresh one-voter Hiqlite target, rebuilds derived FTS, and returns only after exact per-table parity. A fsynced completion marker and atomic rename make the verified target active; a failed or interrupted pre-rename attempt is cleaned before one unchanged-SQLite recovery boot, while post-rename recovery selects only the completed target. An ambiguous active target refuses the boot instead of reverting to SQLite, an activated directory that lost its target refuses to re-import the retained source, and retained source backups are bounded. Synchronous source reads stay on one blocking worker, while target parity uses bounded primary-key pages and an incremental digest."
 paths = [
   "crates/plurx-core/src/cluster/migration.rs",
+  "crates/plurx-core/src/store/schema_lineage.rs",
+  "crates/plurx-core/tests/schema_lineage_upgrade.rs",
   "crates/plurx-core/src/store/hiqlite_import.rs",
   "crates/plurx-core/src/store/sqlite/mod.rs",
   # K-05 section 3.9: poisoned-connection recovery and the boot integrity
@@ -547,6 +554,9 @@ paths = [
   "crates/plurx-core/tests/store_contract.rs",
   "crates/plurx-core/tests/store_contract/background_jobs.rs",
   "crates/plurx-core/tests/support/queue_fixture.rs",
+  "crates/plurx-core/tests/support/fragment_prune_budget.rs",
+  "crates/plurx-core/tests/fixtures/fragment-prune-retention.sql",
+  "crates/plurx-core/tests/fixtures/fragment-prune-worst.sql",
   "crates/plurx-core/tests/support/subtitle_jobs.rs",
   "crates/plurx-core/tests/fixtures/hiqlite-schema-v42.sql",
   "tests/validation/test_store_shard.py",
@@ -677,6 +687,9 @@ paths = [
   "crates/plurx-core/tests/store_contract.rs",
   "crates/plurx-core/tests/store_contract/background_jobs.rs",
   "crates/plurx-core/tests/support/queue_fixture.rs",
+  "crates/plurx-core/tests/support/fragment_prune_budget.rs",
+  "crates/plurx-core/tests/fixtures/fragment-prune-retention.sql",
+  "crates/plurx-core/tests/fixtures/fragment-prune-worst.sql",
   "crates/plurx-core/tests/support/subtitle_jobs.rs",
   "crates/plurx-cluster-check/tests/page_latency_schema.rs",
   "crates/plurxd/tests/cluster_activity.rs",
@@ -701,7 +714,7 @@ paths = [
   "crates/plurxd/src/dv_disk.rs",
   "crates/plurxd/src/media_sessions.rs",
   "crates/plurxd/src/reader_formats.rs",
-  "crates/plurxd/src/http/{analysis,developer,dto,error,extract,mod,network,publication,reading,system}.rs",
+  "crates/plurxd/src/http/{analysis,analysis_reconcile,developer,dto,error,extract,mod,network,preparation,publication,reading,system}.rs",
   "crates/plurxd/src/http/scan_identity.rs",
   "crates/plurxd/src/http/dv_disk.rs",
   # On-request chapter thumbnails: one bounded ffmpeg per chapter, node-local
@@ -1116,6 +1129,7 @@ paths = [
   "scripts/p02-release-cost.py",
   "scripts/p02-release-cost.Dockerfile",
   "scripts/build-static-ffprobe",
+  "scripts/build-static-vmaf-scorer",
   "scripts/ci-cache-prune",
   "scripts/ci-buildkit-prune",
   "scripts/k08-build-measure",
@@ -1124,6 +1138,9 @@ paths = [
   "scripts/release-package-candidate",
   "scripts/package-windows",
   "scripts/{bench,codec-qualification-corpus.json,codec-hdr-score,dv-evidence,gop-census,rolling-grid-census,rolling-grid-acquire,mkpgs,perf-report,perf2-rate-control-n1-corpus.json,perf2-rate-control-n2-corpus.json,perf2-rate-control-smoke-corpus.json,ship,ship-physical}",
+  "scripts/encoder-calibration-screen",
+  "scripts/content-aware-encoding",
+  "scripts/tone-map-calibration",
   "scripts/container-smoke",
   "scripts/container-restore-smoke",
   "scripts/windows-smoke.ps1",

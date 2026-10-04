@@ -1,0 +1,4254 @@
+{
+  "incident_date_edt": "2026-10-01",
+  "source_commit": "3a512c8909ee8c2814ab2004ed724c7b39bdd8ac",
+  "sql_source": "crates/plurx-core/src/store/hiqlite_fragment_index_cluster.rs::prune_cluster_fragment_indexes",
+  "sql_sha256": "40e073465721adab932ec01e2fcc0880f44385e4de4f94234cdbf5b64861ffa3",
+  "root_cause": "Replicated fragment-index cleanup performs repeated poorly indexed analysis-history probes, blocking state-machine apply beyond the serving-proof budget.",
+  "live_mutations": false,
+  "loss_events": {
+    "nuc4": [
+      {
+        "timestamp_utc": "2026-10-01T23:41:20.628159834Z",
+        "last_applied_index": 26344334,
+        "next_entry_confirmed_cleanup": false,
+        "next_entry_index": null
+      },
+      {
+        "timestamp_utc": "2026-10-01T23:44:40.126994676Z",
+        "last_applied_index": 26345398,
+        "next_entry_confirmed_cleanup": false,
+        "next_entry_index": null
+      },
+      {
+        "timestamp_utc": "2026-10-01T23:50:51.139873149Z",
+        "last_applied_index": 26347171,
+        "next_entry_confirmed_cleanup": false,
+        "next_entry_index": null
+      },
+      {
+        "timestamp_utc": "2026-10-01T23:57:20.643376326Z",
+        "last_applied_index": 26349251,
+        "next_entry_confirmed_cleanup": false,
+        "next_entry_index": null
+      },
+      {
+        "timestamp_utc": "2026-10-02T00:00:40.637553513Z",
+        "last_applied_index": 26350252,
+        "next_entry_confirmed_cleanup": false,
+        "next_entry_index": null
+      },
+      {
+        "timestamp_utc": "2026-10-02T00:06:49.648680941Z",
+        "last_applied_index": 26352541,
+        "next_entry_confirmed_cleanup": false,
+        "next_entry_index": null
+      },
+      {
+        "timestamp_utc": "2026-10-02T00:13:20.136962055Z",
+        "last_applied_index": 26354589,
+        "next_entry_confirmed_cleanup": false,
+        "next_entry_index": null
+      },
+      {
+        "timestamp_utc": "2026-10-02T00:16:40.129434894Z",
+        "last_applied_index": 26356087,
+        "next_entry_confirmed_cleanup": false,
+        "next_entry_index": null
+      },
+      {
+        "timestamp_utc": "2026-10-02T00:17:39.644845976Z",
+        "last_applied_index": 26357143,
+        "next_entry_confirmed_cleanup": false,
+        "next_entry_index": null
+      },
+      {
+        "timestamp_utc": "2026-10-02T00:18:28.643703343Z",
+        "last_applied_index": 26357572,
+        "next_entry_confirmed_cleanup": false,
+        "next_entry_index": null
+      },
+      {
+        "timestamp_utc": "2026-10-02T00:19:40.631600329Z",
+        "last_applied_index": 26358012,
+        "next_entry_confirmed_cleanup": false,
+        "next_entry_index": null
+      },
+      {
+        "timestamp_utc": "2026-10-02T00:20:40.144698212Z",
+        "last_applied_index": 26358371,
+        "next_entry_confirmed_cleanup": true,
+        "next_entry_index": 26358372
+      },
+      {
+        "timestamp_utc": "2026-10-02T00:21:40.139031052Z",
+        "last_applied_index": 26358665,
+        "next_entry_confirmed_cleanup": true,
+        "next_entry_index": 26358666
+      },
+      {
+        "timestamp_utc": "2026-10-02T00:22:41.142826439Z",
+        "last_applied_index": 26358880,
+        "next_entry_confirmed_cleanup": true,
+        "next_entry_index": 26358881
+      },
+      {
+        "timestamp_utc": "2026-10-02T00:22:51.629981985Z",
+        "last_applied_index": 26358916,
+        "next_entry_confirmed_cleanup": true,
+        "next_entry_index": 26358917
+      },
+      {
+        "timestamp_utc": "2026-10-02T00:23:40.641055352Z",
+        "last_applied_index": 26359111,
+        "next_entry_confirmed_cleanup": true,
+        "next_entry_index": 26359112
+      },
+      {
+        "timestamp_utc": "2026-10-02T00:23:50.140315112Z",
+        "last_applied_index": 26359141,
+        "next_entry_confirmed_cleanup": true,
+        "next_entry_index": 26359142
+      },
+      {
+        "timestamp_utc": "2026-10-02T00:24:40.124070696Z",
+        "last_applied_index": 26359294,
+        "next_entry_confirmed_cleanup": true,
+        "next_entry_index": 26359295
+      },
+      {
+        "timestamp_utc": "2026-10-02T00:25:29.137803992Z",
+        "last_applied_index": 26359416,
+        "next_entry_confirmed_cleanup": true,
+        "next_entry_index": 26359417
+      }
+    ],
+    "m6": [
+      {
+        "timestamp_utc": "2026-10-01T23:41:20.571222708Z",
+        "last_applied_index": 26344334,
+        "next_entry_confirmed_cleanup": false,
+        "next_entry_index": null
+      },
+      {
+        "timestamp_utc": "2026-10-01T23:44:40.060585033Z",
+        "last_applied_index": 26345398,
+        "next_entry_confirmed_cleanup": false,
+        "next_entry_index": null
+      },
+      {
+        "timestamp_utc": "2026-10-01T23:50:51.057796275Z",
+        "last_applied_index": 26347171,
+        "next_entry_confirmed_cleanup": false,
+        "next_entry_index": null
+      },
+      {
+        "timestamp_utc": "2026-10-01T23:57:20.570576939Z",
+        "last_applied_index": 26349251,
+        "next_entry_confirmed_cleanup": false,
+        "next_entry_index": null
+      },
+      {
+        "timestamp_utc": "2026-10-02T00:00:40.571926626Z",
+        "last_applied_index": 26350252,
+        "next_entry_confirmed_cleanup": false,
+        "next_entry_index": null
+      },
+      {
+        "timestamp_utc": "2026-10-02T00:06:49.569565467Z",
+        "last_applied_index": 26352541,
+        "next_entry_confirmed_cleanup": false,
+        "next_entry_index": null
+      },
+      {
+        "timestamp_utc": "2026-10-02T00:13:20.059620327Z",
+        "last_applied_index": 26354589,
+        "next_entry_confirmed_cleanup": false,
+        "next_entry_index": null
+      },
+      {
+        "timestamp_utc": "2026-10-02T00:16:40.077163745Z",
+        "last_applied_index": 26356087,
+        "next_entry_confirmed_cleanup": false,
+        "next_entry_index": null
+      },
+      {
+        "timestamp_utc": "2026-10-02T00:17:40.076466814Z",
+        "last_applied_index": 26357143,
+        "next_entry_confirmed_cleanup": false,
+        "next_entry_index": null
+      },
+      {
+        "timestamp_utc": "2026-10-02T00:18:28.571648077Z",
+        "last_applied_index": 26357572,
+        "next_entry_confirmed_cleanup": false,
+        "next_entry_index": null
+      },
+      {
+        "timestamp_utc": "2026-10-02T00:19:40.555540460Z",
+        "last_applied_index": 26358012,
+        "next_entry_confirmed_cleanup": false,
+        "next_entry_index": null
+      },
+      {
+        "timestamp_utc": "2026-10-02T00:20:40.070043710Z",
+        "last_applied_index": 26358371,
+        "next_entry_confirmed_cleanup": true,
+        "next_entry_index": 26358372
+      },
+      {
+        "timestamp_utc": "2026-10-02T00:21:40.069328510Z",
+        "last_applied_index": 26358665,
+        "next_entry_confirmed_cleanup": true,
+        "next_entry_index": 26358666
+      },
+      {
+        "timestamp_utc": "2026-10-02T00:22:41.072645056Z",
+        "last_applied_index": 26358880,
+        "next_entry_confirmed_cleanup": true,
+        "next_entry_index": 26358881
+      },
+      {
+        "timestamp_utc": "2026-10-02T00:22:51.557978368Z",
+        "last_applied_index": 26358916,
+        "next_entry_confirmed_cleanup": true,
+        "next_entry_index": 26358917
+      },
+      {
+        "timestamp_utc": "2026-10-02T00:23:40.558006561Z",
+        "last_applied_index": 26359111,
+        "next_entry_confirmed_cleanup": true,
+        "next_entry_index": 26359112
+      },
+      {
+        "timestamp_utc": "2026-10-02T00:23:50.557772309Z",
+        "last_applied_index": 26359141,
+        "next_entry_confirmed_cleanup": true,
+        "next_entry_index": 26359142
+      },
+      {
+        "timestamp_utc": "2026-10-02T00:24:40.072448949Z",
+        "last_applied_index": 26359294,
+        "next_entry_confirmed_cleanup": true,
+        "next_entry_index": 26359295
+      },
+      {
+        "timestamp_utc": "2026-10-02T00:25:29.066633523Z",
+        "last_applied_index": 26359416,
+        "next_entry_confirmed_cleanup": true,
+        "next_entry_index": 26359417
+      }
+    ],
+    "nynuc": [
+      {
+        "timestamp_utc": "2026-10-01T23:41:20.371228364Z",
+        "last_applied_index": 26344334,
+        "next_entry_confirmed_cleanup": false,
+        "next_entry_index": null
+      },
+      {
+        "timestamp_utc": "2026-10-01T23:44:39.886993204Z",
+        "last_applied_index": 26345398,
+        "next_entry_confirmed_cleanup": false,
+        "next_entry_index": null
+      },
+      {
+        "timestamp_utc": "2026-10-01T23:50:50.866630329Z",
+        "last_applied_index": 26347171,
+        "next_entry_confirmed_cleanup": false,
+        "next_entry_index": null
+      },
+      {
+        "timestamp_utc": "2026-10-01T23:57:20.885933748Z",
+        "last_applied_index": 26349253,
+        "next_entry_confirmed_cleanup": false,
+        "next_entry_index": null
+      },
+      {
+        "timestamp_utc": "2026-10-02T00:00:40.388083966Z",
+        "last_applied_index": 26350252,
+        "next_entry_confirmed_cleanup": false,
+        "next_entry_index": null
+      },
+      {
+        "timestamp_utc": "2026-10-02T00:06:49.880912429Z",
+        "last_applied_index": 26352541,
+        "next_entry_confirmed_cleanup": false,
+        "next_entry_index": null
+      },
+      {
+        "timestamp_utc": "2026-10-02T00:13:19.875666664Z",
+        "last_applied_index": 26354589,
+        "next_entry_confirmed_cleanup": false,
+        "next_entry_index": null
+      },
+      {
+        "timestamp_utc": "2026-10-02T00:16:39.886416495Z",
+        "last_applied_index": 26356087,
+        "next_entry_confirmed_cleanup": false,
+        "next_entry_index": null
+      },
+      {
+        "timestamp_utc": "2026-10-02T00:17:39.883612190Z",
+        "last_applied_index": 26357143,
+        "next_entry_confirmed_cleanup": false,
+        "next_entry_index": null
+      },
+      {
+        "timestamp_utc": "2026-10-02T00:18:28.888284904Z",
+        "last_applied_index": 26357572,
+        "next_entry_confirmed_cleanup": false,
+        "next_entry_index": null
+      },
+      {
+        "timestamp_utc": "2026-10-02T00:19:40.367882923Z",
+        "last_applied_index": 26358012,
+        "next_entry_confirmed_cleanup": false,
+        "next_entry_index": null
+      },
+      {
+        "timestamp_utc": "2026-10-02T00:20:39.880333989Z",
+        "last_applied_index": 26358371,
+        "next_entry_confirmed_cleanup": true,
+        "next_entry_index": 26358372
+      },
+      {
+        "timestamp_utc": "2026-10-02T00:21:40.374219667Z",
+        "last_applied_index": 26358665,
+        "next_entry_confirmed_cleanup": true,
+        "next_entry_index": 26358666
+      },
+      {
+        "timestamp_utc": "2026-10-02T00:22:40.875331576Z",
+        "last_applied_index": 26358880,
+        "next_entry_confirmed_cleanup": true,
+        "next_entry_index": 26358881
+      },
+      {
+        "timestamp_utc": "2026-10-02T00:22:51.377919124Z",
+        "last_applied_index": 26358916,
+        "next_entry_confirmed_cleanup": true,
+        "next_entry_index": 26358917
+      },
+      {
+        "timestamp_utc": "2026-10-02T00:23:40.386388936Z",
+        "last_applied_index": 26359111,
+        "next_entry_confirmed_cleanup": true,
+        "next_entry_index": 26359112
+      },
+      {
+        "timestamp_utc": "2026-10-02T00:23:50.386184446Z",
+        "last_applied_index": 26359141,
+        "next_entry_confirmed_cleanup": true,
+        "next_entry_index": 26359142
+      },
+      {
+        "timestamp_utc": "2026-10-02T00:24:39.876198594Z",
+        "last_applied_index": 26359294,
+        "next_entry_confirmed_cleanup": true,
+        "next_entry_index": 26359295
+      },
+      {
+        "timestamp_utc": "2026-10-02T00:25:29.380198426Z",
+        "last_applied_index": 26359416,
+        "next_entry_confirmed_cleanup": true,
+        "next_entry_index": 26359417
+      }
+    ]
+  },
+  "wal_correlation": {
+    "retained_correlated_events": 8,
+    "next_entry_sql_prefix": "DELETE FROM cluster_fragment_index_jobs",
+    "older_events_not_attributed": 11,
+    "method": "Read HQL_WAL records and inspect SQL bytes for last_applied_index + 1; no bind values retained."
+  },
+  "benchmark": {
+    "host": "nuc4",
+    "engine": "SQLite 3.53.2 compiled from pinned libsqlite3-sys 0.38.1 amalgamation; Python driver preloaded only for the reproduction",
+    "method": "Consistent read-only snapshot of six tables, explicit indexes and matching sqlite_stat1/stat4 rows into private :memory: database; DELETE wrapped in BEGIN/ROLLBACK; 30-day cutoff, LIMIT 128; three trials per variant.",
+    "limitations": [
+      "Not the daemon executable or an end-to-end Raft run.",
+      "Production triggers were listed but not copied. All measured deletes affected zero rows, so they would not execute row-trigger bodies.",
+      "Times exclude snapshot copy, migration/index construction, networking and disk commit.",
+      "VM step counts approximate in batches of 10000."
+    ],
+    "records": [
+      {
+        "copied_statistics": {
+          "sqlite_stat1": 18,
+          "sqlite_stat4": 24
+        },
+        "job_table_triggers": [
+          [
+            "cluster_fragment_index_lifecycle_counters"
+          ],
+          [
+            "background_fragment_target_history_removed"
+          ]
+        ]
+      },
+      {
+        "statistics_tables": [
+          [
+            "sqlite_stat1"
+          ],
+          [
+            "sqlite_stat4"
+          ]
+        ],
+        "production_file_plan": [
+          [
+            3,
+            0,
+            87,
+            "SEARCH cluster_fragment_index_jobs USING COVERING INDEX sqlite_autoindex_cluster_fragment_index_jobs_1 (cache_key=?)"
+          ],
+          [
+            7,
+            0,
+            0,
+            "LIST SUBQUERY 9"
+          ],
+          [
+            13,
+            7,
+            0,
+            "MULTI-INDEX OR"
+          ],
+          [
+            14,
+            13,
+            0,
+            "INDEX 1"
+          ],
+          [
+            36,
+            14,
+            117,
+            "SEARCH terminal_job USING INDEX cluster_fragment_index_jobs_status_history (state=? AND updated_at_ms<?)"
+          ],
+          [
+            42,
+            13,
+            0,
+            "INDEX 2"
+          ],
+          [
+            52,
+            42,
+            0,
+            "CORRELATED SCALAR SUBQUERY 1"
+          ],
+          [
+            56,
+            52,
+            33,
+            "SEARCH current_file USING INTEGER PRIMARY KEY (rowid=?)"
+          ],
+          [
+            70,
+            42,
+            0,
+            "CORRELATED SCALAR SUBQUERY 2"
+          ],
+          [
+            75,
+            70,
+            111,
+            "SEARCH request USING INDEX analysis_requests_due (target_node_id=?)"
+          ],
+          [
+            90,
+            42,
+            107,
+            "SEARCH terminal_job USING INDEX cluster_fragment_index_jobs_status_history (state=? AND updated_at_ms<?)"
+          ],
+          [
+            99,
+            7,
+            0,
+            "CORRELATED SCALAR SUBQUERY 3"
+          ],
+          [
+            103,
+            99,
+            39,
+            "SEARCH artifact USING COVERING INDEX sqlite_autoindex_cluster_fragment_index_artifacts_1 (cache_key=?)"
+          ],
+          [
+            112,
+            7,
+            0,
+            "CORRELATED SCALAR SUBQUERY 4"
+          ],
+          [
+            124,
+            112,
+            49,
+            "SEARCH head USING AUTOMATIC COVERING INDEX (generation_cache_key=?)"
+          ],
+          [
+            134,
+            7,
+            0,
+            "CORRELATED SCALAR SUBQUERY 5"
+          ],
+          [
+            138,
+            134,
+            44,
+            "SEARCH location USING COVERING INDEX sqlite_autoindex_cluster_fragment_index_locations_1 (cache_key=?)"
+          ],
+          [
+            148,
+            7,
+            0,
+            "CORRELATED SCALAR SUBQUERY 6"
+          ],
+          [
+            153,
+            148,
+            45,
+            "SEARCH active_job USING INDEX sqlite_autoindex_cluster_fragment_index_jobs_1 (cache_key=?)"
+          ],
+          [
+            170,
+            7,
+            0,
+            "CORRELATED SCALAR SUBQUERY 7"
+          ],
+          [
+            175,
+            170,
+            92,
+            "SEARCH active_request USING INDEX analysis_requests_status (state=?)"
+          ],
+          [
+            217,
+            7,
+            0,
+            "USE TEMP B-TREE FOR ORDER BY"
+          ],
+          [
+            233,
+            0,
+            0,
+            "LIST SUBQUERY 8"
+          ],
+          [
+            240,
+            233,
+            0,
+            "MULTI-INDEX OR"
+          ],
+          [
+            241,
+            240,
+            0,
+            "INDEX 1"
+          ],
+          [
+            263,
+            241,
+            117,
+            "SEARCH terminal_job USING INDEX cluster_fragment_index_jobs_status_history (state=? AND updated_at_ms<?)"
+          ],
+          [
+            269,
+            240,
+            0,
+            "INDEX 2"
+          ],
+          [
+            279,
+            269,
+            0,
+            "CORRELATED SCALAR SUBQUERY 1"
+          ],
+          [
+            283,
+            279,
+            33,
+            "SEARCH current_file USING INTEGER PRIMARY KEY (rowid=?)"
+          ],
+          [
+            297,
+            269,
+            0,
+            "CORRELATED SCALAR SUBQUERY 2"
+          ],
+          [
+            302,
+            297,
+            111,
+            "SEARCH request USING INDEX analysis_requests_due (target_node_id=?)"
+          ],
+          [
+            317,
+            269,
+            107,
+            "SEARCH terminal_job USING INDEX cluster_fragment_index_jobs_status_history (state=? AND updated_at_ms<?)"
+          ],
+          [
+            326,
+            233,
+            0,
+            "CORRELATED SCALAR SUBQUERY 3"
+          ],
+          [
+            330,
+            326,
+            39,
+            "SEARCH artifact USING COVERING INDEX sqlite_autoindex_cluster_fragment_index_artifacts_1 (cache_key=?)"
+          ],
+          [
+            339,
+            233,
+            0,
+            "CORRELATED SCALAR SUBQUERY 4"
+          ],
+          [
+            351,
+            339,
+            49,
+            "SEARCH head USING AUTOMATIC COVERING INDEX (generation_cache_key=?)"
+          ],
+          [
+            361,
+            233,
+            0,
+            "CORRELATED SCALAR SUBQUERY 5"
+          ],
+          [
+            365,
+            361,
+            44,
+            "SEARCH location USING COVERING INDEX sqlite_autoindex_cluster_fragment_index_locations_1 (cache_key=?)"
+          ],
+          [
+            375,
+            233,
+            0,
+            "CORRELATED SCALAR SUBQUERY 6"
+          ],
+          [
+            380,
+            375,
+            45,
+            "SEARCH active_job USING INDEX sqlite_autoindex_cluster_fragment_index_jobs_1 (cache_key=?)"
+          ],
+          [
+            397,
+            233,
+            0,
+            "CORRELATED SCALAR SUBQUERY 7"
+          ],
+          [
+            402,
+            397,
+            92,
+            "SEARCH active_request USING INDEX analysis_requests_status (state=?)"
+          ],
+          [
+            444,
+            233,
+            0,
+            "USE TEMP B-TREE FOR ORDER BY"
+          ]
+        ]
+      },
+      {
+        "sqlite": "3.53.2",
+        "counts": {
+          "cluster_fragment_index_jobs": 18092,
+          "cluster_fragment_index_artifacts": 6324,
+          "cluster_fragment_index_heads": 6149,
+          "cluster_fragment_index_locations": 12788,
+          "analysis_requests": 27433,
+          "files": 6285
+        },
+        "cutoff_ms": 1788309579689
+      },
+      {
+        "variant": "baseline_1",
+        "seconds": 1.3304246669868007,
+        "deleted": 0,
+        "vm_steps_approx": 52830000,
+        "plan": [
+          [
+            3,
+            0,
+            87,
+            "SEARCH cluster_fragment_index_jobs USING COVERING INDEX sqlite_autoindex_cluster_fragment_index_jobs_1 (cache_key=?)"
+          ],
+          [
+            7,
+            0,
+            0,
+            "LIST SUBQUERY 9"
+          ],
+          [
+            13,
+            7,
+            0,
+            "MULTI-INDEX OR"
+          ],
+          [
+            14,
+            13,
+            0,
+            "INDEX 1"
+          ],
+          [
+            36,
+            14,
+            117,
+            "SEARCH terminal_job USING INDEX cluster_fragment_index_jobs_status_history (state=? AND updated_at_ms<?)"
+          ],
+          [
+            42,
+            13,
+            0,
+            "INDEX 2"
+          ],
+          [
+            52,
+            42,
+            0,
+            "CORRELATED SCALAR SUBQUERY 1"
+          ],
+          [
+            56,
+            52,
+            33,
+            "SEARCH current_file USING INTEGER PRIMARY KEY (rowid=?)"
+          ],
+          [
+            70,
+            42,
+            0,
+            "CORRELATED SCALAR SUBQUERY 2"
+          ],
+          [
+            75,
+            70,
+            111,
+            "SEARCH request USING INDEX analysis_requests_due (target_node_id=?)"
+          ],
+          [
+            90,
+            42,
+            107,
+            "SEARCH terminal_job USING INDEX cluster_fragment_index_jobs_status_history (state=? AND updated_at_ms<?)"
+          ],
+          [
+            99,
+            7,
+            0,
+            "CORRELATED SCALAR SUBQUERY 3"
+          ],
+          [
+            103,
+            99,
+            39,
+            "SEARCH artifact USING COVERING INDEX sqlite_autoindex_cluster_fragment_index_artifacts_1 (cache_key=?)"
+          ],
+          [
+            112,
+            7,
+            0,
+            "CORRELATED SCALAR SUBQUERY 4"
+          ],
+          [
+            124,
+            112,
+            49,
+            "SEARCH head USING AUTOMATIC COVERING INDEX (generation_cache_key=?)"
+          ],
+          [
+            134,
+            7,
+            0,
+            "CORRELATED SCALAR SUBQUERY 5"
+          ],
+          [
+            138,
+            134,
+            44,
+            "SEARCH location USING COVERING INDEX sqlite_autoindex_cluster_fragment_index_locations_1 (cache_key=?)"
+          ],
+          [
+            148,
+            7,
+            0,
+            "CORRELATED SCALAR SUBQUERY 6"
+          ],
+          [
+            153,
+            148,
+            45,
+            "SEARCH active_job USING INDEX sqlite_autoindex_cluster_fragment_index_jobs_1 (cache_key=?)"
+          ],
+          [
+            170,
+            7,
+            0,
+            "CORRELATED SCALAR SUBQUERY 7"
+          ],
+          [
+            175,
+            170,
+            92,
+            "SEARCH active_request USING INDEX analysis_requests_status (state=?)"
+          ],
+          [
+            217,
+            7,
+            0,
+            "USE TEMP B-TREE FOR ORDER BY"
+          ],
+          [
+            233,
+            0,
+            0,
+            "LIST SUBQUERY 8"
+          ],
+          [
+            240,
+            233,
+            0,
+            "MULTI-INDEX OR"
+          ],
+          [
+            241,
+            240,
+            0,
+            "INDEX 1"
+          ],
+          [
+            263,
+            241,
+            117,
+            "SEARCH terminal_job USING INDEX cluster_fragment_index_jobs_status_history (state=? AND updated_at_ms<?)"
+          ],
+          [
+            269,
+            240,
+            0,
+            "INDEX 2"
+          ],
+          [
+            279,
+            269,
+            0,
+            "CORRELATED SCALAR SUBQUERY 1"
+          ],
+          [
+            283,
+            279,
+            33,
+            "SEARCH current_file USING INTEGER PRIMARY KEY (rowid=?)"
+          ],
+          [
+            297,
+            269,
+            0,
+            "CORRELATED SCALAR SUBQUERY 2"
+          ],
+          [
+            302,
+            297,
+            111,
+            "SEARCH request USING INDEX analysis_requests_due (target_node_id=?)"
+          ],
+          [
+            317,
+            269,
+            107,
+            "SEARCH terminal_job USING INDEX cluster_fragment_index_jobs_status_history (state=? AND updated_at_ms<?)"
+          ],
+          [
+            326,
+            233,
+            0,
+            "CORRELATED SCALAR SUBQUERY 3"
+          ],
+          [
+            330,
+            326,
+            39,
+            "SEARCH artifact USING COVERING INDEX sqlite_autoindex_cluster_fragment_index_artifacts_1 (cache_key=?)"
+          ],
+          [
+            339,
+            233,
+            0,
+            "CORRELATED SCALAR SUBQUERY 4"
+          ],
+          [
+            351,
+            339,
+            49,
+            "SEARCH head USING AUTOMATIC COVERING INDEX (generation_cache_key=?)"
+          ],
+          [
+            361,
+            233,
+            0,
+            "CORRELATED SCALAR SUBQUERY 5"
+          ],
+          [
+            365,
+            361,
+            44,
+            "SEARCH location USING COVERING INDEX sqlite_autoindex_cluster_fragment_index_locations_1 (cache_key=?)"
+          ],
+          [
+            375,
+            233,
+            0,
+            "CORRELATED SCALAR SUBQUERY 6"
+          ],
+          [
+            380,
+            375,
+            45,
+            "SEARCH active_job USING INDEX sqlite_autoindex_cluster_fragment_index_jobs_1 (cache_key=?)"
+          ],
+          [
+            397,
+            233,
+            0,
+            "CORRELATED SCALAR SUBQUERY 7"
+          ],
+          [
+            402,
+            397,
+            92,
+            "SEARCH active_request USING INDEX analysis_requests_status (state=?)"
+          ],
+          [
+            444,
+            233,
+            0,
+            "USE TEMP B-TREE FOR ORDER BY"
+          ]
+        ]
+      },
+      {
+        "variant": "baseline_2",
+        "seconds": 1.2578217489644885,
+        "deleted": 0,
+        "vm_steps_approx": 52840000,
+        "plan": [
+          [
+            3,
+            0,
+            87,
+            "SEARCH cluster_fragment_index_jobs USING COVERING INDEX sqlite_autoindex_cluster_fragment_index_jobs_1 (cache_key=?)"
+          ],
+          [
+            7,
+            0,
+            0,
+            "LIST SUBQUERY 9"
+          ],
+          [
+            13,
+            7,
+            0,
+            "MULTI-INDEX OR"
+          ],
+          [
+            14,
+            13,
+            0,
+            "INDEX 1"
+          ],
+          [
+            36,
+            14,
+            117,
+            "SEARCH terminal_job USING INDEX cluster_fragment_index_jobs_status_history (state=? AND updated_at_ms<?)"
+          ],
+          [
+            42,
+            13,
+            0,
+            "INDEX 2"
+          ],
+          [
+            52,
+            42,
+            0,
+            "CORRELATED SCALAR SUBQUERY 1"
+          ],
+          [
+            56,
+            52,
+            33,
+            "SEARCH current_file USING INTEGER PRIMARY KEY (rowid=?)"
+          ],
+          [
+            70,
+            42,
+            0,
+            "CORRELATED SCALAR SUBQUERY 2"
+          ],
+          [
+            75,
+            70,
+            111,
+            "SEARCH request USING INDEX analysis_requests_due (target_node_id=?)"
+          ],
+          [
+            90,
+            42,
+            107,
+            "SEARCH terminal_job USING INDEX cluster_fragment_index_jobs_status_history (state=? AND updated_at_ms<?)"
+          ],
+          [
+            99,
+            7,
+            0,
+            "CORRELATED SCALAR SUBQUERY 3"
+          ],
+          [
+            103,
+            99,
+            39,
+            "SEARCH artifact USING COVERING INDEX sqlite_autoindex_cluster_fragment_index_artifacts_1 (cache_key=?)"
+          ],
+          [
+            112,
+            7,
+            0,
+            "CORRELATED SCALAR SUBQUERY 4"
+          ],
+          [
+            124,
+            112,
+            49,
+            "SEARCH head USING AUTOMATIC COVERING INDEX (generation_cache_key=?)"
+          ],
+          [
+            134,
+            7,
+            0,
+            "CORRELATED SCALAR SUBQUERY 5"
+          ],
+          [
+            138,
+            134,
+            44,
+            "SEARCH location USING COVERING INDEX sqlite_autoindex_cluster_fragment_index_locations_1 (cache_key=?)"
+          ],
+          [
+            148,
+            7,
+            0,
+            "CORRELATED SCALAR SUBQUERY 6"
+          ],
+          [
+            153,
+            148,
+            45,
+            "SEARCH active_job USING INDEX sqlite_autoindex_cluster_fragment_index_jobs_1 (cache_key=?)"
+          ],
+          [
+            170,
+            7,
+            0,
+            "CORRELATED SCALAR SUBQUERY 7"
+          ],
+          [
+            175,
+            170,
+            92,
+            "SEARCH active_request USING INDEX analysis_requests_status (state=?)"
+          ],
+          [
+            217,
+            7,
+            0,
+            "USE TEMP B-TREE FOR ORDER BY"
+          ],
+          [
+            233,
+            0,
+            0,
+            "LIST SUBQUERY 8"
+          ],
+          [
+            240,
+            233,
+            0,
+            "MULTI-INDEX OR"
+          ],
+          [
+            241,
+            240,
+            0,
+            "INDEX 1"
+          ],
+          [
+            263,
+            241,
+            117,
+            "SEARCH terminal_job USING INDEX cluster_fragment_index_jobs_status_history (state=? AND updated_at_ms<?)"
+          ],
+          [
+            269,
+            240,
+            0,
+            "INDEX 2"
+          ],
+          [
+            279,
+            269,
+            0,
+            "CORRELATED SCALAR SUBQUERY 1"
+          ],
+          [
+            283,
+            279,
+            33,
+            "SEARCH current_file USING INTEGER PRIMARY KEY (rowid=?)"
+          ],
+          [
+            297,
+            269,
+            0,
+            "CORRELATED SCALAR SUBQUERY 2"
+          ],
+          [
+            302,
+            297,
+            111,
+            "SEARCH request USING INDEX analysis_requests_due (target_node_id=?)"
+          ],
+          [
+            317,
+            269,
+            107,
+            "SEARCH terminal_job USING INDEX cluster_fragment_index_jobs_status_history (state=? AND updated_at_ms<?)"
+          ],
+          [
+            326,
+            233,
+            0,
+            "CORRELATED SCALAR SUBQUERY 3"
+          ],
+          [
+            330,
+            326,
+            39,
+            "SEARCH artifact USING COVERING INDEX sqlite_autoindex_cluster_fragment_index_artifacts_1 (cache_key=?)"
+          ],
+          [
+            339,
+            233,
+            0,
+            "CORRELATED SCALAR SUBQUERY 4"
+          ],
+          [
+            351,
+            339,
+            49,
+            "SEARCH head USING AUTOMATIC COVERING INDEX (generation_cache_key=?)"
+          ],
+          [
+            361,
+            233,
+            0,
+            "CORRELATED SCALAR SUBQUERY 5"
+          ],
+          [
+            365,
+            361,
+            44,
+            "SEARCH location USING COVERING INDEX sqlite_autoindex_cluster_fragment_index_locations_1 (cache_key=?)"
+          ],
+          [
+            375,
+            233,
+            0,
+            "CORRELATED SCALAR SUBQUERY 6"
+          ],
+          [
+            380,
+            375,
+            45,
+            "SEARCH active_job USING INDEX sqlite_autoindex_cluster_fragment_index_jobs_1 (cache_key=?)"
+          ],
+          [
+            397,
+            233,
+            0,
+            "CORRELATED SCALAR SUBQUERY 7"
+          ],
+          [
+            402,
+            397,
+            92,
+            "SEARCH active_request USING INDEX analysis_requests_status (state=?)"
+          ],
+          [
+            444,
+            233,
+            0,
+            "USE TEMP B-TREE FOR ORDER BY"
+          ]
+        ]
+      },
+      {
+        "variant": "baseline_3",
+        "seconds": 1.2218892300734296,
+        "deleted": 0,
+        "vm_steps_approx": 52840000,
+        "plan": [
+          [
+            3,
+            0,
+            87,
+            "SEARCH cluster_fragment_index_jobs USING COVERING INDEX sqlite_autoindex_cluster_fragment_index_jobs_1 (cache_key=?)"
+          ],
+          [
+            7,
+            0,
+            0,
+            "LIST SUBQUERY 9"
+          ],
+          [
+            13,
+            7,
+            0,
+            "MULTI-INDEX OR"
+          ],
+          [
+            14,
+            13,
+            0,
+            "INDEX 1"
+          ],
+          [
+            36,
+            14,
+            117,
+            "SEARCH terminal_job USING INDEX cluster_fragment_index_jobs_status_history (state=? AND updated_at_ms<?)"
+          ],
+          [
+            42,
+            13,
+            0,
+            "INDEX 2"
+          ],
+          [
+            52,
+            42,
+            0,
+            "CORRELATED SCALAR SUBQUERY 1"
+          ],
+          [
+            56,
+            52,
+            33,
+            "SEARCH current_file USING INTEGER PRIMARY KEY (rowid=?)"
+          ],
+          [
+            70,
+            42,
+            0,
+            "CORRELATED SCALAR SUBQUERY 2"
+          ],
+          [
+            75,
+            70,
+            111,
+            "SEARCH request USING INDEX analysis_requests_due (target_node_id=?)"
+          ],
+          [
+            90,
+            42,
+            107,
+            "SEARCH terminal_job USING INDEX cluster_fragment_index_jobs_status_history (state=? AND updated_at_ms<?)"
+          ],
+          [
+            99,
+            7,
+            0,
+            "CORRELATED SCALAR SUBQUERY 3"
+          ],
+          [
+            103,
+            99,
+            39,
+            "SEARCH artifact USING COVERING INDEX sqlite_autoindex_cluster_fragment_index_artifacts_1 (cache_key=?)"
+          ],
+          [
+            112,
+            7,
+            0,
+            "CORRELATED SCALAR SUBQUERY 4"
+          ],
+          [
+            124,
+            112,
+            49,
+            "SEARCH head USING AUTOMATIC COVERING INDEX (generation_cache_key=?)"
+          ],
+          [
+            134,
+            7,
+            0,
+            "CORRELATED SCALAR SUBQUERY 5"
+          ],
+          [
+            138,
+            134,
+            44,
+            "SEARCH location USING COVERING INDEX sqlite_autoindex_cluster_fragment_index_locations_1 (cache_key=?)"
+          ],
+          [
+            148,
+            7,
+            0,
+            "CORRELATED SCALAR SUBQUERY 6"
+          ],
+          [
+            153,
+            148,
+            45,
+            "SEARCH active_job USING INDEX sqlite_autoindex_cluster_fragment_index_jobs_1 (cache_key=?)"
+          ],
+          [
+            170,
+            7,
+            0,
+            "CORRELATED SCALAR SUBQUERY 7"
+          ],
+          [
+            175,
+            170,
+            92,
+            "SEARCH active_request USING INDEX analysis_requests_status (state=?)"
+          ],
+          [
+            217,
+            7,
+            0,
+            "USE TEMP B-TREE FOR ORDER BY"
+          ],
+          [
+            233,
+            0,
+            0,
+            "LIST SUBQUERY 8"
+          ],
+          [
+            240,
+            233,
+            0,
+            "MULTI-INDEX OR"
+          ],
+          [
+            241,
+            240,
+            0,
+            "INDEX 1"
+          ],
+          [
+            263,
+            241,
+            117,
+            "SEARCH terminal_job USING INDEX cluster_fragment_index_jobs_status_history (state=? AND updated_at_ms<?)"
+          ],
+          [
+            269,
+            240,
+            0,
+            "INDEX 2"
+          ],
+          [
+            279,
+            269,
+            0,
+            "CORRELATED SCALAR SUBQUERY 1"
+          ],
+          [
+            283,
+            279,
+            33,
+            "SEARCH current_file USING INTEGER PRIMARY KEY (rowid=?)"
+          ],
+          [
+            297,
+            269,
+            0,
+            "CORRELATED SCALAR SUBQUERY 2"
+          ],
+          [
+            302,
+            297,
+            111,
+            "SEARCH request USING INDEX analysis_requests_due (target_node_id=?)"
+          ],
+          [
+            317,
+            269,
+            107,
+            "SEARCH terminal_job USING INDEX cluster_fragment_index_jobs_status_history (state=? AND updated_at_ms<?)"
+          ],
+          [
+            326,
+            233,
+            0,
+            "CORRELATED SCALAR SUBQUERY 3"
+          ],
+          [
+            330,
+            326,
+            39,
+            "SEARCH artifact USING COVERING INDEX sqlite_autoindex_cluster_fragment_index_artifacts_1 (cache_key=?)"
+          ],
+          [
+            339,
+            233,
+            0,
+            "CORRELATED SCALAR SUBQUERY 4"
+          ],
+          [
+            351,
+            339,
+            49,
+            "SEARCH head USING AUTOMATIC COVERING INDEX (generation_cache_key=?)"
+          ],
+          [
+            361,
+            233,
+            0,
+            "CORRELATED SCALAR SUBQUERY 5"
+          ],
+          [
+            365,
+            361,
+            44,
+            "SEARCH location USING COVERING INDEX sqlite_autoindex_cluster_fragment_index_locations_1 (cache_key=?)"
+          ],
+          [
+            375,
+            233,
+            0,
+            "CORRELATED SCALAR SUBQUERY 6"
+          ],
+          [
+            380,
+            375,
+            45,
+            "SEARCH active_job USING INDEX sqlite_autoindex_cluster_fragment_index_jobs_1 (cache_key=?)"
+          ],
+          [
+            397,
+            233,
+            0,
+            "CORRELATED SCALAR SUBQUERY 7"
+          ],
+          [
+            402,
+            397,
+            92,
+            "SEARCH active_request USING INDEX analysis_requests_status (state=?)"
+          ],
+          [
+            444,
+            233,
+            0,
+            "USE TEMP B-TREE FOR ORDER BY"
+          ]
+        ]
+      },
+      {
+        "variant": "only_requests_result_target_force_1",
+        "seconds": 0.0019631331088021398,
+        "deleted": 0,
+        "vm_steps_approx": 50000,
+        "plan": [
+          [
+            3,
+            0,
+            87,
+            "SEARCH cluster_fragment_index_jobs USING COVERING INDEX sqlite_autoindex_cluster_fragment_index_jobs_1 (cache_key=?)"
+          ],
+          [
+            7,
+            0,
+            0,
+            "LIST SUBQUERY 9"
+          ],
+          [
+            13,
+            7,
+            0,
+            "MULTI-INDEX OR"
+          ],
+          [
+            14,
+            13,
+            0,
+            "INDEX 1"
+          ],
+          [
+            36,
+            14,
+            117,
+            "SEARCH terminal_job USING INDEX cluster_fragment_index_jobs_status_history (state=? AND updated_at_ms<?)"
+          ],
+          [
+            42,
+            13,
+            0,
+            "INDEX 2"
+          ],
+          [
+            52,
+            42,
+            0,
+            "CORRELATED SCALAR SUBQUERY 1"
+          ],
+          [
+            56,
+            52,
+            33,
+            "SEARCH current_file USING INTEGER PRIMARY KEY (rowid=?)"
+          ],
+          [
+            70,
+            42,
+            0,
+            "CORRELATED SCALAR SUBQUERY 2"
+          ],
+          [
+            74,
+            70,
+            49,
+            "SEARCH request USING COVERING INDEX repro_requests_result_target_force (result_cache_key=? AND target_node_id=? AND force_rebuild=?)"
+          ],
+          [
+            85,
+            42,
+            107,
+            "SEARCH terminal_job USING INDEX cluster_fragment_index_jobs_status_history (state=? AND updated_at_ms<?)"
+          ],
+          [
+            94,
+            7,
+            0,
+            "CORRELATED SCALAR SUBQUERY 3"
+          ],
+          [
+            98,
+            94,
+            39,
+            "SEARCH artifact USING COVERING INDEX sqlite_autoindex_cluster_fragment_index_artifacts_1 (cache_key=?)"
+          ],
+          [
+            107,
+            7,
+            0,
+            "CORRELATED SCALAR SUBQUERY 4"
+          ],
+          [
+            119,
+            107,
+            49,
+            "SEARCH head USING AUTOMATIC COVERING INDEX (generation_cache_key=?)"
+          ],
+          [
+            129,
+            7,
+            0,
+            "CORRELATED SCALAR SUBQUERY 5"
+          ],
+          [
+            133,
+            129,
+            44,
+            "SEARCH location USING COVERING INDEX sqlite_autoindex_cluster_fragment_index_locations_1 (cache_key=?)"
+          ],
+          [
+            143,
+            7,
+            0,
+            "CORRELATED SCALAR SUBQUERY 6"
+          ],
+          [
+            148,
+            143,
+            45,
+            "SEARCH active_job USING INDEX sqlite_autoindex_cluster_fragment_index_jobs_1 (cache_key=?)"
+          ],
+          [
+            165,
+            7,
+            0,
+            "CORRELATED SCALAR SUBQUERY 7"
+          ],
+          [
+            170,
+            165,
+            60,
+            "SEARCH active_request USING INDEX repro_requests_result_target_force (result_cache_key=?)"
+          ],
+          [
+            208,
+            7,
+            0,
+            "USE TEMP B-TREE FOR ORDER BY"
+          ],
+          [
+            224,
+            0,
+            0,
+            "LIST SUBQUERY 8"
+          ],
+          [
+            231,
+            224,
+            0,
+            "MULTI-INDEX OR"
+          ],
+          [
+            232,
+            231,
+            0,
+            "INDEX 1"
+          ],
+          [
+            254,
+            232,
+            117,
+            "SEARCH terminal_job USING INDEX cluster_fragment_index_jobs_status_history (state=? AND updated_at_ms<?)"
+          ],
+          [
+            260,
+            231,
+            0,
+            "INDEX 2"
+          ],
+          [
+            270,
+            260,
+            0,
+            "CORRELATED SCALAR SUBQUERY 1"
+          ],
+          [
+            274,
+            270,
+            33,
+            "SEARCH current_file USING INTEGER PRIMARY KEY (rowid=?)"
+          ],
+          [
+            288,
+            260,
+            0,
+            "CORRELATED SCALAR SUBQUERY 2"
+          ],
+          [
+            292,
+            288,
+            49,
+            "SEARCH request USING COVERING INDEX repro_requests_result_target_force (result_cache_key=? AND target_node_id=? AND force_rebuild=?)"
+          ],
+          [
+            303,
+            260,
+            107,
+            "SEARCH terminal_job USING INDEX cluster_fragment_index_jobs_status_history (state=? AND updated_at_ms<?)"
+          ],
+          [
+            312,
+            224,
+            0,
+            "CORRELATED SCALAR SUBQUERY 3"
+          ],
+          [
+            316,
+            312,
+            39,
+            "SEARCH artifact USING COVERING INDEX sqlite_autoindex_cluster_fragment_index_artifacts_1 (cache_key=?)"
+          ],
+          [
+            325,
+            224,
+            0,
+            "CORRELATED SCALAR SUBQUERY 4"
+          ],
+          [
+            337,
+            325,
+            49,
+            "SEARCH head USING AUTOMATIC COVERING INDEX (generation_cache_key=?)"
+          ],
+          [
+            347,
+            224,
+            0,
+            "CORRELATED SCALAR SUBQUERY 5"
+          ],
+          [
+            351,
+            347,
+            44,
+            "SEARCH location USING COVERING INDEX sqlite_autoindex_cluster_fragment_index_locations_1 (cache_key=?)"
+          ],
+          [
+            361,
+            224,
+            0,
+            "CORRELATED SCALAR SUBQUERY 6"
+          ],
+          [
+            366,
+            361,
+            45,
+            "SEARCH active_job USING INDEX sqlite_autoindex_cluster_fragment_index_jobs_1 (cache_key=?)"
+          ],
+          [
+            383,
+            224,
+            0,
+            "CORRELATED SCALAR SUBQUERY 7"
+          ],
+          [
+            388,
+            383,
+            60,
+            "SEARCH active_request USING INDEX repro_requests_result_target_force (result_cache_key=?)"
+          ],
+          [
+            426,
+            224,
+            0,
+            "USE TEMP B-TREE FOR ORDER BY"
+          ]
+        ]
+      },
+      {
+        "variant": "only_requests_result_target_force_2",
+        "seconds": 0.0017669149674475193,
+        "deleted": 0,
+        "vm_steps_approx": 50000,
+        "plan": [
+          [
+            3,
+            0,
+            87,
+            "SEARCH cluster_fragment_index_jobs USING COVERING INDEX sqlite_autoindex_cluster_fragment_index_jobs_1 (cache_key=?)"
+          ],
+          [
+            7,
+            0,
+            0,
+            "LIST SUBQUERY 9"
+          ],
+          [
+            13,
+            7,
+            0,
+            "MULTI-INDEX OR"
+          ],
+          [
+            14,
+            13,
+            0,
+            "INDEX 1"
+          ],
+          [
+            36,
+            14,
+            117,
+            "SEARCH terminal_job USING INDEX cluster_fragment_index_jobs_status_history (state=? AND updated_at_ms<?)"
+          ],
+          [
+            42,
+            13,
+            0,
+            "INDEX 2"
+          ],
+          [
+            52,
+            42,
+            0,
+            "CORRELATED SCALAR SUBQUERY 1"
+          ],
+          [
+            56,
+            52,
+            33,
+            "SEARCH current_file USING INTEGER PRIMARY KEY (rowid=?)"
+          ],
+          [
+            70,
+            42,
+            0,
+            "CORRELATED SCALAR SUBQUERY 2"
+          ],
+          [
+            74,
+            70,
+            49,
+            "SEARCH request USING COVERING INDEX repro_requests_result_target_force (result_cache_key=? AND target_node_id=? AND force_rebuild=?)"
+          ],
+          [
+            85,
+            42,
+            107,
+            "SEARCH terminal_job USING INDEX cluster_fragment_index_jobs_status_history (state=? AND updated_at_ms<?)"
+          ],
+          [
+            94,
+            7,
+            0,
+            "CORRELATED SCALAR SUBQUERY 3"
+          ],
+          [
+            98,
+            94,
+            39,
+            "SEARCH artifact USING COVERING INDEX sqlite_autoindex_cluster_fragment_index_artifacts_1 (cache_key=?)"
+          ],
+          [
+            107,
+            7,
+            0,
+            "CORRELATED SCALAR SUBQUERY 4"
+          ],
+          [
+            119,
+            107,
+            49,
+            "SEARCH head USING AUTOMATIC COVERING INDEX (generation_cache_key=?)"
+          ],
+          [
+            129,
+            7,
+            0,
+            "CORRELATED SCALAR SUBQUERY 5"
+          ],
+          [
+            133,
+            129,
+            44,
+            "SEARCH location USING COVERING INDEX sqlite_autoindex_cluster_fragment_index_locations_1 (cache_key=?)"
+          ],
+          [
+            143,
+            7,
+            0,
+            "CORRELATED SCALAR SUBQUERY 6"
+          ],
+          [
+            148,
+            143,
+            45,
+            "SEARCH active_job USING INDEX sqlite_autoindex_cluster_fragment_index_jobs_1 (cache_key=?)"
+          ],
+          [
+            165,
+            7,
+            0,
+            "CORRELATED SCALAR SUBQUERY 7"
+          ],
+          [
+            170,
+            165,
+            60,
+            "SEARCH active_request USING INDEX repro_requests_result_target_force (result_cache_key=?)"
+          ],
+          [
+            208,
+            7,
+            0,
+            "USE TEMP B-TREE FOR ORDER BY"
+          ],
+          [
+            224,
+            0,
+            0,
+            "LIST SUBQUERY 8"
+          ],
+          [
+            231,
+            224,
+            0,
+            "MULTI-INDEX OR"
+          ],
+          [
+            232,
+            231,
+            0,
+            "INDEX 1"
+          ],
+          [
+            254,
+            232,
+            117,
+            "SEARCH terminal_job USING INDEX cluster_fragment_index_jobs_status_history (state=? AND updated_at_ms<?)"
+          ],
+          [
+            260,
+            231,
+            0,
+            "INDEX 2"
+          ],
+          [
+            270,
+            260,
+            0,
+            "CORRELATED SCALAR SUBQUERY 1"
+          ],
+          [
+            274,
+            270,
+            33,
+            "SEARCH current_file USING INTEGER PRIMARY KEY (rowid=?)"
+          ],
+          [
+            288,
+            260,
+            0,
+            "CORRELATED SCALAR SUBQUERY 2"
+          ],
+          [
+            292,
+            288,
+            49,
+            "SEARCH request USING COVERING INDEX repro_requests_result_target_force (result_cache_key=? AND target_node_id=? AND force_rebuild=?)"
+          ],
+          [
+            303,
+            260,
+            107,
+            "SEARCH terminal_job USING INDEX cluster_fragment_index_jobs_status_history (state=? AND updated_at_ms<?)"
+          ],
+          [
+            312,
+            224,
+            0,
+            "CORRELATED SCALAR SUBQUERY 3"
+          ],
+          [
+            316,
+            312,
+            39,
+            "SEARCH artifact USING COVERING INDEX sqlite_autoindex_cluster_fragment_index_artifacts_1 (cache_key=?)"
+          ],
+          [
+            325,
+            224,
+            0,
+            "CORRELATED SCALAR SUBQUERY 4"
+          ],
+          [
+            337,
+            325,
+            49,
+            "SEARCH head USING AUTOMATIC COVERING INDEX (generation_cache_key=?)"
+          ],
+          [
+            347,
+            224,
+            0,
+            "CORRELATED SCALAR SUBQUERY 5"
+          ],
+          [
+            351,
+            347,
+            44,
+            "SEARCH location USING COVERING INDEX sqlite_autoindex_cluster_fragment_index_locations_1 (cache_key=?)"
+          ],
+          [
+            361,
+            224,
+            0,
+            "CORRELATED SCALAR SUBQUERY 6"
+          ],
+          [
+            366,
+            361,
+            45,
+            "SEARCH active_job USING INDEX sqlite_autoindex_cluster_fragment_index_jobs_1 (cache_key=?)"
+          ],
+          [
+            383,
+            224,
+            0,
+            "CORRELATED SCALAR SUBQUERY 7"
+          ],
+          [
+            388,
+            383,
+            60,
+            "SEARCH active_request USING INDEX repro_requests_result_target_force (result_cache_key=?)"
+          ],
+          [
+            426,
+            224,
+            0,
+            "USE TEMP B-TREE FOR ORDER BY"
+          ]
+        ]
+      },
+      {
+        "variant": "only_requests_result_target_force_3",
+        "seconds": 0.001682452973909676,
+        "deleted": 0,
+        "vm_steps_approx": 40000,
+        "plan": [
+          [
+            3,
+            0,
+            87,
+            "SEARCH cluster_fragment_index_jobs USING COVERING INDEX sqlite_autoindex_cluster_fragment_index_jobs_1 (cache_key=?)"
+          ],
+          [
+            7,
+            0,
+            0,
+            "LIST SUBQUERY 9"
+          ],
+          [
+            13,
+            7,
+            0,
+            "MULTI-INDEX OR"
+          ],
+          [
+            14,
+            13,
+            0,
+            "INDEX 1"
+          ],
+          [
+            36,
+            14,
+            117,
+            "SEARCH terminal_job USING INDEX cluster_fragment_index_jobs_status_history (state=? AND updated_at_ms<?)"
+          ],
+          [
+            42,
+            13,
+            0,
+            "INDEX 2"
+          ],
+          [
+            52,
+            42,
+            0,
+            "CORRELATED SCALAR SUBQUERY 1"
+          ],
+          [
+            56,
+            52,
+            33,
+            "SEARCH current_file USING INTEGER PRIMARY KEY (rowid=?)"
+          ],
+          [
+            70,
+            42,
+            0,
+            "CORRELATED SCALAR SUBQUERY 2"
+          ],
+          [
+            74,
+            70,
+            49,
+            "SEARCH request USING COVERING INDEX repro_requests_result_target_force (result_cache_key=? AND target_node_id=? AND force_rebuild=?)"
+          ],
+          [
+            85,
+            42,
+            107,
+            "SEARCH terminal_job USING INDEX cluster_fragment_index_jobs_status_history (state=? AND updated_at_ms<?)"
+          ],
+          [
+            94,
+            7,
+            0,
+            "CORRELATED SCALAR SUBQUERY 3"
+          ],
+          [
+            98,
+            94,
+            39,
+            "SEARCH artifact USING COVERING INDEX sqlite_autoindex_cluster_fragment_index_artifacts_1 (cache_key=?)"
+          ],
+          [
+            107,
+            7,
+            0,
+            "CORRELATED SCALAR SUBQUERY 4"
+          ],
+          [
+            119,
+            107,
+            49,
+            "SEARCH head USING AUTOMATIC COVERING INDEX (generation_cache_key=?)"
+          ],
+          [
+            129,
+            7,
+            0,
+            "CORRELATED SCALAR SUBQUERY 5"
+          ],
+          [
+            133,
+            129,
+            44,
+            "SEARCH location USING COVERING INDEX sqlite_autoindex_cluster_fragment_index_locations_1 (cache_key=?)"
+          ],
+          [
+            143,
+            7,
+            0,
+            "CORRELATED SCALAR SUBQUERY 6"
+          ],
+          [
+            148,
+            143,
+            45,
+            "SEARCH active_job USING INDEX sqlite_autoindex_cluster_fragment_index_jobs_1 (cache_key=?)"
+          ],
+          [
+            165,
+            7,
+            0,
+            "CORRELATED SCALAR SUBQUERY 7"
+          ],
+          [
+            170,
+            165,
+            60,
+            "SEARCH active_request USING INDEX repro_requests_result_target_force (result_cache_key=?)"
+          ],
+          [
+            208,
+            7,
+            0,
+            "USE TEMP B-TREE FOR ORDER BY"
+          ],
+          [
+            224,
+            0,
+            0,
+            "LIST SUBQUERY 8"
+          ],
+          [
+            231,
+            224,
+            0,
+            "MULTI-INDEX OR"
+          ],
+          [
+            232,
+            231,
+            0,
+            "INDEX 1"
+          ],
+          [
+            254,
+            232,
+            117,
+            "SEARCH terminal_job USING INDEX cluster_fragment_index_jobs_status_history (state=? AND updated_at_ms<?)"
+          ],
+          [
+            260,
+            231,
+            0,
+            "INDEX 2"
+          ],
+          [
+            270,
+            260,
+            0,
+            "CORRELATED SCALAR SUBQUERY 1"
+          ],
+          [
+            274,
+            270,
+            33,
+            "SEARCH current_file USING INTEGER PRIMARY KEY (rowid=?)"
+          ],
+          [
+            288,
+            260,
+            0,
+            "CORRELATED SCALAR SUBQUERY 2"
+          ],
+          [
+            292,
+            288,
+            49,
+            "SEARCH request USING COVERING INDEX repro_requests_result_target_force (result_cache_key=? AND target_node_id=? AND force_rebuild=?)"
+          ],
+          [
+            303,
+            260,
+            107,
+            "SEARCH terminal_job USING INDEX cluster_fragment_index_jobs_status_history (state=? AND updated_at_ms<?)"
+          ],
+          [
+            312,
+            224,
+            0,
+            "CORRELATED SCALAR SUBQUERY 3"
+          ],
+          [
+            316,
+            312,
+            39,
+            "SEARCH artifact USING COVERING INDEX sqlite_autoindex_cluster_fragment_index_artifacts_1 (cache_key=?)"
+          ],
+          [
+            325,
+            224,
+            0,
+            "CORRELATED SCALAR SUBQUERY 4"
+          ],
+          [
+            337,
+            325,
+            49,
+            "SEARCH head USING AUTOMATIC COVERING INDEX (generation_cache_key=?)"
+          ],
+          [
+            347,
+            224,
+            0,
+            "CORRELATED SCALAR SUBQUERY 5"
+          ],
+          [
+            351,
+            347,
+            44,
+            "SEARCH location USING COVERING INDEX sqlite_autoindex_cluster_fragment_index_locations_1 (cache_key=?)"
+          ],
+          [
+            361,
+            224,
+            0,
+            "CORRELATED SCALAR SUBQUERY 6"
+          ],
+          [
+            366,
+            361,
+            45,
+            "SEARCH active_job USING INDEX sqlite_autoindex_cluster_fragment_index_jobs_1 (cache_key=?)"
+          ],
+          [
+            383,
+            224,
+            0,
+            "CORRELATED SCALAR SUBQUERY 7"
+          ],
+          [
+            388,
+            383,
+            60,
+            "SEARCH active_request USING INDEX repro_requests_result_target_force (result_cache_key=?)"
+          ],
+          [
+            426,
+            224,
+            0,
+            "USE TEMP B-TREE FOR ORDER BY"
+          ]
+        ]
+      },
+      {
+        "variant": "explicit_existing_partial_index_predicates_1",
+        "seconds": 0.002955632982775569,
+        "deleted": 0,
+        "vm_steps_approx": 70000,
+        "plan": [
+          [
+            3,
+            0,
+            87,
+            "SEARCH cluster_fragment_index_jobs USING COVERING INDEX sqlite_autoindex_cluster_fragment_index_jobs_1 (cache_key=?)"
+          ],
+          [
+            7,
+            0,
+            0,
+            "LIST SUBQUERY 9"
+          ],
+          [
+            13,
+            7,
+            0,
+            "MULTI-INDEX OR"
+          ],
+          [
+            14,
+            13,
+            0,
+            "INDEX 1"
+          ],
+          [
+            36,
+            14,
+            117,
+            "SEARCH terminal_job USING INDEX cluster_fragment_index_jobs_status_history (state=? AND updated_at_ms<?)"
+          ],
+          [
+            42,
+            13,
+            0,
+            "INDEX 2"
+          ],
+          [
+            52,
+            42,
+            0,
+            "CORRELATED SCALAR SUBQUERY 1"
+          ],
+          [
+            56,
+            52,
+            33,
+            "SEARCH current_file USING INTEGER PRIMARY KEY (rowid=?)"
+          ],
+          [
+            70,
+            42,
+            0,
+            "CORRELATED SCALAR SUBQUERY 2"
+          ],
+          [
+            75,
+            70,
+            49,
+            "SEARCH request USING INDEX analysis_requests_result_history (result_cache_key=?)"
+          ],
+          [
+            90,
+            42,
+            107,
+            "SEARCH terminal_job USING INDEX cluster_fragment_index_jobs_status_history (state=? AND updated_at_ms<?)"
+          ],
+          [
+            99,
+            7,
+            0,
+            "CORRELATED SCALAR SUBQUERY 3"
+          ],
+          [
+            103,
+            99,
+            39,
+            "SEARCH artifact USING COVERING INDEX sqlite_autoindex_cluster_fragment_index_artifacts_1 (cache_key=?)"
+          ],
+          [
+            112,
+            7,
+            0,
+            "CORRELATED SCALAR SUBQUERY 4"
+          ],
+          [
+            124,
+            112,
+            49,
+            "SEARCH head USING AUTOMATIC COVERING INDEX (generation_cache_key=?)"
+          ],
+          [
+            134,
+            7,
+            0,
+            "CORRELATED SCALAR SUBQUERY 5"
+          ],
+          [
+            138,
+            134,
+            44,
+            "SEARCH location USING COVERING INDEX sqlite_autoindex_cluster_fragment_index_locations_1 (cache_key=?)"
+          ],
+          [
+            148,
+            7,
+            0,
+            "CORRELATED SCALAR SUBQUERY 6"
+          ],
+          [
+            153,
+            148,
+            45,
+            "SEARCH active_job USING INDEX sqlite_autoindex_cluster_fragment_index_jobs_1 (cache_key=?)"
+          ],
+          [
+            170,
+            7,
+            0,
+            "CORRELATED SCALAR SUBQUERY 7"
+          ],
+          [
+            175,
+            170,
+            49,
+            "SEARCH active_request USING INDEX analysis_requests_result_history (result_cache_key=?)"
+          ],
+          [
+            213,
+            7,
+            0,
+            "USE TEMP B-TREE FOR ORDER BY"
+          ],
+          [
+            229,
+            0,
+            0,
+            "LIST SUBQUERY 8"
+          ],
+          [
+            236,
+            229,
+            0,
+            "MULTI-INDEX OR"
+          ],
+          [
+            237,
+            236,
+            0,
+            "INDEX 1"
+          ],
+          [
+            259,
+            237,
+            117,
+            "SEARCH terminal_job USING INDEX cluster_fragment_index_jobs_status_history (state=? AND updated_at_ms<?)"
+          ],
+          [
+            265,
+            236,
+            0,
+            "INDEX 2"
+          ],
+          [
+            275,
+            265,
+            0,
+            "CORRELATED SCALAR SUBQUERY 1"
+          ],
+          [
+            279,
+            275,
+            33,
+            "SEARCH current_file USING INTEGER PRIMARY KEY (rowid=?)"
+          ],
+          [
+            293,
+            265,
+            0,
+            "CORRELATED SCALAR SUBQUERY 2"
+          ],
+          [
+            298,
+            293,
+            49,
+            "SEARCH request USING INDEX analysis_requests_result_history (result_cache_key=?)"
+          ],
+          [
+            313,
+            265,
+            107,
+            "SEARCH terminal_job USING INDEX cluster_fragment_index_jobs_status_history (state=? AND updated_at_ms<?)"
+          ],
+          [
+            322,
+            229,
+            0,
+            "CORRELATED SCALAR SUBQUERY 3"
+          ],
+          [
+            326,
+            322,
+            39,
+            "SEARCH artifact USING COVERING INDEX sqlite_autoindex_cluster_fragment_index_artifacts_1 (cache_key=?)"
+          ],
+          [
+            335,
+            229,
+            0,
+            "CORRELATED SCALAR SUBQUERY 4"
+          ],
+          [
+            347,
+            335,
+            49,
+            "SEARCH head USING AUTOMATIC COVERING INDEX (generation_cache_key=?)"
+          ],
+          [
+            357,
+            229,
+            0,
+            "CORRELATED SCALAR SUBQUERY 5"
+          ],
+          [
+            361,
+            357,
+            44,
+            "SEARCH location USING COVERING INDEX sqlite_autoindex_cluster_fragment_index_locations_1 (cache_key=?)"
+          ],
+          [
+            371,
+            229,
+            0,
+            "CORRELATED SCALAR SUBQUERY 6"
+          ],
+          [
+            376,
+            371,
+            45,
+            "SEARCH active_job USING INDEX sqlite_autoindex_cluster_fragment_index_jobs_1 (cache_key=?)"
+          ],
+          [
+            393,
+            229,
+            0,
+            "CORRELATED SCALAR SUBQUERY 7"
+          ],
+          [
+            398,
+            393,
+            49,
+            "SEARCH active_request USING INDEX analysis_requests_result_history (result_cache_key=?)"
+          ],
+          [
+            436,
+            229,
+            0,
+            "USE TEMP B-TREE FOR ORDER BY"
+          ]
+        ]
+      },
+      {
+        "variant": "explicit_existing_partial_index_predicates_2",
+        "seconds": 0.0024271190632134676,
+        "deleted": 0,
+        "vm_steps_approx": 80000,
+        "plan": [
+          [
+            3,
+            0,
+            87,
+            "SEARCH cluster_fragment_index_jobs USING COVERING INDEX sqlite_autoindex_cluster_fragment_index_jobs_1 (cache_key=?)"
+          ],
+          [
+            7,
+            0,
+            0,
+            "LIST SUBQUERY 9"
+          ],
+          [
+            13,
+            7,
+            0,
+            "MULTI-INDEX OR"
+          ],
+          [
+            14,
+            13,
+            0,
+            "INDEX 1"
+          ],
+          [
+            36,
+            14,
+            117,
+            "SEARCH terminal_job USING INDEX cluster_fragment_index_jobs_status_history (state=? AND updated_at_ms<?)"
+          ],
+          [
+            42,
+            13,
+            0,
+            "INDEX 2"
+          ],
+          [
+            52,
+            42,
+            0,
+            "CORRELATED SCALAR SUBQUERY 1"
+          ],
+          [
+            56,
+            52,
+            33,
+            "SEARCH current_file USING INTEGER PRIMARY KEY (rowid=?)"
+          ],
+          [
+            70,
+            42,
+            0,
+            "CORRELATED SCALAR SUBQUERY 2"
+          ],
+          [
+            75,
+            70,
+            49,
+            "SEARCH request USING INDEX analysis_requests_result_history (result_cache_key=?)"
+          ],
+          [
+            90,
+            42,
+            107,
+            "SEARCH terminal_job USING INDEX cluster_fragment_index_jobs_status_history (state=? AND updated_at_ms<?)"
+          ],
+          [
+            99,
+            7,
+            0,
+            "CORRELATED SCALAR SUBQUERY 3"
+          ],
+          [
+            103,
+            99,
+            39,
+            "SEARCH artifact USING COVERING INDEX sqlite_autoindex_cluster_fragment_index_artifacts_1 (cache_key=?)"
+          ],
+          [
+            112,
+            7,
+            0,
+            "CORRELATED SCALAR SUBQUERY 4"
+          ],
+          [
+            124,
+            112,
+            49,
+            "SEARCH head USING AUTOMATIC COVERING INDEX (generation_cache_key=?)"
+          ],
+          [
+            134,
+            7,
+            0,
+            "CORRELATED SCALAR SUBQUERY 5"
+          ],
+          [
+            138,
+            134,
+            44,
+            "SEARCH location USING COVERING INDEX sqlite_autoindex_cluster_fragment_index_locations_1 (cache_key=?)"
+          ],
+          [
+            148,
+            7,
+            0,
+            "CORRELATED SCALAR SUBQUERY 6"
+          ],
+          [
+            153,
+            148,
+            45,
+            "SEARCH active_job USING INDEX sqlite_autoindex_cluster_fragment_index_jobs_1 (cache_key=?)"
+          ],
+          [
+            170,
+            7,
+            0,
+            "CORRELATED SCALAR SUBQUERY 7"
+          ],
+          [
+            175,
+            170,
+            49,
+            "SEARCH active_request USING INDEX analysis_requests_result_history (result_cache_key=?)"
+          ],
+          [
+            213,
+            7,
+            0,
+            "USE TEMP B-TREE FOR ORDER BY"
+          ],
+          [
+            229,
+            0,
+            0,
+            "LIST SUBQUERY 8"
+          ],
+          [
+            236,
+            229,
+            0,
+            "MULTI-INDEX OR"
+          ],
+          [
+            237,
+            236,
+            0,
+            "INDEX 1"
+          ],
+          [
+            259,
+            237,
+            117,
+            "SEARCH terminal_job USING INDEX cluster_fragment_index_jobs_status_history (state=? AND updated_at_ms<?)"
+          ],
+          [
+            265,
+            236,
+            0,
+            "INDEX 2"
+          ],
+          [
+            275,
+            265,
+            0,
+            "CORRELATED SCALAR SUBQUERY 1"
+          ],
+          [
+            279,
+            275,
+            33,
+            "SEARCH current_file USING INTEGER PRIMARY KEY (rowid=?)"
+          ],
+          [
+            293,
+            265,
+            0,
+            "CORRELATED SCALAR SUBQUERY 2"
+          ],
+          [
+            298,
+            293,
+            49,
+            "SEARCH request USING INDEX analysis_requests_result_history (result_cache_key=?)"
+          ],
+          [
+            313,
+            265,
+            107,
+            "SEARCH terminal_job USING INDEX cluster_fragment_index_jobs_status_history (state=? AND updated_at_ms<?)"
+          ],
+          [
+            322,
+            229,
+            0,
+            "CORRELATED SCALAR SUBQUERY 3"
+          ],
+          [
+            326,
+            322,
+            39,
+            "SEARCH artifact USING COVERING INDEX sqlite_autoindex_cluster_fragment_index_artifacts_1 (cache_key=?)"
+          ],
+          [
+            335,
+            229,
+            0,
+            "CORRELATED SCALAR SUBQUERY 4"
+          ],
+          [
+            347,
+            335,
+            49,
+            "SEARCH head USING AUTOMATIC COVERING INDEX (generation_cache_key=?)"
+          ],
+          [
+            357,
+            229,
+            0,
+            "CORRELATED SCALAR SUBQUERY 5"
+          ],
+          [
+            361,
+            357,
+            44,
+            "SEARCH location USING COVERING INDEX sqlite_autoindex_cluster_fragment_index_locations_1 (cache_key=?)"
+          ],
+          [
+            371,
+            229,
+            0,
+            "CORRELATED SCALAR SUBQUERY 6"
+          ],
+          [
+            376,
+            371,
+            45,
+            "SEARCH active_job USING INDEX sqlite_autoindex_cluster_fragment_index_jobs_1 (cache_key=?)"
+          ],
+          [
+            393,
+            229,
+            0,
+            "CORRELATED SCALAR SUBQUERY 7"
+          ],
+          [
+            398,
+            393,
+            49,
+            "SEARCH active_request USING INDEX analysis_requests_result_history (result_cache_key=?)"
+          ],
+          [
+            436,
+            229,
+            0,
+            "USE TEMP B-TREE FOR ORDER BY"
+          ]
+        ]
+      },
+      {
+        "variant": "explicit_existing_partial_index_predicates_3",
+        "seconds": 0.002390344045124948,
+        "deleted": 0,
+        "vm_steps_approx": 80000,
+        "plan": [
+          [
+            3,
+            0,
+            87,
+            "SEARCH cluster_fragment_index_jobs USING COVERING INDEX sqlite_autoindex_cluster_fragment_index_jobs_1 (cache_key=?)"
+          ],
+          [
+            7,
+            0,
+            0,
+            "LIST SUBQUERY 9"
+          ],
+          [
+            13,
+            7,
+            0,
+            "MULTI-INDEX OR"
+          ],
+          [
+            14,
+            13,
+            0,
+            "INDEX 1"
+          ],
+          [
+            36,
+            14,
+            117,
+            "SEARCH terminal_job USING INDEX cluster_fragment_index_jobs_status_history (state=? AND updated_at_ms<?)"
+          ],
+          [
+            42,
+            13,
+            0,
+            "INDEX 2"
+          ],
+          [
+            52,
+            42,
+            0,
+            "CORRELATED SCALAR SUBQUERY 1"
+          ],
+          [
+            56,
+            52,
+            33,
+            "SEARCH current_file USING INTEGER PRIMARY KEY (rowid=?)"
+          ],
+          [
+            70,
+            42,
+            0,
+            "CORRELATED SCALAR SUBQUERY 2"
+          ],
+          [
+            75,
+            70,
+            49,
+            "SEARCH request USING INDEX analysis_requests_result_history (result_cache_key=?)"
+          ],
+          [
+            90,
+            42,
+            107,
+            "SEARCH terminal_job USING INDEX cluster_fragment_index_jobs_status_history (state=? AND updated_at_ms<?)"
+          ],
+          [
+            99,
+            7,
+            0,
+            "CORRELATED SCALAR SUBQUERY 3"
+          ],
+          [
+            103,
+            99,
+            39,
+            "SEARCH artifact USING COVERING INDEX sqlite_autoindex_cluster_fragment_index_artifacts_1 (cache_key=?)"
+          ],
+          [
+            112,
+            7,
+            0,
+            "CORRELATED SCALAR SUBQUERY 4"
+          ],
+          [
+            124,
+            112,
+            49,
+            "SEARCH head USING AUTOMATIC COVERING INDEX (generation_cache_key=?)"
+          ],
+          [
+            134,
+            7,
+            0,
+            "CORRELATED SCALAR SUBQUERY 5"
+          ],
+          [
+            138,
+            134,
+            44,
+            "SEARCH location USING COVERING INDEX sqlite_autoindex_cluster_fragment_index_locations_1 (cache_key=?)"
+          ],
+          [
+            148,
+            7,
+            0,
+            "CORRELATED SCALAR SUBQUERY 6"
+          ],
+          [
+            153,
+            148,
+            45,
+            "SEARCH active_job USING INDEX sqlite_autoindex_cluster_fragment_index_jobs_1 (cache_key=?)"
+          ],
+          [
+            170,
+            7,
+            0,
+            "CORRELATED SCALAR SUBQUERY 7"
+          ],
+          [
+            175,
+            170,
+            49,
+            "SEARCH active_request USING INDEX analysis_requests_result_history (result_cache_key=?)"
+          ],
+          [
+            213,
+            7,
+            0,
+            "USE TEMP B-TREE FOR ORDER BY"
+          ],
+          [
+            229,
+            0,
+            0,
+            "LIST SUBQUERY 8"
+          ],
+          [
+            236,
+            229,
+            0,
+            "MULTI-INDEX OR"
+          ],
+          [
+            237,
+            236,
+            0,
+            "INDEX 1"
+          ],
+          [
+            259,
+            237,
+            117,
+            "SEARCH terminal_job USING INDEX cluster_fragment_index_jobs_status_history (state=? AND updated_at_ms<?)"
+          ],
+          [
+            265,
+            236,
+            0,
+            "INDEX 2"
+          ],
+          [
+            275,
+            265,
+            0,
+            "CORRELATED SCALAR SUBQUERY 1"
+          ],
+          [
+            279,
+            275,
+            33,
+            "SEARCH current_file USING INTEGER PRIMARY KEY (rowid=?)"
+          ],
+          [
+            293,
+            265,
+            0,
+            "CORRELATED SCALAR SUBQUERY 2"
+          ],
+          [
+            298,
+            293,
+            49,
+            "SEARCH request USING INDEX analysis_requests_result_history (result_cache_key=?)"
+          ],
+          [
+            313,
+            265,
+            107,
+            "SEARCH terminal_job USING INDEX cluster_fragment_index_jobs_status_history (state=? AND updated_at_ms<?)"
+          ],
+          [
+            322,
+            229,
+            0,
+            "CORRELATED SCALAR SUBQUERY 3"
+          ],
+          [
+            326,
+            322,
+            39,
+            "SEARCH artifact USING COVERING INDEX sqlite_autoindex_cluster_fragment_index_artifacts_1 (cache_key=?)"
+          ],
+          [
+            335,
+            229,
+            0,
+            "CORRELATED SCALAR SUBQUERY 4"
+          ],
+          [
+            347,
+            335,
+            49,
+            "SEARCH head USING AUTOMATIC COVERING INDEX (generation_cache_key=?)"
+          ],
+          [
+            357,
+            229,
+            0,
+            "CORRELATED SCALAR SUBQUERY 5"
+          ],
+          [
+            361,
+            357,
+            44,
+            "SEARCH location USING COVERING INDEX sqlite_autoindex_cluster_fragment_index_locations_1 (cache_key=?)"
+          ],
+          [
+            371,
+            229,
+            0,
+            "CORRELATED SCALAR SUBQUERY 6"
+          ],
+          [
+            376,
+            371,
+            45,
+            "SEARCH active_job USING INDEX sqlite_autoindex_cluster_fragment_index_jobs_1 (cache_key=?)"
+          ],
+          [
+            393,
+            229,
+            0,
+            "CORRELATED SCALAR SUBQUERY 7"
+          ],
+          [
+            398,
+            393,
+            49,
+            "SEARCH active_request USING INDEX analysis_requests_result_history (result_cache_key=?)"
+          ],
+          [
+            436,
+            229,
+            0,
+            "USE TEMP B-TREE FOR ORDER BY"
+          ]
+        ]
+      }
+    ],
+    "reproduction_build": {
+      "sqlite": "3.53.2",
+      "compile_options": [
+        "ATOMIC_INTRINSICS=1",
+        "COMPILER=gcc-15.2.0",
+        "DEFAULT_AUTOVACUUM",
+        "DEFAULT_CACHE_SIZE=-2000",
+        "DEFAULT_FILE_FORMAT=4",
+        "DEFAULT_FOREIGN_KEYS",
+        "DEFAULT_JOURNAL_SIZE_LIMIT=-1",
+        "DEFAULT_MMAP_SIZE=0",
+        "DEFAULT_PAGE_SIZE=4096",
+        "DEFAULT_PCACHE_INITSZ=20",
+        "DEFAULT_RECURSIVE_TRIGGERS",
+        "DEFAULT_SECTOR_SIZE=4096",
+        "DEFAULT_SYNCHRONOUS=2",
+        "DEFAULT_WAL_AUTOCHECKPOINT=1000",
+        "DEFAULT_WAL_SYNCHRONOUS=2",
+        "DEFAULT_WORKER_THREADS=0",
+        "DIRECT_OVERFLOW_READ",
+        "ENABLE_API_ARMOR",
+        "ENABLE_COLUMN_METADATA",
+        "ENABLE_DBSTAT_VTAB",
+        "ENABLE_FTS3",
+        "ENABLE_FTS3_PARENTHESIS",
+        "ENABLE_FTS5",
+        "ENABLE_LOAD_EXTENSION",
+        "ENABLE_MEMORY_MANAGEMENT",
+        "ENABLE_RTREE",
+        "ENABLE_STAT4",
+        "MALLOC_SOFT_LIMIT=1024",
+        "MAX_ATTACHED=10",
+        "MAX_COLUMN=2000",
+        "MAX_COMPOUND_SELECT=500",
+        "MAX_DEFAULT_PAGE_SIZE=8192",
+        "MAX_EXPR_DEPTH=1000",
+        "MAX_FUNCTION_ARG=1000",
+        "MAX_LENGTH=1000000000",
+        "MAX_LIKE_PATTERN_LENGTH=50000",
+        "MAX_MMAP_SIZE=0x7fff0000",
+        "MAX_PAGE_COUNT=0xfffffffe",
+        "MAX_PAGE_SIZE=65536",
+        "MAX_SQL_LENGTH=1000000000",
+        "MAX_TRIGGER_DEPTH=1000",
+        "MAX_VARIABLE_NUMBER=32766",
+        "MAX_VDBE_OP=250000000",
+        "MAX_WORKER_THREADS=8",
+        "MUTEX_PTHREADS",
+        "SOUNDEX",
+        "SYSTEM_MALLOC",
+        "TEMP_STORE=1",
+        "THREADSAFE=1",
+        "USE_URI"
+      ],
+      "library_sha256": "0e43f04d442a9a2afd5ed79215b217bc2185f5c20471c30057196d500e3fbd21",
+      "provenance": "Read back during review from retained nuc4 reproduction library /tmp/plurx-quorum-rca-20261001/libsqlite3.so. These are not daemon compile options; the hash identifies the library at review time.",
+      "recorded_at_utc": "2026-10-02",
+      "stat4_enabled": true
+    },
+    "plan_origins": {
+      "production_file_plan": "Reproduction SQLite 3.53.2 engine running EXPLAIN QUERY PLAN against read-only production database file; not exported by daemon.",
+      "trial_plan": "Same reproduction engine running EXPLAIN QUERY PLAN against in-memory snapshot for the indicated variant."
+    }
+  },
+  "media_probe": {
+    "file_id": 6736,
+    "video": "HEVC Main, 3840x1600, yuv420p",
+    "audio": "E-AC-3, 48000 Hz, 6 channels",
+    "duration_seconds": 3339.36,
+    "bytes": 6504792644,
+    "ffmpeg_decode_test_seconds": 15,
+    "ffmpeg_exit_code": 0,
+    "scope": "Opening 15 seconds only; not a complete-file or Safari compatibility validation."
+  },
+  "saved_reproduction_validation": {
+    "exit_code": 0,
+    "records": [
+      {
+        "sqlite": "3.53.2",
+        "counts": {
+          "cluster_fragment_index_jobs": 18097,
+          "cluster_fragment_index_artifacts": 6327,
+          "cluster_fragment_index_heads": 6152,
+          "cluster_fragment_index_locations": 12793,
+          "analysis_requests": 27439,
+          "files": 6286
+        },
+        "cutoff_ms": 1788310315153,
+        "copied_statistics": {
+          "sqlite_stat1": 18,
+          "sqlite_stat4": 24
+        },
+        "uncopied_job_triggers": [
+          [
+            "cluster_fragment_index_lifecycle_counters"
+          ],
+          [
+            "background_fragment_target_history_removed"
+          ]
+        ],
+        "sql_sha256": "40e073465721adab932ec01e2fcc0880f44385e4de4f94234cdbf5b64861ffa3",
+        "production_file_plan": [
+          [
+            3,
+            0,
+            87,
+            "SEARCH cluster_fragment_index_jobs USING COVERING INDEX sqlite_autoindex_cluster_fragment_index_jobs_1 (cache_key=?)"
+          ],
+          [
+            7,
+            0,
+            0,
+            "LIST SUBQUERY 9"
+          ],
+          [
+            13,
+            7,
+            0,
+            "MULTI-INDEX OR"
+          ],
+          [
+            14,
+            13,
+            0,
+            "INDEX 1"
+          ],
+          [
+            36,
+            14,
+            117,
+            "SEARCH terminal_job USING INDEX cluster_fragment_index_jobs_status_history (state=? AND updated_at_ms<?)"
+          ],
+          [
+            42,
+            13,
+            0,
+            "INDEX 2"
+          ],
+          [
+            52,
+            42,
+            0,
+            "CORRELATED SCALAR SUBQUERY 1"
+          ],
+          [
+            56,
+            52,
+            33,
+            "SEARCH current_file USING INTEGER PRIMARY KEY (rowid=?)"
+          ],
+          [
+            70,
+            42,
+            0,
+            "CORRELATED SCALAR SUBQUERY 2"
+          ],
+          [
+            75,
+            70,
+            111,
+            "SEARCH request USING INDEX analysis_requests_due (target_node_id=?)"
+          ],
+          [
+            90,
+            42,
+            107,
+            "SEARCH terminal_job USING INDEX cluster_fragment_index_jobs_status_history (state=? AND updated_at_ms<?)"
+          ],
+          [
+            99,
+            7,
+            0,
+            "CORRELATED SCALAR SUBQUERY 3"
+          ],
+          [
+            103,
+            99,
+            39,
+            "SEARCH artifact USING COVERING INDEX sqlite_autoindex_cluster_fragment_index_artifacts_1 (cache_key=?)"
+          ],
+          [
+            112,
+            7,
+            0,
+            "CORRELATED SCALAR SUBQUERY 4"
+          ],
+          [
+            124,
+            112,
+            49,
+            "SEARCH head USING AUTOMATIC COVERING INDEX (generation_cache_key=?)"
+          ],
+          [
+            134,
+            7,
+            0,
+            "CORRELATED SCALAR SUBQUERY 5"
+          ],
+          [
+            138,
+            134,
+            44,
+            "SEARCH location USING COVERING INDEX sqlite_autoindex_cluster_fragment_index_locations_1 (cache_key=?)"
+          ],
+          [
+            148,
+            7,
+            0,
+            "CORRELATED SCALAR SUBQUERY 6"
+          ],
+          [
+            153,
+            148,
+            45,
+            "SEARCH active_job USING INDEX sqlite_autoindex_cluster_fragment_index_jobs_1 (cache_key=?)"
+          ],
+          [
+            170,
+            7,
+            0,
+            "CORRELATED SCALAR SUBQUERY 7"
+          ],
+          [
+            175,
+            170,
+            92,
+            "SEARCH active_request USING INDEX analysis_requests_status (state=?)"
+          ],
+          [
+            217,
+            7,
+            0,
+            "USE TEMP B-TREE FOR ORDER BY"
+          ],
+          [
+            233,
+            0,
+            0,
+            "LIST SUBQUERY 8"
+          ],
+          [
+            240,
+            233,
+            0,
+            "MULTI-INDEX OR"
+          ],
+          [
+            241,
+            240,
+            0,
+            "INDEX 1"
+          ],
+          [
+            263,
+            241,
+            117,
+            "SEARCH terminal_job USING INDEX cluster_fragment_index_jobs_status_history (state=? AND updated_at_ms<?)"
+          ],
+          [
+            269,
+            240,
+            0,
+            "INDEX 2"
+          ],
+          [
+            279,
+            269,
+            0,
+            "CORRELATED SCALAR SUBQUERY 1"
+          ],
+          [
+            283,
+            279,
+            33,
+            "SEARCH current_file USING INTEGER PRIMARY KEY (rowid=?)"
+          ],
+          [
+            297,
+            269,
+            0,
+            "CORRELATED SCALAR SUBQUERY 2"
+          ],
+          [
+            302,
+            297,
+            111,
+            "SEARCH request USING INDEX analysis_requests_due (target_node_id=?)"
+          ],
+          [
+            317,
+            269,
+            107,
+            "SEARCH terminal_job USING INDEX cluster_fragment_index_jobs_status_history (state=? AND updated_at_ms<?)"
+          ],
+          [
+            326,
+            233,
+            0,
+            "CORRELATED SCALAR SUBQUERY 3"
+          ],
+          [
+            330,
+            326,
+            39,
+            "SEARCH artifact USING COVERING INDEX sqlite_autoindex_cluster_fragment_index_artifacts_1 (cache_key=?)"
+          ],
+          [
+            339,
+            233,
+            0,
+            "CORRELATED SCALAR SUBQUERY 4"
+          ],
+          [
+            351,
+            339,
+            49,
+            "SEARCH head USING AUTOMATIC COVERING INDEX (generation_cache_key=?)"
+          ],
+          [
+            361,
+            233,
+            0,
+            "CORRELATED SCALAR SUBQUERY 5"
+          ],
+          [
+            365,
+            361,
+            44,
+            "SEARCH location USING COVERING INDEX sqlite_autoindex_cluster_fragment_index_locations_1 (cache_key=?)"
+          ],
+          [
+            375,
+            233,
+            0,
+            "CORRELATED SCALAR SUBQUERY 6"
+          ],
+          [
+            380,
+            375,
+            45,
+            "SEARCH active_job USING INDEX sqlite_autoindex_cluster_fragment_index_jobs_1 (cache_key=?)"
+          ],
+          [
+            397,
+            233,
+            0,
+            "CORRELATED SCALAR SUBQUERY 7"
+          ],
+          [
+            402,
+            397,
+            92,
+            "SEARCH active_request USING INDEX analysis_requests_status (state=?)"
+          ],
+          [
+            444,
+            233,
+            0,
+            "USE TEMP B-TREE FOR ORDER BY"
+          ]
+        ]
+      },
+      {
+        "variant": "baseline_1",
+        "seconds": 1.180446331971325,
+        "deleted": 0,
+        "vm_steps_approx": 52900000,
+        "plan": [
+          [
+            3,
+            0,
+            87,
+            "SEARCH cluster_fragment_index_jobs USING COVERING INDEX sqlite_autoindex_cluster_fragment_index_jobs_1 (cache_key=?)"
+          ],
+          [
+            7,
+            0,
+            0,
+            "LIST SUBQUERY 9"
+          ],
+          [
+            13,
+            7,
+            0,
+            "MULTI-INDEX OR"
+          ],
+          [
+            14,
+            13,
+            0,
+            "INDEX 1"
+          ],
+          [
+            36,
+            14,
+            117,
+            "SEARCH terminal_job USING INDEX cluster_fragment_index_jobs_status_history (state=? AND updated_at_ms<?)"
+          ],
+          [
+            42,
+            13,
+            0,
+            "INDEX 2"
+          ],
+          [
+            52,
+            42,
+            0,
+            "CORRELATED SCALAR SUBQUERY 1"
+          ],
+          [
+            56,
+            52,
+            33,
+            "SEARCH current_file USING INTEGER PRIMARY KEY (rowid=?)"
+          ],
+          [
+            70,
+            42,
+            0,
+            "CORRELATED SCALAR SUBQUERY 2"
+          ],
+          [
+            75,
+            70,
+            111,
+            "SEARCH request USING INDEX analysis_requests_due (target_node_id=?)"
+          ],
+          [
+            90,
+            42,
+            107,
+            "SEARCH terminal_job USING INDEX cluster_fragment_index_jobs_status_history (state=? AND updated_at_ms<?)"
+          ],
+          [
+            99,
+            7,
+            0,
+            "CORRELATED SCALAR SUBQUERY 3"
+          ],
+          [
+            103,
+            99,
+            39,
+            "SEARCH artifact USING COVERING INDEX sqlite_autoindex_cluster_fragment_index_artifacts_1 (cache_key=?)"
+          ],
+          [
+            112,
+            7,
+            0,
+            "CORRELATED SCALAR SUBQUERY 4"
+          ],
+          [
+            124,
+            112,
+            49,
+            "SEARCH head USING AUTOMATIC COVERING INDEX (generation_cache_key=?)"
+          ],
+          [
+            134,
+            7,
+            0,
+            "CORRELATED SCALAR SUBQUERY 5"
+          ],
+          [
+            138,
+            134,
+            44,
+            "SEARCH location USING COVERING INDEX sqlite_autoindex_cluster_fragment_index_locations_1 (cache_key=?)"
+          ],
+          [
+            148,
+            7,
+            0,
+            "CORRELATED SCALAR SUBQUERY 6"
+          ],
+          [
+            153,
+            148,
+            45,
+            "SEARCH active_job USING INDEX sqlite_autoindex_cluster_fragment_index_jobs_1 (cache_key=?)"
+          ],
+          [
+            170,
+            7,
+            0,
+            "CORRELATED SCALAR SUBQUERY 7"
+          ],
+          [
+            175,
+            170,
+            92,
+            "SEARCH active_request USING INDEX analysis_requests_status (state=?)"
+          ],
+          [
+            217,
+            7,
+            0,
+            "USE TEMP B-TREE FOR ORDER BY"
+          ],
+          [
+            233,
+            0,
+            0,
+            "LIST SUBQUERY 8"
+          ],
+          [
+            240,
+            233,
+            0,
+            "MULTI-INDEX OR"
+          ],
+          [
+            241,
+            240,
+            0,
+            "INDEX 1"
+          ],
+          [
+            263,
+            241,
+            117,
+            "SEARCH terminal_job USING INDEX cluster_fragment_index_jobs_status_history (state=? AND updated_at_ms<?)"
+          ],
+          [
+            269,
+            240,
+            0,
+            "INDEX 2"
+          ],
+          [
+            279,
+            269,
+            0,
+            "CORRELATED SCALAR SUBQUERY 1"
+          ],
+          [
+            283,
+            279,
+            33,
+            "SEARCH current_file USING INTEGER PRIMARY KEY (rowid=?)"
+          ],
+          [
+            297,
+            269,
+            0,
+            "CORRELATED SCALAR SUBQUERY 2"
+          ],
+          [
+            302,
+            297,
+            111,
+            "SEARCH request USING INDEX analysis_requests_due (target_node_id=?)"
+          ],
+          [
+            317,
+            269,
+            107,
+            "SEARCH terminal_job USING INDEX cluster_fragment_index_jobs_status_history (state=? AND updated_at_ms<?)"
+          ],
+          [
+            326,
+            233,
+            0,
+            "CORRELATED SCALAR SUBQUERY 3"
+          ],
+          [
+            330,
+            326,
+            39,
+            "SEARCH artifact USING COVERING INDEX sqlite_autoindex_cluster_fragment_index_artifacts_1 (cache_key=?)"
+          ],
+          [
+            339,
+            233,
+            0,
+            "CORRELATED SCALAR SUBQUERY 4"
+          ],
+          [
+            351,
+            339,
+            49,
+            "SEARCH head USING AUTOMATIC COVERING INDEX (generation_cache_key=?)"
+          ],
+          [
+            361,
+            233,
+            0,
+            "CORRELATED SCALAR SUBQUERY 5"
+          ],
+          [
+            365,
+            361,
+            44,
+            "SEARCH location USING COVERING INDEX sqlite_autoindex_cluster_fragment_index_locations_1 (cache_key=?)"
+          ],
+          [
+            375,
+            233,
+            0,
+            "CORRELATED SCALAR SUBQUERY 6"
+          ],
+          [
+            380,
+            375,
+            45,
+            "SEARCH active_job USING INDEX sqlite_autoindex_cluster_fragment_index_jobs_1 (cache_key=?)"
+          ],
+          [
+            397,
+            233,
+            0,
+            "CORRELATED SCALAR SUBQUERY 7"
+          ],
+          [
+            402,
+            397,
+            92,
+            "SEARCH active_request USING INDEX analysis_requests_status (state=?)"
+          ],
+          [
+            444,
+            233,
+            0,
+            "USE TEMP B-TREE FOR ORDER BY"
+          ]
+        ],
+        "zero_row_witness": true
+      },
+      {
+        "variant": "only_requests_result_target_force_1",
+        "seconds": 0.0015778010711073875,
+        "deleted": 0,
+        "vm_steps_approx": 40000,
+        "plan": [
+          [
+            3,
+            0,
+            87,
+            "SEARCH cluster_fragment_index_jobs USING COVERING INDEX sqlite_autoindex_cluster_fragment_index_jobs_1 (cache_key=?)"
+          ],
+          [
+            7,
+            0,
+            0,
+            "LIST SUBQUERY 9"
+          ],
+          [
+            13,
+            7,
+            0,
+            "MULTI-INDEX OR"
+          ],
+          [
+            14,
+            13,
+            0,
+            "INDEX 1"
+          ],
+          [
+            36,
+            14,
+            117,
+            "SEARCH terminal_job USING INDEX cluster_fragment_index_jobs_status_history (state=? AND updated_at_ms<?)"
+          ],
+          [
+            42,
+            13,
+            0,
+            "INDEX 2"
+          ],
+          [
+            52,
+            42,
+            0,
+            "CORRELATED SCALAR SUBQUERY 1"
+          ],
+          [
+            56,
+            52,
+            33,
+            "SEARCH current_file USING INTEGER PRIMARY KEY (rowid=?)"
+          ],
+          [
+            70,
+            42,
+            0,
+            "CORRELATED SCALAR SUBQUERY 2"
+          ],
+          [
+            74,
+            70,
+            49,
+            "SEARCH request USING COVERING INDEX repro_requests_result_target_force (result_cache_key=? AND target_node_id=? AND force_rebuild=?)"
+          ],
+          [
+            85,
+            42,
+            107,
+            "SEARCH terminal_job USING INDEX cluster_fragment_index_jobs_status_history (state=? AND updated_at_ms<?)"
+          ],
+          [
+            94,
+            7,
+            0,
+            "CORRELATED SCALAR SUBQUERY 3"
+          ],
+          [
+            98,
+            94,
+            39,
+            "SEARCH artifact USING COVERING INDEX sqlite_autoindex_cluster_fragment_index_artifacts_1 (cache_key=?)"
+          ],
+          [
+            107,
+            7,
+            0,
+            "CORRELATED SCALAR SUBQUERY 4"
+          ],
+          [
+            119,
+            107,
+            49,
+            "SEARCH head USING AUTOMATIC COVERING INDEX (generation_cache_key=?)"
+          ],
+          [
+            129,
+            7,
+            0,
+            "CORRELATED SCALAR SUBQUERY 5"
+          ],
+          [
+            133,
+            129,
+            44,
+            "SEARCH location USING COVERING INDEX sqlite_autoindex_cluster_fragment_index_locations_1 (cache_key=?)"
+          ],
+          [
+            143,
+            7,
+            0,
+            "CORRELATED SCALAR SUBQUERY 6"
+          ],
+          [
+            148,
+            143,
+            45,
+            "SEARCH active_job USING INDEX sqlite_autoindex_cluster_fragment_index_jobs_1 (cache_key=?)"
+          ],
+          [
+            165,
+            7,
+            0,
+            "CORRELATED SCALAR SUBQUERY 7"
+          ],
+          [
+            170,
+            165,
+            60,
+            "SEARCH active_request USING INDEX repro_requests_result_target_force (result_cache_key=?)"
+          ],
+          [
+            208,
+            7,
+            0,
+            "USE TEMP B-TREE FOR ORDER BY"
+          ],
+          [
+            224,
+            0,
+            0,
+            "LIST SUBQUERY 8"
+          ],
+          [
+            231,
+            224,
+            0,
+            "MULTI-INDEX OR"
+          ],
+          [
+            232,
+            231,
+            0,
+            "INDEX 1"
+          ],
+          [
+            254,
+            232,
+            117,
+            "SEARCH terminal_job USING INDEX cluster_fragment_index_jobs_status_history (state=? AND updated_at_ms<?)"
+          ],
+          [
+            260,
+            231,
+            0,
+            "INDEX 2"
+          ],
+          [
+            270,
+            260,
+            0,
+            "CORRELATED SCALAR SUBQUERY 1"
+          ],
+          [
+            274,
+            270,
+            33,
+            "SEARCH current_file USING INTEGER PRIMARY KEY (rowid=?)"
+          ],
+          [
+            288,
+            260,
+            0,
+            "CORRELATED SCALAR SUBQUERY 2"
+          ],
+          [
+            292,
+            288,
+            49,
+            "SEARCH request USING COVERING INDEX repro_requests_result_target_force (result_cache_key=? AND target_node_id=? AND force_rebuild=?)"
+          ],
+          [
+            303,
+            260,
+            107,
+            "SEARCH terminal_job USING INDEX cluster_fragment_index_jobs_status_history (state=? AND updated_at_ms<?)"
+          ],
+          [
+            312,
+            224,
+            0,
+            "CORRELATED SCALAR SUBQUERY 3"
+          ],
+          [
+            316,
+            312,
+            39,
+            "SEARCH artifact USING COVERING INDEX sqlite_autoindex_cluster_fragment_index_artifacts_1 (cache_key=?)"
+          ],
+          [
+            325,
+            224,
+            0,
+            "CORRELATED SCALAR SUBQUERY 4"
+          ],
+          [
+            337,
+            325,
+            49,
+            "SEARCH head USING AUTOMATIC COVERING INDEX (generation_cache_key=?)"
+          ],
+          [
+            347,
+            224,
+            0,
+            "CORRELATED SCALAR SUBQUERY 5"
+          ],
+          [
+            351,
+            347,
+            44,
+            "SEARCH location USING COVERING INDEX sqlite_autoindex_cluster_fragment_index_locations_1 (cache_key=?)"
+          ],
+          [
+            361,
+            224,
+            0,
+            "CORRELATED SCALAR SUBQUERY 6"
+          ],
+          [
+            366,
+            361,
+            45,
+            "SEARCH active_job USING INDEX sqlite_autoindex_cluster_fragment_index_jobs_1 (cache_key=?)"
+          ],
+          [
+            383,
+            224,
+            0,
+            "CORRELATED SCALAR SUBQUERY 7"
+          ],
+          [
+            388,
+            383,
+            60,
+            "SEARCH active_request USING INDEX repro_requests_result_target_force (result_cache_key=?)"
+          ],
+          [
+            426,
+            224,
+            0,
+            "USE TEMP B-TREE FOR ORDER BY"
+          ]
+        ],
+        "zero_row_witness": true
+      },
+      {
+        "variant": "explicit_existing_partial_index_predicates_1",
+        "seconds": 0.002818136941641569,
+        "deleted": 0,
+        "vm_steps_approx": 70000,
+        "plan": [
+          [
+            3,
+            0,
+            87,
+            "SEARCH cluster_fragment_index_jobs USING COVERING INDEX sqlite_autoindex_cluster_fragment_index_jobs_1 (cache_key=?)"
+          ],
+          [
+            7,
+            0,
+            0,
+            "LIST SUBQUERY 9"
+          ],
+          [
+            13,
+            7,
+            0,
+            "MULTI-INDEX OR"
+          ],
+          [
+            14,
+            13,
+            0,
+            "INDEX 1"
+          ],
+          [
+            36,
+            14,
+            117,
+            "SEARCH terminal_job USING INDEX cluster_fragment_index_jobs_status_history (state=? AND updated_at_ms<?)"
+          ],
+          [
+            42,
+            13,
+            0,
+            "INDEX 2"
+          ],
+          [
+            52,
+            42,
+            0,
+            "CORRELATED SCALAR SUBQUERY 1"
+          ],
+          [
+            56,
+            52,
+            33,
+            "SEARCH current_file USING INTEGER PRIMARY KEY (rowid=?)"
+          ],
+          [
+            70,
+            42,
+            0,
+            "CORRELATED SCALAR SUBQUERY 2"
+          ],
+          [
+            75,
+            70,
+            49,
+            "SEARCH request USING INDEX analysis_requests_result_history (result_cache_key=?)"
+          ],
+          [
+            90,
+            42,
+            107,
+            "SEARCH terminal_job USING INDEX cluster_fragment_index_jobs_status_history (state=? AND updated_at_ms<?)"
+          ],
+          [
+            99,
+            7,
+            0,
+            "CORRELATED SCALAR SUBQUERY 3"
+          ],
+          [
+            103,
+            99,
+            39,
+            "SEARCH artifact USING COVERING INDEX sqlite_autoindex_cluster_fragment_index_artifacts_1 (cache_key=?)"
+          ],
+          [
+            112,
+            7,
+            0,
+            "CORRELATED SCALAR SUBQUERY 4"
+          ],
+          [
+            124,
+            112,
+            49,
+            "SEARCH head USING AUTOMATIC COVERING INDEX (generation_cache_key=?)"
+          ],
+          [
+            134,
+            7,
+            0,
+            "CORRELATED SCALAR SUBQUERY 5"
+          ],
+          [
+            138,
+            134,
+            44,
+            "SEARCH location USING COVERING INDEX sqlite_autoindex_cluster_fragment_index_locations_1 (cache_key=?)"
+          ],
+          [
+            148,
+            7,
+            0,
+            "CORRELATED SCALAR SUBQUERY 6"
+          ],
+          [
+            153,
+            148,
+            45,
+            "SEARCH active_job USING INDEX sqlite_autoindex_cluster_fragment_index_jobs_1 (cache_key=?)"
+          ],
+          [
+            170,
+            7,
+            0,
+            "CORRELATED SCALAR SUBQUERY 7"
+          ],
+          [
+            175,
+            170,
+            49,
+            "SEARCH active_request USING INDEX analysis_requests_result_history (result_cache_key=?)"
+          ],
+          [
+            213,
+            7,
+            0,
+            "USE TEMP B-TREE FOR ORDER BY"
+          ],
+          [
+            229,
+            0,
+            0,
+            "LIST SUBQUERY 8"
+          ],
+          [
+            236,
+            229,
+            0,
+            "MULTI-INDEX OR"
+          ],
+          [
+            237,
+            236,
+            0,
+            "INDEX 1"
+          ],
+          [
+            259,
+            237,
+            117,
+            "SEARCH terminal_job USING INDEX cluster_fragment_index_jobs_status_history (state=? AND updated_at_ms<?)"
+          ],
+          [
+            265,
+            236,
+            0,
+            "INDEX 2"
+          ],
+          [
+            275,
+            265,
+            0,
+            "CORRELATED SCALAR SUBQUERY 1"
+          ],
+          [
+            279,
+            275,
+            33,
+            "SEARCH current_file USING INTEGER PRIMARY KEY (rowid=?)"
+          ],
+          [
+            293,
+            265,
+            0,
+            "CORRELATED SCALAR SUBQUERY 2"
+          ],
+          [
+            298,
+            293,
+            49,
+            "SEARCH request USING INDEX analysis_requests_result_history (result_cache_key=?)"
+          ],
+          [
+            313,
+            265,
+            107,
+            "SEARCH terminal_job USING INDEX cluster_fragment_index_jobs_status_history (state=? AND updated_at_ms<?)"
+          ],
+          [
+            322,
+            229,
+            0,
+            "CORRELATED SCALAR SUBQUERY 3"
+          ],
+          [
+            326,
+            322,
+            39,
+            "SEARCH artifact USING COVERING INDEX sqlite_autoindex_cluster_fragment_index_artifacts_1 (cache_key=?)"
+          ],
+          [
+            335,
+            229,
+            0,
+            "CORRELATED SCALAR SUBQUERY 4"
+          ],
+          [
+            347,
+            335,
+            49,
+            "SEARCH head USING AUTOMATIC COVERING INDEX (generation_cache_key=?)"
+          ],
+          [
+            357,
+            229,
+            0,
+            "CORRELATED SCALAR SUBQUERY 5"
+          ],
+          [
+            361,
+            357,
+            44,
+            "SEARCH location USING COVERING INDEX sqlite_autoindex_cluster_fragment_index_locations_1 (cache_key=?)"
+          ],
+          [
+            371,
+            229,
+            0,
+            "CORRELATED SCALAR SUBQUERY 6"
+          ],
+          [
+            376,
+            371,
+            45,
+            "SEARCH active_job USING INDEX sqlite_autoindex_cluster_fragment_index_jobs_1 (cache_key=?)"
+          ],
+          [
+            393,
+            229,
+            0,
+            "CORRELATED SCALAR SUBQUERY 7"
+          ],
+          [
+            398,
+            393,
+            49,
+            "SEARCH active_request USING INDEX analysis_requests_result_history (result_cache_key=?)"
+          ],
+          [
+            436,
+            229,
+            0,
+            "USE TEMP B-TREE FOR ORDER BY"
+          ]
+        ],
+        "zero_row_witness": true
+      }
+    ]
+  },
+  "review_corrections": {
+    "m6_last_index_stamp": {
+      "raw_unix_seconds": 1790899243,
+      "utc": "2026-10-02T00:00:43Z",
+      "america_new_york": "2026-10-01T20:00:43-04:00",
+      "source": "Raw live-setting value retained during original investigation; previous prose incorrectly used UTC minus five hours."
+    },
+    "cadence": {
+      "phases_utc": [
+        "23:41:20 / 23:57:20 / 00:13:20",
+        "23:44:40 / 00:00:40 / 00:16:40",
+        "23:50:51 / 00:06:49 / 00:22:51"
+      ],
+      "normal_interval_minutes": 16,
+      "interpretation": "Circumstantial evidence that normal discovery passes across all nodes already caused repeated fences; faster repeats amplified an existing problem. Not WAL attribution of older eleven events.",
+      "unphased_events_utc": [
+        "2026-10-02T00:18:28Z",
+        "2026-10-02T00:25:29Z"
+      ]
+    },
+    "candidate_read_timed": false,
+    "candidate_read_note": "Identical forced-request predicate in preceding query_consistent_map; estimated comparable reader cost is an inference, not a measured result."
+  }
+}

@@ -7,7 +7,8 @@ use std::time::{Duration, Instant};
 use plurx_core::domain::MediaFile;
 use plurx_core::segplan::SourceIdentity;
 use plurx_core::transcode::{
-    vod_pipe_args, Pacing, ResolvedTranscode, TranscodeExecution, TranscodeOptions, VodFrameGrid,
+    vod_pipe_args_with_reorder, Pacing, ResolvedTranscode, TranscodeExecution, TranscodeOptions,
+    VodFrameGrid,
 };
 use sha2::{Digest, Sha256};
 
@@ -63,6 +64,8 @@ pub(crate) struct Encoding {
     pub resources: TranscodeResourceEstimate,
     pub options: TranscodeOptions,
     pub grid: VodFrameGrid,
+    /// Saved operator choice, frozen for this rendition and hashed into identity.
+    pub reorder_frames: bool,
     pub subtitle: Option<Arc<std::fs::File>>,
     pub subtitle_digest: Option<String>,
     pub ffmpeg_build: String,
@@ -112,6 +115,11 @@ pub(crate) struct ActiveProductionEvidence {
 }
 
 impl CandidateProductionProofs {
+    #[cfg(test)]
+    pub(crate) fn record_for_test(&self, recipe: [u8; 32], proof: ActiveProductionEvidence) {
+        self.record(recipe, proof);
+    }
+
     pub(crate) fn get(&self, recipe: [u8; 32]) -> Option<ActiveProductionEvidence> {
         let now = Instant::now();
         let mut rows = self.rows.lock().expect("candidate production proofs");
@@ -307,6 +315,7 @@ impl Encoding {
             resources: self.resources,
             options: self.options.clone(),
             grid: self.grid,
+            reorder_frames: self.reorder_frames,
             subtitle: self.subtitle.clone(),
             subtitle_digest: self.subtitle_digest.clone(),
             ffmpeg_build: self.ffmpeg_build.clone(),
@@ -566,7 +575,14 @@ impl Encoding {
         options.start_seconds = start_seconds;
         let execution = TranscodeExecution::from_options(file, &options, Pacing::unpaced(), ".")
             .expect("frozen VOD execution remains valid");
-        vod_pipe_args(file, &self.plan, &execution, self.grid, duration_seconds)
+        vod_pipe_args_with_reorder(
+            file,
+            &self.plan,
+            &execution,
+            self.grid,
+            duration_seconds,
+            self.reorder_frames,
+        )
     }
 
     pub fn identity(&self, file: &MediaFile, duration_seconds: f64) -> SourceIdentity {
@@ -578,6 +594,8 @@ impl Encoding {
         hash.update(self.executable.digest.as_bytes());
         hash.update(self.engine.digest.as_bytes());
         hash.update(self.plan.plan_digest().as_bytes());
+        hash.update(b"vod-reorder-choice-v1\0");
+        hash.update([u8::from(self.reorder_frames)]);
         for argument in self.args(file, 0.0, duration_seconds) {
             hash.update((argument.len() as u64).to_le_bytes());
             hash.update(argument.as_bytes());

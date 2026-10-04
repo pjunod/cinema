@@ -12,6 +12,16 @@ use crate::error::StoreError;
 use crate::fmp4::{CutClass, PromotionInputs};
 use crate::segplan::{FragmentIndex, IndexRow, SourceIdentity, SEGPLAN_VERSION};
 
+pub(crate) fn analysis_live_viewer_clause(now: &str) -> String {
+    format!(
+        "(analysis_requests.component = 'fragment_index' AND EXISTS (
+        SELECT 1 FROM background_job_waiters viewer
+        WHERE viewer.request_scope = 'playback-analysis'
+          AND viewer.job_id = analysis_requests.request_id
+          AND viewer.state = 'pending' AND viewer.deadline_ms > {now}))"
+    )
+}
+
 pub const CLUSTER_FRAGMENT_INDEX_SCHEMA: &str = r#"
 CREATE TABLE IF NOT EXISTS cluster_fragment_index_sources (
     node_id          TEXT NOT NULL,
@@ -1385,6 +1395,38 @@ pub struct AnalysisRequest {
     pub updated_at_ms: i64,
 }
 
+pub(super) const ANALYSIS_RECONCILE_SQL: &str = include_str!("analysis_reconcile.sql");
+
+pub(super) fn reconciliation_parameters(
+    old: &AnalysisRequest,
+    new: &NewAnalysisRequest,
+) -> Result<(String, String), StoreError> {
+    if old.component != "fragment_index"
+        || old.requested_generation.starts_with("predict:")
+        || new.component != old.component
+        || new.file_id != old.file_id
+        || new.video_identity != old.video_identity
+        || new.force_rebuild != old.force_rebuild
+        || new.request_id == old.request_id
+        || new.request_id.is_empty()
+        || new.request_id.len() > 64
+        || new.priority != old.priority
+        || new.trigger != old.trigger
+        || new.target_node_id.is_empty()
+        || new.target_node_id.len() > 128
+        || new.pipeline_version.is_empty()
+        || new.pipeline_version.len() > 128
+        || new.requested_generation.is_empty()
+        || new.requested_generation.len() > 128
+    {
+        return Err(StoreError::Task("invalid analysis reconciliation".into()));
+    }
+    Ok((
+        serde_json::to_string(old).map_err(|error| StoreError::Task(error.to_string()))?,
+        serde_json::to_string(new).map_err(|error| StoreError::Task(error.to_string()))?,
+    ))
+}
+
 /// Portable source identity for a cluster subtitle extraction request.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SubtitleSourceStamp {
@@ -1868,6 +1910,27 @@ pub trait ClusterFragmentIndexStore: Send + Sync + 'static {
         pipeline_version: Option<&str>,
         now_ms: i64,
         lease_expires_ms: i64,
+    ) -> Result<Option<AnalysisRequest>, StoreError> {
+        self.claim_analysis_request_for_capacity(
+            node_id,
+            pipeline_version,
+            now_ms,
+            lease_expires_ms,
+            false,
+        )
+        .await
+    }
+
+    /// A busy playback node may attest only work with an unexpired viewer.
+    /// Both candidate selection and the fenced claim recheck that interest;
+    /// ordinary maintenance remains idle-only and consumes no retry attempt.
+    async fn claim_analysis_request_for_capacity(
+        &self,
+        node_id: &str,
+        pipeline_version: Option<&str>,
+        now_ms: i64,
+        lease_expires_ms: i64,
+        viewer_only: bool,
     ) -> Result<Option<AnalysisRequest>, StoreError>;
 
     async fn renew_analysis_request(
@@ -1933,6 +1996,29 @@ pub trait ClusterFragmentIndexStore: Send + Sync + 'static {
     ) -> Result<u64, StoreError>;
 
     async fn analysis_requests(&self, limit: i64) -> Result<Vec<AnalysisRequest>, StoreError>;
+
+    /// Complete keyset inventory of active requests, including older work.
+    async fn analysis_reconciliation_page(
+        &self,
+        after: &str,
+        limit: i64,
+    ) -> Result<Vec<AnalysisRequest>, StoreError>;
+
+    /// The globally unique active forced slot for this source, engine and video.
+    async fn analysis_reconciliation_forced_slot(
+        &self,
+        replacement: &NewAnalysisRequest,
+    ) -> Result<Option<AnalysisRequest>, StoreError>;
+
+    /// Secure a current successor before retiring the exact queued predecessor.
+    /// Running work, worker-owned retries and live playback interests are fenced
+    /// out. Publication and historical attempts are never deleted.
+    async fn reconcile_analysis_request(
+        &self,
+        expected: &AnalysisRequest,
+        replacement: &NewAnalysisRequest,
+        now_ms: i64,
+    ) -> Result<bool, StoreError>;
 
     /// Terminal requests that a bulk reopen should actually act on.
     ///
@@ -2390,6 +2476,75 @@ fn class_from_code(code: u8) -> Option<CutClass> {
         _ => None,
     }
 }
+
+/// Unconditional: empty generation keys have the same retention semantics.
+/// Every analysis_requests rebuild must recreate this lookup index.
+pub(crate) const ANALYSIS_RESULT_TARGET_FORCE_SCHEMA: &str = "CREATE INDEX IF NOT EXISTS analysis_requests_result_target_force ON analysis_requests(result_cache_key, target_node_id, force_rebuild);";
+
+/// Production retention statement, shared by both backends and plan tests.
+#[doc(hidden)]
+pub const FRAGMENT_PRUNE_CANDIDATES: &str = "SELECT j.cache_key AS cache_key
+                   FROM cluster_fragment_index_jobs j
+                  WHERE (j.state IN ('ready', 'cancelled') OR (
+                    j.state = 'failed' AND (
+                      NOT EXISTS (SELECT 1 FROM files current_file
+                        WHERE current_file.id = j.file_id
+                          AND current_file.size = j.source_size
+                          AND current_file.mtime = j.source_mtime)
+                      OR EXISTS (SELECT 1 FROM analysis_requests request
+                        WHERE request.result_cache_key = j.cache_key
+                          AND request.target_node_id = j.target_node_id
+                          AND request.force_rebuild = 1))))
+                    AND j.updated_at_ms < $1
+                    AND NOT EXISTS (
+                      SELECT 1 FROM cluster_fragment_index_jobs active_job
+                       WHERE active_job.cache_key = j.cache_key
+                         AND (active_job.state IN ('queued', 'running')
+                           OR active_job.updated_at_ms >= $1))
+                    AND NOT EXISTS (
+                      SELECT 1 FROM analysis_requests active_request
+                       WHERE active_request.result_cache_key = j.cache_key
+                         AND active_request.state IN ('queued', 'running', 'submitted'))
+                    AND NOT EXISTS (
+                      SELECT 1 FROM cluster_fragment_index_locations l
+                       WHERE l.cache_key = j.cache_key)
+                  GROUP BY j.cache_key
+                  ORDER BY MIN(j.updated_at_ms), j.cache_key LIMIT $2";
+
+/// Production retention statement, shared by both backends and plan tests.
+#[doc(hidden)]
+pub const FRAGMENT_PRUNE_TERMINAL_JOBS: &str = "DELETE FROM cluster_fragment_index_jobs
+              WHERE (cache_key, target_node_id) IN (
+                SELECT terminal_job.cache_key, terminal_job.target_node_id
+                  FROM cluster_fragment_index_jobs terminal_job
+                 WHERE (terminal_job.state IN ('ready', 'cancelled') OR (
+                   terminal_job.state = 'failed' AND (
+                     NOT EXISTS (SELECT 1 FROM files current_file
+                       WHERE current_file.id = terminal_job.file_id
+                         AND current_file.size = terminal_job.source_size
+                         AND current_file.mtime = terminal_job.source_mtime)
+                     OR EXISTS (SELECT 1 FROM analysis_requests request
+                       WHERE request.result_cache_key = terminal_job.cache_key
+                         AND request.target_node_id = terminal_job.target_node_id
+                         AND request.force_rebuild = 1))))
+                   AND terminal_job.updated_at_ms < $1
+                   AND NOT EXISTS (SELECT 1 FROM cluster_fragment_index_artifacts artifact
+                     WHERE artifact.cache_key = terminal_job.cache_key)
+                   AND NOT EXISTS (SELECT 1 FROM cluster_fragment_index_heads head
+                     WHERE head.generation_cache_key = terminal_job.cache_key)
+                   AND NOT EXISTS (SELECT 1 FROM cluster_fragment_index_locations location
+                     WHERE location.cache_key = terminal_job.cache_key)
+                   AND NOT EXISTS (SELECT 1 FROM cluster_fragment_index_jobs active_job
+                     WHERE active_job.cache_key = terminal_job.cache_key
+                       AND (active_job.state IN ('queued', 'running')
+                         OR active_job.updated_at_ms >= $1))
+                   AND NOT EXISTS (SELECT 1 FROM analysis_requests active_request
+                     WHERE active_request.result_cache_key = terminal_job.cache_key
+                       AND active_request.state IN ('queued', 'running', 'submitted'))
+                 ORDER BY terminal_job.updated_at_ms, terminal_job.cache_key,
+                          terminal_job.target_node_id
+                 LIMIT $2
+              )";
 
 #[cfg(test)]
 mod tests {

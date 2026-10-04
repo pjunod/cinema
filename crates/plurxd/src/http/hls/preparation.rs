@@ -1113,6 +1113,7 @@ async fn plan_preparation_with_candidate(
     );
     let plan = resolve_plan(
         PlanInputs {
+            snapshot: None,
             state,
             user_id: predecessor.user_id,
             file_id: predecessor.request.file_id,
@@ -1160,6 +1161,31 @@ async fn plan_preparation_with_candidate(
     // tracks did. VOD stays VOD and rolling stays rolling.
     resolved.presentation = predecessor.request.presentation;
     preserve_prepared_audio(&predecessor.request, &mut resolved, source)?;
+    if resolved.quality_catalog.is_none()
+        && predecessor.decoder_caps.is_some()
+        && caps.video.len() <= plurx_core::playback::MAX_CLIENT_DECODER_ENTRIES
+    {
+        let catalog = state
+            .media_pool
+            .quality_catalog(
+                state,
+                crate::media_pool::QualityCatalogRequest {
+                    audio_claim: resolved.audio_claim.clone(),
+                    audio_delivery: resolved.audio_delivery.clone(),
+                    file_id: source.id,
+                    source_size: source.size,
+                    source_mtime: source.mtime,
+                    caps: caps.clone(),
+                    copy_contract: resolved.kind.copy_contract(),
+                    audio_index: resolved.audio_index,
+                    audio_offset_ms: resolved.audio_offset_ms,
+                    subtitle_burn: resolved.subtitle_burn,
+                    presentation: resolved.presentation,
+                },
+            )
+            .await;
+        resolved.quality_catalog = Some(Arc::new(catalog));
+    }
     Ok((resolved, selected_candidate))
 }
 
@@ -1673,6 +1699,13 @@ pub(super) async fn stage_prepared_successor_with_prime(
     let staged_recipe = RemoteStartRequest {
         retained_output: None,
         retained_output_receiver: Some(1),
+        candidate_catalog: candidate.candidate_context.as_ref().and_then(|context| {
+            Some(crate::media_sessions::CandidateCatalogContext {
+                caps: context.canonical_caps.clone()?,
+                candidate: context.selected_candidate.clone(),
+                binding: context.planning_binding.clone()?,
+            })
+        }),
         candidate_id: candidate
             .candidate_context
             .as_ref()
@@ -1700,42 +1733,26 @@ pub(super) async fn stage_prepared_successor_with_prime(
     let response = StartResponse {
         measured_candidate_outputs: None,
         delivered_audio: staged_request.audio_delivery.clone(),
+        quality_catalog_status: candidate.quality_catalog.as_ref().map(
+            |catalog| serde_json::json!({"complete": catalog.complete, "causes": catalog.causes}),
+        ),
         display_aware_auto_protocol: predecessor
             .decoder_caps
             .as_ref()
+            .filter(|_| candidate.quality_catalog.is_some())
             .map(|_| "route-v1".to_owned()),
         quality_candidate_id: candidate
             .candidate_context
             .as_ref()
             .map(|context| context.candidate_id),
-        quality_candidates: if let Some(caps) = predecessor.decoder_caps.as_ref() {
-            Some(
-                state
-                    .media_pool
-                    .quality_candidates(
-                        state,
-                        crate::media_pool::QualityCatalogRequest {
-                            audio_claim: candidate.audio_claim.clone(),
-                            audio_delivery: candidate.audio_delivery.clone(),
-                            copy_contract: candidate.kind.copy_contract(),
-                            file_id: source.id,
-                            source_size: source.size,
-                            source_mtime: source.mtime,
-                            caps: caps.device_caps(),
-                            audio_index: candidate.audio_index,
-                            audio_offset_ms: candidate.audio_offset_ms,
-                            subtitle_burn: candidate.subtitle_burn,
-                            presentation: candidate.presentation,
-                        },
-                    )
-                    .await
-                    .into_iter()
-                    .map(|entry| entry.candidate)
-                    .collect(),
-            )
-        } else {
-            None
-        },
+        quality_candidates: candidate.quality_catalog.as_ref().map(|catalog| {
+            catalog
+                .candidates
+                .iter()
+                .filter(|entry| entry.dispatch_supported && !entry.partial)
+                .map(|entry| entry.candidate.clone())
+                .collect()
+        }),
         session_id: staged_session_id.clone(),
         playlist_url: format!("/api/v1/hls/{staged_session_id}/index.m3u8"),
         duration_ms: source.duration_ms,

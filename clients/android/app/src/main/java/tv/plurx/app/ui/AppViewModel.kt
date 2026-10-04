@@ -210,6 +210,7 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
                                 Session.displayAwareAuto = recovered.info.playback_display_aware_auto
                                 Session.autoAbr = recovered.info.playback_auto_abr
                                 Session.displayAwareAutoProtocol = recovered.info.display_aware_auto_protocol
+                                Session.decoderCompactionContract = recovered.info.decoder_compaction_contract
                                 settings.saveServerIdentity(
                                     recovered.origin,
                                     recovered.info.instance_id,
@@ -488,6 +489,7 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
         Session.displayAwareAuto = false
         Session.autoAbr = false
         Session.displayAwareAutoProtocol = null
+        Session.decoderCompactionContract = null
         currentUser = null
         currentUserId = null
         serverInstanceId = null
@@ -967,6 +969,7 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
         Session.displayAwareAuto = info.playback_display_aware_auto
         Session.autoAbr = info.playback_auto_abr
         Session.displayAwareAutoProtocol = info.display_aware_auto_protocol
+        Session.decoderCompactionContract = info.decoder_compaction_contract
         settings.saveOrigin(normalized, info.instance_id)
         _phase.value = Phase.NeedLogin
     }
@@ -1017,6 +1020,7 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
         Session.displayAwareAuto = info.playback_display_aware_auto
         Session.autoAbr = info.playback_auto_abr
         Session.displayAwareAutoProtocol = info.display_aware_auto_protocol
+        Session.decoderCompactionContract = info.decoder_compaction_contract
         settings.saveServerIdentity(origin, info.instance_id)
         refreshClusterIngress()
     }

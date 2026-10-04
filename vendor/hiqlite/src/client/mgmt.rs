@@ -163,25 +163,60 @@ pub(crate) async fn db_quorum_watermark_local(
     let before = state.raft_db.raft.metrics().borrow().clone();
     before.running_state?;
 
-    let started = std::time::Instant::now();
-    let result = tokio::time::timeout(
-        Duration::from_secs(1),
-        state.raft_db.raft.ensure_linearizable(),
-    )
-    .await;
+    let started = tokio::time::Instant::now();
+    // Same absolute one-second budget as ensure_linearizable, now observed at
+    // both of its existing boundaries. The apply wait remains mandatory.
+    let deadline = started + Duration::from_secs(1);
+    let result = tokio::time::timeout_at(deadline, state.raft_db.raft.get_read_log_id()).await;
     if started.elapsed() >= Duration::from_millis(100) {
         tracing::warn!(
             node = state.id,
             term = before.current_term,
-            phase = "linearizable_check",
+            phase = "quorum_read",
             elapsed_ms = started.elapsed().as_millis() as u64,
+            local_applied_index = before.last_applied.map(|log| log.index),
             timed_out = result.is_err(),
-            "slow leader quorum watermark proof (quorum/apply split unavailable)"
+            "slow leader quorum watermark proof"
         );
     }
-    let committed = result
-        .map_err(|_| Error::Timeout("database quorum watermark proof timed out".into()))??
+    let (read_log_id, applied) = result
+        .map_err(|_| Error::Timeout("database quorum watermark proof timed out".into()))??;
+    let committed = read_log_id
         .ok_or_else(|| Error::LeaderChange("database leader has no read index".into()))?;
+    if applied.map(|log| log.index) < Some(committed.index) {
+        let apply_started = tokio::time::Instant::now();
+        let result = tokio::time::timeout_at(
+            deadline,
+            state
+                .raft_db
+                .raft
+                .wait(None)
+                .applied_index_at_least(Some(committed.index), "db_quorum_watermark"),
+        )
+        .await;
+        if apply_started.elapsed() >= Duration::from_millis(100) {
+            tracing::warn!(
+                node = state.id,
+                term = before.current_term,
+                phase = "apply_wait",
+                elapsed_ms = apply_started.elapsed().as_millis() as u64,
+                total_elapsed_ms = started.elapsed().as_millis() as u64,
+                pending_read_index = committed.index,
+                local_applied_index = state
+                    .raft_db
+                    .raft
+                    .metrics()
+                    .borrow()
+                    .last_applied
+                    .map(|log| log.index),
+                timed_out = result.is_err(),
+                "slow leader quorum watermark proof"
+            );
+        }
+        result
+            .map_err(|_| Error::Timeout("database quorum watermark proof timed out".into()))?
+            .map_err(|_| Error::LeaderChange("database stopped during quorum apply wait".into()))?;
+    }
     let after = state.raft_db.raft.metrics().borrow().clone();
     after.running_state?;
     if after.state != ServerState::Leader
@@ -1096,8 +1131,8 @@ async fn request_snapshot_transport_status_sqlite(
 #[cfg(all(test, feature = "sqlite"))]
 mod tests {
     use super::{
-        RAFT_SHUTDOWN_TIMEOUT, SNAPSHOT_TRANSPORT_STATUS_MAX_RESPONSE_BYTES,
         request_snapshot_transport_status_sqlite, snapshot_transport_peer_from_current_membership,
+        RAFT_SHUTDOWN_TIMEOUT, SNAPSHOT_TRANSPORT_STATUS_MAX_RESPONSE_BYTES,
     };
     use crate::Node;
     use openraft::{Membership, RaftMetrics, StoredMembership};
@@ -1203,12 +1238,15 @@ mod tests {
             addr_api: address,
             ..peer
         };
-        assert!(
-            request_snapshot_transport_status_sqlite(&client, "exact-test-secret", false, &peer,)
-                .await
-                .expect("404 is compatible")
-                .is_none()
-        );
+        assert!(request_snapshot_transport_status_sqlite(
+            &client,
+            "exact-test-secret",
+            false,
+            &peer,
+        )
+        .await
+        .expect("404 is compatible")
+        .is_none());
         server.await.expect("join 404 server");
     }
 
@@ -1455,11 +1493,9 @@ mod tests {
         .into_db_quorum_watermark()
         .expect_err("a malformed advertised protocol is not an old leader");
 
-        assert!(
-            error
-                .to_string()
-                .contains("invalid local_read_protocol_version")
-        );
+        assert!(error
+            .to_string()
+            .contains("invalid local_read_protocol_version"));
     }
 
     #[tokio::test]
@@ -1510,33 +1546,25 @@ mod tests {
             .await
             .expect("remote shutdown deadline")
             .expect("remote shutdown");
-        assert!(
-            operation
-                .await
-                .expect("stream operation did not panic")
-                .is_err()
-        );
-        assert!(
-            db_rate
-                .await
-                .expect("DB rate waiter did not panic")
-                .is_err()
-        );
+        assert!(operation
+            .await
+            .expect("stream operation did not panic")
+            .is_err());
+        assert!(db_rate
+            .await
+            .expect("DB rate waiter did not panic")
+            .is_err());
         #[cfg(feature = "cache")]
-        assert!(
-            cache_rate
-                .await
-                .expect("cache rate waiter did not panic")
-                .is_err()
-        );
+        assert!(cache_rate
+            .await
+            .expect("cache rate waiter did not panic")
+            .is_err());
         assert!(*client.inner.stream_shutdown.borrow());
-        assert!(
-            client
-                .inner
-                .background_handles
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner())
-                .is_empty()
-        );
+        assert!(client
+            .inner
+            .background_handles
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .is_empty());
     }
 }

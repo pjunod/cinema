@@ -117,7 +117,9 @@ async function libraryView(o){
     layoutRegion("library","shell",{kind:"library",title:o.title,href:o.href,sort,reload:o.reload});
   const viewLibs=(await libsCached()).filter(l=>o.libIds.some(id=>String(id)===String(l.id)));
   if(LIB_LOAD!==gen)return;
-  document.getElementById("libbody").insertAdjacentHTML("beforebegin",libraryBrowseTools(viewLibs));
+  // Keep controls outside layout-owned grid wrappers: catalog puts #libbody
+  // beside the A–Z rail, so inserting before it would steal a poster column.
+  document.querySelector("#main .libbar").insertAdjacentHTML("afterend",libraryBrowseTools(viewLibs));
 
   let all=[], total=0;
   // How many cards the grid in #libbody currently holds, and 0 whenever what is

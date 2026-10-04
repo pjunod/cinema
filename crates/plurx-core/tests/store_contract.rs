@@ -428,9 +428,11 @@ const MEDIA_METHODS: &[&str] = &[
     "set_file_frame_luminance",
     "set_file_dolby_vision",
     "get_file_probe_json",
+    "playback_planning_snapshot",
     "get_file_probe_chapters_json",
     "merge_file_probe_chapters",
     "merge_file_probe_hevc_parameter_sets",
+    "merge_file_probe_content_encoding",
     "files_missing_probe",
     "library_file_paths",
     "ensure_library_root_fingerprint",
@@ -522,6 +524,9 @@ const SHARED_CACHE_METHODS: &[&str] = &[
     "finalize_retired_shared_cache_generation",
 ];
 const BACKGROUND_JOB_METHODS: &[&str] = &[
+    "publish_copy_output_job",
+    "publish_encoded_output_job",
+    "media_preparation_history",
     "join_analysis_viewer",
     "join_artifact_viewer",
     "analysis_preparation_observation",
@@ -638,6 +643,7 @@ const TELEMETRY_METHODS: &[&str] = &[
     "playback_events",
 ];
 const FRAGMENT_INDEX_METHODS: &[&str] = &[
+    "fragment_index_status",
     "put_fragment_index",
     "fragment_index",
     "forget_fragment_index",
@@ -678,6 +684,8 @@ const TIMELINE_ANNOTATION_METHODS: &[&str] = &[
     "discard_manual_timeline_annotation",
 ];
 const NETWORK_PRIOR_METHODS: &[&str] = &[
+    "observe_candidate_link",
+    "candidate_link_prior",
     "observe_network_prior",
     "network_prior",
     "prune_network_priors",
@@ -689,6 +697,8 @@ const COORDINATION_METHODS: &[&str] = &[
     "lease_expiry_hint",
 ];
 const MEDIA_SESSION_METHODS: &[&str] = &[
+    "observe_candidate_recovery",
+    "candidate_recovery_memory",
     "record_desired_selection",
     "desired_selection",
     // Test-only in intent, declared on the trait because the fence it proves
@@ -11674,8 +11684,35 @@ async fn api_key_activity_refresh_is_bounded_and_disabled_keys_do_not_touch() {
 /// `IF NOT EXISTS`, so their objects are left in place and replay cleanly.
 /// One list, so the next non-idempotent migration is reversed in one place.
 #[cfg(feature = "hiqlite-contract-tests")]
+async fn downgrade_dv_request_provenance(client: &Client) {
+    client
+        .txn([
+            (
+                "DROP TRIGGER dv_queue_admission_settings_ai",
+                hiqlite::params!(),
+            ),
+            (
+                "ALTER TABLE dv_conversions DROP COLUMN requested_manually",
+                hiqlite::params!(),
+            ),
+            (
+                plurx_core::store::validation_pre_provenance_admission_trigger(),
+                hiqlite::params!(),
+            ),
+        ])
+        .await
+        .expect("rewind conversion provenance")
+        .into_iter()
+        .collect::<Result<Vec<_>, _>>()
+        .expect("commit provenance rewind");
+}
+
+#[cfg(feature = "hiqlite-contract-tests")]
 fn post_v39_downgrade_statements() -> Vec<(&'static str, hiqlite::Params)> {
     [
+        "DROP TRIGGER dv_queue_admission_settings_ai",
+        "ALTER TABLE dv_conversions DROP COLUMN requested_manually",
+        plurx_core::store::validation_pre_provenance_admission_trigger(),
         "ALTER TABLE files DROP COLUMN downloaded_subtitles",
         "ALTER TABLE files DROP COLUMN luminance_source",
         "ALTER TABLE files DROP COLUMN mastering_max_luminance",
@@ -12481,6 +12518,64 @@ fn schema_differences(
     differences
 }
 
+#[path = "support/fragment_prune_budget.rs"]
+mod fragment_prune_budget;
+
+#[cfg(feature = "hiqlite-contract-tests")]
+async fn assert_migrated_fragment_prune_budget(client: &Client) {
+    // Reconstruct all objects from the actual Raft-migrated schema, including
+    // triggers. The workload runs in a rollback-only local mirror; this does
+    // not pretend to measure cluster application or commits.
+    let rows: Vec<SchemaText> = client.query_consistent_map(
+        "SELECT sql AS value FROM sqlite_master WHERE sql IS NOT NULL AND name NOT LIKE 'sqlite_%' AND name NOT IN (SELECT name FROM pragma_table_list WHERE type = 'shadow') ORDER BY CASE type WHEN 'table' THEN 0 WHEN 'index' THEN 1 WHEN 'view' THEN 2 ELSE 3 END, name",
+        hiqlite::params!()).await.expect("read full migrated schema");
+    let conn = rusqlite::Connection::open_in_memory().expect("migrated schema mirror");
+    for row in rows {
+        conn.execute_batch(&row.value)
+            .expect("copy actual migrated schema object");
+    }
+    fragment_prune_budget::assert_plans_and_work(
+        &conn,
+        plurx_core::store::FRAGMENT_PRUNE_CANDIDATES,
+        plurx_core::store::FRAGMENT_PRUNE_TERMINAL_JOBS,
+    );
+}
+
+#[test]
+fn sqlite_fresh_and_upgrade_fragment_prune_plans_and_work_are_bounded() {
+    let directory = tempfile::tempdir().expect("upgrade fixture");
+    let path = directory.path().join("prune.db");
+    drop(SqliteStore::open(&path).expect("fresh full migration chain"));
+    {
+        let conn = rusqlite::Connection::open(&path).expect("fresh schema");
+        fragment_prune_budget::assert_plans_and_work(
+            &conn,
+            plurx_core::store::FRAGMENT_PRUNE_CANDIDATES,
+            plurx_core::store::FRAGMENT_PRUNE_TERMINAL_JOBS,
+        );
+        conn.execute_batch(include_str!("fixtures/fragment-prune-worst.sql"))
+            .expect("populated upgrade workload");
+        conn.execute_batch(
+            "DROP INDEX analysis_requests_result_target_force;
+             ALTER TABLE dv_conversions DROP COLUMN requested_manually;
+             PRAGMA user_version = 87;",
+        )
+        .expect("pre-index upgrade source");
+    }
+    let began = std::time::Instant::now();
+    drop(SqliteStore::open(&path).expect("production upgrade"));
+    eprintln!(
+        "SQLite populated v87→v88 production upgrade: {:?}",
+        began.elapsed()
+    );
+    let conn = rusqlite::Connection::open(&path).expect("upgraded schema");
+    fragment_prune_budget::assert_plans_and_work(
+        &conn,
+        plurx_core::store::FRAGMENT_PRUNE_CANDIDATES,
+        plurx_core::store::FRAGMENT_PRUNE_TERMINAL_JOBS,
+    );
+}
+
 /// Bootstrap installs every schema object directly and stamps
 /// `AUTH_SCHEMA_VERSION`; the daemon's `open_or_migrate` never reruns a step
 /// the stamp says has happened. So bootstrap is a second copy of the
@@ -12520,6 +12615,7 @@ async fn fresh_bootstrap_matches_the_migration_chain_from_a_frozen_v42_tree() {
             .await
             .expect("bootstrap current schema");
         drop(store);
+        assert_migrated_fragment_prune_budget(&client).await;
         store_schema_snapshot(&client).await
     };
 
@@ -12574,6 +12670,7 @@ async fn fresh_bootstrap_matches_the_migration_chain_from_a_frozen_v42_tree() {
             reached.iter().map(|row| row.value).collect::<Vec<_>>(),
             vec![AUTH_SCHEMA_VERSION]
         );
+        assert_migrated_fragment_prune_budget(&client).await;
         store_schema_snapshot(&client).await
     };
 
@@ -12701,7 +12798,7 @@ async fn replicated_v23_store_migrates_the_conversion_ledger_on_daemon_open() {
         .await
         .expect("inspect conversion ledger");
     assert_eq!(rows.len(), 1);
-    assert_eq!(rows[0].value, 10);
+    assert_eq!(rows[0].value, 11);
 }
 
 /// A v25 store gains the attempt history on the next daemon open, and every
@@ -13336,7 +13433,7 @@ async fn replicated_v24_store_migrates_recovery_guards_and_rejects_malformed_sha
         ),
         (
             "SELECT COUNT(*) AS value FROM pragma_table_info('dv_conversions')",
-            10,
+            11,
         ),
         (
             "SELECT COUNT(*) AS value FROM pragma_table_info('dv_recovery_guards')",
@@ -16426,6 +16523,15 @@ fn populated_v14_import_fixture(data_dir: &std::path::Path) -> PathBuf {
     let path = populated_current_import_fixture(data_dir);
     let connection = rusqlite::Connection::open(&path).expect("open current SQLite fixture");
     queue_fixture::remove_common_queue_schema(&connection);
+    connection
+        .execute_batch(
+            "DROP TRIGGER IF EXISTS playback_settings_insert;
+             DROP TRIGGER IF EXISTS playback_settings_update;
+             DROP TRIGGER IF EXISTS playback_settings_delete;
+             DROP TABLE IF EXISTS playback_input_generation;
+             ",
+        )
+        .expect("remove v91 planning generation");
     // Recreate the exact post-v14 schema differences so this is also a valid
     // input to ordinary SQLite startup migration, not merely a current-schema
     // database carrying an older user_version. The activation coordinator now
@@ -16449,6 +16555,7 @@ fn populated_v14_import_fixture(data_dir: &std::path::Path) -> PathBuf {
              DROP TABLE IF EXISTS live_tv_resource_revision;
              DROP TRIGGER IF EXISTS cache_publication_generation_guard;
              DROP TRIGGER IF EXISTS offline_claim_lifecycle_guard;
+             DROP INDEX IF EXISTS analysis_requests_result_target_force;
              DROP INDEX IF EXISTS analysis_requests_one_active_forced_fragment_successor;
              DROP INDEX IF EXISTS analysis_requests_one_active_forced_skip_successor;
              DROP INDEX IF EXISTS analysis_requests_one_active_source;
@@ -16793,7 +16900,11 @@ async fn populated_current_sqlite_import_preserves_new_durable_rows_only() {
         0
     );
     connection
-        .execute_batch("DELETE FROM background_job_migration; PRAGMA user_version = 70;")
+        .execute_batch(
+            "DELETE FROM background_job_migration;
+            ALTER TABLE dv_conversions DROP COLUMN requested_manually;
+            PRAGMA user_version = 70;",
+        )
         .expect("stage pre-queue fixture");
     drop(connection);
     let upgraded = SqliteStore::open(&source_path).expect("apply common queue migration");
@@ -17300,6 +17411,7 @@ async fn sqlite_import_refuses_unrecoverable_committed_claims_before_raft_and_re
             "DROP INDEX dv_conversions_recovery_guard;
              DROP TABLE dv_recovery_guards;
              ALTER TABLE dv_conversions DROP COLUMN recovery_guard_id;
+             ALTER TABLE dv_conversions DROP COLUMN requested_manually;
              PRAGMA user_version = 43;",
         )
         .expect("downgrade malformed fixture to exact v43 shape");
@@ -18469,11 +18581,251 @@ fn contract_inventory_matches_every_store_method() {
     // `none`. Both are named in `MEDIA_METHODS` above and covered on both
     // backends by `frame_luminance_candidates_and_writes_are_exactly_fenced`.
     // No new trait or supertrait of `Store`.
-    assert_eq!(declared.len(), 452, "review the Store method count");
+    // Media info adds the source-aware preparation history projection.
+    // +1: coherent playback file/probe/settings/generation snapshot, covered
+    // by playback_planning_snapshot_retains_one_source_and_settings_revision.
+    // +1: source-fenced content encoding report publication, covered by
+    // content_encoding_report_publication_is_source_fenced_on_every_backend.
+    // The current effort declares 459 methods; these three main additions
+    // are distinct from its luminance and cluster-observation operations.
+    assert_eq!(declared.len(), 462, "review the Store method count");
     assert_eq!(
         covered, declared,
         "the declared async method name inventory changed"
     );
+}
+
+#[tokio::test]
+async fn content_encoding_report_publication_is_source_fenced_on_every_backend() {
+    for_each_backend(|store, backend| async move {
+        let (_, file_id) = seed_file(&store, "content-report").await;
+        let file = store
+            .get_file(file_id)
+            .await
+            .expect("fixture file")
+            .expect("fixture exists");
+        let report = r#"{"outcome":"measured","context":{"version":1}}"#;
+        assert!(
+            !store
+                .merge_file_probe_content_encoding(file_id, file.size, file.mtime, report)
+                .await
+                .expect("unprobed publication"),
+            "{backend}: never invent probe facts"
+        );
+        assert!(store
+            .get_file_probe_json(file_id)
+            .await
+            .expect("unprobed row")
+            .is_none());
+
+        let original = serde_json::json!({"streams":[{"codec_name":"h264"}],"chapters":[]});
+        let probe = ProbeResult {
+            raw_json: Some(original.to_string()),
+            ..Default::default()
+        };
+        store
+            .upsert_file(
+                file.item_id,
+                file.path.to_str().expect("UTF-8 fixture path"),
+                file.size,
+                file.mtime,
+                &probe,
+            )
+            .await
+            .expect("probed fixture");
+        for (id, size, mtime) in [
+            (file_id, file.size + 1, file.mtime),
+            (file_id, file.size, file.mtime + 1),
+            (i64::MAX, file.size, file.mtime),
+        ] {
+            assert!(
+                !store
+                    .merge_file_probe_content_encoding(id, size, mtime, report)
+                    .await
+                    .expect("fenced publication"),
+                "{backend}: reject stale or absent source"
+            );
+        }
+        let unchanged: serde_json::Value = serde_json::from_str(
+            &store
+                .get_file_probe_json(file_id)
+                .await
+                .expect("probe row")
+                .expect("probe exists"),
+        )
+        .expect("probe JSON");
+        assert_eq!(
+            unchanged, original,
+            "{backend}: refused writes leave probe untouched"
+        );
+        assert!(
+            store
+                .merge_file_probe_content_encoding(file_id, file.size, file.mtime, report)
+                .await
+                .expect("current publication"),
+            "{backend}"
+        );
+        let grafted: serde_json::Value = serde_json::from_str(
+            &store
+                .get_file_probe_json(file_id)
+                .await
+                .expect("grafted probe row")
+                .expect("grafted probe exists"),
+        )
+        .expect("grafted JSON");
+        let mut expected = original.clone();
+        expected[plurx_core::store::CONTENT_ENCODING_PROBE_KEY] =
+            serde_json::from_str(report).expect("report JSON");
+        assert_eq!(grafted, expected, "{backend}: only the app report changes");
+
+        store
+            .upsert_file(
+                file.item_id,
+                file.path.to_str().expect("UTF-8 fixture path"),
+                file.size + 1,
+                file.mtime + 1,
+                &probe,
+            )
+            .await
+            .expect("source reprobe");
+        let refreshed: serde_json::Value = serde_json::from_str(
+            &store
+                .get_file_probe_json(file_id)
+                .await
+                .expect("refreshed probe row")
+                .expect("refreshed probe exists"),
+        )
+        .expect("refreshed JSON");
+        assert_eq!(
+            refreshed, original,
+            "{backend}: reprobe discards old evidence"
+        );
+        assert!(
+            !store
+                .merge_file_probe_content_encoding(file_id, file.size, file.mtime, report)
+                .await
+                .expect("late publication"),
+            "{backend}: old source cannot restore evidence"
+        );
+        assert!(
+            store
+                .merge_file_probe_content_encoding(file_id, file.size + 1, file.mtime + 1, report)
+                .await
+                .expect("new source publication"),
+            "{backend}"
+        );
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn playback_planning_snapshot_retains_one_source_and_settings_revision() {
+    for_each_backend(|store, backend| async move {
+        let library = store
+            .create_library(&NewLibrary {
+                name: "planning".into(),
+                kind: LibraryKind::Movies,
+                paths: vec!["/planning".into()],
+                anime: false,
+            })
+            .await
+            .expect("planning library");
+        let item = store
+            .insert_item(&NewItem {
+                library_id: library.id,
+                kind: ItemKind::Movie,
+                parent_id: None,
+                title: "planning".into(),
+                year: None,
+                season_number: None,
+                episode_number: None,
+            })
+            .await
+            .expect("planning item");
+        let probe = ProbeResult {
+            video_codec: Some("hevc".into()),
+            raw_json: Some(r#"{"revision":1}"#.into()),
+            ..Default::default()
+        };
+        let file = store
+            .upsert_file(item, "/planning/movie.mkv", 100, 42, &probe)
+            .await
+            .expect("planning file");
+        store
+            .put_setting("playback.fixture", "before")
+            .await
+            .expect("planning setting");
+        store
+            .put_setting("transcode.fixture", "encoder")
+            .await
+            .expect("encoder setting");
+        let keys = ["playback.fixture", "transcode.fixture", "playback.missing"];
+        let before = store
+            .playback_planning_snapshot(file, &keys)
+            .await
+            .expect("planning snapshot")
+            .expect("known source");
+        assert_eq!(before.file.id, file, "{backend}");
+        assert_eq!(before.probe_json, probe.raw_json, "{backend}");
+        assert_eq!(
+            before.settings.len(),
+            2,
+            "{backend}: missing settings are omitted"
+        );
+        assert_eq!(before.settings["playback.fixture"], "before", "{backend}");
+        assert_eq!(before.settings["transcode.fixture"], "encoder", "{backend}");
+        store
+            .put_setting("jobs.fixture", "history")
+            .await
+            .expect("unrelated setting");
+        let unrelated = store
+            .playback_planning_snapshot(file, &keys)
+            .await
+            .expect("unrelated snapshot")
+            .expect("known source");
+        assert_eq!(
+            unrelated.generation, before.generation,
+            "{backend}: jobs do not invalidate planning"
+        );
+        store
+            .put_setting("playback.fixture", "after")
+            .await
+            .expect("changed setting");
+        let probe = ProbeResult {
+            video_codec: Some("h264".into()),
+            raw_json: Some(r#"{"revision":2}"#.into()),
+            ..Default::default()
+        };
+        assert_eq!(
+            store
+                .upsert_file(item, "/planning/movie.mkv", 100, 42, &probe)
+                .await
+                .expect("same-stamp probe revision"),
+            file
+        );
+        let after = store
+            .playback_planning_snapshot(file, &keys)
+            .await
+            .expect("new snapshot")
+            .expect("known source");
+        assert!(after.generation > before.generation, "{backend}");
+        assert_eq!(after.probe_json, probe.raw_json, "{backend}");
+        assert_eq!(after.file.video_codec.as_deref(), Some("h264"), "{backend}");
+        assert_eq!(after.settings["playback.fixture"], "after", "{backend}");
+        assert_eq!(
+            before.settings["playback.fixture"], "before",
+            "{backend}: retained snapshots stay frozen"
+        );
+        assert!(
+            store
+                .playback_planning_snapshot(i64::MAX, &keys)
+                .await
+                .expect("unknown source")
+                .is_none(),
+            "{backend}"
+        );
+    })
+    .await;
 }
 
 /// The Dolby Vision columns round-trip, and the backfill can find the rows it
@@ -20500,6 +20852,253 @@ async fn analysis_history_contract_runs_through_dyn_store() {
     .await;
 }
 
+#[cfg(feature = "hiqlite-contract-tests")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn fragment_prune_worst_case_keeps_three_voter_proofs_and_playback_mutations_available() {
+    let _case = HIQLITE_CASE.lock().await;
+    let cluster = ContractCluster::start().await;
+    let client = Client::remote(
+        cluster.addresses.clone(),
+        true,
+        true,
+        CONTRACT_API_SECRET.to_owned(),
+        false,
+        None,
+    )
+    .await
+    .expect("cluster client");
+    let telemetry = cluster._root.path().join("prune-worst-telemetry.db");
+    drop(
+        HiqliteAuthStore::bootstrap(client.clone(), CONTRACT_INSTANCE_ID, &telemetry)
+            .await
+            .expect("full replicated schema"),
+    );
+    for result in client
+        .batch(include_str!("fixtures/fragment-prune-worst.sql"))
+        .await
+        .expect("replicated workload")
+    {
+        result.expect("workload statement");
+    }
+    client
+        .txn(vec![
+            (
+                "DROP TRIGGER dv_queue_admission_settings_ai".to_owned(),
+                hiqlite::params!(),
+            ),
+            (
+                "ALTER TABLE dv_conversions DROP COLUMN requested_manually".to_owned(),
+                hiqlite::params!(),
+            ),
+            (
+                plurx_core::store::validation_pre_provenance_admission_trigger().to_owned(),
+                hiqlite::params!(),
+            ),
+            (
+                "DROP INDEX analysis_requests_result_target_force".to_owned(),
+                hiqlite::params!(),
+            ),
+            (
+                "UPDATE cluster_meta SET schema_version = 65 WHERE singleton = 1".to_owned(),
+                hiqlite::params!(),
+            ),
+        ])
+        .await
+        .expect("disposable populated v65 upgrade fixture");
+    let began = std::time::Instant::now();
+    let store = Arc::new(
+        HiqliteAuthStore::open_or_migrate(client.clone(), &telemetry)
+            .await
+            .expect("populated replicated upgrade"),
+    );
+    eprintln!(
+        "Hiqlite populated v65→v66 production upgrade: {:?}",
+        began.elapsed()
+    );
+    let user = store
+        .create_user("prune-viewer", "hash", false)
+        .await
+        .expect("viewer");
+    let activation = current_media_session(
+        store.as_ref(),
+        user.id,
+        "prune-playback",
+        "11111111-1111-4111-8111-111111119901",
+        "11111111-1111-4111-8111-111111119902",
+        "quorum-prune",
+    )
+    .await;
+    let prune = async {
+        for _ in 0..8 {
+            assert!(store
+                .prune_cluster_fragment_indexes(100, 128)
+                .await
+                .expect("worst-case zero-row prune")
+                .is_empty());
+        }
+    };
+    let foreground = async {
+        for ordinal in 0..8 {
+            let began = std::time::Instant::now();
+            let renewed = store
+                .renew_media_sessions(
+                    &activation.owner_node_id,
+                    &[MediaSessionRenewal {
+                        incarnation_id: activation.incarnation_id.clone(),
+                        owner_epoch: 1,
+                        produced_playable_through_ms: ordinal * 1000,
+                        fetched_through_ms: ordinal * 1000,
+                        media_sequence: ordinal,
+                    }],
+                    2000 + ordinal,
+                    900_000 + ordinal,
+                )
+                .await
+                .expect("mutable playback renewal");
+            assert_eq!(renewed, vec![activation.incarnation_id.clone()]);
+            client
+                .db_quorum_watermark()
+                .await
+                .expect("proof refresh under prune");
+            assert!(
+                began.elapsed() < Duration::from_secs(1),
+                "prune/renew/proof exceeded the existing proof deadline"
+            );
+        }
+    };
+    tokio::join!(prune, foreground);
+    for key in ["retained-1", "retained-4000"] {
+        assert!(store
+            .cluster_fragment_index_job(key, "node")
+            .await
+            .expect("retained source")
+            .is_some());
+    }
+}
+
+const FRAGMENT_PRUNE_RETENTION_FIXTURE: &str =
+    include_str!("fixtures/fragment-prune-retention.sql");
+
+async fn assert_fragment_prune_semantics(store: Arc<dyn Store>) {
+    let removable = [
+        "",
+        "delete-cancelled",
+        "delete-forced",
+        "delete-obsolete",
+        "delete-ready",
+    ];
+    let retained = [
+        ("keep-current", "node"),
+        ("keep-wrong-force", "node"),
+        ("keep-recent", "node"),
+        ("keep-active", "node"),
+        ("keep-active-request", "node"),
+        ("keep-shared-active", "node"),
+        ("keep-shared-active", "other"),
+        ("keep-location", "node"),
+    ];
+    for expected_removed in [2, 4, 5] {
+        assert!(store
+            .prune_cluster_fragment_indexes(100, 2)
+            .await
+            .expect("production prune")
+            .is_empty());
+        let mut removed = 0;
+        for key in removable {
+            removed += usize::from(
+                store
+                    .cluster_fragment_index_job(key, "node")
+                    .await
+                    .expect("terminal row")
+                    .is_none(),
+            );
+        }
+        assert_eq!(
+            removed, expected_removed,
+            "deletion limit includes the empty-key forced retry"
+        );
+        for (key, node) in retained {
+            assert!(
+                store
+                    .cluster_fragment_index_job(key, node)
+                    .await
+                    .expect("retained row")
+                    .is_some(),
+                "{key}/{node}"
+            );
+        }
+    }
+    assert!(store
+        .cluster_fragment_index_artifact("keep-location")
+        .await
+        .expect("retained artifact")
+        .is_some());
+    assert_eq!(
+        store
+            .cluster_fragment_index_locations("keep-location")
+            .await
+            .expect("retained holder")
+            .len(),
+        1
+    );
+}
+
+#[tokio::test]
+async fn fragment_prune_retains_guards_and_empty_key_semantics_through_both_stores() {
+    let directory = tempfile::tempdir().expect("SQLite fixture");
+    let path = directory.path().join("retention.db");
+    let store = SqliteStore::open(&path).expect("full SQLite schema");
+    rusqlite::Connection::open(&path)
+        .expect("seed connection")
+        .execute_batch(FRAGMENT_PRUNE_RETENTION_FIXTURE)
+        .expect("seed retention matrix");
+    assert_fragment_prune_semantics(Arc::new(store)).await;
+    #[cfg(feature = "hiqlite-contract-tests")]
+    {
+        let _case = HIQLITE_CASE.lock().await;
+        let cluster = ContractCluster::start().await;
+        let client = Client::remote(
+            cluster.addresses.clone(),
+            true,
+            true,
+            CONTRACT_API_SECRET.to_owned(),
+            false,
+            None,
+        )
+        .await
+        .expect("cluster client");
+        let telemetry = cluster._root.path().join("prune-retention-telemetry.db");
+        let store = HiqliteAuthStore::bootstrap(client.clone(), CONTRACT_INSTANCE_ID, &telemetry)
+            .await
+            .expect("full replicated schema");
+        for result in client
+            .batch(FRAGMENT_PRUNE_RETENTION_FIXTURE)
+            .await
+            .expect("seed replicated retention")
+        {
+            result.expect("replicated fixture statement");
+        }
+        // Proof refresh and a mutable setting remain available during real
+        // replicated cleanup. No benchmark timing is inferred from the mirror.
+        let prune = assert_fragment_prune_semantics(Arc::new(store));
+        let foreground = async {
+            for ordinal in 0..8 {
+                let began = std::time::Instant::now();
+                client.execute("INSERT INTO settings(key,value,updated_at) VALUES ('prune.foreground',$1,1) ON CONFLICT(key) DO UPDATE SET value=excluded.value",hiqlite::params!(ordinal.to_string())).await.expect("foreground write");
+                client
+                    .db_quorum_watermark()
+                    .await
+                    .expect("quorum proof during prune");
+                assert!(
+                    began.elapsed() < Duration::from_secs(1),
+                    "cleanup must fit inside the existing proof deadline"
+                );
+            }
+        };
+        tokio::join!(prune, foreground);
+    }
+}
+
 #[tokio::test]
 async fn fragment_location_retention_is_bounded_through_dyn_store() {
     for_each_backend(|store, backend| async move {
@@ -21436,6 +22035,143 @@ async fn analysis_source_invalidation_terminalizes_exact_attempt_through_dyn_sto
         assert_eq!(
             attempts[0].terminal_code, "source_deleted",
             "backend {backend}"
+        );
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn busy_analysis_worker_claims_only_live_viewers_without_spending_maintenance_attempts() {
+    for_each_backend(|store, backend| async move {
+        let (_, file_id) = seed_file(&store, "busy-analysis-viewer").await;
+        let user = store
+            .create_user("busy-analysis-viewer", "hash", false)
+            .await
+            .expect("user");
+        let request = store
+            .enqueue_analysis_request(&NewAnalysisRequest {
+                request_id: "busy-analysis-request".into(),
+                file_id,
+                source_size: 10_000,
+                source_mtime: 1,
+                component: "fragment_index".into(),
+                pipeline_version: "busy-engine".into(),
+                video_identity: String::new(),
+                requested_generation: "busy-generation".into(),
+                priority: "normal".into(),
+                trigger: "background".into(),
+                force_rebuild: false,
+                target_node_id: "busy-node".into(),
+                not_before_ms: 10,
+                created_at_ms: 10,
+            })
+            .await
+            .expect("request");
+        assert!(
+            store
+                .claim_analysis_request_for_capacity(
+                    "busy-node",
+                    Some("busy-engine"),
+                    11,
+                    1011,
+                    true
+                )
+                .await
+                .expect("busy claim")
+                .is_none(),
+            "{backend}: no maintenance while busy"
+        );
+        assert_eq!(
+            store
+                .analysis_request(&request.request_id)
+                .await
+                .expect("read")
+                .expect("row")
+                .attempts,
+            0
+        );
+        store
+            .join_analysis_viewer(plurx_core::store::AnalysisViewerInterest {
+                analysis_request_id: request.request_id.clone(),
+                requested_generation: request.requested_generation.clone(),
+                pipeline_version: request.pipeline_version.clone(),
+                video_identity: request.video_identity.clone(),
+                target_node_id: request.target_node_id.clone(),
+                user_id: user.id,
+                playback_id: "busy-viewer".into(),
+                now_ms: 12,
+            })
+            .await
+            .expect("viewer");
+        assert!(
+            store
+                .analysis_preparation_observation(&request.request_id, 13)
+                .await
+                .expect("observation")
+                .expect("row")
+                .has_live_viewer,
+            "{backend}"
+        );
+        assert!(
+            store
+                .claim_analysis_request_for_capacity(
+                    "busy-node",
+                    Some("other-engine"),
+                    13,
+                    1013,
+                    true
+                )
+                .await
+                .expect("wrong engine")
+                .is_none(),
+            "{backend}"
+        );
+        let claimed = store
+            .claim_analysis_request_for_capacity("busy-node", Some("busy-engine"), 14, 1014, true)
+            .await
+            .expect("viewer claim")
+            .expect("viewer source read admitted");
+        assert_eq!(claimed.request_id, request.request_id, "{backend}");
+        assert!(store
+            .retry_analysis_request(&claimed, "foreground_preempted", 15, 1015, false)
+            .await
+            .expect("return claim"));
+        assert!(
+            !store
+                .analysis_preparation_observation(&request.request_id, 120013)
+                .await
+                .expect("observation")
+                .expect("row")
+                .has_live_viewer,
+            "{backend}: expired viewers do not admit work"
+        );
+        assert!(
+            store
+                .claim_analysis_request_for_capacity(
+                    "busy-node",
+                    Some("busy-engine"),
+                    120013,
+                    121013,
+                    true
+                )
+                .await
+                .expect("expired viewer claim")
+                .is_none(),
+            "{backend}"
+        );
+        assert!(
+            store
+                .claim_analysis_request_for_capacity(
+                    "busy-node",
+                    Some("busy-engine"),
+                    120014,
+                    121014,
+                    false
+                )
+                .await
+                .expect("idle maintenance claim")
+                .is_some(),
+            "{backend}: idle maintenance still runs"
         );
     })
     .await;
@@ -23813,6 +24549,317 @@ async fn active_legacy_identity_blocks_exact_forced_successor() {
                 .unwrap_or_else(|error| panic!("{backend}: read exact successor: {error}"))
                 .is_none(),
             "{backend}"
+        );
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn analysis_reconciliation_preserves_work_and_fences_changed_requests() {
+    for_each_backend(|store, backend| async move {
+        let (user_id, file_id) = seed_file(&store, "analysis-reconciliation").await;
+        let base = NewAnalysisRequest {
+            request_id: "reconcile-old".into(),
+            file_id,
+            source_size: 10_000,
+            source_mtime: 1,
+            component: "fragment_index".into(),
+            pipeline_version: "old-engine".into(),
+            video_identity: "video-a".into(),
+            requested_generation: "old-generation".into(),
+            priority: "normal".into(),
+            trigger: "background".into(),
+            force_rebuild: false,
+            target_node_id: "node-a".into(),
+            not_before_ms: 10,
+            created_at_ms: 10,
+        };
+        store
+            .enqueue_analysis_request(&base)
+            .await
+            .expect("old request");
+        let claimed = store
+            .claim_analysis_request("node-a", 11, 1011)
+            .await
+            .expect("reconciliation contract operation")
+            .expect("reconciliation contract operation");
+        assert!(store
+            .retry_analysis_request(&claimed, "foreground_preempted", 12, 13, false)
+            .await
+            .expect("reconciliation contract operation"));
+        let old = store
+            .analysis_request(&base.request_id)
+            .await
+            .expect("reconciliation contract operation")
+            .expect("reconciliation contract operation");
+        let attempts_before = store
+            .analysis_attempts(&old.request_id, 10)
+            .await
+            .expect("reconciliation contract operation");
+        let new = NewAnalysisRequest {
+            request_id: "reconcile-new".into(),
+            pipeline_version: "current-engine".into(),
+            requested_generation: "current-generation".into(),
+            ..base.clone()
+        };
+        assert!(
+            store
+                .reconcile_analysis_request(&old, &new, 14)
+                .await
+                .expect("reconciliation contract operation"),
+            "{backend}"
+        );
+        let retired = store
+            .analysis_request(&old.request_id)
+            .await
+            .expect("reconciliation contract operation")
+            .expect("reconciliation contract operation");
+        assert_eq!(retired.state, "cancelled", "{backend}");
+        assert_eq!(retired.last_error_code, "request_reconciled", "{backend}");
+        assert_eq!(
+            serde_json::to_value(
+                store
+                    .analysis_attempts(&old.request_id, 10)
+                    .await
+                    .expect("reconciliation contract operation")
+            )
+            .expect("reconciliation contract operation"),
+            serde_json::to_value(attempts_before).expect("reconciliation contract operation"),
+            "attempt history is not rewritten"
+        );
+        assert_eq!(
+            retired.pipeline_version, "old-engine",
+            "history is retained"
+        );
+        let successor = store
+            .analysis_request(&new.request_id)
+            .await
+            .expect("reconciliation contract operation")
+            .expect("reconciliation contract operation");
+        assert_eq!(successor.state, "queued", "{backend}");
+        assert_eq!(successor.pipeline_version, "current-engine", "{backend}");
+        assert!(
+            !store
+                .reconcile_analysis_request(&old, &new, 15)
+                .await
+                .expect("reconciliation contract operation"),
+            "repeat is idempotent"
+        );
+
+        let duplicate = store
+            .enqueue_analysis_request(&NewAnalysisRequest {
+                request_id: "reconcile-duplicate".into(),
+                pipeline_version: "older-engine".into(),
+                requested_generation: "older-generation".into(),
+                ..base.clone()
+            })
+            .await
+            .expect("reconciliation contract operation");
+        let joined = NewAnalysisRequest {
+            request_id: "should-not-be-created".into(),
+            ..new.clone()
+        };
+        assert!(
+            store
+                .reconcile_analysis_request(&duplicate, &joined, 16)
+                .await
+                .expect("reconciliation contract operation"),
+            "{backend}"
+        );
+        assert!(
+            store
+                .analysis_request(&joined.request_id)
+                .await
+                .expect("reconciliation contract operation")
+                .is_none(),
+            "join existing current work"
+        );
+        assert_eq!(
+            store
+                .analysis_reconciliation_page("", 1)
+                .await
+                .expect("reconciliation contract operation")[0]
+                .request_id,
+            new.request_id
+        );
+        assert!(store
+            .analysis_reconciliation_page(&new.request_id, 100)
+            .await
+            .expect("reconciliation contract operation")
+            .is_empty());
+
+        let before_claim = store
+            .enqueue_analysis_request(&NewAnalysisRequest {
+                request_id: "reconcile-race".into(),
+                pipeline_version: "race-engine".into(),
+                requested_generation: "race-generation".into(),
+                ..base.clone()
+            })
+            .await
+            .expect("reconciliation contract operation");
+        store
+            .claim_analysis_request_compatible("node-a", Some("race-engine"), 1012, 2012)
+            .await
+            .expect("reconciliation contract operation")
+            .expect("reconciliation contract operation");
+        assert!(
+            !store
+                .reconcile_analysis_request(&before_claim, &joined, 1013)
+                .await
+                .expect("reconciliation contract operation"),
+            "a worker won the race"
+        );
+        assert_eq!(
+            store
+                .analysis_request(&before_claim.request_id)
+                .await
+                .expect("reconciliation contract operation")
+                .expect("reconciliation contract operation")
+                .state,
+            "running"
+        );
+
+        let source_race = store
+            .enqueue_analysis_request(&NewAnalysisRequest {
+                request_id: "reconcile-source-race".into(),
+                pipeline_version: "source-engine".into(),
+                requested_generation: "source-generation".into(),
+                ..base.clone()
+            })
+            .await
+            .expect("reconciliation contract operation");
+        let changed_source = NewAnalysisRequest {
+            request_id: "wrong-source".into(),
+            source_mtime: 999,
+            ..new.clone()
+        };
+        assert!(
+            !store
+                .reconcile_analysis_request(&source_race, &changed_source, 19)
+                .await
+                .expect("reconciliation contract operation"),
+            "source rechecked in transaction"
+        );
+        assert!(store
+            .analysis_request("wrong-source")
+            .await
+            .expect("reconciliation contract operation")
+            .is_none());
+        assert_eq!(
+            store
+                .analysis_request(&source_race.request_id)
+                .await
+                .expect("reconciliation contract operation")
+                .expect("reconciliation contract operation")
+                .state,
+            "queued"
+        );
+        let viewer_request = store
+            .enqueue_analysis_request(&NewAnalysisRequest {
+                request_id: "reconcile-viewer".into(),
+                pipeline_version: "viewer-engine".into(),
+                requested_generation: "viewer-generation".into(),
+                ..base.clone()
+            })
+            .await
+            .expect("reconciliation contract operation");
+        assert!(store
+            .join_analysis_viewer(AnalysisViewerInterest {
+                analysis_request_id: viewer_request.request_id.clone(),
+                requested_generation: viewer_request.requested_generation.clone(),
+                pipeline_version: viewer_request.pipeline_version.clone(),
+                video_identity: viewer_request.video_identity.clone(),
+                target_node_id: viewer_request.target_node_id.clone(),
+                user_id,
+                playback_id: "reconciliation-viewer".into(),
+                now_ms: 2000,
+            })
+            .await
+            .expect("reconciliation contract operation"));
+        assert!(
+            !store
+                .reconcile_analysis_request(&viewer_request, &joined, 2001)
+                .await
+                .expect("reconciliation contract operation"),
+            "active playback interest is preserved"
+        );
+
+        let forced = store
+            .enqueue_analysis_request(&NewAnalysisRequest {
+                request_id: "reconcile-forced".into(),
+                pipeline_version: "forced-old".into(),
+                requested_generation: "forced-old-generation".into(),
+                force_rebuild: true,
+                priority: "forced".into(),
+                ..base
+            })
+            .await
+            .expect("reconciliation contract operation");
+        let forced_new = NewAnalysisRequest {
+            request_id: "reconcile-forced-new".into(),
+            pipeline_version: "forced-new".into(),
+            requested_generation: "forced-new-generation".into(),
+            force_rebuild: true,
+            priority: "forced".into(),
+            ..new
+        };
+        assert!(store
+            .reconcile_analysis_request(&forced, &forced_new, 2002)
+            .await
+            .expect("reconciliation contract operation"));
+        assert!(
+            store
+                .analysis_request(&forced_new.request_id)
+                .await
+                .expect("reconciliation contract operation")
+                .expect("reconciliation contract operation")
+                .force_rebuild
+        );
+        let another_forced = store
+            .enqueue_analysis_request(&NewAnalysisRequest {
+                request_id: "another-forced-old".into(),
+                pipeline_version: "another-old-engine".into(),
+                requested_generation: "another-old-generation".into(),
+                ..forced_new.clone()
+            })
+            .await
+            .expect("reconciliation contract operation");
+        let joining_forced = NewAnalysisRequest {
+            request_id: "forced-join-no-insert".into(),
+            requested_generation: "different-forced-generation".into(),
+            ..forced_new.clone()
+        };
+        let occupied = store
+            .analysis_reconciliation_forced_slot(&joining_forced)
+            .await
+            .expect("reconciliation contract operation")
+            .expect("reconciliation contract operation");
+        assert_eq!(occupied.request_id, forced_new.request_id);
+        assert!(
+            store
+                .reconcile_analysis_request(&another_forced, &joining_forced, 2003)
+                .await
+                .expect("reconciliation contract operation"),
+            "two obsolete forced engines converge on one active rebuild"
+        );
+        assert!(store
+            .analysis_request(&joining_forced.request_id)
+            .await
+            .expect("reconciliation contract operation")
+            .is_none());
+        let alternate_target = NewAnalysisRequest {
+            target_node_id: "other-node".into(),
+            ..joining_forced
+        };
+        assert_eq!(
+            store
+                .analysis_reconciliation_forced_slot(&alternate_target)
+                .await
+                .expect("reconciliation contract operation")
+                .expect("reconciliation contract operation")
+                .request_id,
+            forced_new.request_id,
+            "the forced slot spans target nodes"
         );
     })
     .await;
@@ -27410,7 +28457,7 @@ async fn dv_conversion_contract_runs_through_dyn_store() {
             "{backend}: Off mode must not create a ledger row"
         );
         let off_batch = store
-            .queue_library_dv_conversion_batch(library.id, 99, false, 1)
+            .queue_library_dv_conversion_batch(library.id, 99, false, 1, true)
             .await
             .expect_err("off mode refuses library batch admission");
         assert!(
@@ -27447,13 +28494,13 @@ async fn dv_conversion_contract_runs_through_dyn_store() {
             .expect("ineligible HLG"));
 
         let first = store
-            .queue_library_dv_conversion_batch(library.id, 101, false, 1)
+            .queue_library_dv_conversion_batch(library.id, 101, false, 1, false)
             .await
             .expect("first bounded auto queue");
         assert_eq!(first.queued, 1, "{backend}");
         assert!(first.saturated, "{backend}");
         let second = store
-            .queue_library_dv_conversion_batch(library.id, 101, false, 1)
+            .queue_library_dv_conversion_batch(library.id, 101, false, 1, false)
             .await
             .expect("second bounded auto queue");
         assert_eq!(second.queued, 1, "{backend}");
@@ -27497,6 +28544,13 @@ async fn dv_conversion_contract_runs_through_dyn_store() {
             .await
             .expect("bounded ledger projection");
         assert_eq!(ledgers.len(), 3, "{backend}");
+        for row in &ledgers {
+            assert_eq!(
+                row.requested_manually,
+                row.file_id == p7_race,
+                "{backend}: admission origin"
+            );
+        }
         assert!(ledgers
             .windows(2)
             .all(|rows| rows[0].file_id < rows[1].file_id));
@@ -27561,7 +28615,7 @@ async fn dv_conversion_contract_runs_through_dyn_store() {
             .expect("failed"));
         assert_eq!(
             store
-                .queue_library_dv_conversion_batch(library.id, 103, false, 64)
+                .queue_library_dv_conversion_batch(library.id, 103, false, 64, true)
                 .await
                 .expect("auto does not retry")
                 .queued,
@@ -27628,12 +28682,21 @@ async fn dv_conversion_contract_runs_through_dyn_store() {
         );
         assert_eq!(
             store
-                .queue_library_dv_conversion_batch(library.id, 105, true, 64)
+                .queue_library_dv_conversion_batch(library.id, 105, true, 64, true)
                 .await
                 .expect("manual retry")
                 .queued,
             1,
             "{backend}: the operator can retry a corrected source"
+        );
+        assert!(
+            store
+                .dv_conversion(p7)
+                .await
+                .expect("retried ledger")
+                .expect("admitted retry has a ledger")
+                .requested_manually,
+            "{backend}: explicit batch retry replaces automatic provenance"
         );
         assert!(store
             .mark_dv_conversion_running(p7, 80_000)
@@ -28265,7 +29328,7 @@ async fn dv_conversion_retry_batch_does_not_starve_never_queued_files() {
         }
 
         let initial = store
-            .queue_library_dv_conversion_batch(library.id, 100, false, 2)
+            .queue_library_dv_conversion_batch(library.id, 100, false, 2, true)
             .await
             .expect("queue initial bounded prefix");
         assert_eq!(initial.queued, 2, "{backend}");
@@ -28282,7 +29345,7 @@ async fn dv_conversion_retry_batch_does_not_starve_never_queued_files() {
         }
 
         let retry = store
-            .queue_library_dv_conversion_batch(library.id, 102, true, 2)
+            .queue_library_dv_conversion_batch(library.id, 102, true, 2, true)
             .await
             .expect("retry bounded prefix without starving new work");
         assert_eq!(retry.queued, 2, "{backend}");
@@ -35095,6 +36158,35 @@ async fn replicated_schema_marker(client: &Client) -> i64 {
 #[cfg(feature = "hiqlite-contract-tests")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn replicated_v47_store_migrates_the_read_indexes_on_daemon_open() {
+    async fn rewind_non_idempotent_columns(client: &Client) {
+        downgrade_dv_request_provenance(client).await;
+        // v60 also adds a column. Remove its dependent triggers before replaying
+        // that step, including when the v48 index migration itself is a no-op.
+        client
+            .txn([
+                (
+                    "DROP TRIGGER background_transcode_producer_recorded",
+                    hiqlite::params!(),
+                ),
+                (
+                    "DROP TRIGGER background_transcode_producer_backfill",
+                    hiqlite::params!(),
+                ),
+                (
+                    "DROP TRIGGER background_job_verify_transcode_command",
+                    hiqlite::params!(),
+                ),
+                (
+                    "ALTER TABLE background_transcode_artifacts DROP COLUMN producer_payload",
+                    hiqlite::params!(),
+                ),
+            ])
+            .await
+            .expect("rewind producer provenance")
+            .into_iter()
+            .collect::<Result<Vec<_>, _>>()
+            .expect("commit producer provenance rewind");
+    }
     let _case = HIQLITE_CASE.lock().await;
     let cluster = ContractCluster::start().await;
     let client = Client::remote(
@@ -35123,6 +36215,7 @@ async fn replicated_v47_store_migrates_the_read_indexes_on_daemon_open() {
         "a fresh cluster is created with them"
     );
 
+    rewind_non_idempotent_columns(&client).await;
     let mut rewind = ITEM_READ_INDEXES
         .iter()
         .map(|index| (format!("DROP INDEX {index}"), hiqlite::params!()))
@@ -35163,6 +36256,7 @@ async fn replicated_v47_store_migrates_the_read_indexes_on_daemon_open() {
     // The indexes present with the marker behind: the step is `IF NOT
     // EXISTS` throughout, so a repeated attempt moves the marker instead of
     // refusing.
+    rewind_non_idempotent_columns(&client).await;
     client
         .txn([(
             "UPDATE cluster_meta SET schema_version = $1 WHERE singleton = 1",

@@ -27,6 +27,7 @@ use crate::state::{AppState, IntegrationMetrics, ScanStatus, StoreMetricsCache, 
 
 #[derive(Serialize)]
 pub struct ServerInfo {
+    pub decoder_compaction_contract: &'static str,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub display_aware_auto_protocol: Option<String>,
     pub name: String,
@@ -89,6 +90,7 @@ pub async fn server_info(State(state): State<AppState>) -> Result<Json<ServerInf
         .await?
         .is_some_and(|value| value.trim() == "1");
     Ok(Json(ServerInfo {
+        decoder_compaction_contract: plurx_core::playback::DECODER_COMPACTION_CONTRACT,
         display_aware_auto_protocol: Some("route-v1".to_owned()),
         name,
         version: crate::version::SEMVER,
@@ -1834,6 +1836,11 @@ pub struct SettingsDto {
     /// may still be VBR when a family refuses quality mode; `/system`
     /// capabilities and boot logs carry that validation result.
     pub transcode_rate_mode: Option<String>,
+    /// Requested content-aware encoding and its advisory scorer applicability.
+    pub content_aware_encoding: bool,
+    pub content_encoding_scorer_ready: Option<bool>,
+    pub content_encoding_applicability: serde_json::Value,
+    pub vod_reorder_frames: u8,
     /// `None` means use the validated family-tuned default.
     pub transcode_quality: Option<u8>,
     /// What an unset `transcode_rate_mode` resolves to on this node: the code
@@ -2296,6 +2303,16 @@ async fn settings_dto(state: &AppState) -> Result<SettingsDto, ApiError> {
         default_sub_lang: prefs.sub_lang,
         sub_mode: prefs.sub_mode.as_str().to_owned(),
         stream_readrate,
+        content_aware_encoding: setting(keys::CONTENT_AWARE_ENCODING).as_deref() == Some("1"),
+        content_encoding_scorer_ready: state.transcode.content_encoding_scorer_ready(),
+        content_encoding_applicability: state
+            .transcode
+            .content_encoding_applicability(&setting(keys::HWACCEL).unwrap_or_default()),
+        vod_reorder_frames: setting(keys::VOD_REORDER_FRAMES)
+            .as_deref()
+            .and_then(|v| v.parse::<u8>().ok())
+            .filter(|v| matches!(v, 0 | 2))
+            .unwrap_or(0),
         transcode_rate_mode,
         transcode_quality,
         transcode_rate_mode_default,
@@ -2646,6 +2663,9 @@ pub struct UpdateSettings {
     /// back to each encoder family's code default (absent = unchanged).
     #[serde(default, deserialize_with = "deserialize_nullable")]
     pub transcode_rate_mode: Option<Option<String>>,
+    /// Content-aware and reorder requests retain their independent validation.
+    pub content_aware_encoding: Option<bool>,
+    pub vod_reorder_frames: Option<u8>,
     /// JSON null clears the override back to the family-tuned default.
     #[serde(default, deserialize_with = "deserialize_nullable")]
     pub transcode_quality: Option<Option<u8>>,
@@ -2797,6 +2817,8 @@ impl UpdateSettings {
             || self.default_sub_lang.is_some()
             || self.sub_mode.is_some()
             || self.stream_readrate.is_some()
+            || self.content_aware_encoding.is_some()
+            || self.vod_reorder_frames.is_some()
             || self.transcode_rate_mode.is_some()
             || self.transcode_quality.is_some()
             || self.hls_readrate.is_some()
@@ -3102,6 +3124,11 @@ pub async fn update_settings(
     } else {
         None
     };
+    if req.vod_reorder_frames.is_some_and(|v| !matches!(v, 0 | 2)) {
+        return Err(ApiError::BadRequest(
+            "vod_reorder_frames must be 0 or 2".into(),
+        ));
+    }
     let rate_control = match (&req.transcode_rate_mode, req.transcode_quality) {
         (None, None) => None,
         (Some(requested_mode), Some(quality)) => {
@@ -3405,6 +3432,21 @@ pub async fn update_settings(
                 ))
             }
         }
+    }
+    if let Some(enabled) = req.content_aware_encoding {
+        state
+            .store
+            .put_setting(
+                keys::CONTENT_AWARE_ENCODING,
+                if enabled { "1" } else { "0" },
+            )
+            .await?;
+    }
+    if let Some(frames) = req.vod_reorder_frames {
+        state
+            .store
+            .put_setting(keys::VOD_REORDER_FRAMES, &frames.to_string())
+            .await?;
     }
     if let Some(values) = &analysis_settings {
         let borrowed = values
@@ -6049,6 +6091,9 @@ mod tests {
                 // Admin-only route: `AdminUser` was extracted before the body
                 // ran, so `true` is that proof handed on.
                 ("analysis.rs".to_owned(), "true".to_owned()),
+                // Reconciliation also requires AdminUser before previewing
+                // candidate target names from the roster.
+                ("analysis_reconcile.rs".to_owned(), "true".to_owned()),
                 // Any signed-in household member reaches this one, so the
                 // permission is this reader's own admin flag.
                 ("system.rs".to_owned(), "user.0.is_admin".to_owned()),

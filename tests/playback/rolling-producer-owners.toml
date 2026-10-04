@@ -494,7 +494,10 @@ replacement = "every new sleep requires classification; actor-managed producer v
 [[symbols]]
 id = "all-async-intervals"
 pattern = "tokio::time::interval\\("
-expected_occurrences = 3
+# Video-quality batch: one interval in the existing admitted sample phase checks
+# background yield/cancellation; the phase owns it until completion and reap.
+# It cannot restart a producer or decide viewer playback recovery.
+expected_occurrences = 4
 kind = "structural_timer_scan"
 replacement = "intervals remain only for named sampling, repair, or lifecycle work and cannot decide producer recovery"
 
@@ -791,7 +794,10 @@ id = "m4-response-publication-subdeadline"
 pattern = "response_publication_deadline_before"
 # 23 -> 24: the init-inspection read derives its deadline from the request's
 # publication owner before touching the VOD facade.
-expected_occurrences = 24
+# +1 native startup: the legacy-native VOD bridge derives the final
+# response-admission subdeadline after preparation, clipped to its original
+# request deadline. It neither renews that deadline nor adds a producer owner.
+expected_occurrences = 25
 
 [[module_symbols]]
 id = "m4-playlist-request-deadline-chain"
@@ -1414,6 +1420,8 @@ pattern = "driven_local_body"
 # Landed 847c1bfe0 removes the duplicate constructor and its two production
 # callers (plus the old direct-constructor fixture). The one remaining reference
 # is the historical terminal-failure regression's name, not another owner.
+# Main's three batch regressions are retained through ResidentBatch acceptance
+# probes, not calls to the removed constructor. There is still only one pump.
 expected_occurrences = 1
 
 [[module_symbols]]
@@ -2500,7 +2508,33 @@ pattern = "(?:[A-Za-z_]\\w*::)+spawn(?:_blocking|_local|_for_test)?\\s*\\("
 # node-local census file every 60 s and returns on the existing
 # background_shutdown token. It owns an Arc of the census and nothing else; no
 # producer, process or recovery authority.
-expected_occurrences = 719
+# +1 TCL catalog repair: create.rs moves its existing owned worker spawn into
+# media_pool::spawn_create_worker (net zero), carrying the enclosing deadline
+# and Store accounting. chunk_06's unrelated-background-read fixture adds one
+# task, immediately awaited, to prove background reads remain unscoped.
+# 684 -> 683 with #722: the cleanup-gate regression polls and awaits its
+# replacement waiter in the test task instead of spawning a joined task.
+# This removes a test-only owner; production cleanup ownership is unchanged.
+# Combined native-init fixture and TCL source: measured total 685.
+# +1 native-startup delayed-init fixture: one tokio::spawn writes the exact
+# generated init after six seconds. The test awaits its JoinHandle before
+# teardown; it adds no production task or child process.
+# 684 -> 683 with #722: the cleanup-gate regression polls and awaits its
+# replacement waiter in the test task instead of spawning a joined task.
+# This removes a test-only owner; production cleanup ownership is unchanged.
+# Combined native fixture addition and main cleanup fixture removal.
+# +1 for playback_preparation_wakes_busy_analysis_for_any_live_request_waiter:
+# a test-only background consumer, retained in `consumer`, then explicitly
+# aborted and awaited before the cancellation assertions. No producer/process
+# owner is added; the existing daemon consumer owns its fenced work.
+# Video-quality batch: +3 sites. The cached-report metadata snapshot uses one
+# awaited spawn_blocking. Two BoundedDiagnosticChild::spawn calls are existing
+# child-owner construction (one production sample and one cancellation fixture),
+# not detached recovery tasks; both collectors are awaited through reap.
+# Main/effort source union: 724 exact qualified launch sites, retaining both
+# sets of joined fixtures and existing daemon/child owners above. The resolver
+# borrows the captured snapshot; it does not spawn another catalog owner.
+expected_occurrences = 724
 # E1 plus S-14 M8: both ownership sets retained and counted on the merged source.
 # 643 -> 647 with S-14 M8 (`plan/S-14-5`: `Encoding`, `RollingFlowSync`, `TerminalCleanup`,
 # `HeadChildOwner`, `VodServingAdmission` behind per-owner hooks), measured by
@@ -3713,7 +3747,55 @@ pattern = "(?:[A-Za-z_]\\w*::)+(?:sleep|sleep_until|interval|interval_at|timeout
 # S10 public wire: +6 test-owned waits (aggregate fetch, actual completion,
 # completion polling, total wall budget, public DELETE cleanup, listener join).
 # They add no production timer or deadline renewal.
-expected_occurrences = 1206
+# +1 Activity analysis reconciliation: the admin request awaits a two-second
+# source-inspection deadline before admitting reassignment to this node. The
+# request owns and drops the inspection future on timeout; it starts no media
+# producer, claims no job, and leaves full attestation to the existing worker.
+# +2 net TCL catalog repair: create.rs awaits its enclosing request timeout;
+# manager/create.rs awaits binding validation within that same remaining
+# allowance. Internal v1 inspection delegates its existing timeout to the
+# shared catalog collector (net zero). media_pool's deadline fixture adds one
+# awaited sleep while replacing the old local collector wait (net zero).
+# All futures stay owned by the request/test; no watchdog or timer task exists.
+# 1127 -> 1126 with #722: the same regression removes its one-second timeout
+# wrapper and directly checks Pending before releasing cleanup. The real
+# gate future retains its production deadline; no production timer changed.
+# Combined native-init fixture and TCL source: measured total 1129.
+# +4 for playback_preparation_wakes_busy_analysis_for_any_live_request_waiter:
+# a 100 ms maintenance deferral observation, a 20 ms claim poll bounded by
+# a two-second timeout, and a one-second viewer-departure timeout. All are
+# test-only; each timeout asserts rather than extending a production budget.
+# +2 for a_store_outliving_its_writer_runtime_cannot_reuse_a_stale_sink:
+# its test runtime owns a two-second persistence timeout and a 10 ms poll
+# awaited inside that deadline, then drains the writer before runtime drop.
+# No production timer or detached timer owner is added.
+# Video-quality batch: +4 bounds. The one-shot VAAPI capability probe uses a
+# 20-second timeout under status_job_owned. The admitted content phase owns an
+# offset-permit deadline, a cooperative yield/cancel interval and total deadline;
+# cancellation joins the child before releasing source, scratch or admission.
+# +1 native-startup delayed-init fixture: its joined writer owns one bounded
+# six-second sleep, under the test request's unchanged twelve-second deadline.
+# No production timer or recovery clock is added.
+# 1127 -> 1126 with #722: the same regression removes its one-second timeout
+# wrapper and directly checks Pending before releasing cleanup. The real
+# gate future retains its production deadline; no production timer changed.
+# Combined native fixture addition and main cleanup fixture removal.
+# Main/effort source union: 1223 exact qualified time constructors. Additive
+# parent arithmetic (effort 1206 + main 1139 - base 1126 = 1219) missed four
+# constructors the union resolution itself wrote (0b100f1c, unchanged at
+# 901e38cb). All four are awaited in place; none is spawned, periodic, or
+# renews a playback/producer budget:
+# - http/stream.rs decision (the measured_candidate_outputs assignment): the
+#   request awaits one timeout_at(create_stage_deadline(100 ms)) over the
+#   borrowed snapshot projection; expiry yields None (advisory cost only).
+# - transcode/manager/candidates.rs restore_catalog_context: one timeout_at on
+#   the caller's own restoration deadline; expiry returns Unavailable.
+# - transcode/manager/create.rs vod_preparation_snapshot: the fallback
+#   snapshot read awaits timeout_at(create_stage_deadline(2 s)), clamped to the
+#   create startup budget; expiry is a catalog input error.
+# - vod/retained.rs test_reorder_candidate_cost_isolation (#[cfg(test)]): one
+#   in-place 20 ms poll loop ended by the fixture's five-second proof deadline.
+expected_occurrences = 1223
 
 [[module_structures]]
 id = "bare-time-constructor"
@@ -4051,7 +4133,18 @@ pattern = "(?:[A-Za-z_]\\w*::)*Command::new\\s*\\("
 # +1 S-07 PR #727: pipeprobe's test-only
 # `the_cpu_tone_map_survives_a_frame_without_primaries` runs one finite
 # ffmpeg (a 0.25 s lavfi source to framemd5) and awaits its `.output()`.
-expected_occurrences = 205
+# 201 -> 200 with PR #707: pipeprobe's separate FFmpeg and FFprobe
+# constructors now share Spawn::command so both inherit the playback cache.
+# Both existing Tools calls still await output_job_owned, which retains the
+# child job and enables kill-on-drop. The HOME=/ regression uses this same
+# constructor and awaits its finite shell child; no new detached owner exists.
+# Video-quality batch: +4 constructors: one boot VAAPI probe, the bounded
+# sample/scorer command factory, one finite cancellation shell fixture and one
+# independent VOD restart decode fixture. Production commands use existing child
+# job owners; fixtures collect completion before dropping their temporary media.
+# Main/effort source union: 208 exact command constructors; both retained finite
+# fixtures and main's admitted diagnostic children remain under their owners.
+expected_occurrences = 208
 
 [[module_structures]]
 id = "process-capable-launch-method"
@@ -4539,7 +4632,16 @@ pattern = "\\.(?:spawn|output|status)\\s*\\("
 # S10 public wire: +2 reqwest response.status() reads, not process launches.
 # +1 S-07 PR #727: the matching awaited `.output()` of pipeprobe's test-only
 # untagged-primaries tone-map fixture counted under process-command-construction.
-expected_occurrences = 431
+# Combined current-main 409 plus the queued-publication test child = 410.
+# +1 TCL legacy admission fixture: Response::status() asserts typed Auto/1440
+# overflow versus ordinary copy/manual admission. This does not launch a child.
+# Video-quality batch: +1 output() in the independently decoded reordered VOD
+# restart fixture; it awaits completion with kill-on-drop and owns no viewer.
+# +2 native-startup delayed-init fixture: Axum Response::status() reads
+# assert the master and legacy bridge responses. Neither launches a process.
+# Main/effort source union: 435 exact method shapes. Response status assertions
+# remain non-process observations; collected commands retain the owners above.
+expected_occurrences = 435
 
 [[module_structures]]
 id = "process-command-ufcs-launch"
@@ -4775,7 +4877,11 @@ pattern = "\\.(?:kill|start_kill|wait|try_wait|exec)\\s*\\("
 # terminated and reaped it for foreground, download, ownership and deadline yields.
 # Review59: +3 only in the NEW exact executable fixture: ordinary child.wait
 # and timeout start_kill + wait, retaining the job through exact reap.
-expected_occurrences = 253
+# Video-quality batch: +2 net lifecycle calls in BoundedDiagnosticChild. The
+# cancellable collector adds start_kill and a separate awaited wait branch; its
+# successful ordinary/cancelled wait retains the same child-job owner until reap.
+# Main/effort source union retains both sets: 255 exact lifecycle method sites.
+expected_occurrences = 255
 
 [[module_structures]]
 id = "free-or-ufcs-process-lifecycle"
@@ -4943,7 +5049,9 @@ pattern = "kill_on_drop\\s*\\("
 # Queued-publication regression: the test owns one finite sleep child,
 # uses exec to avoid descendants, enables kill-on-drop, and verifies run_part
 # terminated and reaped it for foreground, download, ownership and deadline yields.
-expected_occurrences = 93
+# Video-quality batch: +2 guards on the one-shot VAAPI capability probe and
+# finite reordered-VOD decode fixture. Their enclosing owners also await reap.
+expected_occurrences = 95
 
 [[module_structures]]
 id = "rolling-supervisor-construction"

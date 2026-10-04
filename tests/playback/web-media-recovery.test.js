@@ -85,7 +85,7 @@ test("a paused rolling session's failure parks and Play reopens it", () => {
   assert.match(toggle, /seekTo\(at,true,null,false(?:,|\))/, "the replacement is a forced reopen");
 
   const shell = shellSource().bodyScript;
-  const errorListener = shell.slice(shell.indexOf('v.addEventListener("error",()=>{'));
+  const errorListener = shell.slice(shell.indexOf('v.addEventListener("error",async()=>{'));
   const nativePark = errorListener.indexOf("PlaybackPolicy.parksPausedPlaybackError(");
   assert.ok(nativePark >= 0 && nativePark < errorListener.indexOf("PlaybackPolicy.fallbackAction("),
     "Safari's native network error parks before the rescue ladder");

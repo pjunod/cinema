@@ -358,7 +358,7 @@ function theaterItemBody(p){
   // classicItemBody and catalogItemBody, and it is the headline example in the
   // G3 record of the abstraction failing one layer down.
   const yrs = p.years ? `${p.years.from}${p.years.to>p.years.from?'–'+p.years.to:''}` : '';
-  const kick=[it.kind?esc(it.kind):'', yrs].filter(Boolean).join(' · ');
+  const kick=[esc(itemKindLabel(it)), yrs].filter(Boolean).join(' · ');
 
   const chips=[];
   if(it.recorded_at) chips.push(`<span>${esc(fmtDate(it.recorded_at))}</span>`);

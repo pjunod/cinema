@@ -188,7 +188,7 @@ test_anchor = "transcode_capacity_pending"
 id = "web.frame-callback-registration-lifecycle"
 commits = ["790ffc9da", "4c8830b2c", "b217c615e", "85b177a1b", "3d22d5ee2"]
 source = "crates/plurxd/src/web/player/decode-tiers.js"
-source_anchor = "if(id!=null||v.readyState<2||v.seeking) return;"
+source_anchor = "if(id!=null||v.readyState<2||(v.seeking&&!renewingSeek)) return;"
 test = "tests/playback/web-control.test.js"
 test_anchor = "loadeddata during the initial seek must not strand a frame request"
 
@@ -3637,3 +3637,19 @@ source = "clients/android/app/src/main/java/tv/plurx/app/player/Controller.kt"
 source_anchor = "handOverAudioFocus(previous.asAudioFocusOwner(), successor.asAudioFocusOwner())"
 test = "clients/android/app/src/test/java/tv/plurx/app/player/AudioFocusOwnershipTest.kt"
 test_anchor = "everySwapSiteMovesFocusToTheAudiblePlayer"
+
+[[fixes]]
+id = "android.tcl-decoder-envelope-compaction"
+commits = ["067021dc8"]
+source = "clients/android/app/src/main/java/tv/plurx/app/data/CapsPolicy.kt"
+source_anchor = "internal fun compactVideoEntries(rows: List<VideoEntry>): List<VideoEntry>"
+test = "clients/android/app/src/test/java/tv/plurx/app/data/CapsPolicyTest.kt"
+test_anchor = "fun mediatekRegistryCompactsThroughActualWirePolicyWithoutDroppingProfiles()"
+
+[[fixes]]
+id = "apple.catalog-discovery-existing-retry-owner"
+commits = ["56e52c50e", "3b13d6acf"]
+source = "clients/apple/Sources/PlayerController.swift"
+source_anchor = '"quality_catalog_unavailable",'
+test = "clients/apple/Tests/AppleClientTests.swift"
+test_anchor = "func testOnlyTheContractsNotYetCodesAreRetried() throws"

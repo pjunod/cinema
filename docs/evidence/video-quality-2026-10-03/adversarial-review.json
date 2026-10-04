@@ -1,0 +1,22 @@
+{
+  "reviewed_commit": "6cdddaeef",
+  "base": "9416dbe89",
+  "review_count": 1,
+  "verdict": "request_changes",
+  "findings": [
+    {
+      "priority": "P1",
+      "issue": "Application-owned C2 evidence entered same-reporter media source comparison",
+      "fix_commit": "827023fd2",
+      "regression": "ffmpeg::tests::a_content_encoding_report_is_not_a_source_change_for_the_same_reporter"
+    },
+    {
+      "priority": "P1",
+      "issue": "Fixed-level VAAPI HDR admission omitted source cadence",
+      "fix_commit": "09ab30374",
+      "regression": "transcode::tests::vaapi_hdr10_cadence_contract_preserves_high_rate_sdr_and_refuses_stale_plans"
+    }
+  ],
+  "post_review_candidate": "09ab303741e1b79aeb3dc8807a7398d3ce45bba8",
+  "tests_run_during_review": false
+}

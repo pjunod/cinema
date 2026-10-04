@@ -39,9 +39,11 @@ impl VideoCodec {
     ) -> Option<&'static str> {
         match (self, bit_depth, grade, encoder) {
             (Self::H264, 8, OutputGrade::Sdr, family) => Some(family.video_codec()),
-            // Existing 2026-08-22 Main10 qualification; no new tuple admitted.
+            // Preserve the Main10 measurements and the subsequently published
+            // VAAPI HDR graph; the output tuple remains explicit.
             (Self::Hevc, 10, OutputGrade::Hdr10, Encoder::Software) => Some("libx265"),
             (Self::Hevc, 10, OutputGrade::Hdr10, Encoder::Qsv) => Some("hevc_qsv"),
+            (Self::Hevc, 10, OutputGrade::Hdr10, Encoder::Vaapi) => Some("hevc_vaapi"),
             _ => None,
         }
     }
@@ -124,6 +126,7 @@ mod output_codec_contract_tests {
                     OutputGrade::Hdr10 => match family {
                         Encoder::Software => Some("libx265"),
                         Encoder::Qsv => Some("hevc_qsv"),
+                        Encoder::Vaapi => Some("hevc_vaapi"),
                         _ => None,
                     },
                 };
@@ -553,6 +556,7 @@ impl Encoder {
             (Encoder::Qsv, OutputGrade::Hdr10) => {
                 Some("format=p010le,hwupload=extra_hw_frames=64,format=qsv")
             }
+            (Encoder::Vaapi, OutputGrade::Hdr10) => Some("format=p010le,hwupload"),
             _ => self.filter_suffix(),
         }
     }
@@ -769,15 +773,33 @@ impl Encoder {
         let codec = self
             .video_codec_for(OutputGrade::Hdr10)
             .unwrap_or("libx265");
-        let mut args: Vec<String> = ["-c:v", codec, "-preset", "veryfast"]
-            .into_iter()
-            .map(str::to_owned)
-            .collect();
+        let mut args: Vec<String> = ["-c:v", codec].into_iter().map(str::to_owned).collect();
         match self {
             Encoder::Qsv => {
-                args.extend(["-profile:v".to_owned(), "main10".to_owned()]);
+                args.extend([
+                    "-preset".to_owned(),
+                    "veryfast".to_owned(),
+                    "-profile:v".to_owned(),
+                    "main10".to_owned(),
+                ]);
+            }
+            Encoder::Vaapi => {
+                // VAAPI accepts P010 surfaces and has no x265/preset options.
+                // Force IDR at each requested I-frame; VOD adds its own grid.
+                args.extend([
+                    "-profile:v".to_owned(),
+                    "main10".to_owned(),
+                    "-tier:v".to_owned(),
+                    "high".to_owned(),
+                    "-level:v".to_owned(),
+                    "4".to_owned(),
+                    "-idr_interval".to_owned(),
+                    "0".to_owned(),
+                ]);
             }
             _ => args.extend([
+                "-preset".to_owned(),
+                "veryfast".to_owned(),
                 "-x265-params".to_owned(),
                 "hdr10=1:repeat-headers=1".to_owned(),
             ]),
@@ -811,7 +833,7 @@ impl Encoder {
 }
 
 /// The DRI render node for VAAPI, overridable via `PLURX_VAAPI_DEVICE`.
-fn vaapi_device() -> String {
+pub(super) fn vaapi_device() -> String {
     std::env::var("PLURX_VAAPI_DEVICE")
         .ok()
         .filter(|v| !v.is_empty())
@@ -1645,9 +1667,38 @@ mod tests {
         }
     }
 
-    /// Only the software and QSV HDR10 encoders have completed the real-node
-    /// output and throughput measurements. Absence remains a refusal, not an
-    /// invitation to infer support from `ffmpeg -encoders`.
+    /// Hardware HDR recipes remain explicit by family; absence is a refusal.
+    /// Runtime graph proofs and qualification evidence are separate from argv.
+    #[test]
+    fn vaapi_hdr10_uses_p010_main10_without_software_encoder_options() {
+        assert_eq!(
+            Encoder::Vaapi.video_codec_for(OutputGrade::Hdr10),
+            Some("hevc_vaapi")
+        );
+        assert_eq!(
+            Encoder::Vaapi.filter_suffix_for(OutputGrade::Hdr10),
+            Some("format=p010le,hwupload")
+        );
+        let args = Encoder::Vaapi.encode_args_for(
+            OutputGrade::Hdr10,
+            20_000,
+            EffectiveRateControl::Vbr,
+            false,
+            None,
+        );
+        assert!(args.windows(2).any(|w| w == ["-profile:v", "main10"]));
+        assert!(args.windows(2).any(|w| w == ["-color_trc", "smpte2084"]));
+        assert!(!args.iter().any(|v| v == "-preset" || v == "-x265-params"));
+        assert_eq!(
+            Encoder::Vaapi.video_codec_for(OutputGrade::Sdr),
+            Some("h264_vaapi")
+        );
+        assert_eq!(
+            Encoder::Vaapi.filter_suffix_for(OutputGrade::Sdr),
+            Some("format=nv12,hwupload")
+        );
+    }
+
     #[test]
     fn software_and_qsv_have_measured_hevc_main10_encoders() {
         assert_eq!(
@@ -1658,7 +1709,7 @@ mod tests {
             Encoder::Qsv.video_codec_for(OutputGrade::Hdr10),
             Some("hevc_qsv")
         );
-        for encoder in [Encoder::Nvenc, Encoder::Vaapi, Encoder::VideoToolbox] {
+        for encoder in [Encoder::Nvenc, Encoder::VideoToolbox] {
             assert_eq!(
                 encoder.video_codec_for(OutputGrade::Hdr10),
                 None,

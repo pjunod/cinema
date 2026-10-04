@@ -1,0 +1,27 @@
+{
+  "status": "passed",
+  "test": "transcode::content_encoding::tests::native_sample_phase_scores_all_windows_and_cleans_scratch",
+  "base_commit": "09ab303741e1b79aeb3dc8807a7398d3ce45bba8",
+  "source_path": "crates/plurxd/src/transcode/content_encoding.rs",
+  "source_sha256": "65ab9e89e816c8151bdec2772a6fb6cd8a2e33a1894f8c029e8b89a80c98b389",
+  "ffmpeg_version": "ffmpeg version 9.0.1 Copyright (c) 2000-2026 the FFmpeg developers",
+  "ffprobe_version": "ffprobe version 9.0.1 Copyright (c) 2007-2026 the FFmpeg developers",
+  "command": "PATH=/Users/pjunod/.cargo/bin:/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin PLURX_FFMPEG=/opt/homebrew/bin/ffmpeg PLURX_FFPROBE=/opt/homebrew/bin/ffprobe CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=/private/tmp/plurx-quality-20261002/target cargo test -p plurxd transcode::content_encoding::tests::native_sample_phase_scores_all_windows_and_cleans_scratch -- --exact --ignored --nocapture",
+  "log": "native-content-proof-fixed.log",
+  "original_failure": {
+    "reference_frames": 48,
+    "missing_fields": [
+      "color_transfer",
+      "color_primaries"
+    ],
+    "cause": "Synthetic lavfi frames had unknown color metadata while fixture fabricated a BT709 probe document."
+  },
+  "correction": "Author limited BT709 frame metadata with setparams and derive fixture probe from emitted bytes. Preserve all production sample contract checks.",
+  "exit_code": 0,
+  "passed": 1,
+  "failed": 0,
+  "execution_seconds": 3.13,
+  "log_sha256": "576a4ba7998809eee7d3cd615bb2c462a546c4afa57ce287766579fde42d4e28",
+  "commit": "954165264aa94df6690dc3582ec5be1e49837502",
+  "normal_commit_hook": "passed: catalog, formatting, workspace all-target Clippy -D warnings, JavaScript syntax"
+}

@@ -81,6 +81,9 @@ const HDR10_4K_MAX_LUMA_SAMPLES: i64 = 8_912_896;
 /// collapses a High-tier HDR master to its media rendition for AVPlayer, and
 /// this rung inherits that unchanged.
 const HDR10_HLS_CODEC: &str = "hvc1.2.4.H120.90";
+/// VAAPI's non-packed constraint is set as well: measured from the production
+/// Jellyfin 8.1.3 graph on m6, rather than inherited from the QSV/x265 point.
+const HDR10_VAAPI_HLS_CODEC: &str = "hvc1.2.4.H120.B0";
 /// Measured from the 2160p QSV output's hvcC: Main10, compatibility 4, High
 /// tier, level 150, constraint byte 0x90.
 const HDR10_4K_HLS_CODEC: &str = "hvc1.2.4.H150.90";
@@ -90,11 +93,20 @@ const HDR10_4K_HLS_CODEC: &str = "hvc1.2.4.H150.90";
 /// Without a qualified frozen plan, SDR knows its codec family but not its
 /// profile/compatibility/level triplet. This is not a CODECS declaration;
 /// SDR master emission remains deferred, and fMP4 reads its actual init.
-pub(super) fn transcoded_hls_codecs(grade: OutputGrade, target_height: i64) -> String {
+/// HDR fallback follows the measured encoder-specific graph, including
+/// VAAPI's distinct constraint byte; it does not infer a source sample entry.
+pub(super) fn transcoded_hls_codecs(
+    grade: OutputGrade,
+    target_height: i64,
+    encoder: Encoder,
+) -> String {
     match grade {
         OutputGrade::Sdr => "avc1,mp4a.40.2".to_owned(),
         OutputGrade::Hdr10 if target_height > HDR10_HEIGHT => {
             format!("{HDR10_4K_HLS_CODEC},mp4a.40.2")
+        }
+        OutputGrade::Hdr10 if encoder == Encoder::Vaapi => {
+            format!("{HDR10_VAAPI_HLS_CODEC},mp4a.40.2")
         }
         OutputGrade::Hdr10 => format!("{HDR10_HLS_CODEC},mp4a.40.2"),
     }
@@ -103,7 +115,11 @@ pub(super) fn transcoded_hls_codecs(grade: OutputGrade, target_height: i64) -> S
 pub(super) fn transcoded_hls_codecs_for_plan(plan: &ResolvedTranscode) -> String {
     match plan.output_contract().sdr_avc() {
         Some(proof) => format!("{},mp4a.40.2", proof.codec()),
-        None => transcoded_hls_codecs(plan.codec_contract().grade, plan.options().target_height),
+        None => transcoded_hls_codecs(
+            plan.codec_contract().grade,
+            plan.options().target_height,
+            plan.encoder(),
+        ),
     }
 }
 
@@ -164,7 +180,7 @@ pub(super) fn hdr10_rung_fits(
     encoder: Encoder,
 ) -> bool {
     let max_samples = match (target_height, encoder) {
-        (HDR10_HEIGHT, Encoder::Software | Encoder::Qsv) => HDR10_MAX_LUMA_SAMPLES,
+        (HDR10_HEIGHT, Encoder::Software | Encoder::Qsv | Encoder::Vaapi) => HDR10_MAX_LUMA_SAMPLES,
         (HDR10_4K_HEIGHT, Encoder::Qsv) => HDR10_4K_MAX_LUMA_SAMPLES,
         _ => return false,
     };

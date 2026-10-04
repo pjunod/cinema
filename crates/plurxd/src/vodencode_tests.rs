@@ -299,6 +299,7 @@ async fn encoded_fixture(base: &Path) -> (MediaFile, Arc<crate::vodencode::Encod
         resources,
         options,
         grid: VodFrameGrid::new(24000, 1001).expect("NTSC grid"),
+        reorder_frames: false,
         subtitle: None,
         subtitle_digest: None,
         ffmpeg_build: crate::ffmpeg::ffmpeg_build().await,
@@ -622,6 +623,7 @@ async fn encoded_vod_resurrection_cannot_adopt_same_size_mtime_replacement() {
         resources: encoding.resources,
         options: encoding.options.clone(),
         grid: encoding.grid,
+        reorder_frames: encoding.reorder_frames,
         subtitle: None,
         subtitle_digest: None,
         ffmpeg_build: encoding.ffmpeg_build.clone(),
@@ -1297,13 +1299,17 @@ async fn encoded_vod_aac_is_continuous_across_independently_regenerated_neighbor
     let _campaign = ENCODED_INTEGRATION_CAMPAIGN.lock().await;
     let base = crate::test_tempdir().expect("AAC continuity fixture");
     let (file, encoding) = encoded_fixture(base.path()).await;
-    let serve = bare_serve(&base.path().join("renditions"));
+    assert_encoded_neighbor_continuity(base.path(), &file, &encoding).await;
+}
+
+async fn assert_encoded_neighbor_continuity(base: &Path, file: &MediaFile, encoding: &Arc<crate::vodencode::Encoding>) {
+    let serve = bare_serve(&base.join("neighbor-renditions"));
     for entry in [0, 44] {
-        let (init, old_first, old_next) = encoded_pair(&serve, &file, &encoding, entry).await;
+        let (init, old_first, old_next) = encoded_pair(&serve, file, encoding, entry).await;
         let (new_init, new_next, following) =
-            encoded_pair(&serve, &file, &encoding, entry + 1).await;
+            encoded_pair(&serve, file, encoding, entry + 1).await;
         let (reverse_init, regenerated_first, _) =
-            encoded_pair(&serve, &file, &encoding, entry).await;
+            encoded_pair(&serve, file, encoding, entry).await;
         assert_eq!(init, new_init);
         assert_eq!(init, reverse_init);
         let first_interval = audio_interval(&init, &old_first);
@@ -1320,7 +1326,7 @@ async fn encoded_vod_aac_is_continuous_across_independently_regenerated_neighbor
         assert_eq!(audio_interval(&init, &regenerated_first), first_interval);
         assert_eq!(next_interval.1, audio_interval(&init, &following).0);
         let baseline = decoded_audio(
-            &base.path().join("audio-baseline.mp4"),
+            &base.join("audio-baseline.mp4"),
             &init,
             &old_first,
             &old_next,
@@ -1330,8 +1336,12 @@ async fn encoded_vod_aac_is_continuous_across_independently_regenerated_neighbor
             ("forward", &old_first, &new_next),
             ("reverse", &regenerated_first, &old_next),
         ] {
+            if encoding.reorder_frames {
+                assert_reordered_video_splice(&base.join(format!("video-{entry}-{label}.mp4")),
+                    &init, left, right, encoding.grid.frames_per_segment as usize * 2).await;
+            }
             let joined = decoded_audio(
-                &base.path().join(format!("audio-{label}.mp4")),
+                &base.join(format!("audio-{label}.mp4")),
                 &init,
                 left,
                 right,
@@ -1390,6 +1400,38 @@ async fn encoded_vod_ntsc_gets_decode_after_forward_and_backward_restarts() {
     let _campaign = ENCODED_INTEGRATION_CAMPAIGN.lock().await;
     let base = crate::test_tempdir().expect("encoded fixture");
     let (file, encoding) = encoded_fixture(base.path()).await;
+    assert_encoded_restarts(base.path(), file, encoding).await;
+}
+
+async fn assert_reordered_video_splice(path: &Path, init: &[u8], left: &[u8], right: &[u8], count: usize) {
+    tokio::fs::write(path, [init,left,right].concat()).await.expect("restart splice bytes");
+    let output = tokio::process::Command::new(ffmpeg_bin())
+        .args(["-hide_banner","-loglevel","error","-xerror","-i"]).arg(path)
+        .args(["-map","0:v:0","-an","-fps_mode","passthrough","-f","framemd5","-"])
+        .kill_on_drop(true).output().await.expect("decode reordered restart splice");
+    assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+    let text = String::from_utf8(output.stdout).expect("frame records");
+    let frames = text.lines().filter(|line| !line.starts_with('#') && !line.trim().is_empty())
+        .map(|line| line.split(',').map(str::trim).collect::<Vec<_>>()).collect::<Vec<_>>();
+    assert_eq!(frames.len(), count, "splice must neither drop nor duplicate pictures: {text}");
+    for pair in frames.windows(2) {
+        let before = pair[0][2].parse::<i64>().expect("PTS");
+        let duration = pair[0][3].parse::<i64>().expect("duration");
+        let next = pair[1][2].parse::<i64>().expect("PTS");
+        assert_eq!(next, before + duration, "presentation must be contiguous across restart");
+    }
+}
+
+#[tokio::test]
+async fn encoded_vod_signed_reorder_keeps_restart_init_and_presentation_grid() {
+    let _campaign = ENCODED_INTEGRATION_CAMPAIGN.lock().await;
+    let base = crate::test_tempdir().expect("reordered encoded fixture");
+    let (file, mut encoding) = encoded_fixture(base.path()).await;
+    let original = encoding.identity(&file, 96.0);
+    Arc::get_mut(&mut encoding).expect("new fixture").reorder_frames = true;
+    assert_ne!(encoding.identity(&file, 96.0), original, "reordered bytes need their own rendition");
+    assert_encoded_neighbor_continuity(base.path(), &file, &encoding).await;
+    let encoding = encoding.clone_with_admissions_for_test(crate::admission::Admissions::new()).await;
     assert_encoded_restarts(base.path(), file, encoding).await;
 }
 
@@ -1585,6 +1627,8 @@ async fn assert_encoded_restarts(
         reader.push(&tokio::fs::read(&output).await.expect("served media"));
         let mut video_id = None;
         let mut audio_id = None;
+        let mut parsed_init = None;
+        let mut saw_reorder = false;
         while let Some(unit) = reader.next_unit().expect("parse actual GET bytes") {
             match unit {
                 Unit::Init(init) => {
@@ -1594,12 +1638,18 @@ async fn assert_encoded_restarts(
                         .iter()
                         .find(|track| track.kind == plurx_core::fmp4::TrackKind::Audio)
                         .map(|track| track.id);
+                    parsed_init = Some(init);
                 }
                 Unit::Fragment(fragment) => {
                     if let Some(video) = video_id.and_then(|id| fragment.track(id)) {
                         let expected = rendition.plan.entry(entry).expect("entry");
                         assert_eq!(video.base_decode_time, expected.start_ticks);
                         assert_eq!(video.duration(), expected.duration_ticks);
+                        plurx_core::fmp4::validate_encoded_grid(&fragment,
+                            parsed_init.as_ref().expect("init before media"), rendition.plan.timescale,
+                            expected.start_ticks, expected.duration_ticks, encoding.grid.denominator)
+                            .expect("served fragment owns the exact presentation grid");
+                        saw_reorder |= video.samples().any(|sample| sample.cto != 0);
                         assert_eq!(
                             video.sample_count(),
                             encoding.grid.frames_per_segment as usize
@@ -1618,6 +1668,9 @@ async fn assert_encoded_restarts(
                 }
                 Unit::Trailer => {}
             }
+        }
+        if encoding.reorder_frames {
+            assert!(saw_reorder, "the reordered fixture must actually exercise B pictures");
         }
         // A seek attaches at the containing segment boundary, which can
         // precede the requested film time. With VFR input, the fps filter may
@@ -1667,6 +1720,9 @@ async fn assert_encoded_restarts(
             .expect("decode every output frame");
         assert!(frames.status.success());
         let checksums = String::from_utf8(frames.stdout).expect("frame checksums");
+        let frame_count = checksums.lines().filter(|line| !line.starts_with('#') && !line.trim().is_empty()).count();
+        assert_eq!(frame_count, encoding.grid.frames_per_segment as usize,
+            "standalone entry must decode every planned presentation slot");
         let distinct = checksums
             .lines()
             .filter(|line| !line.starts_with('#'))

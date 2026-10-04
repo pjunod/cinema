@@ -302,6 +302,7 @@ async fn prepared_copy_consumer(control: u8) {
             copy_output_version: 1, file_id: file.id, source_generation: object.clone(),
             source_size: file.size, source_mtime: file.mtime, source_object_version: object.clone(),
             policy_generation: "copy:1".into(), intent: intent.clone(), scratch_bytes: 64 << 20,
+            candidate_catalog: None,
             reason: "recent_demand".into(),
         }, dedupe_key: "copy:consumer".into(), priority: 1, not_before_ms: now, now_ms: now,
         request: JobRequest {

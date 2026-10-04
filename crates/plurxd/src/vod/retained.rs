@@ -115,6 +115,135 @@ impl VodServe {
     }
 }
 
+/// Synthetic completed bytes through the existing Sink/retained registry.
+/// This checks digest-key isolation, not encoded-media qualification.
+#[cfg(test)]
+pub(crate) async fn test_reorder_candidate_cost_isolation(
+    off: &plurx_core::playback::candidate::QualityCandidate,
+    on: &plurx_core::playback::candidate::QualityCandidate,
+) -> ([u8; 32], Option<[u8; 32]>) {
+    use crate::vodgen::Sink;
+    let temp = crate::test_tempdir().expect("reorder cost fixture");
+    let serve = super::tests::bare_serve(temp.path());
+    let mut rendition = super::tests::synthetic_rendition(temp.path()).await;
+    let path = temp.path().join("source.bin");
+    tokio::fs::write(&path, b"reorder cost source")
+        .await
+        .expect("source");
+    let file = super::tests::media_file_at(path, 10_000);
+    let source = crate::fragment_index_cluster::open_source_fence(&file, None)
+        .await
+        .expect("source fence");
+    let audio = plurx_core::playback::audio::AudioDelivery {
+        action: plurx_core::playback::audio::AudioAction::None,
+        downmix: None,
+        reason: "synthetic producer has no audio".to_owned(),
+    };
+    let kind = SessionKind::Transcode {
+        height: i64::from(off.target_height),
+    };
+    let context = crate::transcode::TranscodeManager::candidate_context(off);
+    let owned = Arc::get_mut(&mut rendition).expect("unshared synthetic rendition");
+    owned.source = Some(source);
+    owned.recipe.file = file.clone();
+    owned.recipe.audio_delivery = Some(audio.clone());
+    owned.recipe.measured_candidate = Some(RetainedCandidateBinding {
+        kind,
+        normalized_geometry: off.normalized_geometry,
+        profile: context.profile,
+        candidate_id: off.id,
+        recipe_digest: off.recipe_digest,
+        file_id: file.id,
+        audio_index: None,
+        audio_offset_ms: 0,
+        subtitle_burn: None,
+        grade: off.grade,
+        route: off.route,
+    });
+    let init = b"synthetic reorder init";
+    let init_digest = hex::encode(Sha256::digest(init));
+    *owned.identity.get_mut() = IdentityState {
+        identity: Some(InitIdentity {
+            muxer_init: init_digest.clone(),
+            served_init: init_digest,
+            promotion: Default::default(),
+        }),
+        from_disk: false,
+    };
+    tokio::fs::write(rendition.dir.path().join(INIT_NAME), init)
+        .await
+        .expect("init");
+    serve.shared.retained_artifacts.collect(temp.path()).await;
+    let mut request = SessionRequest {
+        quality_catalog: None,
+        candidate_context: Some(Box::new(context)),
+        file_id: file.id,
+        playback_id: "reorder-cost".to_owned(),
+        request_id: None,
+        control_sequence: None,
+        automatic: true,
+        previous_session_id: None,
+        reopen_reason: None,
+        kind,
+        start_seconds: 0.0,
+        audio_index: None,
+        audio_delivery: Some(audio),
+        audio_claim: None,
+        subtitle_burn: None,
+        audio_offset_ms: 0,
+        hdr10: false,
+        presentation: crate::transcode::Presentation::Vod,
+        block_budget_secs: None,
+        transport: None,
+    };
+    let source = rendition.source.as_ref().expect("held source");
+    assert!(
+        serve
+            .measured_candidate_cost(off, &request, source)
+            .is_none(),
+        "planned numbers cannot substitute for complete bytes"
+    );
+    let sink = RenditionSink {
+        shared: Arc::clone(&serve.shared),
+        rendition: Arc::clone(&rendition),
+        epoch: 0,
+    };
+    for entry in 0..rendition.plan.len() {
+        sink.materialize(entry as u32, vec![7; 1000 + entry])
+            .await
+            .expect("synthetic publication");
+    }
+    sink.completed_output().await;
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let proof = loop {
+        if let Some(proof) = serve.measured_candidate_cost(off, &request, source) {
+            break proof;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "complete retained proof not issued"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    };
+    let descriptor = proof.public_descriptor();
+    assert_eq!(descriptor.qualification, "complete_full_mux_rfc8216_v1");
+    assert!(proof.average_bps() > 0 && proof.rfc_peak_bps() > 0);
+    request.candidate_context = Some(Box::new(
+        crate::transcode::TranscodeManager::candidate_context(on),
+    ));
+    let other = serve
+        .measured_candidate_cost(on, &request, source)
+        .map(|proof| proof.public_descriptor().recipe_digest);
+    // Existing artifact and its proof remain held while the other exact
+    // candidate is queried; a miss is not caused by GC or a mismatched context.
+    assert!(serve
+        .shared
+        .retained_artifacts
+        .acquire_expected(&proof.artifact_facts(), &rendition)
+        .is_some());
+    (descriptor.recipe_digest, other)
+}
+
 #[derive(Debug)]
 pub(crate) struct RetainedVodArtifact {
     pub(super) private_preparation_origin: std::sync::OnceLock<PreparedOrigin>,
@@ -782,6 +911,71 @@ impl RetainedArtifactRegistry {
         if rendition.recipe.measured_candidate.is_some() || incoming_logical.is_none() {
             return None;
         }
+        self.acquire_prepared_private(rendition, incoming_logical, incoming_file, None)
+            .await
+    }
+
+    /// A new candidate attachment may borrow only a locally settled origin,
+    /// never a persisted job result or a discovered manifest.
+    pub(super) async fn acquire_prepared_candidate(
+        &self,
+        rendition: &Rendition,
+        incoming_logical: &Option<super::retained_manifest::LogicalOutput>,
+        incoming_file: &MediaFile,
+        request: &SessionRequest,
+    ) -> Option<Arc<RetainedVodArtifact>> {
+        let context = request.candidate_context.as_ref()?;
+        let binding = rendition.recipe.measured_candidate.as_ref()?;
+        let candidate = &context.selected_candidate;
+        if request.presentation != crate::transcode::Presentation::Vod
+            || !candidate.identity_matches()
+            || !candidate.decoder_compatible
+            || candidate.id != context.candidate_id
+            || candidate.recipe_digest != context.recipe_digest
+            || candidate.normalized_geometry != context.normalized_geometry
+            || candidate.grade != context.grade
+            || binding.candidate_id != context.candidate_id
+            || binding.recipe_digest != context.recipe_digest
+            || binding.normalized_geometry != context.normalized_geometry
+            || binding.profile != context.profile
+            || binding.grade != context.grade
+            || binding.route != candidate.route
+            || binding.kind != request.kind
+            || binding.file_id != request.file_id
+            || binding.file_id != incoming_file.id
+            || binding.audio_index != request.audio_index
+            || binding.audio_offset_ms != request.audio_offset_ms
+            || binding.audio_offset_ms != incoming_file.audio_offset_ms
+            || binding.subtitle_burn != request.subtitle_burn
+        {
+            return None;
+        }
+        let audio = request.audio_delivery.as_ref()?;
+        if !audio.valid_snapshot()
+            || !rendition
+                .recipe
+                .audio_delivery
+                .as_ref()
+                .is_some_and(|actual| {
+                    actual.valid_snapshot() && actual.byte_identity() == audio.byte_identity()
+                })
+        {
+            return None;
+        }
+        self.acquire_prepared_private(rendition, incoming_logical, incoming_file, Some(binding))
+            .await
+    }
+
+    async fn acquire_prepared_private(
+        &self,
+        rendition: &Rendition,
+        incoming_logical: &Option<super::retained_manifest::LogicalOutput>,
+        incoming_file: &MediaFile,
+        candidate: Option<&RetainedCandidateBinding>,
+    ) -> Option<Arc<RetainedVodArtifact>> {
+        if incoming_logical.is_none() {
+            return None;
+        }
         let (executable_digest, engine_digest) = match &rendition.recipe.encoding {
             Some(encoding) => {
                 if !recipe_engine_is_current(&rendition.recipe).await {
@@ -809,7 +1003,18 @@ impl RetainedArtifactRegistry {
                     && origin.executable == executable_digest
                     && origin.engine == engine_digest
                     && origin.source_metadata == source_metadata
-                    && artifact.candidate.is_none()
+                    && artifact.candidate.as_ref() == candidate
+                    && candidate.is_none_or(|_| {
+                        artifact
+                            .audio_delivery
+                            .as_ref()
+                            .zip(rendition.recipe.audio_delivery.as_ref())
+                            .is_some_and(|(actual, requested)| {
+                                actual.valid_snapshot()
+                                    && requested.valid_snapshot()
+                                    && actual.byte_identity() == requested.byte_identity()
+                            })
+                    })
                     && artifact.validated.load(Acquire)
                     && artifact.logical == *incoming_logical
                     && artifact.observation.preimage.playlist == rendition.playlist
@@ -1387,6 +1592,7 @@ mod tests {
             candidate_context: None,
             file_id: file.id,
             playback_id: "durable".into(),
+            quality_catalog: None,
             request_id: None,
             control_sequence: None,
             automatic: false,
@@ -1887,15 +2093,10 @@ mod tests {
             sustainable: true,
         };
         let request = SessionRequest {
-            candidate_context: Some(crate::transcode::CandidateExecutionContext {
-                retained_output: None,
-                owner_node_id: None,
-                candidate_id,
-                recipe_digest: digest,
-                normalized_geometry: true,
-                grade: candidate.grade,
-                profile: None,
-            }),
+            candidate_context: Some(Box::new(
+                crate::transcode::TranscodeManager::candidate_context(&candidate),
+            )),
+            quality_catalog: None,
             file_id: file.id,
             playback_id: "cost-fixture".to_owned(),
             request_id: None,

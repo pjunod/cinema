@@ -51,10 +51,11 @@ pub(super) async fn playlist_local_before(
         )
         .await?;
         if query.native == Some(1) {
-            let (context, file, owner) = session_file(state, session, initial_vod_deadline).await?;
+            let (context, file, owner) = session_file(state, session, playlist_deadline).await?;
             let context =
-                exact_hls_context_before(state, session, context, &owner, initial_vod_deadline)
+                exact_hls_context_before(state, session, context, &owner, playlist_deadline)
                     .await?;
+            let deadline = response_publication_deadline_before(request_deadline);
             let response =
                 playlist_response(master_playlist(&file, query.subtitle, &context).into_bytes());
             return complete_buffered_response_before(
@@ -64,7 +65,7 @@ pub(super) async fn playlist_local_before(
                 crate::transcode::MediaResponsePublication::generation_metadata("master-playlist"),
                 true,
                 response,
-                initial_vod_deadline,
+                deadline,
             )
             .await;
         }
@@ -93,9 +94,10 @@ pub(super) async fn playlist_local_before(
         )
         .await;
     }
+    let (context, file, owner) = session_file(state, session, playlist_deadline).await?;
+    let context =
+        exact_hls_context_before(state, session, context, &owner, playlist_deadline).await?;
     let deadline = response_publication_deadline_before(request_deadline);
-    let (context, file, owner) = session_file(state, session, deadline).await?;
-    let context = exact_hls_context_before(state, session, context, &owner, deadline).await?;
     let response = playlist_response(master_playlist(&file, query.subtitle, &context).into_bytes());
     complete_buffered_response_before(
         state,
@@ -152,9 +154,10 @@ pub(super) async fn master_playlist_response_local_before(
     playlist_deadline: Instant,
     request_deadline: Instant,
 ) -> Result<Response, ApiError> {
+    let (context, file, owner) = session_file(state, session, playlist_deadline).await?;
+    let context =
+        exact_hls_context_before(state, session, context, &owner, playlist_deadline).await?;
     let deadline = response_publication_deadline_before(request_deadline);
-    let (context, file, owner) = session_file(state, session, deadline).await?;
-    let context = exact_hls_context_before(state, session, context, &owner, deadline).await?;
     // Apple's multivariant eligibility check rejects UHD Blu-ray-style HEVC
     // High-tier declarations before VideoToolbox sees bytes it can decode.
     // With no native text renditions, the wrapper buys this session nothing:

@@ -329,20 +329,36 @@ impl TranscodeCacheStore for SqliteStore {
             // Integrity retirement owns the dependent offline lifecycle too.
             // Gate it on the exact location before deletion so a stale reader
             // cannot fail packages backed by a replacement generation.
-            tx.execute(
-                "UPDATE offline_packages
-                    SET state = 'failed', phase = 'integrity',
-                        error_code = 'cache_integrity',
-                        error_message = 'Prepared media failed its generation integrity check.',
-                        updated_at = unixepoch()
+            // Even a no-op UPDATE compiles the package trigger graph. Read
+            // eligibility inside this transaction before preparing that work;
+            // retain the exact-generation predicate on the update as well.
+            let has_ready_packages: bool = tx.query_row(
+                "SELECT EXISTS(SELECT 1 FROM offline_packages
                   WHERE node_id = ?2 AND recipe_hash = ?1 AND state = 'ready'
                     AND EXISTS (
                         SELECT 1 FROM transcode_cache_locations location
                          WHERE location.recipe_hash = ?1 AND location.node_id = ?2
                            AND location.storage_class = ?3 AND location.relative_dir = ?4
-                           AND location.manifest_digest IS ?5)",
+                           AND location.manifest_digest IS ?5))",
                 params![hash, node, class, relative, manifest],
+                |row| row.get(0),
             )?;
+            if has_ready_packages {
+                tx.execute(
+                    "UPDATE offline_packages
+                        SET state = 'failed', phase = 'integrity',
+                            error_code = 'cache_integrity',
+                            error_message = 'Prepared media failed its generation integrity check.',
+                            updated_at = unixepoch()
+                      WHERE node_id = ?2 AND recipe_hash = ?1 AND state = 'ready'
+                        AND EXISTS (
+                            SELECT 1 FROM transcode_cache_locations location
+                             WHERE location.recipe_hash = ?1 AND location.node_id = ?2
+                               AND location.storage_class = ?3 AND location.relative_dir = ?4
+                               AND location.manifest_digest IS ?5)",
+                    params![hash, node, class, relative, manifest],
+                )?;
+            }
             tx.execute(
                 "DELETE FROM cache_consumer_pins
                   WHERE EXISTS (
@@ -825,6 +841,157 @@ mod tests {
             .expect("delete");
         assert_eq!(store.cache_bytes(NODE).await.expect("bytes"), 900);
         assert_eq!(store.cache_by_age(NODE, 10).await.expect("lru").len(), 1);
+    }
+
+    #[tokio::test]
+    async fn cache_invalidation_updates_only_ready_packages_for_the_exact_generation() {
+        use rusqlite::trace::{TraceEvent, TraceEventCodes};
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        static OFFLINE_UPDATES: AtomicUsize = AtomicUsize::new(0);
+        fn record(event: TraceEvent<'_>) {
+            if let TraceEvent::Stmt(_, sql) = event {
+                if sql.starts_with("UPDATE offline_packages") {
+                    OFFLINE_UPDATES.fetch_add(1, Ordering::SeqCst);
+                }
+            }
+        }
+        async fn invalidate(store: &SqliteStore, dir: &str, digest: Option<&str>) -> (bool, usize) {
+            OFFLINE_UPDATES.store(0, Ordering::SeqCst);
+            store
+                .conn
+                .lock()
+                .expect("connection")
+                .trace_v2(TraceEventCodes::SQLITE_TRACE_STMT, Some(record));
+            let changed = store
+                .invalidate_cache_entry("flight", NODE, "local", dir, digest)
+                .await
+                .expect("invalidate");
+            store
+                .conn
+                .lock()
+                .expect("connection")
+                .trace_v2(TraceEventCodes::SQLITE_TRACE_STMT, None);
+            (changed, OFFLINE_UPDATES.load(Ordering::SeqCst))
+        }
+
+        let store = SqliteStore::open_in_memory().expect("open");
+        let file = seed_file(&store).await;
+        let user = store.create_user("paul", "hash", true).await.expect("user");
+        store
+            .claim_cache_entry("flight", file, 1, NODE, "flight")
+            .await
+            .expect("claim");
+        store
+            .complete_cache_entry("flight", NODE, 900, None)
+            .await
+            .expect("complete");
+        assert_eq!(
+            invalidate(&store, "flight", None).await,
+            (true, 0),
+            "cache cleanup without packages must not prepare an offline update"
+        );
+        assert!(store
+            .cache_hit("flight", NODE)
+            .await
+            .expect("hit")
+            .is_none());
+        store
+            .claim_cache_entry("flight", file, 1, NODE, "flight")
+            .await
+            .expect("replacement");
+        store
+            .complete_cache_entry("flight", NODE, 900, Some("replacement-digest"))
+            .await
+            .expect("complete");
+        let package = NewOfflinePackage {
+            audio_recipe: None,
+            id: "package".into(),
+            request_id: "request".into(),
+            user_id: user.id,
+            file_id: file,
+            node_id: NODE.into(),
+            source_path: "/m/Heat.mkv".into(),
+            source_size: 1,
+            source_mtime: 1,
+            effective_rate_control: "vbr".into(),
+            target_height: 720,
+            output_width: Some(1280),
+            output_height: Some(720),
+            audio_index: None,
+            audio_offset_ms: 0,
+            subtitle_index: None,
+            subtitle_language: None,
+            subtitle_mode: "none".into(),
+            estimated_bytes: 800,
+            reserved_bytes: 1_000,
+            expires_at: i64::MAX,
+        };
+        store
+            .create_offline_package(&package, 10, 2_000, 3_000)
+            .await
+            .expect("package");
+        let claimed = store
+            .claim_next_offline_package(NODE)
+            .await
+            .expect("claim")
+            .expect("package");
+        assert!(store
+            .set_offline_package_recipe(&claimed.id, NODE, claimed.claim_generation, "flight",)
+            .await
+            .expect("bind recipe"));
+        store
+            .mark_offline_package_ready(
+                "package",
+                NODE,
+                claimed.claim_generation,
+                "flight",
+                900,
+                1_000,
+            )
+            .await
+            .expect("ready");
+
+        for (dir, digest) in [
+            ("old-flight", Some("replacement-digest")),
+            ("flight", Some("old-digest")),
+            ("flight", None),
+        ] {
+            assert_eq!(invalidate(&store, dir, digest).await, (false, 0));
+            assert!(store
+                .cache_hit("flight", NODE)
+                .await
+                .expect("hit")
+                .is_some());
+            let package = store
+                .offline_package_for_user("package", user.id)
+                .await
+                .expect("package")
+                .expect("retained package");
+            assert_eq!(
+                package.state, "ready",
+                "stale cleanup cannot fail a replacement"
+            );
+        }
+        let (changed, updates) = invalidate(&store, "flight", Some("replacement-digest")).await;
+        assert!(changed);
+        assert!(
+            updates > 0,
+            "the exact generation must update its ready package"
+        );
+        assert!(store
+            .cache_hit("flight", NODE)
+            .await
+            .expect("hit")
+            .is_none());
+        let package = store
+            .offline_package_for_user("package", user.id)
+            .await
+            .expect("package")
+            .expect("retained failure");
+        assert_eq!(package.state, "failed");
+        assert_eq!(package.phase, "integrity");
+        assert_eq!(package.error_code.as_deref(), Some("cache_integrity"));
     }
 
     /// The source file going away takes its cache entries with it — the

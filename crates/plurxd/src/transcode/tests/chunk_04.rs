@@ -1066,6 +1066,7 @@
         previous_session_id: &str,
     ) -> SessionRequest {
         SessionRequest {
+            quality_catalog: None,
             candidate_context: None,
             control_sequence: None,
             file_id,

@@ -724,8 +724,13 @@ impl VodServe {
                     .complete_rates()
                     .and_then(|rates| self.shared.retained_artifacts.acquire(&rates.identity))
                     .filter(|artifact| artifact.logical == incoming_logical);
-                if existing.is_some() || req.candidate_context.is_some() {
+                if existing.is_some() {
                     existing
+                } else if req.candidate_context.is_some() {
+                    self.shared
+                        .retained_artifacts
+                        .acquire_prepared_candidate(&rendition, &incoming_logical, file, req)
+                        .await
                 } else {
                     self.shared
                         .retained_artifacts

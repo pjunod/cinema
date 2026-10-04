@@ -1,0 +1,81 @@
+{
+  "observed_at_utc": "2026-10-02T04:21:23Z",
+  "runtime_host": "lab6",
+  "runtime_build": "v0.3.0-5385-g189286828",
+  "file_id": 120,
+  "title": "reference film / file 120",
+  "client": "Safari",
+  "resume_seconds": 3273.778,
+  "events": [
+    {
+      "at_utc": "04:14:47.286328",
+      "event": "VOD index pending; live HLS fallback selected"
+    },
+    {
+      "at_utc": "04:14:49.162748",
+      "event": "actor-owned copy session created"
+    },
+    {
+      "at_utc": "04:14:51.412305",
+      "event": "first complete segment",
+      "duration_seconds": 7.8
+    },
+    {
+      "at_utc": "04:14:53.631200",
+      "event": "writer gate open",
+      "media_seconds": 16.475
+    },
+    {
+      "at_utc": "04:14:56.830505",
+      "event": "master initialization inspection exhausted 5000ms; HTTP503"
+    },
+    {
+      "at_utc": "04:14:56.895979",
+      "event": "Safari native error4 incorrectly triggered codec rescue"
+    },
+    {
+      "at_utc": "04:14:59.562267",
+      "event": "rescue candidate_encode_route_unavailable; HTTP409"
+    },
+    {
+      "at_utc": "04:15:01.867270",
+      "event": "second master initialization inspection exhausted 5000ms; HTTP503"
+    },
+    {
+      "at_utc": "04:15:04.275583",
+      "event": "first served snapshot",
+      "media_seconds": 56.432,
+      "since_writer_gate_ms": 10589
+    }
+  ],
+  "diagnosis": "Native master init inspection spends the 5-second response-publication budget while waiting for initial rolling publication; the child-media playlist has a separate startup wait. Safari then misattributes the HTTP refusal to decoding.",
+  "comparison": {
+    "title": "comparison film / file 9: Fire and Ash",
+    "file_id": 9,
+    "playlist": "index.m3u8",
+    "first_frame_at_utc": "2026-10-02T04:21:22.219420Z",
+    "ttff_ms": 16114
+  },
+  "runtime_changes_by_this_investigation": [],
+  "live_fix_verified": false,
+  "proposal_document": "PLAYBACK-STARTUP-LATENCY-M0-20261002.md",
+  "requested_behavior": "Start after a few seconds buffered, then continue filling the buffer",
+  "implementation_status": "proposal only; no production source edits committed or deployed",
+  "base_compile_check": "cargo check -p plurxd --bin plurxd --locked: passed, Rust1.97.1",
+  "regression_validation": "No implementation/regression run in this documentation revision; prior draft exact-name command selected zero tests",
+  "draft_clone_cleanup": "complete; temporary investigation clone and build cache removed",
+  "review_received": "2026-10-02; diagnosis approved, proposal changes requested",
+  "review_findings_provenance": "User-supplied review; DB census and boot contention not independently re-queried in this documentation pass",
+  "review_reported_context": {
+    "daemon_start_utc": "2026-10-02T04:14:31.245Z",
+    "listening_utc": "2026-10-02T04:14:31.719Z",
+    "current_digest_prefix": "85e6",
+    "previous_digest_prefix": "953a",
+    "current_ready_files": 310,
+    "current_queued_files": 909,
+    "previous_ready_files": 1523,
+    "previous_queued_files": 1037,
+    "file120_current_digest_claims": 0,
+    "concurrent_boot_proof_encodes": 20
+  }
+}

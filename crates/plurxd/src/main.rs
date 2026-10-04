@@ -1744,7 +1744,7 @@ async fn run(config: Config) -> anyhow::Result<()> {
         let probed = tokio::select! {
             biased;
             () = shutdown.clone().signalled() => None,
-            probed = probe_system(&config, &store, &dirs.transcode) => Some(probed?),
+            probed = probe_system(&config, &store, &dirs.transcode, &dirs.runtime_cache) => Some(probed?),
         };
         let Some((encoder_caps, system)) = probed else {
             tracing::info!("shutdown signal received during system probing; not serving");
@@ -2655,6 +2655,7 @@ async fn probe_system(
     config: &Config,
     store: &Arc<dyn plurx_core::store::Store>,
     transcode_dir: &std::path::Path,
+    runtime_cache: &std::path::Path,
 ) -> anyhow::Result<(plurx_core::transcode::EncoderCaps, SystemInfo)> {
     let ffmpeg = crate::ffmpeg::ffmpeg_bin();
     let configured_ffprobe = crate::ffmpeg::ffprobe_bin();
@@ -2697,7 +2698,12 @@ async fn probe_system(
     // a graph is only worth probing if it can feed the encoder that won. Costs
     // a few seconds on a box with a GPU worth testing and nothing at all on one
     // without.
-    let tone_map = pipeprobe::probe(transcode_dir, encoder_caps.choose(&probe_pref)).await;
+    let tone_map = pipeprobe::probe(
+        transcode_dir,
+        runtime_cache,
+        encoder_caps.choose(&probe_pref),
+    )
+    .await;
     // Measure this node's own FFmpeg once, and decide from it whether any
     // retained contract covers the binary that is about to run. A node with no
     // covering contract still reads every child's stderr; it simply reads it
@@ -2718,6 +2724,11 @@ async fn probe_system(
         hdr10_passthrough: crate::ffmpeg::has_hdr10_passthrough().await,
         hdr10_passthrough_qsv: if encoder_caps.qsv {
             crate::ffmpeg::has_hdr10_passthrough_qsv().await
+        } else {
+            false
+        },
+        hdr10_passthrough_vaapi: if encoder_caps.vaapi {
+            crate::ffmpeg::has_hdr10_passthrough_vaapi().await
         } else {
             false
         },
@@ -2755,6 +2766,7 @@ struct Measured {
     dovi_passthrough_qsv: bool,
     hdr10_passthrough: bool,
     hdr10_passthrough_qsv: bool,
+    hdr10_passthrough_vaapi: bool,
     encoder_selected: String,
     decoders: Vec<String>,
     measured_decoders: plurx_core::transcode::decoder_inventory::MeasuredDecoders,
@@ -2796,6 +2808,7 @@ fn system_info(
         dovi_passthrough_qsv: measured.dovi_passthrough_qsv,
         hdr10_passthrough: measured.hdr10_passthrough,
         hdr10_passthrough_qsv: measured.hdr10_passthrough_qsv,
+        hdr10_passthrough_vaapi: measured.hdr10_passthrough_vaapi,
         dv_disk: measured.dv_disk,
         // Not measured: the conversion is plurx's own code, so the only
         // question is whether an operator has turned it off. The default is
@@ -7233,6 +7246,7 @@ mod startup_tests {
                 dovi_passthrough_qsv: true,
                 hdr10_passthrough: true,
                 hdr10_passthrough_qsv: true,
+                hdr10_passthrough_vaapi: true,
                 encoder_selected: selected.clone(),
                 decoders: vec!["h264".to_owned(), "hevc".to_owned()],
                 tone_map: pipeprobe::PipelineReport::cpu_only("not probed"),
