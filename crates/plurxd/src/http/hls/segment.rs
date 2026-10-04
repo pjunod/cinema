@@ -829,7 +829,29 @@ async fn vod_segment_response_before(
     Ok(response)
 }
 
+/// One segment request's whole local answer. Its state machine spans the
+/// VOD, rolling, copy and live paths and is far larger than a debug thread's
+/// stack can hold inline, so it lives on the heap for every caller, exactly
+/// as it does when axum spawns the request. Callers in tests and relays get
+/// the same layout as production instead of overflowing.
 pub(super) async fn segment_local_before(
+    state: &AppState,
+    session: &str,
+    seg: &str,
+    headers: &RelayHeaders,
+    request_deadline: Instant,
+) -> Result<Response, ApiError> {
+    Box::pin(segment_local_answer(
+        state,
+        session,
+        seg,
+        headers,
+        request_deadline,
+    ))
+    .await
+}
+
+async fn segment_local_answer(
     state: &AppState,
     session: &str,
     seg: &str,
