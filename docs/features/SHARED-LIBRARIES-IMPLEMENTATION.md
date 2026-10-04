@@ -5519,3 +5519,62 @@ Native clients (separate lane) need the same three things the web now does:
 
 Stall recovery that reopens with `previous_session_id` is still refused for
 shared sessions. Clusters, NAT/DERP and devices remain open.
+
+### Native Apple Shared controls, directed reopen and direct play (2026-10-04)
+
+The Apple Shared player now does the three things the web does, plus
+server-accepted controls. Android is a separate lane and still has the
+earlier passive player.
+
+**Status.** The word fields of the Shared status grammar use B's
+`status_token` rule exactly (ASCII letters, digits, `_`, `-`, `.`, at most
+32 bytes). The passive summary is composed only from those tokens and bounded
+integers (`Shared HLS · 720p · h264_videotoolbox · running · 42 s ahead`). A
+status answer is shown only while the player still holds the session it was
+read for; direct play has none.
+
+**Controls.** `SharedControlChannel` (`clients/apple/Sources/SharedPlaybackControl.swift`)
+keeps B's exact tuple, one client instance id per player and one ordered
+sequence. Capabilities ride sequence 1; the selection is the frozen raw ask
+from the Start. Seek, pause and play change the renderer only after B accepted
+that exact sequence (`SharedControlStep`). 425/429/503 replay the identical
+bytes once after `retry_after_ms`. A 409 is never adopted, because B's tuple
+does not move. A 410 during a pause pauses locally and the next play or seek
+starts fresh; a 410 on play or seek starts one fresh session per attachment.
+
+**Directed change.** Quality, audio and subtitle go out as a changed selection
+on the next sequence. `preparation: "none"` reopens at once: a fresh decision
+and Start at the position sampled when the answer arrived, with the same
+playback id and no lineage fields. The predecessor is DELETEd only after the
+new media is attached. The ordered progress order is keyed by the Source item,
+so the next beat names the new session with the next sequence. Absence of the
+field is not a decline. Subtitles are native WebVTT renditions only; a track
+that would need a burn is not offered.
+
+**Direct play.** Chosen when the decision is `direct_play` with delivery mode
+`direct`, the source is not Dolby Vision (AVPlayer's progressive-DV black
+plane, as Local), the planned audio is the default track and there is no
+offset or subtitle ask. The Start carries `presentation: "direct"` and no HLS
+field, and only B's five-field reply bound to this context's own
+`{file_base}/direct?session=<B>` is accepted. AVPlayer reads that URL with no
+account header. After the item fails past its own timeline, a header-free HEAD
+that answers 404 or 410 earns one fresh direct Start at the last position. Any
+change from direct play goes to copy or encoded HLS.
+
+**Ownership.** One owned `Void` operation (Start, exchange or reopen) holds the
+player; `stop()` cancels and joins it. Every B session the controller started
+and no longer plays stays listed until its DELETE was sent, so a release that
+`stop()` interrupted is finished by `stop()`. No timer, watchdog or unchecked
+`Sendable` was added. Local paths and guards are unchanged.
+
+Evidence on the lab Mac (Xcode 27 simulators, owned DerivedData): `make
+apple-test` passed 780 iOS and 764 tvOS tests, zero failures (nine new in
+`SharedPlaybackControlTests`). Two deliberate mutations, dropping the
+accepted-sequence check and applying a pause on an ended session, each failed
+their test. `tests.operations.test_playback_surface_fence` passes with the
+Shared player's published inventory updated. These are synthetic
+authenticated protocol tests. Physical playback against a real B/Source pair,
+direct play on device, and the 300 s direct-expiry restart are not qualified
+here.
+
+Regression-Test: clients/apple/Tests/SharedPlaybackControlTests.swift::testRendererMovesOnlyAfterAcceptanceAndDirectedChangeReopensOnNone

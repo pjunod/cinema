@@ -30,6 +30,14 @@ struct SharedDecisionClient {
     /// Authenticated initial Start only. Local recovery/control fields are never
     /// erased or forwarded to Source as a guessed predecessor identity.
     func start(context: PlaybackFileContext, request body: CreateSessionRequest) async throws -> SharedStartedPlayback {
+        guard body.presentation == "vod", case .hls(let playback) = try await startMedia(context: context, request: body)
+        else { throw APIError.badURL }
+        return playback
+    }
+    /// The same initial Start for either presentation. `direct` answers B's
+    /// closed five-field direct reply; `vod` the ordinary HLS envelope. A reply
+    /// of the other kind is refused.
+    func startMedia(context: PlaybackFileContext, request body: CreateSessionRequest) async throws -> SharedStartedMedia {
         try Task.checkCancellation(); try requireCurrent()
         guard let reference = context.reference, let revision = context.revision,
               context.sessionId == nil, (context.lifecycleGeneration ?? 0) > 0
@@ -39,7 +47,13 @@ struct SharedDecisionClient {
               body.reopenReason == nil, body.subtitleBurn == nil, body.hdr10 != true,
               body.preserveDolbyVision != true
         else { throw APIError.transport("This Shared playback change is not available yet.") }
-        guard body.caps?.v == 2, body.presentation == "vod", !body.playbackId.isEmpty,
+        let direct = body.presentation == "direct"
+        if direct {
+            guard body.copy == nil, body.height == nil, body.nativeSubtitles == nil, body.subtitle == nil,
+                  body.aac == nil, body.blockBudgetSecs == nil
+            else { throw APIError.transport("This Shared direct play is not available.") }
+        }
+        guard body.caps?.v == 2, body.presentation == "vod" || direct, !body.playbackId.isEmpty,
               body.playbackId.utf8.count <= 128,
               !body.playbackId.unicodeScalars.contains(where: { $0.value < 32 || $0.value == 127 }),
               let requestID = body.requestId,
@@ -56,7 +70,59 @@ struct SharedDecisionClient {
             try requireCurrent(); _ = try context.path("hls/sessions")
         }.read()
         try Task.checkCancellation(); try requireCurrent()
-        return try SharedStart.decode(data).bindInitial(context, request: retained)
+        if direct {
+            let (start, bound) = try SharedDirectStart.decode(data, context: context)
+            return .direct(try SharedStartedDirect(start: start, context: bound, request: retained).validated())
+        }
+        return .hls(try SharedStart.decode(data).bindInitial(context, request: retained))
+    }
+    /// The B byte route for a direct play. It carries no account header: the
+    /// signed file alias and the bound B session are the whole authority.
+    func directURL(_ direct: SharedStartedDirect) throws -> URL {
+        try requireCurrent(); _ = try direct.validated()
+        guard let reference = direct.context.reference, let revision = direct.context.revision,
+              let url = URL(string: origin + direct.start.url) else { throw APIError.badURL }
+        try direct.context.validateSharedReference(reference, file: direct.context.sourceFileId, revision: revision)
+        return url
+    }
+    /// Whether B no longer knows this direct session (404, or 410). Asked only
+    /// after the renderer failed to read it; a HEAD opens no body.
+    func directSessionGone(_ direct: SharedStartedDirect) async throws -> Bool {
+        var request = URLRequest(url: try directURL(direct)); request.httpMethod = "HEAD"; request.timeoutInterval = 10
+        let response = try await SharedDecisionReadOperation(request: request, configuration: configuration,
+            statuses: [200, 206, 404, 410, 416], maxBytes: 16_384, allowEmpty: true, current: requireCurrent).readResponse()
+        try requireCurrent()
+        return response.status == 404 || response.status == 410
+    }
+    /// One current-rendition exchange on B's exact tuple. A refusal is
+    /// classified from B's closed body; nothing here adopts another owner.
+    func control(playback: SharedStartedPlayback, channel: SharedControlChannel,
+                 request control: SharedControlRequest) async throws -> SharedControlOutcome {
+        _ = try playlistURL(playback: playback)
+        guard channel.sessionId == playback.start.response.sessionId, control.generation == channel.generation,
+              control.controlEpoch == channel.controlEpoch, control.clientInstanceId == channel.clientInstanceId,
+              let url = URL(string: origin + channel.path) else { throw APIError.badURL }
+        var request = URLRequest(url: url); request.httpMethod = "POST"; request.httpBody = try control.encoded(); request.timeoutInterval = 10
+        request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization"); request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        let response: SharedDecisionHTTPResponse
+        do {
+            response = try await SharedDecisionReadOperation(request: request, configuration: configuration,
+                statuses: [200, 400, 409, 410, 422, 425, 429, 503], maxBytes: 16_384, allowEmpty: true) {
+                _ = try playlistURL(playback: playback)
+            }.readResponse()
+        } catch is CancellationError {
+            throw CancellationError()
+        } catch let error as URLError {
+            return SharedControlChannel.classify(ControlTransportError(status: nil, code: nil, canceled: error.code == .cancelled))
+        }
+        try requireCurrent(); try Task.checkCancellation()
+        guard response.status == 200 else {
+            return SharedControlChannel.classify(PlaybackControlTransport.failure(status: response.status, body: response.data))
+        }
+        let answer: ControlResponse
+        do { answer = try PlaybackControl.decoder.decode(ControlResponse.self, from: response.data) }
+        catch { throw ControlProtocolError(reason: "body") }
+        return try channel.accept(answer, for: control)
     }
     func playlistURL(playback: SharedStartedPlayback) throws -> URL {
         try requireCurrent(); _ = try playback.start.validated(playback.context)
@@ -79,9 +145,12 @@ struct SharedDecisionClient {
     }
     /// Best-effort B End. A successful HTTP reply is never physical settlement
     /// evidence; the server's actual owner retains that obligation.
-    func end(playback: SharedStartedPlayback) async throws {
-        _ = try playlistURL(playback: playback)
-        guard let url = URL(string: origin + "/api/v1/hls/\(playback.start.response.sessionId)") else { throw APIError.badURL }
+    func end(playback: SharedStartedPlayback) async throws { try await end(media: .hls(playback)) }
+    /// DELETE ends either shared presentation through B's one retirement owner.
+    func end(media: SharedStartedMedia) async throws {
+        try requireCurrent(); try media.validated()
+        if case .hls(let playback) = media { _ = try playlistURL(playback: playback) }
+        guard let url = URL(string: origin + "/api/v1/hls/\(media.sessionId)") else { throw APIError.badURL }
         var request = URLRequest(url: url); request.httpMethod = "DELETE"; request.timeoutInterval = 10
         request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
         _ = try await SharedDecisionReadOperation(request: request, configuration: configuration, statuses: [200, 202, 204], maxBytes: 16_384, allowEmpty: true, current: requireCurrent).readResponse()
@@ -92,10 +161,18 @@ struct SharedDecisionClient {
     @MainActor
     func orderedProgress(playback: SharedStartedPlayback, initialWatchSequence: Int64,
                          positionMs: Int64, durationMs: Int64?, watched: Bool = false) async throws -> SharedProgressResult? {
+        try await orderedProgress(media: .hls(playback), initialWatchSequence: initialWatchSequence,
+                                  positionMs: positionMs, durationMs: durationMs, watched: watched)
+    }
+    /// The same ordered watch order for either presentation. It is keyed by
+    /// the Source item, so a reopen's new B session continues the sequence.
+    @MainActor
+    func orderedProgress(media playback: SharedStartedMedia, initialWatchSequence: Int64,
+                         positionMs: Int64, durationMs: Int64?, watched: Bool = false) async throws -> SharedProgressResult? {
         try requireCurrent()
         guard let reference = playback.context.reference, let revision = playback.context.revision else { throw APIError.badURL }
         try playback.context.validateSharedReference(reference, file: playback.context.sourceFileId, revision: revision)
-        _ = try playback.start.validated(playback.context)
+        try playback.validated()
         let account = SharedProgressAccount(origin: origin, token: token, generation: generation)
         let key = SharedProgressKey(server: reference.serverId, epoch: reference.catalogueEpoch, item: reference.itemId)
         let registry = Self.progressRegistry
@@ -123,8 +200,8 @@ struct SharedDecisionClient {
             if !entry.order.needsResync { entry.order = try SharedProgressOrder(sequence: max(entry.order.sequence, fresh)) }
             else { try entry.order.resync(freshAuthorizedSequence: fresh) }
         }
-        let beat = try entry.order.beat(sessionId: playback.start.response.sessionId, positionMs: positionMs, durationMs: durationMs, watched: watched)
-        let result = try await progress(playback: playback, beat: beat)
+        let beat = try entry.order.beat(sessionId: playback.sessionId, positionMs: positionMs, durationMs: durationMs, watched: watched)
+        let result = try await progress(media: playback, beat: beat)
         try requireCurrent(); try entry.order.complete(beat, result: result)
         if result == .acknowledged && (beat.positionMs != positionMs || beat.durationMs != durationMs || beat.watched != watched) { return .previousBeatAcknowledged }
         return result
@@ -133,13 +210,16 @@ struct SharedDecisionClient {
     /// Exact B session beat only. The caller retains it on an uncertain send
     /// and obtains fresh authorized detail/watch state after a typed conflict.
     func progress(playback: SharedStartedPlayback, beat: SharedProgressBeat) async throws -> SharedProgressResult {
+        try await progress(media: .hls(playback), beat: beat)
+    }
+    func progress(media playback: SharedStartedMedia, beat: SharedProgressBeat) async throws -> SharedProgressResult {
         try Task.checkCancellation(); try requireCurrent(); try beat.validate()
         let context = playback.context
         guard let reference = context.reference, context.sessionId == beat.sessionId,
-              playback.start.response.sessionId == beat.sessionId,
+              playback.sessionId == beat.sessionId,
               let revision = context.revision else { throw APIError.badURL }
         try context.validateSharedReference(reference, file: context.sourceFileId, revision: revision)
-        _ = try playback.start.validated(context)
+        try playback.validated()
         let encoder = JSONEncoder(); encoder.keyEncodingStrategy = .convertToSnakeCase; encoder.outputFormatting = [.sortedKeys]
         let bytes = try encoder.encode(beat)
         guard bytes.count <= 1024, let url = URL(string: origin + "/api/v1/shared/imports/\(reference.importId)/items/\(reference.itemId)/progress") else { throw APIError.badURL }
