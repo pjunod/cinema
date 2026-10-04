@@ -127,7 +127,9 @@ mod tests {
             connection
                 .query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0))
                 .expect("version"),
-            encoded
+            // Opening runs the encoded step and every later step to the end
+            // of the chain; the guards below prove the encoded step itself.
+            crate::store::SQLITE_SCHEMA_VERSION
         );
         assert_eq!(connection.query_row("SELECT sql FROM sqlite_master WHERE name='background_job_publish_copy_output_command'", [], |row| row.get::<_,String>(0)).expect("publication unchanged"), publication);
         for name in [

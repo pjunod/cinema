@@ -936,11 +936,18 @@ async fn continuous_worker_roles_resolve_video_only_and_one_cpu_soundtrack() {
     let catalog = manager.quality_candidates_from_snapshot_progress(&planning,
         &plurx_core::playback::DeviceCaps { v: 2, ..Default::default() },
         request.audio_index, 0, None, Presentation::Vod, None, None, None).await;
+    // A real create binds every selected row to the planning inputs it was
+    // built from (`PlanningBinding`); the worker refuses an unbound row.
+    let bound = |candidate: &plurx_core::playback::candidate::QualityCandidate| {
+        let mut context = TranscodeManager::candidate_context(candidate);
+        context.planning_binding = Some(crate::media_pool::PlanningBinding::from_snapshot(&planning));
+        context
+    };
     let candidate = catalog.iter().find(|candidate| candidate.normalized_geometry
         && candidate.grade == OutputGrade::Sdr
         && candidate.route == plurx_core::playback::candidate::CandidateRoute::Encode).expect("normalized SDR catalog candidate");
     request.kind = SessionKind::Transcode { height: i64::from(candidate.target_height) };
-    request.candidate_context = Some(Box::new(TranscodeManager::candidate_context(candidate)));
+    request.candidate_context = Some(Box::new(bound(candidate)));
     let video = prepare(&manager, &request, &file).await.expect("video planning from catalog").expect("video recipe");
     assert!(video.candidate_recipe.is_none(), "video-only work is not a muxed candidate speed proof");
     assert!(!video.plan.options().input_has_audio);
@@ -985,14 +992,23 @@ async fn continuous_worker_roles_resolve_video_only_and_one_cpu_soundtrack() {
         && row.target_height != candidate.target_height && row.grade == OutputGrade::Sdr
         && row.route == plurx_core::playback::candidate::CandidateRoute::Encode)
         .expect("second canonical video recipe");
+    // The capacity setting above is a planning input, so the family is
+    // bound to the snapshot taken after it, as a real create would be.
+    let planning = manager.store.playback_planning_snapshot(file.id,
+        &crate::transcode::QUALITY_PLANNING_KEYS).await.expect("planning snapshot").expect("source");
+    let bound = |candidate: &plurx_core::playback::candidate::QualityCandidate| {
+        let mut context = TranscodeManager::candidate_context(candidate);
+        context.planning_binding = Some(crate::media_pool::PlanningBinding::from_snapshot(&planning));
+        context
+    };
     let mut family = request.clone();
     family.request_id = Some(uuid::Uuid::new_v4().to_string());
-    family.candidate_context = Some(Box::new(TranscodeManager::candidate_context(candidate)));
+    family.candidate_context = Some(Box::new(bound(candidate)));
     let media = family.continuous_media.as_mut().expect("family role");
     media.autonomous_companion = Some(companion.id);
     media.companion_catalog = Some(Box::new(companion.clone()));
     media.companion_context = Some(Box::new(ContinuousCompanionContext {
-        height: i64::from(companion.target_height), candidate: TranscodeManager::candidate_context(companion),
+        height: i64::from(companion.target_height), candidate: bound(companion),
     }));
     let refused = create(&manager, &family).await.err().expect("three-role capacity denial");
     assert!(refused.contains("vod_family_capacity"), "both derived video and AAC roles validate before admission: {refused}");

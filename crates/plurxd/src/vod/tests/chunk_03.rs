@@ -3494,9 +3494,17 @@
         let rates = rendition.output_measurement.lock().expect("observer")
             .complete_rates().expect("complete full-output observation");
         assert_eq!(rates.wire_bytes, (0..rendition.plan.len()).map(|i| 1000 + i as u64).sum::<u64>());
-        sink.materialize(0, vec![7; 1000]).await.expect("legacy repeat remains playable");
-        assert!(rendition.output_measurement.lock().expect("observer")
-            .complete_rates().is_none(), "duplicate publication loses measurement authority");
+        // A published URI is immutable: a repeated write, even with other
+        // bytes, traverses the original publication rather than replacing it,
+        // so the measured bytes are still exactly the served bytes.
+        sink.materialize(0, vec![8; 1000]).await.expect("repeat traverses the publication");
+        let served = tokio::fs::read(rendition.dir.path().join(segment_name(0))).await
+            .expect("published segment");
+        assert_eq!(served, vec![7; 1000], "a repeated write cannot replace published bytes");
+        let repeated = rendition.output_measurement.lock().expect("observer")
+            .complete_rates().expect("an unchanged publication keeps measurement authority");
+        assert_eq!(repeated.identity, rates.identity);
+        assert_eq!(repeated.wire_bytes, rates.wire_bytes);
     }
 
     #[tokio::test]
@@ -3540,18 +3548,31 @@
         let mut ready = artifact.open(Some(0), &meter, &serve.shared, &rendition, Duration::from_secs(1)).await.expect("retained segment");
         assert!(ready.retained_lease.is_some());
         assert_eq!(ready.observed_media_duration_ms, plan_media_duration_ms(&rendition, 0));
-        // The ordinary recipe names change, but already-issued hardlink and
-        // open body leases continue to name precisely the original bytes.
+        // Rematerialization traverses the published URI instead of replacing
+        // it, and already-issued open body leases name the original bytes.
         sink.materialize(0, vec![9; 1000]).await.expect("ordinary rematerialization");
         let mut original = Vec::new();
         ready.file.read_to_end(&mut original).await.expect("open body remains readable");
         assert_eq!(original, vec![7; 1000]);
+        let live = rendition.dir.path().join(segment_name(0));
+        assert_eq!(tokio::fs::read(&live).await.expect("live segment"), vec![7; 1000]);
         let private = temp.path().join(".retained").join(artifact.facts().artifact_id);
         tokio::fs::remove_file(private.join(segment_name(0))).await.expect("missing-object fixture");
+        // Out-of-band damage (a new inode, as a rename would leave) is the
+        // only way the live name can now hold different bytes.
+        let replace_live = |bytes: Vec<u8>| {
+            let live = live.clone();
+            async move {
+                let staged = live.with_extension("fixture");
+                tokio::fs::write(&staged, bytes).await.expect("staged live bytes");
+                tokio::fs::rename(&staged, &live).await.expect("replace live name");
+            }
+        };
+        replace_live(vec![9; 1000]).await;
         assert!(matches!(artifact.open(Some(0), &meter, &serve.shared, &rendition, Duration::from_secs(1)).await,
             Err(VodError::ProducerFailed(_))), "different live bytes cannot repair an issued proof");
         assert!(rendition.failed.lock().expect("failure lock").is_none(), "artifact-local refusal cannot poison the rendition");
-        sink.materialize(0, vec![7; 1000]).await.expect("exact replacement bytes");
+        replace_live(vec![7; 1000]).await;
         let repaired = artifact.open(Some(0), &meter, &serve.shared, &rendition, Duration::from_secs(1)).await.expect("exact repair");
         assert_eq!(repaired.len, 1000);
         assert!(serve.shared.retained_artifacts.acquire_expected(&artifact.facts(), &rendition).is_some());
