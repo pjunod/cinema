@@ -2478,7 +2478,10 @@ mod tests {
             false,
         );
         assert!(failed.is_err(), "duplicate table must fail the step");
-        assert!(conn.is_autocommit(), "failed step leaves no open transaction");
+        assert!(
+            conn.is_autocommit(),
+            "failed step leaves no open transaction"
+        );
         assert_eq!(version(&conn), 0);
         assert!(!table_exists(&conn, "torn"));
 

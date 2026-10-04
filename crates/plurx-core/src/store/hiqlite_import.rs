@@ -3242,8 +3242,10 @@ mod tests {
             "ALTER TABLE offline_packages ADD COLUMN audio_recipe TEXT;"
         );
         assert!(value_projection(table, 88, false).ends_with("expires_at, NULL"));
-        assert!(value_projection(table, OFFLINE_AUDIO_RECIPE_SCHEMA - 1, false)
-            .ends_with("expires_at, NULL"));
+        assert!(
+            value_projection(table, OFFLINE_AUDIO_RECIPE_SCHEMA - 1, false)
+                .ends_with("expires_at, NULL")
+        );
         assert!(value_projection(table, OFFLINE_AUDIO_RECIPE_SCHEMA, false)
             .ends_with("expires_at, audio_recipe"));
         assert!(value_projection(table, SQLITE_SCHEMA_VERSION, false)
@@ -3586,7 +3588,10 @@ mod tests {
             .copied()
             .expect("recovery import fixture");
         let introduced = crate::store::candidate_recovery::SQLITE_INTRODUCED_SCHEMA;
-        assert_eq!(introduced, 96, "candidate_recovery lands at v96 on the composed chain");
+        assert_eq!(
+            introduced, 96,
+            "candidate_recovery lands at v96 on the composed chain"
+        );
         assert_eq!(memory.minimum_schema, introduced);
         for version in [51_i64, 53, introduced - 1, introduced] {
             let dir = tempfile::tempdir().expect("recovery import fixture");
