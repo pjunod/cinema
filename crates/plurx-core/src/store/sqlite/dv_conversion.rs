@@ -1278,6 +1278,7 @@ mod tests {
         drop(store);
 
         let connection = rusqlite::Connection::open(&path).expect("downgrade fixture");
+        crate::queue_fixture::remove_jellyfin_compatibility_schema(&connection);
         crate::queue_fixture::remove_common_queue_schema(&connection);
         connection
             .execute_batch(
@@ -1477,7 +1478,7 @@ mod tests {
     #[test]
     fn the_downgrade_fixture_undoes_every_migration_after_the_guard() {
         const GUARD_SCHEMA_VERSION: i64 = 44;
-        const DROPPED_BY_THE_FIXTURE: [&str; 47] = [
+        const DROPPED_BY_THE_FIXTURE: [&str; 51] = [
             "fragment_index_outcomes",
             "attempt_errors",
             "video_identity",
@@ -1566,6 +1567,11 @@ mod tests {
             "CREATE INDEX IF NOT EXISTS background_jobs_file_source",
             "ADD COLUMN requested_manually",
             "CREATE TABLE IF NOT EXISTS playback_input_generation",
+            // v92–v95: both fixtures call remove_jellyfin_compatibility_schema.
+            "CREATE TABLE IF NOT EXISTS jellyfin_entity_ids",
+            "CREATE TABLE IF NOT EXISTS jellyfin_login_tokens",
+            "CREATE TABLE IF NOT EXISTS jellyfin_plays",
+            "ADD COLUMN manual_revision",
         ];
 
         assert!(

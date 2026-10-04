@@ -3186,7 +3186,7 @@ impl HiqliteAuthStore {
                         result.map_err(database_error)?;
                     }
                     let now = self.now()?;
-                    let attempt = self.client().txn(vec![("UPDATE cluster_meta SET schema_version=$1,migrated_at=$2 WHERE singleton=1 AND schema_version=$3".to_owned(), params!(JELLYFIN_IDENTITY_SCHEMA_VERSION,now,JELLYFIN_IDENTITY_SCHEMA_MIGRATION_SOURCE))]).await;
+                    let attempt = self.client().txn(vec![("UPDATE cluster_meta SET schema_version = $1, migrated_at = $2 WHERE singleton = 1 AND schema_version = $3".to_owned(), params!(JELLYFIN_IDENTITY_SCHEMA_VERSION,now,JELLYFIN_IDENTITY_SCHEMA_MIGRATION_SOURCE))]).await;
                     self.settle_migration_attempt(
                         JELLYFIN_IDENTITY_SCHEMA_MIGRATION_SOURCE,
                         attempt,
@@ -3202,7 +3202,7 @@ impl HiqliteAuthStore {
                         result.map_err(database_error)?;
                     }
                     let now = self.now()?;
-                    let attempt = self.client().txn(vec![("UPDATE cluster_meta SET schema_version=$1,migrated_at=$2 WHERE singleton=1 AND schema_version=$3".to_owned(),params!(JELLYFIN_LOGIN_SCHEMA_VERSION,now,JELLYFIN_LOGIN_SCHEMA_MIGRATION_SOURCE))]).await;
+                    let attempt = self.client().txn(vec![("UPDATE cluster_meta SET schema_version = $1, migrated_at = $2 WHERE singleton = 1 AND schema_version = $3".to_owned(),params!(JELLYFIN_LOGIN_SCHEMA_VERSION,now,JELLYFIN_LOGIN_SCHEMA_MIGRATION_SOURCE))]).await;
                     self.settle_migration_attempt(JELLYFIN_LOGIN_SCHEMA_MIGRATION_SOURCE, attempt)
                         .await?;
                 }
@@ -3211,7 +3211,7 @@ impl HiqliteAuthStore {
                         result.map_err(database_error)?;
                     }
                     let now = self.now()?;
-                    let attempt = self.client().txn(vec![("UPDATE cluster_meta SET schema_version=$1,migrated_at=$2 WHERE singleton=1 AND schema_version=$3".to_owned(),params!(JELLYFIN_PLAY_SCHEMA_VERSION,now,JELLYFIN_PLAY_SCHEMA_MIGRATION_SOURCE))]).await;
+                    let attempt = self.client().txn(vec![("UPDATE cluster_meta SET schema_version = $1, migrated_at = $2 WHERE singleton = 1 AND schema_version = $3".to_owned(),params!(JELLYFIN_PLAY_SCHEMA_VERSION,now,JELLYFIN_PLAY_SCHEMA_MIGRATION_SOURCE))]).await;
                     self.settle_migration_attempt(JELLYFIN_PLAY_SCHEMA_MIGRATION_SOURCE, attempt)
                         .await?;
                 }
@@ -3225,7 +3225,7 @@ impl HiqliteAuthStore {
                         )
                         .await?;
                     let mut statements = super::jellyfin_watch::migration_statements(&columns);
-                    statements.push(("UPDATE cluster_meta SET schema_version=$1,migrated_at=$2 WHERE singleton=1 AND schema_version=$3".to_owned(),params!(JELLYFIN_WATCH_SCHEMA_VERSION,self.now()?,JELLYFIN_WATCH_SCHEMA_MIGRATION_SOURCE)));
+                    statements.push(("UPDATE cluster_meta SET schema_version = $1, migrated_at = $2 WHERE singleton = 1 AND schema_version = $3".to_owned(),params!(JELLYFIN_WATCH_SCHEMA_VERSION,self.now()?,JELLYFIN_WATCH_SCHEMA_MIGRATION_SOURCE)));
                     let attempt = self.client().txn(statements).await;
                     self.settle_migration_attempt(JELLYFIN_WATCH_SCHEMA_MIGRATION_SOURCE, attempt)
                         .await?;
@@ -7400,9 +7400,29 @@ mod tests {
             "v67 advances exactly one step to request provenance"
         );
         assert_eq!(
-            AUTH_SCHEMA_MIGRATION_SOURCE + 64,
+            PLAYBACK_INPUT_SCHEMA_VERSION + 1,
+            JELLYFIN_IDENTITY_SCHEMA_VERSION,
+            "v70 advances to Jellyfin wire identities"
+        );
+        assert_eq!(
+            JELLYFIN_IDENTITY_SCHEMA_VERSION + 1,
+            JELLYFIN_LOGIN_SCHEMA_VERSION,
+            "v71 advances to compatibility logins"
+        );
+        assert_eq!(
+            JELLYFIN_LOGIN_SCHEMA_VERSION + 1,
+            JELLYFIN_PLAY_SCHEMA_VERSION,
+            "v72 advances to compatibility negotiations"
+        );
+        assert_eq!(
+            JELLYFIN_PLAY_SCHEMA_VERSION + 1,
+            JELLYFIN_WATCH_SCHEMA_VERSION,
+            "v73 advances to manual-edit watch revisions"
+        );
+        assert_eq!(
+            AUTH_SCHEMA_MIGRATION_SOURCE + 68,
             AUTH_SCHEMA_VERSION,
-            "this implementation contains every additive v5→v69 step"
+            "this implementation contains every additive v5→v73 step"
         );
         let row = |schema_version| CompatibilityRow {
             schema_version,

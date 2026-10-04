@@ -4993,8 +4993,13 @@ mod tests {
     }
 
     #[cfg(feature = "hiqlite-store")]
-    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-    async fn restore_archive_from_real_snapshot_starts_as_the_only_voter() {
+    #[test]
+    fn restore_archive_from_real_snapshot_starts_as_the_only_voter() {
+        on_startup_stack(restore_archive_from_real_snapshot_starts_as_the_only_voter_fixture);
+    }
+
+    #[cfg(feature = "hiqlite-store")]
+    async fn restore_archive_from_real_snapshot_starts_as_the_only_voter_fixture() {
         install_default_crypto_provider();
 
         let source_dir = tempfile::tempdir().expect("source data dir");
@@ -5301,8 +5306,13 @@ mod tests {
     /// state-machine crash sentinel present and the next boot destroys the
     /// local state machine to rebuild it from peers.
     #[cfg(feature = "hiqlite-store")]
-    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-    async fn a_post_start_initialization_failure_leaves_no_crash_sentinel() {
+    #[test]
+    fn a_post_start_initialization_failure_leaves_no_crash_sentinel() {
+        on_startup_stack(a_post_start_initialization_failure_leaves_no_crash_sentinel_fixture);
+    }
+
+    #[cfg(feature = "hiqlite-store")]
+    async fn a_post_start_initialization_failure_leaves_no_crash_sentinel_fixture() {
         install_default_crypto_provider();
 
         let dir = tempfile::tempdir().expect("post-start failure data dir");
@@ -6068,29 +6078,37 @@ mod tests {
         );
     }
 
+    /// Run a full-startup fixture on an owned 8 MiB stack. A whole daemon
+    /// selection migrates the replicated schema from its first version, and
+    /// `HiqliteAuthStore::migrate_schema` keeps an arm per version in one async
+    /// fn: its unoptimized frame alone measured 1.7 MB once main's and the
+    /// Jellyfin effort's arms met, beyond a 2 MiB test thread. The
+    /// architecture-review effort gives full-startup tests the same stack.
     #[cfg(feature = "hiqlite-store")]
-    #[test]
-    fn daemon_join_refuses_occupied_and_expired_targets_then_resumes_finalization() {
-        // A whole daemon selection migrates the replicated schema from its
-        // first version. `HiqliteAuthStore::migrate_schema` is one async fn
-        // with an arm per version; its unoptimized frame alone measured 1.7 MB
-        // once main's and the Jellyfin effort's arms met, beyond a 2 MiB test
-        // thread. Same owned 8 MiB stack the architecture-review effort gives
-        // full-startup tests.
-        std::thread::Builder::new()
+    fn on_startup_stack<Fut: std::future::Future<Output = ()>>(
+        fixture: impl FnOnce() -> Fut + Send + 'static,
+    ) {
+        let owned = std::thread::Builder::new()
             .stack_size(8 * 1024 * 1024)
-            .spawn(|| {
+            .spawn(move || {
                 tokio::runtime::Builder::new_multi_thread()
                     .worker_threads(4)
                     .thread_stack_size(8 * 1024 * 1024)
                     .enable_all()
                     .build()
-                    .expect("build daemon join runtime")
-                    .block_on(Box::pin(daemon_join_fixture()))
+                    .expect("build startup fixture runtime")
+                    .block_on(Box::pin(fixture()))
             })
-            .expect("spawn owned daemon join thread")
-            .join()
-            .expect("daemon join fixture completes");
+            .expect("spawn owned startup fixture thread");
+        if let Err(panic) = owned.join() {
+            std::panic::resume_unwind(panic);
+        }
+    }
+
+    #[cfg(feature = "hiqlite-store")]
+    #[test]
+    fn daemon_join_refuses_occupied_and_expired_targets_then_resumes_finalization() {
+        on_startup_stack(daemon_join_fixture);
     }
 
     #[cfg(feature = "hiqlite-store")]
@@ -6584,8 +6602,13 @@ mod tests {
     /// asked for. The refusal that comes after activation is the point of the
     /// whole guard, so it is asserted on the message an operator would read.
     #[cfg(feature = "hiqlite-store")]
-    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-    async fn a_deployed_binary_widens_no_range_until_activation_is_asked_for() {
+    #[test]
+    fn a_deployed_binary_widens_no_range_until_activation_is_asked_for() {
+        on_startup_stack(a_deployed_binary_widens_no_range_until_activation_is_asked_for_fixture);
+    }
+
+    #[cfg(feature = "hiqlite-store")]
+    async fn a_deployed_binary_widens_no_range_until_activation_is_asked_for_fixture() {
         install_default_crypto_provider();
 
         let dir = tempfile::tempdir().expect("protocol activation data dir");
@@ -7224,8 +7247,13 @@ mod tests {
     /// durable role survives a restart, and while it exists the cluster refuses
     /// to deactivate the protocol that admitted it.
     #[cfg(feature = "hiqlite-store")]
-    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-    async fn a_learner_joins_only_after_activation_and_never_gains_a_vote() {
+    #[test]
+    fn a_learner_joins_only_after_activation_and_never_gains_a_vote() {
+        on_startup_stack(a_learner_joins_only_after_activation_and_never_gains_a_vote_fixture);
+    }
+
+    #[cfg(feature = "hiqlite-store")]
+    async fn a_learner_joins_only_after_activation_and_never_gains_a_vote_fixture() {
         install_default_crypto_provider();
 
         let source_dir = tempfile::tempdir().expect("source data dir");
@@ -7537,8 +7565,13 @@ mod tests {
     /// voter has to advance it. Either arm collapsing onto the other fails
     /// one of the two halves.
     #[cfg(feature = "hiqlite-store")]
-    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-    async fn a_learner_refuses_a_behind_schema_that_a_voter_migrates() {
+    #[test]
+    fn a_learner_refuses_a_behind_schema_that_a_voter_migrates() {
+        on_startup_stack(a_learner_refuses_a_behind_schema_that_a_voter_migrates_fixture);
+    }
+
+    #[cfg(feature = "hiqlite-store")]
+    async fn a_learner_refuses_a_behind_schema_that_a_voter_migrates_fixture() {
         install_default_crypto_provider();
 
         let dir = tempfile::tempdir().expect("schema role data dir");
@@ -7638,8 +7671,13 @@ mod tests {
     /// heartbeat coupling exists for — the row is present and looks like a
     /// proof until it is compared with that node's current heartbeat.
     #[cfg(feature = "hiqlite-store")]
-    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-    async fn activation_refuses_a_voter_whose_running_binary_is_unproven() {
+    #[test]
+    fn activation_refuses_a_voter_whose_running_binary_is_unproven() {
+        on_startup_stack(activation_refuses_a_voter_whose_running_binary_is_unproven_fixture);
+    }
+
+    #[cfg(feature = "hiqlite-store")]
+    async fn activation_refuses_a_voter_whose_running_binary_is_unproven_fixture() {
         install_default_crypto_provider();
 
         let dir = tempfile::tempdir().expect("unproven voter data dir");
