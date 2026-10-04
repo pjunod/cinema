@@ -1247,6 +1247,12 @@ pub trait SharingSourceSessionStore: Send + Sync {
         &self,
         authority: &SourceSessionWriteAuthority,
     ) -> Result<Option<String>, StoreError>;
+    /// Same-write permission for actual admitted preactivation media probes.
+    /// This grants no physical settlement or route authority.
+    async fn authorize_source_media_preparation(
+        &self,
+        authority: &SourceSessionWriteAuthority,
+    ) -> Result<bool, StoreError>;
     async fn authorize_source_index_preparation(
         &self,
         authority: &SourceSessionWriteAuthority,
@@ -1348,6 +1354,13 @@ impl<T: Backend + super::MediaSessionStore> SharingSourceSessionStore for T {
             [row] => serde_json::from_str(row).map_err(|_| invalid()),
             _ => Err(invalid()),
         }
+    }
+
+    async fn authorize_source_media_preparation(
+        &self,
+        authority: &SourceSessionWriteAuthority,
+    ) -> Result<bool, StoreError> {
+        source_index_permission(self, authority).await
     }
 
     async fn authorize_source_index_preparation(

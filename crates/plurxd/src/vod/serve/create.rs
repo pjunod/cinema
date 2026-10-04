@@ -19,11 +19,11 @@ pub(crate) struct PreparedSourceVodRendition {
     assignment: plurx_core::sharing_source_sessions::SourceDispatchAssignment,
 }
 
-/// A pending copy rendition and its real, indivisible physical reservation.
+/// A pending Source VOD rendition and its real physical reservation.
 /// Dropping this before attachment returns only that reservation; it never
 /// retires the immutable database assignment or certifies a spawned child.
 #[allow(dead_code)] // The private Source actor consumes this first-start handoff.
-pub(crate) struct AdmittedSourceCopyRendition {
+pub(crate) struct AdmittedSourceVodRendition {
     pending: PreparedSourceVodRendition,
     permit: crate::vodencode::EncodePermit,
 }
@@ -39,7 +39,7 @@ impl SourcePendingStartInfo {
     }
 }
 
-pub(crate) struct ReservedSourceCopyRendition {
+pub(crate) struct ReservedSourceVodRendition {
     pending: Option<PreparedSourceVodRendition>,
     permit: Option<crate::vodencode::EncodePermit>,
     owner: Arc<source_lifetime::SourceRenditionOwner>,
@@ -65,7 +65,7 @@ impl SourceCopyReadiness {
 }
 
 #[allow(dead_code)] // Consumed by the private owned Source actor, pending HTTP integration.
-impl ReservedSourceCopyRendition {
+impl ReservedSourceVodRendition {
     pub(crate) fn start_info(&self, session_id: &str) -> Result<SourcePendingStartInfo, String> {
         let uuid = uuid::Uuid::parse_str(session_id)
             .map_err(|_| "invalid actual Source session UUID".to_owned())?;
@@ -83,10 +83,29 @@ impl ReservedSourceCopyRendition {
                 duration_ms: Some(plan_duration_ms(&self.rendition.plan)),
                 start_seconds: 0.0,
                 media_origin_seconds: 0.0,
-                target_height: self.rendition.recipe.file.height.unwrap_or(0),
+                target_height: self
+                    .rendition
+                    .recipe
+                    .encoding
+                    .as_ref()
+                    .map_or(self.rendition.recipe.file.height.unwrap_or(0), |encoding| {
+                        encoding.options.target_height
+                    }),
                 kind: pending.request.kind,
-                encoder: "vod",
-                grade: plurx_core::transcode::OutputGrade::Sdr,
+                encoder: self
+                    .rendition
+                    .recipe
+                    .encoding
+                    .as_ref()
+                    .map_or("vod", |encoding| encoding.plan.encoder().label()),
+                grade: self
+                    .rendition
+                    .recipe
+                    .encoding
+                    .as_ref()
+                    .map_or(plurx_core::transcode::OutputGrade::Sdr, |encoding| {
+                        encoding.options.pipeline.output_grade()
+                    }),
                 vod: true,
                 control_lease_timeout_ms: crate::playback_control::VOD_LEASE_TIMEOUT_MS,
             },
@@ -181,7 +200,7 @@ impl ReservedSourceCopyRendition {
 }
 
 #[cfg(test)]
-impl AdmittedSourceCopyRendition {
+impl AdmittedSourceVodRendition {
     pub(crate) async fn assert_no_demand_or_child(&self) {
         let rendition = &self.pending.prepared.attachment.rendition;
         assert!(rendition.readers.lock().await.is_empty());
@@ -195,17 +214,17 @@ impl AdmittedSourceCopyRendition {
 
 impl VodServe {
     #[allow(dead_code)] // The private owned Source actor is the sole consumer.
-    pub(crate) fn reserve_source_copy(
+    pub(crate) fn reserve_source_vod(
         &self,
-        admitted: AdmittedSourceCopyRendition,
-    ) -> Result<ReservedSourceCopyRendition, String> {
+        admitted: AdmittedSourceVodRendition,
+    ) -> Result<ReservedSourceVodRendition, String> {
         let rendition = Arc::clone(&admitted.pending.prepared.attachment.rendition);
         let assignment = admitted.pending.assignment.clone();
         let owner = rendition
             .source_owners
             .attach(&assignment)
             .map_err(str::to_owned)?;
-        Ok(ReservedSourceCopyRendition {
+        Ok(ReservedSourceVodRendition {
             pending: Some(admitted.pending),
             permit: Some(admitted.permit),
             owner,
@@ -216,9 +235,9 @@ impl VodServe {
     }
 
     #[allow(dead_code)] // The private owned Source actor is the sole consumer.
-    pub(crate) async fn commit_source_copy(
+    pub(crate) async fn commit_source_vod(
         &self,
-        reserved: &mut ReservedSourceCopyRendition,
+        reserved: &mut ReservedSourceVodRendition,
         session_id: &str,
         producer_gate: &Arc<crate::transcode::source_actor::SourceProducerAuthority>,
         admissions: &crate::admission::Admissions,
@@ -276,20 +295,49 @@ impl VodServe {
         admissions: &crate::admission::Admissions,
         store: &dyn plurx_core::store::Store,
         deadline: Instant,
-    ) -> Result<AdmittedSourceCopyRendition, String> {
+    ) -> Result<AdmittedSourceVodRendition, String> {
+        Box::pin(self.prepare_admitted_source_vod(
+            source, assignment, settings, admissions, store, deadline, None,
+        ))
+        .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) async fn prepare_admitted_source_vod(
+        &self,
+        source: &crate::http::hls::PreparedSourcePlayback,
+        assignment: &plurx_core::sharing_source_sessions::SourceDispatchAssignment,
+        settings: &VodSettings,
+        admissions: &crate::admission::Admissions,
+        store: &dyn plurx_core::store::Store,
+        deadline: Instant,
+        encoding: Option<Arc<crate::vodencode::Encoding>>,
+    ) -> Result<AdmittedSourceVodRendition, String> {
         if !source.matches_assignment(assignment)
-            || !matches!(source.request().kind, SessionKind::Copy { .. })
+            || (encoding.is_some()
+                != matches!(source.request().kind, SessionKind::Transcode { .. }))
             || source.request().subtitle_burn.is_some()
         {
             return Err(
-                "Source copy preparation requires its exact unburned copy assignment".into(),
+                "Source VOD preparation requires its exact unburned recipe assignment".into(),
             );
         }
         let admission_deadline = deadline.min(Instant::now() + crate::admission::QUEUE_WAIT);
         let permit = loop {
             let attempt = tokio::time::timeout_at(
                 tokio::time::Instant::from_std(admission_deadline),
-                crate::vodencode::EncodePermit::try_source_copy(admissions, store),
+                async {
+                    if let Some(encoding) = &encoding {
+                        match encoding.try_permit().await {
+                            Some(permit) => {
+                                crate::vodencode::SourceCopyPermitRead::Admitted(permit)
+                            }
+                            None => crate::vodencode::SourceCopyPermitRead::Capacity,
+                        }
+                    } else {
+                        crate::vodencode::EncodePermit::try_source_copy(admissions, store).await
+                    }
+                },
             )
             .await;
             match attempt {
@@ -299,23 +347,23 @@ impl VodServe {
                 }
                 Ok(crate::vodencode::SourceCopyPermitRead::Capacity) => {
                     if Instant::now() >= admission_deadline {
-                        return Err("Source physical copy capacity is unavailable".into());
+                        return Err("Source physical VOD capacity is unavailable".into());
                     }
                     tokio::time::sleep_until(tokio::time::Instant::from_std(
                         admission_deadline.min(Instant::now() + Duration::from_millis(100)),
                     ))
                     .await;
                 }
-                Err(_) => return Err("Source physical copy admission timed out".into()),
+                Err(_) => return Err("Source physical VOD admission timed out".into()),
             }
         };
         let pending = tokio::time::timeout_at(
             tokio::time::Instant::from_std(deadline),
-            Box::pin(self.prepare_source_vod_rendition(source, assignment, settings, None)),
+            Box::pin(self.prepare_source_vod_rendition(source, assignment, settings, encoding)),
         )
         .await
-        .map_err(|_| "Source copy preparation timed out".to_owned())??;
-        Ok(AdmittedSourceCopyRendition { pending, permit })
+        .map_err(|_| "Source VOD preparation timed out".to_owned())??;
+        Ok(AdmittedSourceVodRendition { pending, permit })
     }
 
     /// The VOD arm of session create, called by the manager AFTER it has
@@ -840,10 +888,20 @@ impl VodServe {
                 "the file has no probed duration, so no immutable plan can be built",
             ));
         };
-        let have_dovi = crate::ffmpeg::has_dovi_rpu().await;
+        // Source SDR preparation already owns its actual engine capture. A
+        // generic capability probe here would create an unowned child.
+        let have_dovi = if source_binding.is_some() {
+            false
+        } else {
+            crate::ffmpeg::has_dovi_rpu().await
+        };
         // An encoded rendition never carries the source's parameter sets, so
         // only a copy waits on the census.
-        let probe_json = if prepared.encoding.is_none() && source_binding.is_none() {
+        let probe_json = if prepared.encoding.is_some() && source_binding.is_some() {
+            // Encoded identity comes from the verified held-probe recipe;
+            // source parameter sets are unused by that identity.
+            Ok(None)
+        } else if prepared.encoding.is_none() && source_binding.is_none() {
             crate::hevc_census::probe_json_for_copy(self.shared.store.as_ref(), file).await
         } else {
             self.shared.store.get_file_probe_json(file.id).await
