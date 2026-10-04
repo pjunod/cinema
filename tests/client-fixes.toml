@@ -3698,3 +3698,11 @@ source = "clients/android/app/src/main/java/tv/plurx/app/player/ContinuousSource
 source_anchor = "internal class ContinuousPeriodBindings<T : Any> {"
 test = "clients/android/app/src/test/java/tv/plurx/app/player/ContinuousPeriodBindingsTest.kt"
 test_anchor = "fun maskedPlaylistPeriodsRequireTheirSourceSequenceAndLiveOwner("
+
+[[fixes]]
+id = "apple.prepared-commit-fences-through-attempt-fence"
+commits = ["50b90e68e"]
+source = "clients/apple/Sources/PlayerController.swift"
+source_anchor = "private func preparedCommitStillOwned(_ commit: Attempt) -> Bool {"
+test = "clients/apple/Tests/AttemptScopesTests.swift"
+test_anchor = "func testEachMigratedFenceComparesExactlyTheFieldsItsConjunctionDid()"
