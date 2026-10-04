@@ -36,6 +36,9 @@ pub(super) struct Rendition {
     pub(super) output_measurement: StdMutex<PublishedOutputMeasurement>,
     pub(super) copy_preparation: StdMutex<Option<Arc<super::copy_preparation::CopyPreparation>>>,
     pub(super) preparation_epoch: AtomicU64,
+    /// Identity of the complete output already handed to retained assembly
+    /// (in flight or assembled). Maintenance never re-offers it.
+    pub(super) retained_offer: StdMutex<Option<[u8; 32]>>,
     pub(super) cancelled_preparation_epoch: AtomicU64,
     pub(super) identity: Mutex<IdentityState>,
     pub(super) slot: ProducerSlot,

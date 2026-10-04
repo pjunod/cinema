@@ -481,6 +481,15 @@ struct RetainedEntry {
     idle_since: Option<Instant>,
 }
 
+/// Why a completed output was not handed to assembly.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum AssemblyRefusal {
+    /// Another assembly holds the registry's single metadata-clone slot.
+    Busy,
+    /// This output can never be assembled under the current budget/identity.
+    Refused,
+}
+
 /// The reservation precedes the bounded metadata clone and detached task.
 /// Cancellation keeps any possibly-created links charged until collection.
 pub(super) struct AssemblyReservation {
@@ -628,6 +637,12 @@ impl RetainedArtifactRegistry {
 
     /// Reuses the existing maintenance owner for a refused/busy completion;
     /// there is no second scheduler and no payload or cold-title scan.
+    ///
+    /// Returns true only when this call handed a new assembly to a detached
+    /// owner. A completion already handed off (in flight or assembled) is not
+    /// offered again, and a registry busy with another assembly defers: the
+    /// next maintenance tick offers it again. Only a reservation that cannot
+    /// ever fit this rendition's own completed output fails its preparation.
     pub(super) fn offer(shared: &Arc<Shared>, rendition: &Arc<Rendition>) -> bool {
         let preparation = rendition.preparation();
         let measurement = rendition
@@ -637,23 +652,42 @@ impl RetainedArtifactRegistry {
         let Some(rates) = measurement.complete_rates() else {
             return false;
         };
-        let Some(reservation) = Self::reserve(shared, rendition, &rates) else {
-            if let Some(preparation) = preparation.as_ref() {
-                preparation.fail();
-            }
+        let mut offered = rendition.retained_offer.lock().expect("retained offer lock");
+        if *offered == Some(rates.identity) {
             return false;
+        }
+        let reservation = match Self::reserve(shared, rendition, &rates) {
+            Ok(reservation) => reservation,
+            Err(AssemblyRefusal::Busy) => return false,
+            Err(AssemblyRefusal::Refused) => {
+                if let Some(preparation) = preparation.as_ref() {
+                    preparation.fail();
+                }
+                return false;
+            }
         };
         let Some(observation) = measurement.complete_observation() else {
             return false;
         };
+        *offered = Some(rates.identity);
+        drop(offered);
         drop(measurement);
         let shared = Arc::clone(shared);
         let rendition = Arc::clone(rendition);
         tokio::spawn(async move {
-            shared
+            let identity = observation.rates.identity;
+            let published = shared
                 .retained_artifacts
                 .assemble(&shared, &rendition, observation, reservation, preparation)
                 .await;
+            if !published {
+                // Make an unassembled completion offerable again by the
+                // existing maintenance owner.
+                let mut offered = rendition.retained_offer.lock().expect("retained offer lock");
+                if *offered == Some(identity) {
+                    *offered = None;
+                }
+            }
         });
         true
     }
@@ -1147,30 +1181,37 @@ impl RetainedArtifactRegistry {
         shared: &Arc<Shared>,
         rendition: &Rendition,
         rates: &plurx_core::output_measurement::CompleteOutputRates,
-    ) -> Option<AssemblyReservation> {
+    ) -> Result<AssemblyReservation, AssemblyRefusal> {
         let preparation = rendition.preparation();
         let prepare_nonce = preparation.as_ref().map(|prepare| prepare.allowance.nonce);
         if preparation
             .as_ref()
             .is_some_and(|prepare| prepare.allowance.footprint().is_none())
         {
-            return None;
+            return Err(AssemblyRefusal::Refused);
         }
         let mut state = shared
             .retained_artifacts
             .state
             .lock()
             .expect("retained registry lock");
+        // One queued metadata clone at a time. Another rendition's assembly
+        // is not a property of this output: defer, never refuse.
+        if state.assembling {
+            return Err(AssemblyRefusal::Busy);
+        }
         let reserved = state
             .preparations
             .values()
-            .try_fold(0_u64, |sum, cap| sum.checked_add(*cap))?;
+            .try_fold(0_u64, |sum, cap| sum.checked_add(*cap))
+            .ok_or(AssemblyRefusal::Refused)?;
         let own_cap = prepare_nonce
             .and_then(|nonce| state.preparations.get(&nonce).copied())
             .unwrap_or(0);
-        let reserved = reserved.checked_sub(own_cap)?;
-        if state.assembling
-            || state.entries.contains_key(&rates.identity)
+        let reserved = reserved
+            .checked_sub(own_cap)
+            .ok_or(AssemblyRefusal::Refused)?;
+        if state.entries.contains_key(&rates.identity)
             || state.artifact_count() - usize::from(own_cap > 0) >= MAX_ARTIFACTS
             || state
                 .bytes
@@ -1178,7 +1219,7 @@ impl RetainedArtifactRegistry {
                 .and_then(|bytes| bytes.checked_add(rates.wire_bytes))
                 .is_none_or(|bytes| bytes > rendition.completed_cache_budget)
         {
-            return None;
+            return Err(AssemblyRefusal::Refused);
         }
         state.bytes += rates.wire_bytes;
         if let Some(nonce) = prepare_nonce {
@@ -1187,7 +1228,7 @@ impl RetainedArtifactRegistry {
             }
         }
         state.assembling = true;
-        Some(AssemblyReservation {
+        Ok(AssemblyReservation {
             shared: Arc::clone(shared),
             charge: rates.wire_bytes,
             staging: None,
@@ -1197,6 +1238,7 @@ impl RetainedArtifactRegistry {
 
     /// A detached owner runs this after the completion callback releases all
     /// manifest locks. No cold create waits for this bounded link operation.
+    /// Returns whether the artifact was published (or privately staged).
     pub(super) async fn assemble(
         &self,
         shared: &Shared,
@@ -1204,21 +1246,22 @@ impl RetainedArtifactRegistry {
         observation: CompleteOutputObservation,
         mut reservation: AssemblyReservation,
         preparation: Option<Arc<super::copy_preparation::CopyPreparation>>,
-    ) {
+    ) -> bool {
         let mut completion = PreparationAssemblyOutcome {
             preparation: preparation.clone(),
             completed: false,
         };
-        let Ok(preparing) = self.collector.try_lock() else {
-            return;
-        };
+        // Queue behind a running collection or validation instead of giving
+        // up: this owner is detached, and giving up here would fail a
+        // completed full-title preparation for a momentary GC pass.
+        let preparing = self.collector.lock().await;
         if !self.own_namespace(&shared.base).await {
-            return;
+            return false;
         }
         self.collect_orphans().await;
         let Ok(init_metadata) = tokio::fs::metadata(rendition.dir.path().join(INIT_NAME)).await
         else {
-            return;
+            return false;
         };
         let init_bytes = init_metadata.len();
         let manifest_charge = if rendition.recipe.retained_logical.is_some() {
@@ -1227,10 +1270,10 @@ impl RetainedArtifactRegistry {
             0
         };
         let Some(extra_charge) = init_bytes.checked_add(manifest_charge) else {
-            return;
+            return false;
         };
         let Some(charge) = observation.rates.wire_bytes.checked_add(extra_charge) else {
-            return;
+            return false;
         };
         drop(preparing);
         {
@@ -1240,7 +1283,7 @@ impl RetainedArtifactRegistry {
                 .values()
                 .try_fold(0_u64, |sum, cap| sum.checked_add(*cap))
             else {
-                return;
+                return false;
             };
             if !state.startup_done
                 || !state.orphans.is_empty()
@@ -1250,7 +1293,7 @@ impl RetainedArtifactRegistry {
                     .and_then(|bytes| bytes.checked_add(extra_charge))
                     .is_none_or(|bytes| bytes > rendition.completed_cache_budget)
             {
-                return;
+                return false;
             }
             state.bytes += extra_charge;
             reservation.charge = charge;
@@ -1295,7 +1338,7 @@ impl RetainedArtifactRegistry {
                 completion.completed = true;
             }
             preparation.progress.notify_waiters();
-            return;
+            return completion.completed;
         }
         let mut state = self.state.lock().expect("retained registry lock");
         if result.is_ok() {
@@ -1309,6 +1352,7 @@ impl RetainedArtifactRegistry {
             );
             reservation.published = true;
         }
+        reservation.published
     }
 
     /// A successful queue statement is historical evidence, not registry
@@ -2270,8 +2314,11 @@ mod tests {
         let reserved = RetainedArtifactRegistry::reserve(&serve.shared, &rendition, &rates)
             .expect("first reservation");
         assert!(
-            RetainedArtifactRegistry::reserve(&serve.shared, &rendition, &rates).is_none(),
-            "no second queued metadata clone"
+            matches!(
+                RetainedArtifactRegistry::reserve(&serve.shared, &rendition, &rates),
+                Err(AssemblyRefusal::Busy)
+            ),
+            "no second queued metadata clone; busy defers rather than refuses"
         );
         assert_eq!(
             serve
