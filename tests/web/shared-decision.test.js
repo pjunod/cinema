@@ -12,7 +12,7 @@ function harness(handler=null){const requests=[],ctx=vm.createContext({console,U
  vm.runInContext(`let TOKEN="first",API="/api/v1",AUTH_GENERATION=2,PAGE_RENDER_GENERATION=7;
  const SERVER={build:"test",playback_display_aware_auto:false},PLAY_CAPS={vcodec:"h264,hevc,hevc10",acodec:"aac",container:"mp4",maxheight:1080,progressiveHevcSampleEntries:["hvc1"]};
  function decodeLimits(){return [];}function measuredPresentationTarget(){return null;}
- `+fs.readFileSync(WEB+'core/file-context.js','utf8')+'\n'+functions+'\n'+fs.readFileSync(WEB+'core/shared-decision.js','utf8')+`\nthis.h={details:SHARED_DECISION.details,decision:SHARED_DECISION.decision,retire:sharedDecisionRetire,caps:currentCapsDocument,factory:sharedPlaybackFileContextFromDetail,key:playbackFileKey,change(){TOKEN="next";AUTH_GENERATION++;sharedDecisionRetire();},leave(){PAGE_RENDER_GENERATION++;sharedDecisionRetire();},origin(){API="https://other.test/api/v1";},overflow(){PLAY_CAPS.acodec="a".repeat(128*1024);},};`,ctx);return {...ctx.h,requests};}
+ `+fs.readFileSync(WEB+'core/file-context.js','utf8')+'\n'+functions+'\n'+fs.readFileSync(WEB+'core/shared-decision.js','utf8')+`\nthis.h={details:SHARED_DECISION.details,decision:SHARED_DECISION.decision,start:SHARED_DECISION.start,progress:SHARED_DECISION.progress,retire:sharedDecisionRetire,caps:currentCapsDocument,factory:sharedPlaybackFileContextFromDetail,key:playbackFileKey,change(){TOKEN="next";AUTH_GENERATION++;sharedDecisionRetire();},leave(){PAGE_RENDER_GENERATION++;sharedDecisionRetire();},origin(){API="https://other.test/api/v1";},overflow(){PLAY_CAPS.acodec="a".repeat(128*1024);},};`,ctx);return {...ctx.h,requests};}
 test("actual v2 builder preserves complete engine fields and exact Source identities",async()=>{
  for(const id of ['0','9007199254740993','9223372036854775807']){
   const h=harness((url,o)=>response(o.method==='GET'?detail(id):wire(id),url)),r=await h.details(ref),c=r.files[0].context,d=await h.decision(c,{force:'original',audio:4095,subtitle:-1,audio_offset_ms:-15000});
@@ -52,4 +52,59 @@ test("oversized request and malformed duplicate or UTF8 bodies refuse without fa
 test("old account refusal cannot retire new account decision context",async()=>{
  let release,started;const ready=new Promise(r=>started=r);let posts=0;const h=harness((u,o)=>{if(o.method==='GET')return response(detail(),u);if(++posts===1){started();return new Promise(r=>release=()=>r(response(wire(),u,401)));}return response(wire(),u);});
  const old=(await h.details(ref)).files[0].context,pending=h.decision(old);await ready;h.change();const fresh=(await h.details(ref)).files[0].context;release();await assert.rejects(pending);assert.equal((await h.decision(fresh)).file_id,'9007199254740993');assert.equal(h.requests.at(-1).options.headers.authorization,'Bearer next');
+});
+
+// Synthetic B protocol envelopes exercise the shipped caller; these tests do
+// not claim physical Source production or accepted socket settlement.
+const sid="aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+function startReply(){return {session_id:sid,playlist_url:`/api/v1/hls/${sid}/master.m3u8`,vod:true,start_seconds:12.5,duration_ms:90000,media_origin_ms:0,control:{protocol:"plurx-playback-control-v1",url:`/api/v1/hls/${sid}/control`,generation:"bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",control_epoch:1,next_exchange_ms:5000,lease_timeout_ms:300000}};}
+function startBody(h){return {request_id:"cccccccc-cccc-4ccc-8ccc-cccccccccccc",playback_id:"browser-fixture",caps:h.caps(),start:12.5,force:"original",height:null,previous_session_id:null,control_sequence:null,reopen_reason:null,intent:null};}
+test("synthetic complete B Start retains original caps resume and explicit null fields",async()=>{
+ const h=harness((u,o)=>response(o.method==='GET'?detail():JSON.stringify(startReply()),u)),c=(await h.details(ref)).files[0].context,b=startBody(h),r=await h.start(c,b);
+ assert.deepEqual(JSON.parse(h.requests[1].options.body),JSON.parse(JSON.stringify(b)));
+ assert.equal(r._sharedContext.session_id,sid);assert.equal(r._sharedContext.source_file_id,'9007199254740993');assert.equal(r._sharedContext.source_ref.item_id,ref.item_id);assert.ok(!Object.keys(r).includes('_sharedContext'));
+ for(const field of ['previous_session_id','control_sequence','reopen_reason','intent']){const before=h.requests.length;await assert.rejects(h.start(c,{...b,[field]:field==='control_sequence'?0:'unsupported'}),e=>e.code==='sharing_start_unsupported');assert.equal(h.requests.length,before);}
+});
+test("synthetic B Start rejects foreign session URLs malformed generation and late login",async()=>{
+ for(const mutate of [r=>r.playlist_url='/api/v1/hls/'+ref.import_id+'/master.m3u8',r=>r.control.url='https://source/control',r=>r.control.generation='7',r=>r.control.control_epoch=0,r=>r.vod=false]){
+  const reply=startReply();mutate(reply);const h=harness((u,o)=>response(o.method==='GET'?detail():JSON.stringify(reply),u)),c=(await h.details(ref)).files[0].context;await assert.rejects(h.start(c,startBody(h)));assert.equal(c.session_id,null);
+ }
+});
+test("ordered Shared beats retry identical payload then resync409 without replaying old position",async()=>{
+ let posts=0,gets=0;const h=harness((u,o)=>{
+  if(o.method==='GET'){gets++;const raw=JSON.parse(detail('9007199254740993','1'));raw.watch={sequence:gets===1?4:20};return response(JSON.stringify(raw,(_,v)=>v),u);}
+  if(u.endsWith('/hls/sessions'))return response(JSON.stringify(startReply()),u);
+  if(++posts===1)throw new Error('uncertain network');
+  if(posts===3)return response(JSON.stringify({code:'sharing_progress_stale',current_sequence:20}),u,409);
+  return response('{}',u);
+ });
+ // Use a safe lifecycle here because JSON.parse/stringify is only fixture setup.
+ const first=await h.details(ref),c=(await h.start(first.files[0].context,startBody(h)))._sharedContext;
+ await assert.rejects(h.progress(c,0,90000,false));assert.equal(await h.progress(c,1000,90000,false),false);
+ const beats=h.requests.filter(r=>r.url.endsWith('/progress'));assert.equal(beats[0].options.body,beats[1].options.body);assert.equal(JSON.parse(beats[0].options.body).position_ms,0);
+ assert.equal(await h.progress(c,2000,90000,false),false);assert.equal(gets,2);
+ h.leave();assert.equal(await h.progress(c,3000,90000,false),true);
+ const last=JSON.parse(h.requests.at(-1).options.body);assert.equal(last.sequence,21);assert.equal(last.position_ms,3000);assert.equal(last.session_id,sid);
+ h.change();const n=h.requests.length;await assert.rejects(h.progress(c,4000,90000,false));assert.equal(h.requests.length,n);
+});
+
+test("late synthetic Start cannot attach after original account replacement",async()=>{
+ let release,started;const ready=new Promise(r=>started=r);
+ const h=harness((u,o)=>{if(o.method==='GET')return response(detail(),u);started();return new Promise(r=>release=()=>r(response(JSON.stringify(startReply()),u)));});
+ const c=(await h.details(ref)).files[0].context,pending=h.start(c,startBody(h));await ready;h.change();release();await assert.rejects(pending);assert.equal(c.session_id,null);
+});
+
+test("two imports of the same Source item share ordered beats across B sessions",async()=>{
+ const other={...ref,import_id:'44444444-4444-4444-8444-444444444444'},second='dddddddd-dddd-4ddd-8ddd-dddddddddddd';let starts=0;
+ const h=harness((u,o)=>{
+  if(o.method==='GET'){let raw=detail('9007199254740993','1');if(u.includes(other.import_id))raw=raw.replaceAll(ref.import_id,other.import_id);return response(raw.slice(0,-1)+',"watch":{"sequence":4}}',u);}
+  if(u.endsWith('/hls/sessions')){const r=startReply();if(++starts===2){r.session_id=second;r.playlist_url=r.playlist_url.replaceAll(sid,second);r.control.url=r.control.url.replaceAll(sid,second);}return response(JSON.stringify(r),u);}
+  return response('{}',u);
+ });
+ const a=(await h.start((await h.details(ref)).files[0].context,startBody(h)))._sharedContext;
+ assert.equal(await h.progress(a,1000,90000,false),true);
+ const b=(await h.start((await h.details(other)).files[0].context,startBody(h)))._sharedContext;
+ assert.equal(await h.progress(b,2000,90000,false),true);
+ const beats=h.requests.filter(r=>r.url.endsWith('/progress')).map(r=>JSON.parse(r.options.body));
+ assert.deepEqual(beats.map(r=>r.sequence),[5,6]);assert.deepEqual(beats.map(r=>r.session_id),[sid,second]);
 });
