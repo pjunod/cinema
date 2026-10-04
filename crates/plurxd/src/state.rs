@@ -818,9 +818,9 @@ pub struct AppState {
     pub watch_ledger: Arc<crate::telemetry::WatchLedger>,
     /// Store-backed gauges sampled away from the Prometheus request path.
     pub store_metrics: StoreMetricsCache,
-    /// Application-initiated graceful drain. Signals still use the process
-    /// watcher in `main`; the cluster leave endpoint cancels this only after
-    /// its own voter removal has committed.
+    /// Graceful drain. The cluster leave endpoint cancels this only after its
+    /// own voter removal has committed; `main` cancels it when a process
+    /// signal starts the drain, so owners see one token for either cause.
     pub shutdown: tokio_util::sync::CancellationToken,
     /// Test-only rendezvous inside the real cache-admin revocation fence.
     /// Production has no hook or alternate path.

@@ -1936,6 +1936,10 @@ async fn boot(
                 tracing::info!("cluster leave committed, draining");
             }
         }
+        // One drain token for both causes: owners that must hand work back
+        // before exit (shared session retirement) observe `state.shutdown`,
+        // and a signal is as much a drain as a committed leave.
+        leave_shutdown.cancel();
         // Stop new media starts before waiting for tuner/FFmpeg ownership to
         // settle. The HTTP server remains alive during this short phase so
         // existing close/resource requests can finish normally.
