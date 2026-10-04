@@ -3213,6 +3213,16 @@ generation alongside password CAS before minting a scoped native user token.
 Disabling during password work, including an off/on cycle, refuses the stale
 mint. Media resource cleanup belongs to the later playback adapter.
 
+The facade also answers at the server root on Jellyfin's standard port
+(`server.jellyfin_port`, default 8096, on `server.bind`'s address), because
+Jellyfin clients given only a host connect there. That listener maps every
+request under `/jellyfin` before routing, so the rows below apply there with
+or without the prefix, and nothing else (native API, web app, Plex routes) is
+reachable on it. `TranscodingUrl` and `DirectStreamUrl` are
+client-base-relative (`/Videos/...`): clients join their server address,
+which already carries any mount. HLS manifest children are root-absolute
+under the mount the client used.
+
 | Method | Path | Authority and response |
 |---|---|---|
 | GET | `/jellyfin/` | JSON 404 |

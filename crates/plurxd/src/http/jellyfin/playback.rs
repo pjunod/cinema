@@ -1055,9 +1055,13 @@ async fn info(
     if let Some(index) = request.subtitle_stream_index {
         source["DefaultSubtitleStreamIndex"] = json!(index);
     }
+    // Client-base-relative (design 3.1): every measured client joins its
+    // server address, which already carries any mount, with these paths;
+    // J0 Infuse requested `/jellyfin` + `/videos/...`. Naming the mount
+    // here doubled it.
     if vod.is_some() {
         source["TranscodingUrl"] = json!(format!(
-            "/jellyfin/Videos/{}/master.m3u8?MediaSourceId={}&PlaySessionId={play_id}",
+            "/Videos/{}/master.m3u8?MediaSourceId={}&PlaySessionId={play_id}",
             item.id.to_hex(),
             source["Id"].as_str().unwrap_or_default()
         ));
@@ -1072,7 +1076,7 @@ async fn info(
             source["ETag"] = json!(secret);
         }
         source["DirectStreamUrl"] = json!(format!(
-            "/jellyfin/Videos/{}/stream?MediaSourceId={}&PlaySessionId={play_id}&Static=true",
+            "/Videos/{}/stream?MediaSourceId={}&PlaySessionId={play_id}&Static=true",
             item.id.to_hex(),
             source["Id"].as_str().unwrap_or_default()
         ));
@@ -1465,6 +1469,7 @@ pub(super) async fn direct(
 }
 pub(super) async fn direct_extension(
     caller: MediaCaller,
+    mount: super::Mount,
     State(state): State<AppState>,
     Path((item_id, filename)): Path<(String, String)>,
     RawQuery(raw): RawQuery,
@@ -1487,8 +1492,16 @@ pub(super) async fn direct_extension(
             .map_err(|_| {
                 ApiError::BadRequest("HLS parameters must match the negotiated play".into())
             })?;
+        let pending = Box::pin(binding(
+            &client,
+            &state,
+            &request.play_session_id,
+            &item_id,
+            &request.media_source_id,
+        ))
+        .await?;
         return Box::pin(super::transport::root(
-            client, state, item_id, request, filename, method, headers,
+            client, state, mount, pending, filename, method, headers,
         ))
         .await;
     }

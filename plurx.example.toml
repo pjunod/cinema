@@ -14,6 +14,11 @@ bind = "0.0.0.0:32400"
 # fail-closed: forwarding headers are ignored. Configure only proxies that
 # overwrite or append X-Forwarded-For correctly.
 trusted_proxies = []
+# Jellyfin clients (Infuse, the Jellyfin apps) assume port 8096 at the server
+# root when given only a host. While Jellyfin compatibility is enabled in
+# Settings -> Developer, the facade answers there too, on bind's address.
+# 0 turns this listener off; /jellyfin on the main port always works.
+jellyfin_port = 8096
 
 [storage]
 # Authoritative database, node identity, and compatibility root. Created if

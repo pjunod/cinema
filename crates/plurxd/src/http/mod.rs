@@ -35,6 +35,10 @@ pub(crate) mod internal_media;
 pub(crate) mod internal_media_sessions;
 mod items;
 mod jellyfin;
+pub(crate) use jellyfin::{
+    standard_port_app as jellyfin_standard_port_app, StandardPort as JellyfinStandardPort,
+    StandardPortStatus as JellyfinStandardPortStatus,
+};
 mod keys;
 mod libraries;
 pub(crate) mod library_channels;
