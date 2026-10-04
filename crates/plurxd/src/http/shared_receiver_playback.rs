@@ -1142,7 +1142,16 @@ pub(crate) async fn receiver_media(
         response::IntoResponse,
     };
     use futures_util::StreamExt;
-    let Some(path) = request.uri().path().strip_prefix("/api/v1/hls/") else {
+    // This layer sits on the router nested at /api/v1, which strips the
+    // prefix from the request URI; the public path is the original one.
+    let original = request
+        .extensions()
+        .get::<axum::extract::OriginalUri>()
+        .map_or_else(
+            || request.uri().path().to_owned(),
+            |uri| uri.path().to_owned(),
+        );
+    let Some(path) = original.strip_prefix("/api/v1/hls/") else {
         return next.run(request).await;
     };
     let (session, suffix) = path.split_once('/').unwrap_or((path, ""));
