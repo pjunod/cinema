@@ -7203,3 +7203,23 @@ zero stalls, hitches and dropped frames over 21,181 frames, first frame
 2.7 s, clock 1.001×; host load ≤ 4.9, CPU PSI avg10 ≤ 15 %. Receipt
 `reports/continuous-chrome-mixed-6da1d7634-full20-merged797*`.
 
+### 10.238 Landing
+
+The branch merged main #802 (`7aeebc83c`, a client-fix anchor conflict only)
+and was pushed once. Its fast lane passed scope, mobile versions, preflight
+(history, Regression-Test fields, validation, operations and player-contract
+suites), web syntax/types, Android, Apple and Windows compilation. The Rust
+gate ran 3,456 tests; two failed with `Elapsed`, both five-second wall-clock
+waits on background loops under the loaded runner (1,175 s binary runtime):
+`offline::tests::a_node_without_a_vote_expires_packages_but_claims_none` and
+`state::tests::schedule_loop_dispatches_a_due_library_scan`. Neither file
+differs from main, and both passed in the lab host's full run. Only those two
+were rerun, once, on the exact merged source, and both passed (2.79 s).
+They are left for the batch process that owns full-suite timing failures.
+
+Main #803 (Jellyfin version metadata: its compatibility catalog, its HTTP
+module and one `docs/API.md` table cell) landed while the lane ran. It
+shares no code with this branch, so the PR merged as `f01031b45` without
+another lane. Deploy and physical-device checks follow; physical display and
+audio, native device behaviour and the Firefox full campaign stay open.
+
