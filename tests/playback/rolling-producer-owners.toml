@@ -3895,7 +3895,8 @@ pattern = "(?:[A-Za-z_]\\w*::)*Command::new\\s*\\("
 # +1 authenticated Jellyfin subtitle regression: finite ffmpeg copy/mux
 # through the existing testfixture runner; synchronous, reaped by that runner.
 # Production aliases delegate the existing subtitle owner and add no launcher.
-expected_occurrences = 201
+# J4 encoded qualification: One finite test-only decoder reads an actually fetched mapped fragment. Its kill-on-drop child is awaited to completion before the fixture is dropped; no production launcher is added.
+expected_occurrences = 202
 
 [[module_structures]]
 id = "process-capable-launch-method"
@@ -4375,7 +4376,8 @@ pattern = "\\.(?:spawn|output|status)\\s*\\("
 # composite range and fixture assertions. These do not launch a process.
 # Native handler delegation introduces no Command or spawn owner.
 # J4 shared startup: Two in-process HTTP status reads verify duplicate entry success and sanitized startup failure; neither launches a child.
-expected_occurrences = 451
+# J4 encoded qualification: One HTTP success status and one synchronously collected decoder output verify real encoded alias bytes. Only the finite fixture decoder launches a child.
+expected_occurrences = 453
 # +2 native-startup delayed-init fixture: Axum Response::status() reads
 # assert the master and legacy bridge responses. Neither launches a process.
 
@@ -4772,7 +4774,12 @@ pattern = "kill_on_drop\\s*\\("
 # Queued-publication regression: the test owns one finite sleep child,
 # uses exec to avoid descendants, enables kill-on-drop, and verifies run_part
 # terminated and reaped it for foreground, download, ownership and deadline yields.
-expected_occurrences = 93
+# 93 -> 94 with J4 encoded qualification: the Jellyfin HTTP regression decodes
+# one actually fetched mapped encoded fragment with a finite test-only FFmpeg
+# `framehash` child. It is awaited to completion through `output()` before the
+# fixture is dropped; `kill_on_drop` only covers a panicking assertion. No
+# production launcher or producer is added.
+expected_occurrences = 94
 
 [[module_structures]]
 id = "rolling-supervisor-construction"
