@@ -7676,6 +7676,14 @@ mod startup_tests {
     #[tokio::test]
     async fn sharing_tls_command_refuses_to_replace_an_existing_node_key() {
         let dir = tempfile::tempdir().expect("synthetic node key directory");
+        // NodeTls refuses a group- or world-writable key directory, and a
+        // temporary directory inherits the runner umask (002 on some hosts).
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o700))
+                .expect("private synthetic node key directory");
+        }
         let command = || SharingCommand::InitTls {
             key_directory: dir.path().to_path_buf(),
         };
