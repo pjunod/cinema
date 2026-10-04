@@ -3960,7 +3960,8 @@ assert.equal(context.ACT_TIMER, null);
                 pinned = match.group(1)
                 self.assertRegex(
                     pinned,
-                    r"^192\.168\.4\.7:3000/noirr/plurx-ci@sha256:[0-9a-f]{64}$",
+                    r"^\$\{\{ vars\.FLEET_REGISTRY \|\| 'fleet-registry\.unset\.invalid' \}\}"
+                    r"/noirr/plurx-ci@sha256:[0-9a-f]{64}$",
                 )
                 if image is None:
                     image = pinned

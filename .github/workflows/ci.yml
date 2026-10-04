@@ -311,7 +311,7 @@ jobs:
     runs-on: [self-hosted, Linux, X64, lab, general, high-cpu]
     # Private, smoke-tested CI target; never expose the management credential.
     container:
-      image: 192.168.4.7:3000/noirr/plurx-ci@sha256:3d84b711936233da699308d0301ac1e91f12e76c6b928967c41817e841f5e855
+      image: ${{ vars.FLEET_REGISTRY || 'fleet-registry.unset.invalid' }}/noirr/plurx-ci@sha256:3d84b711936233da699308d0301ac1e91f12e76c6b928967c41817e841f5e855
       credentials:
         username: noirr
         password: ${{ secrets.CI_REGISTRY_PULL_TOKEN }}
@@ -916,7 +916,7 @@ jobs:
     if: needs.scope.outputs.cluster_auth == 'true'
     runs-on: [self-hosted, Linux, X64, lab, general, high-cpu]
     container:
-      image: 192.168.4.7:3000/noirr/plurx-ci@sha256:3d84b711936233da699308d0301ac1e91f12e76c6b928967c41817e841f5e855
+      image: ${{ vars.FLEET_REGISTRY || 'fleet-registry.unset.invalid' }}/noirr/plurx-ci@sha256:3d84b711936233da699308d0301ac1e91f12e76c6b928967c41817e841f5e855
       credentials:
         username: noirr
         password: ${{ secrets.CI_REGISTRY_PULL_TOKEN }}
@@ -974,7 +974,7 @@ jobs:
     # through ffmpeg. See .github/actions/ffmpeg.
     runs-on: [self-hosted, Linux, X64, lab, general]
     container:
-      image: 192.168.4.7:3000/noirr/plurx-ci@sha256:3d84b711936233da699308d0301ac1e91f12e76c6b928967c41817e841f5e855
+      image: ${{ vars.FLEET_REGISTRY || 'fleet-registry.unset.invalid' }}/noirr/plurx-ci@sha256:3d84b711936233da699308d0301ac1e91f12e76c6b928967c41817e841f5e855
       credentials:
         username: noirr
         password: ${{ secrets.CI_REGISTRY_PULL_TOKEN }}
@@ -1046,7 +1046,7 @@ jobs:
     if: needs.scope.outputs.web_layout == 'true'
     runs-on: [self-hosted, Linux, X64, lab, general]
     container:
-      image: 192.168.4.7:3000/noirr/plurx-ci@sha256:3d84b711936233da699308d0301ac1e91f12e76c6b928967c41817e841f5e855
+      image: ${{ vars.FLEET_REGISTRY || 'fleet-registry.unset.invalid' }}/noirr/plurx-ci@sha256:3d84b711936233da699308d0301ac1e91f12e76c6b928967c41817e841f5e855
       credentials:
         username: noirr
         password: ${{ secrets.CI_REGISTRY_PULL_TOKEN }}

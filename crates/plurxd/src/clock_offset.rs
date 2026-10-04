@@ -573,11 +573,10 @@ const CLOCK_ENFORCEMENT_REFRESH: Duration = Duration::from_secs(10);
 /// same `stored_switch` as the settings page (missing is off). A failed read
 /// keeps the current mode, so an unreadable store never turns enforcement on.
 pub(crate) async fn apply_stored_enforcement(state: &AppState) {
-    match plurx_core::store::Store::get_setting(
-        state.store.as_ref(),
-        plurx_core::store::keys::CLUSTER_CLOCK_GUARD_ENFORCED,
-    )
-    .await
+    match state
+        .store
+        .get_setting(plurx_core::store::keys::CLUSTER_CLOCK_GUARD_ENFORCED)
+        .await
     {
         Ok(value) => state
             .membership

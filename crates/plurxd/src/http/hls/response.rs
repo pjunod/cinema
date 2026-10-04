@@ -1127,8 +1127,7 @@ mod batching_tests {
                 _ => None,
             }
         }));
-        let (mut body, pump, receipt, completed) =
-            fixture(reader, 8192, Duration::from_secs(300));
+        let (mut body, pump, receipt, completed) = fixture(reader, 8192, Duration::from_secs(300));
         assert_eq!(
             body.frame()
                 .await

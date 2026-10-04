@@ -2684,9 +2684,11 @@ async fn read_bounded_with_limit(
 /// matching version proves the bytes are the ones hashed. A replaced or
 /// touched object has a new version and is hashed again. The key set is the
 /// resolved encoder and its loaded dependencies, so it stays small.
-static ENGINE_OBJECT_DIGESTS: std::sync::LazyLock<
-    std::sync::Mutex<std::collections::HashMap<std::path::PathBuf, (String, Vec<u8>)>>,
-> = std::sync::LazyLock::new(Default::default);
+/// Digest per engine object path, tagged with the object version it was taken at.
+type EngineObjectDigests =
+    std::sync::Mutex<std::collections::HashMap<std::path::PathBuf, (String, Vec<u8>)>>;
+static ENGINE_OBJECT_DIGESTS: std::sync::LazyLock<EngineObjectDigests> =
+    std::sync::LazyLock::new(Default::default);
 
 fn cached_engine_digest(path: &std::path::Path, version: &str) -> Option<Vec<u8>> {
     ENGINE_OBJECT_DIGESTS
