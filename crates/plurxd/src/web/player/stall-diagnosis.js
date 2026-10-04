@@ -671,11 +671,26 @@ function measuredCandidateCatalog(p,candidates){
     return {...candidate,average_bps:output?.average_bps??null,peak_bps:output?.peak_bps??null};
   });
 }
+function continuousFamilyPeak(p,candidateId){
+  // The open family's declared, server-enforced container-inclusive budget
+  // (video plus shared audio): an object over it is refused, never served.
+  const family=p.continuousQuality&&!p.continuousQuality.closed?p.continuousQuality.family:null;
+  const row=family&&Array.isArray(family.video)?family.video.find(member=>member.candidate_id===candidateId):null;
+  const peak=row?row.peak_bps+(family.audio?.peak_bps||0):null;
+  return Number.isSafeInteger(peak)&&peak>0?peak:null;
+}
 function candidatePositiveMargin(p,candidate,transfer){
-  const output=measuredCandidateOutput(p,candidate),link=PlaybackPolicy.qualityTransferBps(transfer);
-  return !!(output&&candidateTransferOriginCurrent(transfer)&&transfer?.receipt&&transfer.etag&&transfer.attachment===p.mediaAttachment
-    &&transfer.session_id===p.sessionId&&transfer.candidate_id===p.qualityCandidateId
-    &&link>0&&link>=output.peak_bps*1.8);
+  const link=PlaybackPolicy.qualityTransferBps(transfer);
+  const own=!!(candidateTransferOriginCurrent(transfer)&&transfer.etag&&transfer.attachment===p.mediaAttachment
+    &&transfer.session_id===p.sessionId&&transfer.candidate_id===p.qualityCandidateId&&link>0);
+  // Between members of the open continuous family, cost is the family's
+  // enforced budget and the evidence is a completed family object of this
+  // session. Those role-split objects are not a muxed candidate's output, so
+  // they carry no candidate link receipt and are never reported as one.
+  const family=continuousFamilyPeak(p,candidate?.id);
+  if(family!=null&&continuousFamilyPeak(p,p.qualityCandidateId)!=null) return own&&link>=family*1.8;
+  const output=measuredCandidateOutput(p,candidate);
+  return !!(output&&own&&transfer.receipt&&link>=output.peak_bps*1.8);
 }
 function unknownStageableOriginal(p,candidate){
   if(!candidate||candidate.route!=='remux'||candidate.decoder_compatible!==true

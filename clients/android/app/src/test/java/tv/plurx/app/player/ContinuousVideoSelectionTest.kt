@@ -153,4 +153,21 @@ class ContinuousVideoSelectionTest {
         assertSame(unrelated, continuousQualityBoundCatalog(listOf(unrelated), family).single())
     }
 
+    @Test
+    fun onlyVideoMembersOfTheFamilyTakeFamilyLinkEvidence() {
+        val family = buildJsonObject {
+            put("video", JsonArray(listOf("a".repeat(32), "b".repeat(32)).map { id -> buildJsonObject {
+                put("candidate_id", id); put("peak_bps", 8_000_000)
+            } }))
+            put("audio", buildJsonObject { put("candidate_id", "c".repeat(32)); put("peak_bps", 200_000) })
+        }
+        assertTrue(continuousFamilyMember(family, "a".repeat(32)))
+        assertTrue(continuousFamilyMember(family, "b".repeat(32)))
+        assertFalse("the shared soundtrack is not a video rung", continuousFamilyMember(family, "c".repeat(32)))
+        assertFalse(continuousFamilyMember(family, "d".repeat(32)))
+        assertFalse(continuousFamilyMember(family, null))
+        assertFalse(continuousFamilyMember(null, "a".repeat(32)))
+        assertFalse(continuousFamilyMember(buildJsonObject { put("video", "malformed") }, "a".repeat(32)))
+    }
+
 }

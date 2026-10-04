@@ -277,6 +277,31 @@ test("a05 positive margin refuses bare metrics and retired candidate attachment"
   assert.equal(context.candidatePositiveMargin(player,candidate,transfer),false);
 });
 
+test("continuous family upgrades use the enforced family budget and the family's own objects", () => {
+  const source=fs.readFileSync("crates/plurxd/src/web/player/stall-diagnosis.js","utf8");
+  const begin=source.indexOf("function candidateTransferOriginCurrent(");
+  const end=source.indexOf("\nasync function ",begin+1);
+  const context=vm.createContext({URL,location:{href:"http://server/"},PlaybackPolicy:policy}); vm.runInContext(source.slice(begin,end),context);
+  const low={id:"1".repeat(32),recipe_digest:Array(32).fill(1),route:"encode"};
+  const high={id:"2".repeat(32),recipe_digest:Array(32).fill(2),route:"encode"};
+  const other={id:"3".repeat(32),recipe_digest:Array(32).fill(3),route:"encode"};
+  const family={video:[{candidate_id:low.id,peak_bps:4000000},{candidate_id:high.id,peak_bps:8000000}],audio:{peak_bps:200000}};
+  const player={sessionId:"session",qualityCandidateId:low.id,mediaAttachment:{},measuredCandidateOutputs:[],
+    continuousQuality:{closed:false,family}};
+  // 16 Mb/s against the 8.2 Mb/s video-plus-audio budget: above 1.8x, with
+  // no candidate receipt (family objects never carry one) and no sidecar.
+  const transfer={bytes:2000000,elapsed_ms:1000,age_ms:0,completed:true,from_cache:false,producer_paced:false,etag:"e",
+    attachment:player.mediaAttachment,session_id:player.sessionId,candidate_id:low.id,origin:"http://server"};
+  assert.equal(context.candidatePositiveMargin(player,high,transfer),true);
+  assert.equal(context.candidatePositiveMargin(player,high,{...transfer,bytes:1800000}),false,"14.4 Mb/s is under 1.8x the budget");
+  assert.equal(context.candidatePositiveMargin(player,high,{...transfer,etag:null}),false);
+  assert.equal(context.candidatePositiveMargin(player,high,{...transfer,from_cache:true}),false);
+  assert.equal(context.candidatePositiveMargin(player,high,{...transfer,session_id:"other"}),false);
+  assert.equal(context.candidatePositiveMargin(player,other,transfer),false,"non-members still need a measured output and a receipt");
+  player.continuousQuality.closed=true;
+  assert.equal(context.candidatePositiveMargin(player,high,transfer),false,"a closed family proves nothing");
+});
+
 test("a05 qualified full-output sidecar is required for positive candidate margin", () => {
   const source=fs.readFileSync("crates/plurxd/src/web/player/stall-diagnosis.js","utf8");
   const begin=source.indexOf("function candidateTransferOriginCurrent(");

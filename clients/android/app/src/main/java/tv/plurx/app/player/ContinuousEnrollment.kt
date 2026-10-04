@@ -117,6 +117,16 @@ internal class ContinuousEnrollment(origin: String, token: String) : AutoCloseab
 
 
 /** Costs describe the attached continuous presentation, including its shared soundtrack. */
+/**
+ * Whether [candidateId] is a video member of [family]. Between members, Auto
+ * costs a rung by the family's enforced delivery budget and takes its link
+ * evidence from the family's own objects in this session; those role-split
+ * objects are not a muxed candidate's output and carry no candidate receipt.
+ */
+internal fun continuousFamilyMember(family: JsonObject?, candidateId: String?): Boolean =
+    family != null && candidateId != null &&
+        (family["video"] as? JsonArray)?.any { (it as? JsonObject)?.text("candidate_id") == candidateId } == true
+
 internal fun continuousQualityBoundCatalog(candidates: List<QualityCandidate>, family: JsonObject?): List<QualityCandidate> {
     if (family == null) return candidates
     val audio = family.obj("audio")?.number("peak_bps") ?: 0L

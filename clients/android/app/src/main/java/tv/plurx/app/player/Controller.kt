@@ -3487,6 +3487,16 @@ class Controller internal constructor(
         }
     }
 
+    /**
+     * A receipted body is attested candidate evidence. A family object of the
+     * live continuous session is the family's own evidence instead: its cost
+     * is the family's enforced budget, and its role-split objects are not a
+     * muxed candidate's output, so they carry no candidate receipt (and are
+     * never reported as candidate link samples).
+     */
+    private fun autoLinkAttested(transfer: AutoCompletedTransfer, currentId: String): Boolean =
+        transfer.receipt != null || liveContinuous()?.hasMember(currentId) == true
+
     private suspend fun selectAutoStallRecoveryCandidate(observation: ControllerStallGuard.Observation, capturedAtMs: Long, deadlineMs: Long) {
         if (!tv.plurx.app.data.Session.displayAwareAuto || !tv.plurx.app.data.Session.autoAbr ||
             tv.plurx.app.data.Session.displayAwareAutoProtocol != "route-v1" ||
@@ -3499,7 +3509,7 @@ class Controller internal constructor(
         val duration = transfer?.bodyDurationMs
         val link = if (transfer != null && duration != null && transfer.networkLoad &&
             transfer.fromLocalCache == false && transfer.producerPaced == false &&
-            transfer.statusCode == 200 && transfer.receipt != null && transfer.etag != null &&
+            transfer.statusCode == 200 && autoLinkAttested(transfer, current.id) && transfer.etag != null &&
             autoTransferOriginCurrent(transfer) &&
             transfer.pipelineIdentity === autoTransfersByPlayer[player] && sessionId != null &&
             transfer.segmentId.contains("/$sessionId/") &&
@@ -3628,7 +3638,7 @@ class Controller internal constructor(
         val duration = transfer?.bodyDurationMs
         val link = if (transfer != null && duration != null && transfer.networkLoad &&
             transfer.fromLocalCache == false && transfer.producerPaced == false &&
-            transfer.statusCode == 200 && transfer.receipt != null && transfer.etag != null &&
+            transfer.statusCode == 200 && autoLinkAttested(transfer, current.id) && transfer.etag != null &&
             autoTransferOriginCurrent(transfer) &&
             transfer.pipelineIdentity === autoTransfersByPlayer[player] && sessionId != null &&
             transfer.segmentId.contains("/$sessionId/") &&

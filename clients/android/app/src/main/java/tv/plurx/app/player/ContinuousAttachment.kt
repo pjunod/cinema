@@ -150,6 +150,9 @@ internal class ContinuousAttachment(
     fun boundCatalog(candidates: List<tv.plurx.app.data.QualityCandidate>): List<tv.plurx.app.data.QualityCandidate> =
         if (closed.get()) candidates else continuousQualityBoundCatalog(candidates, start.family)
 
+    fun hasMember(candidateId: String?): Boolean =
+        !closed.get() && continuousFamilyMember(start.family, candidateId)
+
     /** Call with the current buffered frontier, never the old tap position. */
     suspend fun change(row: JsonObject, positionMs: Long, automatic: Boolean, request: Long = 0): Boolean {
         if (closed.get() || row !in rows) return false
