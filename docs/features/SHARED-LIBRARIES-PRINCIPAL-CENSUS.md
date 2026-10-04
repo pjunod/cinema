@@ -1820,3 +1820,34 @@ This receipt qualifies the embedded plain-text/SDR Source actor slice; actual
 HTTP native transport is a separate S2 fixture, while directed control,
 burn/HDR/Dolby Vision, direct/progressive and physical restart recovery remain
 open. No ordinary Shared queue or generic Local control authority is enabled.
+
+### Source preparation parent-descriptor settlement ordering
+
+The native combined baseline is `8c446066f45cba9f79b5f69b38d73d2e61027788`.
+A subsequent physical audit found an ordering gap in the three detached
+Source preparation workers: child waits, pipe joins and physical permits
+settled before notification, but their original held Source descriptor was
+still a closure local until the worker future returned after notification.
+Index, probe and native extraction now explicitly consume and drop that
+last parent fence before setting their settled flag or notifying waiters.
+Returned index/probe/native evidence contains no descriptor; actual producer
+and response-body fences retain their separate owned lifetime barriers.
+
+`source_preparation_closes_actual_parent_descriptors_before_settlement`
+runs actual one-voter Source cold indexing, encoded probing and embedded
+text extraction. Each worker performs an immediate Unix descriptor census
+at its close boundary, without an intervening await, allocation or descriptor
+open, and the test requires a recorded closed parent for every worker family.
+This receipt addresses parent-descriptor ordering, not abrupt process-death
+recovery or the separately retained producer/body read obligations.
+
+The exact descriptor-ordering regression passed one test, zero ignored,
+in 33.83 seconds on normal stacks. The pinned daemon all-target compiler
+check passed in 53.56 seconds; documentation index checks passed four tests
+and catalog lint covered 2,715 files. The Unix census observes the actual
+worker descriptor immediately after its explicit close; it is diagnostic
+fixture evidence and never supplies production authority or capacity release.
+Denied-lint and normal tracked-hook validation complete the checkpoint.
+The exact pinned denied-warning daemon all-target Clippy check also passed
+in 66 seconds. Production closes the descriptor without publishing a diagnostic
+boolean as authority; only test observers record the descriptor census.

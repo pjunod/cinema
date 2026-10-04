@@ -1595,6 +1595,8 @@ struct PausingSourceIndexHooks {
     retry: crate::seam_hooks::PauseSlot,
     failed_wait: std::sync::atomic::AtomicBool,
     spawned_pid: std::sync::atomic::AtomicU32,
+    closed_parents: std::sync::atomic::AtomicUsize,
+    open_parent_at_settlement: std::sync::atomic::AtomicBool,
 }
 #[cfg(test)]
 impl SourceIndexHooks for PausingSourceIndexHooks {
@@ -1615,6 +1617,33 @@ impl SourceIndexHooks for PausingSourceIndexHooks {
     }
     fn as_any(&self) -> &dyn std::any::Any {
         self
+    }
+}
+impl SourceIndexHookOwner {
+    fn record_parent_closed(&self, _closed: bool) {
+        #[cfg(all(test, unix))]
+        {
+            let hooks = self.test_hooks();
+            hooks
+                .open_parent_at_settlement
+                .fetch_or(!_closed, std::sync::atomic::Ordering::Release);
+            hooks
+                .closed_parents
+                .fetch_add(1, std::sync::atomic::Ordering::Release);
+        }
+    }
+    #[cfg(all(test, unix))]
+    pub(crate) fn assert_closed_parent_settlements(&self) {
+        let hooks = self.test_hooks();
+        assert!(
+            hooks
+                .closed_parents
+                .load(std::sync::atomic::Ordering::Acquire)
+                > 0
+        );
+        assert!(!hooks
+            .open_parent_at_settlement
+            .load(std::sync::atomic::Ordering::Acquire));
     }
 }
 #[cfg(test)]
@@ -1822,7 +1851,10 @@ pub(crate) fn start_source_index(
         };
         result.source_unchanged = source.unchanged();
         *owned.result.lock().expect("Source index result") = Some(result);
-        // Publish settlement only after dropping the actual physical permit.
+        crate::transcode::source_preparation::close_source_before_settlement(source, |closed| {
+            hooks.record_parent_closed(closed);
+        });
+        // Publish settlement only after dropping the parent descriptor and actual permit.
         drop(owned.permit.lock().expect("Source index permit").take());
         owned
             .settled

@@ -150,6 +150,9 @@ pub(super) fn start_source_native(
             &hooks,
         )
         .await;
+        super::source_preparation::close_source_before_settlement(source, |closed| {
+            hooks.record_parent_closed(closed);
+        });
         // extract_native returns only after each real child and both pipe
         // tasks have settled. A task panic retains this state and permit.
         drop(
