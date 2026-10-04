@@ -49,6 +49,46 @@ pub struct ReceiverSessionWriteAuthority {
     pub(crate) observed_at_ms: i64,
 }
 
+impl ReceiverSessionWriteAuthority {
+    /// Finite delivery deadline from this actual Store observation. The issuing
+    /// transaction still repeats the current login and exact owner guards.
+    pub fn receiver_delivery_deadline(&self, owner_lease_ms: i64) -> Option<i64> {
+        delivery_deadline(self.observed_at_ms, owner_lease_ms, self.login_expires_at_s)
+    }
+}
+
+fn delivery_deadline(
+    observed_ms: i64,
+    owner_lease_ms: i64,
+    login_expiry_s: Option<i64>,
+) -> Option<i64> {
+    if observed_ms <= 0 {
+        return None;
+    }
+    let mut deadline = observed_ms.checked_add(30_000)?.min(owner_lease_ms);
+    if let Some(expiry) = login_expiry_s {
+        deadline = deadline.min(expiry.checked_mul(1_000)?);
+    }
+    (deadline > observed_ms).then_some(deadline)
+}
+
+#[cfg(test)]
+mod deadline_tests {
+    use super::delivery_deadline;
+
+    #[test]
+    fn receiver_delivery_deadline_respects_original_login_owner_and_checked_clock() {
+        assert_eq!(delivery_deadline(10_000, 50_000, Some(12)), Some(12_000));
+        assert_eq!(delivery_deadline(10_000, 50_000, None), Some(40_000));
+        assert_eq!(delivery_deadline(10_000, 20_000, None), Some(20_000));
+        assert_eq!(delivery_deadline(10_000, 10_000, None), None);
+        assert_eq!(delivery_deadline(10_000, 50_000, Some(10)), None);
+        assert_eq!(delivery_deadline(i64::MAX - 29_999, i64::MAX, None), None);
+        assert_eq!(delivery_deadline(10_000, 50_000, Some(i64::MAX)), None);
+        assert_eq!(delivery_deadline(0, 50_000, None), None);
+    }
+}
+
 /// Exact existing blocked receiver owner. No Source or delivery authority.
 #[derive(Clone)]
 pub struct ReceiverPendingRenewal {

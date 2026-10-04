@@ -107,12 +107,23 @@ async function viewSharedCatalogue(generation=++PAGE_RENDER_GENERATION){
         const item=detail.item,current=sharedCatalogueReference(item?.reference);
         if(sharedCatalogueGroupKey(current)!==sharedCatalogueGroupKey(ref)||current.library_id!==ref.library_id||current.item_id!==ref.item_id) throw new Error("Shared source changed");
         if(!Array.isArray(detail.files)||detail.files.length>64) throw new Error("Shared details unavailable");
-        paint(`${SHARED_ARTWORK.markup(item,ref,capture,true)}<h2>${esc(item.title||"")}</h2><p>${esc(item.overview||"")}</p><p class="muted">Playback is not available for this shared item yet.</p><div>${detail.files.map(file=>{
+        const launch=detail.delivery_status==="available";
+        paint(`${SHARED_ARTWORK.markup(item,ref,capture,true)}<h2>${esc(item.title||"")}</h2><p>${esc(item.overview||"")}</p>${launch?"":'<p class="muted">Playback is not available for this shared item yet.</p>'}<div>${detail.files.map((file,index)=>{
           sharedCatalogueId(file.file_id);
           const fileRef=sharedCatalogueReference(file.reference?.item);
           if(JSON.stringify(fileRef)!==JSON.stringify(current)||file.reference.file_id!==file.file_id) throw new Error("Shared file changed");
-          return `<p>${esc(file.video_codec||file.container||"Media file")}${file.duration_ms?` · ${esc(fmtDur(file.duration_ms/1000))}`:""}</p>`;
+          return `<p>${esc(file.video_codec||file.container||"Media file")}${file.duration_ms?` · ${esc(fmtDur(file.duration_ms/1000))}`:""} <button data-shared-play="${index}"${launch?"":" disabled"}>Play</button></p>`;
         }).join("")}</div><div id="shared-children"></div>`);
+        const mount=document.getElementById("shared-catalogue");
+        if(mount)for(const button of mount.querySelectorAll("button[data-shared-play]")){
+          if(!(button instanceof HTMLButtonElement))continue;
+          const index=Number(button.dataset.sharedPlay),file=detail.files[index];
+          if(!file||!Number.isInteger(index)||index<0||index>=detail.files.length)continue;
+          button.onclick=async()=>{if(!launch||!sharedCatalogueCurrent(capture))return;button.disabled=true;
+            try{await sharedCataloguePlay(ref,file.file_id,capture);}catch(error){if(sharedCatalogueCurrent(capture))button.title=error.message||"Shared playback unavailable";}
+            finally{if(sharedCatalogueCurrent(capture))button.disabled=!launch;}
+          };
+        }
         await sharedCatalogueLoadPage(`${base}/items/${ref.item_id}/children`,ref,capture,"shared-children");
       }else{
         const ref=parsed.reference;
@@ -155,4 +166,20 @@ async function sharedCatalogueLoadPage(path,ref,capture,mount,q=""){
     finally{loading=false;}
   };
   await load();
+}
+
+// Fresh B details mint the opaque context. Displayed cached file facts never
+// become a Play authority, and Source numbers never enter the Local router.
+async function sharedCataloguePlay(reference,fileId,capture){
+  const ref=sharedCatalogueReference(reference),id=sharedCatalogueId(fileId);
+  if(!sharedCatalogueCurrent(capture))throw new Error("Shared page changed.");
+  const fresh=await SHARED_DECISION.details(ref);
+  if(!sharedCatalogueCurrent(capture)||fresh.detail.delivery_status!=="available")throw new Error("Shared playback is not available yet.");
+  const selected=fresh.files.find(entry=>entry.context.source_file_id===id);
+  if(!selected)throw new Error("Shared file changed.");
+  const watch=fresh.detail.watch;
+  const resume=watch&&!watch.watched?watch.position_ms:0,duration=selected.file.duration_ms??0;
+  if(!Number.isSafeInteger(resume)||resume<0||!Number.isSafeInteger(duration)||duration<0)throw new Error("Shared timeline unavailable.");
+  return play(id,fresh.detail.item.title||"Shared item",resume,duration,
+    {...fresh.detail.item,fileContext:selected.context,sharedReference:ref});
 }

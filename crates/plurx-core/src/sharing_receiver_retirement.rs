@@ -36,9 +36,9 @@ pub enum ReceiverRetirementOutcome {
 }
 
 /// Captured claim ownership. Unassigned is a real retained NULL owner, not a
-/// wildcard; Assigned retains the original attempted node, including an
-/// uncertain assignment commit. The exact cleanup transaction proves that the
-/// actual request still has that owner; it never adopts another node.
+/// wildcard. Assigned retains the original immutable attempted node, including
+/// commit-unknown assignment; the cleanup transaction proves the actual exact
+/// row. A Refused result may try the retained Unassigned tuple; an error may not.
 pub enum ReceiverPendingOwner {
     Unassigned,
     Assigned(String),

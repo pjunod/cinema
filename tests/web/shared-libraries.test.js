@@ -101,3 +101,15 @@ test("Continue Watching preserves two assigned libraries from the same Source",a
  await fixture.h.view(1);const html=fixture.elements.get("shared-continue-0").innerHTML;
  assert.match(html,/Library title 0/);assert.match(html,/Library title 1/);assert.ok(!html.includes("Local"));
 });
+
+test("Shared launch refetches current delivery and retains string file identity and resume",async()=>{
+ const fixture=harness(),launches=[],fileContext={source_file_id:"9007199254740993"};
+ fixture.context.SHARED_DECISION={details:async()=>({detail:{delivery_status:"available",item:{title:"Fresh",reference:ref},watch:{position_ms:12500,watched:false}},files:[{context:fileContext,file:{duration_ms:90000}}]})};
+ fixture.context.play=(...args)=>{launches.push(args);};
+ vm.runInContext("this.launch=sharedCataloguePlay",fixture.context);
+ await fixture.context.launch(ref,"9007199254740993",fixture.capture());
+ assert.equal(launches[0][0],"9007199254740993");assert.equal(launches[0][2],12500);assert.equal(launches[0][4].fileContext,fileContext);
+ fixture.context.SHARED_DECISION.details=async()=>({detail:{delivery_status:"unavailable"},files:[]});
+ await assert.rejects(fixture.context.launch(ref,"9007199254740993",fixture.capture()));assert.equal(launches.length,1);
+ fixture.context.AUTH_GENERATION++;await assert.rejects(fixture.context.launch(ref,"9007199254740993",fixture.capture()));assert.equal(launches.length,1);
+});

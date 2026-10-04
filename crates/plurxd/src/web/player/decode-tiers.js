@@ -1066,6 +1066,15 @@ function choosePlayRoute(attempt,decided,prepared,initialAudio){
   // purpose and history isolation are enforced. Copy-HLS retains source video
   // when the decision does not require an encode.
   if(libraryChannel) initialRoute=decision.method==='transcode'?'transcode_hls':'copy_hls';
+  if(attempt.fileContext&&playbackFileContext(attempt.fileContext).source_ref.kind!=="local"){
+    const grade=decision.delivered_dynamic_range;
+    const supported=decision.method==='transcode'
+      ?!noSegments()&&(nativeHls||!!(window.Hls&&Hls.isSupported())):hlsAvailable;
+    if(preBurn!=null||!supported||grade&&grade!=='sdr'||decision.preserve_dolby_vision===true){
+      failPreparation(Object.assign(new Error("This shared delivery is not available yet."),{code:"sharing_start_unsupported"}),attempt);return null;
+    }
+    initialRoute=decision.method==='transcode'?'transcode_hls':'copy_hls';
+  }
   // A burn is a transcode whatever the plan said. The server's plan is a remux
   // (or a direct play) when the PGS application overlay is enabled — a delivery
   // this player does not implement, so `prePlayBurnNeeded()` said yes where the

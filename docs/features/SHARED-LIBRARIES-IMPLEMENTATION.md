@@ -4435,6 +4435,63 @@ cannot qualify the daemon's owned no-send CAS or joined jobs. Feature Clippy
 passes in 1 minute 36 seconds. The normal tracked hook remains mandatory, and
 moving the intended base requires exact combined ingress/cleanup qualification.
 
+### Shared web initial Start and ordered receiver progress
+
+The existing Shared detail page keeps Play unavailable until a freshly read B
+item reports `delivery_status: available`. The prepared caller refetches that
+item before launch, retains the full import/Source/epoch/library/item/file
+identity and opaque B file base, and resumes only the fresh B-owned watch
+position. Source IDs remain canonical strings, including values beyond the
+JavaScript integer range. The saved Developer Sharing choice remains unchanged.
+
+Initial playback uses session-first Copy HLS or unburned SDR encoded HLS when
+the actual decision and browser capability support it. Unsupported burn, HDR,
+DV or absent HLS capability refuses. No direct/progressive fallback opens
+pre-session bytes. The initial signed-file Start retains the complete original
+caps, request UUID, initial quality and resume, including explicit null fields.
+Non-null predecessor, control sequence, reopen reason and initial intent remain
+unsupported. The ordinary complete B Start reply is validated against its own
+B session playlist/control URLs, incarnation and control epoch before its full
+compound context is attached to the Player. This is routing metadata, never
+Source physical evidence. Generic Source controls/recovery remain pending.
+
+Progress uses the existing B item endpoint with only B session UUID, ordered
+sequence, position, optional duration and watched flag. Sequence state follows
+the actual Source/epoch/item/user history key across imports and sessions.
+An uncertain network send retains its exact sequence and payload for retry.
+A typed stale/conflict 409 discards that old beat, reads fresh authorized B
+history, and seeds a later new beat above the current sequence; it never
+renumbers and replays old user state. A failed resync blocks new beats until a
+fresh read succeeds. Zero position requires the existing current attachment
+having reached a timeline. Accepted context survives browsing under the same
+login/origin and is rejected after account replacement.
+
+The opaque receiver authority also exposes a finite delivery deadline helper:
+checked Store observation plus 30 seconds, capped by captured owner lease and
+original login expiry. Overflow or an already expired bound returns no
+deadline. This helper does not replace the issuer's same-transaction guards.
+
+Web tests use explicitly synthetic B protocol envelopes, not a physical
+end-to-end fixture. Public ingress/relay/control enablement still requires the
+Root-owned real pinned Source/B qualification and actual accepted connection,
+body and job ownership through cleanup.
+
+Finite caller qualification on the pending-retirement ancestor:
+
+```sh
+node --test tests/web/shared-libraries.test.js tests/web/shared-decision.test.js tests/web/file-context.test.js
+make web-check
+cargo test -p plurx-core --features hiqlite-store,hiqlite-contract-tests --lib receiver_delivery_deadline -- --nocapture
+cargo clippy -p plurx-core -p plurxd --features plurx-core/hiqlite-store,plurx-core/hiqlite-contract-tests --all-targets -- -D warnings
+```
+
+The focused web run reports 35 passed, zero skipped. The full web lane passes,
+including TypeScript without baseline increases and 484 contrast pairs with
+zero failures. The pinned deadline unit reports 1 passed, zero ignored;
+feature Clippy passes in 1 minute 30 seconds. These are caller/metadata
+regressions only. Moving the intended base requires requalification, and the
+candidate ingress remains unregistered until the actual physical relay receipt.
+
 ### S5 joined pending-request cleanup and Source native intent identity
 
 The receiver owner now records its actual claim stage before each claim or
@@ -4487,3 +4544,76 @@ The inert preclaim test runs the actual owned task against the real fixture
 Store, waits for joined retirement and confirms that no route was created. It
 qualifies that early failure case; it does not claim full pinned B-to-Source
 playback or a physical Source cleanup result from registry absence.
+
+### S5 exact Source status and HTTP resource integration
+
+The receiver checks the retained Source session through a fixed authenticated
+status RPC before its first publication and each attached renewal. The bounded
+strict decoder requires the complete VOD Start response and the original
+Source incarnation, session and control epoch. Cleanup-only status, changed
+lineage and presentation origin cannot authorize publication. Each subsequent
+receiver writer still checks the original login and current receiver authority.
+
+On the integrated Source HTTP checkpoint `c8596f4b9` and receiver checkpoint
+`1621b4967`, pinned Rust 1.97.1 all-target check passed in 58.29 seconds after
+making only the decoded fact accessor crate-visible. Denied-warning feature
+Clippy passed in 63 seconds. The strict status wire test passed one test;
+actual Source HTTP passed sixteen in 38.26 seconds, receiver ownership eight
+in 0.14 seconds, strict Start decoding five and End decoding two, all zero
+ignored. These results qualify Source HTTP and receiver status seams. The
+receiver streaming relay and full physical B-to-Source playback remain open.
+The caller is also qualified on the complete joined-pending receiver ancestor
+`1621b4967`. Additive integration retains its independent Unsupported refusal
+and private cleanup factory. The exact combined focused web run reports 36
+passed, zero skipped; the supplemental case starts two synthetic B sessions
+through different assigned imports of the same Source/epoch/item and sends
+sequences 5 then 6 from an initial watch sequence 4. The complete web lane and
+four documentation index tests pass. The pinned deadline unit reports one
+passed, zero ignored, after the combined Core test compile in 1 minute 3
+seconds. These results remain protocol/metadata evidence, not native hardware
+or physical B-to-Source playback qualification.
+The same combined feature all-target Clippy passes in 1 minute 43 seconds.
+The actual daemon ingress filter reports four passed, zero ignored in 0.19
+seconds, preserving complete request fields, recovery refusal, account-authenticated
+aliases and the unregistered public route. The normal merge hook remains
+required for the exact resulting tree.
+
+Root integration of web/delivery checkpoint `b2da6e0e7` onto Source HTTP/status
+checkpoint `850bd67c5` passed pinned all-target check in 79 seconds and denied
+feature Clippy in 88 seconds. The three Shared web suites passed 33 tests,
+file-context passed 13, receiver ingress four in 0.19 seconds and the replicated
+feature delivery deadline unit one, all zero skipped/ignored. The normal tracked
+hook and documentation index checks run before the merge commit. This remains
+a caller/authority checkpoint; full receiver streaming is still under construction.
+
+### S5 guarded Source resource client and native HTTP integration
+
+The receiver's fixed Source resource RPC retains the complete original private
+request and exact Source reference/session/incarnation/epoch. Replies must echo
+that whole tuple and the requested closed resource, use single canonical length
+and MIME headers, and have no content encoding, transfer encoding or trailers.
+Playlists are bounded and validated as relative HLS before publication. Media
+streams preserve exact declared length and the original finite deadline, split
+coalesced transport frames into at most 64KiB chunks without copying the whole
+file, and retain the actual upstream connection driver.
+
+The driver's private lifetime guard survives response EOF and drops only after
+the socket future is destroyed, including cancellation. Actual receiver Source
+Start and status calls carry the same kind of owned connection barrier. After
+B publication, the actor issues the hash of its actual B session UUID under
+fresh original-login authority with a finite Store-derived deadline. It retains
+the exact lease used by attachment/publication before readers can run. The
+candidate resource opener checks the original B login, exact published route,
+full retained binding and delivery grant both before Source IO and after it.
+It remains unregistered pending accepted B writer and physical relay tests.
+
+Native Source HTTP checkpoint `1d290681d` is integrated with these changes.
+Pinned Rust 1.97.1 denied-warning feature Clippy passed on the final tree in
+65 seconds. Strict resource headers and bounded framing passed two tests;
+the real Hyper/socket lifetime test passed one; receiver ownership passed eight,
+all zero ignored. Actual Source HTTP passed nineteen in 45.78 seconds, Native
+Copy/encoded actors ten in 33.63 seconds, and the actual three-family preparation
+FD-close regression one in 33.95 seconds, all zero ignored. These tests qualify
+Source resources and client/ownership seams; they do not qualify full physical
+B playback, accepted B writers, controls or live Tailscale/hardware behavior.
+Documentation checks and the normal tracked hook remain required before commit.
