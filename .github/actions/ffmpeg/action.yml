@@ -44,6 +44,9 @@ runs:
         WANT_BINARY: ${{ inputs.binary }}
       run: |
         set -euo pipefail
+        # The runner leaves an empty optional input's variable unset, and
+        # `set -u` would then fail every caller that names only a major.
+        WANT_BINARY="${WANT_BINARY:-}"
         if command -v ffmpeg >/dev/null 2>&1; then
           version_output="$(ffmpeg -version)"
           banner="${version_output%%$'\n'*}"
