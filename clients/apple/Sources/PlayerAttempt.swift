@@ -174,10 +174,17 @@ enum AttemptFence: String, CaseIterable, Sendable {
     case autoCatalogRefresh = "auto_catalog_refresh"
     /// An asynchronous Auto offer cannot alter a newer title or viewer intent.
     case autoQualityOffer = "auto_quality_offer"
-    /// Failed exposure may restore only the incumbent belonging to this owner.
-    case autoQualityRollback = "auto_quality_rollback"
-    /// Preserve newer transport intent; the caller separately fences the recipe.
+    /// `commitPreparedSuccessor`: failed exposure may restore only the
+    /// incumbent belonging to this title and attachment. Preserve newer
+    /// transport intent; the caller separately fences the recipe.
     case preparedPipelineRollback = "prepared_pipeline_rollback"
+    /// `preparedCommitStillOwned`: the prepared commit, including its
+    /// rendezvous and decoded-alignment waits, belongs to the viewer action
+    /// it began under. A Play, Pause, seek or track change ends it.
+    case preparedCommit = "prepared_commit"
+    /// `applyRetainedQualityWithRestart`: the reopen after the awaited intent
+    /// report belongs to the explicit Apply with restart that asked for it.
+    case retainedQualityRestart = "retained_quality_restart"
 
     /// The epochs this fence depends on — exactly the fields its old
     /// conjunction compared.
@@ -196,8 +203,9 @@ enum AttemptFence: String, CaseIterable, Sendable {
         case .autoInitialLayout: return [.initialDecision]
         case .autoCatalogRefresh: return [.lifecycle, .viewerAction]
         case .autoQualityOffer: return [.lifecycle, .viewerAction]
-        case .autoQualityRollback: return [.lifecycle, .open, .viewerAction]
         case .preparedPipelineRollback: return [.lifecycle, .open, .seek]
+        case .preparedCommit: return [.viewerAction]
+        case .retainedQualityRestart: return [.viewerAction]
         }
     }
 }

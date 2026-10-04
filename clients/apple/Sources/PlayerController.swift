@@ -4372,14 +4372,16 @@ final class PlayerController: ObservableObject {
 
     func applyRetainedQualityWithRestart() {
         guard qualityChangeRetained else { return }
-        let actionEpoch = beginViewerAction()
+        beginViewerAction()
+        let restartAttempt = snapshotAttempt()
         manualQualityRetention.clear()
         qualityChangeRetained = false
         recipeRevision.change()
         Task { @MainActor [weak self] in
             guard let self else { return }
             self.retainControlSequence(await self.playbackControl.reportIntent())
-            guard self.started, self.viewerActionEpoch == actionEpoch else { return }
+            guard self.started,
+                  self.attemptStillCurrent(restartAttempt, fence: .retainedQualityRestart) else { return }
             await self.reopen(at: self.positionForPlaybackIntent())
         }
     }
@@ -10665,7 +10667,10 @@ extension PlayerController: PreparedSuccessorHost {
         _ action: PreparedReplacementAction
     ) async -> PreparedCommitOutcome {
         let automaticTrial = autoPreparing
-        let commitViewerEpoch = viewerActionEpoch
+        // The viewer action this commit began under. Every step below, and the
+        // rendezvous and decoded-alignment waits it hands this to, asks
+        // `preparedCommitStillOwned` rather than comparing the epoch by hand.
+        let commitAttempt = snapshotAttempt()
         if automaticTrial && !autoTrialAllowsExposure(action) { return .failedWithoutReopen }
         guard autoStagedProductionAllowsCommit(action) else { return .refused }
         guard autoStagedOriginalAllowsCommit(action) else { return .refused }
@@ -10703,20 +10708,20 @@ extension PlayerController: PreparedSuccessorHost {
             now: { Int(ProcessInfo.processInfo.systemUptime * 1_000) },
             sleep: { try? await Task.sleep(nanoseconds: UInt64($0) * 1_000_000) },
             read: { [weak self] in
-                guard let self, self.viewerActionEpoch == commitViewerEpoch,
+                guard let self, self.preparedCommitStillOwned(commitAttempt),
                       self.preparedPlayer === successor, self.wantsPlayback,
                       !self.pictureInPictureIsActive, !self.player.isExternalPlaybackActive else { return false }
                 return self.playbackSurface?.canPromote(successor) == true ? true : nil
             }
         )
         guard layerReady == true, preparedPlayer === successor,
-              viewerActionEpoch == commitViewerEpoch, wantsPlayback else {
+              preparedCommitStillOwned(commitAttempt), wantsPlayback else {
             discardPreparedSuccessor()
             return .failedWithoutReopen
         }
         guard let frameDurationSeconds = await awaitPreparedFrameDuration(of: item),
               preparedItem === item, preparedPlayer === successor,
-              viewerActionEpoch == commitViewerEpoch, wantsPlayback else {
+              preparedCommitStillOwned(commitAttempt), wantsPlayback else {
             discardPreparedSuccessor()
             return .failedWithoutReopen
         }
@@ -10749,7 +10754,7 @@ extension PlayerController: PreparedSuccessorHost {
         guard let alignedOutput = preparedVideoOutput,
               await awaitPreparedDecodedAlignment(
                 item: item, successor: successor, output: alignedOutput,
-                rendezvous: rendezvous, frameDurationSeconds: frameDurationSeconds, viewerEpoch: commitViewerEpoch
+                rendezvous: rendezvous, frameDurationSeconds: frameDurationSeconds, commit: commitAttempt
               ) else {
             discardPreparedSuccessor()
             return .failedWithoutReopen
@@ -10758,7 +10763,7 @@ extension PlayerController: PreparedSuccessorHost {
         guard await awaitPreparedRendezvous(
             item: item, successor: successor, rendezvous: rendezvous,
             frameDurationSeconds: frameDurationSeconds, rate: rendezvousRate,
-            viewerEpoch: commitViewerEpoch
+            commit: commitAttempt
         ) else {
             discardPreparedSuccessor()
             return .failedWithoutReopen
@@ -10768,7 +10773,7 @@ extension PlayerController: PreparedSuccessorHost {
         // the app backgrounding. `.switching` stops anything else *opening*
         // one, but it does not stop the pipeline being freed, and handing a
         // released item to the incumbent would be worse than refusing.
-        guard viewerActionEpoch == commitViewerEpoch, wantsPlayback else { return .failedWithoutReopen }
+        guard preparedCommitStillOwned(commitAttempt), wantsPlayback else { return .failedWithoutReopen }
         guard preparedItem === item, preparedPlayer === successor,
               started, player.currentItem != nil,
               !automaticTrial || autoTrialAllowsExposure(action)
@@ -10955,7 +10960,7 @@ extension PlayerController: PreparedSuccessorHost {
             unprovenPreparedItem = nil
             player.allowsExternalPlayback = incumbentPlayer.allowsExternalPlayback
         }
-        if !automaticTrial, viewerActionEpoch == commitViewerEpoch {
+        if !automaticTrial, preparedCommitStillOwned(commitAttempt) {
             manualQualityRetention.clear()
             qualityChangeRetained = false
             recipeRevision.didAttach(recipeRevision.desired)
@@ -11051,17 +11056,27 @@ extension PlayerController: PreparedSuccessorHost {
         return cadence.flatMap { $0 > 0 ? $0 : nil }
     }
 
+    /// Whether the prepared commit captured as `commit` still belongs to the
+    /// viewer action it began under. The commit is one continuation with
+    /// several suspensions — the layer, frame-duration, decoded-alignment and
+    /// rendezvous waits — and every one of them asks this, so the scope set
+    /// is named once (`AttemptFence.preparedCommit`) and a refusal raises
+    /// `attempt_stale` like any other migrated fence.
+    private func preparedCommitStillOwned(_ commit: Attempt) -> Bool {
+        attemptStillCurrent(commit, fence: .preparedCommit)
+    }
+
     /// The successor waits at a future film instant while the incumbent
     /// advances to it. Seeking the moving incumbent clock chases seek latency.
     private func awaitPreparedRendezvous(
         item: AVPlayerItem, successor: AVPlayer, rendezvous: PreparedCommitRendezvous,
-        frameDurationSeconds: Double, rate: Float, viewerEpoch: Int
+        frameDurationSeconds: Double, rate: Float, commit: Attempt
     ) async -> Bool {
         let began = Int(ProcessInfo.processInfo.systemUptime * 1_000)
         while Int(ProcessInfo.processInfo.systemUptime * 1_000) - began < PreparedReplacementBounds.alignmentMs,
               preparedOverlapRemainingMs > 0 {
             guard !Task.isCancelled, preparedItem === item, preparedPlayer === successor,
-                  viewerActionEpoch == viewerEpoch, wantsPlayback, preferredRate == rate,
+                  preparedCommitStillOwned(commit), wantsPlayback, preferredRate == rate,
                   UIApplication.shared.applicationState == .active,
                   !pictureInPictureIsActive, !player.isExternalPlaybackActive,
                   item.status == .readyToPlay else { return false }
@@ -11077,13 +11092,13 @@ extension PlayerController: PreparedSuccessorHost {
     /// A hidden layer ready bit from before the seek cannot satisfy this proof.
     private func awaitPreparedDecodedAlignment(
         item: AVPlayerItem, successor: AVPlayer, output: AVPlayerItemVideoOutput,
-        rendezvous: PreparedCommitRendezvous, frameDurationSeconds: Double, viewerEpoch: Int
+        rendezvous: PreparedCommitRendezvous, frameDurationSeconds: Double, commit: Attempt
     ) async -> Bool {
         let startedAt = Int(ProcessInfo.processInfo.systemUptime * 1_000)
         while Int(ProcessInfo.processInfo.systemUptime * 1_000) - startedAt < PreparedReplacementBounds.alignmentMs,
               preparedOverlapRemainingMs > 0 {
             guard !Task.isCancelled, preparedItem === item, preparedPlayer === successor,
-                  preparedVideoOutput === output, viewerActionEpoch == viewerEpoch,
+                  preparedVideoOutput === output, preparedCommitStillOwned(commit),
                   wantsPlayback, UIApplication.shared.applicationState == .active,
                   !pictureInPictureIsActive, !player.isExternalPlaybackActive,
                   item.status == .readyToPlay else { return false }
