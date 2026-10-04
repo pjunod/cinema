@@ -214,9 +214,10 @@ impl ReceiverStartRegistry {
             .request_fingerprint()
             .map_err(|_| ReceiverStartError::Conflict)?;
         let mut entries = self.entries.lock().expect("receiver starts");
-        // Only the detached retirement owner can mark an entry retired after
-        // actual joins and Applied/Replay. Keep bounded non-authorizing
-        // tombstones so exact retries cannot recreate an already ended actor.
+        // Only the detached retirement owner marks an entry retired: after
+        // actual joins and Applied/Replay, or when it ends without them. Keep
+        // bounded non-authorizing tombstones so exact retries cannot recreate
+        // an already ended actor; only a confirmed one carries an End receipt.
         let mut settled = self.settled.lock().expect("settled receiver attempts");
         entries.retain(|entry| {
             if !entry.state.lock().expect("receiver owner").retired {
@@ -261,6 +262,8 @@ impl ReceiverStartRegistry {
             }
             return Ok((entry.clone(), false));
         }
+        // Every retirement owner is bounded and retires its entry on every
+        // exit, so this counts live attempts, never stuck settlements.
         if entries.len() >= 8 {
             return Err(ReceiverStartError::Capacity);
         }
@@ -420,16 +423,20 @@ impl ReceiverStartActor {
             let changed = self.0.changed.notified();
             tokio::pin!(changed);
             changed.as_mut().enable();
-            if self
-                .0
-                .state
-                .lock()
-                .expect("receiver owner")
-                .end_confirmation
-                .as_ref()
-                .is_some_and(|proof| proof.session_id() == session)
             {
-                return Ok(());
+                let owned = self.0.state.lock().expect("receiver owner");
+                if owned
+                    .end_confirmation
+                    .as_ref()
+                    .is_some_and(|proof| proof.session_id() == session)
+                {
+                    return Ok(());
+                }
+                // A retirement owner that stopped without this receipt has
+                // ended; no later change can produce it.
+                if owned.retired {
+                    return Err(ReceiverStartError::Unresolved);
+                }
             }
             tokio::time::timeout_at(deadline, changed)
                 .await
@@ -641,13 +648,15 @@ impl ReceiverStartActor {
     }
     // Called only by the independently owned retirement task. This exchange
     // retains Source facts; it cannot release B metadata or body ownership.
+    // Only an authenticated, definitive Source refusal is terminal.
     async fn request_source_end(
         &self,
         state: &AppState,
         joined: &JoinedReceiverStart,
-    ) -> Result<Arc<crate::sharing_client::SourceEndReceipt>, ReceiverStartError> {
+    ) -> Result<Arc<crate::sharing_client::SourceEndReceipt>, retirement::RetirementStep> {
+        use retirement::RetirementStep;
         if !Arc::ptr_eq(&self.0, &joined.0) {
-            return Err(ReceiverStartError::Unresolved);
+            return Err(RetirementStep::Refused);
         }
         let (dispatched, received) = {
             let owner = self.0.state.lock().expect("receiver owner");
@@ -655,10 +664,7 @@ impl ReceiverStartActor {
                 return Ok(receipt.clone());
             }
             (
-                owner
-                    .dispatched
-                    .clone()
-                    .ok_or(ReceiverStartError::Unresolved)?,
+                owner.dispatched.clone().ok_or(RetirementStep::Refused)?,
                 owner.received.clone(),
             )
         };
@@ -671,13 +677,13 @@ impl ReceiverStartActor {
                 )
             })
             .transpose()
-            .map_err(|_| ReceiverStartError::Unresolved)?;
+            .map_err(|_| RetirementStep::Refused)?;
         let mut connection = crate::sharing_client::CleanupPeerConnection::connect(
             &state.sharing,
             &dispatched.endpoint,
         )
         .await
-        .map_err(|_| ReceiverStartError::Unresolved)?;
+        .map_err(RetirementStep::from_source_end)?;
         let receipt = Arc::new(
             connection
                 .end(
@@ -687,7 +693,7 @@ impl ReceiverStartActor {
                     known.as_ref(),
                 )
                 .await
-                .map_err(|_| ReceiverStartError::Unresolved)?,
+                .map_err(RetirementStep::from_source_end)?,
         );
         // Preserve the authenticated result before a subsequent Store await.
         let mut owner = self.0.state.lock().expect("receiver owner");
@@ -1053,23 +1059,25 @@ async fn run_owner(
         owned.start = Some(Ok(projected));
     }
     entry.changed.notify_waiters();
-    let mut authority_timer = tokio::time::interval(Duration::from_secs(1));
-    authority_timer.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-    let mut next_renewal = Instant::now();
+    // One Source round trip per lease period. The 30 s lease exchange is what
+    // answers "is the Source alive"; local revocation is enforced by each
+    // accepted connection's monitor and every viewer-visible byte by
+    // `open_source_resource_owned`. A faster Source-end signal has to come
+    // from the Source, never from a faster poll here. Daemon drain ends this
+    // owner so retirement can still send the Source its End.
+    let mut renewal = tokio::time::interval(Duration::from_secs(10));
+    renewal.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     loop {
         tokio::select! {
             _ = entry.stop.cancelled() => return Err(ReceiverStartError::Unresolved),
-            _ = authority_timer.tick() => {}
+            () = state.shutdown.cancelled() => return Err(ReceiverStartError::Unresolved),
+            _ = renewal.tick() => {}
         }
         let actor = ReceiverStartActor(entry.clone());
         actor
             .current_source_status_owned(&state, connection_lifetime.clone())
             .await?;
         actor.current_delivery_attachment(&state).await?;
-        if Instant::now() < next_renewal {
-            continue;
-        }
-        next_renewal = Instant::now() + Duration::from_secs(10);
         let authority = state
             .store
             .prepare_receiver_session_authority(intent.clone())
@@ -1683,5 +1691,119 @@ mod tests {
         ));
         assert!(entry.start_task.lock().expect("task").is_none());
         // Absence of a task is unresolved, never a constructed join receipt.
+    }
+
+    async fn retired_within(actor: &ReceiverStartActor, limit: Duration) -> bool {
+        tokio::time::timeout(limit, async {
+            loop {
+                let changed = actor.0.changed.notified();
+                tokio::pin!(changed);
+                changed.as_mut().enable();
+                if actor.0.state.lock().expect("owner").retired {
+                    return;
+                }
+                changed.await;
+            }
+        })
+        .await
+        .is_ok()
+    }
+
+    #[tokio::test]
+    async fn sharing_receiver_unjoinable_retirement_releases_its_registry_slot() {
+        let registry = ReceiverStartRegistry::default();
+        let state = Arc::new(crate::http::source_actor_test_state());
+        let mut owners = Vec::new();
+        for n in 0..8 {
+            let id = format!("attempt-{n}");
+            let intent = intent(&id);
+            let (entry, _) = registry
+                .register(intent.clone(), id, "player", &wrapper(&intent))
+                .expect("bounded owner");
+            owners.push((entry, intent));
+        }
+        let ninth = intent("ninth");
+        assert!(matches!(
+            registry.register(ninth.clone(), "ninth".into(), "player", &wrapper(&ninth)),
+            Err(ReceiverStartError::Capacity)
+        ));
+        // The Start task was cancelled, so no join receipt and therefore no
+        // retirement witness can exist. The owner still ends.
+        let (entry, first) = owners.swap_remove(0);
+        let cancelled = tokio::spawn(std::future::pending::<()>());
+        cancelled.abort();
+        *entry.start_task.lock().expect("Start handle") = Some(cancelled);
+        let actor = ReceiverStartActor(entry.clone());
+        actor.begin_retirement(
+            state,
+            plurx_core::sharing_receiver_retirement::ReceiverRetirementReason::Revoked,
+        );
+        assert!(
+            retired_within(&actor, Duration::from_secs(5)).await,
+            "an unjoinable retirement owner ends instead of holding its slot"
+        );
+        assert!(entry
+            .state
+            .lock()
+            .expect("owner")
+            .end_confirmation
+            .is_none());
+        assert!(registry
+            .register(ninth.clone(), "ninth".into(), "player", &wrapper(&ninth))
+            .is_ok());
+        // The pruned tombstone carries no End receipt and recreates nothing.
+        assert!(matches!(
+            registry.register(
+                first.clone(),
+                "attempt-0".into(),
+                "player",
+                &wrapper(&first)
+            ),
+            Err(ReceiverStartError::Unresolved)
+        ));
+    }
+
+    #[tokio::test]
+    async fn sharing_receiver_refused_pending_retirement_is_terminal_and_frees_its_slot() {
+        let registry = ReceiverStartRegistry::default();
+        let state = Arc::new(crate::http::source_actor_test_state());
+        let request = intent("attempt");
+        let (entry, _) = registry
+            .register(
+                request.clone(),
+                "attempt".into(),
+                "player",
+                &wrapper(&request),
+            )
+            .expect("owned attempt");
+        // An assigned claim whose activation was never planned, joined after
+        // its Start task returned without sending Source Start.
+        entry.state.lock().expect("owner").claim =
+            ReceiverClaimStage::Assigned(state.node_id.clone());
+        *entry.start_task.lock().expect("Start handle") = Some(tokio::spawn(async {}));
+        let actor = ReceiverStartActor(entry.clone());
+        actor.begin_retirement(
+            state.clone(),
+            plurx_core::sharing_receiver_retirement::ReceiverRetirementReason::Revoked,
+        );
+        // No claimed row exists, so both exact pending witnesses are Refused.
+        // The owner ends before its first 5 s retry instead of resending them.
+        assert!(
+            retired_within(&actor, Duration::from_secs(4)).await,
+            "a refused immutable pending witness is terminal"
+        );
+        {
+            let owned = entry.state.lock().expect("owner");
+            assert!(owned.end_confirmation.is_none() && owned.dispatched.is_none());
+        }
+        assert!(matches!(
+            registry.register(
+                request.clone(),
+                "attempt".into(),
+                "player",
+                &wrapper(&request)
+            ),
+            Err(ReceiverStartError::Unresolved)
+        ));
     }
 }

@@ -6,6 +6,91 @@ use plurx_core::sharing_receiver_retirement::{
 };
 use sha2::{Digest, Sha256};
 
+/// How many failed attempts one retirement owner makes before it stops.
+/// Bounded work on a detached owner, never on an admission path.
+const RETIREMENT_ATTEMPTS: u32 = 6;
+/// The first retry delay; each further failure doubles it up to the cap.
+const RETIREMENT_RETRY: Duration = Duration::from_secs(5);
+const RETIREMENT_MAX_BACKOFF: Duration = Duration::from_secs(80);
+
+fn retirement_retry_delay(failures: u32) -> Duration {
+    let exponent = failures.saturating_sub(1).min(4);
+    RETIREMENT_RETRY
+        .saturating_mul(1_u32 << exponent)
+        .min(RETIREMENT_MAX_BACKOFF)
+}
+
+/// Why one retirement step produced no witness or outcome.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum RetirementStep {
+    /// Transport, deadline or Store commit-unknown. The same exact witness may
+    /// still apply, so the owner repeats it within its bounded budget.
+    Retry,
+    /// The exact immutable witness was refused or cannot be constructed.
+    /// Repeating it cannot change the answer.
+    Refused,
+}
+impl RetirementStep {
+    /// Only an authenticated, definitive Source answer about this exact End
+    /// request is terminal. Dials, deadlines, 503s and unreadable replies may
+    /// still reach the same Source End owner, which a repeated End reattaches.
+    pub(super) fn from_source_end(error: crate::sharing_client::PeerError) -> Self {
+        use crate::sharing_client::PeerError;
+        match error {
+            PeerError::Authentication | PeerError::ProtocolUnsupported => Self::Refused,
+            PeerError::Rejected(status)
+                if status.is_client_error() && !matches!(status.as_u16(), 408 | 429) =>
+            {
+                Self::Refused
+            }
+            PeerError::Unavailable
+            | PeerError::IdentityMismatch
+            | PeerError::InvalidResponse
+            | PeerError::Rejected(_) => Self::Retry,
+        }
+    }
+}
+
+/// Why a retirement owner ended without a confirmed retirement.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum RetirementStall {
+    /// The exact Start task or body registry could not be joined, so no
+    /// retirement witness can exist.
+    Unjoined,
+    /// An exact immutable witness was definitively refused.
+    Refused,
+    /// The bounded retry budget ran out on transport or commit-unknown failures.
+    Exhausted,
+    /// Daemon drain arrived between attempts.
+    Shutdown,
+}
+
+/// The retry budget of one retirement owner. An attempt in flight is never
+/// raced: each is bounded by its own Store or peer deadline, and drain is
+/// observed only before the next one.
+struct RetirementBudget {
+    failures: u32,
+    shutdown: tokio_util::sync::CancellationToken,
+}
+impl RetirementBudget {
+    fn new(shutdown: tokio_util::sync::CancellationToken) -> Self {
+        Self {
+            failures: 0,
+            shutdown,
+        }
+    }
+    async fn retry(&mut self) -> Result<(), RetirementStall> {
+        self.failures = self.failures.saturating_add(1);
+        if self.failures >= RETIREMENT_ATTEMPTS {
+            return Err(RetirementStall::Exhausted);
+        }
+        tokio::select! {
+            () = self.shutdown.cancelled() => Err(RetirementStall::Shutdown),
+            () = tokio::time::sleep(retirement_retry_delay(self.failures)) => Ok(()),
+        }
+    }
+}
+
 #[derive(Default)]
 pub(super) struct ReceiverBodyRegistry {
     state: Mutex<BodyState>,
@@ -164,12 +249,12 @@ impl ReceiverPendingRetirementWitness for ConfirmedPending {
 }
 
 impl ReceiverStartActor {
-    fn mark_confirmed_retired(&self, witness: &ConfirmedRetirement) {
+    fn mark_confirmed_retired(&self, witness: &ConfirmedRetirement) -> Result<(), RetirementStall> {
         let mut owned = self.0.state.lock().expect("receiver owner");
         // A dispatched obligation requires the actual physical Source receipt.
         // Never-dispatched proof is minted only after both independent joins.
         if owned.dispatched.is_some() && witness._source.is_none() {
-            return;
+            return Err(RetirementStall::Refused);
         }
         owned.end_confirmation = Some(Arc::new(ReceiverEndConfirmation {
             session: witness.owner.session_id,
@@ -180,6 +265,7 @@ impl ReceiverStartActor {
         owned.retired = true;
         drop(owned);
         self.0.changed.notify_waiters();
+        Ok(())
     }
     fn mark_retired(&self) {
         self.0.state.lock().expect("receiver owner").retired = true;
@@ -254,14 +340,42 @@ impl ReceiverStartActor {
             .expect("receiver retirement task") = Some(task);
     }
     async fn retire_owned(self, state: Arc<AppState>, reason: ReceiverRetirementReason) {
-        let Ok(joined) = self.join_start_for_cleanup().await else {
+        let mut budget = RetirementBudget::new(state.shutdown.clone());
+        let Err(stall) = self.retire_exact(&state, reason, &mut budget).await else {
             return;
         };
+        // Every exit ends this owner and releases its registry slot. Nothing
+        // here renews the route: the published owner has already stopped, so
+        // its lease lapses, and the durable route and binding keep the exact
+        // lineage that only an exact retirement may remove. That obligation is
+        // the durable row, not this slot; holding the slot would let stuck
+        // settlements refuse all shared playback. The pruned tombstone carries
+        // no End receipt, so an exact retry stays unresolved and End is 503.
+        tracing::warn!(
+            target: "plurxd::sharing",
+            import = %self.0.intent.scope.import_id,
+            incarnation = %self.0.intent.recipe.source_request_id,
+            stall = ?stall,
+            failed_attempts = budget.failures,
+            "shared playback retirement ended without a confirmed retirement; the durable route keeps its exact lineage"
+        );
+        self.mark_retired();
+    }
+    async fn retire_exact(
+        &self,
+        state: &AppState,
+        reason: ReceiverRetirementReason,
+        budget: &mut RetirementBudget,
+    ) -> Result<(), RetirementStall> {
+        let joined = self
+            .join_start_for_cleanup()
+            .await
+            .map_err(|_| RetirementStall::Unjoined)?;
         let bodies = self.0.bodies.join().await;
         // Sealed resource admissions plus actual last guard release are needed
         // even for a no-send outcome. No elapsed timeout can construct this.
         if !Arc::ptr_eq(&bodies.0, &self.0.bodies) {
-            return;
+            return Err(RetirementStall::Unjoined);
         }
         let (claim, never_sent, planned) = {
             let owned = self.0.state.lock().expect("receiver owner");
@@ -278,10 +392,11 @@ impl ReceiverStartActor {
                 claim,
                 ReceiverClaimStage::NotAttempted | ReceiverClaimStage::NotAcquired
             ) {
-                if !planned {
-                    self.mark_retired();
+                if planned {
+                    return Err(RetirementStall::Refused);
                 }
-                return;
+                self.mark_retired();
+                return Ok(());
             }
             let attempted_node = match &claim {
                 ReceiverClaimStage::Assigning(node) | ReceiverClaimStage::Assigned(node) => {
@@ -294,9 +409,9 @@ impl ReceiverStartActor {
                 .map_or(ReceiverPendingOwner::Unassigned, |node| {
                     ReceiverPendingOwner::Assigned(node.clone())
                 });
-            let Ok(mut pending) = self.confirmed_pending(&joined, &bodies, owner) else {
-                return;
-            };
+            let mut pending = self
+                .confirmed_pending(&joined, &bodies, owner)
+                .map_err(|_| RetirementStall::Refused)?;
             let mut unassigned = if attempted_node.is_some() {
                 self.confirmed_pending(&joined, &bodies, ReceiverPendingOwner::Unassigned)
                     .ok()
@@ -307,7 +422,7 @@ impl ReceiverStartActor {
                 match state.store.retire_pending_receiver_request(&pending).await {
                     Ok(ReceiverRetirementOutcome::Applied | ReceiverRetirementOutcome::Replay) => {
                         self.mark_retired();
-                        return;
+                        return Ok(());
                     }
                     Ok(ReceiverRetirementOutcome::Refused) => {
                         if let Some(fallback) = unassigned.take() {
@@ -323,19 +438,23 @@ impl ReceiverStartActor {
                         if planned {
                             break;
                         }
+                        // Nothing was planned, so no later state can make the
+                        // identical transaction apply. Resending it is not cleanup.
+                        return Err(RetirementStall::Refused);
                     }
                     Err(_) => {} // Preserve the exact witness after commit-unknown.
                 }
-                tokio::time::sleep(Duration::from_secs(5)).await;
+                budget.retry().await?;
             }
         }
         let mut witness = loop {
             match self
-                .confirm_retirement(&state, &joined, &bodies, reason)
+                .confirm_retirement(state, &joined, &bodies, reason)
                 .await
             {
                 Ok(witness) => break witness,
-                Err(_) => tokio::time::sleep(Duration::from_secs(5)).await,
+                Err(RetirementStep::Refused) => return Err(RetirementStall::Refused),
+                Err(RetirementStep::Retry) => budget.retry().await?,
             }
         };
         loop {
@@ -343,8 +462,7 @@ impl ReceiverStartActor {
             let refused = matches!(&outcome, Ok(ReceiverRetirementOutcome::Refused));
             match outcome {
                 Ok(ReceiverRetirementOutcome::Applied | ReceiverRetirementOutcome::Replay) => {
-                    self.mark_confirmed_retired(&witness);
-                    return;
+                    return self.mark_confirmed_retired(&witness);
                 }
                 Ok(ReceiverRetirementOutcome::Refused) if witness.binding.is_some() => {
                     // Only Refused permits trying the legitimate pending case.
@@ -355,8 +473,7 @@ impl ReceiverStartActor {
                         Ok(
                             ReceiverRetirementOutcome::Applied | ReceiverRetirementOutcome::Replay,
                         ) => {
-                            self.mark_confirmed_retired(&witness);
-                            return;
+                            return self.mark_confirmed_retired(&witness);
                         }
                         _ => witness.binding = binding,
                     }
@@ -365,20 +482,25 @@ impl ReceiverStartActor {
             }
             if refused {
                 // A sweep can advance a terminal lease while physical facts
-                // remain unchanged. Repeat exact immutable route checks;
+                // remain unchanged. Repeat exact immutable route checks; a
+                // definitive refusal of the route itself ends the owner, and
                 // commit-unknown never enters this metadata refresh path.
-                if let Ok(refreshed) = self
-                    .confirm_retirement(&state, &joined, &bodies, reason)
+                match self
+                    .confirm_retirement(state, &joined, &bodies, reason)
                     .await
                 {
-                    if refreshed.confirmation == witness.confirmation {
+                    Ok(refreshed) if refreshed.confirmation == witness.confirmation => {
                         witness = refreshed;
                     }
+                    Ok(_) | Err(RetirementStep::Refused) => {
+                        return Err(RetirementStall::Refused);
+                    }
+                    Err(RetirementStep::Retry) => {}
                 }
             }
             // Preserve the exact authenticated confirmation and envelope on
             // uncertain commits; do not replace it with an expiry observation.
-            tokio::time::sleep(Duration::from_secs(5)).await;
+            budget.retry().await?;
         }
     }
     async fn confirm_retirement(
@@ -387,9 +509,11 @@ impl ReceiverStartActor {
         joined: &JoinedReceiverStart,
         bodies: &JoinedReceiverBodies,
         reason: ReceiverRetirementReason,
-    ) -> Result<ConfirmedRetirement, ReceiverStartError> {
+    ) -> Result<ConfirmedRetirement, RetirementStep> {
+        // Only a Store read or the Source dial may be repeated; every other
+        // failure is a refusal of the exact immutable route and receipt.
         if !Arc::ptr_eq(&joined.0, &self.0) || !Arc::ptr_eq(&bodies.0, &self.0.bodies) {
-            return Err(ReceiverStartError::Unresolved);
+            return Err(RetirementStep::Refused);
         }
         let dispatched = self
             .0
@@ -406,13 +530,13 @@ impl ReceiverStartActor {
         let (planned, owner, binding) = {
             let owned = self.0.state.lock().expect("receiver owner");
             if !owned.dispatch_closed {
-                return Err(ReceiverStartError::Unresolved);
+                return Err(RetirementStep::Refused);
             }
             (
                 owned
                     .planned_activation
                     .clone()
-                    .ok_or(ReceiverStartError::Unresolved)?,
+                    .ok_or(RetirementStep::Refused)?,
                 owned.owner.clone(),
                 owned.source.as_ref().map(|a| a.binding.clone()),
             )
@@ -421,8 +545,8 @@ impl ReceiverStartActor {
             .store
             .media_session_route_by_incarnation(&planned.incarnation_id)
             .await
-            .map_err(|_| ReceiverStartError::Unresolved)?
-            .ok_or(ReceiverStartError::Unresolved)?;
+            .map_err(|_| RetirementStep::Retry)?
+            .ok_or(RetirementStep::Refused)?;
         if route.incarnation_id != planned.incarnation_id
             || route.session_id != planned.session_id
             || route.principal != planned.principal
@@ -435,7 +559,7 @@ impl ReceiverStartActor {
             || route.media_origin_ms != planned.media_origin_ms
             || !matches!(route.state.as_str(), "active" | "ended")
         {
-            return Err(ReceiverStartError::Unresolved);
+            return Err(RetirementStep::Refused);
         }
         if owner.as_ref().is_some_and(|o| {
             o.owner_epoch != route.owner_epoch
@@ -443,13 +567,12 @@ impl ReceiverStartActor {
                 || o.incarnation_id.to_string() != route.incarnation_id
                 || o.session_id.to_string() != route.session_id
         }) {
-            return Err(ReceiverStartError::Unresolved);
+            return Err(RetirementStep::Refused);
         }
         let owner = ReceiverSourceOwner {
             incarnation_id: Uuid::parse_str(&route.incarnation_id)
-                .map_err(|_| ReceiverStartError::Unresolved)?,
-            session_id: Uuid::parse_str(&route.session_id)
-                .map_err(|_| ReceiverStartError::Unresolved)?,
+                .map_err(|_| RetirementStep::Refused)?,
+            session_id: Uuid::parse_str(&route.session_id).map_err(|_| RetirementStep::Refused)?,
             owner_node_id: route.owner_node_id,
             owner_epoch: route.owner_epoch,
             request_id: self.0.request_id.clone(),
@@ -461,18 +584,18 @@ impl ReceiverStartActor {
                 ReceiverRetirementDisposition::SourceSettled,
                 receipt
                     .retirement_confirmation(&self.0.peer_session)
-                    .map_err(|_| ReceiverStartError::Unresolved)?,
+                    .map_err(|_| RetirementStep::Refused)?,
             )
         } else {
             if binding.is_some() {
-                return Err(ReceiverStartError::Unresolved);
+                return Err(RetirementStep::Refused);
             }
             let identity = serde_json::to_vec(&serde_json::json!({
                 "recipe":self.0.intent.recipe,"incarnation":owner.incarnation_id,
                 "session":owner.session_id,"node":owner.owner_node_id,"epoch":owner.owner_epoch,
                 "request":owner.request_id,
             }))
-            .map_err(|_| ReceiverStartError::Unresolved)?;
+            .map_err(|_| RetirementStep::Refused)?;
             let mut digest = Sha256::new();
             digest.update(b"plurx.receiver.joined-never-dispatched.v1\0");
             digest.update(identity);
@@ -496,6 +619,60 @@ impl ReceiverStartActor {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn receiver_retirement_backoff_doubles_to_its_cap() {
+        let delays: Vec<Duration> = (1..RETIREMENT_ATTEMPTS)
+            .map(retirement_retry_delay)
+            .collect();
+        assert_eq!(delays, [5, 10, 20, 40, 80].map(Duration::from_secs));
+        assert_eq!(retirement_retry_delay(u32::MAX), RETIREMENT_MAX_BACKOFF);
+    }
+    #[tokio::test(start_paused = true)]
+    async fn receiver_retirement_budget_is_bounded_and_observes_drain() {
+        let mut budget = RetirementBudget::new(tokio_util::sync::CancellationToken::new());
+        let started = tokio::time::Instant::now();
+        for _ in 1..RETIREMENT_ATTEMPTS {
+            budget.retry().await.expect("within the bounded budget");
+        }
+        assert_eq!(budget.retry().await, Err(RetirementStall::Exhausted));
+        assert_eq!(budget.failures, RETIREMENT_ATTEMPTS);
+        assert_eq!(started.elapsed(), Duration::from_secs(155));
+        let drain = tokio_util::sync::CancellationToken::new();
+        let mut budget = RetirementBudget::new(drain.clone());
+        drain.cancel();
+        let started = tokio::time::Instant::now();
+        assert_eq!(budget.retry().await, Err(RetirementStall::Shutdown));
+        assert_eq!(started.elapsed(), Duration::ZERO);
+    }
+    #[test]
+    fn receiver_retirement_treats_only_definitive_source_end_refusals_as_terminal() {
+        use crate::sharing_client::PeerError;
+        use axum::http::StatusCode;
+        for refused in [
+            PeerError::Authentication,
+            PeerError::ProtocolUnsupported,
+            PeerError::Rejected(StatusCode::CONFLICT),
+            PeerError::Rejected(StatusCode::UNPROCESSABLE_ENTITY),
+        ] {
+            assert_eq!(
+                RetirementStep::from_source_end(refused),
+                RetirementStep::Refused
+            );
+        }
+        for retried in [
+            PeerError::Unavailable,
+            PeerError::IdentityMismatch,
+            PeerError::InvalidResponse,
+            PeerError::Rejected(StatusCode::SERVICE_UNAVAILABLE),
+            PeerError::Rejected(StatusCode::TOO_MANY_REQUESTS),
+            PeerError::Rejected(StatusCode::REQUEST_TIMEOUT),
+        ] {
+            assert_eq!(
+                RetirementStep::from_source_end(retried),
+                RetirementStep::Retry
+            );
+        }
+    }
     #[tokio::test]
     async fn receiver_resource_retirement_seals_admission_and_waits_actual_owned_job() {
         let registry = Arc::new(ReceiverBodyRegistry::default());

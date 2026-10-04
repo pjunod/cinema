@@ -5,6 +5,12 @@ use serde_json::{json, Value};
 
 const MAX_REPLY: usize = 16 * 1024;
 const MAX_EPOCH: i64 = 9_007_199_254_740_991;
+/// The Source answers End within its own budget: its End owner waits up to
+/// 305 s and its peer router bounds the route at 310 s, after which a
+/// repeated End reattaches the same owner. B outwaits that whole budget plus
+/// transit, so a slow Source settlement is answered once rather than timed
+/// out into another dial.
+const SOURCE_END_DEADLINE: Duration = Duration::from_secs(315);
 
 /// No Deref or access to catalogue, Start or resource methods. The retained
 /// approved SPKI authenticates TLS; the exact authenticated End echo binds
@@ -238,7 +244,7 @@ impl PeerConnection {
             return Err(PeerError::InvalidResponse);
         }
         let body = session.end_body(known)?;
-        tokio::time::timeout(Duration::from_secs(35), async {
+        tokio::time::timeout(SOURCE_END_DEADLINE, async {
             let mut auth = HeaderValue::from_str(&format!("CinemaShare {}", credential.expose()))
                 .map_err(|_| PeerError::InvalidResponse)?;
             auth.set_sensitive(true);
