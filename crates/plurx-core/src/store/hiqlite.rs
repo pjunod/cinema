@@ -176,6 +176,17 @@ const CANDIDATE_RECOVERY_SCHEMA_MIGRATION_SOURCE: i64 = COPY_OUTPUT_SCHEMA_VERSI
 const ENCODED_OUTPUT_SCHEMA_VERSION: i64 = 73;
 const ENCODED_OUTPUT_SCHEMA_MIGRATION_SOURCE: i64 = CANDIDATE_RECOVERY_SCHEMA_VERSION;
 pub const AUTH_SCHEMA_VERSION: i64 = ENCODED_OUTPUT_SCHEMA_VERSION;
+/// Leading compare-and-swap for a replicated schema step, bound to the step's
+/// source version. Two voters can read the same marker and both submit the
+/// step; the trailing marker `UPDATE ... WHERE schema_version = $src` only
+/// stops the stale one from moving the marker, not from running its DDL first.
+/// A step that drops and recreates objects (the source-guard triggers) would
+/// then reinstall a superseded definition under a newer marker. Executed as
+/// the transaction's first statement, this guard aborts the stale step before
+/// any DDL (`json()` of a non-JSON literal raises), the same mechanism the
+/// lineage bridge's CAS uses; `settle_migration_attempt` then sees the marker
+/// already past the source and treats the step as completed elsewhere.
+const SCHEMA_STEP_SOURCE_GUARD: &str = "SELECT CASE WHEN (SELECT COUNT(*) FROM cluster_meta WHERE singleton=1 AND schema_version=$1)=1 THEN 1 ELSE json('schema migration source is stale') END";
 /// Oldest schema this binary can advance through the complete migration chain.
 pub const AUTH_SCHEMA_MIGRATION_SOURCE: i64 = 5;
 const READING_SCHEMA_VERSION: i64 = 6;
@@ -3447,7 +3458,10 @@ impl HiqliteAuthStore {
                     // An incompatible type/nullability is not an audio snapshot.
                     let columns = self.client().query_consistent_map::<CountRow, _>(
                         "SELECT COUNT(*) AS count FROM pragma_table_info('offline_packages') WHERE name = 'audio_recipe' AND upper(type) = 'TEXT' AND \"notnull\" = 0", params!()).await?;
-                    let mut statements = Vec::new();
+                    let mut statements = vec![(
+                        SCHEMA_STEP_SOURCE_GUARD.to_owned(),
+                        params!(OFFLINE_AUDIO_SCHEMA_MIGRATION_SOURCE),
+                    )];
                     if !columns.first().is_some_and(|row| row.count == 1) {
                         statements.push((
                             "ALTER TABLE offline_packages ADD COLUMN audio_recipe TEXT".to_owned(),
@@ -3462,11 +3476,15 @@ impl HiqliteAuthStore {
                 }
                 SchemaMigrationAction::MigrateFrom(COPY_OUTPUT_SCHEMA_MIGRATION_SOURCE) => {
                     let now = self.now()?;
-                    let mut statements: Vec<(String, hiqlite::Params)> =
+                    let mut statements: Vec<(String, hiqlite::Params)> = vec![(
+                        SCHEMA_STEP_SOURCE_GUARD.to_owned(),
+                        params!(COPY_OUTPUT_SCHEMA_MIGRATION_SOURCE),
+                    )];
+                    statements.extend(
                         super::background_jobs::COPY_OUTPUT_SCHEMA
                             .split("-- next statement\n")
-                            .map(|sql| (sql.to_owned(), params!()))
-                            .collect();
+                            .map(|sql| (sql.to_owned(), params!())),
+                    );
                     statements.push(("UPDATE cluster_meta SET schema_version = $1, migrated_at = $2 WHERE singleton = 1 AND schema_version = $3".to_owned(), params!(COPY_OUTPUT_SCHEMA_VERSION, now, COPY_OUTPUT_SCHEMA_MIGRATION_SOURCE)));
                     admit_schema_migration(admission)?;
                     let attempt = self.client().txn(statements).await;
@@ -3477,6 +3495,7 @@ impl HiqliteAuthStore {
                     let now = self.now()?;
                     admit_schema_migration(admission)?;
                     let attempt = self.client().txn([
+                        (SCHEMA_STEP_SOURCE_GUARD, params!(CANDIDATE_RECOVERY_SCHEMA_MIGRATION_SOURCE)),
                         (super::candidate_recovery::SCHEMA, params!()),
                         ("UPDATE cluster_meta SET schema_version = $1, migrated_at = $2 WHERE singleton = 1 AND schema_version = $3", params!(CANDIDATE_RECOVERY_SCHEMA_VERSION, now, CANDIDATE_RECOVERY_SCHEMA_MIGRATION_SOURCE)),
                     ]).await;
@@ -3488,11 +3507,15 @@ impl HiqliteAuthStore {
                 }
                 SchemaMigrationAction::MigrateFrom(ENCODED_OUTPUT_SCHEMA_MIGRATION_SOURCE) => {
                     let now = self.now()?;
-                    let mut statements: Vec<(String, hiqlite::Params)> =
+                    let mut statements: Vec<(String, hiqlite::Params)> = vec![(
+                        SCHEMA_STEP_SOURCE_GUARD.to_owned(),
+                        params!(ENCODED_OUTPUT_SCHEMA_MIGRATION_SOURCE),
+                    )];
+                    statements.extend(
                         super::background_jobs::ENCODED_OUTPUT_SCHEMA
                             .split("-- next statement\n")
-                            .map(|sql| (sql.to_owned(), params!()))
-                            .collect();
+                            .map(|sql| (sql.to_owned(), params!())),
+                    );
                     statements.push(("UPDATE cluster_meta SET schema_version = $1, migrated_at = $2 WHERE singleton = 1 AND schema_version = $3".to_owned(), params!(ENCODED_OUTPUT_SCHEMA_VERSION, now, ENCODED_OUTPUT_SCHEMA_MIGRATION_SOURCE)));
                     admit_schema_migration(admission)?;
                     let attempt = self.client().txn(statements).await;
