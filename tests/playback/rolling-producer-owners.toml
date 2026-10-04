@@ -3806,6 +3806,13 @@ pattern = "(?:[A-Za-z_]\\w*::)+(?:sleep|sleep_until|interval|interval_at|timeout
 # bounds it); clock_offset::run adds one interval that re-reads the replicated
 # clock-enforcement switch every 10 s (+1, stops on shutdown); response.rs adds
 # one test-only paused-time wait proving each no-progress window (+1).
+# 1223 -> 1223 with the advisory-evidence deadline fix: ten fixed 100 ms caps
+# on link evidence (link_receipts binding/ack/current_positive/accept fence/
+# filter_catalog/measured_outputs, create cost proof, stream decision,
+# preparation proof and register) each become one timeout_at on the shared
+# `link_receipts::advisory_deadline()` (ADVISORY_EVIDENCE_STAGE, clamped to
+# the create startup budget); binding's own cap moves to `binding_until`.
+# Removed ten, added ten; all awaited in place, expiry is Unknown evidence.
 expected_occurrences = 1223
 
 [[module_structures]]

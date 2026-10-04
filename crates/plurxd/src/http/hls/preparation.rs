@@ -1411,8 +1411,11 @@ pub(super) async fn process_preparation_candidate(
     ) && candidate.candidate_context.is_some();
     let prepared_proof = if let Some(observation) = accepted_observation.as_ref() {
         if let Some(selected) = selected_candidate.as_ref() {
-            tokio::time::timeout(
-                std::time::Duration::from_millis(100),
+            // Advisory link evidence: one shared advisory deadline for the
+            // whole proof (prior, cost, live link, source fence), not a
+            // short per-read cap. A miss is Unknown and stages no proof.
+            tokio::time::timeout_at(
+                super::link_receipts::advisory_deadline(),
                 observation.proposed_proof(&state, source, &mut candidate, selected),
             )
             .await
@@ -2026,8 +2029,10 @@ pub(super) async fn stage_prepared_successor_with_prime(
             arm_preparation_deadline(active.clone());
             if successor_owner == state.node_id {
                 if let Some(proof) = prepared_proof.as_ref() {
-                    let _ = tokio::time::timeout(
-                        std::time::Duration::from_millis(100),
+                    // Bounded by the shared advisory stage; a registration
+                    // that misses it leaves the stage without link evidence.
+                    let _ = tokio::time::timeout_at(
+                        super::link_receipts::advisory_deadline(),
                         proof.register(
                             state,
                             &active.preparation.session_id,

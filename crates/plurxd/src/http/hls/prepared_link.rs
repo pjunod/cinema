@@ -178,6 +178,10 @@ impl AcceptedObservation {
             .measured_candidate_cost(candidate, request, None)
             .await;
         let link = self.current_link(state, file, owner).await?;
+        // Fence the source once for this proof: the trial's recorded-negative
+        // check and the staged binding both derive from the same identity.
+        let identity =
+            super::link_receipts::SourceLinkIdentity::capture(&self.http.network, file).await?;
         let admission = match cost {
             Some(cost) => {
                 if u128::from(link.transfer()?.usable_bps()?) * 10
@@ -188,27 +192,14 @@ impl AcceptedObservation {
                 PreparedAdmission::QualifiedOutput(cost)
             }
             None if unknown_original_trial(candidate, request) => {
-                if !super::link_receipts::admissible(
-                    state,
-                    Some(&self.http.network),
-                    file,
-                    candidate,
-                )
-                .await
-                {
+                if !super::link_receipts::admissible_for(state, &identity, candidate).await {
                     return None;
                 }
                 PreparedAdmission::UnknownOriginalTrial(Instant::now() + Duration::from_secs(15))
             }
             None => return None,
         };
-        let source = super::link_receipts::binding(
-            &self.http.network,
-            file,
-            candidate.recipe_digest,
-            candidate.route,
-        )
-        .await?;
+        let source = identity.candidate(candidate.recipe_digest, candidate.route);
         if !self.gate.observation_is_current(self.fence.clone()).await {
             return None;
         }

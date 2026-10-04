@@ -1306,8 +1306,17 @@ pub(crate) async fn resolve_plan(
                 .await;
             }
             if requested.is_none() && body.candidate_auto_policy() {
-                catalog =
-                    link_receipts::filter_catalog(state, network_identity, source, catalog).await;
+                // One advisory deadline, clamped to this create's startup
+                // budget, shared by every link-evidence read of this choice.
+                let advisory = link_receipts::advisory_deadline();
+                catalog = link_receipts::filter_catalog(
+                    state,
+                    network_identity,
+                    source,
+                    catalog,
+                    advisory,
+                )
+                .await;
                 if incumbent_receipt.is_some() && body.height != Some(1440) {
                     let measured = link_receipts::measured_outputs(
                         state,
@@ -1315,6 +1324,7 @@ pub(crate) async fn resolve_plan(
                         &catalog_request,
                         &eligible_workers,
                         snapshot,
+                        advisory,
                     )
                     .await;
                     catalog = link_receipts::positive_catalog(
@@ -1325,6 +1335,7 @@ pub(crate) async fn resolve_plan(
                         Some(&body.playback_id),
                         catalog,
                         measured.as_deref(),
+                        advisory,
                     )
                     .await;
                 }
@@ -1547,8 +1558,12 @@ pub(crate) async fn resolve_plan(
             source,
             request.candidate_context.as_ref(),
         ) {
-            let cost = tokio::time::timeout(
-                std::time::Duration::from_millis(100),
+            // The cost read and the live link proof are one advisory
+            // decision: they share one deadline, clamped to this create's
+            // startup budget, and a miss leaves the choice unproven.
+            let advisory = link_receipts::advisory_deadline();
+            let cost = tokio::time::timeout_at(
+                advisory,
                 state
                     .transcode
                     .measured_candidate_cost(candidate, &request, None),
@@ -1559,13 +1574,14 @@ pub(crate) async fn resolve_plan(
             if let Some(cost) = cost {
                 let link = state
                     .link_receipts
-                    .current_positive(
+                    .current_positive_until(
                         state,
                         network,
                         source,
                         incumbent_receipt,
                         Some(&request.playback_id),
                         context.owner_node_id.as_deref(),
+                        advisory,
                     )
                     .await;
                 if link
@@ -1985,7 +2001,14 @@ async fn create_with_purpose_inner(
             request.candidate_context.as_ref(),
             candidate_route,
         ) {
-            link_receipts::binding(identity, source, context.recipe_digest, route).await
+            link_receipts::binding_until(
+                identity,
+                source,
+                context.recipe_digest,
+                route,
+                link_receipts::advisory_deadline(),
+            )
+            .await
         } else {
             None
         }
@@ -2838,6 +2861,7 @@ async fn create_with_purpose_inner(
             &catalog_request,
             &accepted,
             planning_snapshot.as_ref(),
+            link_receipts::advisory_deadline(),
         )
         .await
     } else {
@@ -3161,9 +3185,14 @@ async fn create_with_purpose_inner(
                 request.candidate_context.as_ref(),
                 candidate_route,
             ) {
-                if let Some(source) =
-                    link_receipts::binding(identity, source, context.recipe_digest, candidate_route)
-                        .await
+                if let Some(source) = link_receipts::binding_until(
+                    identity,
+                    source,
+                    context.recipe_digest,
+                    candidate_route,
+                    link_receipts::advisory_deadline(),
+                )
+                .await
                 {
                     if link_source_binding.as_ref() == Some(&source) {
                         state.link_receipts.register(link_receipts::SessionBinding {

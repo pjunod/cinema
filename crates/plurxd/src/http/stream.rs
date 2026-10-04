@@ -2496,6 +2496,11 @@ pub async fn decision(
     // The media endpoints announce it once delivery is actually happening.
 
     let mut measured_candidate_outputs = None;
+    // One advisory deadline for every link-evidence read this decision makes
+    // (measured costs, recorded negatives, the live incumbent proof), taken
+    // once the catalogue itself is in hand so its enumeration cannot spend
+    // it. Missing evidence is Unknown; it never refuses the decision.
+    let mut advisory = None;
     let quality_candidates = if state
         .store
         .get_setting(plurx_core::store::keys::PLAYBACK_DISPLAY_AWARE_AUTO)
@@ -2524,46 +2529,40 @@ pub async fn decision(
                 .await;
             // Costs are advisory, but their source/settings must be the exact
             // accepted local row. Acquisition and projection share one deadline.
-            measured_candidate_outputs = tokio::time::timeout_at(
-                crate::media_pool::create_stage_deadline(std::time::Duration::from_millis(100)),
-                async {
-                    let planning = state
-                        .store
-                        .playback_planning_snapshot(
-                            file.id,
-                            &crate::transcode::QUALITY_PLANNING_KEYS,
-                        )
-                        .await
-                        .ok()??;
-                    let binding = crate::media_pool::PlanningBinding::from_snapshot(&planning);
-                    if planning.file.id != file.id
-                        || planning.file.size != file.size
-                        || planning.file.mtime != file.mtime
-                        || !accepted.iter().any(|entry| {
-                            entry.node_id == state.node_id
-                                && entry.binding.as_ref() == Some(&binding)
-                        })
-                    {
-                        return None;
-                    }
-                    let local: Vec<_> = accepted
-                        .iter()
-                        .filter(|entry| {
-                            entry.node_id == state.node_id
-                                && entry.binding.as_ref() == Some(&binding)
-                        })
-                        .cloned()
-                        .collect();
-                    super::hls::link_receipts::measured_outputs(
-                        &state,
-                        &file,
-                        &request,
-                        &local,
-                        Some(&planning),
-                    )
+            let deadline = *advisory.insert(super::hls::link_receipts::advisory_deadline());
+            measured_candidate_outputs = tokio::time::timeout_at(deadline, async {
+                let planning = state
+                    .store
+                    .playback_planning_snapshot(file.id, &crate::transcode::QUALITY_PLANNING_KEYS)
                     .await
-                },
-            )
+                    .ok()??;
+                let binding = crate::media_pool::PlanningBinding::from_snapshot(&planning);
+                if planning.file.id != file.id
+                    || planning.file.size != file.size
+                    || planning.file.mtime != file.mtime
+                    || !accepted.iter().any(|entry| {
+                        entry.node_id == state.node_id && entry.binding.as_ref() == Some(&binding)
+                    })
+                {
+                    return None;
+                }
+                let local: Vec<_> = accepted
+                    .iter()
+                    .filter(|entry| {
+                        entry.node_id == state.node_id && entry.binding.as_ref() == Some(&binding)
+                    })
+                    .cloned()
+                    .collect();
+                super::hls::link_receipts::measured_outputs(
+                    &state,
+                    &file,
+                    &request,
+                    &local,
+                    Some(&planning),
+                    deadline,
+                )
+                .await
+            })
             .await
             .ok()
             .flatten();
@@ -2584,6 +2583,7 @@ pub async fn decision(
     // advisory selection, never the feature switch or a manual request.
     let selection_candidates = if q.force.as_deref().unwrap_or("auto") == "auto" {
         if let Some(catalog) = quality_candidates.as_ref() {
+            let advisory = advisory.unwrap_or_else(super::hls::link_receipts::advisory_deadline);
             let catalog = super::hls::candidate_recovery::decision_catalog(
                 &state,
                 identity.as_ref(),
@@ -2597,6 +2597,7 @@ pub async fn decision(
                 identity.as_ref(),
                 &file,
                 catalog,
+                advisory,
             )
             .await;
             Some(
@@ -2608,6 +2609,7 @@ pub async fn decision(
                     None,
                     catalog,
                     measured_candidate_outputs.as_deref(),
+                    advisory,
                 )
                 .await,
             )

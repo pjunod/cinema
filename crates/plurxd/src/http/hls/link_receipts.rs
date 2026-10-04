@@ -168,34 +168,131 @@ pub(crate) struct ClientLinkSample {
     pub runway_ms: u32,
 }
 
+/// The most one advisory link-evidence decision may wait, measured from the
+/// moment the request starts it.
+///
+/// Network priors, live receipts and measured output costs only narrow or
+/// widen an Auto choice; none of them can refuse playback, and a read that
+/// does not finish is Unknown. They still must not hold first frame
+/// indefinitely, so each decision takes ONE deadline from
+/// [`advisory_deadline`] and every read inside it shares that deadline. It is
+/// the same stage maximum the candidate catalogue uses for its own critical
+/// reads, and inside a create it is clamped to the request's remaining
+/// startup budget (see `media_pool::create_stage_deadline`), so advisory
+/// work can never spend the allowance the create needs to answer.
+///
+/// It replaces per-read 100 ms caps. Those made Auto timing-dependent: one
+/// source `open`+`fstat` on a NAS whose disks had spun down regularly took
+/// longer than that, and a timed-out filter offered candidates that already
+/// had a recorded negative.
+pub(crate) const ADVISORY_EVIDENCE_STAGE: Duration = Duration::from_secs(2);
+
+/// The deadline one advisory decision shares across all of its reads, derived
+/// from the request making it. Take it once per decision and pass it down.
+pub(crate) fn advisory_deadline() -> tokio::time::Instant {
+    crate::media_pool::create_stage_deadline(ADVISORY_EVIDENCE_STAGE)
+}
+
+async fn network_priors_enabled(state: &AppState) -> bool {
+    state
+        .store
+        .get_setting(plurx_core::store::keys::PLAYBACK_NETWORK_PRIORS)
+        .await
+        .ok()
+        .flatten()
+        .is_some_and(|value| value.trim() == "1")
+}
+
+/// The request-scoped half of a [`CandidateLinkBinding`]: who is asking and
+/// which exact source object they are asking about. The source object version
+/// costs an `open` and an `fstat`, and it is a property of the request, not
+/// of a candidate, so it is fenced once and every candidate binding of the
+/// same request is derived from it.
+// No Debug: the credential generation is never exposed through logs.
+#[derive(Clone, PartialEq, Eq)]
+pub(crate) struct SourceLinkIdentity {
+    user_id: i64,
+    credential_generation: String,
+    client_class: String,
+    network_fingerprint: String,
+    file_id: i64,
+    source_size: i64,
+    source_mtime: i64,
+    source_object_version: String,
+}
+
+impl SourceLinkIdentity {
+    /// Fences the source once. It carries no timer of its own: the caller's
+    /// advisory deadline bounds it, and a miss is Unknown, never a refusal.
+    pub(crate) async fn capture(network: &NetworkIdentity, file: &MediaFile) -> Option<Self> {
+        let user_id = network.user_id?;
+        let credential_generation = network.credential_generation.as_ref()?.as_str().to_owned();
+        let fence = crate::fragment_index_cluster::open_source_fence(file, None)
+            .await
+            .ok()?;
+        if !fence.unchanged() {
+            return None;
+        }
+        Some(Self {
+            user_id,
+            credential_generation,
+            client_class: network.client_class.clone(),
+            network_fingerprint: network.network_fingerprint.clone(),
+            file_id: file.id,
+            source_size: file.size,
+            source_mtime: file.mtime,
+            source_object_version: fence.object_version().to_owned(),
+        })
+    }
+
+    pub(crate) fn candidate(
+        &self,
+        recipe_digest: [u8; 32],
+        route: CandidateRoute,
+    ) -> CandidateLinkBinding {
+        CandidateLinkBinding {
+            user_id: self.user_id,
+            credential_generation: self.credential_generation.clone(),
+            client_class: self.client_class.clone(),
+            network_fingerprint: self.network_fingerprint.clone(),
+            file_id: self.file_id,
+            source_size: self.source_size,
+            source_mtime: self.source_mtime,
+            source_object_version: self.source_object_version.clone(),
+            recipe_digest,
+            route,
+        }
+    }
+}
+
+/// One candidate's binding. Fences the source each call, so a caller that
+/// binds several candidates of one request captures a [`SourceLinkIdentity`]
+/// once instead. Unbounded by itself; callers bound it with their advisory
+/// deadline.
 pub(crate) async fn binding(
     network: &NetworkIdentity,
     file: &MediaFile,
     recipe_digest: [u8; 32],
     route: CandidateRoute,
 ) -> Option<CandidateLinkBinding> {
-    let fence = tokio::time::timeout(
-        Duration::from_millis(100),
-        crate::fragment_index_cluster::open_source_fence(file, None),
-    )
-    .await
-    .ok()?
-    .ok()?;
-    if !fence.unchanged() {
-        return None;
-    }
-    Some(CandidateLinkBinding {
-        user_id: network.user_id?,
-        credential_generation: network.credential_generation.as_ref()?.as_str().to_owned(),
-        client_class: network.client_class.clone(),
-        network_fingerprint: network.network_fingerprint.clone(),
-        file_id: file.id,
-        source_size: file.size,
-        source_mtime: file.mtime,
-        source_object_version: fence.object_version().to_owned(),
-        recipe_digest,
-        route,
-    })
+    SourceLinkIdentity::capture(network, file)
+        .await
+        .map(|source| source.candidate(recipe_digest, route))
+}
+
+/// [`binding`] for a caller with no enclosing advisory bound of its own: a
+/// fence that misses `deadline` is Unknown (no binding), never a refusal.
+pub(crate) async fn binding_until(
+    network: &NetworkIdentity,
+    file: &MediaFile,
+    recipe_digest: [u8; 32],
+    route: CandidateRoute,
+    deadline: tokio::time::Instant,
+) -> Option<CandidateLinkBinding> {
+    tokio::time::timeout_at(deadline, binding(network, file, recipe_digest, route))
+        .await
+        .ok()
+        .flatten()
 }
 
 impl LinkReceipts {
@@ -236,16 +333,12 @@ impl LinkReceipts {
         if !sample.negative {
             return None;
         }
-        tokio::time::timeout(std::time::Duration::from_millis(100), async {
+        // One advisory deadline for the whole acknowledgement: acceptance,
+        // the durable fold and the live-proof readback all share it.
+        let deadline = advisory_deadline();
+        tokio::time::timeout_at(deadline, async {
             let session = session?;
-            let enabled = state
-                .store
-                .get_setting(plurx_core::store::keys::PLAYBACK_NETWORK_PRIORS)
-                .await
-                .ok()
-                .flatten()
-                .is_some_and(|value| value.trim() == "1");
-            if !enabled {
+            if !network_priors_enabled(state).await {
                 return None;
             }
             let value = self.accept(state, network, Some(session), sample).await?;
@@ -272,12 +365,13 @@ impl LinkReceipts {
             let file = state.store.get_file(value.binding.file_id).await.ok()??;
             let route = state.store.media_session_route(session).await.ok()??;
             let proof = self
-                .current_negative(
+                .current_negative_until(
                     state,
                     network,
                     &file,
                     Some(&sample.receipt),
                     &route.playback_id,
+                    deadline,
                 )
                 .await?;
             if proof.incumbent_session() != session
@@ -303,14 +397,28 @@ impl LinkReceipts {
         nonce: Option<&str>,
         playback: &str,
     ) -> Option<LiveLinkProof> {
+        self.current_negative_until(state, network, file, nonce, playback, advisory_deadline())
+            .await
+    }
+
+    async fn current_negative_until(
+        &self,
+        state: &AppState,
+        network: &NetworkIdentity,
+        file: &MediaFile,
+        nonce: Option<&str>,
+        playback: &str,
+        deadline: tokio::time::Instant,
+    ) -> Option<LiveLinkProof> {
         let proof = self
-            .current_positive(
+            .current_positive_until(
                 state,
                 network,
                 file,
                 nonce,
                 Some(playback),
                 Some(&state.node_id),
+                deadline,
             )
             .await?;
         let rows = self.0.lock().ok()?;
@@ -335,18 +443,36 @@ impl LinkReceipts {
         playback_id: Option<&str>,
         proposed_owner: Option<&str>,
     ) -> Option<LiveLinkProof> {
+        self.current_positive_until(
+            state,
+            network,
+            file,
+            incumbent_receipt,
+            playback_id,
+            proposed_owner,
+            advisory_deadline(),
+        )
+        .await
+    }
+
+    /// [`Self::current_positive`] inside a deadline the caller's advisory
+    /// decision already owns, so its reads share that one bound.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) async fn current_positive_until(
+        &self,
+        state: &AppState,
+        network: &NetworkIdentity,
+        file: &MediaFile,
+        incumbent_receipt: Option<&str>,
+        playback_id: Option<&str>,
+        proposed_owner: Option<&str>,
+        deadline: tokio::time::Instant,
+    ) -> Option<LiveLinkProof> {
         if proposed_owner != Some(state.node_id.as_str()) {
             return None;
         }
-        tokio::time::timeout(Duration::from_millis(100), async {
-            if !state
-                .store
-                .get_setting(plurx_core::store::keys::PLAYBACK_NETWORK_PRIORS)
-                .await
-                .ok()
-                .flatten()
-                .is_some_and(|value| value.trim() == "1")
-            {
+        tokio::time::timeout_at(deadline, async {
+            if !network_priors_enabled(state).await {
                 return None;
             }
             let nonce = incumbent_receipt?;
@@ -739,8 +865,11 @@ impl LinkReceipts {
         if file.size != captured.source.source_size || file.mtime != captured.source.source_mtime {
             return None;
         }
-        let fence = tokio::time::timeout(
-            Duration::from_millis(100),
+        // The source fence is advisory evidence like the rest of this claim:
+        // bounded by the shared advisory stage (already inside the caller's
+        // deadline on the acknowledgement path), never by its own short cap.
+        let fence = tokio::time::timeout_at(
+            advisory_deadline(),
             crate::fragment_index_cluster::open_source_fence(&file, None),
         )
         .await
@@ -847,19 +976,14 @@ impl LinkReceipts {
 }
 
 /// Exact negatives only; raw throughput cannot be compared to planned budgets.
-pub(crate) async fn admissible(
+/// One candidate against a source identity the request already fenced: a
+/// single prior read, no filesystem work. Missing evidence is admissible.
+pub(super) async fn admissible_for(
     state: &AppState,
-    network: Option<&NetworkIdentity>,
-    file: &MediaFile,
+    source: &SourceLinkIdentity,
     candidate: &plurx_core::playback::candidate::QualityCandidate,
 ) -> bool {
-    let Some(network) = network else {
-        return true;
-    };
-    let Some(binding) = binding(network, file, candidate.recipe_digest, candidate.route).await
-    else {
-        return true;
-    };
+    let binding = source.candidate(candidate.recipe_digest, candidate.route);
     let prior = state
         .store
         .candidate_link_prior(&binding)
@@ -869,34 +993,41 @@ pub(crate) async fn admissible(
     !prior.is_some_and(|prior| prior.negative_active(crate::media_sessions::unix_ms()))
 }
 
+/// Drops the candidates with an active recorded negative for this requester
+/// and source. The source is fenced once for the whole catalogue, and all of
+/// it shares the caller's advisory `deadline`. A negative read before the
+/// deadline stays applied when it expires; only candidates whose evidence was
+/// not read in time stay offered (Unknown), never the whole catalogue again.
 pub(crate) async fn filter_catalog(
     state: &AppState,
     network: Option<&NetworkIdentity>,
     file: &MediaFile,
     catalog: Vec<plurx_core::playback::candidate::QualityCandidate>,
+    deadline: tokio::time::Instant,
 ) -> Vec<plurx_core::playback::candidate::QualityCandidate> {
-    let fallback = catalog.clone();
-    tokio::time::timeout(Duration::from_millis(100), async {
-        if !state
-            .store
-            .get_setting(plurx_core::store::keys::PLAYBACK_NETWORK_PRIORS)
-            .await
-            .ok()
-            .flatten()
-            .is_some_and(|value| value.trim() == "1")
-        {
-            return catalog;
+    let Some(network) = network else {
+        return catalog;
+    };
+    let mut rejected = vec![false; catalog.len()];
+    let _complete = tokio::time::timeout_at(deadline, async {
+        if !network_priors_enabled(state).await {
+            return;
         }
-        let mut permitted = Vec::with_capacity(catalog.len());
-        for candidate in catalog {
-            if admissible(state, network, file, &candidate).await {
-                permitted.push(candidate);
-            }
+        let Some(source) = SourceLinkIdentity::capture(network, file).await else {
+            return;
+        };
+        for (candidate, slot) in catalog.iter().zip(rejected.iter_mut()) {
+            *slot = !admissible_for(state, &source, candidate).await;
         }
-        permitted
     })
-    .await
-    .unwrap_or(fallback)
+    .await;
+    // `_complete` is Err only when the deadline cut the reads short; the
+    // verdicts already written in `rejected` are kept either way.
+    catalog
+        .into_iter()
+        .zip(rejected)
+        .filter_map(|(candidate, rejected)| (!rejected).then_some(candidate))
+        .collect()
 }
 
 /// Public advisory projection from the exact existing local resolver. Remote
@@ -907,48 +1038,46 @@ pub(crate) async fn measured_outputs(
     request: &crate::media_pool::QualityCatalogRequest,
     accepted: &[crate::media_pool::WorkerQualityCandidate],
     snapshot: Option<&plurx_core::store::PlaybackPlanningSnapshot>,
+    deadline: tokio::time::Instant,
 ) -> Option<Vec<crate::vodserve::retained::MeasuredCandidateOutput>> {
     if !accepted.iter().any(|entry| entry.node_id == state.node_id) {
         return None;
     }
-    let projected = tokio::time::timeout_at(
-        crate::media_pool::create_stage_deadline(Duration::from_millis(100)),
-        async {
-            if let Some(snapshot) = snapshot {
-                state
-                    .transcode
-                    .quality_catalog_from_snapshot_progress(
-                        snapshot,
-                        &request.caps,
-                        request.audio_index,
-                        request.audio_offset_ms,
-                        request.subtitle_burn,
-                        request.presentation,
-                        request.copy_contract,
-                        request.audio_delivery.as_ref(),
-                        request.audio_claim.as_ref(),
-                        None,
-                        None,
-                    )
-                    .await
-            } else {
-                state
-                    .transcode
-                    .quality_candidates_with_measured_outputs(
-                        file,
-                        &request.caps,
-                        request.audio_index,
-                        request.audio_offset_ms,
-                        request.subtitle_burn,
-                        request.presentation,
-                        request.copy_contract,
-                        request.audio_delivery.as_ref(),
-                        request.audio_claim.as_ref(),
-                    )
-                    .await
-            }
-        },
-    )
+    let projected = tokio::time::timeout_at(deadline, async {
+        if let Some(snapshot) = snapshot {
+            state
+                .transcode
+                .quality_catalog_from_snapshot_progress(
+                    snapshot,
+                    &request.caps,
+                    request.audio_index,
+                    request.audio_offset_ms,
+                    request.subtitle_burn,
+                    request.presentation,
+                    request.copy_contract,
+                    request.audio_delivery.as_ref(),
+                    request.audio_claim.as_ref(),
+                    None,
+                    None,
+                )
+                .await
+        } else {
+            state
+                .transcode
+                .quality_candidates_with_measured_outputs(
+                    file,
+                    &request.caps,
+                    request.audio_index,
+                    request.audio_offset_ms,
+                    request.subtitle_burn,
+                    request.presentation,
+                    request.copy_contract,
+                    request.audio_delivery.as_ref(),
+                    request.audio_claim.as_ref(),
+                )
+                .await
+        }
+    })
     .await
     .ok()?;
     let outputs: Vec<_> = projected
@@ -975,6 +1104,8 @@ pub(crate) async fn measured_outputs(
 /// Warm advisory Auto selection may use a fresh incumbent acquisition only
 /// against this node's qualified complete-output costs. Cold/recovery choices
 /// stay ordinary playable catalog entries; absence is not an enable gate.
+/// `deadline` is the caller's one advisory deadline for this decision.
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn positive_catalog(
     state: &AppState,
     network: Option<&NetworkIdentity>,
@@ -983,19 +1114,21 @@ pub(crate) async fn positive_catalog(
     playback_id: Option<&str>,
     catalog: Vec<plurx_core::playback::candidate::QualityCandidate>,
     measured: Option<&[crate::vodserve::retained::MeasuredCandidateOutput]>,
+    deadline: tokio::time::Instant,
 ) -> Vec<plurx_core::playback::candidate::QualityCandidate> {
     let Some(network) = network else {
         return catalog;
     };
     let Some(proof) = state
         .link_receipts
-        .current_positive(
+        .current_positive_until(
             state,
             network,
             file,
             nonce,
             playback_id,
             Some(&state.node_id),
+            deadline,
         )
         .await
     else {
@@ -2542,5 +2675,143 @@ mod tests {
             .mint("unknown", "seg00001.m4s", "etag", 4096, None, true)
             .is_none());
         assert!(registry.0.lock().expect("rows").receipts.is_empty());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn advisory_evidence_takes_one_deadline_derived_from_the_request() {
+        let now = tokio::time::Instant::now();
+        assert_eq!(
+            advisory_deadline(),
+            now + ADVISORY_EVIDENCE_STAGE,
+            "outside a create the advisory stage maximum applies"
+        );
+        let budget = crate::media_pool::CreateStartupBudget::new(1_000);
+        let inside = budget.scope(async { advisory_deadline() }).await;
+        assert_eq!(
+            inside,
+            budget.deadline - Duration::from_millis(250),
+            "inside a create advisory evidence cannot spend the startup tail"
+        );
+        assert!(inside < now + ADVISORY_EVIDENCE_STAGE);
+    }
+
+    #[tokio::test]
+    async fn filter_catalog_fences_once_and_drops_only_exact_negatives() {
+        use axum::{
+            extract::{Path, Query, State},
+            http::HeaderMap,
+        };
+        let (state, user, file, _root) = actual_intake_state().await;
+        state
+            .store
+            .put_setting(plurx_core::store::keys::PLAYBACK_DISPLAY_AWARE_AUTO, "1")
+            .await
+            .expect("Auto setting");
+        let caps = serde_json::from_value(serde_json::json!({"v":2,
+            "video":[{"codec":"h264","present":["sdr"]}],"containers":["mp4"]}))
+        .expect("caps");
+        let mut headers = HeaderMap::new();
+        headers.insert("user-agent", "Mozilla/5.0".parse().expect("UA"));
+        let remote = "192.168.4.9:1234".parse().expect("peer");
+        let decision = crate::http::stream::decision(
+            crate::http::extract::AuthUser(user.clone()),
+            State(state.clone()),
+            Path(file.id),
+            Query(crate::http::stream::Caps {
+                caps_v2: Some(caps),
+                force: Some("original".into()),
+                ..Default::default()
+            }),
+            headers.clone(),
+            crate::http::network::RemoteAddress(Some(remote)),
+        )
+        .await
+        .expect("manual decision")
+        .0;
+        let selected = decision.quality_candidate_id.expect("selected candidate");
+        let catalog = decision.quality_candidates.expect("public catalog");
+        let negative = catalog
+            .iter()
+            .find(|row| row.id == selected)
+            .expect("selected in menu")
+            .clone();
+        let mut network = crate::http::network::identity(&headers, Some(remote)).expect("network");
+        network.user_id = Some(user.id);
+        network.credential_generation = Some(plurx_core::domain::CredentialGeneration::derive(
+            user.id,
+            user.created_at,
+            &user.password_hash,
+        ));
+
+        // The request-scoped identity derives exactly the per-candidate
+        // binding, so fencing once loses nothing a per-candidate fence had.
+        let identity = SourceLinkIdentity::capture(&network, &file)
+            .await
+            .expect("source fenced once");
+        for row in &catalog {
+            assert!(
+                identity.candidate(row.recipe_digest, row.route)
+                    == binding(&network, &file, row.recipe_digest, row.route)
+                        .await
+                        .expect("per-candidate binding"),
+                "candidate {} derives the same binding",
+                row.id.to_hex()
+            );
+        }
+
+        let now = crate::media_sessions::unix_ms();
+        state
+            .store
+            .observe_candidate_link(
+                &CandidateLinkObservation {
+                    binding: identity.candidate(negative.recipe_digest, negative.route),
+                    body_bytes: 4096,
+                    body_duration_ms: 5000,
+                    completed_at_ms: now,
+                    negative: true,
+                },
+                now,
+            )
+            .await
+            .expect("exact negative");
+
+        // Priors off: the negative is not evidence yet, nothing is dropped.
+        let off = filter_catalog(
+            &state,
+            Some(&network),
+            &file,
+            catalog.clone(),
+            advisory_deadline(),
+        )
+        .await;
+        assert_eq!(off.len(), catalog.len());
+
+        state
+            .store
+            .put_setting(plurx_core::store::keys::PLAYBACK_NETWORK_PRIORS, "1")
+            .await
+            .expect("prior setting");
+        let filtered = filter_catalog(
+            &state,
+            Some(&network),
+            &file,
+            catalog.clone(),
+            advisory_deadline(),
+        )
+        .await;
+        let same_recipe = |row: &plurx_core::playback::candidate::QualityCandidate| {
+            row.recipe_digest == negative.recipe_digest && row.route == negative.route
+        };
+        assert!(!filtered.iter().any(same_recipe), "exact negative dropped");
+        assert_eq!(
+            filtered.len(),
+            catalog.iter().filter(|&row| !same_recipe(row)).count(),
+            "every candidate without a negative stays offered"
+        );
+
+        // No requester identity is Unknown, never a refusal.
+        let anonymous =
+            filter_catalog(&state, None, &file, catalog.clone(), advisory_deadline()).await;
+        assert_eq!(anonymous.len(), catalog.len());
     }
 }
