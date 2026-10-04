@@ -107,6 +107,20 @@ struct ReceivedSource {
 #[derive(Clone)]
 pub(crate) struct ReceiverStartActor(Arc<ReceiverStartInner>);
 impl ReceiverStartRegistry {
+    fn by_session(&self, session: Uuid) -> Option<ReceiverStartActor> {
+        self.entries
+            .lock()
+            .expect("receiver registry")
+            .iter()
+            .find_map(|entry| {
+                let owned = entry.state.lock().expect("receiver owner");
+                owned
+                    .owner
+                    .as_ref()
+                    .filter(|owner| owner.session_id == session)
+                    .map(|_| ReceiverStartActor(entry.clone()))
+            })
+    }
     pub(crate) fn begin(
         &self,
         state: Arc<AppState>,
@@ -320,6 +334,67 @@ impl ReceiverStartActor {
         }
         Ok((authority, attachment, received))
     }
+    pub(crate) async fn protect_start_response(
+        &self,
+        state: Arc<AppState>,
+        connection: &crate::SharingConnectionCancellation,
+        response: axum::response::Response,
+    ) -> Result<axum::response::Response, ReceiverStartError> {
+        use futures_util::StreamExt;
+        self.current_delivery_attachment(&state).await?;
+        self.current_source_status(&state).await?;
+        self.current_delivery_attachment(&state).await?;
+        let guard = self.retain_accepted_connection(state, connection)?;
+        let (parts, body) = response.into_parts();
+        let stream = body.into_data_stream().map(move |frame| {
+            let _accepted_writer = &guard;
+            frame
+        });
+        Ok(axum::http::Response::from_parts(
+            parts,
+            axum::body::Body::from_stream(stream),
+        ))
+    }
+    pub(crate) fn retain_accepted_connection(
+        &self,
+        state: Arc<AppState>,
+        connection: &crate::SharingConnectionCancellation,
+    ) -> Result<Arc<dyn Send + Sync>, ReceiverStartError> {
+        let (guard, new_monitor) = self.0.bodies.reserve_connection(connection)?;
+        if !new_monitor {
+            return Ok(guard);
+        }
+        // Capture tokens and the closure observer only: capturing the monitor
+        // owner itself would form an Arc -> JoinHandle -> Arc cycle.
+        let cancel = connection.0.clone();
+        let closed = connection.closed();
+        let actor = self.clone();
+        let retained = guard.clone();
+        if connection.monitor(async move {
+            let _retained = retained;
+            let mut timer = tokio::time::interval(Duration::from_secs(1));
+            timer.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+            loop {
+                tokio::select! {
+                    () = closed.wait() => return,
+                    () = actor.0.stop.cancelled() => break,
+                    _ = timer.tick() => {}
+                }
+                // Original B login and exact delivery binding remain required
+                // while a writer has queued bytes, including after Body EOF.
+                if actor.current_delivery_attachment(&state).await.is_err() {
+                    actor.begin_retirement(state.clone(), plurx_core::sharing_receiver_retirement::ReceiverRetirementReason::Revoked);
+                    break;
+                }
+            }
+            cancel.cancel();
+            closed.wait().await;
+        }).is_err() {
+            connection.0.cancel();
+            return Err(ReceiverStartError::Capacity);
+        }
+        Ok(guard)
+    }
     pub(crate) async fn open_source_resource(
         &self,
         state: &AppState,
@@ -365,6 +440,14 @@ impl ReceiverStartActor {
         &self,
         state: &AppState,
     ) -> Result<crate::sharing_client::SourceStatusReceipt, ReceiverStartError> {
+        let lifetime: Arc<dyn Send + Sync> = self.0.bodies.reserve()?;
+        self.current_source_status_owned(state, lifetime).await
+    }
+    async fn current_source_status_owned(
+        &self,
+        state: &AppState,
+        lifetime: Arc<dyn Send + Sync>,
+    ) -> Result<crate::sharing_client::SourceStatusReceipt, ReceiverStartError> {
         if self.0.stop.is_cancelled() {
             return Err(ReceiverStartError::Unresolved);
         }
@@ -389,7 +472,6 @@ impl ReceiverStartActor {
             catalogue_epoch: self.0.intent.scope.catalogue_epoch,
             created_at_ms: 0,
         };
-        let lifetime: Arc<dyn Send + Sync> = self.0.bodies.reserve()?;
         let (mut peer, _) = crate::sharing_client::PeerConnection::verified_with_lifetime(
             &state.sharing,
             std::slice::from_ref(&received.endpoint),
@@ -640,7 +722,7 @@ async fn run_owner(
         intent,
         &dispatch_owner,
         &source_wrapper,
-        connection_lifetime,
+        connection_lifetime.clone(),
         move |credential, viewer, endpoint| {
             dispatch_entry.retain_dispatch(DispatchedSource {
                 credential: plurx_core::secrets::Secret::from_cleartext(credential.expose()),
@@ -756,7 +838,7 @@ async fn run_owner(
     // Retain the received physical lineage before any authority or Store await.
     entry.state.lock().expect("receiver owner").source = Some(attachment.clone());
     let source_status = ReceiverStartActor(entry.clone())
-        .current_source_status(&state)
+        .current_source_status_owned(&state, connection_lifetime.clone())
         .await?;
     let projected = project_shared_start(
         source_status.response().clone(),
@@ -844,14 +926,23 @@ async fn run_owner(
         owned.start = Some(Ok(projected));
     }
     entry.changed.notify_waiters();
+    let mut authority_timer = tokio::time::interval(Duration::from_secs(1));
+    authority_timer.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    let mut next_renewal = Instant::now();
     loop {
         tokio::select! {
             _ = entry.stop.cancelled() => return Err(ReceiverStartError::Unresolved),
-            _ = timer.tick() => {}
+            _ = authority_timer.tick() => {}
         }
-        ReceiverStartActor(entry.clone())
-            .current_source_status(&state)
+        let actor = ReceiverStartActor(entry.clone());
+        actor
+            .current_source_status_owned(&state, connection_lifetime.clone())
             .await?;
+        actor.current_delivery_attachment(&state).await?;
+        if Instant::now() < next_renewal {
+            continue;
+        }
+        next_renewal = Instant::now() + Duration::from_secs(10);
         let authority = state
             .store
             .prepare_receiver_session_authority(intent.clone())
@@ -878,6 +969,110 @@ async fn run_owner(
         owned.owner = Some(attachment.owner.clone());
         owned.source = Some(attachment.clone());
     }
+}
+
+/// Typed receiver dispatch precedes the Local HLS handlers. A durable remote
+/// recipe cannot recreate the physical actor or authorize a Local producer.
+pub(crate) async fn receiver_media(
+    axum::extract::State(state): axum::extract::State<AppState>,
+    request: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> axum::response::Response {
+    use axum::{
+        http::{Method, StatusCode},
+        response::IntoResponse,
+    };
+    use futures_util::StreamExt;
+    let Some(path) = request.uri().path().strip_prefix("/api/v1/hls/") else {
+        return next.run(request).await;
+    };
+    let (session, suffix) = path.split_once('/').unwrap_or((path, ""));
+    let Ok(session_id) = Uuid::parse_str(session) else {
+        return next.run(request).await;
+    };
+    if session_id.to_string() != session {
+        return next.run(request).await;
+    }
+    let actor = state.sharing.receiver_starts.by_session(session_id);
+    if actor.is_none() {
+        match state.store.media_session_route(session).await {
+            Ok(Some(route)) => {
+                // Only the explicit remote discriminant is inspected here;
+                // neither a row nor its recipe creates a playback authority.
+                let remote = serde_json::from_str::<serde_json::Value>(&route.recipe_json)
+                    .ok()
+                    .is_some_and(|value| {
+                        value.get("kind").and_then(|kind| kind.as_str()) == Some("remote_source")
+                    });
+                if remote {
+                    return (
+                        StatusCode::SERVICE_UNAVAILABLE,
+                        "shared playback owner unavailable",
+                    )
+                        .into_response();
+                }
+            }
+            Err(_) => return StatusCode::SERVICE_UNAVAILABLE.into_response(),
+            Ok(None) => {}
+        }
+        return next.run(request).await;
+    }
+    let actor = actor.expect("actual receiver actor");
+    if request.method() != Method::GET {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            "shared playback operation unavailable",
+        )
+            .into_response();
+    }
+    let relative = match request.uri().query() {
+        Some(query) => format!("{suffix}?{query}"),
+        None => suffix.to_owned(),
+    };
+    let Ok(resource) = plurx_core::sharing_resources::SharingHlsResource::parse(&relative) else {
+        return StatusCode::UNPROCESSABLE_ENTITY.into_response();
+    };
+    let Some(connection) = request
+        .extensions()
+        .get::<crate::SharingConnectionCancellation>()
+        .cloned()
+    else {
+        return StatusCode::SERVICE_UNAVAILABLE.into_response();
+    };
+    // Authorize before registering a writer, then again after Source IO.
+    if actor.current_delivery_attachment(&state).await.is_err() {
+        return StatusCode::SERVICE_UNAVAILABLE.into_response();
+    }
+    let state = Arc::new(state);
+    let guard = match actor.retain_accepted_connection(state.clone(), &connection) {
+        Ok(guard) => guard,
+        Err(_) => return StatusCode::SERVICE_UNAVAILABLE.into_response(),
+    };
+    let opened = match actor.open_source_resource(&state, &resource).await {
+        Ok(opened) => opened,
+        Err(_) => {
+            actor.begin_retirement(
+                state,
+                plurx_core::sharing_receiver_retirement::ReceiverRetirementReason::Revoked,
+            );
+            return StatusCode::SERVICE_UNAVAILABLE.into_response();
+        }
+    };
+    let stream = opened.body.into_data_stream().map(move |frame| {
+        let _writer_ownership = &guard;
+        frame
+    });
+    let mut builder = axum::http::Response::builder()
+        .status(StatusCode::OK)
+        .header(axum::http::header::CONTENT_TYPE, opened.mime)
+        .header(axum::http::header::CONTENT_LENGTH, opened.length)
+        .header(axum::http::header::CACHE_CONTROL, "no-store");
+    if let Some(etag) = opened.etag {
+        builder = builder.header(axum::http::header::ETAG, etag);
+    }
+    builder
+        .body(axum::body::Body::from_stream(stream))
+        .expect("validated Source resource headers")
 }
 
 #[cfg(test)]

@@ -202,6 +202,7 @@ async fn start(
     RawToken(token): RawToken,
     State(state): State<AppState>,
     Path((import, locator)): Path<(String, String)>,
+    connection: Option<axum::Extension<crate::SharingConnectionCancellation>>,
     body: Body,
 ) -> Result<Response, ApiError> {
     let import_id = Uuid::parse_str(&import).map_err(|_| invalid())?;
@@ -268,7 +269,15 @@ async fn start(
         .wait_ready(Instant::now() + Duration::from_secs(305))
         .await
         .map_err(actor_error)?;
-    Ok(([(header::CACHE_CONTROL, "no-store")], Json(response)).into_response())
+    let connection = connection.ok_or_else(unavailable)?;
+    actor
+        .protect_start_response(
+            Arc::new(state),
+            &connection.0,
+            ([(header::CACHE_CONTROL, "no-store")], Json(response)).into_response(),
+        )
+        .await
+        .map_err(actor_error)
 }
 
 #[cfg(test)]

@@ -1092,6 +1092,91 @@ async fn source_actual_actor(
             .expect("actual retained DTO"),
         serde_json::to_value(&response).expect("actual complete DTO")
     );
+    if matches!(mode, 42..=44) {
+        let resource = SharingHlsResource::parse(if mode != 43 {
+            "init.mp4"
+        } else {
+            "seg00000.m4s"
+        })
+        .expect("actual closed Source media resource");
+        let activity = manager
+            .vod
+            .source_control_observation_for_test(&response.session_id)
+            .await
+            .expect("actual resource activity");
+        let pause = actor.0.resource_hooks.pause();
+        let deadline = Instant::now() + Duration::from_secs(if mode == 44 { 2 } else { 20 });
+        let owned = actor.clone();
+        let call = tokio::spawn(Box::pin(async move {
+            owned.open_resource(&resource, deadline).await
+        }));
+        let paused = pause.reached().await;
+        let actual_fd = pause.actual_fd();
+        assert!(actual_fd > 0);
+        // This exact actual cache descriptor is owned by the parked filesystem
+        // job, not a simulated producer/closed flag.
+        assert!(unsafe { libc::fcntl(actual_fd, libc::F_GETFD) } >= 0);
+        if mode == 44 {
+            let called = call.await.expect("actual timed resource waiter");
+            assert!(matches!(called, Err(SourceWorkerError::Deadline)));
+            assert!(
+                actor.0.state.lock().expect("actual Source state").bodies > 0,
+                "timed waiter cannot release actual unfinished filesystem job"
+            );
+            assert!(unsafe { libc::fcntl(actual_fd, libc::F_GETFD) } >= 0);
+            drop(paused);
+            tokio::time::timeout(Duration::from_secs(10), async {
+                loop {
+                    let changed = actor.0.changed.notified();
+                    tokio::pin!(changed);
+                    changed.as_mut().enable();
+                    if actor.0.state.lock().expect("actual Source state").bodies == 0 {
+                        break;
+                    }
+                    changed.await;
+                }
+            })
+            .await
+            .expect("actual timed read job joins");
+            assert_eq!(
+                manager
+                    .vod
+                    .source_control_observation_for_test(&response.session_id)
+                    .await
+                    .expect("actual postdeadline resource activity"),
+                activity,
+                "late observation cannot touch viewer inactivity/demand"
+            );
+            assert_eq!(
+                unsafe { libc::fcntl(actual_fd, libc::F_GETFD) },
+                -1,
+                "timed actual read job descriptor closed before final guard drop"
+            );
+            actor.retire().await.expect("actual timed read retirement");
+            return;
+        }
+        call.abort();
+        assert!(matches!(call.await, Err(error) if error.is_cancelled()));
+        actor.request_retirement();
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert!(
+            actor.settlement_status().is_none(),
+            "actual opened Source job retains retirement through cancelled waiter"
+        );
+        assert!(unsafe { libc::fcntl(actual_fd, libc::F_GETFD) } >= 0);
+        drop(paused);
+        tokio::time::timeout(Duration::from_secs(10), actor.retire())
+            .await
+            .expect("actual read job settlement deadline")
+            .expect("actual joined read job and physical retirement");
+        assert_eq!(actor.settlement_status(), Some(Ok(())));
+        assert_eq!(
+            unsafe { libc::fcntl(actual_fd, libc::F_GETFD) },
+            -1,
+            "actual read descriptor closes before settled actor is visible"
+        );
+        return;
+    }
     if (36..=41).contains(&mode) {
         let baseline = manager
             .vod
@@ -1754,4 +1839,18 @@ async fn source_status_original_observation_expiry_refuses_without_activity() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn source_status_parked_read_reobserves_fresh_authority() {
     Box::pin(source_copy_preadmission_fixture(41)).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn source_resource_init_open_job_retains_actual_fd_and_guard_after_waiter_cancellation() {
+    Box::pin(source_copy_preadmission_fixture(42)).await;
+}
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn source_resource_media_open_job_retains_actual_fd_and_guard_after_waiter_cancellation() {
+    Box::pin(source_copy_preadmission_fixture(43)).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn source_resource_expired_waiter_joins_actual_job_without_late_viewer_activity() {
+    Box::pin(source_copy_preadmission_fixture(44)).await;
 }

@@ -355,6 +355,17 @@ impl VodServe {
         budget: Duration,
         delivery: Arc<crate::meter::Meter>,
     ) -> Result<SegmentReady, VodError> {
+        self.serve_init_with_read_custody(rendition, budget, delivery, None)
+            .await
+    }
+
+    pub(super) async fn serve_init_with_read_custody(
+        &self,
+        rendition: &Arc<Rendition>,
+        budget: Duration,
+        delivery: Arc<crate::meter::Meter>,
+        custody: Option<&crate::transcode::source_actor::resource::SourceResourceReadCustody>,
+    ) -> Result<SegmentReady, VodError> {
         if self.source_changed(rendition) {
             let cause = "source changed after the fragment index was selected".to_owned();
             record_failure(
@@ -383,9 +394,14 @@ impl VodServe {
             if rendition.dir.has_init().await {
                 rendition.clear_demand(INIT_DEMAND_INDEX);
                 let path = rendition.dir.path().join(INIT_NAME);
-                let ready = open_ready(&path, &format!("{}-init", rendition.key), &delivery)
-                    .await
-                    .map_err(VodError::Io)?;
+                let ready = open_with_read_custody(
+                    &path,
+                    &format!("{}-init", rendition.key),
+                    &delivery,
+                    custody,
+                )
+                .await
+                .map_err(VodError::Io)?;
                 if self.source_changed(rendition) {
                     let cause =
                         "source changed while the rendition init was being opened".to_owned();
@@ -429,6 +445,19 @@ impl VodServe {
         budget: Duration,
         delivery: Arc<crate::meter::Meter>,
     ) -> Result<SegmentReady, VodError> {
+        self.serve_segment_with_read_custody(rendition, session_id, index, budget, delivery, None)
+            .await
+    }
+
+    pub(super) async fn serve_segment_with_read_custody(
+        &self,
+        rendition: &Arc<Rendition>,
+        session_id: &str,
+        index: u32,
+        budget: Duration,
+        delivery: Arc<crate::meter::Meter>,
+        custody: Option<&crate::transcode::source_actor::resource::SourceResourceReadCustody>,
+    ) -> Result<SegmentReady, VodError> {
         // Materialized → serve immediately: the overwhelmingly common case,
         // and until now the invisible one. It never reaches the wait pool, so
         // nothing counted it: a node serving a hundred concurrent cache hits
@@ -439,14 +468,32 @@ impl VodServe {
         // when a client goes away and a decrement on the success path leaks on
         // exactly the disconnects worth seeing.
         let _serving = self.shared.pool.metrics_handle().serving();
-        if let Some(ready) = self.open_materialized(rendition, index, &delivery).await? {
+        if let Some(ready) = self
+            .open_materialized_select(rendition, index, &delivery, custody)
+            .await?
+        {
             return Ok(ready);
         }
         if let Some(cause) = rendition.failure_cause() {
             return Err(VodError::ProducerFailed(cause));
         }
-        self.blocked_wait(rendition, session_id, index, budget, delivery)
-            .await
+        match custody {
+            Some(custody) => {
+                self.blocked_wait_with_read_custody(
+                    rendition,
+                    session_id,
+                    index,
+                    budget,
+                    delivery,
+                    Some(custody),
+                )
+                .await
+            }
+            None => {
+                self.blocked_wait(rendition, session_id, index, budget, delivery)
+                    .await
+            }
+        }
     }
 
     /// The blocking half of a segment GET: register on the wait pool, close
@@ -458,6 +505,19 @@ impl VodServe {
         index: u32,
         budget: Duration,
         delivery: Arc<crate::meter::Meter>,
+    ) -> Result<SegmentReady, VodError> {
+        self.blocked_wait_with_read_custody(rendition, session_id, index, budget, delivery, None)
+            .await
+    }
+
+    pub(super) async fn blocked_wait_with_read_custody(
+        &self,
+        rendition: &Arc<Rendition>,
+        session_id: &str,
+        index: u32,
+        budget: Duration,
+        delivery: Arc<crate::meter::Meter>,
+        custody: Option<&crate::transcode::source_actor::resource::SourceResourceReadCustody>,
     ) -> Result<SegmentReady, VodError> {
         let deadline = tokio::time::Instant::now() + budget;
         let key = WaitKey {
@@ -492,7 +552,10 @@ impl VodServe {
         // Register before rechecking bytes/failure to close the lost-wakeup
         // window. The registration stays alive through open_materialized,
         // protecting a just-published target from concurrent eviction.
-        if let Some(ready) = self.open_materialized(rendition, index, &delivery).await? {
+        if let Some(ready) = self
+            .open_materialized_select(rendition, index, &delivery, custody)
+            .await?
+        {
             return Ok(ready);
         }
         if let Some(cause) = rendition.failure_cause() {
@@ -515,7 +578,10 @@ impl VodServe {
         match outcome {
             WaitOutcome::Ready => {
                 self.shared.hooks.get().before_segment_ready_open().await;
-                match self.open_materialized(rendition, index, &delivery).await? {
+                match self
+                    .open_materialized_select(rendition, index, &delivery, custody)
+                    .await?
+                {
                     Some(ready) => Ok(ready),
                     // An eviction already committed before registration, or an
                     // external unlink, can still remove the file. Publication
@@ -544,6 +610,22 @@ impl VodServe {
         }
     }
 
+    async fn open_materialized_select(
+        &self,
+        rendition: &Arc<Rendition>,
+        index: u32,
+        delivery: &Arc<crate::meter::Meter>,
+        custody: Option<&crate::transcode::source_actor::resource::SourceResourceReadCustody>,
+    ) -> Result<Option<SegmentReady>, VodError> {
+        match custody {
+            Some(custody) => {
+                self.open_materialized_with_read_custody(rendition, index, delivery, Some(custody))
+                    .await
+            }
+            None => self.open_materialized(rendition, index, delivery).await,
+        }
+    }
+
     /// Open one materialized segment under the manifest lock, so eviction
     /// cannot unlink it between the check and the open.
     pub(super) async fn open_materialized(
@@ -551,6 +633,17 @@ impl VodServe {
         rendition: &Arc<Rendition>,
         index: u32,
         delivery: &Arc<crate::meter::Meter>,
+    ) -> Result<Option<SegmentReady>, VodError> {
+        self.open_materialized_with_read_custody(rendition, index, delivery, None)
+            .await
+    }
+
+    pub(super) async fn open_materialized_with_read_custody(
+        &self,
+        rendition: &Arc<Rendition>,
+        index: u32,
+        delivery: &Arc<crate::meter::Meter>,
+        custody: Option<&crate::transcode::source_actor::resource::SourceResourceReadCustody>,
     ) -> Result<Option<SegmentReady>, VodError> {
         if self.source_changed(rendition) {
             let cause = "source changed after the fragment index was selected".to_owned();
@@ -570,10 +663,11 @@ impl VodServe {
         // The materialization instant is part of the etag: key-index-length
         // alone collides across an evict-and-regenerate whose bytes differ
         // while its length happens to match.
-        match open_ready(
+        match open_with_read_custody(
             &path,
             &format!("{}-{index}-{at_ms}", rendition.key),
             delivery,
+            custody,
         )
         .await
         {
@@ -622,5 +716,19 @@ impl VodServe {
             .source
             .as_ref()
             .is_some_and(|source| !source.unchanged())
+    }
+}
+
+/// Local delivery keeps the existing Tokio opener. Only closed Source custody
+/// selects a filesystem job retaining its actual response owner.
+async fn open_with_read_custody(
+    path: &std::path::Path,
+    etag_stem: &str,
+    delivery: &Arc<crate::meter::Meter>,
+    custody: Option<&crate::transcode::source_actor::resource::SourceResourceReadCustody>,
+) -> io::Result<SegmentReady> {
+    match custody {
+        Some(custody) => custody.open_ready(path, etag_stem, delivery).await,
+        None => open_ready(path, etag_stem, delivery).await,
     }
 }

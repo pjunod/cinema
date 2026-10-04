@@ -4617,3 +4617,41 @@ FD-close regression one in 33.95 seconds, all zero ignored. These tests qualify
 Source resources and client/ownership seams; they do not qualify full physical
 B playback, accepted B writers, controls or live Tailscale/hardware behavior.
 Documentation checks and the normal tracked hook remain required before commit.
+
+Receiver transport candidate after the upstream socket checkpoint
+----------------------------------------------------------------
+
+The B HLS adapter now dispatches actual retained receiver actors before Local
+HLS handlers. An explicit durable `remote_source` recipe whose actual actor is
+absent receives an unavailable response; it never creates a Local producer.
+GET resources use the closed relative resource parser, original B login and
+exact current binding/delivery grant, current Source lineage, and another B
+observation after the Source request. Source credentials and private lineage
+headers are omitted from the B response. Range requests currently receive the
+complete representation. Status, controls, End, remote-worker forwarding and
+progress are still separate integration work.
+
+Accepted connections have a weak opaque identity, so multiplexed resource
+streams for one actor reuse one counted writer guard. The connection monitor
+retains its guard until actual accepted Hyper writer closure, including when
+the body finishes with queued bytes. Loss of the original login/binding or
+actor retirement closes the actual accepted connection. Its monitor captures
+only cancellation tokens and a closure observer, avoiding a monitor-owner
+reference cycle. Independent upstream resource jobs retain their own guards.
+The actor polls fresh Source/B authority each second, while lease renewal stays
+at ten seconds; one owner guard spans those Source requests and remains held
+by an actual upstream driver until its socket is dropped.
+
+This is candidate implementation. The full B-to-Source physical fixture and
+queued accepted B writer regression remain required; resource parser tests or
+an ownership-count test alone cannot supply that evidence.
+
+The candidate authenticated Start response now obtains fresh B delivery and
+Source lineage observations after its actor reports ready, then retains the
+same accepted writer guard as media resources. It requires the actual
+`serve_http` connection extension. An in-memory Router response cannot stand
+in for accepted-writer ownership. The preceding relay tree passed pinned
+all-target check in 62 seconds, denied feature Clippy in 83 seconds, and nine
+receiver ownership tests with zero ignored. The final Start-writer tree passed
+denied feature Clippy in 77 seconds; its focused regression and normal tracked
+hook remain required before committing this candidate.

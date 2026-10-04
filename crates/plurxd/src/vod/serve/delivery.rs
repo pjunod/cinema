@@ -410,6 +410,28 @@ impl VodServe {
         name: &str,
         deadline: Option<Instant>,
     ) -> Option<VodPublication<Option<SegmentReady>>> {
+        self.segment_with_read_custody(session_id, name, deadline, None)
+            .await
+    }
+
+    pub(crate) async fn source_segment_before(
+        &self,
+        session_id: &str,
+        name: &str,
+        deadline: Option<Instant>,
+        custody: crate::transcode::source_actor::resource::SourceResourceReadCustody,
+    ) -> Option<VodPublication<Option<SegmentReady>>> {
+        self.segment_with_read_custody(session_id, name, deadline, Some(&custody))
+            .await
+    }
+
+    async fn segment_with_read_custody(
+        &self,
+        session_id: &str,
+        name: &str,
+        deadline: Option<Instant>,
+        custody: Option<&crate::transcode::source_actor::resource::SourceResourceReadCustody>,
+    ) -> Option<VodPublication<Option<SegmentReady>>> {
         let publication = self.session_rendition(session_id).await?;
         let (rendition, mut budget, delivery) = match publication.result {
             Ok(found) => found,
@@ -426,10 +448,19 @@ impl VodServe {
         let owner = publication.owner;
         if name == INIT_NAME {
             return Some(VodPublication {
-                result: self
-                    .serve_init(&rendition, budget, delivery)
-                    .await
-                    .map(Some),
+                result: match custody {
+                    Some(custody) => {
+                        self.serve_init_with_read_custody(
+                            &rendition,
+                            budget,
+                            delivery,
+                            Some(custody),
+                        )
+                        .await
+                    }
+                    None => self.serve_init(&rendition, budget, delivery).await,
+                }
+                .map(Some),
                 owner,
             });
         }
@@ -448,10 +479,24 @@ impl VodServe {
             });
         }
         Some(VodPublication {
-            result: self
-                .serve_segment(&rendition, session_id, index, budget, delivery)
-                .await
-                .map(Some),
+            result: match custody {
+                Some(custody) => {
+                    self.serve_segment_with_read_custody(
+                        &rendition,
+                        session_id,
+                        index,
+                        budget,
+                        delivery,
+                        Some(custody),
+                    )
+                    .await
+                }
+                None => {
+                    self.serve_segment(&rendition, session_id, index, budget, delivery)
+                        .await
+                }
+            }
+            .map(Some),
             owner,
         })
     }

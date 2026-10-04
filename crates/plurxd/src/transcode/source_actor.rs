@@ -99,6 +99,9 @@ pub(crate) mod control;
 #[path = "source_status.rs"]
 pub(crate) mod status;
 
+#[path = "source_resource.rs"]
+pub(crate) mod resource;
+
 use plurx_core::{
     domain::{
         MediaSessionActivation, MediaSessionEnd, MediaSessionRenewal, MediaSessionRoute,
@@ -132,6 +135,7 @@ struct SourceViewerInner {
     control_target_duration_ms: i64,
     control_hooks: control::SourceControlHookOwner,
     status_hooks: status::SourceStatusHookOwner,
+    resource_hooks: Arc<resource::SourceResourceHookOwner>,
     original_selection: Option<plurx_core::playback::DesiredSelection>,
     assignment: SourceDispatchAssignment,
     manager: std::sync::Weak<TranscodeManager>,
@@ -359,6 +363,24 @@ impl SourceViewerActor {
         resource: &SharingHlsResource,
         deadline: Instant,
     ) -> Result<SourceOpenedResource, SourceWorkerError> {
+        let actor = self.clone();
+        let resource = resource.clone();
+        let job = tokio::spawn(Box::pin(async move {
+            actor.open_resource_owned(&resource, deadline).await
+        }));
+        tokio::time::timeout_at(tokio::time::Instant::from_std(deadline), job)
+            .await
+            .map_err(|_| SourceWorkerError::Deadline)?
+            .map_err(|_| SourceWorkerError::Unresolved)?
+    }
+    async fn open_resource_owned(
+        &self,
+        resource: &SharingHlsResource,
+        deadline: Instant,
+    ) -> Result<SourceOpenedResource, SourceWorkerError> {
+        if Instant::now() >= deadline {
+            return Err(SourceWorkerError::Deadline);
+        }
         let native = self
             .0
             .state
@@ -421,6 +443,30 @@ impl SourceViewerActor {
         initial
             .validate_observation_freshness(crate::fragment_index_cluster::unix_ms())
             .map_err(|_| SourceWorkerError::Unavailable)?;
+        let facts = manager
+            .vod
+            .hls_facts(&session_id)
+            .await
+            .ok_or(SourceWorkerError::Unavailable)?;
+        if !manager
+            .vod
+            .source_status_owner_is_current(&session_id, &facts.response_owner, &self.0.assignment)
+            .await
+        {
+            return Err(SourceWorkerError::Unavailable);
+        }
+        guard.source = Some(
+            manager
+                .vod
+                .source_response_physical_fence(&facts.response_owner)
+                .await
+                .map_err(|_| SourceWorkerError::Unavailable)?,
+        );
+        let guard = Arc::new(guard);
+        let custody = resource::SourceResourceReadCustody::new(
+            Arc::clone(&guard),
+            Arc::clone(&self.0.resource_hooks),
+        );
         let (payload, owner) = match kind {
             SharingHlsResourceKind::Index | SharingHlsResourceKind::Video => {
                 let publication = manager
@@ -440,7 +486,12 @@ impl SourceViewerActor {
             SharingHlsResourceKind::Init | SharingHlsResourceKind::MediaSegment => {
                 let publication = manager
                     .vod
-                    .segment_before(&session_id, resource.as_str(), Some(deadline))
+                    .source_segment_before(
+                        &session_id,
+                        resource.as_str(),
+                        Some(deadline),
+                        custody.clone(),
+                    )
                     .await
                     .ok_or(SourceWorkerError::Unavailable)?;
                 (
@@ -530,13 +581,7 @@ impl SourceViewerActor {
             plurx_core::sharing_resources::validate_sharing_playlist(resource, bytes)
                 .map_err(|_| SourceWorkerError::Unsupported)?;
         }
-        guard.source = Some(
-            manager
-                .vod
-                .source_response_physical_fence(&owner)
-                .await
-                .map_err(|_| SourceWorkerError::Unavailable)?,
-        );
+
         if let Some(native) = native.as_ref() {
             if !native.matches(
                 &self.0.assignment,
@@ -549,6 +594,11 @@ impl SourceViewerActor {
                 return Err(SourceWorkerError::Unavailable);
             }
         }
+        // Detached observation survives waiter timeout only to settle actual
+        // jobs; an expired request cannot extend authority or viewer activity.
+        if Instant::now() >= deadline {
+            return Err(SourceWorkerError::Deadline);
+        }
         // A parked segment can outlive the first observation's five-second
         // window. Re-observe real membership/current binding after the wait.
         let proof = self.0.gate.current_owned(&self.0.assignment).await?;
@@ -557,7 +607,7 @@ impl SourceViewerActor {
             .map_err(|_| SourceWorkerError::Unavailable)?;
         if !manager
             .vod
-            .response_owner_is_live(&session_id, &owner)
+            .source_status_owner_is_current(&session_id, &owner, &self.0.assignment)
             .await
             || self
                 .0
@@ -565,6 +615,17 @@ impl SourceViewerActor {
                 .lock()
                 .expect("Source worker state")
                 .retirement_requested
+        {
+            return Err(SourceWorkerError::Unavailable);
+        }
+        if Instant::now() >= deadline
+            || proof
+                .validate_observation_freshness(crate::fragment_index_cluster::unix_ms())
+                .is_err()
+            || guard
+                .source
+                .as_ref()
+                .is_none_or(|source| !source.unchanged())
         {
             return Err(SourceWorkerError::Unavailable);
         }
@@ -586,6 +647,8 @@ impl SourceViewerActor {
         {
             return Err(SourceWorkerError::Unavailable);
         }
+        drop(custody);
+        let guard = Arc::try_unwrap(guard).map_err(|_| SourceWorkerError::Unresolved)?;
         Ok(SourceOpenedResource { payload, guard })
     }
 }
@@ -723,6 +786,7 @@ impl TranscodeManager {
             }) * 1_000,
             control_hooks: Default::default(),
             status_hooks: Default::default(),
+            resource_hooks: Arc::new(Default::default()),
             original_selection: prepared.original_selection().copied(),
             assignment,
             manager: Arc::downgrade(self),

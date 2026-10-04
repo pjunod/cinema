@@ -1949,3 +1949,42 @@ custody checkpoint: its existing VOD segment opener uses Tokio filesystem jobs,
 and HTTP reader custody alone does not qualify cancellation during that inner
 observation. That audit remains open; this status checkpoint protects its own
 whole observation and does not claim the resource path is settled.
+
+### Source resource filesystem custody
+
+This checkpoint combines guarded status/control `6b8ef28b4` with the complete
+Root base `61820efe8`. It closes the preceding media-resource audit through an
+opaque Source read-custody value carried into the actual blocking file-open and
+metadata job. Local readers retain their existing behavior. The Source opener
+uses a regular, no-follow cache descriptor and retains the actual counted
+response guard and real Source file fence through the job join. The detached
+owned resource task survives waiter cancellation; no waiter timeout proves that
+a nested filesystem job ended.
+
+The actor checks its original resource deadline after the read and refuses late
+authority renewal or viewer activity. Timely reads obtain fresh current owned
+Source authority after the parked observation and verify the full assignment,
+current VOD owner and physical Source fence before returning. The actual file
+descriptor is closed before its job custody can disappear and terminal actor
+settlement succeeds. This adds no admission, readiness or capacity-release
+authority based on an error enum or absent registry entry.
+
+`cargo test -p plurxd --bin plurxd source_resource_ -- --nocapture` passed five
+tests, zero ignored, in 15.81 seconds on the normal test-thread stack. Three
+actual one-voter/FFmpeg cases park a real opened init or media descriptor,
+cancel or expire its waiter, and prove the descriptor and body guard remain
+live until the job is joined. The deadline case also proves viewer activity
+does not change after expiry. The remaining two tests cover existing strict
+Source resource-client behavior.
+
+On this exact candidate, the Source copy, encoded, native, status and control
+filters passed respectively 13/41.33s, 9/31.78s, 10/33.77s, 7/27.55s and
+6/25.78s, all zero ignored. Existing Local cache-reader regressions
+`the_etag_changes_across_an_evict_and_regenerate`,
+`cancelled_and_refused_gets_leave_no_watchdog_or_reader_frontier` and
+`a_failure_wakes_a_blocked_init_get` each passed. The pinned daemon all-target
+check passed in 61 seconds and denied all-target Clippy in 69 seconds.
+Logs are `/private/tmp/sharing-source-resource-{name}.log`; they are local
+qualification receipts, not production telemetry. HTTP control and VOD-status
+adapters, directed successors, negative factory receipts, crash physical
+recovery and remote Source worker forwarding remain separate work.
