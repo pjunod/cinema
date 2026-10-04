@@ -3150,8 +3150,8 @@ fn locate_hevc_sample_entries(bytes: &[u8]) -> Result<Vec<Option<HvcCLocation>>,
 /// sample-entry fourcc, every byte of each entry outside its `hvcC` identical
 /// (visual fields, `colr`, `pasp`, any Dolby Vision record), the same 22-byte
 /// `hvcC` fixed header, and the same set of VPS/SPS/PPS units once trailing
-/// zero bytes are disregarded, with the track's `trex` selecting description
-/// 1. SEI arrays may differ. Anything else is left untouched and the mutators
+/// zero bytes are disregarded, with the track's `trex` selecting the first
+/// description. SEI arrays may differ. Anything else is left untouched and the mutators
 /// keep refusing it as [`Fmp4Error::MultipleHevcSampleEntries`].
 ///
 /// The description kept is rewritten to its parameter sets alone: VPS, SPS and
@@ -7996,7 +7996,10 @@ mod tests {
     fn duplicate_hevc_sample_entry_at_end(init: &mut Init) {
         let locations = locate_hevc_sample_entries(&init.bytes).expect("locating entries");
         let first = locations[0].as_ref().expect("first entry");
-        let last = locations.last().unwrap().as_ref().expect("last entry");
+        let last = locations
+            .last()
+            .and_then(Option::as_ref)
+            .expect("last entry");
         let entry = first.ancestors[1];
         let copy = init.bytes[entry.start..first.sample_entry_end].to_vec();
         let at = last.sample_entry_end;
