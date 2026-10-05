@@ -1,7 +1,0 @@
-version = 1
-
-[[coverage]]
-commits = ["9a4db1ce", "fa5f6caf", "2e3f8126", "7b3d2128", "863c90fc", "9f4497a1"]
-points = ["live-tv.integration", "web.experience", "apple.client", "android.client"]
-checks = ["web-static", "apple-simulators", "android-jvm"]
-reason = "Issue #815: the Apple TV, iOS and Android Live TV guides drew no station logos while the web did, because #755 kept the logo rule in the web page instead of the shared guide contract. tests/playback/live-tv-guide-cases.json `station_logo` now pins the rule (lineup-id match, cold guide, 38 address cases, the accepted scheme respelled https:// so Coil's case-sensitive fetcher matches), and three suites replay it: `stationLogoUrl answers every shared station_logo case` (tests/web/live-tv.test.js), `testStationLogoAnswersEverySharedCase`, `testGridRowsCarryTheirStationLogo` and `testEveryStationSurfaceDrawsTheGuideLogo` (clients/apple/Tests/LiveTvTests.swift), `stationLogoAnswersEverySharedCase`, `gridRowsCarryTheirStationLogo` and `everyStationSurfaceDrawsTheGuideLogo` (LiveTvGuideTest.kt); the last of each pins that every surface naming a station draws the tile. The native list rows take the logo as a required argument, so a new list cannot be built without one."
