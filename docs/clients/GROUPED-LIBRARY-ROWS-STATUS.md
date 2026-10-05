@@ -34,7 +34,7 @@ handled explicitly, without invented dates or years.
 | Regression coverage | passed | Seven unit/keyboard checks and eight browser cases have passed on the final source. Only failed browser cases were rerun. |
 | Adversarial agent review | addressed | Three P2 findings on `1affd2904`: Theater controls, group viewport navigation, index focus. All corrected with regression coverage. |
 | Fast lane | tracked on PR | [PR #821](http://192.168.4.7:3000/noirr/plurx/pulls/821) carries the current candidate verdict and final evidence. |
-| Merge and cleanup | tracked on PR | The PR records its landing commit and cleanup receipt after all required jobs pass. |
+| Merge and cleanup | tracked on PR | The PR records its landing commit and cleanup receipt under the user’s explicit merge-first instruction. |
 
 ## Decisions
 
@@ -74,7 +74,7 @@ The fixture corrections account for CSS scroll snapping, give the expanded
 group enough content to exercise vertical navigation, and measure library
 containment independently of the existing Classic header overflow at 768 px.
 No production code changed between these browser runs. Full unit suites were
-not run locally. Fast-lane results will be recorded on the PR before merge.
+not run locally. Fast-lane results are recorded on the PR; the user subsequently requested merge first and monitoring afterward.
 
 ## Scope and interaction choices
 
@@ -130,3 +130,17 @@ frozen boundary. Landing `96443d519` (#811) already carries the two correct
 that immutable evidence and fixes the audit at its cause. No history rule,
 erratum, test selection, or playback source changes. The remaining jobs from
 the failed candidate are cancelled before the corrected push.
+
+
+## Merge-first instruction — 2026-10-05
+
+Run 4172 passed the history audit and 289 validation tests, then failed two
+of 691 operations tests. The row keyboard handler violated the existing
+input-adapter fence; it now lives inside the shared keyboard adapter, with
+its behavior unchanged and no fence exemption. The unrelated known-red
+inventory assertion expects 21 ignored tests but finds 24. That baseline
+failure remains assigned to the separate batch repair process.
+
+Paul explicitly requested “Merge it and watch the tests after merge,”
+overriding the earlier green-before-merge timing. The final handler relocation
+will be checked after landing, and the PR will record post-merge results.
