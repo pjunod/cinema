@@ -324,6 +324,7 @@ impl ReceiverStartActor {
                 return;
             }
             owned.retirement_started = true;
+            owned.retirement_reason = Some(reason);
             owned.dispatch_closed = true;
         }
         // An uncommitted prepared successor has no viewer once the session it
@@ -741,6 +742,55 @@ mod tests {
         drop(second);
         let joined = joining.await.expect("actual ownership join");
         assert!(Arc::ptr_eq(&joined.0, &registry));
+    }
+    #[tokio::test]
+    async fn receiver_handover_releases_idle_transports_and_cuts_busy_or_revoked_ones() {
+        use super::super::tests::registered;
+        let state = Arc::new(crate::http::source_actor_test_state());
+        let registry = ReceiverStartRegistry::default();
+        let superseded = ReceiverStartActor(registered(&registry, "superseded", "player", 1));
+        // `idle` carried an answer whose writer has been released (the commit
+        // answer, once its handoff runs); `busy` still has a writer on it.
+        let idle = crate::SharingConnectionCancellation::new();
+        let busy = crate::SharingConnectionCancellation::new();
+        drop(
+            superseded
+                .retain_accepted_connection(state.clone(), &idle)
+                .expect("idle writer"),
+        );
+        let _busy_writer = superseded
+            .retain_accepted_connection(state.clone(), &busy)
+            .expect("busy writer");
+        superseded.begin_retirement(state.clone(), ReceiverRetirementReason::Superseded);
+        let bodies = superseded.0.bodies.clone();
+        let revoked = ReceiverStartActor(registered(&registry, "revoked", "other", 2));
+        let quiet = crate::SharingConnectionCancellation::new();
+        drop(
+            revoked
+                .retain_accepted_connection(state.clone(), &quiet)
+                .expect("quiet writer"),
+        );
+        revoked.begin_retirement(state, ReceiverRetirementReason::Revoked);
+        tokio::time::timeout(Duration::from_secs(5), async {
+            busy.0.cancelled().await;
+            // Revocation still cuts every transport it was retained on.
+            quiet.0.cancelled().await;
+            loop {
+                let changed = bodies.changed.notified();
+                tokio::pin!(changed);
+                changed.as_mut().enable();
+                if bodies.state.lock().expect("bodies").active == 1 {
+                    return;
+                }
+                changed.await;
+            }
+        })
+        .await
+        .expect("the busy and revoked transports are cut and the idle custody released");
+        assert!(
+            !idle.0.is_cancelled(),
+            "a hand-over never cuts a transport it has no writer on"
+        );
     }
     #[tokio::test]
     async fn receiver_resource_retirement_remains_bounded_and_closes_empty_admissions() {

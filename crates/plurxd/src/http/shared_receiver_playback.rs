@@ -109,6 +109,8 @@ struct ReceiverStartState {
     owner: Option<ReceiverSourceOwner>,
     planned_activation: Option<MediaSessionActivation>,
     retirement_started: bool,
+    /// Why retirement began; read by the connection monitors when it stops.
+    retirement_reason: Option<plurx_core::sharing_receiver_retirement::ReceiverRetirementReason>,
     retired: bool,
     end_confirmation: Option<Arc<retirement::ReceiverEndConfirmation>>,
     /// Present on a session B started as a prepared successor.
@@ -120,6 +122,18 @@ struct ReceiverStartState {
 // neither Source settlement nor accepted B body/writer completion.
 struct JoinedReceiverStart(Arc<ReceiverStartInner>);
 impl ReceiverStartInner {
+    /// Whether this session's retirement must cut every transport it was
+    /// retained on. Only a hand-over to the same viewer's own successor
+    /// (`Superseded`, or a withdrawn successor's `Replaced`) may leave an
+    /// idle transport to finish what it is writing; revocation, deletion,
+    /// an administrative stop, or a stop with no recorded reason cut.
+    fn retirement_cuts_transports(&self) -> bool {
+        use plurx_core::sharing_receiver_retirement::ReceiverRetirementReason as Reason;
+        !matches!(
+            self.state.lock().expect("receiver owner").retirement_reason,
+            Some(Reason::Superseded | Reason::Replaced)
+        )
+    }
     fn retain_dispatch(
         &self,
         dispatched: DispatchedSource,
@@ -376,14 +390,25 @@ impl ReceiverStartRegistry {
         state: &Arc<AppState>,
         published: &Arc<ReceiverStartInner>,
     ) -> usize {
+        let predecessors = self.superseded_by(published);
+        for predecessor in &predecessors {
+            predecessor.begin_retirement(
+                state.clone(),
+                plurx_core::sharing_receiver_retirement::ReceiverRetirementReason::Superseded,
+            );
+        }
+        predecessors.len()
+    }
+    /// The older live attempts of the same viewer and player playback id that
+    /// a published, live `published` replaces.
+    fn superseded_by(&self, published: &Arc<ReceiverStartInner>) -> Vec<ReceiverStartActor> {
         {
             let owned = published.state.lock().expect("receiver owner");
             if !matches!(owned.start, Some(Ok(_))) || owned.retirement_started {
-                return 0;
+                return Vec::new();
             }
         }
-        let predecessors: Vec<ReceiverStartActor> = self
-            .entries
+        self.entries
             .lock()
             .expect("receiver registry")
             .iter()
@@ -399,14 +424,7 @@ impl ReceiverStartRegistry {
                         .retirement_started
             })
             .map(|entry| ReceiverStartActor(entry.clone()))
-            .collect();
-        for predecessor in &predecessors {
-            predecessor.begin_retirement(
-                state.clone(),
-                plurx_core::sharing_receiver_retirement::ReceiverRetirementReason::Superseded,
-            );
-        }
-        predecessors.len()
+            .collect()
     }
     pub(crate) fn begin(
         &self,
@@ -800,7 +818,9 @@ impl ReceiverStartActor {
         let actor = self.clone();
         let retained = guard.clone();
         if connection.monitor(async move {
-            let _retained = retained;
+            // Held for the monitor's whole life: its custody of this
+            // connection ends only when the future does.
+            let custody = retained;
             let mut timer = tokio::time::interval(Duration::from_secs(1));
             timer.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
             loop {
@@ -815,6 +835,16 @@ impl ReceiverStartActor {
                     actor.begin_retirement(state.clone(), plurx_core::sharing_receiver_retirement::ReceiverRetirementReason::Revoked);
                     break;
                 }
+            }
+            // A session handed over to its own viewer's successor (superseded
+            // or a withdrawn successor) owes nothing to this transport once
+            // none of its writers is still on it: the connection may be
+            // carrying the commit answer or the successor's own media, so it
+            // is released, not cut. Admission is already closed, so no writer
+            // can join after this count. Every other reason, or a writer still
+            // in flight, cuts the transport as before.
+            if !actor.0.retirement_cuts_transports() && Arc::strong_count(&custody) == 1 {
+                return;
             }
             cancel.cancel();
             closed.wait().await;

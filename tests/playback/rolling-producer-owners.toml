@@ -3699,7 +3699,11 @@ pattern = "(?:[A-Za-z_]\\w*::)+(?:sleep|sleep_until|interval|interval_at|timeout
 # +1 for Shared manual watched state: `viewer_watched` bounds its 64-byte body
 # read with the same 15 s timeout as the progress route. The requesting handler
 # awaits it; it owns no task, producer or process.
-expected_occurrences = 1318
+# +1 for the shared prepared successor hand-over fix, test-only: the bound on
+# the hand-over transport test's waits (busy and revoked transports cut, idle
+# custody released). The commit hand-off itself adds no task or timer: it runs
+# when the commit answer's writer is released.
+expected_occurrences = 1319
 # +1 native-startup delayed-init fixture: its joined writer owns one bounded
 # six-second sleep, under the test request's unchanged twelve-second deadline.
 # No production timer or recovery clock is added.

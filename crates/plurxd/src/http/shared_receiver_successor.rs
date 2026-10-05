@@ -125,6 +125,67 @@ impl AckReplies {
     }
 }
 
+/// A settled commit whose predecessors are not yet superseded. The commit
+/// answer's writer owns it: it is released only after that writer's own
+/// connection guard (see [`CommitAnswerWriter`]), and its drop hands every
+/// predecessor to its single retirement owner (reason `Superseded`). Dropped
+/// on every path, including a client that went away before reading the
+/// answer, so a settled commit always supersedes.
+pub(super) struct CommittedHandoff {
+    state: Arc<AppState>,
+    predecessors: Vec<ReceiverStartActor>,
+}
+
+impl CommittedHandoff {
+    pub(super) fn superseding(&self) -> usize {
+        self.predecessors.len()
+    }
+}
+
+impl Drop for CommittedHandoff {
+    fn drop(&mut self) {
+        // Retirement spawns its owner task; without a runtime (process
+        // teardown) the routes are left to orphan recovery.
+        if tokio::runtime::Handle::try_current().is_err() {
+            return;
+        }
+        for predecessor in self.predecessors.drain(..) {
+            predecessor.begin_retirement(self.state.clone(), ReceiverRetirementReason::Superseded);
+        }
+    }
+}
+
+/// The accepted-writer custody of a commit answer: the connection guard is
+/// released first, then the handoff, so the predecessor's retirement finds no
+/// writer of its own outstanding on that connection and leaves it to finish
+/// delivering the answer.
+pub(super) struct CommitAnswerWriter {
+    writer: Option<Arc<dyn Send + Sync>>,
+    handoff: Option<CommittedHandoff>,
+}
+
+impl CommitAnswerWriter {
+    pub(super) fn custody(
+        writer: Arc<dyn Send + Sync>,
+        handoff: Option<CommittedHandoff>,
+    ) -> Arc<dyn Send + Sync> {
+        match handoff {
+            None => writer,
+            Some(handoff) => Arc::new(Self {
+                writer: Some(writer),
+                handoff: Some(handoff),
+            }),
+        }
+    }
+}
+
+impl Drop for CommitAnswerWriter {
+    fn drop(&mut self) {
+        drop(self.writer.take());
+        drop(self.handoff.take());
+    }
+}
+
 /// What an acknowledgement asks of the current slot.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(super) enum AckPlan {
@@ -634,14 +695,17 @@ impl ReceiverStartActor {
     }
 
     /// The commit, after the Source accepted the committing exchange: the
-    /// successor becomes an ordinary session and supersedes this one (and any
-    /// older attempt of the same player) through the single retirement owner.
+    /// successor becomes an ordinary session at once, and the returned
+    /// handoff supersedes this one (and any older attempt of the same player)
+    /// through the single retirement owner once the commit answer's writer
+    /// has been released. Retiring first would let this session's connection
+    /// monitor cut the very transport still carrying that answer.
     pub(super) fn commit_successor(
         &self,
         state: &Arc<AppState>,
         registry: &ReceiverStartRegistry,
         action_id: &str,
-    ) -> Result<usize, ReceiverStartError> {
+    ) -> Result<CommittedHandoff, ReceiverStartError> {
         let successor = {
             let owned = self.0.state.lock().expect("receiver owner");
             owned
@@ -674,7 +738,10 @@ impl ReceiverStartActor {
         {
             role.committed = true;
         }
-        Ok(registry.supersede_predecessors(state, &successor))
+        Ok(CommittedHandoff {
+            state: state.clone(),
+            predecessors: registry.superseded_by(&successor),
+        })
     }
 
     /// Withdraw the uncommitted successor named by `action_id`.

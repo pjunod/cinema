@@ -9,7 +9,7 @@
 //! A directed change is prepared by B itself (`successor`): the Source is
 //! never offered `prepare_replacement`, and a `Prepare` action names only B's
 //! own successor session, playlist and control bootstrap.
-use super::successor::{AckPlan, AckReplay};
+use super::successor::{AckPlan, AckReplay, CommitAnswerWriter, CommittedHandoff};
 use super::*;
 use crate::{
     http::{
@@ -311,11 +311,13 @@ async fn finish_accepted(
     tuple: &ReceiverTuple,
     request: &ControlRequestV1,
     plan: Option<AckPlan>,
+    committed: &mut Option<CommittedHandoff>,
     response: &mut ControlResponseV1,
 ) -> Result<(), ReceiverStartError> {
     match plan {
         Some(AckPlan::Commit(action_id)) => {
-            actor.commit_successor(state, &state.sharing.receiver_starts, &action_id)?;
+            *committed =
+                Some(actor.commit_successor(state, &state.sharing.receiver_starts, &action_id)?);
         }
         Some(AckPlan::Abort(action_id)) => {
             actor.abort_successor(state, &action_id);
@@ -659,41 +661,46 @@ pub(super) async fn receiver_control(
             retry_after_ms: Some(500),
         }),
     };
+    // A settled commit travels with the answer's writer and supersedes the
+    // predecessor only once that writer is released.
+    let mut committed = None;
     let response = match answer {
         SharedControlAnswer::Accepted(mut response) => {
-            if finish_accepted(&actor, &state, &tuple, &request, plan, &mut response)
-                .await
-                .is_err()
+            if finish_accepted(
+                &actor,
+                &state,
+                &tuple,
+                &request,
+                plan,
+                &mut committed,
+                &mut response,
+            )
+            .await
+            .is_err()
             {
-                return with_writer(
-                    control_error(
-                        StatusCode::CONFLICT,
-                        "stale_control",
-                        "the acknowledgement lost its prepared successor",
-                        generation,
-                        epoch,
-                        None,
-                        None,
-                    ),
-                    guard,
-                );
+                control_error(
+                    StatusCode::CONFLICT,
+                    "stale_control",
+                    "the acknowledgement lost its prepared successor",
+                    generation,
+                    epoch,
+                    None,
+                    None,
+                )
+            } else if let Ok(body) = serde_json::to_vec(&*response) {
+                if request.acknowledgement.is_some() {
+                    actor.retain_acknowledgement_reply(&request, &body);
+                }
+                json_body(body)
+            } else {
+                refusal_response(
+                    &SharedControlRefusal {
+                        code: SharedControlRefusalCode::Unavailable,
+                        retry_after_ms: Some(500),
+                    },
+                    &tuple,
+                )
             }
-            let Ok(body) = serde_json::to_vec(&*response) else {
-                return with_writer(
-                    refusal_response(
-                        &SharedControlRefusal {
-                            code: SharedControlRefusalCode::Unavailable,
-                            retry_after_ms: Some(500),
-                        },
-                        &tuple,
-                    ),
-                    guard,
-                );
-            };
-            if request.acknowledgement.is_some() {
-                actor.retain_acknowledgement_reply(&request, &body);
-            }
-            json_body(body)
         }
         SharedControlAnswer::Refused(refusal) => {
             if matches!(
@@ -719,7 +726,7 @@ pub(super) async fn receiver_control(
             None,
         ),
     };
-    with_writer(response, guard)
+    with_writer(response, CommitAnswerWriter::custody(guard, committed))
 }
 
 #[cfg(test)]

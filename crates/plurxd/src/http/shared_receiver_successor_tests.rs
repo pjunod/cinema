@@ -355,7 +355,15 @@ async fn sharing_receiver_commit_supersedes_exact_predecessor_and_settles_the_sl
         actor.plan_acknowledgement(&state, &commit, clock_ms()),
         Ok(AckPlan::Commit(action_id.clone()))
     );
-    assert_eq!(actor.commit_successor(&state, &registry, &action_id), Ok(1));
+    let handoff = actor
+        .commit_successor(&state, &registry, &action_id)
+        .expect("committed");
+    assert_eq!(handoff.superseding(), 1);
+    assert!(
+        !superseding(&predecessor),
+        "the predecessor serves until the commit answer's writer is released"
+    );
+    drop(handoff);
     assert!(superseding(&predecessor), "the exact predecessor retires");
     assert!(!superseding(&successor) && !successor.awaiting_commit());
     assert!(
@@ -364,10 +372,10 @@ async fn sharing_receiver_commit_supersedes_exact_predecessor_and_settles_the_sl
     );
     assert!(!superseding(&other_player));
     // The settled slot answers nothing further: a second commit is stale.
-    assert_eq!(
+    assert!(matches!(
         actor.commit_successor(&state, &registry, &action_id),
         Err(ReceiverStartError::Conflict)
-    );
+    ));
     assert!(actor
         .plan_acknowledgement(&state, &commit, clock_ms())
         .is_err());
@@ -809,7 +817,11 @@ async fn sharing_receiver_lost_commit_reconciles_after_predecessor_retired() {
         actor.plan_acknowledgement(&state, &commit, clock_ms()),
         Ok(AckPlan::Commit(action_id.clone()))
     );
-    assert_eq!(actor.commit_successor(&state, &registry, &action_id), Ok(1));
+    drop(
+        actor
+            .commit_successor(&state, &registry, &action_id)
+            .expect("committed"),
+    );
     actor.retain_acknowledgement_reply(&commit, b"{\"committed\":1}");
     assert!(retired_within(&actor, Duration::from_secs(5)).await);
     // Still registered: the actor itself replays.
@@ -846,4 +858,44 @@ async fn sharing_receiver_lost_commit_reconciles_after_predecessor_retired() {
         !superseding(&successor),
         "the committed successor is the session now"
     );
+}
+
+#[tokio::test]
+async fn sharing_receiver_commit_answer_writer_is_released_before_the_predecessor_retires() {
+    // Records, at the moment the commit answer's connection guard drops,
+    // whether the predecessor had already begun retiring. Before the fix the
+    // commit superseded at once, so the predecessor's connection monitor
+    // could cut the transport still carrying the answer.
+    struct Writer(Arc<ReceiverStartInner>, Arc<std::sync::Mutex<Option<bool>>>);
+    impl Drop for Writer {
+        fn drop(&mut self) {
+            *self.1.lock().expect("probe") = Some(superseding(&self.0));
+        }
+    }
+    let registry = ReceiverStartRegistry::default();
+    let state = Arc::new(crate::http::source_actor_test_state());
+    let (predecessor, successor, _, action_id) = offered_pair(&registry);
+    let actor = ReceiverStartActor(predecessor.clone());
+    let handoff = actor
+        .commit_successor(&state, &registry, &action_id)
+        .expect("committed");
+    assert!(!successor.awaiting_commit(), "committed at once");
+    assert!(!superseding(&predecessor));
+    let seen = Arc::new(std::sync::Mutex::new(None));
+    let custody = CommitAnswerWriter::custody(
+        Arc::new(Writer(predecessor.clone(), seen.clone())),
+        Some(handoff),
+    );
+    drop(custody);
+    assert_eq!(
+        *seen.lock().expect("probe"),
+        Some(false),
+        "the answer's writer is released before the predecessor retires"
+    );
+    assert!(
+        superseding(&predecessor),
+        "and then the predecessor retires"
+    );
+    assert!(!superseding(&successor));
+    assert!(retired_within(&actor, Duration::from_secs(5)).await);
 }
