@@ -1,10 +1,49 @@
 //! Export production encoder options for offline calibration tools.
 //! This exports arguments, not a capability verdict or a qualified playback plan.
+//!
+//! A screening candidate is the production argv of one base mode (`vbr` or
+//! `qvbr`) with `--extra` tokens appended, one token per `--extra`. Extras may
+//! add options; they may not restate an option production already sets, nor
+//! touch the GOP, keyframe, reordering or codec contract the screen measures.
 
 use plurx_core::transcode::{
-    EffectiveRateControl, Encoder, OutputGrade, Pipeline, VOD_HEVC_SAMPLE_ENTRY,
+    hls_keyframe_args, EffectiveRateControl, Encoder, OutputGrade, Pipeline, SEGMENT_SECONDS,
+    VOD_HEVC_SAMPLE_ENTRY,
 };
 use serde_json::json;
+
+/// Options a candidate may never carry: they would replace the keyframe,
+/// reordering or codec contract the screen holds fixed (B-frames on hardware
+/// encoders are a separate per-family proof).
+const RESERVED_EXTRA: &[&str] = &[
+    "-g",
+    "-bf",
+    "-force_key_frames",
+    "-forced_idr",
+    "-c:v",
+    "-codec:v",
+    "-vcodec",
+    "-b_strategy",
+    "-idr_interval",
+    "-adaptive_b",
+];
+
+fn validate_extra(base: &[String], extra: &[String]) -> Result<(), String> {
+    for token in extra {
+        if token.is_empty() || token.len() > 64 || token.chars().any(char::is_control) {
+            return Err(format!("invalid --extra token: {token:?}"));
+        }
+        if token.starts_with('-') && token.parse::<f64>().is_err() {
+            if RESERVED_EXTRA.contains(&token.as_str()) {
+                return Err(format!("--extra may not set {token}"));
+            }
+            if base.iter().any(|arg| arg == token) {
+                return Err(format!("--extra may not restate production option {token}"));
+            }
+        }
+    }
+    Ok(())
+}
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut family = None;
@@ -12,6 +51,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut bitrate = None;
     let mut quality = None;
     let mut threads = None;
+    let mut candidate_base = None;
+    let mut extra = Vec::new();
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
         let value = args.next().ok_or("each option requires a value")?;
@@ -21,6 +62,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             "--bitrate-kbps" if bitrate.is_none() => bitrate = Some(value.parse::<u32>()?),
             "--quality" if quality.is_none() => quality = Some(value.parse::<u8>()?),
             "--threads" if threads.is_none() => threads = Some(value.parse::<u32>()?),
+            "--candidate-base" if candidate_base.is_none() => candidate_base = Some(value),
+            "--extra" => extra.push(value),
             _ => return Err(format!("unknown or repeated option: {arg}").into()),
         }
     }
@@ -52,16 +95,26 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     {
         return Err("--quality must be 0..51 (VideoToolbox: 1..100)".into());
     }
+    let production =
+        |rc: EffectiveRateControl| encoder.encode_args_for(grade, bitrate, rc, true, Some(threads));
     let mode = |rc: EffectiveRateControl| {
         json!({
             "recipe_value": rc.recipe_value(),
-            "encoder_args": encoder.encode_args_for(grade, bitrate, rc, true, Some(threads)),
+            "encoder_args": production(rc),
         })
     };
+    let base = match candidate_base.as_deref() {
+        None | Some("vbr") => EffectiveRateControl::Vbr,
+        Some("qvbr") => EffectiveRateControl::Qvbr { quality },
+        Some(_) => return Err("--candidate-base must be vbr or qvbr".into()),
+    };
+    let base_args = production(base);
+    validate_extra(&base_args, &extra)?;
+    let candidate_args: Vec<String> = base_args.iter().chain(&extra).cloned().collect();
     println!(
         "{}",
         serde_json::to_string_pretty(&json!({
-            "schema_version": 1,
+            "schema_version": 2,
             "scope": "encoder_arguments_only",
             "family": encoder.family_name(),
             "bitrate_kbps": bitrate,
@@ -77,6 +130,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             "modes": {
                 "vbr": mode(EffectiveRateControl::Vbr),
                 "qvbr": mode(EffectiveRateControl::Qvbr { quality }),
+            },
+            // The rolling producer's keyframe policy and segment length, so a
+            // capture forces IDRs exactly as production does (no `-g`).
+            "keyframe_args": hls_keyframe_args(),
+            "segment_seconds": SEGMENT_SECONDS,
+            "candidate": {
+                "base": if matches!(base, EffectiveRateControl::Vbr) { "vbr" } else { "qvbr" },
+                "extra_args": extra,
+                "encoder_args": candidate_args,
             },
         }))?
     );

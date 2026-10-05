@@ -5,6 +5,19 @@ Capture on a reserved host using exported production encoder arguments, then
 score copied captures on a controller with libvmaf. The existing bench owns
 fixture generation, VMAF scoring and the benefit threshold. This screen cannot
 qualify a production default: it has no served-segment or fleet speed evidence.
+
+Schema 2 screens one named candidate from the committed candidate list against
+production VBR. The candidate is production argv plus appended options (the
+export binary refuses anything else). Every capture uses the rolling
+producer's own keyframe arguments (no `-g`), and each fixture also records:
+
+* forced IDR on the 2 s grid, from a segmented capture: a keyframe within one
+  frame of every boundary (timestamps, not counts), and every segment starting
+  on an IDR access unit that decodes on its own to its first frame;
+* a control with `-force_key_frames` removed, which must fail that check, or
+  the column is void;
+* time to the first complete 2 s segment, and encode speed relative to
+  production VBR on the same fixture.
 """
 
 import argparse
@@ -19,13 +32,22 @@ import time
 ROOT = Path(__file__).resolve().parent.parent
 BENCH = runpy.run_path(str(ROOT / "scripts/bench"))
 CORPUS = ROOT / "scripts/perf2-rate-control-n2-corpus.json"
+CANDIDATES = ROOT / "scripts/encoder-calibration-candidates.json"
 SCOPE = "offline_encoder_screen_non_acceptance"
+SCHEMA_VERSION = 2
 LIMITATIONS = [
     "Synthetic fixtures are not representative movie or sports evidence.",
     "No production daemon, transport, served-segment peak or fleet p10-speed qualification.",
     "Single-run encode elapsed times include process startup; no default change is authorized.",
-    "Software decode, video-only MP4, fixed GOP and no frame reordering are screening overrides.",
+    "Software decode, video-only output and no frame reordering are screening overrides;"
+    " keyframes use the rolling producer's own arguments.",
 ]
+# Options a candidate must never carry (mirrors the export binary): they would
+# replace the keyframe, reordering or codec contract the screen holds fixed.
+RESERVED_EXTRA = {"-g", "-bf", "-force_key_frames", "-forced_idr", "-c:v", "-codec:v", "-vcodec",
+                  "-b_strategy", "-idr_interval", "-adaptive_b"}
+# H.264 IDR; HEVC IRAP (BLA, IDR, CRA) — what the production segmenter starts on.
+RANDOM_ACCESS_NAL = {"h264": {5}, "hevc": set(range(16, 22))}
 
 
 def write_json(path, value):
@@ -40,22 +62,207 @@ def bounded_run(argv, timeout=180):
     return result, time.monotonic() - start
 
 
+def string_list(value, what, allow_empty=False):
+    if not isinstance(value, list) or (not value and not allow_empty):
+        raise ValueError(f"missing {what}")
+    if not all(isinstance(arg, str) and arg for arg in value):
+        raise ValueError(f"{what} must be non-empty strings")
+    return value
+
+
+def option_names(args):
+    return {arg for arg in args if arg.startswith("-") and not re.fullmatch(r"-[0-9.]+", arg)}
+
+
+def validate_extra(base, extra):
+    """A candidate adds options to production argv; it never restates one."""
+    names = option_names(extra)
+    if names & RESERVED_EXTRA:
+        raise ValueError(f"candidate may not set {sorted(names & RESERVED_EXTRA)}")
+    if names & option_names(base):
+        raise ValueError(f"candidate may not restate production {sorted(names & option_names(base))}")
+
+
 def load_export(path):
     value = json.loads(Path(path).read_text())
-    if (value.get("schema_version") != 1 or value.get("scope") != "encoder_arguments_only"
+    if (value.get("schema_version") != SCHEMA_VERSION or value.get("scope") != "encoder_arguments_only"
             or value.get("output_grade") != "sdr"):
-        raise ValueError("expected version-1 production SDR argument export")
+        raise ValueError("expected version-2 production SDR argument export")
     if value.get("family") not in {"software", "qsv", "vaapi", "nvenc", "videotoolbox"}:
         raise ValueError("unknown encoder family")
     for name in ("vbr", "qvbr"):
-        mode = value.get("modes", {}).get(name, {})
-        if not isinstance(mode.get("encoder_args"), list) or not mode["encoder_args"]:
-            raise ValueError("missing production encoder arguments")
-        if not all(isinstance(arg, str) for arg in mode["encoder_args"]):
-            raise ValueError("encoder arguments must be strings")
+        string_list(value.get("modes", {}).get(name, {}).get("encoder_args"),
+                    "production encoder arguments")
     if not isinstance(value.get("input_args"), list):
         raise ValueError("missing production hardware initialization arguments")
+    keyframes = string_list(value.get("keyframe_args"), "production keyframe arguments")
+    if "-force_key_frames" not in keyframes or "-g" in keyframes:
+        raise ValueError("keyframe arguments must be the rolling producer's forced-keyframe policy")
+    if not isinstance(value.get("segment_seconds"), int) or value["segment_seconds"] <= 0:
+        raise ValueError("missing production segment length")
+    candidate = value.get("candidate", {})
+    if candidate.get("base") not in {"vbr", "qvbr"}:
+        raise ValueError("candidate base must be vbr or qvbr")
+    base = value["modes"][candidate["base"]]["encoder_args"]
+    extra = string_list(candidate.get("extra_args"), "candidate extra arguments", allow_empty=True)
+    if string_list(candidate.get("encoder_args"), "candidate arguments") != base + extra:
+        raise ValueError("candidate arguments must be production arguments plus its extras")
+    validate_extra(base, extra)
     return value
+
+
+def load_candidates(path=CANDIDATES):
+    value = json.loads(Path(path).read_text())
+    if value.get("schema_version") != 1 or value.get("scope") != SCOPE:
+        raise ValueError("expected a version-1 offline candidate list")
+    names = set()
+    for row in value.get("candidates", []):
+        if not re.fullmatch(r"[a-z0-9][a-z0-9-]{0,47}", row.get("name", "")) or row["name"] in names:
+            raise ValueError("candidate names must be unique slugs")
+        names.add(row["name"])
+        if row.get("base") not in {"vbr", "qvbr"}:
+            raise ValueError("candidate base must be vbr or qvbr")
+        if (row["base"] == "qvbr") != isinstance(row.get("quality"), int):
+            raise ValueError("a qvbr candidate names its quality; a vbr candidate does not")
+        extra = string_list(row.get("extra_args"), "candidate extra arguments", allow_empty=True)
+        if option_names(extra) & RESERVED_EXTRA:
+            raise ValueError("candidate list may not set a reserved option")
+        if not row["extra_args"] and row["base"] == "vbr":
+            raise ValueError("a vbr candidate with no extras is production itself")
+    if not names:
+        raise ValueError("empty candidate list")
+    return value
+
+
+def candidate_row(name, path=CANDIDATES):
+    rows = [row for row in load_candidates(path)["candidates"] if row["name"] == name]
+    if len(rows) != 1:
+        raise ValueError("candidate must be one name from the committed candidate list")
+    return rows[0]
+
+
+def export_matches_candidate(exported, row):
+    candidate = exported["candidate"]
+    if candidate["base"] != row["base"] or candidate["extra_args"] != row["extra_args"]:
+        raise ValueError("export was not made for this candidate")
+    if row["base"] == "qvbr" and exported.get("quality") != row["quality"]:
+        raise ValueError("export quality differs from the candidate's")
+
+
+def hls_muxer_args(directory, segment_seconds):
+    """The rolling producer's HLS muxer (crates/plurx-core/src/transcode/mod.rs
+    `hls_args_inner`, directory output): MPEG-TS at PTS 0, event playlist,
+    independent segments written through temp files."""
+    return ["-muxdelay", "0", "-muxpreload", "0", "-f", "hls", "-hls_time", str(segment_seconds),
+            "-hls_playlist_type", "event", "-hls_flags", "independent_segments+temp_file",
+            "-hls_segment_type", "mpegts", "-hls_segment_filename", str(directory / "seg%05d.ts"),
+            "-start_number", "0", str(directory / "index.m3u8")]
+
+
+def segment_capture(ffmpeg, before_input, reference, after_input, directory, segment_seconds,
+                    timeout=180):
+    """Encode into the production segmenter; time the first complete segment."""
+    directory.mkdir(parents=True, exist_ok=False)
+    command = [ffmpeg, *before_input, "-i", str(reference), *after_input,
+               *hls_muxer_args(directory, segment_seconds)]
+    first = directory / "seg00000.ts"
+    log = directory.parent / (directory.name + ".log")
+    with open(log, "w") as stderr:
+        start = time.monotonic()
+        child = subprocess.Popen(command, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                                 stderr=stderr)
+        first_segment = None
+        while child.poll() is None:
+            # temp_file renames a segment into place only once it is complete.
+            if first_segment is None and first.exists():
+                first_segment = time.monotonic() - start
+            if time.monotonic() - start > timeout:
+                child.kill()
+                child.wait()
+                raise ValueError("segmenting capture exceeded its deadline")
+            time.sleep(0.005)
+        elapsed = time.monotonic() - start
+    if child.returncode:
+        raise ValueError(f"segmenting capture failed ({child.returncode})")
+    if first_segment is None and first.exists():
+        first_segment = elapsed
+    return {"argv": command, "elapsed_seconds": elapsed, "first_segment_seconds": first_segment,
+            "segments": sorted(p.name for p in directory.glob("seg*.ts"))}
+
+
+def probe_json(ffprobe, args, path):
+    result, _ = bounded_run([ffprobe, "-v", "error", *args, "-of", "json", str(path)], 60)
+    return json.loads(result.stdout)
+
+
+def first_access_unit_nal_types(ffmpeg, path):
+    """NAL unit types of the segment's first video access unit, read from the
+    bitstream itself (`trace_headers`), not from a container key flag."""
+    result = subprocess.run([ffmpeg, "-hide_banner", "-nostdin", "-loglevel", "info", "-i", str(path),
+                             "-map", "0:v:0", "-c:v", "copy", "-bsf:v", "trace_headers",
+                             "-frames:v", "1", "-f", "null", "-"],
+                            capture_output=True, text=True, timeout=60, check=False)
+    types, packets = [], 0
+    for line in result.stderr.splitlines():
+        if "] Packet:" in line:
+            packets += 1
+            if packets > 1:
+                break
+        elif packets == 1:
+            match = re.search(r"nal_unit_type\s+\S+\s+=\s+(\d+)$", line)
+            if match:
+                types.append(int(match[1]))
+    return types
+
+
+def check_forced_idr(ffmpeg, ffprobe, directory, duration, segment_seconds):
+    """Forced IDRs on the production grid, measured on the segmenter's output."""
+    segments = sorted(directory.glob("seg*.ts"))
+    if not segments:
+        return {"passed": False, "failures": ["no segments"]}
+    stream = probe_json(ffprobe, ["-select_streams", "v:0", "-show_entries",
+                                  "stream=codec_name,avg_frame_rate,r_frame_rate"], segments[0])["streams"][0]
+    num, den = (int(x) for x in stream["r_frame_rate"].split("/"))
+    frame = den / num
+    codec = stream["codec_name"]
+    keyframes, rows, failures, origin = [], [], [], None
+    for segment in segments:
+        packets = probe_json(ffprobe, ["-select_streams", "v:0", "-show_entries", "packet=pts_time,flags"],
+                             segment)["packets"]
+        if not packets:
+            failures.append(f"{segment.name}: no video packets")
+            continue
+        if origin is None:
+            origin = float(packets[0]["pts_time"])
+        keyframes += [float(p["pts_time"]) - origin for p in packets if "K" in p.get("flags", "")]
+        first_pts = float(packets[0]["pts_time"])
+        nal_types = first_access_unit_nal_types(ffmpeg, segment)
+        frames = probe_json(ffprobe, ["-select_streams", "v:0", "-read_intervals", "%+#1",
+                                      "-show_entries", "frame=pts_time,key_frame,pict_type"],
+                            segment).get("frames", [])
+        decoded = frames[0] if frames else None
+        random_access = bool(set(nal_types) & RANDOM_ACCESS_NAL.get(codec, set()))
+        alone = (decoded is not None and decoded.get("key_frame") == 1
+                 and abs(float(decoded["pts_time"]) - first_pts) <= frame / 2)
+        rows.append({"segment": segment.name, "first_pts_seconds": round(first_pts - origin, 6),
+                     "first_access_unit_nal_types": nal_types, "random_access_start": random_access,
+                     "first_decoded_frame": decoded, "decodes_alone_from_first_frame": alone})
+        if not random_access:
+            failures.append(f"{segment.name}: first access unit is not a random-access point")
+        if not alone:
+            failures.append(f"{segment.name}: does not decode alone from its first frame")
+    boundaries = []
+    for index in range(int(math.ceil(duration / segment_seconds - 1e-9))):
+        boundary = index * segment_seconds
+        nearest = min(keyframes, key=lambda t: abs(t - boundary)) if keyframes else None
+        hit = nearest is not None and abs(nearest - boundary) <= frame + 1e-6
+        boundaries.append({"boundary_seconds": boundary,
+                           "nearest_keyframe_seconds": None if nearest is None else round(nearest, 6),
+                           "within_one_frame": hit})
+        if not hit:
+            failures.append(f"no keyframe within one frame of {boundary} s")
+    return {"passed": not failures, "codec": codec, "frame_seconds": frame,
+            "boundaries": boundaries, "segments": rows, "failures": failures[:20]}
 
 
 def fixture_row(name):
@@ -72,6 +279,8 @@ def capture(args):
     if not 32 <= args.max_temp_mib <= 1024:
         raise ValueError("max-temp-mib must be 32..1024")
     exported = load_export(args.encoder_args)
+    candidate = candidate_row(args.candidate, Path(args.candidate_list))
+    export_matches_candidate(exported, candidate)
     fixture = fixture_row(args.fixture)
     expected_bitrate = 4000 if fixture["rung"] == 720 else 8000
     if exported.get("bitrate_kbps") != expected_bitrate:
@@ -79,9 +288,11 @@ def capture(args):
     directory = Path(args.output).resolve()
     directory.mkdir(parents=True, exist_ok=False)
     report = {
-        "schema_version": 1, "scope": SCOPE, "acceptance_eligible": False,
+        "schema_version": SCHEMA_VERSION, "scope": SCOPE, "acceptance_eligible": False,
         "limitations": LIMITATIONS, "fixture": fixture,
         "source_revision": args.source_revision,
+        "candidate": candidate,
+        "candidate_list_sha256": BENCH["sha256_file"](args.candidate_list),
         "encoder_export": exported,
         "encoder_export_sha256": BENCH["sha256_file"](args.encoder_args),
         "bench_sha256": BENCH["sha256_file"](ROOT / "scripts/bench"),
@@ -92,8 +303,10 @@ def capture(args):
                             "cpu_threads": 2},
         "status": "incomplete",
     }
+    media = ["reference.mkv", "vbr.mp4", "candidate.mp4"]
     try:
-        for key, tool in (("encoder", args.ffmpeg), ("fixture_generator", args.fixture_ffmpeg)):
+        for key, tool in (("encoder", args.ffmpeg), ("fixture_generator", args.fixture_ffmpeg),
+                          ("prober", args.ffprobe)):
             version, _ = bounded_run([tool, "-version"], 10)
             report[key] = {"executable": tool, "build": version.stdout.splitlines()[0]}
         if args.provenance:
@@ -116,31 +329,55 @@ def capture(args):
             "argv": command, "elapsed_seconds": elapsed,
             "matches_pinned_n2": BENCH["sha256_file"](reference) == fixture["reference_sha256"],
         }
-        for mode in ("vbr", "qvbr"):
+        filters = "format=nv12"
+        if exported.get("upload_filter"):
+            filters += "," + exported["upload_filter"]
+        before = ["-hide_banner", "-nostdin", "-y", "-loglevel", "info", "-threads", "2",
+                  *exported["input_args"]]
+        keyframes = exported["keyframe_args"]
+        segment_seconds = exported["segment_seconds"]
+        video = {"vbr": exported["modes"]["vbr"]["encoder_args"],
+                 "candidate": exported["candidate"]["encoder_args"]}
+        # `-bf 0` is the screen's no-reordering override (production VOD forces
+        # it for every hardware encoder); keyframes are production's own.
+        for mode in ("vbr", "candidate"):
             output = directory / f"{mode}.mp4"
-            filters = "format=nv12"
-            if exported.get("upload_filter"):
-                filters += "," + exported["upload_filter"]
-            command = [args.ffmpeg, "-hide_banner", "-nostdin", "-y", "-loglevel", "info",
-                       "-threads", "2", *exported["input_args"], "-i", str(reference),
-                       "-map", "0:v:0", "-an", "-sn", "-t", str(args.duration),
-                       "-vf", filters, *exported["modes"][mode]["encoder_args"],
-                       "-bf", "0", "-g", "48", "-force_key_frames", "expr:gte(t,n_forced*2)",
+            after = ["-map", "0:v:0", "-an", "-sn", "-t", str(args.duration), "-vf", filters,
+                     *video[mode], "-bf", "0", *keyframes]
+            command = [args.ffmpeg, *before, "-i", str(reference), *after,
                        "-map_metadata", "-1", "-fs", str(media_budget // 8), str(output)]
             report["active_command"] = command
             result, elapsed = bounded_run(command)
             (directory / f"{mode}.log").write_text(result.stderr)
+            segmented = segment_capture(args.ffmpeg, before, reference, after,
+                                        directory / f"{mode}-hls", segment_seconds)
             report["modes"][mode] = {
                 "file": output.name, "sha256": BENCH["sha256_file"](output),
                 "bytes": output.stat().st_size, "argv": command,
                 "encode_elapsed_seconds": elapsed,
+                "first_segment_seconds": segmented["first_segment_seconds"],
+                "segmented": segmented,
+                "forced_idr": check_forced_idr(args.ffmpeg, args.ffprobe, directory / f"{mode}-hls",
+                                               args.duration, segment_seconds),
             }
+        # The control removes only the forcing. A check that still passes is
+        # not measuring forced IDR, and the column is void.
+        control_after = ["-map", "0:v:0", "-an", "-sn", "-t", str(args.duration), "-vf", filters,
+                         *video["candidate"], "-bf", "0"]
+        segmented = segment_capture(args.ffmpeg, before, reference, control_after,
+                                    directory / "control-hls", segment_seconds)
+        control = check_forced_idr(args.ffmpeg, args.ffprobe, directory / "control-hls",
+                                   args.duration, segment_seconds)
+        report["forced_idr_control"] = {"segmented": segmented, "forced_idr": control}
+        report["forced_idr_column_valid"] = not control["passed"]
+        report["speed_relative_to_vbr"] = (report["modes"]["vbr"]["encode_elapsed_seconds"]
+                                           / report["modes"]["candidate"]["encode_elapsed_seconds"])
         report["status"] = "captured"
         report.pop("active_command", None)
     except Exception as error:
         report["error"] = str(error)
         report["status"] = "failed"
-        for filename in ("reference.mkv", "vbr.mp4", "qvbr.mp4"):
+        for filename in media:
             (directory / filename).unlink(missing_ok=True)
         report["partial_media_removed"] = True
         raise
@@ -192,7 +429,8 @@ def validate_frame_match(reference, candidate, duration):
 def score(args):
     directory = Path(args.capture)
     report = json.loads((directory / "capture.json").read_text())
-    if report.get("status") != "captured" or report.get("scope") != SCOPE:
+    if (report.get("status") != "captured" or report.get("scope") != SCOPE
+            or report.get("schema_version") != SCHEMA_VERSION):
         raise ValueError("capture is incomplete or has an unknown evidence scope")
     scorer = BENCH["scoring_executable"](args.scorer)
     probe = BENCH["probe_vmaf_scorer"](scorer, "vmaf_v0.6.1")
@@ -207,7 +445,7 @@ def score(args):
         if BENCH["sha256_file"](path) != item["sha256"]:
             raise ValueError(f"changed capture: {name}")
         facts[name] = inspect_video(args.ffprobe, path)
-    for mode in ("vbr", "qvbr"):
+    for mode in ("vbr", "candidate"):
         validate_frame_match(facts["reference"], facts[mode], report["duration_seconds"])
         item = report["modes"][mode]
         item["vmaf"] = score_vmaf_bounded(
@@ -229,8 +467,9 @@ def summarize(reports):
     identities = set()
     identity = None
     for report in reports:
-        if report.get("status") != "scored" or report.get("scope") != SCOPE:
-            raise ValueError("all reports must be completed offline screens")
+        if (report.get("status") != "scored" or report.get("scope") != SCOPE
+                or report.get("schema_version") != SCHEMA_VERSION):
+            raise ValueError("all reports must be completed version-2 offline screens")
         fixture = report["fixture"]
         if fixture != canonical.get(fixture.get("identity")):
             raise ValueError("fixture metadata differs from the canonical n2 corpus")
@@ -243,7 +482,7 @@ def summarize(reports):
         if fixture["identity"] in identities:
             raise ValueError("duplicate fixture evidence")
         identities.add(fixture["identity"])
-        current = (report["encoder_export"]["family"], report["encoder_export"]["quality"],
+        current = (report["encoder_export"]["family"], json.dumps(report["candidate"], sort_keys=True),
                    report["encoder"]["build"], report["source_revision"], report["bench_sha256"],
                    report["scorer"]["sha256"], report["scorer"]["model"], report["duration_seconds"],
                    binary_hash, report["corpus_sha256"], environment.get("image_id"),
@@ -251,29 +490,52 @@ def summarize(reports):
         if identity is not None and current != identity:
             raise ValueError("mixed source, encoder, candidate, scorer or duration evidence")
         identity = current
-        rows.append({"identity": fixture["identity"], "class": fixture["class"], "modes": report["modes"]})
+        modes = report["modes"]
+        rows.append({"identity": fixture["identity"], "class": fixture["class"],
+                     "modes": {"vbr": modes["vbr"], "candidate": modes["candidate"]},
+                     "speed_relative_to_vbr": report["speed_relative_to_vbr"],
+                     "first_segment_seconds": {m: modes[m]["first_segment_seconds"] for m in modes},
+                     "forced_idr_passed": {m: modes[m]["forced_idr"]["passed"] for m in modes},
+                     "forced_idr_control_passed": report["forced_idr_control"]["forced_idr"]["passed"]})
     if identities != expected:
         raise ValueError("a complete six-fixture n2 screen is required")
-    benefit, failures = BENCH["evaluate_rate_control_benefit"](rows)
-    quality_loss = [r["identity"] for r in rows if r["modes"]["qvbr"]["vmaf"] < r["modes"]["vbr"]["vmaf"]]
-    return {"schema_version": 1, "scope": SCOPE, "acceptance_eligible": False,
+    # The bench's benefit gate is the one §3.3 bar; the candidate takes the
+    # slot it names `qvbr` (the mode under test), production VBR stays `vbr`.
+    benefit, failures = BENCH["evaluate_rate_control_benefit"](
+        [{**row, "modes": {"vbr": row["modes"]["vbr"], "qvbr": row["modes"]["candidate"]}} for row in rows])
+    quality_loss = [r["identity"] for r in rows
+                    if r["modes"]["candidate"]["vmaf"] < r["modes"]["vbr"]["vmaf"]]
+    control_passed = [r["identity"] for r in rows if r["forced_idr_control_passed"]]
+    idr_valid = not control_passed
+    idr_kept = idr_valid and all(r["forced_idr_passed"]["candidate"] for r in rows)
+    return {"schema_version": SCHEMA_VERSION, "scope": SCOPE, "acceptance_eligible": False,
             "decision": "retain_bitrate_pending_production_qualification",
+            "candidate": json.loads(identity[1]),
             "benefit": benefit, "benefit_failures": failures, "quality_regressions": quality_loss,
+            "speed_relative_to_vbr": {r["identity"]: r["speed_relative_to_vbr"] for r in rows},
+            "first_segment_seconds": {r["identity"]: r["first_segment_seconds"] for r in rows},
+            # None when the control also passed: the check did not discriminate.
+            "forced_idr_column_valid": idr_valid,
+            "forced_idr_control_passed_on": control_passed,
+            "forced_idr_kept": idr_kept if idr_valid else None,
             "fixture_rows": rows, "limitations": LIMITATIONS,
-            "matched_identity": dict(zip(("family", "quality", "encoder_build", "source_revision",
+            "matched_identity": dict(zip(("family", "candidate", "encoder_build", "source_revision",
                                            "bench_sha256", "scorer_sha256", "metric_model", "duration_seconds",
                                            "encoder_sha256", "corpus_sha256", "image_id", "software_threads"), identity)),
             "input_reports": reports,
-            "candidate_warrants_further_qualification": bool(benefit and benefit["passed"] and not quality_loss)}
+            "candidate_warrants_further_qualification": bool(
+                benefit and benefit["passed"] and not quality_loss and idr_kept)}
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     sub = parser.add_subparsers(dest="action", required=True)
     cap = sub.add_parser("capture")
-    for name in ("encoder-args", "fixture", "output", "source-revision"):
+    for name in ("encoder-args", "fixture", "output", "source-revision", "candidate"):
         cap.add_argument("--" + name, required=True)
+    cap.add_argument("--candidate-list", default=str(CANDIDATES))
     cap.add_argument("--ffmpeg", default="ffmpeg")
+    cap.add_argument("--ffprobe", default="ffprobe")
     cap.add_argument("--fixture-ffmpeg", default="ffmpeg")
     cap.add_argument("--duration", type=float, default=12)
     cap.add_argument("--provenance")
