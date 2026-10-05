@@ -182,3 +182,41 @@ Native build evidence before review: Android debug APK, JVM test sources,
 and instrumentation APK compile; iOS and tvOS application builds pass;
 iOS XCTest sources compile with build-for-testing. No tests have been run
 for this native follow-up before its adversarial review.
+
+
+### Native adversarial review — 2026-10-05
+
+The one read-only review of `2b284bea9` requested five corrections, all
+implemented before executing tests:
+
+- Restore authoritative watch/rollup refresh after Apple detail navigation;
+  keep the prior complete row snapshot mounted while replacement pages load.
+- Show the shared incomplete-result message and Retry inside Android's
+  expanded group, not only underneath its full-screen sheet.
+- Match the approved visible horizontal letter/year index, with keyed buttons
+  and an accessible selected state.
+- Use landscape home-media artwork and recording metadata; Apple home
+  collections initially select recording-date groups.
+- Reuse month labels and one date formatter per grouping pass; skip Apple
+  grouping in Grid and cancel superseded grouping snapshots.
+
+Native PR: [#823](http://192.168.4.7:3000/noirr/plurx/pulls/823). Tests follow
+these corrections; their final commands and outcomes are recorded on the PR.
+
+
+### Native focused evidence after review
+
+Android: all 12 targeted JVM tests pass (`LibraryGroupsTest`,
+`LibraryPagerWatchFilterTest`, `LibrarySortTest`). Three Android TV UI tests
+pass: group jump/expansion/return, retry while expanded, and D-pad focus
+retention across a late page. Phone layout acceptance is in progress.
+
+Apple: all nine grouping/coordinator cases have passed on an owned iPhone
+simulator. Only the failed partial-page retry case was rerun: the cause was
+the coordinator's reuse of Home's cached-content error suppression, which
+turned a partial-library failure into an immediate retry loop. The coordinator
+now retains the error for explicit Retry. The separate affected shelf-metadata
+regression also passes. iOS and tvOS compile after the corrections.
+
+The merge base remains `1dfcca2dd`; no user checkout or physical device was
+used. Apple build 209 and Android versionCode 146 remain the claimed counters.

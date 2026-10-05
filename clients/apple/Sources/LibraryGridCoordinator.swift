@@ -14,6 +14,7 @@ final class LibraryGridCoordinator: ObservableObject {
     @Published private(set) var visibleItems: [Item] = []
     @Published private(set) var groups: [LibraryGroup] = []
     private var rowsEnabled = false
+    private var preservingRowsDuringRefresh = false
     @Published private(set) var loading = true
     @Published private(set) var error: String?
     @Published private(set) var loadedCount = 0
@@ -89,18 +90,26 @@ final class LibraryGridCoordinator: ObservableObject {
     private func filterNow() {
         filterGeneration += 1
         let generation = filterGeneration
+        for task in filterTasks.values { task.cancel() }
         let snapshot = items
         let selected = filter
         let text = query
         let worker = worker
         let selectedSort = sort
+        let groupRows = rowsEnabled
         filterTasks[generation] = Task { [weak self] in
             let result = await worker(snapshot, selected, text)
-            let grouped = await Task.detached(priority: .userInitiated) {
-                LibraryGroups.make(result, sort: selectedSort)
-            }.value
             guard let self else { return }
-            self.filterTasks[generation] = nil
+            defer { self.filterTasks[generation] = nil }
+            guard generation == self.filterGeneration, !Task.isCancelled else { return }
+            let grouping = Task.detached(priority: .userInitiated) {
+                groupRows ? LibraryGroups.make(result, sort: selectedSort) : []
+            }
+            let grouped = await withTaskCancellationHandler {
+                await grouping.value
+            } onCancel: {
+                grouping.cancel()
+            }
             if generation == self.filterGeneration, !Task.isCancelled {
                 self.visibleItems = result
                 self.groups = grouped
@@ -122,11 +131,7 @@ final class LibraryGridCoordinator: ObservableObject {
 
     func presentationChanged(rows: Bool) {
         rowsEnabled = rows
-        runDrive()
-    }
-
-    func resume() async {
-        await fetchUntil(40)
+        filterNow()
         runDrive()
     }
 
@@ -203,15 +208,19 @@ final class LibraryGridCoordinator: ObservableObject {
                     return
                 }
                 pager = current
-                items = current.decided
-                filterNow()
+                if !preservingRowsDuringRefresh || current.complete {
+                    items = current.decided
+                    filterNow()
+                }
                 loadedCount = current.loadedCount
                 total = current.total
                 complete = current.complete
             }
         } catch {
             guard generation == pageGeneration, !Task.isCancelled else { return }
-            self.error = AppModel.homeErrorMessage(for: error, hasCachedContent: !items.isEmpty)
+            // A partial catalog is not a successful cached Home refresh.
+            // Suppressing this error makes fetchUntil immediately retry forever.
+            self.error = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
         }
     }
 
@@ -224,6 +233,7 @@ final class LibraryGridCoordinator: ObservableObject {
         loading = true
         error = nil
         complete = false
+        preservingRowsDuringRefresh = rowsEnabled && !items.isEmpty && self.sort == sort
         if self.sort != sort {
             items = []; visibleItems = []; groups = []
             loadedCount = 0; total = 0

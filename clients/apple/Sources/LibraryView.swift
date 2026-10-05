@@ -9,9 +9,14 @@ struct LibraryView: View {
     @State private var filter: WatchFilter = .all
     @State private var query = ""
     @AppStorage("plurx.libraryPresentation") private var presentation = "rows"
-    @State private var loadedKey: String?
     @State private var expandedGroup: String?
+    @State private var selectedGroup: String?
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
+
+    init(collection: LibraryCollection) {
+        self.collection = collection
+        _sort = State(initialValue: collection.supportsRecordedSort ? .recorded : .title)
+    }
 
     private var rows: Bool { presentation != "grid" }
 
@@ -38,40 +43,49 @@ struct LibraryView: View {
 
     var body: some View {
         ScrollViewReader { proxy in
-            ScrollView {
-                VStack(alignment: .leading, spacing: 18) {
-                    summary
-                    TextField("Find a title in this library", text: $query)
-                        #if os(iOS)
-                        .textFieldStyle(.roundedBorder)
-                        #endif
-                        .accessibilityLabel("Find a title in this library")
-                    if rows && !state.groups.isEmpty {
-                        Menu {
+            VStack(alignment: .leading, spacing: 12) {
+                summary
+                TextField("Find a title in this library", text: $query)
+                    #if os(iOS)
+                    .textFieldStyle(.roundedBorder)
+                    #endif
+                    .accessibilityLabel("Find a title in this library")
+                if rows && !state.groups.isEmpty {
+                    ScrollView(.horizontal) {
+                        HStack(spacing: 8) {
                             ForEach(state.groups) { group in
                                 Button(group.label) {
+                                    selectedGroup = group.id
                                     withAnimation(reduceMotion ? nil : .default) { proxy.scrollTo(group.id, anchor: .top) }
                                 }
+                                .buttonStyle(.bordered)
+                                .tint(selectedGroup == group.id ? Palette.accent : Palette.muted)
+                                .accessibilityLabel("Jump to \(group.label)")
+                                .accessibilityAddTraits(selectedGroup == group.id ? .isSelected : [])
                             }
-                        } label: { Label("Jump to group", systemImage: "list.bullet") }
-                        .accessibilityIdentifier("library-group-jump")
-                    }
-                    if let error {
-                        HStack {
-                            Text("Incomplete library: \(error)").foregroundColor(Palette.muted)
-                            Button("Retry") { Task { await state.retry() } }
                         }
+                        .padding(.vertical, 8)
                     }
-                    stateContent
+                    .accessibilityIdentifier("library-group-index")
                 }
-                .padding(.horizontal, screenHPad)
-                .padding(.bottom, 36)
+                if let error {
+                    HStack {
+                        Text("Incomplete library: \(error)").foregroundColor(Palette.muted)
+                        Button("Retry") { Task { await state.retry() } }
+                    }
+                }
+                ScrollView {
+                    stateContent.padding(.bottom, 36)
+                }
+                #if os(iOS)
+                .refreshable { await load() }
+                #endif
             }
+            .padding(.horizontal, screenHPad)
             .background(Palette.bg.ignoresSafeArea())
             .navigationTitle(collection.title)
             #if os(iOS)
             .navigationBarTitleDisplayMode(.inline)
-            .refreshable { await load(force: true) }
             #endif
             .toolbar { libraryToolbar }
             .task(id: loadKey) { await load() }
@@ -79,7 +93,8 @@ struct LibraryView: View {
             .task(id: query) { await state.queryChanged(query) }
             .task(id: filter) { state.filterChanged(filter) }
             .navigationDestination(item: $expandedGroup) { key in
-                LibraryGroupView(state: state, groupID: key, title: state.groups.first { $0.id == key }?.label ?? key)
+                LibraryGroupView(state: state, groupID: key, title: state.groups.first { $0.id == key }?.label ?? key,
+                                 landscape: collection.supportsRecordedSort, reload: load)
             }
             .onDisappear {
                 if expandedGroup == nil { state.stop() }
@@ -145,7 +160,11 @@ struct LibraryView: View {
                             LazyHStack(alignment: .top, spacing: 18) {
                                 ForEach(group.items) { item in
                                     NavigationLink(value: Route.item(item.id)) {
-                                        PosterCard(item: item, width: model.posterSize.posterWidth)
+                                        if collection.supportsRecordedSort {
+                                            LandscapeCard(item: item, width: model.posterSize.landscapeWidth)
+                                        } else {
+                                            PosterCard(item: item, width: model.posterSize.posterWidth)
+                                        }
                                     }
                                     .posterButtonStyle()
                                 }
@@ -220,12 +239,7 @@ struct LibraryView: View {
     }
 
     @MainActor
-    private func load(force: Bool = false) async {
-        if !force && loadedKey == loadKey {
-            await state.resume()
-            return
-        }
-        loadedKey = loadKey
+    private func load() async {
         let apiModel = model
         let selectedCollection = collection
         state.configure(
@@ -244,6 +258,8 @@ private struct LibraryGroupView: View {
     @ObservedObject var state: LibraryGridCoordinator
     let groupID: String
     let title: String
+    let landscape: Bool
+    let reload: () async -> Void
     private var items: [Item] { state.groups.first { $0.id == groupID }?.items ?? [] }
 
     var body: some View {
@@ -255,10 +271,14 @@ private struct LibraryGroupView: View {
                     Text("Incomplete library: \(error)")
                     Button("Retry") { Task { await state.retry() } }
                 }
-                LazyVGrid(columns: [GridItem(.adaptive(minimum: model.posterSize.posterWidth), spacing: 18)], spacing: 24) {
+                LazyVGrid(columns: [GridItem(.adaptive(minimum: landscape ? model.posterSize.landscapeWidth : model.posterSize.posterWidth), spacing: 18)], spacing: 24) {
                     ForEach(items) { item in
                         NavigationLink(value: Route.item(item.id)) {
-                            PosterCard(item: item, width: model.posterSize.posterWidth)
+                            if landscape {
+                                LandscapeCard(item: item, width: model.posterSize.landscapeWidth)
+                            } else {
+                                PosterCard(item: item, width: model.posterSize.posterWidth)
+                            }
                         }.posterButtonStyle()
                     }
                 }
@@ -268,6 +288,6 @@ private struct LibraryGroupView: View {
         }
         .background(Palette.bg.ignoresSafeArea())
         .navigationTitle(title)
-        .task { await state.fetchUntil(Int.max) }
+        .task { await reload() }
     }
 }

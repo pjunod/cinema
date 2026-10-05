@@ -2,6 +2,7 @@ package tv.plurx.app.ui
 
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items as rowItems
 import androidx.compose.foundation.lazy.rememberLazyListState
@@ -44,6 +45,9 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.semantics.selected
+import androidx.compose.ui.platform.testTag
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.collectLatest
@@ -114,6 +118,7 @@ internal fun LibraryScreen(
     var jumpGroup by rememberSaveable(libraryIds, sort) { mutableStateOf("") }
     var groups by remember(pager) { mutableStateOf<List<LibraryGroup>>(emptyList()) }
     val rows = presentation == LibraryPresentation.Rows
+    val landscape = kind == "home"
     LaunchedEffect(preferences.libraryPresentation) { presentation = preferences.libraryPresentation }
     var shown by remember(pager) { mutableStateOf<List<Item>>(emptyList()) }
     LaunchedEffect(pager) { pager.ensure(40) }
@@ -138,6 +143,8 @@ internal fun LibraryScreen(
             }.collectLatest { (filtered, grouped) -> shown = filtered; groups = grouped }
     }
     val posterWidth = (preferences.posterSize.widthDp * formFactor.posterScale()).dp
+    val rowWidth = if (landscape) posterWidth * 1.6f else posterWidth
+    val retry: () -> Unit = { scope.launch { pager.ensure(if (rows || filter != WatchFilter.Everything || query.isNotBlank()) Int.MAX_VALUE else shown.size + 40) } }
 
     // This screen arrived with focus nowhere, so a television's first D-pad
     // press was spent finding a stop instead of moving between them. Back is
@@ -198,20 +205,21 @@ internal fun LibraryScreen(
             ChoicePicker("View", presentation, LibraryPresentation.entries, { it.label }, {
                 presentation = it; onPresentationChange(it)
             }, Modifier.weight(1f))
-            if (rows && groups.isNotEmpty()) {
-                ChoicePicker("Jump to", jumpGroup, groups.map { it.key }, { key -> groups.firstOrNull { it.key == key }?.label ?: "Choose group" }, { key ->
-                    jumpGroup = key
-                    val index = groups.indexOfFirst { it.key == key }
-                    if (index >= 0) scope.launch { rowsState.animateScrollToItem(index) }
-                }, Modifier.weight(1f))
+        }
+        if (rows && groups.isNotEmpty()) {
+            LazyRow(
+                modifier = Modifier.fillMaxWidth().testTag("library-group-index"),
+                contentPadding = PaddingValues(horizontal = side), horizontalArrangement = Arrangement.spacedBy(4.dp),
+            ) {
+                rowItems(groups, key = { it.key }) { group ->
+                    TextButton(
+                        onClick = { jumpGroup = group.key; scope.launch { rowsState.animateScrollToItem(groups.indexOfFirst { it.key == group.key }) } },
+                        modifier = Modifier.semantics { selected = jumpGroup == group.key },
+                    ) { Text(group.label) }
+                }
             }
         }
-        if (load.error != null) {
-            Row(Modifier.fillMaxWidth().padding(horizontal = side), verticalAlignment = Alignment.CenterVertically) {
-                Text("Incomplete library: ${load.error}", color = MaterialTheme.colorScheme.error, modifier = Modifier.weight(1f))
-                TextButton(onClick = { scope.launch { pager.ensure(if (rows || filter != WatchFilter.Everything || query.isNotBlank()) Int.MAX_VALUE else shown.size + 40) } }) { Text("Retry") }
-            }
-        }
+        LibraryLoadError(load.error, Modifier.padding(horizontal = side), retry)
 
         when {
             load.loadedCount == 0 && !load.complete && load.error == null -> LoadingBox()
@@ -225,7 +233,7 @@ internal fun LibraryScreen(
                 rowItems(groups, key = { it.key }) { group ->
                     MediaRow(
                         title = "${group.label} · ${group.items.size}${if (load.complete) "" else " loaded"}",
-                        items = group.items, posterWidth = posterWidth,
+                        items = group.items, posterWidth = rowWidth, landscape = landscape,
                         onViewAll = { expandedGroup = group.key }, onOpen = { onOpenItem(it.id) },
                     )
                 }
@@ -253,14 +261,25 @@ internal fun LibraryScreen(
                     TextButton(onClick = { expandedGroup = null }) { Text("All rows") }
                     Text("${expanded.label} · ${expanded.items.size}${if (load.complete) "" else " loaded"}", style = MaterialTheme.typography.titleLarge)
                 }
+                LibraryLoadError(load.error, Modifier.padding(horizontal = side), retry)
                 LazyVerticalGrid(
-                    columns = GridCells.Adaptive(posterWidth),
+                    columns = GridCells.Adaptive(rowWidth),
                     contentPadding = PaddingValues(side),
                     horizontalArrangement = Arrangement.spacedBy(16.dp), verticalArrangement = Arrangement.spacedBy(22.dp),
                 ) {
-                    items(expanded.items, key = { it.id }) { item -> PosterCard(item, width = posterWidth) { onOpenItem(item.id) } }
+                    items(expanded.items, key = { it.id }) { item -> PosterCard(item, width = rowWidth, landscape = landscape) { onOpenItem(item.id) } }
                 }
             }
+        }
+    }
+}
+
+@Composable
+private fun LibraryLoadError(error: String?, modifier: Modifier, retry: () -> Unit) {
+    if (error != null) {
+        Row(modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+            Text("Incomplete library: $error", color = MaterialTheme.colorScheme.error, modifier = Modifier.weight(1f))
+            TextButton(onClick = retry) { Text("Retry") }
         }
     }
 }

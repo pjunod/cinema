@@ -2,6 +2,7 @@ package tv.plurx.app.ui
 
 import java.time.Instant
 import java.time.ZoneId
+import java.time.ZonedDateTime
 import java.time.format.DateTimeFormatter
 import java.util.Locale
 import tv.plurx.app.data.Item
@@ -12,15 +13,19 @@ internal data class LibraryGroup(val key: String, val label: String, val order: 
 internal fun libraryGroups(items: List<Item>, sort: String, now: Instant = Instant.now(), zone: ZoneId = ZoneId.systemDefault()): List<LibraryGroup> {
     val buckets = linkedMapOf<String, LibraryGroup>()
     val members = linkedMapOf<String, MutableList<Item>>()
+    val monthLabels = mutableMapOf<String, String>()
+    val formatter by lazy { DateTimeFormatter.ofPattern("MMMM yyyy") }
     for (item in items) {
-        val group = libraryGroup(item, sort, now, zone)
+        val group = libraryGroup(item, sort, now, zone) { date ->
+            monthLabels.getOrPut("${date.year}-${date.monthValue}") { date.format(formatter) }
+        }
         buckets.putIfAbsent(group.key, group)
         members.getOrPut(group.key) { mutableListOf() }.add(item)
     }
     return buckets.values.sortedBy { it.order }.map { it.copy(items = members.getValue(it.key)) }
 }
 
-private fun libraryGroup(item: Item, sort: String, now: Instant, zone: ZoneId): LibraryGroup {
+private fun libraryGroup(item: Item, sort: String, now: Instant, zone: ZoneId, monthLabel: (ZonedDateTime) -> String): LibraryGroup {
     fun group(key: String, label: String, order: Int) = LibraryGroup(key, label, order)
     return when (sort) {
         "title" -> {
@@ -53,7 +58,7 @@ private fun libraryGroup(item: Item, sort: String, now: Instant, zone: ZoneId): 
                 date >= today -> group("today", "Today", 0)
                 date >= week -> group("week", "Previous 6 days", 1)
                 date >= month -> group("month", "Earlier this month", 2)
-                else -> group("added-${date.year}-${date.monthValue}", date.format(DateTimeFormatter.ofPattern("MMMM yyyy")),
+                else -> group("added-${date.year}-${date.monthValue}", monthLabel(date),
                     3 + (current.year - date.year) * 12 + current.monthValue - date.monthValue)
             }
         }

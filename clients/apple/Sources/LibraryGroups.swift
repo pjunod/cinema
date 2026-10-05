@@ -13,8 +13,19 @@ enum LibraryGroups {
     static func make(_ items: [Item], sort: LibrarySort, now: Date = Date(),
                      calendar: Calendar = .current) -> [LibraryGroup] {
         var groups: [String: LibraryGroup] = [:]
+        let today = calendar.startOfDay(for: now)
+        let week = calendar.date(byAdding: .day, value: -6, to: today)!
+        let month = calendar.date(from: calendar.dateComponents([.year, .month], from: now))!
+        let formatter = DateFormatter()
+        formatter.calendar = calendar
+        formatter.timeZone = calendar.timeZone
+        formatter.setLocalizedDateFormatFromTemplate("MMMM yyyy")
+        var monthLabels: [String: String] = [:]
         for item in items {
-            let bucket = bucket(item, sort: sort, now: now, calendar: calendar)
+            if Task.isCancelled { return [] }
+            let bucket = bucket(item, sort: sort, now: now, calendar: calendar,
+                                today: today, week: week, month: month,
+                                formatter: formatter, monthLabels: &monthLabels)
             if groups[bucket.id] == nil { groups[bucket.id] = bucket }
             groups[bucket.id]?.items.append(item)
         }
@@ -22,7 +33,8 @@ enum LibraryGroups {
     }
 
     private static func bucket(_ item: Item, sort: LibrarySort, now: Date,
-                               calendar: Calendar) -> LibraryGroup {
+                               calendar: Calendar, today: Date, week: Date, month: Date,
+                               formatter: DateFormatter, monthLabels: inout [String: String]) -> LibraryGroup {
         func group(_ id: String, _ label: String, _ order: Int) -> LibraryGroup {
             LibraryGroup(id: id, label: label, order: order, items: [])
         }
@@ -53,9 +65,6 @@ enum LibraryGroups {
         case .added:
             guard let seconds = item.addedAt else { return group("unknown", "Unknown date added", Int.max) }
             let date = Date(timeIntervalSince1970: Double(seconds))
-            let today = calendar.startOfDay(for: now)
-            let week = calendar.date(byAdding: .day, value: -6, to: today)!
-            let month = calendar.date(from: calendar.dateComponents([.year, .month], from: now))!
             if date > now { return group("future", "Future dates", -1) }
             if date >= today { return group("today", "Today", 0) }
             if date >= week { return group("week", "Previous 6 days", 1) }
@@ -64,11 +73,9 @@ enum LibraryGroups {
             let current = calendar.dateComponents([.year, .month], from: now)
             guard let year = parts.year, let m = parts.month, let currentYear = current.year,
                   let currentMonth = current.month else { return group("unknown", "Unknown date added", Int.max) }
-            let formatter = DateFormatter()
-            formatter.calendar = calendar
-            formatter.timeZone = calendar.timeZone
-            formatter.setLocalizedDateFormatFromTemplate("MMMM yyyy")
-            return group("added-\(year)-\(m)", formatter.string(from: date), 3 + (currentYear - year) * 12 + currentMonth - m)
+            let key = "added-\(year)-\(m)"
+            if monthLabels[key] == nil { monthLabels[key] = formatter.string(from: date) }
+            return group(key, monthLabels[key]!, 3 + (currentYear - year) * 12 + currentMonth - m)
         }
     }
 }

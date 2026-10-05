@@ -165,11 +165,15 @@ final class LibraryGridCoordinatorTests: XCTestCase {
         XCTAssertEqual(Set(state.groups.flatMap(\.items).map(\.id)).count, 421)
     }
 
-    func testReturningToLoadedRowsDoesNotRefetchPages() async throws {
-        let rows = try items(421)
-        var calls = 0
+    func testReturningRefreshesWatchStateWithoutDroppingLateRows() async throws {
+        let original = try items(421)
+        var refreshed = original
+        refreshed[0].watch = Watch(positionMs: 0, durationMs: 60_000, watched: true)
+        var returning = false
+        let gate = LibraryWorkerGate()
         let state = LibraryGridCoordinator(fetch: { _, _, offset in
-            calls += 1
+            if returning && offset == 200 { await gate.block("refresh") }
+            let rows = returning ? refreshed : original
             return Page(items: Array(rows.dropFirst(offset).prefix(200)), total: rows.count)
         }, delay: { _ in })
         defer { state.stop() }
@@ -177,9 +181,23 @@ final class LibraryGridCoordinatorTests: XCTestCase {
         await state.load(libraryIds: [1], sort: .title)
         await waitUntil { state.complete && state.visibleItems.count == 421 }
         state.stop()
-        await state.resume()
-        XCTAssertEqual(calls, 3)
-        XCTAssertEqual(state.visibleItems.count, 421)
+        returning = true
+        await state.load(libraryIds: [1], sort: .title)
+        await gate.waitFor("refresh")
+        XCTAssertEqual(state.groups.flatMap(\.items).count, 421, "Keep late rows mounted during refresh")
+        await gate.release("refresh")
+        await waitUntil { state.complete && state.visibleItems.first?.watch?.watched == true }
+        XCTAssertEqual(state.groups.flatMap(\.items).count, 421)
     }
 
+    func testGridSkipsGroupingUntilRowsAreSelected() async throws {
+        let rows = try items(20)
+        let state = LibraryGridCoordinator(fetch: { _, _, _ in Page(items: rows, total: rows.count) }, delay: { _ in })
+        defer { state.stop() }
+        await state.load(libraryIds: [1], sort: .added)
+        await waitUntil { state.visibleItems.count == 20 }
+        XCTAssertTrue(state.groups.isEmpty)
+        state.presentationChanged(rows: true)
+        await waitUntil { state.groups.flatMap(\.items).count == 20 }
+    }
 }
