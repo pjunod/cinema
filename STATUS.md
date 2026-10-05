@@ -325,28 +325,14 @@ simulcast in MPEG-TS, no decoder running. One adversarial review pass, eight
 findings folded (Android now reads the HDMI sink's PCM channel count, described
 tracks never win, `und` is no language, the track is mapped by PID).
 
-## P-03: the regression ledger stops growing, and releases get a weekly cadence
-
-**Merged by #489 (`995b60f3e`); phase B switched on 2026-09-25 by branch
-`ci/p03-enforce` with Paul's approval** — the boundary is `448e803da`, and a
-corrective pull request now needs a resolving `Regression-Test:` line.
-Executes [LEDGER-TEXT-CONTRACTS-AND-RELEASE-TAGS.md](docs/ci/LEDGER-TEXT-CONTRACTS-AND-RELEASE-TAGS.md)
-under Paul's two 2026-09-23 decisions. Built: the `Regression-Test:` field
-(checked before merge in the tree the merge will produce), the landing-commit
-audit that replaces new `validation/regressions.d/` fragments past a boundary
-commit, `scripts/release-cut`, and a Monday release-readiness run that tags a
-merged release only from a green gate. The boundary is set (phase B); the
-first weekly tag still waits for `publish_main` to have a trigger (P-01). This page is now the
-newest sections plus an index; older sections moved verbatim into each
-folder's `STATUS-HISTORY.md`. The execution log in the plan is the record.
-
 ## Older efforts — where each one now lives
 
-Sections older than those above moved verbatim on 2026-09-24, 2026-09-25, 2026-09-26, 2026-09-27 and 2026-09-28
+Sections older than those above moved verbatim on 2026-09-24, 2026-09-25, 2026-09-26, 2026-09-27, 2026-09-28 and 2026-10-04
 into the status history of their subject folder. One row per section, newest first.
 
 | First recorded | Effort | Now in |
 |---|---|---|
+| 2026-09-24 | P-03: the regression ledger stops growing, and releases get a weekly cadence | [docs/ci/STATUS-HISTORY.md](docs/ci/STATUS-HISTORY.md) |
 | 2026-09-22 | PGS subtitles stopped blocking the start path | [docs/clients/STATUS-HISTORY.md](docs/clients/STATUS-HISTORY.md) |
 | 2026-09-22 | The full Rust suite and the release build are clean again | [docs/ci/STATUS-HISTORY.md](docs/ci/STATUS-HISTORY.md) |
 | 2026-09-22 | Resume stopped working on every client — reproduced, half fixed | [docs/streaming/STATUS-HISTORY.md](docs/streaming/STATUS-HISTORY.md) |
