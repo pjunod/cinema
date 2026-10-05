@@ -1,5 +1,11 @@
 import SwiftUI
 
+// The index ForEach also has group IDs. A row target must not resolve to
+// that horizontal index before ScrollViewProxy reaches the vertical rows.
+private enum LibraryScrollTarget: Hashable {
+    case row(String)
+}
+
 struct LibraryView: View {
     @EnvironmentObject var model: AppModel
     let collection: LibraryCollection
@@ -56,7 +62,7 @@ struct LibraryView: View {
                             ForEach(state.groups) { group in
                                 Button(group.label) {
                                     selectedGroup = group.id
-                                    withAnimation(reduceMotion ? nil : .default) { proxy.scrollTo(group.id, anchor: .top) }
+                                    withAnimation(reduceMotion ? nil : .default) { proxy.scrollTo(LibraryScrollTarget.row(group.id), anchor: .top) }
                                 }
                                 .buttonStyle(.bordered)
                                 .tint(selectedGroup == group.id ? Palette.accent : Palette.muted)
@@ -77,6 +83,7 @@ struct LibraryView: View {
                 ScrollView {
                     stateContent.padding(.bottom, 36)
                 }
+                .accessibilityIdentifier("library-results")
                 #if os(iOS)
                 .refreshable { await load() }
                 #endif
@@ -151,6 +158,7 @@ struct LibraryView: View {
                     VStack(alignment: .leading, spacing: 12) {
                         HStack {
                             Text(group.label).font(.title2.bold()).accessibilityAddTraits(.isHeader)
+                                .accessibilityIdentifier("library-group-heading-\(group.id)")
                             Text("\(group.items.count)\(complete ? "" : " loaded")").foregroundColor(Palette.muted)
                             Spacer()
                             Button("View all") { expandedGroup = group.id }
@@ -173,7 +181,7 @@ struct LibraryView: View {
                         }
                         .accessibilityIdentifier("library-row-\(group.id)")
                     }
-                    .id(group.id)
+                    .id(LibraryScrollTarget.row(group.id))
                 }
             }
         } else {

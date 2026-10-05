@@ -253,3 +253,19 @@ The correction receives one adversarial review, then only the four failed
 documentation checks are rerun. The native PR body records the follow-up
 landing and test results. The mobile-counter job's comparison against main
 after the native merge is recorded separately as a post-merge race.
+
+
+### iOS index tap correction — 2026-10-05
+
+The user reported that tapping a letter in the native index does not scroll
+to its row. The shared scroll reader contains two `ForEach` trees with the
+same group IDs: index entries precede the vertical row destinations. The
+repair gives row destinations their own typed identity. Its
+[Apple change note](../apple-builds/823-ios-library-index-scroll.md) records
+the cause and the simulator UI regression. iOS and tvOS compilation passed. The
+one adversarial review found no issues. After review, the letter regression
+reproduced the no-scroll failure with the original IDs; the typed row-target
+fix passed both UI cases (M, repeat M after manual scroll, return A, and 2012).
+Four focused build-claim/documentation contracts also passed. Only a failed
+fixture-navigation attempt was retried; no passing suite was rerun. Apple
+build 213 carries the repair; the PR records its merge and remaining CI.

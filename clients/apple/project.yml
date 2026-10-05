@@ -16,7 +16,7 @@ settings:
     SWIFT_VERSION: "5.9"
     SWIFT_STRICT_CONCURRENCY: targeted
     MARKETING_VERSION: "0.3.0"
-    CURRENT_PROJECT_VERSION: "212"
+    CURRENT_PROJECT_VERSION: "213"
     CODE_SIGN_STYLE: Automatic
 
 targets:
@@ -176,6 +176,19 @@ targets:
         TEST_HOST: "$(BUILT_PRODUCTS_DIR)/plurx.app/plurx"
         BUNDLE_LOADER: "$(TEST_HOST)"
 
+  plurx-iOSUITests:
+    type: bundle.ui-testing
+    platform: iOS
+    sources:
+      - path: UITests/LibraryRowsNavigationTests.swift
+    dependencies:
+      - target: plurx-iOS
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: tv.plurx.app.uitests.ios
+        GENERATE_INFOPLIST_FILE: YES
+        TEST_TARGET_NAME: plurx-iOS
+
   plurx-tvOSUITests:
     type: bundle.ui-testing
     platform: tvOS
@@ -217,3 +230,12 @@ schemes:
     test:
       targets:
         - plurx-tvOSUITests
+
+  plurx-iOS-library-ui:
+    build:
+      targets:
+        plurx-iOS: all
+        plurx-iOSUITests: [test]
+    test:
+      targets:
+        - plurx-iOSUITests
