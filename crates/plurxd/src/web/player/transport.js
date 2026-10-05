@@ -206,10 +206,11 @@ function watchPlaybackSeekTelemetry(p,pending,v){
   v.addEventListener("seeked",onSeeked);
   v.addEventListener("timeupdate",onTimeupdate);
 }
-function beginPlaybackControlSeek(p,targetSec,supersedeIntent=true,seekTelemetry=null){
+function beginPlaybackControlSeek(p,targetSec,supersedeIntent=true,seekTelemetry=null,
+  {preserveContinuousManualQuality=false}={}){
   if(!p) return null;
   const intentGeneration=supersedeIntent
-    ? supersedePlaybackControlIntent(p) : (p.controlIntentGeneration||0);
+    ? supersedePlaybackControlIntent(p,{preserveContinuousManualQuality}) : (p.controlIntentGeneration||0);
   const sequence=(p.controlSeekSequence||0)+1;
   // The destination this replaces is superseded, which is the one thing that
   // retires a fault about a pending destination (contract §3.4).
@@ -230,6 +231,7 @@ function beginPlaybackControlSeek(p,targetSec,supersedeIntent=true,seekTelemetry
   p.controlSeek={sequence,intentGeneration,
     targetMs:Math.max(0,Math.round(targetSec*1000)),
     executed:false,frameFloor,audioPositionMs:null,seekTelemetry};
+  if(preserveContinuousManualQuality)p.continuousQuality?.noteSeek?.(targetSec);
   const reporter=p.controlReporter;
   const predicted=reporter&&!reporter.stopped?(Number(reporter.sequence)||0)+1:null;
   const reported=notifyPlaybackControl();
@@ -556,7 +558,7 @@ function togglePlay(origin="viewer_control"){
   }
   queuePlaybackTransportCommand(v,PLAYER,playerWantsPlayback(v)?"pause":"play",origin,"explicit_transport");
   endWait(false);
-  supersedePlaybackControlIntent(PLAYER);
+  supersedePlaybackControlIntent(PLAYER,{preserveContinuousManualQuality:true});
   const pending=typeof play==='function'&&play.pendingIntent;
   if(pending&&PLAY_OPEN_GATE.current(pending.attempt)){
     pending.wantsPlayback=!pending.wantsPlayback;
@@ -1139,7 +1141,9 @@ async function seekTo(targetSec, forceReopen=false, autoHeightOverride=null, vie
   const seekTelemetry=forceReopen&&prior?.targetMs===Math.round(targetSec*1000)
     &&!prior.seekTelemetry?.outcome ? prior.seekTelemetry
     : viewerInitiated&&!forceReopen ? {startedAt:null,outcome:null,context:null,cleanup:null} : null;
-  const seekIntent=beginPlaybackControlSeek(PLAYER,targetSec,viewerInitiated,seekTelemetry);
+  const seekIntent=beginPlaybackControlSeek(PLAYER,targetSec,viewerInitiated,seekTelemetry,
+    {preserveContinuousManualQuality:!forceReopen&&!!PLAYER.vod
+      &&!!PLAYER.continuousQuality&&!PLAYER.pendingMediaChange});
   endWait(false);
   if(restartPendingPlaybackOpen(PLAYER,forceReopen?"stall-restart":"seek")){
     recordPlaybackSeekRoute(PLAYER,seekIntent,pressed,{route:"reopen"},null,null,null,"pending_open");
@@ -1242,6 +1246,7 @@ async function seekTo(targetSec, forceReopen=false, autoHeightOverride=null, vie
       seekIntent.localVodSeekCleanup=cleanup;
     }
     dispatchPlaybackSeekTelemetry(me,seekIntent);
+    me.continuousQuality?.noteSeek?.(targetSec);
     markPlaybackControlSeekExecuted(me,targetSec,v);
     try{ v.currentTime=Math.max(0,atMs/1000-(me.offset||0)); }catch(e){}
     notifyPlaybackControl();

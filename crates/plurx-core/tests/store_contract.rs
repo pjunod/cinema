@@ -749,6 +749,20 @@ const MEDIA_SESSION_METHODS: &[&str] = &[
     "settle_producer_recovery",
     "producer_recovery_for_epoch",
     "validation_corrupt_recovery_restriction",
+    // Continuous quality: the parent-fenced ledger, its reservations, the
+    // verified family binding and exact cancellation receipts. Covered by
+    // continuous_quality_ledger_cas_and_takeover_preserve_appended_dependencies,
+    // quality_cancellation_is_durable_exact_and_does_not_end_the_incumbent and
+    // quality_cancellations_outlast_128_changes_and_settle_after_takeover.
+    "bind_continuous_family",
+    "quality_ledger",
+    "write_quality_ledger",
+    "write_terminal_quality_transition",
+    "quality_reserved_intervals",
+    "request_quality_cancellation",
+    "quality_cancellation_receipt",
+    "settle_quality_cancellation",
+    "quality_intent_cancelled",
 ];
 const FENCED_PUBLICATION_METHODS: &[&str] = &[
     "add_downloaded_subtitle_fenced",
@@ -2229,6 +2243,7 @@ fn staged_preparation(
     predecessor: &str,
 ) -> plurx_core::domain::MediaSessionPreparation {
     plurx_core::domain::MediaSessionPreparation {
+        quality_cancellation_key: None,
         expected_desired_revision: None,
         incarnation_id: incarnation_id.to_owned(),
         session_id: session_id.to_owned(),
@@ -5194,6 +5209,24 @@ async fn media_session_activation_prepare_settle_contract_runs_through_dyn_store
             .await
             .unwrap_or_else(|error| panic!("{backend}: claim blocked takeover: {error}"))
             .is_none());
+
+        // The request may outlive the owner's activation lease. That does
+        // not turn this unconfirmed start into a recoverable handoff.
+        assert!(store
+            .arm_media_session_handoff(incarnation_id, &activation.owner_node_id, 1, 400_000, 150,)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: arm an in-flight activation: {error}"))
+            .is_none());
+        assert_eq!(
+            store
+                .media_session_route_by_incarnation(incarnation_id)
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: read refused handoff: {error}"))
+                .expect("in-flight activation survives")
+                .publication_ready_at_ms,
+            MEDIA_SESSION_PUBLICATION_BLOCKED,
+            "{backend}: lease recovery cannot steal confirmation"
+        );
 
         let confirmed = confirm_media_activation(store.as_ref(), &activation, 0, backend).await;
         assert_eq!(confirmed.publication_ready_at_ms, 0, "{backend}");
@@ -16584,6 +16617,14 @@ fn populated_v14_import_fixture(data_dir: &std::path::Path) -> PathBuf {
              ",
         )
         .expect("remove v91 planning generation");
+    connection
+        .execute_batch(
+            "DROP TABLE IF EXISTS continuous_quality_ledgers;
+             DROP TABLE IF EXISTS quality_preparation_owners;
+             DROP TABLE IF EXISTS quality_cancellation_receipts;
+             ",
+        )
+        .expect("remove v102 cancellation and v103 continuous dependencies");
     // Recreate the exact post-v14 schema differences so this is also a valid
     // input to ordinary SQLite startup migration, not merely a current-schema
     // database carrying an older user_version. The activation coordinator now
@@ -16795,18 +16836,21 @@ async fn populated_v14_sqlite_import_has_exact_three_voter_parity() {
         .expect("import populated v14 backup");
     assert_eq!(report.source_schema_version, 14);
     assert_eq!(report.backup_sha256, prepared.backup_sha256);
-    // 70 with the current durable tables, including the Library channel
+    // 74 with the current durable tables, including the Library channel
     // entities, media classifications, channel subject jobs and decisions,
-    // the three DVR tables, and the scoped book file grants (SQLite v68). A
+    // the three DVR tables, the scoped book file grants (SQLite v68), the
+    // replicated candidate-recovery memory (SQLite v96), and the three
+    // continuous-quality tables that travel with media sessions. A
     // v14 source has no rows for newer tables — each one's `minimum_schema` is
     // later — but every table is still reported, because the digest inventory
     // is over what the import *plans*, not over what the source happened to
     // hold. The subtitle-source ledgers are node-held facts about local files
     // and are deliberately not imported, so they are not counted here.
-    // 74: main's replicated candidate recovery, plus Jellyfin compatibility's
+    // 77: main's replicated candidate recovery, plus Jellyfin compatibility's
     // wire identities, compatibility logins and bounded negotiations
-    // (SQLite v98–v100).
-    assert_eq!(report.tables.len(), 74);
+    // (SQLite v98–v100), plus the three continuous-quality tables (SQLite
+    // v102–v103).
+    assert_eq!(report.tables.len(), 77);
     assert_eq!(report.search_rows, 2);
     assert_eq!(
         report
@@ -18646,13 +18690,17 @@ fn contract_inventory_matches_every_store_method() {
     // by playback_planning_snapshot_retains_one_source_and_settings_revision.
     // +1: source-fenced content encoding report publication, covered by
     // content_encoding_report_publication_is_source_fenced_on_every_backend.
-    // The current effort declares 459 methods; these three main additions
-    // are distinct from its luminance and cluster-observation operations.
+    // The architecture-review effort declares 459 methods; these three main
+    // additions are distinct from its luminance and cluster-observation
+    // operations (453 -> 462 on main).
     // Merged with main (462): +4 for Jellyfin compatibility: audience-scoped token authentication
     // (jellyfin_login_token_audience_separates_native_and_compatibility), and
     // the origin-stamped watch tree plus the fenced compatibility progress
     // write and its currency check (store_contract/jellyfin_play.rs).
-    assert_eq!(declared.len(), 466, "review the Store method count");
+    // +9 -> 475: continuous quality's ledger, reservation, family-binding and
+    // cancellation-receipt methods on `MediaSessionStore`, listed in
+    // `MEDIA_SESSION_METHODS` with the scenarios that cover them.
+    assert_eq!(declared.len(), 475, "review the Store method count");
     assert_eq!(
         covered, declared,
         "the declared async method name inventory changed"
@@ -37490,4 +37538,1108 @@ async fn an_idle_classification_schedule_proposes_nothing_on_three_voters() {
         1,
         "the contest it replaces is a proposal even when it loses"
     );
+}
+
+#[tokio::test]
+async fn quality_cancellation_is_durable_exact_and_does_not_end_the_incumbent() {
+    for_each_backend(|store, backend| async move {
+        let user = store
+            .create_user("quality-cancel-user", "hash", false)
+            .await
+            .expect("create user");
+        let generation = "00000000-0000-4000-8000-00000000fc01";
+        let session = "00000000-0000-4000-8000-00000000fc02";
+        current_media_session(
+            store.as_ref(),
+            user.id,
+            "quality-cancel",
+            generation,
+            session,
+            backend,
+        )
+        .await;
+        let mut receipt = plurx_core::store::QualityCancellationReceipt {
+            receipt_key: "c".repeat(64),
+            generation: generation.into(),
+            session_id: session.into(),
+            owner_node_id: "staged-node".into(),
+            owner_epoch: 2,
+            client_instance_id: "00000000-0000-4000-8000-00000000fc03".into(),
+            lifetime_id: "movie".into(),
+            recipe_revision: 1,
+            accepted_sequence: 3,
+            state: "requested".into(),
+            created_at_ms: 1500,
+            updated_at_ms: 1500,
+        };
+        assert!(
+            store
+                .request_quality_cancellation(&receipt)
+                .await
+                .expect("wrong owner cancellation")
+                .is_none(),
+            "{backend}"
+        );
+        receipt.owner_epoch = 1;
+        let first = store
+            .request_quality_cancellation(&receipt)
+            .await
+            .expect("cancel")
+            .expect("durable receipt");
+        receipt.created_at_ms = 1600;
+        receipt.updated_at_ms = 1600;
+        assert_eq!(
+            store
+                .request_quality_cancellation(&receipt)
+                .await
+                .expect("replay"),
+            Some(first.clone()),
+            "{backend}"
+        );
+        assert!(store
+            .quality_intent_cancelled(generation, &receipt.client_instance_id, "movie", 1)
+            .await
+            .expect("cancelled intent"));
+        assert!(!store
+            .quality_intent_cancelled(generation, &receipt.client_instance_id, "movie", 2)
+            .await
+            .expect("newer intent"));
+        assert!(!store
+            .settle_quality_cancellation(&receipt.receipt_key, "wrong-owner", 1, 2000)
+            .await
+            .expect("wrong cleanup owner"));
+        assert!(store
+            .settle_quality_cancellation(&receipt.receipt_key, "staged-node", 1, 2000)
+            .await
+            .expect("cleanup"));
+        assert!(store
+            .settle_quality_cancellation(&receipt.receipt_key, "staged-node", 1, 2100)
+            .await
+            .expect("cleanup replay"));
+        let settled = store
+            .quality_cancellation_receipt(&receipt.receipt_key)
+            .await
+            .expect("read receipt")
+            .expect("receipt");
+        assert_eq!(settled.state, "settled");
+        assert_eq!(settled.updated_at_ms, 2000);
+        let current = store
+            .media_session_route_for_playback(user.id, "quality-cancel")
+            .await
+            .expect("current")
+            .expect("incumbent");
+        assert_eq!(current.incarnation_id, generation);
+        assert_eq!(current.state, "active");
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn quality_cancellations_outlast_128_changes_and_settle_after_takeover() {
+    for_each_backend(|store, backend| async move {
+        let user = store
+            .create_user("quality-cancel-long-user", "hash", false)
+            .await
+            .expect("create user");
+        let generation = "00000000-0000-4000-8000-00000000f901";
+        let session = "00000000-0000-4000-8000-00000000f902";
+        current_media_session(
+            store.as_ref(),
+            user.id,
+            "quality-cancel-long",
+            generation,
+            session,
+            backend,
+        )
+        .await;
+        let receipt = |revision: i64, at: i64| plurx_core::store::QualityCancellationReceipt {
+            receipt_key: format!("{revision:064x}"),
+            generation: generation.into(),
+            session_id: session.into(),
+            owner_node_id: "staged-node".into(),
+            owner_epoch: 1,
+            client_instance_id: "00000000-0000-4000-8000-00000000f903".into(),
+            lifetime_id: "movie".into(),
+            recipe_revision: revision,
+            accepted_sequence: revision,
+            state: "requested".into(),
+            created_at_ms: at,
+            updated_at_ms: at,
+        };
+        // A long session cancels far more than 128 optional targets; each
+        // settled, older intent of the same lifetime stops counting.
+        for revision in 1..=200_i64 {
+            let at = 1_500 + revision;
+            let cancel = receipt(revision, at);
+            store
+                .request_quality_cancellation(&cancel)
+                .await
+                .expect("cancel")
+                .unwrap_or_else(|| panic!("{backend}: cancellation {revision} refused"));
+            assert!(
+                store
+                    .settle_quality_cancellation(&cancel.receipt_key, "staged-node", 1, at)
+                    .await
+                    .expect("settle"),
+                "{backend}: cancellation {revision} never settled"
+            );
+        }
+        assert!(store
+            .quality_intent_cancelled(generation, &receipt(1, 1).client_instance_id, "movie", 200)
+            .await
+            .expect("newest cancelled intent still fences"));
+        // Unsettled cleanup is never pruned by a newer cancellation.
+        let pending = receipt(201, 1_800);
+        store
+            .request_quality_cancellation(&pending)
+            .await
+            .expect("cancel")
+            .expect("pending receipt");
+        store
+            .request_quality_cancellation(&receipt(202, 1_801))
+            .await
+            .expect("cancel")
+            .expect("newer receipt");
+        assert_eq!(
+            store
+                .quality_cancellation_receipt(&pending.receipt_key)
+                .await
+                .expect("read pending")
+                .expect("pending receipt kept")
+                .state,
+            "requested",
+            "{backend}"
+        );
+        assert_eq!(
+            store
+                .request_quality_cancellation(&pending)
+                .await
+                .expect("replay"),
+            store
+                .quality_cancellation_receipt(&pending.receipt_key)
+                .await
+                .expect("read"),
+            "{backend}: exact replay of a kept receipt"
+        );
+        // After takeover only the parent's current owner (or the receipt's
+        // own owner) can record the cleanup; the receipt identity is kept.
+        let parent = store
+            .media_session_route(session)
+            .await
+            .expect("parent")
+            .expect("route");
+        let takeover_at = parent.lease_expires_at_ms + 1;
+        store
+            .claim_media_session_takeover(&plurx_core::domain::MediaSessionTakeover {
+                incarnation_id: generation.into(),
+                expected_owner_node_id: "staged-node".into(),
+                expected_owner_epoch: 1,
+                next_owner_node_id: "replacement-node".into(),
+                now_ms: takeover_at,
+                lease_expires_at_ms: takeover_at + 900_000,
+            })
+            .await
+            .expect("takeover")
+            .expect("new owner");
+        assert!(
+            !store
+                .settle_quality_cancellation(
+                    &pending.receipt_key,
+                    "wrong-owner",
+                    2,
+                    takeover_at + 1
+                )
+                .await
+                .expect("foreign settlement"),
+            "{backend}"
+        );
+        assert!(
+            store
+                .settle_quality_cancellation(
+                    &pending.receipt_key,
+                    "replacement-node",
+                    2,
+                    takeover_at + 1
+                )
+                .await
+                .expect("current owner settlement"),
+            "{backend}: a requested receipt could not settle after takeover"
+        );
+        let settled = store
+            .quality_cancellation_receipt(&pending.receipt_key)
+            .await
+            .expect("read settled")
+            .expect("receipt");
+        assert_eq!(settled.state, "settled", "{backend}");
+        assert_eq!(settled.owner_node_id, "staged-node", "{backend}");
+        assert_eq!(settled.owner_epoch, 1, "{backend}");
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn a_durable_quality_cancel_fences_late_preparation_admission() {
+    for_each_backend(|store, backend| async move {
+        let user = store
+            .create_user("quality-cancel-admission-user", "hash", false)
+            .await
+            .expect("create user");
+        let generation = "00000000-0000-4000-8000-00000000fb01";
+        let session = "00000000-0000-4000-8000-00000000fb02";
+        current_media_session(
+            store.as_ref(),
+            user.id,
+            "quality-cancel-admission",
+            generation,
+            session,
+            backend,
+        )
+        .await;
+        let receipt = plurx_core::store::QualityCancellationReceipt {
+            receipt_key: "b".repeat(64),
+            generation: generation.into(),
+            session_id: session.into(),
+            owner_node_id: "staged-node".into(),
+            owner_epoch: 1,
+            client_instance_id: "00000000-0000-4000-8000-00000000fb03".into(),
+            lifetime_id: "movie".into(),
+            recipe_revision: 1,
+            accepted_sequence: 3,
+            state: "requested".into(),
+            created_at_ms: 1500,
+            updated_at_ms: 1500,
+        };
+        store
+            .request_quality_cancellation(&receipt)
+            .await
+            .expect("cancel")
+            .expect("durable cancellation");
+        let mut target = staged_preparation(
+            user.id,
+            "quality-cancel-admission",
+            "00000000-0000-4000-8000-00000000fb04",
+            "00000000-0000-4000-8000-00000000fb05",
+            generation,
+        );
+        target.quality_cancellation_key = Some(receipt.receipt_key);
+        assert!(
+            store
+                .prepare_media_session(&target)
+                .await
+                .expect("late prepare")
+                .is_none(),
+            "{backend}: cancelled target admitted"
+        );
+        assert!(store
+            .media_session_route(&target.session_id)
+            .await
+            .expect("target")
+            .is_none());
+        target.quality_cancellation_key = Some("d".repeat(64));
+        assert!(
+            store
+                .prepare_media_session(&target)
+                .await
+                .expect("new intent prepare")
+                .is_some(),
+            "{backend}: unrelated new intent refused"
+        );
+        let current = store
+            .media_session_route_for_playback(user.id, "quality-cancel-admission")
+            .await
+            .expect("current")
+            .expect("incumbent");
+        assert_eq!(current.incarnation_id, generation);
+        assert_eq!(current.state, "active");
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn quality_cancellation_after_staging_fences_commit_and_requires_cleanup() {
+    for_each_backend(|store, backend| async move {
+        let user = store
+            .create_user("quality-cancel-commit-user", "hash", false)
+            .await
+            .expect("create user");
+        let generation = "00000000-0000-4000-8000-00000000fa01";
+        let session = "00000000-0000-4000-8000-00000000fa02";
+        let playback = "quality-cancel-commit";
+        current_media_session(
+            store.as_ref(),
+            user.id,
+            playback,
+            generation,
+            session,
+            backend,
+        )
+        .await;
+        let mut target = staged_preparation(
+            user.id,
+            playback,
+            "00000000-0000-4000-8000-00000000fa04",
+            "00000000-0000-4000-8000-00000000fa05",
+            generation,
+        );
+        target.quality_cancellation_key = Some("e".repeat(64));
+        assert!(
+            store
+                .prepare_media_session(&target)
+                .await
+                .expect("prepare")
+                .is_some(),
+            "{backend}"
+        );
+        let mut changed = target.clone();
+        changed.quality_cancellation_key = Some("f".repeat(64));
+        assert!(
+            store
+                .prepare_media_session(&changed)
+                .await
+                .expect("changed replay")
+                .is_none(),
+            "{backend}: replay changed ownership"
+        );
+        assert!(
+            store
+                .rejoin_media_session_preparation("00000000-0000-4000-8000-00000000fa06", &changed)
+                .await
+                .expect("changed rejoin replay")
+                .is_none(),
+            "{backend}: rejoin changed ownership"
+        );
+        let receipt = plurx_core::store::QualityCancellationReceipt {
+            receipt_key: "e".repeat(64),
+            generation: generation.into(),
+            session_id: session.into(),
+            owner_node_id: "staged-node".into(),
+            owner_epoch: 1,
+            client_instance_id: "00000000-0000-4000-8000-00000000fa03".into(),
+            lifetime_id: "movie".into(),
+            recipe_revision: 1,
+            accepted_sequence: 3,
+            state: "requested".into(),
+            created_at_ms: 2500,
+            updated_at_ms: 2500,
+        };
+        store
+            .request_quality_cancellation(&receipt)
+            .await
+            .expect("cancel")
+            .expect("receipt");
+        assert!(
+            !store
+                .settle_quality_cancellation(&receipt.receipt_key, "staged-node", 1, 2600)
+                .await
+                .expect("premature settlement"),
+            "{backend}: active child acknowledged cleanup"
+        );
+        assert!(
+            store
+                .prepare_media_session(&target)
+                .await
+                .expect("cancelled replay")
+                .is_none(),
+            "{backend}"
+        );
+        assert!(
+            store
+                .rejoin_media_session_preparation("00000000-0000-4000-8000-00000000fa06", &target)
+                .await
+                .expect("cancelled rejoin replay")
+                .is_none(),
+            "{backend}"
+        );
+        assert!(
+            store
+                .commit_media_session_preparation(
+                    user.id,
+                    playback,
+                    &preparation_commit_request(&target.incarnation_id, 2700, 900_000)
+                )
+                .await
+                .expect("cancelled commit")
+                .is_none(),
+            "{backend}: cancelled target committed"
+        );
+        assert!(
+            store
+                .settle_quality_cancellation(&receipt.receipt_key, "staged-node", 1, 2800)
+                .await
+                .expect("settled after retirement"),
+            "{backend}"
+        );
+        let current = store
+            .media_session_route_for_playback(user.id, playback)
+            .await
+            .expect("current")
+            .expect("incumbent");
+        assert_eq!(current.incarnation_id, generation, "{backend}");
+        assert_eq!(current.state, "active", "{backend}");
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn verified_continuous_family_binding_is_owner_fenced_and_immutable() {
+    use plurx_core::store::ContinuousFamilyDescription;
+    for_each_backend(|store, backend| async move {
+        let user = store.create_user("verified-family-user", "hash", false).await.expect("user");
+        let generation = "00000000-0000-4000-8000-00000000df01";
+        let session = "00000000-0000-4000-8000-00000000df02";
+        let primary = "1".repeat(32); let companion = "2".repeat(32);
+        let description: ContinuousFamilyDescription = serde_json::from_value(serde_json::json!({
+            "version": 1, "family_id": "f".repeat(64), "mode": "autonomous_reserved", "master": "master.m3u8",
+            "video": [
+                { "candidate_id": primary, "rendition_id": "a".repeat(64), "init_id": "b".repeat(64),
+                    "width": 1280, "height": 720, "codec": "avc1.640032", "timescale": 24000,
+                    "frame_ticks": 1001, "segment_ticks": 48048, "peak_bps": 5000000,
+                    "playlist": format!("video/{}/index.m3u8", "a".repeat(64)) },
+                { "candidate_id": companion, "rendition_id": "c".repeat(64), "init_id": "d".repeat(64),
+                    "width": 1920, "height": 1080, "codec": "avc1.640032", "timescale": 24000,
+                    "frame_ticks": 1001, "segment_ticks": 48048, "peak_bps": 8000000,
+                    "playlist": format!("video/{}/index.m3u8", "c".repeat(64)) }
+            ], "audio": null
+        })).expect("verified family");
+        let recipe = serde_json::json!({"candidate_id": primary, "source_object": "retained-source",
+            "request": {"preserved_intent": {"audio_offset_ms": 50}, "continuous_media": {
+                "version": 1, "role": "video", "family_generation": generation, "autonomous_companion": companion
+            }} });
+        let activation = MediaSessionActivation {
+            recovery_epoch: String::new(), expected_desired_revision: None,
+            incarnation_id: generation.into(), session_id: session.into(), user_id: user.id,
+            playback_id: "verified-family".into(), expected_predecessor_incarnation_id: None,
+            fence_predecessor: false, request_id: None, request_fingerprint: "a".repeat(64),
+            owner_node_id: "staged-node".into(), recipe_json: serde_json::to_string(&recipe).expect("recipe"),
+            response_json: r#"{"session":"current"}"#.into(), publication_ready_at_ms: MEDIA_SESSION_PUBLICATION_BLOCKED,
+            media_origin_ms: 0, now_ms: 1000, lease_expires_at_ms: 900000,
+        };
+        store.activate_media_session(&activation).await.expect("activate").expect("route");
+        store.settle_media_session_activation(&activation, MediaSessionActivationSettlement::Confirm { publication_ready_at_ms: 0 }, 1000).await.expect("confirm").expect("published route");
+        assert!(!store.bind_continuous_family(generation, "wrong-owner", 1, &description, 1500).await.expect("wrong owner"), "{backend}");
+        assert!(!store.bind_continuous_family(generation, "staged-node", 2, &description, 1500).await.expect("wrong epoch"), "{backend}");
+        assert!(store.bind_continuous_family(generation, "staged-node", 1, &description, 1500).await.expect("bind"), "{backend}");
+        assert!(store.bind_continuous_family(generation, "staged-node", 1, &description, 1600).await.expect("exact replay"), "{backend}");
+        let mut changed = description.clone(); changed.video[0].init_id = "e".repeat(64);
+        assert!(!store.bind_continuous_family(generation, "staged-node", 1, &changed, 1700).await.expect("changed init refused"), "{backend}");
+        changed = description.clone(); changed.video[0].candidate_id = plurx_core::playback::candidate::CandidateId([9; 16]);
+        assert!(!store.bind_continuous_family(generation, "staged-node", 1, &changed, 1700).await.expect("changed catalog refused"), "{backend}");
+        let route = store.media_session_route(session).await.expect("read proof").expect("route");
+        let mut durable: serde_json::Value = serde_json::from_str(&route.recipe_json).expect("durable recipe");
+        assert_eq!(serde_json::from_value::<ContinuousFamilyDescription>(durable["request"]["continuous_media"]["family_descriptor"].take()).expect("restored proof"), description, "{backend}");
+        durable["request"]["continuous_media"].as_object_mut().expect("media").remove("family_descriptor");
+        assert_eq!(durable, recipe, "{backend}: binding changed source or intent");
+        assert_eq!(route.lease_expires_at_ms, 900000, "{backend}: proof renewed playback lease");
+        store.end_media_session(session, "deleted", 1800).await.expect("End");
+        assert!(!store.bind_continuous_family(generation, "staged-node", 1, &description, 1900).await.expect("terminal proof refused"), "{backend}");
+    }).await;
+}
+
+#[tokio::test]
+async fn shared_continuous_artifacts_remain_reserved_until_each_consumer_disposes() {
+    use plurx_core::playback::continuous_quality::{
+        QualityAttachment, QualityInterval, QualityLedger, QualityOperation,
+        QualityTransitionRequest,
+    };
+    for_each_backend(|store, backend| async move {
+        let user = store
+            .create_user("shared-quality-consumers", "hash", false)
+            .await
+            .expect("user");
+        let video = QualityInterval {
+            artifact_id: "c".repeat(64),
+            rendition_id: "b".repeat(64),
+            timescale: 24000,
+            from_tick: 0,
+            through_tick: 48048,
+            byte_length: 500000,
+        };
+        let audio = QualityInterval {
+            artifact_id: "d".repeat(64),
+            rendition_id: "e".repeat(64),
+            timescale: 48000,
+            from_tick: 0,
+            through_tick: 96256,
+            byte_length: 40000,
+        };
+        let transaction = "00000000-0000-4000-8000-00000000cf05";
+        let mut consumers = Vec::new();
+        for index in 0..2 {
+            let generation = format!("00000000-0000-4000-8000-00000000cf{:02}", index + 10);
+            let session = format!("00000000-0000-4000-8000-00000000cf{:02}", index + 20);
+            let playback = format!("shared-quality-{index}");
+            current_media_session(
+                store.as_ref(),
+                user.id,
+                &playback,
+                &generation,
+                &session,
+                backend,
+            )
+            .await;
+            let mut ledger = QualityLedger::new(
+                generation,
+                1,
+                QualityAttachment {
+                    client_instance_id: "00000000-0000-4000-8000-00000000cf03".into(),
+                    lifetime_id: playback,
+                    attachment_id: "00000000-0000-4000-8000-00000000cf04".into(),
+                    family_id: "a".repeat(64),
+                },
+            )
+            .expect("independent consumer");
+            let request = |ledger: &QualityLedger, sequence, operation| QualityTransitionRequest {
+                version: 1,
+                generation: ledger.generation.clone(),
+                control_epoch: 1,
+                sequence,
+                attachment: ledger.attachment.clone(),
+                transaction_id: transaction.into(),
+                operation,
+            };
+            ledger
+                .apply(
+                    &request(
+                        &ledger,
+                        1,
+                        QualityOperation::Prepare {
+                            intent_revision: 1,
+                            target_rendition_id: video.rendition_id.clone(),
+                        },
+                    ),
+                    1500,
+                )
+                .expect("prepare");
+            ledger
+                .ready(transaction, vec![video.clone()])
+                .expect("ready");
+            ledger
+                .reserve_shared_audio(std::slice::from_ref(&audio))
+                .expect("AAC");
+            ledger
+                .apply(
+                    &request(
+                        &ledger,
+                        2,
+                        QualityOperation::Scheduled {
+                            intervals: vec![video.clone()],
+                        },
+                    ),
+                    1600,
+                )
+                .expect("scheduled");
+            assert!(
+                store
+                    .write_quality_ledger(&ledger, "staged-node", 0, 1700)
+                    .await
+                    .expect("publish consumer"),
+                "{backend}"
+            );
+            consumers.push(ledger);
+        }
+        assert_eq!(
+            store
+                .quality_reserved_intervals(&video.rendition_id)
+                .await
+                .expect("one physical video"),
+            vec![video.clone()],
+            "{backend}"
+        );
+        assert_eq!(
+            store
+                .quality_reserved_intervals(&audio.rendition_id)
+                .await
+                .expect("one physical AAC"),
+            vec![audio.clone()],
+            "{backend}"
+        );
+        for (index, ledger) in consumers.iter_mut().enumerate() {
+            let disposed = QualityTransitionRequest {
+                version: 1,
+                generation: ledger.generation.clone(),
+                control_epoch: 1,
+                sequence: 3,
+                attachment: ledger.attachment.clone(),
+                transaction_id: transaction.into(),
+                operation: QualityOperation::Disposed {
+                    artifacts: vec![video.artifact_id.clone(), audio.artifact_id.clone()],
+                },
+            };
+            ledger
+                .apply(&disposed, 1800 + index as i64)
+                .expect("this consumer removed media");
+            assert!(
+                store
+                    .write_quality_ledger(ledger, "staged-node", 1, 1900 + index as i64)
+                    .await
+                    .expect("dispose consumer"),
+                "{backend}"
+            );
+            let expected_video = if index == 0 {
+                vec![video.clone()]
+            } else {
+                vec![]
+            };
+            let expected_audio = if index == 0 {
+                vec![audio.clone()]
+            } else {
+                vec![]
+            };
+            assert_eq!(
+                store
+                    .quality_reserved_intervals(&video.rendition_id)
+                    .await
+                    .expect("remaining video consumer"),
+                expected_video,
+                "{backend}"
+            );
+            assert_eq!(
+                store
+                    .quality_reserved_intervals(&audio.rendition_id)
+                    .await
+                    .expect("remaining AAC consumer"),
+                expected_audio,
+                "{backend}"
+            );
+        }
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn continuous_quality_ledger_cas_and_takeover_preserve_appended_dependencies() {
+    use plurx_core::playback::continuous_quality::{
+        QualityAttachment, QualityInterval, QualityLedger, QualityOperation,
+        QualityTransitionRequest,
+    };
+    for_each_backend(|store, backend| async move {
+        let user = store
+            .create_user("continuous-ledger-user", "hash", false)
+            .await
+            .expect("user");
+        let generation = "00000000-0000-4000-8000-00000000ce01";
+        let session = "00000000-0000-4000-8000-00000000ce02";
+        current_media_session(
+            store.as_ref(),
+            user.id,
+            "continuous-ledger",
+            generation,
+            session,
+            backend,
+        )
+        .await;
+        let mut ledger = QualityLedger::new(
+            generation.into(),
+            1,
+            QualityAttachment {
+                client_instance_id: "00000000-0000-4000-8000-00000000ce03".into(),
+                lifetime_id: "movie".into(),
+                attachment_id: "00000000-0000-4000-8000-00000000ce04".into(),
+                family_id: "a".repeat(64),
+            },
+        )
+        .expect("ledger");
+        assert!(
+            !store
+                .write_quality_ledger(&ledger, "staged-node", 7, 1500)
+                .await
+                .expect("missing CAS"),
+            "{backend}: missing revision accepted"
+        );
+        assert!(
+            !store
+                .write_quality_ledger(&ledger, "wrong-owner", 0, 1500)
+                .await
+                .expect("wrong owner"),
+            "{backend}"
+        );
+        assert!(
+            store
+                .write_quality_ledger(&ledger, "staged-node", 0, 1500)
+                .await
+                .expect("create"),
+            "{backend}"
+        );
+        assert!(
+            !store
+                .write_quality_ledger(&ledger, "staged-node", 0, 1600)
+                .await
+                .expect("stale create"),
+            "{backend}"
+        );
+        let transaction = "00000000-0000-4000-8000-00000000ce05";
+        let request = |ledger: &QualityLedger, sequence, operation| QualityTransitionRequest {
+            version: 1,
+            generation: generation.into(),
+            control_epoch: ledger.control_epoch,
+            sequence,
+            attachment: ledger.attachment.clone(),
+            transaction_id: transaction.into(),
+            operation,
+        };
+        let prepare = request(
+            &ledger,
+            1,
+            QualityOperation::Prepare {
+                intent_revision: 1,
+                target_rendition_id: "b".repeat(64),
+            },
+        );
+        ledger.apply(&prepare, 1700).expect("prepare");
+        let interval = QualityInterval {
+            artifact_id: "c".repeat(64),
+            rendition_id: "b".repeat(64),
+            timescale: 24000,
+            from_tick: 240240,
+            through_tick: 288288,
+            byte_length: 500000,
+        };
+        ledger
+            .ready(transaction, vec![interval.clone()])
+            .expect("verified ready");
+        let schedule = request(
+            &ledger,
+            2,
+            QualityOperation::Scheduled {
+                intervals: vec![interval.clone()],
+            },
+        );
+        ledger.apply(&schedule, 1800).expect("scheduled");
+        let append = request(
+            &ledger,
+            3,
+            QualityOperation::Appended {
+                intervals: vec![interval.clone()],
+            },
+        );
+        let receipt = ledger.apply(&append, 1900).expect("append");
+        let audio = QualityInterval {
+            artifact_id: "d".repeat(64),
+            rendition_id: "e".repeat(64),
+            timescale: 48_000,
+            from_tick: 0,
+            through_tick: 96_256,
+            byte_length: 40_000,
+        };
+        ledger
+            .reserve_shared_audio(std::slice::from_ref(&audio))
+            .expect("verified AAC dependency");
+
+        assert!(
+            store
+                .write_quality_ledger(&ledger, "staged-node", 1, 2000)
+                .await
+                .expect("persist append"),
+            "{backend}"
+        );
+        assert_eq!(
+            store
+                .quality_reserved_intervals(&interval.rendition_id)
+                .await
+                .expect("reserved media projection"),
+            vec![interval.clone()],
+            "{backend}"
+        );
+        assert!(
+            store
+                .quality_reserved_intervals(&"f".repeat(64))
+                .await
+                .expect("unrelated rendition")
+                .is_empty(),
+            "{backend}"
+        );
+        assert_eq!(
+            store
+                .quality_reserved_intervals(&audio.rendition_id)
+                .await
+                .expect("shared AAC projection"),
+            vec![audio.clone()],
+            "{backend}"
+        );
+        let persisted = store
+            .quality_ledger(generation)
+            .await
+            .expect("read")
+            .expect("snapshot");
+        assert_eq!(persisted.revision, 2, "{backend}");
+        assert_eq!(persisted.ledger, ledger, "{backend}");
+        assert_eq!(
+            persisted
+                .ledger
+                .clone()
+                .apply(&append, 2100)
+                .expect("ack loss replay"),
+            receipt,
+            "{backend}"
+        );
+        let mut changed_attachment = ledger.clone();
+        changed_attachment.attachment.attachment_id = "00000000-0000-4000-8000-00000000ce06".into();
+        // A changed attachment is an ordinary CAS refusal (Ok(false)), like a
+        // stale revision or owner: writers re-read and observe the change.
+        assert!(
+            !store
+                .write_quality_ledger(&changed_attachment, "staged-node", 2, 2100)
+                .await
+                .expect("attachment CAS"),
+            "{backend}: inconsistent receipt attachment accepted"
+        );
+        assert_eq!(
+            store
+                .quality_ledger(generation)
+                .await
+                .expect("read after refused attachment")
+                .expect("snapshot"),
+            persisted,
+            "{backend}: refused attachment write changed the ledger"
+        );
+        let parent = store
+            .media_session_route(session)
+            .await
+            .expect("parent")
+            .expect("route");
+        let takeover_at = parent.lease_expires_at_ms + 1;
+        let next = store
+            .claim_media_session_takeover(&plurx_core::domain::MediaSessionTakeover {
+                incarnation_id: generation.into(),
+                expected_owner_node_id: "staged-node".into(),
+                expected_owner_epoch: 1,
+                next_owner_node_id: "replacement-node".into(),
+                now_ms: takeover_at,
+                lease_expires_at_ms: takeover_at + 900000,
+            })
+            .await
+            .expect("takeover")
+            .expect("new owner");
+        assert_eq!(next.owner_epoch, 2, "{backend}");
+        assert!(
+            !store
+                .write_quality_ledger(&ledger, "staged-node", 2, takeover_at + 1)
+                .await
+                .expect("old owner"),
+            "{backend}"
+        );
+        ledger.adopt_epoch(2).expect("adopt exact facts");
+        assert!(
+            store
+                .write_quality_ledger(&ledger, "replacement-node", 2, takeover_at + 1)
+                .await
+                .expect("new owner projection"),
+            "{backend}"
+        );
+        let adopted = store
+            .quality_ledger(generation)
+            .await
+            .expect("read adopted")
+            .expect("snapshot");
+        assert_eq!(adopted.owner_node_id, "replacement-node", "{backend}");
+        assert_eq!(
+            adopted.ledger.transactions[0].reserved,
+            vec![interval.clone()],
+            "{backend}"
+        );
+        assert!(adopted.ledger.transactions[0].ever_appended, "{backend}");
+        assert_eq!(
+            adopted.ledger.shared_audio_reserved(),
+            std::slice::from_ref(&audio),
+            "{backend}"
+        );
+        assert_eq!(
+            store
+                .quality_reserved_intervals(&audio.rendition_id)
+                .await
+                .expect("takeover retains AAC"),
+            vec![audio.clone()],
+            "{backend}"
+        );
+        assert_eq!(
+            store
+                .quality_reserved_intervals(&interval.rendition_id)
+                .await
+                .expect("takeover retains physical dependency facts"),
+            vec![interval.clone()],
+            "{backend}"
+        );
+        let dispose = request(
+            &ledger,
+            1,
+            QualityOperation::Disposed {
+                artifacts: vec![interval.artifact_id.clone()],
+            },
+        );
+        ledger
+            .apply(&dispose, takeover_at + 2)
+            .expect("exact disposal");
+        assert!(
+            store
+                .write_quality_ledger(&ledger, "replacement-node", 3, takeover_at + 2)
+                .await
+                .expect("persist disposal"),
+            "{backend}"
+        );
+        assert!(
+            store
+                .quality_reserved_intervals(&interval.rendition_id)
+                .await
+                .expect("disposed dependencies released")
+                .is_empty(),
+            "{backend}"
+        );
+
+        assert_eq!(
+            store
+                .quality_reserved_intervals(&audio.rendition_id)
+                .await
+                .expect("video disposal retains shared AAC"),
+            vec![audio.clone()],
+            "{backend}"
+        );
+        let terminal_snapshot = store
+            .quality_ledger(generation)
+            .await
+            .expect("terminal baseline")
+            .expect("ledger");
+        store
+            .end_media_session(session, "deleted", takeover_at + 3)
+            .await
+            .expect("End before disposal acknowledgement");
+        let illegal = request(
+            &ledger,
+            2,
+            QualityOperation::Prepare {
+                intent_revision: 2,
+                target_rendition_id: "f".repeat(64),
+            },
+        );
+        assert!(
+            store
+                .write_terminal_quality_transition(
+                    &terminal_snapshot,
+                    &illegal,
+                    "replacement-node",
+                    takeover_at + 3
+                )
+                .await
+                .is_err(),
+            "{backend}: End cannot restart preparation"
+        );
+        let dispose_audio = request(
+            &ledger,
+            2,
+            QualityOperation::Disposed {
+                artifacts: vec![audio.artifact_id.clone()],
+            },
+        );
+        ledger
+            .apply(&dispose_audio, takeover_at + 3)
+            .expect("named AAC disposal");
+        assert!(
+            !store
+                .write_quality_ledger(&ledger, "replacement-node", 4, takeover_at + 3)
+                .await
+                .expect("active writer after End"),
+            "{backend}"
+        );
+        assert!(
+            store
+                .write_terminal_quality_transition(
+                    &terminal_snapshot,
+                    &dispose_audio,
+                    "wrong-owner",
+                    takeover_at + 3
+                )
+                .await
+                .expect("wrong terminal owner")
+                .is_none(),
+            "{backend}"
+        );
+        let mut forged = terminal_snapshot.clone();
+        forged
+            .ledger
+            .reserve_shared_audio(
+                &[plurx_core::playback::continuous_quality::QualityInterval {
+                    artifact_id: "e".repeat(64),
+                    rendition_id: audio.rendition_id.clone(),
+                    timescale: 48000,
+                    from_tick: 1,
+                    through_tick: 2,
+                    byte_length: 1,
+                }],
+            )
+            .expect("forged snapshot remains structurally valid");
+        assert!(
+            store
+                .write_terminal_quality_transition(
+                    &forged,
+                    &dispose_audio,
+                    "replacement-node",
+                    takeover_at + 3
+                )
+                .await
+                .expect("compare exact old JSON")
+                .is_none(),
+            "{backend}"
+        );
+        let terminal_receipt = store
+            .write_terminal_quality_transition(
+                &terminal_snapshot,
+                &dispose_audio,
+                "replacement-node",
+                takeover_at + 3,
+            )
+            .await
+            .expect("late terminal disposal")
+            .expect("terminal CAS");
+        let settled = store
+            .quality_ledger(generation)
+            .await
+            .expect("terminal ledger")
+            .expect("persisted");
+        assert_eq!(
+            terminal_receipt,
+            store
+                .write_terminal_quality_transition(
+                    &settled,
+                    &dispose_audio,
+                    "replacement-node",
+                    takeover_at + 4
+                )
+                .await
+                .expect("terminal replay")
+                .expect("same receipt"),
+            "{backend}"
+        );
+        assert!(
+            store
+                .write_terminal_quality_transition(
+                    &terminal_snapshot,
+                    &dispose_audio,
+                    "replacement-node",
+                    takeover_at + 4
+                )
+                .await
+                .expect("stale terminal revision")
+                .is_none(),
+            "{backend}"
+        );
+        assert!(
+            store
+                .quality_reserved_intervals(&audio.rendition_id)
+                .await
+                .expect("disposed AAC released")
+                .is_empty(),
+            "{backend}"
+        );
+
+        assert_eq!(
+            store
+                .media_session_route(session)
+                .await
+                .expect("terminal route")
+                .expect("retained receipt owner")
+                .state,
+            "ended",
+            "{backend}"
+        );
+    })
+    .await;
 }

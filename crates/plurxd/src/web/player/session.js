@@ -126,6 +126,12 @@ function qualityCatalogSelectionCurrent(p){
   return !!p?.abr&&p.abr.catalogSelectionKey===qualityCatalogSelectionKey(p);
 }
 function playbackControlSelection(p,ownerBound=false){
+  const retained=p&&p.qualityRetainedSelection;
+  if(retained&&(p.controlIntentGeneration||0)===retained.intentGeneration
+    &&p.sessionId===retained.sessionId) return retained.selection;
+  const negotiating=p&&p.qualityNegotiatingSelection;
+  if(negotiating&&p.directedChange===negotiating.change
+    &&(p.controlIntentGeneration||0)===negotiating.change.intentGeneration) return negotiating.selection;
   const requested=playQuality();
   const manualHeight=/^\d+$/.test(String(requested||""))?Number(requested):null;
   const quality=["original","nomse"].includes(requested)
@@ -156,20 +162,23 @@ function playbackControlSelection(p,ownerBound=false){
   return {quality,audio_track:audioTrack,subtitle,
     audio_offset_ms:audioOffset,codec:"auto",dynamic_range:"auto"};
 }
-function qualityMediaIntent(p,wireSelection){
-  if(!p||!p.abr||!SERVER||SERVER.display_aware_auto_protocol!=='route-v1'
-    ||!SERVER.playback_display_aware_auto) return null;
+function qualityMediaIntent(p,wireSelection,independentlyNegotiated=false){
+  const independent=independentlyNegotiated||!!p?.continuousQualityBootstrap
+    ||typeof qualityControlSupported==="function"&&qualityControlSupported(p);
+  if(!p||(!independent&&(!p.abr||!SERVER||SERVER.display_aware_auto_protocol!=='route-v1'
+    ||!SERVER.playback_display_aware_auto))) return null;
   const wire=wireSelection||playbackControlSelection(p);
   const subtitles=wire.subtitle.mode==='off'?{mode:'off'}:{mode:wire.subtitle.mode,track:wire.subtitle.track};
   const selection={quality:wire.quality,codec:wire.codec,dynamic_range:wire.dynamic_range,
     audio_track:wire.audio_track,audio_offset_ms:wire.audio_offset_ms,subtitles};
-  const key=JSON.stringify(selection), state=p.abr.mediaIntent||{
+  const holder=p.abr||p;
+  const key=JSON.stringify(selection), state=holder.mediaIntent||{
     lifetimeId:newRequestId(),recipeRevision:0,transportRevision:0};
   if(state.recipeKey!==key){state.recipeKey=key;state.recipeRevision++;}
   const video=/** @type {HTMLVideoElement|null} */ (document.getElementById('video'));
   const transport=JSON.stringify([p.wantsPlayback!==false,video&&video.playbackRate||1]);
   if(state.transportKey!==transport){state.transportKey=transport;state.transportRevision++;}
-  p.abr.mediaIntent=state;
+  holder.mediaIntent=state;
   return {lifetime_id:state.lifetimeId,recipe_revision:state.recipeRevision,
     destination_revision:(p.controlSeekSequence||0)+1,transport_revision:state.transportRevision,selection};
 }
@@ -281,7 +290,9 @@ function playbackControlSnapshot(v,p){
     observed_download_bps:Number.isFinite(bps)&&bps>0?Math.round(bps):null,
     selection:playbackControlSelection(p,true),capabilities:playbackControlCapabilities(),
     observation,acknowledgement:pendingPlaybackControlAcknowledgement(p,demand)};
-  const intent=p.qualityProtocol==='route-v1'?qualityMediaIntent(p,snapshot.selection):null;
+  if(p.continuousQuality&&continuousQualitySelectionCompatible(p,snapshot.selection))
+    snapshot.supported_actions=PlurxPlaybackControl.SUPPORTED_ACTIONS.filter(action=>action!==PlurxPlaybackControl.PREPARE_REPLACEMENT_ACTION);
+  const intent=(p.qualityProtocol==='route-v1'||qualityControlSupported(p)||p.continuousQualityBootstrap)?qualityMediaIntent(p,snapshot.selection):null;
   if(intent) Object.assign(snapshot,{intent});
   // A commit and terminal demand are both true, but the protocol deliberately
   // refuses them in one exchange: publishing the successor has to win before
@@ -293,4 +304,124 @@ function playbackControlSnapshot(v,p){
     snapshot.playback_rate=Math.max(0.25,snapshot.playback_rate||0);
   }
   return snapshot;
+}
+
+// Cancellation is negotiated separately from rendition switching and the
+// legacy strict control envelope. Cache support only for the current owner.
+function qualityControlOwnerKey(p){
+  const bootstrap=p&&p.controlReporter&&p.controlReporter.bootstrap;
+  return bootstrap?JSON.stringify([p.sessionId,bootstrap.generation,bootstrap.control_epoch]):null;
+}
+function qualityControlSupported(p){
+  const key=qualityControlOwnerKey(p);
+  return !!key&&!!p.qualityControlSupport&&p.qualityControlSupport.key===key
+    &&p.qualityControlSupport.supported===true;
+}
+function validQualityControlIdentity(identity,request){
+  if(!identity||typeof identity!=="object"||Array.isArray(identity)) return false;
+  const keys=["generation","control_epoch","client_instance_id","lifetime_id","recipe_revision","accepted_sequence"];
+  if(Object.keys(identity).some(key=>!keys.includes(key))) return false;
+  return identity.generation===request.generation&&identity.control_epoch===request.control_epoch
+    &&typeof identity.client_instance_id==="string"&&identity.client_instance_id.length===36
+    &&typeof identity.lifetime_id==="string"&&identity.lifetime_id.length>0&&identity.lifetime_id.length<=128
+    &&!/[\r\n\0]/.test(identity.lifetime_id)
+    &&Number.isSafeInteger(identity.recipe_revision)&&identity.recipe_revision>0
+    &&Number.isSafeInteger(identity.accepted_sequence)&&identity.accepted_sequence>0;
+}
+async function exchangeQualityControl(p,request){
+  const reporter=p&&p.controlReporter, bootstrap=reporter&&reporter.bootstrap;
+  const key=qualityControlOwnerKey(p);
+  if(!bootstrap||reporter.stopped||!key||!String(bootstrap.url||"").endsWith("/control")) return null;
+  const controller=new AbortController(), timer=setTimeout(()=>controller.abort(),4000);
+  try{
+    const response=await fetch(bootstrap.url.replace(/\/control$/,"/quality-control"),{
+      method:"POST",signal:controller.signal,headers:{"content-type":"application/json"},
+      body:JSON.stringify(request)});
+    if(qualityControlOwnerKey(p)!==key||p.controlReporter!==reporter||reporter.stopped) return null;
+    if(response.status===404||response.status===405) return {version:1,
+      generation:request.generation,control_epoch:request.control_epoch,features:[],
+      outcome:"unsupported",pending_identity:null};
+    if(!response.ok) return null;
+    const text=await response.text();
+    if(text.length>4096||qualityControlOwnerKey(p)!==key
+      ||p.controlReporter!==reporter||reporter.stopped) return null;
+    const value=JSON.parse(text), keys=["version","generation","control_epoch","features","outcome","pending_identity"];
+    if(!value||typeof value!=="object"||Array.isArray(value)
+      ||Object.keys(value).some(key=>!keys.includes(key))
+      ||value.version!==1||value.generation!==request.generation||value.control_epoch!==request.control_epoch
+      ||!Array.isArray(value.features)||value.features.length>1
+      ||value.features.some(feature=>feature!=="quality_cancel_v1")
+      ||(value.pending_identity!=null&&!validQualityControlIdentity(value.pending_identity,request))) return null;
+    const outcomes=request.operation==="discover"?["supported","unsupported"]
+      :["cancel_requested","cancelled","observation_unknown","unsupported"];
+    if(!outcomes.includes(value.outcome)
+      ||(value.outcome==="unsupported"?value.features.length!==0:value.features.length!==1)) return null;
+    return value;
+  }catch(e){ return null; }
+  finally{ clearTimeout(timer); }
+}
+async function discoverQualityControl(p,fresh=false){
+  const key=qualityControlOwnerKey(p), reporter=p&&p.controlReporter;
+  if(!key||!reporter||reporter.stopped) return null;
+  if(p.qualityControlDiscovery&&p.qualityControlDiscovery.key===key) return p.qualityControlDiscovery.promise;
+  if(!fresh&&p.qualityControlSupport&&p.qualityControlSupport.key===key) return p.qualityControlSupport.response;
+  const bootstrap=reporter.bootstrap, request={version:1,generation:bootstrap.generation,
+    control_epoch:bootstrap.control_epoch,operation:"discover",identity:null};
+  const promise=exchangeQualityControl(p,request).then(response=>{
+    if(qualityControlOwnerKey(p)===key&&p.controlReporter===reporter){
+      p.qualityControlSupport={key,supported:!!response&&response.features.includes("quality_cancel_v1"),response};
+    }
+    return response;
+  }).finally(()=>{
+    if(p.qualityControlDiscovery&&p.qualityControlDiscovery.promise===promise) p.qualityControlDiscovery=null;
+  });
+  p.qualityControlDiscovery={key,promise};
+  return promise;
+}
+async function cancelUnappendedQualityIntent(p,change){
+  const intent=change&&change.qualityIntent;
+  if(!p||!intent) return "unsupported";
+  const ownerKey=qualityControlOwnerKey(p);
+  let identity=change.cancellationOwnerKey===ownerKey?change.cancellationIdentity:null;
+  if(!identity){
+    const response=await discoverQualityControl(p,true);
+    if(qualityControlOwnerKey(p)!==ownerKey) return "observation_unknown";
+    if(!response||!response.features.includes("quality_cancel_v1")) return "unsupported";
+    identity=response.pending_identity;
+    // A discovery for a newer choice cannot cancel it for this older one.
+    if(!identity||identity.client_instance_id!==CONTROL_CLIENT_ID
+      ||identity.lifetime_id!==intent.lifetime_id||identity.recipe_revision!==intent.recipe_revision)
+      return "observation_unknown";
+    change.cancellationIdentity=identity;
+    change.cancellationOwnerKey=ownerKey;
+  }
+  const request={version:1,generation:identity.generation,control_epoch:identity.control_epoch,
+    operation:"cancel_unappended",identity};
+  const result=await exchangeQualityControl(p,request);
+  if(qualityControlOwnerKey(p)!==ownerKey) return "observation_unknown";
+  // Only the exact receipt settles cleanup. A missing or different identity
+  // cannot promote an initiation response to completed cancellation.
+  if(result?.outcome==="unsupported") return "unsupported";
+  if(!result||!result.pending_identity||Object.keys(identity).some(key=>result.pending_identity[key]!==identity[key]))
+    return "observation_unknown";
+  change.cancellationOutcome=result.outcome;
+  return result.outcome;
+}
+async function settleQualityCancellation(p,change){
+  if(change.cancellationPromise) return change.cancellationPromise;
+  const ownerKey=qualityControlOwnerKey(p);
+  const promise=(async()=>{
+    let outcome=await cancelUnappendedQualityIntent(p,change);
+    // Three exact, idempotent attempts bound receipt recovery. Keep the
+    // identity after request loss; discovery may no longer name a cleaned job.
+    for(const delay of [500,1000]){
+      if(!change.cancellationIdentity||["cancelled","unsupported"].includes(outcome)) break;
+      await new Promise(resolve=>setTimeout(resolve,delay));
+      if(qualityControlOwnerKey(p)!==ownerKey||p.controlReporter?.stopped) return "observation_unknown";
+      outcome=await cancelUnappendedQualityIntent(p,change);
+    }
+    return outcome;
+  })().finally(()=>{if(change.cancellationPromise===promise) change.cancellationPromise=null;});
+  change.cancellationPromise=promise;
+  return promise;
 }

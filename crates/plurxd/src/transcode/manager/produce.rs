@@ -362,6 +362,7 @@ impl TranscodeManager {
         };
         let file = &resolved_file;
         let mut request = SessionRequest {
+            continuous_media: None,
             vod_only: false,
             passive_vod: false,
             finite_bitrate_limit_bps: None,
@@ -451,6 +452,8 @@ impl TranscodeManager {
             .vod
             .prepare_encoded_output(
                 crate::vodserve::VodRecipeRequest {
+                    soundtrack: None,
+                    companion: None,
                     request: &request,
                     encoding: Some(encoding),
                     retained_capture: crate::vodserve::RetainedOutputCapture::New,
@@ -816,6 +819,7 @@ impl TranscodeManager {
             (intent.width, intent.height),
         );
         let mut request = SessionRequest {
+            continuous_media: None,
             vod_only: false,
             passive_vod: false,
             finite_bitrate_limit_bps: None,
@@ -890,6 +894,8 @@ impl TranscodeManager {
             .await?
             .ok_or(PreparationError::Fail("vod_policy_unavailable"))?;
         let prepared_request = crate::vodserve::VodRecipeRequest {
+            soundtrack: None,
+            companion: None,
             request: &request,
             encoding: None,
             retained_capture: crate::vodserve::RetainedOutputCapture::New,

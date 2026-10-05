@@ -14856,20 +14856,21 @@ pub(crate) fn record_preparation_staged(staged: bool) {
 /// and thrown away, or which policy threw them.
 ///
 /// Index order is [`PREPARATION_CANCELLED_REASONS`].
-static PREPARATIONS_CANCELLED: [AtomicU64; 7] = [const { AtomicU64::new(0) }; 7];
+static PREPARATIONS_CANCELLED: [AtomicU64; 8] = [const { AtomicU64::new(0) }; 8];
 
 /// The label vocabulary for [`record_preparation_cancelled`], in index order.
 ///
 /// `other` is last and is deliberately not removable: it is what keeps the sum
 /// of this counter equal to the number of settlements, so a reason nobody
 /// mapped shows up as an unexplained teardown instead of vanishing.
-pub(crate) const PREPARATION_CANCELLED_REASONS: [&str; 7] = [
+pub(crate) const PREPARATION_CANCELLED_REASONS: [&str; 8] = [
     "predecessor_superseded",
     "incumbent_waiting",
     "foreground_claimed",
     "disabled",
     "expired",
     "ownership_cancelled",
+    "intent_cancelled",
     "other",
 ];
 
@@ -14889,6 +14890,9 @@ pub(crate) fn preparation_cancelled_label(reason: &str) -> &'static str {
         "prepared successor ownership was cancelled" | "prepared successor reservation refused" => {
             "ownership_cancelled"
         }
+        // The viewer's quality intent changed and its durable cancellation
+        // receipt retired the staged successor.
+        "quality intent cancelled" => "intent_cancelled",
         _ => "other",
     }
 }
@@ -25587,6 +25591,7 @@ mod tests {
 
     fn session_request(kind: SessionKind) -> crate::transcode::SessionRequest {
         crate::transcode::SessionRequest {
+            continuous_media: None,
             quality_catalog: None,
             candidate_context: None,
             vod_only: false,
@@ -26201,6 +26206,7 @@ mod tests {
 
         fn request(kind: SessionKind, hdr10: bool) -> SessionRequest {
             SessionRequest {
+                continuous_media: None,
                 quality_catalog: None,
                 candidate_context: None,
                 vod_only: false,
@@ -26499,6 +26505,7 @@ mod tests {
         now_ms: i64,
     ) -> plurx_core::domain::MediaSessionPreparation {
         plurx_core::domain::MediaSessionPreparation {
+            quality_cancellation_key: None,
             expected_desired_revision: None,
             incarnation_id: incarnation_id.to_owned(),
             session_id: uuid::Uuid::new_v4().to_string(),

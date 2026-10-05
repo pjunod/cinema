@@ -50,7 +50,7 @@ use plurx_core::transcode::{
     COPY_SEGMENT_MAX_SECS, COPY_SEGMENT_SECONDS,
 };
 use sha2::{Digest, Sha256};
-use tokio::io::{AsyncRead, AsyncReadExt};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncSeekExt};
 use tokio::sync::{Mutex, Notify, Semaphore};
 
 use crate::copyseg::sanitize_stale_dolby_brand;
@@ -397,12 +397,22 @@ pub(crate) struct ResponseOwner {
     /// not keep the heavyweight rendition graph alive after reader/commit
     /// cleanup has finished.
     rendition: Option<Arc<Rendition>>,
+    /// Exact private-reader ownership beneath the public parent, when a
+    /// response serves child media. Rebinding the same cached rendition must
+    /// not let an old body commit to its replacement reader.
+    media_child: Option<MediaReaderResponseOwner>,
     rendition_key: String,
     file: Arc<MediaFile>,
     /// Terminal snapshot at resolution. Status publication compares this
     /// exact value so a live error cannot be admitted after tombstoning and a
     /// tombstone from one incarnation cannot describe its replacement.
     tombstone: Option<Terminal>,
+}
+
+#[derive(Clone)]
+struct MediaReaderResponseOwner {
+    reader_id: String,
+    rendition: Arc<Rendition>,
 }
 
 impl std::fmt::Debug for ResponseOwner {
@@ -413,6 +423,58 @@ impl std::fmt::Debug for ResponseOwner {
             .field("rendition_key", &self.rendition_key)
             .field("tombstone", &self.tombstone)
             .finish_non_exhaustive()
+    }
+}
+
+/// A bounded, typed child resource; never interpreted as a filesystem path.
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct ChildMediaRequest {
+    pub role: String,
+    pub rendition: String,
+    pub kind: String,
+    pub object: String,
+}
+
+impl ChildMediaRequest {
+    pub(crate) fn valid_identity(role: &str, rendition: &str) -> bool {
+        matches!(role, "video" | "audio")
+            && rendition.len() == 64
+            && rendition
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    }
+
+    pub(crate) fn is_valid(&self) -> bool {
+        let hash = |value: &str| {
+            value.len() == 64
+                && value
+                    .bytes()
+                    .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+        };
+        Self::valid_identity(&self.role, &self.rendition)
+            && match self.kind.as_str() {
+                "init" => self.object.strip_suffix(".mp4").is_some_and(hash),
+                "segment" => self.object.strip_suffix(".m4s").is_some_and(|digits| {
+                    !digits.is_empty()
+                        && digits.len() <= 9
+                        && digits.bytes().all(|byte| byte.is_ascii_digit())
+                        && (digits == "0" || !digits.starts_with('0'))
+                        && digits.parse::<u32>().is_ok()
+                }),
+                _ => false,
+            }
+    }
+
+    pub(crate) fn media_name(&self) -> Option<String> {
+        if !self.is_valid() {
+            return None;
+        }
+        if self.kind == "init" {
+            return Some(INIT_NAME.to_owned());
+        }
+        let index = self.object.strip_suffix(".m4s")?.parse::<u32>().ok()?;
+        Some(segment_name(u64::from(index)))
     }
 }
 
@@ -636,13 +698,74 @@ pub struct VodStart {
     pub duration_ms: i64,
 }
 
-/// The durable request plus an already resolved encoder recipe. Plain copy
+/// Actual init-verified media and exact catalog provenance for one parent.
+pub(crate) struct VerifiedContinuousFamily {
+    pub controlled: bool,
+    pub family: plurx_core::transcode::VodPresentationFamily,
+    pub video_budgets: Vec<plurx_core::transcode::VodRenditionBandwidth>,
+    pub audio_budget: Option<plurx_core::transcode::VodRenditionBandwidth>,
+    pub candidates: HashMap<String, plurx_core::playback::candidate::CandidateId>,
+}
+
+impl VerifiedContinuousFamily {
+    pub(crate) fn description(&self) -> Result<Vec<u8>, VodError> {
+        let mut video = Vec::new();
+        for rung in self.family.video().rungs() {
+            let candidate = self.candidates.get(rung.rendition_id()).ok_or_else(|| {
+                VodError::ProducerFailed("family rung has no retained catalog identity".into())
+            })?;
+            let budget = self
+                .video_budgets
+                .iter()
+                .find(|budget| budget.rendition_id == rung.rendition_id())
+                .ok_or_else(|| {
+                    VodError::ProducerFailed("family rung has no delivery budget".into())
+                })?;
+            video.push(serde_json::json!({
+                "candidate_id": candidate, "rendition_id": rung.rendition_id(),
+                "init_id": rung.init_id(), "width": rung.facts().width,
+                "height": rung.facts().height, "codec": rung.facts().codec,
+                "timescale": rung.grid().numerator, "frame_ticks": rung.grid().denominator,
+                "segment_ticks": rung.grid().segment_ticks(),
+                "peak_bps": budget.peak_bps,
+                "playlist": format!("video/{}/index.m3u8", rung.rendition_id()),
+            }));
+        }
+        let audio = self.family.audio().map(|audio| {
+            serde_json::json!({
+                "rendition_id": audio.rendition_id(), "init_id": audio.init_id(),
+                "codec": audio.facts().codec, "channels": audio.facts().channels,
+                "timescale": plurx_core::transcode::VOD_AUDIO_RATE,
+                "peak_bps": self.audio_budget.as_ref().map(|budget| budget.peak_bps),
+                "playlist": format!("audio/{}/index.m3u8", audio.rendition_id()),
+            })
+        });
+        let bytes = serde_json::to_vec(&serde_json::json!({
+            "version": 1, "family_id": self.family.id(),
+            "mode": if self.controlled { "controlled" } else { "autonomous_reserved" }, "master": "master.m3u8", "video": video, "audio": audio,
+        }))
+        .map_err(|error| VodError::ProducerFailed(error.to_string()))?;
+        if bytes.len() > 32 * 1024 {
+            return Err(VodError::ProducerFailed(
+                "family description exceeds its bound".into(),
+            ));
+        }
+        Ok(bytes)
+    }
+}
+
+/// The durable request plus already resolved encoder recipes. Plain copy
 /// callers need no encoder preparation and convert from their request alone.
 pub(crate) struct VodRecipeRequest<'a> {
     pub(crate) measured_candidate: Option<RetainedCandidateBinding>,
     pub(crate) retained_capture: RetainedOutputCapture,
     pub request: &'a SessionRequest,
     pub encoding: Option<Arc<crate::vodencode::Encoding>>,
+    /// Resolved shared AAC for a continuous video attachment, never a second
+    /// public session. Creation commits both private readers together.
+    pub soundtrack: Option<Arc<crate::vodencode::Encoding>>,
+    /// The second video of a two-rung autonomous attachment.
+    pub companion: Option<(SessionRequest, Arc<crate::vodencode::Encoding>)>,
 }
 
 impl<'a> From<&'a SessionRequest> for VodRecipeRequest<'a> {
@@ -652,6 +775,8 @@ impl<'a> From<&'a SessionRequest> for VodRecipeRequest<'a> {
             request,
             retained_capture: RetainedOutputCapture::New,
             encoding: None,
+            soundtrack: None,
+            companion: None,
         }
     }
 }
@@ -1120,6 +1245,11 @@ use init::*;
 #[path = "vod/tests.rs"]
 mod tests;
 // split: end vod-tests
+
+#[path = "vod/serve/quality.rs"]
+mod vod_serve_quality;
+
+pub(crate) use vod_serve_quality::{QualityScheduleRequest, QualityScheduleResponse};
 
 #[path = "vod/passive_grant.rs"]
 mod passive_grant;

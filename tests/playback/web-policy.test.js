@@ -92,6 +92,44 @@ function test(name, run) {
   }
 }
 
+test("future callback metadata cannot seed false backward hitches or erase real holds", () => {
+  assert.equal(policy.frameMetadataAheadOfClock({mediaTime:769.125,expectedDisplayTime:1000},
+    {nowMs:1000,currentTime:768.709,nominalSeconds:1/24}),true);
+  assert.equal(policy.frameMetadataAheadOfClock({mediaTime:1.4,expectedDisplayTime:1400},
+    {nowMs:1000,currentTime:1,playbackRate:1,nominalSeconds:1/24}),false);
+  assert.equal(policy.frameMetadataAheadOfClock({mediaTime:0.8,expectedDisplayTime:1000},
+    {nowMs:1000,currentTime:1,nominalSeconds:1/24}),false);
+  const p={},v={requestVideoFrameCallback(){},paused:false,seeking:false,playbackRate:1,currentTime:0,dataset:{}};
+  let next,settled=0;
+  const run=new Function('PLAYER','PlaybackPolicy','document','performance','queuePlaybackFrame',
+    'playbackOwnsAttachedMedia','settlePlaybackControlSeek','reportRateChase',
+    `let PLAYBACK_LIFETIME_HITCHES=0;
+     const HITCH_WARMUP=12,HITCH_WINDOW=120,HITCH_NEAR_MS=150,HITCH_GAP_FRAMES=2.5,
+       HITCH_SLOW_FACTOR=3,HITCH_LATE_FLOOR_MS=25,HITCH_LATE_FRACTION=0.75;
+     ${shippedSource('armHitchDetector')}
+     // The slice keeps the comment block that trails the declaration, so the
+     // call must start on its own line or it is commented out.
+     armHitchDetector(arguments[8]);`);
+  run(p,policy,{getElementById:()=>v},{now:()=>0},(_v,_p,callback)=>{next=callback;},
+    ()=>true,()=>{settled++;},()=>{},v);
+  function frame(now,mediaTime,currentTime,count){v.currentTime=currentTime;next(now,
+    {mediaTime,presentedFrames:count,expectedDisplayTime:now},0,{});}
+  for(let i=0;i<24;i++)frame(i*1000/24,i/24,i/24,i+1);
+  const lastSettled=settled;
+  frame(1000,1.4,1,25);
+  assert.equal(p.hitches.metadataAnomalies,1);
+  assert.equal(p.hitches.metadataFaults[0].media_time,1.4);
+  assert.equal(settled,lastSettled,'uncertain metadata cannot settle presentation');
+  frame(1041.667,25/24,25/24,26);
+  assert.equal(p.hitches.back,0,'future outlier cannot seed a false backward step');
+  frame(1083.333,1,26/24,27);
+  assert.equal(p.hitches.back,1,'a real backward timestamp remains classified');
+  // A future metadata row does not reset the display-clock interval.
+  frame(1300,1.5,1.125,28);
+  frame(1400,26/24,1.125,29);
+  assert.equal(p.hitches.late,1,'a real hold across uncertain metadata stays visible');
+});
+
 function heldKeyFixture() {
   let now = 0;
   let nextTimer = 1;
@@ -3477,7 +3515,11 @@ function keepWaitingHarness() {
   const act = new Function(
     "PLAYER", "playbackSurfaceStep", "retryPlayback", "closePlayer",
     "startTranscodeFallback", "logout", "armStall", "pbPosSec",
+    "PLAYBACK_SURFACE", "retryQualityChange",
     [
+      // Retry routes a retained quality change to its own effect; whether one
+      // is retained is the shipped predicate, not a harness answer.
+      shippedSource("retainedQualityChange"),
       shippedSource("playbackSurfaceAction"),
       "return playbackSurfaceAction;",
     ].join("\n"),
@@ -3490,6 +3532,8 @@ function keepWaitingHarness() {
     (options) => calls.push(["logout", options]),
     (from) => calls.push(["armStall", from]),
     () => 742,
+    { state: policy.initialSurfaceState(), surface: null, history: [] },
+    () => calls.push(["retryQualityChange"]),
   );
   return { act, calls, player };
 }
@@ -6922,6 +6966,39 @@ test("severe route pressure skips intermediate rungs despite voluntary budget",(
   assert.equal(result.emergency,true);
 });
 
+test("mild route pressure survives ordinary HLS refills but only moves while draining",()=>{
+  const f=routeQualityFixture();
+  const args={state:{previousRunwayMs:61000},candidates:[f.low,f.middle,f.high],
+    currentId:f.high.id,target:f.target,aspect:16/9,
+    sample:{...f.sample,cause:"link",runway_ms:60000,
+      transfer:{...f.transfer,bytes:3000000}}};
+  const first=policy.decideCandidateTransition(args);
+  assert.equal(first.candidate,null);
+  assert.equal(first.state.mildSamples,1);
+  const refill=policy.decideCandidateTransition({...args,state:first.state,
+    sample:{...args.sample,now_ms:121000,runway_ms:61000}});
+  assert.equal(refill.candidate,null,"refilling is not a draining-buffer decision");
+  assert.equal(refill.state.mildSamples,2,"low link margin persists across the refill");
+  const drained={...args,state:refill.state,
+    sample:{...args.sample,now_ms:122000,runway_ms:60000}};
+  const move=policy.decideCandidateTransition(drained);
+  assert.equal(move.candidate.id,f.middle.id);
+  assert.equal(move.emergency,false);
+  assert.equal(policy.decideCandidateTransition({...drained,
+    state:{...refill.state,lastSwitchMs:121000}}).candidate,null,"cooldown still applies");
+  assert.equal(policy.decideCandidateTransition({...drained,
+    state:{...refill.state,switchTimesMs:Array(6).fill(119000)}}).candidate,null,"voluntary budget still applies");
+  for(const transfer of [{...f.transfer,bytes:5000000},
+    {...args.sample.transfer,age_ms:15001}, {...args.sample.transfer,producer_paced:true}]){
+    const reset=policy.decideCandidateTransition({...drained,
+      sample:{...drained.sample,transfer}});
+    assert.equal(reset.state.mildSamples,0,"recovered or invalid link proof clears the counter");
+    assert.equal(policy.decideCandidateTransition({...args,state:reset.state,
+      sample:{...args.sample,now_ms:123000,runway_ms:59000}}).candidate,null,
+      "one new low-margin observation cannot reuse cleared pressure");
+  }
+});
+
 test("unknown peak original downshifts from fresh demand without inventing upgrade proof",()=>{
   const f=routeQualityFixture(), original={...f.original,peak_bps:null,average_bps:50000000};
   const args={state:{},candidates:[f.low,f.middle,original],currentId:original.id,
@@ -7100,4 +7177,36 @@ test("fenced recovery cannot inherit a predecessor attachment or session", () =>
     {sessionId:'old',attachment:{},reason:'serving_fenced'},
     {sessionId:'new',attachment:{},reason:'serving_fenced'},
   ]) assert.equal(build({sessionId:'new',mediaAttachment:{},sessionTerminal:terminal}),false);
+});
+
+
+test("completed video transfer evidence survives a full browser resource timing buffer",()=>{
+  const source=fs.readFileSync(path.join(__dirname,"../../crates/plurxd/src/web/player/player.js"),"utf8");
+  const block=source.slice(source.indexOf("const QUALITY_RESOURCE_TIMING_LIMIT="),source.indexOf("function createHlsStartupLoader("));
+  const retained=Array.from({length:250},(_,i)=>({name:`http://localhost/old-${i}`}));
+  const queued=[];
+  class Observer {
+    observe(options){assert.equal(options.type,"resource");}
+    takeRecords(){return queued.splice(0);}
+    disconnect(){}
+  }
+  const perf={getEntriesByName:name=>retained.filter(row=>row.name===name)};
+  const build=new Function("PerformanceObserver","performance","URL","location",block+
+    "\nreturn {complete:completedQualityTransfer,size:()=>qualityResourceTimingRows.size};");
+  const timing=build(Observer,perf,URL,{href:"http://localhost/"});
+  const url="http://localhost/api/v1/hls/session/video/rendition/segment/0.m4s";
+  const entry={name:url,startTime:100,responseStart:110,responseEnd:130,encodedBodySize:100000,transferSize:100400};
+  const xhr={status:200,getResponseHeader:()=>"0"};
+  queued.push(entry);
+  const proof=timing.complete(xhr,url,{start:100,end:130},140,100000);
+  assert.equal(proof.bytes,100000);assert.equal(proof.elapsed_ms,20);
+  assert.equal(proof.from_cache,false);assert.equal(proof.producer_paced,false);
+  assert.equal(retained.length,250);
+  assert.equal(timing.complete({...xhr,getResponseHeader:()=>"1"},url,{start:100,end:130},140,100000),undefined);
+  queued.push({...entry,transferSize:0});
+  assert.equal(timing.complete(xhr,url,{start:100,end:130},140,100000),undefined);
+  for(let i=0;i<200;i++)queued.push({...entry,name:url+`?request=${i}`});
+  timing.complete(xhr,url,{start:100,end:130},140,100000);
+  assert.equal(timing.size(),128);
+  assert.equal(timing.complete(xhr,url,{start:100,end:130},140,100000),undefined);
 });

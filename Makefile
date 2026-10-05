@@ -1521,6 +1521,8 @@ web-unit-check: ## Run every Node web and playback test (no browser)
 	# resume point. One failed session used to erase it for good.
 	@node --test tests/web/progress-never-presented.test.js
 	@node --test tests/web/seek-telemetry.test.js
+	# Continuous quality: protocol refusals, adapter reservations, fMP4 inspection.
+	@node --test tests/web/continuous-quality.test.js tests/web/continuous-adapter.test.js tests/web/continuous-media.test.js
 	@node tests/web/nav-keyboard.test.js
 	@node tests/web/reader.test.js
 	@node tests/web/library-channels.test.js

@@ -320,6 +320,12 @@ the unbound retry replaces an invalid reopen without a terminal failure.
 
 ## Phase 3 — seamless switching (optional, the majors' UX)
 
+**2026-09-30:** Paul requested this work across clients, with web first.
+[Continuous quality](../playback-control/CONTINUOUS-QUALITY-BUILD.md) is the
+new build contract. The sketch below is historical: it does not establish
+that cold variants are immediately deliverable, that all encoders share
+decodable boundaries, or that the existing adaptation policy can be deleted.
+
 True multivariant HLS, adapted to JIT: `master.m3u8` advertises every rung
 (`EXT-X-STREAM-INF` with `BANDWIDTH`/`RESOLUTION`); each variant's playlist
 and segments live at `/hls/:session/:rung/…` and its encoder starts *lazily*

@@ -144,6 +144,7 @@ const MAX_ROUTE_CACHE_ENTRIES: usize = 4_096;
 const MAX_CONTROL_RATE_ENTRIES: usize = 4_096;
 const CONTROL_RATE_WINDOW: Duration = Duration::from_secs(1);
 const CONTROL_RATE_PER_SESSION: u32 = 8;
+const QUALITY_RATE_PER_SESSION: u32 = 32;
 const CONTROL_RATE_GLOBAL: u32 = 512;
 /// Maximum authenticated clock disagreement accepted on a relayed resource
 /// deadline. This is deliberately small: it is only tolerance for wall-clock
@@ -1272,7 +1273,14 @@ impl RemoteStartRequest {
 }
 
 fn remote_start_envelope_is_valid(request: &RemoteStartRequest) -> bool {
-    request.retained_output_receiver.is_none_or(|version| version == 1)
+    request.request.continuous_media.as_ref().is_none_or(|media| {
+        media.autonomous_companion.is_none_or(|companion| request.candidate_id.is_some_and(|primary| primary != companion))
+            && media.family_descriptor.as_ref().is_none_or(|description| {
+                request.candidate_id.is_some_and(|primary| description.video.iter().any(|row| row.candidate_id == primary))
+            })
+    })
+        && (request.request.continuous_media.is_none() || request.library_channel.is_none())
+        && request.retained_output_receiver.is_none_or(|version| version == 1)
         && (request.retained_output.is_none() || request.retained_output_receiver == Some(1))
         && request.retained_output.as_ref().is_none_or(crate::transcode::RetainedOutputFacts::valid)
         && (request.candidate_id.is_none() || request.decoder_caps.is_some() && request.candidate_catalog.is_some())
@@ -1322,8 +1330,12 @@ pub(crate) fn worker_session_request_is_valid(request: &SessionRequest) -> bool 
 }
 
 fn worker_session_request_fields_are_valid(request: &SessionRequest) -> bool {
-    (!request.passive_vod
-        || (request.vod_only && request.request_id.as_deref().is_some_and(|id| !id.trim().is_empty())))
+    request
+        .continuous_media
+        .as_ref()
+        .is_none_or(|media| media.valid_for(request))
+        && (!request.passive_vod
+            || (request.vod_only && request.request_id.as_deref().is_some_and(|id| !id.trim().is_empty())))
         && (!request.vod_only || request.presentation == crate::transcode::Presentation::Vod)
         && request.finite_bitrate_limit_bps.is_none_or(|limit|
             request.passive_vod && request.vod_only && (64_000..=1_000_000_000).contains(&limit))
@@ -1609,6 +1621,7 @@ pub(crate) enum RelayResource {
         diagnostic: Option<String>,
     },
     VideoPlaylist,
+    ContinuousFamily,
     SubtitlePlaylist {
         index: i64,
     },
@@ -1618,6 +1631,13 @@ pub(crate) enum RelayResource {
     },
     Segment {
         segment: String,
+    },
+    ChildPlaylist {
+        role: String,
+        rendition: String,
+    },
+    ChildSegment {
+        child: crate::vodserve::ChildMediaRequest,
     },
     Delete,
     /// Authenticated compatibility presence for one exact passive play.
@@ -1702,7 +1722,7 @@ impl RelayHeaders {
 impl RelayResource {
     pub(crate) fn is_valid(&self) -> bool {
         match self {
-            Self::Status | Self::VideoPlaylist | Self::Delete => true,
+            Self::Status | Self::VideoPlaylist | Self::ContinuousFamily | Self::Delete => true,
             Self::Playlist { native, subtitle } => {
                 native.is_none_or(|value| value <= 1)
                     && subtitle.is_none_or(|value| (0..=1_024).contains(&value))
@@ -1721,6 +1741,10 @@ impl RelayResource {
                 (0..=1_024).contains(index) && valid_resource_name(segment)
             }
             Self::Segment { segment } => valid_resource_name(segment),
+            Self::ChildSegment { child } => child.is_valid(),
+            Self::ChildPlaylist { role, rendition } => {
+                crate::vodserve::ChildMediaRequest::valid_identity(role, rendition)
+            }
             Self::PassivePresence {
                 user,
                 player,
@@ -1738,8 +1762,10 @@ impl RelayResource {
             Self::Playlist { .. }
             | Self::Master { .. }
             | Self::VideoPlaylist
-            | Self::SubtitlePlaylist { .. } => RELAY_PLAYLIST_MAX_LIFETIME,
-            Self::Segment { .. } => RELAY_SEGMENT_MAX_LIFETIME,
+            | Self::ContinuousFamily
+            | Self::SubtitlePlaylist { .. }
+            | Self::ChildPlaylist { .. } => RELAY_PLAYLIST_MAX_LIFETIME,
+            Self::Segment { .. } | Self::ChildSegment { .. } => RELAY_SEGMENT_MAX_LIFETIME,
             Self::Status
             | Self::SubtitleSegment { .. }
             | Self::Delete
@@ -1842,6 +1868,7 @@ pub(crate) struct MediaSessionCoordinator {
     route_generations: Arc<Vec<std::sync::atomic::AtomicU64>>,
     lease_seeds: Arc<tokio::sync::Mutex<HashMap<String, LeaseSeed>>>,
     control_admission: Arc<StdMutex<ControlAdmission>>,
+    quality_admission: Arc<StdMutex<ControlAdmission>>,
     route_cache_metrics: Arc<RouteCacheMetrics>,
     /// Test-only: while set, a lookup that reaches the Store read waits here
     /// until the semaphore is closed, so a test can hold one read open and
@@ -1895,6 +1922,15 @@ impl Default for ControlAdmission {
 
 impl ControlAdmission {
     fn admit(&mut self, now: Instant, session_id: &str) -> Result<(), u32> {
+        self.admit_with_limit(now, session_id, CONTROL_RATE_PER_SESSION)
+    }
+
+    fn admit_with_limit(
+        &mut self,
+        now: Instant,
+        session_id: &str,
+        per_session: u32,
+    ) -> Result<(), u32> {
         if now.duration_since(self.window_started) >= CONTROL_RATE_WINDOW {
             self.window_started = now;
             self.admitted = 0;
@@ -1931,7 +1967,7 @@ impl ControlAdmission {
             entry.window_started = now;
             entry.admitted = 0;
         }
-        if entry.admitted >= CONTROL_RATE_PER_SESSION {
+        if entry.admitted >= per_session {
             let remaining =
                 CONTROL_RATE_WINDOW.saturating_sub(now.duration_since(entry.window_started));
             return Err(u32::try_from(remaining.as_millis())
@@ -1969,6 +2005,7 @@ impl MediaSessionCoordinator {
             ),
             lease_seeds: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
             control_admission: Arc::new(StdMutex::new(ControlAdmission::default())),
+            quality_admission: Arc::new(StdMutex::new(ControlAdmission::default())),
             route_cache_metrics: Arc::new(RouteCacheMetrics::default()),
             #[cfg(test)]
             route_store_gate: Arc::new(StdMutex::new(None)),
@@ -2018,6 +2055,24 @@ impl MediaSessionCoordinator {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         admission.admit(now, session_id)
+    }
+
+    /// Fragment reservations and completed facts have a separate bounded
+    /// budget: prebuffering must not consume the manual intent/lease budget.
+    pub(crate) fn admit_quality_schedule(&self, session_id: &str) -> Result<(), u32> {
+        self.quality_admission
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .admit_with_limit(Instant::now(), session_id, QUALITY_RATE_PER_SESSION)
+    }
+
+    /// Schedule admissions charged in the current node-wide window.
+    #[cfg(test)]
+    pub(crate) fn quality_schedule_admissions_in_window(&self) -> u32 {
+        self.quality_admission
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .admitted
     }
 
     /// Cache active routes and short negative answers. Deterministic query
@@ -2908,6 +2963,76 @@ impl MediaSessionCoordinator {
         relay_response(response)
     }
 
+    pub(crate) async fn quality_schedule(
+        &self,
+        owner_node_id: &str,
+        request: &crate::http::hls::QualityScheduleRelayRequest,
+    ) -> Result<Response<Body>, PeerTransportError> {
+        let body = serde_json::to_vec(request).map_err(|_| PeerTransportError::InvalidResponse)?;
+        if body.len() > crate::http::hls::QUALITY_SCHEDULE_MAX_BYTES {
+            return Err(PeerTransportError::InvalidResponse);
+        }
+        let remaining = request
+            .deadline_unix_ms
+            .saturating_sub(unix_ms())
+            .min(12_000);
+        if remaining <= 0 {
+            return Err(PeerTransportError::TimedOut);
+        }
+        let deadline = deadline_after(Duration::from_millis(remaining as u64));
+        let base = self.peer_base(owner_node_id, deadline).await?;
+        let (response, retry_after) = self
+            .transport
+            .request_with_retry_after(
+                owner_node_id,
+                &base,
+                reqwest::Method::POST,
+                crate::http::hls::QUALITY_SCHEDULE_PATH,
+                body,
+                deadline,
+                crate::http::hls::QUALITY_SCHEDULE_MAX_RESPONSE_BYTES,
+                PeerAuthMode::ExactRequest,
+            )
+            .await?;
+        if response.status.is_success() {
+            serde_json::from_slice::<crate::vodserve::QualityScheduleResponse>(&response.body)
+                .ok()
+                .filter(|reply| reply.valid_for(&request.request))
+                .ok_or(PeerTransportError::InvalidResponse)?;
+        }
+        relayed_owner_response(response.status.as_u16(), retry_after, response.body)
+    }
+
+    pub(crate) async fn quality_control(
+        &self,
+        owner_node_id: &str,
+        request: &crate::http::hls::QualityControlRelayRequest,
+    ) -> Result<QualityControlRelayOutcome, PeerTransportError> {
+        let body = serde_json::to_vec(request).map_err(|_| PeerTransportError::InvalidResponse)?;
+        if body.len() > crate::http::hls::QUALITY_CONTROL_MAX_BYTES {
+            return Err(PeerTransportError::InvalidResponse);
+        }
+        let budget =
+            crate::playback_control::inherited_exchange_budget(request.deadline_unix_ms, unix_ms())
+                .ok_or(PeerTransportError::TimedOut)?;
+        let deadline = deadline_after(budget);
+        let base = self.peer_base(owner_node_id, deadline).await?;
+        let (response, retry_after) = self
+            .transport
+            .request_with_retry_after(
+                owner_node_id,
+                &base,
+                reqwest::Method::POST,
+                crate::http::hls::QUALITY_CONTROL_PATH,
+                body,
+                deadline,
+                crate::http::hls::QUALITY_CONTROL_MAX_BYTES,
+                PeerAuthMode::ExactRequest,
+            )
+            .await?;
+        classify_quality_control_relay(response, retry_after, &request.request)
+    }
+
     /// Mutating playback control uses its own exact-auth endpoint. It must not
     /// inherit the generic relay's read authorization merely because the M1
     /// action happens to be `none`.
@@ -3015,6 +3140,91 @@ fn remote_abort_legacy_retry_body(
     }
     serde_json::to_vec(&request.without_reason())
         .map(Some)
+        .map_err(|_| PeerTransportError::InvalidResponse)
+}
+
+/// What an owner answered a relayed quality-control exchange.
+pub(crate) enum QualityControlRelayOutcome {
+    Reply(crate::http::hls::QualityControlResponse),
+    /// The owner has no quality-control endpoint (an older build).
+    Unsupported,
+    /// The owner refused or deferred this exchange; its status, body and
+    /// retry hint reach the client unchanged.
+    Refused(Response<Body>),
+}
+
+/// An owner's quality-control answer, keeping its meaning across the relay.
+///
+/// A 404 carrying the owner's own `session_gone` body is a route miss on a
+/// node that does implement the endpoint; any other 404, or a 405, is an
+/// owner without the endpoint, which is what "unsupported" means. Owner
+/// refusals (409/410/425) and deferrals (429/503) pass through rather than
+/// collapsing into a 503 that loses the difference between "stop" and
+/// "retry".
+fn classify_quality_control_relay(
+    response: PeerResponse,
+    retry_after: Option<u32>,
+    request: &crate::http::hls::QualityControlRequest,
+) -> Result<QualityControlRelayOutcome, PeerTransportError> {
+    let status = response.status.as_u16();
+    if response.status.is_success() {
+        return serde_json::from_slice::<crate::http::hls::QualityControlResponse>(&response.body)
+            .ok()
+            .filter(|reply| reply.valid_for(request))
+            .map(QualityControlRelayOutcome::Reply)
+            .ok_or(PeerTransportError::InvalidResponse);
+    }
+    let error_body =
+        serde_json::from_slice::<crate::playback_control::ControlErrorBody>(&response.body)
+            .ok()
+            .filter(|body| body.is_valid_for_status(status));
+    match (status, error_body) {
+        (404, Some(body)) => quality_control_refusal(status, retry_after, Some(body)),
+        (404 | 405, None) => Ok(QualityControlRelayOutcome::Unsupported),
+        (409 | 410 | 425 | 429 | 503, body) => {
+            // The owner answers some refusals with a bare status; an
+            // unparseable body is dropped rather than relayed.
+            quality_control_refusal(status, retry_after, body)
+        }
+        _ => Err(PeerTransportError::InvalidResponse),
+    }
+}
+
+fn quality_control_refusal(
+    status: u16,
+    retry_after: Option<u32>,
+    body: Option<crate::playback_control::ControlErrorBody>,
+) -> Result<QualityControlRelayOutcome, PeerTransportError> {
+    let retry_after = retry_after.or_else(|| {
+        body.as_ref()
+            .and_then(|body| body.retry_after_ms)
+            .map(|delay_ms| delay_ms.div_ceil(1000).max(1))
+    });
+    let bytes = match body {
+        Some(body) => serde_json::to_vec(&body).map_err(|_| PeerTransportError::InvalidResponse)?,
+        None => Vec::new(),
+    };
+    relayed_owner_response(status, retry_after, bytes).map(QualityControlRelayOutcome::Refused)
+}
+
+/// One owner answer relayed to the client: its status and body, plus its
+/// retry hint. A deferral (429/503) always carries one, so a client that
+/// waits on the header never spins on an owner that omitted it.
+fn relayed_owner_response(
+    status: u16,
+    retry_after: Option<u32>,
+    body: Vec<u8>,
+) -> Result<Response<Body>, PeerTransportError> {
+    let retry_after = retry_after.or(matches!(status, 429 | 503).then_some(1));
+    let mut builder = Response::builder()
+        .status(status)
+        .header(header::CACHE_CONTROL, "no-store")
+        .header(header::CONTENT_TYPE, "application/json");
+    if let Some(seconds) = retry_after {
+        builder = builder.header(header::RETRY_AFTER, seconds.to_string());
+    }
+    builder
+        .body(Body::from(body))
         .map_err(|_| PeerTransportError::InvalidResponse)
 }
 
@@ -5582,6 +5792,7 @@ pub(crate) fn takeover_eligible_route(session_id: &str, incarnation_id: &str) ->
         user_id: route.user_id,
         typeless_playlist: true,
         request: SessionRequest {
+            continuous_media: None,
             quality_catalog: None,
             candidate_context: None,
             vod_only: false,
@@ -6150,6 +6361,7 @@ mod tests {
             typeless_playlist: true,
             library_channel: None,
             request: SessionRequest {
+                continuous_media: None,
                 quality_catalog: None,
                 candidate_context: None,
                 vod_only: false,
@@ -6374,6 +6586,74 @@ mod tests {
             deadline_unix_ms,
             headers: RelayHeaders::default(),
         }
+    }
+
+    #[test]
+    fn private_media_relay_refuses_path_and_identity_aliases() {
+        let mut child = crate::vodserve::ChildMediaRequest {
+            role: "video".into(),
+            rendition: "a".repeat(64),
+            kind: "segment".into(),
+            object: "12.m4s".into(),
+        };
+        assert!(RelayResource::ChildSegment {
+            child: child.clone()
+        }
+        .is_valid());
+        assert!(RelayResource::ChildPlaylist {
+            role: "audio".into(),
+            rendition: child.rendition.clone()
+        }
+        .is_valid());
+        assert!(!RelayResource::ChildPlaylist {
+            role: "subtitle".into(),
+            rendition: child.rendition.clone()
+        }
+        .is_valid());
+        assert!(!RelayResource::ChildPlaylist {
+            role: "video".into(),
+            rendition: "../cached".into()
+        }
+        .is_valid());
+        assert_eq!(child.media_name().as_deref(), Some("seg00012.m4s"));
+        for object in [
+            "../12.m4s",
+            "012.m4s",
+            "-1.m4s",
+            "12.m4s/extra",
+            "9999999999.m4s",
+        ] {
+            child.object = object.into();
+            assert!(!RelayResource::ChildSegment {
+                child: child.clone()
+            }
+            .is_valid());
+            assert!(child.media_name().is_none());
+        }
+        child.kind = "init".into();
+        child.object = format!("{}.mp4", "b".repeat(64));
+        assert!(child.is_valid());
+        assert_eq!(child.media_name().as_deref(), Some("init.mp4"));
+        child.object = format!("{}.mp4", "B".repeat(64));
+        assert!(!child.is_valid());
+        child.object = format!("{}.mp4", "b".repeat(64));
+        child.role = "subtitles".into();
+        assert!(!child.is_valid());
+        child.role = "audio".into();
+        child.rendition = "../cached".into();
+        assert!(!child.is_valid());
+        assert!(!RelayResource::Segment {
+            segment: "video/child/12.m4s".into()
+        }
+        .is_valid());
+        let now = 1_700_000_000_000_i64;
+        child.rendition = "a".repeat(64);
+        let request = relay_request(RelayResource::ChildSegment { child }, now + 90_000);
+        assert_eq!(
+            request.owner_budget_at(now),
+            Some(RELAY_SEGMENT_MAX_LIFETIME)
+        );
+        assert!(!request.deadline_is_plausible_at(now));
     }
 
     #[test]
@@ -7276,6 +7556,7 @@ mod tests {
         let mut vod = base.clone();
         vod.recipe_json = serde_json::to_string(&RemoteStartRequest {
             request: SessionRequest {
+                continuous_media: None,
                 quality_catalog: None,
                 candidate_context: None,
                 vod_only: false,
@@ -7425,6 +7706,7 @@ mod tests {
 
         let vod = RemoteStartRequest {
             request: SessionRequest {
+                continuous_media: None,
                 quality_catalog: None,
                 candidate_context: None,
                 vod_only: false,
@@ -8659,6 +8941,182 @@ mod tests {
             spray.sessions.len() <= MAX_CONTROL_RATE_ENTRIES,
             "the admission map itself must stay bounded"
         );
+    }
+
+    #[test]
+    fn quality_reservation_burst_keeps_manual_control_budget_independent() {
+        let started = Instant::now();
+        let mut quality = ControlAdmission {
+            window_started: started,
+            ..Default::default()
+        };
+        let mut manual = ControlAdmission {
+            window_started: started,
+            ..Default::default()
+        };
+        for _ in 0..QUALITY_RATE_PER_SESSION {
+            assert_eq!(
+                quality.admit_with_limit(started, "film", QUALITY_RATE_PER_SESSION),
+                Ok(())
+            );
+        }
+        assert!(quality
+            .admit_with_limit(started, "film", QUALITY_RATE_PER_SESSION)
+            .is_err());
+        for _ in 0..CONTROL_RATE_PER_SESSION {
+            assert_eq!(manual.admit(started, "film"), Ok(()));
+        }
+        assert!(manual.admit(started, "film").is_err());
+        assert_eq!(
+            quality.admit_with_limit(
+                started + CONTROL_RATE_WINDOW,
+                "film",
+                QUALITY_RATE_PER_SESSION
+            ),
+            Ok(())
+        );
+        let mut spray = ControlAdmission {
+            window_started: started,
+            ..Default::default()
+        };
+        for index in 0..CONTROL_RATE_GLOBAL {
+            assert_eq!(
+                spray.admit_with_limit(started, &index.to_string(), QUALITY_RATE_PER_SESSION),
+                Ok(())
+            );
+        }
+        assert!(spray
+            .admit_with_limit(started, "extra", QUALITY_RATE_PER_SESSION)
+            .is_err());
+        assert!(spray.sessions.len() <= MAX_CONTROL_RATE_ENTRIES);
+    }
+
+    fn owner_answer(status: u16, body: &[u8]) -> PeerResponse {
+        PeerResponse {
+            clock_timing: None,
+            status: reqwest::StatusCode::from_u16(status).expect("status"),
+            body: body.to_vec(),
+        }
+    }
+
+    fn quality_discovery() -> crate::http::hls::QualityControlRequest {
+        crate::http::hls::QualityControlRequest {
+            version: 1,
+            generation: uuid::Uuid::new_v4().to_string(),
+            control_epoch: 1,
+            operation: crate::http::hls::QualityControlOperation::Discover,
+            identity: None,
+        }
+    }
+
+    /// An owner's refusal or deferral must keep its meaning across the relay:
+    /// collapsing 409/410/429 into 503 turns "stop" into "retry", and calling
+    /// an owner's route miss "unsupported" disables cancellation for a
+    /// session that merely raced its own end.
+    #[test]
+    fn quality_control_relay_keeps_owner_refusals_and_route_misses_distinct() {
+        let request = quality_discovery();
+        let gone = serde_json::to_vec(&crate::playback_control::ControlErrorBody {
+            terminal_reason: None,
+            code: "session_gone".into(),
+            message: "no media session holds this capability".into(),
+            generation: None,
+            control_epoch: None,
+            retry_after_ms: None,
+            invalid_field: None,
+        })
+        .expect("error body");
+        let Ok(QualityControlRelayOutcome::Refused(miss)) =
+            classify_quality_control_relay(owner_answer(404, &gone), None, &request)
+        else {
+            panic!("an owner's own route miss is not 'unsupported'");
+        };
+        assert_eq!(miss.status(), StatusCode::NOT_FOUND);
+        for status in [404, 405] {
+            assert!(
+                matches!(
+                    classify_quality_control_relay(owner_answer(status, b""), None, &request),
+                    Ok(QualityControlRelayOutcome::Unsupported)
+                ),
+                "an owner without the endpoint ({status}) is unsupported"
+            );
+        }
+        for status in [409, 410] {
+            let Ok(QualityControlRelayOutcome::Refused(refusal)) =
+                classify_quality_control_relay(owner_answer(status, b""), None, &request)
+            else {
+                panic!("owner {status} must pass through");
+            };
+            assert_eq!(refusal.status().as_u16(), status);
+            assert!(refusal.headers().get(header::RETRY_AFTER).is_none());
+        }
+        let limited = serde_json::to_vec(&crate::playback_control::ControlErrorBody {
+            terminal_reason: None,
+            code: "control_rate_limited".into(),
+            message: "the quality control budget is exhausted".into(),
+            generation: None,
+            control_epoch: None,
+            retry_after_ms: Some(2_500),
+            invalid_field: None,
+        })
+        .expect("error body");
+        let Ok(QualityControlRelayOutcome::Refused(deferred)) =
+            classify_quality_control_relay(owner_answer(429, &limited), None, &request)
+        else {
+            panic!("owner 429 must pass through");
+        };
+        assert_eq!(deferred.status(), StatusCode::TOO_MANY_REQUESTS);
+        assert_eq!(
+            deferred
+                .headers()
+                .get(header::RETRY_AFTER)
+                .and_then(|v| v.to_str().ok()),
+            Some("3"),
+            "the owner's own delay reaches the client"
+        );
+        let Ok(QualityControlRelayOutcome::Refused(unavailable)) =
+            classify_quality_control_relay(owner_answer(503, b""), Some(7), &request)
+        else {
+            panic!("owner 503 must pass through");
+        };
+        assert_eq!(unavailable.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(
+            unavailable
+                .headers()
+                .get(header::RETRY_AFTER)
+                .and_then(|v| v.to_str().ok()),
+            Some("7")
+        );
+        assert!(matches!(
+            classify_quality_control_relay(owner_answer(500, b""), None, &request),
+            Err(PeerTransportError::InvalidResponse)
+        ));
+    }
+
+    /// The schedule relay keeps the owner's status and its retry hint, and a
+    /// deferral without one still tells the client when to come back.
+    #[test]
+    fn quality_schedule_relay_passes_owner_status_and_retry_after() {
+        let deferred = relayed_owner_response(429, Some(4), Vec::new()).expect("relay");
+        assert_eq!(deferred.status(), StatusCode::TOO_MANY_REQUESTS);
+        assert_eq!(
+            deferred
+                .headers()
+                .get(header::RETRY_AFTER)
+                .and_then(|v| v.to_str().ok()),
+            Some("4")
+        );
+        let unavailable = relayed_owner_response(503, None, Vec::new()).expect("relay");
+        assert_eq!(
+            unavailable
+                .headers()
+                .get(header::RETRY_AFTER)
+                .and_then(|v| v.to_str().ok()),
+            Some("1")
+        );
+        let refused = relayed_owner_response(409, None, Vec::new()).expect("relay");
+        assert_eq!(refused.status(), StatusCode::CONFLICT);
+        assert!(refused.headers().get(header::RETRY_AFTER).is_none());
     }
 
     #[test]

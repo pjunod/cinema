@@ -130,7 +130,10 @@ function toggleMenu(kind,low){
     m.innerHTML=`<div class="amsec">Quality</div>`+qualityOptions().map(([v,l])=>{
       const note=v==="auto"?" — automatic":v==="original"?" — max, no transcode":"";
       return `<button class="${playQuality()===v?'sel':''}" onclick="setQuality('${v}')">${l}${note}</button>`;
-    }).join("")+limNote;
+    }).join("")+limNote+(retainedQualityChange(PLAYER)?
+      `<div class="menunote">Your preference is saved; the current stream is still playing.</div>
+      <button onclick="retryQualityChange()">Retry quality change</button>
+      <button onclick="applyQualityWithRestart()">Apply with restart</button>`:"");
   } else {
     m.innerHTML=`<button class="${PLAYER.curSub<0?'sel':''}" onclick="setSub(-1)">Off</button>`+
       PLAYER.subs.map(s=>`<button class="${PLAYER.curSub===s.index?'sel':''}" onclick="setSub(${s.index})">${esc(subLabelMenu(s))}</button>`).join("");
@@ -258,6 +261,7 @@ window.addEventListener("resize",()=>{
 // Auto follows the automatic ladder; Original forces direct/remux (no video
 // transcode); a height forces a transcode. Changing it restarts at position.
 function setQuality(q){
+  const standing=PLAYER?playbackControlSelection(PLAYER):null;
   let from="auto"; try{ from=localStorage.getItem("plurx_quality")||"auto"; }catch(e){}
   try{ localStorage.setItem("plurx_quality", q); }catch(e){}
   closeMenu();
@@ -289,7 +293,7 @@ function setQuality(q){
     // server builds a successor. `PENDING_ATTEMPT_REASON` is set by the reopen
     // itself now: a switch that commits opens no session, and leaving the
     // reason armed would label the next unrelated open a quality change.
-    const running=requestQualityChange(PLAYER,"manual");
+    const running=requestQualityChange(PLAYER,"manual",null,null,standing);
     if(running&&running.catch) running.catch(()=>{});
   }
 }

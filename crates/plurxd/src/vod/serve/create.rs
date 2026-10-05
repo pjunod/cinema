@@ -397,6 +397,9 @@ impl VodServe {
         ids
     }
 
+    /// Resolve immutable media without attaching a public playback handle.
+    /// The returned build guard protects the lookup/reader-attachment gap;
+    /// callers must commit their parent-owned reader graph before dropping it.
     async fn resolve_rendition(
         &self,
         prepared: &mut VodRecipeRequest<'_>,
@@ -496,7 +499,11 @@ impl VodServe {
                 "the file has no probed duration, so no immutable plan can be built",
             ));
         };
+        let phase_started = Instant::now();
         let have_dovi = crate::ffmpeg::has_dovi_rpu().await;
+        tracing::debug!(target: "plurxd::vodserve", file_id = file.id,
+            phase = "pipeline_capability", elapsed_ms = phase_started.elapsed().as_millis(),
+            "rendition preparation phase completed");
         // An encoded rendition never carries the source's parameter sets, so
         // only a copy waits on the census.
         let probe_json = if prepared.encoding.is_none() {
@@ -727,6 +734,112 @@ impl VodServe {
         })
     }
 
+    pub(super) async fn reserve_media_group(
+        media: &[Arc<Rendition>],
+        priority: Option<crate::admission::Priority>,
+    ) -> Result<Vec<crate::vodencode::EncodePermit>, String> {
+        let refuse = || {
+            crate::transcode::vod_refusal_error(
+                "vod_family_capacity",
+                "the continuous media group cannot be admitted together",
+            )
+        };
+        let encodings = media
+            .iter()
+            .map(|rendition| rendition.recipe.encoding.as_ref().ok_or_else(refuse))
+            .collect::<Result<Vec<_>, _>>()?;
+        let first = encodings.first().ok_or_else(refuse)?;
+        if encodings
+            .iter()
+            .any(|encoding| !first.admissions.shares_pool(&encoding.admissions))
+        {
+            return Err(refuse());
+        }
+        let Ok(Ok((hardware, software))) = tokio::time::timeout(
+            Duration::from_secs(1),
+            first.store.get_setting_pair(
+                plurx_core::store::keys::MAX_HW_SESSIONS,
+                plurx_core::store::keys::SW_POOL_THREADS,
+            ),
+        )
+        .await
+        else {
+            return Err(refuse());
+        };
+        let hardware_limit = hardware
+            .and_then(|value| value.trim().parse().ok())
+            .unwrap_or(crate::admission::DEFAULT_MAX_HW_SESSIONS);
+        let software_budget = software
+            .and_then(|value| value.trim().parse().ok())
+            .unwrap_or_else(crate::admission::software_budget);
+        let estimates = encodings
+            .iter()
+            .map(|encoding| encoding.resources())
+            .collect::<Vec<_>>();
+        let total_cpu = estimates
+            .iter()
+            .try_fold(0usize, |sum, estimate| {
+                sum.checked_add(estimate.cpu_threads)
+            })
+            .ok_or_else(refuse)?;
+        if total_cpu > software_budget
+            || estimates
+                .iter()
+                .filter(|estimate| estimate.hardware_slot)
+                .count()
+                > hardware_limit
+        {
+            return Err(refuse());
+        }
+        let mut retained = media
+            .iter()
+            .map(|rendition| rendition.retained_admission.current())
+            .collect::<Vec<_>>();
+        let missing = estimates
+            .iter()
+            .zip(&retained)
+            .filter_map(|(estimate, permit)| permit.is_none().then_some(*estimate))
+            .collect::<Vec<_>>();
+        let priority = priority.unwrap_or_else(|| {
+            if encodings
+                .iter()
+                .any(|encoding| encoding.is_speculative() || encoding.nonpreemptive_trial)
+            {
+                crate::admission::Priority::Speculative
+            } else {
+                crate::admission::Priority::Live
+            }
+        });
+        let mut admitted = if missing.is_empty() {
+            Vec::new()
+        } else {
+            first
+                .admissions
+                .try_admit_bundles_claiming(
+                    hardware_limit,
+                    software_budget,
+                    &missing,
+                    priority,
+                    None,
+                )
+                .ok_or_else(refuse)?
+        }
+        .into_iter();
+        for (rendition, permit) in media.iter().zip(&mut retained) {
+            if permit.is_none() {
+                *permit = Some(
+                    rendition
+                        .retained_admission
+                        .bind(admitted.next().expect("one permit per missing role").into()),
+                );
+            }
+        }
+        Ok(retained
+            .into_iter()
+            .map(|permit| permit.expect("every role admitted"))
+            .collect())
+    }
+
     async fn try_create_with_release_fence(
         &self,
         mut prepared: VodRecipeRequest<'_>,
@@ -777,10 +890,233 @@ impl VodServe {
         } else {
             None
         };
+        let continuous = req
+            .continuous_media
+            .as_ref()
+            .is_some_and(|media| media.role == crate::transcode::ContinuousMediaRole::Video);
+        if prepared.soundtrack.is_some() && !continuous {
+            return Err(crate::transcode::vod_refusal_error(
+                "vod_family_invalid",
+                "a shared soundtrack requires a continuous video parent",
+            ));
+        }
+        if continuous && !file.audio_streams.is_empty() && prepared.soundtrack.is_none() {
+            return Err(crate::transcode::vod_refusal_error(
+                "vod_family_invalid",
+                "the continuous video parent is missing its soundtrack",
+            ));
+        }
+        if continuous {
+            let video = prepared.encoding.as_ref().ok_or_else(|| {
+                crate::transcode::vod_refusal_error(
+                    "vod_family_invalid",
+                    "continuous video has no executable recipe",
+                )
+            })?;
+            if video.shared_audio.is_some()
+                || video.plan.options().input_has_audio
+                || video.options.video_sample_envelope
+                    != plurx_core::transcode::VideoSampleEnvelope::ContinuousAvcHigh50
+                || prepared.soundtrack.as_ref().is_some_and(|audio| {
+                    audio.shared_audio.is_none()
+                        || audio.source_object_version != video.source_object_version
+                        || audio.grid != video.grid
+                        || audio.options.audio_index != video.options.audio_index
+                })
+            {
+                return Err(crate::transcode::vod_refusal_error(
+                    "vod_family_invalid",
+                    "continuous video and soundtrack recipes do not pair",
+                ));
+            }
+        }
+        if prepared.companion.is_some()
+            != req
+                .continuous_media
+                .as_ref()
+                .is_some_and(|media| media.autonomous_companion.is_some())
+        {
+            return Err(crate::transcode::vod_refusal_error(
+                "vod_family_invalid",
+                "the autonomous companion was not resolved",
+            ));
+        }
+        if let Some((companion_request, companion)) = prepared.companion.as_ref() {
+            let video = prepared.encoding.as_ref().ok_or_else(|| {
+                crate::transcode::vod_refusal_error(
+                    "vod_family_invalid",
+                    "an autonomous companion requires an executable video parent",
+                )
+            })?;
+            if !continuous
+                || companion.shared_audio.is_some()
+                || companion.plan.options().input_has_audio
+                || companion.options.video_sample_envelope
+                    != plurx_core::transcode::VideoSampleEnvelope::ContinuousAvcHigh50
+                || companion.source_object_version != video.source_object_version
+                || companion.grid != video.grid
+                || companion.options.audio_index != video.options.audio_index
+                || companion.plan.output_contract().effective_height()
+                    == video.plan.output_contract().effective_height()
+                || companion_request
+                    .candidate_context
+                    .as_ref()
+                    .map(|context| context.candidate_id)
+                    != req
+                        .continuous_media
+                        .as_ref()
+                        .and_then(|media| media.autonomous_companion)
+            {
+                return Err(crate::transcode::vod_refusal_error(
+                    "vod_family_invalid",
+                    "the autonomous video recipes do not pair",
+                ));
+            }
+        }
+        let companion_rendition = match prepared.companion.as_ref() {
+            Some((request, encoding)) => {
+                let attachment = self
+                    .resolve_rendition(
+                        &mut VodRecipeRequest {
+                            measured_candidate: None,
+                            retained_capture: RetainedOutputCapture::New,
+                            request,
+                            encoding: Some(Arc::clone(encoding)),
+                            soundtrack: None,
+                            companion: None,
+                        },
+                        file,
+                        settings,
+                        fences.viewer.as_ref(),
+                        None,
+                    )
+                    .await?
+                    .0;
+                let rendition = Arc::clone(&attachment.rendition);
+                drop(attachment);
+                Some(rendition)
+            }
+            None => None,
+        };
+        // Prepare independently, then reacquire all build gates in key order.
+        // No public reader exists until the exact cached objects are rechecked.
+        let mut audio_request = req.clone();
+        audio_request.candidate_context = None;
+        if let Some(media) = audio_request.continuous_media.as_mut() {
+            media.role = crate::transcode::ContinuousMediaRole::SharedAudio;
+            media.autonomous_companion = None;
+            media.companion_catalog = None;
+            media.companion_context = None;
+            media.family_descriptor = None;
+        }
+        let audio_rendition = match prepared.soundtrack.as_ref() {
+            Some(soundtrack) => {
+                let attachment = self
+                    .resolve_rendition(
+                        &mut VodRecipeRequest {
+                            measured_candidate: None,
+                            retained_capture: RetainedOutputCapture::New,
+                            companion: None,
+                            request: &audio_request,
+                            encoding: Some(Arc::clone(soundtrack)),
+                            soundtrack: None,
+                        },
+                        file,
+                        settings,
+                        fences.viewer.as_ref(),
+                        None,
+                    )
+                    .await?
+                    .0;
+                let rendition = Arc::clone(&attachment.rendition);
+                drop(attachment);
+                Some(rendition)
+            }
+            None => None,
+        };
         let (attachment, incoming_logical) = self
             .resolve_rendition(&mut prepared, file, settings, fences.viewer.as_ref(), None)
             .await?;
         let rendition = Arc::clone(&attachment.rendition);
+        drop(attachment);
+        let mut media = vec![Arc::clone(&rendition)];
+        if let Some(audio) = audio_rendition.as_ref() {
+            media.push(Arc::clone(audio));
+        }
+        if let Some(companion) = companion_rendition.as_ref() {
+            media.push(Arc::clone(companion));
+        }
+        media.sort_unstable_by(|a, b| a.key.cmp(&b.key));
+        if media.windows(2).any(|pair| pair[0].key == pair[1].key) {
+            return Err(crate::transcode::vod_refusal_error(
+                "vod_family_invalid",
+                "autonomous media roles alias one immutable recipe",
+            ));
+        }
+        let mut build_guards = Vec::with_capacity(media.len());
+        for child in &media {
+            build_guards.push(
+                self.shared
+                    .rendition_build_gate(&child.key)
+                    .lock_owned()
+                    .await,
+            );
+        }
+        {
+            let cached = self.shared.renditions.lock().await;
+            if media.iter().any(|child| {
+                child.closed.load(Acquire)
+                    || !cached
+                        .get(&child.key)
+                        .is_some_and(|current| Arc::ptr_eq(current, child))
+                    || child
+                        .source
+                        .as_ref()
+                        .is_some_and(|source| !source.unchanged())
+            }) {
+                return Err(crate::transcode::vod_refusal_error(
+                    "vod_source_rescan_required",
+                    "continuous preparation changed before attachment",
+                ));
+            }
+        }
+        let mut private_media = if continuous {
+            let permits = Self::reserve_media_group(&media, None).await?;
+            media
+                .into_iter()
+                .zip(permits)
+                .map(|(child, permit)| ParentMediaReader {
+                    controlled: req
+                        .continuous_media
+                        .as_ref()
+                        .is_some_and(|media| media.controlled)
+                        && child
+                            .recipe
+                            .encoding
+                            .as_ref()
+                            .is_some_and(|encoding| encoding.shared_audio.is_none()),
+                    candidate_id: if Arc::ptr_eq(&child, &rendition) {
+                        req.candidate_context
+                            .as_ref()
+                            .map(|context| context.candidate_id)
+                    } else if companion_rendition
+                        .as_ref()
+                        .is_some_and(|companion| Arc::ptr_eq(&child, companion))
+                    {
+                        req.continuous_media
+                            .as_ref()
+                            .and_then(|media| media.autonomous_companion)
+                    } else {
+                        None
+                    },
+                    reader_id: uuid::Uuid::new_v4().to_string(),
+                    rendition: child,
+                    _reservation: Some(permit),
+                })
+                .collect::<Vec<_>>()
+        } else {
+            Vec::new()
+        };
 
         let start_entry = entry_containing(&rendition.plan, req.start_seconds);
         let retained_output = match prepared.retained_capture {
@@ -805,6 +1141,9 @@ impl VodServe {
             RetainedOutputCapture::Restore(None) | RetainedOutputCapture::ReceiverUnavailable => {
                 None
             }
+            // A continuous parent serves role-split private children; no
+            // complete retained output can stand in for that reader graph.
+            RetainedOutputCapture::New if continuous => None,
             RetainedOutputCapture::New => {
                 let existing = rendition
                     .output_measurement
@@ -848,7 +1187,7 @@ impl VodServe {
             None
         };
         let lifecycle = self.shared.session_lifecycle(&session_id);
-        let _lifecycle = lifecycle.lock().await;
+        let lifecycle_guard = Arc::clone(&lifecycle).lock_owned().await;
         let duration_ms = plan_duration_ms(&rendition.plan);
         if retained_output.as_ref().is_some_and(|artifact| {
             self.shared
@@ -861,7 +1200,8 @@ impl VodServe {
                 "the exact artifact changed before attachment",
             ));
         }
-        let replacement = Session {
+        let mut replacement = Session {
+            children: Vec::new(),
             passive_grant: passive_grant.clone(),
             retained_output,
             rendition: Some(Arc::clone(&rendition)),
@@ -946,6 +1286,26 @@ impl VodServe {
         // stall every other reader of the same rendition — so what crosses the
         // drop is the flight's identity, not the decision to stop it.
         let mut obsolete_window_flight: Option<u64> = None;
+        let mut audio_readers = match audio_rendition.as_ref() {
+            Some(audio)
+                if !previous_rendition
+                    .as_ref()
+                    .is_some_and(|previous| Arc::ptr_eq(previous, audio)) =>
+            {
+                Some(audio.readers.lock().await)
+            }
+            _ => None,
+        };
+        let mut companion_readers = match companion_rendition.as_ref() {
+            Some(companion)
+                if !previous_rendition
+                    .as_ref()
+                    .is_some_and(|previous| Arc::ptr_eq(previous, companion)) =>
+            {
+                Some(companion.readers.lock().await)
+            }
+            _ => None,
+        };
         let mut replacement_readers = rendition.readers.lock().await;
         let _serving_transition = if let Some(admission) = fences.serving_admission.as_ref() {
             Some(admission.commit_guard_before().await.ok_or_else(|| {
@@ -995,7 +1355,31 @@ impl VodServe {
             obsolete_window_flight = crate::subtitles::session_window_flight(&session_id);
         }
         rendition.revoke_preparation();
-        replacement_readers.insert(session_id.clone(), Reader::new(start_entry));
+        for child in &private_media {
+            let entry = media_entry_containing_ms(
+                &child.rendition.plan,
+                (req.start_seconds.max(0.0) * 1000.0) as i64,
+            );
+            if Arc::ptr_eq(&child.rendition, &rendition) {
+                replacement_readers.insert(child.reader_id.clone(), Reader::new(entry));
+            } else {
+                let readers = if companion_rendition
+                    .as_ref()
+                    .is_some_and(|companion| Arc::ptr_eq(companion, &child.rendition))
+                {
+                    companion_readers.as_mut().or(previous_readers.as_mut())
+                } else {
+                    audio_readers.as_mut().or(previous_readers.as_mut())
+                }
+                .expect("private media reader guard");
+                readers.insert(child.reader_id.clone(), Reader::new(entry));
+                *child.rendition.dormant_since.lock().expect("dormant lock") = None;
+            }
+        }
+        replacement.children = std::mem::take(&mut private_media);
+        let mut authority = Reader::new(start_entry);
+        authority.authority_only = replacement.children.iter().any(|child| child.controlled);
+        replacement_readers.insert(session_id.clone(), authority);
         *rendition.dormant_since.lock().expect("dormant lock") = None;
         // A live entry with this id is replaced rather than refused, and the
         // replacement carries a fresh `ControlState` — so a staged M6
@@ -1007,6 +1391,10 @@ impl VodServe {
         if let Some(outgoing) = sessions.get(&session_id) {
             outgoing.abort_staged_preparation();
         }
+        let outgoing_children = sessions
+            .get_mut(&session_id)
+            .map(|session| std::mem::take(&mut session.children))
+            .unwrap_or_default();
         sessions.insert(session_id.clone(), replacement);
         {
             let mut observation = self
@@ -1023,21 +1411,57 @@ impl VodServe {
         // would let one viewer's recipe change stall every other reader of the
         // rendition they left or the one they joined.
         drop(replacement_readers);
+        drop(audio_readers);
+        drop(companion_readers);
         drop(previous_readers);
         drop(_serving_transition);
         drop(sessions);
-        if let Some(flight) = obsolete_window_flight {
-            crate::subtitles::abandon_session_window(&session_id, flight).await;
+        let cleanup_id = session_id.clone();
+        let shared = Arc::clone(&self.shared);
+        let file_id = file.id;
+        let file_height = file.height.unwrap_or(0);
+        let kind = req.kind;
+        // Wake the committed reader graph before any asynchronous cleanup.
+        // Cancellation cannot strand an attached parent without a driver kick.
+        rendition.kick();
+        if let Some(audio) = audio_rendition.as_ref() {
+            audio.kick();
         }
-        self.emit_lifecycle(
-            &session_id,
-            file.id,
-            file.height.unwrap_or(0),
-            req.kind,
-            "session_start",
-            None,
-        );
-        drop(_lifecycle);
+        if let Some(companion) = companion_rendition.as_ref() {
+            companion.kick();
+        }
+        if outgoing_children.is_empty() && obsolete_window_flight.is_none() {
+            self.emit_lifecycle(
+                &cleanup_id,
+                file_id,
+                file_height,
+                kind,
+                "session_start",
+                None,
+            );
+            drop(lifecycle_guard);
+        } else {
+            let cleanup = spawn_cancellation_independent(async move {
+                let _lifecycle = lifecycle_guard;
+                // Child identities belong to the outgoing incarnation. Retiring
+                // them cannot fence parent captions or remove a new private reader.
+                for child in outgoing_children {
+                    child.detach(&shared.pool).await;
+                }
+                if let Some(flight) = obsolete_window_flight {
+                    crate::subtitles::abandon_session_window(&cleanup_id, flight).await;
+                }
+                VodServe { shared }.emit_lifecycle(
+                    &cleanup_id,
+                    file_id,
+                    file_height,
+                    kind,
+                    "session_start",
+                    None,
+                );
+            });
+            let _ = cleanup.await;
+        }
         // The reader graph and registry are now one committed attachment.
         // Release does not wait for producer wakeup, tracing or lifecycle
         // event publication, and can tombstone this exact incarnation before
@@ -1046,8 +1470,7 @@ impl VodServe {
         // Reader graph and registry now own the exact handle. Releasing the
         // per-key build gate before this point would let a dormant purge
         // remove it in the lookup/attach gap.
-        drop(attachment);
-        rendition.kick();
+        drop(build_guards);
         tracing::info!(
             target: "plurxd::vodserve",
             session = %session_log_id(&session_id),

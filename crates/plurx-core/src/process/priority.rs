@@ -133,7 +133,7 @@ impl ChildWork {
 }
 
 /// Register the class's priority on `command` so the child applies it to
-/// itself before `exec`.
+/// itself before `exec`, with Linux parent-death ownership installed first.
 ///
 /// [`super::spawn_job_owned`] calls this for every spawn. A caller that
 /// registers its own `pre_exec` which does not return (the decode-fact
@@ -150,14 +150,27 @@ pub(crate) fn apply_policy(command: &mut std::process::Command, policy: ChildPol
         use std::os::unix::process::CommandExt;
         let nice = policy.nice;
         #[cfg(target_os = "linux")]
+        let parent = unsafe { libc::getpid() };
+        #[cfg(target_os = "linux")]
         let ioprio = linux::ioprio_value(policy.io_level);
         #[cfg(target_os = "linux")]
         let oom = linux::OomBytes::new(policy.oom_score_adj);
         // SAFETY: the closure makes raw syscalls on values computed above,
         // before the fork: no allocation, no lock, no logging. Each result is
-        // ignored so a failure cannot turn into a failed spawn.
+        // ignored for priority. Linux lifetime setup must succeed before exec.
         unsafe {
             command.pre_exec(move || {
+                #[cfg(target_os = "linux")]
+                {
+                    if libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGKILL) == -1 {
+                        return Err(io::Error::last_os_error());
+                    }
+                    // The owner can die between fork and prctl: no signal is
+                    // delivered retroactively, so never exec an orphan.
+                    if libc::getppid() != parent {
+                        libc::_exit(127);
+                    }
+                }
                 let current = libc::getpriority(libc::PRIO_PROCESS, 0);
                 if current < nice {
                     libc::setpriority(libc::PRIO_PROCESS, 0, nice);
@@ -690,6 +703,31 @@ mod tests {
         if std::env::var(CHILD_MODE).as_deref() == Ok("sleep") {
             std::thread::sleep(Duration::from_secs(120));
         }
+        #[cfg(target_os = "linux")]
+        if std::env::var(CHILD_MODE).as_deref() == Ok("owner") {
+            use std::io::Write;
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("owner runtime");
+            runtime.block_on(async {
+                let handle = tokio::runtime::Handle::current();
+                // Deliberately retire the caller thread while the child is
+                // still owned: PDEATHSIG must follow the persistent spawner.
+                let (mut child, _job) = std::thread::spawn(move || {
+                    let _runtime = handle.enter();
+                    spawn_job_owned(&mut sleeper(), ChildWork::background("owner death test"))
+                        .expect("owned child")
+                })
+                .join()
+                .expect("launch thread");
+                let pid = child.id().expect("child pid");
+                assert_eq!(unsafe { libc::kill(pid as libc::pid_t, libc::SIGSTOP) }, 0);
+                println!("OWNED-CHILD:{pid}");
+                std::io::stdout().flush().expect("publish child pid");
+                let _ = child.wait().await;
+            });
+        }
     }
 
     #[cfg(target_os = "linux")]
@@ -889,6 +927,80 @@ mod tests {
                 "apply before the exec closure: {apply_first}"
             );
         }
+    }
+
+    /// A paused child outlives its temporary launching caller while the
+    /// daemon is healthy, but cannot survive the daemon's abrupt death.
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn a_stopped_child_survives_its_launch_caller_but_not_its_owner() {
+        use tokio::io::{AsyncBufReadExt, BufReader};
+
+        let mut command = sleeper();
+        command.env(CHILD_MODE, "owner").stdout(Stdio::piped());
+        let (mut owner, _job) =
+            spawn_job_owned(&mut command, ChildWork::background("owner fixture"))
+                .expect("owner process");
+        let mut lines = BufReader::new(owner.stdout.take().expect("owner stdout")).lines();
+        let pid = tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                let line = lines
+                    .next_line()
+                    .await
+                    .expect("owner line")
+                    .expect("child pid line");
+                if let Some(pid) = line.strip_prefix("OWNED-CHILD:") {
+                    break pid.parse::<u32>().expect("numeric child pid");
+                }
+            }
+        })
+        .await
+        .expect("owner publishes child");
+        let path = format!("/proc/{pid}/stat");
+        let state_and_birth = |stat: &str| {
+            let fields = stat
+                .rsplit_once(')')
+                .expect("stat comm")
+                .1
+                .split_whitespace()
+                .collect::<Vec<_>>();
+            (fields[0].to_owned(), fields[19].to_owned())
+        };
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        let (state, birth) =
+            state_and_birth(&std::fs::read_to_string(&path).expect("healthy owned child"));
+        assert_eq!(
+            state, "T",
+            "the stopped child survives the retired caller thread"
+        );
+        owner.start_kill().expect("abrupt owner kill");
+        owner.wait().await.expect("reap owner");
+        let retired = tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                match std::fs::read_to_string(&path) {
+                    Ok(stat) => {
+                        let (state, current_birth) = state_and_birth(&stat);
+                        if current_birth != birth || state == "Z" {
+                            break;
+                        }
+                    }
+                    Err(error) if error.kind() == io::ErrorKind::NotFound => break,
+                    Err(error) => panic!("read child stat: {error}"),
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await;
+        if retired.is_err() {
+            if let Ok(stat) = std::fs::read_to_string(&path) {
+                if state_and_birth(&stat).1 == birth {
+                    unsafe {
+                        libc::kill(pid as libc::pid_t, libc::SIGKILL);
+                    }
+                }
+            }
+        }
+        retired.expect("even a stopped child exits after owner death");
     }
 
     #[cfg(target_os = "linux")]

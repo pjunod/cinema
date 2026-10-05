@@ -957,7 +957,17 @@
                 "sess-a",
             )
             .expect("a parked request on the rendition being left");
-        assert_eq!(serve.shared.pool.demands(&first.key).len(), 1);
+        let private_id = uuid::Uuid::new_v4().to_string();
+        first.attach_reader(&private_id, 0).await;
+        serve.shared.sessions.lock().await.get_mut("sess-a").expect("parent").children.push(
+            ParentMediaReader { controlled: false, candidate_id: None,
+                reader_id: private_id.clone(), rendition: Arc::clone(&first), _reservation: None,
+            },
+        );
+        let _private_wait = serve.shared.pool.register(
+            WaitKey { rendition: first.key.clone(), index: 42 }, &private_id,
+        ).expect("private demand on the outgoing attachment");
+        assert_eq!(serve.shared.pool.demands(&first.key).len(), 2);
 
         // Same session, a different recipe: a different rendition key, and the
         // reader moves to it.
@@ -994,10 +1004,170 @@
             "the fixture must actually move the viewer to another rendition"
         );
 
+        assert!(!first.readers.lock().await.contains_key(&private_id));
         assert!(
             serve.shared.pool.demands(&first.key).is_empty(),
             "the request left behind goes with the reader that made it"
         );
+    }
+
+    #[tokio::test]
+    async fn private_media_response_fences_rebinding_and_preserves_parent_frontier() {
+        let base = crate::test_tempdir().expect("base");
+        let serve = bare_serve(base.path());
+        let root = synthetic_rendition(&base.path().join("root")).await;
+        let mut child = synthetic_rendition(&base.path().join("child")).await;
+        Arc::get_mut(&mut child).expect("exclusive child fixture").key = "private-rendition".into();
+        let parent = uuid::Uuid::new_v4().to_string();
+        let other = uuid::Uuid::new_v4().to_string();
+        let private_id = uuid::Uuid::new_v4().to_string();
+        insert_control_session(&serve, &parent, Arc::clone(&root), Instant::now()).await;
+        insert_control_session(&serve, &other, Arc::clone(&root), Instant::now()).await;
+        child.attach_reader(&private_id, 0).await;
+        serve.shared.sessions.lock().await.get_mut(&parent).expect("parent").children.push(
+            ParentMediaReader { controlled: false, candidate_id: None, reader_id: private_id.clone(), rendition: Arc::clone(&child), _reservation: None },
+        );
+        let publication = serve.session_media_rendition(&parent, Some(&child.key)).await.expect("parent lookup");
+        assert!(publication.result.expect("live lookup").is_some());
+        let owner = publication.owner;
+        assert!(serve.response_owner_is_live(&parent, &owner).await);
+        assert!(serve.commit_resolved_media(&parent, &owner, Some(2)).await);
+        assert_eq!(child.readers.lock().await[&private_id].last_served, Some(2));
+        assert_eq!(root.readers.lock().await[&parent].last_served, None);
+        assert!(serve.session_media_rendition(&other, Some(&child.key)).await
+            .expect("other parent").result.expect("lookup").is_none(), "a shared cache key grants no read access");
+        let old_children = std::mem::take(&mut serve.shared.sessions.lock().await.get_mut(&parent).expect("parent").children);
+        for old in old_children { old.detach(&serve.shared.pool).await; }
+        let next_id = uuid::Uuid::new_v4().to_string();
+        child.attach_reader(&next_id, 0).await;
+        let touched = {
+            let mut sessions = serve.shared.sessions.lock().await;
+            let session = sessions.get_mut(&parent).expect("parent");
+            session.children.push(ParentMediaReader { controlled: false, candidate_id: None, reader_id: next_id.clone(), rendition: Arc::clone(&child), _reservation: None });
+            let touched = *session.last_touch.lock().expect("touch");
+            touched
+        };
+        assert!(!serve.response_owner_is_live(&parent, &owner).await);
+        assert!(!serve.response_status_owner_is_current(&parent, &owner).await);
+        assert!(!serve.commit_resolved_media(&parent, &owner, Some(3)).await);
+        assert_eq!(*serve.shared.sessions.lock().await[&parent].last_touch.lock().expect("touch"), touched);
+        assert_eq!(child.readers.lock().await[&next_id].last_served, None);
+        let current = serve.session_media_rendition(&parent, Some(&child.key)).await.expect("rebound reader");
+        assert!(serve.response_owner_is_live(&parent, &current.owner).await);
+        assert!(serve.commit_resolved_media(&parent, &current.owner, Some(4)).await);
+        assert_eq!(child.readers.lock().await[&next_id].last_served, Some(4));
+        assert_eq!(root.readers.lock().await[&parent].last_served, None);
+        assert!(serve.end(&parent, Terminal::Deleted).await);
+        assert!(serve.end(&other, Terminal::Deleted).await);
+    }
+
+    #[tokio::test]
+    async fn ending_a_parent_retires_its_private_media_readers_only() {
+        let base = crate::test_tempdir().expect("base");
+        let serve = bare_serve(base.path());
+        let rendition = synthetic_rendition(base.path()).await;
+        let parent = uuid::Uuid::new_v4().to_string();
+        let other = uuid::Uuid::new_v4().to_string();
+        let child_id = uuid::Uuid::new_v4().to_string();
+        insert_control_session(&serve, &parent, Arc::clone(&rendition), Instant::now()).await;
+        insert_control_session(&serve, &other, Arc::clone(&rendition), Instant::now()).await;
+        rendition.attach_reader(&child_id, 0).await;
+        serve.shared.sessions.lock().await.get_mut(&parent).expect("parent").children.push(
+            ParentMediaReader { controlled: false, candidate_id: None,
+                reader_id: child_id.clone(),
+                rendition: Arc::clone(&rendition),
+                _reservation: None,
+            },
+        );
+        let _child_wait = serve.shared.pool.register(
+            WaitKey { rendition: rendition.key.clone(), index: 30 }, &child_id,
+        ).expect("private child demand");
+        let _other_wait = serve.shared.pool.register(
+            WaitKey { rendition: rendition.key.clone(), index: 2 }, &other,
+        ).expect("another viewer's demand");
+        assert!(serve.end(&parent, Terminal::Deleted).await);
+        let readers = rendition.readers.lock().await;
+        assert!(!readers.contains_key(&parent));
+        assert!(!readers.contains_key(&child_id));
+        assert!(readers.contains_key(&other));
+        drop(readers);
+        let remaining = serve.shared.pool.demands(&rendition.key);
+        assert_eq!(remaining.len(), 1);
+        assert_eq!(remaining[0].session, other);
+        let sessions = serve.shared.sessions.lock().await;
+        assert!(sessions[&parent].children.is_empty());
+        assert!(sessions[&parent].rendition.is_none());
+        drop(sessions);
+        // Replaying End cannot retire a different parent's later private reader.
+        let next_child = uuid::Uuid::new_v4().to_string();
+        rendition.attach_reader(&next_child, 0).await;
+        serve.shared.sessions.lock().await.get_mut(&other).expect("other parent").children.push(
+            ParentMediaReader { controlled: false, candidate_id: None,
+                reader_id: next_child.clone(),
+                rendition: Arc::clone(&rendition),
+                _reservation: None,
+            },
+        );
+        assert!(serve.end(&parent, Terminal::Deleted).await);
+        assert!(rendition.readers.lock().await.contains_key(&next_child));
+        assert!(serve.end(&other, Terminal::Deleted).await);
+    }
+
+    #[tokio::test]
+    async fn cancelled_idle_reap_keeps_parent_gate_until_children_are_detached() {
+        let base = crate::test_tempdir().expect("base");
+        let serve = bare_serve(base.path());
+        let root = synthetic_rendition(&base.path().join("root")).await;
+        let mut child = synthetic_rendition(&base.path().join("child")).await;
+        Arc::get_mut(&mut child).expect("exclusive fixture").key = "private-child-rendition".into();
+        let parent = uuid::Uuid::new_v4().to_string();
+        let child_id = uuid::Uuid::new_v4().to_string();
+        insert_control_session(
+            &serve, &parent, Arc::clone(&root),
+            Instant::now() - SESSION_IDLE_TTL - Duration::from_secs(1),
+        ).await;
+        child.attach_reader(&child_id, 0).await;
+        let lifecycle = {
+            let mut sessions = serve.shared.sessions.lock().await;
+            let session = sessions.get_mut(&parent).expect("parent");
+            session.children.push(ParentMediaReader { controlled: false, candidate_id: None,
+                reader_id: child_id.clone(), rendition: Arc::clone(&child), _reservation: None,
+            });
+            Arc::clone(&session.lifecycle)
+        };
+        // Block actual child detach after the registry removal, then cancel
+        // maintain at precisely the old leak/resurrection race boundary.
+        let child_lock = child.readers.lock().await;
+        let maintenance = tokio::spawn({
+            let serve = Arc::clone(&serve);
+            async move { serve.maintain().await }
+        });
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while serve.shared.sessions.lock().await.contains_key(&parent) {
+                tokio::task::yield_now().await;
+            }
+        }).await.expect("registry removal");
+        maintenance.abort();
+        assert!(maintenance.await.expect_err("cancelled waiter").is_cancelled());
+        assert!(Arc::clone(&lifecycle).try_lock_owned().is_err());
+        let resurrection = tokio::spawn({
+            let serve = Arc::clone(&serve);
+            let root = Arc::clone(&root);
+            let parent = parent.clone();
+            async move {
+                let _lifecycle = lifecycle.lock_owned().await;
+                insert_control_session(&serve, &parent, root, Instant::now()).await;
+            }
+        });
+        tokio::task::yield_now().await;
+        assert!(!resurrection.is_finished());
+        drop(child_lock);
+        tokio::time::timeout(Duration::from_secs(5), resurrection)
+            .await.expect("detached cleanup completes").expect("resurrection");
+        assert!(!child.readers.lock().await.contains_key(&child_id));
+        assert!(root.readers.lock().await.contains_key(&parent));
+        assert!(serve.shared.sessions.lock().await.contains_key(&parent));
+        assert!(serve.end(&parent, Terminal::Deleted).await);
     }
 
     /// Reattachment also stops the subtitle window the viewer left behind, and
@@ -2455,6 +2625,7 @@
         serve.shared.sessions.lock().await.insert(
             "sess-a".into(),
             Session {
+                children: Vec::new(),
                 passive_grant: None,
                 rendition: Some(Arc::clone(&rendition)),
                 retained_output: None,
@@ -2592,6 +2763,7 @@
         serve.shared.sessions.lock().await.insert(
             "sess-a".into(),
             Session {
+                children: Vec::new(),
                 passive_grant: None,
                 rendition: Some(Arc::clone(&rendition)),
                 retained_output: None,
@@ -2681,4 +2853,20 @@
         assert_eq!(beyond.server_ready_seconds, Some(0.0));
         assert_eq!(beyond.server_next_ready_start_ms, None);
         assert_eq!(beyond.server_next_ready_end_ms, None);
+    }
+
+    #[test]
+    fn shared_soundtrack_restart_uses_its_own_interval_boundary() {
+        let audio = plurx_core::transcode::vod_shared_audio_plan(96_000, 160);
+        assert_eq!(video_entry_at_or_before(&audio, 40), 40);
+        assert_eq!(video_entry_at_or_before(&audio, 1), 1);
+        assert_eq!(video_entry_at_or_before(&audio, u32::MAX), 0);
+        let grid = plurx_core::transcode::VodFrameGrid::new(24_000, 1_001).expect("grid");
+        let mut muxed = grid.plan(8_000, 4_000_000);
+        let tail = muxed.entries.len() as u32;
+        let mut entry = muxed.entries.last().expect("last video").clone();
+        entry.index = tail;
+        entry.kind = PlanEntryKind::AudioTail;
+        muxed.entries.push(entry);
+        assert_eq!(video_entry_at_or_before(&muxed, tail), tail - 1);
     }

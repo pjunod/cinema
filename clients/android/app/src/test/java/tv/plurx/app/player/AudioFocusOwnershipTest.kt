@@ -59,7 +59,7 @@ class AudioFocusOwnershipTest {
         val rollback = body(controller, "private fun rollbackSwitchedReplacement(")
         val back = rollback.indexOf("handOverAudioFocus(failedSuccessor.asAudioFocusOwner(), predecessor.player.asAudioFocusOwner())")
         assertTrue(back >= 0, "a rollback hands focus back to the predecessor")
-        assertTrue(back < rollback.indexOf("predecessor.player.playWhenReady = predecessor.playWhenReady"))
+        assertTrue(back < rollback.indexOf("predecessor.player.playWhenReady = effectivePlayWhenReady()"))
     }
 
     @Test

@@ -504,7 +504,10 @@ class EvidenceWorkflowCase(unittest.TestCase):
         pipeline = android.split("private fun buildPipeline(", 1)[1].split("\n}\n", 1)[0]
         self.assertIn("val autoTransfers = AutoTransferEvidence(progressiveMediaOrigin)", pipeline)
         self.assertIn("transferListener = autoTransfers,", pipeline)
-        self.assertIn("return BuiltPlayer(player, progressiveMediaOrigin, autoTransfers)", pipeline)
+        self.assertIn(
+            "return BuiltPlayer(player, progressiveMediaOrigin, autoTransfers, continuousSources, continuousOutput)",
+            pipeline,
+        )
         self.assertIn("autoTransfers.complete(loadEventInfo, mediaLoadData)", pipeline)
         self.assertIn("mediaLoadData.dataType == C.DATA_TYPE_MEDIA", pipeline)
         self.assertIn("autoTransfers.discard(loadEventInfo.uri.toString())", pipeline)
@@ -541,7 +544,13 @@ class EvidenceWorkflowCase(unittest.TestCase):
         android_poll = android.split("private fun pollPreparedReplacement()", 1)[1].split(
             "private fun commitPreparedReplacement", 1
         )[0]
-        self.assertIn("parkSuccessor(hold.park(monotonicNowMs(), realPosition()), originMs, successor)", android_poll)
+        # The first park converts the wall-time lead at the incumbent's own
+        # rate; the default 1.0 would mis-place the rendezvous off 1x.
+        self.assertIn(
+            "parkSuccessor(hold.park(monotonicNowMs(), realPosition(), "
+            "player.playbackParameters.speed.toDouble()), originMs, successor)",
+            android_poll,
+        )
         self.assertIn("successor.seekTo(successorAttachPositionMs", android_poll)
         self.assertIn("val restored = rollbackSwitchedReplacement()", android_poll)
         self.assertIn("failSwitchedReplacement()", android_poll)
@@ -568,7 +577,11 @@ class EvidenceWorkflowCase(unittest.TestCase):
         self.assertIn("player = predecessor.player", rollback)
         self.assertIn("preparedRollbackReopen", rollback)
         self.assertIn("predecessor.player.playbackParameters", rollback)
-        self.assertIn("predecessor.player.playWhenReady", rollback)
+        self.assertIn("predecessor.player.volume = failedSuccessor.volume", rollback)
+        self.assertIn("predecessor.player.playbackParameters = failedSuccessor.playbackParameters", rollback)
+        self.assertIn("predecessor.player.playWhenReady = effectivePlayWhenReady()", rollback)
+        for stale in ("predecessor.volume", "predecessor.playbackParameters", "predecessor.playWhenReady"):
+            self.assertNotIn(stale, rollback)
         commit = android.split("private fun commitPreparedReplacement", 1)[1].split(
             "fun collectRetiredPlayer()", 1
         )[0]
@@ -577,9 +590,15 @@ class EvidenceWorkflowCase(unittest.TestCase):
         self.assertIn("PREPARED_ALIGNMENT_SLACK_MS", commit)
         release = android.split("fun release()", 1)[1].split("fun switchAudio", 1)[0]
         self.assertIn(
-            "endPlaybackControl(settling) { endingSession?.let(vm::endHlsSession) }",
+            "endPlaybackControl(settling) { endingSession?.let(::releaseOwnedSession) }",
             release,
         )
+        # A continuous session is ended by the attachment that owns it; every
+        # other session still reaches the server's end after the final exchange.
+        owned = android.split("private fun releaseOwnedSession(id: String)", 1)[1].split(
+            "private suspend fun", 1
+        )[0]
+        self.assertIn("} else vm.endHlsSession(id)", owned)
         self.assertNotIn("sessionId?.let { vm.endHlsSession(it) }", release)
         session = self.read(
             "clients/android/app/src/main/java/tv/plurx/app/player/PlaybackControlSession.kt"

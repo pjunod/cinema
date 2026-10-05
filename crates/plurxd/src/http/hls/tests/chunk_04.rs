@@ -27,6 +27,9 @@
             Some(&staged_source_file()),
             AcceptedAsk {
                 prepared_proof: None,
+                planning_registration: None,
+                quality_intent: None,
+                planning_cancellation: None,
                 film_time_ms: RESUME_ACCEPTED_PLAYHEAD_MS,
                 desired_digest: None,
             },
@@ -337,7 +340,8 @@
     ) -> plurx_core::domain::MediaSessionPreparation {
         let staged_session_id = uuid::Uuid::new_v4().to_string();
         let staged_request = crate::transcode::SessionRequest {
-            quality_catalog: None,
+            continuous_media: None,
+quality_catalog: None,
             candidate_context: None,
             vod_only: false,
             passive_vod: false,
@@ -376,6 +380,7 @@
         };
         let now_ms = unix_ms();
         plurx_core::domain::MediaSessionPreparation {
+            quality_cancellation_key: None,
             expected_desired_revision: None,
             incarnation_id: staged_incarnation_id.to_owned(),
             session_id: staged_session_id,
@@ -458,7 +463,8 @@
         let session_id = uuid::Uuid::new_v4().to_string();
         let incarnation_id = uuid::Uuid::new_v4().to_string();
         let request = crate::transcode::SessionRequest {
-            quality_catalog: None,
+            continuous_media: None,
+quality_catalog: None,
             candidate_context: None,
             vod_only: false,
             passive_vod: false,
@@ -560,6 +566,57 @@
             None,
         )
         .await
+    }
+
+    #[tokio::test]
+    async fn terminal_successor_releases_armed_handoff_without_publication() {
+        let dir = crate::test_tempdir().expect("state dir");
+        let playback_id = unique_playback_id("terminal-handoff-successor");
+        let (fixture, session_id, mut successor) =
+            staging_fixture_for_playback(dir.path(), &playback_id).await;
+        successor.publication_ready_at_ms = unix_ms() + 60_000;
+        let authority = crate::serving_fence::ServingAuthority::always_ready();
+        let admitted = authority.admit().expect("serving generation");
+        let permits = std::sync::Arc::new(tokio::sync::Semaphore::new(1));
+        let permit = permits.clone().acquire_owned().await.expect("permit");
+        let state = fixture.state.clone();
+        let waiter = tokio::spawn(async move {
+            let _permit = permit;
+            settle_armed_activation_handoff(
+                &state,
+                uuid::Uuid::new_v4().to_string(),
+                successor,
+                authority,
+                admitted,
+            )
+            .await
+        });
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        assert!(!waiter.is_finished(), "an active successor must keep waiting");
+        assert_eq!(permits.available_permits(), 0);
+        fixture
+            .state
+            .store
+            .end_media_session(&session_id, "deleted", unix_ms())
+            .await
+            .expect("durable terminal successor");
+        assert!(tokio::time::timeout(std::time::Duration::from_secs(3), waiter)
+            .await
+            .expect("terminal successor must release promptly")
+            .expect("handoff task"));
+        assert_eq!(permits.available_permits(), 1);
+        let terminal = fixture
+            .state
+            .store
+            .media_session_route(&session_id)
+            .await
+            .expect("route lookup")
+            .expect("terminal route");
+        assert_eq!(terminal.state, "ended");
+        assert_eq!(
+            terminal.publication_ready_at_ms,
+            plurx_core::domain::MEDIA_SESSION_PUBLICATION_BLOCKED,
+        );
     }
 
     /// Wait for a settlement to have taken the successor's durable row.
@@ -756,17 +813,21 @@
             &route,
             &staged_predecessor_recipe(&route),
             &crate::transcode::SessionRequest {
+                continuous_media: None,
                 quality_catalog: None,
-            candidate_context: None,
-            vod_only: false,
-            passive_vod: false,
-            finite_bitrate_limit_bps: None,
+                candidate_context: None,
+                vod_only: false,
+                passive_vod: false,
+                finite_bitrate_limit_bps: None,
                 playback_id: playback_id.clone(),
                 ..staged_candidate_request()
             },
             Some(&staged_source_file()),
             AcceptedAsk {
                 prepared_proof: None,
+                planning_registration: None,
+                quality_intent: None,
+                planning_cancellation: None,
                 film_time_ms: STAGED_ACCEPTED_FILM_TIME_MS,
                 desired_digest: None,
             },
@@ -833,17 +894,21 @@
             &route,
             &staged_predecessor_recipe(&route),
             &crate::transcode::SessionRequest {
+                continuous_media: None,
                 quality_catalog: None,
-            candidate_context: None,
-            vod_only: false,
-            passive_vod: false,
-            finite_bitrate_limit_bps: None,
+                candidate_context: None,
+                vod_only: false,
+                passive_vod: false,
+                finite_bitrate_limit_bps: None,
                 playback_id: ending_playback.clone(),
                 ..staged_candidate_request()
             },
             Some(&staged_source_file()),
             AcceptedAsk {
                 prepared_proof: None,
+                planning_registration: None,
+                quality_intent: None,
+                planning_cancellation: None,
                 film_time_ms: STAGED_ACCEPTED_FILM_TIME_MS,
                 desired_digest: None,
             },
@@ -1078,7 +1143,8 @@
         let staging_session = session_id.clone();
         let staging_route = route.clone();
         let candidate = crate::transcode::SessionRequest {
-            quality_catalog: None,
+            continuous_media: None,
+quality_catalog: None,
             candidate_context: None,
             vod_only: false,
             passive_vod: false,
@@ -1099,6 +1165,9 @@
                 PreparationPurpose::SelectionChange,
                 AcceptedAsk {
                     prepared_proof: None,
+                    planning_registration: None,
+                    quality_intent: None,
+                    planning_cancellation: None,
                     film_time_ms: STAGED_ACCEPTED_FILM_TIME_MS,
                     desired_digest: Some("the-first-ask".to_owned()),
                 },
@@ -1275,17 +1344,21 @@
             &route,
             &staged_predecessor_recipe(&route),
             &crate::transcode::SessionRequest {
+                continuous_media: None,
                 quality_catalog: None,
-            candidate_context: None,
-            vod_only: false,
-            passive_vod: false,
-            finite_bitrate_limit_bps: None,
+                candidate_context: None,
+                vod_only: false,
+                passive_vod: false,
+                finite_bitrate_limit_bps: None,
                 playback_id: playback_id.clone(),
                 ..staged_candidate_request()
             },
             Some(&staged_source_file()),
             AcceptedAsk {
                 prepared_proof: None,
+                planning_registration: None,
+                quality_intent: None,
+                planning_cancellation: None,
                 film_time_ms: STAGED_ACCEPTED_FILM_TIME_MS,
                 desired_digest: None,
             },
@@ -1349,6 +1422,25 @@
             control_start_response(&current).is_some(),
             "and it is still usable: without a bootstrap its next exchange is a 404",
         );
+    }
+
+    #[tokio::test]
+    async fn incumbent_wait_cancels_planning_without_cancelling_a_later_ask() {
+        let playback_id = unique_playback_id("incumbent-wait-planning");
+        let planning = PendingCandidateGuard::begin(&playback_id, "optional-target");
+        cancel_preparations_for_incumbent_wait(&playback_id);
+        assert!(planning.cancelled());
+        assert!(pending_candidate_for_playback(&playback_id).is_none());
+        assert!(pending_candidate_superseded(&playback_id, Some("optional-target")));
+
+        // A late destructor from cancelled planning must not evict a fresh
+        // explicit choice accepted after the incumbent recovered.
+        let later = PendingCandidateGuard::begin(&playback_id, "later-target");
+        drop(planning);
+        assert!(!later.cancelled());
+        assert_eq!(pending_candidate_for_playback(&playback_id).as_deref(), Some("later-target"));
+        drop(later);
+        assert!(pending_candidate_for_playback(&playback_id).is_none());
     }
 
     /// A plain create is a supersession too.
@@ -1439,7 +1531,8 @@
         let staging_session = session_id.clone();
         let staging_route = route.clone();
         let candidate = crate::transcode::SessionRequest {
-            quality_catalog: None,
+            continuous_media: None,
+quality_catalog: None,
             candidate_context: None,
             vod_only: false,
             passive_vod: false,
@@ -1460,6 +1553,9 @@
                 PreparationPurpose::SelectionChange,
                 AcceptedAsk {
                     prepared_proof: None,
+                    planning_registration: None,
+                    quality_intent: None,
+                    planning_cancellation: None,
                     film_time_ms: STAGED_ACCEPTED_FILM_TIME_MS,
                     desired_digest: None,
                 },
@@ -1474,6 +1570,105 @@
         cancel_preparations_for_superseded_predecessor(&playback_id, None);
         staging.await.expect("the staging task finished");
         drop(pending);
+
+        assert!(
+            !has_active_preparation_for_ask(&playback_id, "register-window-digest"),
+            "the successor registered in that window must not be left running",
+        );
+        assert!(
+            fixture
+                .state
+                .store
+                .staged_media_session_for_playback(route.user_id, &playback_id)
+                .await
+                .expect("ledger read")
+                .is_none(),
+            "and it must never have been reserved, let alone staged",
+        );
+        let superseded_after = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            loop {
+                let now = cancelled_total("predecessor_superseded");
+                if now > superseded_before {
+                    break now;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("the post-registration read settled the successor as a supersession");
+        assert!(superseded_after > superseded_before);
+        assert_eq!(
+            cancelled_total("ownership_cancelled"),
+            ownership_before,
+            "the supersession must be what tore it down, not a reservation guard \
+             dropping after it had already gone on to reserve and prime",
+        );
+    }
+
+    /// Retrying the same selection creates a new planning owner. A digest
+    /// comparison cannot distinguish it from the older cancelled candidate.
+    #[tokio::test]
+    async fn same_selection_retry_cannot_revive_cancelled_planning_at_registration() {
+        let dir = crate::test_tempdir().expect("state dir");
+        let playback_id = unique_playback_id("preparation-register-same-selection");
+        let (fixture, session_id, route) =
+            staging_fixture_for_playback(dir.path(), &playback_id).await;
+        fixture
+            .state
+            .transcode
+            .vod_for_test()
+            .install_http_test_session(&session_id, staged_source_file(), dir.path())
+            .await;
+
+        // The marker a real candidate would be holding at this point.
+        let pending = PendingCandidateGuard::begin(&playback_id, "register-window-digest");
+        delay_preparation_registration(&fixture.state, &playback_id, std::time::Duration::from_millis(800));
+
+        let superseded_before = cancelled_total("predecessor_superseded");
+        let ownership_before = cancelled_total("ownership_cancelled");
+        let state = fixture.state.clone();
+        let staging_session = session_id.clone();
+        let staging_route = route.clone();
+        let candidate = crate::transcode::SessionRequest {
+            continuous_media: None,
+            candidate_context: None,
+            playback_id: playback_id.clone(),
+            ..staged_candidate_request()
+        };
+        let predecessor_recipe = staged_predecessor_recipe(&route);
+        let planning_cancellation = pending.cancellation_token();
+        let staging = tokio::spawn(async move {
+            stage_prepared_successor_with_prime(
+                &state,
+                &staging_session,
+                &staging_route,
+                &predecessor_recipe,
+                &candidate,
+                Some(&staged_source_file()),
+                &state.node_id,
+                PreparationPurpose::SelectionChange,
+                AcceptedAsk {
+                    prepared_proof: None,
+                    planning_registration: None,
+                    quality_intent: None,
+                    planning_cancellation: Some(planning_cancellation),
+                    film_time_ms: STAGED_ACCEPTED_FILM_TIME_MS,
+                    desired_digest: Some("register-window-digest".to_owned()),
+                },
+                true,
+            )
+            .await;
+        });
+
+        // Inside the parked window: after the task's last await, before it
+        // registers. The real edge, not a hand-written cancellation.
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+        let newer = PendingCandidateGuard::begin(&playback_id, "register-window-digest");
+        assert!(pending.cancelled());
+        assert!(!newer.cancelled());
+        staging.await.expect("the staging task finished");
+        drop(pending);
+        assert!(!newer.cancelled());
 
         assert!(
             !has_active_preparation_for_ask(&playback_id, "register-window-digest"),
@@ -1848,7 +2043,8 @@
 
     fn staged_candidate_request() -> crate::transcode::SessionRequest {
         crate::transcode::SessionRequest {
-            quality_catalog: None,
+            continuous_media: None,
+quality_catalog: None,
             candidate_context: None,
             vod_only: false,
             passive_vod: false,
@@ -2547,4 +2743,46 @@
             .find(|entry| entry.message.contains("HLS playlist request refused"))
             .expect("the refusal is logged");
         assert_eq!(refused.target, "plurxd::http::hls");
+    }
+
+
+    #[tokio::test]
+    async fn continuous_family_quality_does_not_stage_a_legacy_successor() {
+        let dir = crate::test_tempdir().expect("state dir");
+        let playback_id = unique_playback_id("continuous-single-owner");
+        let (fixture, _, mut route) = staging_fixture_for_playback(dir.path(), &playback_id).await;
+        fixture.set_delivered_bps_for_test(10_000_000);
+        let mut recipe: RemoteStartRequest = serde_json::from_str(&route.recipe_json).expect("fixture recipe");
+        let video = [(720, 1280, "a", "1"), (1080, 1920, "b", "2")].map(|(height,width,digest,candidate)| {
+            serde_json::json!({"candidate_id":candidate.repeat(32),"rendition_id":digest.repeat(64),
+                "init_id":"c".repeat(64),"width":width,"height":height,"codec":"avc1.640032",
+                "timescale":24,"frame_ticks":1,"segment_ticks":48,"peak_bps":1000000,
+                "playlist":format!("video/{}/index.m3u8",digest.repeat(64))})
+        });
+        recipe.request.continuous_media = Some(Box::new(serde_json::from_value(serde_json::json!({
+            "version":1,"controlled":true,"family_generation":route.incarnation_id,
+            "role":"video","family_descriptor":{"version":1,"family_id":"d".repeat(64),
+                "mode":"controlled","master":"master.m3u8","video":video,"audio":null}
+        })).expect("continuous fixture media")));
+        route.recipe_json = serde_json::to_string(&recipe).expect("fixture recipe serialization");
+        let mut request = preparing_control_request(&route);
+        request.selection.audio_track = recipe.request.audio_index;
+        request.selection.audio_offset_ms = recipe.request.audio_offset_ms;
+        let opening = accepted_exchange(&fixture, &route, &request).await;
+        assert_eq!(preparation_state(&opening), "none");
+        pace_control_exchanges().await;
+        request.sequence = 2;
+        request.capabilities = None;
+        request.selection.quality = crate::playback_control::QualitySelection::Manual { height: 1080 };
+        let selected = accepted_exchange(&fixture, &route, &request).await;
+        assert_eq!(preparation_state(&selected), "none", "the rendition transaction owns this switch");
+        assert!(pending_candidate_for_playback(&playback_id).is_none());
+        assert!(fixture.state.store.staged_media_session_for_playback(route.user_id, &playback_id)
+            .await.expect("prepared ledger").is_none());
+        assert!(super::continuous_family_owns_quality(&recipe, &request.selection));
+        request.selection.quality = crate::playback_control::QualitySelection::Manual { height: 2160 };
+        assert!(!super::continuous_family_owns_quality(&recipe, &request.selection));
+        request.selection.quality = crate::playback_control::QualitySelection::Manual { height: 720 };
+        request.selection.audio_offset_ms += 100;
+        assert!(!super::continuous_family_owns_quality(&recipe, &request.selection));
     }

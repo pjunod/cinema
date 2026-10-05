@@ -25,9 +25,15 @@ pub(super) struct Recipe {
 /// One attached reader, in plan indexes.
 #[derive(Debug, Clone)]
 pub(super) struct Reader {
+    /// Parent authority or a cold controlled child retains control identity,
+    /// but creates neither background production nor an eviction window.
+    pub(super) authority_only: bool,
     /// Current playback anchor, owned by accepted control once available.
     /// Before control arrives, successful media commits are the fallback.
     pub(super) frontier: u32,
+    /// Optional target work stays at its append boundary while ordinary
+    /// control continues to report the incumbent playback anchor.
+    pub(super) preparation_frontier: Option<u32>,
     pub(super) control_sequence: Option<u64>,
     /// The last segment actually served. Telemetry only: the observed runway
     /// the status publishes is measured from here, while both the eviction
@@ -45,7 +51,9 @@ pub(super) struct Reader {
 impl Reader {
     pub(super) fn new(frontier: u32) -> Self {
         Self {
+            authority_only: false,
             frontier,
+            preparation_frontier: None,
             control_sequence: None,
             last_served: None,
             marker_prewarm: Arc::new(StdMutex::new(MarkerPrewarmLedger::default())),

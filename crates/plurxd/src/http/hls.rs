@@ -134,6 +134,10 @@ mod control;
 pub use control::*;
 // split: end hls-control
 
+#[path = "hls/quality_control.rs"]
+mod quality_control;
+pub(crate) use quality_control::*;
+
 // split: begin hls-preparation
 #[path = "hls/preparation.rs"]
 mod preparation;
@@ -198,3 +202,7 @@ pub use segment::*;
 #[path = "hls/tests.rs"]
 mod tests;
 // split: end hls-tests
+
+#[path = "hls/quality_schedule.rs"]
+mod quality_schedule;
+pub(crate) use quality_schedule::*;

@@ -716,6 +716,9 @@ pub struct AppState {
     /// C-07's façade census. Per state rather than process-global so each
     /// router counts only its own requests (see `http::PlexCensus`).
     pub(crate) plex_census: Arc<crate::http::PlexCensus>,
+    /// What became of this process's Jellyfin standard-port listener.
+    /// Advisory; Settings -> Developer reports it.
+    pub(crate) jellyfin_standard_port: Arc<crate::http::JellyfinStandardPortStatus>,
     /// Node-local network boundary for security-sensitive forwarding headers.
     pub(crate) trusted_proxies: Arc<Vec<ipnet::IpNet>>,
     /// Named Authority/BoundedReplica boundary for eligible catalogue reads.
@@ -1177,6 +1180,7 @@ impl AppState {
             login_throttle: Default::default(),
             password_capacity: Default::default(),
             plex_census: Default::default(),
+            jellyfin_standard_port: Default::default(),
             trusted_proxies: Arc::new(trusted_proxies),
             catalogue,
             replication,

@@ -42,7 +42,8 @@
             MediaSessionRequestClaim::Acquired { .. }
         ));
         let request = crate::transcode::SessionRequest {
-            quality_catalog: None,
+            continuous_media: None,
+quality_catalog: None,
             candidate_context: None,
             vod_only: false,
             passive_vod: false,
@@ -196,7 +197,8 @@
         let dir = crate::test_tempdir().expect("state dir");
         let fixture = HlsDeliveryFixture::publish(dir.path(), "cleanup-shape").await;
         let request = crate::transcode::SessionRequest {
-            quality_catalog: None,
+            continuous_media: None,
+quality_catalog: None,
             candidate_context: None,
             vod_only: false,
             passive_vod: false,

@@ -52,6 +52,7 @@
         serve.shared.sessions.lock().await.insert(
             "sess-a".into(),
             Session {
+                children: Vec::new(),
                 passive_grant: None,
                 rendition: Some(Arc::clone(&rendition)),
                 retained_output: None,
@@ -101,6 +102,7 @@
         serve.shared.sessions.lock().await.insert(
             "sess-a".into(),
             Session {
+                children: Vec::new(),
                 passive_grant: None,
                 rendition: Some(rendition),
                 rendition_key: replacement_key,
@@ -816,6 +818,22 @@
         let serve = local_serve(base.path().to_path_buf(), store);
         let rendition = synthetic_rendition(base.path()).await;
         insert_control_session(&serve, VIEWER, Arc::clone(&rendition), Instant::now()).await;
+        let mut soundtrack = synthetic_rendition(&base.path().join("soundtrack")).await;
+        let audio = Arc::get_mut(&mut soundtrack).expect("exclusive soundtrack");
+        audio.key = "parent-soundtrack".into();
+        audio.plan = plurx_core::transcode::vod_shared_audio_plan(plan_duration_ms(&rendition.plan), 128);
+        audio.timescale = audio.plan.timescale;
+        audio.manifest = Mutex::new(Manifest::new(audio.plan.clone()));
+        soundtrack.attach_reader("private-audio", 0).await;
+        rendition.attach_reader("private-root", 0).await;
+        {
+            let mut sessions = serve.shared.sessions.lock().await;
+            let session = sessions.get_mut(VIEWER).expect("parent");
+            session.children.push(ParentMediaReader { controlled: false, candidate_id: None, reader_id: "private-audio".into(),
+                rendition: Arc::clone(&soundtrack), _reservation: None });
+            session.children.push(ParentMediaReader { controlled: false, candidate_id: None, reader_id: "private-root".into(),
+                rendition: Arc::clone(&rendition), _reservation: None });
+        }
         let control = |sequence, snapshot| crate::playback_control::LocalControlRequest {
             session_id: VIEWER,
             generation: GENERATION,
@@ -859,6 +877,12 @@
             .await
             .expect("VOD session")
             .expect("accepted seek");
+        let forward_anchor = snapshot.buffer_anchor_ms();
+        let expected_audio = media_entry_containing_ms(&soundtrack.plan, forward_anchor);
+        assert!(expected_audio > 0, "AAC-only entries must advance beyond zero");
+        assert_eq!(soundtrack.readers.lock().await["private-audio"].frontier, expected_audio);
+        assert_eq!(soundtrack.readers.lock().await["private-audio"].control_sequence, Some(1));
+        assert_eq!(rendition.readers.lock().await["private-root"].frontier, 45);
         let position = Position {
             produced_through: None,
             positioned_at: None,
@@ -900,6 +924,16 @@
                 .expect("VOD session");
         }
         rewind.expect("accepted rewind");
+        let rewind_anchor = (rendition.plan.entry(3).expect("rewind").start_ticks * 1000
+            / u64::from(rendition.timescale)) as i64 + 1;
+        let expected_audio = media_entry_containing_ms(&soundtrack.plan, rewind_anchor);
+        let mut audio_readers = soundtrack.readers.lock().await;
+        audio_readers.get_mut("private-audio").expect("private reader").served(70);
+        assert_eq!(audio_readers["private-audio"].frontier, expected_audio,
+            "late soundtrack delivery cannot undo the parent seek");
+        assert_eq!(audio_readers["private-audio"].control_sequence, Some(2));
+        drop(audio_readers);
+        assert_eq!(rendition.readers.lock().await["private-root"].frontier, 3);
         drop(prefetch);
         let near_prefetch = serve
             .shared
@@ -1248,6 +1282,194 @@
             .expect("GET task")
             .expect("response file");
         assert_eq!(ready.len, 12);
+    }
+
+    #[test]
+    fn controlled_future_loading_retires_work_without_disposing_incumbent_bytes() {
+        use plurx_core::playback::continuous_quality::{QualityAttachment, QualityLedger, QualityState, QualityTransaction};
+        let identity = || uuid::Uuid::new_v4().to_string();
+        let mut ledger = QualityLedger::new(identity(),1,QualityAttachment {
+            client_instance_id: identity(), lifetime_id: "film".into(), attachment_id: identity(), family_id: "c".repeat(64),
+        }).expect("ledger");
+        let transaction = |intent_revision,target_rendition_id:String,state,first_presented_tick:Option<u64>| QualityTransaction {
+            transaction_id: identity(),intent_revision,target_rendition_id,state,
+            intent_superseded:false,cancel_requested:false,preparation:None,ready:vec![],reserved:vec![],appended:vec![],
+            ever_appended:first_presented_tick.is_some(),disposed:vec![],first_presented_tick,
+            first_presented_at_ms:first_presented_tick.map(|_| 1),
+        };
+        ledger.transactions.push(transaction(1,"a".repeat(64),QualityState::Presented,Some(0)));
+        ledger.transactions.push(transaction(2,"b".repeat(64),QualityState::Ready,None));
+        ledger.latest_intent_revision=2;
+        let active = |ledger:&QualityLedger| VodServe::controlled_video_demand(ledger).expect("active")
+            .into_iter().map(str::to_owned).collect::<Vec<_>>();
+        assert_eq!(active(&ledger),vec!["a".repeat(64),"b".repeat(64)]);
+        ledger.transactions[1].state=QualityState::Scheduled;
+        assert_eq!(active(&ledger),vec!["b".repeat(64)]);
+        assert_eq!(ledger.transactions[0].first_presented_tick,Some(0));
+        assert!(!ledger.transactions[0].cancel_requested);
+        ledger.transactions[1].cancel_requested=true;
+        assert_eq!(active(&ledger),vec!["a".repeat(64)]);
+        ledger.transactions[1].cancel_requested=false;
+        ledger.transactions[1].state=QualityState::Presented;
+        ledger.transactions[1].first_presented_tick=Some(48);
+        assert_eq!(active(&ledger),vec!["b".repeat(64)]);
+        ledger.transactions[1].state=QualityState::Disposed;
+        assert_eq!(active(&ledger),vec!["b".repeat(64)],"ordinary eviction does not retire wanted loading");
+    }
+
+    #[tokio::test]
+    async fn cold_controlled_readers_keep_authority_without_driving_shared_work() {
+        let base = crate::test_tempdir().expect("base");
+        let serve = bare_serve(base.path());
+        let rendition = synthetic_rendition(base.path()).await;
+        for (id,frontier) in [("parent",0),("cold",45),("other",3)] {
+            rendition.attach_reader(id,frontier).await;
+        }
+        {
+            let mut readers = rendition.readers.lock().await;
+            for id in ["parent","cold"] {
+                let reader = readers.get_mut(id).expect("authority");
+                reader.authority_only = true;
+                reader.accept_control(1,77);
+            }
+        }
+        let cold = serve.shared.pool.register(WaitKey {
+            rendition: rendition.key.clone(), index: 45,
+        }, "cold").expect("bounded cold request");
+        let active = serve.shared.pool.register(WaitKey {
+            rendition: rendition.key.clone(), index: 3,
+        }, "other").expect("other viewer");
+        let windows = rendition.reader_windows().await;
+        assert_eq!(windows.len(),1);
+        assert_eq!(windows[0].playhead,3);
+        {
+            let readers = rendition.readers.lock().await;
+            let manifest = rendition.manifest.lock().await;
+            let demands = playback_demands(&serve.shared.pool,&rendition,&readers,&manifest);
+            assert!(!demands.iter().any(|demand| demand.blocked_on == Some(45)));
+            assert!(demands.iter().any(|demand| demand.blocked_on == Some(3) && demand.foreground));
+            assert_eq!(readers["cold"].control_sequence,Some(1));
+            assert_eq!(readers["cold"].frontier,77);
+        }
+        {
+            let mut readers = rendition.readers.lock().await;
+            readers.get_mut("cold").expect("same cold identity").authority_only = false;
+            let manifest = rendition.manifest.lock().await;
+            let demands = playback_demands(&serve.shared.pool,&rendition,&readers,&manifest);
+            assert!(demands.iter().any(|demand| demand.blocked_on == Some(45)));
+            assert!(readers["parent"].authority_only);
+        }
+        assert_eq!(rendition.reader_windows().await.len(),2);
+        drop(cold);
+        drop(active);
+    }
+
+    #[tokio::test]
+    async fn admitted_controlled_target_moves_preparation_frontier_without_duplicate_credit() {
+        let base = crate::test_tempdir().expect("base");
+        let serve = bare_serve(base.path());
+        let rendition = synthetic_rendition(base.path()).await;
+        let parent = "already-admitted-parent";
+        insert_control_session(&serve, parent, Arc::clone(&rendition), Instant::now()).await;
+        rendition.attach_reader("target", 3).await;
+        let admissions = crate::admission::Admissions::new();
+        let estimate = crate::admission::TranscodeResourceEstimate {
+            hardware_slot: false, cpu_threads: 1, decoder_threads: Some(1),
+        };
+        let permit = admissions.try_admit_bundle(0, 1, &estimate, crate::admission::Priority::Speculative)
+            .expect("one retained credit");
+        serve.shared.sessions.lock().await.get_mut(parent).expect("parent").children.push(ParentMediaReader {
+            controlled: true, candidate_id: Some(plurx_core::playback::candidate::CandidateId([1;16])),
+            reader_id: "target".into(), rendition: Arc::clone(&rendition), _reservation: Some(permit.into()),
+        });
+        for frontier_ms in [4_000, 72_000] {
+            serve.admit_controlled_video_before(parent, &rendition.key, frontier_ms,
+                Instant::now() + Duration::from_secs(1)).await.expect("reuse admitted target");
+            let mut readers = rendition.readers.lock().await;
+            let target = readers.get_mut("target").expect("target");
+            target.accept_control(7, 11);
+            assert_eq!(target.preparation_frontier, Some(media_entry_containing_ms(&rendition.plan, frontier_ms)));
+            assert_eq!(target.frontier, 11, "the ordinary heartbeat remains independent");
+            assert!(!target.authority_only);
+            let manifest = rendition.manifest.lock().await;
+            assert!(playback_demands(&serve.shared.pool, &rendition, &readers, &manifest)
+                .iter().any(|demand| demand.frontier == media_entry_containing_ms(&rendition.plan, frontier_ms)));
+            assert_eq!(admissions.software_in_use(), 1, "reuse never reserves another permit");
+        }
+        serve.shared.sessions.lock().await.remove(parent);
+        assert_eq!(admissions.software_in_use(), 0, "the parent still owns and releases the credit");
+    }
+
+    #[tokio::test]
+    async fn controlled_preparation_frontier_survives_incumbent_control_before_wait_registration() {
+        let base = crate::test_tempdir().expect("base");
+        let serve = bare_serve(base.path());
+        let rendition = synthetic_rendition(base.path()).await;
+        rendition.attach_reader("target", 3).await;
+        let mut readers = rendition.readers.lock().await;
+        let target = readers.get_mut("target").expect("target");
+        target.preparation_frontier = Some(36);
+        target.accept_control(7, 11);
+        let manifest = rendition.manifest.lock().await;
+        let demands = playback_demands(&serve.shared.pool, &rendition, &readers, &manifest);
+        assert!(demands.iter().any(|demand| demand.frontier == 36 && demand.blocked_on == Some(36) && demand.foreground));
+        assert_eq!(readers["target"].frontier, 11, "ordinary control still owns playback position");
+        assert_eq!(readers["target"].control_sequence, Some(7));
+        readers.get_mut("target").expect("target").preparation_frontier = None;
+        let demands = playback_demands(&serve.shared.pool, &rendition, &readers, &manifest);
+        assert!(demands.iter().any(|demand| demand.frontier == 11));
+        assert!(!demands.iter().any(|demand| demand.frontier == 36));
+    }
+
+    #[tokio::test]
+    async fn admitted_preparation_outranks_its_stale_get_before_target_wait_registration() {
+        let base = crate::test_tempdir().expect("base");
+        let serve = bare_serve(base.path());
+        let rendition = synthetic_rendition(base.path()).await;
+        rendition.attach_reader("target", 7).await;
+        {
+            let mut readers = rendition.readers.lock().await;
+            let target = readers.get_mut("target").expect("target");
+            target.accept_control(1, 7);
+            target.preparation_frontier = Some(24);
+        }
+        let old = serve.shared.pool.register(WaitKey {
+            rendition: rendition.key.clone(), index: 7,
+        }, "target").expect("old GET admitted");
+        let position = Position {
+            produced_through: None, positioned_at: None,
+            seconds_per_segment: rendition.seconds_per_segment,
+            ahead_held: false, working_set: WorkingSet::default(),
+        };
+        {
+            let readers = rendition.readers.lock().await;
+            let manifest = rendition.manifest.lock().await;
+            let demands = playback_demands(&serve.shared.pool, &rendition, &readers, &manifest);
+            assert_eq!(decide(&manifest, &demands, position, &[]), Action::Reposition { to: 24 });
+            assert!(demands.iter().any(|demand| demand.blocked_on == Some(24) && demand.bounded_preparation));
+            let running = Position { positioned_at: Some(21), ..position };
+            assert_eq!(decide(&manifest, &demands, running, &[]), Action::Reposition { to: 24 },
+                "an already-running target cannot spend the copy horizon on old gaps");
+            assert!(demands.iter().any(|demand| demand.blocked_on == Some(7) && !demand.foreground), "the old obligation is retained");
+            assert_eq!(readers["target"].frontier, 7, "ordinary playback reporting does not move");
+        }
+        rendition.attach_reader("other-viewer", 3).await;
+        let other = serve.shared.pool.register(WaitKey {
+            rendition: rendition.key.clone(), index: 3,
+        }, "other-viewer").expect("foreground viewer admitted");
+        {
+            let readers = rendition.readers.lock().await;
+            let manifest = rendition.manifest.lock().await;
+            let demands = playback_demands(&serve.shared.pool, &rendition, &readers, &manifest);
+            assert_eq!(decide(&manifest, &demands, position, &[]), Action::Reposition { to: 3 }, "preparation does not displace another viewer's ordered GET");
+        }
+        drop(other);
+        rendition.readers.lock().await.get_mut("target").expect("target").preparation_frontier = None;
+        let readers = rendition.readers.lock().await;
+        let manifest = rendition.manifest.lock().await;
+        let demands = playback_demands(&serve.shared.pool, &rendition, &readers, &manifest);
+        assert_eq!(decide(&manifest, &demands, position, &[]), Action::Reposition { to: 7 });
+        drop(old);
     }
 
     #[tokio::test]
@@ -2862,6 +3084,7 @@
         serve.shared.sessions.lock().await.insert(
             "sess-a".into(),
             Session {
+                children: Vec::new(),
                 passive_grant: None,
                 rendition: Some(rendition),
                 rendition_key,
@@ -3274,9 +3497,17 @@
         let rates = rendition.output_measurement.lock().expect("observer")
             .complete_rates().expect("complete full-output observation");
         assert_eq!(rates.wire_bytes, (0..rendition.plan.len()).map(|i| 1000 + i as u64).sum::<u64>());
-        sink.materialize(0, vec![7; 1000]).await.expect("legacy repeat remains playable");
-        assert!(rendition.output_measurement.lock().expect("observer")
-            .complete_rates().is_none(), "duplicate publication loses measurement authority");
+        // A published URI is immutable: a repeated write, even with other
+        // bytes, traverses the original publication rather than replacing it,
+        // so the measured bytes are still exactly the served bytes.
+        sink.materialize(0, vec![8; 1000]).await.expect("repeat traverses the publication");
+        let served = tokio::fs::read(rendition.dir.path().join(segment_name(0))).await
+            .expect("published segment");
+        assert_eq!(served, vec![7; 1000], "a repeated write cannot replace published bytes");
+        let repeated = rendition.output_measurement.lock().expect("observer")
+            .complete_rates().expect("an unchanged publication keeps measurement authority");
+        assert_eq!(repeated.identity, rates.identity);
+        assert_eq!(repeated.wire_bytes, rates.wire_bytes);
     }
 
     #[tokio::test]
@@ -3320,18 +3551,31 @@
         let mut ready = artifact.open(Some(0), &meter, &serve.shared, &rendition, Duration::from_secs(1)).await.expect("retained segment");
         assert!(ready.retained_lease.is_some());
         assert_eq!(ready.observed_media_duration_ms, plan_media_duration_ms(&rendition, 0));
-        // The ordinary recipe names change, but already-issued hardlink and
-        // open body leases continue to name precisely the original bytes.
+        // Rematerialization traverses the published URI instead of replacing
+        // it, and already-issued open body leases name the original bytes.
         sink.materialize(0, vec![9; 1000]).await.expect("ordinary rematerialization");
         let mut original = Vec::new();
         ready.file.read_to_end(&mut original).await.expect("open body remains readable");
         assert_eq!(original, vec![7; 1000]);
+        let live = rendition.dir.path().join(segment_name(0));
+        assert_eq!(tokio::fs::read(&live).await.expect("live segment"), vec![7; 1000]);
         let private = temp.path().join(".retained").join(artifact.facts().artifact_id);
         tokio::fs::remove_file(private.join(segment_name(0))).await.expect("missing-object fixture");
+        // Out-of-band damage (a new inode, as a rename would leave) is the
+        // only way the live name can now hold different bytes.
+        let replace_live = |bytes: Vec<u8>| {
+            let live = live.clone();
+            async move {
+                let staged = live.with_extension("fixture");
+                tokio::fs::write(&staged, bytes).await.expect("staged live bytes");
+                tokio::fs::rename(&staged, &live).await.expect("replace live name");
+            }
+        };
+        replace_live(vec![9; 1000]).await;
         assert!(matches!(artifact.open(Some(0), &meter, &serve.shared, &rendition, Duration::from_secs(1)).await,
             Err(VodError::ProducerFailed(_))), "different live bytes cannot repair an issued proof");
         assert!(rendition.failed.lock().expect("failure lock").is_none(), "artifact-local refusal cannot poison the rendition");
-        sink.materialize(0, vec![7; 1000]).await.expect("exact replacement bytes");
+        replace_live(vec![7; 1000]).await;
         let repaired = artifact.open(Some(0), &meter, &serve.shared, &rendition, Duration::from_secs(1)).await.expect("exact repair");
         assert_eq!(repaired.len, 1000);
         assert!(serve.shared.retained_artifacts.acquire_expected(&artifact.facts(), &rendition).is_some());
@@ -3546,6 +3790,22 @@
         }
     }
 
+    #[tokio::test]
+    async fn cached_init_read_does_not_wake_an_idle_controlled_producer() {
+        let temp = crate::test_tempdir().expect("cached init");
+        let serve = bare_serve(temp.path());
+        let rendition = synthetic_rendition(temp.path()).await;
+        rendition.attach_reader("controlled", 22).await;
+        rendition.readers.lock().await.get_mut("controlled").expect("reader").authority_only = true;
+        rendition.dir.write_init(b"moov").await.expect("immutable cached init");
+        let ready = serve.serve_init(&rendition, Duration::from_secs(1), Arc::new(crate::meter::Meter::new()))
+            .await.expect("cached init is immediately readable");
+        assert_eq!(ready.len, 4);
+        assert!(rendition.demand_since.lock().expect("materialization ownership").is_empty());
+        assert!(tokio::time::timeout(Duration::from_millis(1), rendition.wake.notified()).await.is_err(),
+            "reading an existing init must not start work at the ordinary frontier");
+    }
+
     /// Fix 9: both wake paths for a blocked init GET — the init landing, and
     /// a producer failure — answer promptly instead of sleeping the budget.
     #[tokio::test]
@@ -3693,6 +3953,201 @@
         assert!(serve.reopen_facts("sess-a").await.is_none());
         assert!(serve.owns("sess-a").await, "tombstoned is still addressed");
         assert!(serve.frontier_ms("sess-x").await.is_none());
+    }
+
+    #[tokio::test]
+    async fn restarted_sink_keeps_published_bytes_before_quality_reservation() {
+        use crate::vodgen::Sink;
+        let base = crate::test_tempdir().expect("unreserved traversal");
+        let store = Arc::new(SqliteStore::open_in_memory().expect("store"));
+        let serve = local_serve(base.path().to_path_buf(), store.clone());
+        let mut rendition = synthetic_rendition(base.path()).await;
+        Arc::get_mut(&mut rendition).expect("private rendition").key = "b".repeat(64);
+        let sink = RenditionSink { shared: Arc::clone(&serve.shared),
+            rendition: Arc::clone(&rendition), epoch: rendition.gen_epoch.load(Relaxed) };
+        let original = b"already-delivered-before-scheduled-ack";
+        sink.materialize(0, original.to_vec()).await.expect("first publication");
+        assert!(store.quality_reserved_intervals(&rendition.key).await.expect("no pins").is_empty());
+        let charged = serve.shared.working_set.load(Relaxed);
+        let publication = rendition.publication_serial.load(Relaxed);
+        rendition.gen_epoch.fetch_add(1, Relaxed);
+        let restarted = RenditionSink { shared: Arc::clone(&serve.shared),
+            rendition: Arc::clone(&rendition), epoch: rendition.gen_epoch.load(Relaxed) };
+        restarted.materialize(0, b"different-encoder-history-before-pin".to_vec())
+            .await.expect("traverse existing publication");
+        assert_eq!(tokio::fs::read(rendition.dir.path().join(segment_name(0)))
+            .await.expect("original publication"), original);
+        assert_eq!(serve.shared.working_set.load(Relaxed), charged);
+        assert_eq!(rendition.publication_serial.load(Relaxed), publication,
+            "traversal must not mint a second publication");
+    }
+
+    #[tokio::test]
+    async fn restarted_sink_keeps_verified_reserved_bytes_and_refuses_corruption() {
+        use crate::vodgen::Sink;
+        use plurx_core::playback::continuous_quality::{QualityAttachment, QualityLedger,
+            QualityInterval, QualityOperation, QualityTransitionRequest};
+        let base = crate::test_tempdir().expect("reserved traversal");
+        let store = Arc::new(SqliteStore::open_in_memory().expect("store"));
+        let generation = uuid::Uuid::new_v4().to_string();
+        // A route's session id is a capability UUID; the store refuses others.
+        let session = uuid::Uuid::new_v4().to_string();
+        activate_control_route(&store, &session, &generation).await;
+        let serve = local_serve(base.path().to_path_buf(), store.clone());
+        let mut rendition = synthetic_rendition(base.path()).await;
+        Arc::get_mut(&mut rendition).expect("private rendition").key = "b".repeat(64);
+        let sink = RenditionSink { shared: Arc::clone(&serve.shared),
+            rendition: Arc::clone(&rendition), epoch: rendition.gen_epoch.load(Relaxed) };
+        let original = b"original-immutable-media";
+        sink.materialize(0, original.to_vec()).await.expect("first publication");
+        let entry = rendition.plan.entry(0).expect("entry");
+        let interval = QualityInterval { artifact_id: hex::encode(Sha256::digest(original)),
+            rendition_id: rendition.key.clone(), timescale: rendition.timescale,
+            from_tick: entry.start_ticks, through_tick: entry.end_ticks(), byte_length: original.len() as u64 };
+        let attachment = QualityAttachment { client_instance_id: uuid::Uuid::new_v4().to_string(),
+            lifetime_id: session.clone(), attachment_id: uuid::Uuid::new_v4().to_string(),
+            family_id: "c".repeat(64) };
+        let mut ledger = QualityLedger::new(generation.clone(), 1, attachment.clone()).expect("ledger");
+        let transaction = uuid::Uuid::new_v4().to_string();
+        let mut request = QualityTransitionRequest { version: 1, generation, control_epoch: 1,
+            sequence: 1, attachment, transaction_id: transaction.clone(),
+            operation: QualityOperation::Prepare { intent_revision: 1, target_rendition_id: rendition.key.clone() } };
+        ledger.apply(&request, now_ms()).expect("prepare");
+        ledger.ready(&transaction, vec![interval.clone()]).expect("ready");
+        request.sequence = 2; request.operation = QualityOperation::Scheduled { intervals: vec![interval.clone()] };
+        ledger.apply(&request, now_ms()).expect("scheduled");
+        assert!(store.write_quality_ledger(&ledger, "node-a", 0, now_ms()).await.expect("reserve"));
+        assert_eq!(store.quality_reserved_intervals(&rendition.key).await.expect("dependencies"), vec![interval]);
+        let charged = serve.shared.working_set.load(Relaxed);
+        let publication = rendition.publication_serial.load(Relaxed);
+        rendition.gen_epoch.fetch_add(1, Relaxed);
+        let restarted = RenditionSink { shared: Arc::clone(&serve.shared),
+            rendition: Arc::clone(&rendition), epoch: rendition.gen_epoch.load(Relaxed) };
+        restarted.materialize(0, b"different-regenerated-media".to_vec()).await.expect("traverse cached reserved interval");
+        let path = rendition.dir.path().join(segment_name(0));
+        assert_eq!(tokio::fs::read(&path).await.expect("original bytes"), original);
+        assert_eq!(serve.shared.working_set.load(Relaxed), charged);
+        assert_eq!(rendition.publication_serial.load(Relaxed), publication, "no false publication credit");
+        // The sink consults reservations only for continuous recipes, so the
+        // retained-publication check is exercised directly against this pin.
+        let dependencies = store.quality_reserved_intervals(&rendition.key).await.expect("dependencies");
+        verify_retained_publication(&path, &rendition.plan, 0, original.len() as u64, &dependencies)
+            .await.expect("exact reserved bytes");
+        tokio::fs::write(&path, vec![0; original.len()]).await.expect("corrupt cached bytes");
+        assert!(verify_retained_publication(&path, &rendition.plan, 0, original.len() as u64, &dependencies)
+            .await.is_err(), "corruption cannot be repaired under a live reservation");
+        tokio::fs::remove_file(&path).await.expect("remove cached bytes");
+        assert!(verify_retained_publication(&path, &rendition.plan, 0, original.len() as u64, &dependencies)
+            .await.is_err(), "a missing reserved artifact cannot be silently replaced");
+    }
+
+    #[tokio::test]
+    async fn ordinary_renditions_publish_without_consulting_continuous_reservations() {
+        use crate::vodgen::Sink;
+        use plurx_core::playback::continuous_quality::{QualityAttachment, QualityLedger,
+            QualityInterval, QualityOperation, QualityTransitionRequest};
+        let base = crate::test_tempdir().expect("ordinary publication");
+        let store = Arc::new(SqliteStore::open_in_memory().expect("store"));
+        let serve = local_serve(base.path().to_path_buf(), store.clone());
+        let mut rendition = synthetic_rendition(base.path()).await;
+        Arc::get_mut(&mut rendition).expect("private rendition").key = "b".repeat(64);
+        assert!(!quality_reservations_possible(&rendition.recipe), "a copy remux carries no pins");
+        // Make the reservation lookup for this key fail: two ledgers name one
+        // immutable artifact with different facts.
+        let entry = rendition.plan.entry(0).expect("entry");
+        for byte_length in [10_u64, 11] {
+            let session = uuid::Uuid::new_v4().to_string();
+            let generation = uuid::Uuid::new_v4().to_string();
+            activate_control_route(&store, &session, &generation).await;
+            let interval = QualityInterval { artifact_id: "d".repeat(64),
+                rendition_id: rendition.key.clone(), timescale: rendition.timescale,
+                from_tick: entry.start_ticks, through_tick: entry.end_ticks(), byte_length };
+            let attachment = QualityAttachment { client_instance_id: uuid::Uuid::new_v4().to_string(),
+                lifetime_id: session.clone(), attachment_id: uuid::Uuid::new_v4().to_string(),
+                family_id: "c".repeat(64) };
+            let mut ledger = QualityLedger::new(generation.clone(), 1, attachment.clone()).expect("ledger");
+            let transaction = uuid::Uuid::new_v4().to_string();
+            let mut request = QualityTransitionRequest { version: 1, generation, control_epoch: 1,
+                sequence: 1, attachment, transaction_id: transaction.clone(),
+                operation: QualityOperation::Prepare { intent_revision: 1, target_rendition_id: rendition.key.clone() } };
+            ledger.apply(&request, now_ms()).expect("prepare");
+            ledger.ready(&transaction, vec![interval.clone()]).expect("ready");
+            request.sequence = 2; request.operation = QualityOperation::Scheduled { intervals: vec![interval] };
+            ledger.apply(&request, now_ms()).expect("scheduled");
+            assert!(store.write_quality_ledger(&ledger, "node-a", 0, now_ms()).await.expect("reserve"));
+        }
+        assert!(store.quality_reserved_intervals(&rendition.key).await.is_err(), "lookup is unavailable");
+        let sink = RenditionSink { shared: Arc::clone(&serve.shared),
+            rendition: Arc::clone(&rendition), epoch: rendition.gen_epoch.load(Relaxed) };
+        sink.materialize(0, b"ordinary-media".to_vec()).await
+            .expect("ordinary playback does not depend on the quality ledger");
+        assert!(rendition.failure().is_none());
+        assert_eq!(tokio::fs::read(rendition.dir.path().join(segment_name(0))).await.expect("published"),
+            b"ordinary-media");
+    }
+
+    #[test]
+    fn unknown_continuous_reservations_are_a_hold_not_a_write_fault() {
+        let unknown = quality_reservations_unknown_error("store timed out".into());
+        assert!(quality_reservations_unknown(&unknown));
+        assert!(unknown.to_string().contains("store timed out"));
+        for fault in [io::Error::other("disk full"), io::Error::from(io::ErrorKind::TimedOut),
+            io::Error::new(io::ErrorKind::InvalidData, "regenerated media differs")] {
+            assert!(!quality_reservations_unknown(&fault), "{fault}");
+        }
+    }
+
+    #[test]
+    fn reserved_publication_refuses_changed_bytes_before_materialization() {
+        let grid = plurx_core::transcode::VodFrameGrid::new(24_000, 1_001).expect("grid");
+        let plan = grid.plan(6_000, 1_000_000);
+        let entry = plan.entry(1).expect("middle");
+        let bytes = b"immutable-media";
+        let interval = plurx_core::playback::continuous_quality::QualityInterval {
+            artifact_id: hex::encode(Sha256::digest(bytes)), rendition_id: "b".repeat(64),
+            timescale: plan.timescale, from_tick: entry.start_ticks,
+            through_tick: entry.end_ticks(), byte_length: bytes.len() as u64,
+        };
+        verify_reserved_publication(&plan, 1, bytes, std::slice::from_ref(&interval))
+            .expect("identical regeneration is safe");
+        assert!(verify_reserved_publication(&plan, 1, b"different-media",
+            std::slice::from_ref(&interval)).is_err());
+        assert!(verify_reserved_publication(&plan, 1, b"short",
+            std::slice::from_ref(&interval)).is_err());
+        verify_reserved_publication(&plan, 0, b"unreserved-neighbor",
+            std::slice::from_ref(&interval)).expect("neighbor remains independent");
+        let mut wrong = interval.clone();
+        wrong.timescale = 48_000;
+        assert!(verify_reserved_publication(&plan, 1, bytes, &[wrong]).is_err());
+        let mut partial = interval.clone();
+        partial.from_tick += 1;
+        assert!(verify_reserved_publication(&plan, 1, bytes, &[partial]).is_err());
+        verify_reserved_publication(&plan, 1, b"new-after-disposal", &[])
+            .expect("exact disposal releases the immutable dependency");
+    }
+
+    #[test]
+    fn durable_dependency_windows_protect_exact_intervals_from_eviction() {
+        let grid = plurx_core::transcode::VodFrameGrid::new(24_000, 1_001).expect("grid");
+        let plan = grid.plan(6_000, 1_000_000);
+        let entry = plan.entry(1).expect("middle");
+        let interval = plurx_core::playback::continuous_quality::QualityInterval {
+            artifact_id: "a".repeat(64), rendition_id: "b".repeat(64),
+            timescale: plan.timescale, from_tick: entry.start_ticks,
+            through_tick: entry.end_ticks(), byte_length: 100,
+        };
+        let windows = continuous_dependency_windows(&plan, std::slice::from_ref(&interval))
+            .expect("exact dependency");
+        let mut manifest = Manifest::new(plan.clone());
+        for index in 0..3 { manifest.materialize(index, 100, i64::from(index)); }
+        assert_eq!(manifest.eviction_candidates(&windows, u64::MAX), vec![0, 2]);
+        let mut wrong_clock = interval.clone();
+        wrong_clock.timescale = 48_000;
+        assert!(continuous_dependency_windows(&plan, &[wrong_clock]).is_err());
+        let mut partial = interval.clone();
+        partial.from_tick += 1;
+        assert!(continuous_dependency_windows(&plan, &[partial]).is_err());
+        assert_eq!(manifest.eviction_candidates(&[], u64::MAX), vec![0, 1, 2]);
     }
 
     #[tokio::test]

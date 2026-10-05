@@ -933,3 +933,53 @@ class CommittedMediaOriginTest {
         )
     }
 }
+
+class PreparedActiveWallBudgetTest {
+    @Test fun explicitPausePreservesRemainingFirstFrameBudget() {
+        val budget = PreparedActiveWallBudget(5_000, 100, true)
+        assertFalse(budget.update(2_100, false))
+        assertEquals(3_000L, budget.remainingMs)
+        assertFalse(budget.update(62_100, true))
+        assertEquals(3_000L, budget.remainingMs)
+        assertFalse(budget.update(65_099, true))
+        assertTrue(budget.update(65_100, true))
+        assertEquals(0L, budget.remainingMs)
+    }
+
+    @Test fun preparationAndAlignmentConsumeTheSamePhysicalOverlapDeadline() {
+        val budget = PreparedActiveWallBudget(5_000, 11_100, false,
+            overlapBoundMs = 12_000, overlapStartedAtMs = 100)
+        assertEquals(1_000L, budget.remainingOverlapMs)
+        assertFalse(budget.update(12_099, false))
+        assertTrue(budget.update(12_100, false))
+        assertEquals(5_000L, budget.remainingMs)
+        val spent = PreparedActiveWallBudget(5_000, 20_100, true,
+            overlapBoundMs = 12_000, overlapStartedAtMs = 100)
+        assertEquals(0L, spent.remainingOverlapMs)
+    }
+
+    @Test fun pauseParksObservationButPhysicalOverlapStillExpires() {
+        val budget = PreparedActiveWallBudget(5_000, 100, true, overlapBoundMs = 12_000)
+        assertFalse(budget.update(2_100, false))
+        assertEquals(3_000L, budget.remainingMs)
+        assertEquals(10_000L, budget.remainingOverlapMs)
+        assertFalse(budget.update(1_100, false))
+        assertEquals(10_000L, budget.remainingOverlapMs)
+        assertFalse(budget.update(12_099, false))
+        assertEquals(3_000L, budget.remainingMs)
+        assertTrue(budget.update(12_100, false))
+        assertEquals(0L, budget.remainingOverlapMs)
+        assertEquals(3_000L, budget.remainingMs)
+        assertTrue(budget.update(12_101, true))
+    }
+
+    @Test fun activeStallsRemainBoundedAndBackwardSamplesCannotRefillBudget() {
+        val budget = PreparedActiveWallBudget(5_000, 100, true)
+        assertFalse(budget.update(2_100, true))
+        assertFalse(budget.update(1_100, true))
+        assertEquals(3_000L, budget.remainingMs)
+        assertTrue(budget.update(5_100, true))
+        assertEquals(0L, budget.remainingMs)
+        assertTrue(budget.update(90_000, false))
+    }
+}

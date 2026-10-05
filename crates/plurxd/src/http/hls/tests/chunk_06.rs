@@ -1523,6 +1523,263 @@
     }
 
     #[test]
+    fn continuous_master_keeps_verified_variants_and_one_common_subtitle_group() {
+        let file = hls_file(vec![sub("subrip", "eng", "Regular", false, false),
+            sub("webvtt", "eng", "SDH", false, false), sub("hdmv_pgs_subtitle", "eng", "Bitmap", false, false)]);
+        let original = "#EXTM3U\n#EXT-X-VERSION:7\n#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID=\"audio\",URI=\"audio/exact/index.m3u8\"\n#EXT-X-STREAM-INF:BANDWIDTH=1000000,RESOLUTION=1280x720,CODECS=\"avc1.640032,mp4a.40.2\",AUDIO=\"audio\"\nvideo/low/index.m3u8\n#EXT-X-STREAM-INF:BANDWIDTH=2000000,RESOLUTION=1920x1080,CODECS=\"avc1.640032,mp4a.40.2\",AUDIO=\"audio\"\nvideo/high/index.m3u8\n";
+        let master = String::from_utf8(continuous_master_with_subtitles(original.as_bytes().to_vec(), &file, Some(1)).expect("caption family")).expect("UTF-8");
+        assert_eq!(master.matches("TYPE=AUDIO").count(), 1);
+        assert_eq!(master.matches("TYPE=SUBTITLES").count(), 2);
+        assert_eq!(master.matches(",SUBTITLES=\"subs\"").count(), 2);
+        assert!(master.contains("DEFAULT=YES"));
+        assert!(!master.contains("subs/2/"));
+        assert!(!master.contains("40000000") && !master.contains("3840x2160"));
+        for line in original.lines().filter(|line| !line.starts_with("#EXT-X-STREAM-INF:")) { assert!(master.lines().any(|candidate| candidate == line)); }
+        let none = hls_file(vec![]);
+        assert_eq!(continuous_master_with_subtitles(original.as_bytes().to_vec(), &none, None).expect("no native captions"), original.as_bytes());
+    }
+
+    #[tokio::test]
+    async fn terminal_quality_snapshot_preserves_pins_and_requires_exact_attachment() {
+        use plurx_core::playback::continuous_quality::{QualityAttachment,QualityLedger,QualityInterval,QualityOperation,QualityTransitionRequest};
+        let dir = crate::test_tempdir().expect("state dir");
+        let session_id = uuid::Uuid::new_v4().to_string();
+        let fixture = HlsDeliveryFixture::publish(dir.path(), &session_id).await;
+        activate_fixture_route(&fixture,&session_id,"terminal-quality-read").await;
+        let route = fixture.store.media_session_route(&session_id).await.expect("route read").expect("active parent");
+        let attachment = QualityAttachment { client_instance_id:uuid::Uuid::new_v4().to_string(),lifetime_id:"film".into(),
+            attachment_id:uuid::Uuid::new_v4().to_string(),family_id:"a".repeat(64) };
+        let interval = QualityInterval { artifact_id:"b".repeat(64),rendition_id:"c".repeat(64),timescale:24000,
+            from_tick:0,through_tick:48048,byte_length:1024 };
+        let transition = QualityTransitionRequest {version:1,generation:route.incarnation_id.clone(),control_epoch:route.owner_epoch as u64,
+            sequence:1,attachment:attachment.clone(),transaction_id:uuid::Uuid::new_v4().to_string(),
+            operation:QualityOperation::Prepare { intent_revision:1,target_rendition_id:interval.rendition_id.clone() }};
+        let mut ledger = QualityLedger::new(route.incarnation_id.clone(),route.owner_epoch as u64,attachment.clone()).expect("ledger");
+        ledger.apply(&transition,unix_ms()).expect("intent");ledger.ready(&transition.transaction_id,vec![interval.clone()]).expect("owner ready");
+        let mut scheduled = transition.clone();scheduled.sequence=2;scheduled.operation=QualityOperation::Scheduled {intervals:vec![interval.clone()]};
+        ledger.apply(&scheduled,unix_ms()).expect("scheduled");
+        assert!(fixture.store.write_quality_ledger(&ledger,&route.owner_node_id,0,unix_ms()).await.expect("durable scheduled facts"));
+        fixture.store.end_media_session(&session_id,"deleted",unix_ms()).await.expect("End").expect("terminal parent");
+        let request = crate::vodserve::QualityScheduleRequest { version:1,generation:route.incarnation_id.clone(),control_epoch:route.owner_epoch as u64,
+            attachment,transition:None,frontier:None,window:None };
+        let read = |body:crate::vodserve::QualityScheduleRequest| quality_schedule(State(fixture.state.clone()),AxPath(session_id.clone()),
+            Bytes::from(serde_json::to_vec(&body).expect("request JSON")));
+        let before = fixture.store.quality_ledger(&route.incarnation_id).await.expect("before read").expect("ledger");
+        let response = read(request.clone()).await;
+        assert_eq!(response.status(),StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(),QUALITY_SCHEDULE_MAX_RESPONSE_BYTES).await.expect("bounded body");
+        let reply:crate::vodserve::QualityScheduleResponse=serde_json::from_slice(&body).expect("terminal proof");
+        assert!(reply.terminal && reply.valid_for(&request));assert!(reply.receipt.is_none());
+        assert_eq!(reply.ledger.transactions[0].reserved,vec![interval.clone()]);
+        assert_eq!(fixture.store.quality_ledger(&route.incarnation_id).await.expect("after read").expect("ledger"),before,"read cannot reduce dependencies");
+        let mut wrong = request.clone();wrong.attachment.attachment_id=uuid::Uuid::new_v4().to_string();
+        assert_eq!(read(wrong).await.status(),StatusCode::CONFLICT);
+        let mut late = request.clone();late.transition=Some(scheduled);
+        assert_eq!(read(late).await.status(),StatusCode::GONE,"End cannot reserve late media");
+        let mut disposed = transition;disposed.sequence=3;disposed.operation=QualityOperation::Disposed { artifacts:vec![interval.artifact_id] };
+        let mut completed=request;completed.transition=Some(disposed);
+        assert_eq!(read(completed).await.status(),StatusCode::OK);
+        assert!(fixture.store.quality_reserved_intervals(&interval.rendition_id).await.expect("released pins").is_empty());
+    }
+
+    /// Ended-session reconciliation needs only the Store. Relaying it to an
+    /// owner that has left the cluster answered 503 forever, so a departed
+    /// owner stranded every pin the client was trying to release.
+    #[tokio::test]
+    async fn terminal_quality_reconciliation_is_answered_without_its_departed_owner() {
+        use plurx_core::playback::continuous_quality::{QualityAttachment,QualityLedger,QualityInterval,QualityOperation,QualityTransitionRequest};
+        let dir = crate::test_tempdir().expect("state dir");
+        let fixture = HlsDeliveryFixture::publish(dir.path(), "unrelated-terminal-worker").await;
+        let user = fixture.store.create_user("terminal-departed", "hash", false).await.expect("terminal user");
+        let session_id = uuid::Uuid::new_v4().to_string();
+        let now_ms = unix_ms();
+        let route = activate_ready(&fixture.store, MediaSessionActivation {
+            recovery_epoch: String::new(), expected_desired_revision: None,
+            incarnation_id: uuid::Uuid::new_v4().to_string(), session_id: session_id.clone(),
+            user_id: user.id, playback_id: "terminal-departed".to_owned(),
+            expected_predecessor_incarnation_id: None, fence_predecessor: false, request_id: None,
+            request_fingerprint: "a".repeat(64),
+            // Not this node, and not any reachable member.
+            owner_node_id: "departed-owner".to_owned(),
+            lease_expires_at_ms: now_ms.saturating_add(60_000),
+            recipe_json: "{}".to_owned(), response_json: "{}".to_owned(),
+            publication_ready_at_ms: 0, media_origin_ms: 0, now_ms,
+        }).await;
+        assert_ne!(route.owner_node_id, fixture.state.node_id);
+        let attachment = QualityAttachment { client_instance_id:uuid::Uuid::new_v4().to_string(),lifetime_id:"film".into(),
+            attachment_id:uuid::Uuid::new_v4().to_string(),family_id:"a".repeat(64) };
+        let interval = QualityInterval { artifact_id:"b".repeat(64),rendition_id:"c".repeat(64),timescale:24000,
+            from_tick:0,through_tick:48048,byte_length:1024 };
+        let transition = QualityTransitionRequest {version:1,generation:route.incarnation_id.clone(),control_epoch:route.owner_epoch as u64,
+            sequence:1,attachment:attachment.clone(),transaction_id:uuid::Uuid::new_v4().to_string(),
+            operation:QualityOperation::Prepare { intent_revision:1,target_rendition_id:interval.rendition_id.clone() }};
+        let mut ledger = QualityLedger::new(route.incarnation_id.clone(),route.owner_epoch as u64,attachment.clone()).expect("ledger");
+        ledger.apply(&transition,unix_ms()).expect("intent");ledger.ready(&transition.transaction_id,vec![interval.clone()]).expect("owner ready");
+        let mut scheduled = transition.clone();scheduled.sequence=2;scheduled.operation=QualityOperation::Scheduled {intervals:vec![interval.clone()]};
+        ledger.apply(&scheduled,unix_ms()).expect("scheduled");
+        assert!(fixture.store.write_quality_ledger(&ledger,&route.owner_node_id,0,unix_ms()).await.expect("durable scheduled facts"));
+        fixture.store.end_media_session(&session_id,"deleted",unix_ms()).await.expect("End").expect("terminal parent");
+        let send = |body:crate::vodserve::QualityScheduleRequest| quality_schedule(State(fixture.state.clone()),AxPath(session_id.clone()),
+            Bytes::from(serde_json::to_vec(&body).expect("request JSON")));
+        let read = crate::vodserve::QualityScheduleRequest { version:1,generation:route.incarnation_id.clone(),control_epoch:route.owner_epoch as u64,
+            attachment,transition:None,frontier:None,window:None };
+        assert_eq!(send(read.clone()).await.status(),StatusCode::OK,"a terminal read is a Store read");
+        let mut disposed = transition;disposed.sequence=3;disposed.operation=QualityOperation::Disposed { artifacts:vec![interval.artifact_id] };
+        let mut completed = read.clone();completed.transition=Some(disposed);
+        let response = send(completed.clone()).await;
+        assert_eq!(response.status(),StatusCode::OK,"terminal disposal must not wait on the departed owner");
+        let body = axum::body::to_bytes(response.into_body(),QUALITY_SCHEDULE_MAX_RESPONSE_BYTES).await.expect("bounded body");
+        let reply:crate::vodserve::QualityScheduleResponse=serde_json::from_slice(&body).expect("terminal proof");
+        assert!(reply.terminal && reply.receipt.is_some() && reply.valid_for(&completed));
+        assert!(fixture.store.quality_reserved_intervals(&interval.rendition_id).await.expect("released pins").is_empty());
+        // Authorization is unchanged: the wrong generation is still refused.
+        let mut stale = read;stale.generation=uuid::Uuid::new_v4().to_string();
+        assert_eq!(send(stale).await.status(),StatusCode::CONFLICT);
+    }
+
+    /// The session id is the capability and the route needs no login, so an
+    /// unknown capability must be answered before it spends the node-wide
+    /// schedule budget; otherwise a spray of random UUIDs 429s every viewer.
+    #[tokio::test]
+    async fn unknown_quality_schedule_capabilities_do_not_spend_the_node_budget() {
+        use plurx_core::playback::continuous_quality::QualityAttachment;
+        let dir = crate::test_tempdir().expect("state dir");
+        let fixture = HlsDeliveryFixture::publish(dir.path(), &uuid::Uuid::new_v4().to_string()).await;
+        let request = crate::vodserve::QualityScheduleRequest { version:1,generation:uuid::Uuid::new_v4().to_string(),control_epoch:1,
+            attachment:QualityAttachment { client_instance_id:uuid::Uuid::new_v4().to_string(),lifetime_id:"film".into(),
+                attachment_id:uuid::Uuid::new_v4().to_string(),family_id:"a".repeat(64) },
+            transition:None,frontier:None,window:None };
+        assert!(request.valid());
+        for _ in 0..8 {
+            let response = quality_schedule(State(fixture.state.clone()),AxPath(uuid::Uuid::new_v4().to_string()),
+                Bytes::from(serde_json::to_vec(&request).expect("request JSON"))).await;
+            assert_eq!(response.status(),StatusCode::NOT_FOUND);
+        }
+        assert_eq!(fixture.state.media_sessions.quality_schedule_admissions_in_window(),0,
+            "an unknown capability spent the node-wide schedule budget");
+    }
+
+    /// Only a failure whose premise is gone may answer 4xx: clients settle any
+    /// 4xx except 429 by one ledger read and drop the viewer's change.
+    #[test]
+    fn quality_schedule_refusal_table_names_messages_the_owner_still_produces() {
+        // The refusal table matches exact owner messages. A renamed message
+        // would silently turn a final refusal into a retried 503.
+        let owner = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/src/vod/serve/quality.rs"));
+        for message in QUALITY_SCHEDULE_REFUSALS {
+            assert!(owner.contains(&format!("\"{message}")), "{message}");
+        }
+    }
+
+    #[test]
+    fn quality_schedule_failures_separate_final_refusals_from_transient_ones() {
+        use plurx_core::playback::continuous_quality::QualityTransitionError;
+        for transient in [
+            "database error: disk I/O error",
+            "storage task failed: join error",
+            "continuous family is not attached",
+            "quality parent is not attached",
+            "quality schedule revision changed repeatedly",
+            "quality window revision changed repeatedly",
+            "controlled settlement exceeded its response deadline",
+            "quality ledger settlement exceeded its inherited deadline",
+            "controlled admission exceeded its original deadline",
+            "quality preparation ledger disappeared",
+        ] {
+            assert_eq!(classify_quality_schedule_error(transient),QualityScheduleFailure::Transient,"{transient}");
+        }
+        for refused in [
+            "quality family changed",
+            "quality attachment changed",
+            "quality owner epoch changed",
+            "quality target is outside its family",
+            "quality response owner changed",
+        ] {
+            assert_eq!(classify_quality_schedule_error(refused),QualityScheduleFailure::Refused,"{refused}");
+        }
+        for error in [QualityTransitionError::StaleSequence,QualityTransitionError::ConflictingReplay,QualityTransitionError::Capacity] {
+            assert_eq!(classify_quality_schedule_error(&error.to_string()),QualityScheduleFailure::Refused,"{error}");
+        }
+        assert_eq!(classify_quality_schedule_error("controlled parent ended"),QualityScheduleFailure::Ended);
+        assert_eq!(classify_quality_schedule_error("invalid quality schedule request"),QualityScheduleFailure::Invalid);
+        let transient = QualityScheduleFailure::Transient.response();
+        assert_eq!(transient.status(),StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(transient.headers().get(header::RETRY_AFTER).and_then(|value| value.to_str().ok()),Some("1"));
+        assert_eq!(QualityScheduleFailure::Refused.response().status(),StatusCode::CONFLICT);
+        assert_eq!(QualityScheduleFailure::Ended.response().status(),StatusCode::GONE);
+    }
+
+    #[test]
+    fn continuous_catalog_pairs_require_one_worker_and_distinct_actual_rasters() {
+        use plurx_core::playback::candidate::{CandidateId, CandidateRoute, QualityCandidate};
+        let candidate = |node: &str, seed: u8, target, width, height| crate::media_pool::WorkerQualityCandidate {
+            node_id: node.into(),
+            binding: None, dispatch_supported: true, partial: false,
+            candidate: QualityCandidate {
+                id: CandidateId::for_recipe_digest([seed;32]), recipe_digest: [seed;32],
+                route: CandidateRoute::Encode, normalized_geometry: true, width, height,
+                target_height: target, average_bps: None, peak_bps: None,
+                grade: plurx_core::transcode::OutputGrade::Sdr,
+                decoder_compatible: true, complete_cache: false, sustainable: true,
+            },
+        };
+        let primary = candidate("one",1,1080,1920,1080);
+        let other_node = candidate("two",2,720,1280,720);
+        let alias = candidate("one",3,900,1920,1080);
+        assert!(continuous_candidates_from_workers(&[primary.clone(), other_node.clone(), alias.clone()]).pairs.is_empty());
+        let companion = candidate("one",4,720,1280,720);
+        let response = continuous_candidates_from_workers(&[primary.clone(),other_node,alias,companion.clone()]);
+        let pair = response.pairs.iter().find(|pair|pair.primary_candidate_id==primary.candidate.id).expect("same worker family");
+        assert_eq!(pair.companion_candidate_id,companion.candidate.id);
+        let mut unsupported = companion;
+        unsupported.candidate.normalized_geometry = false;
+        assert!(continuous_candidates_from_workers(&[primary.clone(), unsupported.clone()]).pairs.is_empty());
+        unsupported.candidate.normalized_geometry = true;
+        unsupported.dispatch_supported = false;
+        assert!(continuous_candidates_from_workers(&[primary.clone(), unsupported.clone()]).pairs.is_empty());
+        unsupported.dispatch_supported = true;
+        unsupported.partial = true;
+        assert!(continuous_candidates_from_workers(&[primary, unsupported]).pairs.is_empty());
+    }
+
+    #[test]
+    fn continuous_bootstrap_uses_durable_owner_without_legacy_control() {
+        let mut route = eligible_owner_loss_route();
+        route.state = "active".into();
+        route.response_json = "{}".into(); // No legacy control bootstrap.
+        route.lease_expires_at_ms = unix_ms().saturating_add(60_000);
+        let bootstrap = ContinuousQualityBootstrap::from_route(&route).expect("active owner");
+        assert_eq!(bootstrap.generation, route.incarnation_id);
+        assert_eq!(bootstrap.control_epoch, 3);
+        assert_eq!(bootstrap.schedule_url, format!("/api/v1/hls/{}/quality-schedule", route.session_id));
+        assert_eq!(bootstrap.family_url, format!("/api/v1/hls/{}/quality-family", route.session_id));
+        route.owner_epoch = 9_007_199_254_740_992;
+        assert!(ContinuousQualityBootstrap::from_route(&route).is_err());
+        route.owner_epoch = 3;
+        route.state = "ended".into();
+        assert!(ContinuousQualityBootstrap::from_route(&route).is_err());
+        route.state = "active".into();
+        route.lease_expires_at_ms = unix_ms() - 1;
+        assert!(ContinuousQualityBootstrap::from_route(&route).is_err());
+        route.lease_expires_at_ms = unix_ms().saturating_add(60_000);
+        route.session_id = "malformed".into();
+        assert!(ContinuousQualityBootstrap::from_route(&route).is_err());
+    }
+
+    #[test]
+    fn continuous_create_is_a_strict_separate_two_role_envelope() {
+        let wire = serde_json::json!({"version":1,"family_generation":uuid::Uuid::new_v4().to_string(),
+            "primary_candidate_id":"a".repeat(32),"companion_candidate_id":"b".repeat(32),
+            "start":{"playback_id":"family","caps":{"v":2}}});
+        let request: CreateContinuousFamily = serde_json::from_value(wire.clone()).expect("family envelope");
+        assert!(request.valid());
+        let mut duplicate = wire.clone(); duplicate["companion_candidate_id"] = duplicate["primary_candidate_id"].clone();
+        assert!(!serde_json::from_value::<CreateContinuousFamily>(duplicate).expect("shape").valid());
+        let mut extra = wire; extra["unknown"] = serde_json::json!(true);
+        assert!(serde_json::from_value::<CreateContinuousFamily>(extra).is_err());
+    }
+
+    #[test]
     fn hdr_master_declares_the_range_and_exact_session_codecs() {
         let file = hls_file(vec![]);
         let stripped = hls_context("hvc1.2.4.L150.B0,mp4a.40.2", None);
@@ -2782,7 +3039,8 @@
         // drives: a 2160p copy being delivered, and the viewer asks for 1080p.
         let source = staging_source(&fixture).await;
         let mut recipe = crate::transcode::SessionRequest {
-            quality_catalog: None,
+            continuous_media: None,
+quality_catalog: None,
             candidate_context: None,
             vod_only: false,
             passive_vod: false,
@@ -2962,6 +3220,9 @@
             Some(&staged_source_file()),
             AcceptedAsk {
                 prepared_proof: None,
+                planning_registration: None,
+                quality_intent: None,
+                planning_cancellation: None,
                 film_time_ms: STAGED_ACCEPTED_FILM_TIME_MS,
                 desired_digest: None,
             },

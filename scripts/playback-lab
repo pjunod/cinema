@@ -16,6 +16,7 @@ const net = require("node:net");
 const os = require("node:os");
 const path = require("node:path");
 const { spawn, spawnSync } = require("node:child_process");
+const {FRAME_CLOCK, frameClockFilter, decodeFrameClockRgb} = require("./playback-frame-clock");
 
 const ROOT = path.resolve(__dirname, "..");
 const MANIFEST_PATH = path.join(ROOT, "tests", "playback", "cases.json");
@@ -371,9 +372,9 @@ Usage:
   scripts/playback-lab safari-seek-server [--observe SECONDS] [--duration SECONDS] [--rate 1|2] [--fixtures DIR]
       [--seek-count COUNT]
                               [--server PATH] [--json PATH]
-  scripts/playback-lab plan [--suite smoke|full|stall-recovery|vod]
+  scripts/playback-lab plan [--suite smoke|full|stall-recovery|vod|continuous]
                              [--case TEXT] [--exclude-case TEXT]
-  scripts/playback-lab run [--suite smoke|full|stall-recovery|vod]
+  scripts/playback-lab run [--suite smoke|full|stall-recovery|vod|continuous]
                              [--browser chrome|safari|edge|firefox]
                              [--case TEXT] [--exclude-case TEXT] [--observe SECONDS]
                              [--network-profile NAME] [--json PATH] [--junit PATH]
@@ -463,6 +464,18 @@ function fixtureMap(manifest) {
 
 function caseName(testCase) {
   return `${testCase.fixture} :: ${testCase.quality} :: ${testCase.operation}`;
+}
+
+function vodAttachmentCensus(events, fileId, sinceMs) {
+  if (!Array.isArray(events) || events.length >= 2000 || fileId == null) {
+    throw new Error("VOD attachment census is unavailable or truncated");
+  }
+  return events.filter(event => {
+    if (event.event !== "session_start" || event.encoder !== "vod"
+        || String(event.file_id) !== String(fileId)
+        || !Number.isSafeInteger(event.at_unix_ms) || event.at_unix_ms < sinceMs) return false;
+    try { return JSON.parse(event.extra).presentation === "vod"; } catch (_) { return false; }
+  }).length;
 }
 
 function expandCases(manifest, suiteName, filter, excludeFilter) {
@@ -658,7 +671,9 @@ function ffmpegPrefix() {
 }
 
 function fixtureCommand(fixture, output, directory, fixtures) {
-  const seconds = fixture.builder === "hevc_hdr_open_gop_mkv" ? "18" : "24";
+  const duration = Number(fixture.duration_seconds ?? (fixture.builder === "hevc_hdr_open_gop_mkv" ? 18 : 24));
+  if (!Number.isInteger(duration) || duration < 18 || duration > 3600) throw new Error("fixture duration must be 18–3600 whole seconds");
+  const seconds = String(duration);
   switch (fixture.builder) {
     case "h264_aac_mp4":
       return [
@@ -668,6 +683,17 @@ function fixtureCommand(fixture, output, directory, fixtures) {
         "-map", "0:v:0", "-map", "1:a:0",
         "-c:v", "libx264", "-preset", "veryfast", "-pix_fmt", "yuv420p",
         "-g", "48", "-keyint_min", "48", "-sc_threshold", "0", "-b:v", "8M",
+        "-c:a", "aac", "-b:a", "192k", "-movflags", "+faststart", "-shortest", output,
+      ];
+    case "mpeg4_aac_mp4_continuous":
+      return [
+        ...ffmpegPrefix(),
+        "-f", "lavfi", "-i", `testsrc2=size=1920x1080:rate=24:duration=${seconds}`,
+        "-f", "lavfi", "-i", `sine=frequency=440:sample_rate=48000:duration=${seconds}`,
+        "-filter_complex_threads", "1", "-filter_complex", frameClockFilter(duration),
+        "-map", "[clocked_video]", "-map", "1:a:0",
+        "-c:v", "mpeg4", "-threads", "1", "-b:v", "4M", "-g", "48", "-bf", "0",
+        "-pix_fmt", "yuv420p", "-colorspace", "bt709", "-color_primaries", "bt709", "-color_trc", "bt709",
         "-c:a", "aac", "-b:a", "192k", "-movflags", "+faststart", "-shortest", output,
       ];
     case "h264_multitrack_mkv": { // video is copied so this case differs only where intended
@@ -761,6 +787,25 @@ function ffprobe(file) {
   return JSON.parse(result.stdout);
 }
 
+function verifyFixtureFrameClock(file) {
+  const clock = FRAME_CLOCK;
+  const stride = clock.readWidth * clock.readHeight * 3;
+  const decoded = spawnSync("ffmpeg", ["-hide_banner", "-loglevel", "error", "-nostdin",
+    "-threads", "1", "-i", file, "-an", "-filter_threads", "1", "-vf",
+    `crop=${clock.width}:${clock.height}:${clock.x}:${clock.y},scale=${clock.readWidth}:${clock.readHeight}:flags=area`,
+    "-frames:v", "24", "-fps_mode", "passthrough", "-pix_fmt", "rgb24", "-f", "rawvideo", "pipe:1"],
+  {timeout: 20_000, maxBuffer: stride * 25, encoding: null});
+  if (decoded.error || decoded.status !== 0 || decoded.stdout?.length !== stride * 24) {
+    throw new Error("Encoded optical frame clock could not be verified");
+  }
+  for (let frame = 0; frame < 24; frame++) {
+    if (decodeFrameClockRgb(decoded.stdout.subarray(frame * stride, (frame + 1) * stride)) !== frame) {
+      throw new Error(`Encoded optical frame clock mismatch at frame ${frame}`);
+    }
+  }
+  return {...clock, verified_frames: 24};
+}
+
 function verifyFixture(fixture, file) {
   const probe = ffprobe(file);
   const video = probe.streams.find((stream) => stream.codec_type === "video");
@@ -770,6 +815,7 @@ function verifyFixture(fixture, file) {
   if (!video) failures.push("no video stream");
   const want = {
     h264_aac_mp4: { video: "h264", audio: ["aac"], width: 1920, height: 1080, minDuration: 20 },
+    mpeg4_aac_mp4_continuous: { video: "mpeg4", audio: ["aac"], width: 1920, height: 1080, minDuration: 1800 },
     h264_multitrack_mkv: { video: "h264", audio: ["aac", "ac3"], subtitles: 1, width: 1920, height: 1080, minDuration: 20 },
     mpeg4_mp3_avi: { video: "mpeg4", audio: ["mp3"], width: 1280, height: 720, minDuration: 20 },
     mpeg4_mp3_avi_long: { video: "mpeg4", audio: ["mp3"], width: 1280, height: 720, minDuration: 200 },
@@ -785,11 +831,22 @@ function verifyFixture(fixture, file) {
   if (want.hdr && video && video.color_transfer !== "smpte2084") failures.push(`transfer ${video.color_transfer || "none"}, want smpte2084`);
   const bitrate = Number(probe.format.bit_rate || video?.bit_rate || 0);
   const duration = Number(probe.format.duration || 0);
-  if (want.minDuration && duration < want.minDuration) failures.push(`duration ${duration.toFixed(1)}s, want >= ${want.minDuration}s`);
+  const minimumDuration = Math.max(want.minDuration || 0, Number(fixture.duration_seconds || 0) - 0.1);
+  if (duration < minimumDuration) failures.push(`duration ${duration.toFixed(1)}s, want >= ${minimumDuration}s`);
   if (want.minBitrate && bitrate < want.minBitrate) failures.push(`bitrate ${(bitrate / 1e6).toFixed(1)} Mb/s, want >= ${(want.minBitrate / 1e6).toFixed(0)} Mb/s`);
+  let frameClock = null;
+  if (fixture.frame_clock_version !== undefined) {
+    if (fixture.frame_clock_version !== FRAME_CLOCK.version) failures.push("unknown optical clock version");
+    const rate = String(video?.avg_frame_rate || "").split("/").map(Number);
+    if (rate.length !== 2 || !rate.every(Number.isFinite) || rate[1] <= 0 || rate[0] / rate[1] !== FRAME_CLOCK.fps) {
+      failures.push("optical clock source cadence differs from its encoded counter");
+    }
+    if (!failures.length) frameClock = verifyFixtureFrameClock(file);
+  }
   if (failures.length) throw new Error(`${fixture.id}: ${failures.join("; ")}`);
   return {
     codec: video.codec_name,
+    ...(frameClock ? {frame_clock: frameClock} : {}),
     dimensions: `${video.width}x${video.height}`,
     audio: audio.map((stream) => stream.codec_name),
     subtitles: subtitles.map((stream) => stream.codec_name),
@@ -1778,6 +1835,15 @@ function fragmentIndexPassBuiltFile(entry, fileId) {
   return builtFiles[1].split(",").some((value) => value.trim() === String(fileId));
 }
 
+function fragmentIndexTargets(files, filenames) {
+  return filenames.map((filename) => {
+    const file = files.get(filename);
+    if (!file) throw new Error(`scan missed VOD fixture ${filename}`);
+    if (!file.video_codec) throw new Error(`scan did not identify the video codec for ${filename}`);
+    return file;
+  }).filter((file) => ["h264", "hevc"].includes(file.video_codec));
+}
+
 async function startServer(options, fixtureDirectory) {
   // A throwaway daemon owns three listeners. Reserving all three together
   // prevents concurrent Forgejo jobs from sharing the default Raft/API ports
@@ -1883,23 +1949,20 @@ async function startServer(options, fixtureDirectory) {
   if (options.enable_vod) {
     process.stdout.write("INDEX   enable VOD and wait for the node-local fragment pass\n");
     const indexStartedAt = performance.now();
+    const requested = options.vod_filenames || [];
+    const targets = fragmentIndexTargets(files, requested);
+    const needsIndex = !requested.length || targets.length > 0;
     await api(baseUrl, "/settings", {
       token,
       method: "PUT",
       body: {
         vod_presentation: true,
-        vod_index_mins: 15,
+        vod_index_mins: needsIndex ? 15 : 0,
         vod_block_budget_secs: "8",
         vod_materialize_budget_secs: "30",
       },
     });
-    const requested = options.vod_filenames || [];
-    const targets = requested.map((filename) => {
-      const file = files.get(filename);
-      if (!file) throw new Error(`scan missed VOD fixture ${filename}`);
-      return file;
-    });
-    await waitFor(async () => {
+    if (needsIndex) await waitFor(async () => {
       const logs = await api(baseUrl, "/system/logs?level=debug&limit=500", { token });
       if (targets.length) {
         return targets.every((file) => logs.some((entry) =>
@@ -1908,13 +1971,16 @@ async function startServer(options, fixtureDirectory) {
       }
       return completedFragmentIndexPass(logs);
     }, 180_000, "VOD fragment indexing pass", 1_000);
+    preparation.cache_condition.fragment_index_at_playback = needsIndex ? "local" : "not_applicable";
     preparation.source_indexing = {
-      wall_status: "measured",
-      wall_ms: Math.round(performance.now() - indexStartedAt),
+      wall_status: needsIndex ? "measured" : "not_required",
+      wall_ms: needsIndex ? Math.round(performance.now() - indexStartedAt) : null,
       bytes_read_status: "unavailable",
       bytes_read: null,
-      reason: "request-to-completed-pass wall time includes scheduler wake-up; the daemon exposes no per-pass I/O byte counter",
-      full_source: true,
+      reason: needsIndex
+        ? "request-to-completed-pass wall time includes scheduler wake-up; the daemon exposes no per-pass I/O byte counter"
+        : "the selected encoded-source fixtures are not eligible for the AVC/HEVC copy fragment index",
+      full_source: needsIndex,
       target_count: targets.length,
     };
   }
@@ -2092,8 +2158,8 @@ class CdpDriver {
     await waitFor(() => this.eval("document.readyState === 'complete' && typeof render === 'function'"), 20_000, "web app reload");
   }
 
-  async startPlayback(fileId, title, durationMs) {
-    await this.exec(`play(${Number(fileId)}, ${JSON.stringify(title)}, 0, ${Number(durationMs || 0)}, null); return true;`);
+  async startPlayback(fileId, title, durationMs, resumeMs = 0) {
+    await this.exec(`play(${Number(fileId)}, ${JSON.stringify(title)}, ${Number(resumeMs)}, ${Number(durationMs || 0)}, null); return true;`);
   }
 
   async close() {
@@ -2169,15 +2235,15 @@ class SafariDriver {
     await waitFor(() => this.eval("document.readyState === 'complete'"), 20_000, "Safari web app reload");
   }
 
-  async startPlayback(fileId, title, durationMs) {
+  async startPlayback(fileId, title, durationMs, resumeMs = 0) {
     await this.exec(`
       var old=document.getElementById('plurx-lab-start'); if(old) old.remove();
       var button=document.createElement('button'); button.id='plurx-lab-start';
       button.textContent='Start playback test';
       button.style='position:fixed;z-index:99999;left:20px;top:20px;width:220px;height:80px';
-      button.onclick=function(){ play(arguments[0], arguments[1], 0, arguments[2], null); button.remove(); }.bind(null, arguments[0], arguments[1], arguments[2]);
+      button.onclick=function(){ play(arguments[0], arguments[1], arguments[3], arguments[2], null); button.remove(); }.bind(null, arguments[0], arguments[1], arguments[2], arguments[3]);
       document.body.appendChild(button); return true;
-    `, [Number(fileId), String(title), Number(durationMs || 0)]);
+    `, [Number(fileId), String(title), Number(durationMs || 0), Number(resumeMs)]);
     const element = await this.wd("POST", `/session/${this.sessionId}/element`, { using: "css selector", value: "#plurx-lab-start" });
     const elementId = element[ELEMENT_KEY] || element.ELEMENT;
     await this.wd("POST", `/session/${this.sessionId}/element/${elementId}/click`, {});
@@ -2263,15 +2329,15 @@ class FirefoxDriver {
     await waitFor(() => this.eval("document.readyState === 'complete'"), 20_000, "Firefox web app reload");
   }
 
-  async startPlayback(fileId, title, durationMs) {
+  async startPlayback(fileId, title, durationMs, resumeMs = 0) {
     await this.exec(`
       var old=document.getElementById('plurx-lab-start'); if(old) old.remove();
       var button=document.createElement('button'); button.id='plurx-lab-start';
       button.textContent='Start playback test';
       button.style='position:fixed;z-index:99999;left:20px;top:20px;width:220px;height:80px';
-      button.onclick=function(){ play(arguments[0], arguments[1], 0, arguments[2], null); button.remove(); }.bind(null, arguments[0], arguments[1], arguments[2]);
+      button.onclick=function(){ play(arguments[0], arguments[1], arguments[3], arguments[2], null); button.remove(); }.bind(null, arguments[0], arguments[1], arguments[2], arguments[3]);
       document.body.appendChild(button); return true;
-    `, [Number(fileId), String(title), Number(durationMs || 0)]);
+    `, [Number(fileId), String(title), Number(durationMs || 0), Number(resumeMs)]);
     const element = await this.wd("POST", `/session/${this.sessionId}/element`, { using: "css selector", value: "#plurx-lab-start" });
     const elementId = element[ELEMENT_KEY] || element.ELEMENT;
     await this.wd("POST", `/session/${this.sessionId}/element/${elementId}/click`, {});
@@ -2288,6 +2354,152 @@ function qualityForce(quality) {
   if (quality === "auto") return "auto";
   if (quality === "original" || quality === "nomse") return "original";
   return "transcode";
+}
+
+// Observe the real production graph. Weak identities survive snapshots without
+// retaining retired players; completed removals are media facts, not intentions.
+function continuousTransportSnapshot(player, video, objects) {
+  const identity = (object) => {
+    if (!object || (typeof object !== "object" && typeof object !== "function")) return null;
+    if (!objects.ids.has(object)) objects.ids.set(object, ++objects.next);
+    return objects.ids.get(object);
+  };
+  if (!objects.bufferObservers) objects.bufferObservers = new WeakMap();
+  const controller = player.hls?.bufferController;
+  const buffers = [];
+  for (const type of ["video", "audio"]) {
+    const buffer = controller?.tracks?.[type]?.buffer;
+    if (!buffer) continue;
+    let observer = objects.bufferObservers.get(buffer);
+    if (!observer) {
+      observer = { sequence: 0, completed: [], pending: null };
+      objects.bufferObservers.set(buffer, observer);
+      const remove = buffer.remove.bind(buffer);
+      buffer.remove = (from, through) => {
+        if (buffer.updating) return remove(from, through);
+        const operation = { from, through, failed: false };
+        observer.pending = operation;
+        try { return remove(from, through); }
+        catch (error) { if (observer.pending === operation) observer.pending = null; throw error; }
+      };
+      const failed = () => { if (observer.pending) observer.pending.failed = true; };
+      buffer.addEventListener("error", failed, true);
+      buffer.addEventListener("abort", failed, true);
+      buffer.addEventListener("updateend", () => {
+        const operation = observer.pending;
+        observer.pending = null;
+        if (!operation || operation.failed) return;
+        observer.completed.push({ sequence: ++observer.sequence,
+          from: operation.from, through: operation.through,
+          playhead: Number(video.currentTime), at_ms: Math.round(performance.now()) });
+        if (observer.completed.length > 64) observer.completed.shift();
+      }, true);
+    }
+    buffers.push({ type, identity: identity(buffer), removal_sequence: observer.sequence,
+      completed_removals: observer.completed.map((row) => ({ ...row })) });
+  }
+  const adapter = player.continuousQuality;
+  const ledger = adapter?.protocol?.ledger;
+  const wanted = adapter?.wanted;
+  const transaction = ledger?.transactions?.findLast((row) =>
+    row.target_rendition_id === wanted?.rendition_id && !row.intent_superseded && !row.cancel_requested);
+  return {
+    element: identity(video), hls: identity(player.hls), media_source: identity(controller?.mediaSource),
+    buffers, family_id: adapter?.family?.family_id || null,
+    mode: adapter?.family?.mode || null, closed: adapter ? adapter.closed : null,
+    frontier: adapter?.frontier ?? null, wanted_candidate: wanted?.candidate_id || null,
+    presented: player.continuousQualityPresented ? { ...player.continuousQualityPresented } : null,
+    transaction: transaction ? {
+      id: transaction.transaction_id, state: transaction.state,
+      target: transaction.target_rendition_id, first_presented_tick: transaction.first_presented_tick,
+      first_presented_at_ms: transaction.first_presented_at_ms,
+      appended: transaction.appended.map((row) => ({ artifact_id: row.artifact_id,
+        from_tick: row.from_tick, through_tick: row.through_tick, timescale: row.timescale })),
+    } : null,
+    observation: player.continuousQualityObservation || null,
+    observation_stack: player.continuousQualityObservationStack || null,
+  };
+}
+
+// Fold sampled completed removals into two bounded counters. A long Auto
+// observation may outlive the 64-row browser journal; every sampled interval
+// must still be contiguous and bound to the original SourceBuffer identity.
+function continuousRemovalEvidence(snapshot) {
+  return { version: 1, buffers: ["video", "audio"].map((type) => {
+    const buffer = snapshot?.buffers?.find((row) => row.type === type);
+    return { type, identity: buffer?.identity ?? null,
+      from_sequence: buffer?.removal_sequence ?? null,
+      through_sequence: buffer?.removal_sequence ?? null,
+      completed_count: 0, truncated: !buffer, replaced: false, removed_ahead: false };
+  }) };
+}
+
+function observeContinuousRemovals(evidence, snapshot) {
+  for (const observed of evidence.buffers) {
+    const buffer = snapshot?.buffers?.find((row) => row.type === observed.type);
+    if (!buffer || buffer.identity !== observed.identity) { observed.replaced = true; continue; }
+    const prior = observed.through_sequence, next = buffer.removal_sequence;
+    if (!Number.isSafeInteger(prior) || !Number.isSafeInteger(next) || next < prior) {
+      observed.truncated = true; continue;
+    }
+    const completed = buffer.completed_removals.filter((row) => row.sequence > prior);
+    if (completed.length !== next - prior
+        || completed.some((row, index) => row.sequence !== prior + index + 1)) observed.truncated = true;
+    if (completed.some((row) => !Number.isFinite(row.through) || !Number.isFinite(row.playhead)
+        || row.through > row.playhead + 0.001)) observed.removed_ahead = true;
+    observed.completed_count += completed.length;
+    observed.through_sequence = next;
+  }
+  return evidence;
+}
+
+function continuousSwitchErrors(before, after, requestedAtMs, expectedHeight, removalEvidence = null) {
+  const errors = [];
+  if (!before || !after || !before.family_id || before.family_id !== after.family_id
+      || after.closed !== false) errors.push("continuous family identity was absent, changed or closed");
+  for (const key of ["element", "hls", "media_source"]) {
+    if (before?.[key] == null || before[key] !== after?.[key]) errors.push(`continuous ${key} was absent or replaced`);
+  }
+  for (const type of ["video", "audio"]) {
+    const previous = before?.buffers?.find((row) => row.type === type);
+    const current = after?.buffers?.find((row) => row.type === type);
+    if (!previous || !current || previous.identity !== current.identity) {
+      errors.push(`continuous ${type} buffer was absent or replaced`);
+      continue;
+    }
+    if (removalEvidence) {
+      const observed = removalEvidence.version === 1
+        && removalEvidence.buffers?.find((row) => row.type === type);
+      if (!observed || observed.identity !== previous.identity || observed.replaced
+          || observed.from_sequence !== previous.removal_sequence
+          || observed.through_sequence !== current.removal_sequence || observed.truncated
+          || !Number.isSafeInteger(observed.completed_count)
+          || observed.completed_count !== current.removal_sequence - previous.removal_sequence) {
+        errors.push(`continuous ${type} removal evidence was truncated or replaced`);
+      }
+      if (observed?.removed_ahead) errors.push(`continuous ${type} removed media ahead of the playhead`);
+    } else {
+      const completed = current.completed_removals.filter((row) => row.sequence > previous.removal_sequence);
+      if (completed.length !== current.removal_sequence - previous.removal_sequence) {
+        errors.push(`continuous ${type} removal evidence was truncated`);
+      }
+      if (completed.some((row) => row.through > row.playhead + 0.001)) {
+        errors.push(`continuous ${type} removed media ahead of the playhead`);
+      }
+    }
+  }
+  const tx = after?.transaction;
+  const presented = after?.presented;
+  if (!Number.isFinite(requestedAtMs) || !tx || !Number.isFinite(tx.first_presented_at_ms) || tx.first_presented_at_ms < requestedAtMs
+      || !Number.isSafeInteger(tx.first_presented_tick)
+      || !tx.appended.some((row) => row.from_tick <= tx.first_presented_tick && tx.first_presented_tick < row.through_tick)) {
+    errors.push("continuous target has no fresh presented receipt within an actual appended interval");
+  }
+  if (!presented || presented.candidate_id !== after?.wanted_candidate
+      || (expectedHeight && presented.height !== Number(expectedHeight))) {
+    errors.push("continuous target has no matching decoded raster evidence");
+  }
+  return errors;
 }
 
 function playerSnapshotExpression() {
@@ -2324,9 +2536,18 @@ function playerSnapshotExpression() {
     const mediaError=v&&v.error?{code:v.error.code,message:v.error.message||null}:null;
     return {
       sampled_at_ms:Math.round(performance.now()),
+      sampled_unix_ms:Date.now(),
+      continuous:(${continuousTransportSnapshot.toString()})(p,v,labPlayers),
       acquisition_clock_ms:performance.now(),
       file_id:p.fileId||null, started:!!p.started, decided_method:p.decidedMethod||null,
       method:p.method||null, copy_hls:!!p.copyHls, tried_fallback:!!p.triedFallback,
+      controlled_hls:p.continuousQuality&&p.hls?{
+        start_level:p.hls.startLevel??null,load_level:p.hls.loadLevel??null,
+        current_level:p.hls.currentLevel??null,next_load_level:p.hls.nextLoadLevel??null,
+        levels:(p.hls.levels||[]).slice(0,32).map((level,index)=>({index,
+          width:level.width??null,height:level.height??null,bitrate:level.bitrate??null})),
+        primary_candidate:p.continuousQualityBootstrap?.primary_candidate_id??null,
+        observations:(p.continuousQualityObservations||[]).slice(-16).map(row=>({...row}))}:null,
       encoder:p.encoder||null, vod:!!p.vod, attempt_id:p.attemptId||null,
       attempt_reason:p.attemptReason||null, player_generation:playerGeneration,
       session_id:p.sessionId||null, keeper_fires:p._keeperFires||0,
@@ -2348,9 +2569,19 @@ function playerSnapshotExpression() {
         target_height:p.recoveringStall.targetHeight??null}:null,
       hitches:{back:h.back||0,held:h.held||0,late:h.late||0,drop:h.drop||0,gap:h.gap||0,slow:h.slow||0,rate:h.rate==null?null:h.rate},
       hitch_faults:(h.faults||[]).slice(-16).map(fault=>({...fault})),
+      frame_metadata_anomalies:Number(h.metadataAnomalies||0),
+      frame_metadata_faults:(h.metadataFaults||[]).slice(-16).map(fault=>({...fault})),
       decode:p.decodeInfo||null, health:p.health||null,
       source:p.source||null, audio_count:(p.audio||[]).length, subtitle_count:(p.subs||[]).length,
       current_audio:p.curAudio==null?null:p.curAudio, current_subtitle:p.curSub==null?null:p.curSub,
+      auto_policy:p.abr?{
+        current_candidate:p.qualityCandidateId||null,
+        requested_candidate:p.abr.requestedCandidateId||null,
+        decision_key:p.abr.lastDecisionKey||null,
+        switching:!!p.abr.switching,controller_running:!!p.abr.controllerTickRunning,
+        state:p.abr.candidateState?JSON.parse(JSON.stringify(p.abr.candidateState)):null,
+        transfer:p.abr.qualityTransfer?{...p.abr.qualityTransfer,attachment:undefined}:null,
+        pressure:p.abr.qualityPressureTransfer?{...p.abr.qualityPressureTransfer,attachment:undefined}:null}:null,
       auto_switch_seq:typeof AUTO_SWITCH_SEQ==='undefined'?0:AUTO_SWITCH_SEQ,
       auto_switches:(p.abr&&p.abr.switches||[]).map(entry=>({...entry})),
       media_event_seq:globalThis.__plurxLabMediaEventSeq||0,
@@ -2397,6 +2628,47 @@ function diagnosticSwitchCommit(commit, stageAtMs) {
     && commit.at >= stageAtMs ? commit : null;
 }
 
+function frameGapSince(lastFrameAtMs, nowMs, windowStartMs = null) {
+  if (lastFrameAtMs == null) return 0;
+  const from = windowStartMs == null ? lastFrameAtMs : Math.max(lastFrameAtMs, windowStartMs);
+  return Math.max(0, nowMs - from);
+}
+
+// requestVideoFrameCallback may dispatch one refresh after composition. Keep
+// dispatch timing separately; expectedDisplayTime describes the display clock.
+// Missing, stale, wrong-clock or nonadvancing evidence falls back to dispatch.
+function framePresentationTime(frame) {
+  if (!frame || !Number.isFinite(frame.at_ms) || frame.at_ms < 0
+      || !Number.isFinite(frame.expected_display_time_ms) || frame.expected_display_time_ms < 0
+      || Math.abs(frame.expected_display_time_ms - frame.at_ms) > 100
+      || !Number.isFinite(frame.media_time) || frame.media_time < 0
+      || !Number.isInteger(frame.presented_frames) || frame.presented_frames <= 0) return null;
+  return frame.expected_display_time_ms;
+}
+
+function framePresentationGap(before, after, windowStartMs = null) {
+  const callbackGap = frameGapSince(before?.at_ms ?? null, after.at_ms, windowStartMs);
+  const from = framePresentationTime(before), through = framePresentationTime(after);
+  const sameElement = before?.element_id === after.element_id;
+  const advances = sameElement
+    ? after.presented_frames > before?.presented_frames && after.media_time >= before?.media_time
+    : Number.isFinite(before?.absolute_time) && Number.isFinite(after.absolute_time)
+      && after.absolute_time >= before.absolute_time;
+  const supported = from != null && through != null && through > from && advances;
+  return {gap_ms: supported ? frameGapSince(from, through, windowStartMs) : callbackGap,
+    callback_gap_ms: callbackGap, clock: supported ? "expected_display" : "callback"};
+}
+
+function advancingOutgoingFrame(snapshot, baselineSequence) {
+  const probe = snapshot.frame_probe;
+  if (probe?.supported !== true) return true;
+  const frame = probe.last_frame;
+  return Number.isFinite(probe.last_frame_at_ms)
+    && Number(probe.sequence) > baselineSequence
+    && Number(frame?.media_time) > 0
+    && !snapshot.video.paused && !snapshot.video.seeking;
+}
+
 async function setCasePreferences(driver, quality, frameDiagnostics = false, d3Acquisition = false) {
   await driver.exec(`
     try{closePlayer()}catch(e){}
@@ -2404,6 +2676,10 @@ async function setCasePreferences(driver, quality, frameDiagnostics = false, d3A
     // Existing callbacks append to bounded rings; no new timer/subscription.
     globalThis.__plurxLabFrameDiagnostics=${frameDiagnostics ? `{windows:[],dropped_windows:0,max_windows:4,max_records:512}` : "null"};
     globalThis.__plurxLabDiagnosticCommit=${diagnosticSwitchCommit.toString()};
+    globalThis.__plurxLabFrameGapSince=${frameGapSince.toString()};
+    const frameGapSince=globalThis.__plurxLabFrameGapSince;
+    const framePresentationTime=${framePresentationTime.toString()};
+    globalThis.__plurxLabFramePresentationGap=${framePresentationGap.toString()};
     globalThis.__plurxLabMediaEvents=[];
     globalThis.__plurxLabMediaEventSeq=globalThis.__plurxLabMediaEventSeq||0;
     globalThis.__plurxLabD3?.stop('case-boundary');
@@ -2429,7 +2705,7 @@ async function setCasePreferences(driver, quality, frameDiagnostics = false, d3A
         v.__plurxLabFrameProbe=true;
         if(!globalThis.__plurxLabFrameProbe||!globalThis.__plurxLabFrameProbe.supported)
           globalThis.__plurxLabFrameProbe={supported:true,sequence:0,last_frame_at_ms:null,
-            maximum_gap_ms:0,maximum_gap_detail:null,frames:0,last_frame:null,auto_presentations:[]};
+            maximum_gap_ms:0,maximum_gap_detail:null,frames:0,last_frame:null,auto_presentations:[],backward_frames:[]};
         const frame=(now,metadata)=>{
           globalThis.__plurxLabD3?.appendFrame(v,now,metadata,
             (typeof PLAYER!=='undefined'&&PLAYER)||null);
@@ -2487,19 +2763,15 @@ async function setCasePreferences(driver, quality, frameDiagnostics = false, d3A
           const probe=globalThis.__plurxLabFrameProbe;
           if(probe){
             const priorFrame=probe.last_frame;
-            const gap=probe.last_frame_at_ms==null?0:now-probe.last_frame_at_ms;
-            if(gap>probe.maximum_gap_ms){
-              probe.maximum_gap_ms=gap;
-              probe.maximum_gap_detail={start_at_ms:probe.last_frame_at_ms,
-                end_at_ms:now,from_element:priorFrame?.element_id||null,
-                to_element:v.__plurxLabElementId||null,
-                from_session_id:priorFrame?.session_id||null};
-            }
             probe.last_frame_at_ms=now;
             probe.frames+=1;
             probe.sequence+=1;
             const p=(typeof PLAYER!=='undefined'&&PLAYER)||{};
             const presented={sequence:probe.sequence,at_ms:now,
+              current_time:Number.isFinite(v.currentTime)?v.currentTime:null,
+              presentation_time_ms:Number.isFinite(metadata?.presentationTime)?metadata.presentationTime:null,
+              expected_display_time_ms:Number.isFinite(metadata?.expectedDisplayTime)?metadata.expectedDisplayTime:null,
+              presented_frames:Number.isFinite(metadata?.presentedFrames)?metadata.presentedFrames:null,
               element_id:v.__plurxLabElementId||null,
               media_time:metadata&&Number.isFinite(metadata.mediaTime)?metadata.mediaTime:null,
               absolute_time:metadata&&Number.isFinite(metadata.mediaTime)
@@ -2507,9 +2779,39 @@ async function setCasePreferences(driver, quality, frameDiagnostics = false, d3A
               width:metadata&&Number.isFinite(metadata.width)?metadata.width:v.videoWidth,
               height:metadata&&Number.isFinite(metadata.height)?metadata.height:v.videoHeight,
               method:p.method||null,session_id:p.sessionId||null,attempt_id:p.attemptId||null};
+            const measured=globalThis.__plurxLabFramePresentationGap(priorFrame,presented,probe.measurement_start_at_ms);
+            const gap=measured.gap_ms;
+            if(measured.callback_gap_ms>Number(probe.maximum_callback_gap_ms||0)){
+              probe.maximum_callback_gap_ms=measured.callback_gap_ms;
+              probe.maximum_callback_gap_detail={start_at_ms:priorFrame?.at_ms??null,end_at_ms:now,
+                gap_ms:measured.callback_gap_ms,from:{...priorFrame},to:{...presented}};
+            }
+            if(gap>probe.maximum_gap_ms){
+              probe.maximum_gap_ms=gap;
+              probe.maximum_gap_detail={start_at_ms:probe.measurement_start_at_ms==null?(priorFrame?.at_ms??null):
+                  Math.max(priorFrame?.at_ms??probe.measurement_start_at_ms,probe.measurement_start_at_ms),
+                end_at_ms:now,gap_ms:gap,gap_clock:measured.clock,callback_gap_ms:measured.callback_gap_ms,from_element:priorFrame?.element_id||null,
+                to_element:v.__plurxLabElementId||null,
+                from_session_id:priorFrame?.session_id||null,
+                from_media_time:priorFrame?.media_time??null,
+                from_expected_display_time_ms:priorFrame?.expected_display_time_ms??null,
+                from_presented_frames:priorFrame?.presented_frames??null};
+            }
+            if(priorFrame&&Number.isFinite(priorFrame.media_time)
+                &&Number.isFinite(presented.media_time)&&presented.media_time<priorFrame.media_time-0.001){
+              if(!Array.isArray(probe.backward_frames))probe.backward_frames=[];
+              probe.backward_frames.push({from:{...priorFrame},to:{...presented},
+                current_time:v.currentTime,seeking:!!v.seeking,paused:!!v.paused});
+              if(probe.backward_frames.length>16)probe.backward_frames.shift();
+            }
             probe.last_frame=presented;
-            if(probe.maximum_gap_detail&&probe.maximum_gap_detail.end_at_ms===now)
-              probe.maximum_gap_detail.to_session_id=presented.session_id;
+            if(probe.maximum_gap_detail&&probe.maximum_gap_detail.end_at_ms===now){
+              Object.assign(probe.maximum_gap_detail,{to_session_id:presented.session_id,
+                to_media_time:presented.media_time,
+                to_presentation_time_ms:presented.presentation_time_ms,
+                to_expected_display_time_ms:presented.expected_display_time_ms,
+                to_presented_frames:presented.presented_frames});
+            }
             if(!Array.isArray(probe.auto_presentations)) probe.auto_presentations=[];
             const switches=p.abr&&Array.isArray(p.abr.switches)?p.abr.switches:[];
             for(let index=switches.length-1;index>=0;index--){
@@ -2652,8 +2954,8 @@ async function performOperation(driver, testCase, start) {
   }
   if (testCase.operation === "quality-cycle") {
     const qualities = testCase.switches || [];
-    if (!Array.isArray(qualities) || qualities.length < 2) {
-      throw new Error("quality-cycle needs at least two named switches");
+    if (!Array.isArray(qualities) || qualities.length < 1) {
+      throw new Error("quality-cycle needs at least one named switch");
     }
     const changes = [];
     let before = start;
@@ -2672,17 +2974,18 @@ async function performOperation(driver, testCase, start) {
       // An API-present but silent rVFC implementation is not an oracle. Wait
       // for a real outgoing frame before resetting the per-transition maxima,
       // so a callback stream that begins only on the successor cannot erase
-      // the outgoing-to-target blank interval.
+      // the outgoing-to-target blank interval. A paused preload frame at
+      // film time zero is not advancing playback: require a fresh callback
+      // before issuing the request, then preserve its entire gap below.
+      const baselineSequence = Number(before.frame_probe?.sequence || 0);
       before = await waitFor(async () => {
         const state = await driver.eval(playerSnapshotExpression());
-        if (state.frame_probe?.supported !== true) return state;
-        return state.frame_probe.last_frame_at_ms != null
-          && Number.isFinite(Number(state.frame_probe.last_frame_at_ms)) ? state : null;
+        return advancingOutgoingFrame(state, baselineSequence) ? state : null;
       }, Number(testCase.frame_baseline_timeout_seconds || 2) * 1_000,
       `outgoing frame before quality switch to ${quality}`, 50);
       await driver.exec(`
         { const probe=globalThis.__plurxLabFrameProbe;
-          if(probe){probe.maximum_gap_ms=0;probe.maximum_gap_detail=null;probe.frames=0;}
+          if(probe){probe.maximum_gap_ms=0;probe.maximum_callback_gap_ms=0;probe.maximum_callback_gap_detail=null;probe.maximum_gap_detail=null;probe.frames=0;probe.measurement_start_at_ms=null;}
         }
         return true;
       `);
@@ -2695,6 +2998,7 @@ async function performOperation(driver, testCase, start) {
         timeline.push(sampleFrom(state, performance.now() - transitionOrigin));
         const selected = await driver.eval("playQuality()");
         if (state.video.error) return state;
+        if (testCase.require_continuous && state.continuous?.observation === "Continuous target retained current") return state;
         if (selected !== quality || !state.started || state.video.seeking
             || state.video.ready_state < 2 || state.video.current_time <= 0.05) return null;
         const targetState = (!spec.expected_method || (state.decided_method === spec.expected_method
@@ -2716,8 +3020,14 @@ async function performOperation(driver, testCase, start) {
           if (spec.expected_height && Number(frame.height) !== Number(spec.expected_height)) return null;
           if (frame.session_id !== state.session_id || frame.attempt_id !== state.attempt_id) return null;
         }
+        if (testCase.require_continuous && (!state.continuous?.transaction
+            || state.continuous.transaction.first_presented_at_ms == null
+            || state.continuous.transaction.first_presented_at_ms < before.sampled_unix_ms)) return null;
         return state;
       }, Number(testCase.switch_wait_timeout_seconds || 30) * 1000, `committed quality switch to ${quality}`, 50);
+      if (testCase.require_continuous && committed.continuous?.observation === "Continuous target retained current") {
+        throw new Error(`quality target ${quality} retained current playback; the continuity series failed`);
+      }
       const targetFrame = committed.frame_probe?.supported ? committed.frame_probe.last_frame : null;
       const readyAtMs = Number(targetFrame?.at_ms ?? committed.sampled_at_ms);
       const landedPosition = Number(targetFrame?.absolute_time ?? committed.video.absolute_time);
@@ -2741,6 +3051,11 @@ async function performOperation(driver, testCase, start) {
         runway_seconds: committed.video.runway,
         committed_frame_sequence: committed.frame_probe?.last_frame?.sequence ?? null,
         video_gap_ms: null,
+        ...(testCase.require_continuous ? {
+          continuous_before: before.continuous,
+          continuous_after: committed.continuous,
+          continuous_requested_at_ms: before.sampled_unix_ms,
+        } : {}),
       };
       let evidenceEnd = committed;
       const holdSeconds = Number(testCase.switch_hold_seconds || 0);
@@ -2759,7 +3074,16 @@ async function performOperation(driver, testCase, start) {
           sampledVideoGap(timeline.slice(timelineStartIndex)).maximum_clock_gap_ms,
         );
       }
+      if (testCase.require_continuous) change.continuous_after = evidenceEnd.continuous;
       change.video_gap_ms = measuredTransition.maximum_video_gap_ms;
+      change.frame_probe_gap_detail = measuredTransition.frame_probe_gap_detail;
+      change.callback_gap_ms = measuredTransition.maximum_callback_gap_ms;
+      change.frame_probe_callback_gap_detail = measuredTransition.frame_probe_callback_gap_detail;
+      change.dropped_frames = Number.isFinite(evidenceEnd.video.dropped)
+        && Number.isFinite(before.video.dropped)
+        ? Math.max(0, evidenceEnd.video.dropped - before.video.dropped) : null;
+      change.independent_backward_frames = (probe?.backward_frames || [])
+        .filter(row => Number(row.to?.sequence) > Number(before.frame_probe?.sequence || 0));
       change.frame_probe_operative = frameProbeOperative;
       changes.push(change);
       before = evidenceEnd;
@@ -2821,7 +3145,8 @@ function transitionMetrics(before, after) {
   const probe = after?.frame_probe || {};
   const openFrameGap = probe.supported && probe.last_frame_at_ms != null
     && !after?.video?.paused && !after?.video?.ended
-    ? Math.max(0, Number(after?.sampled_at_ms || 0) - Number(probe.last_frame_at_ms))
+    ? frameGapSince(framePresentationTime(probe.last_frame) ?? Number(probe.last_frame_at_ms), Number(after?.sampled_at_ms || 0),
+      probe.measurement_start_at_ms ?? null)
     : 0;
   maximumGapMs = Math.max(maximumGapMs, Number(probe.maximum_gap_ms || 0), openFrameGap);
   return {
@@ -2829,7 +3154,12 @@ function transitionMetrics(before, after) {
     event_count: events.length,
     expected_event_count: expectedEvents,
     maximum_video_gap_ms: maximumGapMs,
+    maximum_callback_gap_ms: Math.max(Number(probe.maximum_callback_gap_ms || 0),
+      probe.supported && probe.last_frame_at_ms != null && !after?.video?.paused && !after?.video?.ended
+        ? frameGapSince(Number(probe.last_frame_at_ms), Number(after?.sampled_at_ms || 0),
+          probe.measurement_start_at_ms ?? null) : 0),
     frame_probe_gap_detail: probe.maximum_gap_detail || null,
+    frame_probe_callback_gap_detail: probe.maximum_callback_gap_detail || null,
     wait_events: events.filter((event) => event.event === "waiting" || event.event === "stalled").length,
     reopen_events: events.filter((event) => event.event === "emptied" || event.event === "abort").length,
     stalls: Math.max(0, Number(after?.lifetime_stalls || 0) - Number(before?.lifetime_stalls || 0)),
@@ -2999,7 +3329,7 @@ async function observeShapedCliff(driver, shaper, testCase, start) {
   for (let cliffIndex = 1; cliffIndex < shaper.profile.stages.length; cliffIndex += 1) {
     await driver.exec(`
       { const probe=globalThis.__plurxLabFrameProbe;
-          if(probe){probe.maximum_gap_ms=0;probe.maximum_gap_detail=null;probe.frames=0;}
+          if(probe){probe.maximum_gap_ms=0;probe.maximum_callback_gap_ms=0;probe.maximum_callback_gap_detail=null;probe.maximum_gap_detail=null;probe.frames=0;probe.measurement_start_at_ms=null;}
       }
       return true;
     `);
@@ -3146,6 +3476,10 @@ function scoreCase(
       errors.push(`${changes.length}/${expectedChanges} quality switches completed`);
     }
     for (const change of changes) {
+      if (testCase.require_continuous) errors.push(...continuousSwitchErrors(
+        change.continuous_before, change.continuous_after,
+        change.continuous_requested_at_ms, change.expected_height,
+      ).map((error) => `${change.quality}: ${error}`));
       const deadlineMs = Number(testCase.maximum_switch_ready_ms ?? 2_000);
       if (change.ready_ms > deadlineMs) {
         errors.push(`${change.quality} switch took ${change.ready_ms} ms, want <= ${deadlineMs} ms`);
@@ -3216,6 +3550,7 @@ function scoreCase(
       switches: changes.length,
       video_gap_p95_ms: p95Gap,
       video_gap_max_ms: maximumGap,
+      callback_gap_p95_ms: percentile(changes.map(change => Number(change.callback_gap_ms)).filter(Number.isFinite), 0.95),
     };
     if (testCase.evidence_scope === "browser_video_partial") {
       warnings.push(
@@ -3930,12 +4265,17 @@ async function runOneCase(driver, server, manifest, fixture, testCase, browserIn
 async function runOneCaseBody(driver, server, manifest, fixture, testCase, browserInfo, observeOverride, shaper, frameDiagnostics = false, d3Acquisition = false) {
   const file = server.files.get(fixture.filename);
   if (!file) throw new Error(`scanner did not return ${fixture.filename}`);
+  const resumeMs = Number(testCase.start_seconds ?? 0) * 1000;
+  if (!Number.isFinite(resumeMs) || resumeMs < 0
+      || (file.duration_ms > 0 && resumeMs >= file.duration_ms)) {
+    throw new Error("diagnostic start position must be within the fixture");
+  }
   await setCasePreferences(driver, testCase.quality, frameDiagnostics, d3Acquisition);
   const decision = await api(server.baseUrl,
     `/files/${file.id}/decision?${browserInfo.caps_q}&force=${qualityForce(testCase.quality)}`,
     { token: server.token });
   const startedAt = Date.now();
-  await driver.startPlayback(file.id, file.title || fixture.id, file.duration_ms || 0);
+  await driver.startPlayback(file.id, file.title || fixture.id, file.duration_ms || 0, resumeMs);
   let start;
   try {
     start = await waitFor(async () => {
@@ -3950,6 +4290,7 @@ async function runOneCaseBody(driver, server, manifest, fixture, testCase, brows
       name: testCase.name, fixture: fixture.id, quality: testCase.quality, operation: testCase.operation,
       status: "failed", duration_ms: Date.now() - startedAt,
       playback_request_unix_ms: startedAt,
+      requested_start_seconds: resumeMs / 1000,
       errors: [error.message], warnings: [], decision, start: null, end,
     };
   }
@@ -3958,6 +4299,7 @@ async function runOneCaseBody(driver, server, manifest, fixture, testCase, brows
       name: testCase.name, fixture: fixture.id, quality: testCase.quality, operation: testCase.operation,
       status: "failed", duration_ms: Date.now() - startedAt,
       playback_request_unix_ms: startedAt,
+      requested_start_seconds: resumeMs / 1000,
       errors: [`media error ${start.video.error.code}: ${start.video.error.message || "unknown"}`], warnings: [], decision, start, end: start,
     };
   }
@@ -3970,6 +4312,7 @@ async function runOneCaseBody(driver, server, manifest, fixture, testCase, brows
       outcome: shaped.score.outcome,
       duration_ms: Date.now() - startedAt,
       playback_request_unix_ms: startedAt,
+      requested_start_seconds: resumeMs / 1000,
       errors: shaped.score.errors,
       warnings: shaped.score.metrics.shaping.transport_errors.length
         ? [`shaper reported ${shaped.score.metrics.shaping.transport_errors.length} transport errors`] : [],
@@ -4000,7 +4343,17 @@ async function runOneCaseBody(driver, server, manifest, fixture, testCase, brows
       end: shaped.end,
     };
   }
-  const continuityStart = start;
+  // Startup has its own TTFF receipt. A steady observation begins now, not
+  // at the preload frame that could have been rendered before play started.
+  // Switch operations deliberately retain their full outgoing-frame interval.
+  const continuityStart = testCase.operation === "steady"
+    ? await driver.eval(`(()=>{
+        const probe=globalThis.__plurxLabFrameProbe;
+        if(probe){probe.maximum_gap_ms=0;probe.maximum_callback_gap_ms=0;probe.maximum_callback_gap_detail=null;probe.maximum_gap_detail=null;probe.frames=0;
+          probe.measurement_start_at_ms=performance.now();}
+        return ${playerSnapshotExpression()};
+      })()`)
+    : start;
   let operation = null;
   try {
     operation = await performOperation(driver, testCase, start);
@@ -4011,6 +4364,7 @@ async function runOneCaseBody(driver, server, manifest, fixture, testCase, brows
       name: testCase.name, fixture: fixture.id, quality: testCase.quality, operation: testCase.operation,
       status: "failed", duration_ms: Date.now() - startedAt,
       playback_request_unix_ms: startedAt,
+      requested_start_seconds: resumeMs / 1000,
       errors: [`${testCase.operation}: ${error.message}`], warnings: [], decision, start, end,
     };
   }
@@ -4030,6 +4384,7 @@ async function runOneCaseBody(driver, server, manifest, fixture, testCase, brows
     status: score.status,
     duration_ms: Date.now() - startedAt,
     playback_request_unix_ms: startedAt,
+    requested_start_seconds: resumeMs / 1000,
     errors: score.errors,
     warnings: score.warnings,
     metrics: score.metrics,
@@ -4424,18 +4779,23 @@ async function runSuite(manifest, options, dependencies = {}) {
         result.diagnostics = [];
       }
       if (testCase.require_vod) {
-        const creates = result.server_logs.filter((entry) =>
-          String(entry.message || "").includes("vod session attached"),
-        ).length;
         result.metrics = result.metrics || {};
-        result.metrics.session_creates = creates;
-        const allowed = Number(testCase.maximum_session_creates ?? 1);
-        if (creates !== allowed) {
+        try {
+          // A long browser run can outlive the bounded console ring. The
+          // durable lifecycle stream records every actual parent attachment.
+          const events = await (dependencies.api || api)(server.baseUrl,
+            `/system/playback-events?since=${caseLogStart - 100}&event=session_start&limit=2000`,
+            { token: server.token });
+          const file = server.files.get(fixture.filename);
+          const creates = vodAttachmentCensus(events, file?.id, caseLogStart - 100);
+          result.metrics.session_creates = creates;
+          result.metrics.session_create_evidence = "durable_vod_lifecycle";
+          const allowed = Number(testCase.maximum_session_creates ?? 1);
+          if (creates !== allowed) throw new Error(`${creates} VOD session creates, want exactly ${allowed}`);
+        } catch (error) {
           result.status = "failed";
           result.errors = result.errors || [];
-          result.errors.push(
-            `${creates} VOD session creates in server log, want exactly ${allowed}`,
-          );
+          result.errors.push(error.message);
         }
       }
       results.push(result);
@@ -4474,7 +4834,7 @@ async function runSuite(manifest, options, dependencies = {}) {
     generated_at: new Date().toISOString(),
     suite,
     browser: browserInfo,
-    network_profile: profile,
+    network_profile: shaper?.profile || profile,
     shaping: shaper ? shaper.telemetry() : null,
     server: {
       base_url: server.baseUrl,
@@ -5219,6 +5579,12 @@ module.exports = {
   SHAPER_SLICE_BYTES,
   ShapingProxy,
   TokenBucket,
+  CdpDriver,
+  FirefoxDriver,
+  runOneCase,
+  startServer,
+  api,
+  fragmentIndexTargets,
   automaticSwitchesAfter,
   cdpBrowserArgs,
   findOrCreateCdpPageTarget,
@@ -5248,6 +5614,11 @@ module.exports = {
   peakUpgradeRate,
   performOperation,
   playerSnapshotExpression,
+  continuousTransportSnapshot,
+  continuousSwitchErrors,
+  continuousRemovalEvidence,
+  observeContinuousRemovals,
+  vodAttachmentCensus,
   rungHistory,
   scoreRecovery,
   scoreCase,
@@ -5257,6 +5628,10 @@ module.exports = {
   shaperClaimBoundBytes,
   timeToSustained,
   transitionMetrics,
+  frameGapSince,
+  framePresentationTime,
+  framePresentationGap,
+  advancingOutgoingFrame,
   waitForDeviceAcceptance,
   writePreparationReport,
   writeFatalRunReport,

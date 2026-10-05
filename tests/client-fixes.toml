@@ -3656,6 +3656,398 @@ source_anchor = '"quality_catalog_unavailable",'
 test = "clients/apple/Tests/AppleClientTests.swift"
 test_anchor = "func testOnlyTheContractsNotYetCodesAreRetried() throws"
 
+
+[[fixes]]
+id = "android.prepared-alignment-decoded-frame-cadence"
+commits = ["08ca9a15a"]
+source = "clients/android/app/src/main/java/tv/plurx/app/player/PreparedSurfaceReceipts.kt"
+source_anchor = "data class Frame(val positionUs: Long, val width: Int, val height: Int, val frameDurationUs: Double? = null)"
+test = "clients/android/app/src/test/java/tv/plurx/app/player/PreparedSurfaceReceiptsTest.kt"
+test_anchor = "fun alignmentRequiresOneDecodedFrameRatherThanQuarterSecondSlack("
+
+[[fixes]]
+id = "android.rendezvous-waits-for-decoded-readiness"
+commits = ["0a13cd18e"]
+source = "clients/android/app/src/main/java/tv/plurx/app/player/PreparedVideoSurfaces.kt"
+source_anchor = "fun alignmentWindowMs(player: ExoPlayer): Double? ="
+test = "clients/android/app/src/test/java/tv/plurx/app/player/RendezvousModelTest.kt"
+test_anchor = "fun decodedFrameWindowReparksInsteadOfAcceptingQuarterSecondLateArrival("
+
+[[fixes]]
+id = "apple.inline-promotion-keeps-prepared-player-and-layer"
+commits = ["11ad88cc1"]
+source = "clients/apple/Sources/PlayerSurface.swift"
+source_anchor = "func promote(_ player: AVPlayer) -> Bool {"
+test = "clients/apple/Tests/PreparedReplacementTests.swift"
+test_anchor = "func testTransportAdvanceKeepsRetentionButCannotReviveAnOlderChoice("
+
+[[fixes]]
+id = "android.continuous-transaction-replays-uncertain-request"
+commits = ["122a26831"]
+source = "clients/android/app/src/main/java/tv/plurx/app/player/ContinuousQualityProtocol.kt"
+source_anchor = "private suspend fun replayPending() { pending?.let { send(it) } }"
+test = "clients/android/app/src/test/java/tv/plurx/app/player/ContinuousQualityProtocolTest.kt"
+test_anchor = "fun lostAcknowledgementReplaysTheSameRequestBeforeNewIntent("
+
+[[fixes]]
+id = "apple.prepared-track-reconciliation-bounded-by-overlap"
+commits = ["130ab19a0"]
+source = "clients/apple/Sources/PlayerController.swift"
+source_anchor = "private func reconcilePreparedMediaSelections(to item: AVPlayerItem, overlapStartedAtMs: Int) async -> Bool {"
+test = "clients/apple/Tests/PlayerOperationOwnershipTests.swift"
+test_anchor = "func testCancelledMediaSelectionPreparationCannotApplyLateTracks("
+
+[[fixes]]
+id = "android.committed-quality-observation-deadline"
+commits = ["19d7b3820"]
+source = "clients/android/app/src/main/java/tv/plurx/app/player/ContinuousObservationDeadline.kt"
+source_anchor = "internal class ContinuousObservationDeadline(private val graceMs: Long = 2000) {"
+test = "clients/android/app/src/test/java/tv/plurx/app/player/ContinuousObservationDeadlineTest.kt"
+test_anchor = "fun aFarFutureAppendAndPauseDoNotBecomeAFalsePresentationTimeout("
+
+[[fixes]]
+id = "android.reserved-loading-bound-to-accepted-samples"
+commits = ["1c915839b"]
+source = "clients/android/app/src/main/java/tv/plurx/app/player/ContinuousHlsExtractorFactory.kt"
+source_anchor = "data class AcceptedSample("
+test = "clients/android/app/src/test/java/tv/plurx/app/player/ContinuousVideoSelectionTest.kt"
+test_anchor = "fun aReadyTargetCannotChangeFutureLoadsUntilItsIntervalIsReserved("
+
+[[fixes]]
+id = "android.superseded-owners-dispose-unexposed-pins"
+commits = ["26c4f10c3"]
+source = "clients/android/app/src/main/java/tv/plurx/app/player/ContinuousUnexposedPins.kt"
+source_anchor = "internal object ContinuousUnexposedPins {"
+test = "clients/android/app/src/test/java/tv/plurx/app/player/ContinuousUnexposedPinsTest.kt"
+test_anchor = "fun supersededOwnersDisposeOnlyPinsThatNeverReachedTheQueue("
+
+[[fixes]]
+id = "android.refused-quality-command-settled-from-ledger"
+commits = ["287641427"]
+source = "clients/android/app/src/main/java/tv/plurx/app/player/ContinuousQualityProtocol.kt"
+source_anchor = "private suspend fun resolveRefusal(request: JsonObject, refusal: ContinuousQualityHttpFailure): JsonObject {"
+test = "clients/android/app/src/test/java/tv/plurx/app/player/ContinuousQualityProtocolTest.kt"
+test_anchor = "fun refusalIsResolvedByOneLedgerReadAndNeverResent("
+
+# The commit's own regression tests are server-side; this client test pins
+# that stale compositor callbacks cannot credit a presentation.
+[[fixes]]
+id = "android.prepared-present-fence-observation-bounded"
+commits = ["2b7fd1743"]
+source = "clients/android/app/src/main/java/tv/plurx/app/player/PreparedVideoSurfaces.kt"
+source_anchor = "val deadline = android.os.SystemClock.elapsedRealtime() + PREPARED_OVERLAP_BOUND_MS"
+test = "clients/android/app/src/test/java/tv/plurx/app/player/PreparedSurfaceReceiptsTest.kt"
+test_anchor = "fun seekAndSurfaceRecreationRejectOldFramesAndCompositorCallbacks("
+
+[[fixes]]
+id = "android.continuous-auto-costs-include-audio"
+commits = ["34f6a87d7"]
+source = "clients/android/app/src/main/java/tv/plurx/app/player/ContinuousEnrollment.kt"
+source_anchor = "internal fun continuousQualityBoundCatalog(candidates: List<QualityCandidate>, family: JsonObject?): List<QualityCandidate> {"
+test = "clients/android/app/src/test/java/tv/plurx/app/player/ContinuousVideoSelectionTest.kt"
+test_anchor = "fun continuousAutoCostsIncludeSharedAudioWithoutChangingCandidateIdentity("
+
+[[fixes]]
+id = "android.tunneled-rendering-item-local-frames"
+commits = ["471e3a410"]
+source = "clients/android/app/src/main/java/tv/plurx/app/player/PreparedFrameRenderersFactory.kt"
+source_anchor = "internal fun preparedItemFramePositionUs(codecPositionUs: Long, streamOffsetUs: Long): Long? {"
+test = "clients/android/app/src/test/java/tv/plurx/app/player/PreparedSurfaceReceiptsTest.kt"
+test_anchor = "fun tunneledCodecClockMapsToTheSameItemFrameBoundary("
+
+[[fixes]]
+id = "android.rendezvous-lead-at-playback-rate"
+commits = ["487db3085"]
+source = "clients/android/app/src/main/java/tv/plurx/app/player/PreparedReplacement.kt"
+source_anchor = "val filmLead = kotlin.math.ceil(wallLead.toDouble() * rate).toLong().coerceAtLeast(1)"
+test = "clients/android/app/src/test/java/tv/plurx/app/player/RendezvousModelTest.kt"
+test_anchor = "fun wallLeadIsConvertedToFilmDistanceAtThePlaybackRate("
+
+[[fixes]]
+id = "android.continuous-output-evidence-owner-bound"
+commits = ["530c55c11"]
+source = "clients/android/app/src/main/java/tv/plurx/app/player/ContinuousCodecAdapterFactory.kt"
+source_anchor = "override fun flush() { adapter.flush(); freed() }"
+test = "clients/android/app/src/test/java/tv/plurx/app/player/ContinuousOutputEvidenceTest.kt"
+test_anchor = "fun aFailedCodecFlushCannotCreditDecoderRelease("
+
+[[fixes]]
+id = "android.reservation-owned-rendition-selection"
+commits = ["62c72e8a8"]
+source = "clients/android/app/src/main/java/tv/plurx/app/player/ContinuousVideoSelection.kt"
+source_anchor = "internal data class ReservedVideoChoice(val renditionId: String, val intentRevision: Long, val transactionId: String, val automatic: Boolean)"
+test = "clients/android/app/src/test/java/tv/plurx/app/player/ContinuousVideoSelectionTest.kt"
+test_anchor = "fun reservedFutureChoiceUsesTheSameSelectionAfterMedia3ReordersFormats("
+
+[[fixes]]
+id = "android.prepared-readiness-and-alignment-share-overlap"
+commits = ["6309c5d70"]
+source = "clients/android/app/src/main/java/tv/plurx/app/player/PreparedReplacement.kt"
+source_anchor = "var remainingOverlapMs = overlapBoundMs?.let { bound ->"
+test = "clients/android/app/src/test/java/tv/plurx/app/player/PreparedReplacementTest.kt"
+test_anchor = "fun preparationAndAlignmentConsumeTheSamePhysicalOverlapDeadline("
+
+[[fixes]]
+id = "android.canceled-control-restored-without-reopen"
+commits = ["637b47f05"]
+source = "clients/android/app/src/main/java/tv/plurx/app/player/ContinuousReservations.kt"
+source_anchor = "suspend fun recoverFailedChange(): Retained? = lock.withLock {"
+test = "clients/android/app/src/test/java/tv/plurx/app/player/ContinuousReservationsTest.kt"
+test_anchor = "fun unsupportedTargetsDoNotPrepareAndColdVideoSchedulesBeforeSelection("
+
+[[fixes]]
+id = "android.optional-control-budget-bounded"
+commits = ["6718dd049"]
+source = "clients/android/app/src/main/java/tv/plurx/app/player/ContinuousControlDeadline.kt"
+source_anchor = "internal class ContinuousControlDeadline(private val budgetMs: Long = 30_000) {"
+test = "clients/android/app/src/test/java/tv/plurx/app/player/ContinuousControlDeadlineTest.kt"
+test_anchor = "fun pauseAndCommittedTargetsCannotConsumeOrReuseOptionalControlBudgets("
+
+[[fixes]]
+id = "android.audio-focus-stays-with-audible-player"
+commits = ["699db58de"]
+source = "clients/android/app/src/main/java/tv/plurx/app/player/PlurxPlayerBuilder.kt"
+source_anchor = "internal object PreparedAudioFocus {"
+test = "clients/android/app/src/test/java/tv/plurx/app/player/PreparedAudioFocusTest.kt"
+test_anchor = "fun aStagedSuccessorNeverRequestsFocusAndCommitReleasesBeforeRequesting("
+
+[[fixes]]
+id = "android.failed-manual-quality-retains-playback"
+commits = ["6aa41e7b2"]
+source = "clients/android/app/src/main/java/tv/plurx/app/player/PlaybackIntent.kt"
+source_anchor = "fun retainFailedQuality(pending: PendingQualityChange, incumbent: QualitySelection): Boolean {"
+test = "clients/android/app/src/test/java/tv/plurx/app/player/PlaybackIntentTest.kt"
+test_anchor = "fun failedQualityRetainsWireAndMediaWithoutLosingSavedPreferenceOrPause("
+
+[[fixes]]
+id = "android.continuous-budgets-charge-active-time-only"
+commits = ["700a9e883"]
+source = "clients/android/app/src/main/java/tv/plurx/app/player/ContinuousPlaybackClock.kt"
+source_anchor = "internal class ContinuousPlaybackClock {"
+test = "clients/android/app/src/test/java/tv/plurx/app/player/ContinuousPlaybackClockTest.kt"
+test_anchor = "fun coalescedPauseResumeSamplesCannotChargeBackgroundTime("
+
+[[fixes]]
+id = "android.continuous-ownership-retired-with-transport"
+commits = ["76d150901"]
+source = "clients/android/app/src/main/java/tv/plurx/app/player/Controller.kt"
+source_anchor = "private fun retireContinuousForTransportChange(): ContinuousAttachment? {"
+test = "clients/android/app/src/test/java/tv/plurx/app/player/ContinuousQualityOwnershipTest.kt"
+test_anchor = "fun aClosedAttachmentOwnsNoQualityChange("
+
+[[fixes]]
+id = "android.prepared-overlap-bounded-through-pause"
+commits = ["809881e92"]
+source = "clients/android/app/src/main/java/tv/plurx/app/player/PreparedReplacement.kt"
+source_anchor = "remainingOverlapMs = remainingOverlapMs?.let { it - minOf(it, elapsed) }"
+test = "clients/android/app/src/test/java/tv/plurx/app/player/PreparedReplacementTest.kt"
+test_anchor = "fun pauseParksObservationButPhysicalOverlapStillExpires("
+
+[[fixes]]
+id = "apple.prepared-rendezvous-ahead-of-seek-latency"
+commits = ["823bf7c03"]
+source = "clients/apple/Sources/PlayerController.swift"
+source_anchor = "private func awaitPreparedRendezvous("
+test = "clients/apple/Tests/PreparedCommitRendezvousTests.swift"
+test_anchor = "func testFutureRendezvousParksAheadWithoutChangingTheSuccessorOrigin("
+
+[[fixes]]
+id = "android.artifact-disposal-serialized-against-reads"
+commits = ["86cd395fc"]
+source = "clients/android/app/src/main/java/tv/plurx/app/player/ContinuousDisposalBarriers.kt"
+source_anchor = "internal class ContinuousDisposalBarriers {"
+test = "clients/android/app/src/test/java/tv/plurx/app/player/ContinuousDisposalBarriersTest.kt"
+test_anchor = "fun reentryWaitsForActualRetirementAndCancellationDoesNotRemoveTheBarrier("
+
+[[fixes]]
+id = "apple.first-frame-budget-survives-explicit-pause"
+commits = ["88101f553"]
+source = "clients/apple/Sources/PreparedReplacement.swift"
+source_anchor = "struct PreparedActiveWallBudget: Equatable {"
+test = "clients/apple/Tests/PreparedCommitRendezvousTests.swift"
+test_anchor = "func testFirstFrameBudgetSuspendsExplicitPauseAndResumesRemainingTime("
+
+[[fixes]]
+id = "android.warm-decoder-surfaces-through-exposure"
+commits = ["883957178"]
+source = "clients/android/app/src/main/java/tv/plurx/app/player/PreparedVideoSurfaces.kt"
+source_anchor = "internal class PreparedVideoSurfaces private constructor() {"
+test = "clients/android/app/src/test/java/tv/plurx/app/player/PreparedSurfaceReceiptsTest.kt"
+test_anchor = "fun hiddenRenderingDoesNotProveExposureAndRollbackFencesLatePresentation("
+
+[[fixes]]
+id = "android.target-presentation-delay-from-film-clock"
+commits = ["9565c98c1"]
+source = "clients/android/app/src/main/java/tv/plurx/app/player/ContinuousObservationDeadline.kt"
+source_anchor = "fun expectedDelayMs(boundaryUs: Long, clock: Clock): Long? {"
+test = "clients/android/app/src/test/java/tv/plurx/app/player/ContinuousObservationDeadlineTest.kt"
+test_anchor = "fun expectedPresentationUsesActualRateWithoutPromisingThroughPauseOrOverflow("
+
+[[fixes]]
+id = "android.aac-reserved-on-actual-fragment-clock"
+commits = ["960b18a99"]
+source = "clients/android/app/src/main/java/tv/plurx/app/player/ContinuousFragmentClock.kt"
+source_anchor = "fun firstDecodeTick(bytes: ByteArray): Long {"
+test = "clients/android/app/src/test/java/tv/plurx/app/player/ContinuousFragmentClockTest.kt"
+test_anchor = "fun actualAacDecodeClockChoosesItsContainingVideoEntry("
+
+[[fixes]]
+id = "android.compressed-allocation-retirement-proved"
+commits = ["9793ed7aa"]
+source = "clients/android/app/src/main/java/tv/plurx/app/player/ContinuousAllocationOwnership.kt"
+source_anchor = "internal class ContinuousAllocationOwnership {"
+test = "clients/android/app/src/test/java/tv/plurx/app/player/ContinuousAllocationOwnershipTest.kt"
+test_anchor = "fun sharedAllocationsRemainOwnedUntilActualReleaseAndOwnersStaySeparate("
+
+[[fixes]]
+id = "apple.failed-manual-quality-retains-playback"
+commits = ["9f0a14a07"]
+source = "clients/apple/Sources/PlayerController.swift"
+source_anchor = "private func retainManualQualityFailure() -> Bool {"
+test = "clients/apple/Tests/PreparedReplacementTests.swift"
+test_anchor = "func testRetainsExactStandingRecipeOnceAndRejectsStaleFailure("
+
+[[fixes]]
+id = "android.quality-receipt-operation-facts-validated"
+commits = ["a73f0add9"]
+source = "clients/android/app/src/main/java/tv/plurx/app/player/ContinuousQualityProtocol.kt"
+source_anchor = "fun acceptedIntervals(field: String, destination: String): Boolean {"
+test = "clients/android/app/src/test/java/tv/plurx/app/player/ContinuousQualityProtocolTest.kt"
+test_anchor = "fun receiptIdentityAloneCannotAcknowledgeUnperformedOperations("
+
+[[fixes]]
+id = "android.continuous-segments-are-auto-link-samples"
+commits = ["a982c789a"]
+source = "clients/android/app/src/main/java/tv/plurx/app/player/Controller.kt"
+source_anchor = "internal fun autoLinkMediaSegment(path: String): Boolean ="
+test = "clients/android/app/src/test/java/tv/plurx/app/player/AutoLinkMediaSegmentTest.kt"
+test_anchor = "fun continuousVideoSegmentsAreLinkSamplesLikeOrdinarySegments("
+
+[[fixes]]
+id = "android.first-frame-budget-survives-pause-and-background"
+commits = ["af18f77b8"]
+source = "clients/android/app/src/main/java/tv/plurx/app/player/Controller.kt"
+source_anchor = "private fun samplePreparedCommitFrameBudget(): Boolean? = preparedCommitFrameBudget?.update("
+test = "clients/android/app/src/test/java/tv/plurx/app/player/PreparedReplacementTest.kt"
+test_anchor = "fun explicitPausePreservesRemainingFirstFrameBudget("
+
+[[fixes]]
+id = "android.first-render-metadata-not-replaced-by-queued-frames"
+commits = ["b7a6ea11a"]
+source = "clients/android/app/src/main/java/tv/plurx/app/player/PreparedSurfaceReceipts.kt"
+source_anchor = "internal class PreparedFirstFrameSlot {"
+test = "clients/android/app/src/test/java/tv/plurx/app/player/PreparedSurfaceReceiptsTest.kt"
+test_anchor = "fun queuedMetadataCannotReplaceTheFrameNamedByFirstRender("
+
+[[fixes]]
+id = "apple.decoded-alignment-before-warm-promotion"
+commits = ["b83b690ad"]
+source = "clients/apple/Sources/PlayerController.swift"
+source_anchor = "private func awaitPreparedDecodedAlignment("
+test = "clients/apple/Tests/PreparedCommitRendezvousTests.swift"
+test_anchor = "func testDecodedAlignmentRejectsStaleInvalidAndEmptySamples("
+
+[[fixes]]
+id = "android.compact-acknowledgements-use-current-media-facts"
+commits = ["bc1600ee2"]
+source = "clients/android/app/src/main/java/tv/plurx/app/player/ContinuousQualityProtocol.kt"
+source_anchor = 'settled["intent_revision"] != acknowledged["intent_revision"]) return false'
+test = "clients/android/app/src/test/java/tv/plurx/app/player/ContinuousQualityProtocolTest.kt"
+test_anchor = "fun compactAcknowledgementsUseCurrentLedgerMediaFactsWithoutInventingPins("
+
+# The legacy-preparation half of this commit is server-side (pinned by
+# chunk_04.rs); this row covers the Apple overlap clamp.
+[[fixes]]
+id = "apple.layer-readiness-clamped-to-remaining-overlap"
+commits = ["be001d003"]
+source = "clients/apple/Sources/PlayerController.swift"
+source_anchor = "boundMs: min(PreparedReplacementBounds.alignmentMs, preparedOverlapRemainingMs),"
+test = "clients/apple/Tests/PreparedCommitRendezvousTests.swift"
+test_anchor = "func testPreparationAndAlignmentConsumeTheSamePhysicalOverlapDeadline("
+
+[[fixes]]
+id = "android.quality-authority-survives-independent-seeks"
+commits = ["c26b08f6c"]
+source = "clients/android/app/src/main/java/tv/plurx/app/player/ContinuousQueueEpochs.kt"
+source_anchor = "internal class ContinuousQueueEpochs {"
+test = "clients/android/app/src/test/java/tv/plurx/app/player/ContinuousQueueEpochsTest.kt"
+test_anchor = "fun queueResetNeedsActualZeroIndicesAndNewSamplesCannotBorrowTheEarlierEpoch("
+
+[[fixes]]
+id = "android.held-producer-not-an-auto-blocker"
+commits = ["d8bce1eb7"]
+source = "clients/android/app/src/main/java/tv/plurx/app/player/Controller.kt"
+source_anchor = "internal fun autoDecisionGate(state: AutoTickState): String? = when {"
+test = "clients/android/app/src/test/java/tv/plurx/app/player/AutoDecisionGateTest.kt"
+test_anchor = "fun aHeldProducerNeverBlocksAnAutoDecision("
+
+[[fixes]]
+id = "android.reserved-loads-survive-cancellation-and-retirement"
+commits = ["d94f6dc60"]
+source = "clients/android/app/src/main/java/tv/plurx/app/player/ContinuousLoadErrorPolicy.kt"
+source_anchor = "internal class ContinuousLoadErrorPolicy : DefaultLoadErrorHandlingPolicy() {"
+test = "clients/android/app/src/test/java/tv/plurx/app/player/ContinuousVideoSelectionTest.kt"
+test_anchor = "fun staleColdLoadsYieldOnlyToTheBoundReservedChoiceWithoutBlacklisting("
+
+[[fixes]]
+id = "android.continuous-reservation-bytes-verified"
+commits = ["dc827ebcc"]
+source = "clients/android/app/src/main/java/tv/plurx/app/player/ContinuousQualityMedia.kt"
+source_anchor = "fun authorize(resource: Resource, bytes: ByteArray): Authorized? {"
+test = "clients/android/app/src/test/java/tv/plurx/app/player/ContinuousQualityMediaTest.kt"
+test_anchor = "fun immutableInitializationAndExactReservedBytesAreRequiredBeforeExtraction("
+
+[[fixes]]
+id = "android.cold-target-failure-retained-before-exposure"
+commits = ["dd6f68a69"]
+source = "clients/android/app/src/main/java/tv/plurx/app/player/ContinuousExposure.kt"
+source_anchor = "internal class ContinuousExposure {"
+test = "clients/android/app/src/test/java/tv/plurx/app/player/ContinuousExposureTest.kt"
+test_anchor = "fun publicationAndPhysicalAliasingPreventFalseRetention("
+
+# The commit's own regression test (tests/operations/test_evidence_workflows.py)
+# no longer exists; this test pins the standing Pause intent across a failed
+# prepared change.
+[[fixes]]
+id = "android.prepared-rollback-keeps-viewer-controls"
+commits = ["f5b244a76"]
+source = "clients/android/app/src/main/java/tv/plurx/app/player/Controller.kt"
+source_anchor = "predecessor.player.playWhenReady = effectivePlayWhenReady()"
+test = "clients/android/app/src/test/java/tv/plurx/app/player/PlaybackIntentTest.kt"
+test_anchor = "fun failedQualityRetainsWireAndMediaWithoutLosingSavedPreferenceOrPause("
+
+[[fixes]]
+id = "android.continuous-session-adopted-on-retained-attachment"
+commits = ["fbb1c9e1b"]
+source = "clients/android/app/src/main/java/tv/plurx/app/player/PlaybackIntent.kt"
+source_anchor = "fun presented(quality: PlaybackQuality) { activeQuality = quality }"
+test = "clients/android/app/src/test/java/tv/plurx/app/player/PlaybackIntentTest.kt"
+test_anchor = "fun aPresentedContinuousQualityKeepsLaterSeeksOnTheRetainedPlan("
+
+[[fixes]]
+id = "android.load-control-forwards-media3-defaults"
+commits = ["fccbccf00"]
+source = "clients/android/app/src/main/java/tv/plurx/app/player/ContinuousLoadControl.kt"
+source_anchor = "override fun shouldStartPlayback(parameters: LoadControl.Parameters): Boolean = delegate.shouldStartPlayback(parameters)"
+test = "clients/android/app/src/test/java/tv/plurx/app/player/ContinuousLoadControlTest.kt"
+test_anchor = "fun modernPlayerLifecycleAndStartupKeepTheDelegatePolicy("
+
+[[fixes]]
+id = "android.controlled-callbacks-bound-to-timeline-source"
+commits = ["ff87c371d"]
+source = "clients/android/app/src/main/java/tv/plurx/app/player/ContinuousSourceRegistry.kt"
+source_anchor = "internal class ContinuousPeriodBindings<T : Any> {"
+test = "clients/android/app/src/test/java/tv/plurx/app/player/ContinuousPeriodBindingsTest.kt"
+test_anchor = "fun maskedPlaylistPeriodsRequireTheirSourceSequenceAndLiveOwner("
+
+[[fixes]]
+id = "apple.prepared-commit-fences-through-attempt-fence"
+commits = ["50b90e68e"]
+source = "clients/apple/Sources/PlayerController.swift"
+source_anchor = "private func preparedCommitStillOwned(_ commit: Attempt) -> Bool {"
+test = "clients/apple/Tests/AttemptScopesTests.swift"
+test_anchor = "func testEachMigratedFenceComparesExactlyTheFieldsItsConjunctionDid()"
+
 # 2026-10-04 promotion-review client fixes (Opus).
 [[fixes]]
 id = "android.recovery-sample-encodes-cause-and-age"
@@ -3704,6 +4096,14 @@ source = "crates/plurxd/src/web/player/transport.js"
 source_anchor = "async function resumeQualityBoundary(p){"
 test = "tests/playback/web-media-recovery.test.js"
 test_anchor = "Play after a long pause never seeks when Auto keeps the route"
+
+[[fixes]]
+id = "web.continuous-auto-family-budget-margin"
+commits = ["a81fa97684ea6b099e3bb6fc4706fa6792a0f1f8"]
+source = "crates/plurxd/src/web/player/stall-diagnosis.js"
+source_anchor = "if(family!=null&&continuousFamilyPeak(p,p.qualityCandidateId)!=null) return own&&link>=family*1.8;"
+test = "tests/playback/current-main-effort-quality.test.js"
+test_anchor = "continuous family upgrades use the enforced family budget and the family's own objects"
 
 [[fixes]]
 id = "android.seek-during-a-prepared-switch-is-held-not-dropped"

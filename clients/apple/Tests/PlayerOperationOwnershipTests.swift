@@ -284,6 +284,43 @@ final class PlayerOperationOwnershipTests: XCTestCase {
         await load.value
     }
 
+    func testCancelledMediaSelectionPreparationCannotApplyLateTracks() async throws {
+        let decisionEntered = expectation(description: "decision suspended")
+        var decision: CheckedContinuation<(decision: Decision, caps: DeviceCaps), Error>?
+        let preparedAudio = expectation(description: "audio suspended")
+        var releaseAudio: CheckedContinuation<Void, Never>?
+        var audioCommits = 0
+        var subtitlePreparations = 0
+        var preparation = PlayerController.MediaSelectionPreparation()
+        preparation.audio = { _, _ in
+            await withCheckedContinuation { releaseAudio = $0; preparedAudio.fulfill() }
+            return { audioCommits += 1 }
+        }
+        preparation.native = { _, _, _ in
+            subtitlePreparations += 1
+            return .init(hasSubtitleOptions: true, apply: { true })
+        }
+        let controller = PlayerController(requestPlaybackDecision: { _, _, _, _ in
+            try await withCheckedThrowingContinuation { decision = $0; decisionEntered.fulfill() }
+        }, mediaSelectionPreparation: preparation)
+        let model = AppModel()
+        start(controller, model: model)
+        let load = try XCTUnwrap(controller.loadingTask)
+        await fulfillment(of: [decisionEntered], timeout: 3)
+        let item = AVPlayerItem(url: URL(fileURLWithPath: "/cancelled-selection-test"))
+        controller.player.replaceCurrentItem(with: item)
+        let selection = Task { await controller.reconcileNativeMediaSelections(to: item) }
+        await fulfillment(of: [preparedAudio], timeout: 3)
+        selection.cancel()
+        try XCTUnwrap(releaseAudio).resume()
+        await selection.value
+        XCTAssertEqual(audioCommits, 0)
+        XCTAssertEqual(subtitlePreparations, 0)
+        controller.stop()
+        try XCTUnwrap(decision).resume(throwing: CancellationError())
+        await load.value
+    }
+
     // MARK: - M5: the create "not yet" retry sequence
 
     /// The create endpoint, scripted. Each attempt takes the next answer; a
