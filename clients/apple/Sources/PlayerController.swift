@@ -10933,6 +10933,10 @@ final class SharedPlayerController: ObservableObject {
     /// attachment earns it again when it reaches its own timeline.
     private var restartAllowance = false
     private var closing = false
+    /// Called once the title played to its natural end and its final watched
+    /// beat and B release are done. The view decides whether a next Shared
+    /// episode follows; this controller never starts another title itself.
+    var onNaturalEnd: (() -> Void)?
 
     var isDirect: Bool { playback?.isDirect == true }
 
@@ -11200,7 +11204,11 @@ final class SharedPlayerController: ObservableObject {
         for observer in itemObservers { NotificationCenter.default.removeObserver(observer) }
         itemObservers = [
             NotificationCenter.default.addObserver(forName: .AVPlayerItemDidPlayToEndTime, object: item, queue: .main) { [weak self] _ in
-                Task { @MainActor in await self?.stop(watched: true) }
+                Task { @MainActor in
+                    guard let self, !self.closing else { return }
+                    await self.stop(watched: true)
+                    self.onNaturalEnd?()
+                }
             },
             NotificationCenter.default.addObserver(forName: .AVPlayerItemFailedToPlayToEndTime, object: item, queue: .main) { [weak self, weak item] _ in
                 Task { @MainActor in if let item { self?.rendererFailed(item) } }

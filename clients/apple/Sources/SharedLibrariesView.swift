@@ -156,6 +156,12 @@ struct SharedLibraryDetailView: View {
                         Text(watch.watched ? "Watched on this server" : "Position on this server: \(watch.positionMs / 1000) seconds")
                             .font(.caption).foregroundStyle(.secondary)
                     }
+                    if SharedWatchedAction.applies(to: detail.item) {
+                        let watched = detail.watch?.watched == true
+                        Button(SharedWatchedAction.title(watched: watched)) { Task { await setWatched(!watched) } }
+                            .disabled(loading)
+                            .accessibilityIdentifier("shared-watched-toggle")
+                    }
                     if detail.item.hasChildren {
                         NavigationLink("Browse children") {
                             SharedLibraryItemsView(library: library, parent: reference, title: detail.item.title)
@@ -177,7 +183,7 @@ struct SharedLibraryDetailView: View {
         }
         .navigationTitle(detail?.item.title ?? "Shared title")
         .sheet(isPresented: Binding(get: { playbackPlan != nil }, set: { if !$0 { playbackPlan = nil } })) {
-            if let playbackPlan { SharedPlayerView(plan: playbackPlan) }
+            if let playbackPlan { SharedPlayerView(plan: playbackPlan).environmentObject(model) }
         }
         .task(id: reference) { await load() }
     }
@@ -194,4 +200,22 @@ struct SharedLibraryDetailView: View {
             detail = result; error = nil
         } catch { self.error = error.localizedDescription }
     }
+    /// B's own watched override, then a fresh detail read so the page shows
+    /// what B now holds rather than what was asked.
+    private func setWatched(_ watched: Bool) async {
+        loading = true
+        do {
+            let client = try SharedLibraryClient()
+            _ = try await client.setWatched(reference, watched: watched); try client.requireCurrent()
+            loading = false
+            await load()
+        } catch { loading = false; self.error = error.localizedDescription }
+    }
+}
+
+/// Where the manual watched control appears: B accepts it for a movie or an
+/// episode only (`sharing_watch_unsupported` otherwise), as Local offers it.
+enum SharedWatchedAction {
+    static func applies(to item: SharedLibraryItem) -> Bool { item.kind == "movie" || item.kind == "episode" }
+    static func title(watched: Bool) -> String { watched ? "Mark unwatched" : "Mark watched" }
 }
