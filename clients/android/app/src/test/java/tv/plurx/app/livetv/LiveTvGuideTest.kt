@@ -58,6 +58,122 @@ class LiveTvGuideTest {
         }
     }
 
+    /**
+     * The station-logo rule is the web's, transcribed. Until 2026-10-04 it
+     * lived only in the web page, outside this fixture — which is how both
+     * native guides shipped without logos and no suite noticed.
+     */
+    @Test
+    fun stationLogoAnswersEverySharedCase() {
+        val logos = cases.getValue("station_logo").jsonObject
+        val match = logos.getValue("match").jsonArray
+        val values = logos.getValue("values").jsonArray
+        assertTrue("the fixture lost its station-logo cases", match.isNotEmpty() && values.isNotEmpty())
+        match.forEach { element ->
+            val row = element.jsonObject
+            assertEquals(
+                row.getValue("name").jsonPrimitive.content,
+                row.getValue("expect").jsonPrimitive.contentOrNullSafe(),
+                LiveTvGuideReducer.stationLogoUrl(guide, row.getValue("channel").jsonPrimitive.content),
+            )
+        }
+        val cold = logos.getValue("no_guide").jsonObject
+        assertEquals(
+            cold.getValue("name").jsonPrimitive.content,
+            cold.getValue("expect").jsonPrimitive.contentOrNullSafe(),
+            LiveTvGuideReducer.stationLogoUrl(null, cold.getValue("channel").jsonPrimitive.content),
+        )
+        values.forEach { element ->
+            val row = element.jsonObject
+            val single = LiveTvGuide(
+                channels = listOf(
+                    LiveTvGuideChannel(
+                        id = "logo",
+                        guide_number = "0.1",
+                        image_url = row["image_url"]?.jsonPrimitive?.contentOrNullSafe(),
+                    ),
+                ),
+            )
+            assertEquals(
+                row.getValue("name").jsonPrimitive.content,
+                row.getValue("expect").jsonPrimitive.contentOrNullSafe(),
+                LiveTvGuideReducer.stationLogoUrl(single, "logo"),
+            )
+        }
+    }
+
+    /**
+     * Reducer cases cannot see whether a screen draws what the reducer says.
+     * The logo rule once existed on the web alone and both native guides
+     * shipped without it, so the wiring is pinned too: every surface that
+     * names a station draws [LiveTvStationChip] with the guide's logo.
+     */
+    @Test
+    fun everyStationSurfaceDrawsTheGuideLogo() {
+        fun source(name: String): String = listOf(
+            java.io.File("app/src/main/java/tv/plurx/app/livetv/$name"),
+            java.io.File("src/main/java/tv/plurx/app/livetv/$name"),
+            java.io.File("clients/android/app/src/main/java/tv/plurx/app/livetv/$name"),
+        ).firstOrNull(java.io.File::isFile)?.readText() ?: error("$name source not found")
+        val guideUi = source("LiveTvGuideUi.kt")
+        val screen = source("LiveTvScreen.kt")
+        fun chips(text: String) = text.split("LiveTvStationChip(").size - 1
+        assertEquals("list row and grid header", 2, chips(guideUi.substringAfter("fun LiveTvChannelRow(")))
+        assertTrue("the grid header draws the row's logo", guideUi.contains("row.logo?.let { logo ->"))
+        assertTrue(
+            "browser row, focused details, picture badges and fullscreen overlay",
+            chips(screen) >= 5,
+        )
+        assertEquals(
+            "both channel lists pass the logo",
+            2,
+            screen.split("logo = controller.stationLogo(channel)").size - 1,
+        )
+    }
+
+    /**
+     * Coil keeps no record of failures; without this a blocked logo host is
+     * asked again on every recomposition of a 50-row guide.
+     */
+    @Test
+    fun aFailedStationLogoBacksOffAndASuccessClearsIt() {
+        val address = "https://example.invalid/backoff-${System.nanoTime()}.png"
+        assertTrue("an address never tried is loaded", LiveTvStationLogos.shouldLoad(address, 1_000))
+        LiveTvStationLogos.failed(address, nowMs = 1_000)
+        assertTrue(
+            "a failure backs off",
+            !LiveTvStationLogos.shouldLoad(address, 1_000 + LiveTvStationLogos.FAILURE_RETRY_MS - 1),
+        )
+        assertTrue(
+            "and is tried again once the window has passed",
+            LiveTvStationLogos.shouldLoad(address, 1_000 + LiveTvStationLogos.FAILURE_RETRY_MS),
+        )
+        LiveTvStationLogos.succeeded(address)
+        assertTrue("a success clears the failure", LiveTvStationLogos.shouldLoad(address, 1_001))
+        assertTrue("and draws from the first frame next time", LiveTvStationLogos.wasDecoded(address))
+    }
+
+    /** The grid header draws the logo the layout carries, row by row. */
+    @Test
+    fun gridRowsCarryTheirStationLogo() {
+        val grid = cases.getValue("grid").jsonObject
+        val layout = LiveTvGuideReducer.gridLayout(
+            guide = guide,
+            channels = lineup,
+            window = LiveTvGuideWindow(
+                grid.getValue("window").jsonObject.getValue("start").jsonPrimitive.long,
+                grid.getValue("window").jsonObject.getValue("end").jsonPrimitive.long,
+            ),
+            now = grid.getValue("now").jsonPrimitive.long,
+            pxPerSlot = grid.getValue("px_per_slot").jsonPrimitive.float,
+        )
+        layout.rows.forEach { row ->
+            assertEquals(row.channel.id, LiveTvGuideReducer.stationLogoUrl(guide, row.channel.id), row.logo)
+        }
+        assertEquals("https://example.invalid/cbs.png", layout.rows.first { it.channel.id == "2.1" }.logo)
+        assertNull(layout.rows.first { it.channel.id == "4.1" }.logo)
+    }
+
     @Test
     fun gridLayoutPlacesEveryCellWhereTheSharedCasesSay() {
         val grid = cases.getValue("grid").jsonObject

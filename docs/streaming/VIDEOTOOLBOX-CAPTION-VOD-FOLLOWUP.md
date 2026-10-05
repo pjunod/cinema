@@ -1,6 +1,6 @@
 # VideoToolbox file captions — preserve playback and decide caption policy
 
-**Status:** open follow-up · **Issue:** [#345](http://192.168.4.7:3000/noirr/plurx/issues/345) · **Written:** 2026-09-16 · **Origin:** F1 in
+**Status:** open follow-up · **Issue:** [#345](http://forge.lan:3000/noirr/plurx/issues/345) · **Written:** 2026-09-16 · **Origin:** F1 in
 [Fable's review](../reviews/LIVE-TV-VIDEOTOOLBOX-ATSC1-FABLE-REVIEW.md).
 
 Companion to the [live-TV repair](LIVE-TV-VIDEOTOOLBOX-ATSC1-ROOT-CAUSE-AND-FIX.md).

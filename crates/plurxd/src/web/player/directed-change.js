@@ -535,7 +535,7 @@ function nativeHlsSubtitleOrdinal(player,index){
 //
 // The obvious move — re-select the rendition so hls.js fetches the segment
 // again — does not work, and that is measured rather than assumed. Against
-// the bundled hls.js 1.6.16, `subtitleTrack = -1` then back, the same wrapped
+// hls.js 1.6.16 (the build bundled when this was measured), `subtitleTrack = -1` then back, the same wrapped
 // in `subtitleDisplay` off/on, a bounce through a sibling rendition, a purge
 // of the fragment tracker, and a reselect with a nudge seek all leave the
 // cue count at zero and produce exactly ONE request for the segment. hls.js

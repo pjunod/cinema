@@ -2,8 +2,8 @@
 
 **Status:** promotion ready under owner-approved Windows waiver · **Updated:** 2026-09-18 ·
 **Branch:** `codex/apple-pause-resume` · **Base:** `6fb0901d3d18` ·
-**Issue:** [#359](http://192.168.4.7:3000/noirr/plurx/issues/359) ·
-**PR:** [#360](http://192.168.4.7:3000/noirr/plurx/pulls/360)
+**Issue:** [#359](http://forge.lan:3000/noirr/plurx/issues/359) ·
+**PR:** [#360](http://forge.lan:3000/noirr/plurx/pulls/360)
 
 Executes the reviewed
 [implementation handoff](APPLE-PAUSE-RESUME-IMPLEMENTATION-HANDOFF.md).

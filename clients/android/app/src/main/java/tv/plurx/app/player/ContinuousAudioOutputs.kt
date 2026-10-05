@@ -16,9 +16,15 @@ internal class ContinuousAudioOutputs {
         outputs[resource] = Output(owner, allocation, released)
     }
     @Synchronized fun collectReleased(): Set<Any> {
-        val retired = outputs.entries.filter { runCatching { it.value.released() }.getOrDefault(false) }
-        val owners = retired.map { it.value.owner }.toSet()
-        retired.forEach { outputs.remove(it.key) }
+        // Copy key and value out before removing anything: IdentityHashMap's
+        // entry views are slot positions, and every remove() shifts later
+        // slots, so a removal through a retained entry view misses (or hits
+        // the wrong) resource and released outputs were never retired.
+        val retired = outputs.entries
+            .filter { runCatching { it.value.released() }.getOrDefault(false) }
+            .map { it.key to it.value.owner }
+        retired.forEach { (resource, _) -> outputs.remove(resource) }
+        val owners = retired.map { it.second }
         return owners.filter { owner -> outputs.values.none { it.owner === owner } }.toSet()
     }
     @Synchronized fun allocationMark(): Long = allocation

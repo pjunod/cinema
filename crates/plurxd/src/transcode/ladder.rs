@@ -82,7 +82,7 @@ const HDR10_4K_MAX_LUMA_SAMPLES: i64 = 8_912_896;
 /// this rung inherits that unchanged.
 const HDR10_HLS_CODEC: &str = "hvc1.2.4.H120.90";
 /// VAAPI's non-packed constraint is set as well: measured from the production
-/// Jellyfin 8.1.3 graph on m6, rather than inherited from the QSV/x265 point.
+/// Jellyfin 8.1.3 graph on lab6, rather than inherited from the QSV/x265 point.
 const HDR10_VAAPI_HLS_CODEC: &str = "hvc1.2.4.H120.B0";
 /// Measured from the 2160p QSV output's hvcC: Main10, compatibility 4, High
 /// tier, level 150, constraint byte 0x90.
@@ -91,8 +91,11 @@ const HDR10_4K_HLS_CODEC: &str = "hvc1.2.4.H150.90";
 /// The RFC 6381 `CODECS` value for a *re-encoded* HLS session.
 ///
 /// Without a qualified frozen plan, SDR knows its codec family but not its
-/// profile/compatibility/level triplet. This is not a CODECS declaration;
-/// SDR master emission remains deferred, and fMP4 reads its actual init.
+/// profile/compatibility/level triplet, so this SDR value is never printed.
+/// An SDR master prints `CODECS` only from complete `FrozenHlsCodecFacts`
+/// (qualified encoder output, or the actual fMP4 init) and only for a
+/// session created with Settings → Developer `playback.sdr_master_codecs`
+/// on; off, the default, is the pre-S-10 master with no SDR `CODECS`.
 /// HDR fallback follows the measured encoder-specific graph, including
 /// VAAPI's distinct constraint byte; it does not infer a source sample entry.
 pub(super) fn transcoded_hls_codecs(

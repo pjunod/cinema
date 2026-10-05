@@ -140,7 +140,7 @@
         let mgr = Arc::new(mgr);
         let file = store.get_file(file_id).await.expect("get").expect("file");
 
-        let hash = recipe_hash_for(&mgr, &file, 240).await;
+        let hash = producer_recipe_hash_for(&mgr, &file, 240).await;
         assert!(
             mgr.produce(&file, 240, Instant::now() + Duration::from_secs(120))
                 .await
@@ -182,7 +182,7 @@
         // about the fixture failing to encode.
         let (lenient, _work2, lenient_cache) = cached_manager(&store);
         let lenient = Arc::new(lenient);
-        let lenient_hash = recipe_hash_for(&lenient, &file, 240).await;
+        let lenient_hash = producer_recipe_hash_for(&lenient, &file, 240).await;
         assert!(
             lenient
                 .produce(&file, 240, Instant::now() + Duration::from_secs(120))
@@ -2063,6 +2063,7 @@
     fn audio_intent_fingerprint_keys_the_claim_not_a_refreshed_server_answer() {
         use plurx_core::playback::audio::{AudioAction, AudioClaim, AudioDelivery, AudioSink};
         let mut request = SessionRequest {
+            sdr_master_codecs: None,
             continuous_media: None,
             vod_only: false, passive_vod: false, finite_bitrate_limit_bps: None,
             control_sequence: None, file_id: 1, playback_id: "player".into(), request_id: None,
@@ -2122,6 +2123,7 @@
         let claim = AudioClaim { decoders: vec!["aac".into()], sinks: vec![AudioSink {
             codec: "aac".into(), max_channels: 6, passthrough: false, sample_rates_hz: vec![48_000] }] };
         let mut request = SessionRequest {
+            sdr_master_codecs: None,
             continuous_media: None,
             vod_only: false, passive_vod: false, finite_bitrate_limit_bps: None,
             control_sequence: None, file_id: file.id, playback_id: "integration".into(), request_id: None,
@@ -2199,6 +2201,7 @@
             codec: "aac".into(), channels: 6, layout: Some("5.1".into()), bitrate_kbps: 320, sample_rate: 48_000,
         }, downmix: None, reason: "retained actual producer".into() };
         let mut request = SessionRequest {
+            sdr_master_codecs: None,
             continuous_media: None,
             vod_only: false, passive_vod: false, finite_bitrate_limit_bps: None,
             control_sequence: None, file_id: file.id, playback_id: "retained-player".into(), request_id: None,

@@ -2201,3 +2201,190 @@ class DisplayAwareAutoIntentTest {
         assertTrue(wire.contains("\"candidate_id\":\"$id\""))
     }
 }
+
+/**
+ * M4 / D5: a viewer seek whose coalesce ends while a prepared successor is
+ * switched onto the surface but has not rendered is held and run once, never
+ * dropped and never run on a successor a rollback failed to replace.
+ *
+ * The first case drives [SeekDeferredBehindSwitch] itself. The other three
+ * read `Controller.kt`, because the controller needs a `Context` and a real
+ * ExoPlayer and so cannot be built on the JVM lane; each pins the line a
+ * refactor would quietly drop.
+ */
+class SeekDeferredBehindSwitchTest {
+    @Test fun seekDeferredBehindASwitchRunsExactlyOnceAndOnlyWhileCurrent() {
+        val deferred = SeekDeferredBehindSwitch()
+        var current = 5L
+        val isCurrent: (Long) -> Boolean = { sequence -> sequence == current }
+        assertFalse(deferred.isHolding)
+        assertNull(deferred.take(isCurrent, epoch = 3), "nothing held, nothing to run")
+
+        deferred.hold(targetMs = 60_000L, sequence = 5L, epoch = 3L)
+        assertTrue(deferred.isHolding)
+        val taken = assertNotNull(deferred.take(isCurrent, epoch = 3))
+        assertEquals(60_000L, taken.targetMs)
+        assertEquals(5L, taken.sequence)
+        assertFalse(deferred.isHolding)
+        assertNull(deferred.take(isCurrent, epoch = 3), "exactly once")
+
+        // A stream mutation since the hold (an executed seek, a reopen, the
+        // target deadline) owns the destination now; the held seek is
+        // discarded, not kept for a later settle.
+        deferred.hold(60_000L, 5L, 3L)
+        assertNull(deferred.take(isCurrent, epoch = 4))
+        assertFalse(deferred.isHolding, "a stale seek is discarded, not retried")
+        assertNull(deferred.take(isCurrent, epoch = 3))
+
+        // A newer viewer seek supersedes it.
+        deferred.hold(60_000L, 5L, 3L)
+        current = 6L
+        assertNull(deferred.take(isCurrent, epoch = 3))
+        assertFalse(deferred.isHolding)
+
+        // The newest held seek replaces an older one still waiting.
+        deferred.hold(60_000L, 5L, 3L)
+        deferred.hold(90_000L, 6L, 3L)
+        assertEquals(90_000L, deferred.take(isCurrent, epoch = 3)?.targetMs)
+        assertNull(deferred.take(isCurrent, epoch = 3))
+
+        deferred.hold(90_000L, 6L, 3L)
+        deferred.clear()
+        assertFalse(deferred.isHolding)
+        assertNull(deferred.take(isCurrent, epoch = 3), "release clears it")
+    }
+
+    @Test fun seekPressedWhileSwitchedIsHeldNotDropped() {
+        val source = controllerSource()
+        val seek = source.substringAfter("private fun enqueueSeek(")
+            .substringBefore("private suspend fun publishIntent(")
+        // Held at the post-coalesce check and nowhere earlier: a seek pressed
+        // just before the commit is still coalescing when the switch happens.
+        val coalesce = seek.indexOf("delay(SEEK_COALESCE_MS)")
+        assertTrue(coalesce >= 0)
+        assertFalse(seek.substring(0, coalesce).contains("isSwitched"), "no press-time switch check")
+        assertFalse(seek.substring(0, coalesce).contains("seekDeferredBehindSwitch"), "no press-time hold")
+        val fence = seek.indexOf("mediaMutationEpoch != publicationEpoch")
+        val switched = seek.indexOf("if (preparedLedger.isSwitched) {")
+        val hold = seek.indexOf("seekDeferredBehindSwitch.hold(pending.targetMs, pending.sequence, publicationEpoch)")
+        val execute = seek.indexOf("executeSeek(pending.targetMs, pending.sequence)")
+        assertTrue(coalesce < fence && fence < switched, "fence, epoch and currency are checked before the hold")
+        assertTrue(switched < hold && hold < execute, "a switched successor holds the seek instead of executing it")
+        assertTrue(seek.substring(hold, execute).contains("return@launch"))
+        assertFalse(
+            seek.contains("!playbackIntent.isCurrent(pending.sequence) || preparedLedger.isSwitched"),
+            "the switched case no longer returns without recording the seek",
+        )
+        // Not the pre-effort behaviour either: abandoning a switched successor
+        // publishes FAILED and then seeks the session the server was told failed.
+        assertFalse(seek.contains("abandonPreparedReplacement"))
+
+        // It runs last in the first-frame settle, posted rather than inline.
+        val settle = source.substringAfter("private fun settleCommitOnFirstFrame(")
+            .substringBefore("private fun drainSeekDeferredBehindSwitch(")
+        val drainAt = settle.lastIndexOf("drainSeekDeferredBehindSwitch()")
+        assertTrue(drainAt > settle.indexOf("preparedLedger.committed(firstFrameUnixMs)"))
+        assertTrue(drainAt > settle.lastIndexOf("collectRetiredPlayer()"), "the drain is the settle's last step")
+        val drain = source.substringAfter("private fun drainSeekDeferredBehindSwitch() {")
+            .substringBefore("/**")
+        val launch = drain.indexOf("scope.launch")
+        assertTrue(launch >= 0, "posted: the settle runs inside onRenderedFirstFrame")
+        assertTrue(launch < drain.indexOf("seekDeferredBehindSwitch.take("))
+        assertTrue(drain.contains("epoch = mediaMutationEpoch"))
+        assertTrue(drain.indexOf("seekDeferredBehindSwitch.take(") < drain.indexOf("executeSeek(held.targetMs, held.sequence)"))
+        val release = source.substringAfter("    fun release() {").substringBefore("    fun switchAudio(")
+        assertTrue(release.contains("seekDeferredBehindSwitch.clear()"))
+    }
+
+    @Test fun switchedRollbackReopensAtTheViewerDestination() {
+        val source = controllerSource()
+        val poll = source.substringAfter("private fun pollPreparedReplacement()")
+            .substringBefore("val successor = preparedPlayer ?: return")
+        assertTrue(poll.contains("restartAt(positionForPlaybackIntent(), \"prepared successor rendered no frame\")"))
+        assertFalse(poll.contains("restartAt(realPosition()"), "the playhead would settle the pending seek at the wrong place")
+        // An Auto preparation "routes" by giving up, which reopens nothing, so
+        // an unrestored Auto rollback must still reopen.
+        assertTrue(poll.indexOf("val autoOwned = autoPreparing") in 0 until poll.indexOf("failSwitchedReplacement()"))
+        assertTrue(poll.contains("val reopened = routed && !autoOwned"))
+        assertTrue(poll.contains("if (!restored && !reopened) {"))
+        val collect = source.substringAfter("fun collectRetiredPlayer()")
+            .substringBefore("private var pendingAcknowledgement")
+        assertTrue(collect.contains("restartAt(playbackIntent.positionForPlaybackIntent(reopen.first), reopen.second)"))
+        assertFalse(collect.contains("restartAt(reopen.first"))
+        // The directed-change rollback already reopened at the pending target.
+        val directed = source.substringAfter("private fun fallBackDirectedChange(")
+            .substringBefore("private fun fallBackAfterPreparedFailure(")
+        assertTrue(directed.contains("playbackIntent.positionForPlaybackIntent(observed)"))
+    }
+
+    @Test fun deferredSeekIsNeverDrainedOntoAnUnrestoredSuccessor() {
+        val source = controllerSource()
+        val poll = source.substringAfter("private fun pollPreparedReplacement()")
+            .substringBefore("val successor = preparedPlayer ?: return")
+        val unrestored = poll.substringAfter("if (!restored && !reopened) {").substringBefore("} else if")
+        assertTrue(unrestored.contains("seekDeferredBehindSwitch.clear()"))
+        assertFalse(unrestored.contains("drainSeekDeferredBehindSwitch"))
+        val restoredAuto = poll.substringAfter("} else if (restored && autoOwned) {").substringBefore("} else {")
+        assertTrue(restoredAuto.contains("drainSeekDeferredBehindSwitch()"))
+        assertEquals(1, Regex("drainSeekDeferredBehindSwitch\\(\\)").findAll(poll).count())
+        // Exactly two callers in the whole controller: the first-frame settle
+        // and the restored Auto rollback.
+        val callers = Regex("(?<!fun )drainSeekDeferredBehindSwitch\\(\\)").findAll(source).count()
+        assertEquals(2, callers)
+        for (name in listOf(
+            "private fun rollbackSwitchedReplacement()",
+            "private fun failSwitchedReplacement()",
+            "fun collectRetiredPlayer()",
+        )) {
+            val body = source.substringAfter(name).substringBefore("\n    }\n")
+            assertFalse(body.contains("drainSeekDeferredBehindSwitch"), name)
+        }
+        // And the drain itself refuses while a switch is still outstanding.
+        val drain = source.substringAfter("private fun drainSeekDeferredBehindSwitch() {")
+            .substringBefore("/**")
+        assertTrue(drain.indexOf("if (preparedLedger.isSwitched) return@launch") in 0 until drain.indexOf("seekDeferredBehindSwitch.take("))
+    }
+
+    @Test fun deferredSeekIsNotStrandedWhenAnAbandonSettlesTheSwitch() {
+        val source = controllerSource()
+        // An abandon settles a switched successor as failed with no settle or
+        // rollback after it, so nothing would ever drain a held seek: it is
+        // cleared before the failure is published, never left behind.
+        val abandon = source.substringAfter("private fun abandonPreparedReplacement(failed: Boolean) {")
+            .substringBefore("\n    }\n")
+        val switched = abandon.substringAfter("if (preparedLedger.isSwitched) {").substringBefore("return")
+        assertTrue(switched.contains("seekDeferredBehindSwitch.clear()"))
+        assertTrue(switched.indexOf("seekDeferredBehindSwitch.clear()") < switched.indexOf("failSwitchedReplacement()"))
+        assertFalse(abandon.contains("drainSeekDeferredBehindSwitch"), "never drained onto the successor being failed")
+
+        // The node failover is the one caller that keeps the media epoch and
+        // re-attaches the switched successor itself. It takes the held seek
+        // first (exactly once, fenced by currency and epoch), then re-attaches
+        // at the viewer's destination rather than the successor's playhead,
+        // and settles that seek's sequence on the re-attach.
+        val retry = source.substringAfter("private fun retryMediaOnNextNode(error: PlaybackException): Boolean {")
+            .substringBefore("\n    }\n")
+        val take = retry.indexOf("seekDeferredBehindSwitch.take(")
+        val abandoned = retry.indexOf("abandonPreparedReplacement(failed = false)")
+        assertTrue(take in 0 until abandoned, "the held seek is taken before the abandon clears it")
+        assertTrue(retry.substring(0, take).contains("preparedLedger.isSwitched"))
+        assertTrue(retry.contains("epoch = mediaMutationEpoch"))
+        assertTrue(retry.contains("isCurrent = { sequence -> playbackIntent.isCurrent(sequence) }"))
+        assertTrue(retry.contains("val presentationSequence = heldSeek?.sequence ?: playbackIntent.executedSequence()"))
+        val attach = retry.substringAfter("val attachPosition = when {").substringBefore("playbackTelemetry.report(")
+        assertTrue(attach.contains("heldSeek != null -> playerTimelinePositionMs(positionForPlaybackIntent())"))
+        assertTrue(attach.indexOf("heldSeek != null") < attach.indexOf("player.currentPosition"),
+            "a held seek wins over the successor's playhead")
+        assertTrue(retry.indexOf("player.setMediaItem(MediaItem.fromUri(next), attachPosition)") >
+            retry.indexOf("val attachPosition = when {"))
+        assertTrue(retry.contains("markIntentExecuted(sequence, recipe)"))
+        // Still exactly two drains in the controller: this path takes, it does not drain.
+        assertFalse(retry.contains("drainSeekDeferredBehindSwitch"))
+    }
+
+    private fun controllerSource(): String = listOf(
+        java.io.File("app/src/main/java/tv/plurx/app/player/Controller.kt"),
+        java.io.File("src/main/java/tv/plurx/app/player/Controller.kt"),
+        java.io.File("clients/android/app/src/main/java/tv/plurx/app/player/Controller.kt"),
+    ).firstOrNull(java.io.File::isFile)?.readText() ?: error("Controller.kt source not found")
+}

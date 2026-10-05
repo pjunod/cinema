@@ -1,0 +1,115 @@
+# Intentional exceptions to scripts/scrub-infra-names.
+#
+# Every entry is a real infrastructure name the public mirror still carries,
+# so keep this list short and give each one the reason it cannot be
+# rewritten. `path` is a glob over repository-relative paths (fnmatch: `*`
+# also crosses `/`). `rules` limits the exemption to the named rules (host,
+# forge, lan, home, ssh-user, retired-name); without it the file is skipped
+# entirely. tests/operations/test_infra_names.py fails on an entry that no
+# longer matches a tracked file.
+#
+# Release inputs (clients/apple/Sources, clients/android/app/src/main) are
+# never rewritten by --write. If one ever carries a real name, fix it in the
+# next deliberate client change, or list it here with the reason
+# "release input; rides next client build" until then. None does today.
+
+[[allow]]
+path = "scripts/scrub-infra-names"
+reason = "the mapping table itself"
+
+[[allow]]
+path = "README.md"
+rules = ["retired-name"]
+reason = "the trademark reservation names the retired mark on purpose"
+
+# Content-addressed or digest-pinned evidence: rewriting the bytes breaks a
+# sha256 that another file records (and, for the first two, that a test
+# verifies).
+
+[[allow]]
+path = "validation/python-unit-local/*.json"
+reason = "content-addressed: the file name is the sha256 of the bytes (validation/python_unit_receipts.py local_receipts)"
+
+[[allow]]
+path = "validation/python-unit-legacy-pr663-correction.txt"
+reason = "sha256 pinned by validation/python-unit-legacy-pr663.json correction_receipt_sha256 and checked by legacy_pr663()"
+
+[[allow]]
+path = "docs/streaming/DISPLAY-AWARE-AUTO-QUALITY-OPUS-REVIEW.txt"
+reason = "source artifact whose sha256 the review and plan docs record"
+
+[[allow]]
+path = "docs/evidence/video-quality-2026-10-02/encoder/failed-gpu-group.json"
+reason = "sha256 recorded in encoder/receipt.json"
+
+[[allow]]
+path = "docs/evidence/video-quality-2026-10-02/encoder/failed-scratch-user.json"
+reason = "sha256 recorded in encoder/receipt.json"
+
+[[allow]]
+path = "docs/evidence/video-quality-2026-10-02/encoder/incomplete-grain.json"
+reason = "sha256 recorded in encoder/receipt.json"
+
+[[allow]]
+path = "docs/evidence/video-quality-2026-10-02/encoder/qsv-screen-summary.json"
+reason = "sha256 recorded in encoder/receipt.json"
+
+[[allow]]
+path = "docs/evidence/video-quality-2026-10-03/native-content-proof-fixed.json"
+reason = "sha256 recorded in batch-qualification.json"
+
+[[allow]]
+path = "docs/evidence/video-quality-2026-10-03/native-hls-retained.json"
+reason = "sha256 recorded in batch-qualification.json"
+
+[[allow]]
+path = "docs/evidence/video-quality-2026-10-03/preflight-selective-repair.json"
+reason = "sha256 recorded in batch-qualification.json"
+
+[[allow]]
+path = "docs/evidence/video-quality-2026-10-03/rust-41502-receipt.json"
+reason = "sha256 recorded in batch-qualification.json"
+
+[[allow]]
+path = "docs/evidence/video-quality-2026-10-03/selective-windows-41558-receipt.json"
+reason = "sha256 recorded in batch-qualification.json"
+
+[[allow]]
+path = "docs/evidence/video-quality-2026-10-03/windows-retry-41591-receipt.json"
+reason = "sha256 recorded in batch-qualification.json"
+
+[[allow]]
+path = "docs/evidence/video-quality-2026-10-03/wrapper-selective-provenance.json"
+reason = "sha256 recorded in batch-qualification.json"
+
+[[allow]]
+path = "docs/evidence/video-quality-2026-10-03/wrapper-windows-retry-provenance.json"
+reason = "sha256 recorded in batch-qualification.json"
+
+[[allow]]
+path = "docs/evidence/video-quality-2026-10-03/scorer/qualification.json"
+reason = "sha256 recorded in batch-qualification.json"
+
+[[allow]]
+path = "docs/evidence/video-quality-2026-10-03/operations-41505.log"
+reason = "sha256 recorded in continuation-receipt.json"
+
+[[allow]]
+path = "docs/evidence/video-quality-2026-10-03/web-41504.log"
+reason = "sha256 recorded in continuation-receipt.json"
+
+# Installed verbatim on the two Apple runner Macs by deploy/apple-runner/install.
+# Rewriting them would install a probe that cannot reach the primary. They stay
+# until the install renders these values from a site-local file.
+
+[[allow]]
+path = "deploy/apple-runner/plurx-apple-primary-health"
+reason = "installed verbatim on the primary Mac: its launchd label is the live runner's label and its probe URL must resolve there"
+
+[[allow]]
+path = "deploy/apple-runner/standby.json"
+reason = "installed verbatim on the backup Mac: the real SSH user and address of the primary"
+
+[[allow]]
+path = "deploy/apple-runner/tv.plurx.apple-standby.plist"
+reason = "installed verbatim: launchd does not expand ~ in HOME"

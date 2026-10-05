@@ -85,6 +85,9 @@ fn ensure_retention_cleanup(session: &Session) {
         .scratch
         .as_ref()
         .map(|permit| (Arc::clone(permit.ledger()), permit.key()));
+    // Only a session with a rolling collection can have linked a segment;
+    // every other session skips the per-segment link-count lookup.
+    let may_hold_retained_links = session.rolling_collection.is_some();
     tokio::spawn(async move {
         before_unlink.await;
         let pass_len = queue
@@ -97,11 +100,23 @@ fn ensure_retention_cleanup(session: &Session) {
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .first()
                 .cloned();
-            let Some((path, _)) = next else {
+            let Some((path, queued_bytes)) = next else {
                 break;
             };
+            // A segment rolling retention linked keeps its bytes on disk after
+            // this unlink returns its ledger credit. That is the one way
+            // retention erodes free-space headroom between samples, so it is
+            // charged to the headroom here, before the next capture reads it.
+            let retained_link =
+                may_hold_retained_links && retained_link_count_above_one(&path).await;
             match tokio::fs::remove_file(&path).await {
-                Ok(()) => {}
+                Ok(()) => {
+                    if retained_link {
+                        if let Some((ledger, _)) = scratch.as_ref() {
+                            ledger.headroom().consume(queued_bytes);
+                        }
+                    }
+                }
                 Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
                 Err(error) => {
                     tracing::warn!(
@@ -152,6 +167,22 @@ fn ensure_retention_cleanup(session: &Session) {
         active.store(false, Release);
         after_batch.await;
     });
+}
+
+/// Whether another directory entry (a retained hard link) shares this file.
+async fn retained_link_count_above_one(path: &std::path::Path) -> bool {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        tokio::fs::symlink_metadata(path)
+            .await
+            .is_ok_and(|metadata| metadata.nlink() > 1)
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = path;
+        false
+    }
 }
 
 pub(super) async fn gc_expired_segments(session: &Session) {

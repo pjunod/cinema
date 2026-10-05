@@ -527,12 +527,19 @@ recordings library.
   never stops the stream and never refetches — it is a re-render of the browse
   region. A protected channel is dimmed rather than hidden, with a
   `Hide protected` filter for a lineup that is mostly DRM.
-- **Station artwork comes from the guide.** The web list, grid and current
-  programme details display HDHomeRun's full-color station image on a neutral
-  tile, matched by channel id. Channel numbers and names stay visible beside
-  it. Missing or failed artwork leaves a callsign fallback; loading a logo
-  never delays tuning. Only HTTPS image URLs without embedded credentials are
-  used, and image requests omit the page referrer.
+- **Station artwork comes from the guide.** Every client — the web list, grid
+  and current-programme details; the Apple and Android list rows, grid
+  headers, programme details, picture badge and fullscreen identity — draws
+  HDHomeRun's full-color station image on a neutral tile, matched by channel
+  id. Which address is used is one rule in the shared guide contract
+  (`station_logo` in `tests/playback/live-tv-guide-cases.json`), so the three
+  clients cannot disagree: only an `https://` address of printable ASCII with
+  a plain host and no embedded credentials, at most 512 characters. Channel
+  numbers and names stay visible beside it; missing or failed artwork leaves a
+  callsign fallback, and loading a logo never delays tuning. The web omits the
+  page referrer; the native clients fetch artwork on a dedicated connection
+  that never carries the account's token or cookies and never follows a
+  redirect off HTTPS.
 - **Source format and live reception stay distinct.** Every channel row and
   guide row uses compact badges for the facts the tuner advertises — `HD` or
   `SD`, video codec and audio codec — and leaves a badge out when the device
@@ -880,6 +887,17 @@ Kodi-family Plex clients (Composite, PKC), `python-plexapi`, and Home Assistant
 browse and play directly against plurx — validated end-to-end with
 `python-plexapi`. plex.tv is never contacted. Detail: [CLIENTS.md](CLIENTS.md),
 [ARCHITECTURE.md](ARCHITECTURE.md) §5.
+
+**Jellyfin-compat (experimental, off by default):** a `/jellyfin` façade so
+Infuse 8.5.6 and Jellyfin for Android TV 0.19.10 connect to plurx as if it
+were Jellyfin Server 10.11.11: sign-in, movie/TV browsing and search, artwork,
+direct play, native VOD over HLS, audio choice, embedded or sidecar subtitles
+(VTT/SRT) chosen from each client's subtitle profile, skip markers, watch
+progress and watched marks. Every play runs on the native media owners. The
+switch is Settings → Developer → *Allow Jellyfin clients*; physical client
+qualification is still open. Detail: [OPERATIONS.md](OPERATIONS.md#jellyfin-client-compatibility),
+[PLAYBACK.md](PLAYBACK.md#jellyfin-clients--the-same-media-owners-another-protocol),
+[JELLYFIN-COMPATIBILITY-STATUS.md](clients/JELLYFIN-COMPATIBILITY-STATUS.md).
 
 **Web settings:** Live TV owns tuner enablement, owner recovery, guide
 configuration, recording, library-channel playback and subject matching.

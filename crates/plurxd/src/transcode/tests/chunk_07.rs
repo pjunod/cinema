@@ -432,6 +432,23 @@ use crate::queue_fixture::QueueFixture;
         mgr.effective_recipe(&digest, &plan, false).hash()
     }
 
+    // A speculative producer now includes the canonical stereo sink claim.
+    // Keep claimless live keys separate: those deliberately cannot reuse it.
+    async fn producer_recipe_hash_for(
+        mgr: &TranscodeManager,
+        file: &plurx_core::domain::MediaFile,
+        height: i64,
+    ) -> String {
+        let encoder = mgr.encoder().await;
+        let Tracks { audio_index, subtitle_burn } = TranscodeManager::select_tracks_with_prefs(
+            file, None, None, &plurx_core::tracks::LangPrefs::default(), false,
+        );
+        let opts = mgr.speculative_producer_options(
+            mgr.rate_control_snapshot(), encoder, file, height, audio_index, subtitle_burn,
+        );
+        recipe_hash_for_options(mgr, file, &opts, encoder).await
+    }
+
     /// A retry that changes the decode route is a different production, and
     /// the two ways it could pretend otherwise are publishing under the failed
     /// plan's name and resuming the failed producer's prefix. Both are closed
@@ -1144,6 +1161,7 @@ use crate::queue_fixture::QueueFixture;
                     supersession_user: r#"["username","paul"]"#,
                     playback_id: "pb-1",
                     automatic: true,
+                    sdr_master_codecs: false,
                 },
             )
         };
@@ -1411,9 +1429,23 @@ use crate::queue_fixture::QueueFixture;
         );
 
         // And the part that cannot be checked any other way: a real playback,
-        // computing the recipe from its own inputs, finds it.
+        // computing the recipe from its own inputs, finds it. A real client:
+        // web, Apple and Android all send audio sinks, so the lookup is typed
+        // (D1, main-merge defects 2026-10-04).
+        let web = plurx_core::playback::audio::AudioClaim {
+            decoders: vec!["aac".into(), "mp3".into()],
+            sinks: ["aac", "mp3"]
+                .into_iter()
+                .map(|codec| plurx_core::playback::audio::AudioSink {
+                    codec: codec.into(),
+                    max_channels: 2,
+                    passthrough: false,
+                    sample_rates_hz: vec![44_100, 48_000],
+                })
+                .collect(),
+        };
         let info = mgr
-            .start(file_id, 240, 0.0, None, None, "paul", "pb-after-produce")
+            .start_claiming(file_id, 240, "pb-after-produce", &web)
             .await
             .expect("start");
         assert!(
@@ -1431,6 +1463,314 @@ use crate::queue_fixture::QueueFixture;
                 .expect("produce again")
                 .is_none(),
             "an entry that already exists was produced a second time"
+        );
+    }
+
+    /// D1: the end-to-end half. A pre-transcoded generation is served to a
+    /// client that sends sinks, and a claimless client keeps the untyped key
+    /// it always computed, which the typed producer no longer writes.
+    #[tokio::test]
+    async fn pretranscoded_generation_is_served_to_a_sink_claiming_start() {
+        super::require_ffmpeg();
+        use plurx_core::store::SqliteStore;
+        let store: Arc<dyn Store> = Arc::new(SqliteStore::open_in_memory().expect("store"));
+        let media = crate::test_tempdir().expect("media");
+        let source = media.path().join("Heat.mkv");
+        write_real_video(&source, 6);
+        let file_id = seed_real_file(&store, &source).await;
+        let (mgr, _work, _cache) = cached_manager(&store);
+        let mgr = Arc::new(mgr);
+        let file = store.get_file(file_id).await.expect("get").expect("file");
+        mgr.produce(&file, 240, Instant::now() + Duration::from_secs(120))
+            .await
+            .expect("produce")
+            .expect("something was produced");
+        let claim = plurx_core::playback::audio::canonical_producer_claim();
+        let typed = mgr
+            .start_claiming(file_id, 240, "pb-typed", &claim)
+            .await
+            .expect("typed start");
+        assert!(typed.vod, "a sink-claiming start must hit the pre-transcoded rung");
+        assert_eq!(typed.encoder, "cached");
+        assert!(mgr.stop_session(&typed.session_id, "test").await);
+        let claimless = mgr
+            .start(file_id, 240, 0.0, None, None, "paul", "pb-claimless")
+            .await
+            .expect("claimless start");
+        assert!(
+            !claimless.vod,
+            "a claimless client computes the untyped key, which no producer writes now"
+        );
+        assert!(mgr.stop_session(&claimless.session_id, "test").await);
+    }
+
+    // ---- D4 (main-merge defects 2026-10-04): one settings statement -------
+
+    /// A real rolling start at position 0 on a fresh manager: a cold
+    /// `ahead_limits` cache, a cache budget so the retained lookup and
+    /// retention run, every path a Play takes. Returns the settings-bearing
+    /// statements the start issued.
+    async fn d4_rolling_start_reads(
+        settings: &[(&str, &str)],
+        copy: bool,
+    ) -> (Vec<Vec<String>>, Result<StartInfo, String>) {
+        super::require_ffmpeg();
+        use plurx_core::store::SqliteStore;
+        let sqlite = Arc::new(SqliteStore::open_in_memory().expect("store"));
+        let store: Arc<dyn Store> = sqlite.clone();
+        let media = crate::test_tempdir().expect("media");
+        let source = media.path().join("Heat.mkv");
+        write_real_video(&source, 6);
+        let file_id = seed_real_file(&store, &source).await;
+        store
+            .put_setting(plurx_core::store::keys::CACHE_MAX_GB, "1")
+            .await
+            .expect("budget");
+        store
+            .put_setting(plurx_core::store::keys::VOD_ROLLING_RETENTION, "1")
+            .await
+            .expect("retention on, so the retained lookup runs");
+        for (key, value) in settings {
+            store.put_setting(key, value).await.expect("setting");
+        }
+        let (mgr, _work, _cache) = cached_manager(&store);
+        let _ = sqlite.take_settings_reads();
+        let started = if copy {
+            mgr.start_copy(
+                file_id,
+                0.0,
+                None,
+                CopySessionOptions {
+                    transcode_audio: false,
+                    preserve_dolby_vision: false,
+                    convert_dolby_vision: false,
+                },
+                "paul",
+                "pb-copy",
+            )
+            .await
+        } else {
+            mgr.start(file_id, 240, 0.0, None, None, "paul", "pb-d4").await
+        };
+        let reads = sqlite.take_settings_reads();
+        if let Ok(info) = &started {
+            mgr.stop_session(&info.session_id, "test").await;
+        }
+        (reads, started)
+    }
+
+    #[tokio::test]
+    async fn rolling_start_reads_settings_in_one_snapshot() {
+        let (reads, started) = d4_rolling_start_reads(&[], false).await;
+        started.expect("start");
+        assert_eq!(
+            reads.len(),
+            1,
+            "a rolling transcode start issues one settings statement; it issued {reads:?}"
+        );
+        assert!(
+            reads[0].iter().any(|key| key == plurx_core::store::keys::HLS_SCRATCH_MAX_BYTES),
+            "the one statement is the planning snapshot: {reads:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn copy_rolling_start_reads_settings_in_one_snapshot() {
+        let (reads, started) = d4_rolling_start_reads(&[], true).await;
+        started.expect("copy start");
+        assert_eq!(
+            reads.len(),
+            1,
+            "a rolling copy start issues one settings statement; it issued {reads:?}"
+        );
+    }
+
+    /// The retained-output lookup is optional: a plan it cannot resolve is
+    /// counted and skipped, and nothing in it can return early from Play.
+    #[test]
+    fn retained_lookup_refusal_does_not_fail_play() {
+        let source = include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/src/transcode/manager/start.rs"
+        ));
+        let start = source
+            .find("let mut retained_lookup: Option<(")
+            .expect("the retained lookup block");
+        let end = start
+            + source[start..]
+                .find("retained_lookup = Some((logical, production));")
+                .expect("the lookup's end");
+        let block = &source[start..end];
+        assert!(
+            block.contains("record_rolling_retained_lookup_skipped(\"plan_error\")"),
+            "a plan error is counted"
+        );
+        assert!(
+            !block.contains('?'),
+            "no `?` in the optional lookup: a refusal there must not fail Play"
+        );
+        assert!(
+            crate::telemetry::ROLLING_RETAINED_LOOKUP_SKIP_REASONS.contains(&"plan_error"),
+            "the counter has the label"
+        );
+    }
+
+    /// A read budget cannot see a setting silently replaced by its default,
+    /// so this asserts the operator's limits are the ones the reservation
+    /// actually applied.
+    #[tokio::test]
+    async fn rolling_start_enforces_operator_ahead_and_scratch_limits_from_the_snapshot() {
+        use plurx_core::store::keys;
+        // A scratch cap far below any startup grant: the start must be refused
+        // by the ledger with the operator's figure, not admitted under the
+        // default cap.
+        let (_, refused) = d4_rolling_start_reads(
+            &[
+                (keys::HLS_SCRATCH_MAX_BYTES, "4096"),
+                (keys::HLS_AHEAD_MAX_SECS, "7"),
+                (keys::HLS_AHEAD_MAX_BYTES, "8388608"),
+            ],
+            false,
+        )
+        .await;
+        let Err(error) = refused else {
+            panic!("a 4 KiB scratch cap cannot admit a rolling start");
+        };
+        assert!(error.contains("4096"), "the refusal names the configured cap: {error}");
+
+        // On a candidate-bound start the same keys come from the snapshot the
+        // candidate was accepted from, fetched with the same key list.
+        use plurx_core::store::SqliteStore;
+        let store: Arc<dyn Store> = Arc::new(SqliteStore::open_in_memory().expect("store"));
+        let file_id = seed_file(&store).await;
+        for (key, value) in [
+            (keys::HLS_SCRATCH_MAX_BYTES, "123456789"),
+            (keys::HLS_AHEAD_MAX_SECS, "7"),
+            (keys::HLS_AHEAD_MAX_BYTES, "8388608"),
+            (keys::CACHE_MAX_GB, "3"),
+            (keys::VOD_ROLLING_RETENTION, "1"),
+        ] {
+            store.put_setting(key, value).await.expect("setting");
+        }
+        let (mgr, _work, _cache) = cached_manager(&store);
+        let snapshot = store
+            .playback_planning_snapshot(file_id, &crate::transcode::QUALITY_PLANNING_KEYS)
+            .await
+            .expect("snapshot")
+            .expect("file");
+        let digest = [7; 32];
+        let candidate = plurx_core::playback::candidate::QualityCandidate {
+            id: plurx_core::playback::candidate::CandidateId::for_recipe_digest(digest),
+            recipe_digest: digest,
+            route: plurx_core::playback::candidate::CandidateRoute::Encode,
+            normalized_geometry: false,
+            width: 1280,
+            height: 720,
+            target_height: 720,
+            average_bps: None,
+            peak_bps: None,
+            grade: OutputGrade::Sdr,
+            decoder_compatible: true,
+            complete_cache: false,
+            sustainable: true,
+        };
+        let mut context = TranscodeManager::candidate_context(&candidate);
+        context.planning_snapshot = Some(Arc::new(snapshot));
+        let inputs = mgr
+            .rolling_start_inputs(file_id, Some(&context))
+            .await
+            .expect("inputs");
+        let limits = mgr.ahead_limits_for_start(&inputs.settings);
+        assert_eq!(
+            (limits.max_secs, limits.max_bytes, limits.global_max_bytes),
+            (7, 8_388_608, 123_456_789),
+            "a candidate-bound start applies the operator's limits, not the defaults"
+        );
+        assert_eq!(
+            mgr.scratch_cap.load(std::sync::atomic::Ordering::Relaxed),
+            123_456_789,
+            "the start publishes what it read as the ledger's cap"
+        );
+        assert_eq!(
+            TranscodeManager::rolling_retained_budget_from(&inputs.settings),
+            Some(3 << 30)
+        );
+    }
+
+    #[tokio::test]
+    async fn candidate_bound_start_honours_operator_cache_and_pacing_settings() {
+        use plurx_core::store::keys;
+        use plurx_core::store::SqliteStore;
+        let store: Arc<dyn Store> = Arc::new(SqliteStore::open_in_memory().expect("store"));
+        let file_id = seed_file(&store).await;
+        for (key, value) in [
+            (keys::CACHE_MAX_GB, "2"),
+            (keys::VOD_ROLLING_RETENTION, "1"),
+            (keys::HLS_READRATE, "1.5"),
+            (keys::HLS_BURST_SECS, "11"),
+            (keys::SW_POOL_THREADS, "3"),
+            (keys::MAX_HW_SESSIONS, "5"),
+            (keys::CONTENT_AWARE_ENCODING, "1"),
+        ] {
+            store.put_setting(key, value).await.expect("setting");
+        }
+        let snapshot = store
+            .playback_planning_snapshot(file_id, &crate::transcode::QUALITY_PLANNING_KEYS)
+            .await
+            .expect("snapshot")
+            .expect("file");
+        for key in [
+            keys::CACHE_MAX_GB,
+            keys::HLS_READRATE,
+            keys::HLS_BURST_SECS,
+            keys::SW_POOL_THREADS,
+            keys::MAX_HW_SESSIONS,
+            keys::CONTENT_AWARE_ENCODING,
+        ] {
+            assert!(
+                snapshot.settings.contains_key(key),
+                "{key} must ride in every candidate's planning snapshot"
+            );
+        }
+        let (mgr, _work, _cache) = cached_manager(&store);
+        let digest = [9; 32];
+        let candidate = plurx_core::playback::candidate::QualityCandidate {
+            id: plurx_core::playback::candidate::CandidateId::for_recipe_digest(digest),
+            recipe_digest: digest,
+            route: plurx_core::playback::candidate::CandidateRoute::Encode,
+            normalized_geometry: false,
+            width: 1280,
+            height: 720,
+            target_height: 720,
+            average_bps: None,
+            peak_bps: None,
+            grade: OutputGrade::Sdr,
+            decoder_compatible: true,
+            complete_cache: false,
+            sustainable: true,
+        };
+        let mut context = TranscodeManager::candidate_context(&candidate);
+        context.planning_snapshot = Some(Arc::new(snapshot));
+        let inputs = mgr
+            .rolling_start_inputs(file_id, Some(&context))
+            .await
+            .expect("inputs");
+        assert_eq!(
+            TranscodeManager::rolling_retained_budget_from(&inputs.settings),
+            Some(2 << 30)
+        );
+        assert!(inputs.content_aware_encoding());
+        assert_eq!(
+            TranscodeManager::num_from(&inputs.settings, keys::SW_POOL_THREADS, 99usize),
+            3
+        );
+        assert_eq!(
+            TranscodeManager::num_from(&inputs.settings, keys::MAX_HW_SESSIONS, 99usize),
+            5
+        );
+        assert_eq!(
+            TranscodeManager::pacing_from_settings(&inputs.settings, false).await,
+            TranscodeManager::pacing_from(1.5, 11.0, false).await,
         );
     }
 
@@ -1505,7 +1845,7 @@ use crate::queue_fixture::QueueFixture;
             ..ProducerTuning::default()
         });
         let file = store.get_file(file_id).await.expect("get").expect("file");
-        let hash = recipe_hash_for(&mgr, &file, 240).await;
+        let hash = producer_recipe_hash_for(&mgr, &file, 240).await;
 
         // A short budget: it encodes some of the film and runs out of time.
         let staging = crate::cachekeep::staging_dir(cache.path(), &hash);
@@ -1606,7 +1946,7 @@ use crate::queue_fixture::QueueFixture;
         let file_id = seed_file(&store).await;
         let (mgr, _work, _cache) = cached_manager(&store);
         let file = store.get_file(file_id).await.expect("get").expect("file");
-        let hash = recipe_hash_for(&mgr, &file, 1080).await;
+        let hash = producer_recipe_hash_for(&mgr, &file, 1080).await;
 
         // Somebody else is mid-encode.
         store
@@ -1689,9 +2029,13 @@ use crate::queue_fixture::QueueFixture;
         write_real_video(&source, SECONDS);
         let file_id = seed_real_file(&store, &source).await;
         let file = store.get_file(file_id).await.expect("get").expect("file");
+        let (mgr, _work, cache) = cached_manager(&store);
+        let audio_delivery = mgr.speculative_producer_options(
+            mgr.rate_control_snapshot(), Encoder::Software, &file, 240, None, None,
+        ).audio.expect("canonical producer audio");
         let package_id = "offline-preemption";
         let requested = NewOfflinePackage {
-            audio_recipe: None,
+            audio_recipe: Some(serde_json::to_string(&audio_delivery).expect("audio recipe")),
             id: package_id.to_owned(),
             request_id: "offline-preemption-request".to_owned(),
             user_id: user.id,
@@ -1727,7 +2071,6 @@ use crate::queue_fixture::QueueFixture;
             .expect("queued package");
         assert_eq!(claimed.id, package_id);
 
-        let (mgr, _work, cache) = cached_manager(&store);
         let mgr = Arc::new(mgr.with_producer_tuning(ProducerTuning {
             pacing: Pacing {
                 readrate: Some(READRATE),
@@ -1751,7 +2094,7 @@ use crate::queue_fixture::QueueFixture;
                 &claimed,
                 &file,
                 &OfflineSpec {
-                    audio_delivery: None,
+                    audio_delivery: Some(audio_delivery),
                     target_height: 240,
                     audio_index: None,
                     subtitle: OfflineSubtitle::None,
@@ -2045,7 +2388,7 @@ use crate::queue_fixture::QueueFixture;
 
         // It serves, which is the only thing any of this was for.
         let info = mgr
-            .start(file_id, 240, 0.0, None, None, "paul", "pb-resumed")
+            .start_claiming(file_id, 240, "pb-resumed", &plurx_core::playback::audio::canonical_producer_claim())
             .await
             .expect("start");
         assert!(info.vod, "a resumed asset is not findable");
@@ -2171,6 +2514,7 @@ use crate::queue_fixture::QueueFixture;
                     supersession_user: r#"["username","paul"]"#,
                     playback_id: "pb-1",
                     automatic: true,
+                    sdr_master_codecs: false,
                 },
             )
             .await
@@ -2218,13 +2562,19 @@ use crate::queue_fixture::QueueFixture;
             "an explicit quality request is a different policy"
         );
 
-        // The durable value itself, unchanged since before `requested_mode`
-        // became an `Option`. A PR that flips a family default moves this
-        // deliberately, with its artefact; nothing else may move it.
+        // The durable value itself. It moved exactly once on purpose: the
+        // main-merge defects build (2026-10-04) made producers plan typed
+        // audio under the canonical producer claim, which changes every
+        // producer key, so the claim now feeds this generation and every
+        // queued row planned under the untyped audio is cancelled
+        // (`policy_changed`) and rediscovered. Until then it was
+        // `08494ca1…6c67723`, unchanged since before `requested_mode` became an
+        // `Option`. A PR that flips a family default moves this deliberately,
+        // with its artefact; nothing else may move it.
         assert_eq!(
             generation,
             "speculative-auto-v2:\
-             08494ca183d08fdddf67791b5c47a324dbf4dd32544694dc2fd12589a6c67723",
+             3c5e96e7288ba8502d2a190ea0e4045642ff00f9e03b6d3d7bbda2bd126e63fb",
             "the speculative dedupe key for an unset pair is durable state"
         );
     }

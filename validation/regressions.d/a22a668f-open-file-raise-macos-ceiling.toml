@@ -19,7 +19,7 @@ RLIM_INFINITY hard with a 24576 ceiling targets 24576. A hard limit below
 the ceiling is the target. A soft limit already at the ceiling makes no
 call. With the clamp reverted to `hard` it fails on Linux with
 `left: Some(18446744073709551615), right: Some(24576)`; that revert was run
-on nuc3 on 2026-09-24.
+on lab3 on 2026-09-24.
 `the_raise_targets_the_hard_limit_where_no_platform_ceiling_applies` pins
 the unchanged Linux target (1024 -> 524288, and no call at equality or
 infinity).
@@ -27,7 +27,7 @@ infinity).
 binary, lowers soft to 256 and asserts that both the reported and the
 getrlimit-observed soft limit equal min(hard, `sysctl -n
 kern.maxfilesperproc`) on macOS, or the hard limit elsewhere, and that hard
-is unchanged. On the lab Mac mba, with the Apple ceiling removed, it fails
+is unchanged. On the lab Mac maca, with the Apple ceiling removed, it fails
 with `left: 9223372036854775807, right: 122880`.
 Run `cargo test -p plurx-core process::rlimit`.
 """

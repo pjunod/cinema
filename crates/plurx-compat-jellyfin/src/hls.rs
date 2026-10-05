@@ -1,4 +1,5 @@
-//! Closed translation of native HLS resource names; no authentication material is added.
+//! Closed translation of native HLS resource names. The only thing added is the
+//! caller's own URL credential, when the handler passes one (`public_query`).
 use std::ops::Range;
 
 const MAX_MANIFEST_BYTES: usize = 8 * 1024 * 1024;
@@ -117,13 +118,31 @@ fn resolve(uri: &str, parent: &Resource, native_session: &str) -> Option<Resourc
 /// Translate only native resources supported by the adapter. Original timelines and HLS metadata
 /// survive unchanged. Inline-init delivery removes MAP and gives each native video fragment a TS
 /// filename; the HTTP handler must prefix the native initialization bytes for that delivery mode.
+///
+/// `public_query`, when given, is appended to every rewritten URI. A player
+/// resolves a playlist's children without the playlist's own query, so a
+/// client that authenticates media only by URL (Android TV sends `ApiKey`
+/// and no header) needs it on each child, as Jellyfin's playlists carry it.
 pub fn rewrite_manifest(
     input: &str,
     parent: &Resource,
     native_session: &str,
     public_base: &str,
+    public_query: Option<&str>,
     inline_init: bool,
 ) -> Result<String, &'static str> {
+    if public_query.is_some_and(|query| {
+        query.is_empty()
+            || query.len() > 256
+            || !query
+                .bytes()
+                .all(|c| c.is_ascii_alphanumeric() || matches!(c, b'=' | b'_' | b'-'))
+    }) {
+        return Err("invalid HLS manifest context");
+    }
+    let suffix = public_query
+        .map(|query| format!("?{query}"))
+        .unwrap_or_default();
     if input.len() > MAX_MANIFEST_BYTES
         || input.contains('\r')
         || input.contains('\0')
@@ -172,6 +191,7 @@ pub fn rewrite_manifest(
             }
             output.push_str(public_base);
             output.push_str(&resource.public_path(inline_init));
+            output.push_str(&suffix);
         } else if let Some((tag, attributes)) = line.split_once(':') {
             if tag.starts_with("#EXT")
                 && !matches!(
@@ -249,6 +269,7 @@ pub fn rewrite_manifest(
                 output.push_str(&attributes[..range.start]);
                 output.push_str(public_base);
                 output.push_str(&resource.public_path(inline_init));
+                output.push_str(&suffix);
                 output.push_str(&attributes[range.end..]);
             } else {
                 output.push_str(line);
@@ -376,8 +397,9 @@ mod tests {
         let master = "#EXTM3U\n#EXT-X-STREAM-INF:BANDWIDTH=750000,CODECS=\"avc1.64001f,mp4a.40.2\"\nindex.m3u8\n";
         let root = BASE.trim_start_matches("/jellyfin");
         assert_eq!(
-            rewrite_manifest(master, &Resource::Master, SESSION, root, false).expect("root mount"),
-            rewrite_manifest(master, &Resource::Master, SESSION, BASE, false)
+            rewrite_manifest(master, &Resource::Master, SESSION, root, None, false)
+                .expect("root mount"),
+            rewrite_manifest(master, &Resource::Master, SESSION, BASE, None, false)
                 .expect("jellyfin mount")
                 .replace(BASE, root)
         );
@@ -388,7 +410,7 @@ mod tests {
             "/jellyfinx/Videos/x/",
         ] {
             assert!(
-                rewrite_manifest(master, &Resource::Master, SESSION, base, false).is_err(),
+                rewrite_manifest(master, &Resource::Master, SESSION, base, None, false).is_err(),
                 "{base}"
             );
         }
@@ -397,17 +419,17 @@ mod tests {
     #[test]
     fn manifests_rewrite_exact_resources_and_preserve_source_timeline() {
         let master = "#EXTM3U\n#EXT-X-MEDIA:TYPE=SUBTITLES,NAME=\"English, URI=pretend\",URI=\"subs/2/index.m3u8\"\n#EXT-X-STREAM-INF:BANDWIDTH=750000,CODECS=\"hvc1.1.6.L120,B0,mp4a.40.2\"\nindex.m3u8\n";
-        let result = rewrite_manifest(master, &Resource::Master, SESSION, BASE, false)
+        let result = rewrite_manifest(master, &Resource::Master, SESSION, BASE, None, false)
             .expect("native manifest fixture");
         assert!(result.contains(&format!("URI=\"{BASE}subs/2/index.m3u8\"")));
         assert!(result.contains("NAME=\"English, URI=pretend\""));
         assert!(result.ends_with(&format!("{BASE}index.m3u8\n")));
         let media = "#EXTM3U\n#EXT-X-MAP:URI=\"init.mp4\"\n#EXT-X-MEDIA-SEQUENCE:99\n#EXTINF:6.003,\nseg00099.m4s\n#EXT-X-ENDLIST\n";
-        let mp4 = rewrite_manifest(media, &Resource::Media, SESSION, BASE, false)
+        let mp4 = rewrite_manifest(media, &Resource::Media, SESSION, BASE, None, false)
             .expect("native manifest fixture");
         assert!(mp4.contains(&format!("URI=\"{BASE}init.mp4\"")));
         assert!(mp4.contains("#EXT-X-MEDIA-SEQUENCE:99\n#EXTINF:6.003,"));
-        let inline = rewrite_manifest(media, &Resource::Media, SESSION, BASE, true)
+        let inline = rewrite_manifest(media, &Resource::Media, SESSION, BASE, None, true)
             .expect("native manifest fixture");
         assert!(!inline.contains("#EXT-X-MAP"));
         assert!(inline.contains(&format!("{BASE}seg00099.ts")));
@@ -417,6 +439,7 @@ mod tests {
             &Resource::SubtitlePlaylist(2),
             SESSION,
             BASE,
+            None,
             true,
         )
         .expect("native manifest fixture");
@@ -428,10 +451,45 @@ mod tests {
                 &format!("/api/v1/hls/{SESSION}/seg00099.m4s"),
             );
         assert_eq!(
-            rewrite_manifest(&absolute, &Resource::Media, SESSION, BASE, false)
+            rewrite_manifest(&absolute, &Resource::Media, SESSION, BASE, None, false)
                 .expect("native manifest fixture"),
             mp4
         );
+    }
+
+    #[test]
+    fn every_rewritten_uri_carries_the_url_credential_for_header_less_clients() {
+        let master = "#EXTM3U\n#EXT-X-MEDIA:TYPE=SUBTITLES,GROUP-ID=\"subs\",NAME=\"English\",URI=\"subs/2/index.m3u8\"\n#EXT-X-STREAM-INF:BANDWIDTH=1,SUBTITLES=\"subs\"\nindex.m3u8\n";
+        let result = rewrite_manifest(
+            master,
+            &Resource::Master,
+            SESSION,
+            BASE,
+            Some("ApiKey=0123abcd"),
+            false,
+        )
+        .expect("native manifest fixture");
+        assert!(result.contains(&format!("URI=\"{BASE}subs/2/index.m3u8?ApiKey=0123abcd\"")));
+        assert!(result.ends_with(&format!("{BASE}index.m3u8?ApiKey=0123abcd\n")));
+        let media = "#EXTM3U\n#EXT-X-MAP:URI=\"init.mp4\"\n#EXTINF:6.003,\nseg00099.m4s\n";
+        let mp4 = rewrite_manifest(
+            media,
+            &Resource::Media,
+            SESSION,
+            BASE,
+            Some("ApiKey=0123abcd"),
+            false,
+        )
+        .expect("native manifest fixture");
+        assert!(mp4.contains(&format!("URI=\"{BASE}init.mp4?ApiKey=0123abcd\"")));
+        assert!(mp4.contains(&format!("{BASE}seg00099.m4s?ApiKey=0123abcd\n")));
+        for query in ["", "ApiKey=a&b=c", "ApiKey=\"x\"", "ApiKey=a b"] {
+            assert!(
+                rewrite_manifest(media, &Resource::Media, SESSION, BASE, Some(query), false)
+                    .is_err(),
+                "{query}"
+            );
+        }
     }
 
     #[test]
@@ -453,6 +511,7 @@ mod tests {
                     &Resource::Master,
                     SESSION,
                     BASE,
+                    None,
                     false
                 )
                 .is_err(),
@@ -474,20 +533,28 @@ mod tests {
                     &Resource::Master,
                     SESSION,
                     BASE,
+                    None,
                     false
                 )
                 .is_err(),
                 "{line}"
             );
         }
-        assert!(
-            rewrite_manifest("#EXTM3U\nseg0.m4s\n", &Resource::Media, SESSION, BASE, true).is_err()
-        );
+        assert!(rewrite_manifest(
+            "#EXTM3U\nseg0.m4s\n",
+            &Resource::Media,
+            SESSION,
+            BASE,
+            None,
+            true
+        )
+        .is_err());
         assert!(rewrite_manifest(
             "#EXTM3U\n#EXT-X-MAP:URI=\"init.mp4\",BYTERANGE=\"10@0\"\n",
             &Resource::Media,
             SESSION,
             BASE,
+            None,
             false
         )
         .is_err());
@@ -510,6 +577,7 @@ mod tests {
                     &parent,
                     SESSION,
                     BASE,
+                    None,
                     false
                 )
                 .is_err(),
@@ -521,6 +589,7 @@ mod tests {
             &Resource::SubtitlePlaylist(2),
             SESSION,
             BASE,
+            None,
             false,
         )
         .expect("own subtitle track");

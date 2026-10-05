@@ -411,6 +411,11 @@ final class LiveTvPlayerController: ObservableObject {
         LiveTvGuideReducer.airing(guide, channelId: channel.id, now: now)
     }
 
+    /// The station's logo address from the guide, or nil for the callsign.
+    func stationLogo(_ channel: LiveTvChannel) -> String? {
+        LiveTvGuideReducer.stationLogoURL(guide, channelId: channel.id)
+    }
+
     func expireSourceFormats(now: Int) {
         func fresh(_ channel: LiveTvChannel) -> LiveTvChannel {
             guard let observed = channel.sourceFormat?.observedAt else { return channel }
@@ -726,6 +731,11 @@ enum LiveTvGridMetrics {
     #if os(iOS)
     static let rowHeight: Double = 56
     static let channelColumnWidth: Double = 128
+    /// The station tile at the head of each row: logo, or callsign until one
+    /// decodes. Inside the fixed column, so no slot geometry moves for it.
+    static let stationChipWidth: CGFloat = 44
+    static let stationChipHeight: CGFloat = 30
+    static let stationChipGap: CGFloat = 5
     static let visibleSlots = 8
     static let horizontalInset: Double = 16
     /// The phone grid scrolls horizontally, so its column is a fixed size
@@ -734,6 +744,9 @@ enum LiveTvGridMetrics {
     #else
     static let rowHeight: Double = 74
     static let channelColumnWidth: Double = 200
+    static let stationChipWidth: CGFloat = 72
+    static let stationChipHeight: CGFloat = 44
+    static let stationChipGap: CGFloat = 8
     static let visibleSlots = 4
     /// The grid draws 8 pt of padding on each side of its own content, so the
     /// slots have `contentWidth - 16` to share with the channel column.
@@ -1153,6 +1166,10 @@ struct LiveTvStreamInfoPanel: View {
 /// because in a 620 pt column that edge is three feet away on a television.
 struct LiveTvChannelRow: View {
     let channel: LiveTvChannel
+    /// The guide's station artwork (`LiveTvPlayerController.stationLogo`). Required,
+    /// not defaulted: a row built without it is how the native guides went
+    /// without logos while the web had them.
+    let logo: String?
     let airing: LiveTvAiring
     let selected: Bool
 
@@ -1178,14 +1195,7 @@ struct LiveTvChannelRow: View {
 
     var body: some View {
         HStack(alignment: .center, spacing: columnGap) {
-            Text(stationName)
-                .font(LiveTvType.chip)
-                .foregroundStyle(Palette.muted)
-                .lineLimit(1)
-                .minimumScaleFactor(0.7)
-                .frame(width: chipWidth, height: chipHeight)
-                .background(Palette.surfaceHi)
-                .clipShape(RoundedRectangle(cornerRadius: 6))
+            LiveTvStationChip(name: stationName, logo: logo, width: chipWidth, height: chipHeight)
             VStack(alignment: .leading, spacing: 3) {
                 HStack(spacing: 6) {
                     Text(channel.title).font(LiveTvType.primary).lineLimit(1)
@@ -1459,11 +1469,29 @@ struct LiveTvGuideGrid: View {
                 ForEach(layout.rows, id: \.channel.id) { row in
                     HStack(spacing: 0) {
                         Button { onAiring(row.channel) } label: {
-                            VStack(alignment: .leading, spacing: 1) {
-                                Text(row.channel.guideNumber).font(LiveTvType.secondary.weight(.semibold))
-                                Text(row.channel.guideName).font(LiveTvType.badge)
-                                    .foregroundStyle(Palette.muted).lineLimit(1)
-                                LiveTvFormatBadges(channel: row.channel)
+                            HStack(spacing: LiveTvGridMetrics.stationChipGap) {
+                                // Only a station with artwork gives up header width
+                                // to a tile — the name column already says the
+                                // callsign, and the layout knows before any load.
+                                if let logo = row.logo {
+                                    LiveTvStationChip(
+                                        name: row.channel.guideName,
+                                        logo: logo,
+                                        width: LiveTvGridMetrics.stationChipWidth,
+                                        height: LiveTvGridMetrics.stationChipHeight,
+                                        font: LiveTvType.badge
+                                    )
+                                }
+                                VStack(alignment: .leading, spacing: 1) {
+                                    Text(row.channel.guideNumber).font(LiveTvType.secondary.weight(.semibold))
+                                    Text(row.channel.guideName).font(LiveTvType.badge)
+                                        .foregroundStyle(Palette.muted).lineLimit(1)
+                                    // Clipped at the column edge, as on the web, rather
+                                    // than squeezed into ellipses one badge at a time.
+                                    LiveTvFormatBadges(channel: row.channel).fixedSize()
+                                }
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                                .clipped()
                             }
                             .padding(.horizontal, 6)
                             .frame(width: dimensions.channelColumnWidth,
@@ -2930,7 +2958,8 @@ struct LiveTvView: View {
                 Button {
                     selectAiring(channel)
                 } label: {
-                    LiveTvChannelRow(channel: channel, airing: live.airing(channel, now: now),
+                    LiveTvChannelRow(channel: channel, logo: live.stationLogo(channel),
+                                     airing: live.airing(channel, now: now),
                                      selected: live.watching?.id == channel.id)
                 }
                 .disabled(!channel.watchable || live.busy)
@@ -3372,10 +3401,10 @@ struct LiveTvView: View {
             .overlay(alignment: .topLeading) {
                 if let watching = live.watching, live.playing {
                     HStack(spacing: 8) {
-                        Text(watching.guideName)
-                            .font(LiveTvType.badge)
-                            .padding(.horizontal, 8).padding(.vertical, 3)
-                            .background(Palette.surfaceHi, in: RoundedRectangle(cornerRadius: 6))
+                        LiveTvStationChip(name: watching.guideName, logo: live.stationLogo(watching),
+                                          width: LiveTvStationChipMetrics.pictureBadge.width,
+                                          height: LiveTvStationChipMetrics.pictureBadge.height,
+                                          font: LiveTvType.badge, foreground: Palette.onBg, padding: 3)
                         Text(watching.title).font(LiveTvType.secondary)
                         Text("LIVE").font(LiveTvType.eyebrow).foregroundStyle(.white)
                             .padding(.horizontal, 7).padding(.vertical, 2)
@@ -3426,11 +3455,18 @@ struct LiveTvView: View {
                      + (programme.map { " · \(liveTvTime($0.start))–\(liveTvTime($0.end))" } ?? ""))
                     .font(LiveTvType.eyebrow).foregroundStyle(Palette.accent).lineLimit(1)
             }
-            HStack(alignment: .firstTextBaseline, spacing: 12) {
-                Text(programme?.title ?? channel?.guideName ?? "Live TV")
-                    .font(LiveTvType.title).lineLimit(1)
-                if !eyebrow && !meta.isEmpty {
-                    Text(meta).font(LiveTvType.secondary).foregroundStyle(Palette.muted).lineLimit(1)
+            HStack(alignment: .center, spacing: 12) {
+                if let channel {
+                    LiveTvStationChip(name: channel.guideName, logo: live.stationLogo(channel),
+                                      width: LiveTvStationChipMetrics.detail.width,
+                                      height: LiveTvStationChipMetrics.detail.height)
+                }
+                HStack(alignment: .firstTextBaseline, spacing: 12) {
+                    Text(programme?.title ?? channel?.guideName ?? "Live TV")
+                        .font(LiveTvType.title).lineLimit(1)
+                    if !eyebrow && !meta.isEmpty {
+                        Text(meta).font(LiveTvType.secondary).foregroundStyle(Palette.muted).lineLimit(1)
+                    }
                 }
             }
             if let synopsis = programme?.synopsis {
@@ -3538,6 +3574,7 @@ struct LiveTvView: View {
                     Button { if !live.busy { selectAiring(channel) } } label: {
                         LiveTvChannelRow(
                             channel: channel,
+                            logo: live.stationLogo(channel),
                             airing: live.airing(channel, now: now),
                             selected: live.watching?.id == channel.id
                         )
@@ -3960,15 +3997,19 @@ struct LiveTvView: View {
     ) -> some View {
         HStack(spacing: 28) {
             if let channel {
-                Text(channel.guideNumber)
-                    .font(.system(size: 40, weight: .bold, design: .monospaced))
-                    .lineLimit(1)
-                    .minimumScaleFactor(0.7)
-                    .frame(width: 112, height: 112)
-                    .background(
-                        Palette.playerChrome.opacity(0.72),
-                        in: RoundedRectangle(cornerRadius: 16, style: .continuous)
-                    )
+                // The station's logo once it decodes; the channel number until
+                // then, and for a station the guide has no artwork for.
+                LiveTvStationChip(
+                    name: channel.guideNumber,
+                    logo: live.stationLogo(channel),
+                    width: LiveTvStationChipMetrics.identity.width,
+                    height: LiveTvStationChipMetrics.identity.height,
+                    font: .system(size: 40, weight: .bold, design: .monospaced),
+                    cornerRadius: 16,
+                    background: Palette.playerChrome.opacity(0.72),
+                    foreground: .white,
+                    padding: 14
+                )
             }
             VStack(alignment: .leading, spacing: 6) {
                 if let channel {
@@ -4470,9 +4511,16 @@ struct LiveTvView: View {
     private func programmeDetail(_ programme: LiveTvProgramme) -> some View {
         VStack(alignment: .leading, spacing: 10) {
             Text(programme.title).font(LiveTvType.title)
-            Text("\(detailChannel?.title ?? "") · \(liveTvTime(programme.start))–\(liveTvTime(programme.end))"
-                 + (programme.episode.map { " · \($0)" } ?? ""))
-                .font(.caption).foregroundStyle(Palette.muted)
+            HStack(spacing: 10) {
+                if let channel = detailChannel {
+                    LiveTvStationChip(name: channel.guideName, logo: live.stationLogo(channel),
+                                      width: LiveTvStationChipMetrics.detail.width,
+                                      height: LiveTvStationChipMetrics.detail.height)
+                }
+                Text("\(detailChannel?.title ?? "") · \(liveTvTime(programme.start))–\(liveTvTime(programme.end))"
+                     + (programme.episode.map { " · \($0)" } ?? ""))
+                    .font(.caption).foregroundStyle(Palette.muted)
+            }
             if let episodeTitle = programme.episodeTitle {
                 Text(episodeTitle).font(LiveTvType.primary)
             }

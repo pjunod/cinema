@@ -3,7 +3,7 @@
   "kind": "docs-only fast-lane evidence; not effort-release qualification",
   "head": "b3ff464b9eb7822b465377ddd9b4292852db9d27",
   "base": "9a719fcb73da195676a6dea5378871d64547bb8b",
-  "run_url": "http://192.168.4.7:3000/noirr/plurx/actions/runs/3881",
+  "run_url": "http://forge.lan:3000/noirr/plurx/actions/runs/3881",
   "run_status": "success",
   "jobs": [
     {

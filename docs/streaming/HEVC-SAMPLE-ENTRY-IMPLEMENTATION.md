@@ -54,7 +54,7 @@ Apple's existing `dvTransport: hls` does not protect SDR/HDR10 admission.
   execution guard and optional plan constraint specified in §5.
 - No Android capability expansion in this PR; omission preserves its current
   behavior without making an untested new claim.
-- No playback-control rewrite. [PR #336](http://192.168.4.7:3000/noirr/plurx/pulls/336)
+- No playback-control rewrite. [PR #336](http://forge.lan:3000/noirr/plurx/pulls/336)
   addresses the separate seek defect; record whether the acceptance candidate
   includes it rather than copying its implementation into this change.
 

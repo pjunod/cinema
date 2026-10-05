@@ -3234,7 +3234,7 @@ impl JobManager {
     }
 
     #[cfg(test)]
-    fn new(store: Arc<dyn Store>, artwork_dir: PathBuf) -> Self {
+    pub(crate) fn new(store: Arc<dyn Store>, artwork_dir: PathBuf) -> Self {
         Self::new_with_scan_prune_percent(
             store,
             artwork_dir,
@@ -5827,17 +5827,33 @@ impl JobManager {
         use plurx_core::store::background_jobs::JobKind;
         let preparation = async {
             let mut pacing = crate::background_jobs::IdlePoll::new();
+            // Draining lists queued rows, a replicated read; once a minute is
+            // prompt enough for a switch an operator just turned off.
+            let mut last_drain: Option<std::time::Instant> = None;
             loop {
-                let kinds = [JobKind::TranscodePrepare];
+                let kinds = [
+                    JobKind::TranscodePrepare,
+                    JobKind::CopyOutputPrepare,
+                    JobKind::EncodedOutputPrepare,
+                ];
                 let before = crate::background_jobs::accepted_claims(&kinds);
-                if self
-                    .job_authority
-                    .may_execute_job(JobKind::TranscodePrepare)
-                    .await
-                    && self.job_interval(keys::JOB_CACHE_PRODUCE_MINS).await > 0
+                // Each lane opens on its own setting: speculative work on the
+                // discovery schedule, viewer-demand output preparation on its
+                // Developer switch. The disabled output kinds are drained on
+                // every node whether or not anything here can execute them.
+                // An unreadable switch closes the output lane for this tick
+                // and skips the drain: an error is not the operator saying off.
+                let (lanes, output_read) = self.read_preparation_lanes().await;
+                if output_read
+                    && last_drain.is_none_or(|at| at.elapsed() >= Duration::from_secs(60))
                 {
+                    last_drain = Some(std::time::Instant::now());
+                    self.drain_disabled_output_preparation(lanes.output).await;
+                }
+                let lanes = self.executable_lanes(lanes).await;
+                if !lanes.is_empty() {
                     Arc::clone(&self)
-                        .work_pretranscode_queue(Arc::clone(&transcode))
+                        .work_pretranscode_queue(Arc::clone(&transcode), lanes)
                         .await;
                 }
                 let progressed = crate::background_jobs::accepted_claims(&kinds) != before;
@@ -6075,7 +6091,18 @@ impl JobManager {
         if global.cache_produce_mins > 0 {
             let state = Arc::clone(self);
             let transcode = Arc::clone(transcode);
-            tokio::spawn(async move { state.work_pretranscode_queue(transcode).await });
+            tokio::spawn(async move {
+                // Not narrowed by job authority, as before the lanes existed:
+                // this pass also runs the node's local cachekeep sweep, which
+                // a node owes its own cache whatever rows it may execute.
+                // `claim_pretranscode` still checks authority per kind.
+                let lanes = state.preparation_lanes().await;
+                if !lanes.is_empty() {
+                    Arc::clone(&state)
+                        .work_pretranscode_queue(transcode, lanes)
+                        .await;
+                }
+            });
         }
 
         // Discovery stays on the configured library cadence, but execution is
@@ -10195,7 +10222,182 @@ impl JobManager {
         completed
     }
 
-    async fn work_pretranscode_queue(self: Arc<Self>, transcode: Arc<TranscodeManager>) {
+    /// The preparation lanes the settings open: the speculative discovery
+    /// schedule and the `vod.output_preparation` Developer switch.
+    pub(crate) async fn preparation_lanes(&self) -> crate::background_jobs::PreparationLanes {
+        self.read_preparation_lanes().await.0
+    }
+
+    /// [`Self::preparation_lanes`], and whether the output switch was actually
+    /// read. A store error is not "off": the output lane stays closed for this
+    /// tick (nothing is claimed under a switch nobody read) and the caller
+    /// must not drain on it, because draining cancels queued work the
+    /// operator may well have switched on.
+    async fn read_preparation_lanes(&self) -> (crate::background_jobs::PreparationLanes, bool) {
+        /// One warning per run of failures, debug for the rest of the run.
+        static OUTPUT_SWITCH_UNREADABLE: std::sync::atomic::AtomicBool =
+            std::sync::atomic::AtomicBool::new(false);
+        let speculative = self.job_interval(keys::JOB_CACHE_PRODUCE_MINS).await > 0;
+        let (output, read) = match self.store.get_setting(keys::VOD_OUTPUT_PREPARATION).await {
+            Ok(value) => {
+                OUTPUT_SWITCH_UNREADABLE.store(false, Ordering::Relaxed);
+                (
+                    crate::vodserve::OutputPreparation::parse(value.as_deref()),
+                    true,
+                )
+            }
+            Err(error) => {
+                if OUTPUT_SWITCH_UNREADABLE.swap(true, Ordering::Relaxed) {
+                    tracing::debug!(%error, "output preparation switch still unreadable; lane and drain skipped");
+                } else {
+                    tracing::warn!(%error, "could not read the output preparation switch; its lane and drain are skipped until it reads");
+                }
+                (crate::vodserve::OutputPreparation::Off, false)
+            }
+        };
+        (
+            crate::background_jobs::PreparationLanes {
+                speculative,
+                output,
+            },
+            read,
+        )
+    }
+
+    /// `lanes` narrowed to what this node's job authority lets it execute.
+    async fn executable_lanes(
+        &self,
+        lanes: crate::background_jobs::PreparationLanes,
+    ) -> crate::background_jobs::PreparationLanes {
+        use plurx_core::store::background_jobs::JobKind;
+        let speculative = lanes.speculative
+            && self
+                .job_authority
+                .may_execute_job(JobKind::TranscodePrepare)
+                .await;
+        let output = match lanes.output {
+            crate::vodserve::OutputPreparation::Off => crate::vodserve::OutputPreparation::Off,
+            mode => {
+                let copy = self
+                    .job_authority
+                    .may_execute_job(JobKind::CopyOutputPrepare)
+                    .await;
+                let encoded = mode == crate::vodserve::OutputPreparation::CopyAndEncoded
+                    && self
+                        .job_authority
+                        .may_execute_job(JobKind::EncodedOutputPrepare)
+                        .await;
+                match (copy, encoded) {
+                    (true, true) => crate::vodserve::OutputPreparation::CopyAndEncoded,
+                    (true, false) => crate::vodserve::OutputPreparation::Copy,
+                    // An encoded-only authority is not a mode the switch has;
+                    // claim nothing rather than invent one.
+                    _ => crate::vodserve::OutputPreparation::Off,
+                }
+            }
+        };
+        crate::background_jobs::PreparationLanes {
+            speculative,
+            output,
+        }
+    }
+
+    /// Cancel queued output-preparation rows the switch no longer admits.
+    ///
+    /// By cancelling, never by claiming: a claim needs target-node
+    /// eligibility, scratch, and an admission permit, and a row the operator
+    /// disabled may never satisfy them. `cancel_job` is one guarded update that
+    /// takes a `queued` row straight to `cancelled`, so this runs on every
+    /// node whatever the row's target, with nothing reserved. A row claimed
+    /// concurrently goes to `cancelling` instead; its executor's heartbeat
+    /// settles it with the cancel disposition, and if that executor is gone,
+    /// store upkeep settles it at lease expiry. Bounded: 32 rows per kind per
+    /// tick.
+    pub(crate) async fn drain_disabled_output_preparation(
+        &self,
+        mode: crate::vodserve::OutputPreparation,
+    ) -> usize {
+        self.drain_disabled_output_preparation_with(mode, |_| std::future::ready(()))
+            .await
+    }
+
+    /// [`Self::drain_disabled_output_preparation`] with a hook that runs
+    /// between listing a queued row and cancelling it, so a test can claim
+    /// the row in exactly that window. Production passes a no-op.
+    pub(crate) async fn drain_disabled_output_preparation_with<F, Fut>(
+        &self,
+        mode: crate::vodserve::OutputPreparation,
+        before_cancel: F,
+    ) -> usize
+    where
+        F: Fn(String) -> Fut,
+        Fut: std::future::Future<Output = ()>,
+    {
+        use plurx_core::store::background_jobs::{CancelJob, JobKind, JobQuery, JobState};
+        const DRAIN_PER_KIND: usize = 32;
+        let mut drained = 0;
+        for kind in [JobKind::CopyOutputPrepare, JobKind::EncodedOutputPrepare] {
+            if mode.job_kinds().contains(&kind) {
+                continue;
+            }
+            let page = match self
+                .store
+                .list_jobs(JobQuery {
+                    node_id: None,
+                    state: Some(JobState::Queued),
+                    kind: Some(kind),
+                    after_id: None,
+                    limit: DRAIN_PER_KIND,
+                })
+                .await
+            {
+                Ok(page) => page,
+                Err(error) => {
+                    tracing::debug!(%error, ?kind, "could not list disabled output preparation");
+                    continue;
+                }
+            };
+            for job in page.jobs {
+                before_cancel(job.id.clone()).await;
+                match self
+                    .store
+                    .cancel_job(CancelJob {
+                        job_id: job.id.clone(),
+                        now_ms: clock_ms(),
+                    })
+                    .await
+                {
+                    Ok(Some(cancelled)) => {
+                        drained += 1;
+                        crate::telemetry::record_output_preparation_drained(kind);
+                        // `cancelled` when it was still queued; `cancelling`
+                        // when a node claimed it after the list, in which case
+                        // its executor (or store upkeep at lease expiry)
+                        // settles it.
+                        tracing::info!(
+                            job = %job.id,
+                            ?kind,
+                            state = ?cancelled.state,
+                            reason = "output_preparation_disabled",
+                            "cancelled queued output preparation the Developer switch no longer admits"
+                        );
+                    }
+                    // Another node cancelled it first, or it settled.
+                    Ok(None) => {}
+                    Err(error) => {
+                        tracing::debug!(job = %job.id, %error, "output preparation drain failed")
+                    }
+                }
+            }
+        }
+        drained
+    }
+
+    async fn work_pretranscode_queue(
+        self: Arc<Self>,
+        transcode: Arc<TranscodeManager>,
+        lanes: crate::background_jobs::PreparationLanes,
+    ) {
         let Some((root, node)) = transcode.cache_location() else {
             return;
         };
@@ -10203,12 +10405,17 @@ impl JobManager {
             return;
         }
         let _running = ProducingGuard(Arc::clone(&self));
+        let mut lanes = lanes;
         const LOCAL_SWEEP_INTERVAL_MS: i64 = 15 * 60 * 1_000;
         let sweep_now = clock_ms();
         let previous = self
             .last_pretranscode_cache_sweep_ms
             .load(Ordering::Acquire);
-        if sweep_now.saturating_sub(previous) >= LOCAL_SWEEP_INTERVAL_MS
+        // The pre-transcode cache's own upkeep belongs to the speculative
+        // lane: a node running only output preparation has no business
+        // sweeping that cache.
+        if lanes.speculative
+            && sweep_now.saturating_sub(previous) >= LOCAL_SWEEP_INTERVAL_MS
             && self
                 .last_pretranscode_cache_sweep_ms
                 .compare_exchange(previous, sweep_now, Ordering::AcqRel, Ordering::Acquire)
@@ -10233,14 +10440,21 @@ impl JobManager {
                 "pretranscode cachekeep sweep finished"
             );
         }
-        let cache_ceiling = match crate::cachekeep::budget_bytes_fallible(&self.store).await {
-            Ok(Some(bytes)) => bytes,
-            Ok(None) => return,
+        // One read: the speculative lane's ceiling and the output lanes'
+        // retained budget are the same key under the same unset rule.
+        let stored_budget = match self.store.get_setting(keys::CACHE_MAX_GB).await {
+            Ok(value) => value,
             Err(error) => {
-                tracing::warn!(%error, "speculative queue cannot read its cache budget");
+                tracing::warn!(%error, "preparation queue cannot read its cache budget");
                 return;
             }
         };
+        let budget = crate::cachekeep::cache_budget(stored_budget.as_deref());
+        let cache_ceiling = budget.map_or(0, |bytes| i64::try_from(bytes).unwrap_or(i64::MAX));
+        let output_budget = budget.unwrap_or(0);
+        if budget.is_none() {
+            return;
+        }
 
         let deadline = std::time::Instant::now() + PRODUCE_WINDOW;
         let mut produced = 0_u64;
@@ -10263,30 +10477,41 @@ impl JobManager {
             // cache reconciliation stays on the cleanup schedule: doing its
             // database inventory and filesystem walk here would make an empty
             // queue tax every media-serving node once per scheduler tick.
-            let used_bytes = match self.store.cache_bytes(node).await {
-                Ok(bytes) => bytes.max(0),
-                Err(error) => {
-                    tracing::warn!(%error, "could not read durable cache usage before queue claim");
-                    *reasons.entry("cache_usage_unavailable").or_default() += 1;
-                    break;
-                }
+            let remaining_budget = if lanes.speculative {
+                let used_bytes = match self.store.cache_bytes(node).await {
+                    Ok(bytes) => bytes.max(0),
+                    Err(error) => {
+                        tracing::warn!(%error, "could not read durable cache usage before queue claim");
+                        *reasons.entry("cache_usage_unavailable").or_default() += 1;
+                        break;
+                    }
+                };
+                cache_ceiling.saturating_sub(used_bytes)
+            } else {
+                0
             };
-            let remaining_budget = cache_ceiling.saturating_sub(used_bytes);
-            if remaining_budget <= 0 {
+            if lanes.speculative && remaining_budget <= 0 {
                 tracing::info!(
-                    used_bytes,
+                    remaining_budget,
                     cache_ceiling,
                     "speculative worker stopped at cache budget"
                 );
                 *reasons.entry("cache_budget_full").or_default() += 1;
-                break;
+                // The output lanes publish into the retained registry, which
+                // this budget does not bound; they continue on their own.
+                lanes.speculative = false;
+                if lanes.is_empty() {
+                    break;
+                }
             }
-            let mut capabilities = transcode.pretranscode_capabilities();
+            let output_remaining =
+                i64::try_from(transcode.retained_output_remaining(output_budget))
+                    .unwrap_or(i64::MAX);
+            let capabilities = transcode.pretranscode_capabilities();
             // Requirements carry the estimated complete artifact plus 64 MiB
-            // generation headroom. Advertising only the lesser of physical
-            // scratch and durable budget remainder prevents a claim whose
-            // expected publication is already known not to fit.
-            capabilities.scratch_bytes = capabilities.scratch_bytes.min(remaining_budget);
+            // generation headroom. Each lane advertises only the lesser of
+            // physical scratch and its own durable remainder, so a claim whose
+            // expected publication is already known not to fit never starts.
             if capabilities.scratch_bytes == 0 {
                 tracing::warn!(
                     decoders = ?capabilities.decoders,
@@ -10306,12 +10531,16 @@ impl JobManager {
                     .cloned()
                     .collect::<Vec<_>>()
             };
+            let allowed = lanes.kinds();
             let claim = match crate::background_jobs::claim_pretranscode(
                 Arc::clone(&self.store),
                 Arc::clone(&self.job_authority),
                 &transcode,
                 node,
+                &allowed,
                 &capabilities,
+                remaining_budget,
+                output_remaining,
                 &excluded_job_ids,
             )
             .await
@@ -10331,7 +10560,7 @@ impl JobManager {
                     let result = {
                         let operation = async {
                             let plurx_core::store::background_jobs::JobPayload::EncodedOutputPrepare {
-                                file_id, source_size, source_mtime, ..
+                                file_id, source_size, source_mtime, reason, ..
                             } = job.supported_payload().map_err(|_| {
                                 crate::background_jobs::PreparationError::Fail(
                                     "encoded_payload_unsupported",
@@ -10354,12 +10583,14 @@ impl JobManager {
                             else {
                                 return Ok(false);
                             };
-                            let roots = match self
+                            let item = self
                                 .store
                                 .get_item(file.item_id)
                                 .await
-                                .map_err(|error| error.to_string())?
-                            {
+                                .map_err(|error| error.to_string())?;
+                            self.publish_preparation(&file, item.as_ref(), &reason, index)
+                                .await;
+                            let roots = match item {
                                 Some(item) => self
                                     .store
                                     .get_library(item.library_id)
@@ -10382,10 +10613,17 @@ impl JobManager {
                                 )
                                 .await
                         };
+                        // Activity's Stop reaches a running preparation here:
+                        // the watcher polls this every PRODUCER_POLL and
+                        // abandons the operation, and the settle below
+                        // cancels the job instead of yielding it.
                         crate::background_jobs::watch_copy_preparation(
                             &fence,
                             deadline.into(),
-                            || transcode.encoded_preparation_still_idle(observation),
+                            || {
+                                !self.stop_producing.load(Ordering::Relaxed)
+                                    && transcode.encoded_preparation_still_idle(observation)
+                            },
                             operation,
                         )
                         .await
@@ -10399,6 +10637,7 @@ impl JobManager {
                             fence.loss_token().is_cancelled()
                                 || std::time::Instant::now() >= deadline
                                 || !transcode.encoded_preparation_still_idle(observation),
+                            self.stop_producing.load(Ordering::Relaxed),
                         )
                         .await;
                     match reason {
@@ -10428,6 +10667,7 @@ impl JobManager {
                                 file_id,
                                 source_size,
                                 source_mtime,
+                                reason,
                                 ..
                             } = payload
                             else {
@@ -10447,12 +10687,14 @@ impl JobManager {
                             else {
                                 return Ok(false);
                             };
-                            let roots = match self
+                            let item = self
                                 .store
                                 .get_item(file.item_id)
                                 .await
-                                .map_err(|error| error.to_string())?
-                            {
+                                .map_err(|error| error.to_string())?;
+                            self.publish_preparation(&file, item.as_ref(), &reason, index)
+                                .await;
+                            let roots = match item {
                                 Some(item) => self
                                     .store
                                     .get_library(item.library_id)
@@ -10480,7 +10722,11 @@ impl JobManager {
                         crate::background_jobs::watch_copy_preparation(
                             &fence,
                             deadline.into(),
-                            || transcode.copy_preparation_still_idle(&admission, observation),
+                            || {
+                                !self.stop_producing.load(Ordering::Relaxed)
+                                    && transcode
+                                        .copy_preparation_still_idle(&admission, observation)
+                            },
                             operation,
                         )
                         .await
@@ -10494,6 +10740,7 @@ impl JobManager {
                             fence.loss_token().is_cancelled()
                                 || std::time::Instant::now() >= deadline
                                 || !transcode.copy_preparation_still_idle(&admission, observation),
+                            self.stop_producing.load(Ordering::Relaxed),
                         )
                         .await;
                     match reason {
@@ -10751,12 +10998,26 @@ impl JobManager {
         kind: &'static str,
         result: Result<bool, crate::background_jobs::PreparationError>,
         preempted: bool,
+        operator_stopped: bool,
     ) -> Option<&'static str> {
         let error = match result {
             Ok(true) => return None,
             Ok(false) => crate::background_jobs::PreparationError::Yield("output_not_published"),
             Err(error) => error,
         };
+        if operator_stopped {
+            // Activity's Stop on a preparation cancels it (ruling 3 of the
+            // main-merge defects build): this node only, and the title's next
+            // play may queue it again.
+            tracing::info!(job = %job.id, kind, %error, "output preparation stopped by an operator");
+            if let Err(store_error) = fence
+                .settle(plurx_core::store::background_jobs::JobSettlement::Cancel)
+                .await
+            {
+                tracing::warn!(job = %job.id, kind, %store_error, "output preparation cancel failed");
+            }
+            return Some("operator_stopped");
+        }
         let retry_code = if kind == "encoded_output" {
             "encoded_output_failed"
         } else {
@@ -10787,6 +11048,27 @@ impl JobManager {
             tracing::warn!(job = %job.id, kind, %store_error, "output preparation settlement failed");
         }
         Some(reason)
+    }
+
+    /// Publish the output preparation this pass is running, so Activity's
+    /// producer banner and its Stop cover it like a speculative title.
+    async fn publish_preparation(
+        &self,
+        file: &plurx_core::domain::MediaFile,
+        item: Option<&plurx_core::domain::Item>,
+        reason: &str,
+        index: usize,
+    ) {
+        self.set_producing(Some(ProducingNow {
+            title: item.map_or_else(
+                || file.path.display().to_string(),
+                |item| item.title.clone(),
+            ),
+            reason: reason.to_owned(),
+            index: index + 1,
+            total: PRODUCE_MAX_PER_PASS,
+        }))
+        .await;
     }
 
     fn emit_producer_pass(&self, produced: u64, skipped: u64, reasons: serde_json::Value) {
@@ -13302,11 +13584,162 @@ mod tests {
             .with_cache(cache_root, "test-ffmpeg".to_owned(), "test-node".to_owned()),
         );
 
-        Arc::clone(&jobs).work_pretranscode_queue(transcode).await;
+        Arc::clone(&jobs)
+            .work_pretranscode_queue(transcode, crate::background_jobs::PreparationLanes::ALL)
+            .await;
         assert!(
             !orphan.exists(),
             "a producer-enabled node did not maintain its local cache on an empty queue"
         );
+    }
+
+    // ---- D2 (main-merge defects 2026-10-04): preparation lanes ----------
+
+    async fn d2_lanes(settings: &[(&str, &str)]) -> crate::background_jobs::PreparationLanes {
+        let store = Arc::new(SqliteStore::open_in_memory().expect("store"));
+        for (key, value) in settings {
+            store.put_setting(key, value).await.expect("setting");
+        }
+        let artwork = crate::test_tempdir().expect("artwork");
+        let jobs = manager(store, artwork.path());
+        let lanes = jobs.preparation_lanes().await;
+        jobs.executable_lanes(lanes).await
+    }
+
+    #[tokio::test]
+    async fn output_preparation_runs_with_schedule_off_when_enabled() {
+        use plurx_core::store::background_jobs::JobKind;
+        let lanes = d2_lanes(&[(keys::VOD_OUTPUT_PREPARATION, "copy")]).await;
+        assert!(!lanes.speculative, "discovery stays at its default, never");
+        assert_eq!(
+            lanes.kinds(),
+            vec![JobKind::CopyOutputPrepare],
+            "viewer-demand preparation has an executor with the schedule off"
+        );
+        let both = d2_lanes(&[(keys::VOD_OUTPUT_PREPARATION, "copy_and_encoded")]).await;
+        assert_eq!(
+            both.kinds(),
+            vec![JobKind::CopyOutputPrepare, JobKind::EncodedOutputPrepare]
+        );
+    }
+
+    #[tokio::test]
+    async fn viewer_demand_kinds_never_claim_transcode_prepare_with_schedule_off() {
+        use plurx_core::store::background_jobs::JobKind;
+        let lanes = d2_lanes(&[(keys::VOD_OUTPUT_PREPARATION, "copy_and_encoded")]).await;
+        assert!(
+            !lanes.kinds().contains(&JobKind::TranscodePrepare),
+            "opening the output lanes must not open the speculative one"
+        );
+        let claim = include_str!("background_jobs.rs");
+        let transcode_branch = claim
+            .split("let JobPayload::TranscodePrepare {")
+            .nth(1)
+            .expect("the speculative branch");
+        assert!(
+            transcode_branch.contains("if !kinds.contains(&JobKind::TranscodePrepare)"),
+            "the claim filter refuses speculative rows when their lane is closed"
+        );
+    }
+
+    #[tokio::test]
+    async fn output_preparation_off_neither_enqueues_nor_claims() {
+        use plurx_core::store::background_jobs::JobKind;
+        let lanes = d2_lanes(&[(keys::JOB_CACHE_PRODUCE_MINS, "60")]).await;
+        assert!(lanes.speculative, "the schedule is on");
+        assert_eq!(
+            lanes.kinds(),
+            vec![JobKind::TranscodePrepare],
+            "with the switch absent, no output kind is claimed even with the schedule on"
+        );
+        let off = crate::vodserve::OutputPreparation::parse(None);
+        assert_eq!(off, crate::vodserve::OutputPreparation::Off);
+        assert!(
+            !off.admits(false) && !off.admits(true),
+            "and a VOD start enqueues nothing"
+        );
+        let copy = crate::vodserve::OutputPreparation::parse(Some("copy"));
+        assert!(copy.admits(false) && !copy.admits(true));
+        assert_eq!(
+            crate::vodserve::OutputPreparation::parse(Some("bogus")),
+            off
+        );
+    }
+
+    #[tokio::test]
+    async fn copy_and_encoded_preparation_publish_producing_now() {
+        let store = Arc::new(SqliteStore::open_in_memory().expect("store"));
+        let artwork = crate::test_tempdir().expect("artwork");
+        let jobs = manager(store, artwork.path());
+        let source = artwork.path().join("Heat.mkv");
+        std::fs::write(&source, b"heat").expect("source");
+        let file = crate::subtitle_ride_along::synthetic_media_file(&source, 1_000).expect("file");
+        jobs.publish_preparation(&file, None, "recent_demand", 0)
+            .await;
+        let now = jobs.producing_now().await.expect("published");
+        let title = source.display().to_string();
+        assert_eq!(
+            (now.title.as_str(), now.reason.as_str(), now.index),
+            (title.as_str(), "recent_demand", 1)
+        );
+        // Both branches publish, so the banner and its Stop cover them.
+        let source = include_str!("state.rs");
+        // Formatting may split the call from its await; both production paths
+        // must still publish through this owner.
+        let call = concat!(
+            "self.publish_preparation(",
+            "&file, item.as_ref(), &reason, index)"
+        );
+        assert_eq!(source.matches(call).count(), 2);
+    }
+
+    #[tokio::test]
+    async fn cachekeep_sweep_runs_only_with_the_schedule_on() {
+        let store = Arc::new(SqliteStore::open_in_memory().expect("empty queue store"));
+        store
+            .put_setting(keys::CACHE_MAX_GB, "50")
+            .await
+            .expect("enable cache");
+        let artwork = crate::test_tempdir().expect("artwork");
+        let cache = crate::test_tempdir().expect("cache");
+        let cache_root = cache.path().join("transcode");
+        let recipe = "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee";
+        let orphan = cache_root
+            .join("ee")
+            .join(format!("{recipe}-j00000000-0000-4000-8000-000000000304-f1"));
+        tokio::fs::create_dir_all(&orphan).await.expect("orphan");
+        tokio::fs::write(orphan.join("index.m3u8"), b"unbound")
+            .await
+            .expect("orphan bytes");
+        let shared: Arc<dyn Store> = store;
+        let jobs = manager(Arc::clone(&shared), artwork.path());
+        let transcode = Arc::new(
+            TranscodeManager::new(
+                shared,
+                cache.path().join("work"),
+                EncoderCaps::default(),
+                Pipeline::Cpu,
+            )
+            .with_decoders(vec!["h264".to_owned()])
+            .with_cache(cache_root, "test-ffmpeg".to_owned(), "test-node".to_owned()),
+        );
+        Arc::clone(&jobs)
+            .work_pretranscode_queue(
+                Arc::clone(&transcode),
+                crate::background_jobs::PreparationLanes {
+                    speculative: false,
+                    output: crate::vodserve::OutputPreparation::CopyAndEncoded,
+                },
+            )
+            .await;
+        assert!(
+            orphan.exists(),
+            "output preparation alone does not sweep the pre-transcode cache"
+        );
+        Arc::clone(&jobs)
+            .work_pretranscode_queue(transcode, crate::background_jobs::PreparationLanes::ALL)
+            .await;
+        assert!(!orphan.exists(), "the speculative lane maintains its cache");
     }
 
     fn targeted_show_tmdb(

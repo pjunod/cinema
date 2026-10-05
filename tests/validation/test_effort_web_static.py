@@ -90,7 +90,8 @@ assert.throws(()=>shape.domShape({...shell,html:shell.html.replace('id="pbplay"'
             self.assertIn(command, target)
         self.assertNotIn(".test.js", target)
         self.assertNotIn("browser-check", target)
-        full = makefile.split("web-check: ##", 1)[1].split("## ---- packaging", 1)[0]
+        # `web-check` depends on `web-unit-check`, which holds the Node lines.
+        full = makefile.split("\nweb-check:", 1)[1].split("## ---- packaging", 1)[0]
         for retained in ("asset-load.test.js", "player-typedef.test.js", "web-hls-startup-browser-check",
                          "subtitle-readiness-browser-check", "player-input-contract.test.js", "player-dom.test.js"):
             self.assertIn(retained, full)

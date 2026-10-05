@@ -1,6 +1,8 @@
 # Clock measurement — the separately owned observation release
 
-**Status:** open — measurement runtime implemented; release review/gate and fleet evidence pending
+**Status:** open — measurement runtime on `main` since 2026-10-04 (#793);
+the identified one-hour idle and sixty-second loaded receipt and fleet
+evidence pending
 · **Executes:** K-06 measurement handoff · **Written:** 2026-09-30 ·
 **Source baseline:** effort `f319fa779`.
 
@@ -108,7 +110,21 @@ query attempts reached by inbound clock-route authorization, including failed
 queries, rather than all inbound requests or an inferred process-wide delta.
 The two consistent roster reads per round are separate from that route cost.
 Unknown rounds and local discontinuities have process-lifetime counters.
-Developer's clock card has no switch or Save and reads the same snapshot.
+Developer's clock card reads the same snapshot; as written for this release
+it had no switch or Save, which `main` no longer matches (note below).
+
+**2026-10-04 note — superseded on `main`.** The two paragraphs above describe
+the measurement release as written. Since `4cfd1bdd1` (#793) `main` also
+carries the enforcement consumers (takeover, the expired-session scan,
+membership changes, fenced removal and `/readyz`; see the
+[enforcement plan](CLOCK-SKEW-ENFORCEMENT-IMPLEMENTATION.md)'s 2026-10-04
+note), and the Developer clock card is now *Cluster clock guard*, with the toggle
+*Enforce the cluster clock guard*,
+a switch (`cluster.clock_guard_enforced`, default off) with advisory
+readiness rows. With the switch off, decisions are admitted and would-be
+refusals are counted in `plurx_cluster_clock_advisory_refusals_total`. The
+switch contradicts §1's 2026-09-30 clarification and design §3.8, and awaits
+Paul's ruling (see the 2026-10-04 relevance pass §2.2).
 
 Focused commands (pinned Rust 1.97.1; results recorded below when complete):
 

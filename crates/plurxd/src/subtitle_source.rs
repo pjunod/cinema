@@ -2147,7 +2147,7 @@ mod tests {
             source_size: 10,
             source_mtime: 20,
             source_attestation: "a".repeat(64),
-            node_id: "nuc4".into(),
+            node_id: "lab4".into(),
             ordinal,
             kind: "text".into(),
             format: "webvtt".into(),
@@ -2396,7 +2396,7 @@ mod tests {
             .upsert_subtitle_source_publication(&row)
             .await
             .expect("row");
-        let outcome = sweep(&catalog, "nuc4", &root, None, 256, u64::MAX)
+        let outcome = sweep(&catalog, "lab4", &root, None, 256, u64::MAX)
             .await
             .expect("sweep");
         assert_eq!(outcome.removed, 1);

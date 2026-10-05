@@ -14,7 +14,7 @@ This file is the specification in the meantime, written by reading the routers
 and the handlers on 2026-09-07. Where a plan document and the code disagreed,
 the code won and the disagreement is recorded in §23.
 
-One binary serves everything on one port (`:32400` by default). plurx has 293
+One binary serves everything on one port (`:32400` by default). plurx has 303
 routes across the five surfaces below. Every path here is absolute; the native
 API is the only one under a version prefix, and §7-§18 state that prefix once
 per section rather than repeating it in every row.
@@ -349,7 +349,10 @@ Fields: `name`, `version` (bare semver, which is what clients compare), `build`
 (git description), `built_at`, `instance_id`, `node_id`,
 `cluster_advertisement`, `uptime_seconds`, `setup_required`, `android_app`,
 `playback_auto_abr`, `display_mode_match` (the replicated Android-TV cadence
-switch; missing storage is `false`).
+switch; missing storage is `false`). Also `decoder_compaction_contract`,
+`display_aware_auto_protocol` (always `"route-v1"` on this build) and
+`playback_display_aware_auto` (the Developer switch; missing storage is
+`false`) — see §7.4.
 
 ### 4.2 `POST /api/v1/setup`
 
@@ -434,6 +437,7 @@ of never storing it.
 | DELETE | `/api/v1/activity/sessions/{id}` | admin | Stops one transcode or VOD session |
 | DELETE | `/api/v1/activity/offline/{id}` | admin | Cancels and deletes one visible offline package |
 | DELETE | `/api/v1/activity/producer` | admin | Stops the pre-transcode producer after the current title |
+| DELETE | `/api/v1/activity/retained/{nonce}` | admin | Releases one retained rolling output this node holds |
 | DELETE | `/api/v1/activity/processes/{pid}` | admin | Kills one child process the Activity page lists |
 
 ### 5.1 Settings
@@ -469,6 +473,15 @@ progressive playback. It can restore known color corruption. Saving it never
 depends on readiness; `hevc_header_trace_available` is a read-only nullable
 boolean reporting this node’s FFmpeg capability for the Developer advice.
 
+`playback_sdr_master_codecs` is an admin-writable boolean (default `false`,
+store key `playback.sdr_master_codecs`). On, an SDR HLS master variant
+carries `CODECS` when the session's frozen video and audio facts are both
+complete; off is the pre-S-10 master, which carries no `CODECS` on SDR
+variants. HDR and Dolby Vision variants are the same either way. The value is
+fixed when a session is created; a session rebuilt after an owner takeover or
+VOD resurrection reads the current value. Saving it never depends on the Developer
+readiness row (`sdr_master_codecs` → `sdr_codecs_device_requalification`).
+
 Live-TV settings are a separate transaction with their own generation
 compare-and-swap, and mixing them into a request with any non-Live-TV field is
 refused up front: a losing CAS must report 409 without an unrelated setting
@@ -490,6 +503,20 @@ Refusals worth knowing, each a 400 unless noted:
 - `sign-in expiry must be between 1 and 3650 days` for `auth_token_idle_days`
   out of range. Switching `auth_token_expiry` from off to on also writes
   `auth_token_expiry_since` = now in the same commit (§2.5).
+
+Two Developer switches govern work a VOD start can leave behind (added
+2026-10-04, both off by default):
+
+- `vod_output_preparation` — `"off"`, `"copy"` or `"copy_and_encoded"`. What
+  complete-output preparation a VOD start may queue. Anything else is a 400.
+  It runs whether or not `cache_produce_mins` is on. Turning a kind off
+  cancels that kind's queued rows within a minute, on every node.
+- `vod_rolling_retention` — boolean. Whether a rolling session's segments are
+  hard-linked into a retained artifact as they are written.
+
+`cache_max_gb` is reported as 50 when no row is stored, and that is the budget
+both features use. VOD rendition admission keeps its own rule: no stored row
+means admission is closed. Storing `0` turns all three off.
 
 Job intervals (`probe_retry_mins`, `artwork_retry_mins`,
 `transcode_cleanup_mins`, `cache_produce_mins`) take 0 to mean off and
@@ -625,6 +652,19 @@ handles a crashed encoder or a failed probe.
 title**, not mid-encode, because the producer resumes from published segment
 boundaries: a clean stop keeps the part already made and a kill throws it
 away.
+A copy or encoded output preparation is different: Stop **cancels** the job
+running on the node that answers the request. It does not reach a preparation
+running on a peer, and the next play of that title may queue it again.
+
+The admin view of `/api/v1/activity/detail` carries `retained_output`: one row
+per rolling output this node is collecting, holding or releasing (`nonce`,
+`file_id`, `title`, `bytes`, `state` — `collecting`, `retained`,
+`releasing` — and `attached`), plus `retained_output_node`. The list
+is this node's only; it is not part of the peer Activity snapshot.
+`DELETE /api/v1/activity/retained/{nonce}` abandons a collecting artifact or
+releases a retained one: `200 {"ok": true}` on success (the collector deletes
+it on its next tick), `400` for a nonce that is not a UUID, `404` for one this
+node does not hold, `409` while a session is reading the published artifact.
 
 ---
 
@@ -1189,6 +1229,93 @@ both shapes route through one translation and must agree.
 Session creation can hydrate an exact shared artifact; otherwise it retains
 the rolling first-play fallback while enabled shared preparation queues the
 missing source/recipe work. It does not wait for a full-file index pass.
+
+### 7.4 Display-aware Auto (`route-v1`)
+
+Behind two Developer switches that both default off:
+`playback.display_aware_auto` (*Fit Auto to display*) and `playback.auto_abr`
+(*Adaptive Auto quality*). The protocol came with #669; the typed recovery
+consumers and link acknowledgements came with the architecture effort (#793,
+2026-10-04). This section lists what the server accepts and returns and the
+file that owns each field. Native recovery on this protocol has no device
+qualification; the design is
+[DISPLAY-AWARE-AUTO-QUALITY-PLAN.md](streaming/DISPLAY-AWARE-AUTO-QUALITY-PLAN.md).
+
+- **Advertisement.** `GET /api/v1/server` (§4.1) carries
+  `display_aware_auto_protocol: "route-v1"` and the two switches as
+  `playback_display_aware_auto` and `playback_auto_abr`
+  (`crates/plurxd/src/http/system.rs`; a stored value of exactly `1` is on).
+  The native clients enter their recovery paths only when both switches are
+  on and the protocol is `route-v1`.
+- **Capabilities.** The v2 capabilities document (§7.1) may carry the
+  display's `presentation_target` (`DisplayCaps`) and `audio_sinks`
+  (`DeviceCaps`; at most 16 entries), in
+  `crates/plurx-core/src/playback/caps.rs`. A presentation target describes
+  the display; it grants no codec capability.
+- **Decision and session responses.** `DecisionResponse`
+  (`crates/plurxd/src/http/stream.rs`) and the session-create `StartResponse`
+  (`crates/plurxd/src/http/hls/session_guard.rs`) may carry
+  `display_aware_auto_protocol`, `quality_candidate_id` and
+  `quality_candidates` (`QualityCandidate`,
+  `crates/plurx-core/src/playback/candidate.rs`); all three are omitted when
+  absent. Create sets the protocol only when a quality owner was negotiated
+  (`crates/plurxd/src/http/hls/create.rs`).
+- **Session create (§9).** An Auto ask for one candidate is
+  `intent.selection.quality = {"mode":"auto","candidate_id":…}`. While
+  `playback.display_aware_auto` is off, a create that names a `candidate_id`
+  is refused `400 candidate_route_disabled`. A typed recovery names its
+  predecessor with `previous_session_id` and `reopen_reason`, one of `stall`,
+  `link`, `encode`, `decode`, `hold` or `authority` (`ReopenReason`,
+  `crates/plurxd/src/transcode/session_request.rs`; an unknown value is
+  refused). `stall` is the legacy untyped reopen. For the other five the
+  server tries to authenticate the cause against the incumbent candidate
+  (`authenticate_cause`, `crates/plurxd/src/http/hls/candidate_recovery.rs`):
+  `link` needs a fresh negative link proof for that incumbent, `encode` live
+  producer pressure, `decode` accepted decoder evidence, and `hold` and
+  `authority` must not change the candidate. A cause that cannot be
+  authenticated is logged and the create proceeds as an ordinary reopen — a
+  typed cause never refuses a reopen. Only `decode` changes later candidate
+  admission (durable decoder-rejection memory); the other recorded causes are
+  logged at debug level and change nothing.
+- **Link receipts.** A complete `200` media-segment response
+  (`seg*.m4s` / `seg*.ts`) for a bound session may carry
+  `X-Plurx-Link-Receipt` (a UUID nonce, valid 30 s) and
+  `X-Plurx-Link-Media-Duration-Ms`
+  (`crates/plurxd/src/http/hls/segment.rs`). The client may echo one nonce
+  back as the request header `X-Plurx-Link-Receipt` on a create; a missing,
+  duplicated or malformed header is treated as no receipt
+  (`requested_receipt`, `crates/plurxd/src/http/hls/link_receipts.rs`).
+- **Samples on `POST /api/v1/client-log` (§5.5).** Two optional objects,
+  each refusing unknown fields:
+  - `link_sample` (`ClientLinkSample`, `link_receipts.rs`): `receipt`,
+    `object_name`, `etag`, `body_bytes`, `body_duration_ms`, `age_ms`,
+    `network_load`, `from_cache`, `producer_paced`, `cause` (`link`,
+    `encode`, `decode`, `hold` or `authority`), `negative`,
+    `media_duration_ms`, `presenting`, `stalled`, `runway_ms`. A positive
+    sample claims the owner's live receipt whatever the setting, and is also
+    folded into network priors while `playback.network_priors` is on. A
+    negative sample is acknowledged with the response header
+    `X-Plurx-Link-Accepted: <nonce>` only when it names a session and the
+    server accepts it for the receipt the owner issued. With priors on the
+    negative is folded durably and acknowledged after an exact readback of
+    that fold; with priors off nothing durable is written and the owner's
+    live receipt backs the acknowledgement. A session placed on a peer and an
+    IPv6 client still get no receipts, so they are never acknowledged.
+    Anything else gets the ordinary `204` with no header.
+  - `candidate_recovery` (`ClientRecoverySample`,
+    `crates/plurxd/src/http/hls/candidate_recovery.rs`): `cause`, `event_id`
+    (a UUID), `candidate_id`, `recipe_digest`, `age_ms` (at most 15 s),
+    `decoder_failed`, `rendered_elapsed_ms`, `position_progress_ms`,
+    `dropped_frames`, `runway_ms`. Only `cause: "decode"` is accepted, and
+    only with `decoder_failed` or sustained dropped frames (at least 6 over
+    4 s of rendering with 2 s of progress and 10 s of runway) on the
+    incumbent candidate. An accepted sample is acknowledged with
+    `X-Plurx-Recovery-Accepted: <event_id>`.
+- **Control exchange (§10).** `selection.quality` may be
+  `{"mode":"auto","candidate_id":…}` (`QualitySelection`,
+  `crates/plurxd/src/playback_control.rs`), and `capabilities` may carry
+  `presentation_target` and `decoder_caps: {revision, video[]}`
+  (`DynamicCapabilities`); a missing value keeps the previous exchange's.
 
 ---
 
@@ -2531,6 +2658,20 @@ The refusal is enforced again at start, not only in the lineup: a start
 re-fetches the lineup forced, so it never rides the stale projection, and a
 protected channel is 415 `drm_unsupported`.
 
+**Legacy settings fields.** `PUT /api/v1/settings` still accepts
+`live_tv_owner_node_id` and `live_tv_fenced_owner` from the single-owner model
+#537 replaced, and ignores their values. Shipped Apple and Android clients send
+`live_tv_owner_node_id` with every tuner-configuration save. Neither sends
+`live_tv_fenced_owner`: both still define the change (`FencedOwner` in
+`LiveTvApi.kt`, `.fencedOwner` in `LiveTv.swift`) but no production path
+constructs it, so it is accepted only so an older or third-party client that
+does send it is not refused. They still count as a Live TV
+save, so they need `live_tv_config_generation` and bump it even when nothing
+else changes. `GET /api/v1/settings` keeps `live_tv_owner_node_id` (always the
+answering node) and `live_tv_transition_from_owner_node_id` /
+`live_tv_transition_drain_before` (always `""` / `0`) for clients that decode
+them.
+
 ### 17.4 Session status separates source, delivery and reception
 
 `GET /api/v1/live-tv/sessions/{capability}/status` returns
@@ -3197,7 +3338,7 @@ streaming, and refuses a response signed for the wrong node or nonce.
 | Method | Path | Body limit | What it does |
 |---|---|---|---|
 | GET | `/_internal/v1/activity-snapshot` | — | Node-local delivery snapshot |
-| GET | `/_internal/v1/clock` | — (empty exact request) | Signed `{node_id, received_unix_ms, sent_unix_ms}` for four-timestamp clock observation. Any exact committed member, including a learner; unchanged 30 s auth window. The prober captures the exact signed request timestamp and bounded-body receipt before verifying the response; 1 KiB response budget and 2 s peer deadline. Measurement only, with no takeover, membership or readiness consequence. |
+| GET | `/_internal/v1/clock` | — (empty exact request) | Signed `{node_id, received_unix_ms, sent_unix_ms}` for four-timestamp clock observation. Any exact committed member, including a learner; unchanged 30 s auth window. The prober captures the exact signed request timestamp and bounded-body receipt before verifying the response; 1 KiB response budget and 2 s peer deadline. The route itself only measures; since 2026-10-04 (#793) the observations it supplies feed the cluster clock guard, which refuses takeover, the expired-session scan, membership changes and readiness only while the Developer switch `cluster.clock_guard_enforced` is on (default off; see OPERATIONS.md). |
 | GET | `/api/v1/internal/cluster/operations-status` | — | This node's own operations status, for the aggregate |
 | POST | `/api/v1/internal/auth/cache-revocation` | 256 B | Propagates one credential-revocation phase |
 | GET | `/internal/v1/media/snapshot` | — | This node's media-pool snapshot |
@@ -3213,7 +3354,7 @@ streaming, and refuses a response signed for the wrong node or nonce.
 | POST | `/_internal/v1/live-tv/guide` | 16 KiB | The owner's cached programme guide, relayed verbatim. Deliberately not gated on the Live TV protocol capability: an owner that predates the guide answers 404 and the ingress renders "no guide yet" rather than taking Live TV down across a mixed fleet |
 | POST | `/_internal/v1/live-tv/start`, `/_internal/v2/live-tv/start`, `/_internal/v1/live-tv/activate` | 16 KiB | Starts and activates a tuner session on the owner; v2 carries the exact signed live playback envelope |
 | POST | `/_internal/v1/live-tv/resource` | 16 KiB | Fetches a playlist, segment or status for an owned capability |
-| POST | `/_internal/v1/live-tv/stop`, `/_internal/v1/live-tv/drain` | 16 KiB | Releases a capability; drains below a generation |
+| POST | `/_internal/v1/live-tv/stop` | 16 KiB | Releases a capability. (The single-owner model's generation drain beside it was removed on 2026-10-04: since #537 nothing sent it.) |
 | POST | `/_internal/v1/live-tv/retire`, `/_internal/v1/live-tv/resume`, `/_internal/v1/live-tv/start-state` | 1 KiB | Retires a viewer's public start id on the owner, hands back the session it still owns, or reports what became of it. Three paths rather than one with a mode flag: `resume` selects a session, cancels the others and fences an id it has never seen, and a status read may do none of that. New paths rather than new fields on the signed start bodies: an owner that predates them answers 404, which an ingress renders as a typed answer that proves nothing about the tuner |
 | POST | `/internal/cluster/media/sessions/start`, `/internal/cluster/media/sessions/activate` | 96 / 128 KiB | Starts and confirms a remote media session |
 | POST | `/internal/cluster/media/sessions/prepare` | 96 KiB | Validates an already-reserved successor identity, primes its durable recipe on the target owner, and returns only after the existing actor slot accepts it |
@@ -3363,10 +3504,28 @@ client-base-relative (`/Videos/...`): clients join their server address,
 which already carries any mount. HLS manifest children are root-absolute
 under the mount the client used.
 
+Catalog queries follow Jellyfin's contract. A missing `Limit` returns every
+row and `Limit` has no ceiling: pages are assembled from store reads of 500
+rows, up to 10,000 rows per response, with the true `TotalRecordCount`. Every
+Jellyfin `IncludeItemTypes` and `SortBy` name is accepted. Kinds Plurx does not
+catalogue (BoxSet, Video, ...) select nothing, and orders it cannot compute
+(Random, CommunityRating, ...) are skipped, falling back to SortName.
+`SeriesId`/`SeasonId` scope a recursive read. `IncludeItemTypes=CollectionFolder`
+alone lists the user's libraries. A name Jellyfin does not define is still a
+400. A refused facade request (400, 403, 404 other than artwork, 405) is logged
+once a second as `Jellyfin client request refused`, with its path and query,
+and with credential values redacted.
+
 | Method | Path | Authority and response |
 |---|---|---|
 | GET | `/jellyfin/` | JSON 404 |
 | GET | `/jellyfin/System/Info/Public` | Enabled switch; native server identity/name and setup status; `Version`/`ProductName` are the tested protocol baseline (Jellyfin Server 10.11.11, J0), never the Plurx build |
+| GET | `/jellyfin/System/Info` | Compatibility token; the public identity plus fixed state flags; `PackageName` is `plurx <build>`; no paths, encoder or update details |
+| GET | `/jellyfin/Users/Public` | Enabled switch, no login; always `[]` (no native policy lists users to anyone signed out) |
+| POST | `/jellyfin/Sessions/Capabilities` | Compatibility token; query report validated and accepted (204), not stored: the facade advertises no remote control |
+| POST | `/jellyfin/Sessions/Capabilities/Full` | Same, JSON object body up to 16 KiB |
+| GET | `/jellyfin/Search/Hints` | Compatibility token; required `searchTerm`; the catalog's literal title search as `SearchHints`; item types Plurx does not hold match nothing |
+| GET | `/jellyfin/Items/{item_id}/Download` | Compatibility token and live item; `403 download_not_offered` (every returned policy has `EnableContentDownloading: false`) |
 | POST | `/jellyfin/Users/AuthenticateByName` | Shared native password verification/throttle; `Username` and `Pw`; supported client metadata and device ID; exact enabled generation |
 | GET | `/jellyfin/Users/Me` | Compatibility token; authenticated user projection |
 | GET | `/jellyfin/Users/{user_id}` | Compatibility token; exact own permanent user ID |
@@ -3376,7 +3535,8 @@ under the mount the client used.
 | GET | `/jellyfin/DisplayPreferences/{id}` | Initial client presentation; no native persisted per-client preferences |
 | GET | `/jellyfin/Items/{item_id}/Intros` | Authenticated live media item; empty native pre-roll collection |
 | GET | `/jellyfin/MediaSegments/{item_id}` | Authenticated native skip markers; bounded segment-type filter, source-relative ticks |
-| GET | `/jellyfin/Videos/{item_id}/{source_id}/Subtitles/{index}/{filename}` | Authentication on every request; exact source membership and global subtitle index; native extracted VTT or bounded SRT representation; extraction and bitmap failures propagate |
+| GET | `/jellyfin/Videos/{item_id}/{source_id}/Subtitles/{index}/{start_ticks}/{filename}` | The form `DeliveryUrl` names and both pinned clients request. Compatibility token in a header or `ApiKey`; exact source membership and global subtitle index; `Stream.vtt`/`Stream.webvtt` (native extracted VTT) or `Stream.srt`/`Stream.subrip` (bounded SRT representation); `start_ticks`, `EndPositionTicks` and `CopyTimestamps` apply Jellyfin's cue window; extraction and bitmap failures propagate |
+| GET | `/jellyfin/Videos/{item_id}/{source_id}/Subtitles/{index}/{filename}` | Same, with the start as an optional `StartPositionTicks` query value |
 | GET | `/jellyfin/Items/{item_id}/LocalTrailers` | Live item; empty array because native Movies/TV has no classified trailer records |
 | GET | `/jellyfin/Items/{item_id}/SpecialFeatures` | Live item; empty array because native Movies/TV has no classified extra records |
 | GET | `/jellyfin/UserViews` | Compatibility token; same library views |
@@ -3398,7 +3558,7 @@ under the mount the client used.
 | GET | `/jellyfin/Shows/{item_id}/Episodes` | Compatibility token; descendant episodes; optional season parent |
 
 | GET, POST | `/jellyfin/Items/{item_id}/PlaybackInfo` | Compatibility token; live source membership, checked times and independently eligible direct or finite native VOD profile; native prerequisite and output validation precede advertisement |
-| GET, HEAD | `/jellyfin/Videos/{item_id}/stream` | Compatibility token with `PlaySessionId`, or the play's scoped link as `tag` (case-insensitive query names); exact play/source binding; native direct bytes, Range and HEAD; live native grant and source fingerprint |
+| GET, HEAD | `/jellyfin/Videos/{item_id}/stream` | Compatibility token with `PlaySessionId`; or the token alone with `MediaSourceId`, resolving that login's newest pending or active direct play of exactly that source (Infuse names no play); or the play's scoped link as `tag` (case-insensitive query names); exact play/source binding; native direct bytes, Range and HEAD; live native grant and source fingerprint |
 | GET, HEAD | `/jellyfin/Videos/{item_id}/{filename}` | Authenticated direct aliases or negotiated `master.m3u8` / `main.m3u8` entry; exact play/source binding |
 | GET, HEAD | `/jellyfin/Videos/{item_id}/{play_id}/hls/{*resource}` | Fresh compatibility login and exact current native incarnation; closed manifest/init/fragment/subtitle names; native reader and publication authority |
 | POST | `/jellyfin/Sessions/Logout` | Presented compatibility login only; native token exclusion, exact play release, other devices retained. |
@@ -3406,6 +3566,9 @@ under the mount the client used.
 | POST | `/jellyfin/Sessions/Playing/Progress` | Exact active play; checked position ticks, original manual revision and shared native watch effects |
 | POST | `/jellyfin/Sessions/Playing/Stopped` | Forced durable final when supplied; no-position stop does not write zero; exact resource release and retry on storage failure |
 | POST, DELETE | `/jellyfin/Users/{user_id}/PlayedItems/{item_id}` | Own user and supported item; shared cascading watched/unwatched marks with trusted login origin |
+| POST, DELETE | `/jellyfin/UserPlayedItems/{item_id}` | Same marks; `userId` optional in the query and, when present, the caller's own |
+| POST | `/jellyfin/Sessions/Playing/Ping` | `PlaySessionId` required; this login's active play only; renews exactly what a position-less Progress renews; never activates or revives |
+| DELETE | `/jellyfin/Videos/ActiveEncodings` | `PlaySessionId` required (never by device alone; a `DeviceId` must be the login's); releases that play's native encoding and keeps its binding, so a later Stopped still commits; a direct play has none |
 
 Player identity is stable within the authenticated user/device/client family,
 including login replacement. Negotiation leaves an active play running.
@@ -3419,8 +3582,14 @@ prerequisites before its URL is returned. Its private recipe identity includes
 the trusted passive/VOD-only policy and optional bitrate ceiling. Older worker
 request schemas refuse unknown policy fields rather than dropping the ceiling.
 
-Every mapped HLS request requires a fresh login; generated URLs contain no
-credential. Native manifests retain the movie's original clock, with closed
+Every mapped HLS request requires a fresh login. URLs the facade returns
+(`TranscodingUrl`, `DirectStreamUrl`, subtitle `DeliveryUrl`) are relative to
+the client's configured server address, which already ends in `/jellyfin`, and
+carry the presented compatibility login as `ApiKey`, as Jellyfin's do:
+Jellyfin Android TV sends no header on media, HLS or subtitle requests. A
+manifest repeats that `ApiKey` on every child URI, because a player resolves a
+child without its playlist's query. The login authenticates nothing outside
+`/jellyfin`, and request logs omit the query. Native manifests retain the movie's original clock, with closed
 resource names rewritten to this mount and private native session IDs removed.
 The observed MPEG-TS declaration uses the measured init-prefix fMP4 transport:
 each fragment includes the exact native init bytes. Composite byte ranges map
@@ -3438,6 +3607,10 @@ Disabled requests, including unsupported mutations, answer JSON 404. Enabled
 unsupported methods answer JSON 405; unknown paths answer JSON 404. The
 native root still serves its app shell. Connection/catalog handlers use the
 existing JSON deadline and serving-authority layers and fixed route groups.
+The switch is read once per request, by the gate, and handlers use that
+snapshot. Every matched request counts in
+`plurx_jellyfin_requests_total{route,outcome}` under its route template, and a
+request no route matches under `route="unmatched"`.
 
 Bearer, `X-Emby-Token`, Emby authorization attributes, and the observed query
 token carriers share the bounded credential parser. Duplicates are preserved;
@@ -3454,6 +3627,29 @@ a fresh projection; allocated IDs are never attached to an older item body.
 Sources omit native paths/raw probes and retain actual global stream indices.
 Pages with more than 5,000 sources and bootstrap inventories above 500 supported
 libraries refuse rather than truncate.
+
+Each subtitle stream in a PlaybackInfo source carries `DeliveryMethod`,
+decided from the request's `SubtitleProfiles` the way Jellyfin 10.11.11
+decides it: an embedded entry for the track's own format (direct play only),
+then `External` or `Hls` entries in profile order for the track's format, then
+the same allowing conversion, then `Encode`. Sidecars are produced only as
+VTT or SRT and manifest renditions only as VTT; a bitmap track is embedded or
+burned, never a sidecar. `External` adds `DeliveryUrl` at the five-segment
+route with a zero start. A selected track that resolves to `Encode` makes the
+play a transcode. Text means any codec the native extractor converts (every
+non-bitmap codec, ASS included). On HLS the master carries renditions when any
+text track resolves to `Hls`, and then every text track is reported as `Hls`,
+because the native master carries them all. A request with no
+`SubtitleProfiles` on an output that declares `ManifestSubtitles` or
+`EnableSubtitlesInManifest` is treated as asking for VTT renditions.
+
+A request that enables direct play over HTTP (`EnableDirectPlay: true`,
+`DirectPlayProtocols` naming `Http`) and declares no `DirectPlayProfiles` is a
+client choosing static delivery itself: Infuse sends exactly this and then
+fetches `/Videos/{id}/stream?Static=true`, even where Jellyfin answered with a
+transcode. It is negotiated as a direct play, and no subtitle selection turns
+it into a transcode. `DirectPlayProtocols` accepts Jellyfin's protocol names
+only.
 
 PlaybackInfo evaluates each direct profile independently, including bounded codec
 and container predicates, against the selected audio and coherent native probe.

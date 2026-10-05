@@ -7,7 +7,7 @@ checks = ["rust-gate", "rust-gate-ci", "web-static"]
 reason = """
 The #500 review of C-08 M5 found three release-evidence series that did not
 measure what OPERATIONS.md said. Each fix is pinned by a test that was run
-on nuc3 with its production hunk reverted and failed.
+on lab3 with its production hunk reverted and failed.
 
 Row 3's numerator. The web reports a long stall from persistentWait at its
 8 s mark with the time so far, and endWait returned without the rest, so a

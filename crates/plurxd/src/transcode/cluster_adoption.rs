@@ -106,7 +106,7 @@ pub(super) struct ClusterReplacementGates {
 /// returns, or is cancelled, while its guard lives on, and nothing aged,
 /// expired or force-released the registry. One holder parked on an unbounded
 /// await therefore turned its player's key into a three-second refusal for the
-/// life of the process: observed on m6 on 2026-09-21, where a start blocked on
+/// life of the process: observed on lab6 on 2026-09-21, where a start blocked on
 /// a 402-second subtitle sidecar extraction refused the viewer's own reopen of
 /// the title they were watching.
 pub(super) struct ReplacementGate {

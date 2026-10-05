@@ -25591,6 +25591,7 @@ mod tests {
 
     fn session_request(kind: SessionKind) -> crate::transcode::SessionRequest {
         crate::transcode::SessionRequest {
+            sdr_master_codecs: None,
             continuous_media: None,
             quality_catalog: None,
             candidate_context: None,
@@ -26206,6 +26207,7 @@ mod tests {
 
         fn request(kind: SessionKind, hdr10: bool) -> SessionRequest {
             SessionRequest {
+                sdr_master_codecs: None,
                 continuous_media: None,
                 quality_catalog: None,
                 candidate_context: None,

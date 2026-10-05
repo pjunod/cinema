@@ -88,6 +88,17 @@ pub trait JellyfinPlayStore: Send + Sync {
         &self,
         grant_id: &str,
     ) -> Result<Option<JellyfinPlay>, StoreError>;
+    /// This login's newest pending or active direct play (one negotiated with
+    /// a link grant) of exactly this item and source. Infuse requests direct
+    /// bytes with only `MediaSourceId` and its login header, never naming the
+    /// play; the newest negotiation is the one its play events then name.
+    /// Never crosses a login, device, client family, item or source.
+    async fn jellyfin_current_direct_play(
+        &self,
+        scope: &JellyfinPlayScope,
+        item_wire_id: &str,
+        file_wire_id: &str,
+    ) -> Result<Option<JellyfinPlay>, StoreError>;
     /// The plays one activation of this login's play ended. The coordinator
     /// releases their exact native session or direct grant; a replacement that
     /// never sent Stopped must not leave its predecessor's resources behind.
@@ -273,6 +284,18 @@ ON CONFLICT(play_id) DO NOTHING
 pub(crate) const READ: &str = "SELECT payload,state,expires_at_ms,manual_revision,native_incarnation_id,direct_grant_id FROM jellyfin_plays WHERE play_id=$1 AND user_id=$2 AND token_digest=$3 AND device_digest=$4 AND client_family=$5";
 /// The scope columns are returned through the payload, so the caller learns
 /// the exact login and device that negotiated this grant.
+pub(crate) const READ_CURRENT_DIRECT: &str = "SELECT payload,state,expires_at_ms,manual_revision,native_incarnation_id,direct_grant_id FROM jellyfin_plays WHERE user_id=$1 AND token_digest=$2 AND device_digest=$3 AND client_family=$4 AND item_wire_id=$5 AND file_wire_id=$6 AND state IN ('pending','active') AND direct_grant_id IS NOT NULL ORDER BY json_extract(payload,'$.negotiation_order') DESC, play_id DESC LIMIT 1";
+pub(crate) fn validate_source(
+    scope: &JellyfinPlayScope,
+    item_wire_id: &str,
+    file_wire_id: &str,
+) -> Result<(), StoreError> {
+    validate_scope(scope)?;
+    if !wire(item_wire_id) || !wire(file_wire_id) {
+        return Err(invalid());
+    }
+    Ok(())
+}
 pub(crate) const READ_BY_DIRECT_GRANT: &str = "SELECT payload,state,expires_at_ms,manual_revision,native_incarnation_id,direct_grant_id FROM jellyfin_plays WHERE direct_grant_id=$1";
 /// Bounded by the player's pending and active rows at the moment of one
 /// activation; the chosen play must belong to the asking login.

@@ -4106,11 +4106,35 @@ test = "tests/playback/current-main-effort-quality.test.js"
 test_anchor = "continuous family upgrades use the enforced family budget and the family's own objects"
 
 [[fixes]]
+id = "android.display-mode-timeout-withdraws-the-request"
+commits = ["42f93dd2c893596de0934857a8f8418ca92ddd9b", "fb724005eb87a1a3f625db28dacfc899763adf09"]
+source = "clients/android/app/src/main/java/tv/plurx/app/player/DisplayModeMatcher.kt"
+source_anchor = "internal fun clearsDisplayModeRequestAfterWait(matched: Boolean, stillOwner: Boolean, late: Boolean): Boolean ="
+test = "clients/android/app/src/test/java/tv/plurx/app/player/DisplayModeMatcherTest.kt"
+test_anchor = "@Test fun timedOutPrepareWaitWithdrawsTheRequestOnlyWhileItStillOwnsTheWindow()"
+
+[[fixes]]
+id = "android.continuous-audio-outputs-retire-every-released-output"
+commits = ["5ab6affcf2ea0f9ce2f89d2a84be79fe81a3d811"]
+source = "clients/android/app/src/main/java/tv/plurx/app/player/ContinuousAudioOutputs.kt"
+source_anchor = ".map { it.key to it.value.owner }"
+test = "clients/android/app/src/test/java/tv/plurx/app/player/ContinuousAudioOutputsTest.kt"
+test_anchor = "@Test fun releasingManyOutputsRetiresEveryOneOfThem()"
+
+[[fixes]]
+id = "android.seek-during-a-prepared-switch-is-held-not-dropped"
+commits = ["8ed4a3b821ccff4d2e2c515d18124b2348d6c8f6"]
+source = "clients/android/app/src/main/java/tv/plurx/app/player/Controller.kt"
+source_anchor = "internal class SeekDeferredBehindSwitch {"
+test = "clients/android/app/src/test/java/tv/plurx/app/player/PlaybackControlReporterTest.kt"
+test_anchor = "@Test fun seekDeferredBehindASwitchRunsExactlyOnceAndOnlyWhileCurrent()"
+
 # iOS does not promise an `.ended` for every `.began`. A hold raised on
 # `.began` that only `.ended` could clear stayed up for an hour over a picture
 # the viewer had resumed (iPad Pro, 2026-10-04), with the stall monitor off.
 # The viewer's press, and film actually playing, now end it, and a `.began`
 # while the viewer has already paused holds nothing.
+[[fixes]]
 id = "apple.system-hold-ends-without-ended"
 commits = ["969aba483299e9293ec3ffc5fc9bc40b2ef0da67"]
 source = "clients/apple/Sources/PlayerController.swift"
@@ -4129,6 +4153,57 @@ source = "clients/apple/Sources/PlaybackPlatformIntegration.swift"
 source_anchor = "static let shared = DisplayWakeOwner { UIApplication.shared.isIdleTimerDisabled = $0 }"
 test = "clients/apple/Tests/DisplayWakeTests.swift"
 test_anchor = "func testTheClaimFollowsItsPlayersTransportState() async"
+
+
+[[fixes]]
+# The web drew guide station logos from #755 while Apple and Android drew
+# callsigns only: the rule lived in the web page, outside the shared guide
+# contract the three clients replay (issue #815). Each native reducer now
+# answers the fixture's `station_logo` cases, and every surface that names a
+# station draws the tile.
+id = "apple.live-tv-guide-station-logos"
+commits = ["f2c36d0bc605d3aa6380a9c20cd8e06a638f1a6b"]
+source = "clients/apple/Sources/LiveTvGuide.swift"
+source_anchor = "static func stationLogoURL(_ guide: LiveTvGuide?, channelId: String) -> String?"
+test = "clients/apple/Tests/LiveTvTests.swift"
+test_anchor = "func testStationLogoAnswersEverySharedCase() throws"
+
+[[fixes]]
+id = "android.live-tv-guide-station-logos"
+commits = ["11532e7c1d3d32cad90c46e06c5a1642cc474b4d"]
+source = "clients/android/app/src/main/java/tv/plurx/app/livetv/LiveTvGuide.kt"
+source_anchor = "fun stationLogoUrl(guide: LiveTvGuide?, channelId: String): String?"
+test = "clients/android/app/src/test/java/tv/plurx/app/livetv/LiveTvGuideTest.kt"
+test_anchor = "fun stationLogoAnswersEverySharedCase()"
+
+[[fixes]]
+# Coil's HTTP fetcher matches the scheme case-sensitively, so an accepted
+# `HTTPS://` logo drew on the web and Apple and not on Android. The shared rule
+# now respells the accepted scheme `https://` on every client.
+id = "live-tv.station-logo-scheme-respelled"
+commits = ["9c248d7cd5f28c28f7a53a6d72954eb9219d1cd9"]
+source = "clients/android/app/src/main/java/tv/plurx/app/livetv/LiveTvGuide.kt"
+source_anchor = "return \"https://$rest\""
+test = "tests/web/live-tv.test.js"
+test_anchor = "stationLogoUrl answers every shared station_logo case"
+
+[[fixes]]
+id = "apple.live-tv-station-tile-wiring"
+commits = ["92e1317756623a6c363d25223bf4b8c5b9583a29"]
+source = "clients/apple/Sources/LiveTvStationLogo.swift"
+source_anchor = "guard flights[address] == flight else { return }"
+test = "clients/apple/Tests/LiveTvTests.swift"
+test_anchor = "func testEveryStationSurfaceDrawsTheGuideLogo() throws"
+
+[[fixes]]
+# Coil keeps no record of failures, so a blocked logo host was asked again on
+# every recomposition of the guide. A failed address now backs off.
+id = "android.live-tv-station-logo-backoff"
+commits = ["184b1e7f87c890064d0f06994bd18a25808a0ffc"]
+source = "clients/android/app/src/main/java/tv/plurx/app/livetv/LiveTvStationLogo.kt"
+source_anchor = "fun shouldLoad(address: String, nowMs: Long = System.currentTimeMillis()): Boolean"
+test = "clients/android/app/src/test/java/tv/plurx/app/livetv/LiveTvGuideTest.kt"
+test_anchor = "fun aFailedStationLogoBacksOffAndASuccessClearsIt()"
 
 
 [[fixes]]
