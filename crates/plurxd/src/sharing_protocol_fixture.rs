@@ -57,8 +57,9 @@ pub(crate) fn mutated(base: &Value, row: &Value, session: &str) -> Value {
 // Rows whose B surface is reachable from here. The rest are asserted next to
 // the private function they exercise (`sharing_protocol_fixture_*` in
 // sharing_playback_wire, sharing_direct_wire, shared_receiver_direct,
-// shared_receiver_assets and shared_receiver_orphans, plus plurx-core's
-// sharing and sharing_resources).
+// shared_receiver_assets, shared_receiver_orphans and shared_receiver_control
+// (B's status envelope, refusal answers, control precheck and `none`
+// rebind), plus plurx-core's sharing and sharing_resources).
 #[cfg(test)]
 mod tests {
     use super::*;
