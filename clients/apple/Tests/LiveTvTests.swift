@@ -1775,6 +1775,31 @@ final class LiveTvTests: XCTestCase {
         await controller.stop()
     }
 
+    /// The stub's playlist is refused within milliseconds, so the item fails
+    /// and the player pauses on its own; what this pins is that starting a
+    /// channel claims the display at all. Release on pause and stop is the
+    /// claim's own behaviour, pinned in `DisplayWakeTests`.
+    func testLiveTvHoldsTheDisplayWhenAChannelStarts() async {
+        let recorder = DisplayWakeRecorder()
+        let owner = DisplayWakeOwner { recorder.applied.append($0) }
+        let controller = LiveTvPlayerController.testing(
+            requests: LiveTvMockRequests(result: started()),
+            displayWake: owner
+        )
+        XCTAssertTrue(recorder.applied.isEmpty, "nothing is claimed before a channel starts")
+        await controller.watch(channel)
+        let held = expectation(description: "starting a channel holds the screensaver off")
+        let poll = Task { @MainActor in
+            while !Task.isCancelled {
+                if recorder.applied.contains(true) { held.fulfill(); return }
+                await Task.yield()
+            }
+        }
+        await fulfillment(of: [held], timeout: 3)
+        poll.cancel()
+        await controller.stop()
+    }
+
     func testLiveTvViewerPlayEndsASystemHoldThatIOSNeverEnded() async {
         let controller = LiveTvPlayerController.testing(
             requests: LiveTvMockRequests(result: started())

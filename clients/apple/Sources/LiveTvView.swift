@@ -14,9 +14,10 @@ final class LiveTvPlayerController: ObservableObject {
         requests: LiveTvRequests,
         channels: [LiveTvChannel] = [],
         activateAudioSession: @escaping () -> Void = {},
-        deactivateAudioSession: @escaping () -> Void = {}
+        deactivateAudioSession: @escaping () -> Void = {},
+        displayWake: DisplayWakeOwner? = nil
     ) -> LiveTvPlayerController {
-        let controller = LiveTvPlayerController()
+        let controller = LiveTvPlayerController(displayWakeOwner: displayWake)
         controller.lease = LiveTvLease(requests: requests)
         controller.activateAudioSession = activateAudioSession
         controller.deactivateAudioSession = deactivateAudioSession
@@ -71,6 +72,7 @@ final class LiveTvPlayerController: ObservableObject {
     private var itemFailure: NSError?
     private var itemDidFail = false
     private let remoteCommands = LiveRemoteCommands()
+    private let displayWake: PlaybackDisplayWake
     #if os(tvOS)
     private var displayCriteriaObservation: NSKeyValueObservation?
     #endif
@@ -90,6 +92,10 @@ final class LiveTvPlayerController: ObservableObject {
             options: .notifyOthersOnDeactivation
         )
 #endif
+    }
+
+    init(displayWakeOwner: DisplayWakeOwner? = nil) {
+        displayWake = PlaybackDisplayWake(owner: displayWakeOwner)
     }
 
     func load(origin: String, token: String?) async {
@@ -223,6 +229,7 @@ final class LiveTvPlayerController: ObservableObject {
         attachedAt = Date()
         playing = true
         player.play()
+        displayWake.track(player, hasVideo: true)
         remoteCommands.start(
             title: channel.title,
             playing: true,

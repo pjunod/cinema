@@ -1038,6 +1038,31 @@ final class PlayerOperationOwnershipTests: XCTestCase {
         )
     }
 
+    /// The finite player's half of #818: the claim follows `decision` through
+    /// an open and the player's own transport, so a film holds the display
+    /// while it plays and lets go the moment the viewer pauses.
+    func testTheFinitePlayerHoldsTheDisplayWhilePlayingAndLetsGoOnPause() async throws {
+        let (path, url) = try makeOfflineAudio()
+        defer { try? FileManager.default.removeItem(at: url) }
+        var preparation = PlayerController.MediaSelectionPreparation()
+        preparation.audio = { _, _ in nil }
+        preparation.native = { _, _, _ in .init(hasSubtitleOptions: true, apply: { true }) }
+        let recorder = DisplayWakeRecorder()
+        let owner = DisplayWakeOwner { recorder.applied.append($0) }
+        let controller = PlayerController(
+            mediaSelectionPreparation: preparation,
+            canPlayOffline: { _ in true },
+            displayWakeOwner: owner
+        )
+        controller.startOffline(model: AppModel(), item: offlineItem(path: path))
+        for _ in 0..<100 where !owner.isHeld { try await Task.sleep(for: .milliseconds(50)) }
+        XCTAssertTrue(owner.isHeld, "a playing film holds the screensaver and auto-lock off")
+        controller.togglePlayPause()
+        for _ in 0..<100 where owner.isHeld { try await Task.sleep(for: .milliseconds(50)) }
+        XCTAssertFalse(owner.isHeld, "a paused film lets the display sleep")
+        controller.stop()
+    }
+
     func testOfflineAttachmentHonorsPauseAndSeeksWithoutAnOnlineRecipeReopen() async throws {
         let (path, url) = try makeOfflineAudio()
         defer { try? FileManager.default.removeItem(at: url) }

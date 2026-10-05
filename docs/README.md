@@ -38,6 +38,8 @@ Apple playback controls: [10 and 30 second seeking](apple-builds/689-playback-se
 
 Apple seek icons: [Directional arrows for seek distances](apple-builds/694-seek-arrow-icons.md).
 
+Apple display wake: [818-display-wake.md](apple-builds/818-display-wake.md) — playback owns the display idle timer.
+
 ## Find it fast
 
 | You want to know… | Read |

@@ -2247,9 +2247,11 @@ final class PlayerController: ObservableObject {
         },
         waitResumeSample: @escaping @MainActor () async -> Void = {
             try? await Task.sleep(for: PlayerController.resumeSampleDelay)
-        }
+        },
+        displayWakeOwner: DisplayWakeOwner? = nil
     ) {
         self.player = player
+        displayWake = PlaybackDisplayWake(owner: displayWakeOwner)
         self.requestPlaybackDecision = requestPlaybackDecision
         self.mediaSelectionPreparation = mediaSelectionPreparation
         self.itemPreparation = itemPreparation
@@ -2371,7 +2373,9 @@ final class PlayerController: ObservableObject {
         return .finish(durationMs: durationMs)
     }
 
-    @Published private(set) var player: AVPlayer
+    @Published private(set) var player: AVPlayer {
+        didSet { syncDisplayWake() }
+    }
     @Published private(set) var stagedSurfacePlayer: AVPlayer?
     private weak var playbackSurface: PlayerSurfaceView?
     private var warmPredecessor: AVPlayer?
@@ -2396,7 +2400,18 @@ final class PlayerController: ObservableObject {
         else { previous.pause() }
     }
 
-    @Published private(set) var decision: Decision?
+    @Published private(set) var decision: Decision? {
+        didSet { syncDisplayWake() }
+    }
+    /// The screensaver and auto-lock stay off while this title's video is
+    /// playing or buffering toward play, and only then. It follows `player`
+    /// through a prepared commit and `decision` through every open, so an
+    /// audiobook (no source video codec) never holds the display awake.
+    private let displayWake: PlaybackDisplayWake
+
+    private func syncDisplayWake() {
+        displayWake.track(player, hasVideo: decision?.source?.videoCodec != nil)
+    }
     /// Immutable facts used to obtain `decision`; every session opened by this
     /// controller repeats them even if another screen probes in the meantime.
     private var autoDesiredCandidate: QualityCandidate?
