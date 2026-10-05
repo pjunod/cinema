@@ -1,7 +1,0 @@
-version = 1
-
-[[coverage]]
-commits = ["7ba9c3c1", "6aae51ab"]
-points = ["sharing.authority"]
-checks = ["rust-gate", "rust-gate-ci"]
-reason = "Shared prepared successor (P1/P2) follow-ups. The commit answer was cut by its own predecessor's connection monitor over H2. The commit now supersedes the predecessor only after the answer's writer releases its connection guard (CommittedHandoff owned by CommitAnswerWriter), and a hand-over retirement (Superseded or Replaced) releases a transport with none of its writers outstanding instead of cutting it. Revocation, deletion and administrative stop still cut. Separately, a cancelled or aborted directed change no longer stages a successor for the session's own ask (own_digest). Proven by sharing_receiver_commit_answer_writer_is_released_before_the_predecessor_retires, receiver_handover_releases_idle_transports_and_cuts_busy_or_revoked_ones and sharing_receiver_cancelled_change_never_restages_the_sessions_own_ask, all failing on the old code, plus the real pinned fixture sharing_receiver_real_pinned_prepared_handoff_commit_and_abort passing over H1 and H2."
