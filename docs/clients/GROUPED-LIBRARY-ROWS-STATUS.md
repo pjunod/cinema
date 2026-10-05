@@ -1,6 +1,6 @@
 # Grouped library rows — implementation and acceptance status
 
-**Status:** implemented and locally validated · **Updated:** 2026-10-05 · **Branch:**
+**Status:** merged; post-merge checks in progress · **Updated:** 2026-10-05 · **Branch:**
 `codex/grouped-library-rows` · **Pull request:** [#821](http://192.168.4.7:3000/noirr/plurx/pulls/821)
 
 Companion to [WEB-SHELL-LAYOUT.md](WEB-SHELL-LAYOUT.md), which maps the web
@@ -144,3 +144,13 @@ failure remains assigned to the separate batch repair process.
 Paul explicitly requested “Merge it and watch the tests after merge,”
 overriding the earlier green-before-merge timing. The final handler relocation
 will be checked after landing, and the PR will record post-merge results.
+
+
+## Post-merge input wiring correction — 2026-10-05
+
+PR #821 landed as `4ab8ad84c`. The merged tree matched the final branch.
+The targeted fence rerun caught the listener registration still outside the
+keyboard adapter; the row now calls an adapter-owned wiring function too.
+The merged-source keyboard navigation check and row-boundary browser case
+passed. The follow-up corrects only the adapter boundary, without relaxing
+its enforcement or changing keyboard behavior.
