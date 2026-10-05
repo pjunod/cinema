@@ -4749,6 +4749,17 @@ final class AppleClientTests: XCTestCase {
             after: APIError.refused(status: 400, code: "vod_invalid_height", message: "no", positionMs: nil)
         ))
         XCTAssertNil(PlayerController.unboundStallRetry(for: body, after: APIError.http(404)))
+        // The binding alone is not enough: an Auto recovery reopen carries the
+        // same `previousSessionId` with a non-stall reason, and its 400 must
+        // reach the caller's restore-and-surface path, not be retried unbound.
+        var autoReopen = createBody()
+        autoReopen.previousSessionId = "session-a"
+        autoReopen.reopenReason = "auto"
+        XCTAssertNil(PlayerController.unboundStallRetry(for: autoReopen, after: APIError.http(400)))
+        XCTAssertNil(PlayerController.unboundStallRetry(
+            for: autoReopen,
+            after: APIError.refused(status: 400, code: "vod_invalid_height", message: "no", positionMs: nil)
+        ))
     }
 
     func testPlaybackInfoRowsMatchTheSharedFieldList() throws {
