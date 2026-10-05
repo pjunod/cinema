@@ -1,8 +1,24 @@
 # Status — what the agent is working on and where it stands
 
-**Updated:** 2026-10-04 · Kept current by the working agent in the same
+**Updated:** 2026-10-05 · Kept current by the working agent in the same
 commit as the work it describes; a stale entry here is a bug. Newest effort
 first.
+
+## Main-merge defects D1–D7 and the red gates: one batched PR
+
+**[PR #810](http://192.168.4.7:3000/noirr/plurx/pulls/810), branch `claude/main-merge-defects`; Android 146 source; not yet deployed or merged.**
+Builds `claude/main-merge-defects-rca-and-fix-2026-10-04.md` (rev 3). D1: the
+speculative and content-aware producers resolve audio with the canonical
+stereo-AAC claim, so stereo-route clients hit pre-transcodes again (policy
+generation moves: set `jobs.cache_produce_mins = 0` for the deploy, restore
+after). D4: a rolling start reads its settings in one snapshot. D2/D3:
+complete-output preparation and rolling retention are Developer switches,
+default off, with an executor that does not need the speculative schedule, a
+cancel-only drain, a disk free-space guard, prompt release and Activity rows
+with Stop. D5: a seek during a prepared switch is held, not dropped (Android,
+web; Apple waits on a device check). D6: the Fit Auto card names its
+network-priors prerequisite and priors get a switch (behaviour unchanged). D7
+and gates G1, G3–G6, G8 fixed; G2 (the UI golden) is regenerated separately.
 
 ## Apple TV: new HEVC WEB-DLs refused with 503 — ffmpeg 8 repeats the sample description
 
