@@ -120,3 +120,13 @@ without emitting a ready-for-review run, so this documentation update supplies
 the normal ready-PR synchronization event. It changes no tested source.
 The [PR check list](http://192.168.4.7:3000/noirr/plurx/pulls/821) is the
 source of truth for the resulting candidate's gate and landing status.
+
+## Fast-lane baseline correction — 2026-10-05
+
+Run 4171 stopped at `make history-check`: the pre-existing fragment
+`10cd4ba6-ffmpeg8-repeated-hevc-descriptions.toml` named a commit after the
+frozen boundary. Landing `96443d519` (#811) already carries the two correct
+`Regression-Test` lines. Removing the forbidden duplicate fragment preserves
+that immutable evidence and fixes the audit at its cause. No history rule,
+erratum, test selection, or playback source changes. The remaining jobs from
+the failed candidate are cancelled before the corrected push.
