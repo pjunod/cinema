@@ -13,7 +13,9 @@ pub enum Sort {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct BrowseQuery {
     pub start: i64,
-    pub limit: i64,
+    /// `None` when the client sent no `Limit`; each route applies Jellyfin's
+    /// own default for that case (every row for `/Items`, 20 for Latest).
+    pub limit: Option<i64>,
     pub parent: Option<WireId>,
     pub user: Option<WireId>,
     pub series: Option<WireId>,
@@ -26,6 +28,9 @@ pub struct BrowseQuery {
     /// catalogue never holds (BoxSet, Video, MusicVideo, ...). Jellyfin answers
     /// such a request with an empty page, so the facade does too.
     pub kinds_absent: bool,
+    /// `IncludeItemTypes` named `CollectionFolder`: the user's library views,
+    /// which are not catalogue rows and so never appear in `kinds`.
+    pub views: bool,
     pub search: Option<String>,
 }
 
@@ -118,8 +123,7 @@ impl BrowseQuery {
         }
         let mut result = Self {
             start: 0,
-            // Jellyfin answers a request without `Limit` with every row.
-            limit: i64::MAX,
+            limit: None,
             parent: None,
             user: None,
             series: None,
@@ -129,6 +133,7 @@ impl BrowseQuery {
             sorts: vec![Sort::SortName],
             kinds: vec![],
             kinds_absent: false,
+            views: false,
             search: None,
         };
         let mut seen = std::collections::BTreeMap::<String, &str>::new();
@@ -165,10 +170,11 @@ impl BrowseQuery {
                     }
                 }
                 "limit" => {
-                    result.limit = value.parse::<i64>().map_err(|_| InvalidQuery)?;
-                    if result.limit < 0 {
+                    let limit = value.parse::<i64>().map_err(|_| InvalidQuery)?;
+                    if limit < 0 {
                         return Err(InvalidQuery);
                     }
+                    result.limit = Some(limit);
                 }
                 "parentid" => result.parent = Some(WireId::parse(value).map_err(|_| InvalidQuery)?),
                 "userid" => result.user = Some(WireId::parse(value).map_err(|_| InvalidQuery)?),
@@ -227,7 +233,11 @@ impl BrowseQuery {
                             "series" => "show",
                             "season" => "season",
                             "episode" => "episode",
-                            "collectionfolder" => "library",
+                            "collectionfolder" => {
+                                named = true;
+                                result.views = true;
+                                continue;
+                            }
                             other if JELLYFIN_ITEM_KINDS.contains(&other) => {
                                 named = true;
                                 continue;
@@ -239,7 +249,7 @@ impl BrowseQuery {
                             kinds.push(kind.into());
                         }
                     }
-                    result.kinds_absent = named && kinds.is_empty();
+                    result.kinds_absent = named && kinds.is_empty() && !result.views;
                     result.kinds = kinds;
                 }
                 "searchterm" => {
@@ -268,7 +278,7 @@ mod tests {
             ("sortOrder", "Descending"),
         ])
         .expect("target page");
-        assert_eq!((q.start, q.limit), (2400, 100));
+        assert_eq!((q.start, q.limit), (2400, Some(100)));
         assert!(q.recursive && q.descending);
         assert_eq!(q.kinds, ["movie", "episode"]);
         assert_eq!(q.sorts, [Sort::SortName, Sort::Year]);
@@ -295,12 +305,16 @@ mod tests {
         assert_eq!(q.kinds, ["movie"]);
         assert!(!q.kinds_absent);
         let q = BrowseQuery::parse(&[("IncludeItemTypes", "CollectionFolder")]).expect("views");
-        assert_eq!(q.kinds, ["library"]);
+        assert!(q.views && q.kinds.is_empty() && !q.kinds_absent, "{q:?}");
+        let q = BrowseQuery::parse(&[("IncludeItemTypes", "CollectionFolder,BoxSet,Series")])
+            .expect("views and series");
+        assert!(q.views && !q.kinds_absent);
+        assert_eq!(q.kinds, ["show"]);
         let q = BrowseQuery::parse(&[]).expect("default");
         assert!(q.kinds.is_empty() && !q.kinds_absent);
-        assert_eq!(q.limit, i64::MAX, "no Limit means every row");
+        assert_eq!(q.limit, None, "the route chooses Jellyfin's default");
         let q = BrowseQuery::parse(&[("Limit", "2000")]).expect("large page");
-        assert_eq!(q.limit, 2000);
+        assert_eq!(q.limit, Some(2000));
         let q = BrowseQuery::parse(&[("SortBy", "Random,CommunityRating")]).expect("orders");
         assert_eq!(q.sorts, [Sort::SortName]);
         let q = BrowseQuery::parse(&[(
