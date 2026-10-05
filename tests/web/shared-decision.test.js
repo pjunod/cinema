@@ -12,7 +12,7 @@ function harness(handler=null){const requests=[],ctx=vm.createContext({console,U
  vm.runInContext(`let TOKEN="first",API="/api/v1",AUTH_GENERATION=2,PAGE_RENDER_GENERATION=7;
  const SERVER={build:"test",playback_display_aware_auto:false},PLAY_CAPS={vcodec:"h264,hevc,hevc10",acodec:"aac",container:"mp4",maxheight:1080,progressiveHevcSampleEntries:["hvc1"]};
  function decodeLimits(){return [];}function measuredPresentationTarget(){return null;}
- `+fs.readFileSync(WEB+'core/file-context.js','utf8')+'\n'+functions+'\n'+fs.readFileSync(WEB+'core/shared-decision.js','utf8')+`\nthis.h={details:SHARED_DECISION.details,decision:SHARED_DECISION.decision,start:SHARED_DECISION.start,progress:SHARED_DECISION.progress,retire:sharedDecisionRetire,caps:currentCapsDocument,factory:sharedPlaybackFileContextFromDetail,key:playbackFileKey,change(){TOKEN="next";AUTH_GENERATION++;sharedDecisionRetire();},leave(){PAGE_RENDER_GENERATION++;sharedDecisionRetire();},origin(){API="https://other.test/api/v1";},overflow(){PLAY_CAPS.acodec="a".repeat(128*1024);},};`,ctx);return {...ctx.h,requests};}
+ `+fs.readFileSync(WEB+'core/file-context.js','utf8')+'\n'+functions+'\n'+fs.readFileSync(WEB+'core/shared-decision.js','utf8')+`\nthis.h={details:SHARED_DECISION.details,decision:SHARED_DECISION.decision,start:SHARED_DECISION.start,progress:SHARED_DECISION.progress,successor:SHARED_DECISION.successor,status:sharedPlaybackStatusMetrics,retire:sharedDecisionRetire,caps:currentCapsDocument,factory:sharedPlaybackFileContextFromDetail,key:playbackFileKey,change(){TOKEN="next";AUTH_GENERATION++;sharedDecisionRetire();},leave(){PAGE_RENDER_GENERATION++;sharedDecisionRetire();},origin(){API="https://other.test/api/v1";},overflow(){PLAY_CAPS.acodec="a".repeat(128*1024);},};`,ctx);return {...ctx.h,requests};}
 test("actual v2 builder preserves complete engine fields and exact Source identities",async()=>{
  for(const id of ['0','9007199254740993','9223372036854775807']){
   const h=harness((url,o)=>response(o.method==='GET'?detail(id):wire(id),url)),r=await h.details(ref),c=r.files[0].context,d=await h.decision(c,{force:'original',audio:4095,subtitle:-1,audio_offset_ms:-15000});
@@ -190,4 +190,55 @@ test("a declined shared HLS change reopens as a fresh Start of its base file and
  // A lineage field is still refused for a reopen, before any request.
  const n=h.requests.length;await assert.rejects(h.start(next,{...reopen,previous_session_id:second}),e=>e.code==='sharing_start_unsupported');assert.equal(h.requests.length,n);
  h.change();await assert.rejects(h.decision(next));await assert.rejects(h.start(next,reopen));assert.equal(h.requests.length,n);
+});
+
+// B's prepared successor (P1/P2): B starts it and offers it on the
+// predecessor's control channel; the client binds it, and only once B accepts
+// the commit does the player name it. Synthetic envelopes, as above.
+test("a shared prepared successor binds whole under the accepted login and the next beat names it",async()=>{
+ const next='ffffffff-ffff-4fff-8fff-ffffffffffff',gen='99999999-9999-4999-8999-999999999999';let posts=0;
+ const h=harness((u,o)=>{
+  if(o.method==='GET')return response(detail('9007199254740993','1').slice(0,-1)+',"watch":{"sequence":4}}',u);
+  if(u.endsWith('/hls/sessions'))return response(JSON.stringify(startReply()),u);
+  if(++posts===2)throw new Error('uncertain network');
+  return response('{}',u);
+ });
+ const c=(await h.details(ref)).files[0].context,first=(await h.start(c,startBody(h)))._sharedContext;
+ assert.equal(first.control_generation,startReply().control.generation);assert.equal(first.control_epoch,1);
+ assert.equal(await h.progress(first,1000,90000,false),true);
+ const control={protocol:'plurx-playback-control-v1',url:`/api/v1/hls/${next}/control`,generation:gen,control_epoch:1,next_exchange_ms:5000,lease_timeout_ms:300000};
+ const offer=(o={})=>({type:'prepare',action_id:'12121212-1212-4212-8212-121212121212',session_id:next,
+   playlist_url:`/api/v1/hls/${next}/index.m3u8?native=1&subtitle=2`,media_origin_ms:0,control,
+   effective_selection:{quality_auto:false,height:480,audio_track:null,subtitle_burn:null,audio_offset_ms:0,codec:'server_selected',dynamic_range:'sdr'},...o});
+ // Strict: another B session, its own playlist, its own control bootstrap.
+ for(const bad of [{session_id:sid},{session_id:next.toUpperCase()},{session_id:next.replace('4fff','1fff')},
+   {playlist_url:`/api/v1/hls/${sid}/index.m3u8`},{playlist_url:`/api/v1/hls/${next}/video.m3u8`},{playlist_url:`/api/v1/hls/${next}/seg1.m4s`},
+   {playlist_url:`https://source.test/api/v1/hls/${next}/index.m3u8`},{playlist_url:`/api/v1/hls/${next}/index.m3u8?token=x`},
+   {control:{...control,url:`/api/v1/hls/${sid}/control`}},{control:{...control,url:`/api/v1/hls/${next}/status`}},
+   {control:{...control,generation:startReply().control.generation}},{control:{...control,generation:'7'}},
+   {control:{...control,control_epoch:0}},{control:{...control,lease_timeout_ms:60000}},{control:{...control,next_exchange_ms:1000}},
+   {control:{...control,protocol:'plurx-playback-control-v2'}},{control:null},{media_origin_ms:1.5}])
+  assert.throws(()=>h.successor(first,offer(bad)),JSON.stringify(bad));
+ assert.throws(()=>h.successor(c,offer()),'an unstarted context has no successor');
+ assert.equal(h.successor(first,offer({playlist_url:`/api/v1/hls/${next}/master.m3u8`})).session_id,next);
+ h.leave(); // the watch modal outlives the page that opened it
+ const bound=h.successor(first,offer());
+ assert.equal(bound.session_id,next);assert.equal(bound.control_generation,gen);assert.equal(bound.control_epoch,1);assert.equal(h.key(bound),h.key(c));
+ assert.equal(h.requests.length,3,'binding a successor sends nothing: B started it');
+ // Status replies bind to the session the context started, incarnation and epoch included.
+ const reply={subject:'shared',reference:{item:{...ref},file_id:'9007199254740993',revision,lifecycle_generation:1},session_id:next,incarnation_id:gen,control_epoch:1,status:{target_height:480}};
+ assert.equal(h.status(bound,reply),reply.status);
+ assert.equal(h.status(bound,{...reply,incarnation_id:startReply().control.generation}),null);
+ assert.equal(h.status(first,reply),null);
+ // A beat on the predecessor whose send is uncertain stays retained for it;
+ // once the client has committed, the next beat names the successor with the
+ // next sequence and the predecessor's beat is never resent under it.
+ await assert.rejects(h.progress(first,2000,90000,false));
+ assert.equal(await h.progress(bound,3000,90000,false),true);
+ const beats=h.requests.filter(r=>r.url.endsWith('/progress')).map(r=>JSON.parse(r.options.body));
+ assert.deepEqual(beats.map(r=>[r.sequence,r.session_id,r.position_ms]),[[5,sid,1000],[6,sid,2000],[7,next,3000]]);
+ // A later change from the committed successor reopens as a fresh Start of the same file.
+ await h.start(bound,{...startBody(h),request_id:'dddddddd-dddd-4ddd-8ddd-dddddddddddd'});
+ assert.equal(h.requests.at(-1).url,'https://b.test'+base+'/hls/sessions');
+ h.change();assert.throws(()=>h.successor(first,offer()),'an account change ends the accepted login');
 });

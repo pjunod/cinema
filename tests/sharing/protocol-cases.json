@@ -55,7 +55,11 @@
       {"id":"envelope-foreign-file","layer":"client","path":["reference","file_id"],"expected":"invalid","value":"1"},
       {"id":"envelope-foreign-item","layer":"client","path":["reference","item","item_id"],"expected":"invalid","value":"1"},
       {"id":"envelope-foreign-import","layer":"client","path":["reference","item","import_id"],"expected":"invalid","value":"20000000-0000-4000-8000-000000000004"},
-      {"id":"envelope-status-array","layer":"client","path":["status"],"expected":"invalid","value":[]}
+      {"id":"envelope-status-array","layer":"client","path":["status"],"expected":"invalid","value":[]},
+      {"id":"envelope-foreign-incarnation","layer":"client","path":["incarnation_id"],"expected":"invalid","value":"5b5b5b5b-5b5b-45b5-85b5-5b5b5b5b5b5b"},
+      {"id":"envelope-foreign-control-epoch","layer":"client","path":["control_epoch"],"expected":"invalid","value":9},
+      {"id":"envelope-missing-incarnation","layer":"client","path":["incarnation_id"],"expected":"invalid","op":"remove"},
+      {"id":"envelope-unknown-key","layer":"client","path":["local_session_id"],"expected":"invalid","value":"1"}
     ],
     "word_fields": ["encoder","playlist_shape","producer_state","producer_hold","producer_decision","control_demand","render_state","server_ready_state","tone_map_peak_source"]
   },

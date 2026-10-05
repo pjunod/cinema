@@ -110,7 +110,7 @@ final class SharedProtocolFixtureTests: XCTestCase {
         let decoded = try SharedPlaybackStatus.decode(JSONSerialization.data(withJSONObject: accepted), playback: playback)
         XCTAssertEqual(decoded.summary, "Shared HLS · 720p · h264_videotoolbox · running · 42 s ahead")
         let mutations = try XCTUnwrap(status["mutations"] as? [[String: Any]]).filter(clientLayer)
-        XCTAssertEqual(mutations.count, 13)
+        XCTAssertEqual(mutations.count, 17)
         for row in mutations {
             let wire = mutate(accepted, path: row["path"] as! [String], row: row)
             let result = try? SharedPlaybackStatus.decode(JSONSerialization.data(withJSONObject: wire), playback: playback)

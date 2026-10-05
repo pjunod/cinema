@@ -46,7 +46,8 @@ test("fixture Source IDs keep the exact decimal wire grammar",()=>{
 test("fixture status tokens and the bound Shared status grammar",()=>{
   const {h,base}=harness();
   for(const row of F.status_tokens) assert.equal(h.sharedPlaybackStatusToken(row.token),row.expected==="accepted",row.id);
-  const accepted=F.shared_status.accepted,bound=h.withPlaybackFileSession(base,accepted.session_id);
+  const accepted=F.shared_status.accepted,bound=h.withPlaybackFileSession(base,accepted.session_id,
+    {generation:accepted.incarnation_id,control_epoch:accepted.control_epoch});
   assert.deepEqual([...h.words()],F.shared_status.word_fields);
   for(const field of F.shared_status.word_fields) for(const row of F.status_tokens){
     const reply=structuredClone(accepted);reply.status[field]=row.token;
