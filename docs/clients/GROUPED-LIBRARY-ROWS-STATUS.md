@@ -166,16 +166,17 @@ Work uses a fresh agent-owned clone, never the user's checkout.
 | Surface | State | Acceptance / evidence |
 |---|---|---|
 | Native grouping | implemented | Same five sort dimensions, unknown groups, stable row keys and full filtered membership. |
-| Android | compiled | Existing LibraryPager and MediaRow; saved Rows/Grid, title search, jump menu, View all, partial error Retry. |
-| Apple | compiled | Existing LibraryGridCoordinator and PosterCard; saved Rows/Grid, jump menu, View all destination, partial error Retry. |
+| Android | validated | Existing LibraryPager and MediaRow; saved Rows/Grid, title search, visible group index, View all, partial error Retry. Twelve JVM and six phone/TV UI cases passed. |
+| Apple | validated | Existing LibraryGridCoordinator and cards; saved Rows/Grid, visible group index, View all destination, partial error Retry. Ten iPhone-simulator cases passed; iOS/tvOS builds passed. |
 | Paging ownership | implemented | Rows request all pages through the existing pager; Grid keeps viewport prefetch. No second loader. |
-| Review and tests | pending | One adversarial review when ready, then focused tests; only failures rerun. |
+| Review and tests | complete | One adversarial review, all five findings addressed, then focused tests; only failed cases rerun. |
 | Merge | pending | One batched native PR; retain regression trailers and monitor remaining tests under the user's merge-first direction. |
 
 Rows are the default on both native platforms. Native lazy row containers
 keep cards bounded to the viewport without limiting group membership.
-Grouping and filtering run off the UI thread. Release counters will increase
-with the client changes; this work does not deploy a build or change playback.
+Grouping and filtering run off the UI thread. Release counters are Apple
+build 209 and Android versionCode 146; this work does not deploy a build or
+change playback.
 
 
 Native build evidence before review: Android debug APK, JVM test sources,
@@ -228,3 +229,11 @@ failed phone case was rerun. Final local evidence is 12 Android JVM cases,
 three Android TV UI/focus cases, three phone acceptance cases, and ten Apple
 cases (nine grouping/coordinator plus the existing card-metadata contract).
 The final PR body carries configured CI outcomes and the landing receipt.
+
+
+Native fast lane 4177 passed scope and mobile version validation, then stopped
+at history-check. This PR records its native regression anchors, updates the
+superseded watch-filter wiring anchor to the combined Rows/filter/search
+paging demand, and records the malformed immutable Python trailer in #822 as
+an erratum. The audit rules remain unchanged; the new PR trailers resolve
+against the current tree before landing.

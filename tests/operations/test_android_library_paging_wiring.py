@@ -11,9 +11,12 @@ class AndroidLibraryPagingWiringCase(unittest.TestCase):
         public = screen.split("fun LibraryScreen(", 1)[1].split("internal fun LibraryScreen(", 1)[0]
         body = screen.split("internal fun LibraryScreen(", 1)[1]
         self.assertIn("vm.libraryPager(libraryIds, order)", public)
-        self.assertIn("LibraryScreen(libraryIds, title, preferences, kind, pagerFactory, onOpenItem, onBack)", public)
-        self.assertEqual(screen.count("LazyVerticalGrid("), 1)
-        self.assertIn("pager.setWatchFilter(filter)", body)
+        self.assertIn("LibraryScreen(libraryIds, title, preferences, kind, pagerFactory, onOpenItem, onBack, vm::setLibraryPresentation)", public)
+        # The ordinary Grid and the expanded single group share the same
+        # route, pager, cards, and stable item IDs.
+        self.assertEqual(screen.count("LazyVerticalGrid("), 2)
+        self.assertIn("rowItems(groups, key = { it.key })", body)
+        self.assertIn("pager.setDriveToCompletion(rows || filter != WatchFilter.Everything || query.isNotBlank())", body)
         self.assertIn("RequestInitialFocus(backFocus)", body)
         self.assertIn("items(shown, key = { it.id })", body)
         pager = (ROOT / "clients/android/app/src/main/java/tv/plurx/app/ui/LibraryPager.kt").read_text()

@@ -241,3 +241,8 @@ reason = "PR #698 reached the architecture effort through immutable merge 27397d
 [[errata]]
 commit = "d871707179e67c8b7f1749c24b6f856881795ce2"
 reason = "PR #699 reached the architecture effort through immutable merge 6f0bac0bafed2e063e95883a3654d1b035849b69 with subject 'fix(streaming): prepare exact encoded complete output for later attachments', which omitted (#699) and therefore is not recognized as a landing by the history audit. That merge preserves five Regression-Test lines resolving against its own tree; corrective commit 8c601d5b is in its ancestry. The recognized #700 landing exposes this ancestor as outside a recognized landing. This coordinator-approved permanent erratum records only the malformed subject; it does not move the boundary, rewrite history, change the parser or runtime, promote the effort into main, or exempt PR #702 from checked regression fields."
+
+
+[[errata]]
+commit = "6cb19bb489edf0a8cb005503cd914b586fbc628c"
+reason = "PR #822 landed with a class-qualified Python Regression-Test field, tests/operations/test_player_input_fence.py::PlayerInputFenceTest.test_the_fence_passes_the_repository_as_it_stands. The resolver requires the bare method name: tests/operations/test_player_input_fence.py::test_the_fence_passes_the_repository_as_it_stands. That test passed on the corrected bb90441e1 source before landing; the merge tree was verified identical, and the row-boundary browser regression also passed. Native PR #823 exposed the malformed immutable trailer in history-check. This erratum records only that reference typo; it preserves the boundary, audit policy, runtime and original history. PR #823 validates its own bare-method trailers before merging."
