@@ -5919,3 +5919,75 @@ Still open:
 - B answers a refused artwork read (assignment removed, import inactive) with
   503 rather than a typed 404. No bytes are served either way.
 - None of this is physically qualified against a real pinned Source/B pair.
+
+### Shared prepared successor — commit transport and cancelled change (2026-10-04)
+
+Two defects in the P1/P2 handoff above, found on the integrated
+`claude/sharing-batch4` tree.
+
+**Commit answer cut by its own predecessor.** The real pinned fixture failed
+over B H2: the commit exchange got `BrokenPipe`. The commit settled at B and
+called `supersede_predecessors` inside the control handler, before the answer
+was returned. That started the predecessor's retirement, which cancels `stop`.
+The predecessor's connection monitor (`retain_accepted_connection`) then cut
+every transport it was retained on, including the one still carrying the
+commit answer. Over H1 the body is written inside the connection's own poll,
+so the race was usually won; over H2 the stream task hands the frame to the
+connection driver, and the cut won.
+
+The fix is ordering and ownership, with no delay or retry:
+
+- `commit_successor` still marks the successor committed at once. The
+  predecessors it replaces now travel in a `CommittedHandoff` owned by the
+  commit answer's writer (`CommitAnswerWriter`).
+- The writer drops its connection guard first, then the handoff. Only then is
+  each predecessor handed to its retirement owner with reason `Superseded`.
+  The handoff runs on every path, including a client that left before reading
+  the answer, so a settled commit always supersedes.
+- A connection monitor whose session retires as a hand-over to the same
+  viewer's successor (`Superseded`, or a withdrawn successor's `Replaced`)
+  releases its custody without cutting when none of that session's writers is
+  still on the transport. Admission is already closed, so no writer can join
+  after the count.
+- A transport with a writer still in flight, and every revocation, deletion
+  or administrative stop, is cut exactly as before.
+
+Without that last distinction the commit answer, or the successor's own media
+on a shared H2 connection, could still be cut after its body ended.
+
+**A cancelled change restaged the original rendition.** The dispatch rule
+compared each ask with the last *dispatched* ask. After a change to X was
+withdrawn (the client returned to its original ask A) or aborted, A differed
+from X, so B staged a successor for the rendition it was already delivering.
+An idle player then held a second Source and B slot until the deadline. Now
+each session records its own ask (`own_digest`): the first accepted exchange,
+or the ask a successor was staged for. An ask equal to it never stages.
+`dispatched_digest` now only keeps a refused or failed ask from being
+redispatched. It is cleared when the successor is withdrawn for a left ask or
+aborted, so a renewed change stages again.
+
+Evidence on nuc4 (rustc 1.97.1), integrated tree:
+
+- New regressions, each failing on the old code and passing now:
+  - `sharing_receiver_commit_answer_writer_is_released_before_the_predecessor_retires`;
+  - `receiver_handover_releases_idle_transports_and_cuts_busy_or_revoked_ones`;
+  - `sharing_receiver_cancelled_change_never_restages_the_sessions_own_ask`.
+
+  The commit tests now assert the predecessor keeps serving until the
+  handoff runs.
+- Real pinned CGNAT fixtures in the disposable namespace:
+  - `sharing_receiver_real_pinned_prepared_handoff_commit_and_abort` passed
+    over H1 and H2, twice (85.5 s and 96.3 s);
+  - `sharing_receiver_real_pinned_quality_reopen_preserves_position_and_releases_slot`,
+    whose superseded predecessor now takes the release-or-cut path, passed
+    (34.3 s).
+- Affected daemon filters (`sharing`, `source_`, `direct_range`, `receiver_`):
+  348 passed, 10 ignored, 2 failed. The failures were
+  `sharing_artwork_blocked_http1_http2_bytes_own_their_lease_without_a_monitor`
+  (503 for 429 under load) and
+  `source_resource_media_open_job_retains_actual_fd_and_guard_after_waiter_cancellation`
+  (an fd-close race). Neither is in changed code, and both passed on an exact
+  rerun.
+- Clippy with denied warnings on plurxd and plurx-core, all targets.
+  `tests/validation` (253) passes, with the ownership inventory at +1
+  test-only wait.
