@@ -58,6 +58,71 @@ class LiveTvGuideTest {
         }
     }
 
+    /**
+     * The station-logo rule is the web's, transcribed. Until 2026-10-04 it
+     * lived only in the web page, outside this fixture — which is how both
+     * native guides shipped without logos and no suite noticed.
+     */
+    @Test
+    fun stationLogoAnswersEverySharedCase() {
+        val logos = cases.getValue("station_logo").jsonObject
+        val match = logos.getValue("match").jsonArray
+        val values = logos.getValue("values").jsonArray
+        assertTrue("the fixture lost its station-logo cases", match.isNotEmpty() && values.isNotEmpty())
+        match.forEach { element ->
+            val row = element.jsonObject
+            assertEquals(
+                row.getValue("name").jsonPrimitive.content,
+                row.getValue("expect").jsonPrimitive.contentOrNullSafe(),
+                LiveTvGuideReducer.stationLogoUrl(guide, row.getValue("channel").jsonPrimitive.content),
+            )
+        }
+        val cold = logos.getValue("no_guide").jsonObject
+        assertEquals(
+            cold.getValue("name").jsonPrimitive.content,
+            cold.getValue("expect").jsonPrimitive.contentOrNullSafe(),
+            LiveTvGuideReducer.stationLogoUrl(null, cold.getValue("channel").jsonPrimitive.content),
+        )
+        values.forEach { element ->
+            val row = element.jsonObject
+            val single = LiveTvGuide(
+                channels = listOf(
+                    LiveTvGuideChannel(
+                        id = "logo",
+                        guide_number = "0.1",
+                        image_url = row["image_url"]?.jsonPrimitive?.contentOrNullSafe(),
+                    ),
+                ),
+            )
+            assertEquals(
+                row.getValue("name").jsonPrimitive.content,
+                row.getValue("expect").jsonPrimitive.contentOrNullSafe(),
+                LiveTvGuideReducer.stationLogoUrl(single, "logo"),
+            )
+        }
+    }
+
+    /** The grid header draws the logo the layout carries, row by row. */
+    @Test
+    fun gridRowsCarryTheirStationLogo() {
+        val grid = cases.getValue("grid").jsonObject
+        val layout = LiveTvGuideReducer.gridLayout(
+            guide = guide,
+            channels = lineup,
+            window = LiveTvGuideWindow(
+                grid.getValue("window").jsonObject.getValue("start").jsonPrimitive.long,
+                grid.getValue("window").jsonObject.getValue("end").jsonPrimitive.long,
+            ),
+            now = grid.getValue("now").jsonPrimitive.long,
+            pxPerSlot = grid.getValue("px_per_slot").jsonPrimitive.float,
+        )
+        layout.rows.forEach { row ->
+            assertEquals(row.channel.id, LiveTvGuideReducer.stationLogoUrl(guide, row.channel.id), row.logo)
+        }
+        assertEquals("https://example.invalid/cbs.png", layout.rows.first { it.channel.id == "2.1" }.logo)
+        assertNull(layout.rows.first { it.channel.id == "4.1" }.logo)
+    }
+
     @Test
     fun gridLayoutPlacesEveryCellWhereTheSharedCasesSay() {
         val grid = cases.getValue("grid").jsonObject

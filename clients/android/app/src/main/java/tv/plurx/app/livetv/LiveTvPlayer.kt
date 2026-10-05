@@ -684,6 +684,10 @@ class LiveTvPlayer private constructor(context: Context) {
     fun airing(channel: LiveTvChannel, now: Long = System.currentTimeMillis() / 1000): LiveTvAiring =
         LiveTvGuideReducer.airing(mutableState.value.guide, channel.id, now)
 
+    /** The station's logo address from the guide, or null for the callsign. */
+    fun stationLogo(channel: LiveTvChannel): String? =
+        LiveTvGuideReducer.stationLogoUrl(mutableState.value.guide, channel.id)
+
     /** Drop observations at 20 minutes or the programme that owned them, whichever ends first. */
     fun expireSourceFormats(now: Long) {
         val latest = mutableState.value
