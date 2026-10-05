@@ -14,7 +14,7 @@ page (`pages/live-tv.js`) instead of the shared guide reducer and
 `tests/playback/live-tv-guide-cases.json` — the one contract all three guides
 reproduce — so the native clients, which already decode `image_url`, were
 never asked to draw it and no suite could see the gap. The rule is now
-`station_logo` in that fixture (lineup-id match, cold guide, 33 address
+`station_logo` in that fixture (lineup-id match, cold guide, 38 address
 cases; a textual `https://` + plain-host rule so three languages agree),
 answered by `PlurxLiveTv.stationLogoUrl`, Apple's and Android's
 `LiveTvGuideReducer`. Apple (build 209) and Android (versionCode 146) draw it
@@ -22,7 +22,10 @@ in list rows, grid headers, programme details, the picture badge and the
 fullscreen identity, with the callsign until the image decodes. Native
 artwork loads on its own connection with no bearer, cookies or HTTPS→HTTP
 redirects (Android's app-wide Coil loader adds the bearer to every host).
-Not yet on hardware.
+Adversarial review: no blockers; its five should-fix findings are
+addressed (scheme respelled for Coil, Android failure backoff, Apple lock
+kept off suspension points, grid headers keep their width without artwork,
+wiring pinned by source tests). Not yet on hardware.
 
 ## Apple TV: new HEVC WEB-DLs refused with 503 — ffmpeg 8 repeats the sample description
 
