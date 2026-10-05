@@ -156,6 +156,18 @@ and subtitle requests. Add root aliases only for an observed client need and
 after checking every collision. A reverse-proxy subdomain can be a later
 deployment choice; it must not become a hidden prerequisite.
 
+**Standard-port amendment (2026-10-04).** Jellyfin clients given only a host
+connect to `http://<host>:8096/`, Jellyfin's standard port at the root, and
+Infuse on iPhone failed exactly that way. That is the observed need. The
+facade also listens on that port (`server.jellyfin_port`), on its own
+listener, so `/` on Plurx's port stays the UI and Plex and nothing collides.
+Every request there is mapped under `/jellyfin` before routing, so only the
+facade is reachable, with the same gate, fence, deadlines and metrics.
+Responses name paths under the mount the client used. The same change made
+`TranscodingUrl`/`DirectStreamUrl` client-base-relative, as this section
+always required: they had named `/jellyfin`, which the client's own base
+doubled.
+
 Use client-base-relative URLs. Plurx has no configured public-origin setting;
 `trusted_proxies` resolves client IP, not a public URL. Do not invent that
 setting or construct origins from request `Host`. J0 must prove the exact

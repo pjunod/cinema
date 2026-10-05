@@ -2105,6 +2105,7 @@ async fn boot_observing(
     let leave_shutdown = state.shutdown.clone();
     let live_tv_shutdown = Arc::clone(&state.live_tv);
     let serving_shutdown = state.serving.clone();
+    let jellyfin_standard_port = Arc::clone(&state.jellyfin_standard_port);
     let app = http::router(state);
     tokio::task::spawn_blocking(http::web::warm_static_assets)
         .await
@@ -2120,6 +2121,13 @@ async fn boot_observing(
     let discovery_node_id =
         (!config.cluster.advertise_host.trim().is_empty()).then_some(node_id.as_str());
     let mdns = start_discovery(&config, &instance_id, discovery_node_id, advertiser);
+    let jellyfin = JellyfinStandardListener::open(
+        config.server.jellyfin_bind(),
+        &app,
+        &jellyfin_standard_port,
+    )
+    .await;
+    let jellyfin_stop = jellyfin.stop_token();
 
     let shutdown = async move {
         tokio::select! {
@@ -2142,16 +2150,23 @@ async fn boot_observing(
         if let Err(error) = live_tv_shutdown.shutdown().await {
             tracing::warn!(%error, "Live TV shutdown could not confirm complete cleanup");
         }
+        // The main listener stops accepting when this future completes;
+        // the Jellyfin standard port stops at the same moment.
+        jellyfin_stop.cancel();
     };
     let served = if let Some(owner) = observation {
         match owner.serve_normal(app, shutdown).await {
-            Ok(drain) => drain_serving_state(progress, mdns).await.map(|()| drain),
+            Ok(drain) => {
+                let drain = drain.and(jellyfin.drain().await);
+                drain_serving_state(progress, mdns).await.map(|()| drain)
+            }
             Err(error) => Err(error),
         }
     } else {
         serve(
             listener.expect("normal startup owns its listener"),
             app,
+            jellyfin,
             progress,
             mdns,
             shutdown,
@@ -3277,11 +3292,16 @@ fn gdm_responder_port(lan_discovery: bool, bind: SocketAddr) -> Option<u16> {
 async fn serve(
     listener: tokio::net::TcpListener,
     app: axum::Router,
+    jellyfin: JellyfinStandardListener,
     progress: Arc<crate::progress::ProgressCoalescer>,
     mdns: Option<mdns_sd::ServiceDaemon>,
     shutdown: impl std::future::Future<Output = ()> + Send + 'static,
 ) -> anyhow::Result<HttpDrain> {
-    let drain = serve_http(listener, app, shutdown, HTTP_TIMEOUTS).await?;
+    // The shutdown future stops both listeners at once; the standard port
+    // finishes draining before progress is flushed, like the main one.
+    let drain = serve_http(listener, app, shutdown, HTTP_TIMEOUTS)
+        .await?
+        .and(jellyfin.drain().await);
     drain_serving_state(progress, mdns).await?;
     Ok(drain)
 }
@@ -3295,6 +3315,104 @@ enum HttpDrain {
     Complete,
     /// The window passed with connections still open; they were abandoned.
     TimedOut,
+}
+
+impl HttpDrain {
+    /// A process drained only if every listener it served did.
+    fn and(self, other: Self) -> Self {
+        if self == Self::Complete && other == Self::Complete {
+            Self::Complete
+        } else {
+            Self::TimedOut
+        }
+    }
+}
+
+/// Jellyfin's standard port, served beside the main listener.
+///
+/// Jellyfin clients given only a host assume this port at the server root, so
+/// the facade answers there too: `http::jellyfin_standard_port_app` maps every
+/// request under the facade's mount, and nothing else is reachable on it.
+/// Opening it is best-effort, like discovery: a host where the port is taken
+/// (a real Jellyfin still running, say) keeps serving on its own port, and
+/// Settings -> Developer says why bare-host clients cannot connect. It stops
+/// accepting at the same moment as the main listener and drains before
+/// playback progress is flushed, so a late progress report through it is not
+/// lost.
+#[derive(Default)]
+struct JellyfinStandardListener {
+    stop: tokio_util::sync::CancellationToken,
+    task: Option<tokio::task::JoinHandle<anyhow::Result<HttpDrain>>>,
+}
+
+impl JellyfinStandardListener {
+    async fn open(
+        address: Option<SocketAddr>,
+        app: &axum::Router,
+        status: &http::JellyfinStandardPortStatus,
+    ) -> Self {
+        let mut listener = Self::default();
+        let Some(address) = address else {
+            status.record(http::JellyfinStandardPort::Off);
+            return listener;
+        };
+        match tokio::net::TcpListener::bind(address).await {
+            Ok(socket) => {
+                let bound = socket.local_addr().unwrap_or(address);
+                tracing::info!(addr = %bound, "listening for Jellyfin clients at the server root");
+                status.record(http::JellyfinStandardPort::Listening(bound));
+                let stop = listener.stop.clone();
+                listener.task = Some(tokio::spawn(serve_http(
+                    socket,
+                    http::jellyfin_standard_port_app(app.clone()),
+                    async move { stop.cancelled().await },
+                    HTTP_TIMEOUTS,
+                )));
+            }
+            Err(error) => {
+                tracing::warn!(
+                    addr = %address,
+                    %error,
+                    "Jellyfin standard port unavailable; Jellyfin clients need the /jellyfin address on the main port"
+                );
+                status.record(http::JellyfinStandardPort::Unavailable {
+                    address,
+                    error: error.to_string(),
+                });
+            }
+        }
+        listener
+    }
+
+    fn stop_token(&self) -> tokio_util::sync::CancellationToken {
+        self.stop.clone()
+    }
+
+    /// Stop accepting, if the shutdown future has not already, and wait for
+    /// open connections to finish inside `serve_http`'s drain window.
+    async fn drain(mut self) -> HttpDrain {
+        self.stop.cancel();
+        let Some(task) = self.task.take() else {
+            return HttpDrain::Complete;
+        };
+        match task.await {
+            Ok(Ok(drain)) => drain,
+            Ok(Err(error)) => {
+                tracing::warn!(%error, "Jellyfin standard-port listener stopped with an error");
+                HttpDrain::TimedOut
+            }
+            Err(error) => {
+                tracing::warn!(%error, "Jellyfin standard-port listener task failed");
+                HttpDrain::TimedOut
+            }
+        }
+    }
+}
+
+impl Drop for JellyfinStandardListener {
+    fn drop(&mut self) {
+        self.stop.cancel();
+    }
 }
 
 async fn drain_serving_state(
@@ -6008,9 +6126,16 @@ mod startup_tests {
         let (stop, stopped) = tokio::sync::oneshot::channel::<()>();
         let logs = Arc::new(logbuf::LogBuffer::new(64));
         let _capture = capturing(&logs);
-        let served = tokio::spawn(serve(listener, app, progress, Some(daemon), async move {
-            let _ = stopped.await;
-        }));
+        let served = tokio::spawn(serve(
+            listener,
+            app,
+            JellyfinStandardListener::default(),
+            progress,
+            Some(daemon),
+            async move {
+                let _ = stopped.await;
+            },
+        ));
         stop.send(()).expect("stop");
 
         tokio::time::timeout(Duration::from_secs(10), served)
@@ -6089,9 +6214,16 @@ mod startup_tests {
         let (stop, stopped) = tokio::sync::oneshot::channel::<()>();
         let logs = Arc::new(logbuf::LogBuffer::new(64));
         let _capture = capturing(&logs);
-        let served = tokio::spawn(serve(listener, app, progress, None, async move {
-            let _ = stopped.await;
-        }));
+        let served = tokio::spawn(serve(
+            listener,
+            app,
+            JellyfinStandardListener::default(),
+            progress,
+            None,
+            async move {
+                let _ = stopped.await;
+            },
+        ));
         stop.send(()).expect("stop");
 
         tokio::time::timeout(Duration::from_secs(10), served)
@@ -6554,9 +6686,16 @@ mod startup_tests {
         let addr = listener.local_addr().expect("addr");
 
         let (stop, stopped) = tokio::sync::oneshot::channel::<()>();
-        let served = tokio::spawn(serve(listener, app, progress, None, async move {
-            let _ = stopped.await;
-        }));
+        let served = tokio::spawn(serve(
+            listener,
+            app,
+            JellyfinStandardListener::default(),
+            progress,
+            None,
+            async move {
+                let _ = stopped.await;
+            },
+        ));
 
         let client = reqwest::Client::new();
         let health = client
@@ -6624,9 +6763,16 @@ mod startup_tests {
         let addr = listener.local_addr().expect("addr");
 
         let (stop, stopped) = tokio::sync::oneshot::channel::<()>();
-        let served = tokio::spawn(serve(listener, app, progress, None, async move {
-            let _ = stopped.await;
-        }));
+        let served = tokio::spawn(serve(
+            listener,
+            app,
+            JellyfinStandardListener::default(),
+            progress,
+            None,
+            async move {
+                let _ = stopped.await;
+            },
+        ));
 
         let body = reqwest::Client::new()
             .get(format!("http://{addr}/peer"))
@@ -6845,6 +6991,61 @@ mod startup_tests {
         assert!(!Arc::ptr_eq(&logs.general, &again.general));
         assert!(!Arc::ptr_eq(&logs.cluster, &again.cluster));
         init_companion_logging();
+    }
+
+    /// The standard port is best-effort: off and taken both leave the server
+    /// running and say so, and an open one answers over TCP, then stops
+    /// accepting when it drains.
+    #[tokio::test]
+    async fn jellyfin_standard_port_is_best_effort_and_drains_with_the_server() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let status = http::JellyfinStandardPortStatus::default();
+        let app = axum::Router::new();
+
+        let off = JellyfinStandardListener::open(None, &app, &status).await;
+        assert_eq!(status.current(), http::JellyfinStandardPort::Off);
+        assert_eq!(off.drain().await, HttpDrain::Complete);
+
+        let held = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("hold a port");
+        let taken = held.local_addr().expect("held address");
+        let refused = JellyfinStandardListener::open(Some(taken), &app, &status).await;
+        assert!(
+            matches!(
+                status.current(),
+                http::JellyfinStandardPort::Unavailable { address, .. } if address == taken
+            ),
+            "{:?}",
+            status.current()
+        );
+        assert_eq!(refused.drain().await, HttpDrain::Complete);
+
+        let open = JellyfinStandardListener::open(
+            Some("127.0.0.1:0".parse().expect("addr")),
+            &app,
+            &status,
+        )
+        .await;
+        let http::JellyfinStandardPort::Listening(bound) = status.current() else {
+            panic!("not listening: {:?}", status.current());
+        };
+        assert_ne!(bound.port(), 0);
+        let mut stream = tokio::net::TcpStream::connect(bound)
+            .await
+            .expect("connect");
+        stream
+            .write_all(b"GET /System/Info/Public HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n")
+            .await
+            .expect("write");
+        let mut response = String::new();
+        stream.read_to_string(&mut response).await.expect("read");
+        assert!(response.starts_with("HTTP/1.1 404"), "{response}");
+        assert_eq!(open.drain().await, HttpDrain::Complete);
+        assert!(
+            tokio::net::TcpStream::connect(bound).await.is_err(),
+            "a drained listener stops accepting"
+        );
     }
 
     /// The common boot failure is a port already in use, and "Address already
@@ -8068,9 +8269,16 @@ mod startup_tests {
         let addr = listener.local_addr().expect("addr");
 
         let (stop, stopped) = tokio::sync::oneshot::channel::<()>();
-        let served = tokio::spawn(serve(listener, app, progress, None, async move {
-            let _ = stopped.await;
-        }));
+        let served = tokio::spawn(serve(
+            listener,
+            app,
+            JellyfinStandardListener::default(),
+            progress,
+            None,
+            async move {
+                let _ = stopped.await;
+            },
+        ));
 
         // Hold a request open, then ask the server to stop.
         let hanging = tokio::spawn(async move {

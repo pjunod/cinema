@@ -869,3 +869,24 @@ eligibility check rejects High-tier declarations in a multivariant. Infuse
 would see a media playlist at the master URL for that file. Negotiation
 already refuses HDR copy, so it reaches only that source class; J6 decides it
 with the physical client.
+
+## 12. Reachable by host alone (2026-10-04)
+
+Infuse on iPhone, given only a node's address, could not connect. Jellyfin
+clients complete a bare host to Jellyfin's standard port at the server root,
+`http://<host>:8096/`, and Plurx answered Jellyfin only on its own port under
+`/jellyfin`. The facade now also listens on 8096 (`server.jellyfin_port`;
+Compose publishes it, movable with `PLURX_JELLYFIN_HOST_PORT`). That listener
+maps every request under `/jellyfin`, so it reaches only the facade. A taken
+port is not fatal: it is logged, and Settings → Developer shows it as the
+*Reachable by host alone* readiness row.
+
+The same review found that `TranscodingUrl` and `DirectStreamUrl` named the
+`/jellyfin` mount. J0 measured that clients join their server address with
+these paths, so on Plurx's port a client would have requested
+`/jellyfin/jellyfin/Videos/...`. Both are now client-base-relative, and HLS
+manifest children follow the mount the client used.
+
+A learner node (nuc3 today) answers facade requests with 503
+`learner_route_ineligible`, as it does native server requests: a learner serves
+only bounded catalogue reads and node-local media. Use a voter's address.

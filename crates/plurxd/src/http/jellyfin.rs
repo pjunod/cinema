@@ -9,7 +9,7 @@ use super::{auth, error::ApiError};
 use crate::state::AppState;
 use axum::{
     extract::{DefaultBodyLimit, FromRequestParts, Path, RawQuery, State},
-    http::{request::Parts, HeaderMap, StatusCode},
+    http::{request::Parts, uri::PathAndQuery, HeaderMap, StatusCode, Uri},
     response::{IntoResponse, Response},
     routing::{get, post},
     Json, Router,
@@ -101,6 +101,105 @@ pub(super) fn router() -> Router<AppState> {
         .fallback(not_found)
         .method_not_allowed_fallback(method_not_allowed)
 }
+/// The facade's path on Plurx's own port, beside the web app and Plex.
+pub(crate) const MOUNT: &str = "/jellyfin";
+
+/// Marks a request that reached the facade at the root of the Jellyfin
+/// standard port, so the responses that name facade paths themselves name
+/// them without a mount the client never used.
+#[derive(Clone, Copy, Debug)]
+struct RootMount;
+
+/// The path prefix this client reaches the facade under: `/jellyfin` on
+/// Plurx's port, nothing at the root of the Jellyfin standard port.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) struct Mount(pub(super) &'static str);
+impl<S: Send + Sync> FromRequestParts<S> for Mount {
+    type Rejection = std::convert::Infallible;
+    async fn from_request_parts(parts: &mut Parts, _state: &S) -> Result<Self, Self::Rejection> {
+        Ok(Self(if parts.extensions.get::<RootMount>().is_some() {
+            ""
+        } else {
+            MOUNT
+        }))
+    }
+}
+
+/// The facade at the server root, for the Jellyfin standard-port listener.
+///
+/// Jellyfin clients given only a host connect to `http://<host>:8096/`.
+/// Every request on that listener is mapped under [`MOUNT`] before routing,
+/// so it reaches only the facade, never the native API, the web app or the
+/// Plex routes, and passes the same enabled gate, serving fence, deadlines,
+/// redaction and metrics as a request to `/jellyfin` on Plurx's port. A path
+/// already under the mount is left as it is, so `http://<host>:8096/jellyfin`
+/// works too.
+pub(crate) fn standard_port_app(app: Router) -> Router {
+    Router::new().fallback_service(tower::util::MapRequest::new(app, at_root))
+}
+
+// `OriginalUri` keeps the unmapped target on purpose: nothing in plurxd
+// reads it, and routing, gates, metrics and redaction all key on the mapped
+// URI and `MatchedPath`.
+fn at_root(mut request: axum::extract::Request) -> axum::extract::Request {
+    let path = request.uri().path();
+    if path == MOUNT || path.starts_with("/jellyfin/") {
+        return request;
+    }
+    // An asterisk-form target (`OPTIONS *`) has no leading slash, and
+    // prefixing it would name `/jellyfin*`, outside the nest and so the SPA.
+    if !path.starts_with('/') {
+        *request.uri_mut() = Uri::from_static("/jellyfin/");
+        request.extensions_mut().insert(RootMount);
+        return request;
+    }
+    let target = match request.uri().query() {
+        Some(query) => format!("{MOUNT}{path}?{query}"),
+        None => format!("{MOUNT}{path}"),
+    };
+    let mut parts = request.uri().clone().into_parts();
+    // Whatever happens, an unmapped path must never reach a native route,
+    // so a target that cannot be re-parsed falls to the mount's JSON 404.
+    parts.path_and_query = Some(
+        target
+            .parse()
+            .unwrap_or_else(|_| PathAndQuery::from_static("/jellyfin/")),
+    );
+    *request.uri_mut() = Uri::from_parts(parts).unwrap_or_else(|_| Uri::from_static("/jellyfin/"));
+    request.extensions_mut().insert(RootMount);
+    request
+}
+
+/// What became of this process's Jellyfin standard-port listener.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(crate) enum StandardPort {
+    /// Turned off (`jellyfin_port = 0`), or startup has not opened it yet.
+    #[default]
+    Off,
+    Listening(std::net::SocketAddr),
+    Unavailable {
+        address: std::net::SocketAddr,
+        error: String,
+    },
+}
+
+#[derive(Debug, Default)]
+pub(crate) struct StandardPortStatus(std::sync::RwLock<StandardPort>);
+impl StandardPortStatus {
+    pub(crate) fn record(&self, port: StandardPort) {
+        *self
+            .0
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = port;
+    }
+    pub(crate) fn current(&self) -> StandardPort {
+        self.0
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+    }
+}
+
 pub(super) async fn not_found() -> ApiError {
     ApiError::NotFound("Jellyfin endpoint")
 }
@@ -1127,6 +1226,17 @@ mod tests {
         }
         r.body(Body::from(body.to_string())).expect("request")
     }
+    /// Facade URLs are client-base-relative: the client joins its server
+    /// address, which already carries any mount, with them (design 3.1; J0
+    /// Infuse requested `/jellyfin` + `TranscodingUrl`). The test app is
+    /// Plurx's own port, so the request goes under the mount.
+    fn mounted(url: &str) -> String {
+        assert!(
+            url.starts_with("/Videos/"),
+            "a facade URL names no mount: {url}"
+        );
+        format!("{MOUNT}{url}")
+    }
     async fn json_call(app: &Router, r: Request<Body>) -> (StatusCode, Value) {
         let path = r.uri().path().to_owned();
         let response = app.clone().oneshot(r).await.expect("response");
@@ -1368,6 +1478,8 @@ mod tests {
         let url = info["MediaSources"][0]["TranscodingUrl"]
             .as_str()
             .expect("native HLS URL");
+        let root_url = url;
+        let url = &mounted(url);
         assert!(!url.contains(&f.token));
         let response = f
             .app
@@ -1472,6 +1584,55 @@ mod tests {
             master.contains("#EXT-X-STREAM-INF"),
             "the master alias is a multivariant wrapper: {master}"
         );
+        // A client at the root of the Jellyfin standard port is handed the
+        // same children at that root, never under a mount it did not use.
+        let at_root = super::standard_port_app(f.app.clone())
+            .oneshot(request("GET", root_url, Some(&f.token), Value::Null))
+            .await
+            .expect("root-mounted master");
+        assert_eq!(at_root.status(), StatusCode::OK);
+        let root_master = String::from_utf8(
+            at_root
+                .into_body()
+                .collect()
+                .await
+                .expect("root master body")
+                .to_bytes()
+                .to_vec(),
+        )
+        .expect("root manifest");
+        let children = |manifest: &str| {
+            manifest
+                .lines()
+                .filter(|line| !line.is_empty() && !line.starts_with('#'))
+                .map(str::to_owned)
+                .collect::<Vec<_>>()
+        };
+        let root_children = children(&root_master);
+        assert!(!root_children.is_empty(), "{root_master}");
+        assert!(
+            root_children
+                .iter()
+                .all(|child| child.starts_with("/Videos/")),
+            "{root_master}"
+        );
+        assert_eq!(
+            children(&master),
+            root_children
+                .iter()
+                .map(|child| format!("{MOUNT}{child}"))
+                .collect::<Vec<_>>()
+        );
+        let child = super::standard_port_app(f.app.clone())
+            .oneshot(request(
+                "GET",
+                &root_children[0],
+                Some(&f.token),
+                Value::Null,
+            ))
+            .await
+            .expect("root-mounted child");
+        assert_eq!(child.status(), StatusCode::OK, "{}", root_children[0]);
         if encoded {
             assert!(
                 !master.contains("#EXT-X-MEDIA") && !master.contains("SUBTITLES="),
@@ -1907,6 +2068,7 @@ mod tests {
         let url = next["MediaSources"][0]["DirectStreamUrl"]
             .as_str()
             .expect("URL");
+        let url = &mounted(url);
         let response = f
             .app
             .clone()
@@ -1996,6 +2158,7 @@ mod tests {
         let url = negotiation["MediaSources"][0]["DirectStreamUrl"]
             .as_str()
             .expect("direct URL");
+        let url = &mounted(url);
         let unauthorized = f
             .app
             .clone()
@@ -2140,6 +2303,7 @@ mod tests {
         let direct_url = negotiation["MediaSources"][0]["DirectStreamUrl"]
             .as_str()
             .expect("direct URL");
+        let direct_url = &mounted(direct_url);
         assert!(
             !direct_url.contains(&tag),
             "the authenticated URL must not carry the link"
@@ -2313,6 +2477,7 @@ mod tests {
             .as_str()
             .expect("URL")
             .to_owned();
+        let url = mounted(&url);
         let call = |range: Option<&str>, if_range: Option<&str>, method: &str| {
             let mut r = request(method, &url, Some(&f.token), Value::Null);
             if let Some(range) = range {
@@ -2369,6 +2534,7 @@ mod tests {
             .as_str()
             .expect("URL")
             .to_owned();
+        let url = mounted(&url);
         for enabled in [false, true] {
             f.state
                 .store
@@ -2449,6 +2615,7 @@ mod tests {
         let fresh_url = fresh["MediaSources"][0]["DirectStreamUrl"]
             .as_str()
             .expect("fresh URL");
+        let fresh_url = &mounted(fresh_url);
         assert_eq!(
             status_of(&f, request("GET", fresh_url, Some(&f.token), Value::Null))
                 .await
@@ -3134,6 +3301,78 @@ mod tests {
             .expect("root content type")
             .starts_with("text/html"));
     }
+    /// A client given only a host reaches Jellyfin's standard port at the
+    /// root. That listener maps every request under the mount, so it serves
+    /// exactly the facade: the same answers as `/jellyfin` on Plurx's port, a
+    /// JSON 404 where the native API, web app or Plex routes would be, and
+    /// nothing while compatibility is off.
+    #[tokio::test]
+    async fn jellyfin_standard_port_serves_only_the_facade_at_the_server_root() {
+        let (app, _state) = super::super::tests::test_app_with_state();
+        let root = super::standard_port_app(app.clone());
+        let admin = setup(&app).await;
+        let (status, _) = json_call(
+            &root,
+            request("GET", "/System/Info/Public", None, Value::Null),
+        )
+        .await;
+        assert_eq!(status, StatusCode::NOT_FOUND, "off is off on every port");
+        let (status, _) = json_call(
+            &app,
+            request(
+                "PUT",
+                "/api/v1/settings",
+                Some(&admin),
+                json!({"jellyfin_compatibility_enabled":true}),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        for path in ["/System/Info/Public", "/jellyfin/System/Info/Public"] {
+            let (status, info) = json_call(&root, request("GET", path, None, Value::Null)).await;
+            assert_eq!(status, StatusCode::OK, "{path}");
+            assert_eq!(info["Version"], "10.11.11", "{path}");
+        }
+        let mut login = request(
+            "POST",
+            "/Users/AuthenticateByName",
+            None,
+            json!({"Username":"catalog-admin","Pw":"supersecret"}),
+        );
+        login.headers_mut().insert(
+            "x-emby-authorization",
+            "MediaBrowser Client=\"Infuse-Library\", DeviceId=\"root-port\", Version=\"8.5.6\""
+                .parse()
+                .expect("metadata"),
+        );
+        let (status, session) = json_call(&root, login).await;
+        assert_eq!(status, StatusCode::OK, "{session}");
+        let token = session["AccessToken"].as_str().expect("token");
+        let (status, me) =
+            json_call(&root, request("GET", "/Users/Me", Some(token), Value::Null)).await;
+        assert_eq!(status, StatusCode::OK, "{me}");
+        // The native API, the web app and the Plex routes are not on this
+        // port, whatever form the request target takes.
+        for path in [
+            "/",
+            "/api/v1/server",
+            "/api/v1/me",
+            "/web/index.html",
+            "/identity",
+            "/library/sections",
+            "*",
+            "http://elsewhere/api/v1/me",
+            "//api/v1/me",
+            "/%6Aellyfin/../api/v1/me",
+            "/Jellyfin/System/Info/Public",
+            "/jellyfinfoo",
+        ] {
+            let (status, _) =
+                json_call(&root, request("GET", path, Some(&admin), Value::Null)).await;
+            assert_eq!(status, StatusCode::NOT_FOUND, "{path}");
+        }
+    }
+
     #[tokio::test]
     async fn jellyfin_connection_catalog_preserves_zero_paging_and_refuses_user_and_credential_conflicts(
     ) {
