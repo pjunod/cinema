@@ -1,0 +1,9 @@
+image=sha256:f4b0321a60fdabf6c1f51f893722400246f49a874dda19b0fdc4713d725f16e6
+net=none caps=[ALL] no_new_privileges=[no-new-privileges] cpus=2000000000 cpu_shares=128 mem=2147483648 swap=2147483648 pids=128 user=1000:1000
+90004301255382e1beb441a294fa8b75ac7fbb54678837f224d3458032e38787  /usr/lib/jellyfin-ffmpeg/ffmpeg
+2f270d6f6f97bfb4167ee8ab00d4e17ecd18bd22069f4d270f7af41c06e11ac2  /usr/lib/jellyfin-ffmpeg/ffprobe
+96733ee5dc9044777292ef7968ce127abd57f6e64d7b34cae869cf6eafce6b74  /var/tmp/plurx-fm2f.XrSpMt/layout.py
+2693e738a058f8e42181742640d9aebcac6baac1676a9859aed1451eccc12585  /var/tmp/plurx-fm2f.XrSpMt/collector.py
+plurx_transcode_sessions_active 0
+plurx_live_tv_sessions{state="starting"} 0
+plurx_live_tv_sessions{state="active"} 0
