@@ -28,6 +28,16 @@ bump may break compatibility and a **patch** bump never does.
 
 ### Fixed
 
+- **Station logos on the Apple and Android Live TV guides.** The web guide
+  has drawn HDHomeRun's station artwork since 2026-10-03; the Apple TV, iOS
+  and Android guides still showed only callsigns, because the rule that picks
+  a channel's logo lived in the web page instead of the shared guide contract
+  the three clients reproduce, so nothing asked the native clients for it.
+  The rule is now `station_logo` in `tests/playback/live-tv-guide-cases.json`,
+  answered identically by the web, Apple and Android reducers, and the native
+  list rows, grid headers, programme details, picture badge and fullscreen
+  identity draw the logo with the callsign as fallback. Native clients fetch
+  the third-party artwork without the account token.
 - **A day of settled background work no longer stops every new job for a
   week.** The durable queue keeps finished jobs for seven days as receipts,
   and its 10,000-row bound counted them. On 2026-09-28 an embedding backfill
