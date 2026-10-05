@@ -37,7 +37,10 @@ bump may break compatibility and a **patch** bump never does.
   answered identically by the web, Apple and Android reducers, and the native
   list rows, grid headers, programme details, picture badge and fullscreen
   identity draw the logo with the callsign as fallback. Native clients fetch
-  the third-party artwork without the account token.
+  the third-party artwork without the account token. The web applies the same
+  textual rule, which is stricter than the browser's URL parser it replaced:
+  an address with an underscore or non-ASCII host, or a space, now shows the
+  callsign.
 - **A day of settled background work no longer stops every new job for a
   week.** The durable queue keeps finished jobs for seven days as receipts,
   and its 10,000-row bound counted them. On 2026-09-28 an embedding backfill
