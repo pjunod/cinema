@@ -3017,17 +3017,22 @@ pub async fn update_settings(
         }
     }
     // `live_tv_owner_node_id` and `live_tv_fenced_owner` are legacy fields of
-    // the single-owner model #537 replaced. Shipped Apple and Android clients
-    // still send both with every Live TV save, so they are accepted and
-    // ignored: the owner is always this node's id and the attestation is never
-    // read. They do still count as a Live TV save here, so a request carrying
-    // only them (plus `live_tv_config_generation`) is a generation-CAS save
-    // that changes nothing else and bumps the generation (pinned by
+    // the single-owner model #537 replaced; both are accepted and ignored: the
+    // owner is always this node's id and the attestation is never read.
+    // Shipped Apple and Android clients send `live_tv_owner_node_id` with every
+    // tuner-configuration save, beside real Live TV fields. No shipped client
+    // sends `live_tv_fenced_owner`: both still define the change (`FencedOwner`
+    // in LiveTvApi.kt, `.fencedOwner` in LiveTv.swift) but no production path
+    // constructs it, so it stays accepted only so an older or third-party
+    // client that does send it is not refused (pinned by
+    // `live_tv_legacy_fenced_owner_attestation_is_still_accepted_and_ignored`).
+    // Both still count as a Live TV save here, so a request carrying only them
+    // (plus `live_tv_config_generation`) is a generation-CAS save that changes
+    // nothing else and bumps the generation (pinned by
     // `live_tv_legacy_owner_metadata_never_requires_physical_fence_recovery`,
-    // which saves the owner alone). Left as-is deliberately: every shipped
-    // client sends them beside real Live TV fields, so narrowing the set would
-    // change only what a lone legacy save does, and it would stop requiring
-    // the generation for it.
+    // which saves the owner alone). Left as-is deliberately: narrowing the set
+    // would change only what a lone legacy save does, and it would stop
+    // requiring the generation for it.
     let live_tv_requested = req.live_tv_enabled.is_some()
         || req.live_tv_device_ipv4.is_some()
         || req.live_tv_owner_node_id.is_some()

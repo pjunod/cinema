@@ -1,8 +1,8 @@
 # Native Auto-quality policy runners — source only
 
-**Status:** open — A05 M2, on `main` since 2026-10-04 (#793) in Apple build
-206; no native playback enablement or device acceptance; the ports are
-deleted in the 2026-10-04 close-out PR.
+**Status:** done — A05 M2 landed on `main` in Apple build 206 (#793); the
+ports were deleted in Apple 208 / Android 146 (2026-10-04 close-out). No
+native playback enablement or device acceptance ever happened.
 
 Build: 208
 Issue: #634
