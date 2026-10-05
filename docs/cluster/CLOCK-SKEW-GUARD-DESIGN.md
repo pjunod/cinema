@@ -503,6 +503,22 @@ pub(crate) enum ClusterClockState {
 }
 ```
 
+**Learners (amended 2026-10-04, Paul's "fix them" on the K-06 findings).**
+"Peer" in `Incomplete` means a *voting* peer. A committed non-voting learner
+is still probed, still has its per-peer `observation_state`, and is counted
+separately (`ClockSnapshot::unobserved_learners`,
+`plurx_cluster_clock_unobserved_learners`), but an unobserved learner does
+not make the state `Incomplete`: it holds no vote, so a stopped learner must
+not refuse takeover, the expiry scan and every membership change on every
+node. The role is proved only from the exact applied peer directory bound to
+the membership watch; a roster without one treats every peer as a voter. A
+*measured* learner still contributes `|offset| + uncertainty` to the worst
+bound and refuses above 2 s, because a learner may own delegated media
+sessions whose leases takeover and the expiry scan spend. Promoting a learner
+makes its clock a voter's clock, so promotion additionally requires that
+learner's own fresh bounded observation (§3.5). A node that is itself a
+learner applies the same rule: every voter is its peer and must be bounded.
+
 The policy types and one `Arc<ClusterClockGuard>` live in `plurx-core` so
 `MembershipManager`, media-session recovery and HTTP readiness consult the
 same local snapshot. The daemon owns transport and filtering and publishes one
@@ -607,6 +623,13 @@ Reasons, each row:
   protocol rollback. The exception never skips a fence, manufactures quorum,
   permits self-promotion, or turns a missing clock probe alone into proof that
   the target is unreachable.
+- **An unobserved learner refuses nothing but its own promotion.** The
+  amended §3.3 rule applies to every row: coverage, takeover, the expiry scan,
+  membership acquisition and the surviving set of a fenced removal excuse an
+  unobserved learner and never an unobserved voter. Learner promotion (the
+  application `promote_learner` and the leader-side Raft `Promote`
+  admission) also requires the promoted learner's own bounded observation, so
+  startup promotion still waits for the leader to have measured the learner.
 - **A post-step removal waits for stable reachability evidence.** After a local
   discontinuity, target exclusion cannot use a `last_seen_at` comparison from
   the new wall-clock generation until `NODE_REACHABLE_WINDOW_MS = 30_000` has
@@ -614,6 +637,12 @@ Reasons, each row:
   This prevents the very forward step being guarded from making a healthy
   target look stale. An actually lost target becomes removable after the
   bounded 30-second stabilization interval; recovery is delayed, not stranded.
+  That wall-age use is a guard decision like every other, never a raw read of
+  the capture: with enforcement off it admits (one advisory refusal is
+  counted at `admit_fenced_removal`); with enforcement on the removal keeps
+  polling for target-applied evidence within its original 15-second budget and,
+  if that budget ends with only unusable wall evidence, returns the typed
+  `LocalDiscontinuity` refusal (counted) rather than a bare deadline.
 - **`/readyz` stays ready on `Incomplete`.** A rolling deploy makes every
   peer temporarily `Unknown`; taking the whole fleet out of rotation because
   a probe route is new would be the upgrade turning itself off. Only a

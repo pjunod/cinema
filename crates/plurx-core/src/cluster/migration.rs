@@ -426,9 +426,10 @@ async fn complete_startup_observation(
             StoreError::Database("clock observation has no original startup deadline".into())
         })?;
     // Starting the observer is a local bind and task spawn. It is not tied to
-    // the phased membership deadline: clock observation must never be what
-    // consumes (or is refused by) a startup budget that a long snapshot
-    // catch-up may already have spent.
+    // the membership admission deadline: clock observation must never be
+    // what consumes (or is refused by) that phase. The deadline itself was
+    // installed after vendor startup and snapshot catch-up, so neither of
+    // those spent it either.
     observer
         .start(membership.clone(), identity.node_id.clone())
         .await?;
@@ -3366,28 +3367,16 @@ async fn start_voter(
         learner_only: role.is_learner(),
         ..production_hiqlite_defaults(config)
     };
-    // The phased membership budget starts before vendor startup, not after
-    // its potentially waiting join future returns. Never replenish it for
-    // the subsequent applied-membership reconciliation.
-    let phased_deadline = tokio::time::Instant::now() + MEMBERSHIP_ADMISSION_TIMEOUT;
-    let admission = Arc::new(if observation_only {
-        super::membership::StartupMembershipAdmission::with_startup_deadline(phased_deadline)
-    } else {
-        super::membership::StartupMembershipAdmission::default()
-    });
+    // Vendor startup, including a join that waits for its snapshot
+    // catch-up, is bounded exactly as it was before clock observation: by the
+    // vendor's own snapshot transfer/install timeouts, which the deploy
+    // startup budget already counts. It does not spend the membership
+    // admission budget, which starts only after the health wait below.
+    let admission = Arc::new(super::membership::StartupMembershipAdmission::default());
     let client = if observation_only {
-        tokio::time::timeout_at(
-            phased_deadline,
-            hiqlite::start_node_for_clock_observation(node_config, admission),
-        )
-        .await
-        .map_err(|_| {
-            StoreError::Database(
-                "Hiqlite clock-observation startup exceeded original membership budget".into(),
-            )
-        })?
+        hiqlite::start_node_for_clock_observation(node_config, admission.clone()).await
     } else {
-        hiqlite::start_node_with_membership_admission(node_config, admission).await
+        hiqlite::start_node_with_membership_admission(node_config, admission.clone()).await
     }
     .map_err(|error| StoreError::Database(format!("starting Hiqlite voter: {error}")))?;
     // No await between vendor Client handoff and cancellation-safe ownership.
@@ -3409,11 +3398,8 @@ async fn start_voter(
     // role waits for has to be exactly what admission means for it. A voter
     // waits for its vote. A learner waits to be a committed member, and must
     // never wait for a promotion it was admitted specifically not to receive.
-    let admission_deadline = if observation_only {
-        phased_deadline
-    } else {
-        tokio::time::Instant::now() + MEMBERSHIP_ADMISSION_TIMEOUT
-    };
+    let admission_started = tokio::time::Instant::now();
+    let admission_deadline = admission_started + MEMBERSHIP_ADMISSION_TIMEOUT;
     loop {
         let metrics = client
             .local_db_raft_metrics()
@@ -3452,6 +3438,7 @@ async fn start_voter(
         }
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
+    let admission_spent = admission_started.elapsed();
     // Membership admission proves that Raft recognizes this node; it does not
     // prove that the local state machine has installed a snapshot needed to
     // reach the cluster's current database image. Capture one quorum-confirmed
@@ -3563,6 +3550,21 @@ async fn start_voter(
         }
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
+    if observation_only {
+        // Promotion and activation finish the SAME admission phase the loop
+        // above began. The snapshot catch-up between them has its own
+        // deadline and must not spend this one, so the phase resumes with
+        // what the admission loop left of MEMBERSHIP_ADMISSION_TIMEOUT. The
+        // deadline is installed once and never replenished.
+        let resumed = tokio::time::Instant::now()
+            + startup_admission_remaining(MEMBERSHIP_ADMISSION_TIMEOUT, admission_spent);
+        if let Err(error) = admission.install_startup_deadline(resumed) {
+            if pending_client.is_none() {
+                let _ = shutdown_voter(&client, active_transport).await;
+            }
+            return Err(StoreError::Database(error.to_string()));
+        }
+    }
     if role.is_learner() {
         tracing::info!(
             node_id = %identity.node_id,
@@ -3572,6 +3574,14 @@ async fn start_voter(
         );
     }
     Ok((client, local, pending_client))
+}
+
+/// What one membership admission phase has left after its committed-member
+/// wait. Startup work outside the phase (vendor start, health, catch-up) is
+/// never passed in, so it cannot spend the phase.
+#[cfg(feature = "hiqlite-store")]
+fn startup_admission_remaining(phase: Duration, admission_spent: Duration) -> Duration {
+    phase.saturating_sub(admission_spent)
 }
 
 #[cfg(feature = "hiqlite-store")]
@@ -5939,6 +5949,58 @@ mod tests {
             local_client_address(configured_v6),
             "[::1]:32402".parse().expect("IPv6 loopback")
         );
+    }
+
+    /// K-06 finding 3. Vendor startup (join and its snapshot catch-up), the
+    /// health wait and the startup catch-up must not spend the 45-second
+    /// membership admission phase. The phase starts after the health wait,
+    /// and the deadline promotion/activation honour is installed once, after
+    /// the catch-up, with only what the committed-member wait left.
+    #[cfg(feature = "hiqlite-store")]
+    #[test]
+    fn k06_vendor_start_and_catchup_do_not_spend_the_admission_phase() {
+        assert_eq!(
+            startup_admission_remaining(MEMBERSHIP_ADMISSION_TIMEOUT, Duration::from_secs(5)),
+            Duration::from_secs(40)
+        );
+        assert_eq!(
+            startup_admission_remaining(MEMBERSHIP_ADMISSION_TIMEOUT, Duration::from_secs(90)),
+            Duration::ZERO,
+            "an overspent phase is never replenished"
+        );
+        let source = include_str!("migration.rs");
+        let start = source
+            .split_once("async fn start_voter(")
+            .expect("start_voter")
+            .1
+            .split_once("fn startup_wait_log_is_due(")
+            .expect("start_voter boundary")
+            .0;
+        let vendor_start = start
+            .find("hiqlite::start_node_for_clock_observation(")
+            .expect("observation start");
+        let health = start
+            .find("client.wait_until_healthy_db()")
+            .expect("health wait");
+        let phase_start = start
+            .find("let admission_started = tokio::time::Instant::now();")
+            .expect("phase start");
+        let catchup = start
+            .find("let catchup_deadline = tokio::time::Instant::now() + catchup_timeout;")
+            .expect("catch-up deadline");
+        let install = start
+            .find(".install_startup_deadline(")
+            .expect("deadline install");
+        assert!(vendor_start < health && health < phase_start && phase_start < catchup);
+        assert!(
+            catchup < install,
+            "the catch-up must not spend the installed phase"
+        );
+        assert!(
+            !start[..health].contains("MEMBERSHIP_ADMISSION_TIMEOUT"),
+            "vendor startup is not bounded by the admission phase"
+        );
+        assert!(!source.contains(concat!("with_startup", "_deadline(")));
     }
 
     /// A readdressed voter has application rows that are older than its new

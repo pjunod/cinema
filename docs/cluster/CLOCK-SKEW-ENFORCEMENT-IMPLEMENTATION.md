@@ -225,8 +225,9 @@ activation deadline findings remain open; draft source is not qualified.
 
 **2026-10-02 review64 R3 source repair:** readiness checks original expiry
 before accepting a safe guard. Final activation binds its clock ticket to
-the exact deadline installed before vendor startup; the public finishing
-boundary cannot substitute a later deadline. Schema, heartbeat, signing-key,
+the exact deadline installed once by startup (before vendor startup at the
+time; since 2026-10-04 after vendor startup and catch-up, see below); the
+public finishing boundary cannot substitute a later deadline. Schema, heartbeat, signing-key,
 HTTP and marker pre-submission checks carry both facts. Phase expiry is a
 startup error, not an invented clock refusal or an extension of clock age.
 Submitted writes are still awaited through actual completion, without an
@@ -243,6 +244,47 @@ awaited preparatory schema reads. Ordinary `open_or_migrate` is unchanged;
 already-submitted transaction settlement never calls the admission callback.
 Static source checks and a new callback control do not replace the owed
 actual delayed-transaction proof.
+
+**2026-10-04 K-06 findings, fixed on Paul's "fix them"** (the enforce switch
+and enforcement itself are untouched; their ruling is separate):
+
+1. *Learners no longer block coverage.* An unobserved committed learner is
+   reported (`unobserved_learners`, `plurx_cluster_clock_unobserved_learners`,
+   per-peer `observation_state`) but does not make the guard `Incomplete`, so
+   a stopped learner no longer refuses takeover, the expiry scan and every
+   membership change on every node. Voters must still be bounded; a measured
+   learner above 2 s still refuses; fenced removal excuses only unobserved
+   *learner* survivors; and `promote_learner` plus the leader-side Raft
+   `Promote` admission require the promoted learner's own bound
+   (`admit_promotion_for` / `revalidate_promotion_for`). The role comes only
+   from the exact applied directory. Focused tests:
+   `k06_stopped_learner_admits_when_voters_bounded_but_unobserved_voter_refuses`,
+   `k06_local_learner_requires_every_voter_and_excuses_other_learners`,
+   `k06_learner_role_needs_the_exact_applied_directory`,
+   `k06_fenced_removal_excuses_an_unobserved_surviving_learner_only`.
+2. *Post-step wall reachability goes through the guard.* The reduction proof
+   read `permits_wall_reachability()` directly, so after a local step even an
+   advisory node waited out its 15-second budget and failed with "original
+   removal proof deadline expired". It now asks `admit_wall_reachability`
+   (advisory admits; the advisory refusal is counted once at
+   `admit_fenced_removal`). Enforced, it keeps polling for TargetApplied and,
+   if the budget ends blocked on that evidence, returns the counted typed
+   `LocalDiscontinuity` refusal. Focused test:
+   `k06_post_step_wall_reachability_is_decided_by_the_guard`.
+3. *Vendor start and catch-up no longer spend the admission budget.* The
+   observation path started one `MEMBERSHIP_ADMISSION_TIMEOUT` deadline before
+   vendor startup and never renewed it, so join/snapshot catch-up, the health
+   wait, admission, the startup catch-up, promotion and activation all shared
+   45 seconds. Vendor startup is again bounded only as before (its own
+   snapshot transfer/install timeouts, which `make
+   docker-startup-budget-check` counts); the admission phase starts after the
+   health wait exactly as on the non-observation path; and the deadline that
+   promotion and `finish_clock_observation` honour is installed once, after the
+   startup catch-up, carrying only what the committed-member wait left of the
+   45 seconds. It is still never replaced or replenished
+   (`install_startup_deadline` refuses a second install). This is the owner of
+   "the 45-second startup budget" named in the causal-observation entry above.
+   Focused test: `k06_startup_deadline_is_installed_once_and_never_replenished`.
 
 ### E0 interfaces — local policy without an irreversible operation
 

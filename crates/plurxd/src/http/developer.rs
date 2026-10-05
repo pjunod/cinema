@@ -115,6 +115,18 @@ fn clock_measurement(state: &AppState, enforced: bool) -> DeveloperEnableItem {
     let snapshot = guard.snapshot();
     let would_refuse = guard.check_evidence().err();
     let peers = snapshot.peers.len();
+    let learners = snapshot.unobserved_learners;
+    // Unobserved learners are reported but never required: a non-voting
+    // member's stopped clock does not refuse any guarded decision.
+    let learner_note = if learners == 0 {
+        String::new()
+    } else {
+        format!(
+            "; {learners} unobserved learner(s) reported but not required (no vote; \
+             a measured learner still counts, and promotion needs its own bound)"
+        )
+    };
+    let measured = peers.saturating_sub(learners);
     let (coverage_status, coverage, worst) = match snapshot.state {
         ClusterClockState::NoPeers => (
             RequirementStatus::Met,
@@ -123,8 +135,10 @@ fn clock_measurement(state: &AppState, enforced: bool) -> DeveloperEnableItem {
         ),
         ClusterClockState::Bounded { worst_abs_upper_us } => (
             RequirementStatus::Met,
-            format!("{peers} / {peers} committed remote members reachable and bounded"),
-            Some(worst_abs_upper_us),
+            format!(
+                "{measured} / {peers} committed remote members reachable and bounded{learner_note}"
+            ),
+            (measured > 0).then_some(worst_abs_upper_us),
         ),
         ClusterClockState::Incomplete {
             unknown_peers,
@@ -133,10 +147,10 @@ fn clock_measurement(state: &AppState, enforced: bool) -> DeveloperEnableItem {
             RequirementStatus::Unmet,
             format!(
                 "{} / {peers} committed remote members bounded; {unknown_peers} unreachable, \
-                 unanswered or roster unproved",
-                peers.saturating_sub(unknown_peers)
+                 unanswered or roster unproved{learner_note}",
+                peers.saturating_sub(unknown_peers + learners)
             ),
-            (peers > unknown_peers).then_some(worst_abs_upper_us),
+            (peers > unknown_peers + learners).then_some(worst_abs_upper_us),
         ),
     };
     let limit_us = CLOCK_OFFSET_REFUSAL_MS * 1_000;
@@ -171,7 +185,7 @@ fn clock_measurement(state: &AppState, enforced: bool) -> DeveloperEnableItem {
         requirements: vec![
             DeveloperRequirement {
                 id: "coverage",
-                title: "Every member reachable and observed",
+                title: "Every voter reachable and observed",
                 status: coverage_status,
                 evidence: coverage,
             },
@@ -199,9 +213,10 @@ fn clock_measurement(state: &AppState, enforced: bool) -> DeveloperEnableItem {
                     RequirementStatus::Unmet
                 },
                 evidence: format!(
-                    "While enforced, one down or unreachable member makes coverage unknown, \
+                    "While enforced, one down or unreachable voter makes coverage unknown, \
                      which refuses session takeover, the expired-session scan and membership \
-                     changes on every node (fenced removal of that member still works), and \
+                     changes on every node (fenced removal of that member still works); a down \
+                     learner is reported but refuses nothing except its own promotion, and \
                      two consecutive rounds above {CLOCK_OFFSET_REFUSAL_MS} ms make /readyz \
                      answer 503. Startup is never refused. Now: {current}; \
                      plurx_cluster_clock_advisory_refusals_total counts what it would have \

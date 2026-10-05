@@ -2306,7 +2306,10 @@ production TOML. A resolved command-line `--config` path takes precedence over
 and their sources, validates that the chunk budget does not exceed the transfer
 budget, and exits before any Compose replacement unless the health start period
 it is about to apply covers the two sequential stages plus all three named
-startup phases.
+startup phases. Each phase is spent once: vendor startup (including a join's
+snapshot catch-up) and the startup catch-up do not spend the 45-second
+membership admission phase, which begins after the health wait and is shared
+by the committed-member wait, promotion and activation.
 
 If `PLURX_CONFIG` points into a named volume or another opaque mount, expose
 `PLURX_CLUSTER_SNAPSHOT_CHUNK_TIMEOUT_SECS`,
@@ -2349,6 +2352,13 @@ fixed 2,000 ms relative contract, retain the discontinuity and Unknown-round
 counters, and report `plurx_cluster_clock_authority_reads_total` to measure
 inbound probe authorization cost. This observation changes no acquisition or
 readiness decision and does not replace the absolute 250 ms discipline rule.
+Learners are probed like any member, but an unobserved learner is counted in
+`plurx_cluster_clock_unobserved_learners` instead of making coverage
+incomplete: with the clock guard enforced, a stopped learner does not refuse
+takeover, the expired-session scan or membership changes, while a stopped
+voter still does. A learner that is measured above the bound still refuses,
+and promoting a learner requires its own bounded observation, so measure it
+before promoting.
 See [the measurement handoff](cluster/CLOCK-SKEW-MEASUREMENT-IMPLEMENTATION.md)
 for the identified one-hour idle and sixty-second loaded receipt still owed.
 

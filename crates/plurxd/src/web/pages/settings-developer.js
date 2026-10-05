@@ -415,10 +415,10 @@ function clusterClockCard(settings,readiness){
   const enabled=!!settings.cluster_clock_guard_enforced;
   return setCard(`${cardHead("Cluster clock guard","Refuse clock-dependent cluster decisions when peer clock offsets cannot be bounded.",enabled?`<span class="pill warn">enforced</span>`:`<span class="pill">advisory</span>`)}
     ${togRow("cluster-clock-enforced","Enforce the cluster clock guard","When on, session takeover, the expired-session scan, membership changes and /readyz are refused while clock evidence is unknown or above 2,000 ms. When off, offsets are still measured and what would have been refused is counted. Startup is never refused.",enabled)}
-    ${devReq(readiness,"cluster_clock","coverage","Every member reachable and observed","Every committed remote member, learners included, must answer a fresh authenticated probe.")}
+    ${devReq(readiness,"cluster_clock","coverage","Every voter reachable and observed","Every committed remote voter must answer a fresh authenticated probe. A learner that does not answer is reported but not required; a measured learner still counts, and promoting one needs its own bound.")}
     ${devReq(readiness,"cluster_clock","upper_bound","Worst observed offset within 2 s","Absolute offset plus uncertainty; an unknown member has no numeric offset.")}
     ${devReq(readiness,"cluster_clock","ntp","NTP running on every node","Check chronyd or systemd-timesyncd on each node; this server cannot see them.")}
-    ${devReq(readiness,"cluster_clock","consequence","What enforcement refuses","While enforced, one down member blocks takeover, the expiry scan and membership changes on every node until it returns or is removed.")}
+    ${devReq(readiness,"cluster_clock","consequence","What enforcement refuses","While enforced, one down voter blocks takeover, the expiry scan and membership changes on every node until it returns or is removed. A down learner does not.")}
     <p class="hint">Requirements are advisory and never prevent saving, in either direction.</p>
     ${devGraduation("the identified measurement and enforcement releases have their fleet acceptance receipts.","the switch moves to Settings → Cluster.")}<div class="err" id="cluster-clock-error" role="alert"></div>${setCardFoot("saveClusterClockGuard")}`,{id:"cluster-clock-settings"});
 }

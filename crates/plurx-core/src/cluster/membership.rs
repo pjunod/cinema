@@ -2019,7 +2019,10 @@ impl ClockMembershipSource for hiqlite::LocalDbRaftMetrics {
 pub struct StartupMembershipAdmission {
     source: Arc<StartupClockMembershipSource>,
     clock: Arc<ClusterClockGuard>,
-    startup_deadline: Option<tokio::time::Instant>,
+    /// The admission/promotion/activation phase deadline. Installed exactly
+    /// once, after vendor startup, the health wait and snapshot catch-up have
+    /// returned, so none of those consume it; never replaced afterwards.
+    startup_deadline: OnceLock<tokio::time::Instant>,
     /// Bound exactly once after construction; never retains the manager/client
     /// cycle or borrows another installed node's removal authority.
     removal_owner: OnceLock<Weak<ReplicatedMembership>>,
@@ -2044,7 +2047,7 @@ impl Default for StartupMembershipAdmission {
         Self {
             clock: Arc::new(ClusterClockGuard::with_membership_source(source.clone())),
             source,
-            startup_deadline: None,
+            startup_deadline: OnceLock::new(),
             removal_owner: OnceLock::new(),
             #[cfg(test)]
             activation_capture_pause: StartupSettlementPause {
@@ -2057,17 +2060,20 @@ impl Default for StartupMembershipAdmission {
 }
 
 impl StartupMembershipAdmission {
-    #[must_use]
-    pub fn with_startup_deadline(deadline: tokio::time::Instant) -> Self {
-        Self {
-            startup_deadline: Some(deadline),
-            ..Self::default()
-        }
+    /// Install the original phase deadline. It is set exactly once: a second
+    /// install is refused rather than replenishing an expired phase.
+    pub fn install_startup_deadline(
+        &self,
+        deadline: tokio::time::Instant,
+    ) -> Result<(), MembershipError> {
+        self.startup_deadline.set(deadline).map_err(|_| {
+            MembershipError::Internal("startup phase deadline was already installed".into())
+        })
     }
 
     #[must_use]
     pub fn startup_deadline(&self) -> Option<tokio::time::Instant> {
-        self.startup_deadline
+        self.startup_deadline.get().copied()
     }
 
     #[must_use]
@@ -2079,6 +2085,9 @@ impl StartupMembershipAdmission {
 struct PreparedStartupMembershipAdmission<'guard> {
     clock: &'guard ClusterClockGuard,
     original: Result<ClockAcquisitionTicket<'guard>, ClockRefusal>,
+    /// A promotion makes this learner a voter, so its own clock must be
+    /// bounded; coverage excuses only learners that stay learners.
+    promote_target: Option<u64>,
 }
 
 struct PreparedReductionAdmission<'guard> {
@@ -2144,12 +2153,14 @@ impl hiqlite::membership_admission::PreparedMembershipAdmission
     for PreparedStartupMembershipAdmission<'_>
 {
     fn redeem(&self) -> Result<(), hiqlite::Error> {
-        self.clock
-            .admit_for(ClockDecision::MembershipChange, self.original)
-            .map(|_| ())
-            .map_err(|error| {
-                hiqlite::Error::Error(format!("cluster_clock_unbounded: {error}").into())
-            })
+        match self.promote_target {
+            Some(target) => self.clock.admit_promotion_for(target, self.original),
+            None => self
+                .clock
+                .admit_for(ClockDecision::MembershipChange, self.original),
+        }
+        .map(|_| ())
+        .map_err(|error| hiqlite::Error::Error(format!("cluster_clock_unbounded: {error}").into()))
     }
 }
 
@@ -2180,9 +2191,16 @@ impl hiqlite::membership_admission::MembershipAdmission for StartupMembershipAdm
                 proof: None,
             });
         }
+        let promote_target = match operation {
+            hiqlite::membership_admission::MembershipAcquisition::Promote { node_id } => {
+                Some(node_id)
+            }
+            _ => None,
+        };
         Box::new(PreparedStartupMembershipAdmission {
             clock: &self.clock,
             original: self.clock.acquire(),
+            promote_target,
         })
     }
 
@@ -8447,7 +8465,7 @@ impl MembershipManager {
         // Committed promotion and ambiguous-result reconciliation above are
         // ungated. Issuing a new proposal, even for a pending audit row, is not.
         let admission = clock
-            .admit_for(ClockDecision::MembershipChange, prepared_admission)
+            .admit_promotion_for(target_raft_id, prepared_admission)
             .map_err(MembershipError::ClockUnbounded)?;
         let (attempt_id, new_attempt) = if let Some(existing) = existing {
             (existing.attempt_id, false)
@@ -8455,7 +8473,7 @@ impl MembershipManager {
             let attempt_id = uuid::Uuid::new_v4().to_string();
             let started_at = admission.now_ms();
             clock
-                .revalidate_for(ClockDecision::MembershipChange, &admission)
+                .revalidate_promotion_for(target_raft_id, &admission)
                 .map_err(MembershipError::ClockUnbounded)?;
             let inserted = inner
                 .client
@@ -8531,7 +8549,7 @@ impl MembershipManager {
             .nodes()
             .map(|(raft_id, node)| (*raft_id, node.addr_api.clone()))
             .collect::<Vec<_>>();
-        if let Err(cause) = clock.revalidate_for(ClockDecision::MembershipChange, &admission) {
+        if let Err(cause) = clock.revalidate_promotion_for(target_raft_id, &admission) {
             if new_attempt {
                 self.clear_learner_promotion(node_id, &attempt_id).await;
             }
@@ -8982,7 +9000,7 @@ impl MembershipManager {
         &self,
         reference: &hiqlite::ReductionFenceReference,
         captured: &ClockRemovalCapture<'_>,
-    ) -> Result<Option<AppliedRemovalFence>, MembershipError> {
+    ) -> Result<ReductionProofPoll, MembershipError> {
         if !reference.has_valid_shape() {
             return Err(MembershipError::RemovalPending(
                 "invalid reduction reference".into(),
@@ -9031,23 +9049,28 @@ impl MembershipManager {
                 &inner.identity.node_id,
             )
             .map_err(MembershipError::ClockUnbounded)?;
-        let evidence = if row
+        let applied = row
             .last_applied_index
             .and_then(|index| u64::try_from(index).ok())
-            .is_some_and(|index| index >= reference.barrier_index)
-        {
-            RemovalFenceEvidence::TargetApplied
-        } else if captured.permits_wall_reachability()
-            && !node_is_reachable(captured.now_ms(), row.last_seen_at)
-        {
-            RemovalFenceEvidence::AuthoritativeUnreachable
-        } else {
-            return Ok(None);
-        };
-        Ok(Some(AppliedRemovalFence {
-            reference: frozen,
-            evidence,
-        }))
+            .is_some_and(|index| index >= reference.barrier_index);
+        Ok(
+            match reduction_fence_evidence(
+                &self.clock,
+                captured,
+                applied,
+                node_is_reachable(captured.now_ms(), row.last_seen_at),
+            ) {
+                ReductionEvidence::Proved(evidence) => {
+                    ReductionProofPoll::Proved(AppliedRemovalFence {
+                        reference: frozen,
+                        evidence,
+                    })
+                }
+                ReductionEvidence::Pending { clock_blocked } => {
+                    ReductionProofPoll::Pending { clock_blocked }
+                }
+            },
+        )
     }
 
     async fn wait_for_reduction_reference(
@@ -9055,30 +9078,51 @@ impl MembershipManager {
         reference: &hiqlite::ReductionFenceReference,
         captured: &ClockRemovalCapture<'_>,
     ) -> Result<AppliedRemovalFence, MembershipError> {
+        // Whether the last poll found the target stale by wall age but could
+        // not use it (post-step stabilization, enforced). Waiting continues,
+        // because a live target can still prove TargetApplied; if the budget
+        // ends first, that is a typed clock refusal, not a bare timeout.
+        let mut clock_blocked = false;
         loop {
-            let remaining = captured.remaining_removal_budget().ok_or_else(|| {
-                MembershipError::RemovalPending("original removal proof deadline expired".into())
-            })?;
+            let Some(remaining) = captured.remaining_removal_budget() else {
+                return Err(self.removal_budget_expired(captured, clock_blocked));
+            };
             match tokio::time::timeout(
                 remaining,
                 self.prove_reduction_reference(reference, captured),
             )
             .await
             {
-                Ok(Ok(Some(proof))) => return Ok(proof),
-                Ok(Ok(None)) => {}
-                Ok(Err(error)) => return Err(error),
-                Err(_) => {
-                    return Err(MembershipError::RemovalPending(
-                        "original removal proof deadline expired".into(),
-                    ))
+                Ok(Ok(ReductionProofPoll::Proved(proof))) => return Ok(proof),
+                Ok(Ok(ReductionProofPoll::Pending {
+                    clock_blocked: blocked,
+                })) => {
+                    clock_blocked = blocked;
                 }
+                Ok(Err(error)) => return Err(error),
+                Err(_) => return Err(self.removal_budget_expired(captured, clock_blocked)),
             }
-            let remaining = captured.remaining_removal_budget().ok_or_else(|| {
-                MembershipError::RemovalPending("original removal proof deadline expired".into())
-            })?;
+            let Some(remaining) = captured.remaining_removal_budget() else {
+                return Err(self.removal_budget_expired(captured, clock_blocked));
+            };
             tokio::time::sleep(remaining.min(Duration::from_millis(250))).await;
         }
+    }
+
+    /// The original removal budget ended. When the only evidence that could
+    /// have proved the target was a wall-age comparison the post-step capture
+    /// may not use, enforcement reports (and counts) the typed clock refusal.
+    fn removal_budget_expired(
+        &self,
+        captured: &ClockRemovalCapture<'_>,
+        clock_blocked: bool,
+    ) -> MembershipError {
+        if clock_blocked {
+            if let Err(cause) = self.clock.refuse_unstable_wall_reachability(captured) {
+                return MembershipError::ClockUnbounded(cause);
+            }
+        }
+        MembershipError::RemovalPending("original removal proof deadline expired".into())
     }
 
     async fn prepare_reduction_reference(
@@ -9091,19 +9135,20 @@ impl MembershipManager {
         let remaining = captured.remaining_removal_budget().ok_or_else(|| {
             MembershipError::RemovalPending("original removal proof deadline expired".into())
         })?;
-        tokio::time::timeout(remaining, async {
-            let reference = self
-                .freeze_reduction_reference(node_id, raft_id, attempt_id, captured)
-                .await?;
-            let proof = self
-                .wait_for_reduction_reference(&reference, captured)
-                .await?;
-            Ok((reference, proof))
-        })
+        // Both halves spend the same original budget. The wait bounds itself
+        // against it, so its expiry can still name a typed clock refusal.
+        let reference = tokio::time::timeout(
+            remaining,
+            self.freeze_reduction_reference(node_id, raft_id, attempt_id, captured),
+        )
         .await
         .map_err(|_| {
             MembershipError::RemovalPending("original removal proof deadline expired".into())
-        })?
+        })??;
+        let proof = self
+            .wait_for_reduction_reference(&reference, captured)
+            .await?;
+        Ok((reference, proof))
     }
 
     pub async fn remove_voter(&self, node_id: &str) -> Result<MembershipStatus, MembershipError> {
@@ -11470,6 +11515,47 @@ enum RemovalFenceEvidence {
     AuthoritativeUnreachable,
 }
 
+/// One poll of an exact durable reduction reference.
+pub(super) enum ReductionProofPoll {
+    Proved(AppliedRemovalFence),
+    Pending { clock_blocked: bool },
+}
+
+enum ReductionEvidence {
+    Proved(RemovalFenceEvidence),
+    /// `clock_blocked`: the target is stale by wall age, but the original
+    /// post-step capture may not use that comparison and enforcement is on.
+    Pending {
+        clock_blocked: bool,
+    },
+}
+
+/// Classify one poll. Wall-age unreachability is consulted through the clock
+/// guard's decision API (never the raw capture flag), so enforcement off
+/// admits it exactly like every other guarded decision and the counted
+/// boundary, `admit_fenced_removal`, records the advisory refusal once.
+fn reduction_fence_evidence(
+    clock: &ClusterClockGuard,
+    captured: &ClockRemovalCapture<'_>,
+    target_applied: bool,
+    wall_reachable: bool,
+) -> ReductionEvidence {
+    if target_applied {
+        return ReductionEvidence::Proved(RemovalFenceEvidence::TargetApplied);
+    }
+    if wall_reachable {
+        return ReductionEvidence::Pending {
+            clock_blocked: false,
+        };
+    }
+    match clock.admit_wall_reachability(captured) {
+        Ok(()) => ReductionEvidence::Proved(RemovalFenceEvidence::AuthoritativeUnreachable),
+        Err(_) => ReductionEvidence::Pending {
+            clock_blocked: true,
+        },
+    }
+}
+
 impl AppliedRemovalFence {
     pub(super) fn reference(&self) -> &hiqlite::ReductionFenceReference {
         &self.reference
@@ -12203,6 +12289,215 @@ pub(crate) fn system_short_hostname() -> Option<String> {
 
 #[cfg(test)]
 mod tests {
+    use super::{
+        reduction_fence_evidence, ActivityPeer, AppliedRemovalFence, ClockMembershipIdentity,
+        ClockMembershipSource, ClockPeerRoster, ClockRefusal, ClusterClockGuard, ReductionEvidence,
+        RemovalFenceEvidence,
+    };
+    use crate::cluster::clock::PeerClockOffset;
+
+    struct FixedClockMembership(ClockMembershipIdentity);
+
+    impl ClockMembershipSource for FixedClockMembership {
+        fn current(&self) -> Option<ClockMembershipIdentity> {
+            Some(self.0.clone())
+        }
+    }
+
+    fn clock_node(raft_id: u64) -> String {
+        format!("00000000-0000-0000-0000-{raft_id:012}")
+    }
+
+    /// Local node 1; `voters` vote, every other member is a learner. The
+    /// returned roster is the exact directory of every remote member.
+    fn clock_fixture(
+        members: &[u64],
+        voters: &[u64],
+        enforced: bool,
+    ) -> (ClusterClockGuard, ClockPeerRoster) {
+        let identity = ClockMembershipIdentity {
+            local_node: 1,
+            log: (2, 1, 7),
+            members: members.iter().copied().collect(),
+            voters: voters.iter().copied().collect(),
+        };
+        let guard = ClusterClockGuard::with_membership_source(std::sync::Arc::new(
+            FixedClockMembership(identity.clone()),
+        ));
+        guard.set_enforced(enforced);
+        let roster = ClockPeerRoster {
+            membership: Some(identity),
+            peers: members
+                .iter()
+                .filter(|raft_id| **raft_id != 1)
+                .map(|raft_id| ActivityPeer {
+                    node_id: clock_node(*raft_id),
+                    raft_id: *raft_id,
+                    http_base: Some(format!("https://node{raft_id}:443")),
+                    reachable: true,
+                })
+                .collect(),
+        };
+        (guard, roster)
+    }
+
+    fn publish_clock_round(guard: &ClusterClockGuard, roster: &ClockPeerRoster, bounded: &[u64]) {
+        let round = guard
+            .roster_for_peer_directory(roster)
+            .expect("exact directory");
+        let observations = roster
+            .peers
+            .iter()
+            .map(|peer| {
+                let observation = if bounded.contains(&peer.raft_id) {
+                    PeerClockOffset::Bounded {
+                        offset_us: 0,
+                        uncertainty_us: 1_000,
+                        observed_at: std::time::Instant::now(),
+                    }
+                } else {
+                    PeerClockOffset::Unknown
+                };
+                (peer.node_id.clone(), observation)
+            })
+            .collect();
+        assert!(guard.publish(round, observations));
+    }
+
+    fn removal_fence(target: u64, evidence: RemovalFenceEvidence) -> AppliedRemovalFence {
+        AppliedRemovalFence {
+            reference: hiqlite::ReductionFenceReference {
+                version: 1,
+                target_node_id: clock_node(target),
+                target_raft_id: target,
+                attempt_id: "00000000-0000-0000-0000-000000000099".into(),
+                barrier_index: 7,
+            },
+            evidence,
+        }
+    }
+
+    fn counter(guard: &ClusterClockGuard, family: &str, cause: &str) -> String {
+        let prefix = format!("{family}{{decision=\"membership_change\",cause=\"{cause}\"}} ");
+        guard
+            .prometheus()
+            .lines()
+            .find_map(|line| line.strip_prefix(prefix.as_str()).map(str::to_owned))
+            .expect("closed metric vocabulary")
+    }
+
+    /// Fenced removal of a voter with a stopped learner elsewhere in the
+    /// cluster: the unobserved surviving learner is excused (it holds no
+    /// vote), an unobserved surviving VOTER still refuses.
+    #[test]
+    fn k06_fenced_removal_excuses_an_unobserved_surviving_learner_only() {
+        let (guard, roster) = clock_fixture(&[1, 2, 3, 4], &[1, 2, 3], true);
+        publish_clock_round(&guard, &roster, &[3]);
+        let captured = guard.capture_removal_raft(2).expect("exact capture");
+        assert_eq!(
+            guard.admit_fenced_removal(
+                &captured,
+                &removal_fence(2, RemovalFenceEvidence::TargetApplied)
+            ),
+            Ok(()),
+            "target 2 excluded, voter 3 bounded, learner 4 unobserved"
+        );
+        drop(captured);
+        publish_clock_round(&guard, &roster, &[4]);
+        let captured = guard.capture_removal_raft(2).expect("exact capture");
+        assert_eq!(
+            guard.admit_fenced_removal(
+                &captured,
+                &removal_fence(2, RemovalFenceEvidence::TargetApplied)
+            ),
+            Err(ClockRefusal::Unknown),
+            "an unobserved surviving voter is never excused"
+        );
+    }
+
+    /// K-06 finding 2. After a local wall step the original capture may not
+    /// use a wall-age `last_seen_at` comparison. That decision goes through
+    /// the guard: advisory mode admits the authoritative-unreachable proof
+    /// (counting ONE advisory refusal at the counted boundary), enforced mode
+    /// keeps waiting for TargetApplied and, if the budget ends, reports the
+    /// typed counted refusal instead of a bare deadline.
+    #[test]
+    fn k06_post_step_wall_reachability_is_decided_by_the_guard() {
+        for enforced in [false, true] {
+            let (guard, roster) = clock_fixture(&[1, 2, 3], &[1, 2, 3], enforced);
+            publish_clock_round(&guard, &roster, &[2, 3]);
+            guard.simulate_wall_step_for_test(15_000);
+            // The step invalidates evidence; a later complete round restores
+            // coverage, but the 30 s stabilization window still holds.
+            publish_clock_round(&guard, &roster, &[2, 3]);
+            let captured = guard.capture_removal_raft(2).expect("bounded capture");
+            assert!(!captured.permits_wall_reachability());
+            let advisory = "plurx_cluster_clock_advisory_refusals_total";
+            let refusals = "plurx_cluster_clock_refusals_total";
+
+            // A live target is still provable either way; a wall-reachable
+            // target is simply not yet proved, never clock-blocked.
+            assert!(matches!(
+                reduction_fence_evidence(&guard, &captured, true, false),
+                ReductionEvidence::Proved(RemovalFenceEvidence::TargetApplied)
+            ));
+            assert!(matches!(
+                reduction_fence_evidence(&guard, &captured, false, true),
+                ReductionEvidence::Pending {
+                    clock_blocked: false
+                }
+            ));
+
+            let stale = reduction_fence_evidence(&guard, &captured, false, false);
+            assert_eq!(counter(&guard, advisory, "local_discontinuity"), "0");
+            assert_eq!(counter(&guard, refusals, "local_discontinuity"), "0");
+            if enforced {
+                assert!(matches!(
+                    stale,
+                    ReductionEvidence::Pending {
+                        clock_blocked: true
+                    }
+                ));
+                assert_eq!(
+                    guard.refuse_unstable_wall_reachability(&captured),
+                    Err(ClockRefusal::LocalDiscontinuity)
+                );
+                assert_eq!(counter(&guard, refusals, "local_discontinuity"), "1");
+            } else {
+                assert!(
+                    matches!(
+                        stale,
+                        ReductionEvidence::Proved(RemovalFenceEvidence::AuthoritativeUnreachable)
+                    ),
+                    "advisory mode must not strand the removal until its budget expires"
+                );
+                assert_eq!(
+                    guard.admit_fenced_removal(
+                        &captured,
+                        &removal_fence(2, RemovalFenceEvidence::AuthoritativeUnreachable)
+                    ),
+                    Ok(())
+                );
+                assert_eq!(counter(&guard, advisory, "local_discontinuity"), "1");
+                assert_eq!(counter(&guard, refusals, "local_discontinuity"), "0");
+            }
+        }
+    }
+
+    #[test]
+    fn k06_startup_deadline_is_installed_once_and_never_replenished() {
+        let admission = super::StartupMembershipAdmission::default();
+        assert_eq!(admission.startup_deadline(), None);
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(45);
+        admission
+            .install_startup_deadline(deadline)
+            .expect("first install");
+        assert!(admission
+            .install_startup_deadline(deadline + std::time::Duration::from_secs(45))
+            .is_err());
+        assert_eq!(admission.startup_deadline(), Some(deadline));
+    }
+
     #[test]
     fn k06_reduction_binding_refuses_zero_stale_and_foreign_identity_without_borrowing() {
         use super::{
@@ -17195,6 +17490,14 @@ mod tests {
                     .expect("entry capture")
                     < body.find(".await").expect("awaited preparation")
             );
+            if signature == "pub async fn promote_learner(" {
+                // Coverage excuses an unobserved learner only while it holds
+                // no vote; promoting one requires its own bounded clock.
+                assert!(body.contains(".admit_promotion_for(target_raft_id, prepared_admission)"));
+                assert!(body.contains(".revalidate_promotion_for(target_raft_id, &admission)"));
+                assert!(!body.contains(".admit_for(") && !body.contains(".revalidate_for("));
+                continue;
+            }
             assert!(
                 body.contains(".admit_for(ClockDecision::MembershipChange, prepared_admission)")
             );
@@ -17220,7 +17523,9 @@ mod tests {
             promotion
                 .find("reconcile_promotion_change(")
                 .expect("reconcile")
-                < promotion.find(".admit_for(").expect("new authority")
+                < promotion
+                    .find(".admit_promotion_for(")
+                    .expect("new authority")
         );
         assert!(promotion.contains("let started_at = admission.now_ms();"));
         let activation = method_body(source, "pub async fn activate_learner_protocol(");
