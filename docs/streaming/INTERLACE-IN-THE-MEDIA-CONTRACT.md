@@ -1,6 +1,6 @@
 # Interlace in the media contract — field order as a fact, deinterlace as a decision
 
-**Status:** open — M1–M4 merged (#417); M5 measured 2026-10-02 (§9): hardware deinterlace **not adopted**, CPU bwdif stays; routing by the M4 verdict still open (§8) · **Executes:** Q4 / §3.1.1 / F-stream-4 and
+**Status:** open — M1–M4 merged (#417); M5 measured 2026-10-02 (§9): hardware deinterlace **not adopted**, CPU bwdif stays; the §9.3 bars ratified by Paul 2026-10-05 (relevance pass §2.15); routing by the M4 verdict still open (§8) · **Executes:** Q4 / §3.1.1 / F-stream-4 and
 the field-rate bitrate half of Q9 / F-ltv-7 from
 [ARCHITECTURE-REVIEW-2026-09-20.md](../reviews/ARCHITECTURE-REVIEW-2026-09-20.md)
 · **Written:** 2026-09-20 against `main` @ `88a3957a`
@@ -540,6 +540,10 @@ bwdif without M4's overrule measures PSNR-Y 52.5 dB / SSIM 0.9966 against
 untouched — mild softening, which M4 removes.
 
 ### 9.3 Proposed replacement bars (pending ratification)
+
+**Ratified by Paul, 2026-10-05** (relevance pass §2.15): the bars below replace
+§5.5's for a future hardware candidate. The text below keeps its original
+wording.
 
 What failed as written: `idet` ≥ 95 % progressive fails real content *for
 the CPU reference itself* (78.8 %, 83.2 %) while every graph passes the

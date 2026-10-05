@@ -4,7 +4,9 @@
 (writer-fixed cut, off-writer copy) and storage admission run on every voter,
 with no switch, by design. Paul accepted the shipped path on 2026-10-04 and
 declined a 24-hour undisturbed readout; what remains is to observe one real
-snapshot on production data
+snapshot on production data. Paul ratified the path as shipped on 2026-10-05 —
+measure first, no revert — and ratified the 2026-09-30 execution (sequencing)
+amendment below (relevance pass §2.3, §2.15)
 · **Executes:** S2, S5, F-sc-2, F-sc-5 from
 [ARCHITECTURE-REVIEW-2026-09-20.md](../reviews/ARCHITECTURE-REVIEW-2026-09-20.md)
 · **Written:** 2026-09-20 against `main` @ `88a3957a`

@@ -1,6 +1,6 @@
 # Transcode decomposition — behaviour-preserving moves first, redesign later
 
-**Status:** open — M0–M8 on `main` since 2026-10-04 (#793), including the M7 removal transition and joins (M0 to M6 came in through [PR #425](http://forge.lan:3000/noirr/plurx/pulls/425) and [PR #511](http://forge.lan:3000/noirr/plurx/pulls/511); M4 through S-05); learner removal and voter leave are being moved onto the shared `RemovalTransition` in the 2026-10-04 close-out PR; the D-M7 and D-M8 decisions were taken under delegation and await Paul's ratification (see the 2026-10-04 relevance pass §2.15) · **Executes:** §4.1, §4.2, §4.9, F-stream-15,
+**Status:** open — M0–M8 on `main` since 2026-10-04 (#793), including the M7 removal transition and joins (M0 to M6 came in through [PR #425](http://forge.lan:3000/noirr/plurx/pulls/425) and [PR #511](http://forge.lan:3000/noirr/plurx/pulls/511); M4 through S-05); learner removal and voter leave are being moved onto the shared `RemovalTransition` in the 2026-10-04 close-out PR; D-M7, D-M7-removal and D-M8-E…K were taken under delegation and ratified by Paul on 2026-10-05 (see the 2026-10-04 relevance pass §2.15) · **Executes:** §4.1, §4.2, §4.9, F-stream-15,
 F-core-10, F-sc-12, F-hist-13, F-build-ops-codehealth-3 and -14 from
 [ARCHITECTURE-REVIEW-2026-09-20.md](../reviews/ARCHITECTURE-REVIEW-2026-09-20.md)
 (§5.3 "this quarter", size L) · **Written:** 2026-09-20 against `main` @

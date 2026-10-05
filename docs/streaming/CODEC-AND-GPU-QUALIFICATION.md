@@ -1,7 +1,9 @@
 # Codec and GPU qualification — widen the measured boundary, one graph at a time
 
 **Status:** open: M1 corpus/M2 contract; sixteen internal M3 cells recorded,
-original qualification open, 2026-10-02 · **Executes:** Q12 (§3.1.3), Q6 / F-stream-10,
+original qualification open, 2026-10-02; folded into #766's per-graph
+qualification lane by Paul's ruling on 2026-10-05, which also deletes
+`OutputCodecContract.rate_control` (relevance pass §2.7) · **Executes:** Q12 (§3.1.3), Q6 / F-stream-10,
 Q8 / F-stream-16 from
 [ARCHITECTURE-REVIEW-2026-09-20.md](../reviews/ARCHITECTURE-REVIEW-2026-09-20.md)
 · **Written:** 2026-09-20 against `main` @ `0f02b7ea`
@@ -322,6 +324,9 @@ pub struct OutputCodecContract {
     pub pipeline: Pipeline,
 }
 ```
+
+**2026-10-05:** Paul ruled that `rate_control` is deleted from
+`OutputCodecContract`; it was never read in production (relevance pass §2.7).
 
 The rule that keeps this safe is a single `qualified()` predicate: a
 contract is selectable only if the exact tuple has a recorded measurement

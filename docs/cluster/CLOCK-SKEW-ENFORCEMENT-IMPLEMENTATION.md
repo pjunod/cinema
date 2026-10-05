@@ -2,7 +2,8 @@
 
 **Status:** open — E0 policy and active consumers on `main` since 2026-10-04
 (#793) behind Developer switch `cluster.clock_guard_enforced`, default off;
-measurement evidence pending (see the 2026-10-04 note in §1) · **Executes:** K-06 enforcement handoff ·
+measurement evidence pending (see the 2026-10-04 note in §1); Paul ruled on
+2026-10-05 to delete the switch and the enforcing branch · **Executes:** K-06 enforcement handoff ·
 **Written:** 2026-09-30 · **Source baseline:** effort `f319fa779`.
 
 Companion to [the accepted design](CLOCK-SKEW-GUARD-DESIGN.md) and the
@@ -49,8 +50,11 @@ describe the source they were written against. On `main`:
   keeps the node's current mode. While off, every guarded decision is
   admitted and `/readyz` ignores the clock; would-be refusals are counted in
   `plurx_cluster_clock_advisory_refusals_total`. Startup is always advisory.
-  The switch contradicts the design's §3.8 and awaits Paul's ruling (see the
-  2026-10-04 relevance pass §2.2).
+  The switch contradicts the design's §3.8. Paul ruled on 2026-10-05
+  (relevance pass §2.2, option b): the switch and the enforcing branch are to
+  be deleted, so the guard is always advisory; measurement stays; enforcement
+  returns later as its own change, with a measurement hour behind it. The
+  deletion is a separate code change.
 - **Being corrected.** The 2026-10-04 close-out PR changes three behaviours
   that apply with the switch on or off: which members the clock roster
   counts, the clock read in the removal fence, and the membership admission

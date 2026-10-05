@@ -3,8 +3,9 @@
 **Status:** open — M1–M5 on `main` since 2026-10-04 (#793); the Lo/Ro fold
 and −4 dBFS limiter apply to typed stereo encodes (not progressive untyped,
 legacy untyped or Live TV); synthetic subset measured 2026-09-30; listening
-notes and device routes owed; Decision 6 (the copy rule) awaits Paul's
-ratification (see the 2026-10-04 relevance pass §2.15) · **Executes:** Q5 / §3.1.2 / F-stream-5 from
+notes and device routes owed; Paul ratified on 2026-10-05 the fold and
+limiter (pending one listening pass) and Decision 6 (a decoding client's route
+does not refuse a copy) (see the 2026-10-04 relevance pass §2.15) · **Executes:** Q5 / §3.1.2 / F-stream-5 from
 [ARCHITECTURE-REVIEW-2026-09-20.md](../reviews/ARCHITECTURE-REVIEW-2026-09-20.md)
 · **Written:** 2026-09-20 against `main` @ `88a3957a`
 

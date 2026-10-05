@@ -1,8 +1,10 @@
 # Plex façade paging — batched metadata, honest container counts, and a golden corpus to hold them
 
 **Status:** open — M0 (census) and M5 (route-cache metrics) on `main` since
-2026-10-04 (#793); paging (M1–M3) deliberately not built; whether the facade
-stays awaits Paul's ruling (see the 2026-10-04 relevance pass §2.8) ·
+2026-10-04 (#793); paging (M1–M3) deliberately not built. Paul ruled on
+2026-10-05 (relevance pass §2.8): take the seven-day
+`plurx_plex_requests_since_census_total` reading; if it is zero on every node,
+retire the facade in one PR; do not build paging (M1–M3) either way ·
 **Executes:** C4 / F-core-5, with C9 /
 F-core-11 as the measure-first appendix, from
 [ARCHITECTURE-REVIEW-2026-09-20.md](../reviews/ARCHITECTURE-REVIEW-2026-09-20.md)

@@ -123,8 +123,10 @@ note), and the Developer clock card is now *Cluster clock guard*, with the toggl
 a switch (`cluster.clock_guard_enforced`, default off) with advisory
 readiness rows. With the switch off, decisions are admitted and would-be
 refusals are counted in `plurx_cluster_clock_advisory_refusals_total`. The
-switch contradicts §1's 2026-09-30 clarification and design §3.8, and awaits
-Paul's ruling (see the 2026-10-04 relevance pass §2.2).
+switch contradicts §1's 2026-09-30 clarification and design §3.8. Paul ruled on 2026-10-05 (relevance pass §2.2, option b): the switch and the
+enforcing branch are to be deleted, so the guard is always advisory;
+measurement stays; enforcement returns later as its own change, with a
+measurement hour behind it.
 
 Focused commands (pinned Rust 1.97.1; results recorded below when complete):
 

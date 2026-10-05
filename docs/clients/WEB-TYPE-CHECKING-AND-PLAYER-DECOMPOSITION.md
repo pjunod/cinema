@@ -1,8 +1,9 @@
 # Web type checking and player decomposition — a ratcheted `tsc` over one global scope, then `play()` and `attachHls()` cut at their seams
 
 **Status:** open — M0 and 5.1–5.7 on `main` since 2026-10-04 (#793); LG webOS
-and Fire TV acceptance open and awaits Paul's ruling (see the 2026-10-04
-relevance pass §2.11) ·
+and Fire TV acceptance open: Paul ruled on 2026-10-05 to run the existing GPT
+prompt (§5.7) if the GPT fleet can reach either TV, and otherwise to waive it
+(see the 2026-10-04 relevance pass §2.11) ·
 **Executes:** W8 / F-web-10 and W9 /
 F-web-11, F-web-12, F-web-13, F-web-15 from
 [ARCHITECTURE-REVIEW-2026-09-20.md](../reviews/ARCHITECTURE-REVIEW-2026-09-20.md)

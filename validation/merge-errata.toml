@@ -33,14 +33,17 @@
 # request's Regression-Test fields" step. tests/validation/
 # test_regression_field.py refuses either without the other.
 #
-# `[[errata]]` rows are permanent. A landing commit cannot be amended, so a
-# `Regression-Test:` line that reaches `main` wrong (or missing) stays that
-# way; a row naming that landing commit is the only way to record it and move
-# on. A row may also name a corrective commit past the boundary that reached
-# `main` without a landing commit at all. A row that names no commit past the
-# boundary is an error. Expect this list to stay empty. If it does not, the
-# pre-merge check in `validation/regression_field.py` is not doing its job and
-# that, not the typo, is the thing to fix.
+# `[[errata]]` rows are permanent records of malformed historical landings,
+# kept so the history audit can stay strict for every other commit. Each row
+# names a commit past the boundary that `make history-check` would otherwise
+# refuse: a landing commit whose immutable message is missing a
+# `Regression-Test:` line, carries a malformed one, or has a subject the audit
+# does not recognise as a landing; or a corrective commit that reached `main`
+# without a landing commit at all. A landing commit cannot be amended, so the
+# row is the record, and its reason says what went wrong and which test pins
+# the change. Rows are never removed or rewritten; new ones are added when a
+# malformed landing reaches `main`. A row that names no commit past the
+# boundary is an error.
 
 version = 1
 

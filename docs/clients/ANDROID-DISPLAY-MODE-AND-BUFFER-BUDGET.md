@@ -1,6 +1,6 @@
 # Android display-mode matching and buffer budget — implementation plan
 
-**Status:** open — M1–M3 and M4 actual-heap containment on `main` since 2026-10-04 (#793); M0 measured on the Google TV Streamer 2026-10-02; M4 larger allocation decided *not justified* (no-build on buffer roles, coordinator decision, awaits Paul's ratification, see the 2026-10-04 relevance pass §2.15); the §5.6 matcher-timeout reset is built in the 2026-10-04 close-out PR (Android 146); M0 on the other televisions and the M5 HDMI matrix open · **Executes:** §2.9 / D1 / F-android-1 /
+**Status:** open — M1–M3 and M4 actual-heap containment on `main` since 2026-10-04 (#793); M0 measured on the Google TV Streamer 2026-10-02; M4 larger allocation decided *not justified* (no-build on buffer roles, coordinator decision, ratified by Paul on 2026-10-05 together with the device substitutions, see the 2026-10-04 relevance pass §2.15); the §5.6 matcher-timeout reset is built in the 2026-10-04 close-out PR (Android 146); M0 on the other televisions and the M5 HDMI matrix open · **Executes:** §2.9 / D1 / F-android-1 /
 F-android-2 from
 [ARCHITECTURE-REVIEW-2026-09-20.md](../reviews/ARCHITECTURE-REVIEW-2026-09-20.md)
 · **Written:** 2026-09-20 against `main` @ `88a3957a`

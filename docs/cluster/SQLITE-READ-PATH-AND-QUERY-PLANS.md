@@ -1,6 +1,6 @@
 # SQLite read path and query plans — readers off the writer, indexes from plans, and the search predicate that keeps renamed titles
 
-**Status:** M0-M3, M4 (partial), M6, M7 and one found fix merged from [PR #502](http://forge.lan:3000/noirr/plurx/pulls/502) as `4bba363bc`; M5 in draft [PR #541](http://forge.lan:3000/noirr/plurx/pulls/541); M4's keyset pagination and `next_up` CTE not built by decision; post-merge fleet evidence owed (see the execution log) · **Executes:** S6, S7, S11, F-sc-6, F-sc-7,
+**Status:** M0-M3, M4 (partial), M6, M7 and one found fix merged from [PR #502](http://forge.lan:3000/noirr/plurx/pulls/502) as `4bba363bc`; M5 in draft [PR #541](http://forge.lan:3000/noirr/plurx/pulls/541); M4's keyset pagination and `next_up` CTE not built by decision; post-merge fleet evidence owed (see the execution log); the `watch_rollups` query plan is pinned in PR #814 (Paul, 2026-10-05, relevance pass §2.10) · **Executes:** S6, S7, S11, F-sc-6, F-sc-7,
 F-sc-8 (as corrected in §0 of the review), F-sc-14 from
 [ARCHITECTURE-REVIEW-2026-09-20.md](../reviews/ARCHITECTURE-REVIEW-2026-09-20.md)
 · **Written:** 2026-09-20 against `main` @ `88a3957a`

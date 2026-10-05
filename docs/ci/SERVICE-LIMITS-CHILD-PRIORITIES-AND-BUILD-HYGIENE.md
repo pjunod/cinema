@@ -2,7 +2,9 @@
 
 **Status:** open — M1 partial, M2, M3, M5, M6 (release profile C), M7 PR 3 and
 M8 on `main` since 2026-10-04 (#793); M4, the busy-load readbacks and M7 PR 4
-open ·
+open. Paul ruled on 2026-10-05 (relevance pass §2.12): M4's Compose rows are
+ratified and the systemd unit rows stay for bare-metal installs; M7 PR 4 stays
+unbuilt until he asks; profile C is decided (Paul, 2026-09-30) ·
 **Executes:** §4.6 / F-build-4 / F-build-8 /
 F-build-11 / F-build-13 from
 [ARCHITECTURE-REVIEW-2026-09-20.md](../reviews/ARCHITECTURE-REVIEW-2026-09-20.md)
@@ -854,6 +856,7 @@ runtime image installs both beside their executables in `/usr/local/bin`.
 `overflow-checks` is not set in the release profile, so PR 4 has not landed,
 and `lto`/`codegen-units` keep their thin/default values. This is on `main`
 since 2026-10-04 (#793), and every node runs an image built this way.
+Paul ruled on 2026-10-05 that PR 4 stays unbuilt until he asks for it.
 
 ### 3.6 Fuzz targets
 
@@ -1077,7 +1080,8 @@ lab VM, which a transient unit on lab3 cannot stand in for; `TasksMax` also
 still lacks its observed peak. The steps are in the execution log.
 
 **Compose rows proposed, 2026-10-02 (claude-opus-5-5, for Paul to ratify;
-nothing deployed).** §7 question 1 found no node running
+nothing deployed).** *Ratified by Paul on 2026-10-05 (relevance pass §2.12);
+the systemd rows stay for bare-metal installs.* §7 question 1 found no node running
 `deploy/plurxd.service`, so the systemd rows above harden an install path
 with nothing behind it. What the fleet inherits is the Compose service.
 Rescoping M4 from the unit to Compose is **Paul's call**; this is the

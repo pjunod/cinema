@@ -2,7 +2,8 @@
 
 **Status:** open — original design accepted; measurement and enforcement
 on `main` since 2026-10-04 (#793), enforcement behind a Developer switch this
-design does not allow (see the §3.8 note); runtime evidence open ·
+design does not allow (see the §3.8 note); runtime evidence open; Paul ruled
+on 2026-10-05 to delete that switch and the enforcing branch (§3.8 note) ·
 **Executes:** S9 / F-sc-10 from
 [ARCHITECTURE-REVIEW-2026-09-20.md](../reviews/ARCHITECTURE-REVIEW-2026-09-20.md)
 · **Written:** 2026-09-20 · **Revised:** 2026-09-21 against `main` @
@@ -800,9 +801,12 @@ longer — the state this section rules out. While it is off, every guarded
 decision is admitted and what would have been refused is counted in
 `plurx_cluster_clock_advisory_refusals_total`; while it is on, the guard
 refuses takeover, the expired-session scan and membership changes when the
-roster is not fully observed or an offset exceeds the bound. Whether the switch stays, or
-enforcement is removed until the measurement evidence exists, awaits Paul's
-ruling (see the 2026-10-04 relevance pass §2.2).
+roster is not fully observed or an offset exceeds the bound. Paul ruled on 2026-10-05 (relevance pass §2.2, option b): the switch and the
+enforcing branch are to be deleted, so the guard is always advisory;
+measurement stays; enforcement returns later as its own change, with a
+measurement hour behind it. The live
+fixes — the raw clock read at `membership.rs:9040`, and admission getting its
+own 45 s again — are in PR #814; the deletion is a separate code change.
 
 No recipe identity, cache digest or manifest changes: nothing here enters a
 transcode recipe or a cache key.

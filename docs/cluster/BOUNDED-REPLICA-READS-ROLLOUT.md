@@ -1,6 +1,6 @@
 # Bounded replica reads rollout — a consistency-policy change, one route at a time
 
-**Status:** open — M0–M4, the web echo, and the on-by-default setting (the `config.rs` seed is `true`) on `main` since 2026-10-04 (#793), switched on before the lab readout; Apple and Android send no `X-Plurx-Read-After`; the named lab readout and rolling-upgrade acceptance remain open; recommendation: remove the switch after the lab readout (see the 2026-10-04 relevance pass §2.9) · **Executes:** S1, F-sc-1, F-core-4 from
+**Status:** open — M0–M4, the web echo, and the on-by-default setting (the `config.rs` seed is `true`) on `main` since 2026-10-04 (#793), switched on before the lab readout; Apple and Android send no `X-Plurx-Read-After`; the named lab readout and rolling-upgrade acceptance remain open; Paul ruled on 2026-10-05 to remove the switch after the lab readout; the key-comment fix is already in (see the 2026-10-04 relevance pass §2.9) · **Executes:** S1, F-sc-1, F-core-4 from
 [ARCHITECTURE-REVIEW-2026-09-20.md](../reviews/ARCHITECTURE-REVIEW-2026-09-20.md)
 · **Written:** 2026-09-20 against `main` @ `88a3957a`
 

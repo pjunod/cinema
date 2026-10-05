@@ -1,6 +1,6 @@
 # Native library paging — pages on demand, one merged order, filtering off the main thread
 
-**Status:** 5.1–5.5 merged; automated tests in place; acceptance redefined by route-metric delta (§6.1, 2026-10-02); physical Apple TV and Lenovo acceptance open · **Executes:** A5 / F-apple-5 and the
+**Status:** 5.1–5.5 merged; automated tests in place; acceptance redefined by route-metric delta (§6.1, 2026-10-02), with before-numbers waived, ratified by Paul 2026-10-05 (relevance pass §2.15); physical Apple TV and Lenovo acceptance open · **Executes:** A5 / F-apple-5 and the
 library half of D6 / F-android-10 from
 [ARCHITECTURE-REVIEW-2026-09-20.md](../reviews/ARCHITECTURE-REVIEW-2026-09-20.md)
 · **Written:** 2026-09-20 against `main` @ `88a3957a`
@@ -455,7 +455,8 @@ has no access log) and report every reading with its time.
 
 ### 6.1 Route-metric acceptance (2026-10-02)
 
-*Coordinator decision, awaiting Paul's review.* This section replaces the request-count method of
+*Coordinator decision, ratified by Paul on 2026-10-05 together with the
+before-numbers waiver (relevance pass §2.15).* This section replaces the request-count method of
 §5.2, §5.4 and §6.
 
 Every node exports `plurx_http_route_seconds_count{route_group="library",role=…}`

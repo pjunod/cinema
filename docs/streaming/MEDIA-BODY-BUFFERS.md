@@ -4,8 +4,8 @@
 (#793). §5.1 before/after measured 2026-09-24 (§5.1.1). Decision 1 taken on
 Paul's behalf and his to overturn: the shared read is 128 KiB, and
 `TCP_NODELAY` is set on accepted connections, which removed the HLS p50
-regression at a packet-count cost on HLS bodies (§5.1.2, Decision 6); both
-await Paul's ratification (see the 2026-10-04 relevance pass §2.15). The
+regression at a packet-count cost on HLS bodies (§5.1.2, Decision 6); Paul
+ratified both on 2026-10-05 (see the 2026-10-04 relevance pass §2.15). The
 controlled acceptance and the packet-rate check are owed: the 2026-10-03
 controlled cell failed 151.6 s into the run, during the software 2160p
 first-segment warm-up (`502 producer_failed` at the 30 s materialisation

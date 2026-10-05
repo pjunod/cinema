@@ -1,6 +1,6 @@
 # Regression ledger, text contracts and release tags — what the process buys, and what it costs
 
-**Status:** open — M1-M4, M6 and M7's buildable half on `main` since 2026-10-04 (#793); M5 refused by its own protocol; the first release tag is open, and whether to tag the last pre-effort commit awaits Paul's ruling (see the 2026-10-04 relevance pass §2.1) · **Executes:** §4.4 / §4.5 / F-hist-8 / F-hist-9 /
+**Status:** open — M1-M4, M6 and M7's buildable half on `main` since 2026-10-04 (#793); M5 refused by its own protocol; the first release tag is open; the last pre-effort commit `1f0a91c9e` carries the annotated record tag `pre-architecture-0.3.1` (Paul's ruling 2.1, 2026-10-05 — no `v` prefix, so it starts no release sweep and publishes nothing) · **Executes:** §4.4 / §4.5 / F-hist-8 / F-hist-9 /
 F-build-9 / F-build-15 from
 [ARCHITECTURE-REVIEW-2026-09-20.md](../reviews/ARCHITECTURE-REVIEW-2026-09-20.md)
 · **Written:** 2026-09-20 against `main` @ `0f02b7ea`

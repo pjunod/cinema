@@ -1,6 +1,6 @@
 # Status — what the agent is working on and where it stands
 
-**Updated:** 2026-10-04 · Kept current by the working agent in the same
+**Updated:** 2026-10-05 · Kept current by the working agent in the same
 commit as the work it describes; a stale entry here is a bug. Newest effort
 first.
 
@@ -26,9 +26,13 @@ commits are not deployed.**
   network priors off. S-14, L-02, K-05 and D-01 (Android 146) fixes; the
   hiqlite fork ledger tied to source; the host-name scrub and its guard;
   Apple 209. The progressive-remux leader-restart grace is PR #807.
-- **Rulings Paul owes** are listed with recommendations in the 2026-10-04
-  relevance pass (an agent-side project document). K-02's snapshot path was
-  accepted on 2026-10-04.
+- **Rulings, 2026-10-05.** Paul ruled on the 2026-10-04 relevance pass (an
+  agent-side project document): every recommendation accepted except §2.13,
+  which keeps batch branches so unit tests run once per batch. Each ruling and
+  the rows it changes are in the work board's
+  [Rulings, 2026-10-05](docs/reviews/ARCHITECTURE-REVIEW-2026-09-20-WORKBOARD.md)
+  section. K-02's snapshot path was accepted on 2026-10-04 and ratified as
+  shipped on 2026-10-05.
 
 ## Apple TV: new HEVC WEB-DLs refused with 503 — ffmpeg 8 repeats the sample description
 

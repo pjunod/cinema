@@ -5,8 +5,10 @@
 since 2026-10-04 (#793); the runners have no production caller and are
 deleted in the 2026-10-04 close-out PR; native recovery runs only while the
 Developer switches `playback.display_aware_auto` and `playback.auto_abr` are
-both on (both default off); physical qualification open (see the 2026-10-04
-relevance pass §2.5) · **Executes:**
+both on (both default off); physical qualification open. Paul ruled on
+2026-10-05 (relevance pass §2.5): delete the three orphan Auto-quality runners,
+give the v93 link columns a producer (the D6 behavioural fix), and keep native
+recovery behind its two switches; built in PR #814 · **Executes:**
 [NATIVE-ADAPTIVE-QUALITY-DESIGN.md](NATIVE-ADAPTIVE-QUALITY-DESIGN.md)'s D4
 · **Written:** 2026-09-23 against `main` @ `8839cc72`
 

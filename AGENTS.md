@@ -81,21 +81,24 @@ test failures, or denied lints.
   toolchain is not equivalent evidence. Remove stale source extractions when
   the session's fixed writable allowance gets tight.
 
-## Large efforts
+## Large efforts — work is batched
 
-- Integrate a multi-task project on one temporary `effort/<project>` branch.
-- Base each reviewable task branch on the current effort and open its pull
-  request back into that effort.
-- Dispatch `Effort development gate` by hand before merging a task into the
-  effort, and do not merge on a red run. `.github/workflows/effort-ci.yml`
-  runs only on `workflow_dispatch`: nothing fires it on a task pull request,
-  so it gates a merge only when someone runs it first. It proves policy,
-  formatting, static web contracts, and affected Rust/Apple/Android
-  compilation; it does not run the Rust, Apple or Android unit suites and
-  does not make the branch releasable.
+Work reaches `main` in batches so the unit suite runs once per batch, not once
+per task. Paul, 2026-10-05: "Batches of PRs make it so we can save time and
+resources on unit tests."
+
+- Batch the work: task pull requests into one temporary batch branch
+  (`effort/<project>`), each task based on the current effort, which then
+  reaches `main` as one promotion pull request. Work small enough to be one
+  task can be that one batched pull request to `main` directly.
+- `.github/workflows/effort-ci.yml` (`Effort development gate`) runs only on
+  `workflow_dispatch`; nothing fires it on a task pull request. It is compile
+  and preflight only — policy, formatting, static web contracts, and affected
+  Rust/Apple/Android compilation — and runs no unit suite.
+- Do not add `make unit` to effort or task pull requests. The `main` fast lane
+  runs `make unit` once, on the batch heading to `main`.
 - Run the smallest focused regression for changed behavior locally and record
-  that command in the task pull request. The effort workflow deliberately
-  defers the full suites.
+  that command in the task pull request.
 - **If the change alters behavior a user could observe, its subject is `fix(`
   or `perf(`.** The corrective-history audit narrows to those two prefixes past
   its boundary commit, so a behavior fix labelled `chore(` or `refactor(` is
@@ -125,18 +128,16 @@ test failures, or denied lints.
   Rust formatting and Clippy, and embedded JavaScript syntax; it does not run
   tests or compile-only effort evidence. Run the smallest focused regression
   and the affected compile checks before pushing.
-- When the effort is complete, freeze task merges, merge current `main` into
-  the effort, and open `effort/<project>` into `main`.
-- Merge only after `Main promotion gate` passes on the current candidate and
-  the qualification receipt exists. If `main` or the effort moves, qualify the
-  new tree again.
+- When the batch is complete, freeze task merges, merge current `main` into
+  the effort, and open `effort/<project>` into `main`. Its fast-lane run is the
+  batch's one full-suite run; merge when it is green.
 
 **The one bounded exception.** A multi-task project may branch each task from
 `main` and merge it there instead, when its implementation plan says so *and*
 names the file ownership per task, because an effort branch buys serialised
 integration and there is nothing to serialise when no two tasks can touch the
 same file. Everything else in this section still applies to such a project —
-focused regression per task, the tracked hook, the gate — and the plan carries
+focused regression per task and the tracked hook — and the plan carries
 the ownership table that makes the exception safe. The playback surface
 contract ran this way through eleven task pull requests
 ([§8 and §9 of its plan](docs/clients/PLAYBACK-SURFACE-CONTRACT-IMPLEMENTATION.md));

@@ -1,7 +1,11 @@
 # Encoder rate-control defaults — flip a family to quality mode only on evidence
 
-**Status:** implementation in progress — M1, M2 and M5 complete; M3/M4 need
-fleet acceptance captures · **Executes:** Q1 / F-stream-1 from
+**Status:** done — closed by Paul's ruling on 2026-10-05 (relevance pass §2.7) on the
+retain-bitrate result of #766: the QSV Q22 screen failed all six fixtures
+([VIDEO-QUALITY-STATUS.md](../performance/VIDEO-QUALITY-STATUS.md)), so every
+family stays Bitrate; software and VA-API are recorded as not compared; M1, M2
+and M5 complete; the §7.4 clear of the fleet's stored `bitrate` is approved and
+not yet run · **Executes:** Q1 / F-stream-1 from
 [ARCHITECTURE-REVIEW-2026-09-20.md](../reviews/ARCHITECTURE-REVIEW-2026-09-20.md)
 · **Written:** 2026-09-20 · **Implementation base:** `main` @ `21eab120`
 
@@ -517,7 +521,9 @@ flipped):
   explicit-quality-without-override rows move); that is a separate,
   deliberate decision if one is ever made.
 
-**Operator step: return an explicit cluster value to "default".** The setting
+**Operator step: return an explicit cluster value to "default".** Paul
+approved this clear on 2026-10-05 (relevance pass §2.7); it is a fleet step
+and has not been run. The setting
 is replicated, so one request on any voter clears it cluster-wide. After this
 branch is deployed, either choose **Default (per encoder)** in the Encoder
 rate control card and Save, or:
@@ -541,6 +547,10 @@ comparisons — M3 (QSV on media1), M4 (software on lab4) and the VA-API
 comparison on lab6 — and the §3.3 flip decision remain open; an offline
 pre-screen is being measured separately and does not replace them. Every
 `Encoder::default_rate_mode()` still returns Bitrate.
+
+**Closed, 2026-10-05.** Paul closed S-06 on #766's retain-bitrate result (the
+QSV Q22 screen failed all six fixtures). Software and VA-API are recorded as
+not compared; no further comparison is owed under this plan.
 
 ---
 
