@@ -1336,6 +1336,34 @@ impl TranscodeManager {
         .await
     }
 
+    /// [`Self::encoder_and_grade_for`], from `preference` when the caller
+    /// already holds the HWACCEL value and from the store when it does not.
+    pub(super) async fn encoder_and_grade_preferring(
+        &self,
+        file: &plurx_core::domain::MediaFile,
+        requested: bool,
+        target_height: i64,
+        subtitle_burn: bool,
+        preference: Option<&str>,
+    ) -> Result<(Encoder, OutputGrade), String> {
+        match preference {
+            Some(preference) => {
+                self.encoder_and_grade_for_with_preference(
+                    file,
+                    requested,
+                    target_height,
+                    subtitle_burn,
+                    preference,
+                )
+                .await
+            }
+            None => {
+                self.encoder_and_grade_for(file, requested, target_height, subtitle_burn)
+                    .await
+            }
+        }
+    }
+
     pub(super) async fn encoder_and_grade_for_with_preference(
         &self,
         file: &plurx_core::domain::MediaFile,
