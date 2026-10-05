@@ -53,6 +53,9 @@ class PlaybackFileContext private constructor(
     fun path(resource: String, query: Map<String, String> = emptyMap()): String {
         requireCurrent()
         require(Regex("(decision|hls/sessions|direct|stream\\.mp4|subs/[0-9]{1,6}(\\.vtt|/overlay\\.json|/overlay/[0-9a-f]{64}/objects/[0-9a-f]{64}\\.png)?|chapters/[0-9]{1,6}/thumb)").matches(resource))
+        // A Shared track or chapter index is the Source wire grammar: canonical
+        // decimal 0..4095, the bound B and every Source enforce. Local keeps its own.
+        if (reference != null) require(sharedFileSuffix(resource))
         if (reference != null && resource in setOf("direct", "stream.mp4")) require(sessionId != null)
         if (reference != null) validateQuery(resource, query)
         val parameters = query.toMutableMap()
@@ -158,6 +161,12 @@ class PlaybackFileContext private constructor(
                 }
                 require(valid)
             }
+        }
+        private val sharedSuffix = Regex("decision|hls/sessions|direct|stream\\.mp4|subs/(0|[1-9][0-9]{0,3})(\\.vtt|/overlay\\.json|/overlay/[0-9a-f]{64}/objects/[0-9a-f]{64}\\.png)?|chapters/(0|[1-9][0-9]{0,3})/thumb")
+        /** The closed Shared file-suffix grammar, as B and every Source parse it. */
+        internal fun sharedFileSuffix(resource: String): Boolean {
+            val match = sharedSuffix.matchEntire(resource) ?: return false
+            return listOf(1, 3).all { group -> match.groupValues[group].let { it.isEmpty() || it.toInt() <= 4095 } }
         }
         fun canonicalId(value: String): Boolean = value.toLongOrNull()?.let { it >= 0 && it.toString() == value } == true
         fun canonicalUuid(value: String): Boolean = runCatching { UUID.fromString(value).toString() == value }.getOrDefault(false)

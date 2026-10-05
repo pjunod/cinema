@@ -147,7 +147,7 @@ internal class SharedStartedPlayback(val start: SharedStart, override val contex
 internal fun SharedStart.bindInitial(context: PlaybackFileContext, request: CreateSessionReq): SharedStartedPlayback {
     require(context.reference != null && context.sessionId == null)
     require(response.vod == true && response.start_seconds.isFinite() && response.start_seconds >= 0 && response.start_seconds <= 9_007_199_254_740.0)
-    require(response.duration_ms?.let { it >= 0 } != false)
+    require(response.duration_ms?.let { it in 0..9_007_199_254_740_991L } != false)
     val control = requireNotNull(response.control)
     require(Regex("[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}").matches(control.generation))
     require(control.nextExchangeMs == 5_000L && control.leaseTimeoutMs == 300_000L)
@@ -380,6 +380,7 @@ internal class SharedPlaybackStatus private constructor(val sessionId: String, v
         val optionalWords = setOf("tone_map_peak_source", "producer_hold", "producer_decision", "control_demand", "render_state")
         /** `status_token` in sharing_playback_client.rs. */
         private val token = Regex("[A-Za-z0-9_.-]{1,32}")
+        fun isToken(text: String): Boolean = token.matches(text)
         fun decode(bytes: ByteArray, playback: SharedStartedPlayback): SharedPlaybackStatus {
             require(bytes.size <= 65_536)
             val outer = Json.parseToJsonElement(bytes.decodeToString()).jsonObject
