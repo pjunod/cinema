@@ -86,7 +86,9 @@ class KnownRedContractTest(unittest.TestCase):
         admitted_identities = {capture_identity, public_wire_identity}
         # Main's native FFmpeg/libvmaf qualification remains independently
         # admitted; keep it in addition to effort's two acquisition identities.
-        self.assertEqual(len(tuple(item for item in ignored if item.identity not in admitted_identities)), 21)
+        # #811 added three opt-in captures of real ffmpeg 8 output
+        # (`captured_ffmpeg8_*`), each ignored until its capture path is set.
+        self.assertEqual(len(tuple(item for item in ignored if item.identity not in admitted_identities)), 24)
         validate_listed_tests(public_wires, (public_wire.cargo_name,))
         with self.assertRaisesRegex(KnownRedError, "absent"):
             validate_listed_tests(public_wires, ())
