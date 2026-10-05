@@ -133,6 +133,9 @@ private fun SharedLibraryItems(route: SharedBrowseRoute.Library, onItem: (Shared
 private fun SharedLibraryDetails(route: SharedBrowseRoute.Detail, onChildren: (String) -> Unit) {
     val vm: AppViewModel = androidx.lifecycle.viewmodel.compose.viewModel()
     var playbackPlan by remember { mutableStateOf<SharedPlaybackPlan?>(null) }
+    /** The full Shared reference of what is playing; next episode resolves from it. */
+    var playing by remember { mutableStateOf(route.reference) }
+    val preferences by vm.preferences.collectAsState()
     var detail by remember { mutableStateOf<SharedLibraryDetail?>(null) }
     var error by remember { mutableStateOf<String?>(null) }
     var loading by remember { mutableStateOf(false) }
@@ -145,7 +148,18 @@ private fun SharedLibraryDetails(route: SharedBrowseRoute.Detail, onChildren: (S
     }
     LaunchedEffect(route.reference) { load() }
     playbackPlan?.let { plan ->
-        tv.plurx.app.player.PlayerScreen(vm, plan) { playbackPlan = null }
+        tv.plurx.app.player.PlayerScreen(vm, plan, onEnded = {
+            // A finished episode continues with the next one in Source order,
+            // started from fresh details under the current login.
+            if (!preferences.autoplayNext) { playbackPlan = null; scope.launch { load() } }
+            else scope.launch {
+                val next = try { vm.prepareNextSharedEpisode(playing) } catch (failure: Exception) {
+                    if (failure is kotlinx.coroutines.CancellationException) throw failure
+                    error = failure.message ?: "The next shared episode is not available."; null
+                }
+                if (next == null) { playbackPlan = null; load() } else { playing = next.first; playbackPlan = next.second }
+            }
+        }) { playbackPlan = null; scope.launch { load() } }
         return
     }
     LazyColumn(verticalArrangement = Arrangement.spacedBy(14.dp)) {
@@ -159,6 +173,18 @@ private fun SharedLibraryDetails(route: SharedBrowseRoute.Detail, onChildren: (S
             if (value.item.genres.isNotEmpty()) item { Text(value.item.genres.joinToString(" · ")) }
             if (value.delivery_status != "available") item { Text("Playback is unavailable for this Shared title.") }
             value.watch?.let { watch -> item { Text(if (watch.watched) "Watched on this server" else "Position on this server: ${watch.position_ms / 1000} seconds") } }
+            if (value.item.kind == "movie" || value.item.kind == "episode") item {
+                val watched = value.watch?.watched == true
+                Button(enabled = !loading, onClick = {
+                    scope.launch {
+                        loading = true
+                        try { val client = SharedLibraryClient.create(); client.setWatched(route.reference, !watched); client.requireCurrent(); error = null }
+                        catch (failure: Exception) { if (failure is kotlinx.coroutines.CancellationException) throw failure; error = failure.message ?: "Shared watch state unavailable" }
+                        finally { loading = false }
+                        load()
+                    }
+                }) { Text(if (watched) "Mark unwatched" else "Mark watched") }
+            }
             if (value.item.hasChildren) item { Button(onClick = { onChildren(value.item.title) }) { Text("Browse children") } }
             items(value.files, key = { it.file_id + "|" + it.revision }) { file ->
                 Column {
@@ -168,7 +194,7 @@ private fun SharedLibraryDetails(route: SharedBrowseRoute.Detail, onChildren: (S
                     if (value.delivery_status == "available" && file.file_base != null) Button(enabled = !loading, onClick = {
                         scope.launch {
                             loading = true
-                            try { playbackPlan = vm.prepareSharedPlayback(route.reference, file.file_id); error = null }
+                            try { playbackPlan = vm.prepareSharedPlayback(route.reference, file.file_id); playing = route.reference; error = null }
                             catch (failure: Exception) { if (failure is kotlinx.coroutines.CancellationException) throw failure; error = failure.message ?: "Shared playback unavailable" }
                             finally { loading = false }
                         }

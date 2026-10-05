@@ -3094,7 +3094,7 @@ private fun BackChip(onExit: () -> Unit) {
 /** Explicit Shared dispatch, without a numeric Local PlanLike sentinel. Every
  * control here asks the server first; the picture moves only after B accepts. */
 @Composable
-internal fun PlayerScreen(vm: AppViewModel, plan: tv.plurx.app.data.SharedPlaybackPlan, onExit: () -> Unit) {
+internal fun PlayerScreen(vm: AppViewModel, plan: tv.plurx.app.data.SharedPlaybackPlan, onEnded: () -> Unit = {}, onExit: () -> Unit) {
     val context = androidx.compose.ui.platform.LocalContext.current
     val controller = remember(vm, plan) { SharedPlayerController(context, vm) }
     val starting by controller.owner.starting.collectAsStateWithLifecycle()
@@ -3105,6 +3105,9 @@ internal fun PlayerScreen(vm: AppViewModel, plan: tv.plurx.app.data.SharedPlayba
     val scope = rememberCoroutineScope()
     BackHandler { scope.launch { controller.stop(); onExit() } }
     LaunchedEffect(plan) { controller.start(plan) }
+    val ended by controller.ended.collectAsStateWithLifecycle()
+    val finished by rememberUpdatedState(onEnded)
+    LaunchedEffect(ended) { if (ended) finished() }
     DisposableEffect(controller) { onDispose { controller.close() } }
     Column(Modifier.fillMaxSize()) {
         Text(plan.subject.title, style = MaterialTheme.typography.headlineSmall)

@@ -5100,6 +5100,8 @@ internal fun statusPollIntervalMs(visible: Boolean): Long = if (visible) 2_000L 
 internal class SharedPlayerController(context: android.content.Context, vm: AppViewModel) {
     val player = buildPlayer(context, vm).player
     val playing = kotlinx.coroutines.flow.MutableStateFlow(false)
+    /** The title played to its end and the session was settled as watched. */
+    val ended = kotlinx.coroutines.flow.MutableStateFlow(false)
     private val scope = kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.SupervisorJob() + kotlinx.coroutines.Dispatchers.Main.immediate)
     /** B's direct byte URL already carries its narrow session binding; no account header rides with it. */
     private val directSource = androidx.media3.exoplayer.source.ProgressiveMediaSource.Factory(
@@ -5137,7 +5139,7 @@ internal class SharedPlayerController(context: android.content.Context, vm: AppV
         player.addListener(object : androidx.media3.common.Player.Listener {
             override fun onPlaybackStateChanged(state: Int) {
                 if (state == androidx.media3.common.Player.STATE_READY && !reachedTimeline) { reachedTimeline = true; owner.timelineReached() }
-                if (state == androidx.media3.common.Player.STATE_ENDED) scope.launch { stop(watched = true) }
+                if (state == androidx.media3.common.Player.STATE_ENDED) scope.launch { if (!stopped) { stop(watched = true); ended.value = true } }
             }
             override fun onPlayWhenReadyChanged(playWhenReady: Boolean, reason: Int) { playing.value = playWhenReady }
             override fun onPlayerError(error: androidx.media3.common.PlaybackException) {
