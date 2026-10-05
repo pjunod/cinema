@@ -20,6 +20,7 @@ test("library browse controls stay above the full-width poster grid",async()=>{
         localStorage.setItem("plurx_token","fixture");
         localStorage.setItem("plurx_layout",layout);
         localStorage.setItem("plurx_perpage","all");
+        localStorage.setItem("plurx_library_view","grid");
       },layout);
       await page.route("**/*",async route=>{
         const url=new URL(route.request().url()),p=url.pathname;

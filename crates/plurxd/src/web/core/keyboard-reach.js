@@ -5,8 +5,9 @@
 // announced, and Enter does nothing. Catalog and Theater each carried a
 // near-copy of this (their own comment said so) and Classic carried none, so
 // the layout you picked decided whether the library was reachable at all.
-function navEnhanceClickables(){
-  for(const el of document.querySelectorAll(
+/** @param {ParentNode} [root] */
+function navEnhanceClickables(root=document){
+  for(const el of root.querySelectorAll(
     ".poster[onclick]:not([tabindex]),.eprow[onclick]:not([tabindex])")){
     el.setAttribute("tabindex","0");
     // Cards that navigate are links; the photo cards call openLightbox() and
@@ -35,7 +36,7 @@ function navKeyboardWireOnce(){
   // #app itself is never replaced (every view assigns to its innerHTML), so
   // one observer on it outlives every route change.
   const app=document.getElementById("app");
-  if(app&&window.MutationObserver) new MutationObserver(navEnhanceClickables).observe(app,{childList:true,subtree:true});
+  if(app&&window.MutationObserver) new MutationObserver(()=>navEnhanceClickables()).observe(app,{childList:true,subtree:true});
   navEnhanceClickables();
 }
 // nav-keyboard-adapter:end

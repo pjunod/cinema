@@ -1,6 +1,6 @@
 # Grouped library rows — implementation and acceptance status
 
-**Status:** building · **Updated:** 2026-10-04 · **Branch:**
+**Status:** implemented; awaiting adversarial review · **Updated:** 2026-10-04 · **Branch:**
 `codex/grouped-library-rows` · **Pull request:** pending
 
 Companion to [WEB-SHELL-LAYOUT.md](WEB-SHELL-LAYOUT.md), which maps the web
@@ -29,9 +29,9 @@ handled explicitly, without invented dates or years.
 |---|---|---|
 | Isolated checkout | done | Own clone under `/private/tmp`; user checkouts untouched. |
 | Compiler and hooks | ready | Local Rust 1.97.1 verified; tracked commit hook installed. |
-| Shared grouping and row presentation | building | Existing loader and card renderer; no server change expected. |
-| Responsive controls and navigation | pending | Desktop and mobile browser; native scope awaiting clarification. |
-| Regression coverage | pending | Author during implementation; execute after review. |
+| Shared grouping and row presentation | implemented | Shared loader/card renderer; all five sorts; no server changes. |
+| Responsive controls and navigation | implemented | All three web layouts, touch rows, keyboard navigation, jump index and group grids. |
+| Regression coverage | authored | Pure grouping/order cases and real-browser paging, focus, filters, responsive layout, failure/retry and merged libraries; not yet executed. |
 | Adversarial agent review | pending | One review when the complete PR is ready to merge. |
 | Fast lane | pending | After review corrections; rerun only failed checks. |
 | Merge and cleanup | pending | Carry regression fields into landing message; delete task branch and temporary build files. |
@@ -51,5 +51,29 @@ handled explicitly, without invented dates or years.
 
 ## Review and validation evidence
 
-Not run yet. Record exact commands and results here after the adversarial
-review and corrections. A pending row is not a passing result.
+Formatting, pinned workspace Clippy, JavaScript syntax, and the TypeScript
+baseline have passed during development. Behavioral tests have not run yet.
+Record exact commands and results here after the adversarial review and
+corrections. A pending row is not a passing result.
+
+## Scope and interaction choices
+
+This PR implements the responsive web app shown in the approved renders,
+including mobile browsers. Native Apple and Android screens are outside this
+PR; no response to the optional scope question had arrived when work began.
+
+Rows is the default; `plurx_library_view` remembers Rows/Grid per browser.
+The existing page size controls Grid and group expansion, not row contents.
+Title groups follow the server's article-stripped `sort_title`; non-A–Z keys
+share `#`. Year and recording date use years; resolution uses existing tiers.
+Recently added uses Today, Previous 6 days, Earlier this month, then calendar
+months. Missing metadata goes into named Unknown groups; future added dates
+are identified separately. TV years are series years, not episode air dates.
+
+Each row initially mounts at most 40 cards. Approaching its horizontal end
+mounts another 40. Arrow keys move between posters; Home/End reach a row's
+first/last poster. View all opens the complete group in the existing grid,
+and All rows restores its horizontal position. Counts identify partial loads
+and request failures offer Retry. Grouping never caps membership to Grid's
+page size. Merged category ordering follows the server's shared sort fixture.
+
