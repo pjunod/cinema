@@ -142,4 +142,62 @@ final class LibraryGridCoordinatorTests: XCTestCase {
         XCTAssertEqual(queries, ["Zero Harbor"])
         XCTAssertEqual(state.visibleItems.map(\.id), [2])
     }
+    func testRowsDriveTheWholeLibraryAndRetryKeepsDecidedItems() async throws {
+        let rows = try items(421)
+        var fail = true
+        var offsets: [Int] = []
+        let state = LibraryGridCoordinator(fetch: { _, _, offset in
+            offsets.append(offset)
+            if offset == 200 && fail { fail = false; throw URLError(.cannotConnectToHost) }
+            return Page(items: Array(rows.dropFirst(offset).prefix(200)), total: rows.count)
+        }, delay: { _ in })
+        defer { state.stop() }
+        state.presentationChanged(rows: true)
+        await state.load(libraryIds: [1], sort: .title)
+        await waitUntil { state.error != nil }
+        XCTAssertFalse(state.complete)
+        XCTAssertEqual(state.items.count, 200)
+        await state.retry()
+        await waitUntil { state.groups.flatMap(\.items).count == 421 }
+        XCTAssertTrue(state.complete)
+        XCTAssertNil(state.error)
+        XCTAssertEqual(offsets, [0, 200, 200, 400])
+        XCTAssertEqual(Set(state.groups.flatMap(\.items).map(\.id)).count, 421)
+    }
+
+    func testReturningRefreshesWatchStateWithoutDroppingLateRows() async throws {
+        let original = try items(421)
+        var refreshed = original
+        refreshed[0].watch = Watch(positionMs: 0, durationMs: 60_000, watched: true)
+        var returning = false
+        let gate = LibraryWorkerGate()
+        let state = LibraryGridCoordinator(fetch: { _, _, offset in
+            if returning && offset == 200 { await gate.block("refresh") }
+            let rows = returning ? refreshed : original
+            return Page(items: Array(rows.dropFirst(offset).prefix(200)), total: rows.count)
+        }, delay: { _ in })
+        defer { state.stop() }
+        state.presentationChanged(rows: true)
+        await state.load(libraryIds: [1], sort: .title)
+        await waitUntil { state.complete && state.visibleItems.count == 421 }
+        state.stop()
+        returning = true
+        await state.load(libraryIds: [1], sort: .title)
+        await gate.waitFor("refresh")
+        XCTAssertEqual(state.groups.flatMap(\.items).count, 421, "Keep late rows mounted during refresh")
+        await gate.release("refresh")
+        await waitUntil { state.complete && state.visibleItems.first?.watch?.watched == true }
+        XCTAssertEqual(state.groups.flatMap(\.items).count, 421)
+    }
+
+    func testGridSkipsGroupingUntilRowsAreSelected() async throws {
+        let rows = try items(20)
+        let state = LibraryGridCoordinator(fetch: { _, _, _ in Page(items: rows, total: rows.count) }, delay: { _ in })
+        defer { state.stop() }
+        await state.load(libraryIds: [1], sort: .added)
+        await waitUntil { state.visibleItems.count == 20 }
+        XCTAssertTrue(state.groups.isEmpty)
+        state.presentationChanged(rows: true)
+        await waitUntil { state.groups.flatMap(\.items).count == 20 }
+    }
 }
