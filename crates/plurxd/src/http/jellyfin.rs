@@ -624,16 +624,30 @@ async fn catalog(
 async fn catalog_mode(
     client: &ClientUser,
     state: &AppState,
-    q: BrowseQuery,
+    mut q: BrowseQuery,
     target: Option<WireId>,
     mode: JellyfinCatalogMode,
 ) -> Result<wire::Items<wire::Item>, ApiError> {
     if let Some(user) = &q.user {
         check_user(client, &user.to_hex())?;
     }
-    if q.series.is_some() || q.season.is_some() || q.kinds.iter().any(|k| k == "library") {
-        return Err(ApiError::BadRequest("unsupported catalog filter".into()));
+    // Kinds Jellyfin defines but the catalogue never holds select nothing.
+    if q.kinds_absent {
+        return Ok(wire::Items {
+            items: vec![],
+            total_record_count: 0,
+            start_index: q.start as u64,
+        });
     }
+    // `SeriesId`/`SeasonId` narrow to that show's or season's descendants:
+    // the most specific one is the parent of a recursive read.
+    if let Some(scope) = q.season.take().or(q.series.take()) {
+        q.parent = Some(scope);
+        q.recursive = true;
+    }
+    // Library folders are not catalogue rows; `items` answers a request for
+    // only them, and a mixed request lists its catalogue kinds.
+    q.kinds.retain(|k| k != "library");
     let query = JellyfinCatalogQuery {
         mode,
         today: if matches!(mode, JellyfinCatalogMode::Upcoming) {
@@ -690,6 +704,45 @@ async fn catalog_mode(
         }
         _ => {}
     }
+    // The store reads at most STORE_PAGE_ROWS rows at a time. Jellyfin has no
+    // page ceiling, and a client that omits `Limit` expects every row, so a
+    // larger page is assembled from consecutive reads, up to RESPONSE_ROWS;
+    // the true TotalRecordCount lets the client page past that.
+    let wanted = q.limit.min(RESPONSE_ROWS);
+    let server = server_id(state).await?;
+    let mut items = Vec::new();
+    let total = loop {
+        query.start = q.start.saturating_add(items.len() as i64);
+        query.limit = (wanted - items.len() as i64).min(STORE_PAGE_ROWS);
+        let page = Box::pin(catalog_page(state, &query)).await?;
+        let read = page.items.len() as i64;
+        for row in &page.items {
+            items.push(item_dto(row, &server)?);
+        }
+        if read == 0
+            || items.len() as i64 >= wanted
+            || query.start.saturating_add(read) >= page.total
+        {
+            break page.total;
+        }
+    };
+    Ok(wire::Items {
+        items,
+        total_record_count: total.max(0) as u64,
+        start_index: q.start as u64,
+    })
+}
+
+/// The most rows one store read returns (the store's own bound).
+const STORE_PAGE_ROWS: i64 = 500;
+/// The most rows one facade response carries, however large `Limit` is.
+const RESPONSE_ROWS: i64 = 10_000;
+
+/// One store read, with any Jellyfin identities it lacks allocated first.
+async fn catalog_page(
+    state: &AppState,
+    query: &JellyfinCatalogQuery,
+) -> Result<plurx_core::store::JellyfinCatalogPage, ApiError> {
     for _ in 0..4 {
         let page = state.store.jellyfin_catalog_page(query.clone()).await?;
         if !page.authorized {
@@ -704,17 +757,7 @@ async fn catalog_mode(
             ));
         }
         if page.missing.is_empty() {
-            let server = server_id(state).await?;
-            let items = page
-                .items
-                .iter()
-                .map(|row| item_dto(row, &server))
-                .collect::<Result<Vec<_>, _>>()?;
-            return Ok(wire::Items {
-                items,
-                total_record_count: page.total as u64,
-                start_index: q.start as u64,
-            });
+            return Ok(page);
         }
         for (name, kind) in [
             ("item", JellyfinEntityKind::Item),
@@ -740,17 +783,21 @@ async fn items(
     client: ClientUser,
     State(state): State<AppState>,
     RawQuery(raw): RawQuery,
-) -> Result<Json<wire::Items<wire::Item>>, ApiError> {
-    Ok(Json(
-        catalog(&client, &state, browse(raw.as_deref())?, None).await?,
-    ))
+) -> Result<Response, ApiError> {
+    let q = browse(raw.as_deref())?;
+    // `IncludeItemTypes=CollectionFolder` alone is how a client lists the
+    // user's libraries through `/Items`; those are the mapped views.
+    if q.kinds == ["library"] && q.parent.is_none() {
+        return Ok(current_views(client, State(state)).await?.into_response());
+    }
+    Ok(Json(catalog(&client, &state, q, None).await?).into_response())
 }
 async fn user_items(
     client: ClientUser,
     state: State<AppState>,
     Path(id): Path<String>,
     raw: RawQuery,
-) -> Result<Json<wire::Items<wire::Item>>, ApiError> {
+) -> Result<Response, ApiError> {
     check_user(&client, &id)?;
     items(client, state, raw).await
 }
@@ -789,6 +836,7 @@ async fn seasons(
 ) -> Result<Json<wire::Items<wire::Item>>, ApiError> {
     let mut q = browse(raw.as_deref())?;
     q.parent = Some(wire_id(&id)?);
+    (q.series, q.season) = (None, None);
     q.recursive = false;
     q.kinds = vec!["season".into()];
     Ok(Json(catalog(&client, &state, q, None).await?))
@@ -801,6 +849,7 @@ async fn episodes(
 ) -> Result<Json<wire::Items<wire::Item>>, ApiError> {
     let mut q = browse(raw.as_deref())?;
     q.parent = Some(q.season.take().unwrap_or(wire_id(&id)?));
+    q.series = None;
     q.recursive = true;
     q.kinds = vec!["episode".into()];
     Ok(Json(catalog(&client, &state, q, None).await?))
@@ -1195,7 +1244,28 @@ pub(super) async fn cache_policy(
     request: axum::http::Request<axum::body::Body>,
     next: axum::middleware::Next,
 ) -> Response {
+    let method = request.method().clone();
+    let target = refused_request_target(request.uri());
     let mut response = next.run(request).await;
+    // A supported client sending something the facade cannot answer is the
+    // exception this ring exists for: it is how a compatibility gap becomes
+    // attributable without a packet capture. Successful requests and auth
+    // challenges stay out; an artwork miss is an ordinary answer.
+    let status = response.status();
+    if matches!(status.as_u16(), 400 | 403 | 404 | 405)
+        && !(status == StatusCode::NOT_FOUND && target.contains("/Images/"))
+    {
+        if let Some(also_suppressed) = REFUSAL_LINES.admit(0) {
+            tracing::warn!(
+                target: "plurxd::http::jellyfin",
+                status = status.as_u16(),
+                %method,
+                request = %target,
+                also_suppressed,
+                "Jellyfin client request refused"
+            );
+        }
+    }
     if !response
         .headers()
         .contains_key(axum::http::header::CACHE_CONTROL)
@@ -1208,10 +1278,69 @@ pub(super) async fn cache_policy(
     response
 }
 
+/// At most one refusal line per second, with a count of the ones skipped.
+static REFUSAL_LINES: std::sync::LazyLock<super::AccessLineThrottle> =
+    std::sync::LazyLock::new(super::AccessLineThrottle::default);
+
+/// The refused request as a log line: the redacted path plus its query, with
+/// every credential-bearing value replaced. Item, sort and type names stay,
+/// because they are what says which part of the protocol is missing.
+fn refused_request_target(uri: &Uri) -> String {
+    let mut line = super::safe_trace_target(uri);
+    if let Some(query) = uri.query() {
+        let pairs = query
+            .split('&')
+            .filter(|pair| !pair.is_empty())
+            .map(|pair| {
+                let (key, value) = pair.split_once('=').unwrap_or((pair, ""));
+                let lower = key.to_ascii_lowercase();
+                if lower.contains("key") || lower.contains("token") {
+                    format!("{key}=[REDACTED]")
+                } else if value.is_empty() {
+                    key.to_owned()
+                } else {
+                    format!("{key}={value}")
+                }
+            })
+            .collect::<Vec<_>>();
+        line.push('?');
+        line.push_str(&pairs.join("&"));
+    }
+    if line.len() > 1024 {
+        let mut cut = 1024;
+        while !line.is_char_boundary(cut) {
+            cut -= 1;
+        }
+        line.truncate(cut);
+    }
+    line
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use axum::{body::Body, http::Request};
+
+    /// A refused request is logged so the missing protocol piece is visible,
+    /// never with a credential in it.
+    #[test]
+    fn refused_requests_are_logged_without_credentials() {
+        let line = refused_request_target(&Uri::from_static(
+            "/jellyfin/Users/u/Items?SortBy=Bogus&api_key=secret1&ApiKey=secret2&X-Emby-Token=secret3&Recursive",
+        ));
+        assert_eq!(
+            line,
+            "/jellyfin/Users/u/Items?SortBy=Bogus&api_key=[REDACTED]&ApiKey=[REDACTED]&X-Emby-Token=[REDACTED]&Recursive"
+        );
+        let hls = refused_request_target(&Uri::from_static(
+            "/jellyfin/Videos/item/capability/hls/index.m3u8",
+        ));
+        assert!(!hls.contains("capability"), "{hls}");
+        let long = refused_request_target(
+            &Uri::try_from(format!("/jellyfin/Items?q={}", "a".repeat(2000))).expect("uri"),
+        );
+        assert!(long.len() <= 1024);
+    }
     use http_body_util::BodyExt;
     use tower::ServiceExt;
     fn request(method: &str, path: &str, token: Option<&str>, body: Value) -> Request<Body> {
@@ -3373,6 +3502,78 @@ mod tests {
         }
     }
 
+    /// The store reads at most 500 rows at a time; Jellyfin has no page
+    /// ceiling and answers a request without `Limit` with every row. Larger
+    /// pages are assembled from consecutive reads without a gap or repeat.
+    #[tokio::test]
+    async fn jellyfin_catalog_pages_past_the_store_read_bound() {
+        use plurx_core::domain::{ItemKind, LibraryKind, NewItem, NewLibrary};
+        let (app, state) = super::super::tests::test_app_with_state();
+        let admin = setup(&app).await;
+        let (status, _) = json_call(
+            &app,
+            request(
+                "PUT",
+                "/api/v1/settings",
+                Some(&admin),
+                json!({"jellyfin_compatibility_enabled":true}),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let library = state
+            .store
+            .create_library(&NewLibrary {
+                name: "Many films".into(),
+                kind: LibraryKind::Movies,
+                paths: vec!["/private/many".into()],
+                anime: false,
+            })
+            .await
+            .expect("library");
+        for n in 0..520 {
+            state
+                .store
+                .insert_item(&NewItem {
+                    library_id: library.id,
+                    kind: ItemKind::Movie,
+                    parent_id: None,
+                    title: format!("Film {n:04}"),
+                    year: Some(2024),
+                    season_number: None,
+                    episode_number: None,
+                })
+                .await
+                .expect("item");
+        }
+        let (token, uid) = facade_login(&app).await;
+        let base = format!("/jellyfin/Users/{uid}/Items?Recursive=true&IncludeItemTypes=Movie");
+        for (query, start, count) in [
+            ("", 0, 520),
+            ("&Limit=510", 0, 510),
+            ("&StartIndex=495&Limit=20", 495, 20),
+            ("&StartIndex=515", 515, 5),
+        ] {
+            let (status, page) = json_call(
+                &app,
+                request("GET", &format!("{base}{query}"), Some(&token), Value::Null),
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK, "{query}");
+            assert_eq!(page["TotalRecordCount"], 520, "{query}");
+            let names = page["Items"]
+                .as_array()
+                .expect("items")
+                .iter()
+                .map(|item| item["Name"].as_str().expect("name").to_owned())
+                .collect::<Vec<_>>();
+            let expected = (start..start + count)
+                .map(|n| format!("Film {n:04}"))
+                .collect::<Vec<_>>();
+            assert_eq!(names, expected, "{query}");
+        }
+    }
+
     #[tokio::test]
     async fn jellyfin_connection_catalog_preserves_zero_paging_and_refuses_user_and_credential_conflicts(
     ) {
@@ -3522,6 +3723,49 @@ mod tests {
             assert_eq!(empty["TotalRecordCount"], 2);
             assert!(empty["Items"].as_array().expect("items").is_empty());
         }
+        // Infuse's library mode and advanced browsing name kinds, orders and
+        // filters the catalogue lacks. Jellyfin answers those requests, so
+        // the facade narrows or degrades them; it never refuses them.
+        let movie = first["Items"][0]["Id"].as_str().expect("item wire");
+        let library_items = format!("/jellyfin/Users/{uid}/Items?ParentId={parent}");
+        for (query, total) in [
+            ("&IncludeItemTypes=Movie,BoxSet,Video&SortBy=SortName,Random,CommunityRating&SortOrder=Ascending&Recursive=true", 2),
+            ("&IncludeItemTypes=BoxSet,Folder&Recursive=true", 0),
+            ("&Limit=2000&Recursive=true", 2),
+            ("&SortBy=DateCreated,SortName&Recursive=true&Fields=Genres,Overview&Filters=IsNotFolder&EnableUserData=true", 2),
+        ] {
+            let (status, page) = json_call(
+                &app,
+                request("GET", &format!("{library_items}{query}"), Some(&token), Value::Null),
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK, "{query}: {page}");
+            assert_eq!(page["TotalRecordCount"], total, "{query}");
+        }
+        let (status, page) = json_call(
+            &app,
+            request(
+                "GET",
+                &format!("/jellyfin/Users/{uid}/Items?SeriesId={movie}&IncludeItemTypes=Episode"),
+                Some(&token),
+                Value::Null,
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{page}");
+        assert_eq!(page["TotalRecordCount"], 0);
+        let (status, folders) = json_call(
+            &app,
+            request(
+                "GET",
+                &format!("/jellyfin/Users/{uid}/Items?IncludeItemTypes=CollectionFolder"),
+                Some(&token),
+                Value::Null,
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{folders}");
+        assert_eq!(folders["Items"][0]["Id"], parent);
         let image_path = format!(
             "/jellyfin/Items/{}/Images/Primary",
             first["Items"][0]["Id"].as_str().expect("item wire")

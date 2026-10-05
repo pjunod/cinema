@@ -890,3 +890,18 @@ manifest children follow the mount the client used.
 A learner node (nuc3 today) answers facade requests with 503
 `learner_route_ineligible`, as it does native server requests: a learner serves
 only bounded catalogue reads and node-local media. Use a voter's address.
+
+**Libraries could not be opened.** With the address given in full, Infuse
+connected, but selecting any library failed, and adding the share in library
+mode, or with advanced options set, failed outright. The catalog parser
+accepted only a whitelist narrower than Jellyfin's contract and answered
+everything else with 400:
+- item kinds other than Movie, Series, Season, Episode and CollectionFolder;
+- orders other than seven sort keys;
+- any `Limit` above 500;
+- any `SeriesId` or `SeasonId`.
+
+It also answered a request without `Limit` with 100 rows where Jellyfin returns
+all. Those requests now narrow or degrade the way Jellyfin's do (API §24).
+Refused facade requests are now logged with their path and query, so the next
+gap names itself in the server log.

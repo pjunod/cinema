@@ -4786,7 +4786,9 @@ pattern = "\\.(?:spawn|output|status)\\s*\\("
 # 515 -> 517 (#806): two Axum `Response::status()` reads in the Jellyfin HLS
 # test, for the master and a child fetched through the standard-port app.
 # HTTP status codes on in-process oneshot responses; nothing is launched.
-expected_occurrences = 517
+# 517 -> 518: the Jellyfin facade's `cache_policy` reads `Response::status()`
+# to log refused client requests. An HTTP status code; nothing is launched.
+expected_occurrences = 518
 
 [[module_structures]]
 id = "process-command-ufcs-launch"
