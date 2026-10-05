@@ -10,6 +10,7 @@ import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.*
 import tv.plurx.app.data.CreateSessionReq
 import tv.plurx.app.data.HlsStart
+import tv.plurx.app.data.MediaIntentEnvelope
 import tv.plurx.app.data.Net
 import tv.plurx.app.data.QualityCandidate
 
@@ -22,9 +23,11 @@ internal class ContinuousEnrollment(origin: String, token: String) : AutoCloseab
     private val attempts = LinkedHashMap<String, String>()
 
     /** The bounded reason this start keeps the ordinary path, or null when a
-     * compatible encoded family may be negotiated. */
-    private fun declineReason(fileId: Long, body: CreateSessionReq): String? {
-        val intent = body.intent ?: return "no_intent"
+     * compatible encoded family may be negotiated. [intent] is the continuous
+     * start's own envelope ([continuousEnrollmentIntent]), not the create
+     * body's display-aware one. */
+    internal fun declineReason(fileId: Long, body: CreateSessionReq, intent: MediaIntentEnvelope?): String? {
+        intent ?: return "no_intent"
         return when {
             fileId <= 0 -> "file"
             body.caps == null -> "no_capabilities"
@@ -42,13 +45,15 @@ internal class ContinuousEnrollment(origin: String, token: String) : AutoCloseab
         }
     }
 
-    suspend fun open(fileId: Long, body: CreateSessionReq): Start? {
-        val declined = declineReason(fileId, body)
+    /** [continuousIntent] is the start's own envelope; [body] is sent to the
+     * candidate catalog unchanged, exactly as the ordinary create would be. */
+    suspend fun open(fileId: Long, body: CreateSessionReq, continuousIntent: MediaIntentEnvelope? = body.intent): Start? {
+        val declined = declineReason(fileId, body, continuousIntent)
         if (declined != null) {
             Log.i("PlurxPlayback", "continuous enrollment declined: $declined")
             return null
         }
-        val intent = requireNotNull(body.intent)
+        val intent = requireNotNull(continuousIntent)
         val request = Json.parseToJsonElement(Net.json.encodeToString(body)).jsonObject
         val catalog = try { profile.request("/api/v1/files/$fileId/hls/continuous-candidates", buildJsonObject {
             put("version", 1); put("start", request)
@@ -115,6 +120,26 @@ internal class ContinuousEnrollment(origin: String, token: String) : AutoCloseab
     override fun close() = profile.close()
 }
 
+
+/**
+ * The continuous start's own intent envelope, built whether or not display-aware
+ * Auto is on (Paul's ruling R5, 2026-10-04).
+ *
+ * Continuous enrollment is a quality-family choice, not a display-aware one:
+ * the server admits a continuous family without the display-aware setting
+ * (`http/hls/create.rs`: `continuous.is_some() || <playback.display_aware_auto>`),
+ * and web builds this envelope independently of it
+ * (`openContinuousQualitySession` → `qualityMediaIntent(player, selection, true)`).
+ * Only the display-aware create body carried an envelope here, so a default
+ * server never enrolled Android. A body that already carries the display-aware
+ * envelope keeps it; otherwise the presentation's own [PlaybackIntent] builds
+ * one from the current [selection]. Pricing is unchanged.
+ */
+internal fun continuousEnrollmentIntent(
+    body: CreateSessionReq,
+    playbackIntent: PlaybackIntent,
+    selection: ClientSelection,
+): MediaIntentEnvelope = body.intent ?: playbackIntent.mediaIntent(selection)
 
 /** Costs describe the attached continuous presentation, including its shared soundtrack. */
 /**

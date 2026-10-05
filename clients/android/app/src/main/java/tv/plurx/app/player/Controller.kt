@@ -351,7 +351,8 @@ class Controller internal constructor(
             return vm.createHlsSession(plan.fileId, body, recoveryLinkReceipt(body))
         }
         val enrollment = continuousAttempt ?: ContinuousEnrollment(Session.origin, Session.token.orEmpty()).also { continuousAttempt = it }
-        val started = enrollment.open(plan.fileId, body)
+        val started = enrollment.open(plan.fileId, body,
+            continuousEnrollmentIntent(body, playbackIntent, playbackControlSelection()))
         if (started == null) {
             enrollment.close()
             continuousAttempt = null
