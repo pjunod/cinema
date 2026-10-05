@@ -131,6 +131,28 @@ class LiveTvGuideTest {
         )
     }
 
+    /**
+     * Coil keeps no record of failures; without this a blocked logo host is
+     * asked again on every recomposition of a 50-row guide.
+     */
+    @Test
+    fun aFailedStationLogoBacksOffAndASuccessClearsIt() {
+        val address = "https://example.invalid/backoff-${System.nanoTime()}.png"
+        assertTrue("an address never tried is loaded", LiveTvStationLogos.shouldLoad(address, 1_000))
+        LiveTvStationLogos.failed(address, nowMs = 1_000)
+        assertTrue(
+            "a failure backs off",
+            !LiveTvStationLogos.shouldLoad(address, 1_000 + LiveTvStationLogos.FAILURE_RETRY_MS - 1),
+        )
+        assertTrue(
+            "and is tried again once the window has passed",
+            LiveTvStationLogos.shouldLoad(address, 1_000 + LiveTvStationLogos.FAILURE_RETRY_MS),
+        )
+        LiveTvStationLogos.succeeded(address)
+        assertTrue("a success clears the failure", LiveTvStationLogos.shouldLoad(address, 1_001))
+        assertTrue("and draws from the first frame next time", LiveTvStationLogos.wasDecoded(address))
+    }
+
     /** The grid header draws the logo the layout carries, row by row. */
     @Test
     fun gridRowsCarryTheirStationLogo() {
