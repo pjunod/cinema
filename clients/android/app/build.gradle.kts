@@ -178,6 +178,8 @@ android {
         // playback-info-fields.json are consumed directly from tests/playback.
         getByName("test").resources.directories.add("../../../tests/contracts")
         getByName("test").resources.directories.add("../../../tests/playback")
+        // tests/sharing/protocol-cases.json: the Shared wire rows every port reads.
+        getByName("test").resources.directories.add("../../../tests/sharing")
     }
 }
 
