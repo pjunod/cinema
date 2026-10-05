@@ -1,6 +1,6 @@
 # Grouped library rows — implementation and acceptance status
 
-**Status:** native parity validated; merge tracked on PR #823 · **Updated:** 2026-10-05 · **Branch:**
+**Status:** open — native parity merged; post-merge CI monitoring continues · **Updated:** 2026-10-05 · **Branch:**
 `codex/grouped-library-rows` · **Pull request:** [#821](http://192.168.4.7:3000/noirr/plurx/pulls/821)
 
 Companion to [WEB-SHELL-LAYOUT.md](WEB-SHELL-LAYOUT.md), which maps the web
@@ -170,7 +170,7 @@ Work uses a fresh agent-owned clone, never the user's checkout.
 | Apple | validated | Existing LibraryGridCoordinator and cards; saved Rows/Grid, visible group index, View all destination, partial error Retry. Ten iPhone-simulator cases passed; iOS/tvOS builds passed. |
 | Paging ownership | implemented | Rows request all pages through the existing pager; Grid keeps viewport prefetch. No second loader. |
 | Review and tests | complete | One adversarial review, all five findings addressed, then focused tests; only failed cases rerun. |
-| Merge | pending | One batched native PR; retain regression trailers and monitor remaining tests under the user's merge-first direction. |
+| Merge | merged | Native PR #823 landed as `b924ec11b`; all seven regression references are retained. Post-merge checks remain monitored. |
 
 Rows are the default on both native platforms. Native lazy row containers
 keep cards bounded to the viewport without limiting group membership.
@@ -237,3 +237,19 @@ superseded watch-filter wiring anchor to the combined Rows/filter/search
 paging demand, and records the malformed immutable Python trailer in #822 as
 an erratum. The audit rules remain unchanged; the new PR trailers resolve
 against the current tree before landing.
+
+
+### Post-merge documentation correction — 2026-10-05
+
+Native fast lane 4178 passed its history audit, regression references, and
+289 validation tests. Operations reported four failures from two documentation
+omissions: Android's README still claimed build 145 after versionCode became
+146, and the Apple release note lacked the status header required by its
+existing `built` index row. This follow-up corrects those source documents;
+validation rules and application code stay unchanged. The separate known-red
+inventory failure (24 versus 21) remains for batch repair.
+
+The correction receives one adversarial review, then only the four failed
+documentation checks are rerun. The native PR body records the follow-up
+landing and test results. The mobile-counter job's comparison against main
+after the native merge is recorded separately as a post-merge race.
