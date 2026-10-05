@@ -1,6 +1,6 @@
 # Grouped library rows — implementation and acceptance status
 
-**Status:** native parity implementation in progress · **Updated:** 2026-10-05 · **Branch:**
+**Status:** native parity validated; merge tracked on PR #823 · **Updated:** 2026-10-05 · **Branch:**
 `codex/grouped-library-rows` · **Pull request:** [#821](http://192.168.4.7:3000/noirr/plurx/pulls/821)
 
 Companion to [WEB-SHELL-LAYOUT.md](WEB-SHELL-LAYOUT.md), which maps the web
@@ -209,7 +209,7 @@ these corrections; their final commands and outcomes are recorded on the PR.
 Android: all 12 targeted JVM tests pass (`LibraryGroupsTest`,
 `LibraryPagerWatchFilterTest`, `LibrarySortTest`). Three Android TV UI tests
 pass: group jump/expansion/return, retry while expanded, and D-pad focus
-retention across a late page. Phone layout acceptance is in progress.
+retention across a late page. All three phone acceptance cases also pass, including 16:9 home-video artwork and recording-year defaults.
 
 Apple: all nine grouping/coordinator cases have passed on an owned iPhone
 simulator. Only the failed partial-page retry case was rerun: the cause was
@@ -220,3 +220,11 @@ regression also passes. iOS and tvOS compile after the corrections.
 
 The merge base remains `1dfcca2dd`; no user checkout or physical device was
 used. Apple build 209 and Android versionCode 146 remain the claimed counters.
+
+
+The phone navigation fixture initially selected both visible “View all”
+actions. Each action now has an accessible group-specific name; only that
+failed phone case was rerun. Final local evidence is 12 Android JVM cases,
+three Android TV UI/focus cases, three phone acceptance cases, and ten Apple
+cases (nine grouping/coordinator plus the existing card-metadata contract).
+The final PR body carries configured CI outcomes and the landing receipt.

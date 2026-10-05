@@ -6,6 +6,7 @@ import java.io.File
 import androidx.compose.ui.test.onAllNodesWithTag
 import androidx.compose.ui.test.getUnclippedBoundsInRoot
 import androidx.compose.ui.test.assertIsDisplayed
+import androidx.compose.ui.test.onNodeWithContentDescription
 import androidx.compose.ui.test.hasAnyAncestor
 import androidx.compose.ui.test.hasText
 import androidx.compose.ui.test.isDialog
@@ -51,7 +52,7 @@ class LibraryRowsNavigationTest {
             capture("library-rows-movies")
             compose.onNodeWithText("Z").performClick()
             compose.onNodeWithText("Zulu 401").assertIsDisplayed()
-            compose.onNodeWithText("View all").performClick()
+            compose.onNodeWithContentDescription("View all Z · 21").performClick()
             compose.onNode(hasText("Zulu 401") and hasAnyAncestor(isDialog())).performClick()
             compose.runOnIdle { assertEquals(401L, opened) }
             compose.onNodeWithText("All rows").performClick()

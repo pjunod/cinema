@@ -32,6 +32,8 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.scale
 import androidx.compose.ui.focus.FocusRequester
@@ -218,6 +220,7 @@ fun MediaRow(
                     color = Accent,
                     style = MaterialTheme.typography.labelLarge,
                     modifier = Modifier
+                        .semantics { contentDescription = "View all $title" }
                         .focusRequester(viewAllFocusRequester)
                         .focusProperties {
                             if (previousRowFocusRequester != null) up = previousRowFocusRequester
