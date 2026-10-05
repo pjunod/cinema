@@ -10,13 +10,27 @@ import java.nio.charset.StandardCharsets
  * token can change without rebuilding it.
  */
 object Session {
-    /** Server origin, no trailing slash, e.g. `http://192.168.1.10:32400`. */
+    /** Server origin, no trailing slash, e.g. `http://192.168.1.10:32400`.
+     * A change ends the signed-in session's watch-write floor ([ReadAfter]). */
     @Volatile
     var origin: String = ""
+        set(value) {
+            if (field != value) {
+                field = value
+                ReadAfter.floor.signedInSessionChanged()
+            }
+        }
 
-    /** Bearer token, or null when signed out. */
+    /** Bearer token, or null when signed out. Sign-in, sign-out and an
+     * account change each end the watch-write floor ([ReadAfter]). */
     @Volatile
     var token: String? = null
+        set(value) {
+            if (field != value) {
+                field = value
+                ReadAfter.floor.signedInSessionChanged()
+            }
+        }
 
     /** Replicated Android-TV refresh matching policy from `/api/v1/server`. */
     @Volatile

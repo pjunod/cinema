@@ -42,6 +42,7 @@ import tv.plurx.app.data.ItemDetail
 import tv.plurx.app.data.Library
 import tv.plurx.app.data.LoginReq
 import tv.plurx.app.data.Net
+import tv.plurx.app.data.ReadAfter
 import tv.plurx.app.data.PlurxApi
 import tv.plurx.app.data.parseRefusal
 import tv.plurx.app.player.PlaybackClientLog
@@ -263,7 +264,7 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
                 }
                 saved.origin.isNotBlank() -> {
                     Session.origin = saved.origin
-                    api = Net.api(saved.origin)
+                    api = Net.profileApi(saved.origin)
                     _phase.value = Phase.NeedLogin
                 }
                 else -> _phase.value = Phase.NeedServer
@@ -716,6 +717,8 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
         val serverInstanceId: String?,
         val userId: Long?,
         val token: String?,
+        /** The signed-in session whose watch-write floor this pager echoes. */
+        val readAfterGeneration: Long,
     )
 
     private var activeLibraryPager: LibraryPager? = null
@@ -728,14 +731,18 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     internal fun libraryPager(ids: List<Long>, sort: String): LibraryPager {
-        val profile = LibraryPagerProfile(Session.origin, serverInstanceId, currentUserId, Session.token)
+        val profile = LibraryPagerProfile(Session.origin, serverInstanceId, currentUserId, Session.token,
+            ReadAfter.floor.generation())
         val active = activeLibraryPager
         if (active != null && activeLibraryPagerProfile == profile && active.ids == ids && active.sort == sort) {
             return active
         }
         invalidateLibraryPager()
         // Never let an in-flight page borrow the next profile's global bearer.
-        val boundApi = profile.token?.let { Net.api(profile.origin, Net.profileClient(it)) }
+        // It echoes the floor of the session it was built for, and only that one.
+        val boundApi = profile.token?.let {
+            Net.api(profile.origin, Net.profileClient(it), profile.readAfterGeneration)
+        }
         return LibraryPager(ids, sort, viewModelScope) { id, offset, order ->
             if (activeLibraryPagerProfile != profile) throw CancellationException("Library profile changed")
             val source = boundApi ?: error("Sign in to load this library")
@@ -959,10 +966,11 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
         Session.token = null
         currentUser = null
         Session.origin = normalized
-        val candidate = Net.api(normalized)
-        val info = candidate.server()
+        // An unverified candidate: its probe neither echoes nor captures the
+        // watch-write floor. The profile's own API is bound once it answers.
+        val info = Net.api(normalized).server()
         origin = normalized
-        api = candidate
+        api = Net.profileApi(normalized)
         serverName = info.name
         serverInstanceId = info.instance_id
         Session.displayModeMatch = info.display_mode_match
@@ -979,7 +987,7 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
         origin = value
         Session.origin = value
         Session.token = token
-        api = Net.api(value)
+        api = Net.profileApi(value)
     }
 
     /**
