@@ -4151,7 +4151,7 @@ impl LiveTvManager {
                     .unwrap_or_else(std::sync::PoisonError::into_inner);
                 if registry.closing {
                     return Err(LiveTvError::Conflict(
-                        "the live-TV start was fenced by a drain".into(),
+                        "the live-TV start was refused: this node is shutting down".into(),
                     ));
                 }
                 // A concurrent identical request may have won while the lineup
@@ -7199,7 +7199,7 @@ async fn ensure_session_fence(
 ///
 /// Identical to `ensure_session_fence` except for where the settings come
 /// from: the node's shared observation rather than a read of this session's
-/// own. The four `validate_start_config` checks are unchanged and run just as
+/// own. The three `validate_start_config` checks are unchanged and run just as
 /// often, so a fresh observation that fails them ends the session with exactly
 /// the error it ended with before. What changes is the cost — one consistent
 /// read per node per second instead of one per session per second — and what
@@ -10802,7 +10802,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_fresh_observation_that_fails_validation_ends_the_session_exactly_as_before() {
-        // The four `validate_start_config` checks are not weakened by moving
+        // The three `validate_start_config` checks are not weakened by moving
         // where the config comes from: a change another node saved reaches
         // every session through the next observation, with the same error
         // codes the clients already branch on.

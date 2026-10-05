@@ -166,7 +166,7 @@ against D1–D8; see "As built in M1" below.)
 | "inserted in `registry.transports` before its worker is spawned, as the DVR does" (§3.3) | the insert (`dvr.rs:1727-1735`) does precede the spawn (`:1741-1766`), but the **capacity decision (`:1639-1664`) and the insert are two lock holds with an awaited folder creation and `O_EXCL` open between them** (`:1666-1684`) | **false as a model for viewers — D2** |
 | a consumer attaches under the registry lock, only once its resources exist (§3.3, `dvr.rs:1438-1446`) | the sink is published after its file is open (`:1704-1715`) but **pushed into `transport.sinks` without the registry lock and without checking the transport is still running** | incomplete — D3 |
 | a transport closes when it has no consumer and `open_until` has passed (§3.3) | two closers key on *sinks*: the fan-out returns when `live_sinks()` is empty (`dvr.rs:2302-2305`) and every DVR tick closes any transport with no live sink (`close_finished_transports`, `:1898-1914`) | **must change — D3** |
-| `drain_before` closes transports with `generation <` the barrier, then sessions (§3.3) | `live_tv.rs:3864-3900` | holds |
+| `drain_before` closes transports with `generation <` the barrier, then sessions (§3.3) | `live_tv.rs:3864-3900` | held at review — *historical: `drain_before`, the owner drain route and `close_transport` were removed 2026-10-04 (L-02 #537 cleanup); transports now close through `close_transport_arc`* |
 | shutdown = `close_all_transports` then `cancel_and_wait` (§3.3) | `:3902-3913` | holds |
 | `TUNER_READ_TIMEOUT` "moves entirely to the pump" (§3.2) | the fan-out needs it on the tuner *read* (`dvr.rs:2274`) or a silent tuner is never noticed | wording — D6 |
 | a join requires `(generation, device_id, channel_id)` equality; a different generation → `settings_conflict` (§3.4, §3.5, §4) | `generation` is `live_tv.config_generation`, which **every** Live TV settings save bumps (`http/system.rs:2676-2679`, `:2792`), and a save only drains on a disable or owner transition (`:2702-2727`, `:3295-3300`). A live session ends on the next fence after a save (`validate_start_config` `live_tv.rs:5417-5421`); **a DVR transport does not** — nothing but a drain, disable, owner change or shutdown closes it (`dvr.rs:807-819`, `live_tv.rs:3868-3886`) | **contradiction — D7 (flagged)** |
@@ -499,9 +499,11 @@ Metric: `plurx_live_tv_consumer_evictions_total{kind,reason}` with `kind ∈
   today. The worker owns the `reqwest::Response`, so joining it is what
   releases the tuner (the invariant `pump_tuner_stream`'s comment states,
   `:6312-6314`).
-- Fencing: `drain_before` closes transports with `generation <
-  drain_before_generation` (unchanged, `:3500-3514`), which detaches every
-  consumer; each viewer session then ends on its own fence check with the
+- Fencing (*historical — `drain_before` and the owner drain route were
+  removed 2026-10-04 with the L-02 #537 cleanup; a live session now ends on
+  its own fence when it sees a newer `config_generation`*): `drain_before`
+  closes transports with `generation < drain_before_generation` (unchanged,
+  `:3500-3514`), which detaches every consumer; each viewer session then ends on its own fence check with the
   existing `settings_conflict`/`owner_unavailable` reasons. The per-chunk
   `serving.is_current(owner_serving_generation)` check stays in the reader.
 - Shutdown: `close_all_transports` then `cancel_and_wait(sessions)` — the
@@ -645,6 +647,7 @@ is).
   generation. **Relaxed by the §2.4 D7 decision:** a join never crosses a
   device, a device address or a serving generation; it may cross a
   configuration generation, and `drain_before` still closes by generation.
+  (*Historical: `drain_before` was removed 2026-10-04, L-02 #537 cleanup.*)
 - **The reader never awaits a consumer.** Eviction is by bounded queue;
   `TUNER_READ_TIMEOUT` lives in pumps and writers only.
 - **Tuner slots cannot grow.** `live_tv.max_sessions` keeps its key,
@@ -694,9 +697,10 @@ whose `opens` counter is the oracle for "one GET"):
   leaves, sink window still open → transport stays; window ends → closes.
 - `a_join_across_a_generation_is_refused`: transport at generation 3; a
   start with `config_generation = 4` → `settings_conflict`, no join.
-- `a_drain_closes_a_shared_transport_and_ends_every_viewer`:
-  `drain_before(4)` → transport closed, both sessions end with the existing
-  reasons; `plurx_live_tv_session_ends_total{reason}` reflects both.
+- `a_drain_closes_a_shared_transport_and_ends_every_viewer` (*historical:
+  `drain_before` was removed 2026-10-04; the test now runs through
+  `close_all_transports`*): `drain_before(4)` → transport closed, both
+  sessions end with the existing reasons; `plurx_live_tv_session_ends_total{reason}` reflects both.
 - `a_recording_joining_a_viewer_transport_respects_the_reserve`:
   `max_sessions = 2, tuner_reserve = 1`, one viewer transport, one
   recording transport; a second recording asks to join the viewer's

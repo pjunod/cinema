@@ -5150,9 +5150,12 @@ the tuner's truth and a relaying node's `relay_bytes` is how much it carried.
 There is nothing to move. Since #537 the tuner is a cluster resource: there is
 no configured owner node, no owner drain and no fenced-owner attestation. The
 settings fields of the old single-owner model, `live_tv_owner_node_id` and
-`live_tv_fenced_owner`, are still accepted because shipped Apple and Android
-clients send them with every Live TV save, and they are ignored: the settings
-response's `live_tv_owner_node_id` is always the answering node, and
+`live_tv_fenced_owner`, are still accepted and ignored. Shipped Apple and
+Android clients send `live_tv_owner_node_id` with every tuner-configuration
+save; no shipped client sends `live_tv_fenced_owner` (both define it, nothing
+constructs it), which stays accepted so an older or third-party client that
+does is not refused. Neither value is read: the settings response's
+`live_tv_owner_node_id` is always the answering node, and
 `live_tv_transition_from_owner_node_id` / `live_tv_transition_drain_before` are
 always `""` / `0`. A save that carries only those fields (and the generation)
 still counts as a Live TV save and bumps `live_tv_config_generation`.

@@ -2632,8 +2632,12 @@ protected channel is 415 `drm_unsupported`.
 
 **Legacy settings fields.** `PUT /api/v1/settings` still accepts
 `live_tv_owner_node_id` and `live_tv_fenced_owner` from the single-owner model
-#537 replaced, because shipped Apple and Android clients send both with every
-Live TV save; the server ignores their values. They still count as a Live TV
+#537 replaced, and ignores their values. Shipped Apple and Android clients send
+`live_tv_owner_node_id` with every tuner-configuration save. Neither sends
+`live_tv_fenced_owner`: both still define the change (`FencedOwner` in
+`LiveTvApi.kt`, `.fencedOwner` in `LiveTv.swift`) but no production path
+constructs it, so it is accepted only so an older or third-party client that
+does send it is not refused. They still count as a Live TV
 save, so they need `live_tv_config_generation` and bump it even when nothing
 else changes. `GET /api/v1/settings` keeps `live_tv_owner_node_id` (always the
 answering node) and `live_tv_transition_from_owner_node_id` /

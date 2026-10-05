@@ -435,8 +435,8 @@ impl DvrTransport {
 
     /// Attach a viewer that holds a reserved seat. The caller releases that
     /// seat afterwards, so the transport is never seen with neither the seat
-    /// nor the viewer. Refused if the transport is closing: `close_transport`
-    /// cancels before it takes the viewer list, and this checks under that
+    /// nor the viewer. Refused if the transport is closing:
+    /// `close_transport_arc` cancels before it takes the viewer list, and this checks under that
     /// list's lock, so a viewer is either seen by the close or refused here.
     pub(crate) fn attach_viewer(&self, viewer: Arc<ViewerConsumer>) -> bool {
         let mut viewers = self
@@ -1642,8 +1642,9 @@ impl LiveTvManager {
     ) -> Result<(), LiveTvError> {
         // Read once at the top and carry it through every conditional write:
         // a settings save mid-tick must land no rows from the configuration it
-        // replaced. Same discipline as `registry.min_generation` on the live
-        // path.
+        // replaced. Same discipline as the live path, where a session keeps
+        // the `config_generation` it started under and `validate_start_config`
+        // ends it once a newer one is observed.
         let generation = live_tv.generation;
         let now = unix_seconds();
 
@@ -2703,7 +2704,7 @@ impl LiveTvManager {
             if let Some(manager) = manager.upgrade() {
                 // Cleanup must not await the JoinHandle of the task that is
                 // currently executing this block. Hand it to a sibling task
-                // so the worker can become joinable before close_transport
+                // so the worker can become joinable before close_transport_arc
                 // settles writers and collects it. The exact transport, not
                 // whatever the channel's entry is by then.
                 let transport = Arc::clone(&worker_transport);
