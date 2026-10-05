@@ -105,13 +105,11 @@ The [`effort-ci.yml`](../.github/workflows/effort-ci.yml) gate runs only:
 | Apple | iOS and tvOS compilation | XCTest and physical-device acceptance |
 | Android | Debug application compilation | JVM tests, lint, emulator tests, and physical-device acceptance |
 
-The aggregate result is named `Effort development gate`. Receipt-bearing
-attempts serialize without automatic cancellation so successful Python units
-cannot lose their evidence. [Once-per-PR Python receipts](ci/PYTHON-UNIT-PR-RECEIPTS.md)
-retain the original test/run/source attribution; retries execute only failed
-or newly discovered IDs. They do not replace current-source compilation,
-history, catalog or static checks. Missing scope information enables all
-compile surfaces; ambiguous PR receipt identity refuses unit execution.
+The aggregate result is named `Effort development gate`. Its preflight runs
+the validation and operations Python suites directly; the once-per-PR receipt
+machinery that used to retain earlier successes was deleted on 2026-10-05
+(Paul's ruling 2.14), because batching already spends the suites once per
+batch. Missing scope information enables all compile surfaces.
 
 **Compilation being blocking is a reason to compile locally, not a reason to
 let the gate do it.** A session whose checkout has no toolchain can still have

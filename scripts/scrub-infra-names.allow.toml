@@ -27,14 +27,6 @@ reason = "the trademark reservation names the retired mark on purpose"
 # verifies).
 
 [[allow]]
-path = "validation/python-unit-local/*.json"
-reason = "content-addressed: the file name is the sha256 of the bytes (validation/python_unit_receipts.py local_receipts)"
-
-[[allow]]
-path = "validation/python-unit-legacy-pr663-correction.txt"
-reason = "sha256 pinned by validation/python-unit-legacy-pr663.json correction_receipt_sha256 and checked by legacy_pr663()"
-
-[[allow]]
 path = "docs/streaming/DISPLAY-AWARE-AUTO-QUALITY-OPUS-REVIEW.txt"
 reason = "source artifact whose sha256 the review and plan docs record"
 

@@ -6,8 +6,8 @@ The blocking effort web lane runs `make effort-web-static-check` against
 the current source. It does not execute a unit test, evaluate the application
 in a VM, or launch Chromium. Passing this lane is not web behavior acceptance.
 The [development pipeline](../DEVELOPMENT_PIPELINE.md) still requires the
-smallest focused regression for changed behavior, with once-per-PR success
-receipts. Successful units are not rerun merely because a base or head moves.
+smallest focused regression for changed behavior, run locally and named in
+the pull request.
 
 ## What runs automatically
 
@@ -63,6 +63,4 @@ full manual target are not changed.
 
 Validator refusal regressions live in
 `tests/validation/test_effort_web_static.py`; they run separately as units and
-are not hidden inside the source lint. See
-[Python PR receipts](PYTHON-UNIT-PR-RECEIPTS.md) for retaining their original
-source and first successful execution.
+are not hidden inside the source lint.

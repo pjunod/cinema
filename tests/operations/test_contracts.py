@@ -1837,7 +1837,7 @@ assert.equal(context.ACT_TIMER, null);
                     "actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020"
                 ),
                 contract_preflight.index(
-                    "run: python3 -m validation.python_unit_receipts run"
+                    "make operations-check"
                     if contract_preflight == effort_preflight
                     else "run: make operations-check"
                 ),
@@ -1846,6 +1846,10 @@ assert.equal(context.ACT_TIMER, null);
             # client on a fixture-only diff, so without this step a ruling
             # could be edited out of the contract with nothing to notice.
             if contract_preflight == effort_preflight:
+                self.assertIn(
+                    "python3 -m unittest discover -s tests/validation -p 'test_*.py'",
+                    contract_preflight,
+                )
                 self.assertNotIn("node tests/playback/player-input-contract.test.js", contract_preflight)
                 self.assertNotIn("node tests/web/player-dom.test.js", contract_preflight)
             else:
@@ -3458,8 +3462,7 @@ assert.equal(context.ACT_TIMER, null);
                 for command in (
                     "make history-check",
                     "make validation-lint",
-                    "python3 -m validation.python_unit_receipts run"
-                    if workflow == "effort-ci" else "make operations-check",
+                    "make operations-check",
                 ):
                     self.assertIn(command, preflight)
 
