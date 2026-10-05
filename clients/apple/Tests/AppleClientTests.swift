@@ -3772,14 +3772,34 @@ final class AppleClientTests: XCTestCase {
         )
         // One explicit viewer stop survives in the centralized setter. The
         // lock screen, remote controls and on-screen toggle all route here.
+        // The public entry point only stamps viewer origin and forwards; the
+        // body that owns the stop is its `viewerOrigin:` overload, which the
+        // route-change revocation also calls (as a non-viewer origin) so that
+        // it cannot become a second stop.
         let viewerStop = "wantsPlayback = false\n            player.pause()\n            isPlaying = false"
-        let setter = try XCTUnwrap(source.range(of: "func setPlaybackRequested(_ requested: Bool) {"))
+        let entry = try XCTUnwrap(source.range(of: "func setPlaybackRequested(_ requested: Bool) {"))
+        let entryEnd = try XCTUnwrap(
+            source.range(of: "\n    }\n", range: entry.upperBound..<source.endIndex)
+        )
+        XCTAssertEqual(
+            String(source[entry.upperBound..<entryEnd.lowerBound])
+                .trimmingCharacters(in: .whitespacesAndNewlines),
+            "setPlaybackRequested(requested, viewerOrigin: true)",
+            "the public intent setter forwards to the one owner and does nothing else"
+        )
+        let setter = try XCTUnwrap(source.range(
+            of: "private func setPlaybackRequested(_ requested: Bool, viewerOrigin: Bool) {"
+        ))
         let setterEnd = try XCTUnwrap(
             source.range(of: "\n    }\n", range: setter.upperBound..<source.endIndex)
         )
         XCTAssertTrue(
             String(source[setter.upperBound..<setterEnd.lowerBound]).contains(viewerStop),
             "the one explicit viewer stop belongs to the centralized intent setter"
+        )
+        XCTAssertEqual(
+            source.components(separatedBy: viewerStop).count - 1, 1,
+            "the explicit viewer stop is spelled once, in the setter"
         )
         // The lock screen and remote controls reach the setter from inside
         // their own command targets — past `RemoteCommandOwner`'s current-owner
@@ -4717,8 +4737,12 @@ final class AppleClientTests: XCTestCase {
             after: APIError.refused(status: 503, code: "x", message: "y", positionMs: nil),
             caps: legacyCaps
         ))
+        // A bound stall reopen is the binding plus its typed reason, exactly as
+        // `applyOpenIntent` stamps it; an Auto recovery's binding carries a
+        // different reason and is not this matcher's case.
         var body = createBody()
         body.previousSessionId = "session-a"
+        body.reopenReason = PlayerController.stallReopenReason
         XCTAssertNotNil(PlayerController.unboundStallRetry(for: body, after: APIError.http(400)))
         XCTAssertNotNil(PlayerController.unboundStallRetry(
             for: body,

@@ -505,7 +505,9 @@ final class PausedRetirementTests: XCTestCase {
 
     func testResumeConsumesTheLatchBeforeAnyInPlaceResumePath() throws {
         let source = try playerSource()
-        let play = try body(of: "func setPlaybackRequested(", in: source)
+        // The public `setPlaybackRequested(_:)` only forwards with viewer
+        // origin; the body that resumes is its `viewerOrigin:` overload.
+        let play = try body(of: "private func setPlaybackRequested(_ requested: Bool, viewerOrigin: Bool) {", in: source)
         let latch = try XCTUnwrap(play.range(
             of: "} else if let retired = currentPausedRetirement, !isChangingStream {"
         ))

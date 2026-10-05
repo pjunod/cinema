@@ -6,6 +6,10 @@ import kotlinx.coroutines.test.TestScope
 import kotlinx.coroutines.test.advanceUntilIdle
 import kotlinx.coroutines.test.currentTime
 import kotlinx.coroutines.test.runTest
+import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.jsonArray
+import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.jsonPrimitive
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
@@ -59,16 +63,20 @@ class CreateRetryTest {
     @Test
     fun onlyANotYetAnswerIsRetriedAtAll() {
         assertEquals(CreateRetryStep.Fail, createRetryStep(0, 0L, false))
-        assertEquals(
-            setOf(
-                "startup_timeout",
-                "media_owner_transition",
-                "vod_index_pending",
-                "vod_engine_unattested",
-                "transcode_capacity_pending",
-            ),
-            CreateRetry.codes,
-        )
+        // The retried codes are the contract's `create_503_not_yet` row, not a
+        // second list kept by hand here (the Apple twin,
+        // `testOnlyTheContractsNotYetCodesAreRetried`, reads the same row).
+        val contract = checkNotNull(
+            javaClass.classLoader?.getResource("playback-surface-contract.json"),
+        ) { "tests/playback/playback-surface-contract.json is not on the JVM test classpath" }
+            .readText()
+            .let { Json.parseToJsonElement(it).jsonObject }
+        val row = contract.getValue("sources").jsonArray
+            .map { it.jsonObject }
+            .single { it["id"]?.jsonPrimitive?.content == "create_503_not_yet" }
+        val codes = row.getValue("codes").jsonArray.map { it.jsonPrimitive.content }
+        assertTrue("the contract row names at least one code", codes.isNotEmpty())
+        assertEquals(codes.toSet(), CreateRetry.codes)
     }
 
     @Test
