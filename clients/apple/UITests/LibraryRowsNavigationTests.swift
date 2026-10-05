@@ -6,9 +6,9 @@ import XCTest
 /// fixture owns a loopback-only API; no server credentials or app test mode.
 @MainActor
 final class LibraryRowsNavigationTests: XCTestCase {
-    func testLetterIndexScrollsToOffscreenRowAndRepeatsAfterManualScroll() async throws {
+    func testLetterIndexScrollsToOffscreenRowAndRepeatsAfterManualScroll() throws {
         let server = try LibraryRowsServer()
-        let origin = try await server.start()
+        let origin = try server.start()
         defer { server.stop() }
         let app = openLibrary(origin: origin)
         defer { app.terminate() }
@@ -29,9 +29,9 @@ final class LibraryRowsNavigationTests: XCTestCase {
         assertHeading("A", atTopOf: results, in: app)
     }
 
-    func testYearIndexScrollsToItsRowInsteadOfItsOwnButton() async throws {
+    func testYearIndexScrollsToItsRowInsteadOfItsOwnButton() throws {
         let server = try LibraryRowsServer()
-        let origin = try await server.start()
+        let origin = try server.start()
         defer { server.stop() }
         let app = openLibrary(origin: origin)
         defer { app.terminate() }
@@ -74,9 +74,13 @@ final class LibraryRowsNavigationTests: XCTestCase {
         let button = index.buttons["Jump to \(label)"]
         for _ in 0..<20 {
             if button.exists && button.isHittable { return }
-            if forward { index.swipeLeft() } else { index.swipeRight() }
+            // Slow, bounded drags avoid flinging past a narrow target letter.
+            let movingForward = button.exists ? button.frame.midX > index.frame.midX : forward
+            let start = index.coordinate(withNormalizedOffset: CGVector(dx: movingForward ? 0.8 : 0.2, dy: 0.5))
+            let end = index.coordinate(withNormalizedOffset: CGVector(dx: movingForward ? 0.3 : 0.7, dy: 0.5))
+            start.press(forDuration: 0.1, thenDragTo: end, withVelocity: .slow, thenHoldForDuration: 0.2)
         }
-        XCTFail("Could not reach index entry \(label)")
+        XCTFail("Could not reach index entry \(label): \(index.debugDescription)")
     }
 
     private func assertHeading(_ id: String, atTopOf results: XCUIElement, in app: XCUIApplication) {
@@ -103,27 +107,27 @@ private final class LibraryRowsServer: @unchecked Sendable {
         listener = try NWListener(using: parameters)
     }
 
-    func start() async throws -> String {
+    func start() throws -> String {
         listener.newConnectionHandler = { [weak self] connection in
             guard let self else { connection.cancel(); return }
             connection.start(queue: self.queue)
             self.receive(connection, buffered: Data())
         }
-        return try await withCheckedThrowingContinuation { continuation in
-            listener.stateUpdateHandler = { [weak self] state in
-                guard let self else { return }
-                switch state {
-                case .ready:
-                    self.listener.stateUpdateHandler = nil
-                    continuation.resume(returning: "http://127.0.0.1:\(self.listener.port!.rawValue)")
-                case .failed(let error):
-                    self.listener.stateUpdateHandler = nil
-                    continuation.resume(throwing: error)
-                default: break
-                }
+        let ready = DispatchSemaphore(value: 0)
+        listener.stateUpdateHandler = { [weak self] state in
+            switch state {
+            case .ready, .failed:
+                self?.listener.stateUpdateHandler = nil
+                ready.signal()
+            default: break
             }
-            listener.start(queue: queue)
         }
+        listener.start(queue: queue)
+        guard ready.wait(timeout: .now() + 5) == .success, let port = listener.port else {
+            listener.cancel()
+            throw URLError(.cannotConnectToHost)
+        }
+        return "http://127.0.0.1:\(port.rawValue)"
     }
 
     func stop() { listener.cancel() }

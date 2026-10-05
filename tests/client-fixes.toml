@@ -4238,3 +4238,11 @@ source = "clients/android/app/src/main/java/tv/plurx/app/ui/components/Common.kt
 source_anchor = '.semantics { contentDescription = "View all $title" }'
 test = "clients/android/app/src/androidTest/java/tv/plurx/app/ui/LibraryRowsNavigationTest.kt"
 test_anchor = 'compose.onNodeWithContentDescription("View all Z · 21").performClick()'
+
+[[fixes]]
+id = "apple.library-index-scroll-target"
+commits = ["970005e101f3e67fe80c5d3184dcf2e611e3c6ba"]
+source = "clients/apple/Sources/LibraryView.swift"
+source_anchor = "proxy.scrollTo(LibraryScrollTarget.row(group.id), anchor: .top)"
+test = "clients/apple/UITests/LibraryRowsNavigationTests.swift"
+test_anchor = "func testLetterIndexScrollsToOffscreenRowAndRepeatsAfterManualScroll()"
