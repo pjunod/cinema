@@ -1,9 +1,7 @@
 import AVFoundation
 import AVKit
 import Foundation
-#if os(tvOS)
 import UIKit
-#endif
 
 enum DisplayCriteriaDecision: Equatable, Sendable {
     case apply
@@ -140,5 +138,118 @@ final class PlaybackAudioSessionObserver {
 
     deinit {
         for token in tokens { NotificationCenter.default.removeObserver(token) }
+    }
+}
+
+/// The app's one holder of `UIApplication.isIdleTimerDisabled`, which is what
+/// keeps the tvOS screensaver and iOS auto-lock off.
+///
+/// Every player stack used to leave display wake to AVPlayer's implicit
+/// `preventsDisplaySleepDuringVideoPlayback`: a heuristic private to the
+/// AVPlayer that decides for itself whether "video is playing" from its
+/// binding to a visible layer, which the app can neither observe nor
+/// reassert. On tvOS 26 it is reported to lapse once that binding changes and
+/// not return until the item is replaced. Live TV moves its one long-lived
+/// AVPlayer between the guide's picture and the fullscreen surface without
+/// replacing the item, and the screensaver came on over live television in
+/// both places (Apple TV, 2026-10-04). Android has always owned this
+/// explicitly (`keepScreenOn`); this is the Apple counterpart. More than one
+/// stack may hold at once, and the timer stays disabled while any of them does.
+///
+/// Every change is written through rather than only its edges: UIKit is not
+/// promised to leave the flag alone, and a cached "already applied" would
+/// leave a reset flag reset until every holder let go and claimed again.
+@MainActor
+final class DisplayWakeOwner {
+    static let shared = DisplayWakeOwner { UIApplication.shared.isIdleTimerDisabled = $0 }
+
+    private var holders: Set<UUID> = []
+    private let apply: @MainActor (Bool) -> Void
+
+    init(apply: @escaping @MainActor (Bool) -> Void) {
+        self.apply = apply
+    }
+
+    var isHeld: Bool { !holders.isEmpty }
+
+    func set(_ token: UUID, holding: Bool) {
+        if holding { holders.insert(token) } else { holders.remove(token) }
+        apply(!holders.isEmpty)
+    }
+}
+
+/// One player stack's claim on display wake, derived from its AVPlayer the
+/// way Android's `PlayerScreenOn` derives `keepScreenOn` from ExoPlayer: held
+/// while the player is playing or waiting to play (the viewer asked for
+/// playback and it is buffering), released as soon as it is paused (by the
+/// viewer, by the system, by a failure or by a stop), never held for an
+/// audio-only title, and never held while the picture is on an AirPlay
+/// receiver rather than this screen. The claim follows the player rather than
+/// any surface, so moving the picture between surfaces cannot drop it.
+///
+/// A stack's teardown must pause before it empties the player: an item-less
+/// AVPlayer left at rate 1 reads as waiting to play, and holds.
+@MainActor
+final class PlaybackDisplayWake {
+    nonisolated static func holds(
+        status: AVPlayer.TimeControlStatus,
+        hasVideo: Bool,
+        external: Bool
+    ) -> Bool {
+        hasVideo && !external && status != .paused
+    }
+
+    private let owner: DisplayWakeOwner
+    private let token = UUID()
+    private weak var player: AVPlayer?
+    private var observations: [NSKeyValueObservation] = []
+    private var hasVideo = false
+
+    init(owner: DisplayWakeOwner? = nil) {
+        self.owner = owner ?? .shared
+    }
+
+    /// Idempotent: the same player keeps its observation, and a different
+    /// one replaces it.
+    func track(_ player: AVPlayer, hasVideo: Bool) {
+        self.hasVideo = hasVideo
+        if self.player !== player {
+            observations.forEach { $0.invalidate() }
+            self.player = player
+            observations = [
+                player.observe(\.timeControlStatus, options: [.new]) { [weak self] _, _ in
+                    Task { @MainActor [weak self] in self?.sync() }
+                },
+                player.observe(\.isExternalPlaybackActive, options: [.new]) { [weak self] _, _ in
+                    Task { @MainActor [weak self] in self?.sync() }
+                },
+            ]
+        }
+        sync()
+    }
+
+    func release() {
+        observations.forEach { $0.invalidate() }
+        observations = []
+        player = nil
+        owner.set(token, holding: false)
+    }
+
+    private func sync() {
+        guard let player else {
+            owner.set(token, holding: false)
+            return
+        }
+        owner.set(token, holding: Self.holds(
+            status: player.timeControlStatus,
+            hasVideo: hasVideo,
+            external: player.isExternalPlaybackActive
+        ))
+    }
+
+    deinit {
+        let owner = owner
+        let token = token
+        Task { @MainActor in owner.set(token, holding: false) }
     }
 }

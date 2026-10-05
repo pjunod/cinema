@@ -336,6 +336,7 @@ final class LibraryChannelPlayerController: ObservableObject {
     private var itemObserver: AVPlayerItemObserver?
     private var itemEventTask: Task<Void, Never>?
     private let remoteCommands = LiveRemoteCommands()
+    private let displayWake = PlaybackDisplayWake()
     private let audioSessionObserver = PlaybackAudioSessionObserver()
     private var progressObserver: Any?
     private let playbackControl = PlaybackControlSession()
@@ -437,6 +438,7 @@ final class LibraryChannelPlayerController: ObservableObject {
             observeItem(item, channel: channel, sequence: expected)
             observeProgress(item, sequence: expected)
             player.play()
+            displayWake.track(player, hasVideo: true)
             remoteCommands.start(
                 title: title ?? channel.name,
                 playing: true,
