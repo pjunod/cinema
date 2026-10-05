@@ -1,0 +1,7 @@
+version = 1
+
+[[coverage]]
+commits = ["9a4db1ce", "fa5f6caf", "2e3f8126"]
+points = ["live-tv.integration", "web.experience", "apple.client", "android.client"]
+checks = ["web-static", "apple-simulators", "android-jvm"]
+reason = "Issue #815: the Apple TV, iOS and Android Live TV guides drew no station logos while the web did, because #755 kept the logo rule in the web page instead of the shared guide contract. tests/playback/live-tv-guide-cases.json `station_logo` now pins the rule (lineup-id match, cold guide, 33 address cases), and three suites replay it: `stationLogoUrl answers every shared station_logo case` (tests/web/live-tv.test.js), `testStationLogoAnswersEverySharedCase` and `testGridRowsCarryTheirStationLogo` (clients/apple/Tests/LiveTvTests.swift), `stationLogoAnswersEverySharedCase` and `gridRowsCarryTheirStationLogo` (LiveTvGuideTest.kt). The native list rows take the logo as a required argument, so a new list cannot be built without one."
