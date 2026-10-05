@@ -133,6 +133,8 @@ targets:
         buildPhase: resources
       - path: ../../tests/playback/dvr-visibility-cases.json
         buildPhase: resources
+      - path: ../../tests/sharing/protocol-cases.json
+        buildPhase: resources
     dependencies:
       - target: plurx-iOS
     settings:
@@ -166,6 +168,8 @@ targets:
       - path: ../../tests/playback/pgs-overlay-cases.json
         buildPhase: resources
       - path: ../../tests/playback/dvr-visibility-cases.json
+        buildPhase: resources
+      - path: ../../tests/sharing/protocol-cases.json
         buildPhase: resources
     dependencies:
       - target: plurx-tvOS

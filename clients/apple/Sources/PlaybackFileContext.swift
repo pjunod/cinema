@@ -147,6 +147,7 @@ struct PlaybackFileContext: Hashable {
         try requireCurrent()
         guard Self.matches(resource, "^(decision|hls/sessions|direct|stream\\.mp4|subs/[0-9]{1,6}(\\.vtt|/overlay\\.json|/overlay/[0-9a-f]{64}/objects/[0-9a-f]{64}\\.png)?|chapters/[0-9]{1,6}/thumb)$")
         else { throw APIError.badURL }
+        if reference != nil, !Self.sharedAssetIndexIsCanonical(resource) { throw APIError.badURL }
         if reference != nil && (resource == "direct" || resource == "stream.mp4") && sessionId == nil {
             throw APIError.badURL
         }
@@ -157,6 +158,17 @@ struct PlaybackFileContext: Hashable {
         if !items.isEmpty { components.queryItems = items }
         guard let result = components.string else { throw APIError.badURL }
         return result
+    }
+    /// B's Shared suffix grammar names a subtitle or chapter by its canonical
+    /// index, 0 through 4095: no leading zero, nothing wider. The Local route
+    /// keeps its own wider pattern.
+    static func sharedAssetIndexIsCanonical(_ resource: String) -> Bool {
+        let parts = resource.split(separator: "/", omittingEmptySubsequences: false)
+        guard parts.count >= 2, parts[0] == "subs" || parts[0] == "chapters" else { return true }
+        var index = String(parts[1])
+        if parts[0] == "subs", parts.count == 2, index.hasSuffix(".vtt") { index.removeLast(4) }
+        guard let value = Int(index), String(value) == index else { return false }
+        return (0...4095).contains(value)
     }
     func apiPath(_ resource: String, query: [URLQueryItem] = []) throws -> String {
         String(try path(resource, query: query).dropFirst("/api/v1/".count))
