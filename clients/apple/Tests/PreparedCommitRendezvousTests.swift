@@ -135,7 +135,10 @@ final class PreparedCommitRendezvousTests: XCTestCase {
         let body = try commitBody()
         let align = try XCTUnwrap(body.range(of: "awaitPreparedAlignment(of: item"))
         let boundary = try XCTUnwrap(body.range(of: "let boundaryMs = rendezvous.filmPositionMs"))
-        let expose = try XCTUnwrap(body.range(of: "player.replaceCurrentItem(with: item)"))
+        // The successor is exposed by promoting its warm player onto the
+        // surface (continuous quality, #774), not by swapping an item into
+        // the incumbent player.
+        let expose = try XCTUnwrap(body.range(of: "playbackSurface?.promote(successor)"))
         XCTAssertTrue(
             align.lowerBound < expose.lowerBound,
             "exposing first shows the viewer the staged position, which is behind the picture"
@@ -153,7 +156,7 @@ final class PreparedCommitRendezvousTests: XCTestCase {
         let refusal = try XCTUnwrap(
             tail.range(of: "PreparedCommitRendezvous.outcomeWhenAlignmentCannotLand")
         )
-        let expose = try XCTUnwrap(tail.range(of: "player.replaceCurrentItem(with: item)"))
+        let expose = try XCTUnwrap(tail.range(of: "playbackSurface?.promote(successor)"))
         XCTAssertTrue(refusal.lowerBound < expose.lowerBound)
         XCTAssertEqual(
             PreparedCommitRendezvous.outcomeWhenAlignmentCannotLand,
