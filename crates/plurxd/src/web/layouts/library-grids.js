@@ -157,7 +157,7 @@ function libraryPaintRows(body,groups,done,state){
         }
         libraryRowSync(section);
       },{passive:true});
-      strip.addEventListener("keydown",libraryRowKey);
+      libraryRowKeyboardWire(strip);
       row={section,strip,cards:new Map(),position:0,limit:LIB_ROW_CHUNK,items:[]};
       LIB_ROW_NODES.set(strip,row);state.rows.set(group.key,row);
     }

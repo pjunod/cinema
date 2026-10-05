@@ -40,6 +40,9 @@ function navKeyboardWireOnce(){
   navEnhanceClickables();
 }
 // Horizontal library navigation shares the card keyboard adapter.
+function libraryRowKeyboardWire(strip){
+  strip.addEventListener("keydown",libraryRowKey);
+}
 function libraryRowKey(event){
   if(event.altKey||event.ctrlKey||event.metaKey||event.shiftKey)return;
   const poster=event.target.closest(".poster");if(!poster)return;
