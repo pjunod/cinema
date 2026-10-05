@@ -91,8 +91,11 @@ const HDR10_4K_HLS_CODEC: &str = "hvc1.2.4.H150.90";
 /// The RFC 6381 `CODECS` value for a *re-encoded* HLS session.
 ///
 /// Without a qualified frozen plan, SDR knows its codec family but not its
-/// profile/compatibility/level triplet. This is not a CODECS declaration;
-/// SDR master emission remains deferred, and fMP4 reads its actual init.
+/// profile/compatibility/level triplet, so this SDR value is never printed.
+/// An SDR master prints `CODECS` only from complete `FrozenHlsCodecFacts`
+/// (qualified encoder output, or the actual fMP4 init) and only for a
+/// session created with Settings → Developer `playback.sdr_master_codecs`
+/// on; off, the default, is the pre-S-10 master with no SDR `CODECS`.
 /// HDR fallback follows the measured encoder-specific graph, including
 /// VAAPI's distinct constraint byte; it does not infer a source sample entry.
 pub(super) fn transcoded_hls_codecs(

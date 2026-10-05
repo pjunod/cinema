@@ -1933,6 +1933,10 @@ impl TranscodeManager {
                 plurx_core::store::keys::VOD_MATERIALIZE_BUDGET_SECS,
                 plurx_core::store::keys::CACHE_MAX_GB,
                 plurx_core::store::keys::VOD_BLOCKED_GET_CAP,
+                // Not admission policy, but read on this same create path:
+                // folding it in costs no extra Store read, and the session
+                // freezes it beside its block budget (S-10 Developer switch).
+                plurx_core::store::keys::PLAYBACK_SDR_MASTER_CODECS,
             ])
             .await
             .map_err(|error| {
@@ -2028,6 +2032,11 @@ impl TranscodeManager {
             block_budget: Duration::from_secs_f64(block_secs),
             materialize_budget: Duration::from_secs_f64(materialize_secs),
             blocked_get_cap,
+            // Missing is off: the pre-S-10 master with no SDR CODECS.
+            sdr_master_codecs: plurx_core::store::stored_switch(
+                read(plurx_core::store::keys::PLAYBACK_SDR_MASTER_CODECS).map(String::as_str),
+                false,
+            ),
         }))
     }
 

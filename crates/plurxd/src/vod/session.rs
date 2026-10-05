@@ -647,6 +647,9 @@ pub(super) struct Session {
     /// viewer's `playback_id` can never end another viewer's session.
     pub(super) supersession_user: String,
     pub(super) block_budget: Duration,
+    /// `playback.sdr_master_codecs` as read when this incarnation was
+    /// created. The master reads this, never the live setting.
+    pub(super) sdr_master_codecs: bool,
     /// Serializes authority-checked control with terminal/reap transitions for
     /// this session only. Keeping the gate on the session avoids making an
     /// unrelated rolling or VOD control wait behind node-wide Store I/O.

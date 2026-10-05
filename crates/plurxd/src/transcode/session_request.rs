@@ -951,6 +951,8 @@ pub(super) struct SessionOwner<'a> {
     pub(super) supersession_user: &'a str,
     pub(super) playback_id: &'a str,
     pub(super) automatic: bool,
+    /// The starting session's frozen `playback.sdr_master_codecs` choice.
+    pub(super) sdr_master_codecs: bool,
 }
 
 impl SessionKind {

@@ -3186,6 +3186,31 @@ in production. A green `make check` says the playlist is syntactically what was
 intended; it does not say AVPlayer will accept it. Treat an unobserved rung as
 untested, and turn it back off if the device does not visibly improve.
 
+### SDR `CODECS` on the master (Developer switch)
+
+**Settings → Developer → Master playlist codecs → *Print CODECS on SDR
+variants*** (`playback.sdr_master_codecs`, API field
+`playback_sdr_master_codecs`) is **off by default**. Off serves the pre-S-10
+master: SDR (`avc1`) variants carry no `CODECS`, which is the shape every
+client has played. On, an SDR variant names its exact `avc1.PPCCLL` string (and
+its audio component) whenever the session's frozen facts are complete — the
+same information HDR masters already carry. HDR10 and Dolby Vision variants
+are identical either way.
+
+It is a switch rather than a default because AVPlayer filters variants on
+`CODECS` before it fetches a byte: a string tvOS or iOS dislikes removes the
+rung silently, and no server counter can see a request that was never made.
+The value is read once when a session is created (in the same settings batch
+as the VOD admission policy; one read per rolling start), so a running
+session's master never changes shape. Flip it, then start a **new** playback
+to observe the effect. The Developer row "Apple TV and iPhone keep every SDR
+variant with CODECS printed" is advisory and reads `not observable` until the
+device check in
+[HONEST-MASTER-PLAYLIST §5.4](streaming/HONEST-MASTER-PLAYLIST.md#54-m4--re-qualify-the-sdr-ruling-on-the-named-devices-then-print-codecs)
+is recorded; it never refuses the save. If an SDR title stops offering a
+quality or fails at item preparation on Apple hardware with the switch on,
+turn it off and start playback again.
+
 ## Ports
 
 | Port | Proto | Purpose |

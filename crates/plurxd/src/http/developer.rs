@@ -321,6 +321,13 @@ pub(crate) async fn readiness(
             .map(String::as_str),
         false,
     );
+    // Missing is off, exactly as the session-create reads parse it.
+    let sdr_master_codecs_on = plurx_core::store::stored_switch(
+        settings
+            .get(plurx_core::store::keys::PLAYBACK_SDR_MASTER_CODECS)
+            .map(String::as_str),
+        false,
+    );
     let clock_guard_enforced = plurx_core::store::stored_switch(
         settings
             .get(plurx_core::store::keys::CLUSTER_CLOCK_GUARD_ENFORCED)
@@ -383,6 +390,7 @@ pub(crate) async fn readiness(
             cluster_transport_recovery(&state).await,
             playback_control_protocol(control_advertised),
             prepared_quality_handoff(prepared_handoff_on),
+            sdr_master_codecs(sdr_master_codecs_on),
             content_analysis_repair(&state, content_analysis_on).await,
             live_hls_recovery(live_recovery_on),
             pgs_overlay(overlay_on),
@@ -1627,6 +1635,33 @@ fn playback_control_protocol(advertised: bool) -> DeveloperEnableItem {
         enabled: Some(advertised),
         setting: Some("playback_control_protocol_v1"),
         requirements: vec![reporters],
+    }
+}
+
+/// S-10's SDR master `CODECS`. The switch is the whole decision; its one row
+/// says what nobody has measured yet and never refuses the save. It is
+/// `unobservable` by construction: whether AVPlayer still offers every SDR
+/// variant once the master names its codecs is a physical-device result, and
+/// a daemon that served such a master has no way to see a rung the player
+/// silently dropped before fetching it.
+fn sdr_master_codecs(enabled: bool) -> DeveloperEnableItem {
+    DeveloperEnableItem {
+        id: "sdr_master_codecs",
+        title: "CODECS on SDR master playlists",
+        enabled: Some(enabled),
+        setting: Some("playback_sdr_master_codecs"),
+        requirements: vec![DeveloperRequirement {
+            id: "sdr_codecs_device_requalification",
+            title: "Apple TV and iPhone keep every SDR variant with CODECS printed",
+            status: RequirementStatus::Unobservable,
+            evidence: "Not recorded: the S-10 device re-qualification \
+                       (HONEST-MASTER-PLAYLIST \u{a7}5.4) is a physical-device result this \
+                       daemon cannot read, and a variant AVPlayer drops on CODECS is never \
+                       fetched, so no server counter can see it. Advisory only; the saved \
+                       choice applies to sessions created after it, and each session keeps \
+                       the master shape it started with."
+                .to_owned(),
+        }],
     }
 }
 

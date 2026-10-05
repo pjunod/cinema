@@ -469,6 +469,15 @@ progressive playback. It can restore known color corruption. Saving it never
 depends on readiness; `hevc_header_trace_available` is a read-only nullable
 boolean reporting this node’s FFmpeg capability for the Developer advice.
 
+`playback_sdr_master_codecs` is an admin-writable boolean (default `false`,
+store key `playback.sdr_master_codecs`). On, an SDR HLS master variant
+carries `CODECS` when the session's frozen video and audio facts are both
+complete; off is the pre-S-10 master, which carries no `CODECS` on SDR
+variants. HDR and Dolby Vision variants are the same either way. The value is
+read once when a session is created and kept for that session, so a save
+affects new sessions only. Saving it never depends on the Developer
+readiness row (`sdr_master_codecs` → `sdr_codecs_device_requalification`).
+
 Live-TV settings are a separate transaction with their own generation
 compare-and-swap, and mixing them into a request with any non-Live-TV field is
 refused up front: a losing CAS must report 409 without an unrelated setting

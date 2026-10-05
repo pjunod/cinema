@@ -1263,23 +1263,93 @@
         hls_context("avc1.640034,mp4a.40.2", None)
     }
 
+    /// With the session's frozen `playback.sdr_master_codecs` on, an SDR
+    /// master names only complete frozen components. The switch is set
+    /// explicitly on every context here: off is the default and is covered by
+    /// `sdr_master_codecs_off_restores_the_pre_s10_master_and_leaves_hdr_alone`.
     #[test]
     fn sdr_master_declares_only_complete_frozen_output_components() {
         let file = hls_file(vec![]);
         let mut context = sdr_context();
         assert!(!master_playlist(&file, None, &context).contains("CODECS="));
-        let mut facts = crate::transcode::FrozenHlsCodecFacts::audio(None, true, false);
+        let mut facts = crate::transcode::FrozenHlsCodecFacts::audio(None, true, false)
+            .with_sdr_master_codecs(true);
         facts.bind_output_avc_init("avc1.64001F".to_owned());
         context.codec_facts = Some(facts);
         assert!(!master_playlist(&file, None, &context).contains("CODECS="));
-        let mut facts = crate::transcode::FrozenHlsCodecFacts::audio(None, false, false);
+        let mut facts = crate::transcode::FrozenHlsCodecFacts::audio(None, false, false)
+            .with_sdr_master_codecs(true);
         facts.bind_output_avc_init("avc1.64001F".to_owned());
         context.codec_facts = Some(facts);
         let master = master_playlist(&file, None, &context);
         assert!(master.contains("CODECS=\"avc1.64001F\""), "{master}");
         assert!(!master.contains("mp4a.40.2"));
         assert!(!master.contains("VIDEO-RANGE="));
+        assert!(master.contains("#EXT-X-VERSION:7"), "an SDR CODECS never moves the version");
         assert_eq!(master.matches("#EXT-X-STREAM-INF:").count(), 1);
+    }
+
+    /// S-10's Developer switch, `playback.sdr_master_codecs`, default off.
+    ///
+    /// Off must be the master every client played before S-10: complete SDR
+    /// facts are still frozen, but no `CODECS` is printed, because AVPlayer
+    /// filters variants on it before fetching a byte and no device has
+    /// re-qualified the SDR string (HONEST-MASTER-PLAYLIST §2.5, §5.4). The
+    /// HDR/Dolby Vision branch never consults the switch: its master is
+    /// byte-identical either way.
+    #[test]
+    fn sdr_master_codecs_off_restores_the_pre_s10_master_and_leaves_hdr_alone() {
+        let file = hls_file(vec![]);
+        let complete = |enabled: bool| {
+            let mut facts = crate::transcode::FrozenHlsCodecFacts::audio(None, false, false)
+                .with_sdr_master_codecs(enabled);
+            facts.bind_output_avc_init("avc1.64001F".to_owned());
+            facts
+        };
+
+        // The pre-S-10 SDR master: no facts at all, so nothing to print.
+        let legacy = master_playlist(&file, None, &sdr_context());
+        let mut off = sdr_context();
+        off.codec_facts = Some(complete(false));
+        let off_master = master_playlist(&file, None, &off);
+        assert!(!off_master.contains("CODECS="), "{off_master}");
+        assert_eq!(off_master, legacy, "off is byte-for-byte the pre-S-10 master");
+        // Every diagnostic shape that may print CODECS agrees.
+        for diagnostic in ["video-only-codecs", "video-only-hdr"] {
+            let shaped = master_playlist_diagnostic(&file, None, &off, Some(diagnostic));
+            assert!(!shaped.contains("CODECS="), "{diagnostic}: {shaped}");
+        }
+
+        let mut on = sdr_context();
+        on.codec_facts = Some(complete(true));
+        let on_master = master_playlist(&file, None, &on);
+        assert!(on_master.contains(",CODECS=\"avc1.64001F\","), "{on_master}");
+        assert_eq!(
+            on_master.replace(",CODECS=\"avc1.64001F\"", ""),
+            legacy,
+            "on adds exactly one attribute and moves nothing else"
+        );
+
+        // HDR10 and Dolby Vision: identical with the switch on, off, or with
+        // no component facts at all.
+        for (codecs, supplemental) in [
+            ("hvc1.2.4.H120.90,mp4a.40.2", None),
+            ("hvc1.2.4.L150.B0,ec-3", Some("dvh1.08.10/db1p")),
+            ("dvh1.05.06,ec-3", None),
+        ] {
+            let bare = hls_context(codecs, supplemental);
+            let expected = master_playlist(&file, None, &bare);
+            assert!(expected.contains(&format!("CODECS=\"{codecs}\"")), "{expected}");
+            for enabled in [false, true] {
+                let mut context = bare.clone();
+                context.codec_facts = Some(complete(enabled));
+                assert_eq!(
+                    master_playlist(&file, None, &context),
+                    expected,
+                    "{codecs}: the HDR branch ignores sdr_master_codecs={enabled}"
+                );
+            }
+        }
     }
 
     #[test]
@@ -1863,6 +1933,17 @@
         // SDR — the source's `hdr` column alone is not permission to claim PQ
         // for a tone-mapped picture.
         let sdr = master_playlist(&file, None, &hls_context("avc1.640034,mp4a.40.2", None));
+        assert!(!sdr.contains("VIDEO-RANGE="), "{sdr}");
+        assert!(!sdr.contains("CODECS="), "{sdr}");
+        // The same omission holds for a session whose complete SDR facts were
+        // frozen with `playback.sdr_master_codecs` off — the default, and the
+        // pre-S-10 ruling until the device re-qualification is recorded.
+        let mut facts = crate::transcode::FrozenHlsCodecFacts::audio(None, false, false)
+            .with_sdr_master_codecs(false);
+        facts.bind_output_avc_init("avc1.640028".to_owned());
+        let mut off = hls_context("avc1.640028", None);
+        off.codec_facts = Some(facts);
+        let sdr = master_playlist(&file, None, &off);
         assert!(!sdr.contains("VIDEO-RANGE="), "{sdr}");
         assert!(!sdr.contains("CODECS="), "{sdr}");
     }

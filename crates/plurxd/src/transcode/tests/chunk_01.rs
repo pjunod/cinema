@@ -2351,6 +2351,15 @@ async fn vod_settings_snapshot_preserves_budgets_and_maintenance_refusal() {
         block_budget_secs: None,
         transport: None,
     };
+    // S-10: missing is off — the pre-S-10 master with no SDR CODECS.
+    assert!(
+        !manager
+            .vod_settings(&req)
+            .await
+            .expect("snapshot")
+            .expect("enabled")
+            .sdr_master_codecs
+    );
     store
         .put_settings(&[
             (keys::VOD_PRESENTATION, "1"),
@@ -2359,6 +2368,7 @@ async fn vod_settings_snapshot_preserves_budgets_and_maintenance_refusal() {
             (keys::VOD_MATERIALIZE_BUDGET_SECS, "42"),
             (keys::CACHE_MAX_GB, "3"),
             (keys::VOD_BLOCKED_GET_CAP, "512"),
+            (keys::PLAYBACK_SDR_MASTER_CODECS, "1"),
         ])
         .await
         .expect("one settings update");
@@ -2373,6 +2383,7 @@ async fn vod_settings_snapshot_preserves_budgets_and_maintenance_refusal() {
     assert_eq!(settings.block_budget, Duration::from_secs(12));
     assert_eq!(settings.materialize_budget, Duration::from_secs(42));
     assert_eq!(settings.blocked_get_cap, 512);
+    assert!(settings.sdr_master_codecs, "read in the same batch");
 
     store
         .put_settings(&[
@@ -2381,6 +2392,7 @@ async fn vod_settings_snapshot_preserves_budgets_and_maintenance_refusal() {
             (keys::VOD_MATERIALIZE_BUDGET_SECS, "999"),
             (keys::CACHE_MAX_GB, "invalid"),
             (keys::VOD_BLOCKED_GET_CAP, "999999"),
+            (keys::PLAYBACK_SDR_MASTER_CODECS, " OFF "),
         ])
         .await
         .expect("invalid and excessive budgets");
@@ -2395,6 +2407,7 @@ async fn vod_settings_snapshot_preserves_budgets_and_maintenance_refusal() {
     assert_eq!(settings.block_budget, Duration::from_secs(2));
     assert_eq!(settings.materialize_budget, Duration::from_secs(300));
     assert_eq!(settings.blocked_get_cap, 4096);
+    assert!(!settings.sdr_master_codecs, "a hand-written OFF is off");
 
     store
         .put_setting(keys::VOD_PRESENTATION, " 0 ")

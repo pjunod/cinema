@@ -211,7 +211,7 @@ test("a card's Save wakes on a change and sleeps again once saved", () => {
 test("Playback saves per card, and each card writes only its own fields", () => {
   const writes = {};
   const run = (fn, ids) => new Function(
-    "api", "document", "cacheSettings", "toast", "setCardSaved", "SERVER", "SETTINGS", "verifiedDecodeCard", "decodeRecoveryCard", "pgsOverlayCard", "DEVELOPER_READINESS",
+    "api", "document", "cacheSettings", "toast", "setCardSaved", "SERVER", "SETTINGS", "verifiedDecodeCard", "decodeRecoveryCard", "pgsOverlayCard", "DEVELOPER_READINESS", "sdrMasterCodecsCard",
     // The newline matters: a shipped function may be followed by a line
     // comment, and `shippedSource` returns everything up to the next
     // declaration. Without it the injected `return` lands inside that comment
@@ -220,7 +220,7 @@ test("Playback saves per card, and each card writes only its own fields", () => 
   )(
     async (path, opts) => { writes[fn] = { path, body: opts.body }; return {}; },
     { getElementById: (id) => { assert.ok(ids.includes(id), `${fn} reads ${id}`); return { value: "v", checked: true, textContent: "" }; } },
-    (v) => v, () => {}, () => {}, {}, {}, () => "", () => "", () => "", null,
+    (v) => v, () => {}, () => {}, {}, {}, () => "", () => "", () => "", null, () => "",
   );
   const defaults = ["pal", "psl", "psm", "perr"];
   // Protocol and quality switching have separate cards. Streaming must not
@@ -249,6 +249,8 @@ test("Playback saves per card, and each card writes only its own fields", () => 
     run("saveVerifiedDecode", verifiedDecode)({ disabled: false }),
     run("saveAutomaticDecoderRecovery", automaticRecovery)({ disabled: false }),
     run("savePgsOverlay", pgsOverlay)({ disabled: false }),
+    // S-10's SDR master CODECS switch: its own card, its own field.
+    run("saveSdrMasterCodecs", ["sdr-master-codecs", "sdr-codecs-error", "sdr-codecs-card"])({ disabled: false }),
   ]).then(() => {
     assert.deepEqual(Object.keys(writes.savePlaybackDefaults.body).sort(), ["default_audio_lang", "default_sub_lang", "sub_mode"]);
     assert.deepEqual(Object.keys(writes.saveStreaming.body).sort(), [
@@ -275,6 +277,8 @@ test("Playback saves per card, and each card writes only its own fields", () => 
     assert.deepEqual(Object.keys(writes.saveAutomaticDecoderRecovery.body).sort(), ["automatic_decoder_recovery"]);
     assert.equal(writes.saveAutomaticDecoderRecovery.path, "/settings");
     assert.deepEqual(writes.savePgsOverlay.body, { pgs_overlay: true });
+    assert.deepEqual(writes.saveSdrMasterCodecs.body, { playback_sdr_master_codecs: true });
+    assert.equal(writes.saveSdrMasterCodecs.path, "/settings");
     assert.equal(writes.savePgsOverlay.path, "/settings");
     assert.equal(writes.savePlaybackDefaults.path, "/settings");
     assert.equal(writes.saveStreaming.path, "/settings");
@@ -478,6 +482,7 @@ test("Developer keeps only experiments; everyday controls retain their saves and
       // calls has to be composed here or the panel throws on the name and this
       // whole gate reports one failure instead of checking anything.
       shippedSource("contentEncodingCard"), shippedSource("vodReorderCard"),
+      shippedSource("sdrMasterCodecsCard"),
       shippedSource("subtitleNotReadyCard"),
       shippedSource("clusterClockCard"),
       shippedSource("pgsOverlayCard"),
@@ -590,6 +595,19 @@ test("Developer keeps only experiments; everyday controls retain their saves and
   assert.match(unverified, /TOG:hevc-unverified\|[^|]*\|[^|]*\|checked=true\|/);
   assert.match(unverified, /FOOT:saveHevcCopy/);
   assert.match(unverified, /not configured/);
+  // S-10: SDR master CODECS is an operator switch, off by default, whose one
+  // readiness row (the Apple device re-qualification) is advisory.
+  const sdrCodecs = /CODECS on SDR master playlists[\s\S]*?(?=<div class="setsection"|$)/.exec(html);
+  assert.ok(sdrCodecs, "Developer shows the SDR master CODECS switch");
+  assert.match(sdrCodecs[0], /TOG:sdr-master-codecs\|[^|]*\|[^|]*\|checked=false/, "off by default");
+  assert.match(sdrCodecs[0], /FOOT:saveSdrMasterCodecs/);
+  assert.match(sdrCodecs[0], /data-devstat="sdr_master_codecs:sdr_codecs_device_requalification"/);
+  assert.match(sdrCodecs[0], /never refused/);
+  assert.doesNotMatch(sdrCodecs[0], / disabled/, "no readiness result may disable the switch");
+  assert.match(
+    panels.developerPanel({ ...settings, playback_sdr_master_codecs: true }, readiness),
+    /TOG:sdr-master-codecs\|[^|]*\|[^|]*\|checked=true/,
+  );
   assert.match(html, /FOOT:saveLiveTvEnable/);
   assert.match(html, /Readiness observations never disable the control/);
   // Graduated 2026-09-28 at Paul's word: chapter thumbnails and both decoder
@@ -705,6 +723,7 @@ test("Developer keeps only experiments; everyday controls retain their saves and
   assert.doesNotMatch(waitsOf("Unverified HEVC copy"), /containment is deployed and/);
   assert.match(waitsOf("Unverified HEVC copy"), /containment itself is deployed \(87ca67c0e\)/);
   assert.match(waitsOf("Enable Live TV"), /scratch-fault \(L9\)/);
+  assert.match(waitsOf("CODECS on SDR master playlists"), /Apple TV and iPhone device check confirms every SDR variant is still offered/);
   // Adaptive Auto's graduation is Paul's choice between two destinations.
   const autoCard = developerCards.find((card) => card.startsWith("CARDHEAD:Adaptive Auto quality|"));
   assert.ok(autoCard, "Developer renders the adaptive Auto card");
@@ -1415,6 +1434,22 @@ test("HEVC override saves either choice without consulting advisory readiness", 
     await save({disabled:false});
     assert.deepEqual(calls, [["/settings",{hevc_unverified_copy:enabled}]]);
     assert.equal(card.outerHTML, `saved:${enabled}`);
+    assert.equal(err.textContent, "");
+  }
+});
+
+test("SDR master CODECS saves either choice without consulting advisory readiness", async () => {
+  for (const enabled of [true, false]) {
+    const calls=[], err={textContent:""}, card={outerHTML:""}, btn={disabled:false};
+    const save = new Function("api","document","cacheSettings","sdrMasterCodecsCard","toast","DEVELOPER_READINESS",
+      `${shippedSource("saveSdrMasterCodecs")}\nreturn saveSdrMasterCodecs;`)(
+      async (path, opts) => {calls.push([path,opts.body]);return {playback_sdr_master_codecs:enabled};},
+      {getElementById:(id)=>id==="sdr-codecs-error"?err:id==="sdr-codecs-card"?card:{checked:enabled}},
+      (s)=>s, (s,r)=>`saved:${s.playback_sdr_master_codecs}:${r.items[0].requirements[0].status}`, ()=>{},
+      {items:[{id:"sdr_master_codecs",requirements:[{id:"sdr_codecs_device_requalification",status:"unmet"}]}]});
+    await save(btn);
+    assert.deepEqual(calls, [["/settings",{playback_sdr_master_codecs:enabled}]]);
+    assert.equal(card.outerHTML, `saved:${enabled}:unmet`, "the card redraws with the readiness it already had");
     assert.equal(err.textContent, "");
   }
 });

@@ -446,6 +446,7 @@ function developerPanel(settings,readiness){
       <div class="setsection"><h2>Cluster work</h2><p>Remote media placement and replica catalogue reads.</p></div>${clusterPlacementCard(settings)}${boundedCatalogueCard(settings,readiness)}${clusterClockCard(settings,readiness)}
       <div class="setsection" id="enable-content-encoding"><h2>Content-aware encoding</h2><p>Measured choices for cached and offline video, with baseline fallback.</p></div>${contentEncodingCard(settings)}
       <div class="setsection" id="enable-vod-reorder"><h2>VOD compression</h2><p>Software x264 reordered frames.</p></div>${vodReorderCard(settings)}
+      <div class="setsection" id="enable-sdr-codecs"><h2>Master playlist codecs</h2><p>Name SDR codecs to players before they fetch media. Device re-qualification is still outstanding.</p></div>${sdrMasterCodecsCard(settings,readiness)}
       <div class="setsection" id="enable-hevc-copy"><h2>Enable HEVC copy</h2><p>The saved choice controls playback. Requirements below are advisory and never prevent enabling.</p></div>${hevcCopyCard(settings)}
       <div class="setsection"><h2>Live TV video</h2><p>Output choices whose device and node capacity evidence remains advisory.</p></div>${liveTvDeinterlaceCard(settings)}
       <div class="setsection"><h2>Recovery</h2><p>Portable backup scheduling and visible readiness. Saving is never gated by these observations.</p></div>${clusterBackupCard(settings,readiness)}
@@ -646,4 +647,27 @@ async function saveVodReorder(btn){
     const saved=cacheSettings(await api("/settings",{method:"PUT",body:{vod_reorder_frames:(/** @type {HTMLInputElement} */ (document.getElementById("vod-reorder"))).checked?2:0}}));
     const card=document.getElementById("vod-reorder-card");if(card)card.outerHTML=vodReorderCard(saved);
   }catch(error){if(err)err.textContent=error.message;}finally{btn.disabled=false;}
+}
+// S-10: CODECS on SDR HLS master variants. AVPlayer filters variants on
+// CODECS before it fetches a byte, so a string it dislikes silently removes a
+// rung, and no device has re-qualified the SDR string. Off is the pre-S-10
+// master every client already plays. The readiness row is advice: it never
+// disables the checkbox or refuses the save.
+function sdrMasterCodecsCard(settings,readiness){
+  const on=!!settings.playback_sdr_master_codecs;
+  return setCard(`${cardHead("CODECS on SDR master playlists","Name the exact H.264 and audio codecs on SDR HLS masters, as HDR masters already do.",`<span class="pill${on?" warn":""}">${on?"Enabled":"Off"}</span>`)}
+    ${togRow("sdr-master-codecs","Print CODECS on SDR variants","Applies to playback sessions started after saving; a running session keeps the master it started with. Only complete codec facts are printed, and HDR and Dolby Vision masters are unchanged either way.",on)}
+    <details class="setdetails" open><summary>Readiness — advisory only</summary><div class="setdetails-body">
+    ${devReq(readiness,"sdr_master_codecs","sdr_codecs_device_requalification","Apple TV and iPhone device check","With CODECS printed, every SDR variant must still be offered and play on tvOS and iOS. A player that rejects the string drops the variant before requesting it, so this server cannot observe the failure.")}
+    <p class="devcheck-note">Advisory only. The switch remains available and its save is never refused.</p>
+    </div></details>${devGraduation("the Apple TV and iPhone device check confirms every SDR variant is still offered.","the default becomes on and this switch is removed.")}<div class="err" id="sdr-codecs-error" role="alert"></div>${setCardFoot("saveSdrMasterCodecs")}`,{id:"sdr-codecs-card"});
+}
+async function saveSdrMasterCodecs(btn){
+  const err=document.getElementById("sdr-codecs-error");if(err)err.textContent="";
+  if(btn)btn.disabled=true;
+  try{
+    const saved=cacheSettings(await api("/settings",{method:"PUT",body:{playback_sdr_master_codecs:(/** @type {HTMLInputElement} */ (document.getElementById("sdr-master-codecs"))).checked}}));
+    const card=document.getElementById("sdr-codecs-card");if(card)card.outerHTML=sdrMasterCodecsCard(saved,DEVELOPER_READINESS);
+    toast("SDR master CODECS preference saved");
+  }catch(error){if(err)err.textContent=error.message;if(btn)btn.disabled=false;}
 }

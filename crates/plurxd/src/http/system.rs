@@ -1923,6 +1923,10 @@ pub struct SettingsDto {
     pub decoder_health_qualified_artifacts: bool,
     /// Explicit operator override, applied to new copy starts.
     pub hevc_unverified_copy: bool,
+    /// Print `CODECS` on SDR HLS master variants (S-10). Off by default, which
+    /// is the pre-S-10 master; applied to sessions created after the save and
+    /// frozen per session. Developer readiness is advisory only.
+    pub playback_sdr_master_codecs: bool,
     /// Advisory engine observation, never used to authorize a settings save.
     pub hevc_header_trace_available: Option<bool>,
     /// What this node measured about itself, and the identity it therefore
@@ -2387,6 +2391,10 @@ async fn settings_dto(state: &AppState) -> Result<SettingsDto, ApiError> {
             setting(keys::HEVC_UNVERIFIED_COPY).as_deref(),
             false,
         ),
+        playback_sdr_master_codecs: plurx_core::store::stored_switch(
+            setting(keys::PLAYBACK_SDR_MASTER_CODECS).as_deref(),
+            false,
+        ),
         hevc_header_trace_available: crate::ffmpeg::hevc_header_trace_available().await,
         decoder_health_qualification: DecoderHealthQualification::of(
             &state.transcode.published_artifact_qualification(),
@@ -2678,6 +2686,7 @@ pub struct UpdateSettings {
     pub automatic_decoder_recovery: Option<bool>,
     pub decoder_health_qualified_artifacts: Option<bool>,
     pub hevc_unverified_copy: Option<bool>,
+    pub playback_sdr_master_codecs: Option<bool>,
     pub pgs_overlay: Option<bool>,
     pub dolby_vision_convert: Option<bool>,
     pub vod_working_set_bytes: Option<String>,
@@ -2842,6 +2851,7 @@ impl UpdateSettings {
             || self.automatic_decoder_recovery.is_some()
             || self.decoder_health_qualified_artifacts.is_some()
             || self.hevc_unverified_copy.is_some()
+            || self.playback_sdr_master_codecs.is_some()
             || self.pgs_overlay.is_some()
             || self.dolby_vision_convert.is_some()
             || self.vod_working_set_bytes.is_some()
@@ -3808,6 +3818,15 @@ pub async fn update_settings(
         state
             .store
             .put_setting(keys::HEVC_UNVERIFIED_COPY, if on { "1" } else { "0" })
+            .await?;
+    }
+    if let Some(on) = req.playback_sdr_master_codecs {
+        // Saved unconditionally: the device re-qualification row on the
+        // Developer card is advice, not a precondition. New sessions read the
+        // value at create; running sessions keep the master they started with.
+        state
+            .store
+            .put_setting(keys::PLAYBACK_SDR_MASTER_CODECS, if on { "1" } else { "0" })
             .await?;
     }
     if let Some(on) = req.decoder_health_qualified_artifacts {

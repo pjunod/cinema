@@ -15,6 +15,30 @@ impl TranscodeManager {
             .checked_mul(1 << 30)
             .filter(|bytes| *bytes > 0)
     }
+
+    /// Settings → Developer `playback.sdr_master_codecs` for a rolling
+    /// session being created now. Read once per rolling start — this path has
+    /// no settings batch to fold it into (VOD reads it in `vod_settings`) —
+    /// and frozen into the session's codec facts, so no playlist request
+    /// reads it. A failed read is off: the pre-S-10 master, which every
+    /// client has already played, is the safe shape to fall back to.
+    pub(super) async fn sdr_master_codecs_switch(&self) -> bool {
+        match self
+            .store
+            .get_setting(plurx_core::store::keys::PLAYBACK_SDR_MASTER_CODECS)
+            .await
+        {
+            Ok(value) => plurx_core::store::stored_switch(value.as_deref(), false),
+            Err(error) => {
+                tracing::warn!(
+                    target: "plurxd::transcode",
+                    %error,
+                    "reading playback.sdr_master_codecs; this session keeps SDR masters without CODECS"
+                );
+                false
+            }
+        }
+    }
     /// The rolling producer owns route-specific initial negotiation. A retained
     /// producer answer is already authoritative, even if catalog facts changed.
     pub(super) fn rolling_start_audio_options(
@@ -560,6 +584,9 @@ impl TranscodeManager {
             opts.start_number = takeover.media_sequence;
         }
         let plan = self.resolve_movie_plan(&file, &opts, encoder).await?;
+        // Frozen for every presentation this start can produce — cached,
+        // retained or freshly encoded — so the session's master has one shape.
+        let sdr_master_codecs = self.sdr_master_codecs_switch().await;
         if takeover.is_none() {
             if let Some(info) = self
                 .serve_cached(
@@ -572,6 +599,7 @@ impl TranscodeManager {
                         supersession_user,
                         playback_id,
                         automatic,
+                        sdr_master_codecs,
                     },
                 )
                 .await
@@ -649,7 +677,10 @@ impl TranscodeManager {
                         let frozen = FrozenHlsPresentation::from_contract(
                             file.clone(),
                             HlsContext {
-                                codec_facts: Some(FrozenHlsCodecFacts::encoded(&retained_plan)),
+                                codec_facts: Some(
+                                    FrozenHlsCodecFacts::encoded(&retained_plan)
+                                        .with_sdr_master_codecs(sdr_master_codecs),
+                                ),
                                 bandwidth: None,
                                 file_id,
                                 start_seconds,
@@ -716,6 +747,7 @@ impl TranscodeManager {
                                 supersession_user,
                                 playback_id,
                                 automatic,
+                                sdr_master_codecs,
                             },
                         )
                         .await
@@ -965,7 +997,9 @@ impl TranscodeManager {
         let frozen_presentation = FrozenHlsPresentation::from_contract(
             file.clone(),
             HlsContext {
-                codec_facts: Some(FrozenHlsCodecFacts::encoded(&plan)),
+                codec_facts: Some(
+                    FrozenHlsCodecFacts::encoded(&plan).with_sdr_master_codecs(sdr_master_codecs),
+                ),
                 bandwidth: None,
                 file_id,
                 start_seconds,
@@ -1766,14 +1800,20 @@ impl TranscodeManager {
             preserve_dolby_vision: served.preserve_dolby_vision,
             convert_dolby_vision: served.convert_dolby_vision,
         };
+        // Frozen with the rest of the presentation: this session's master
+        // keeps one shape whatever the setting does later.
+        let sdr_master_codecs = self.sdr_master_codecs_switch().await;
         let frozen_presentation = FrozenHlsPresentation::new(
             file.clone(),
             HlsContext {
-                codec_facts: Some(FrozenHlsCodecFacts::audio(
-                    audio_delivery,
-                    !file.audio_streams.is_empty(),
-                    served.transcode_audio,
-                )),
+                codec_facts: Some(
+                    FrozenHlsCodecFacts::audio(
+                        audio_delivery,
+                        !file.audio_streams.is_empty(),
+                        served.transcode_audio,
+                    )
+                    .with_sdr_master_codecs(sdr_master_codecs),
+                ),
                 bandwidth: None,
                 file_id,
                 start_seconds,
