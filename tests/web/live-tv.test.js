@@ -95,7 +95,7 @@ async function main() {
         programmes:[{image_url:"https://images.example/movie.jpg"}]},
     ]}};
     const esc=value=>String(value).replace(/&/g,"&amp;").replace(/"/g,"&quot;").replace(/</g,"&lt;").replace(/>/g,"&gt;");
-    const {url,markup}=new Function("LIVE_TV","esc",`${shipped("liveTvStationLogoUrl")}\n${shipped("liveTvStationLogo")}\nreturn {url:liveTvStationLogoUrl,markup:liveTvStationLogo};`)(state,esc);
+    const {url,markup}=new Function("LIVE_TV","esc","PlurxLiveTv",`${shipped("liveTvStationLogoUrl")}\n${shipped("liveTvStationLogo")}\nreturn {url:liveTvStationLogoUrl,markup:liveTvStationLogo};`)(state,esc,liveTv);
     const channel={id:"one",guide_name:'CBS <6> "HD"'};
     assert.equal(url(channel),"https://images.example/cbs6.png?size=large&theme=color");
     assert.equal(url({id:"absent"}),null);
@@ -1756,6 +1756,24 @@ async function main() {
           `${c.name}: progress ${answer.progress} != ${c.expect.progress}`,
         );
       }
+    }
+  });
+
+  await test("stationLogoUrl answers every shared station_logo case", () => {
+    // The rule the Apple and Android guides transcribe. It lived in the page
+    // until 2026-10-04, outside this fixture, which is how both native guides
+    // shipped without logos while the web had them: nothing failed.
+    const logos = CASES.station_logo;
+    for (const c of logos.match) {
+      assert.equal(liveTv.stationLogoUrl(CASES.guide, c.channel), c.expect, c.name);
+    }
+    assert.equal(
+      liveTv.stationLogoUrl(null, logos.no_guide.channel), logos.no_guide.expect, logos.no_guide.name,
+    );
+    for (const c of logos.values) {
+      const channel = { id: "logo", guide_number: "0.1", programmes: [] };
+      if (Object.prototype.hasOwnProperty.call(c, "image_url")) channel.image_url = c.image_url;
+      assert.equal(liveTv.stationLogoUrl({ channels: [channel] }, "logo"), c.expect, c.name);
     }
   });
 

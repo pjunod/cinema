@@ -585,15 +585,9 @@ function liveTvOverlayTechnical(channel,status){
   return [source,rf].filter(Boolean).join(" · ");
 }
 function liveTvStationLogoUrl(channel){
-  // Match the station by its stable lineup id, never by a programme image or
-  // a guessed network name. HDHomeRun already supplies the affiliate artwork.
-  const source=(LIVE_TV.guide?.channels||[]).find(row=>row.id===channel?.id);
-  const value=source?.image_url;
-  if(typeof value!=="string"||value.length>512)return null;
-  try{
-    const url=new URL(value);
-    return url.protocol==="https:"&&!url.username&&!url.password?url.href:null;
-  }catch(e){return null;}
+  // The rule is the shared guide contract's, not this page's: every client
+  // answers it from tests/playback/live-tv-guide-cases.json `station_logo`.
+  return PlurxLiveTv.stationLogoUrl(LIVE_TV.guide,channel?.id);
 }
 function liveTvStationLogo(channel){
   const url=liveTvStationLogoUrl(channel);
