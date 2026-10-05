@@ -2343,9 +2343,9 @@ pub fn push_audio_delivery_args(
             args.extend(["-ar".into(), sample_rate.to_string()]);
             // A measured downmix is a filter, emitted by the caller's single
             // `-af` (see `audio_filter_chain`); `-ac` above is then a no-op
-            // confirmation of the stereo the chain already produced. The
-            // incumbent `RequiresLayoutMeasurement` fold has no filter and
-            // is performed by `-ac` alone, exactly as before.
+            // confirmation of the layout the chain already produced. Every
+            // fold has one; only a decision stored before the 7.1 -> 5.1
+            // measurement has none and is folded by `-ac` alone, as it was.
         }
     }
 }

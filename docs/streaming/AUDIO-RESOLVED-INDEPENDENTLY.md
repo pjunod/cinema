@@ -470,8 +470,24 @@ exact filter chain feeds `plan_digest`, so folded keys move once and any later
 gain change moves them again; unfolded and incumbent keys do not move. The
 fold and the A/V correction travel as one `-af` (ffmpeg keeps only the last),
 and encoded VOD runs the fold ahead of its sample-lattice trim — generation
-joins are bit-identical in pre-AAC PCM. Non-stereo targets keep the incumbent
-fold. Still owed: listening notes on the three heavily limited windows.
+joins are bit-identical in pre-AAC PCM. Still owed: listening notes on the
+three heavily limited windows.
+
+**2026-10-05 7.1 → 5.1 measured, and folded the same way:** the
+[7.1 → 5.1 receipt](../evidence/audio-downmix-7-1-to-5-1-2026-10-05.md)
+ran the incumbent `-ac 6` fold (swresample's default: each side surround added
+into its back surround at −3 dB, unnormalised in float) through the
+target-layout harness on the production engine. It clips on real content: a
+whole-title scan of one DTS-HD MA 7.1 film put the folded back surrounds at
++4.5 dBFS, with 95 audio frames at or above full scale. Every non-stereo fold
+is now `limited_default_to`: float conversion to the target count's default
+layout (the incumbent's own gains) and the same −4 dBFS limiter as every
+stereo fold. It is not a `pan` matrix on purpose — a DTS-HD MA 7.1 track
+decoded after an input seek can arrive as its 5.1(side) core, and swresample
+folds the layout the decoder actually emits where a fixed 7.1 matrix would
+drop those surrounds by 3 dB. `requires_layout_measurement` is retired: no
+decision produces it, and a durable snapshot that still carries it reads as
+the unfiltered `-ac` fold it described.
 
 ### 5.5 M5 — Android and web claims
 
@@ -543,8 +559,10 @@ undecodable audio). Device observations remain owed.
    wins until a client supplies measured route evidence.
 3. **Unmeasured downmixes carry a requirement, not invented gains.** The pure
    decision reports `requires_layout_measurement` with the source channel
-   count. *(2026-10-02: stereo folds are now measured — see §5.4; only
-   non-stereo targets keep this requirement.)* M2 must not turn that into FFmpeg argv until M4 supplies the source
+   count. *(2026-10-02: stereo folds are now measured — see §5.4.
+   2026-10-05: non-stereo folds are measured too and the requirement is
+   retired; every fold now has a named matrix or the limited default fold.)*
+   M2 must not turn that into FFmpeg argv until M4 supplies the source
    layout and measured matrix. Source and sink sample-rate facts now fail
    closed before a copy is admitted; missing evidence takes the encode
    fallback.
@@ -592,3 +610,4 @@ trailers `Agent-Model:` / `Agent-Session:` on every commit of the branch.
 | 2026-10-01 | gpt-6.1-sol | agent:/root/s09_665_resume_sol61 | M2 propagation and sole-review disposition | [#665](http://192.168.4.7:3000/noirr/plurx/pulls/665) | Typed audio reaches actual producer options/argv, plan/recipe identity, manifests/budgets, remote responses, durable offline snapshots and prepared successors. Sole review #28/comment #6752 identified retained rolling/encoded audio being re-resolved; actual owner regressions fail with the old claim-first behavior and pass with retained authority. Initial rolling negotiation remains route-specific; legacy absence and the v4 golden remain pinned. Composed effort `ec79f4b34` / main `5c99538fd`: pinned workspace check, core7, daemon11, real SQLite/three-voter offline2, numeric/docs9 and ownership census passed on their recorded source. Later main `1b2ae4f62` (#662) is composed additively with its yield reasons, publication/admission ownership and tests; audio owner/test bytes are unchanged, measured census414. Current committed-tree/compiler/hook receipts are in the PR; no already-passed tests are repeated for this base refresh. Numeric failures and physical/content/listening limits are retained; M3–M5 remain open. |
 | 2026-10-02 | claude-opus-5-5 | https://claude.ai/code/session_01CAyBrYCQ7PpAtuZwUxKfp7 | M4 real content + shipped stereo fold | Opus S-09 continuation PR | Nine real windows measured on the production ffmpeg; incumbent fold clipped and honoured AC-3/E-AC-3 stored levels. Float named matrix per layout + −4 dBFS limiter ships for every stereo fold (legacy absent-claim transcodes included); digest carries the exact chain; one `-af` with the A/V correction; encoded VOD folds ahead of the lattice trim (join bit-identical in PCM, lag 0). Listening notes and M3/M5 device evidence remain open. |
 | 2026-10-02 | claude-opus-5-5 | https://claude.ai/code/session_01CAyBrYCQ7PpAtuZwUxKfp7 | M3/M5 client claims | Opus S-09 continuation PR | Apple (AVAudioSession route channels + HDMI receiver), Android (HDMI PCM channels + Media3 bitstreams) and web (AudioContext destination channels) send `audio_sinks`; decision 6 keeps decodable copies and direct plays for stereo routes. Focused Apple iOS+tvOS, Android JVM and web-policy tests pass; device observations owed. |
+| 2026-10-05 | claude-opus-5-5 | https://claude.ai/code/session_014JowGeyJXJkRPwfiMtyiqL | 7.1 → 5.1 measurement and fold | Quality and streaming follow-ups PR (F-M2) | Target-layout harness (`layout.py`) on the production engine: synthetic worst case, 25 real 60 s windows and two whole-title scans. The incumbent `-ac 6` fold reached +4.5 dBFS on a real title; `limited_default_to` (float fold to the target layout, incumbent gains, −4 dBFS limiter) replaces `requires_layout_measurement`, which legacy snapshots read as the unfiltered fold. |

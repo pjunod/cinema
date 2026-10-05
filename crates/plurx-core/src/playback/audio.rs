@@ -113,12 +113,20 @@ pub enum AudioRoute {
 /// A row is selected only from the source's own layout spelling with a
 /// matching channel count; an absent or unrecognised spelling takes the
 /// limited default fold, never a matrix guessed from the channel count.
+///
+/// Folds to any other target end in the same limiter. The 7.1 → 5.1
+/// measurement (`docs/evidence/audio-downmix-7-1-to-5-1-2026-10-05.md`) found
+/// that FFmpeg's default `-ac 6` fold — each side surround added into its
+/// back surround at −3 dB, unlimited in float — reaches +4.5 dBFS on real
+/// content. Its gains are kept: the fold converts to float, names the target
+/// layout, and limits. It is deliberately not a `pan` matrix: a DTS-HD MA 7.1
+/// track decoded after an input seek can arrive as its 5.1(side) core, and
+/// swresample's fold follows the layout the decoder actually emits (side
+/// surrounds straight into the back pair) where a fixed 7.1 matrix would drop
+/// them by 3 dB.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, serde::Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum DownmixMatrix {
-    /// The incumbent unlimited fold. Retained for durable snapshots and for
-    /// non-stereo targets (7.1 → 5.1), which this measurement did not cover.
-    RequiresLayoutMeasurement { source_channels: u8 },
     /// `5.1` or `5.1(side)` → Lo/Ro, limited. One row names both surround
     /// pairs, so it folds the same whichever pair the decoder actually emits
     /// (an absent channel contributes nothing): a stored spelling that
@@ -130,6 +138,27 @@ pub enum DownmixMatrix {
     LoRo71,
     /// Any other layout: FFmpeg's float default fold to stereo, limited.
     LimitedDefault { source_channels: u8 },
+    /// Any fold to a target that is not stereo — 7.1 → 5.1 above all:
+    /// FFmpeg's float default fold to that channel count's default layout,
+    /// limited.
+    LimitedDefaultTo {
+        source_channels: u8,
+        target_channels: u8,
+    },
+}
+
+/// FFmpeg's default layout for an `-ac N` target, which the limited default
+/// folds name explicitly so the fold is the one `-ac` alone would perform.
+fn default_target_layout(channels: u8) -> Option<&'static str> {
+    Some(match channels {
+        1 => "mono",
+        2 => "stereo",
+        3 => "2.1",
+        4 => "4.0",
+        5 => "5.0",
+        6 => "5.1",
+        _ => return None,
+    })
 }
 
 /// −4 dBFS as linear amplitude: the ceiling the real-content receipt chose.
@@ -146,11 +175,33 @@ impl DownmixMatrix {
         }
     }
 
-    /// The filter chain this matrix contributes to the audio `-af`, or
-    /// `None` for the incumbent fold, which `-ac` alone performs.
+    /// The fold for any target with fewer channels than the source: the
+    /// stereo rows above, or the limited default fold to the target's
+    /// default layout.
+    pub fn for_target(source_channels: u8, target_channels: u8, layout: Option<&str>) -> Self {
+        match target_channels {
+            2 => Self::stereo_for(source_channels, layout),
+            _ => Self::LimitedDefaultTo {
+                source_channels,
+                target_channels,
+            },
+        }
+    }
+
+    /// The channel count this fold produces.
+    pub fn target_channels(&self) -> u8 {
+        match self {
+            Self::LoRo51 | Self::LoRo71 | Self::LimitedDefault { .. } => 2,
+            Self::LimitedDefaultTo {
+                target_channels, ..
+            } => *target_channels,
+        }
+    }
+
+    /// The filter chain this matrix contributes to the audio `-af`. Every
+    /// fold has one; `None` only for a matrix that fails validation.
     pub fn filter(&self) -> Option<String> {
         let pan = match self {
-            Self::RequiresLayoutMeasurement { .. } => return None,
             Self::LoRo51 => {
                 "pan=stereo|FL=FL+0.707*FC+0.707*SL+0.707*BL|FR=FR+0.707*FC+0.707*SR+0.707*BR"
             }
@@ -160,17 +211,65 @@ impl DownmixMatrix {
                     "aformat=sample_fmts=fltp:channel_layouts=stereo,{DOWNMIX_LIMIT}"
                 ))
             }
+            Self::LimitedDefaultTo {
+                target_channels, ..
+            } => {
+                return self.valid().then(|| {
+                    format!(
+                        "aformat=sample_fmts=fltp:channel_layouts={},{DOWNMIX_LIMIT}",
+                        default_target_layout(*target_channels).unwrap_or_default()
+                    )
+                })
+            }
         };
         Some(format!("aformat=sample_fmts=fltp,{pan},{DOWNMIX_LIMIT}"))
     }
 
     fn valid(&self) -> bool {
         match self {
-            Self::RequiresLayoutMeasurement { source_channels }
-            | Self::LimitedDefault { source_channels } => *source_channels > 0,
+            Self::LimitedDefault { source_channels } => *source_channels > 0,
+            Self::LimitedDefaultTo {
+                source_channels,
+                target_channels,
+            } => {
+                *target_channels != 2
+                    && default_target_layout(*target_channels).is_some()
+                    && source_channels > target_channels
+            }
             Self::LoRo51 | Self::LoRo71 => true,
         }
     }
+}
+
+/// Durable snapshots written before every fold had a measured matrix carry
+/// the retired `requires_layout_measurement` marker. It named the unfiltered
+/// `-ac` fold, which is exactly what an absent matrix produces, so it reads as
+/// `None`: a stored decision rebuilds the argv it was made with.
+fn stored_downmix<'de, D>(deserializer: D) -> Result<Option<DownmixMatrix>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    // Deserialize-only: the retired marker is recognised and then dropped,
+    // so its payload is never read.
+    #[allow(dead_code)]
+    #[derive(serde::Deserialize)]
+    #[serde(untagged)]
+    enum Stored {
+        Matrix(DownmixMatrix),
+        Retired(Retired),
+    }
+    #[allow(dead_code)]
+    #[derive(serde::Deserialize)]
+    #[serde(tag = "kind", rename_all = "snake_case")]
+    enum Retired {
+        RequiresLayoutMeasurement { source_channels: u8 },
+    }
+    Ok(
+        match <Option<Stored> as serde::Deserialize>::deserialize(deserializer)? {
+            Some(Stored::Matrix(matrix)) => Some(matrix),
+            Some(Stored::Retired(_)) | None => None,
+        },
+    )
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, serde::Deserialize)]
@@ -195,7 +294,11 @@ pub enum AudioAction {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, serde::Deserialize)]
 pub struct AudioDelivery {
     pub action: AudioAction,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "stored_downmix"
+    )]
     pub downmix: Option<DownmixMatrix>,
     pub reason: String,
 }
@@ -265,8 +368,8 @@ impl AudioDelivery {
     }
 
     /// A durable snapshot is server-authored, but storage corruption must not
-    /// become arbitrary FFmpeg argv on a later owner. Unmeasured matrices
-    /// deliberately remain a requirement; they supply no filter expression.
+    /// become arbitrary FFmpeg argv on a later owner: a matrix is only ever a
+    /// named fold, and it must produce the delivery's own channel count.
     pub fn valid_snapshot(&self) -> bool {
         let valid = match &self.action {
             AudioAction::None => self.downmix.is_none(),
@@ -294,13 +397,10 @@ impl AudioDelivery {
         valid
             && self.reason.len() <= 256
             && self.downmix.is_none_or(|matrix| {
+                // A fold is never a label on some other output shape.
                 matrix.valid()
-                    && match matrix {
-                        // A measured matrix is a stereo fold, never a label
-                        // on some other output shape.
-                        DownmixMatrix::RequiresLayoutMeasurement { .. } => true,
-                        _ => matches!(&self.action, AudioAction::Encode { channels: 2, .. }),
-                    }
+                    && matches!(&self.action, AudioAction::Encode { channels, .. }
+                        if *channels == matrix.target_channels())
             })
     }
 }
@@ -342,11 +442,7 @@ fn encoded(
             sample_rate: AUDIO_SAMPLE_RATE,
         },
         downmix: (channels < source_channels).then(|| {
-            if channels == 2 {
-                DownmixMatrix::stereo_for(source_channels, source.channel_layout.as_deref())
-            } else {
-                DownmixMatrix::RequiresLayoutMeasurement { source_channels }
-            }
+            DownmixMatrix::for_target(source_channels, channels, source.channel_layout.as_deref())
         }),
         reason: reason.to_owned(),
     }
@@ -742,19 +838,101 @@ mod tests {
         assert_eq!(legacy.downmix, Some(DownmixMatrix::LoRo71));
     }
 
+    /// The 7.1 → 5.1 measurement: the incumbent `-ac 6` fold reached
+    /// +4.5 dBFS on a real title, so every non-stereo fold is now the float
+    /// default fold to the target layout with the stereo folds' limiter.
     #[test]
-    fn non_stereo_targets_keep_the_incumbent_fold() {
-        let delivery = resolve_audio(
-            Some(&laid_out("truehd", 8, "7.1")),
-            &claimed(&[("eac3", 6)]),
+    fn non_stereo_targets_fold_in_float_and_end_in_the_limiter() {
+        let limit = "alimiter=limit=0.6309573444801932:level=0:latency=1";
+        let fold = |stream: AudioStream, profile: &DeviceProfile, route| {
+            resolve_audio(Some(&stream), profile, route, 0)
+        };
+        // Every route and codec that produces 5.1 from a 7.1 source.
+        for (sink, route) in [
+            ("eac3", AudioRoute::RollingHls),
+            ("ac3", AudioRoute::RollingHls),
+            ("aac", AudioRoute::RollingHls),
+            ("aac", AudioRoute::EncodedVod),
+        ] {
+            let delivery = fold(laid_out("truehd", 8, "7.1"), &claimed(&[(sink, 6)]), route);
+            assert_eq!(
+                delivery.downmix,
+                Some(DownmixMatrix::LimitedDefaultTo {
+                    source_channels: 8,
+                    target_channels: 6
+                }),
+                "{sink}"
+            );
+            assert_eq!(
+                delivery.downmix_filter().expect("measured fold"),
+                format!("aformat=sample_fmts=fltp:channel_layouts=5.1,{limit}")
+            );
+            assert!(delivery.valid_snapshot(), "{delivery:?}");
+        }
+        // No layout spelling, an unusual one, or seven channels: the same
+        // fold. No `pan` matrix is named from a stored spelling, because the
+        // decoder's layout decides what swresample folds.
+        for stream in [
+            source("dts", 8),
+            laid_out("dts", 8, "7.1(wide)"),
+            source("truehd", 7),
+        ] {
+            let delivery = fold(stream, &claimed(&[("eac3", 6)]), AudioRoute::RollingHls);
+            let Some(DownmixMatrix::LimitedDefaultTo {
+                target_channels: 6, ..
+            }) = delivery.downmix
+            else {
+                panic!("{delivery:?}");
+            };
+            assert_eq!(
+                delivery.downmix_filter().expect("limited fold"),
+                format!("aformat=sample_fmts=fltp:channel_layouts=5.1,{limit}")
+            );
+        }
+        // A four-channel AAC sink: the default 4.0 fold, limited.
+        let four = fold(
+            laid_out("truehd", 8, "7.1"),
+            &claimed(&[("aac", 4)]),
             AudioRoute::RollingHls,
-            0,
         );
         assert_eq!(
-            delivery.downmix,
-            Some(DownmixMatrix::RequiresLayoutMeasurement { source_channels: 8 })
+            four.downmix,
+            Some(DownmixMatrix::LimitedDefaultTo {
+                source_channels: 8,
+                target_channels: 4
+            })
         );
-        assert_eq!(delivery.downmix_filter(), None);
+        assert_eq!(
+            four.downmix_filter().expect("limited fold"),
+            format!("aformat=sample_fmts=fltp:channel_layouts=4.0,{limit}")
+        );
+        // A 5.1 source to a six-channel sink folds nothing.
+        let unfolded = fold(
+            laid_out("dts", 6, "5.1(side)"),
+            &claimed(&[("eac3", 6)]),
+            AudioRoute::RollingHls,
+        );
+        assert_eq!(unfolded.downmix, None);
+    }
+
+    /// Snapshots stored before the measurement carry the retired marker; it
+    /// named the unfiltered `-ac` fold, so it rebuilds exactly that argv.
+    #[test]
+    fn the_retired_layout_measurement_marker_reads_as_the_unfiltered_fold() {
+        for (channels, layout) in [(6, ",\"layout\":\"5.1\""), (2, "")] {
+            let stored = format!(
+                "{{\"action\":{{\"kind\":\"encode\",\"codec\":\"aac\",\"channels\":{channels}{layout},\"bitrate_kbps\":320,\"sample_rate\":48000}},\"downmix\":{{\"kind\":\"requires_layout_measurement\",\"source_channels\":8}},\"reason\":\"stored\"}}"
+            );
+            let delivery = AudioDelivery::parse_encoded_snapshot(&stored).expect("legacy snapshot");
+            assert_eq!(delivery.downmix, None);
+            assert_eq!(delivery.downmix_filter(), None);
+            assert!(!delivery
+                .byte_identity()
+                .contains("requires_layout_measurement"));
+        }
+        // An unknown kind is still corruption, not a fold.
+        let corrupt = "{\"action\":{\"kind\":\"encode\",\"codec\":\"aac\",\"channels\":2,\"bitrate_kbps\":160,\"sample_rate\":48000},\"downmix\":{\"kind\":\"volume_boost\"},\"reason\":\"x\"}";
+        assert_eq!(AudioDelivery::parse_encoded_snapshot(corrupt), None);
     }
 
     #[test]
@@ -775,9 +953,32 @@ mod tests {
             format!("aformat=sample_fmts=fltp:channel_layouts=stereo,{limit}")
         );
         assert_eq!(
-            DownmixMatrix::RequiresLayoutMeasurement { source_channels: 6 }.filter(),
-            None
+            DownmixMatrix::LimitedDefaultTo {
+                source_channels: 8,
+                target_channels: 6
+            }
+            .filter()
+            .expect("measured fold"),
+            format!("aformat=sample_fmts=fltp:channel_layouts=5.1,{limit}")
         );
+        // A limited default fold to a target FFmpeg has no default layout
+        // for, or to stereo under the wrong row, is not a fold at all.
+        for invalid in [
+            DownmixMatrix::LimitedDefaultTo {
+                source_channels: 8,
+                target_channels: 7,
+            },
+            DownmixMatrix::LimitedDefaultTo {
+                source_channels: 8,
+                target_channels: 2,
+            },
+            DownmixMatrix::LimitedDefaultTo {
+                source_channels: 4,
+                target_channels: 6,
+            },
+        ] {
+            assert_eq!(invalid.filter(), None, "{invalid:?}");
+        }
     }
 
     #[test]
@@ -794,6 +995,22 @@ mod tests {
         if let AudioAction::Encode { channels, .. } = &mut delivery.action {
             *channels = 6;
         }
+        assert!(!delivery.valid_snapshot());
+        // Nor a 5.1 fold on a stereo delivery, nor a fold whose target is not
+        // the delivery's channel count.
+        delivery.downmix = Some(DownmixMatrix::LimitedDefaultTo {
+            source_channels: 8,
+            target_channels: 6,
+        });
+        assert!(delivery.valid_snapshot());
+        if let AudioAction::Encode { channels, .. } = &mut delivery.action {
+            *channels = 2;
+        }
+        assert!(!delivery.valid_snapshot());
+        delivery.downmix = Some(DownmixMatrix::LimitedDefaultTo {
+            source_channels: 8,
+            target_channels: 4,
+        });
         assert!(!delivery.valid_snapshot());
     }
 

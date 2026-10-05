@@ -82,8 +82,9 @@ Every stereo fold: float conversion, a named matrix where the source's own
 layout spelling and channel count identify one, then one look-ahead limiter at
 −4 dBFS with auto-level off. Other layouts (none of the uncommon ones exist in
 the library) take the float default fold plus the same limiter, never a matrix
-guessed from a channel count. Non-stereo targets (7.1 → 5.1) are unmeasured
-and keep the incumbent fold.
+guessed from a channel count. Non-stereo targets (7.1 → 5.1) were measured
+on 2026-10-05 and now fold the same way: see the
+[7.1 → 5.1 receipt](../evidence/audio-downmix-7-1-to-5-1-2026-10-05.md).
 
 ```text
 5.1(side): aformat=sample_fmts=fltp,pan=stereo|FL=FL+0.707*FC+0.707*SL|FR=FR+0.707*FC+0.707*SR,alimiter=limit=0.6309573444801932:level=0:latency=1
