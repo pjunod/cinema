@@ -42,23 +42,16 @@ pub(super) async fn route(state: &AppState, play: &JellyfinPlay) -> Result<Strin
     Ok(native.session_id)
 }
 
+/// Activate the client's own negotiated binding and serve its HLS entry.
 pub(super) async fn root(
     client: ClientUser,
     state: AppState,
-    item: String,
-    request: playback::DirectRequest,
+    mount: Mount,
+    pending: JellyfinPlay,
     filename: String,
     method: Method,
     headers: HeaderMap,
 ) -> Result<Response, ApiError> {
-    let pending = playback::binding(
-        &client,
-        &state,
-        &request.play_session_id,
-        &item,
-        &request.media_source_id,
-    )
-    .await?;
     let selection: Value = serde_json::from_str(&pending.negotiation.selection_json)?;
     if selection.get("vod").is_none_or(|v| v.is_null()) {
         return Err(ApiError::BadRequest(
@@ -71,11 +64,15 @@ pub(super) async fn root(
     } else {
         Resource::Media
     };
-    Box::pin(serve(&client, &state, play, resource, method, headers)).await
+    Box::pin(serve(
+        &client, &state, mount, play, resource, method, headers,
+    ))
+    .await
 }
 
 pub(super) async fn resource(
     client: ClientUser,
+    mount: Mount,
     State(state): State<AppState>,
     Path((item, play_id, path)): Path<(String, String, String)>,
     RawQuery(raw): RawQuery,
@@ -113,7 +110,10 @@ pub(super) async fn resource(
         path
     };
     let resource = Resource::parse(&native_path).ok_or(ApiError::NotFound("media resource"))?;
-    Box::pin(serve(&client, &state, play, resource, method, headers)).await
+    Box::pin(serve(
+        &client, &state, mount, play, resource, method, headers,
+    ))
+    .await
 }
 
 type NativeResponse =
@@ -185,6 +185,7 @@ fn native_resource(
 async fn serve(
     client: &ClientUser,
     state: &AppState,
+    mount: Mount,
     play: JellyfinPlay,
     resource: Resource,
     method: Method,
@@ -248,9 +249,11 @@ async fn serve(
         let input = std::str::from_utf8(&bytes).map_err(|_| {
             ApiError::ServiceUnavailable("native manifest encoding unavailable".into())
         })?;
+        // Children are root-absolute under the mount this client used, so a
+        // client at the standard port's root is never sent to `/jellyfin`.
         let base = format!(
-            "/jellyfin/Videos/{}/{}/hls/",
-            play.negotiation.item_wire_id, play.negotiation.play_id
+            "{}/Videos/{}/{}/hls/",
+            mount.0, play.negotiation.item_wire_id, play.negotiation.play_id
         );
         let manifest_resource = if resource == Resource::Master
             && input.lines().any(|line| line.starts_with("#EXTINF:"))

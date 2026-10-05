@@ -388,6 +388,13 @@ TV cannot reach settings or mint keys. It still appears in the account's device
 list, where it can be revoked. Signing out of the facade revokes the token
 before any media cleanup, so a busy release cannot leave it valid.
 
+The facade also answers on Jellyfin's standard port (`server.jellyfin_port`,
+default 8096) on the main listener's address, so a client given only a host
+connects. Every request there is mapped under `/jellyfin` before routing:
+nothing native, no web app and no Plex route is reachable on it, and while the
+switch is off it answers a JSON 404 to everything. Set `jellyfin_port = 0` to
+close that listener.
+
 ## Live TV capabilities — one tuner, one URL, no account bearer
 
 A live session is not a library read, and its URLs end up in places library

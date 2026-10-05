@@ -3099,6 +3099,7 @@ membership addresses and token-file paths are intentionally file-only:
 | Env var | TOML | Default | What it does |
 |---|---|---|---|
 | `PLURX_BIND` | `server.bind` | `0.0.0.0:32400` | Address the HTTP API binds to |
+| `PLURX_JELLYFIN_PORT` | `server.jellyfin_port` | `8096` | Port on `PLURX_BIND`'s address where Jellyfin clients reach the compatibility facade at the server root, so a host name alone is enough; `0` = off. Best-effort: a taken port is logged and shown in Settings → Developer, and `/jellyfin` on the main port still works |
 | `PLURX_TRUSTED_PROXIES` | `server.trusted_proxies` | empty | Comma-separated proxy CIDRs whose appended `X-Forwarded-For` hops the login throttle may trust. Keep empty unless those peers overwrite or append the header correctly |
 | `PLURX_SERVER_NAME` | `server.name` | `plurx` | Bootstrap seed for the human-visible server name. The replicated setting is authoritative after first boot; rename it through the admin API |
 | `PLURX_NODE_HOSTNAME` | — | OS hostname | Short physical-machine name shown in Settings → Cluster. Native installs normally leave this unset; containers set it explicitly so a generated container id is not mistaken for the host |
@@ -3133,6 +3134,7 @@ membership addresses and token-file paths are intentionally file-only:
 | `PLURX_TONEMAP` | — | zscale | The **CPU** tone-map operator: `zscale` · `libplacebo` · `off` (no tone-map — plays HDR washed, but a useful test/escape hatch). Which *pipeline* runs — GPU or CPU — is probed at boot, not configured; this only chooses the operator when the CPU chain is the one running |
 | `PLURX_HWDECODE` | — | on | Set `off` to force software decode (still hardware-encodes) — for a GPU that decodes a stream to garbage, e.g. some Dolby Vision |
 | `PLURX_GDM_PORT` | — | `32414` | Host UDP port for GDM discovery (move if Plex owns 32414) |
+| `PLURX_JELLYFIN_HOST_PORT` | — | `8096` | Host TCP port Compose publishes for the Jellyfin standard port (move if a real Jellyfin owns 8096; clients then need that port or `/jellyfin`) |
 | `PLURX_MDNS_ADVERTISE` | — | `true` | Run Bonjour inside the server process; Compose sets this to `false` because its host-network companion advertises instead |
 | `PLURX_DISCOVERY_SERVER_URL` | — | `http://127.0.0.1:32400` | Server URL read by `plurxd advertise`; normally only the Compose companion uses it |
 | `PLURX_LOG` | — | `info` | Log filter (`tracing` EnvFilter syntax, e.g. `plurxd=debug`) |

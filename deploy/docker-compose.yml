@@ -106,6 +106,12 @@ services:
       # Keep the container port stable for peer containers. Move only the host
       # side when another service (usually Plex) still owns TCP 32400.
       - "${PLURX_HTTP_PORT:-32400}:32400"      # HTTP API + web app
+      # Jellyfin compatibility at the server root on Jellyfin's standard
+      # port, which Jellyfin clients assume when given only a host. It
+      # answers only while Settings -> Developer enables Jellyfin
+      # compatibility. If a real Jellyfin still owns host port 8096, move
+      # the host side with PLURX_JELLYFIN_HOST_PORT in .env.
+      - "${PLURX_JELLYFIN_HOST_PORT:-8096}:8096"
       # GDM discovery for Plex clients. Discovery only works on host port
       # 32414; if something else owns it (a still-running Plex), set
       # PLURX_GDM_PORT in .env to park it elsewhere until Plex retires.

@@ -20,9 +20,41 @@ Infuse (a new Store read on both backends), the nine missing contract routes,
 one switch read per request, and `plurx_jellyfin_requests_total`. The leader
 restart gap was a misreading: `/jellyfin` is fenced like native media and an
 HLS play keeps #798's grace; a regression now proves it. Detail:
-[JELLYFIN-COMPATIBILITY-STATUS.md](docs/clients/JELLYFIN-COMPATIBILITY-STATUS.md) §12.
+[JELLYFIN-COMPATIBILITY-STATUS.md](docs/clients/JELLYFIN-COMPATIBILITY-STATUS.md) §13.
 Open: the physical check on both clients (a GPT prompt), and the `ApiKey`
 decision for Paul to look over.
+
+## Apple TV: new HEVC WEB-DLs refused with 503 — ffmpeg 8 repeats the sample description
+
+**Branch `fix/ffmpeg8-repeated-hevc-descriptions`.** Paul reported
+2026-10-04 that *Taylor Tomlinson: Prodigal Daughter* (file 91) and
+*Tom Segura: Teacher* (file 106) error out on the Apple TV
+(`NSURLErrorDomain -1008`, underlying HTTP 503). Neither has a VOD index, so
+both play through live-HLS copy, and every attempt ended in `copy segmenter
+rejected the stream shape: … this stsd has 2 HEVC sample entries`; the
+legacy-muxer fallback wrote the same init and `master.m3u8` refused it (503).
+Cause: jellyfin-ffmpeg 8's MOV muxer appends a sample description whenever a
+packet carries new-extradata side data that differs byte-wise from the current
+one, and `extract_extradata` (needed for Matroska sources with a bare 23-byte
+`hvcC`) attaches it on every parameter-set keyframe. Reproduced on six of six
+2160p sources on nynuc: two descriptions identical outside `hvcC`, the same
+`hvcC` header and the same VPS/SPS/PPS modulo a PPS trailing zero (only SEI
+arrays differ), no `tfhd` sample-description index, `trex` default 1. The fix
+collapses such provably decoder-equivalent descriptions to the first, in
+`fmp4::collapse_equivalent_hevc_sample_entries`, called by both served-init
+builders (`promote_from`, `promote_hevc_parameter_sets`), by the copy
+segmenter on the init, and by VOD's `InitIdentity` before it digests a
+generation's muxer init; descriptions that differ in anything else keep the
+typed `MultipleHevcSampleEntries` refusal. The kept `hvcC` is reduced to its
+VPS/SPS/PPS arrays: ffmpeg 8's extraction copies the leading keyframe's SEI
+(decoded-picture hashes included), so without that every VOD generation
+started at a different keyframe would have refused as muxer drift once these
+titles get an index. Verified on captures: a real 8.1.3 copy pipe publishes a
+one-description init end to end, and four generations of file 91 started at
+0/300/900/1800 s collapse to byte-identical inits (opt-in tests).
+Not addressed here: file 91's fragment index also fails on a separate
+`Non-monotonic DTS` muxer error, and file 6710's `410 Gone` in the same log
+window is unrelated.
 
 ## Content analysis stopped: the queue's receipt bound is the next cliff after #608
 

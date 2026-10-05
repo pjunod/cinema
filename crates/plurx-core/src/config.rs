@@ -12,6 +12,10 @@ use crate::error::ConfigError;
 /// Default HTTP port. Deliberately near — but never colliding with — the
 /// 32400-era ports ex-Plex users already have muscle memory for.
 pub const DEFAULT_PORT: u16 = 32400;
+/// Jellyfin's own default HTTP port. Jellyfin clients assume it, at the
+/// server root, when the user types only a host, so the compatibility
+/// facade answers there too (see [`ServerConfig::jellyfin_port`]).
+pub const DEFAULT_JELLYFIN_PORT: u16 = 8096;
 /// Default Raft replication port, adjacent to the public HTTP API.
 pub const DEFAULT_RAFT_PORT: u16 = 32401;
 /// Default authenticated node-to-node API port.
@@ -61,6 +65,11 @@ pub struct ServerConfig {
     /// Reverse-proxy networks whose appended forwarding hops may be trusted
     /// for security-sensitive client-address decisions.
     pub trusted_proxies: Vec<ipnet::IpNet>,
+    /// Port, on `bind`'s address, where the Jellyfin compatibility facade
+    /// also answers at the server root, so a Jellyfin client given only a
+    /// host name reaches it. `0` turns this listener off. Whether the facade
+    /// answers at all is still the Settings -> Developer switch.
+    pub jellyfin_port: u16,
 }
 
 impl Default for ServerConfig {
@@ -69,7 +78,18 @@ impl Default for ServerConfig {
             name: "plurx".to_owned(),
             bind: SocketAddr::from(([0, 0, 0, 0], DEFAULT_PORT)),
             trusted_proxies: Vec::new(),
+            jellyfin_port: DEFAULT_JELLYFIN_PORT,
         }
+    }
+}
+
+impl ServerConfig {
+    /// Where the Jellyfin standard-port listener binds: `bind`'s address on
+    /// `jellyfin_port`. `None` when it is off, or when it names the main
+    /// listener's own port, which already serves the facade at `/jellyfin`.
+    pub fn jellyfin_bind(&self) -> Option<SocketAddr> {
+        (self.jellyfin_port != 0 && self.jellyfin_port != self.bind.port())
+            .then(|| SocketAddr::new(self.bind.ip(), self.jellyfin_port))
     }
 }
 
@@ -334,6 +354,14 @@ impl Config {
                 message: format!("`{bind}` is not a socket address (e.g. 0.0.0.0:{DEFAULT_PORT})"),
             })?;
         }
+        if let Some(port) = env_var("PLURX_JELLYFIN_PORT") {
+            self.server.jellyfin_port = port.parse().map_err(|_| ConfigError::Env {
+                var: "PLURX_JELLYFIN_PORT".to_owned(),
+                message: format!(
+                    "`{port}` is not a port number (e.g. {DEFAULT_JELLYFIN_PORT}, or 0 for off)"
+                ),
+            })?;
+        }
         if let Some(value) = env_var("PLURX_TRUSTED_PROXIES") {
             self.server.trusted_proxies = value
                 .split(',')
@@ -478,6 +506,33 @@ fn env_var(name: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Jellyfin clients given only a host assume port 8096 at the root. The
+    /// extra listener follows the main bind address, so a loopback-only
+    /// proxy install stays loopback-only, and can be moved or turned off.
+    #[test]
+    fn jellyfin_standard_port_follows_the_bind_address_and_can_be_turned_off() {
+        let mut server = ServerConfig::default();
+        assert_eq!(
+            server.jellyfin_bind(),
+            Some(SocketAddr::from(([0, 0, 0, 0], DEFAULT_JELLYFIN_PORT)))
+        );
+        server.bind = "127.0.0.1:32400".parse().expect("bind");
+        assert_eq!(
+            server.jellyfin_bind(),
+            Some("127.0.0.1:8096".parse().expect("loopback"))
+        );
+        server.jellyfin_port = 32400;
+        assert_eq!(
+            server.jellyfin_bind(),
+            None,
+            "the main port already serves it"
+        );
+        server.jellyfin_port = 0;
+        assert_eq!(server.jellyfin_bind(), None);
+        let parsed: Config = toml::from_str("[server]\njellyfin_port = 18096\n").expect("toml");
+        assert_eq!(parsed.server.jellyfin_port, 18096);
+    }
 
     #[test]
     fn defaults_are_sane() {
