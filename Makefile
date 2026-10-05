@@ -1463,6 +1463,12 @@ ui-check: ## Sweep every layout and fail if the structural golden moved
 control-browser-check: ## Run the shipped playback-control reporter in a real browser
 	@scripts/control-reporter-browser-check
 
+.PHONY: library-rows-browser-check
+library-rows-browser-check: ## Test grouped library rows with the provisioned Playwright browser
+	@PLAYWRIGHT_MODULE="$${PLAYWRIGHT_MODULE:-$$(python3 -c 'import pathlib, playwright; print(pathlib.Path(playwright.__file__).parent / "driver/package")')}" \
+		"$${PLAYWRIGHT_NODE:-$$(python3 -c 'import pathlib, playwright; print(pathlib.Path(playwright.__file__).parent / "driver/node")')}" \
+		--test tests/web/library-rows.browser.cjs
+
 # Regenerating the golden is a deliberate act that shows up in a git diff, never
 # a side effect of a normal run — a golden that rewrites itself asserts nothing.
 # Run this when you MEANT to change the UI, then read the diff before committing.
@@ -1526,6 +1532,7 @@ web-unit-check: ## Run every Node web and playback test (no browser)
 	@node tests/web/nav-keyboard.test.js
 	@node tests/web/reader.test.js
 	@node tests/web/library-channels.test.js
+	@node tests/web/library-rows.test.js
 	@node tests/web/live-tv.test.js
 	@node tests/web/layout-containment.test.js
 	@node tests/web/calm-library.test.js
