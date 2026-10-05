@@ -208,7 +208,7 @@ and calls back on the main actor with a typed event. Its pure policy is
 `nonisolated static` so it is unit-testable without AVFoundation:
 
 ```swift
-enum AudioInterruptionResponse: Equatable { case suspend, resume, stay }
+enum AudioInterruptionResponse: Equatable { case suspend, resume, stay, ignore }
 
 nonisolated static func interruptionResponse(
     type: AVAudioSession.InterruptionType,
@@ -216,7 +216,7 @@ nonisolated static func interruptionResponse(
     wantsPlayback: Bool
 ) -> AudioInterruptionResponse {
     switch type {
-    case .began: return .suspend
+    case .began: return wantsPlayback ? .suspend : .ignore
     case .ended: return options.contains(.shouldResume) && wantsPlayback ? .resume : .stay
     @unknown default: return .stay
     }
@@ -247,6 +247,26 @@ Finite player wiring:
   Live TV and Library Channels set `paused = true`. The viewer's next on-screen
   or remote Play therefore creates one real resume rather than turning the
   retained pre-interruption intent off or no-oping against it.
+- **iOS does not promise an `.ended` for every `.began`** (2026-10-04: an
+  iPad Pro paused for ten minutes got a `.began`, never an `.ended`, and kept
+  "Paused — audio interrupted" over a picture the viewer had resumed for an
+  hour, with the stall monitor off throughout). So a hold has three more
+  ends besides `.ended`:
+  - `.began` while the viewer has already paused is `.ignore`: nobody but
+    the viewer paused anything, and no hold is raised.
+  - The viewer's own transport press (on-screen, remote, lock screen)
+    ends the hold. Under a hold the transport reads Play, so a toggle is a
+    resume. A Play re-activates the session first; if iOS refuses (the call
+    is still live) the hold stays. On the finite player a Play settles the
+    stale intent through `settleSystemHoldAsPause()` — the one writer it
+    shares with `.stay` — so the press goes through the ordinary Play path
+    (paused-retirement latch, bounded resume) with the hold's real length
+    as the pause length.
+  - Film actually playing (`timeControlStatus == .playing`, no pending
+    seek, the presenter's presenting sample) retires it; Library Channels
+    takes the same evidence from the item observer because AVKit's own Play
+    button reaches the player directly. A `.resume` that arrives after the
+    viewer already ended the hold does nothing.
 - Route change `.oldDeviceUnavailable` (headphones pulled, AirPods case
   closed): `setPlaybackRequested(false)` — this **is** a viewer-pause
   semantically, and it is what keeps the film off the speaker. Every

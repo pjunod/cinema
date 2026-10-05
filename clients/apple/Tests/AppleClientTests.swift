@@ -3855,8 +3855,16 @@ final class AppleClientTests: XCTestCase {
         )
         XCTAssertTrue(
             String(source[interruption.upperBound..<interruptionEnd.lowerBound])
-                .contains("wantsPlayback = false"),
+                .contains("settleSystemHoldAsPause()"),
             "declined automatic resume is the fifth, explicitly owned intent transition"
+        )
+        let settle = try XCTUnwrap(source.range(of: "private func settleSystemHoldAsPause() {"))
+        let settleEnd = try XCTUnwrap(
+            source.range(of: "\n    }\n", range: settle.upperBound..<source.endIndex)
+        )
+        XCTAssertTrue(
+            String(source[settle.upperBound..<settleEnd.lowerBound]).contains("wantsPlayback = false"),
+            "the end of a system hold — declined resume or the viewer's own press — writes it in one place"
         )
         let start = try XCTUnwrap(source.range(
             of: "private func stopForBlockingSurface(revokingPlaybackIntent: Bool = false) {"
@@ -5559,6 +5567,39 @@ final class AppleClientTests: XCTestCase {
             ),
             .stay
         )
+        XCTAssertEqual(
+            PlaybackAudioSessionObserver.interruptionResponse(
+                type: .began, options: [], wantsPlayback: false
+            ),
+            .ignore,
+            "a viewer who already paused was not paused by the system (iPad Pro, 2026-10-04)"
+        )
+    }
+
+    /// iPad Pro, 2026-10-04: paused for ten minutes, a `.began` and never an
+    /// `.ended`; Play resumed the picture and "Paused — audio interrupted" stayed
+    /// up for an hour. The viewer's press must end a hold iOS never ends.
+    @MainActor
+    func testViewerPlayEndsASystemHoldThatIOSNeverEnded() {
+        let controller = PlayerController()
+        controller.handleAudioSessionEvent(.interruption(.suspend))
+        XCTAssertTrue(controller.systemPaused)
+        controller.togglePlayPause()
+        XCTAssertFalse(controller.systemPaused, "the viewer's Play is the end of the hold")
+        XCTAssertTrue(controller.wantsPlayback, "one press under a hold is a resume, not a pause of stale intent")
+    }
+
+    @MainActor
+    func testViewerPauseEndsASystemHoldAndALateEndChangesNothing() {
+        let controller = PlayerController()
+        controller.handleAudioSessionEvent(.interruption(.suspend))
+        controller.setPlaybackRequested(false)
+        XCTAssertFalse(controller.systemPaused)
+        XCTAssertFalse(controller.wantsPlayback)
+        controller.handleAudioSessionEvent(.interruption(.ignore))
+        controller.handleAudioSessionEvent(.interruption(.stay))
+        XCTAssertFalse(controller.systemPaused)
+        XCTAssertFalse(controller.wantsPlayback)
     }
 
     @MainActor

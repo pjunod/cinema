@@ -25,7 +25,7 @@ commits are not deployed.**
   default off. D6: a link negative is acknowledged from the live receipt with
   network priors off. S-14, L-02, K-05 and D-01 (Android 146) fixes; the
   hiqlite fork ledger tied to source; the host-name scrub and its guard;
-  Apple 208. The progressive-remux leader-restart grace is PR #807.
+  Apple 209. The progressive-remux leader-restart grace is PR #807.
 - **Rulings Paul owes** are listed with recommendations in the 2026-10-04
   relevance pass (an agent-side project document). K-02's snapshot path was
   accepted on 2026-10-04.

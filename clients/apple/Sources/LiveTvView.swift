@@ -226,14 +226,8 @@ final class LiveTvPlayerController: ObservableObject {
         remoteCommands.start(
             title: channel.title,
             playing: true,
-            play: { [weak self] in
-                guard let self, self.paused else { return }
-                self.togglePause()
-            },
-            pause: { [weak self] in
-                guard let self, !self.paused else { return }
-                self.togglePause()
-            },
+            play: { [weak self] in self?.setPaused(false) },
+            pause: { [weak self] in self?.setPaused(true) },
             toggle: { [weak self] in self?.togglePause() }
         )
         surfaceMessage = nil
@@ -467,6 +461,11 @@ final class LiveTvPlayerController: ObservableObject {
         let expected = serial
         waitingDebounce?.cancel()
         waitingDebounce = nil
+        if status == .playing, systemPaused {
+            // Film playing is the hold over even when iOS never says so.
+            systemPaused = false
+            surfaceMessage = nil
+        }
         guard !systemPaused else {
             waiting = false
             return
@@ -511,14 +510,30 @@ final class LiveTvPlayerController: ObservableObject {
     }
 
     func togglePause() {
+        setPaused(!(paused || systemPaused))
+    }
+
+    /// The viewer's transport press. Under a system hold the player is paused
+    /// whatever `paused` says, and iOS does not promise an `.ended` for every
+    /// `.began`, so the press itself ends the hold — otherwise the banner and
+    /// the keepalive gate outlive the interruption and the tuner is released
+    /// under a picture the viewer resumed.
+    func setPaused(_ pause: Bool) {
         guard playing else { return }
-        paused.toggle()
+        let held = systemPaused
+        if held {
+            systemPaused = false
+            surfaceMessage = nil
+        }
+        guard pause != paused || held else { return }
+        paused = pause
         if paused {
             player.pause()
             pausedAt = Date()
             message = "Paused. The tuner is released after 30 seconds without playback; resuming has no rewind guarantee."
             surfaceMessage = message
         } else {
+            if held { activateAudioSession() }
             player.play()
             pausedAt = nil
             message = "Playing live"
@@ -592,7 +607,7 @@ final class LiveTvPlayerController: ObservableObject {
         case .interruption(.stay):
             let wasSystemPaused = systemPaused
             systemPaused = false
-            surfaceMessage = nil
+            if wasSystemPaused { surfaceMessage = nil }
             if wasSystemPaused && playing {
                 paused = true
                 player.pause()
@@ -605,6 +620,8 @@ final class LiveTvPlayerController: ObservableObject {
             player.pause()
             message = "Paused — audio route disconnected"
             surfaceMessage = "Paused — audio route disconnected"
+        case .interruption(.ignore):
+            break
         }
     }
 
@@ -4043,8 +4060,8 @@ struct LiveTvView: View {
         HStack(spacing: 16) {
             Button { live.togglePause() } label: {
                 Label(
-                    live.paused ? "Play live" : "Pause",
-                    systemImage: live.paused ? "play.fill" : "pause.fill"
+                    live.paused || live.systemPaused ? "Play live" : "Pause",
+                    systemImage: live.paused || live.systemPaused ? "play.fill" : "pause.fill"
                 )
             }
             .focused($focusedControl, equals: .pillPlay)

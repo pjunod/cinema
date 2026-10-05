@@ -4120,3 +4120,16 @@ source = "clients/android/app/src/main/java/tv/plurx/app/player/ContinuousAudioO
 source_anchor = ".map { it.key to it.value.owner }"
 test = "clients/android/app/src/test/java/tv/plurx/app/player/ContinuousAudioOutputsTest.kt"
 test_anchor = "@Test fun releasingManyOutputsRetiresEveryOneOfThem()"
+
+[[fixes]]
+# iOS does not promise an `.ended` for every `.began`. A hold raised on
+# `.began` that only `.ended` could clear stayed up for an hour over a picture
+# the viewer had resumed (iPad Pro, 2026-10-04), with the stall monitor off.
+# The viewer's press, and film actually playing, now end it, and a `.began`
+# while the viewer has already paused holds nothing.
+id = "apple.system-hold-ends-without-ended"
+commits = ["969aba483299e9293ec3ffc5fc9bc40b2ef0da67"]
+source = "clients/apple/Sources/PlayerController.swift"
+source_anchor = "if systemPaused, viewerOrigin { endSystemHoldForViewer(play: requested) }"
+test = "clients/apple/Tests/AppleClientTests.swift"
+test_anchor = "func testViewerPlayEndsASystemHoldThatIOSNeverEnded()"
