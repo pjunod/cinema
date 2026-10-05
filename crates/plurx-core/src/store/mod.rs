@@ -1989,10 +1989,16 @@ pub mod keys {
     /// Nothing reads an index yet; a file without one keeps today's
     /// presentation, so this job is invisible to every client either way.
     pub const VOD_INDEX_MINS: &str = "playback.vod_index_mins";
+    /// Replicated Developer-tab override for K-04 bounded local catalogue
+    /// reads. Effective default is ON: a missing or unrecognised value falls
+    /// back through `stored_switch(value, default)` to the node's
+    /// `cluster.bounded_replica_reads` config seed (`true` unless
+    /// `PLURX_CLUSTER_BOUNDED_REPLICA_READS` says otherwise); only an explicit
+    /// "0"/"false"/"no"/"off" turns it off.
+    pub const BOUNDED_REPLICA_READS: &str = "cluster.bounded_replica_reads";
     /// Content-addressed cluster coordination for VOD indexes. Missing/zero is
     /// off so an upgrade never starts full-library reads without the operator's
     /// topology measurement and explicit opt-in.
-    pub const BOUNDED_REPLICA_READS: &str = "cluster.bounded_replica_reads";
     pub const VOD_INDEX_CLUSTER_CACHE: &str = "playback.vod_index_cluster_cache";
     /// Durable analysis retry budget. The settings API constrains this to a
     /// small positive range so an operator can tune slow media without making

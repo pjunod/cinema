@@ -3,6 +3,26 @@
 //! is no legitimately committed partial bridge or intermediate marker.
 //! Table witnesses below are the retained published69/91 capture schemas
 //! (manifest8c58), not newly executed/private historical captures.
+//!
+//! Retirement: this bridge exists only for the 2026-10-04 ordinal collision
+//! (SQLite `user_version` 88..=97 bridged to 97; replicated
+//! `cluster_meta.schema_version` 66..=73 bridged to 73; see `bridge_plan`).
+//! It may be deleted once no restorable artifact can sit inside either
+//! range: every node's live store (SQLite and replicated) is at or above
+//! the canonical end, AND no artifact older than that remains restorable —
+//! no `plurxd` backup still retained under the `backup.keep` setting
+//! (`keys::BACKUP_KEEP`, default 14, pruned in `backup.destination`) and no
+//! activation import source backup still retained under `migration/`
+//! (`MIGRATION_BACKUP_RETENTION` in `cluster/migration.rs`) predates the
+//! bridge. Deleting the bridge must NOT delete the refusal: the migration
+//! dispatchers — `SqliteStore::migrate` (`store/sqlite/mod.rs`, where
+//! `bridge_sqlite` is called today) and `HiqliteAuthStore::migrate_schema`
+//! (`store/hiqlite.rs`, where `bridge_private_lineage` is called today) —
+//! must keep refusing any marker in 88..=96 / 66..=72 before the ordinary
+//! chain runs. Private effort markers never exceed 93 / 69 and only the
+//! published chain or this bridge stamps the canonical end, so without that
+//! refusal a private-lineage backup restored later would be misread as a
+//! canonical database at the same ordinal and migrated as one.
 use std::collections::{BTreeMap, BTreeSet};
 
 use crate::error::StoreError;

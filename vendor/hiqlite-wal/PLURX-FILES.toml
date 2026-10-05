@@ -1,0 +1,31 @@
+# Every Rust source under src/, classified against the crates.io
+# `hiqlite-wal` 0.14.0 package (whitespace-insensitive, 2026-10-04).
+# tests/operations/test_hiqlite_patch_ledger.py reads this file; its
+# ForkSourceManifestCase docstring explains what each table guarantees.
+
+# Carry Plurx changes; each must be named by a PLURX-PATCH.md row bullet.
+patched = [
+    "src/log_store.rs",
+    "src/log_store_impl.rs",
+    "src/metadata.rs",
+    "src/reader.rs",
+    "src/wal.rs",
+    "src/writer.rs",
+]
+
+# Carry Plurx changes no row owns yet. A disclosed gap that may only shrink.
+[unledgered]
+"src/inspection.rs" = "read-only stopped-node WAL inspection; needs a row"
+"src/lib.rs" = "exports only the status and inspection surfaces above"
+"src/status.rs" = "bounded WAL runtime status; needs a row"
+
+# Differ from upstream by rustfmt/import order only. Pinned so that any
+# real edit fails until the file moves to `patched` and a row names it.
+[formatting]
+"src/utils.rs" = "932dfbd24c36ac361cc61959643063fe9a781601f3be75c0aaaca05242bc2f96"
+
+# Identical to upstream. Pinned for the same reason.
+[upstream]
+"src/error.rs" = "71b27abf2b8fee6e1a5ccfc70fb103f078fcdd786b864b1b687ac935fdff330c"
+"src/lockfile.rs" = "3fde8a66e201c75f4ae711163c9db92c4a78c2da68d1d30439b381d19ed5f36e"
+"src/shutdown.rs" = "faf8af62567fe51b7d5d67b896675d833b08b33a74aaada358078fb18cdf54ee"
