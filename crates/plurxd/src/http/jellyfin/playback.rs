@@ -2,6 +2,7 @@
 use super::*;
 use axum::extract::Query;
 use axum::http::Method;
+use plurx_compat_jellyfin::subtitle::{delivery, DeliveryMethod, TrackFacts, Transport};
 use plurx_core::domain::MediaFile;
 use plurx_core::store::{
     JellyfinPlay, JellyfinPlayActivation, JellyfinPlayScope, JellyfinProgressProvenance,
@@ -404,10 +405,19 @@ pub(super) struct InfoRequest {
     audio_stream_index: Option<i64>,
     subtitle_stream_index: Option<i64>,
     device_profile: Option<Value>,
+    /// Bounded below; only `Http` has a meaning here.
+    direct_play_protocols: Option<Vec<String>>,
     max_streaming_bitrate: Option<i64>,
     current_play_session_id: Option<String>,
     #[serde(flatten)]
     extra: std::collections::BTreeMap<String, Value>,
+}
+fn wire_track(stream: &wire::MediaStream) -> TrackFacts<'_> {
+    TrackFacts {
+        codec: &stream.codec,
+        language: stream.language.as_deref(),
+        text: !plurx_core::tracks::is_bitmap_subtitle(&stream.codec),
+    }
 }
 fn profiles(
     request: &InfoRequest,
@@ -660,7 +670,7 @@ pub(super) async fn info_post(
     Path(id): Path<String>,
     RawQuery(raw): RawQuery,
     Json(mut request): Json<InfoRequest>,
-) -> Result<Json<Value>, ApiError> {
+) -> Result<Response, ApiError> {
     merge_info_query(&client, raw.as_deref(), &mut request)?;
     info(&client, &state, &id, request).await
 }
@@ -669,7 +679,7 @@ pub(super) async fn info_get(
     State(state): State<AppState>,
     Path(id): Path<String>,
     RawQuery(raw): RawQuery,
-) -> Result<Json<Value>, ApiError> {
+) -> Result<Response, ApiError> {
     let mut request = InfoRequest::default();
     merge_info_query(&client, raw.as_deref(), &mut request)?;
     info(&client, &state, &id, request).await
@@ -751,9 +761,28 @@ fn merge_info_query(
                 &mut request.current_play_session_id,
                 wire_id(&value)?.to_hex(),
             )?,
+            "directplayprotocols" => assign(
+                &mut request.direct_play_protocols,
+                value.split(',').map(|p| p.trim().to_owned()).collect(),
+            )?,
             "api_key" | "apikey" | "isplayback" | "autoopenlivestream" => {}
             _ => return Err(ApiError::BadRequest("unsupported playback query".into())),
         }
+    }
+    // Jellyfin's MediaProtocol names; anything else is not a protocol.
+    if request
+        .direct_play_protocols
+        .as_ref()
+        .is_some_and(|protocols| {
+            protocols.len() > 8
+                || protocols.iter().any(|p| {
+                    !["File", "Http", "Rtmp", "Rtsp", "Udp", "Rtp", "Ftp"]
+                        .iter()
+                        .any(|known| known.eq_ignore_ascii_case(p))
+                })
+        })
+    {
+        return Err(ApiError::BadRequest("invalid direct play protocol".into()));
     }
     Ok(())
 }
@@ -763,7 +792,7 @@ async fn info(
     state: &AppState,
     id: &str,
     mut request: InfoRequest,
-) -> Result<Json<Value>, ApiError> {
+) -> Result<Response, ApiError> {
     if let Some(uid) = request.user_id.as_deref() {
         check_user(client, uid)?;
     }
@@ -879,6 +908,51 @@ async fn info(
             return Err(ApiError::BadRequest("invalid subtitle selection".into()));
         }
     }
+    // A malformed list grants nothing: every track then resolves to Encode.
+    let subtitle_rules = plurx_compat_jellyfin::subtitle::subtitle_rules(
+        request
+            .device_profile
+            .as_ref()
+            .and_then(|profile| profile.get("SubtitleProfiles")),
+    )
+    .unwrap_or_else(|_| {
+        tracing::debug!(target: "plurxd::jellyfin", "malformed SubtitleProfiles; no subtitle delivery granted");
+        Vec::new()
+    });
+    let direct_transport = Transport::Direct {
+        container: file.container.as_deref(),
+    };
+    // A client that declares no DirectPlayProfiles but enables direct play
+    // over HTTP picks static delivery itself: Infuse sends exactly this and
+    // then requests `/Videos/{id}/stream?Static=true`, even where Jellyfin
+    // answered with a transcode (J0). It plays the file and its tracks as
+    // they are, so no subtitle choice turns that into a transcode.
+    let client_static = request.enable_direct_play == Some(true)
+        && request
+            .direct_play_protocols
+            .as_ref()
+            .is_some_and(|protocols| protocols.iter().any(|p| p.eq_ignore_ascii_case("http")))
+        && request
+            .device_profile
+            .as_ref()
+            .is_some_and(|profile| profile.get("DirectPlayProfiles").is_none_or(Value::is_null));
+    // As in Jellyfin, a selected track the file cannot deliver to this client
+    // as-is (Encode) makes the play a transcode.
+    let direct = client_static
+        || direct
+            && request
+                .subtitle_stream_index
+                .filter(|index| *index >= 0)
+                .and_then(|index| {
+                    source
+                        .media_streams
+                        .iter()
+                        .find(|s| s.stream_type == wire::StreamType::Subtitle && s.index == index)
+                })
+                .is_none_or(|stream| {
+                    delivery(&subtitle_rules, wire_track(stream), direct_transport).method
+                        != DeliveryMethod::Encode
+                });
     let item_id = state
         .store
         .jellyfin_resolve_entity(JellyfinEntityKind::Item, &item.id.to_hex())
@@ -914,7 +988,7 @@ async fn info(
         None
     } else {
         let Some(profile) = request.device_profile.as_ref() else {
-            return Ok(Json(json!({"MediaSources":[],"ErrorCode":"NotSupported"})));
+            return Ok(not_supported());
         };
         Box::pin(super::vod::negotiate(
             state,
@@ -933,12 +1007,13 @@ async fn info(
                 allow_encode: request.enable_transcoding != Some(false),
                 allow_audio_copy: request.allow_audio_stream_copy != Some(false),
                 source_facts: &facts,
+                subtitle_rules: &subtitle_rules,
             },
         ))
         .await?
     };
     if !direct && vod.is_none() {
-        return Ok(Json(json!({"MediaSources":[],"ErrorCode":"NotSupported"})));
+        return Ok(not_supported());
     }
     let selection=json!({"audio":request.audio_stream_index,"subtitle":request.subtitle_stream_index,"source":{"size":file.size,"mtime":file.mtime,"probe":snapshot.probe_json},"vod":vod.as_ref().map(|v| json!({"body":v.body,"bitrate":v.bitrate,"inline_init":v.inline_init}))}).to_string();
     let profile_json = serde_json::to_string(&request.device_profile)
@@ -1045,8 +1120,59 @@ async fn info(
             }
         }
     }
+    let deliveries = source
+        .media_streams
+        .iter()
+        .filter(|s| s.stream_type == wire::StreamType::Subtitle)
+        .map(|s| {
+            let track = wire_track(s);
+            let choice = match vod.as_ref() {
+                Some(plan) => super::vod::hls_track_delivery(
+                    &subtitle_rules,
+                    track,
+                    plan.manifest_capable,
+                    plan.manifest_subtitles,
+                ),
+                None => delivery(&subtitle_rules, track, direct_transport),
+            };
+            (s.index, track.text, choice)
+        })
+        .collect::<Vec<_>>();
+    // Returned URLs are relative to the client's configured server address,
+    // which already ends in `/jellyfin`: both pinned clients prefix it (a
+    // returned `/jellyfin/...` becomes `/jellyfin/jellyfin/...`). Media and
+    // subtitle requests from Android TV carry no header, only this `ApiKey`.
+    let credential = client
+        .url_credential
+        .as_deref()
+        .map(|token| format!("&ApiKey={token}"))
+        .unwrap_or_default();
+    let item_wire = item.id.to_hex();
+    let source_wire = source.id.to_hex();
     let mut source = serde_json::to_value(source)
         .map_err(|_| ApiError::ServiceUnavailable("source DTO unavailable".into()))?;
+    if let Some(streams) = source["MediaStreams"].as_array_mut() {
+        for stream in streams {
+            let Some((index, text, choice)) = deliveries
+                .iter()
+                .find(|(index, ..)| stream["Type"] == "Subtitle" && stream["Index"] == *index)
+            else {
+                continue;
+            };
+            stream["DeliveryMethod"] = json!(choice.method.as_str());
+            stream["IsTextSubtitleStream"] = json!(text);
+            stream["SupportsExternalStream"] = json!(text);
+            if choice.method == DeliveryMethod::External {
+                stream["DeliveryUrl"] = json!(format!(
+                    "/Videos/{item_wire}/{source_wire}/Subtitles/{index}/0/Stream.{}?{}",
+                    choice.format,
+                    credential.trim_start_matches('&')
+                )
+                .trim_end_matches('?'));
+                stream["IsExternalUrl"] = json!(false);
+            }
+        }
+    }
     source["SupportsDirectPlay"] = json!(direct);
     source["SupportsTranscoding"] = json!(vod.is_some());
     if let Some(index) = request.audio_stream_index {
@@ -1061,9 +1187,7 @@ async fn info(
     // here doubled it.
     if vod.is_some() {
         source["TranscodingUrl"] = json!(format!(
-            "/Videos/{}/master.m3u8?MediaSourceId={}&PlaySessionId={play_id}",
-            item.id.to_hex(),
-            source["Id"].as_str().unwrap_or_default()
+            "/Videos/{item_wire}/master.m3u8?MediaSourceId={source_wire}&PlaySessionId={play_id}{credential}"
         ));
         source["TranscodingContainer"] = json!(if vod.as_ref().is_some_and(|v| v.inline_init) {
             "ts"
@@ -1076,14 +1200,18 @@ async fn info(
             source["ETag"] = json!(secret);
         }
         source["DirectStreamUrl"] = json!(format!(
-            "/Videos/{}/stream?MediaSourceId={}&PlaySessionId={play_id}&Static=true",
-            item.id.to_hex(),
-            source["Id"].as_str().unwrap_or_default()
+            "/Videos/{item_wire}/stream?MediaSourceId={source_wire}&PlaySessionId={play_id}&Static=true{credential}"
         ));
     }
-    Ok(Json(
-        json!({"MediaSources":[source],"PlaySessionId":play_id}),
-    ))
+    Ok(Json(json!({"MediaSources":[source],"PlaySessionId":play_id})).into_response())
+}
+/// Jellyfin's in-band refusal, marked so the metrics can tell it from a play.
+fn not_supported() -> Response {
+    let mut response = Json(json!({"MediaSources":[],"ErrorCode":"NotSupported"})).into_response();
+    response
+        .extensions_mut()
+        .insert(super::metrics::NotSupported);
+    response
 }
 
 #[derive(Deserialize)]
@@ -1268,11 +1396,8 @@ pub(super) async fn stopped(
     released?;
     Ok(StatusCode::NO_CONTENT)
 }
-#[derive(Deserialize)]
 pub(super) struct DirectRequest {
-    #[serde(rename = "MediaSourceId")]
     pub(super) media_source_id: String,
-    #[serde(rename = "PlaySessionId")]
     pub(super) play_session_id: String,
 }
 /// Jellyfin query names are case-insensitive. A client that builds its own
@@ -1408,7 +1533,27 @@ async fn direct_play(
             }
             Ok((link_client, play))
         }
-        (Some(_), None, None) => Err(ApiError::BadRequest("PlaySessionId is required".into())),
+        // Infuse builds `/Videos/{id}/stream?MediaSourceId=…&Static=true` with
+        // its login header and no play id (J0 trace). Resolve only this
+        // login's own live direct negotiation of exactly this source.
+        (Some(client), None, None) => {
+            let source = query
+                .media_source_id
+                .as_deref()
+                .ok_or_else(|| ApiError::BadRequest("MediaSourceId is required".into()))?;
+            let scope = scope(&client, state).await?;
+            let play = state
+                .store
+                .jellyfin_current_direct_play(
+                    &scope,
+                    &wire_id(item_id)?.to_hex(),
+                    &wire_id(source)?.to_hex(),
+                )
+                .await?
+                .ok_or(ApiError::NotFound("play binding"))?;
+            same_generation(&play, &client.generation)?;
+            Ok((client, play))
+        }
         (None, _, None) => Err(ApiError::Unauthorized),
     }
 }
@@ -1488,10 +1633,20 @@ pub(super) async fn direct_extension(
             }
         }
         let client = caller.client.ok_or(ApiError::Unauthorized)?;
-        let request: DirectRequest = serde_urlencoded::from_str(raw.as_deref().unwrap_or(""))
-            .map_err(|_| {
-                ApiError::BadRequest("HLS parameters must match the negotiated play".into())
-            })?;
+        // Query names are case-insensitive: Infuse lower-cases the first
+        // letter of every key of the URL it was given (J0 trace).
+        let query = direct_query(raw.as_deref())?;
+        let (Some(media_source_id), Some(play_session_id)) =
+            (query.media_source_id, query.play_session_id)
+        else {
+            return Err(ApiError::BadRequest(
+                "HLS parameters must match the negotiated play".into(),
+            ));
+        };
+        let request = DirectRequest {
+            media_source_id,
+            play_session_id,
+        };
         let pending = Box::pin(binding(
             &client,
             &state,
@@ -1554,6 +1709,108 @@ pub(super) async fn mark_unplayed(
     Path((uid, id)): Path<(String, String)>,
 ) -> Result<Json<Value>, ApiError> {
     manual(client, state, uid, id, false).await
+}
+
+/// `POST`/`DELETE /UserPlayedItems/{itemId}`: the 10.9+ form of the
+/// user-scoped route, with the user optional in the query.
+pub(super) async fn played_item(
+    client: ClientUser,
+    State(state): State<AppState>,
+    method: Method,
+    Path(id): Path<String>,
+    RawQuery(raw): RawQuery,
+) -> Result<Json<Value>, ApiError> {
+    let mut user = None;
+    for (key, value) in query_pairs(raw.as_deref())? {
+        if key.eq_ignore_ascii_case("userId") {
+            if user.as_ref().is_some_and(|old| *old != value) {
+                return Err(ApiError::BadRequest("conflicting userId values".into()));
+            }
+            user = Some(value);
+        }
+    }
+    let user = match user {
+        Some(user) => user,
+        None => client
+            .identity
+            .wire_id
+            .clone()
+            .ok_or(ApiError::Unauthorized)?,
+    };
+    manual(client, state, user, id, method == Method::POST).await
+}
+
+/// The login's own play named by `PlaySessionId` (case-insensitive key).
+async fn named_play(
+    client: &ClientUser,
+    state: &AppState,
+    raw: Option<&str>,
+) -> Result<JellyfinPlay, ApiError> {
+    let mut play_id = None;
+    let mut device = None;
+    for (key, value) in query_pairs(raw)? {
+        let slot = if key.eq_ignore_ascii_case("playSessionId") {
+            &mut play_id
+        } else if key.eq_ignore_ascii_case("deviceId") {
+            &mut device
+        } else {
+            continue;
+        };
+        if slot.as_ref().is_some_and(|old| *old != value) {
+            return Err(ApiError::BadRequest(format!("conflicting {key} values")));
+        }
+        *slot = Some(value);
+    }
+    // Never a kill or renewal by device alone: a play is always named.
+    let play_id =
+        play_id.ok_or_else(|| ApiError::BadRequest("PlaySessionId is required".into()))?;
+    let scope = scope(client, state).await?;
+    if device.is_some_and(|device| plurx_core::auth::hash_token(&device) != scope.device_digest) {
+        return Err(ApiError::Forbidden);
+    }
+    state
+        .store
+        .jellyfin_play(&wire_id(&play_id)?.to_hex(), &scope)
+        .await?
+        .ok_or(ApiError::NotFound("play binding"))
+}
+
+/// `POST /Sessions/Playing/Ping`: keep this login's named active play alive,
+/// exactly as a position-less Progress does. It never activates or revives
+/// a play, and it is not playback evidence.
+pub(super) async fn ping(
+    client: ClientUser,
+    State(state): State<AppState>,
+    RawQuery(raw): RawQuery,
+) -> Result<StatusCode, ApiError> {
+    let play = named_play(&client, &state, raw.as_deref()).await?;
+    same_generation(&play, &client.generation)?;
+    if play.state != "active" {
+        return Err(ApiError::Conflict("play is not active".into()));
+    }
+    if play.native_incarnation_id.is_some() {
+        let session = super::transport::route(&state, &play).await?;
+        renew_passive_presence(&state, &session, &play).await;
+    } else {
+        state.direct_plays.touch_key(&direct_key(&play));
+    }
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// `DELETE /Videos/ActiveEncodings`: stop the encoding of this login's named
+/// play, and only that one. The binding stays, so a later Stopped still
+/// commits its final position; a direct play has no encoding to stop.
+pub(super) async fn active_encodings(
+    client: ClientUser,
+    State(state): State<AppState>,
+    RawQuery(raw): RawQuery,
+) -> Result<StatusCode, ApiError> {
+    let play = named_play(&client, &state, raw.as_deref()).await?;
+    // An ended play's encoding was released when it ended.
+    if play.state != "ended" && play.native_incarnation_id.is_some() {
+        release(&state, &play).await?;
+    }
+    Ok(StatusCode::NO_CONTENT)
 }
 
 /// Reuse native digest exclusion and token deletion, retaining other logins.
