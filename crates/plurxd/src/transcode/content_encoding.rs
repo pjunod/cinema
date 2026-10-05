@@ -157,6 +157,12 @@ fn metric(document: &[u8], expected_frames: usize) -> Result<(f64, f64), String>
     Ok((mean, p10))
 }
 
+/// Where a content lookup gets the stored probe: held by the caller, or read.
+enum HeldProbe<'a> {
+    Held(Option<&'a str>),
+    Read,
+}
+
 impl TranscodeManager {
     pub fn content_encoding_scorer_ready(&self) -> Option<bool> {
         SCORER_READY.get().map(|scorer| scorer.available)
@@ -254,15 +260,26 @@ impl TranscodeManager {
 
     /// Cache-only alternative: callers must retain the original live options on
     /// a miss. Report thread counts describe already-produced bytes, not a new
-    /// admission request or permission to spend encoder capacity on Play.
-    pub(super) async fn measured_content_cache_options(
+    /// admission request or permission to spend encoder capacity on Play. The
+    /// switch and stored probe are the ones a rolling start already read in
+    /// its one planning snapshot.
+    pub(super) async fn measured_content_cache_options_from(
         &self,
         file: &plurx_core::domain::MediaFile,
         opts: &TranscodeOptions,
         encoder: Encoder,
+        enabled: bool,
+        stored_probe: Option<&str>,
     ) -> Option<TranscodeOptions> {
-        self.measured_content_options(file, opts, encoder, true)
-            .await
+        self.measured_content_options_with(
+            file,
+            opts,
+            encoder,
+            true,
+            enabled,
+            HeldProbe::Held(stored_probe),
+        )
+        .await
     }
 
     async fn measured_content_options(
@@ -272,13 +289,34 @@ impl TranscodeManager {
         encoder: Encoder,
         cache_only: bool,
     ) -> Option<TranscodeOptions> {
+        let enabled = self.content_encoding_enabled().await;
+        self.measured_content_options_with(
+            file,
+            opts,
+            encoder,
+            cache_only,
+            enabled,
+            HeldProbe::Read,
+        )
+        .await
+    }
+
+    async fn measured_content_options_with(
+        &self,
+        file: &plurx_core::domain::MediaFile,
+        opts: &TranscodeOptions,
+        encoder: Encoder,
+        cache_only: bool,
+        enabled: bool,
+        probe: HeldProbe<'_>,
+    ) -> Option<TranscodeOptions> {
         let policy = self.rate_control_snapshot();
         if encoder != Encoder::Software
             || policy.requested_mode.is_some()
             || policy.requested_quality.is_some()
             || policy.effective_for(encoder) != EffectiveRateControl::Vbr
             || !policy.quality_rc.supported_by(encoder)
-            || !self.content_encoding_enabled().await
+            || !enabled
         {
             return None;
         }
@@ -293,12 +331,15 @@ impl TranscodeManager {
         })
         .await
         .ok()??;
-        let raw = self
-            .store
-            .get_file_probe_json(file.id)
-            .await
-            .ok()
-            .flatten()?;
+        let raw = match probe {
+            HeldProbe::Held(raw) => raw?.to_owned(),
+            HeldProbe::Read => self
+                .store
+                .get_file_probe_json(file.id)
+                .await
+                .ok()
+                .flatten()?,
+        };
         let value: serde_json::Value = serde_json::from_str(&raw).ok()?;
         let report: Report = serde_json::from_value(value.get(PROBE_KEY)?.clone()).ok()?;
         let mut candidate =

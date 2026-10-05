@@ -61,6 +61,7 @@ pub(super) fn tone_map_pref() -> ToneMap {
     }
 }
 
+#[cfg(test)]
 pub(crate) async fn unverified_hevc_copy_enabled(store: &dyn Store) -> Result<bool, String> {
     let value = store
         .get_setting(plurx_core::store::keys::HEVC_UNVERIFIED_COPY)

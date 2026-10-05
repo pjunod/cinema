@@ -418,6 +418,17 @@ exists.
   spelling deliberately, with the artefact §3.4 requires, and
   `an_unset_rate_control_pair_keeps_the_explicit_bitrate_policy_generation`
   pins the durable value so it cannot move by accident.
+  *What feeds it now (2026-10-04).* The recipe version, the output contract,
+  the requested encoder, the effective rate policy per family, the requested
+  quality, the three language preferences, and — since the main-merge defects
+  build — the canonical producer audio claim
+  (`plurx_core::playback::audio::canonical_producer_claim`). Producers plan
+  typed audio under that claim so their keys match sink-claiming clients; the
+  claim changes every producer key, so it is part of the policy and the pinned
+  value moved once, from `08494ca1…6c67723` to `3c5e96e7…126e63fb`. Because a
+  mismatch is a hard `cancel_job(.., "policy_changed")`, nodes on two versions
+  cancel each other's rows: set `jobs.cache_produce_mins = 0` before such a
+  deploy and restore it once every node runs the new build.
 - M2 adds the balanced six-fixture n2 manifest, reproducible generation for
   **all six** fixtures it references, source/output-grade validation, and the
   exact §3.3 benefit gate. The first implementation gave the four new fixtures

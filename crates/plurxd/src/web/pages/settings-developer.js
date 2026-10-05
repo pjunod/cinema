@@ -137,13 +137,21 @@ async function saveLiveTvDeinterlace(btn){
 // F-1: the same replicated switch, moved to Developer. Every readiness row is
 // an observation or a dated qualification receipt; none is read on save or by
 // the player. Enabling remains an operator choice even when rows are red.
-function displayAwareAutoCard(settings){
+// D6: Auto moves quality up only on link evidence, and the server accepts link
+// receipts only while network priors are on, only on the node that owns the
+// session, and only for a client with an IPv4 network identity. The rows say
+// so; none of them changes what Save does.
+function displayAwareAutoCard(settings,readiness){
   const enabled=!!settings.playback_display_aware_auto;
   return setCard(`${cardHead("Fit Auto to display","Choose a useful sustainable encode size for the fitted picture.",`<span class="pill" id="daqstate">${enabled?"Enabled":"Disabled"}</span>`)}
       ${togRow("pdisplayauto","Fit Auto to display","Compatible smooth originals remain preferred. When encoding is needed, use the active render area with at most 10% enlargement. Manual quality stays selectable.",enabled)}
       <div class="hint">This saved choice is authoritative. Readiness is advisory and never disables this switch or rejects Save.</div>
+      ${devReq(readiness,"display_aware_auto","auto_abr","Adaptive Auto quality","Fit Auto to display chooses the starting rung. Changing rungs during playback is Adaptive Auto quality's switch; turning off one does not stop the other.")}
+      ${devReq(readiness,"display_aware_auto","network_priors","Network priors","Without priors Auto can only move down: it never upgrades, and a link stall retries the same quality. Producer and decoder recovery still work. The Network priors card below is its switch.")}
+      ${devReq(readiness,"display_aware_auto","local_session_owner","Sessions owned by the serving node","Only the node that owns a session accepts its link receipts, so a session placed on a peer gets none.")}
+      ${devReq(readiness,"display_aware_auto","ipv4_client","Clients on IPv4","Network identity is an IPv4 /24. A client on IPv6 with no forwarded IPv4 address gets no network identity and so never gets link evidence.")}
       ${devStaticReq("Combined source and runtime qualification","pending","Display-aware candidates, source-grade worker proofs and physical client recovery traces are being built and qualified together.","warn")}
-      ${devGraduation("the combined display-aware Auto effort passes source-grade, device and runtime qualification on its exact candidate.","this control graduates to Playback if a permanent toggle remains useful, otherwise fitting Auto becomes the default.")}
+      ${devGraduation("the combined display-aware Auto effort passes source-grade, device and runtime qualification on its exact candidate, and D6 (link evidence only with network priors on, only on the owning node, only for IPv4 clients) is fixed or accepted.","this control graduates to Playback if a permanent toggle remains useful, otherwise fitting Auto becomes the default.")}
       <div class="err" id="daqerr" role="alert"></div>${setCardFoot("saveDisplayAwareAuto")}`);
 }
 
@@ -162,6 +170,27 @@ async function saveDisplayAwareAuto(btn){
     const state=document.getElementById("daqstate");if(state)state.textContent=saved.playback_display_aware_auto?"Enabled":"Disabled";
     toast("Display Auto saved");if(btn)setCardSaved(btn);
   }catch(error){if(err)err.textContent=error.message||String(error);if(btn)btn.disabled=false;}
+}
+
+// `playback.network_priors`, which had no Settings control before this card.
+// Display-aware Auto needs it to move up (D6). Off by default.
+function networkPriorsCard(settings,readiness){
+  const enabled=!!settings.playback_network_priors;
+  return setCard(`${cardHead("Network priors","Remember how each network has played, and let Auto use it.",enabled?`<span class="pill ok">on</span>`:`<span class="pill">off</span>`)}
+    ${togRow("network-priors","Use network priors","Stores playback history per user, client and IPv4 /24 network on each node: a conservative throughput estimate and the lowest rung that starved. Turning it on also changes Auto's starting (cold-start) rung on a network with history, and lets link receipts through so Fit Auto to display can upgrade.",enabled)}
+    ${devReq(readiness,"network_priors","priors_history","What turning it on stores","History is node-local and kept for 30 days. Nothing new is recorded while this is off.")}
+    ${devReq(readiness,"network_priors","priors_cold_start","What it changes for Auto's starting rung","With history, Auto starts below a rung that starved on that network or at the highest peak-safe rung; with none, it keeps today's start.")}
+    <p class="hint">Requirements are advisory and never prevent saving.</p>
+    ${devGraduation("Fit Auto to display graduates and D6 is fixed or accepted, with a fleet run showing priors improving cold starts without upgrading into stalls.","Paul chooses: the switch moves to Settings → Playback beside Auto quality, or priors become how Auto works and the switch is removed.")}
+    <div class="err" id="network-priors-error" role="alert"></div>${setCardFoot("saveNetworkPriors")}`,{id:"network-priors-card"});
+}
+async function saveNetworkPriors(btn){
+  const err=document.getElementById("network-priors-error");if(err)err.textContent="";btn.disabled=true;
+  try{
+    const saved=cacheSettings(await api("/settings",{method:"PUT",body:{playback_network_priors:!!(/** @type {HTMLInputElement} */(document.getElementById("network-priors"))).checked}}));
+    const card=document.getElementById("network-priors-card");if(card)card.outerHTML=networkPriorsCard(saved,DEVELOPER_READINESS);
+    toast("Network priors saved");
+  }catch(error){if(err)err.textContent=error.message;}finally{btn.disabled=false;}
 }
 
 function autoQualityCard(settings){
@@ -429,6 +458,52 @@ async function saveClusterClockGuard(btn){
     const card=document.getElementById("cluster-clock-settings");if(card)card.outerHTML=clusterClockCard(saved,DEVELOPER_READINESS);
   }catch(error){if(err)err.textContent=error.message;}finally{btn.disabled=false;}
 }
+// Complete-output preparation queued by VOD starts. Three-valued, so it has
+// its own selector rather than a readiness `setting` (the switch walk PUTs
+// booleans). Off by default: one play must not start a whole-title encode.
+function outputPreparationCard(settings,readiness){
+  const mode=["off","copy","copy_and_encoded"].includes(settings.vod_output_preparation)?settings.vod_output_preparation:"off";
+  const opt=(v,label)=>`<option value="${v}"${mode===v?" selected":""}>${label}</option>`;
+  return setCard(`${cardHead("Complete-output preparation","Prepare a reusable copy or encode of a title after a VOD play.",mode==="off"?`<span class="pill">off</span>`:`<span class="pill warn">${esc(mode)}</span>`)}
+    <label class="tog" for="vod-output-preparation"><span>What a VOD start may queue<small>Off queues nothing. Copy queues remux preparation. Copy and encoded also queues a whole-title background encode. Turning a kind off cancels its queued jobs within a minute.</small></span><select id="vod-output-preparation">${opt("off","Off")}${opt("copy","Copy")}${opt("copy_and_encoded","Copy and encoded")}</select></label>
+    ${devReq(readiness,"output_preparation","output_budget","A retained-output budget","Preparations publish into the retained registry, bounded by the cache budget (unset is 50 GB).")}
+    ${devReq(readiness,"output_preparation","output_jobs","Queued and running preparation","Every job is in Settings → Jobs, filtered by kind, with a Cancel.")}
+    ${devReq(readiness,"output_preparation","output_node_idle","This node's background encoder is idle","A claimed preparation yields to foreground and offline work.")}
+    ${devReq(readiness,"output_preparation","output_stop","What Stop in Activity does","Stop cancels the preparation running on the node that answers; the next play of the title may queue it again.")}
+    <p class="hint">Requirements are advisory and never prevent saving.</p>
+    ${devGraduation("copy and encoded preparation each have a qualified fleet run: jobs drain on every node, Stop cancels, and the retained registry stays inside its budget.","Paul chooses: the selector moves to Settings → Playback beside the cache budget, or preparation becomes how plurx works and the selector is removed.")}
+    <div class="err" id="vod-output-preparation-error" role="alert"></div>${setCardFoot("saveOutputPreparation")}`,{id:"vod-output-preparation-card"});
+}
+async function saveOutputPreparation(btn){
+  const err=document.getElementById("vod-output-preparation-error");if(err)err.textContent="";btn.disabled=true;
+  try{
+    const saved=cacheSettings(await api("/settings",{method:"PUT",body:{vod_output_preparation:/** @type {HTMLSelectElement} */(document.getElementById("vod-output-preparation")).value}}));
+    const card=document.getElementById("vod-output-preparation-card");if(card)card.outerHTML=outputPreparationCard(saved,DEVELOPER_READINESS);
+  }catch(error){if(err)err.textContent=error.message;}finally{btn.disabled=false;}
+}
+// Retaining a rolling session's complete output as a reusable artifact. The
+// links pin disk the scratch ledger stops counting, so the rows below are the
+// free-space headroom and what this node holds.
+function rollingRetentionCard(settings,readiness){
+  const enabled=!!settings.vod_rolling_retention;
+  return setCard(`${cardHead("Rolling output retention","Keep a fully watched rolling session's segments as a reusable artifact.",enabled?`<span class="pill warn">on</span>`:`<span class="pill">off</span>`)}
+    ${togRow("vod-rolling-retention","Retain rolling output","Hard-links each segment into the retained namespace while the session plays. Only a title played from the start to its verified end publishes. Activity lists each retained output on this node with a Stop.",enabled)}
+    ${devReq(readiness,"rolling_retention","retention_same_filesystem","Session scratch and the retained namespace share a filesystem","Hard links need one filesystem; on another device a collection is refused before it reserves anything. Windows keeps retention off.")}
+    ${devReq(readiness,"rolling_retention","retention_budget","A retained-output budget","Bounded by the cache budget (unset is 50 GB).")}
+    ${devReq(readiness,"rolling_retention","retention_headroom","Free space beyond everything scratch may write","Sampled every 30 seconds. Below a 1 GiB reserve, every unpublished collection is abandoned.")}
+    ${devReq(readiness,"rolling_retention","retention_live_bytes","What retention holds on this node","Collecting, retained and releasing artifacts.")}
+    ${devReq(readiness,"rolling_retention","retention_cleanup_pending","Nothing waiting on the collector","Orphans from a crash and released artifacts are deleted in bounded slices each tick.")}
+    <p class="hint">Requirements are advisory and never prevent saving.</p>
+    ${devGraduation("a qualified fleet run shows retention staying inside its headroom on every node and released artifacts deleted within a tick.","Paul chooses: the switch moves to Settings → Playback beside the cache budget, or it is removed if retention becomes how plurx works.")}
+    <div class="err" id="vod-rolling-retention-error" role="alert"></div>${setCardFoot("saveRollingRetention")}`,{id:"vod-rolling-retention-card"});
+}
+async function saveRollingRetention(btn){
+  const err=document.getElementById("vod-rolling-retention-error");if(err)err.textContent="";btn.disabled=true;
+  try{
+    const saved=cacheSettings(await api("/settings",{method:"PUT",body:{vod_rolling_retention:/** @type {HTMLInputElement} */(document.getElementById("vod-rolling-retention")).checked}}));
+    const card=document.getElementById("vod-rolling-retention-card");if(card)card.outerHTML=rollingRetentionCard(saved,DEVELOPER_READINESS);
+  }catch(error){if(err)err.textContent=error.message;}finally{btn.disabled=false;}
+}
 function developerPanel(settings,readiness){
   const destinations=`<nav class="setdestinations" aria-label="Everyday settings">
     <a href="#/settings/livetv"><strong>Live TV <span aria-hidden="true">↗</span></strong><span>Tuner, guide, recording and library channels</span></a>
@@ -447,12 +522,13 @@ function developerPanel(settings,readiness){
       <div class="setsection" id="enable-content-encoding"><h2>Content-aware encoding</h2><p>Measured choices for cached and offline video, with baseline fallback.</p></div>${contentEncodingCard(settings)}
       <div class="setsection" id="enable-vod-reorder"><h2>VOD compression</h2><p>Software x264 reordered frames.</p></div>${vodReorderCard(settings)}
       <div class="setsection" id="enable-sdr-codecs"><h2>Master playlist codecs</h2><p>Name SDR codecs to players before they fetch media. Device re-qualification is still outstanding.</p></div>${sdrMasterCodecsCard(settings,readiness)}
+      <div class="setsection" id="enable-output-preparation"><h2>Complete output</h2><p>Background preparation and rolling retention. Both off by default; each is attributed and stoppable in Activity.</p></div>${outputPreparationCard(settings,readiness)}${rollingRetentionCard(settings,readiness)}
       <div class="setsection" id="enable-hevc-copy"><h2>Enable HEVC copy</h2><p>The saved choice controls playback. Requirements below are advisory and never prevent enabling.</p></div>${hevcCopyCard(settings)}
       <div class="setsection"><h2>Live TV video</h2><p>Output choices whose device and node capacity evidence remains advisory.</p></div>${liveTvDeinterlaceCard(settings)}
       <div class="setsection"><h2>Recovery</h2><p>Portable backup scheduling and visible readiness. Saving is never gated by these observations.</p></div>${clusterBackupCard(settings,readiness)}
       <div class="setsection" id="enable-seek-scratch"><h2>Seek scratch accounting</h2><p>Recently shipped accounting and retention changes with unverified native-device behavior.</p></div>${seekScratchReservationsCard()}
       <div class="setsection" id="enable-auto-quality"><h2>Adaptive Auto quality</h2><p>One authoritative switch and dated qualification evidence for each client.</p></div>${autoQualityCard(settings)}
-      <div class="setsection" id="enable-display-auto"><h2>Fit Auto to display</h2><p>One saved choice with advisory combined qualification evidence.</p></div>${displayAwareAutoCard(settings)}
+      <div class="setsection" id="enable-display-auto"><h2>Fit Auto to display</h2><p>One saved choice with advisory combined qualification evidence. It moves quality up only with network priors on.</p></div>${displayAwareAutoCard(settings,readiness)}${networkPriorsCard(settings,readiness)}
       <div class="setsection" id="enable-quality"><h2>Prepared quality handoff</h2><p>Prepare a replacement stream using a second player. Device qualification is still incomplete.</p></div>${preparedQualityCard(settings,readiness)}${browser}
       <div class="setsection" id="enable-subtitle-refusal"><h2>Subtitle delivery</h2><p>Experimental error handling that still needs observations on each playback engine.</p></div>${subtitleNotReadyCard(settings,readiness)}
       <div class="setsection" id="enable-pgs-overlay"><h2>PGS subtitle overlay</h2><p>Serve bitmap subtitles separately from the video on capable clients.</p></div>${pgsOverlayCard(settings,readiness)}

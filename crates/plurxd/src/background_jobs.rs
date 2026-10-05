@@ -1312,14 +1312,58 @@ pub(crate) enum PreparationClaim {
     ),
 }
 
+/// Which preparation kinds one pass may claim, and what each may occupy.
+///
+/// The speculative lane is the discovery schedule's (`jobs.cache_produce_mins`)
+/// and occupies the pre-transcode cache; the output lanes are the
+/// `vod.output_preparation` switch's and occupy the retained registry. One
+/// loop runs both, but neither may open the other: until 2026-10-04 the loop
+/// ran only when the schedule was on, so viewer-demand rows had no executor
+/// on any node that left discovery at "never".
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct PreparationLanes {
+    pub(crate) speculative: bool,
+    pub(crate) output: crate::vodserve::OutputPreparation,
+}
+
+impl PreparationLanes {
+    #[cfg(test)]
+    pub(crate) const ALL: Self = Self {
+        speculative: true,
+        output: crate::vodserve::OutputPreparation::CopyAndEncoded,
+    };
+
+    pub(crate) fn kinds(self) -> Vec<plurx_core::store::background_jobs::JobKind> {
+        let mut kinds = Vec::with_capacity(3);
+        if self.speculative {
+            kinds.push(plurx_core::store::background_jobs::JobKind::TranscodePrepare);
+        }
+        kinds.extend_from_slice(self.output.job_kinds());
+        kinds
+    }
+
+    pub(crate) fn is_empty(self) -> bool {
+        self.kinds().is_empty()
+    }
+}
+
+#[allow(clippy::too_many_arguments)] // one claim's complete admission inputs
 pub(crate) async fn claim_pretranscode(
     store: Arc<dyn Store>,
     authority: Arc<dyn ClusterJobAuthority>,
     transcode: &crate::transcode::TranscodeManager,
     node: &str,
+    allowed: &[plurx_core::store::background_jobs::JobKind],
     capabilities: &plurx_core::domain::PretranscodeWorkerCapabilities,
+    speculative_capacity: i64,
+    output_capacity: i64,
     excluded: &[String],
 ) -> Result<Option<PreparationClaim>, StoreError> {
+    // Each lane is bounded by the store it publishes into: speculative
+    // generations by the pre-transcode cache, output preparations by the
+    // retained registry. Physical scratch bounds both.
+    let mut speculative_capabilities = capabilities.clone();
+    speculative_capabilities.scratch_bytes = capabilities.scratch_bytes.min(speculative_capacity);
     use plurx_core::store::background_jobs::{
         CandidateQuery, JobKind, JobPayload, MAX_ACTIVE_JOBS, MAX_PAGE_SIZE,
     };
@@ -1331,7 +1375,7 @@ pub(crate) async fn claim_pretranscode(
         JobKind::CopyOutputPrepare,
         JobKind::EncodedOutputPrepare,
     ] {
-        if authority.may_execute_job(kind).await {
+        if allowed.contains(&kind) && authority.may_execute_job(kind).await {
             kinds.push(kind);
         }
     }
@@ -1373,7 +1417,12 @@ pub(crate) async fn claim_pretranscode(
                 ..
             } = &payload
             {
-                if intent.target_node_id != node || *scratch_bytes > capabilities.scratch_bytes {
+                // An output row is bounded by the retained registry it
+                // publishes into, not by the pre-transcode cache budget.
+                if !kinds.contains(&JobKind::EncodedOutputPrepare)
+                    || intent.target_node_id != node
+                    || *scratch_bytes > capabilities.scratch_bytes.min(output_capacity)
+                {
                     continue;
                 }
                 let Some(admission) = transcode.admit_encoded_preparation() else {
@@ -1419,7 +1468,10 @@ pub(crate) async fn claim_pretranscode(
                 ..
             } = &payload
             {
-                if intent.target_node_id != node || *scratch_bytes > capabilities.scratch_bytes {
+                if !kinds.contains(&JobKind::CopyOutputPrepare)
+                    || intent.target_node_id != node
+                    || *scratch_bytes > capabilities.scratch_bytes.min(output_capacity)
+                {
                     continue;
                 }
                 let Some(admission) = transcode.admit_fragment().await else {
@@ -1465,9 +1517,13 @@ pub(crate) async fn claim_pretranscode(
             else {
                 continue;
             };
-            if !capabilities.validate()
-                || !requirements.compatible_with(capabilities)
-                || i64::from(*target_height) > capabilities.max_target_height
+            if !kinds.contains(&JobKind::TranscodePrepare) {
+                continue;
+            }
+            if speculative_capabilities.scratch_bytes <= 0
+                || !speculative_capabilities.validate()
+                || !requirements.compatible_with(&speculative_capabilities)
+                || i64::from(*target_height) > speculative_capabilities.max_target_height
             {
                 continue;
             }

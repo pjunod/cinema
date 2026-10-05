@@ -657,6 +657,23 @@ actual geometry, cached-recipe reuse, manual continuity and client compatibility
 They are advisory: never disable the switch, reject Save or override a saved
 choice. Expose supported status and effective policy in diagnostics.
 
+**Acknowledged prerequisite and limits (D6, 2026-10-04).** Display-aware Auto
+moves quality *up* only on link evidence, and the five server paths that
+produce or consume that evidence and the stored prior return early unless
+`playback.network_priors` is `"1"`. So `playback.network_priors` is a
+prerequisite: with it off, Auto never upgrades and a link stall retries the
+same quality; producer and decoder recovery still work. Two limits remain with
+it on. A session placed on a peer node gets no link receipts, because only the
+node that owns the session accepts them. A client that reaches the server over
+IPv6 with no forwarded IPv4 address gets no network identity — the identity is
+an IPv4 /24 — so it never gets link evidence and Auto never upgrades for it.
+This build documents D6 and does not change server behaviour. The **Fit Auto
+to display** Developer card reports `auto_abr`, `network_priors`,
+`local_session_owner` and `ipv4_client` as advisory readiness rows, and
+`playback.network_priors` gets its own Developer switch, **Network priors**,
+whose text says it stores per-/24 network history and also changes Auto's
+cold-start rung.
+
 A's card graduates only when M5-A's matrix and the combined final qualification
 pass on the exact promotion candidate. Move
 the useful permanent control into Playback, preserving its saved value; remove

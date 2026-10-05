@@ -114,7 +114,9 @@ const MIXED_RECOVERY_CAPACITY_WAIT: Duration = Duration::from_secs(5);
 // split: begin planning
 #[path = "transcode/planning.rs"]
 mod planning;
-pub(crate) use planning::*;
+#[cfg(test)]
+pub(crate) use planning::unverified_hevc_copy_enabled;
+use planning::*;
 // split: end planning
 
 const ADMISSION_POLL: Duration = Duration::from_millis(250);
@@ -814,6 +816,15 @@ const QUALIFICATION_PIPELINES: [Pipeline; 9] = [
 mod terminal_admission;
 use terminal_admission::*;
 // split: end terminal-admission
+
+/// Rolling retention as this node sees it, for the Developer card.
+pub(crate) struct RollingRetentionFacts {
+    pub(crate) same_filesystem: Option<bool>,
+    pub(crate) slack: Option<i64>,
+    pub(crate) admits: Result<(), &'static str>,
+    pub(crate) rows: Vec<crate::vodserve::retained::RetainedOutputRow>,
+    pub(crate) cleanup_pending: usize,
+}
 
 // split: begin manager
 #[path = "transcode/manager/cache.rs"]

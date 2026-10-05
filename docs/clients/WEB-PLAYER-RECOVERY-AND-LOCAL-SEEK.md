@@ -69,7 +69,7 @@ Copied from `main` @ `88a3957a`; **re-verify at build time**.
 
 | Fact | Where |
 |---|---|
-| Vendored hls.js is `1.6.16` (`crates/plurxd/src/web/hls.min.js`; the version string is in the bundle). It contains `recoverMediaError` and `swapAudioCodec`; the app calls neither. | `hls.min.js` |
+| Vendored hls.js is `1.6.19` (`crates/plurxd/src/web/hls.min.js`; the version string is in the bundle; it was `1.6.16` when this plan was written). It contains `recoverMediaError` and `swapAudioCodec`; at `88a3957a` the app called neither — the decoder rescue this plan added in `player/player.js` now calls them. | `hls.min.js` |
 | `attachHls(video, playlistUrl, startAt)` — 378 lines, `:499-876` | `:499` |
 | Per-attach budget reset: `attachedPlayer.hlsRetryUsed=0;` with the comment "ONE `startLoad` per attach, shared between the network-class fatal and the `segment_503_not_yet` row (M5 §4.6.2)" | `:519` |
 | `new Hls({ enableWorker:false, … loader:createHlsStartupLoader(StockLoader,startup) … })` — the custom loader subclasses `Hls.DefaultConfig.loader` | `:558-593` |
@@ -96,7 +96,7 @@ function fallbackAction({ method, alreadyTried=false, playbackIsReal=false,
 `data.type===Hls.ErrorTypes.MEDIA_ERROR || /codec|decode|parsing/i.test(details)`
 and returns the control observation `{decoder_state, error_code, error_detail}`.
 
-hls.js 1.6.16 detail names present in the bundle (grep-confirmed):
+hls.js detail names present in the bundle (grep-confirmed against 1.6.16, and all five still present in the bundled 1.6.19):
 `bufferAppendError`, `bufferAppendingError`, `bufferAddCodecError`,
 `bufferIncompatibleCodecsError`, `fragParsingError`. The `ERROR` payload
 for buffer faults carries the SourceBuffer it concerned (`sourceBufferName`

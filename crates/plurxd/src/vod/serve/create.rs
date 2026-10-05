@@ -127,7 +127,7 @@ impl VodServe {
         let allowance = super::retained::RetainedArtifactRegistry::reserve_preparation(
             &self.shared,
             cap,
-            settings.completed_cache_bytes,
+            settings.output_budget_bytes,
         )
         .await
         .ok_or(PreparationError::Yield("retention_capacity"))?;
@@ -421,7 +421,9 @@ impl VodServe {
             recipe,
             duration_ms,
             incoming_logical,
-        } = self.prepare_recipe(prepared, file, viewer).await?;
+        } = self
+            .prepare_recipe(prepared, file, settings, viewer)
+            .await?;
         let canonical_key = rendition_key(&recipe, &identity);
         let key = private_preparation.map_or_else(
             || canonical_key.clone(),
@@ -452,9 +454,10 @@ impl VodServe {
         &self,
         mut prepared: VodRecipeRequest<'_>,
         file: &MediaFile,
+        settings: &VodSettings,
         viewer: Option<&crate::state::PlaybackViewerDemand>,
     ) -> Result<Option<Arc<crate::vodencode::Encoding>>, String> {
-        self.prepare_recipe(&mut prepared, file, viewer)
+        self.prepare_recipe(&mut prepared, file, settings, viewer)
             .await
             .map(|prepared| prepared.recipe.encoding)
     }
@@ -463,6 +466,7 @@ impl VodServe {
         &self,
         prepared: &mut VodRecipeRequest<'_>,
         file: &MediaFile,
+        settings: &VodSettings,
         viewer: Option<&crate::state::PlaybackViewerDemand>,
     ) -> Result<PreparedVodRecipe, String> {
         let req = prepared.request;
@@ -519,14 +523,7 @@ impl VodServe {
             Some(encoding) => encoding.identity(file, duration_ms as f64 / 1_000.0),
             None => crate::fragindex::identity_for(file, video),
         };
-        let cluster_cache_enabled = prepared.encoding.is_none()
-            && self
-                .shared
-                .store
-                .get_setting(plurx_core::store::keys::VOD_INDEX_CLUSTER_CACHE)
-                .await
-                .map_err(|error| format!("reading the cluster index gate: {error}"))
-                .map(|value| plurx_core::store::stored_switch(value.as_deref(), false))?;
+        let cluster_cache_enabled = prepared.encoding.is_none() && settings.index_cluster_cache;
         let cluster_index = if prepared.encoding.is_some() {
             Ok(None)
         } else if cluster_cache_enabled {
@@ -581,7 +578,7 @@ impl VodServe {
         let source_object_version = if prepared.encoding.is_none()
             && matches!(file.video_codec.as_deref(), Some("hevc" | "h265"))
             && !video.retains_hevc_parameter_sets()
-            && !crate::transcode::unverified_hevc_copy_enabled(self.shared.store.as_ref()).await?
+            && !settings.hevc_unverified_copy
         {
             let current = crate::fragment_index_cluster::inspect_source(file)
                 .await

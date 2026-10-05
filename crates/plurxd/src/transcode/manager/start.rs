@@ -1,52 +1,116 @@
 use super::*;
 
-impl TranscodeManager {
-    pub(super) async fn rolling_retained_budget(&self) -> Option<u64> {
-        let settings = self
-            .store
-            .get_settings(&[plurx_core::store::keys::CACHE_MAX_GB])
-            .await
-            .ok()?;
-        settings
-            .get(plurx_core::store::keys::CACHE_MAX_GB)?
-            .trim()
-            .parse::<u64>()
-            .ok()?
-            .checked_mul(1 << 30)
-            .filter(|bytes| *bytes > 0)
+/// Everything a rolling start reads from the Store — the file, its stored
+/// probe and every setting on the path — from one statement.
+///
+/// The start path used to read settings one key at a time as each step needed
+/// them: thirteen serial linearizable reads on a rolling transcode start at
+/// position 0 by the week of 2026-09-27 (eight after #627), two of them inside
+/// an optional lookup with `?`, so a store error there failed Play.
+pub(super) struct RollingStartInputs {
+    pub(super) file: plurx_core::domain::MediaFile,
+    pub(super) probe_json: Option<String>,
+    pub(super) settings: std::collections::BTreeMap<String, String>,
+}
+
+impl RollingStartInputs {
+    /// The stored encoder preference; empty is auto.
+    pub(super) fn encoder_preference(&self) -> String {
+        self.settings
+            .get(keys::HWACCEL)
+            .cloned()
+            .unwrap_or_default()
     }
 
-    /// Settings → Developer `playback.sdr_master_codecs` for a rolling
-    /// session being started now, frozen into the session's codec facts so
-    /// no playlist request reads it.
-    ///
-    /// `frozen` is the value the HTTP create already read from its planning
-    /// snapshot (`SessionRequest::sdr_master_codecs`); a start that has one
-    /// pays no Store read here. Only a start with no create behind it — an
-    /// owner takeover or a request rebuilt from its durable recipe — reads
-    /// the switch's current value. A failed read is off: the pre-S-10 master,
-    /// which every client has already played, is the safe shape to fall back
-    /// to.
-    pub(super) async fn sdr_master_codecs_switch(&self, frozen: Option<bool>) -> bool {
-        if let Some(frozen) = frozen {
-            return frozen;
-        }
-        match self
-            .store
-            .get_setting(plurx_core::store::keys::PLAYBACK_SDR_MASTER_CODECS)
-            .await
-        {
-            Ok(value) => plurx_core::store::stored_switch(value.as_deref(), false),
-            Err(error) => {
-                tracing::warn!(
-                    target: "plurxd::transcode",
-                    %error,
-                    "reading playback.sdr_master_codecs; this session keeps SDR masters without CODECS"
-                );
-                false
-            }
-        }
+    pub(super) fn content_aware_encoding(&self) -> bool {
+        self.settings
+            .get(keys::CONTENT_AWARE_ENCODING)
+            .map(String::as_str)
+            == Some("1")
     }
+}
+
+impl TranscodeManager {
+    /// The one Store read of a rolling start. A start bound to a candidate
+    /// reuses the snapshot its plan was accepted from, which was fetched with
+    /// the same key list; anything else reads one now. Its error is fatal: it
+    /// carries the file.
+    pub(super) async fn rolling_start_inputs(
+        &self,
+        file_id: i64,
+        candidate_context: Option<&super::CandidateExecutionContext>,
+    ) -> Result<RollingStartInputs, String> {
+        if let Some(snapshot) = candidate_context
+            .and_then(|context| context.planning_snapshot.as_ref())
+            .filter(|snapshot| snapshot.file.id == file_id)
+        {
+            return Ok(RollingStartInputs {
+                file: snapshot.file.clone(),
+                probe_json: snapshot.probe_json.clone(),
+                settings: snapshot.settings.clone(),
+            });
+        }
+        let snapshot = self
+            .store
+            .playback_planning_snapshot(file_id, &super::QUALITY_PLANNING_KEYS)
+            .await
+            .map_err(|e| e.to_string())?
+            .ok_or_else(|| "file not found".to_owned())?;
+        Ok(RollingStartInputs {
+            file: snapshot.file,
+            probe_json: snapshot.probe_json,
+            settings: snapshot.settings,
+        })
+    }
+
+    /// The rolling-retention budget from settings already read: a pure
+    /// parse, never a Store read. `None` is off. Retention is enabled by its
+    /// Developer switch (`vod.rolling_retention`, absent = off), not by the
+    /// cache key's presence; its budget is `cache.max_gb` under the one
+    /// unset rule ([`crate::cachekeep::cache_budget`]).
+    pub(super) fn rolling_retained_budget_from(
+        settings: &std::collections::BTreeMap<String, String>,
+    ) -> Option<u64> {
+        let enabled = plurx_core::store::stored_switch(
+            settings
+                .get(plurx_core::store::keys::VOD_ROLLING_RETENTION)
+                .map(String::as_str),
+            false,
+        );
+        if !enabled {
+            return None;
+        }
+        crate::cachekeep::cache_budget(
+            settings
+                .get(plurx_core::store::keys::CACHE_MAX_GB)
+                .map(String::as_str),
+        )
+    }
+
+    /// Input pacing from settings already read.
+    pub(super) async fn pacing_from_settings(
+        settings: &std::collections::BTreeMap<String, String>,
+        for_copy: bool,
+    ) -> Pacing {
+        Self::pacing_from(
+            Self::num_from(settings, keys::HLS_READRATE, HLS_READRATE_DEFAULT),
+            Self::num_from(settings, keys::HLS_BURST_SECS, HLS_BURST_SECS_DEFAULT),
+            for_copy,
+        )
+        .await
+    }
+
+    /// The scratch and ahead limits from settings already read, published as
+    /// the current snapshot so the 2 s refresh and this start agree.
+    pub(super) fn ahead_limits_for_start(
+        &self,
+        settings: &std::collections::BTreeMap<String, String>,
+    ) -> AheadLimits {
+        let limits = Self::ahead_limits_from(settings);
+        self.publish_ahead_limits(limits);
+        limits
+    }
+
     /// The rolling producer owns route-specific initial negotiation. A retained
     /// producer answer is already authoritative, even if catalog facts changed.
     pub(super) fn rolling_start_audio_options(
@@ -125,6 +189,45 @@ impl TranscodeManager {
         .await
     }
 
+    /// [`Self::start`] for a client that sends audio sinks, as every current
+    /// client does.
+    #[cfg(test)]
+    pub async fn start_claiming(
+        &self,
+        file_id: i64,
+        target_height: i64,
+        playback_id: &str,
+        claim: &plurx_core::playback::audio::AudioClaim,
+    ) -> Result<StartInfo, String> {
+        let recovery = SessionRecoveryIdentity {
+            user_id: 0,
+            incarnation_id: String::new(),
+            recovery_epoch: String::new(),
+        };
+        self.start_with_audio_offset(
+            file_id,
+            target_height,
+            0.0,
+            None,
+            None,
+            0,
+            "paul",
+            &serde_json::json!(["username", "paul"]).to_string(),
+            &recovery,
+            None,
+            None,
+            playback_id,
+            false,
+            false,
+            None,
+            Priority::Live,
+            Some(claim),
+            None,
+            None,
+        )
+        .await
+    }
+
     /// Acquire the foreground encoder's durable permit after every background
     /// encoder has actually yielded.
     ///
@@ -141,12 +244,33 @@ impl TranscodeManager {
         max_wait: Duration,
         priority: Priority,
     ) -> Result<LiveAdmission, String> {
+        let sw_budget = self.software_budget().await;
+        let max_hw = if preferred != Encoder::Software {
+            self.max_hw_sessions().await
+        } else {
+            0
+        };
+        self.admit_live_with(preferred, plan, work, max_wait, priority, sw_budget, max_hw)
+            .await
+    }
+
+    /// [`Self::admit_live`] under pool sizes the caller already read.
+    #[allow(clippy::too_many_arguments)]
+    pub(super) async fn admit_live_with(
+        &self,
+        preferred: Encoder,
+        plan: Option<&ResolvedTranscode>,
+        work: Workload<'_>,
+        max_wait: Duration,
+        priority: Priority,
+        sw_budget: usize,
+        max_hw: usize,
+    ) -> Result<LiveAdmission, String> {
         let _queued = (priority == Priority::Live).then(|| self.admissions.wait_for_slot());
         let deadline = Instant::now() + max_wait;
-        let sw_budget = self.software_budget().await;
 
         if preferred != Encoder::Software {
-            let max = self.max_hw_sessions().await;
+            let max = max_hw;
             // What this pipeline will actually spend, read off the plan rather
             // than off the encoder's name. A hardware encoder fed by a software
             // decode spends most of a box's cores on the decode, and admitting
@@ -518,12 +642,25 @@ impl TranscodeManager {
                 .await?;
         }
 
-        let mut file = self
-            .store
-            .get_file(file_id)
-            .await
-            .map_err(|e| e.to_string())?
-            .ok_or_else(|| "file not found".to_owned())?;
+        // The file, its probe and every setting this start reads, in one
+        // statement (D4). Nothing below reads settings from the Store.
+        let inputs = self
+            .rolling_start_inputs(file_id, candidate_context)
+            .await?;
+        let preference = inputs.encoder_preference();
+        let content_aware = inputs.content_aware_encoding();
+        let RollingStartInputs {
+            mut file,
+            probe_json,
+            settings,
+        } = inputs;
+        let retained_budget = Self::rolling_retained_budget_from(&settings);
+        let pacing = Self::pacing_from_settings(&settings, false).await;
+        let sw_budget = Self::num_from(
+            &settings,
+            keys::SW_POOL_THREADS,
+            crate::admission::software_budget(),
+        );
         file.audio_offset_ms = if file.audio_streams.is_empty() {
             0
         } else {
@@ -547,18 +684,19 @@ impl TranscodeManager {
         // The grade with no burn. Read before the tracks, because whether the
         // implicit pick may be a burn at all depends on what this session
         // would otherwise be delivering.
-        let base_grade = self.grade_preview(&file, hdr10, target_height, None).await;
+        let base_grade = self
+            .grade_preview_with_preference(&file, hdr10, target_height, None, &preference)
+            .await;
         let Tracks {
             audio_index,
             subtitle_burn,
-        } = self
-            .select_tracks(
-                &file,
-                audio_override,
-                subtitle_override,
-                base_grade == OutputGrade::Hdr10,
-            )
-            .await;
+        } = Self::select_tracks_with_prefs(
+            &file,
+            audio_override,
+            subtitle_override,
+            &Self::lang_prefs_from(&settings),
+            base_grade == OutputGrade::Hdr10,
+        );
 
         // The cache, before anything is claimed. A hit needs no encoder, no
         // hardware slot and no place in the queue — the work is already done,
@@ -567,7 +705,13 @@ impl TranscodeManager {
         // Resolved together, once, before the cache lookup: the grade and
         // encoder both change the bytes and therefore the recipe identity.
         let (mut encoder, grade) = self
-            .encoder_and_grade_for(&file, hdr10, target_height, subtitle_burn.is_some())
+            .encoder_and_grade_for_with_preference(
+                &file,
+                hdr10,
+                target_height,
+                subtitle_burn.is_some(),
+                &preference,
+            )
             .await?;
         let mut opts = self.live_lookup_options(
             rate_control,
@@ -593,10 +737,17 @@ impl TranscodeManager {
         if let Some(takeover) = takeover.as_ref() {
             opts.start_number = takeover.media_sequence;
         }
-        let plan = self.resolve_movie_plan(&file, &opts, encoder).await?;
-        // Frozen for every presentation this start can produce — cached,
-        // retained or freshly encoded — so the session's master has one shape.
-        let sdr_master_codecs = self.sdr_master_codecs_switch(sdr_master_codecs).await;
+        let plan =
+            self.resolve_movie_plan_from_probe(&file, &opts, encoder, probe_json.as_deref())?;
+        // Freeze the master shape from the same settings read as the plan.
+        let sdr_master_codecs = sdr_master_codecs.unwrap_or_else(|| {
+            plurx_core::store::stored_switch(
+                settings
+                    .get(keys::PLAYBACK_SDR_MASTER_CODECS)
+                    .map(String::as_str),
+                false,
+            )
+        });
         if takeover.is_none() {
             if let Some(info) = self
                 .serve_cached(
@@ -631,7 +782,7 @@ impl TranscodeManager {
         if start_seconds == 0.0
             && takeover.is_none()
             && opts.subtitle_burn.is_none()
-            && self.rolling_retained_budget().await.is_some()
+            && retained_budget.is_some()
         {
             let work = Workload::of(&file, target_height);
             let estimate = TranscodeResourceEstimate::of(&plan, &work);
@@ -643,18 +794,40 @@ impl TranscodeManager {
             } else {
                 None
             };
-            let retained_plan = self
-                .resolve_movie_plan(&file, &retained_opts, encoder)
-                .await?;
-            let pacing = self.pacing(false).await;
-            let observation = DiagnosticObservation::for_plan(
-                &retained_plan,
-                &self.measured_decoders,
-                self.automatic_decoder_recovery_enabled(),
-            );
-            if let Ok(execution) =
-                TranscodeExecution::from_options(&file, &retained_opts, pacing, "retained-output")
-            {
+            // The lookup is optional. A plan it cannot resolve is counted
+            // and skipped — a miss starts a producer — never a failed Play.
+            let retained_plan = match self.resolve_movie_plan_from_probe(
+                &file,
+                &retained_opts,
+                encoder,
+                probe_json.as_deref(),
+            ) {
+                Ok(plan) => Some(plan),
+                Err(error) => {
+                    tracing::info!(
+                        target: "plurxd::transcode",
+                        file = file_id,
+                        %error,
+                        "skipping the retained-output lookup: its plan did not resolve"
+                    );
+                    crate::telemetry::record_rolling_retained_lookup_skipped("plan_error");
+                    None
+                }
+            };
+            if let Some((retained_plan, Ok(execution))) = retained_plan.map(|plan| {
+                let execution = TranscodeExecution::from_options(
+                    &file,
+                    &retained_opts,
+                    pacing,
+                    "retained-output",
+                );
+                (plan, execution)
+            }) {
+                let observation = DiagnosticObservation::for_plan(
+                    &retained_plan,
+                    &self.measured_decoders,
+                    self.automatic_decoder_recovery_enabled(),
+                );
                 let execution =
                     execution.observing_qualified_grammar(observation.qualified_logging());
                 let logical = serde_json::to_vec(&serde_json::json!({
@@ -674,13 +847,6 @@ impl TranscodeManager {
                     )
                     .await
                     {
-                        let probe_json =
-                            self.store
-                                .get_file_probe_json(file_id)
-                                .await
-                                .map_err(|error| {
-                                    format!("reading frozen presentation probe: {error}")
-                                })?;
                         let kind = SessionKind::Transcode {
                             height: target_height,
                         };
@@ -736,16 +902,24 @@ impl TranscodeManager {
         // recipe and must never be redirected to a different one.
         if takeover.is_none() && candidate_context.is_none() {
             if let Some(cached_options) = self
-                .measured_content_cache_options(&file, &opts, encoder)
+                .measured_content_cache_options_from(
+                    &file,
+                    &opts,
+                    encoder,
+                    content_aware,
+                    probe_json.as_deref(),
+                )
                 .await
             {
                 // Resolution reads stored decoder facts; it does not probe or
                 // score media. serve_cached retains all manifest/source checks,
                 // shared generation pins and normal session ownership.
-                if let Ok(cached_plan) = self
-                    .resolve_movie_plan(&file, &cached_options, encoder)
-                    .await
-                {
+                if let Ok(cached_plan) = self.resolve_movie_plan_from_probe(
+                    &file,
+                    &cached_options,
+                    encoder,
+                    probe_json.as_deref(),
+                ) {
                     if let Some(info) = self
                         .serve_cached(
                             &file,
@@ -805,7 +979,7 @@ impl TranscodeManager {
         // play will forgive five seconds far sooner than a hang.
         let work = Workload::of(&file, target_height);
         let admission = self
-            .admit_live(
+            .admit_live_with(
                 encoder,
                 Some(&plan),
                 work,
@@ -815,6 +989,8 @@ impl TranscodeManager {
                     QUEUE_WAIT
                 },
                 priority,
+                sw_budget,
+                Self::num_from(&settings, keys::MAX_HW_SESSIONS, DEFAULT_MAX_HW_SESSIONS),
             )
             .await?;
         encoder = admission.encoder;
@@ -888,21 +1064,19 @@ impl TranscodeManager {
         // Admission is allowed to demote the encoder. That is a different
         // byte-producing decision, so it receives a fresh complete plan;
         // neither the old encoder nor its decode surface is patched in place.
-        let plan = self.resolve_movie_plan(&file, &opts, encoder).await?;
+        let plan =
+            self.resolve_movie_plan_from_probe(&file, &opts, encoder, probe_json.as_deref())?;
         // Every object FFmpeg's muxer writes for this session passes a
         // scratch grant before it reaches the disk, so the session starts on
         // its startup allowance and grows, instead of reserving the whole
         // per-session ceiling that an unbounded writer had to.
         let output_bitrate = transcode_output_bitrate(&opts);
         let scratch_envelope = rolling_scratch_envelope(output_bitrate, 1.0);
-        let scratch_reservation = self
-            .reserve_rolling_scratch(RollingScratchSizing::Startup(rolling_startup_bytes(
-                output_bitrate,
-                1.0,
-            )))
-            .await?;
+        let scratch_reservation = self.reserve_rolling_scratch_with(
+            RollingScratchSizing::Startup(rolling_startup_bytes(output_bitrate, 1.0)),
+            self.ahead_limits_for_start(&settings),
+        )?;
         let upload = self.bind_scratch_upload(&dir, &scratch_reservation, scratch_envelope)?;
-        let pacing = self.pacing(false).await;
         let automatic_decoder_recovery = self.automatic_decoder_recovery_enabled();
         let observation = DiagnosticObservation::for_plan(
             &plan,
@@ -926,7 +1100,7 @@ impl TranscodeManager {
         let rolling_provenance = if start_seconds == 0.0
             && takeover.is_none()
             && opts.subtitle_burn.is_none()
-            && self.rolling_retained_budget().await.is_some()
+            && retained_budget.is_some()
         {
             match logical {
                 Some(logical) => match retained_lookup.take() {
@@ -996,14 +1170,6 @@ impl TranscodeManager {
         };
         let hls_codecs =
             audio_delivery_hls_codecs(transcoded_hls_codecs_for_plan(&plan), opts.audio.as_ref());
-        let probe_json = match self.store.get_file_probe_json(file_id).await {
-            Ok(probe_json) => probe_json,
-            Err(error) => {
-                let _ = tokio::fs::remove_dir_all(&dir).await;
-                start_settlement.disarm();
-                return Err(format!("reading frozen presentation probe: {error}"));
-            }
-        };
         let frozen_presentation = FrozenHlsPresentation::from_contract(
             file.clone(),
             HlsContext {
@@ -1023,7 +1189,15 @@ impl TranscodeManager {
         );
         let presentation_contract_fingerprint = frozen_presentation.contract_fingerprint.clone();
         let rolling_collection = self
-            .begin_rolling_retention(rolling_provenance.as_ref(), file.duration_ms, file.size)
+            .begin_rolling_retention(
+                rolling_provenance.as_ref(),
+                file.duration_ms,
+                file.size,
+                retained_budget,
+                &dir,
+                file.id,
+                &item_title,
+            )
             .await;
         if let Some(collection) = &rolling_collection {
             upload.bind_retained(Arc::clone(collection));
@@ -1031,12 +1205,11 @@ impl TranscodeManager {
         let retry = if encoder == Encoder::Software {
             None
         } else {
-            // One read for both recipes: they are frozen together, and a
+            // One value for both recipes: they are frozen together, and a
             // budget that moved between them would put the pair on two
-            // different pictures of the node. Inside this branch rather than
-            // above it, because a software encoder builds neither recipe and
-            // has no reason to pay for a settings read on the start path.
-            let software_budget = self.software_budget().await;
+            // different pictures of the node. It is the one this start was
+            // admitted under, from its planning snapshot.
+            let software_budget = sw_budget;
             let prepared = PrepublicationTranscodeRetry::prepare(
                 &file,
                 &opts,
@@ -1568,12 +1741,13 @@ impl TranscodeManager {
         audio_delivery: Option<&plurx_core::playback::audio::AudioDelivery>,
         sdr_master_codecs: Option<bool>,
     ) -> Result<StartInfo, String> {
-        let mut file = self
-            .store
-            .get_file(file_id)
-            .await
-            .map_err(|e| e.to_string())?
-            .ok_or_else(|| "file not found".to_owned())?;
+        // One Store read for the file, its probe and its settings (D4).
+        let RollingStartInputs {
+            mut file,
+            probe_json: stored_probe,
+            settings,
+        } = self.rolling_start_inputs(file_id, None).await?;
+        let retained_budget = Self::rolling_retained_budget_from(&settings);
         // Same make-before-break rule as the transcode path. A takeover
         // continues an existing incarnation and supersedes nothing.
         if replacement_deadline.is_none() && takeover.is_none() {
@@ -1581,10 +1755,11 @@ impl TranscodeManager {
                 .await?;
         }
 
-        let probe_json = crate::hevc_census::probe_json_for_copy(self.store.as_ref(), &file)
-            .await
-            .ok()
-            .flatten();
+        let probe_json =
+            crate::hevc_census::probe_json_for_copy_from(self.store.as_ref(), &file, stored_probe)
+                .await
+                .ok()
+                .flatten();
         file.audio_offset_ms = if file.audio_streams.is_empty() {
             0
         } else {
@@ -1612,10 +1787,14 @@ impl TranscodeManager {
             ),
             true,
         );
-        let audio_index = self
-            .select_tracks(&file, audio_override, None, copy_delivers_hdr)
-            .await
-            .audio_index;
+        let audio_index = Self::select_tracks_with_prefs(
+            &file,
+            audio_override,
+            None,
+            &Self::lang_prefs_from(&settings),
+            copy_delivers_hdr,
+        )
+        .audio_index;
         let item_title = self
             .store
             .get_item(file.item_id)
@@ -1695,7 +1874,7 @@ impl TranscodeManager {
                     .to_owned(),
             );
         }
-        let pacing = self.pacing(true).await;
+        let pacing = Self::pacing_from_settings(&settings, true).await;
         let canonical_args = if segmenting {
             transcode::copy_pipe_args_with_audio_delivery(
                 &file,
@@ -1732,32 +1911,30 @@ impl TranscodeManager {
             "args": canonical_args,
         }))
         .ok();
-        let rolling_provenance = if start_seconds == 0.0
-            && takeover.is_none()
-            && self.rolling_retained_budget().await.is_some()
-        {
-            match logical {
-                Some(logical) => {
-                    crate::rolling_provenance::RollingProduction::capture(
-                        &file,
-                        &logical,
-                        file.audio_offset_ms != 0
-                            && !file.audio_streams.is_empty()
-                            && audio_delivery
-                                .map_or(!options.transcode_audio, |audio| !audio.transcodes()),
-                        &if segmenting {
-                            ffmpeg_bin()
-                        } else {
-                            producer_ffmpeg_bin()
-                        },
-                    )
-                    .await
+        let rolling_provenance =
+            if start_seconds == 0.0 && takeover.is_none() && retained_budget.is_some() {
+                match logical {
+                    Some(logical) => {
+                        crate::rolling_provenance::RollingProduction::capture(
+                            &file,
+                            &logical,
+                            file.audio_offset_ms != 0
+                                && !file.audio_streams.is_empty()
+                                && audio_delivery
+                                    .map_or(!options.transcode_audio, |audio| !audio.transcodes()),
+                            &if segmenting {
+                                ffmpeg_bin()
+                            } else {
+                                producer_ffmpeg_bin()
+                            },
+                        )
+                        .await
+                    }
+                    None => None,
                 }
-                None => None,
-            }
-        } else {
-            None
-        };
+            } else {
+                None
+            };
         let mut execution_file = file.clone();
         if let Some(provenance) = &rolling_provenance {
             execution_file.path = provenance.input_path();
@@ -1814,7 +1991,14 @@ impl TranscodeManager {
         };
         // Frozen with the rest of the presentation: this session's master
         // keeps one shape whatever the setting does later.
-        let sdr_master_codecs = self.sdr_master_codecs_switch(sdr_master_codecs).await;
+        let sdr_master_codecs = sdr_master_codecs.unwrap_or_else(|| {
+            plurx_core::store::stored_switch(
+                settings
+                    .get(keys::PLAYBACK_SDR_MASTER_CODECS)
+                    .map(String::as_str),
+                false,
+            )
+        });
         let frozen_presentation = FrozenHlsPresentation::new(
             file.clone(),
             HlsContext {
@@ -1863,12 +2047,10 @@ impl TranscodeManager {
             .filter(|rate| *rate > 0)
             .map(|rate| rate as f64);
         let scratch_envelope = rolling_scratch_envelope(copy_bitrate, 1.0);
-        let scratch_reservation = self
-            .reserve_rolling_scratch(RollingScratchSizing::Startup(rolling_startup_bytes(
-                copy_bitrate,
-                1.0,
-            )))
-            .await?;
+        let scratch_reservation = self.reserve_rolling_scratch_with(
+            RollingScratchSizing::Startup(rolling_startup_bytes(copy_bitrate, 1.0)),
+            self.ahead_limits_for_start(&settings),
+        )?;
 
         let session_id = takeover
             .as_ref()
@@ -1916,7 +2098,15 @@ impl TranscodeManager {
             ffmpeg_args_log_message("copy-video HLS ffmpeg args", &initial_args, &session_id)
         );
         let rolling_collection = self
-            .begin_rolling_retention(rolling_provenance.as_ref(), file.duration_ms, file.size)
+            .begin_rolling_retention(
+                rolling_provenance.as_ref(),
+                file.duration_ms,
+                file.size,
+                retained_budget,
+                &dir,
+                file.id,
+                &item_title,
+            )
             .await;
         if let Some(collection) = &rolling_collection {
             upload.bind_retained(Arc::clone(collection));

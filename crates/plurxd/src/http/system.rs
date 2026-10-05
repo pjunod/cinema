@@ -2062,6 +2062,12 @@ pub struct SettingsDto {
     /// Off by default: the guard then only measures and reports. The
     /// Developer readiness rows are advisory and never block this switch.
     pub cluster_clock_guard_enforced: bool,
+    /// Developer switch: which complete-output preparation a VOD start may
+    /// queue — `off` (the default), `copy`, or `copy_and_encoded`.
+    pub vod_output_preparation: &'static str,
+    /// Developer switch: retain a rolling session's complete output as a
+    /// reusable artifact. Off by default.
+    pub vod_rolling_retention: bool,
     /// Server-wide scheduled maintenance, in minutes; 0 is off (the default).
     /// Per-library scan/refresh intervals are on the library, not here.
     pub probe_retry_mins: i64,
@@ -2255,10 +2261,10 @@ async fn settings_dto(state: &AppState) -> Result<SettingsDto, ApiError> {
         .max(0);
     let transcode_cleanup_mins = mins(setting(keys::JOB_TRANSCODE_CLEANUP_MINS));
     let cache_produce_mins = mins(setting(keys::JOB_CACHE_PRODUCE_MINS));
-    let cache_max_gb = setting(keys::CACHE_MAX_GB)
-        .and_then(|v| v.trim().parse::<i64>().ok())
-        .unwrap_or(crate::cachekeep::DEFAULT_MAX_GB)
-        .max(0);
+    // One rule with cachekeep and the two switched preparation features:
+    // unset is the 50 GB default, `0` is off.
+    let cache_max_gb = crate::cachekeep::cache_budget(setting(keys::CACHE_MAX_GB).as_deref())
+        .map_or(0, |bytes| i64::try_from(bytes >> 30).unwrap_or(i64::MAX));
     let cache_used_bytes = match state.transcode.cache_location() {
         Some((_, node)) => state.store.cache_bytes(node).await.unwrap_or(0),
         None => 0,
@@ -2338,6 +2344,11 @@ async fn settings_dto(state: &AppState) -> Result<SettingsDto, ApiError> {
         setting(keys::CLUSTER_CLOCK_GUARD_ENFORCED).as_deref(),
         false,
     );
+    let vod_output_preparation =
+        crate::vodserve::OutputPreparation::parse(setting(keys::VOD_OUTPUT_PREPARATION).as_deref())
+            .as_str();
+    let vod_rolling_retention =
+        plurx_core::store::stored_switch(setting(keys::VOD_ROLLING_RETENTION).as_deref(), false);
     let analysis_max_attempts = plurx_core::store::bounded_analysis_max_attempts(
         setting(keys::ANALYSIS_MAX_ATTEMPTS).as_deref(),
     );
@@ -2517,6 +2528,8 @@ async fn settings_dto(state: &AppState) -> Result<SettingsDto, ApiError> {
         cluster_media_pool_ready,
         cluster_session_takeover_enabled,
         cluster_clock_guard_enforced,
+        vod_output_preparation,
+        vod_rolling_retention,
         probe_retry_mins,
         artwork_retry_mins,
         transcode_cleanup_mins,
@@ -2805,6 +2818,10 @@ pub struct UpdateSettings {
     /// Turn the cluster clock guard's refusals on or off cluster-wide. Never
     /// refused: readiness prerequisites are advisory only.
     pub cluster_clock_guard_enforced: Option<bool>,
+    /// `off`, `copy` or `copy_and_encoded`. Never refused by readiness;
+    /// turning it off cancels queued rows of the kinds it no longer admits.
+    pub vod_output_preparation: Option<String>,
+    pub vod_rolling_retention: Option<bool>,
     /// Server-wide job intervals in minutes; 0 turns one off.
     pub probe_retry_mins: Option<i64>,
     pub artwork_retry_mins: Option<i64>,
@@ -2947,6 +2964,8 @@ impl UpdateSettings {
             || self.cluster_media_pool_enabled.is_some()
             || self.cluster_session_takeover_enabled.is_some()
             || self.cluster_clock_guard_enforced.is_some()
+            || self.vod_output_preparation.is_some()
+            || self.vod_rolling_retention.is_some()
             || self.probe_retry_mins.is_some()
             || self.artwork_retry_mins.is_some()
             || self.transcode_cleanup_mins.is_some()
@@ -3502,6 +3521,18 @@ pub async fn update_settings(
             )));
         }
     }
+    if req.vod_output_preparation.as_deref().is_some_and(|mode| {
+        ![
+            crate::vodserve::OutputPreparation::OFF,
+            crate::vodserve::OutputPreparation::COPY,
+            crate::vodserve::OutputPreparation::COPY_AND_ENCODED,
+        ]
+        .contains(&mode.trim())
+    }) {
+        return Err(ApiError::BadRequest(
+            "vod_output_preparation must be off, copy or copy_and_encoded".into(),
+        ));
+    }
     if req
         .cache_max_gb
         .is_some_and(|gb| !(0..=10_240).contains(&gb))
@@ -3994,6 +4025,19 @@ pub async fn update_settings(
         // loop now. An "on" is never cached, so turning takeover off is seen
         // on the next 2 s tick here and on every other node.
         crate::media_sessions::takeover_settings_changed();
+    }
+    if let Some(mode) = &req.vod_output_preparation {
+        let mode = crate::vodserve::OutputPreparation::parse(Some(mode)).as_str();
+        state
+            .store
+            .put_setting(keys::VOD_OUTPUT_PREPARATION, mode)
+            .await?;
+    }
+    if let Some(enabled) = req.vod_rolling_retention {
+        state
+            .store
+            .put_setting(keys::VOD_ROLLING_RETENTION, if enabled { "1" } else { "0" })
+            .await?;
     }
     if let Some(enabled) = req.cluster_clock_guard_enforced {
         state
@@ -5098,6 +5142,16 @@ pub async fn activity_detail(
         "offline": offline,
         "scans": scans,
         "producing": state.jobs.producing_now().await,
+        // Rolling complete output this node retains or is collecting. These
+        // registries are process-private, so the list is this node's only;
+        // the Activity card says so.
+        "retained_output": if user.0.is_admin {
+            serde_json::to_value(state.transcode.retained_output_snapshot())
+                .map_err(|error| ApiError::Internal(error.to_string()))?
+        } else {
+            serde_json::json!([])
+        },
+        "retained_output_node": state.node_id,
         "trakt": {
             "configured": trakt.configured,
             "linked": linked,
@@ -5190,10 +5244,12 @@ pub async fn stop_process(
 
 /// DELETE /api/v1/activity/producer (admin) — stop the pre-transcode pass.
 ///
-/// It stops after the title it is on rather than mid-encode: the producer
-/// resumes from published segment boundaries, so a clean stop keeps the part
-/// it has already made and a kill throws it away. The next scheduled pass
-/// picks up from there.
+/// A speculative pre-transcode stops after the title it is on rather than
+/// mid-encode: the producer resumes from published segment boundaries, so a
+/// clean stop keeps the part it has already made and a kill throws it away.
+/// The next scheduled pass picks up from there. A copy or encoded output
+/// preparation the same pass is running is cancelled at once instead, on this
+/// node only; the title's next play may queue it again.
 pub async fn stop_producer(
     _admin: AdminUser,
     State(state): State<AppState>,
@@ -5201,9 +5257,38 @@ pub async fn stop_producer(
     if !state.jobs.stop_producing() {
         return Err(ApiError::NotFound("producer"));
     }
-    Ok(Json(
-        serde_json::json!({ "ok": true, "note": "stopping after the current title" }),
-    ))
+    Ok(Json(serde_json::json!({
+        "ok": true,
+        "note": "stopping: a pre-transcode finishes its current title first; \
+                 an output preparation on this node is cancelled now"
+    })))
+}
+
+/// DELETE /api/v1/activity/retained/:nonce (admin) — stop retaining one
+/// rolling output on this node. A collection is abandoned and its links
+/// released; a retained artifact nobody is reading goes to the collector.
+/// 409 while a session reads it. Node-local, like the list it comes from.
+pub async fn stop_retained_output(
+    _admin: AdminUser,
+    State(state): State<AppState>,
+    axum::extract::Path(nonce): axum::extract::Path<String>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let nonce = uuid::Uuid::parse_str(&nonce)
+        .map_err(|_| ApiError::BadRequest("retained output id must be a uuid".into()))?;
+    match state.transcode.release_retained_output(nonce) {
+        crate::vodserve::retained::RetainedRelease::Released => Ok(Json(serde_json::json!({
+            "ok": true,
+            "note": "released; it is no longer served, and the collector deletes it \
+                     once nothing holds it (a published output waits for its producing \
+                     session to end)"
+        }))),
+        crate::vodserve::retained::RetainedRelease::Attached => Err(ApiError::Conflict(
+            "a session is reading this output; stop the session first".into(),
+        )),
+        crate::vodserve::retained::RetainedRelease::Unknown => {
+            Err(ApiError::NotFound("retained output"))
+        }
+    }
 }
 
 /// DELETE /api/v1/activity/sessions/:id (admin) — stop a transcode session.

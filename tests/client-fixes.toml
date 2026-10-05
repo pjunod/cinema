@@ -4122,11 +4122,19 @@ test = "clients/android/app/src/test/java/tv/plurx/app/player/ContinuousAudioOut
 test_anchor = "@Test fun releasingManyOutputsRetiresEveryOneOfThem()"
 
 [[fixes]]
+id = "android.seek-during-a-prepared-switch-is-held-not-dropped"
+commits = ["8ed4a3b821ccff4d2e2c515d18124b2348d6c8f6"]
+source = "clients/android/app/src/main/java/tv/plurx/app/player/Controller.kt"
+source_anchor = "internal class SeekDeferredBehindSwitch {"
+test = "clients/android/app/src/test/java/tv/plurx/app/player/PlaybackControlReporterTest.kt"
+test_anchor = "@Test fun seekDeferredBehindASwitchRunsExactlyOnceAndOnlyWhileCurrent()"
+
 # iOS does not promise an `.ended` for every `.began`. A hold raised on
 # `.began` that only `.ended` could clear stayed up for an hour over a picture
 # the viewer had resumed (iPad Pro, 2026-10-04), with the stall monitor off.
 # The viewer's press, and film actually playing, now end it, and a `.began`
 # while the viewer has already paused holds nothing.
+[[fixes]]
 id = "apple.system-hold-ends-without-ended"
 commits = ["969aba483299e9293ec3ffc5fc9bc40b2ef0da67"]
 source = "clients/apple/Sources/PlayerController.swift"

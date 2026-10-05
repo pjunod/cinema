@@ -140,7 +140,7 @@
         let mgr = Arc::new(mgr);
         let file = store.get_file(file_id).await.expect("get").expect("file");
 
-        let hash = recipe_hash_for(&mgr, &file, 240).await;
+        let hash = producer_recipe_hash_for(&mgr, &file, 240).await;
         assert!(
             mgr.produce(&file, 240, Instant::now() + Duration::from_secs(120))
                 .await
@@ -182,7 +182,7 @@
         // about the fixture failing to encode.
         let (lenient, _work2, lenient_cache) = cached_manager(&store);
         let lenient = Arc::new(lenient);
-        let lenient_hash = recipe_hash_for(&lenient, &file, 240).await;
+        let lenient_hash = producer_recipe_hash_for(&lenient, &file, 240).await;
         assert!(
             lenient
                 .produce(&file, 240, Instant::now() + Duration::from_secs(120))

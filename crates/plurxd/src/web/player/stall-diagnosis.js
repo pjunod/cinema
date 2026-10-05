@@ -246,8 +246,6 @@ function recordAutoSwitch(p,from,to,reason,position,targetSessionId){
 }
 function autoCauseEvidence(p,nowMs){
   const maxAge=PlaybackPolicy.AUTO_DEFAULTS.causeMaxAgeMs;
-  if(p&&p.abr&&nowMs<Number(p.abr.stallVerdictUntilMs||0))
-    return {kind:"control-stall-verdict",ageMs:0};
   const episode=p&&p.hlsStartup;
   if(episode&&episode.establishedSuspension
     &&episode.establishedSuspension.attachment===p.mediaAttachment){

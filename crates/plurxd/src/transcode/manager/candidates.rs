@@ -1172,7 +1172,15 @@ fn candidate_heights(source_height: Option<i64>) -> Vec<i64> {
     heights
 }
 
-pub(crate) const QUALITY_PLANNING_KEYS: [&str; 11] = [
+/// Every setting a playback plan or a rolling start reads, fetched in the one
+/// statement that also returns the file, its probe and the planning
+/// generation. One list on purpose: every snapshot that reaches a
+/// `CandidateExecutionContext` is fetched with it, so a start bound to a
+/// candidate sees exactly the keys an unbound start reads instead of reading
+/// some of them as unset. Widening it changes no planning identity:
+/// `PlanningBinding::from_snapshot` hashes the file, probe, reorder flag and
+/// generation, never this map.
+pub(crate) const QUALITY_PLANNING_KEYS: [&str; 22] = [
     keys::HWACCEL,
     keys::DV_CONVERT,
     keys::AUDIO_LANG,
@@ -1187,6 +1195,20 @@ pub(crate) const QUALITY_PLANNING_KEYS: [&str; 11] = [
     // freezes the session's SDR master shape without a second Store read
     // (`SessionRequest::sdr_master_codecs`).
     keys::PLAYBACK_SDR_MASTER_CODECS,
+    // The rolling start path (D4, main-merge defects 2026-10-04): retention
+    // budget, input pacing, admission pools, content-aware lookup, the three
+    // scratch/ahead limits, and the two complete-output switches.
+    keys::CACHE_MAX_GB,
+    keys::HLS_READRATE,
+    keys::HLS_BURST_SECS,
+    keys::SW_POOL_THREADS,
+    keys::MAX_HW_SESSIONS,
+    keys::CONTENT_AWARE_ENCODING,
+    keys::HLS_AHEAD_MAX_SECS,
+    keys::HLS_AHEAD_MAX_BYTES,
+    keys::HLS_SCRATCH_MAX_BYTES,
+    keys::VOD_OUTPUT_PREPARATION,
+    keys::VOD_ROLLING_RETENTION,
 ];
 
 #[cfg(test)]
@@ -1267,7 +1289,11 @@ mod snapshot_catalog_regression {
             .await
             .expect("snapshot")
             .expect("source");
-        assert_eq!(QUALITY_PLANNING_KEYS.len(), 11);
+        assert_eq!(QUALITY_PLANNING_KEYS.len(), 22);
+        assert!(
+            QUALITY_PLANNING_KEYS.len() <= 32,
+            "one settings statement binds at most 32 keys"
+        );
         assert!(QUALITY_PLANNING_KEYS.contains(&keys::PLAYBACK_SDR_MASTER_CODECS));
         assert!(QUALITY_PLANNING_KEYS.contains(&"playback.vod_reorder_frames"));
         assert!(!TranscodeManager::vod_reorder_from_snapshot(&off_snapshot));

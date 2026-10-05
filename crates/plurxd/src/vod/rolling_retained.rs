@@ -17,6 +17,24 @@ pub(crate) struct RollingArtifact {
     objects: StdMutex<BTreeMap<String, crate::rolling_output::CommittedObject>>,
     complete: OnceLock<RollingComplete>,
     refused: AtomicBool,
+    /// Abandoned before publication: never served, so deletable as soon as
+    /// no capture holds the gate, even while its session still runs.
+    abandoned: AtomicBool,
+    /// The collection's capture gate, so the collector can tell when no
+    /// optional link is in flight.
+    gate: Arc<Mutex<()>>,
+    /// What this is, for Activity: the operator sees a title, not a nonce.
+    pub(crate) file_id: i64,
+    pub(crate) item_title: String,
+    /// Exactly what this artifact added to the registry's `bytes` when it was
+    /// published or handed to the collector, written under the registry lock.
+    /// The collector subtracts this, never the live `charge`: a capture racing
+    /// an abandonment may raise `charge` after the abandonment read it.
+    accounted: AtomicU64,
+    /// Whether the collection that produced this artifact still exists. Its
+    /// reference is not a reader, so Activity's "attached" and Stop discount
+    /// it. Cleared when that collection drops.
+    producer_alive: AtomicBool,
 }
 
 struct RollingComplete {
@@ -35,7 +53,23 @@ pub(crate) struct RollingCollection {
     gate: Arc<Mutex<()>>,
     refused: AtomicBool,
     published: AtomicBool,
+    /// Free-space headroom on the disk these links pin. Read, never sampled,
+    /// on the capture path.
+    headroom: Arc<crate::scratch_ledger::RetainedHeadroom>,
+    /// Test seam: park the next capture after it took the gate and passed
+    /// its checks, just before it links.
+    #[cfg(test)]
+    link_pause: StdMutex<
+        Option<(
+            std::sync::mpsc::SyncSender<()>,
+            std::sync::mpsc::Receiver<()>,
+        )>,
+    >,
 }
+
+/// How old a headroom sample may be before a capture refuses: two sampler
+/// ticks.
+const HEADROOM_MAX_AGE: Duration = Duration::from_secs(60);
 
 impl RollingCollection {
     #[cfg(test)]
@@ -57,6 +91,18 @@ impl RollingCollection {
             return;
         };
         if self.refused.load(Acquire) || Instant::now() >= self.deadline {
+            self.refuse();
+            return;
+        }
+        // The disk must still hold everything scratch is authorised to write
+        // with this link's bytes pinned beside it. Atomics only: no statvfs
+        // on the publication path.
+        if let Err(reason) = self.headroom.admits(HEADROOM_MAX_AGE) {
+            tracing::info!(
+                target: "plurxd::vodserve",
+                reason,
+                "rolling retention abandoned: free-space headroom"
+            );
             self.refuse();
             return;
         }
@@ -88,6 +134,8 @@ impl RollingCollection {
         // ordinary publisher never waits for filesystem proof collection.
         tokio::task::spawn_blocking(move || {
             let _gate = gate;
+            #[cfg(test)]
+            owner.pause_before_link_for_test();
             let result = (|| {
                 let before =
                     plurx_core::fs_secure::regular_file_identity_nofollow_blocking(&source)?;
@@ -104,6 +152,15 @@ impl RollingCollection {
             })();
             if result.is_err() || Instant::now() >= owner.deadline {
                 owner.refuse();
+                // A link that landed after an abandonment pins bytes nobody
+                // will ever serve: take it back here, under the gate.
+                if result.is_ok() {
+                    let _ = std::fs::remove_file(&destination);
+                }
+                return;
+            }
+            if owner.artifact.abandoned.load(Acquire) {
+                let _ = std::fs::remove_file(&destination);
                 return;
             }
             owner
@@ -115,8 +172,98 @@ impl RollingCollection {
         });
     }
 
+    /// Abandon this collection: idempotent, and a no-op once published —
+    /// attached sessions serve straight from the artifact directory. The
+    /// unpublished artifact goes to the collector at once, charged until its
+    /// directory is actually gone, instead of when the session finally ends:
+    /// its links pin disk the ledger no longer counts. Every refusal routes
+    /// here: a refused capture, an unverified completion, a stopped session,
+    /// and failed free-space headroom.
     pub(crate) fn refuse(&self) {
+        self.abandon();
+    }
+
+    pub(crate) fn abandon(&self) {
+        if self.published.load(Acquire) {
+            return;
+        }
         self.refused.store(true, Release);
+        if self.artifact.abandoned.swap(true, AcqRel) {
+            return;
+        }
+        let Some(shared) = self.shared.upgrade() else {
+            return;
+        };
+        let mut state = shared
+            .retained_artifacts
+            .state
+            .lock()
+            .expect("retained registry lock");
+        if self.published.load(Acquire) {
+            return;
+        }
+        if state.preparations.contains_key(&self.artifact.nonce) {
+            // The reservation becomes the charge for what was linked; the
+            // collector frees exactly this amount once the directory is gone.
+            let charge = self.artifact.charge.load(Acquire);
+            let Some(bytes) = state.bytes.checked_add(charge) else {
+                return;
+            };
+            state.bytes = bytes;
+            self.artifact.accounted.store(charge, Release);
+            state.preparations.remove(&self.artifact.nonce);
+            state.rolling_retired.push_back(Arc::clone(&self.artifact));
+        }
+        state.collections.remove(&self.artifact.nonce);
+    }
+
+    /// Whether this collection was abandoned before publication.
+    #[cfg(test)]
+    pub(crate) fn abandoned(&self) -> bool {
+        self.artifact.abandoned.load(Acquire)
+    }
+
+    /// Test seam: park the next capture once it holds the gate and has passed
+    /// every check, just before its hard link. Returns (reached, resume).
+    #[cfg(test)]
+    pub(crate) fn pause_next_link_for_test(
+        &self,
+    ) -> (
+        std::sync::mpsc::Receiver<()>,
+        std::sync::mpsc::SyncSender<()>,
+    ) {
+        let (reached_tx, reached_rx) = std::sync::mpsc::sync_channel(1);
+        let (resume_tx, resume_rx) = std::sync::mpsc::sync_channel(1);
+        *self.link_pause.lock().expect("link pause lock") = Some((reached_tx, resume_rx));
+        (reached_rx, resume_tx)
+    }
+
+    #[cfg(test)]
+    fn pause_before_link_for_test(&self) {
+        let pause = self.link_pause.lock().expect("link pause lock").take();
+        if let Some((reached, resume)) = pause {
+            let _ = reached.send(());
+            let _ = resume.recv();
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn directory_for_test(&self) -> PathBuf {
+        self.artifact.directory.clone()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn nonce_for_test(&self) -> uuid::Uuid {
+        self.artifact.nonce
+    }
+
+    /// Abandon every unpublished collection on this node: the free-space
+    /// headroom failed, or a scratch write hit ENOSPC. Driven by the disk,
+    /// never by a ledger refusal, which these bytes are not part of.
+    pub(crate) fn shed_all(&self) {
+        if let Some(shared) = self.shared.upgrade() {
+            shed_unpublished(&shared);
+        }
     }
 
     /// Called only by the original actor's normal, duration-verified exit
@@ -211,16 +358,22 @@ impl RollingCollection {
             self.refuse();
             return None;
         }
-        self.artifact
-            .complete
-            .set(RollingComplete { rates, manifest })
-            .ok()?;
         let shared = self.shared.upgrade()?;
         let mut state = shared
             .retained_artifacts
             .state
             .lock()
             .expect("retained registry lock");
+        // Checked under the registry lock that `abandon` also takes, so an
+        // abandonment racing this publication either wins (nothing is
+        // published) or loses (abandon becomes a no-op).
+        if self.artifact.abandoned.load(Acquire) {
+            return None;
+        }
+        self.artifact
+            .complete
+            .set(RollingComplete { rates, manifest })
+            .ok()?;
         let cap = state.preparations.get(&self.artifact.nonce).copied()?;
         if cap != self.cap
             || state
@@ -230,6 +383,7 @@ impl RollingCollection {
             return None;
         }
         state.bytes = state.bytes.checked_add(charge)?;
+        self.artifact.accounted.store(charge, Release);
         state.preparations.remove(&self.artifact.nonce);
         state.rolling.insert(
             self.artifact.production.binding(),
@@ -238,6 +392,7 @@ impl RollingCollection {
                 idle_since: None,
             },
         );
+        state.collections.remove(&self.artifact.nonce);
         self.published.store(true, Release);
         Some(Arc::clone(&self.artifact))
     }
@@ -245,6 +400,9 @@ impl RollingCollection {
 
 impl Drop for RollingCollection {
     fn drop(&mut self) {
+        // This collection's reference to the artifact is about to go; from
+        // here on every other reference is a reader.
+        self.artifact.producer_alive.store(false, Release);
         if self.published.load(Acquire) {
             return;
         }
@@ -254,13 +412,15 @@ impl Drop for RollingCollection {
                 .state
                 .lock()
                 .expect("retained registry lock");
+            state.collections.remove(&self.artifact.nonce);
             if state.preparations.contains_key(&self.artifact.nonce) {
                 // Charge remains until the exact directory is actually gone.
-                let Some(bytes) = state.bytes.checked_add(self.artifact.charge.load(Acquire))
-                else {
+                let charge = self.artifact.charge.load(Acquire);
+                let Some(bytes) = state.bytes.checked_add(charge) else {
                     return; // Keep the full reservation, never free overflowed credit.
                 };
                 state.bytes = bytes;
+                self.artifact.accounted.store(charge, Release);
                 state.preparations.remove(&self.artifact.nonce);
                 state.rolling_retired.push_back(Arc::clone(&self.artifact));
             }
@@ -271,6 +431,29 @@ impl Drop for RollingCollection {
 impl RollingArtifact {
     pub(crate) fn acquirable(&self) -> bool {
         !self.refused.load(Acquire)
+    }
+
+    /// Sessions reading this artifact, given one reference the caller knows
+    /// is not a reader (the registry's entry). The producing collection's own
+    /// reference is not a reader either: a freshly published artifact whose
+    /// producer session is still alive has nobody reading it.
+    fn readers(self: &Arc<Self>) -> usize {
+        Arc::strong_count(self)
+            .saturating_sub(1)
+            .saturating_sub(usize::from(self.producer_alive.load(Acquire)))
+    }
+
+    /// Whether the collector may delete this retired directory now. A
+    /// published artifact waits for its last reader (the registry's queue
+    /// entry and the collector's own clone are the only two references). An
+    /// abandoned one was never served, so it waits only for an in-flight
+    /// capture: the gate is free, and any capture that takes it afterwards
+    /// sees the abandonment and unlinks its own destination.
+    fn deletable(self: &Arc<Self>) -> bool {
+        if self.abandoned.load(Acquire) && self.complete.get().is_none() {
+            return self.gate.try_lock().is_ok();
+        }
+        Arc::strong_count(self) == 2
     }
     pub(crate) async fn current_for_attachment(
         &self,
@@ -336,47 +519,91 @@ impl RetainedArtifactRegistry {
                 }
             }
         }
-        let artifact = self
+        // The whole queue, not only its front: an artifact still held by a
+        // live session must not block every abandoned one behind it.
+        let deadline = Instant::now() + RETAINED_GC_TICK_BUDGET;
+        let queued = self
             .state
             .lock()
             .expect("retained registry lock")
             .rolling_retired
-            .front()
-            .cloned();
-        let Some(artifact) = artifact else {
-            return;
-        };
-        if Arc::strong_count(&artifact) != 2 {
-            return;
-        }
-        match remove_artifact_batch(&artifact.directory).await {
-            Ok(true) => {
-                let mut state = self.state.lock().expect("retained registry lock");
-                if state
-                    .rolling_retired
-                    .front()
-                    .is_some_and(|front| Arc::ptr_eq(front, &artifact))
-                {
-                    state.rolling_retired.pop_front();
-                    state.bytes = state.bytes.saturating_sub(artifact.charge.load(Acquire));
-                }
+            .iter()
+            .cloned()
+            .collect::<Vec<_>>();
+        for artifact in queued {
+            if Instant::now() >= deadline {
+                break;
             }
-            Ok(false) => {}
-            Err(error) => tracing::warn!(target: "plurxd::vodserve", %error,
-                "rolling retained cleanup remains charged"),
+            if !artifact.deletable() {
+                continue;
+            }
+            match remove_artifact_within(&artifact.directory, deadline).await {
+                Ok(true) => {
+                    let mut state = self.state.lock().expect("retained registry lock");
+                    if let Some(position) = state
+                        .rolling_retired
+                        .iter()
+                        .position(|queued| Arc::ptr_eq(queued, &artifact))
+                    {
+                        state.rolling_retired.remove(position);
+                        // Exactly what publication or retirement added.
+                        state.bytes = state.bytes.saturating_sub(artifact.accounted.load(Acquire));
+                    }
+                }
+                Ok(false) => {}
+                Err(error) => tracing::warn!(target: "plurxd::vodserve", %error,
+                    "rolling retained cleanup remains charged"),
+            }
         }
     }
 }
 
+/// Abandon every unpublished collection. Collected under the lock, abandoned
+/// outside it, because `abandon` takes the same lock.
+fn shed_unpublished(shared: &Shared) -> usize {
+    let live = shared
+        .retained_artifacts
+        .state
+        .lock()
+        .expect("retained registry lock")
+        .collections
+        .values()
+        .filter_map(Weak::upgrade)
+        .collect::<Vec<_>>();
+    let shed = live.len();
+    for collection in live {
+        collection.abandon();
+    }
+    shed
+}
+
 impl VodServe {
+    /// What `budget` still admits in the retained registry.
+    pub(crate) fn retained_remaining(&self, budget: u64) -> u64 {
+        self.shared.retained_artifacts.remaining(budget)
+    }
+
+    #[allow(clippy::too_many_arguments)] // one collection's complete admission
     pub(crate) async fn begin_rolling_collection(
         &self,
         production: Arc<crate::rolling_provenance::RollingProduction>,
         budget: u64,
         estimate: u64,
         deadline: Instant,
+        headroom: Arc<crate::scratch_ledger::RetainedHeadroom>,
+        session_dir: &std::path::Path,
+        file_id: i64,
+        item_title: &str,
     ) -> Option<Arc<RollingCollection>> {
         let shared = &self.shared;
+        // Hard links need one filesystem, and Windows has no device identity
+        // to prove it with; there retention simply stays off.
+        if cfg!(windows) {
+            return None;
+        }
+        if headroom.admits(HEADROOM_MAX_AGE).is_err() {
+            return None;
+        }
         // A rolling-only manager has not necessarily entered VOD generation,
         // which normally creates this immediate owned base. Do not require a
         // synthetic VOD request, and never follow a substituted base symlink.
@@ -386,6 +613,13 @@ impl VodServe {
                 tokio::fs::create_dir(&shared.base).await.ok()?;
             }
             _ => return None,
+        }
+        // No reservation for a collection that cannot take a single link: a
+        // session directory on another filesystem (EXDEV) would leave the
+        // feature silently inert while holding its allowance. Checked once
+        // the base exists, so a fresh node's first collection is not refused.
+        if !same_filesystem(session_dir, &shared.base).await {
+            return None;
         }
         if estimate == 0
             || estimate > budget
@@ -427,13 +661,17 @@ impl VodServe {
             .preparations
             .get(&nonce)
             .copied()?;
+        let gate = Arc::new(Mutex::new(()));
         let collection = Arc::new(RollingCollection {
             shared: Arc::downgrade(shared),
             cap,
             deadline,
-            gate: Arc::new(Mutex::new(())),
+            gate: Arc::clone(&gate),
             refused: AtomicBool::new(false),
             published: AtomicBool::new(false),
+            headroom,
+            #[cfg(test)]
+            link_pause: StdMutex::new(None),
             artifact: Arc::new(RollingArtifact {
                 directory,
                 production,
@@ -442,6 +680,12 @@ impl VodServe {
                 objects: StdMutex::new(BTreeMap::new()),
                 complete: OnceLock::new(),
                 refused: AtomicBool::new(false),
+                abandoned: AtomicBool::new(false),
+                gate,
+                file_id,
+                item_title: item_title.to_owned(),
+                accounted: AtomicU64::new(0),
+                producer_alive: AtomicBool::new(true),
             }),
         });
         let owner = Arc::clone(&collection);
@@ -449,7 +693,126 @@ impl VodServe {
             .await
             .ok()?
             .ok()?;
+        shared
+            .retained_artifacts
+            .state
+            .lock()
+            .expect("retained registry lock")
+            .collections
+            .insert(nonce, Arc::downgrade(&collection));
         Some(collection)
+    }
+
+    /// Abandon every unpublished rolling collection on this node. Called when
+    /// the free-space headroom fails: shedding is driven by the disk, never
+    /// by a scratch-ledger refusal, which these bytes were never part of.
+    pub(crate) fn shed_rolling_collections(&self) -> usize {
+        shed_unpublished(&self.shared)
+    }
+
+    /// Orphan directories and retired artifacts the collector still owes.
+    pub(crate) fn retained_cleanup_pending(&self) -> usize {
+        let state = self
+            .shared
+            .retained_artifacts
+            .state
+            .lock()
+            .expect("retained registry lock");
+        state.orphans.len() + state.rolling_retired.len()
+    }
+
+    /// The retained namespace's base, for the free-space sampler.
+    pub(crate) fn retained_base(&self) -> PathBuf {
+        self.shared.base.clone()
+    }
+
+    /// Every rolling artifact this node holds or is collecting, for Activity.
+    /// Node-local: these registries are process-private.
+    pub(crate) fn retained_snapshot(&self) -> Vec<RetainedOutputRow> {
+        // Live collections are upgraded under the lock but dropped only after
+        // it is released: an upgrade can be the last strong reference if its
+        // session ends meanwhile, and `RollingCollection::drop` takes this
+        // same (non-reentrant) lock.
+        let (collecting, mut rows) = {
+            let state = self
+                .shared
+                .retained_artifacts
+                .state
+                .lock()
+                .expect("retained registry lock");
+            let collecting = state
+                .collections
+                .values()
+                .filter_map(Weak::upgrade)
+                .collect::<Vec<_>>();
+            let mut rows = Vec::new();
+            for entry in state.rolling.values() {
+                // The registry's own reference and the producing collection's
+                // are not readers; any other reference is a session.
+                let attached = entry.artifact.readers() > 0;
+                rows.push(RetainedOutputRow::of(&entry.artifact, "retained", attached));
+            }
+            for artifact in &state.rolling_retired {
+                rows.push(RetainedOutputRow::of(artifact, "releasing", false));
+            }
+            (collecting, rows)
+        };
+        for collection in &collecting {
+            rows.push(RetainedOutputRow::of(
+                &collection.artifact,
+                "collecting",
+                false,
+            ));
+        }
+        drop(collecting);
+        rows.sort_by(|left, right| left.nonce.cmp(&right.nonce));
+        rows
+    }
+
+    /// Activity's Stop for one retained output: a collection is abandoned, a
+    /// published artifact nobody reads is retired to the collector. Refused
+    /// while a session is attached to it.
+    pub(crate) fn release_retained_output(&self, nonce: uuid::Uuid) -> RetainedRelease {
+        let collecting = {
+            let mut state = self
+                .shared
+                .retained_artifacts
+                .state
+                .lock()
+                .expect("retained registry lock");
+            if state
+                .rolling_retired
+                .iter()
+                .any(|artifact| artifact.nonce == nonce)
+            {
+                return RetainedRelease::Released;
+            }
+            // Attached means a session other than the producer reads it: the
+            // producing collection (and the upload holding it) keeps a
+            // reference until its session ends, and that is not a reader.
+            let published = state
+                .rolling
+                .iter()
+                .find(|(_, entry)| entry.artifact.nonce == nonce)
+                .map(|(key, entry)| (*key, entry.artifact.readers() > 0));
+            match published {
+                Some((_, true)) => return RetainedRelease::Attached,
+                Some((key, false)) => {
+                    let entry = state.rolling.remove(&key).expect("selected rolling entry");
+                    entry.artifact.refused.store(true, Release);
+                    state.rolling_retired.push_back(entry.artifact);
+                    return RetainedRelease::Released;
+                }
+                None => state.collections.get(&nonce).and_then(Weak::upgrade),
+            }
+        };
+        match collecting {
+            Some(collection) => {
+                collection.abandon();
+                RetainedRelease::Released
+            }
+            None => RetainedRelease::Unknown,
+        }
     }
 
     pub(crate) fn acquire_rolling_output(
@@ -491,6 +854,58 @@ impl VodServe {
             }
         }
     }
+}
+
+/// One rolling artifact as Activity shows it.
+#[derive(Debug, Clone, serde::Serialize, PartialEq, Eq)]
+pub(crate) struct RetainedOutputRow {
+    pub nonce: String,
+    pub file_id: i64,
+    pub title: String,
+    /// `collecting` (a live session is linking its segments), `retained`
+    /// (published, reusable) or `releasing` (queued for deletion).
+    pub state: &'static str,
+    pub bytes: u64,
+    /// A session is reading it; Stop is refused until it ends.
+    pub attached: bool,
+}
+
+impl RetainedOutputRow {
+    fn of(artifact: &RollingArtifact, state: &'static str, attached: bool) -> Self {
+        Self {
+            nonce: artifact.nonce.to_string(),
+            file_id: artifact.file_id,
+            title: artifact.item_title.clone(),
+            state,
+            bytes: artifact.charge.load(Acquire),
+            attached,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum RetainedRelease {
+    Released,
+    Attached,
+    Unknown,
+}
+
+/// Whether two paths are on one filesystem, the precondition for a hard link.
+#[cfg(unix)]
+async fn same_filesystem(left: &std::path::Path, right: &std::path::Path) -> bool {
+    use std::os::unix::fs::MetadataExt;
+    match (
+        tokio::fs::metadata(left).await,
+        tokio::fs::metadata(right).await,
+    ) {
+        (Ok(left), Ok(right)) => left.dev() == right.dev(),
+        _ => false,
+    }
+}
+
+#[cfg(not(unix))]
+async fn same_filesystem(_left: &std::path::Path, _right: &std::path::Path) -> bool {
+    false
 }
 
 pub(super) fn owned_name(name: &str) -> bool {

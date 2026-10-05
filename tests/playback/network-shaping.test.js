@@ -2744,6 +2744,7 @@ test("quality cycles wait for the requested rendition and a presented frame", as
   let lastFrame = null;
   let maximumGapMs = 0;
   let switchPolls = null;
+  const targetFrames = [];
   const presentFrame = () => {
     frames += 1;
     frameSequence += 1;
@@ -2763,14 +2764,22 @@ test("quality cycles wait for the requested rendition and a presented frame", as
   const state = () => {
     sampledAt += 50;
     position += 0.05;
-    if (switchPolls === null && frames === 0) presentFrame();
+    // Playback advances before each request: the lab waits for a fresh
+    // outgoing frame before it issues one.
+    if (switchPolls === null) presentFrame();
     if (switchPolls !== null) {
       switchPolls += 1;
       renditionPolls = switchPolls;
       if (switchPolls === 1) presentFrame(); // one late frame from the outgoing rendition
       if (switchPolls === 2) committed = selected;
-      if (switchPolls === 4) presentFrame(); // first frame after target state was observed
-      if (switchPolls >= 5) maximumGapMs = Math.max(maximumGapMs, 150);
+      if (switchPolls === 4) { // first frame after target state was observed
+        presentFrame();
+        targetFrames.push(frameSequence);
+      }
+      if (switchPolls >= 5) {
+        maximumGapMs = Math.max(maximumGapMs, 150);
+        presentFrame(); // the target rendition keeps playing
+      }
     }
     const down = committed === "720";
     return {
@@ -2834,7 +2843,10 @@ test("quality cycles wait for the requested rendition and a presented frame", as
   assert.equal(operation.changes.length, 2);
   assert.deepEqual(operation.changes.map((change) => change.actual_method), ["transcode", "remux"]);
   assert.deepEqual(operation.changes.map((change) => change.decoded_height), [720, 1080]);
-  assert.deepEqual(operation.changes.map((change) => change.committed_frame_sequence), [4, 7]);
+  // Frames keep arriving before and after each switch, so the committed
+  // frame is named by the poll that produced it, not by a count.
+  assert.equal(targetFrames.length, 2);
+  assert.deepEqual(operation.changes.map((change) => change.committed_frame_sequence), targetFrames);
   assert.ok(renditionPolls >= 4,
     "the old frame and the target-state poll were not accepted without a later target frame");
   assert.ok(

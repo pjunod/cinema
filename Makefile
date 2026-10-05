@@ -1108,10 +1108,19 @@ cluster-wal-check: ## Run exact Hiqlite and WAL recovery regressions
 	  --lib -- --exact
 
 .PHONY: cluster-store-check
+# 8 MiB test threads: in a debug build, one poll of the hundred-step replicated
+# migration loop needs more than libtest's default 2 MiB, so every test that
+# opens a store from an old marker (v47, v65) aborted the whole binary with a
+# stack overflow. Release builds are unaffected; this is a debug-frame bound.
 cluster-store-check: ## Run the Store contracts against SQLite and three voters
-	$(CARGO) test --locked -p plurx-core \
+	RUST_MIN_STACK=8388608 $(CARGO) test --locked -p plurx-core \
 	  --features cluster-read-cost-validation,hiqlite-contract-tests \
 	  --test store_contract -- --test-threads=1
+	# The only end-to-end test of the schema-lineage bridge: a real three-voter
+	# cluster carried from each private and canonical marker to the head.
+	RUST_MIN_STACK=8388608 $(CARGO) test --locked -p plurx-core \
+	  --features cluster-read-cost-validation,hiqlite-contract-tests \
+	  --test schema_lineage_upgrade -- --test-threads=1
 
 .PHONY: cluster-harness-check
 cluster-harness-check: ## Run replicated growth and topology harness contracts
@@ -1480,13 +1489,31 @@ media-preparation-browser-check: ## Focused media-info browser regression (PLAYW
 	@node --test tests/web/media-preparation.browser.cjs
 
 .PHONY: web-check
-web-check: ## Test playback policy, embedded JS, and every shipped theme
+web-check: web-unit-check ## Test playback policy, embedded JS, and every shipped theme
+	@scripts/web-hls-startup-browser-check
+	@scripts/subtitle-readiness-browser-check
+	@scripts/js-check
+	# Shape, not order: TypeScript's checker (tsc, checkJs) over the same rows,
+	# against a per-file baseline that only shrinks. The file list is generated
+	# from the shell, so a new row is read the day it is served.
+	# docs/clients/WEB-TYPE-CHECKING-AND-PLAYER-DECOMPOSITION.md §3.
+	@node tests/web/jsconfig-generated.test.js
+	@scripts/web-types
+	@node tests/web/player-typedef.test.js
+	@scripts/contrast-check --from-index crates/plurxd/src/web/core/theme.js \
+		--foregrounds='--text,--muted,--prose,--accent,--good,--warn,--bad' \
+		--allow scripts/contrast-allow.txt
+
+.PHONY: web-unit-check
+# Every Node test of the web client and its playback policy, with no browser
+# and no TypeScript: about two minutes on two cores. The fast lane's web job
+# runs exactly this, so a web pull request executes the same tests web-check
+# does apart from the two real-browser scripts.
+web-unit-check: ## Run every Node web and playback test (no browser)
 	@node tests/playback/web-policy.test.js
 	@node --test tests/playback/web-media-recovery.test.js
 	@node tests/playback/web-control.test.js
 	@node --test tests/playback/seek-control.test.js
-	@scripts/web-hls-startup-browser-check
-	@scripts/subtitle-readiness-browser-check
 	@node tests/playback/player-input-contract.test.js
 	@node tests/playback/playback-surface-contract.test.js
 	@node tests/web/player-dom.test.js
@@ -1522,22 +1549,26 @@ web-check: ## Test playback policy, embedded JS, and every shipped theme
 	# surface like any other here. Two seconds.
 	@node tests/web/cluster-membership.test.js
 	@node --test tests/web/error-reporter.test.js
+	@node --test tests/playback/current-main-effort-quality.test.js
+	@node --test tests/playback/frame-diagnostics.test.js
+	@node tests/playback/network-shaping.test.js
+	@node --test tests/playback/preparation-measurement.test.js
+	@node --test tests/playback/frame-clock.test.js
+	@node --test tests/playback/quality-cancellation.test.js
+	# Every tests/{web,playback}/*.test.js is run here or is required by a test
+	# that is; tests/operations/test_web_test_inventory.py fails a pull request
+	# that adds one this recipe would not run.
+	@node --test tests/web/content-analysis-failures.test.js
+	@node --test tests/web/dvr-visibility.test.js
+	@node --test tests/web/grid-poster-derivatives.test.js
+	@node --test tests/web/hls-seek.test.js
+	@node --test tests/web/local-search.test.js
+	@node --test tests/web/ui-baseline-capture-clamp.test.js
 	# The split shell is sixty-five plain scripts in one scope: the order they
 	# are served in is a load order. One reads them, one runs them.
 	@node tests/web/asset-order.test.js
 	@node tests/web/asset-load.test.js
 	@node tests/web/asset-layout.test.js
-	@scripts/js-check
-	# Shape, not order: TypeScript's checker (tsc, checkJs) over the same rows,
-	# against a per-file baseline that only shrinks. The file list is generated
-	# from the shell, so a new row is read the day it is served.
-	# docs/clients/WEB-TYPE-CHECKING-AND-PLAYER-DECOMPOSITION.md §3.
-	@node tests/web/jsconfig-generated.test.js
-	@scripts/web-types
-	@node tests/web/player-typedef.test.js
-	@scripts/contrast-check --from-index crates/plurxd/src/web/core/theme.js \
-		--foregrounds='--text,--muted,--prose,--accent,--good,--warn,--bad' \
-		--allow scripts/contrast-allow.txt
 
 ## ---- packaging & setup -------------------------------------------------
 

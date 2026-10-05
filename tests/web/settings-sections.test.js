@@ -211,7 +211,7 @@ test("a card's Save wakes on a change and sleeps again once saved", () => {
 test("Playback saves per card, and each card writes only its own fields", () => {
   const writes = {};
   const run = (fn, ids) => new Function(
-    "api", "document", "cacheSettings", "toast", "setCardSaved", "SERVER", "SETTINGS", "verifiedDecodeCard", "decodeRecoveryCard", "pgsOverlayCard", "DEVELOPER_READINESS", "sdrMasterCodecsCard",
+    "api", "document", "cacheSettings", "toast", "setCardSaved", "SERVER", "SETTINGS", "verifiedDecodeCard", "decodeRecoveryCard", "pgsOverlayCard", "DEVELOPER_READINESS", "sdrMasterCodecsCard", "networkPriorsCard",
     // The newline matters: a shipped function may be followed by a line
     // comment, and `shippedSource` returns everything up to the next
     // declaration. Without it the injected `return` lands inside that comment
@@ -238,6 +238,9 @@ test("Playback saves per card, and each card writes only its own fields", () => 
   const verifiedDecode = ["dhqa", "dhqerr", "vdcard"];
   const automaticRecovery = ["adr", "adrerr", "drcard"];
   const pgsOverlay = ["pgsoverlay", "pgsoverlayerr", "pgsoverlaycard"];
+  // D6: the priors switch had no control at all; it gets its own card and
+  // writes only its own field.
+  const networkPriors = ["network-priors", "network-priors-error", "network-priors-card"];
   return Promise.all([
     run("savePlaybackDefaults", defaults)({ disabled: false }),
     run("saveStreaming", streaming)({ disabled: false }),
@@ -251,6 +254,7 @@ test("Playback saves per card, and each card writes only its own fields", () => 
     run("savePgsOverlay", pgsOverlay)({ disabled: false }),
     // S-10's SDR master CODECS switch: its own card, its own field.
     run("saveSdrMasterCodecs", ["sdr-master-codecs", "sdr-codecs-error", "sdr-codecs-card"])({ disabled: false }),
+    run("saveNetworkPriors", networkPriors)({ disabled: false }),
   ]).then(() => {
     assert.deepEqual(Object.keys(writes.savePlaybackDefaults.body).sort(), ["default_audio_lang", "default_sub_lang", "sub_mode"]);
     assert.deepEqual(Object.keys(writes.saveStreaming.body).sort(), [
@@ -280,6 +284,8 @@ test("Playback saves per card, and each card writes only its own fields", () => 
     assert.deepEqual(writes.saveSdrMasterCodecs.body, { playback_sdr_master_codecs: true });
     assert.equal(writes.saveSdrMasterCodecs.path, "/settings");
     assert.equal(writes.savePgsOverlay.path, "/settings");
+    assert.deepEqual(writes.saveNetworkPriors.body, { playback_network_priors: true });
+    assert.equal(writes.saveNetworkPriors.path, "/settings");
     assert.equal(writes.savePlaybackDefaults.path, "/settings");
     assert.equal(writes.saveStreaming.path, "/settings");
     assert.equal(writes.savePlaybackCompatibility.path, "/settings");
@@ -483,6 +489,9 @@ test("Developer keeps only experiments; everyday controls retain their saves and
       // whole gate reports one failure instead of checking anything.
       shippedSource("contentEncodingCard"), shippedSource("vodReorderCard"),
       shippedSource("sdrMasterCodecsCard"),
+      // The main-merge defects build (2026-10-04): complete-output
+      // preparation and rolling retention arrived with their Developer cards.
+      shippedSource("outputPreparationCard"), shippedSource("rollingRetentionCard"),
       shippedSource("subtitleNotReadyCard"),
       shippedSource("clusterClockCard"),
       shippedSource("pgsOverlayCard"),
@@ -506,6 +515,8 @@ test("Developer keeps only experiments; everyday controls retain their saves and
       shippedSource("clusterBackupCard"),
       shippedSource("clusterPlacementCard"), shippedSource("boundedCatalogueCard"),
       shippedSource("autoQualityCard"), shippedSource("displayAwareAutoCard"), shippedSource("preparedQualityCard"), shippedSource("dvrCard"),
+      // D6 (2026-10-04): the network priors switch sits beside display Auto.
+      shippedSource("networkPriorsCard"),
       shippedSource("libraryChannelsSettingsCard"),
       shippedSource("playbackProtocolCard"), shippedSource("liveHlsRecoveryCard"),
       shippedSource("rateControlCard"),
@@ -589,6 +600,57 @@ test("Developer keeps only experiments; everyday controls retain their saves and
   assert.match(
     panels.developerPanel({ ...settings, cluster_clock_guard_enforced: true }, readiness),
     /TOG:cluster-clock-enforced\|[^|]*\|[^|]*\|checked=true/,
+  );
+  // Complete-output preparation and rolling retention: both off by default,
+  // both advisory, both graduate (main-merge defects build, 2026-10-04).
+  const preparation = /Complete-output preparation[\s\S]*?(?=Rolling output retention)/.exec(html);
+  assert.ok(preparation, "Developer shows the complete-output preparation card");
+  assert.match(preparation[0], /<option value="off" selected>/, "preparation is off by default");
+  assert.match(preparation[0], /FOOT:saveOutputPreparation/);
+  assert.match(preparation[0], /advisory and never prevent saving/);
+  assert.match(preparation[0], /Leaves Developer when/);
+  assert.match(
+    panels.developerPanel({ ...settings, vod_output_preparation: "copy_and_encoded" }, readiness),
+    /<option value="copy_and_encoded" selected>/,
+  );
+  const retention = /Rolling output retention[\s\S]*?(?=<div class="setsection")/.exec(html);
+  assert.ok(retention, "Developer shows the rolling retention card");
+  assert.match(retention[0], /TOG:vod-rolling-retention\|[^|]*\|[^|]*\|checked=false/, "retention is off by default");
+  assert.match(retention[0], /FOOT:saveRollingRetention/);
+  assert.match(retention[0], /Leaves Developer when/);
+  assert.match(
+    panels.developerPanel({ ...settings, vod_rolling_retention: true }, readiness),
+    /TOG:vod-rolling-retention\|[^|]*\|[^|]*\|checked=true/,
+  );
+  // D6: Fit Auto to display moves up only with network priors on. The card
+  // names that prerequisite and the two limits beside it, and the priors
+  // switch is a Developer card of its own. Red rows never move either switch.
+  const displayAuto = /CARDHEAD:Fit Auto to display\|[\s\S]*?(?=CARDHEAD:Network priors)/.exec(html);
+  assert.ok(displayAuto, "Developer shows Fit Auto to display followed by Network priors");
+  for (const id of ["auto_abr", "network_priors", "local_session_owner", "ipv4_client"])
+    assert.match(displayAuto[0], new RegExp(`data-devstat="display_aware_auto:${id}"`), `display Auto reports ${id}`);
+  assert.match(displayAuto[0], /TOG:pdisplayauto\|/);
+  assert.match(displayAuto[0], /FOOT:saveDisplayAwareAuto/);
+  const priors = /CARDHEAD:Network priors\|[\s\S]*?(?=<div class="setsection")/.exec(html);
+  assert.ok(priors, "Developer shows the network priors card");
+  assert.match(priors[0], /TOG:network-priors\|[^|]*\|[^|]*\|checked=false/, "priors are off by default");
+  assert.match(priors[0], /per user, client and IPv4 \/24 network/);
+  assert.match(priors[0], /starting \(cold-start\) rung/);
+  assert.match(priors[0], /FOOT:saveNetworkPriors/);
+  assert.match(priors[0], /Leaves Developer when/);
+  const priorsOff = { items: [
+    { id: "display_aware_auto", requirements: [
+      { id: "network_priors", status: "unmet", evidence: "Off: Auto never upgrades and a link stall retries the same quality; producer and decoder recovery still work" },
+    ] },
+    { id: "network_priors", requirements: [] },
+  ] };
+  const savedOn = renderComposedPanel("developerPanel", () => panels.developerPanel(
+    { ...settings, playback_display_aware_auto: true, playback_network_priors: false }, priorsOff));
+  assert.match(savedOn, /TOG:pdisplayauto\|[^|]*\|[^|]*\|checked=true/, "unmet priors never turn display Auto off");
+  assert.match(savedOn, /Auto never upgrades and a link stall retries the same quality/);
+  assert.match(
+    panels.developerPanel({ ...settings, playback_network_priors: true }, priorsOff),
+    /TOG:network-priors\|[^|]*\|[^|]*\|checked=true/,
   );
   const unverified = panels.developerPanel({...settings, hevc_unverified_copy:true,
     hevc_header_trace_available:false, vod_index_cluster_cache:false, vod_index_mins:0}, readiness);

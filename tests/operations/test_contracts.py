@@ -2130,7 +2130,9 @@ assert.equal(context.ACT_TIMER, null);
         self.assertIn("run: make android", effort)
         self.assertIn("run: make effort-web-static-check", effort)
         web_check = makefile.split(".PHONY: web-check", 1)[1].split(".PHONY:", 1)[0]
-        self.assertIn("node tests/web/cluster-membership.test.js", web_check)
+        self.assertIn("web-check: web-unit-check ", web_check)
+        web_unit_check = makefile.split(".PHONY: web-unit-check", 1)[1].split(".PHONY:", 1)[0]
+        self.assertIn("node tests/web/cluster-membership.test.js", web_unit_check)
         self.assertIn(
             'test("transport recovery is attributed only to the receiving node"',
             membership_web_tests,
