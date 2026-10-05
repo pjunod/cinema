@@ -11,6 +11,52 @@ describes the state on the day it was written, and
 `tests/operations/test_status_pr_claims.py` keeps holding it to the same
 merged-pull-request rule it held in `STATUS.md`.
 
+## 2026-09-24 · Live TV: direct play first, 5.1 stays 5.1
+
+**Branch `fix/live-tv-direct-play`, draft pull request; not merged, nothing
+deployed.** Paul's three reports of 2026-09-24 — Live TV "transcodes no matter
+what", audio is "unnecessarily downmixed to stereo", and every channel shows
+the same aspect ratio — worked against the real lineup on the FLEX 4K
+(59 ATSC 1.0 MPEG-2/AC-3 channels, 10 ATSC 3.0 HEVC/AC-4 channels).
+Record: [docs/streaming/LIVE-TV-DIRECT-PLAY-AND-SURROUND.md](LIVE-TV-DIRECT-PLAY-AND-SURROUND.md).
+
+- **Transcoding:** every client sent `interlaced: false` and no client claimed
+  `mpeg2video`, so all 59 ATSC 1.0 channels were encoded on every client. Android
+  TV now claims its hardware MPEG-2 decoder and interlaced input (television UI
+  mode only), so ATSC 1.0 is copied there; Apple and the web cannot decode MPEG-2
+  in HLS and keep the encode — the one necessary case. On ATSC 3.0 the picture
+  was already copied; the audio was converted from the fragile AC-4 track even
+  though 157.x carries an **AC-3 5.1 simulcast in the same programme**. The
+  owner now probes every audio stream and selects the track the player can copy
+  (`LiveDeliveryPlan.audio_track`), and the AC-3-in-fMP4 rule switches the
+  container to MPEG-TS when the player claims that pair instead of converting.
+- **Stereo:** all three clients claimed `aac: max_channels 2`, and an AC-4 track
+  whose layout the probe had not seen was folded to stereo before a frame
+  existed. The AAC claim is now the sink's real channel count (floored 2, capped
+  5.1) on Apple, Android and the web, and the encode negotiates its layout with
+  `aformat=channel_layouts=` under that ceiling — `-ac` is gone from live
+  commands, so stereo stays stereo, 7.1.4 folds to 5.1, unknown is decided by
+  the first frame.
+- **Aspect ratio: not reproduced on the server.** Real 6.2 captures (704×480,
+  SAR 40:33, 480i) through the exact QSV, VAAPI and x264 producer chains on nynuc
+  all publish SAR 40:33 / DAR 16:9. `scripts/live-tv-hardware` now records the
+  segment's SAR/DAR. Open until the client showing it is named.
+
+**Deployment finding (same day):** the layout list led with `5.1(side)`, which
+the AAC encoder signals as ADTS configuration 0 plus a PCE; browsers read that
+as an audio track with no channels and never start, so Safari and Chrome sat
+black on 157.1. Fixed: the list is `5.1|stereo|mono`, the harness asserts a
+positive header channel count and gains `--surround`.
+
+Verified: focused Rust tests (53) + clippy `-D warnings` + fmt on nuc3;
+`make apple-test` on mba (1330 cases); Android unit tests in the pinned image
+(745); `tests/web/live-tv.test.js`. Hardware, this branch's `plurxd` against
+the real tuner from nuc3: 6.2 encodes to `704×480 SAR 40:33 DAR 16:9`;
+157.1 with a copy envelope comes back **copy/copy** — HEVC + the AC-3 5.1
+simulcast in MPEG-TS, no decoder running. One adversarial review pass, eight
+findings folded (Android now reads the HDMI sink's PCM channel count, described
+tracks never win, `und` is no language, the track is mapped by PID).
+
 ## 2026-09-22 · Resume stopped working on every client — reproduced, half fixed
 
 `PR #438`, branch `fix/resume-progress-zero-clobber`, **merged, NOT deployed**.
