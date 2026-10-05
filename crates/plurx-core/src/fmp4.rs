@@ -1145,7 +1145,7 @@ impl PromotionInputs {
         // travel in band (`CopyVideoOptions::retains_hevc_parameter_sets`)
         // look like one whose clean starts disagree about their init, when
         // every one of them promotes to the same init.
-        let configured = locate_hvcc(&init.bytes)
+        let configured = locate_configuring_hvcc(&init.bytes)
             .ok()
             .flatten()
             .and_then(|location| hvcc_nal_array_types(&init.bytes[location.payload]).ok())
@@ -1789,6 +1789,9 @@ pub fn promote_from(init: &mut Init, inputs: &PromotionInputs) -> Result<bool, F
                 .into(),
         ));
     }
+    // Before the first mutator: each one refuses an init with two
+    // descriptions, and this removes the repeated one ffmpeg 8 writes.
+    let collapsed = collapse_equivalent_hevc_sample_entries(init)? > 0;
     let hevc = promote_hevc_parameter_sets_from(init, &inputs.parameter_sets)?;
     // The removal goes FIRST, and the rewrite below goes last, for the same
     // reason pointing opposite ways: `promote_hdr10_static_metadata_from`
@@ -1820,12 +1823,13 @@ pub fn promote_from(init: &mut Init, inputs: &PromotionInputs) -> Result<bool, F
         // still the union of all three.
         None => removed,
     };
-    Ok(hevc || hdr10 || dolby_vision)
+    Ok(collapsed || hevc || hdr10 || dolby_vision)
 }
 
 pub fn promote_hevc_parameter_sets(init: &mut Init, first: &Fragment) -> Result<bool, Fmp4Error> {
+    let collapsed = collapse_equivalent_hevc_sample_entries(init)? > 0;
     let inputs = PromotionInputs::from_fragment(first, init);
-    promote_hevc_parameter_sets_from(init, &inputs.parameter_sets)
+    Ok(promote_hevc_parameter_sets_from(init, &inputs.parameter_sets)? || collapsed)
 }
 
 /// The same surgery, from parameter sets captured somewhere else.
@@ -2119,7 +2123,7 @@ impl DolbyVisionRecord {
 
 /// The Dolby Vision configuration this init declares, if it declares one.
 pub fn dolby_vision_record(init: &Init) -> Result<Option<DolbyVisionRecord>, Fmp4Error> {
-    let Some(location) = locate_hvcc(&init.bytes)? else {
+    let Some(location) = locate_configuring_hvcc(&init.bytes)? else {
         return Ok(None);
     };
     let Some(existing) = location.dolby_vision else {
@@ -2545,7 +2549,7 @@ pub fn compare_in_band_parameter_sets(
     if video.codec != Some(VideoCodec::Hevc) || video.nal_length_size == 0 {
         return Ok(InBandParameterSets::Absent);
     }
-    let Some(location) = locate_hvcc(&init.bytes)? else {
+    let Some(location) = locate_configuring_hvcc(&init.bytes)? else {
         return Ok(InBandParameterSets::Absent);
     };
     let configured = hvcc_parameter_set_nals(&init.bytes[location.payload])?;
@@ -3123,6 +3127,268 @@ fn locate_hevc_sample_entries(bytes: &[u8]) -> Result<Vec<Option<HvcCLocation>>,
         }
     }
     Ok(locations)
+}
+
+/// Remove HEVC sample descriptions that repeat the first one's decoder
+/// configuration, returning how many were removed.
+///
+/// FFmpeg 8's MOV muxer appends a sample description whenever a packet carries
+/// new-extradata side data whose bytes differ from the current description.
+/// `extract_extradata` — which the copy path needs for Matroska sources whose
+/// `hvcC` is the bare 23-byte header — attaches that side data to every
+/// keyframe carrying in-band parameter sets, and one keyframe's extraction
+/// differs from another's only in its SEI arrays or a PPS trailing zero byte.
+/// The result is an `stsd` declaring two descriptions that configure the
+/// decoder identically, with every fragment selecting the first (the muxer
+/// writes no `tfhd` sample-description index; `trex` defaults to 1). Measured
+/// 2026-10-04 on six 2160p sources under jellyfin-ffmpeg 8.1.3: all six
+/// produced exactly this shape, so every such title's live-HLS copy and every
+/// fragment-index build refused it.
+///
+/// Removal is lossless only when the descriptions really are one decoder
+/// configuration, so the proof is strict: one `stsd`, every entry the same
+/// sample-entry fourcc, every byte of each entry outside its `hvcC` identical
+/// (visual fields, `colr`, `pasp`, any Dolby Vision record), the same 22-byte
+/// `hvcC` fixed header, and the same set of VPS/SPS/PPS units once trailing
+/// zero bytes are disregarded, with the track's `trex` selecting the first
+/// description. SEI arrays may differ. Anything else is left untouched and the mutators
+/// keep refusing it as [`Fmp4Error::MultipleHevcSampleEntries`].
+///
+/// The description kept is rewritten to its parameter sets alone: VPS, SPS and
+/// PPS arrays in record order, trailing zero bytes trimmed, duplicates and SEI
+/// arrays dropped. FFmpeg 8's extraction copies whatever SEI the generation's
+/// first keyframe carried — a decoded-picture hash, a per-scene message — so
+/// two generations of one film started at different keyframes would otherwise
+/// describe themselves differently, and VOD's init identity (one muxer init
+/// per rendition across every generation) would refuse every later one. The
+/// samples keep their in-band SEI, and HDR10 static metadata is promoted from
+/// them as before.
+pub fn collapse_equivalent_hevc_sample_entries(init: &mut Init) -> Result<usize, Fmp4Error> {
+    // Like every other init mutator here: no parsed HEVC track, nothing to do.
+    if !init
+        .video()
+        .is_some_and(|video| video.codec == Some(VideoCodec::Hevc))
+    {
+        return Ok(0);
+    }
+    let Some(entries) = equivalent_hevc_sample_entries(&init.bytes)? else {
+        return Ok(0);
+    };
+    let removed = entries.len() - 1;
+    let first = &entries[0];
+    let stsd = first.ancestors[2];
+    let start = first.sample_entry_end;
+    let end = entries
+        .last()
+        .expect("at least two equivalent entries")
+        .sample_entry_end;
+    let delta = end - start;
+    init.bytes.drain(start..end);
+    let entry_count_at = stsd.start + stsd.header_len + 4;
+    write_be_u32(&mut init.bytes, entry_count_at, 1)?;
+    for &ancestor in &first.ancestors[2..] {
+        shrink_box(&mut init.bytes, ancestor, delta)?;
+    }
+    // The kept entry precedes the drained span, so its offsets still hold.
+    let payload = first.payload.clone();
+    let canonical = parameter_set_only_hvcc(&init.bytes[payload.clone()])?;
+    let old_len = payload.len();
+    let new_len = canonical.len();
+    init.bytes.splice(payload, canonical);
+    if new_len < old_len {
+        for &ancestor in &first.ancestors {
+            shrink_box(&mut init.bytes, ancestor, old_len - new_len)?;
+        }
+    } else if new_len > old_len {
+        for &ancestor in &first.ancestors {
+            grow_box(&mut init.bytes, ancestor, new_len - old_len)?;
+        }
+    }
+    Ok(removed)
+}
+
+/// An `hvcC` record reduced to its parameter sets: the fixed header, then the
+/// VPS/SPS/PPS arrays in record order with each array's completeness byte
+/// kept, every NAL's trailing zero bytes trimmed and repeats dropped.
+fn parameter_set_only_hvcc(record: &[u8]) -> Result<Vec<u8>, Fmp4Error> {
+    if record.len() < 23 {
+        return malformed("hvcC too short for its NAL arrays");
+    }
+    let mut out = record[..22].to_vec();
+    out.push(0);
+    let mut arrays = 0u8;
+    let mut pos = 23usize;
+    for _ in 0..record[22] {
+        if pos + 3 > record.len() {
+            return malformed("hvcC NAL array header runs past the record");
+        }
+        let head = record[pos];
+        let count = u16::from_be_bytes([record[pos + 1], record[pos + 2]]) as usize;
+        pos += 3;
+        let mut nals: Vec<&[u8]> = Vec::new();
+        for _ in 0..count {
+            if pos + 2 > record.len() {
+                return malformed("hvcC NAL length runs past the record");
+            }
+            let len = u16::from_be_bytes([record[pos], record[pos + 1]]) as usize;
+            pos += 2;
+            let end = pos
+                .checked_add(len)
+                .filter(|end| *end <= record.len())
+                .ok_or_else(|| Fmp4Error::Malformed("hvcC NAL runs past the record".into()))?;
+            let nal = without_trailing_zero_bytes(&record[pos..end]);
+            pos = end;
+            if !nal.is_empty() && !nals.contains(&nal) {
+                nals.push(nal);
+            }
+        }
+        if !matches!(head & 0x3f, 32..=34) || nals.is_empty() {
+            continue;
+        }
+        out.push(head);
+        out.extend_from_slice(&(nals.len() as u16).to_be_bytes());
+        for nal in nals {
+            out.extend_from_slice(&(nal.len() as u16).to_be_bytes());
+            out.extend_from_slice(nal);
+        }
+        arrays += 1;
+    }
+    out[22] = arrays;
+    Ok(out)
+}
+
+/// Every HEVC description of the init when there are several and they are one
+/// decoder configuration (see [`collapse_equivalent_hevc_sample_entries`]), in
+/// `stsd` order; `None` for a single description or any other shape.
+fn equivalent_hevc_sample_entries(bytes: &[u8]) -> Result<Option<Vec<HvcCLocation>>, Fmp4Error> {
+    let locations = locate_hevc_sample_entries(bytes)?;
+    if locations.len() < 2 {
+        return Ok(None);
+    }
+    let mut entries = Vec::with_capacity(locations.len());
+    for location in locations {
+        let Some(location) = location else {
+            return Ok(None);
+        };
+        entries.push(location);
+    }
+    let stsd = entries[0].ancestors[2];
+    if entries
+        .iter()
+        .any(|entry| entry.ancestors[2].start != stsd.start)
+    {
+        return Ok(None);
+    }
+    // A non-HEVC description beside them (or a count the walk disagrees with)
+    // is not a repeated configuration.
+    let declared = be_u32(bytes, stsd.start + stsd.header_len + 4) as usize;
+    if declared != entries.len() {
+        return Ok(None);
+    }
+    struct Shape<'a> {
+        kind: [u8; 4],
+        before: &'a [u8],
+        after: &'a [u8],
+        header: &'a [u8],
+        parameter_sets: Vec<&'a [u8]>,
+    }
+    fn shape<'a>(bytes: &'a [u8], entry: &HvcCLocation) -> Result<Shape<'a>, Fmp4Error> {
+        let sample_entry = entry.ancestors[1];
+        let hvcc = entry.ancestors[0];
+        let header = peek_box(bytes, sample_entry.start)?
+            .ok_or_else(|| Fmp4Error::Malformed("sample entry truncated".into()))?;
+        let record = &bytes[entry.payload.clone()];
+        let mut parameter_sets: Vec<&[u8]> = hvcc_parameter_set_nals(record)?
+            .into_iter()
+            .map(without_trailing_zero_bytes)
+            .collect();
+        parameter_sets.sort_unstable();
+        parameter_sets.dedup();
+        Ok(Shape {
+            kind: *header.kind(),
+            before: &bytes[sample_entry.start + sample_entry.header_len..hvcc.start],
+            after: &bytes[entry.payload.end..entry.sample_entry_end],
+            header: &record[..22],
+            parameter_sets,
+        })
+    }
+    // A description this cannot read is not provably equivalent; leave the
+    // refusal (and its classification) to the validators that own it.
+    let Ok(first) = shape(bytes, &entries[0]) else {
+        return Ok(None);
+    };
+    if first.parameter_sets.is_empty() {
+        // Nothing to prove equality with; the incomplete-configuration
+        // refusal belongs to validation, not to this collapse.
+        return Ok(None);
+    }
+    for entry in &entries[1..] {
+        let Ok(other) = shape(bytes, entry) else {
+            return Ok(None);
+        };
+        if other.kind != first.kind
+            || other.before != first.before
+            || other.after != first.after
+            || other.header != first.header
+            || other.parameter_sets != first.parameter_sets
+        {
+            return Ok(None);
+        }
+    }
+    // Contiguity: the removal drains one span after the first entry.
+    for pair in entries.windows(2) {
+        if pair[1].ancestors[1].start != pair[0].sample_entry_end {
+            return Ok(None);
+        }
+    }
+    // Fragments that rely on `trex` must already select the description kept;
+    // equivalence does not make a dangling index valid.
+    if trex_default_description(bytes, &entries[0])? != Some(1) {
+        return Ok(None);
+    }
+    Ok(Some(entries))
+}
+
+/// The `trex` default sample-description index of the track an HEVC entry
+/// belongs to, or `None` when the init declares no `trex` for it.
+fn trex_default_description(bytes: &[u8], entry: &HvcCLocation) -> Result<Option<u32>, Fmp4Error> {
+    let trak = entry.ancestors[6];
+    let moov = entry.ancestors[7];
+    let Some(trak_header) = peek_box(bytes, trak.start)? else {
+        return Ok(None);
+    };
+    let Some(track_id) = track_id_in_trak(
+        bytes,
+        trak.start + trak.header_len..trak.start + trak_header.size,
+    )?
+    else {
+        return Ok(None);
+    };
+    let Some(moov_header) = peek_box(bytes, moov.start)? else {
+        return Ok(None);
+    };
+    let moov_body = moov.start + moov.header_len..moov.start + moov_header.size;
+    let Some((mvex_at, mvex)) = find_child(bytes, moov_body, b"mvex")? else {
+        return Ok(None);
+    };
+    let mvex_body = mvex_at.start + mvex.header_len..mvex_at.start + mvex.size;
+    for (trex_at, trex) in find_children(bytes, mvex_body, b"trex")? {
+        let payload = trex_at.start + trex.header_len..trex_at.start + trex.size;
+        if payload.len() >= 12 && be_u32(bytes, payload.start + 4) == track_id {
+            return Ok(Some(be_u32(bytes, payload.start + 8)));
+        }
+    }
+    Ok(None)
+}
+
+/// The `hvcC` the init's samples are configured by: the only description, or
+/// the first of several decoder-equivalent ones.
+fn locate_configuring_hvcc(bytes: &[u8]) -> Result<Option<HvcCLocation>, Fmp4Error> {
+    if let Some(mut entries) = equivalent_hevc_sample_entries(bytes)? {
+        entries.truncate(1);
+        return Ok(entries.pop());
+    }
+    locate_hvcc(bytes)
 }
 
 fn locate_hvcc(bytes: &[u8]) -> Result<Option<HvcCLocation>, Fmp4Error> {
@@ -7532,6 +7798,10 @@ mod tests {
         // decoder-valid entries, which is the shape the refusal is about.
         assert!(promote_hevc_parameter_sets(&mut init, &fragment).expect("first promotion"));
         duplicate_hevc_sample_entry(&mut init);
+        // The second description now configures the decoder differently: an
+        // extra PPS the first does not declare. That is a real choice the
+        // writer cannot make, so the refusal stands.
+        add_parameter_set_to_second_hevc_entry(&mut init, &[0x44, 0x01, 0xc1, 0x40]);
 
         let promotion = promote_hevc_parameter_sets(&mut init, &fragment)
             .expect_err("the writer cannot choose one of two sample descriptions");
@@ -7541,6 +7811,337 @@ mod tests {
             HevcSampleEntryLayout::Multiple { count: 2 }
         );
         assert!(promotion.to_string().contains("2 HEVC sample entries"));
+    }
+
+    /// Splice one more PPS into the second HEVC description's hvcC so the two
+    /// descriptions configure the decoder differently.
+    fn add_parameter_set_to_second_hevc_entry(init: &mut Init, nal: &[u8]) {
+        let locations = locate_hevc_sample_entries(&init.bytes).expect("locating entries");
+        let second = locations[1].as_ref().expect("second entry has hvcC");
+        let record = &init.bytes[second.payload.clone()];
+        // Find the PPS array (type 34) and bump its count, appending the NAL
+        // at the array's end.
+        let mut pos = second.payload.start + 23;
+        let arrays = record[22];
+        let mut inserted = false;
+        for _ in 0..arrays {
+            let kind = init.bytes[pos] & 0x3f;
+            let count = u16::from_be_bytes([init.bytes[pos + 1], init.bytes[pos + 2]]);
+            let count_at = pos + 1;
+            pos += 3;
+            for _ in 0..count {
+                let len = u16::from_be_bytes([init.bytes[pos], init.bytes[pos + 1]]) as usize;
+                pos += 2 + len;
+            }
+            if kind == 34 && !inserted {
+                init.bytes[count_at..count_at + 2].copy_from_slice(&(count + 1).to_be_bytes());
+                let mut unit = (nal.len() as u16).to_be_bytes().to_vec();
+                unit.extend_from_slice(nal);
+                let delta = unit.len();
+                init.bytes.splice(pos..pos, unit);
+                for &ancestor in &second.ancestors {
+                    grow_box(&mut init.bytes, ancestor, delta).expect("growing ancestors");
+                }
+                inserted = true;
+                break;
+            }
+        }
+        assert!(inserted, "the second entry declares a PPS array");
+    }
+
+    #[test]
+    fn decoder_equivalent_hevc_descriptions_collapse_to_the_first() {
+        // The ffmpeg 8 shape measured on 2026-10-04: two descriptions that
+        // differ only in a PPS trailing zero byte (and SEI arrays), with every
+        // fragment selecting the first.
+        let mut init = minimal_hvcc_dv_init();
+        let video = init.video().expect("video").clone();
+        let vps = [0x40, 0x01, 0x0c];
+        let sps = [0x42, 0x01, 0x01];
+        let pps = [0x44, 0x01, 0xc0];
+        let vcl = [0x26, 0x01, 0x80];
+        let fragment = fragment_with_first_video_sample(
+            video.id,
+            length_prefixed_hevc_nals(&[&vps, &sps, &pps, &vcl]),
+        );
+        assert!(promote_hevc_parameter_sets(&mut init, &fragment).expect("first promotion"));
+        let single = init.bytes.clone();
+        duplicate_hevc_sample_entry(&mut init);
+        append_trailing_zero_to_second_entry_pps(&mut init);
+        // And the SEI arrays the field captures differed in.
+        append_sei_array_to_hevc_entry(&mut init, 1, &[0x4e, 0x01, 0x84, 0x10, 0x80]);
+        assert_eq!(
+            validate_hevc_sample_entries(&init).expect("both descriptions are decoder-valid"),
+            HevcSampleEntryLayout::Multiple { count: 2 }
+        );
+
+        let mut collapsed = init.clone();
+        assert_eq!(
+            collapse_equivalent_hevc_sample_entries(&mut collapsed).expect("collapse"),
+            1
+        );
+        assert_eq!(
+            collapsed.bytes, single,
+            "the first description survives byte for byte"
+        );
+        assert_eq!(
+            validate_hevc_sample_entries(&collapsed).expect("one description"),
+            HevcSampleEntryLayout::Single
+        );
+        let mut reader = FragmentReader::new();
+        reader.push(&collapsed.bytes);
+        assert!(matches!(
+            reader.next_unit().expect("reparse"),
+            Some(Unit::Init(_))
+        ));
+        assert_eq!(
+            collapse_equivalent_hevc_sample_entries(&mut collapsed).expect("idempotent"),
+            0
+        );
+
+        // Both served-init builders collapse before they mutate.
+        let mut promoted = init.clone();
+        assert!(
+            promote_hevc_parameter_sets(&mut promoted, &fragment)
+                .expect("promotion collapses first"),
+            "the collapse is a change the caller must hear about"
+        );
+        assert_eq!(promoted.bytes, single);
+        let mut from_inputs = init.clone();
+        let inputs = PromotionInputs::from_fragment(&fragment, &init);
+        assert!(
+            inputs.parameter_sets.is_empty(),
+            "the equivalent descriptions already configure every in-band set"
+        );
+        assert!(
+            promote_from(&mut from_inputs, &inputs).expect("promote_from collapses first"),
+            "the collapse is a change the caller must hear about"
+        );
+        assert_eq!(from_inputs.bytes, single);
+    }
+
+    #[test]
+    fn equivalent_descriptions_keep_only_parameter_sets_whichever_keyframe_led() {
+        // Two generations of one film: each muxer put a different keyframe's
+        // SEI into its first description. The collapsed inits are identical.
+        let mut base = minimal_hvcc_dv_init();
+        let video = base.video().expect("video").clone();
+        let fragment = fragment_with_first_video_sample(
+            video.id,
+            length_prefixed_hevc_nals(&[
+                &[0x40, 0x01, 0x0c],
+                &[0x42, 0x01, 0x01],
+                &[0x44, 0x01, 0xc0],
+                &[0x26, 0x01, 0x80],
+            ]),
+        );
+        assert!(promote_hevc_parameter_sets(&mut base, &fragment).expect("promotion"));
+        let single = base.bytes.clone();
+        let mut head = base.clone();
+        duplicate_hevc_sample_entry(&mut head);
+        duplicate_hevc_sample_entry_at_end(&mut head);
+        append_sei_array_to_hevc_entry(&mut head, 0, &[0x4e, 0x01, 0x05, 0x10, 0x80]);
+        let mut seeked = base.clone();
+        duplicate_hevc_sample_entry(&mut seeked);
+        append_sei_array_to_hevc_entry(&mut seeked, 0, &[0x50, 0x01, 0x84, 0x20, 0x80]);
+        append_trailing_zero_to_second_entry_pps(&mut seeked);
+        assert_ne!(head.bytes, seeked.bytes);
+
+        assert_eq!(
+            collapse_equivalent_hevc_sample_entries(&mut head).expect("three"),
+            2
+        );
+        assert_eq!(
+            collapse_equivalent_hevc_sample_entries(&mut seeked).expect("two"),
+            1
+        );
+        assert_eq!(head.bytes, single);
+        assert_eq!(seeked.bytes, single);
+    }
+
+    #[test]
+    fn equivalent_descriptions_behind_a_non_default_trex_do_not_collapse() {
+        let mut init = minimal_hvcc_dv_init();
+        let video = init.video().expect("video").clone();
+        let fragment = fragment_with_first_video_sample(
+            video.id,
+            length_prefixed_hevc_nals(&[
+                &[0x40, 0x01, 0x0c],
+                &[0x42, 0x01, 0x01],
+                &[0x44, 0x01, 0xc0],
+                &[0x26, 0x01, 0x80],
+            ]),
+        );
+        assert!(promote_hevc_parameter_sets(&mut init, &fragment).expect("promotion"));
+        duplicate_hevc_sample_entry(&mut init);
+        let trex = init
+            .bytes
+            .windows(4)
+            .enumerate()
+            .find_map(|(name, kind)| {
+                (kind == b"trex"
+                    && init.bytes.len() >= name + 16
+                    && be_u32(&init.bytes, name + 8) == video.id)
+                    .then_some(name)
+            })
+            .expect("video trex");
+        init.bytes[trex + 12..trex + 16].copy_from_slice(&2_u32.to_be_bytes());
+        assert_eq!(
+            collapse_equivalent_hevc_sample_entries(&mut init).expect("no collapse"),
+            0
+        );
+    }
+
+    /// Append one more copy of the first HEVC description after the last one.
+    fn duplicate_hevc_sample_entry_at_end(init: &mut Init) {
+        let locations = locate_hevc_sample_entries(&init.bytes).expect("locating entries");
+        let first = locations[0].as_ref().expect("first entry");
+        let last = locations
+            .last()
+            .and_then(Option::as_ref)
+            .expect("last entry");
+        let entry = first.ancestors[1];
+        let copy = init.bytes[entry.start..first.sample_entry_end].to_vec();
+        let at = last.sample_entry_end;
+        let stsd = first.ancestors[2];
+        let ancestors = first.ancestors[2..].to_vec();
+        let delta = copy.len();
+        init.bytes.splice(at..at, copy);
+        let count_at = stsd.start + stsd.header_len + 4;
+        let count = be_u32(&init.bytes, count_at);
+        init.bytes[count_at..count_at + 4].copy_from_slice(&(count + 1).to_be_bytes());
+        for ancestor in ancestors {
+            grow_box(&mut init.bytes, ancestor, delta).expect("growing ancestors");
+        }
+    }
+
+    /// Append a prefix-SEI array (type 39) holding `nal` to the `index`th HEVC
+    /// description's hvcC.
+    fn append_sei_array_to_hevc_entry(init: &mut Init, index: usize, nal: &[u8]) {
+        let locations = locate_hevc_sample_entries(&init.bytes).expect("locating entries");
+        let target = locations[index].as_ref().expect("entry has hvcC");
+        let mut array = vec![39u8];
+        array.extend_from_slice(&1u16.to_be_bytes());
+        array.extend_from_slice(&(nal.len() as u16).to_be_bytes());
+        array.extend_from_slice(nal);
+        let delta = array.len();
+        let at = target.payload.end;
+        let count_at = target.payload.start + 22;
+        let ancestors = target.ancestors.clone();
+        init.bytes.splice(at..at, array);
+        init.bytes[count_at] += 1;
+        for ancestor in ancestors {
+            grow_box(&mut init.bytes, ancestor, delta).expect("growing ancestors");
+        }
+    }
+
+    /// Opt-in: captures of one film started at different keyframes
+    /// (`PLURX_FFMPEG8_GENERATIONS=a.mp4:b.mp4:…`) collapse to one init.
+    #[test]
+    #[ignore = "needs captured ffmpeg 8 generations"]
+    fn captured_ffmpeg8_generations_collapse_to_one_init() {
+        let paths = std::env::var("PLURX_FFMPEG8_GENERATIONS").expect("set the capture paths");
+        let mut collapsed = Vec::new();
+        for path in paths.split(':') {
+            let feed = std::fs::read(path).expect("reading a capture");
+            let (mut init, _, _) = read_all(&feed);
+            assert!(collapse_equivalent_hevc_sample_entries(&mut init).expect("collapse") > 0);
+            collapsed.push(init.bytes);
+        }
+        assert!(
+            collapsed.windows(2).all(|pair| pair[0] == pair[1]),
+            "generations differ"
+        );
+    }
+
+    /// Give the second HEVC description's PPS a trailing zero byte — the
+    /// difference ffmpeg 8's in-band extraction produced in the field.
+    fn append_trailing_zero_to_second_entry_pps(init: &mut Init) {
+        let locations = locate_hevc_sample_entries(&init.bytes).expect("locating entries");
+        let second = locations[1].as_ref().expect("second entry has hvcC");
+        let arrays = init.bytes[second.payload.start + 22];
+        let mut pos = second.payload.start + 23;
+        for _ in 0..arrays {
+            let kind = init.bytes[pos] & 0x3f;
+            let count = u16::from_be_bytes([init.bytes[pos + 1], init.bytes[pos + 2]]);
+            pos += 3;
+            for _ in 0..count {
+                let len = u16::from_be_bytes([init.bytes[pos], init.bytes[pos + 1]]) as usize;
+                if kind == 34 {
+                    init.bytes[pos..pos + 2].copy_from_slice(&((len + 1) as u16).to_be_bytes());
+                    init.bytes.insert(pos + 2 + len, 0);
+                    for &ancestor in &second.ancestors {
+                        grow_box(&mut init.bytes, ancestor, 1).expect("growing ancestors");
+                    }
+                    return;
+                }
+                pos += 2 + len;
+            }
+        }
+        panic!("the second entry declares no PPS");
+    }
+
+    /// Opt-in: a real `ffmpeg -bsf:v hevc_mp4toannexb,extract_extradata` output
+    /// from jellyfin-ffmpeg 8 (two equivalent descriptions) collapses to one
+    /// and promotes cleanly. `PLURX_FFMPEG8_MULTI_STSD=<file.mp4>`.
+    #[test]
+    #[ignore = "needs a captured ffmpeg 8 output"]
+    fn captured_ffmpeg8_repeated_descriptions_collapse() {
+        let path = std::env::var("PLURX_FFMPEG8_MULTI_STSD").expect("set the capture path");
+        let feed = std::fs::read(path).expect("reading the capture");
+        let (init, fragments, _) = read_all(&feed);
+        assert!(matches!(
+            validate_hevc_sample_entries(&init).expect("valid"),
+            HevcSampleEntryLayout::Multiple { count: 2 }
+        ));
+        let mut served = init.clone();
+        promote_hevc_parameter_sets(&mut served, &fragments[0]).expect("promotion");
+        assert_eq!(
+            validate_hevc_sample_entries(&served).expect("valid"),
+            HevcSampleEntryLayout::Single
+        );
+        let segment = merge(&fragments[..1], &served, 1).expect("merge");
+        let mut reader = FragmentReader::new();
+        reader.push(&served.bytes);
+        reader.push(&segment.bytes);
+        assert!(matches!(
+            reader.next_unit().expect("init"),
+            Some(Unit::Init(_))
+        ));
+        assert!(matches!(
+            reader.next_unit().expect("segment"),
+            Some(Unit::Fragment(_))
+        ));
+    }
+
+    #[test]
+    fn hevc_descriptions_that_differ_outside_hvcc_do_not_collapse() {
+        let mut init = minimal_hvcc_dv_init();
+        let video = init.video().expect("video").clone();
+        let fragment = fragment_with_first_video_sample(
+            video.id,
+            length_prefixed_hevc_nals(&[
+                &[0x40, 0x01, 0x0c],
+                &[0x42, 0x01, 0x01],
+                &[0x44, 0x01, 0xc0],
+                &[0x26, 0x01, 0x80],
+            ]),
+        );
+        assert!(promote_hevc_parameter_sets(&mut init, &fragment).expect("first promotion"));
+        duplicate_hevc_sample_entry(&mut init);
+        // A different width in the second description's visual fields.
+        let locations = locate_hevc_sample_entries(&init.bytes).expect("locating entries");
+        let entry = locations[1].as_ref().expect("second entry").ancestors[1];
+        let width_at = entry.start + entry.header_len + 24;
+        init.bytes[width_at] ^= 0x01;
+        assert_eq!(
+            collapse_equivalent_hevc_sample_entries(&mut init).expect("no collapse"),
+            0
+        );
+        assert_eq!(
+            validate_hevc_sample_entries(&init).expect("both valid"),
+            HevcSampleEntryLayout::Multiple { count: 2 }
+        );
     }
 
     #[test]

@@ -355,7 +355,8 @@ pub(crate) async fn readiness(
                 setting:Some("jellyfin_compatibility_enabled"),
                 requirements:vec![DeveloperRequirement { id:"client_qualification",title:"Pinned clients qualified",
                     status:RequirementStatus::Unobservable,
-                    evidence:"The frozen-candidate browsing, playback, tracks and recovery qualification receipt is not visible to this daemon. The saved choice remains authoritative.".into() }],
+                    evidence:"The frozen-candidate browsing, playback, tracks and recovery qualification receipt is not visible to this daemon. The saved choice remains authoritative.".into() },
+                    jellyfin_standard_port(&state)],
             },
             clock_measurement(&state, clock_guard_enforced),
             durable_cluster_work(&state).await,
@@ -2202,6 +2203,38 @@ fn channel_subjects(enabled: bool) -> DeveloperEnableItem {
         DeveloperRequirement{id:"metadata",title:"Metadata coverage",status:if observed.metadata_total>0{RequirementStatus::Met}else{RequirementStatus::Unobservable},evidence:format!("Last observed scope: {} titles, {} missing item overviews, {} truncated inputs. Sparse metadata can remain uncertain.",observed.metadata_total,observed.missing_overviews,observed.truncated)},
         DeveloperRequirement{id:"batch",title:"Recent batch outcome and queued work",status:if observed.error.is_some(){RequirementStatus::Unmet}else{RequirementStatus::Unobservable},evidence:format!("{}; queued work observed: {}. Only new rule evaluations pause when disabled; saves, cached decisions and published playback remain available.",observed.error.unwrap_or_else(||"No recent error recorded".into()),observed.pending>0)},
     ]}
+}
+
+/// Whether a Jellyfin client given only this server's host can connect: that
+/// is Jellyfin's standard port at the root, which this process opens beside
+/// its own. It reads only this process's listener; a container host's port
+/// publishing is outside its view, and the evidence says so.
+fn jellyfin_standard_port(state: &AppState) -> DeveloperRequirement {
+    use crate::http::JellyfinStandardPort;
+    let (status, evidence) = match state.jellyfin_standard_port.current() {
+        JellyfinStandardPort::Listening(address) => (
+            RequirementStatus::Met,
+            format!(
+                "This process answers Jellyfin clients at the root of {address}, so a client given only this server's host connects. Whether a container host publishes that port is outside this process's view."
+            ),
+        ),
+        JellyfinStandardPort::Unavailable { address, error } => (
+            RequirementStatus::Unmet,
+            format!(
+                "This process could not listen on {address} ({error}). Until that port is free, or server.jellyfin_port names another, clients need this server's /jellyfin address."
+            ),
+        ),
+        JellyfinStandardPort::Off => (
+            RequirementStatus::Unmet,
+            "This process opened no Jellyfin standard-port listener: server.jellyfin_port is 0 or names the main port, or startup has not reached it. Clients need this server's /jellyfin address.".into(),
+        ),
+    };
+    DeveloperRequirement {
+        id: "standard_port",
+        title: "Reachable by host alone",
+        status,
+        evidence,
+    }
 }
 
 #[cfg(test)]

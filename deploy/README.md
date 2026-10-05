@@ -704,6 +704,7 @@ conversion Off until a real pod proves the filesystem contract above.
 | Port | Proto | Purpose |
 |---|---|---|
 | 32400 | TCP | HTTP API + web app (and the Plex-compat façade) |
+| 8096 | TCP | Jellyfin compatibility at the server root, Jellyfin's standard port, so a Jellyfin client given only a host connects; answers only while Settings → Developer enables it (host port movable via `PLURX_JELLYFIN_HOST_PORT`) |
 | 32414 | UDP | GDM discovery so Plex/Kodi clients find the server on the LAN (host port movable via `PLURX_GDM_PORT`, but discovery only works on 32414) |
 | 5353 | UDP multicast | Bonjour `_plurx._tcp` discovery for native clients; the Compose companion owns this on the host network |
 

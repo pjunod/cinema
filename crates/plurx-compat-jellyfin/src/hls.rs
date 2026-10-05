@@ -137,7 +137,7 @@ pub fn rewrite_manifest(
         || !native_session
             .bytes()
             .all(|c| c.is_ascii_alphanumeric() || c == b'-' || c == b'_')
-        || !public_base.starts_with("/jellyfin/")
+        || !(public_base.starts_with("/jellyfin/Videos/") || public_base.starts_with("/Videos/"))
         || !public_base.ends_with('/')
         || public_base.contains(['?', '#', '%', '\\'])
         || public_base.contains("..")
@@ -366,6 +366,32 @@ mod tests {
         )
         .is_err());
         assert!(without_subtitle_renditions("#EXTM3U\n#EXT-X-MEDIA:TYPE\n").is_err());
+    }
+
+    /// The facade's two mounts: `/jellyfin` on Plurx's port and the root of
+    /// the Jellyfin standard port. Children follow whichever was used; any
+    /// other base is refused.
+    #[test]
+    fn manifest_children_follow_the_mount_and_refuse_any_other_base() {
+        let master = "#EXTM3U\n#EXT-X-STREAM-INF:BANDWIDTH=750000,CODECS=\"avc1.64001f,mp4a.40.2\"\nindex.m3u8\n";
+        let root = BASE.trim_start_matches("/jellyfin");
+        assert_eq!(
+            rewrite_manifest(master, &Resource::Master, SESSION, root, false).expect("root mount"),
+            rewrite_manifest(master, &Resource::Master, SESSION, BASE, false)
+                .expect("jellyfin mount")
+                .replace(BASE, root)
+        );
+        for base in [
+            "/api/v1/hls/x/",
+            "/Items/x/",
+            "Videos/x/",
+            "/jellyfinx/Videos/x/",
+        ] {
+            assert!(
+                rewrite_manifest(master, &Resource::Master, SESSION, base, false).is_err(),
+                "{base}"
+            );
+        }
     }
 
     #[test]

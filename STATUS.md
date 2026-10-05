@@ -4,62 +4,63 @@
 commit as the work it describes; a stale entry here is a bug. Newest effort
 first.
 
-## 2026-10-04: the architecture effort is on `main`; fleet on `b5e39b8bb`
+## 2026-10-04: the architecture effort is on `main`; the close-out is a draft PR
 
-**`main` is `1c8ee9acb`. All four nodes were deployed to `b5e39b8bb` on
-2026-10-04; `1c8ee9acb` (#802) is not deployed yet.**
+**All four nodes were deployed to `b5e39b8bb` on 2026-10-04; later `main`
+commits are not deployed.**
 
-- **#793 — architecture-review effort, merged as `4cfd1bdd1`.** The branch
-  `effort/architecture-review-2026-09-20` landed whole, without the
-  pre-merge relevance check that was planned. It is not yet device- or
-  fleet-qualified; the 2026-10-04 relevance pass lists the rulings Paul owes
-  and the evidence still owed, and the
+- **#793 — architecture-review effort (`4cfd1bdd1`)** landed whole, before
+  the planned relevance check. Not device- or fleet-qualified; the
   [work board](docs/reviews/ARCHITECTURE-REVIEW-2026-09-20-WORKBOARD.md) has
-  the corrected row states. On by default with it: sign-ins expire after 90
-  idle days; the Lo/Ro fold and −4 dBFS limiter on typed stereo encodes; the
-  corrected CPU tone-map chain; SDR `CODECS` in master playlists; bounded
-  replica reads; the off-writer Raft snapshot copy; and the profile C release
-  build with packed `.dwp` debug info. Behind Developer switches, default
-  off: cluster clock guard enforcement and display-aware Auto. Rolling back
-  is not a revert: SQLite and replicated migrations from the effort and #797
-  have run on every node.
-- **#797 — Jellyfin client compatibility facade, merged as `b5e39b8bb`.** Off
-  by default (Developer → *Allow Jellyfin clients*); physical client
-  qualification is still owed.
-- **#802 — web: Play after a long pause no longer pulls the picture back a
-  second, merged as `1c8ee9acb`.** A pause of 60 s or more is an Auto quality
-  boundary; the web player now asks for the route before seeking, and a
-  retained route leaves the position alone. Web only; needs a server deploy
-  and a browser check.
-- **The 2026-10-04 close-out PR, in progress as a draft.** One PR to
-  `main` for the fixes no ruling waits on: K-06 (the clock roster stops
-  counting learners, the removal fence's raw clock read, and a fresh 45 s
-  membership admission budget); a Developer switch for SDR `CODECS` in
-  master playlists, default off; D6 — a link negative is acknowledged from the in-memory
-  receipt when network priors are off; S-14's learner removal and voter leave
-  on the shared `RemovalTransition`; L-02's #537 cleanup; the K-05
-  `watch_rollups` plan; D-01's matcher timeout reset (Android 146); the
-  hiqlite fork ledger rows and a test tying them to source; the host-name
-  scrub; and the Apple and Android unit suites green on current `main`.
-  Progressive remux leader-restart grace: PR #807 (separate). This
-  records change (work board, plan headers, clock docs, `API.md`,
-  `CHANGELOG.md`, this page) is part of it.
-- **Rulings Paul owes** — each is written up with a recommendation in the
-  2026-10-04 relevance pass (an agent-side project document, not a file in
-  this tree): tag `1f0a91c9e` as the pre-effort release; K-06 keep the
-  enforce switch or remove enforcement until measured; S-10 whether SDR
-  `CODECS` stays on before devices are re-checked; A-05 the orphan runners
-  and SQLite v93 link columns; S-06 and S-11 close on #766's Video Quality
-  Program; C-07 whether the Plex facade survives; K-04 remove the
-  replica-reads switch after the lab readout; K-05 fix the `watch_rollups`
-  regression; W-02 waive LG webOS and Fire TV; P-02 M4's systemd half;
-  effort lanes (`make unit` on effort PRs, or no more effort branches); which
-  effort machinery is kept; and the decisions taken on Paul's behalf (S-02
-  Decisions 1 and 6, S-09's copy rule, D-01's buffer-role no-build and
-  device substitutions, A-03's acceptance bar, S-14's D-M7/D-M8, S-08's
-  deinterlace bars). K-02's snapshot path was accepted on 2026-10-04, and
-  A-04's switch location is already settled (Developer now, Playback at
-  graduation).
+  the corrected row states. On by default with it: 90-day sign-in expiry, the
+  Lo/Ro fold and −4 dBFS limiter on typed stereo encodes, the CPU tone-map
+  chain, bounded replica reads, the off-writer Raft snapshot copy, the
+  profile C release build. Rolling back is not a revert: its migrations have
+  run on every node. **#797** (Jellyfin facade, off by default) and **#802**
+  (web long-pause resume) followed.
+- **Close-out PR (`claude/architecture-closeout`, draft).** K-06: learners no
+  longer block the clock guard but a lease owner must be bounded, the removal
+  fence's raw clock read goes through the guard, vendor start has its own
+  bound and admission a fresh 45 s. SDR `CODECS` behind a Developer switch,
+  default off. D6: a link negative is acknowledged from the live receipt with
+  network priors off. S-14, L-02, K-05 and D-01 (Android 146) fixes; the
+  hiqlite fork ledger tied to source; the host-name scrub and its guard;
+  Apple 208. The progressive-remux leader-restart grace is PR #807.
+- **Rulings Paul owes** are listed with recommendations in the 2026-10-04
+  relevance pass (an agent-side project document). K-02's snapshot path was
+  accepted on 2026-10-04.
+
+## Apple TV: new HEVC WEB-DLs refused with 503 — ffmpeg 8 repeats the sample description
+
+**Branch `fix/ffmpeg8-repeated-hevc-descriptions`.** Paul reported
+2026-10-04 that *Taylor Tomlinson: Prodigal Daughter* (file 91) and
+*Tom Segura: Teacher* (file 106) error out on the Apple TV
+(`NSURLErrorDomain -1008`, underlying HTTP 503). Neither has a VOD index, so
+both play through live-HLS copy, and every attempt ended in `copy segmenter
+rejected the stream shape: … this stsd has 2 HEVC sample entries`; the
+legacy-muxer fallback wrote the same init and `master.m3u8` refused it (503).
+Cause: jellyfin-ffmpeg 8's MOV muxer appends a sample description whenever a
+packet carries new-extradata side data that differs byte-wise from the current
+one, and `extract_extradata` (needed for Matroska sources with a bare 23-byte
+`hvcC`) attaches it on every parameter-set keyframe. Reproduced on six of six
+2160p sources on media1: two descriptions identical outside `hvcC`, the same
+`hvcC` header and the same VPS/SPS/PPS modulo a PPS trailing zero (only SEI
+arrays differ), no `tfhd` sample-description index, `trex` default 1. The fix
+collapses such provably decoder-equivalent descriptions to the first, in
+`fmp4::collapse_equivalent_hevc_sample_entries`, called by both served-init
+builders (`promote_from`, `promote_hevc_parameter_sets`), by the copy
+segmenter on the init, and by VOD's `InitIdentity` before it digests a
+generation's muxer init; descriptions that differ in anything else keep the
+typed `MultipleHevcSampleEntries` refusal. The kept `hvcC` is reduced to its
+VPS/SPS/PPS arrays: ffmpeg 8's extraction copies the leading keyframe's SEI
+(decoded-picture hashes included), so without that every VOD generation
+started at a different keyframe would have refused as muxer drift once these
+titles get an index. Verified on captures: a real 8.1.3 copy pipe publishes a
+one-description init end to end, and four generations of file 91 started at
+0/300/900/1800 s collapse to byte-identical inits (opt-in tests).
+Not addressed here: file 91's fragment index also fails on a separate
+`Non-monotonic DTS` muxer error, and file 6710's `410 Gone` in the same log
+window is unrelated.
 
 ## Content analysis stopped: the queue's receipt bound is the next cliff after #608
 
