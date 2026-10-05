@@ -8,6 +8,12 @@ struct LibraryView: View {
     @State private var sort: LibrarySort = .title
     @State private var filter: WatchFilter = .all
     @State private var query = ""
+    @AppStorage("plurx.libraryPresentation") private var presentation = "rows"
+    @State private var loadedKey: String?
+    @State private var expandedGroup: String?
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+
+    private var rows: Bool { presentation != "grid" }
 
     private var items: [Item] { state.items }
     private var visibleItems: [Item] { state.visibleItems }
@@ -31,32 +37,54 @@ struct LibraryView: View {
     private var loadKey: String { "\(collection.id):\(sort.rawValue)" }
 
     var body: some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: 18) {
-                summary
-                TextField("Find a title in this library", text: $query)
-                    #if os(iOS)
-                    .textFieldStyle(.roundedBorder)
-                    #endif
-                    .accessibilityLabel("Find a title in this library")
-                stateContent
+        ScrollViewReader { proxy in
+            ScrollView {
+                VStack(alignment: .leading, spacing: 18) {
+                    summary
+                    TextField("Find a title in this library", text: $query)
+                        #if os(iOS)
+                        .textFieldStyle(.roundedBorder)
+                        #endif
+                        .accessibilityLabel("Find a title in this library")
+                    if rows && !state.groups.isEmpty {
+                        Menu {
+                            ForEach(state.groups) { group in
+                                Button(group.label) {
+                                    withAnimation(reduceMotion ? nil : .default) { proxy.scrollTo(group.id, anchor: .top) }
+                                }
+                            }
+                        } label: { Label("Jump to group", systemImage: "list.bullet") }
+                        .accessibilityIdentifier("library-group-jump")
+                    }
+                    if let error {
+                        HStack {
+                            Text("Incomplete library: \(error)").foregroundColor(Palette.muted)
+                            Button("Retry") { Task { await state.retry() } }
+                        }
+                    }
+                    stateContent
+                }
+                .padding(.horizontal, screenHPad)
+                .padding(.bottom, 36)
             }
-            .padding(.horizontal, screenHPad)
-            .padding(.bottom, 36)
-        }
-        .background(Palette.bg.ignoresSafeArea())
-        .navigationTitle(collection.title)
-        #if os(iOS)
-        .navigationBarTitleDisplayMode(.inline)
-        .refreshable { await load() }
-        #endif
-        .toolbar { libraryToolbar }
-        .task(id: loadKey) { await load() }
-        .task(id: query) { await state.queryChanged(query) }
-        .task(id: filter) { state.filterChanged(filter) }
-        .onDisappear {
-            state.stop()
-            visibleIndices.removeAll()
+            .background(Palette.bg.ignoresSafeArea())
+            .navigationTitle(collection.title)
+            #if os(iOS)
+            .navigationBarTitleDisplayMode(.inline)
+            .refreshable { await load(force: true) }
+            #endif
+            .toolbar { libraryToolbar }
+            .task(id: loadKey) { await load() }
+            .task(id: rows) { state.presentationChanged(rows: rows) }
+            .task(id: query) { await state.queryChanged(query) }
+            .task(id: filter) { state.filterChanged(filter) }
+            .navigationDestination(item: $expandedGroup) { key in
+                LibraryGroupView(state: state, groupID: key, title: state.groups.first { $0.id == key }?.label ?? key)
+            }
+            .onDisappear {
+                if expandedGroup == nil { state.stop() }
+                visibleIndices.removeAll()
+            }
         }
     }
 
@@ -102,6 +130,33 @@ struct LibraryView: View {
                 description: filter == .all && query.isEmpty ? nil : Text("Clear the title or watch filter to see more.")
             )
             .frame(maxWidth: .infinity)
+        } else if rows {
+            LazyVStack(alignment: .leading, spacing: 28) {
+                ForEach(state.groups) { group in
+                    VStack(alignment: .leading, spacing: 12) {
+                        HStack {
+                            Text(group.label).font(.title2.bold()).accessibilityAddTraits(.isHeader)
+                            Text("\(group.items.count)\(complete ? "" : " loaded")").foregroundColor(Palette.muted)
+                            Spacer()
+                            Button("View all") { expandedGroup = group.id }
+                            .accessibilityLabel("View all \(group.label) items")
+                        }
+                        ScrollView(.horizontal) {
+                            LazyHStack(alignment: .top, spacing: 18) {
+                                ForEach(group.items) { item in
+                                    NavigationLink(value: Route.item(item.id)) {
+                                        PosterCard(item: item, width: model.posterSize.posterWidth)
+                                    }
+                                    .posterButtonStyle()
+                                }
+                            }
+                            .padding(.vertical, 12)
+                        }
+                        .accessibilityIdentifier("library-row-\(group.id)")
+                    }
+                    .id(group.id)
+                }
+            }
         } else {
             LazyVGrid(columns: columns, alignment: .leading, spacing: 24) {
                 ForEach(Array(visibleItems.enumerated()), id: \.element.id) { index, item in
@@ -135,6 +190,14 @@ struct LibraryView: View {
     private var libraryToolbar: some ToolbarContent {
         ToolbarItemGroup(placement: .automatic) {
             Menu {
+                Picker("View", selection: $presentation) {
+                    Text("Rows").tag("rows")
+                    Text("Grid").tag("grid")
+                }
+            } label: {
+                Label("View", systemImage: rows ? "rectangle.grid.1x2" : "square.grid.2x2")
+            }
+            Menu {
                 Picker("Sort", selection: $sort) {
                     ForEach(sorts) { option in
                         Label(option.label, systemImage: option.icon).tag(option)
@@ -157,7 +220,12 @@ struct LibraryView: View {
     }
 
     @MainActor
-    private func load() async {
+    private func load(force: Bool = false) async {
+        if !force && loadedKey == loadKey {
+            await state.resume()
+            return
+        }
+        loadedKey = loadKey
         let apiModel = model
         let selectedCollection = collection
         state.configure(
@@ -165,5 +233,41 @@ struct LibraryView: View {
             legacy: { sort, publish in try await apiModel.libraryItems(selectedCollection, sort: sort, publish: publish) }
         )
         await state.load(libraryIds: collection.libraries.map(\.id), sort: sort)
+    }
+}
+
+
+/// Uses the same coordinator so arriving pages update the expanded group.
+/// Pushing a destination retains the rows' native scroll and focus state.
+private struct LibraryGroupView: View {
+    @EnvironmentObject var model: AppModel
+    @ObservedObject var state: LibraryGridCoordinator
+    let groupID: String
+    let title: String
+    private var items: [Item] { state.groups.first { $0.id == groupID }?.items ?? [] }
+
+    var body: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 18) {
+                Text("\(items.count)\(state.complete ? " items" : " loaded · library still loading")")
+                    .foregroundColor(Palette.muted)
+                if let error = state.error {
+                    Text("Incomplete library: \(error)")
+                    Button("Retry") { Task { await state.retry() } }
+                }
+                LazyVGrid(columns: [GridItem(.adaptive(minimum: model.posterSize.posterWidth), spacing: 18)], spacing: 24) {
+                    ForEach(items) { item in
+                        NavigationLink(value: Route.item(item.id)) {
+                            PosterCard(item: item, width: model.posterSize.posterWidth)
+                        }.posterButtonStyle()
+                    }
+                }
+            }
+            .padding(.horizontal, screenHPad)
+            .padding(.bottom, 36)
+        }
+        .background(Palette.bg.ignoresSafeArea())
+        .navigationTitle(title)
+        .task { await state.fetchUntil(Int.max) }
     }
 }

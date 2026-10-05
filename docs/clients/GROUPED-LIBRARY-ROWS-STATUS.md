@@ -1,6 +1,6 @@
 # Grouped library rows — implementation and acceptance status
 
-**Status:** merged; post-merge checks in progress · **Updated:** 2026-10-05 · **Branch:**
+**Status:** native parity implementation in progress · **Updated:** 2026-10-05 · **Branch:**
 `codex/grouped-library-rows` · **Pull request:** [#821](http://192.168.4.7:3000/noirr/plurx/pulls/821)
 
 Companion to [WEB-SHELL-LAYOUT.md](WEB-SHELL-LAYOUT.md), which maps the web
@@ -154,3 +154,31 @@ keyboard adapter; the row now calls an adapter-owned wiring function too.
 The merged-source keyboard navigation check and row-boundary browser case
 passed. The follow-up corrects only the adapter boundary, without relaxing
 its enforcement or changing keyboard behavior.
+
+
+## Native Android and Apple parity — 2026-10-05
+
+The approved mobile renders also cover native Android and iOS. The initial
+web-only interpretation was incorrect; this follow-up completes that scope
+in one native-client PR, including shared Android TV and tvOS screens.
+Work uses a fresh agent-owned clone, never the user's checkout.
+
+| Surface | State | Acceptance / evidence |
+|---|---|---|
+| Native grouping | implemented | Same five sort dimensions, unknown groups, stable row keys and full filtered membership. |
+| Android | compiled | Existing LibraryPager and MediaRow; saved Rows/Grid, title search, jump menu, View all, partial error Retry. |
+| Apple | compiled | Existing LibraryGridCoordinator and PosterCard; saved Rows/Grid, jump menu, View all destination, partial error Retry. |
+| Paging ownership | implemented | Rows request all pages through the existing pager; Grid keeps viewport prefetch. No second loader. |
+| Review and tests | pending | One adversarial review when ready, then focused tests; only failures rerun. |
+| Merge | pending | One batched native PR; retain regression trailers and monitor remaining tests under the user's merge-first direction. |
+
+Rows are the default on both native platforms. Native lazy row containers
+keep cards bounded to the viewport without limiting group membership.
+Grouping and filtering run off the UI thread. Release counters will increase
+with the client changes; this work does not deploy a build or change playback.
+
+
+Native build evidence before review: Android debug APK, JVM test sources,
+and instrumentation APK compile; iOS and tvOS application builds pass;
+iOS XCTest sources compile with build-for-testing. No tests have been run
+for this native follow-up before its adversarial review.

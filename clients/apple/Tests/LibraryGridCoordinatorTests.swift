@@ -142,4 +142,44 @@ final class LibraryGridCoordinatorTests: XCTestCase {
         XCTAssertEqual(queries, ["Zero Harbor"])
         XCTAssertEqual(state.visibleItems.map(\.id), [2])
     }
+    func testRowsDriveTheWholeLibraryAndRetryKeepsDecidedItems() async throws {
+        let rows = try items(421)
+        var fail = true
+        var offsets: [Int] = []
+        let state = LibraryGridCoordinator(fetch: { _, _, offset in
+            offsets.append(offset)
+            if offset == 200 && fail { fail = false; throw URLError(.cannotConnectToHost) }
+            return Page(items: Array(rows.dropFirst(offset).prefix(200)), total: rows.count)
+        }, delay: { _ in })
+        defer { state.stop() }
+        state.presentationChanged(rows: true)
+        await state.load(libraryIds: [1], sort: .title)
+        await waitUntil { state.error != nil }
+        XCTAssertFalse(state.complete)
+        XCTAssertEqual(state.items.count, 200)
+        await state.retry()
+        await waitUntil { state.groups.flatMap(\.items).count == 421 }
+        XCTAssertTrue(state.complete)
+        XCTAssertNil(state.error)
+        XCTAssertEqual(offsets, [0, 200, 200, 400])
+        XCTAssertEqual(Set(state.groups.flatMap(\.items).map(\.id)).count, 421)
+    }
+
+    func testReturningToLoadedRowsDoesNotRefetchPages() async throws {
+        let rows = try items(421)
+        var calls = 0
+        let state = LibraryGridCoordinator(fetch: { _, _, offset in
+            calls += 1
+            return Page(items: Array(rows.dropFirst(offset).prefix(200)), total: rows.count)
+        }, delay: { _ in })
+        defer { state.stop() }
+        state.presentationChanged(rows: true)
+        await state.load(libraryIds: [1], sort: .title)
+        await waitUntil { state.complete && state.visibleItems.count == 421 }
+        state.stop()
+        await state.resume()
+        XCTAssertEqual(calls, 3)
+        XCTAssertEqual(state.visibleItems.count, 421)
+    }
+
 }
