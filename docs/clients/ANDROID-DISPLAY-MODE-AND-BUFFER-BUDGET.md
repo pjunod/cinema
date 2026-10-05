@@ -1,6 +1,6 @@
 # Android display-mode matching and buffer budget — implementation plan
 
-**Status:** open — M1–M3 and M4 actual-heap containment on `main` since 2026-10-04 (#793); M0 measured on the Google TV Streamer 2026-10-02; M4 larger allocation decided *not justified* (no-build on buffer roles, coordinator decision, awaits Paul's ratification, see the 2026-10-04 relevance pass §2.15); the §5.6 matcher-timeout reset is built in the 2026-10-04 close-out PR (Android 145); M0 on the other televisions and the M5 HDMI matrix open · **Executes:** §2.9 / D1 / F-android-1 /
+**Status:** open — M1–M3 and M4 actual-heap containment on `main` since 2026-10-04 (#793); M0 measured on the Google TV Streamer 2026-10-02; M4 larger allocation decided *not justified* (no-build on buffer roles, coordinator decision, awaits Paul's ratification, see the 2026-10-04 relevance pass §2.15); the §5.6 matcher-timeout reset is built in the 2026-10-04 close-out PR (Android 146); M0 on the other televisions and the M5 HDMI matrix open · **Executes:** §2.9 / D1 / F-android-1 /
 F-android-2 from
 [ARCHITECTURE-REVIEW-2026-09-20.md](../reviews/ARCHITECTURE-REVIEW-2026-09-20.md)
 · **Written:** 2026-09-20 against `main` @ `88a3957a`
@@ -615,13 +615,18 @@ owner may have set its own. The `late` path (`onTracksChanged`, no source rate)
 switches mid-play by design and is not this gap.
 
 **Built 2026-10-04 (Android build 146).** `match` now withdraws the request —
-`preferredDisplayModeId = 0` — when the wait times out and this owner is still
-current, and leaves it on the owner-changed return; the decision is
-`clearsDisplayModeRequestAfterWait`, pinned by
-`DisplayModeMatcherTest.timedOutWaitWithdrawsTheRequestOnlyWhileItStillOwnsTheWindow`.
-M5 still has to observe it: with the setting on, a timed-out switch should
-leave the mode unchanged through playback rather than change it after first
-frame.
+`preferredDisplayModeId = 0` — when a prepare-time wait times out and this owner
+is still current, and leaves it on the owner-changed return. A `late` wait
+(the `onTracksChanged` fallback above) never withdraws, matched or not: it is
+already mid-play by design, and a display that completes that switch after the
+2 s bound is doing what the late request asked for. The decision is
+`clearsDisplayModeRequestAfterWait(matched, stillOwner, late)`, pinned by
+`DisplayModeMatcherTest.timedOutPrepareWaitWithdrawsTheRequestOnlyWhileItStillOwnsTheWindow`
+and `DisplayModeMatcherTest.lateWaitNeverWithdrawsTheRequest`. The
+`playback_display_mode` detail now ends `withdrawn=true|false`, so telemetry
+records which waits cleared the request. M5 still has to observe it: with the
+setting on, a timed-out prepare-time switch should leave the mode unchanged
+through playback rather than change it after first frame.
 
 ---
 
@@ -733,3 +738,4 @@ trailers `Agent-Model:` / `Agent-Session:` on every commit of the branch.
 | 2026-10-02 | claude-opus-5-5 | https://claude.ai/code/session_01CAyBrYCQ7PpAtuZwUxKfp7 | M4 decision | `opus/client-evidence` | Coordinator decision for Paul's review: larger incumbent allocation not justified; granted-heap containment stays as M4 (§5.5). |
 | 2026-10-02 | claude-opus-5-5 | https://claude.ai/code/session_01CAyBrYCQ7PpAtuZwUxKfp7 | M5 precondition | `opus/client-evidence` | `display_mode_match` is off on the fleet, so only the setting-OFF row is observed (Google TV stayed 2160p60). Matcher timeout leaves `preferredDisplayModeId` set (§5.6 note); M5 must watch for a late switch. |
 | 2026-10-04 | claude-opus-5-5 | https://claude.ai/code/session_01ENdV5pjk5WztKEXnKHy8YT | §5.6 timeout correction | `0acff727`, Android build 146 | On timeout with the owner still current the matcher sets `preferredDisplayModeId` back to 0; the owner-changed return does not clear. JVM regression `timedOutWaitWithdrawsTheRequestOnlyWhileItStillOwnsTheWindow` (four cases). Not compiled or run here (no Android SDK in this session); no device observation. |
+| 2026-10-04 | claude-opus-5-5 | https://claude.ai/code/session_01ENdV5pjk5WztKEXnKHy8YT | §5.6 review fix | close-out PR, Android build 146 | Adversarial review: the withdrawal also fired on the `late` (`onTracksChanged`) wait, which switches mid-play by design. The helper now takes `late` and never withdraws on that path; the test was renamed `timedOutPrepareWaitWithdrawsTheRequestOnlyWhileItStillOwnsTheWindow` and `lateWaitNeverWithdrawsTheRequest` added; telemetry detail gains `withdrawn=`. Not compiled or run here (no Android SDK in this session). |

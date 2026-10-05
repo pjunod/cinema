@@ -20,16 +20,19 @@ internal data class DisplayModeMatchResult(
     val toHz: Float? = null,
     val waitMs: Long = 0,
     val late: Boolean = false,
+    /** True when this wait cleared `preferredDisplayModeId` (§5.6 timeout withdrawal). */
+    val withdrawn: Boolean = false,
 ) {
     fun detail(): String = String.format(
         Locale.US,
-        "outcome=%s result=%s source_fps=%.3f from_hz=%.3f to_hz=%.3f wait_ms=%d",
+        "outcome=%s result=%s source_fps=%.3f from_hz=%.3f to_hz=%.3f wait_ms=%d withdrawn=%b",
         if (late && outcome !in setOf("disabled", "unsupported", "no_source_rate")) "late" else outcome,
         outcome,
         sourceFps ?: 0.0,
         fromHz ?: 0f,
         toHz ?: 0f,
         waitMs,
+        withdrawn,
     )
 }
 
@@ -46,9 +49,14 @@ internal fun logDisplayModeResult(result: DisplayModeMatchResult) {
  * playback (ANDROID-DISPLAY-MODE-AND-BUFFER-BUDGET §5.6). A wait whose owner
  * changed leaves it alone, because the new owner may already have set its own
  * request. A matched wait keeps the mode it asked for.
+ *
+ * A `late` wait (the `onTracksChanged` fallback when the plan carried no source
+ * rate) never withdraws: playback is already running, the mid-play switch is
+ * that path's purpose by design (§5.6), and a display that completes the switch
+ * after the 2 s bound is still doing what the late request asked for.
  */
-internal fun clearsDisplayModeRequestAfterWait(matched: Boolean, stillOwner: Boolean): Boolean =
-    !matched && stillOwner
+internal fun clearsDisplayModeRequestAfterWait(matched: Boolean, stillOwner: Boolean, late: Boolean): Boolean =
+    !matched && stillOwner && !late
 
 /** Owns one activity window's exact display-mode request and bounded wait. */
 internal class DisplayModeMatcher(private val activity: Activity) {
@@ -108,7 +116,8 @@ internal class DisplayModeMatcher(private val activity: Activity) {
             }
         } == true
         val stillOwner = owner == generation
-        if (clearsDisplayModeRequestAfterWait(matched, stillOwner)) {
+        val withdrawn = clearsDisplayModeRequestAfterWait(matched, stillOwner, late)
+        if (withdrawn) {
             val attributes = activity.window.attributes
             attributes.preferredDisplayModeId = 0
             activity.window.attributes = attributes
@@ -130,6 +139,7 @@ internal class DisplayModeMatcher(private val activity: Activity) {
             toHz = requested.refreshHz,
             waitMs = (SystemClock.elapsedRealtime() - startedAt).coerceAtLeast(0),
             late = late,
+            withdrawn = withdrawn,
         )
     }
 
