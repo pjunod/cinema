@@ -146,8 +146,7 @@ pub(crate) enum TransportOrigin {
 /// it left optional.
 pub(crate) struct DvrTransport {
     pub(crate) channel: LiveTvChannel,
-    /// The tuner configuration generation this transport opened under.
-    /// `drain_before` compares it exactly as it does for a session. A viewer
+    /// The tuner configuration generation this transport opened under. A viewer
     /// may join across it (§2.4 D7, option (b)): the bytes do not depend on
     /// any generation-scoped setting except the device, which is checked
     /// separately below.
@@ -2894,20 +2893,6 @@ impl LiveTvManager {
         }
     }
 
-    /// Close whatever transport is registered for this channel now.
-    pub(crate) async fn close_transport(&self, channel_id: &str) {
-        let transport = {
-            let registry = self
-                .registry
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            registry.transports.get(channel_id).cloned()
-        };
-        if let Some(transport) = transport {
-            self.close_transport_arc(transport).await;
-        }
-    }
-
     /// Close exactly this transport: cancel it, settle its sinks, close its
     /// viewers' feeds, take it out of the registry if it is still the entry
     /// there, join the worker that owns the tuner response, then say so.
@@ -5284,7 +5269,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_drain_closes_a_shared_transport_and_ends_every_viewer() {
+    async fn closing_a_shared_transport_ends_every_viewer_and_joins_its_reader() {
         let root = tempfile::tempdir().expect("root");
         let manager = transport_test_manager(root.path());
         let serving = crate::serving_fence::ServingAuthority::always_ready();
@@ -5312,12 +5297,12 @@ mod tests {
         *transport.worker.lock().expect("worker slot") = Some(worker);
         tokio::time::sleep(std::time::Duration::from_millis(20)).await;
 
-        manager.drain_before(4).await.expect("drain");
+        manager.close_all_transports().await;
         assert!(transport.is_closed());
         assert_eq!(manager.registry.lock().expect("registry").held(), 0);
         assert!(
             dropped.load(Ordering::Acquire),
-            "the drain joined the tuner's reader"
+            "closing joined the tuner's reader"
         );
         for feed in [&mut a_feed, &mut b_feed] {
             let ended = tokio::time::timeout(std::time::Duration::from_secs(1), async {

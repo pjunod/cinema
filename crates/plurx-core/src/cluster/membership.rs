@@ -14354,11 +14354,11 @@ mod tests {
     }
 
     #[test]
-    fn live_tv_drain_response_signature_binds_each_exchange_field_and_domain() {
+    fn internal_peer_response_signature_binds_each_exchange_field_and_domain() {
         let key = ActivitySigningKey::from_seed_hex(&"42".repeat(32)).expect("fixture signing key");
         let nonce = uuid::Uuid::new_v4().to_string();
         let other_nonce = uuid::Uuid::new_v4().to_string();
-        let path = "/_internal/v1/live-tv/drain";
+        let path = "/_internal/v1/live-tv/start-state";
         let payload = br#"["owner","controller","nonce",7,2]"#;
         let message = internal_peer_response_message("owner", "controller", &nonce, path, payload)
             .expect("message");
@@ -14376,7 +14376,7 @@ mod tests {
                 "controller",
                 &nonce,
                 path,
-                b"changed cutoff or count",
+                b"changed payload",
             ),
             internal_peer_auth_message("owner", "controller", 1, &nonce, "POST", path, payload),
         ] {

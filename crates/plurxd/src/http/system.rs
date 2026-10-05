@@ -1792,6 +1792,9 @@ pub struct SettingsDto {
     pub live_tv_max_output_height: u16,
     pub live_tv_deinterlace_output: String,
     pub live_tv_config_generation: i64,
+    /// Legacy owner-handoff barrier from the single-owner model #537
+    /// replaced. Nothing sets or reads it any more; it is always `""` / `0`
+    /// and stays in the response only because older clients decode it.
     pub live_tv_transition_from_owner_node_id: String,
     pub live_tv_transition_drain_before: i64,
     pub live_tv_guide_source: String,
@@ -2298,8 +2301,8 @@ async fn settings_dto(state: &AppState) -> Result<SettingsDto, ApiError> {
         live_tv_max_output_height: live_tv.max_output_height,
         live_tv_deinterlace_output: live_tv.deinterlace_output.as_str().to_owned(),
         live_tv_config_generation: live_tv.generation,
-        live_tv_transition_from_owner_node_id: live_tv.transition_from_owner_node_id,
-        live_tv_transition_drain_before: live_tv.transition_drain_before,
+        live_tv_transition_from_owner_node_id: String::new(),
+        live_tv_transition_drain_before: 0,
         live_tv_guide_source: live_tv.guide_source.as_str().to_owned(),
         live_tv_xmltv_url: live_tv.xmltv_url,
         live_tv_guide_hours: live_tv.guide_hours,
@@ -2601,6 +2604,8 @@ pub struct UpdateSettings {
     /// while disabled, run readiness, then enable in a separate request.
     pub live_tv_enabled: Option<bool>,
     pub live_tv_device_ipv4: Option<String>,
+    /// Legacy; accepted and ignored since #537 (the owner is always the
+    /// node that answers). See `update_settings`.
     pub live_tv_owner_node_id: Option<String>,
     pub live_tv_max_sessions: Option<u8>,
     pub live_tv_output_height: Option<u16>,
@@ -2634,7 +2639,8 @@ pub struct UpdateSettings {
     pub backup_destination: Option<String>,
     pub backup_schedule_utc: Option<String>,
     pub backup_keep: Option<i64>,
-    /// Explicit admin attestation, never an automatic timeout override.
+    /// Legacy single-owner attestation (`{node_id, …}`), still sent by shipped
+    /// native clients. Accepted and ignored since #537; see `update_settings`.
     pub live_tv_fenced_owner: Option<serde_json::Value>,
     /// Set the TMDB API key. Empty string clears it. Absent leaves it as-is.
     pub tmdb_api_key: Option<String>,
@@ -2782,14 +2788,10 @@ fn live_tv_setting_values(config: &crate::live_tv::LiveTvConfig) -> Vec<(&'stati
             keys::LIVE_TV_MAX_OUTPUT_HEIGHT,
             config.max_output_height.to_string(),
         ),
-        (
-            keys::LIVE_TV_TRANSITION_FROM_OWNER_NODE_ID,
-            config.transition_from_owner_node_id.clone(),
-        ),
-        (
-            keys::LIVE_TV_TRANSITION_DRAIN_BEFORE,
-            config.transition_drain_before.to_string(),
-        ),
+        // The retired handoff barrier is still written as "no handoff" so a
+        // binary from before #537 that reads it in a mixed cluster sees none.
+        (keys::LIVE_TV_TRANSITION_FROM_OWNER_NODE_ID, String::new()),
+        (keys::LIVE_TV_TRANSITION_DRAIN_BEFORE, "0".to_owned()),
         (
             keys::LIVE_TV_CONFIG_GENERATION,
             config.generation.to_string(),
@@ -2930,6 +2932,18 @@ pub async fn update_settings(
             )));
         }
     }
+    // `live_tv_owner_node_id` and `live_tv_fenced_owner` are legacy fields of
+    // the single-owner model #537 replaced. Shipped Apple and Android clients
+    // still send both with every Live TV save, so they are accepted and
+    // ignored: the owner is always this node's id and the attestation is never
+    // read. They do still count as a Live TV save here, so a request carrying
+    // only them (plus `live_tv_config_generation`) is a generation-CAS save
+    // that changes nothing else and bumps the generation (pinned by
+    // `live_tv_legacy_owner_metadata_never_requires_physical_fence_recovery`,
+    // which saves the owner alone). Left as-is deliberately: every shipped
+    // client sends them beside real Live TV fields, so narrowing the set would
+    // change only what a lone legacy save does, and it would stop requiring
+    // the generation for it.
     let live_tv_requested = req.live_tv_enabled.is_some()
         || req.live_tv_device_ipv4.is_some()
         || req.live_tv_owner_node_id.is_some()
@@ -2979,8 +2993,6 @@ pub async fn update_settings(
             .map(str::trim)
             .unwrap_or(&current.xmltv_url)
             .to_owned();
-        let transition_from_owner_node_id = String::new();
-        let transition_drain_before = 0;
         let next_generation = current
             .generation
             .checked_add(1)
@@ -3002,8 +3014,6 @@ pub async fn update_settings(
             // Readiness runs against the still-current owner tuple. The CAS
             // publishes the increment only after every precondition passes.
             generation: current.generation,
-            transition_from_owner_node_id,
-            transition_drain_before,
         };
         candidate
             .validate_static()

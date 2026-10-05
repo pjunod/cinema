@@ -533,7 +533,6 @@ fn http_route_group(path: &str) -> usize {
         | crate::live_tv::RETIRE_PATH
         | crate::live_tv::RESUME_PATH
         | crate::live_tv::START_STATE_PATH
-        | crate::live_tv::DRAIN_PATH
         | crate::live_tv::GUIDE_PATH
         | crate::media_sessions::START_PATH
         | crate::media_sessions::ACTIVATE_PATH
@@ -2046,12 +2045,6 @@ pub fn router(state: AppState) -> Router {
         .route(
             crate::live_tv::START_STATE_PATH,
             post(internal_live_tv::start_state).layer(DefaultBodyLimit::max(1_024)),
-        )
-        .route(
-            crate::live_tv::DRAIN_PATH,
-            post(internal_live_tv::drain).layer(DefaultBodyLimit::max(
-                crate::live_tv::MAX_INTERNAL_BODY_BYTES,
-            )),
         )
         .route(
             crate::live_tv::GUIDE_PATH,
@@ -4353,7 +4346,6 @@ mod tests {
             (Method::POST, crate::live_tv::SNAPSHOT_PATH),
             (Method::POST, crate::live_tv::START_PATH),
             (Method::POST, crate::live_tv::ACTIVATE_PATH),
-            (Method::POST, crate::live_tv::DRAIN_PATH),
             (Method::POST, crate::live_tv::GUIDE_PATH),
             (Method::POST, "/api/v1/cluster/join-tokens"),
             (Method::DELETE, "/api/v1/cluster/nodes/node-b"),

@@ -4872,11 +4872,10 @@ HOST=http://localhost:32400
 curl -s -H "Authorization: Bearer $TOKEN" $HOST/api/v1/settings \
   | python3 -c 'import json,sys; s=json.load(sys.stdin); print({k:v for k,v in s.items() if k.startswith("live_tv")})'
 
-# 2. Configure the device. The owner is a node id from /api/v1/server.
+# 2. Configure the device.
 curl -s -X PUT -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
   -d '{"live_tv_config_generation":0,
        "live_tv_device_ipv4":"10.42.4.20",
-       "live_tv_owner_node_id":"<node id of the machine next to the tuner>",
        "live_tv_max_sessions":2,
        "live_tv_output_height":720}' \
   $HOST/api/v1/settings
@@ -5075,18 +5074,15 @@ the tuner's truth and a relaying node's `relay_bytes` is how much it carried.
 
 ### Moving the owner
 
-The owner is a setting, not an election, and there is no timeout-based takeover.
-That is deliberate: elapsed time cannot prove somebody else's FFmpeg process
-closed a tuner socket, and guessing wrong means two processes fighting over one
-piece of hardware.
-
-- **Owner is alive:** change `live_tv_owner_node_id`. The old owner drains, the
-  drain is signed and confirmed, and the change lands.
-- **Owner is gone for good:** disable Live TV, then re-enable with an explicit
-  attestation — `live_tv_fenced_owner` carrying the original
-  `owner_node_id`, the `drain_before_generation` cutoff, and
-  `stopped_and_restart_prevented: true`. You are signing that the old machine
-  is stopped and cannot come back. If it can, do not send this.
+There is nothing to move. Since #537 the tuner is a cluster resource: there is
+no configured owner node, no owner drain and no fenced-owner attestation. The
+settings fields of the old single-owner model, `live_tv_owner_node_id` and
+`live_tv_fenced_owner`, are still accepted because shipped Apple and Android
+clients send them with every Live TV save, and they are ignored: the settings
+response's `live_tv_owner_node_id` is always the answering node, and
+`live_tv_transition_from_owner_node_id` / `live_tv_transition_drain_before` are
+always `""` / `0`. A save that carries only those fields (and the generation)
+still counts as a Live TV save and bumps `live_tv_config_generation`.
 
 Reconfiguration is always possible **while disabled**. Losing the owner ends
 the live session that was in flight; viewers see a named refusal and start

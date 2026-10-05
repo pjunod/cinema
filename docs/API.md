@@ -14,7 +14,7 @@ This file is the specification in the meantime, written by reading the routers
 and the handlers on 2026-09-07. Where a plan document and the code disagreed,
 the code won and the disagreement is recorded in §23.
 
-One binary serves everything on one port (`:32400` by default). plurx has 293
+One binary serves everything on one port (`:32400` by default). plurx has 292
 routes across the five surfaces below. Every path here is absolute; the native
 API is the only one under a version prefix, and §7-§18 state that prefix once
 per section rather than repeating it in every row.
@@ -2531,6 +2531,16 @@ The refusal is enforced again at start, not only in the lineup: a start
 re-fetches the lineup forced, so it never rides the stale projection, and a
 protected channel is 415 `drm_unsupported`.
 
+**Legacy settings fields.** `PUT /api/v1/settings` still accepts
+`live_tv_owner_node_id` and `live_tv_fenced_owner` from the single-owner model
+#537 replaced, because shipped Apple and Android clients send both with every
+Live TV save; the server ignores their values. They still count as a Live TV
+save, so they need `live_tv_config_generation` and bump it even when nothing
+else changes. `GET /api/v1/settings` keeps `live_tv_owner_node_id` (always the
+answering node) and `live_tv_transition_from_owner_node_id` /
+`live_tv_transition_drain_before` (always `""` / `0`) for clients that decode
+them.
+
 ### 17.4 Session status separates source, delivery and reception
 
 `GET /api/v1/live-tv/sessions/{capability}/status` returns
@@ -3213,7 +3223,7 @@ streaming, and refuses a response signed for the wrong node or nonce.
 | POST | `/_internal/v1/live-tv/guide` | 16 KiB | The owner's cached programme guide, relayed verbatim. Deliberately not gated on the Live TV protocol capability: an owner that predates the guide answers 404 and the ingress renders "no guide yet" rather than taking Live TV down across a mixed fleet |
 | POST | `/_internal/v1/live-tv/start`, `/_internal/v2/live-tv/start`, `/_internal/v1/live-tv/activate` | 16 KiB | Starts and activates a tuner session on the owner; v2 carries the exact signed live playback envelope |
 | POST | `/_internal/v1/live-tv/resource` | 16 KiB | Fetches a playlist, segment or status for an owned capability |
-| POST | `/_internal/v1/live-tv/stop`, `/_internal/v1/live-tv/drain` | 16 KiB | Releases a capability; drains below a generation |
+| POST | `/_internal/v1/live-tv/stop` | 16 KiB | Releases a capability. (The single-owner model's generation drain beside it was removed on 2026-10-04: since #537 nothing sent it.) |
 | POST | `/_internal/v1/live-tv/retire`, `/_internal/v1/live-tv/resume`, `/_internal/v1/live-tv/start-state` | 1 KiB | Retires a viewer's public start id on the owner, hands back the session it still owns, or reports what became of it. Three paths rather than one with a mode flag: `resume` selects a session, cancels the others and fences an id it has never seen, and a status read may do none of that. New paths rather than new fields on the signed start bodies: an owner that predates them answers 404, which an ingress renders as a typed answer that proves nothing about the tuner |
 | POST | `/internal/cluster/media/sessions/start`, `/internal/cluster/media/sessions/activate` | 96 / 128 KiB | Starts and confirms a remote media session |
 | POST | `/internal/cluster/media/sessions/prepare` | 96 KiB | Validates an already-reserved successor identity, primes its durable recipe on the target owner, and returns only after the existing actor slot accepts it |
