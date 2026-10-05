@@ -3515,3 +3515,20 @@ source = "clients/apple/Sources/SharedPlaybackControl.swift"
 source_anchor = "response.acceptedSequence == request.sequence"
 test = "clients/apple/Tests/SharedPlaybackControlTests.swift"
 test_anchor = "testAnswersBindOnlyToTheSentSequenceOnBsTuple"
+
+[[fixes]]
+id = "sharing.native-shared-asset-index-grammar"
+commits = ["399a1a7cd"]
+source = "clients/apple/Sources/PlaybackFileContext.swift"
+source_anchor = "if reference != nil, !Self.sharedAssetIndexIsCanonical(resource) { throw APIError.badURL }"
+test = "clients/apple/Tests/SharedProtocolFixtureTests.swift"
+test_anchor = "testFileSuffixGrammarAndPresessionAssetPaths"
+
+[[fixes]]
+id = "sharing.native-shared-start-safe-duration"
+commits = []
+supplements = "sharing.native-shared-asset-index-grammar"
+source = "clients/apple/Sources/SharedPlaybackModels.swift"
+source_anchor = "response.durationMs.map({ (0...9_007_199_254_740_991).contains($0) }) ?? true,"
+test = "clients/apple/Tests/SharedProtocolFixtureTests.swift"
+test_anchor = "testHlsStartPublicProjectionAndClientMutations"

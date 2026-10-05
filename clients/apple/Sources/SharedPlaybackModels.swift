@@ -149,7 +149,7 @@ extension SharedStart {
         guard context.reference != nil, context.sessionId == nil,
               response.vod == true, let position = response.startSeconds,
               position.isFinite, position >= 0, position <= 9_007_199_254_740,
-              response.durationMs.map({ $0 >= 0 }) ?? true,
+              response.durationMs.map({ (0...9_007_199_254_740_991).contains($0) }) ?? true,
               let control = response.control,
               PlaybackFileContext.matches(control.generation, "^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"),
               control.nextExchangeMs == 5_000, control.leaseTimeoutMs == 300_000

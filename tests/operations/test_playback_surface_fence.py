@@ -320,7 +320,9 @@ class PlaybackSurfaceFenceTest(unittest.TestCase):
         # PlaybackSurfaceModel instead is an open question for its lane.
         # `busy`, `playing` and `plan` drive its server-accepted controls;
         # `notice` is a refused control or change, never a playback fault.
-        self.assertEqual(shared, ["busy", "failure", "notice", "plan", "playback", "playing", "starting", "statusSummary"])
+        # `preparing` only lets a viewer action interrupt a prepared change
+        # that has not reached its switch; it draws no surface.
+        self.assertEqual(shared, ["busy", "failure", "notice", "plan", "playback", "playing", "preparing", "starting", "statusSummary"])
         self.assertEqual(published, [
             "currentMs", "decision", "deliveredDolbyVisionProfile", "deliveredRange",
             "encoder", "finished", "isChangingStream", "isPlaying", "isVOD",

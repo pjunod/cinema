@@ -122,7 +122,11 @@ struct SharedDecisionClient {
         let answer: ControlResponse
         do { answer = try PlaybackControl.decoder.decode(ControlResponse.self, from: response.data) }
         catch { throw ControlProtocolError(reason: "body") }
-        return try channel.accept(answer, for: control)
+        // A `prepare` is the whole offer from this same answer, including the
+        // successor's control bootstrap the Local action type does not model.
+        let offer = answer.action.type == PlaybackControl.prepareActionType && channel.prepares
+            ? try SharedPreparedOffer.decode(answer.action, raw: response.data, predecessor: channel.sessionId) : nil
+        return try channel.accept(answer, offer: offer, for: control)
     }
     func playlistURL(playback: SharedStartedPlayback) throws -> URL {
         try requireCurrent(); _ = try playback.start.validated(playback.context)

@@ -997,11 +997,17 @@ final class AppModel: ObservableObject {
 
     /// Shared preparation is a distinct typed path; it never calls Local
     /// decision/session/history helpers with a Source identifier.
-    func prepareSharedPlayback(reference: SharedPlaybackReference, fileId: String) async throws -> SharedPlaybackPlan {
+    /// A fresh authorized Shared plan from fresh B details. `fileId` nil takes
+    /// the first deliverable file of those details (the next episode, which
+    /// inherits nothing from the episode that ended).
+    func prepareSharedPlayback(reference: SharedPlaybackReference, fileId requested: String?) async throws -> SharedPlaybackPlan {
         do {
             let catalogue = try SharedLibraryClient()
             let detail = try await catalogue.detail(reference); try catalogue.requireCurrent()
-            guard detail.deliveryStatus == "available", detail.files.contains(where: { $0.fileId == fileId && $0.fileBase != nil }) else {
+            let chosen: SharedLibraryFile?
+            if let requested { chosen = detail.files.first { $0.fileId == requested } }
+            else { chosen = detail.files.first { $0.fileBase != nil } }
+            guard detail.deliveryStatus == "available", let fileId = chosen?.fileId, chosen?.fileBase != nil else {
                 throw APIError.transport("Playback is unavailable for this Shared title.")
             }
             let context = try await PlaybackFileContext.authenticatedDetail(reference: reference, fileId: fileId)
@@ -1011,6 +1017,19 @@ final class AppModel: ObservableObject {
             let position = detail.watch.map { $0.watched ? 0 : $0.positionMs } ?? 0
             let subject = SharedPlaybackSubject(context: context, title: detail.item.title, resumeMs: position, watchSequence: detail.watch?.sequence ?? 0)
             return try SharedPlaybackPlan.make(subject: subject, decision: result.decision, caps: result.caps, quality: playbackQuality)
+        } catch { noteAuthFailure(error); throw error }
+    }
+
+    /// The Shared episode after `reference` in Source order, started from
+    /// fresh details, or nil at the end of the series, for a movie, or with
+    /// autoplay off.
+    func prepareSharedNextEpisode(after reference: SharedPlaybackReference) async throws -> SharedPlaybackPlan? {
+        guard autoplay else { return nil }
+        do {
+            let catalogue = try SharedLibraryClient()
+            guard let next = try await catalogue.nextEpisode(after: reference) else { return nil }
+            try catalogue.requireCurrent()
+            return try await prepareSharedPlayback(reference: next, fileId: nil)
         } catch { noteAuthFailure(error); throw error }
     }
 

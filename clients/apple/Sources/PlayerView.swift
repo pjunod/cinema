@@ -3522,10 +3522,28 @@ struct PlaybackStatsView: View {
 
 
 /// Typed Shared dispatch never supplies sentinel numeric IDs to PlayerView.
+///
+/// A next Shared episode is a new title: its own fresh, reauthorized plan and
+/// its own controller (the session view is keyed by the plan's request id),
+/// never a continuation of the one that ended.
 struct SharedPlayerView: View {
     let plan: SharedPlaybackPlan
+    @State private var next: SharedPlaybackPlan?
+    var body: some View {
+        let current = next ?? plan
+        SharedPlayerSessionView(plan: current) { following in next = following }
+            .id(current.request.requestId ?? current.request.playbackId)
+    }
+}
+
+struct SharedPlayerSessionView: View {
+    let plan: SharedPlaybackPlan
+    let playNext: (SharedPlaybackPlan) -> Void
     @StateObject private var controller = SharedPlayerController()
+    @EnvironmentObject private var model: AppModel
     @Environment(\.dismiss) private var dismiss
+    @State private var ended = false
+    @State private var findingNext = false
     var body: some View {
         VStack(spacing: 12) {
             Text(plan.subject.title).font(.headline)
@@ -3538,10 +3556,23 @@ struct SharedPlayerView: View {
             }
             if let notice = controller.notice { Text(notice).font(.caption).foregroundStyle(.secondary) }
             if let failure = controller.failure { Text(failure).foregroundStyle(.secondary) }
+            if findingNext { ProgressView("Finding the next episode") }
             if controller.playback != nil, let current = controller.plan { SharedPlayerControls(controller: controller, plan: current) }
             Button("Close") { Task { await controller.stop(); dismiss() } }
         }
-        .task { await controller.start(plan) }
+        .task {
+            controller.onNaturalEnd = { ended = true }
+            await controller.start(plan)
+        }
+        // Owned by this view: closing it cancels the lookup.
+        .task(id: ended) {
+            guard ended, let reference = plan.subject.context.reference else { return }
+            findingNext = true
+            let following = try? await model.prepareSharedNextEpisode(after: reference)
+            findingNext = false
+            guard !Task.isCancelled, let following else { return }
+            playNext(following)
+        }
         .onDisappear { Task { await controller.stop() } }
     }
 }
@@ -3593,7 +3624,9 @@ struct SharedPlayerControls: View {
                 }.accessibilityIdentifier("shared-subtitles")
             }
         }
-        .disabled(controller.busy)
+        // A preparation waiting for B or priming its successor yields to a
+        // viewer action; the switch itself and its settlement do not.
+        .disabled(controller.busy && !controller.preparing)
     }
     private func seek(by deltaMs: Int) {
         let target = max(0, controller.currentPositionMs() + deltaMs)

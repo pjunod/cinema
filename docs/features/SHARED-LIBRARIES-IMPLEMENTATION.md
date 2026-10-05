@@ -1352,18 +1352,18 @@ layer; "B-only" means no client parses that wire.
 
 | Fixture group | Rows | Rust | Web | Swift | Kotlin |
 |---|---|---|---|---|---|
-| `cases` Source IDs | 12 | yes, core `sharing_shared_protocol_fixture_validates_exact_wire_ids` | yes, `playbackFileDecimal` | open | open |
-| `status_tokens` × `shared_status.word_fields` | 12 × 9 | yes, `sharing_protocol_fixture_status_grammar` | yes, `sharedPlaybackStatusMetrics` | open | open |
-| `shared_status` accepted + mutations | 1 + 17 (b 10, client 13) | decode and b rows: yes. B's emitted envelope: **open** (built inline in `receiver_status`) | yes | open | open |
-| `control_refusals.source` | 14 (7 valid) | validity and Source minting: yes, `sharing_protocol_fixture_source_control_refusals`. B's mapped answer (`b`): **open** (`refusal_response`) | client outcome (`client`): yes | open | open |
-| `control_refusals.b_precheck` | 4 | **open** (inline in `receiver_control`) | client outcome: yes | open | open |
-| `control_preparation` (`none`) | 3 | **open** (`rebind_to_receiver`) | yes, `settlePreparedOfferWaiter` | open | open |
-| `hls_start` public + mutations | 1 + 17 (b 15, client 16) | yes, `sharing_protocol_fixture_hls_start_projection` | yes, `sharedPlaybackStartContext` | open | open |
-| `direct` MIME set, public + mutations | 13; 1 + 16 (b 9, client 13) | yes, `sharing_protocol_fixture_direct_start` | yes, `sharedPlaybackDirectStartContext` | open | open |
-| `direct_session_query` | 11 | yes, `sharing_protocol_fixture_direct_session_query` | yes | open | open |
-| `file_suffixes` (route class `b`) | 25 | yes, core `sharing_protocol_fixture_file_suffixes` | yes, `playbackFileUrl` | open, fails 5 rows | open, fails 5 rows |
+| `cases` Source IDs | 12 | yes, core `sharing_shared_protocol_fixture_validates_exact_wire_ids` | yes, `playbackFileDecimal` | yes, `SharedProtocolFixtureTests` | open |
+| `status_tokens` × `shared_status.word_fields` | 12 × 9 | yes, `sharing_protocol_fixture_status_grammar` | yes, `sharedPlaybackStatusMetrics` | yes | open |
+| `shared_status` accepted + mutations | 1 + 17 (b 10, client 13) | decode and b rows: yes. B's emitted envelope: **open** (built inline in `receiver_status`) | yes | yes (client 13) | open |
+| `control_refusals.source` | 14 (7 valid) | validity and Source minting: yes, `sharing_protocol_fixture_source_control_refusals`. B's mapped answer (`b`): **open** (`refusal_response`) | client outcome (`client`): yes | client outcome: yes | open |
+| `control_refusals.b_precheck` | 4 | **open** (inline in `receiver_control`) | client outcome: yes | client outcome: yes | open |
+| `control_preparation` (`none`) | 3 | **open** (`rebind_to_receiver`) | yes, `settlePreparedOfferWaiter` | yes (`SharedControlStep`, `PreparedOfferWait`) | open |
+| `hls_start` public + mutations | 1 + 17 (b 15, client 16) | yes, `sharing_protocol_fixture_hls_start_projection` | yes, `sharedPlaybackStartContext` | yes (client 16; fixed `unsafe-duration`) | open |
+| `direct` MIME set, public + mutations | 13; 1 + 16 (b 9, client 13) | yes, `sharing_protocol_fixture_direct_start` | yes, `sharedPlaybackDirectStartContext` | yes (client 13) | open |
+| `direct_session_query` | 11 | yes, `sharing_protocol_fixture_direct_session_query` | yes | yes | open |
+| `file_suffixes` (route class `b`) | 25 | yes, core `sharing_protocol_fixture_file_suffixes` | yes, `playbackFileUrl` | yes (5 rows fixed) | open, fails 5 rows |
 | `asset_session_query` | 14 | yes, `sharing_protocol_fixture_asset_session_query` | B-only parser; web composes the bound query (next row) | B-only | B-only |
-| `presession_assets` | 4 | yes, same test | yes, `playbackFileUrl` bound and unbound | open | open |
+| `presession_assets` | 4 | yes, same test | yes, `playbackFileUrl` bound and unbound | yes, bound and unbound | open |
 | `resource_unsupported` (typed 422) | 1 | yes, `sharing_protocol_fixture_resource_unsupported` | B-only | B-only | B-only |
 | `playback_ids` (per-session) | 1 | yes, `sharing_protocol_fixture_per_session_playback_ids` | B-only (B to Source) | B-only | B-only |
 | `receiver_recovery` | 1 + 4 rendered | yes, `sharing_protocol_fixture_receiver_recovery_status` | yes, `sharingRecoveryHTML` | B-only (web node card) | B-only |
@@ -5885,7 +5885,9 @@ Client work still owed before a client may declare
   committed handoff, since B supersedes it. Then add
   `shared_prepare_replacement` to `SUPPORTED_ACTIONS` for Shared sessions
   only.
-- **Apple/Android.** Shared channels declare no actions and no dual-player
+- **Apple.** Done; see "Apple Shared prepared successor, watched state, next
+  episode and fixture" below.
+- **Android.** Shared channels declare no actions and no dual-player
   preparation today. They need a second player on the offered B playlist, the
   acknowledgement sequence on the predecessor channel, a switch of the Shared
   control channel and progress pool to the successor's tuple after commit,
@@ -5914,8 +5916,9 @@ old code.
 
 Still open:
 
-- Native Apple and Android clients have neither the manual watched control nor
-  Shared next episode. The web client is the reference implementation.
+- Android has neither the manual watched control nor Shared next episode. The
+  web client is the reference implementation; Apple has both (see "Apple Shared
+  prepared successor, watched state, next episode and fixture", below).
 - B answers a refused artwork read (assignment removed, import inactive) with
   503 rather than a typed 404. No bytes are served either way.
 - None of this is physically qualified against a real pinned Source/B pair.
@@ -5991,3 +5994,77 @@ Evidence on nuc4 (rustc 1.97.1), integrated tree:
 - Clippy with denied warnings on plurxd and plurx-core, all targets.
   `tests/validation` (253) passes, with the ownership inventory at +1
   test-only wait.
+
+### Apple Shared prepared successor, watched state, next episode and fixture (2026-10-04)
+
+The Apple client now covers the four client items the B prepared successor,
+the S4 audit and the fixture parity matrix left open. Android remains open
+for all four.
+
+**Prepared successor.** The Shared channel declares `dual_player_preparation`
+at sequence 1 and both `prepare_replacement` and `shared_prepare_replacement`
+when the existing Developer switch enables two-player preparation (the switch
+Local reads; a source with no video codec keeps the P0 reopen, since there is
+no frame to prove a switch with). B records a session's first exchange as the
+ask it was started for, so a session that has not spoken states its own ask
+before the change. A `prepare` binds only whole: another canonical B session,
+its own `/api/v1/hls/{B}/index.m3u8` or master playlist and its own control
+bootstrap (`/api/v1/hls/{B}/control`, 5 s cadence, 300 s lease)
+(`SharedPreparedOffer`). It is bound to the player's context through the
+ordinary Shared Start grammar before anything is primed; one that does not
+bind is settled `failed` and reopens.
+
+The machinery is Local M6's, reused rather than copied: `PreparedOfferWait`
+reads `staging`, the offer, a later `none` and its 12 s bound;
+`PreparedReplacementCoordinator` owns the ledger; the commit uses Local's
+rendezvous, 4 s alignment bound, 6 s first-frame bound and 250 ms tolerance.
+The second AVPlayer is muted, layer-less and never played, primed at the film
+position (a shared session is VOD, so its zero is the film's, per Local's
+`sessionMediaOriginMs`). Every acknowledgement rides the predecessor's B
+channel on its own ordered sequence: progress at most once a second and not
+resent, and the terminal one always; a lost answer resends the identical bytes
+(at most three sends), which B replays byte-identically. Only an accepted
+committed exchange makes the successor the player's session: a fresh ordered
+channel on its B tuple, its status, and the shared progress beat, which names
+it from the next beat on with the item's next sequence. The predecessor is not
+DELETEd; B retires it. A paused viewer, a failed or late successor and a
+switch without a frame take the P0 reopen. A commit B did not accept after
+the item already moved reopens fresh and ends both sessions. A viewer action
+while the change is still waiting or priming takes the player back (`aborted`);
+the switch and its settlement do not yield. `stop()` also ends a staged
+successor it never adopted.
+
+**Manual watched.** Movie and episode details offer Mark watched/unwatched,
+posting `{watched}` to `POST /api/v1/shared/imports/{i}/items/{item}/watched`
+and adopting only an answer for the state asked; the page then re-reads its
+details. The next progress beat resyncs on its typed conflict.
+
+**Next episode.** At a natural end with autoplay on, the player resolves the
+next episode in Source order through B's viewer routes only (next in the
+season, else the first episode of the next season; bounded cursors, a repeated
+cursor refuses, never another library) and starts it from fresh B details: a
+new authenticated context, decision, plan and playback id in a new player
+session. The lookup is owned by the player view.
+
+**Fixture.** `SharedProtocolFixtureTests` reads every client-parsed group of
+`tests/sharing/protocol-cases.json` (matrix above). It exposed the five
+`file_suffixes` rows and `hls_start` `unsafe-duration`; the Shared context now
+refuses a non-canonical or out-of-range (above 4095) subtitle or chapter index
+(the Local route keeps its pattern), and the Start binder refuses a
+`duration_ms` past 2^53 - 1.
+
+Evidence on the lab Mac (Xcode simulators, owned DerivedData): `make
+apple-test` passed 796 iOS and 780 tvOS tests, zero failures (sixteen new:
+`SharedProtocolFixtureTests` 8, `SharedPreparedHandoffTests` 5,
+`SharedCatalogueActionsTests` 3). Reverting the two fixes failed exactly the
+six fixture rows; dropping the successor control-URL check failed its test.
+`tests/validation` (253) and `tests.operations.test_playback_surface_fence`
+(the Shared player's published inventory gains `preparing`) pass. These are
+synthetic authenticated protocol tests: the two-player switch, its first-frame
+proof and the B commit/abort against a real pinned Source/B pair are not
+qualified here, and B's `observe_ask` stages a successor for a session's own
+original ask after a withdrawn change (the client aborts such an unrequested
+offer the next time it exchanges, but nothing exchanges while the viewer is
+idle).
+
+Regression-Test: clients/apple/Tests/SharedPreparedHandoffTests.swift::testCommittedSuccessorBecomesThePlayersSessionAskAndProgress
