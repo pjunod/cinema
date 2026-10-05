@@ -10,13 +10,13 @@ acceptance.
 
 ## 1. Contract publication — the real gate ran before merge
 
-[PR #744](http://192.168.4.7:3000/noirr/plurx/pulls/744) published the reviewed
+[PR #744](http://forge.lan:3000/noirr/plurx/pulls/744) published the reviewed
 contract. Its earlier runs were skipped because their event payloads carried
 `draft: true`; making the PR ready had not produced a new eligible run.
 Closing and reopening the ready PR triggered the existing fast lane without
 changing the reviewed source or workflow.
 
-[Run 3881](http://192.168.4.7:3000/noirr/plurx/actions/runs/3881) passed scope,
+[Run 3881](http://forge.lan:3000/noirr/plurx/actions/runs/3881) passed scope,
 policy/contract preflight and **Main promotion gate** on head `b3ff464b9` and
 base `9a719fcb7`. Unaffected compiler jobs were skipped by the docs-only
 scope. The gate checked that both refs remained current. PR #744 then merged
@@ -209,7 +209,7 @@ The scratch encoder was restored and the isolated daemon stopped afterward.
 
 ## 3. Compiler loop — available before Rust changes
 
-The local toolchain resolves through `/Users/pjunod/.cargo/bin` with
+The local toolchain resolves through `~/.cargo/bin` with
 `RUSTUP_TOOLCHAIN=1.97.1`; `rustc --version` reported
 `rustc 1.97.1 (8bab26f4f 2026-07-14)`. All-target `cargo check -p plurxd
 --all-targets --locked` passed on the reviewed publication source before any
@@ -434,15 +434,15 @@ assertion changed. The new candidate still requires its complete effort gate.
 
 ## 9. J0 integrated; J1 foundations under verification
 
-[Effort run 3947](http://192.168.4.7:3000/noirr/plurx/actions/runs/3947)
+[Effort run 3947](http://forge.lan:3000/noirr/plurx/actions/runs/3947)
 passed every required lane on `adf0d5e89`: policy/contracts, Rust, Windows,
 web, Apple, Android and the aggregate Effort development gate.
-[PR #747](http://192.168.4.7:3000/noirr/plurx/pulls/747) merged into the effort
+[PR #747](http://forge.lan:3000/noirr/plurx/pulls/747) merged into the effort
 as `0331f5686`, retaining all thirteen checked regression fields in the landing
 message. This closes the J0 integration failures described above. It does not
 qualify the remaining physical Infuse recovery or the production facade.
 
-[PR #763](http://192.168.4.7:3000/noirr/plurx/pulls/763) consolidates the J1
+[PR #763](http://forge.lan:3000/noirr/plurx/pulls/763) consolidates the J1
 [protocol forms](JELLYFIN-PROTOCOL-FOUNDATION.md),
 [durable identities](JELLYFIN-DURABLE-IDENTITIES.md),
 [shared services](JELLYFIN-SHARED-SERVICES.md) and
@@ -461,9 +461,9 @@ its availability does not block implementation or the J1 integration gate.
 
 ## 10. J0–J3 integrated; J4 negotiation underway
 
-[Effort run 3963](http://192.168.4.7:3000/noirr/plurx/actions/runs/3963)
+[Effort run 3963](http://forge.lan:3000/noirr/plurx/actions/runs/3963)
 passes all eight required jobs on J1 head `0e4318355`.
-[PR #763](http://192.168.4.7:3000/noirr/plurx/pulls/763) merged as `d3719303e`
+[PR #763](http://forge.lan:3000/noirr/plurx/pulls/763) merged as `d3719303e`
 with exactly `0331f5686` and `0e4318355` as parents and all 36 checked
 regression references in the landing message. The earlier run's Windows
 failure occurred while fetching the pinned toolchain action, before source
@@ -496,8 +496,8 @@ The Android TV's previously authorized address is currently unreachable. The
 Apple TV remains deferred and untouched under Paul's instruction; these device
 checks do not block implementation or automated compilation.
 
-[Effort run 3983](http://192.168.4.7:3000/noirr/plurx/actions/runs/3983)
-passed all eight jobs on J2 head `5a5514b7f`. [PR #772](http://192.168.4.7:3000/noirr/plurx/pulls/772)
+[Effort run 3983](http://forge.lan:3000/noirr/plurx/actions/runs/3983)
+passed all eight jobs on J2 head `5a5514b7f`. [PR #772](http://forge.lan:3000/noirr/plurx/pulls/772)
 merged as `e5d17b1c8` with the eighteen checked regression references in its
 landing message. The full local web check passed without increasing the
 TypeScript ratchet. Artwork remains authenticated pending the direct decision.
@@ -520,10 +520,10 @@ also pass. These results do not qualify either physical client,
 J4/J5 transport completion, or release promotion.
 
 
-[PR #779](http://192.168.4.7:3000/noirr/plurx/pulls/779) merged J3 as
+[PR #779](http://forge.lan:3000/noirr/plurx/pulls/779) merged J3 as
 `13568fbf36b415f111d922c33faf90fdcbd54c83`, with parents `e5d17b1c8` and
 `a7d45e149` and all 22 checked regression references in the landing message.
-[Effort run 4018](http://192.168.4.7:3000/noirr/plurx/actions/runs/4018)
+[Effort run 4018](http://forge.lan:3000/noirr/plurx/actions/runs/4018)
 passed all eight jobs. The exact J1 history erratum records its earlier landing
 whose subject omitted the PR number; it does not weaken the history audit.
 
@@ -551,7 +551,7 @@ to every non-excluded source; the regression covers that bypass. Accepting a
 protocol wildcard never fills in HDR/DV claims in the native planner.
 
 
-The profile slice merged through [PR #780](http://192.168.4.7:3000/noirr/plurx/pulls/780)
+The profile slice merged through [PR #780](http://forge.lan:3000/noirr/plurx/pulls/780)
 as `7a4e56b86071b856703ea357218f75ce229f026a` after all eight jobs passed
 on head `687c83602`. Its landing contains the ten checked regression fields.
 
@@ -578,10 +578,10 @@ inventories pass. Workspace/all-target Clippy passes on pinned Rust 1.97.1.
 These automated results do not count as physical client qualification.
 
 
-[PR #781](http://192.168.4.7:3000/noirr/plurx/pulls/781) merged the ancillary
+[PR #781](http://forge.lan:3000/noirr/plurx/pulls/781) merged the ancillary
 slice as `e5c6e9d34aad7d382bd4985c055c98ec87dd9131`, with parents
 `7a4e56b86` and `fa16201f3`. All eight jobs passed in
-[effort run 4023](http://192.168.4.7:3000/noirr/plurx/actions/runs/4023), and
+[effort run 4023](http://forge.lan:3000/noirr/plurx/actions/runs/4023), and
 its landing preserves all seven checked regression references.
 
 The next J4 slice keeps native player identity stable for an authenticated
@@ -612,7 +612,7 @@ remaining VOD transport work are not included in these results.
 
 The supersession slice landed in PR #782 at `acbce39ee`, with exact parents
 `e5c6e9d34` and `a37ade039`. All eight jobs passed in
-[effort run 4025](http://192.168.4.7:3000/noirr/plurx/actions/runs/4025), and
+[effort run 4025](http://forge.lan:3000/noirr/plurx/actions/runs/4025), and
 its landing preserves all nine checked regression references.
 
 The next native watch slice admits a ready, leased native incarnation only
@@ -633,7 +633,7 @@ watch admission; they do not qualify an HLS adapter or a physical client.
 
 The native watch slice landed in PR #783 at `5f27b2905`, with exact parents
 `acbce39ee` and `9414e6f86`. All eight jobs passed in
-[effort run 4027](http://192.168.4.7:3000/noirr/plurx/actions/runs/4027),
+[effort run 4027](http://forge.lan:3000/noirr/plurx/actions/runs/4027),
 and the landing preserves both checked regression references.
 
 The next admission slice reserves `jellyfin:<PlaySessionId>` native request
@@ -657,7 +657,7 @@ qualification is claimed by these receipts.
 
 The native admission slice landed in PR #784 at `e8ff688f10`, with exact
 parents `5f27b2905` and `18719c68d`. All eight jobs passed in
-[effort run 4030](http://192.168.4.7:3000/noirr/plurx/actions/runs/4030),
+[effort run 4030](http://forge.lan:3000/noirr/plurx/actions/runs/4030),
 and the landing preserves its checked regression reference.
 
 The next transport slice translates one closed transcode tuple at a time,
@@ -696,7 +696,7 @@ encoded/HEVC and physical-client qualification are still open.
 
 The native HLS slice landed in PR #785 at `d373716f4`, preserving all sixteen
 checked regression references. All eight jobs passed in
-[effort run 4032](http://192.168.4.7:3000/noirr/plurx/actions/runs/4032).
+[effort run 4032](http://forge.lan:3000/noirr/plurx/actions/runs/4032).
 
 The shared-start slice waits on the exact native incarnation already claimed
 by the same request, then accepts its exact active compatibility binding when
@@ -718,7 +718,7 @@ and the physical client matrix remain open. Apple TV testing stays deferred.
 
 The shared-start slice landed in PR #786 at `235e1c44d`, with exact parents
 `d373716f4` and `111c24b8d` and the same tree as the tested head. All eight
-jobs passed in [effort run 4034](http://192.168.4.7:3000/noirr/plurx/actions/runs/4034);
+jobs passed in [effort run 4034](http://forge.lan:3000/noirr/plurx/actions/runs/4034);
 the landing preserves all three checked regression references. All 28 local
 Jellyfin service tests, 17 documentation/API/identity/ownership contracts,
 workspace/all-target Clippy and the normal commit hooks passed on Rust 1.97.1.
@@ -746,7 +746,7 @@ deferred.
 PR #787 merged as `b138ae619` with parents `235e1c44d` and `1a2b6499d`, the
 tested head's exact tree and its three checked regression references, after
 all eight jobs passed in
-[effort run 4039](http://192.168.4.7:3000/noirr/plurx/actions/runs/4039).
+[effort run 4039](http://forge.lan:3000/noirr/plurx/actions/runs/4039).
 
 ## 11. J4 completion — access, lifecycle and the remaining service matrix
 

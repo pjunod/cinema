@@ -2444,7 +2444,7 @@
         .await;
     }
 
-    /// Production (m6, f600d282): every quality change on a full encoder pool
+    /// Production (lab6, f600d282): every quality change on a full encoder pool
     /// logged `segment_pending` for the successor's init.mp4 and then
     /// `producer_failed`, and no successor ever spawned. The successor asks as
     /// `Speculative`, which registers no waiter, and a running predecessor

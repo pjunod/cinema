@@ -204,16 +204,16 @@ Reproduce with `scripts/live-tv-caption-audit` (`--image` runs the fleet's
 FFmpeg from a plurxd image).
 
 **Default engine** — jellyfin-ffmpeg 8.1.2 from `plurx/plurxd:latest`, on
-`nuc3` (Intel i5-1240P, iHD driver), 2026-09-24, plan/L-03:
+`lab3` (Intel i5-1240P, iHD driver), 2026-09-24, plan/L-03:
 
 | Audit | Encoder | Result | Caption args | Evidence |
 |---|---|---|---|---|
-| caption-audit | `software` | preserved — CC1 and service 1, all four runs | none | `nuc3` audit; also every `make unit` on the build host's FFmpeg (`the_software_live_graph_carries_608_and_708_through_both_deinterlace_modes`) |
-| caption-audit | `qsv` | preserved — CC1 and service 1, all four runs | none | `nuc3` audit |
-| caption-audit | `vaapi` | preserved — CC1 and service 1, all four runs; this build's `h264_vaapi` already defaults `-sei` to include `a53_cc`, so no flag is added | none | `nuc3` audit |
-| caption-audit | `nvenc` | not audited — no node reports NVENC (`nuc3` boot log: `nvenc=false`); the build's `h264_nvenc` defaults `a53cc` true | none | needs a node with NVIDIA hardware |
+| caption-audit | `software` | preserved — CC1 and service 1, all four runs | none | `lab3` audit; also every `make unit` on the build host's FFmpeg (`the_software_live_graph_carries_608_and_708_through_both_deinterlace_modes`) |
+| caption-audit | `qsv` | preserved — CC1 and service 1, all four runs | none | `lab3` audit |
+| caption-audit | `vaapi` | preserved — CC1 and service 1, all four runs; this build's `h264_vaapi` already defaults `-sei` to include `a53_cc`, so no flag is added | none | `lab3` audit |
+| caption-audit | `nvenc` | not audited — no node reports NVENC (`lab3` boot log: `nvenc=false`); the build's `h264_nvenc` defaults `a53cc` true | none | needs a node with NVIDIA hardware |
 | caption-audit | `videotoolbox` | disabled — reason: SEI insertion failure (`live_encoder_diagnostic`); the `-a53cc 1` re-proof on a Mac is still owed | `-a53cc 0` | needs a Mac node |
-| caption-audit | `copy` | preserved — H.264 source with A/53 SEI, CC1 and service 1, TS and fMP4 | none | `nuc3` audit; also every `make unit` (`a_copied_h264_route_carries_608_and_708`) |
+| caption-audit | `copy` | preserved — H.264 source with A/53 SEI, CC1 and service 1, TS and fMP4 | none | `lab3` audit; also every `make unit` (`a_copied_h264_route_carries_608_and_708`) |
 
 **Distro fallback engine** — Debian FFmpeg 5.1.9 at `/usr/bin/ffmpeg` in the
 same image, which the Dockerfile keeps for older GPUs: captions are **not**

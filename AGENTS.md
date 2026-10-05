@@ -30,6 +30,19 @@ that table, all in one commit; three tests fail otherwise. They are plain
 scripts in one global scope, so served order is load order, and `export` /
 `import` / `module.exports` do not belong in any of them.
 
+## The public mirror names no real infrastructure
+
+The repository is pushed to a public mirror, so hosts, LAN addresses, home
+directories and SSH users are written with neutral names: `media1`,
+`lab1`–`lab6`, `maca`/`macb`, `nas`, `10.42.x.y`, `forge.lan:3000`, `~` and
+`operator@`. `scripts/scrub-infra-names` holds the mapping and its context
+rules; `--write` rewrites the tree, `--check` lists what is left, and
+`tests/operations/test_infra_names.py` runs the check in
+`make operations-check`. A literal that truly must stay goes in
+`scripts/scrub-infra-names.allow.toml` with its reason. Tools that need the
+real lab take it from a git-ignored `scripts/*.fleet.json` (or a path given
+on the command line) shaped like the committed `*.fleet.example.json`.
+
 ## Optional features and the Developer tab
 
 There are no feature gates. An optional or unfinished feature gets an

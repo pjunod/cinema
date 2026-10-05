@@ -51,7 +51,7 @@ The fast lane (`make unit`) was green on `main`; the red was all in what only
   expectations were updated with it (the v42 index split; 46 to 52 import
   tables).
 - **`live_tv_two_node`** (4 cases) needs to bind ports 80 and 5004, and fails
-  by design on a host that cannot. With `cap_net_bind_service` on nuc3 all
+  by design on a host that cannot. With `cap_net_bind_service` on lab3 all
   four pass. Not a code defect.
 
 ## 2026-09-17 · The twenty red tests, and the three live defects three of them were reporting

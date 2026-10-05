@@ -2,10 +2,10 @@
 
 **Status:** M1–M3 and E0–E3 merged into main · **Updated:** 2026-09-27 ·
 **Final implementation:** `82df7f59e` · **Production:** deployed in `55aa430fd` on all four nodes, 2026-09-27 (A-04 board row, exact-55aa fleet point) ·
-**Core:** [#532 — merged](http://192.168.4.7:3000/noirr/plurx/pulls/532) ·
-**E0:** [#564 — merged](http://192.168.4.7:3000/noirr/plurx/pulls/564) ·
-**E1–E3:** [#572 — merged](http://192.168.4.7:3000/noirr/plurx/pulls/572) ·
-**Qualification:** [fast lane 3363 — passed](http://192.168.4.7:3000/noirr/plurx/actions/runs/3363)
+**Core:** [#532 — merged](http://forge.lan:3000/noirr/plurx/pulls/532) ·
+**E0:** [#564 — merged](http://forge.lan:3000/noirr/plurx/pulls/564) ·
+**E1–E3:** [#572 — merged](http://forge.lan:3000/noirr/plurx/pulls/572) ·
+**Qualification:** [fast lane 3363 — passed](http://forge.lan:3000/noirr/plurx/actions/runs/3363)
 
 Companion to the [implementation contract](DURABLE-WORK-QUEUE-IMPLEMENTATION.md).
 This page records actual implementation and evidence. “Planned” means no
@@ -15,7 +15,7 @@ implementation is claimed; “compiled” does not mean tests passed.
 
 **2026-09-28:** branch `fix/queue-receipt-pressure` (PR link in
 [STATUS.md](../../STATUS.md)), on top of #608. A second read of the same
-production database (nynuc, 16:27 UTC) while #608 was being built: besides the
+production database (media1, 16:27 UTC) while #608 was being built: besides the
 10,000 job rows, `background_job_waiters` held **11,947 of 16,384** — 10,775
 succeeded, 1,110 pending, 62 cancelled — and admission refuses at 16,384
 counting settled receipts, which the upkeep trigger only retired at
@@ -38,11 +38,11 @@ a store at the cap through refusal → one page (oldest first, the 24 protected
 receipts spared) → reopened admission → convergence → quiet.
 
 The `pipeline version unavailable` rows the report led with are the
-jellyfin-ffmpeg 8.1.2 ↔ 8.1.3 digest flip, [#604](http://192.168.4.7:3000/noirr/plurx/issues/604).
+jellyfin-ffmpeg 8.1.2 ↔ 8.1.3 digest flip, [#604](http://forge.lan:3000/noirr/plurx/issues/604).
 
 ## Settled-history eviction follow-up
 
-**2026-09-28:** production observation on nynuc, m6 and nuc4 (build
+**2026-09-28:** production observation on media1, lab6 and lab4 (build
 `g86d516219`): every enqueue answered `QueueFull` from three seconds after
 startup, `library intent was not accepted` once a minute per library, and
 Monarr's `POST /api/v1/scan` came back 500 for every import for a day. The
@@ -52,7 +52,7 @@ running — all created after the 2026-09-27 02:32 reset. The table bound
 (`MAX_RETAINED_JOBS`) counted settled history, and history is only retired
 after seven days, 128 rows per upkeep pass, so the queue would have stayed
 wedged until the prune began retiring rows on 2026-10-04, with almost nothing
-running. nuc3 logged no admissions at all in the same window.
+running. lab3 logged no admissions at all in the same window.
 
 The fix (SQLite migration 85, replicated schema 63) replaces the enqueue and
 upkeep triggers: admission evicts the oldest evictable settled rows (no pending
@@ -71,12 +71,12 @@ that a refused admission is a 503 naming `QueueFull`.
 
 ## Activity and subtitle throughput follow-up
 
-**2026-09-27:** implemented in [PR #588](http://192.168.4.7:3000/noirr/plurx/pulls/588); final review addressed.
+**2026-09-27:** implemented in [PR #588](http://forge.lan:3000/noirr/plurx/pulls/588); final review addressed.
 The existing programme is merged; this follow-up addresses the production
 observation that one old job appears to run indefinitely.
 
-Read-only observations found four reachable workers (nynuc, m6, nuc4, nuc3),
-with successful subtitle attempts on m6, nuc4 and nuc3. Eight queued subtitle
+Read-only observations found four reachable workers (media1, lab6, lab4, lab3),
+with successful subtitle attempts on lab6, lab4 and lab3. Eight queued subtitle
 jobs referred to already-ready analysis requests. Their claim trigger rejected
 ownership, but the worker conservatively treated each database error as an
 uncertain commit and spent up to 30 seconds resolving it while holding local
@@ -713,7 +713,7 @@ continue E1–E3.
   The subtitle outbox now also retires permanently fenced/source-invalid
   entries, so stale pages cannot block later work. Required PR fast lane next.
 
-- 2026-09-26: fast lane [3314](http://192.168.4.7:3000/noirr/plurx/actions/runs/3314)
+- 2026-09-26: fast lane [3314](http://forge.lan:3000/noirr/plurx/actions/runs/3314)
   on `bf6b1365e` stopped in static preflight: the publication-guard inventory
   mistook `self.local_serving_role().await` for direct field access. Registered
   that exact read-only accessor call; direct stores/swaps remain prohibited.
@@ -729,7 +729,7 @@ continue E1–E3.
   authoritative, and clients without a valid watch floor retain authority reads.
   New regressions are written, not executed; E1 review and tests remain deferred.
 
-- 2026-09-26: lane [3315](http://192.168.4.7:3000/noirr/plurx/actions/runs/3315)
+- 2026-09-26: lane [3315](http://forge.lan:3000/noirr/plurx/actions/runs/3315)
   passed the corrected guard inventory, then found the API overview's stale
   route count (236 versus 237 after storage-domain routes). Corrected the count.
   A local TypeScript check also found three new storage-input element type
@@ -743,7 +743,7 @@ continue E1–E3.
   now use one Authority read instead of three. Its backend contract is written
   and compiled, not run. Shared artifact work remains in construction.
 
-- 2026-09-26: lane [3317](http://192.168.4.7:3000/noirr/plurx/actions/runs/3317)
+- 2026-09-26: lane [3317](http://forge.lan:3000/noirr/plurx/actions/runs/3317)
   passed preflight and web checks, then stopped before Rust compilation because
   the isolated Hiqlite spike lockfile lacked core's new cancellation dependency.
   Refreshed only that workspace dependency list; both isolated lockfiles pass
@@ -764,7 +764,7 @@ continue E1–E3.
   process and timer inventory entries in the only merge conflict.
 
 - 2026-09-26: E0 candidate `715074e19` includes main `2b09d7a32`.
-  Lane [3320](http://192.168.4.7:3000/noirr/plurx/actions/runs/3320) passed
+  Lane [3320](http://forge.lan:3000/noirr/plurx/actions/runs/3320) passed
   preflight and web checks; Rust and Windows are running. The merged process
   ownership inventory passed seven focused checks before push. No second review.
 
@@ -785,7 +785,7 @@ continue E1–E3.
   missing scan consumers in HTTP/scheduler fixtures, an unclassified storage-domain
   route and two discarded subtitle cancellation results. Fixes are being checked
   against the pinned compiler before the next candidate. No merge is claimed.
-  E1 remains in [draft PR #566](http://192.168.4.7:3000/noirr/plurx/pulls/566);
+  E1 remains in [draft PR #566](http://forge.lan:3000/noirr/plurx/pulls/566);
   portable transcode copies, prediction and E2–E3 remain outstanding.
 
 - 2026-09-26: the missing-root regression exposed a visibility gap. An unreadable
@@ -1030,7 +1030,7 @@ continue E1–E3.
   observations; missing samples never refuse work. Shared remote Live TV
   processing remains unfinished. No E3 tests have run.
 
-- 2026-09-27: E3 draft [#572](http://192.168.4.7:3000/noirr/plurx/pulls/572)
+- 2026-09-27: E3 draft [#572](http://forge.lan:3000/noirr/plurx/pulls/572)
   contains advisory placement controls and recent I/O ranking. Added an
   exact-authenticated raw Live TV consumer using the existing shared tuner
   transport and bounded per-consumer queue. Viewer execution can consume a

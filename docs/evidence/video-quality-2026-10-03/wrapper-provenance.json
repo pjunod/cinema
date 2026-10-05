@@ -35,7 +35,7 @@
   "wrapper_commit": "ea687a8f9312a8c7470f37cad2dd6b2bbb49aa15",
   "forgejo_run_id": 3993,
   "ui_run_index": 3972,
-  "url": "http://192.168.4.7:3000/noirr/plurx/actions/runs/3972",
+  "url": "http://forge.lan:3000/noirr/plurx/actions/runs/3972",
   "jobs": {
     "rust_compile": 41502,
     "windows_compile": 41503,

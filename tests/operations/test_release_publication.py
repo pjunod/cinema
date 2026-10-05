@@ -216,7 +216,7 @@ class ReleasePublicationContractCase(unittest.TestCase):
 
     def test_digest_bound_release_omits_mutable_runtime_install(self):
         source = (ROOT / "Dockerfile").read_text(encoding="utf-8")
-        runtime = "192.168.4.7:3000/noirr/plurx-media-runtime@sha256:" + "a" * 64
+        runtime = "forge.lan:3000/noirr/plurx-media-runtime@sha256:" + "a" * 64
         generated = render(source, runtime)
 
         self.assertIn(f"FROM {runtime} AS runtime-assets", generated)
@@ -228,7 +228,7 @@ class ReleasePublicationContractCase(unittest.TestCase):
             generated,
         )
         with self.assertRaisesRegex(ValueError, "immutable sha256 digest"):
-            render(source, "192.168.4.7:3000/noirr/plurx-media-runtime:latest")
+            render(source, "forge.lan:3000/noirr/plurx-media-runtime:latest")
 
     def test_release_binds_daemon_identity_to_published_runtime(self):
         workflow = WORKFLOW.read_text(encoding="utf-8")

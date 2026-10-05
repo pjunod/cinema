@@ -312,9 +312,9 @@ deployed and report both tables side by side.
 ```
 
 Read-only discovery on 2026-09-20 found that the old lab names no longer
-describe the live voter set: `192.168.4.7` reports itself as the learner,
-while `nuc4` (`192.168.4.8`), `m6` (`192.168.4.14`) and `nynuc`
-(`192.168.5.236`) report themselves as the three voters. No historical
+describe the live voter set: `10.42.4.7` reports itself as the learner,
+while `lab4` (`10.42.4.8`), `lab6` (`10.42.4.14`) and `media1`
+(`10.42.5.236`) report themselves as the three voters. No historical
 Prometheus-compatible endpoint was exposed on those nodes' standard ports,
 and the supplied deployment key was refused by all four hosts, so no
 node-local history could be inspected.
@@ -324,7 +324,7 @@ the three voters every 60 s and starts the acceptance window only when all
 three are reachable, remain voters on one build, report zero pending outbox
 rows, and report no transcode, Live TV or protected-playback activity. It
 resets the window on activity, reachability, build or role change, or a
-counter rollback. `m6` reported one active transcode at launch, so the
+counter rollback. `lab6` reported one active transcode at launch, so the
 continuous 24-hour window had not started yet. The sampler deploys nothing
 and performs only unauthenticated `GET /metrics` reads.
 
@@ -398,7 +398,7 @@ added 2026-10-03 uses `observe-after` in the existing capture tool. It does
 not deploy, change a switch, or authorize a capture. The exact schema is:
 
 - Top-level fields: `schema: "k03-after-acquisition-v1"` and `observations`.
-- Exactly one observation each for `nuc4`, `m6`, `nynuc`, with only `node`,
+- Exactly one observation each for `lab4`, `lab6`, `media1`, with only `node`,
   `build`, `source_commit`, integer UTC `epoch`, boolean
   `cluster_media_pool_enabled` and boolean `cluster_session_takeover_enabled`.
 - Every build/full-source binding must match the independently verified
@@ -446,9 +446,16 @@ The new offline observer control uses synthetic HTTP responses, not a fleet.
 
 After a separate capture admission, set `K03_BUILD` and `K03_SOURCE_SHA` from
 the verified deployed build receipt, and `K03_OWNER` / `K03_MANIFEST` to
-explicit approved owned paths. `K03_OWNER` must not exist already:
+explicit approved owned paths. `K03_OWNER` must not exist already. The voters
+and their metrics URLs are not in either tool: export `PLURX_K03_FLEET` (or pass
+`--fleet`) naming a roster kept outside the repository, shaped like
+[`scripts/replicated-write-capture.fleet.example.json`](../../scripts/replicated-write-capture.fleet.example.json)
+(`scripts/*.fleet.json` is git-ignored). `evaluate`, `sample-after`,
+`observe-after` and the M0 sampler refuse to run without one; `attribute` does
+not need it.
 
 ```sh
+export PLURX_K03_FLEET=<private>/k03-voters.fleet.json
 scripts/replicated-write-capture-sampler --after \
   --output-dir "$K03_OWNER" --acquisition-manifest "$K03_MANIFEST" \
   --expected-build "$K03_BUILD" --source-commit "$K03_SOURCE_SHA" \
@@ -552,7 +559,7 @@ trailers `Agent-Model:` / `Agent-Session:` on every commit of the branch.
 
 | Date | Model | Session | Milestone | PR | Outcome / evidence |
 |---|---|---|---|---|---|
-| 2026-09-20 | gpt-5.6-sol | agent:/root/c02_builder | M0 | #405 | Read-only discovery found the live three-voter set is `nuc4`, `m6`, and `nynuc`; the old `lab1`–`lab3` names are stale and `192.168.4.7` is now the learner. No historical metrics endpoint was found and node SSH refused the supplied key. A persistent 60 s `/metrics` sampler started at 2026-09-21T03:23:20Z and will complete only after a continuous 24-hour idle, empty-outbox, stable-build/role and monotonic-counter window; it was waiting because `m6` had one active transcode. The coordinator approved the 30 s forced claim, 10 s idle ceiling, unchanged SQLite singleton lease, and local-only notifications. No Rust was changed. |
+| 2026-09-20 | gpt-5.6-sol | agent:/root/c02_builder | M0 | #405 | Read-only discovery found the live three-voter set is `lab4`, `lab6`, and `media1`; the names in older prompts are stale and `10.42.4.7` is now the learner. No historical metrics endpoint was found and node SSH refused the supplied key. A persistent 60 s `/metrics` sampler started at 2026-09-21T03:23:20Z and will complete only after a continuous 24-hour idle, empty-outbox, stable-build/role and monotonic-counter window; it was waiting because `lab6` had one active transcode. The coordinator approved the 30 s forced claim, 10 s idle ceiling, unchanged SQLite singleton lease, and local-only notifications. No Rust was changed. |
 | 2026-09-25 | claude-opus-5-5 | https://claude.ai/code/session_01AZemhL7Y1nXGWxUGRC2tkK | M0 | #405 | **Unblocked by Paul's 12-hour gate.** `5010892f3` puts the sampler (`scripts/replicated-write-capture-sampler`, 43,200 s, append-safe) and its evaluator (`scripts/replicated-write-capture`) in the repo with `tests/operations/test_replicated_write_capture.py`; the running Mac copy's `capture.sh` was replaced in place (new inode) with the same 12-hour, append-safe script and the sampler was not stopped. Replaying all 16,783 sample lines (2026-09-21T03:23:20Z – 2026-09-25T01:25:21Z) finds 57 idle windows, one qualifying: 2026-09-22T03:36:36Z – 19:39:03Z, 16.04 h. `52c03014c` records the readout: 902,512 proposals/day cluster-wide, ≈ 1.07 M authority reads and 91 snapshot builds/day per voter; the learner-WAL attribution puts the outbox claim at 28.9% of entries, a `metadata-classification` lease cycle at 41.6% and the idle offline-package claim at 14.0% (both flagged, out of scope). The sampler's last sample is 01:25:21Z and nothing was written by 09:15Z; its launchd state was not readable from the agent workspace. |
 | 2026-09-25 | claude-opus-5-5 | https://claude.ai/code/session_01AZemhL7Y1nXGWxUGRC2tkK | M1, M2 | #405 | `b12e18636`. Local outbox and lease-expiry hints on both backends; `plurx_core::store::watched_drain` (hint + 30 s forced claim + 60 s settings pair cache + 1→10 s backoff, woken by local enqueue and settings writes); the `watched:outbox` singleton lease with 15 s local-read retry; `plurx_watched_outbox_ticks_total{outcome}`. Three-voter `store_contract`: an idle configured minute proposes 2 claims (was 60), an unconfigured minute 0, a lease hint 0 against an acquire's 1. plurxd: 1 s local delivery, ≤ 30 s forced claim, 60 s settings refresh, 10 s backoff, two-drainer failover within TTL + retry with zero non-owner acquires. Ten production-hunk reverts each fail their test. Decisions 5–6 in §7 record how §3.2 and §3.3 were read. |
 | 2026-09-25 | claude-opus-5-5 | https://claude.ai/code/session_01AZemhL7Y1nXGWxUGRC2tkK | M3 | #405 | `3763395d1`. Takeover switches read as one pair cached for 60 s; 10 s idle sleep while off, woken by a local switch write; 2 s cadence and CAS unchanged when on. Paused-clock tests: 10–11 reads in ten minutes off and no inventory tick; a local flip acted on within one tick; 2 s cadence with ≤ 2 reads in two minutes on. Reverting the cache or the wake fails them. |
@@ -568,7 +575,7 @@ trailers `Agent-Model:` / `Agent-Session:` on every commit of the branch.
 GPT prompt (fleet, K-03 M4). This is a separately admitted post-deploy
 measurement, not permission to deploy or start a capture from this document.
 After the exact source carrying K-03 M1–M3 and the takeover-start attribution
-is deployed and independently build/source-bound on nuc4, m6, nynuc and nuc3:
+is deployed and independently build/source-bound on lab4, lab6, media1 and lab3:
 1. On each voter, `curl -s http://<ip>:32400/metrics | grep
    plurx_watched_outbox_ticks_total` must list five outcomes. Over five
    minutes exactly one voter's claimed+empty_claim+skipped_hint grows; the
@@ -586,7 +593,7 @@ is deployed and independently build/source-bound on nuc4, m6, nynuc and nuc3:
    aggregate authority reads. Also report the owner's
    plurx_watched_outbox_ticks_total claimed +
    empty_claim delta over the same window scaled to a day.
-4. Copy (read-only, cp) the learner nuc3's /srv/plurx/hiqlite/logs/*.wal to
+4. Copy (read-only, cp) the learner lab3's /srv/plurx/hiqlite/logs/*.wal to
    /tmp and run `scripts/replicated-write-capture attribute <copies>`; report
    the `UPDATE watched_outbox` and `job_leases ... watched:outbox` shares.
    Independently retain bounded-copy identity, window span and WAL integrity

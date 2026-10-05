@@ -1,12 +1,12 @@
-# Nynuc runner orphaned sleeps — evidence and cleanup boundary
+# Media1 runner orphaned sleeps — evidence and cleanup boundary
 
 **Status:** open investigation · **Observed:** 2026-09-08 · **Scope:** the four
-Forgejo runner services on `nynuc`
+Forgejo runner services on `media1`
 
 Companion to [VALIDATION.md](../VALIDATION.md) (what CI gates) and
 [CI_EXECUTION_ACCELERATION_PLAN.md](CI_EXECUTION_ACCELERATION_PLAN.md) (runner
 capacity and isolation) — this note records the stopped processes found in the
-`nynuc` runner cgroups, what they do and do not explain, and the safe boundary
+`media1` runner cgroups, what they do and do not explain, and the safe boundary
 for a later cleanup and monitoring change.
 
 ## Finding — 50 stopped orphan processes remain in runner cgroups
@@ -22,10 +22,10 @@ original systemd runner cgroups.
 
 | Runner service | Stopped orphan count | Oldest observed age at the second check |
 |---|---:|---:|
-| `forgejo-runner-gha-nynuc-general-01.service` | 26 | 21h 16m |
-| `forgejo-runner-gha-nynuc-general-02.service` | 14 | 20h 52m |
-| `forgejo-runner-gha-nynuc-general-03.service` | 6 | 17h 35m |
-| `forgejo-runner-gha-nynuc-general-04.service` | 4 | 18h 55m |
+| `forgejo-runner-gha-media1-general-01.service` | 26 | 21h 16m |
+| `forgejo-runner-gha-media1-general-02.service` | 14 | 20h 52m |
+| `forgejo-runner-gha-media1-general-03.service` | 6 | 17h 35m |
+| `forgejo-runner-gha-media1-general-04.service` | 4 | 18h 55m |
 | **Total** | **50** | |
 
 The counts did not grow between the two observations. They also did not fall,
@@ -55,7 +55,7 @@ Those facts prove historical pressure, not current starvation: a cumulative
 `memory.high` counter does not identify which job caused an event.
 
 For the runner originally under investigation,
-`gha-nynuc-general-02`, the same snapshot showed:
+`gha-media1-general-02`, the same snapshot showed:
 
 - service active since 2026-09-07 21:26 UTC, with no restart;
 - 107 GiB available on the filesystem containing
@@ -66,7 +66,7 @@ For the runner originally under investigation,
 ## Causality — these processes did not cause PR #156's preflight result
 
 The three PR #156 preflight attempts assigned to
-`gha-nynuc-general-02` completed in 62, 69, and 52 seconds. They did not reach
+`gha-media1-general-02` completed in 62, 69, and 52 seconds. They did not reach
 the workflow's three-minute timeout. Each attempt exited on the same six
 `test_rolling_producer_ownership_inventory` assertions because source counts
 and the reviewed ownership ledger differed.
@@ -79,12 +79,12 @@ origin as unproved until a new process can be correlated with a specific task.
 
 ## Read-only inspection — count without changing the host
 
-Run this on `nynuc` to list and count stopped processes in the four runner
+Run this on `media1` to list and count stopped processes in the four runner
 cgroups:
 
 ```bash
 ps -eo pid,ppid,unit,state,etime,comm --sort=unit \
-  | awk '$3 ~ /^forgejo-runner-gha-nynuc-general-[0-9]+\.service$/ && \
+  | awk '$3 ~ /^forgejo-runner-gha-media1-general-[0-9]+\.service$/ && \
          $4 ~ /^T/ {
       count[$3]++
       print
@@ -103,10 +103,10 @@ Check service state separately:
 
 ```bash
 systemctl is-active \
-  forgejo-runner-gha-nynuc-general-01.service \
-  forgejo-runner-gha-nynuc-general-02.service \
-  forgejo-runner-gha-nynuc-general-03.service \
-  forgejo-runner-gha-nynuc-general-04.service
+  forgejo-runner-gha-media1-general-01.service \
+  forgejo-runner-gha-media1-general-02.service \
+  forgejo-runner-gha-media1-general-03.service \
+  forgejo-runner-gha-media1-general-04.service
 ```
 
 Four `active` lines prove the daemons are running; they do not prove their

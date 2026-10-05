@@ -3,7 +3,7 @@
 **Status:** open — decisions are taken; implementation continues in the build
 plan · **Build plan:**
 [QUALITY-SWITCH-CONTINUITY-BUILD.md](QUALITY-SWITCH-CONTINUITY-BUILD.md) ·
-**Anchors:** `main` at `c9e4edf4` (2026-09-16, deployed to nynuc/m6 the same
+**Anchors:** `main` at `c9e4edf4` (2026-09-16, deployed to media1/lab6 the same
 evening) · **Written:** 2026-09-16 · **Companions:**
 [PLAYBACK-CONTROL-STATUS.md](PLAYBACK-CONTROL-STATUS.md) (what M6 built),
 [M6-CLIENT-REPLACEMENT-CONTRACT.md](M6-CLIENT-REPLACEMENT-CONTRACT.md) (the
@@ -101,14 +101,14 @@ M6 is not a stub any more. On `main`:
   (`PreparedReplacement.swift:423`) and the `.declined` arm is dead. Correct,
   since priming landed; the status page is stale there.
 
-The fleet is on this code: nynuc and m6 report `v0.3.0-2633-gc9e4edf4`,
-nuc4 `-2609`. Server setting `prepared_quality_handoff` defaults on
+The fleet is on this code: media1 and lab6 report `v0.3.0-2633-gc9e4edf4`,
+lab4 `-2609`. Server setting `prepared_quality_handoff` defaults on
 (`http/hls.rs:8082-8095`).
 
 ## 2. Why the viewer still sees a gap — three independent defects
 
 Any one of these alone would keep the count of prepared handoffs in
-production at zero. All three are present. nynuc's counters 28 minutes after
+production at zero. All three are present. media1's counters 28 minutes after
 today's deploy read `preparation_observations_total{seam="in_session"} 2`,
 `preparation_staged_total{outcome="refused"} 1`, `staged 0`, `actions
 prepare 0` — two selection changes observed, one staging attempted and lost,
@@ -171,7 +171,7 @@ a node at `DEFAULT_MAX_HW_SESSIONS = 2` (`admission.rs:41`) the reopen's own
 live create sets `live_is_waiting`, the 25 ms foreground watch tears the
 successor down as "foreground playback claimed prepared capacity"
 (`:7307-7329`), and `record_preparation_staged(false)` is counted. That is
-the `refused 1` on nynuc today.
+the `refused 1` on media1 today.
 
 ### 2.4 Two things that are *not* the problem
 
@@ -443,7 +443,7 @@ reason `predecessor superseded` and the speculative worker gone; the wire
 conformance test (`tests/validation/test_control_wire_conformance.py`)
 pins the new optional field; `preparation_staged_total{outcome="refused"}`
 stops incrementing on a directed change from a current client (checked on
-nynuc's `/metrics` after deploy).
+media1's `/metrics` after deploy).
 
 ### M1 — web: the quality menu and Auto go through the handoff
 
@@ -451,7 +451,7 @@ nynuc's `/metrics` after deploy).
 in the same PR as a no-op digest input if D3 is undecided — see D3).
 Acceptance: `tests/playback/web-control.test.js` cases for publish → offer →
 commit, publish → `none` → reopen, publish → 12 s → `aborted` + reopen, and
-seek-during-wait → reopen at target; a browser run against nynuc with
+seek-during-wait → reopen at target; a browser run against media1 with
 `plurx_playback_control_actions_total{action="prepare",platform="web"}`
 incrementing and one `committed` acknowledgement per menu change; client
 log `quality_switch` carries `via=prepared|fallback`.

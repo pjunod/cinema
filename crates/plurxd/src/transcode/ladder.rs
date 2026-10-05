@@ -82,7 +82,7 @@ const HDR10_4K_MAX_LUMA_SAMPLES: i64 = 8_912_896;
 /// this rung inherits that unchanged.
 const HDR10_HLS_CODEC: &str = "hvc1.2.4.H120.90";
 /// VAAPI's non-packed constraint is set as well: measured from the production
-/// Jellyfin 8.1.3 graph on m6, rather than inherited from the QSV/x265 point.
+/// Jellyfin 8.1.3 graph on lab6, rather than inherited from the QSV/x265 point.
 const HDR10_VAAPI_HLS_CODEC: &str = "hvc1.2.4.H120.B0";
 /// Measured from the 2160p QSV output's hvcC: Main10, compatibility 4, High
 /// tier, level 150, constraint byte 0x90.

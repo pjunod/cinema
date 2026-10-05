@@ -93,7 +93,7 @@ admission tests can model the historical reservation.
 
 * **No capability fallback.** The endpoint needs FFmpeg's `http` output
   protocol. Both engines in the published image have it (checked in the
-  running `plurxd` container on `nynuc`: jellyfin-ffmpeg 8.1.2, the default
+  running `plurxd` container on `media1`: jellyfin-ffmpeg 8.1.2, the default
   engine, and distro FFmpeg 5.1 both list `http` under output protocols), and
   a fallback to file output would reintroduce the whole-ceiling path this
   removes. A build without network protocols fails
@@ -107,7 +107,7 @@ admission tests can model the historical reservation.
 
 ## 4. Regression evidence
 
-Pinned toolchain, `nuc3`:
+Pinned toolchain, `lab3`:
 
 ```bash
 rustup run 1.97.1 rustc --version        # 1.97.1 (8bab26f4f 2026-07-14)
@@ -138,7 +138,7 @@ cargo test -p plurx-core --lib upload_output
 | `transcode::upload_output_tests::scratch_charge_upload_output_swaps_temp_file_for_put_and_nothing_else` | The write-mode switch changes nothing but `temp_file` → `-method PUT`. |
 
 The production engine was checked separately. In the published image on
-`nynuc`, jellyfin-ffmpeg 8.1.2 wrote the same MPEG-TS transcode and fMP4 copy
+`media1`, jellyfin-ffmpeg 8.1.2 wrote the same MPEG-TS transcode and fMP4 copy
 once to files and once with `-method PUT` to a loopback receiver: 6 of 6 and
 5 of 5 objects byte-identical. The CI tests use the build host's FFmpeg 8.0.1.
 

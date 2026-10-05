@@ -3287,7 +3287,7 @@ async fn create_with_purpose_inner(
                     });
                     // Deliberately still codeless, i.e. still not retried.
                     //
-                    // Both 50-second failures on m6 came through here rather
+                    // Both 50-second failures on lab6 came through here rather
                     // than through `session_start_error`, so naming it was
                     // tempting. But with the burn sidecar bounded above, a cold
                     // sidecar no longer reaches this arm at all — what does is

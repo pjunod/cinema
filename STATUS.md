@@ -63,8 +63,8 @@ first.
 
 ## Content analysis stopped: the queue's receipt bound is the next cliff after #608
 
-**Branch `fix/queue-receipt-pressure`, [PR #610](http://192.168.4.7:3000/noirr/plurx/pulls/610), CI running; the retained-row half is
-already on `main` as [#608](http://192.168.4.7:3000/noirr/plurx/pulls/608)
+**Branch `fix/queue-receipt-pressure`, [PR #610](http://forge.lan:3000/noirr/plurx/pulls/610), CI running; the retained-row half is
+already on `main` as [#608](http://forge.lan:3000/noirr/plurx/pulls/608)
 (`29358ce5`), not yet deployed — the GPT deploy/verify prompt is in the
 project doc.** Paul reported 2026-09-28 that Content analysis was not
 advancing with `pipeline version unavailable` on every row. Two things, and
@@ -77,7 +77,7 @@ answered `queue_full`; fragment requests bounced as `queue_full_or_busy`
 last `ready` 2026-09-27 05:11 UTC). Two sessions diagnosed it in parallel;
 #608 landed first with enqueue-path eviction plus upkeep from 9,000
 (replicated v63 / SQLite v85), and this session's
-[#605](http://192.168.4.7:3000/noirr/plurx/pulls/605) was closed as
+[#605](http://forge.lan:3000/noirr/plurx/pulls/605) was closed as
 superseded. What #608 leaves: `background_job_waiters` stood at 11,947 of
 16,384 with 10,775 succeeded receipts that only expire after seven days, so
 the same refusal was days away one table over. This branch compacts the
@@ -89,12 +89,12 @@ The rows on the page: today's image builds flipped jellyfin-ffmpeg
 8.1.2 → 8.1.3 → 8.1.2 (the Dockerfile installs `jellyfin-ffmpeg8` unpinned),
 which changes the fragment-index engine digest, and each deploy under the
 other digest failed everything queued under the first — 278 rows, 228 of
-them tombstones on nynuc until **Retry this page** is pressed after the
-deploy. Filed as [#604](http://192.168.4.7:3000/noirr/plurx/issues/604).
+them tombstones on media1 until **Retry this page** is pressed after the
+deploy. Filed as [#604](http://forge.lan:3000/noirr/plurx/issues/604).
 
 ## Android Live TV fullscreen on tablets: every box gets its own player view
 
-**[PR #606](http://192.168.4.7:3000/noirr/plurx/pulls/606), merged 2026-09-28 as `cfa61cb3e`; Android 138 installed on the Lenovo TB322FC, Google TV Streamer, Pixel 11 Pro XL, Pixel 10 Pro Fold and razr ultra 2025; VERIFIED on the TB322FC and the Streamer. Still owed: the TCL 9445X and the Xiaomi 25019PNF3C, which were not reachable over wireless adb.**
+**[PR #606](http://forge.lan:3000/noirr/plurx/pulls/606), merged 2026-09-28 as `cfa61cb3e`; Android 138 installed on the Lenovo TB322FC, Google TV Streamer, Pixel 11 Pro XL, Pixel 10 Pro Fold and razr ultra 2025; VERIFIED on the TB322FC and the Streamer. Still owed: the TCL 9445X and the Xiaomi 25019PNF3C, which were not reachable over wireless adb.**
 Paul reported 2026-09-28 that fullscreen Live TV on the tablets still shows
 the small inline picture in a mostly black screen. #509's relayout + surface
 rebind *is* on `main` (re-landed by #546 after the push-mirror rewind, in
@@ -105,14 +105,14 @@ geometry. Each host box now composes its own PlayerView on the shared
 ExoPlayer and unbinds on release; phones are unchanged (same slot, just a
 resize). `LiveTvPlayerSurfaceTest` fails against `main` and passes here;
 `testDebugUnitTest` (799/0), `lintDebug` and `assembleDebug` green;
-`history-audit` ok. Open as [PR #606](http://192.168.4.7:3000/noirr/plurx/pulls/606).
+`history-audit` ok. Open as [PR #606](http://forge.lan:3000/noirr/plurx/pulls/606).
 The adversarial review found no blocker and confirmed the release/bind order
 against Media3 1.10.1 and Compose's apply order; it added PlayerView's API 34
 SurfaceView sync workaround for the boxes that resize in place, an honest
 KDoc (one black frame per swap, no PiP host on the wide layout) and a
 tighter source pin. The fast lane went green (Rust gate included) and the
 merge carries the `Regression-Test:` trailer. Hardware, driven over wireless
-adb from nuc3 with screenshots and `uiautomator` bounds: on the TB322FC the
+adb from lab3 with screenshots and `uiautomator` bounds: on the TB322FC the
 fullscreen SurfaceView is `[0,97][3040,1807]` and the picture fills it at
 16:9; exit returns it to the inline box `[44,492][1753,1453]`; five
 fullscreen/exit toggles from the watch pane and three from the Guide preview
@@ -126,7 +126,7 @@ never installed anywhere.
 
 ## Live TV said "all slots are busy" with every tuner idle
 
-**[PR #585](http://192.168.4.7:3000/noirr/plurx/pulls/585), merged 2026-09-28 as `2694db665`; not yet deployed — the GPT deploy/verify prompt is in the project doc.**
+**[PR #585](http://forge.lan:3000/noirr/plurx/pulls/585), merged 2026-09-28 as `2694db665`; not yet deployed — the GPT deploy/verify prompt is in the project doc.**
 Paul reported 2026-09-27 (web and iOS) that channels intermittently refuse
 with *All Live TV slots are busy*; the FLEX 4K had four idle tuners each
 time. The owner's own log named the cause — `tuner_capacity` with
@@ -155,7 +155,7 @@ admission's own predicate, and the tests reach the arms they name.
 **Decision for Paul to look over:** admitting a viewer over a stuck
 background permit reverses the ruling OPERATIONS.md carried ("absence after
 five seconds means that worker is stuck rather than permission to start
-beside it"); the RCA §3 argues why. Next (GPT): deploy the three voters then nuc3,
+beside it"); the RCA §3 argues why. Next (GPT): deploy the three voters then lab3,
 confirm the eight zombie rows retire on the first upkeep pass, tune 6.1
 under backfill load twenty times from web and iPhone, screenshot the
 `encoder_capacity` copy, and install Android 134 / Apple 196.
@@ -164,7 +164,7 @@ first.
 
 ## Apple TV Live TV navigation: every press reversible, every control reachable
 
-**[PR #589](http://192.168.4.7:3000/noirr/plurx/pulls/589) merged to `main`
+**[PR #589](http://forge.lan:3000/noirr/plurx/pulls/589) merged to `main`
 2026-09-28 as `f400c0ea2`, Apple build 195; not yet installed on any device.**
 Paul reported 2026-09-27 that Live TV navigation on the Apple TV
 was close to broken: hard to reach anything, and a move often did not reverse.
@@ -194,7 +194,7 @@ in hand — the device pass is `~/Downloads/kit 2/APPLETV-LIVE-TV-NAVIGATION-PHY
 
 ## Silo comparison: two implementation plans and one device census, no code
 
-**Branch `docs/silo-comparison-plans`, [PR #563](http://192.168.4.7:3000/noirr/plurx/pulls/563), draft; not merged, nothing deployed.**
+**Branch `docs/silo-comparison-plans`, [PR #563](http://forge.lan:3000/noirr/plurx/pulls/563), draft; not merged, nothing deployed.**
 Paul asked 2026-09-26 how plurx compares with Silo (github.com/Silo-Server),
 then for implementation docs on the two things worth taking and a census for
 the third. Both plans went through an adversarial agent review that pulled
@@ -230,7 +230,7 @@ Record: §3.2.2 of [the P-02 plan](docs/ci/SERVICE-LIMITS-CHILD-PRIORITIES-AND-B
 
 ## P-02: four parser fuzz targets, one of which found a way to abort plurxd; the release profile measured
 
-**Branch `plan/P-02-2`, [PR #510](http://192.168.4.7:3000/noirr/plurx/pulls/510), merged 2026-09-25; not yet deployed.**
+**Branch `plan/P-02-2`, [PR #510](http://forge.lan:3000/noirr/plurx/pulls/510), merged 2026-09-25; not yet deployed.**
 The second pass of
 [SERVICE-LIMITS-CHILD-PRIORITIES-AND-BUILD-HYGIENE.md](docs/ci/SERVICE-LIMITS-CHILD-PRIORITIES-AND-BUILD-HYGIENE.md)
 took the buildable remainder that needs no lab host and no decision of
@@ -256,7 +256,7 @@ Exp-Golomb overflows, `dvconvert` refuses any RPU over 64 KiB before
 parsing, each fuzz input is a fixture with a test in `dvconvert`, and
 refusals report the parse error's whole chain rather than "CM v4.0".
 
-**M6's release-profile half, measured on nuc3 and not shipped:** PR 1 as
+**M6's release-profile half, measured on lab3 and not shipped:** PR 1 as
 written (`debug = "line-tables-only"`, `strip = "none"`) makes `plurxd` a
 420 MiB binary (+427 %) for a fully symbolicated backtrace; `strip =
 "debuginfo"` gives named frames without lines at +36 % (+11.5 % gzipped);
@@ -308,7 +308,7 @@ Record: [docs/streaming/LIVE-TV-DIRECT-PLAY-AND-SURROUND.md](docs/streaming/LIVE
   commands, so stereo stays stereo, 7.1.4 folds to 5.1, unknown is decided by
   the first frame.
 - **Aspect ratio: not reproduced on the server.** Real 6.2 captures (704×480,
-  SAR 40:33, 480i) through the exact QSV, VAAPI and x264 producer chains on nynuc
+  SAR 40:33, 480i) through the exact QSV, VAAPI and x264 producer chains on media1
   all publish SAR 40:33 / DAR 16:9. `scripts/live-tv-hardware` now records the
   segment's SAR/DAR. Open until the client showing it is named.
 
@@ -318,10 +318,10 @@ as an audio track with no channels and never start, so Safari and Chrome sat
 black on 157.1. Fixed: the list is `5.1|stereo|mono`, the harness asserts a
 positive header channel count and gains `--surround`.
 
-Verified: focused Rust tests (53) + clippy `-D warnings` + fmt on nuc3;
-`make apple-test` on mba (1330 cases); Android unit tests in the pinned image
+Verified: focused Rust tests (53) + clippy `-D warnings` + fmt on lab3;
+`make apple-test` on maca (1330 cases); Android unit tests in the pinned image
 (745); `tests/web/live-tv.test.js`. Hardware, this branch's `plurxd` against
-the real tuner from nuc3: 6.2 encodes to `704×480 SAR 40:33 DAR 16:9`;
+the real tuner from lab3: 6.2 encodes to `704×480 SAR 40:33 DAR 16:9`;
 157.1 with a copy envelope comes back **copy/copy** — HEVC + the AC-3 5.1
 simulcast in MPEG-TS, no decoder running. One adversarial review pass, eight
 findings folded (Android now reads the HDMI sink's PCM channel count, described

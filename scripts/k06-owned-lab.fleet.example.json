@@ -1,0 +1,12 @@
+{
+  "schema": "k06-fleet-v1",
+  "ssh_user": "operator",
+  "trusted_network": "10.42.0.0/16",
+  "hosts": [
+    {"host": "media1", "ip": "10.42.5.236"},
+    {"host": "lab6", "ip": "10.42.4.14"},
+    {"host": "lab4", "ip": "10.42.4.8"},
+    {"host": "lab3", "ip": "10.42.4.7"}
+  ],
+  "load": {"sender": "lab6", "receiver": "lab4"}
+}

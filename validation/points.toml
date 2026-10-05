@@ -632,6 +632,7 @@ paths = [
   "crates/plurxd/src/http/internal_clock.rs",
   "tests/operations/test_clock_skew_guard_design.py",
   "scripts/k06-owned-lab.py",
+  "scripts/k06-owned-lab.fleet.example.json",
   "tests/operations/test_k06_owned_lab.py",
   "tests/operations/test_k06_owned_lab_review.py",
   "tests/operations/test_k06_transport_diagnostics.py",
@@ -649,6 +650,7 @@ paths = [
   "crates/plurxd/src/wal_cli.rs",
   "scripts/replicated-write-capture",
   "scripts/replicated-write-capture-sampler",
+  "scripts/replicated-write-capture.fleet.example.json",
   "tests/operations/test_replicated_write_capture.py",
 ]
 checks = ["rust-gate", "rust-gate-ci", "cluster-auth", "cluster-transport-recovery", "security-boundaries", "web-membership", "operations-contract"]
@@ -1233,6 +1235,9 @@ paths = [
   "docs/ci/RIPWIRE.md",
   "docs/ci/RIPWIRE-PILOT.md",
   "scripts/history-audit",
+  "scripts/scrub-infra-names",
+  "scripts/scrub-infra-names.allow.toml",
+  "tests/operations/test_infra_names.py",
   "scripts/prove-fix",
   "scripts/prove-tombstone-offline-fence",
   "scripts/require-test-count",

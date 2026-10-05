@@ -1080,7 +1080,7 @@ preflight is still required.
 ### 9.3 M1-A source progress — 2026-09-30
 
 B-R1 is committed as `62fcdaa12aa2cffa478dff4aff3b148a069a4885` and reviewed
-in [PR657](http://192.168.4.7:3000/noirr/plurx/pulls/657). The tracked hook and
+in [PR657](http://forge.lan:3000/noirr/plurx/pulls/657). The tracked hook and
 exact-commit check passed. The artifact attachment API rejected this Forgejo
 URL; the PR exists. No skipped workflow is treated as qualification. The
 combined effort and M1 task retain this reviewed dependency pending ordinary
@@ -1232,10 +1232,10 @@ masters remain attempt-bound; MPEG-TS does not have an AVC init object, so this
 is not an init-derived codec claim. Manifest adapter regression/compile checks
 are running.
 
-Read-only fleet discovery currently reports FOUR f16be4f22 members: nynuc
-192.168.5.236 and m6 192.168.4.14 voters, nuc4 192.168.4.8 leader/voter, and nuc3
-192.168.4.7 read-worker/learner. Bonjour's two responders were not a complete
-fleet census. Current nynuc UI reports jellyfin-ffmpeg8.1.3, QSV/VAAPI boot graph
+Read-only fleet discovery currently reports FOUR f16be4f22 members: media1
+10.42.5.236 and lab6 10.42.4.14 voters, lab4 10.42.4.8 leader/voter, and lab3
+10.42.4.7 read-worker/learner. Bonjour's two responders were not a complete
+fleet census. Current media1 UI reports jellyfin-ffmpeg8.1.3, QSV/VAAPI boot graph
 validation, but unavailable held FFprobe identity and explicit decode facts;
 Main10 plain-HDR and DV-HDR10 graphs failed. These are baseline observations,
 not source geometry/tone-map admission proofs or parser-floor deployment receipts.

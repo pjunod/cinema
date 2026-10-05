@@ -20,7 +20,7 @@ playing *Bad Boys: Ride or Die*: `transcode capacity is temporarily
 unavailable: another replacement for this player is still being committed`,
 over a Retry button that could not clear it.
 
-**Orphaned**, not a commit in flight. On m6 the cluster replacement gate for
+**Orphaned**, not a commit in flight. On lab6 the cluster replacement gate for
 that player was held by the detached cleanup of a request that had answered
 the viewer 503 six seconds earlier, and nothing in the tree ages, expires or
 force-releases that registry. What wedged the hold inside the start was a

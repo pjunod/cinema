@@ -13,7 +13,7 @@ folds in.
 `docs/clients/APPLE-PAUSE-RESUME-IMPLEMENTATION-HANDOFF.md` in Paul's checkout
 (607 lines, byte-identical to the pasted text). Swift claims are reasoned from
 source, not compiled — no toolchain here. Incident evidence re-pulled from
-`m6` read-only: `docker logs` plus `playback_events` rows 66687–66723 in
+`lab6` read-only: `docker logs` plus `playback_events` rows 66687–66723 in
 `/srv/plurx/hiqlite/telemetry.db`.
 
 Line numbers below are `clients/apple/Sources/PlayerController.swift` at the
@@ -26,7 +26,7 @@ pinned sha unless another file is named.
 The stall report at 03:22:01.303 carries the full diagnostic snapshot
 (`reportPlaybackStall` → `playbackDiagnosticSnapshot`, 6802–6824). The server
 does not print it in the log line; it is stored in `playback_events.extra`
-(`http/system.rs` 1153–1253). Row 66713 on m6 says:
+(`http/system.rs` 1153–1253). Row 66713 on lab6 says:
 
 ```
 time_control_status = "waiting"

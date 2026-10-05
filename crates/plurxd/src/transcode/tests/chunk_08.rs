@@ -928,7 +928,7 @@ quality_catalog: None,
     /// waited the cooperative window and was refused, so a viewer could not
     /// restart the title they had been watching.
     ///
-    /// Reproduced from m6, 2026-09-21 22:55 UTC, file 5208: a start blocked
+    /// Reproduced from lab6, 2026-09-21 22:55 UTC, file 5208: a start blocked
     /// under the gate on a 402-second subtitle sidecar extraction, answered
     /// 503 at its own deadline, and its cleanup still held the key four
     /// seconds later when the viewer pressed Retry.

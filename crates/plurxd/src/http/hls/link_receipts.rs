@@ -1404,7 +1404,7 @@ mod tests {
         }
         let mut headers = HeaderMap::new();
         headers.insert("user-agent", "Mozilla/5.0".parse().expect("UA"));
-        let peer = "192.168.4.9:1234".parse().expect("socket");
+        let peer = "10.42.4.9:1234".parse().expect("socket");
         let mut network = crate::http::network::identity(&headers, Some(peer)).expect("namespace");
         network.user_id = Some(user.id);
         network.credential_generation = Some(plurx_core::domain::CredentialGeneration::derive(
@@ -1729,7 +1729,7 @@ mod tests {
             .expect("Auto");
         let mut headers = HeaderMap::new();
         headers.insert("user-agent", "Mozilla/5.0".parse().expect("UA"));
-        let remote = "192.168.4.9:1234".parse().expect("socket");
+        let remote = "10.42.4.9:1234".parse().expect("socket");
         let caps: plurx_core::playback::DeviceCaps = serde_json::from_value(
             serde_json::json!({"v":2,"video":[{"codec":"h264","present":["sdr"]}],"containers":["mp4"]})
         ).expect("actual request caps");
@@ -2123,7 +2123,7 @@ mod tests {
                 &user.password_hash,
             )),
             client_class: "web".into(),
-            network_fingerprint: "192.168.4.0/24".into(),
+            network_fingerprint: "10.42.4.0/24".into(),
         };
         let source = binding(&network, &file, [4; 32], CandidateRoute::Encode)
             .await
@@ -2336,7 +2336,7 @@ mod tests {
         .expect("caps");
         let mut headers = HeaderMap::new();
         headers.insert("user-agent", "Mozilla/5.0".parse().expect("UA"));
-        let remote = "192.168.4.9:1234".parse().expect("peer");
+        let remote = "10.42.4.9:1234".parse().expect("peer");
         let q = crate::http::stream::Caps {
             caps_v2: Some(caps),
             force: Some("original".into()),
@@ -2528,7 +2528,7 @@ mod tests {
         .expect("caps");
         let mut headers = HeaderMap::new();
         headers.insert("user-agent", "Mozilla/5.0".parse().expect("UA"));
-        let remote = "192.168.4.9:1234".parse().expect("peer");
+        let remote = "10.42.4.9:1234".parse().expect("peer");
         let q = crate::http::stream::Caps {
             caps_v2: Some(caps),
             force: Some("auto".into()),
@@ -2677,7 +2677,7 @@ mod tests {
                     &user.password_hash,
                 )),
                 client_class: "web".into(),
-                network_fingerprint: "192.168.4.0/24".into(),
+                network_fingerprint: "10.42.4.0/24".into(),
             };
             let source = binding(&network, &file, [4; 32], CandidateRoute::Encode)
                 .await
@@ -3205,7 +3205,7 @@ mod tests {
         let (_state, user, file, _root) = actual_intake_state().await;
         let mut headers = axum::http::HeaderMap::new();
         headers.insert("user-agent", "Mozilla/5.0".parse().expect("UA"));
-        let remote = "192.168.4.9:1234".parse().expect("peer");
+        let remote = "10.42.4.9:1234".parse().expect("peer");
         let mut network = crate::http::network::identity(&headers, Some(remote)).expect("network");
         network.user_id = Some(user.id);
         network.credential_generation = Some(plurx_core::domain::CredentialGeneration::derive(
@@ -3273,7 +3273,7 @@ mod tests {
         .expect("caps");
         let mut headers = HeaderMap::new();
         headers.insert("user-agent", "Mozilla/5.0".parse().expect("UA"));
-        let remote = "192.168.4.9:1234".parse().expect("peer");
+        let remote = "10.42.4.9:1234".parse().expect("peer");
         let decision = crate::http::stream::decision(
             crate::http::extract::AuthUser(user.clone()),
             State(state.clone()),

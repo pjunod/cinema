@@ -81,10 +81,10 @@ reported, not judged.
   PR · implement the findings · full suite once · fix to green · un-WIP
   (`PATCH /pulls/<n>` title) · merge it yourself.
 - **Compile before you push.** Rust: [docs/ci/AGENT-COMPILE-LOOP.md](../ci/AGENT-COMPILE-LOOP.md);
-  the lab build host is nuc3 (`ssh pjunod@192.168.4.7`, rustup 1.97.1 at
+  the lab build host is lab3 (`ssh operator@10.42.4.7`, rustup 1.97.1 at
   `~/.cargo/bin`, clone under `~/work/<name>`, `CARGO_TARGET_DIR` may point at
   an existing warm target). Apple: `make apple-test` on the macOS runner
-  `pjunod@192.168.5.115` (`export PATH=/usr/local/bin:/opt/homebrew/bin:$PATH
+  `operator@10.42.5.115` (`export PATH=/usr/local/bin:/opt/homebrew/bin:$PATH
   DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer`; ~150 s warm).
   Android: `./gradlew --no-daemon :app:testDebugUnitTest :app:assembleDebug
   :app:lintDebug` with `platforms;android-37.0` from `--channel=3`.
@@ -880,7 +880,7 @@ unaffected.
   `p.autoRequestedHeight` is set before `notifyPlaybackControl` runs, that
   the outgoing selection carries `height: 1080`, and (Rust side) that the
   digest changes and the staged recipe carries 1080.
-- Browser acceptance against nynuc: `plurx_playback_control_actions_total{action="prepare",platform="web"}`
+- Browser acceptance against media1: `plurx_playback_control_actions_total{action="prepare",platform="web"}`
   increments once per menu change, one `committed` per change; the client log
   `quality_switch` carries `via=prepared`.
 

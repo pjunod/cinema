@@ -6197,10 +6197,10 @@ final class AppleClientTests: XCTestCase {
         XCTAssertEqual(
             PlaybackAcceptanceLaunch.current(
                 defaults: defaults,
-                arguments: ["plurx", "-plurx.origin", "http://192.168.4.143:52773"]
+                arguments: ["plurx", "-plurx.origin", "http://10.42.4.143:52773"]
             ),
             PlaybackAcceptanceLaunch(
-                requestedOrigin: "http://192.168.4.143:52773",
+                requestedOrigin: "http://10.42.4.143:52773",
                 itemId: 17,
                 fileId: 42,
                 startMs: 91_000,
@@ -6215,20 +6215,20 @@ final class AppleClientTests: XCTestCase {
             PlaybackAcceptanceLaunch.current(defaults: defaults, arguments: ["plurx"])
         )
         XCTAssertFalse(missingProxy.matchesActiveOrigins(
-            model: "http://192.168.4.7:32400",
-            session: "http://192.168.4.7:32400"
+            model: "http://10.42.4.7:32400",
+            session: "http://10.42.4.7:32400"
         ))
         let launch = try XCTUnwrap(PlaybackAcceptanceLaunch.current(
             defaults: defaults,
-            arguments: ["plurx", "-plurx.origin", "http://192.168.4.143:52773"]
+            arguments: ["plurx", "-plurx.origin", "http://10.42.4.143:52773"]
         ))
         XCTAssertTrue(launch.matchesActiveOrigins(
-            model: "http://192.168.4.143:52773",
-            session: "http://192.168.4.143:52773"
+            model: "http://10.42.4.143:52773",
+            session: "http://10.42.4.143:52773"
         ))
         XCTAssertFalse(launch.matchesActiveOrigins(
-            model: "http://192.168.4.143:52773",
-            session: "http://192.168.4.7:32400"
+            model: "http://10.42.4.143:52773",
+            session: "http://10.42.4.7:32400"
         ))
     }
     #endif

@@ -121,7 +121,7 @@ list.
 | File | Answers | |
 |---|---|---|
 | [STATUS-HISTORY.md](playback-control/STATUS-HISTORY.md) | Status history: the `STATUS.md` sections for this folder's efforts, moved verbatim on 2026-09-24 and dated by when each was first recorded; `STATUS.md` keeps a one-line row per section pointing here. | done |
-| [REPLACEMENT-GATE-SUPERSESSION-RCA.md](playback-control/REPLACEMENT-GATE-SUPERSESSION-RCA.md) | Why an abandoned replacement held its player key forever, the m6 evidence, and the supersedable gate that fixes it. | built |
+| [REPLACEMENT-GATE-SUPERSESSION-RCA.md](playback-control/REPLACEMENT-GATE-SUPERSESSION-RCA.md) | Why an abandoned replacement held its player key forever, the lab6 evidence, and the supersedable gate that fixes it. | built |
 | [CALLBACK-ROOT-CAUSE-AND-FIX.md](playback-control/CALLBACK-ROOT-CAUSE-AND-FIX.md) | Why Safari cold resume lost frame callbacks, the lifecycle fix, controlled evidence, and questions for Fable review. | open |
 | [PLAYBACK-LIFECYCLE-COVERAGE.md](playback-control/PLAYBACK-LIFECYCLE-COVERAGE.md) | Playback states and transitions, buffer handoffs, communication contracts, existing test anchors, and open acceptance gaps. | open |
 | [PLAYBACK-REWRITE-REMAINDER.md](playback-control/PLAYBACK-REWRITE-REMAINDER.md) | Executed Sol handoff: the finite B01–B05 remainder, its boundaries, and the work promoted through PR #263. | done |
@@ -328,7 +328,7 @@ conversion, decoder selection, and the stall/stutter investigations.
 ## cluster/ — replication, membership, and recovery
 
 Durable cluster work: [implementation](cluster/DURABLE-WORK-QUEUE-IMPLEMENTATION.md) ·
-[build status](cluster/DURABLE-WORK-QUEUE-STATUS.md) — **built**; [Activity and subtitle-throughput follow-up](http://192.168.4.7:3000/noirr/plurx/pulls/588).
+[build status](cluster/DURABLE-WORK-QUEUE-STATUS.md) — **built**; [Activity and subtitle-throughput follow-up](http://forge.lan:3000/noirr/plurx/pulls/588).
 
 Phase 4 and everything under it: the clustering transition, the performance
 and media-pool work built on top, and the diagnoses of specific replicated
@@ -549,7 +549,7 @@ Two rounds of performance work, each with its plan, review, and response.
 | [FORGEJO-MAIN-IMAGE-HANDOFF.md](ci/FORGEJO-MAIN-IMAGE-HANDOFF.md) | Publishing the main image from Forgejo. | open |
 | [RUNNER-DISK.md](ci/RUNNER-DISK.md) | What fills a runner, what bounds it, how to reclaim it. | live |
 | [MEDIA1-RUNNER-ORPHANED-PROCESSES.md](ci/MEDIA1-RUNNER-ORPHANED-PROCESSES.md) | Why effort preflight leaked stopped children on media1, and how cleanup is proved. | open |
-| [NYNUC-RUNNER-ORPHANED-SLEEP-PROCESSES.md](ci/NYNUC-RUNNER-ORPHANED-SLEEP-PROCESSES.md) | Evidence for stopped orphaned sleeps in the nynuc runner cgroups and the safe cleanup boundary. | open |
+| [MEDIA1-RUNNER-ORPHANED-SLEEP-PROCESSES.md](ci/MEDIA1-RUNNER-ORPHANED-SLEEP-PROCESSES.md) | Evidence for stopped orphaned sleeps in the media1 runner cgroups and the safe cleanup boundary. | open |
 
 ---
 

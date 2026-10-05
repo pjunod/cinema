@@ -16,7 +16,7 @@ waiting, and which execution stage has actually been observed. Watching stays
 above two Activity tabs: Status and Jobs. Node and job-type selections must
 query the entire queue, rather than filter only the current page.
 
-On 2026-09-30, a short Docker sample across nynuc, m6, nuc4 and nuc3 showed
+On 2026-09-30, a short Docker sample across media1, lab6, lab4 and lab3 showed
 roughly 1.3 CPU cores used out of 60 logical CPUs. That sample does not prove
 sustained CPU starvation or establish a safe storage concurrency limit.
 The observed upstream analysis backlog was 2,631 requests; these are not the

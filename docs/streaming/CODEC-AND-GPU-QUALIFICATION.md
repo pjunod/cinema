@@ -72,9 +72,9 @@ document.
 
 ## Video-quality batch continuation — 2026-10-03
 
-[PR #766](http://192.168.4.7:3000/noirr/plurx/pulls/766) adds one candidate
+[PR #766](http://forge.lan:3000/noirr/plurx/pulls/766) adds one candidate
 plain-HDR10 path: software decode/10-bit scale, P010 upload, `hevc_vaapi`
-Main10 at the existing 1080p rung. The installed m6 Jellyfin encoder advertises
+Main10 at the existing 1080p rung. The installed lab6 Jellyfin encoder advertises
 that profile and P010 hardware surfaces; advertisement alone is not a
 qualification. Source implementation and compile checks precede the final
 adversarial review and once-only validation/measurement pass.
@@ -653,8 +653,8 @@ organic usage week is supplementary; unknown history remains labelled unknown.
 
 #### 2026-09-21 pre-instrumentation fleet inventory
 
-The maintained Ansible inventory currently names four Plurx nodes (`nynuc`,
-`m6`, `nuc4`, `nuc3`), rather than the historical host list in §6. The table
+The maintained Ansible inventory currently names four Plurx nodes (`media1`,
+`lab6`, `lab4`, `lab3`), rather than the historical host list in §6. The table
 below comes from read-only SSH discovery against those four nodes. It separates
 an encoder present in FFmpeg's build from one accepted by the boot probe. An
 unset preference means the existing automatic ordering selects the first
@@ -662,10 +662,10 @@ accepted family; it is not an operator enable switch.
 
 | Node | GPU / kernel driver | FFmpeg build exposes | Boot probe accepts | Automatic selection / tone-map | Historical use available? |
 |---|---|---|---|---|---|
-| `nynuc` | Intel Arrow Lake-P Arc Pro 130T/140T · `i915` · Linux `7.0.0-31-generic` | H.264/HEVC NVENC, QSV, VA-API | software, QSV, VA-API | QSV / `vpp_qsv` | No: container started `2026-09-21T04:18:48Z`; M0 metrics absent |
-| `m6` | AMD Phoenix1 · `amdgpu` · Linux `7.0.0-31-generic` | H.264/HEVC NVENC, QSV, VA-API | software, VA-API | VA-API / CPU fallback | No: container started `2026-09-21T04:20:03Z`; M0 metrics absent |
-| `nuc4` | Intel Alder Lake-P Iris Xe · `i915` · Linux `7.0.0-31-generic` | H.264/HEVC NVENC, QSV, VA-API | software, QSV, VA-API | QSV / `vpp_qsv` | No: container started `2026-09-21T04:27:49Z`; M0 metrics absent |
-| `nuc3` | Intel Alder Lake-P Iris Xe · `i915` · Linux `7.0.0-31-generic` | H.264/HEVC NVENC, QSV, VA-API | software, QSV, VA-API | QSV / `vpp_qsv` | No: container started `2026-09-21T04:20:40Z`; M0 metrics absent |
+| `media1` | Intel Arrow Lake-P Arc Pro 130T/140T · `i915` · Linux `7.0.0-31-generic` | H.264/HEVC NVENC, QSV, VA-API | software, QSV, VA-API | QSV / `vpp_qsv` | No: container started `2026-09-21T04:18:48Z`; M0 metrics absent |
+| `lab6` | AMD Phoenix1 · `amdgpu` · Linux `7.0.0-31-generic` | H.264/HEVC NVENC, QSV, VA-API | software, VA-API | VA-API / CPU fallback | No: container started `2026-09-21T04:20:03Z`; M0 metrics absent |
+| `lab4` | Intel Alder Lake-P Iris Xe · `i915` · Linux `7.0.0-31-generic` | H.264/HEVC NVENC, QSV, VA-API | software, QSV, VA-API | QSV / `vpp_qsv` | No: container started `2026-09-21T04:27:49Z`; M0 metrics absent |
+| `lab3` | Intel Alder Lake-P Iris Xe · `i915` · Linux `7.0.0-31-generic` | H.264/HEVC NVENC, QSV, VA-API | software, QSV, VA-API | QSV / `vpp_qsv` | No: container started `2026-09-21T04:20:40Z`; M0 metrics absent |
 
 All four images are `plurx/plurxd:latest`; none sets `PLURX_HWACCEL` or
 `PLURX_TONEMAP`. NVENC's symbols are compiled into the shipped FFmpeg, but its
@@ -819,7 +819,7 @@ are checked by `qualified()`; existing boot capability validation remains in
 the node's resolution path. No new tuple is admitted, no argv changes, and
 the plan/digest/recipe versions stay unchanged.
 
-**Sole review disposition, 2026-09-30 — [#649 review 22](http://192.168.4.7:3000/noirr/plurx/pulls/649#issuecomment-6639):**
+**Sole review disposition, 2026-09-30 — [#649 review 22](http://forge.lan:3000/noirr/plurx/pulls/649#issuecomment-6639):**
 P2 accepted: the incumbent HDR10 builder always emits bitrate-bounded VBR,
 so the new delivered contract normalizes a supplied HDR10 QVBR preference
 to VBR and `qualified()` refuses a manually malformed HDR10/QVBR contract.
@@ -1160,10 +1160,10 @@ run, and no process-local zero was used as absence evidence.
 
 | Node | Hardware | Compiled H.264 families | Existing boot validation | Selection evidence |
 |---|---|---|---|---|
-| `nynuc` | Intel Arc Pro 130T/140T, `8086:7d51` | NVENC, QSV, VA-API | QSV/VA-API accepted; NVENC refused `libcuda.so.1`; VideoToolbox false | Existing production pre-transcode records name Intel QuickSync |
-| `m6` | AMD Phoenix1, `1002:15bf` | NVENC, QSV, VA-API | VA-API accepted; QSV device creation refused; NVENC refused `libcuda.so.1`; VideoToolbox false | Existing boot caption graph records use VA-API |
-| `nuc4` | Intel Iris Xe, `8086:46a6` | NVENC, QSV, VA-API | QSV/VA-API accepted; NVENC refused `libcuda.so.1`; VideoToolbox false | Accepted-family evidence; ordinary-session selection not independently sampled |
-| `nuc3` | Intel Iris Xe, `8086:46a6` | NVENC, QSV, VA-API | QSV/VA-API accepted; NVENC refused `libcuda.so.1`; VideoToolbox false | Accepted-family evidence; ordinary-session selection not independently sampled |
+| `media1` | Intel Arc Pro 130T/140T, `8086:7d51` | NVENC, QSV, VA-API | QSV/VA-API accepted; NVENC refused `libcuda.so.1`; VideoToolbox false | Existing production pre-transcode records name Intel QuickSync |
+| `lab6` | AMD Phoenix1, `1002:15bf` | NVENC, QSV, VA-API | VA-API accepted; QSV device creation refused; NVENC refused `libcuda.so.1`; VideoToolbox false | Existing boot caption graph records use VA-API |
+| `lab4` | Intel Iris Xe, `8086:46a6` | NVENC, QSV, VA-API | QSV/VA-API accepted; NVENC refused `libcuda.so.1`; VideoToolbox false | Accepted-family evidence; ordinary-session selection not independently sampled |
+| `lab3` | Intel Iris Xe, `8086:46a6` | NVENC, QSV, VA-API | QSV/VA-API accepted; NVENC refused `libcuda.so.1`; VideoToolbox false | Accepted-family evidence; ordinary-session selection not independently sampled |
 
 Container starts were respectively 16:34:55, 18:32:39, 18:43:58 and
 16:39:35 UTC on 2026-09-30. These are current capability observations, not
@@ -1182,7 +1182,7 @@ that matrix and must not silently change it.
 **GPT prompt — current fleet encoder inventory (M0; organic week supplementary):**
 
 ```text
-On the maintained Plurx nodes `nynuc`, `m6`, `nuc4`, and `nuc3`, with the
+On the maintained Plurx nodes `media1`, `lab6`, `lab4`, and `lab3`, with the
 exact candidate build running:
 1. From the continuously scraped Prometheus history, report seven-day
    `increase()` values for `plurx_encoder_sessions_total` and
@@ -1321,14 +1321,14 @@ trailers `Agent-Model:` / `Agent-Session:` on every commit of the branch.
 | 2026-10-02 | gpt-6.1-sol | agent:/root/s11_next_cell_sol61 | M3 retained-header coverage16/16, original acceptance open | evidence-only continuation | [Additive ledger](../reviews/S11-RETAINED-NAL-CONTINUATION-20261002.md): three retained Grain contexts plus thirteen new Linux headers,35 first IDRs/1680AUs/actual rung geometry/exact3750ticks, old decimal keys≤1tick; Grain720's TWO extras retained. Actual per-process/export/independent cleanup hashes distinct from old Docker; route/local/H264-PQ pressure refusals preserved, no invented absence/sample. Privately retained raw/local reviewer access is not portable raw evidence; review/gate separate and original qualification open. No successful census/control/unit replay or gate waiver. |
 | 2026-10-02 | gpt-6.1-sol | agent:/root/s11_next_cell_sol61 | M3 retained Grain720 header evidence, original qualification open | evidence-only continuation | [NAL ledger](../reviews/S11-GRAIN720-NAL-EVIDENCE-20261002.md): one old fb436 context,35 first IDRs/1680 actual AUs/37 total IDRs including TWO extras, matched to retained probes. Nine new syntax controls and one offline corpus success retained once; no media or test replay. Historical review snapshots, sanitized-not-raw provenance, durable private bytes and exact cleanup bounds recorded;15 other NAL contexts and original public/film/native/GPU/fidelity acceptance remain open. |
 | 2026-10-02 | gpt-6.1-sol | agent:/root/s11_next_cell_sol61 | M3 internal acquisition/census evidence, original acceptance incomplete | evidence-only continuation | [Sixteen-cell sanitized ledger](S11-INTERNAL-ROLLING-CELLS-2026-10-02.md): four synthetic inputs,16 distinct internal once-successful cells at measured fb436 source/cc943750 tree/656e binary/b7bc runtime;35 objects/1680 packets/60+s real1× each,35 first keys/no drift. Grain720 has two internal extra keyflags, unchanged. Actual source-FD/PUT owner and four-way byte equality/exact cleanup retained privately; failures remain failed. No current-effort/public/NAL/physical/native/HDR-fidelity/GPU/full-M3 qualification or production GOP change. Independent review/current-head effort gate remain separate. |
-| 2026-10-02 | gpt-6.1-sol | codex://threads/01a0c165-d718-73a1-93e9-e81380017705 | M3 acquisition reporting cadence; incomplete | [#710](http://192.168.4.7:3000/noirr/plurx/pulls/710) | Wait500ms after each accepted response before another frame report; existing bridge450ms floor, refusal and real-frame guards unchanged. One NEW actual-page synthetic control passed once0.127s; normal hook79442 passed; sole independent review60 approved with controller/PAGE hash-label correction. Ten already-landed #690 local receipts are retired only after byte-identical private preservation and complete923-pass journal1539 coverage; immutable history retained, no cap change or unit replay. Current composition/gate and real browser/corpus/matrix qualification remain owed. |
-| 2026-09-21 | gpt-5.6-sol | agent:/root/c02_builder | M0 | [`17dfebc4` / #422](http://192.168.4.7:3000/noirr/plurx/pulls/422) | Implemented five-family availability, family/grade accepted-start, and eight-pipeline counters with closed enum labels. Count points are manager registration for rolling, reader attachment for VOD, and first publishable/fenced Live TV inventory (encoder only; Live TV currently refuses tone-map-required routes). Read-only inventory found QSV/VA-API nodes only; M7 NVENC and M8 VideoToolbox are refused for this fleet. Review correction: the seven-day gate is reset-aware and bound to the exact build; focused production-seam tests cover rolling, VOD and Live TV once-only/pre-boundary behavior. Needs: deploy and collect one valid reset-aware week before M1-M6. |
+| 2026-10-02 | gpt-6.1-sol | codex://threads/01a0c165-d718-73a1-93e9-e81380017705 | M3 acquisition reporting cadence; incomplete | [#710](http://forge.lan:3000/noirr/plurx/pulls/710) | Wait500ms after each accepted response before another frame report; existing bridge450ms floor, refusal and real-frame guards unchanged. One NEW actual-page synthetic control passed once0.127s; normal hook79442 passed; sole independent review60 approved with controller/PAGE hash-label correction. Ten already-landed #690 local receipts are retired only after byte-identical private preservation and complete923-pass journal1539 coverage; immutable history retained, no cap change or unit replay. Current composition/gate and real browser/corpus/matrix qualification remain owed. |
+| 2026-09-21 | gpt-5.6-sol | agent:/root/c02_builder | M0 | [`17dfebc4` / #422](http://forge.lan:3000/noirr/plurx/pulls/422) | Implemented five-family availability, family/grade accepted-start, and eight-pipeline counters with closed enum labels. Count points are manager registration for rolling, reader attachment for VOD, and first publishable/fenced Live TV inventory (encoder only; Live TV currently refuses tone-map-required routes). Read-only inventory found QSV/VA-API nodes only; M7 NVENC and M8 VideoToolbox are refused for this fleet. Review correction: the seven-day gate is reset-aware and bound to the exact build; focused production-seam tests cover rolling, VOD and Live TV once-only/pre-boundary behavior. Needs: deploy and collect one valid reset-aware week before M1-M6. |
 | 2026-09-30 | gpt-6.1-sol | agent:/root/k06_runtime_sol61 | M2 runtime; M1 generator seams, incomplete | pending | Typed contract drives the actual resolved plan/delivered presentation; all legacy selections and golden recipe identity preserved, five focused storage-enabled core regressions green. Three fixture-seam tests and all 59 existing harness tests green. No new HEVC qualification/default or production change. Current four-node hardware/compiled/existing-probe evidence above, with unknown ordinary-session observations retained. Organic week now supplementary by Paul's ruling; M1 remains open for genuine P5 acquisition, actual generation/session burn and HDR-aware scoring/fidelity evidence. |
 | 2026-10-01 | gpt-6.1-sol | agent:/root/s09_665_resume_sol61 | M1 bench metadata/acquisition continuation, incomplete | candidate | Two new focused guards passed once after negative controls; first is argument-only. Actual x265-parameter-only counterexample retained; final metadata-only frame tail proves tiny SPS and full unchanged 45-second ten-bit gradient metadata. Three other generated fixtures plus a distinct requested-45-second genuine P5/RPU fixture acquired; GOP extent and source-stat limits recorded above. Organic week is supplementary, not M1/M2 eligibility. No production encoder/default, GPU, independent HDR grade or whole-corpus qualification. |
 
 The batch's [isolated VAAPI receipt](../evidence/video-quality-2026-10-03/vaapi-qualification.json)
 verifies the actual sample entry, profile/tier/constraints, all 96 timestamps,
-PQ/BT.2020 tags, complete decode and a continuous neutral ramp on m6. A separate
+PQ/BT.2020 tags, complete decode and a continuous neutral ramp on lab6. A separate
 discontinuous fixture exceeded its worst-pixel limit; see the
 [execution ledger](../performance/VIDEO-QUALITY-STATUS.md#final-qualification--retained-per-check-receipts)
 for that failed result and the exact limits of the passing capture.

@@ -2,7 +2,7 @@
   "image_id": "sha256:c00dd183ada4f898520aeb05cd08d4fdc8413dc4e052c59e996b7d26b1936200",
   "deployed_revision": "9416dbe89c0917bd46dbbb1c7bdfe8781a949161",
   "encoder_sha256": "90004301255382e1beb441a294fa8b75ac7fbb54678837f224d3458032e38787",
-  "host": "m6",
+  "host": "lab6",
   "container_cpu_limit": 2,
   "container_memory_bytes": 2147483648,
   "container_network": "none",

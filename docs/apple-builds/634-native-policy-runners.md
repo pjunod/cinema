@@ -33,6 +33,6 @@ Design §3.6 explicitly permits these pure runners before D3; adapters remain
 subject to the design's own measured-baseline dependency.
 
 Focused iOS/tvOS XCTest, Android JVM JUnit and existing web policy results are
-recorded in [PR #634](http://192.168.4.7:3000/noirr/plurx/pulls/634). The
+recorded in [PR #634](http://forge.lan:3000/noirr/plurx/pulls/634). The
 [A05 build plan](../clients/NATIVE-ADAPTIVE-QUALITY-BUILD-PLAN.md) retains the
 execution history and remaining native work.
