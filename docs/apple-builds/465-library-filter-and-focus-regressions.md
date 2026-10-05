@@ -1,7 +1,7 @@
 # Verify native library filtering and page-arrival focus
 
-**Status:** open — on `main` since 2026-10-04 (#793); focused execution on
-`main` and physical qualification remain pending.
+**Status:** open — source branches integrated; this batch's single review,
+focused execution and qualification remain pending.
 
 Build: 206
 Issue: #465
@@ -17,17 +17,10 @@ page-arrival focus case using the production grid and card actions. A source
 contract binds its local-loader route to the view-model route. Android category
 query is excluded by plan section 5.5 and is not introduced.
 
-This change was first reserved as Apple 200 / Android 137. It reached `main`
-with the architecture effort (#793, 2026-10-04), and `main` has held Apple
-build 206 and Android versionCode 144 since, so build 206 is the first build
-number that carries it. Build 206 is the effort's counter, not this change's
-alone: it contains every Apple change on `main` at that point. The last
-recorded Apple suite run is the 2026-10-02 simulator run of the effort branch
-at `6f6466ebc` (both platforms built; seven failing tests, none of them this
-change's — listed in
-[APPLE-DISPLAY-CRITERIA-AND-AUDIO-SESSION.md §6.1](../clients/APPLE-DISPLAY-CRITERIA-AND-AUDIO-SESSION.md));
-no run on `main` is recorded. Build 206 has not been signed, uploaded or
-installed, and no performance improvement is claimed.
+Apple200 and Android137 are reserved above the preceding native batch's
+199/136 inputs. The separately authored app and regression sources compile;
+this integrated counter claim has not been compiled or behaviorally executed.
+No signed product, installation or performance improvement is claimed.
 Named Apple TV and Lenovo 6000-title request, order, duplicate, filter, focus
 and frame traces remain open. Synthetic fixtures cannot close those rows.
 

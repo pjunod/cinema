@@ -4,7 +4,7 @@
 206; no native playback enablement or device acceptance; the ports are
 deleted in the 2026-10-04 close-out PR.
 
-Build: 206
+Build: 208
 Issue: #634
 
 The Apple and Android clients now contain pure ports of the current browser

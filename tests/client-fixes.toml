@@ -4104,3 +4104,11 @@ source = "crates/plurxd/src/web/player/stall-diagnosis.js"
 source_anchor = "if(family!=null&&continuousFamilyPeak(p,p.qualityCandidateId)!=null) return own&&link>=family*1.8;"
 test = "tests/playback/current-main-effort-quality.test.js"
 test_anchor = "continuous family upgrades use the enforced family budget and the family's own objects"
+
+[[fixes]]
+id = "android.display-mode-timeout-withdraws-the-request"
+commits = ["0acff727"]
+source = "clients/android/app/src/main/java/tv/plurx/app/player/DisplayModeMatcher.kt"
+source_anchor = "internal fun clearsDisplayModeRequestAfterWait(matched: Boolean, stillOwner: Boolean): Boolean ="
+test = "clients/android/app/src/test/java/tv/plurx/app/player/DisplayModeMatcherTest.kt"
+test_anchor = "@Test fun timedOutWaitWithdrawsTheRequestOnlyWhileItStillOwnsTheWindow()"
