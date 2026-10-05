@@ -20,7 +20,11 @@ feeding an AVR keeps lossless TrueHD instead of a 256 kb/s AAC downmix: the box
 has no TrueHD decoder, the receiver does, and the claim follows the route. It is
 recomputed on every decision, because unplugging HDMI changes the answer.
 
-> Status: **v0.3.0**, build `145` — continuous quality: manual and Auto
+> Status: **v0.3.0**, build `146` — Live TV station logos: the list rows,
+> grid headers, programme details, picture badge and fullscreen overlay draw
+> the guide's station artwork from the shared `station_logo` rule, fetched
+> without the account token. Not yet installed on hardware.
+> Build `145` — continuous quality: manual and Auto
 > quality changes adapt inside the one player, with owned outputs and release
 > fences around a prepared replacement, on top of current main's recovery
 > parity and audio-focus handover. Production and test sources compile;

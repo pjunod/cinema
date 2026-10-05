@@ -4,6 +4,26 @@
 commit as the work it describes; a stale entry here is a bug. Newest effort
 first.
 
+## Live TV station logos on Apple TV, iOS and Android
+
+**Branch `fix/live-tv-station-logos-native`, issue
+[#815](http://192.168.4.7:3000/noirr/plurx/issues/815).** Paul reported
+2026-10-04 that the Apple TV Live TV guide has no station logos while the web
+guide does. Cause: #755 put the rule that picks a channel's logo in the web
+page (`pages/live-tv.js`) instead of the shared guide reducer and
+`tests/playback/live-tv-guide-cases.json` — the one contract all three guides
+reproduce — so the native clients, which already decode `image_url`, were
+never asked to draw it and no suite could see the gap. The rule is now
+`station_logo` in that fixture (lineup-id match, cold guide, 33 address
+cases; a textual `https://` + plain-host rule so three languages agree),
+answered by `PlurxLiveTv.stationLogoUrl`, Apple's and Android's
+`LiveTvGuideReducer`. Apple (build 209) and Android (versionCode 146) draw it
+in list rows, grid headers, programme details, the picture badge and the
+fullscreen identity, with the callsign until the image decodes. Native
+artwork loads on its own connection with no bearer, cookies or HTTPS→HTTP
+redirects (Android's app-wide Coil loader adds the bearer to every host).
+Not yet on hardware.
+
 ## Apple TV: new HEVC WEB-DLs refused with 503 — ffmpeg 8 repeats the sample description
 
 **Branch `fix/ffmpeg8-repeated-hevc-descriptions`.** Paul reported
