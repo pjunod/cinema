@@ -19,8 +19,10 @@ patched = [
 "src/lib.rs" = "exports only the status and inspection surfaces above"
 "src/status.rs" = "bounded WAL runtime status; needs a row"
 
-# Differ from upstream by rustfmt/import order only. Pinned so that any
-# real edit fails until the file moves to `patched` and a row names it.
+# Differ from upstream by rustfmt/import order only. Pinned so that an edit
+# fails unless the same change edits the pin. Re-pinning passes the test, so
+# a reviewer must treat any digest change below as a possible unledgered
+# patch: a real change moves the file to `patched` and a row names it.
 [formatting]
 "src/utils.rs" = "932dfbd24c36ac361cc61959643063fe9a781601f3be75c0aaaca05242bc2f96"
 

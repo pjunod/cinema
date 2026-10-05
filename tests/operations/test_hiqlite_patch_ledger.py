@@ -262,14 +262,20 @@ class ForkSourceManifestCase(unittest.TestCase):
     - `unledgered` files carry Plurx changes no row owns yet; they are a
       disclosed gap bounded by KNOWN_UNLEDGERED and named in the ledger text;
     - `formatting` (rustfmt/import order only) and `upstream` (identical)
-      files are pinned by SHA-256, so editing one fails here until it moves
-      to `patched` and a row names it.
+      files are pinned by SHA-256, so an edit to one fails here unless the
+      same change also edits its pin.
 
     A new source file fails until it is classified. Separately, any source
     carrying a K-06 identifier must be named by a K-06 row, whatever the
     manifest says.
 
-    Limits, stated plainly: the tie is per file, not per hunk. A new hunk in
+    Limits, stated plainly: re-pinning passes. A change that edits a pinned
+    file and writes the new digest into PLURX-FILES.toml is green here, so a
+    reviewer must read every PLURX-FILES.toml diff: a changed digest under
+    `formatting` or `upstream` is an unledgered patch unless the file really
+    is still identical (or formatting-only) against upstream, which
+    `test_manifest_matches_upstream` can re-derive. And the tie is per file,
+    not per hunk. A new hunk in
     a file that is already `patched` passes as long as some row names that
     file, even if no row describes the hunk; review of the row prose is still
     what catches that. The manifest's classification was made once against
@@ -310,7 +316,8 @@ class ForkSourceManifestCase(unittest.TestCase):
                         actual,
                         digest,
                         f"{name} is pinned as unpatched but changed (now {actual}); "
-                        "move it to `patched` and name it in the row that owns the change",
+                        "move it to `patched` and name it in the row that owns the change "
+                        "(re-pinning the digest instead would hide a patch from the ledger)",
                     )
 
                 body = ledger.read_text(encoding="utf-8")

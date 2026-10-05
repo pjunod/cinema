@@ -353,11 +353,23 @@ an exact submission/disposition, and its unchanged drop condition is not met.
 This is read-only source evidence, not a newly executed upstream reproduction
 or permission to upgrade or remove the patch.
 
-**Unledgered fork file, 2026-10-04:** `src/transport_status.rs` (bounded,
+**Unledgered fork change, 2026-10-04:** `src/transport_status.rs` (bounded,
 process-local snapshot transport observations, with the snapshot chunk and
 transfer budgets in `src/config.rs`) is Plurx code no row above owns yet.
 `PLURX-FILES.toml` lists it under `unledgered` so the gap stays visible and
-cannot grow; it needs its own row before this ledger is complete.
+cannot grow; it needs its own row before this ledger is complete. The file is
+only where the surface is defined. Its observations are threaded through
+sources the manifest classifies as `patched` because other rows name them,
+though no row describes this change: `src/network/raft_client.rs` (outbound
+snapshot attempts and per-socket observations), `src/network/raft_server.rs`
+(inbound socket epochs and the reader/writer task status clones),
+`src/network/snapshot_executor.rs` (inbound chunk receipt and the attempt's
+succeeded/retrying/failed disposition), `src/network/management.rs` (the
+SQLite snapshot-transport route), `src/client/mgmt.rs`
+(`local_snapshot_transport_status` and `snapshot_transport_status_sqlite`),
+`src/start.rs`, `src/store/mod.rs` and `src/app_state.rs` (construction,
+membership binding and the shared handle), and the `src/lib.rs` re-exports.
+Its row must name all of these.
 
 Remove this vendor when both halves of its exit hold. First, the rows an
 upstream release can retire (rows 1, 8, 9, 10, 11, 17, 18 and 19: the

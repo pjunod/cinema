@@ -59,8 +59,10 @@ patched = [
 [unledgered]
 "src/transport_status.rs" = "bounded snapshot transport observations; needs its own policy row"
 
-# Differ from upstream by rustfmt/import order only. Pinned so that any
-# real edit fails until the file moves to `patched` and a row names it.
+# Differ from upstream by rustfmt/import order only. Pinned so that an edit
+# fails unless the same change edits the pin. Re-pinning passes the test, so
+# a reviewer must treat any digest change below as a possible unledgered
+# patch: a real change moves the file to `patched` and a row names it.
 [formatting]
 "src/dashboard/handlers.rs" = "ce13cc383980f0ab114282f4cf36535bf8fd654371c802b0e9498c8628a45f81"
 "src/dashboard/middleware.rs" = "62725255005a76bc43530aad10635d3a78930c520d464bf465b39cb1ee4db2d8"

@@ -56,11 +56,24 @@ As of 2026-09-30, row 2 has an accepted upstream mechanism; the two
   `k06_cancelled_wal_constructor_retains_real_writer_until_drained` and
   `k06_staged_wal_timer_panic_drains_actual_writer_before_error` tests pin it.
 
-**Unledgered fork files, 2026-10-04:** `src/status.rs` (bounded WAL runtime
+**Unledgered fork changes, 2026-10-04:** `src/status.rs` (bounded WAL runtime
 status), `src/inspection.rs` (described below) and the `src/lib.rs` exports
-for both are Plurx code no row above owns yet. `PLURX-FILES.toml` lists them
-under `unledgered` so the gap stays visible and cannot grow; they need a row
-before this ledger is complete.
+for both are Plurx code no row above owns yet. `PLURX-FILES.toml` lists those
+three under `unledgered` so the gap stays visible and cannot grow; they need a
+row before this ledger is complete. The status surface is wider than those
+files. Its plumbing also lives in two files the manifest classifies as
+`patched` because rows 1, 3 and 4 name them, though no row describes this
+change: `src/writer.rs` builds the `WalStatusHandle` in `spawn` (about lines
+112-182: the sync-mode label, WAL size and integrity flag it reports, the
+clone handed to the writer thread, `record_error` on a failed writer, and the
+handle returned beside the sender), threads it into `run` (about line 238),
+and records state, sync, compaction, error and stop transitions through the
+writer loop (from about line 304); its two `status_*` tests are there too.
+`src/log_store.rs` carries the handle on `LogStore` and exposes it as
+`status_handle()`. And `Cargo.toml` adds tokio's `macros` feature beside the
+upstream `fs`, `sync` and `rt-multi-thread` in the normal (not dev)
+dependency, which only the `#[tokio::test]` status test in `src/writer.rs`
+uses. A row for the status surface must name all of these.
 
 The additive `inspection` module is a read-only stopped-node diagnostic
 surface. It refuses a live lock and exposes metadata, WAL, and decoded log-id
