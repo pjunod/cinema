@@ -1,7 +1,0 @@
-version = 1
-
-[[coverage]]
-commits = ["10cd4ba6"]
-points = ["playback.pipeline", "core.media"]
-checks = ["rust-gate"]
-reason = "jellyfin-ffmpeg 8 writes a second, decoder-equivalent HEVC sample description whenever extract_extradata is in the copy chain, which plurx refused, so every bare-hvcC WEB-DL failed live-HLS copy with a 503 master playlist (Apple TV -1008, files 91 and 106). `decoder_equivalent_hevc_descriptions_collapse_to_the_first` (crates/plurx-core/src/fmp4.rs) fails against the pre-fix code because neither served-init builder accepted the two-description init and no collapse existed; `equivalent_descriptions_keep_only_parameter_sets_whichever_keyframe_led` fails without the parameter-set-only rewrite because two generations led by different keyframes would keep different SEI and break VOD's init identity. The distinct-description, incomplete-description and non-default-trex tests pin that every other multi-entry shape is still refused."
