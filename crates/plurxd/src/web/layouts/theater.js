@@ -301,15 +301,14 @@ function theaterLibraryShell(m){
   const sort=m.sort;
   const head=pageHead([{href:"#/",label:"Home"},{label:m.title}],m.title);
   const bar=`<div class="libbar th-chips">
+      ${libraryViewToggle()}
       <span class="th-cpair"><span class="lbl">Sort</span>
         <select aria-label="Sort" onchange="LIB_SORT=this.value;${m.reload}">
           ${libOpt("title","Title (A–Z)",sort)}${libOpt("added","Recently added",sort)}${libOpt("recorded","Date recorded",sort)}${libOpt("year","Year",sort)}${libOpt("resolution","Resolution",sort)}</select></span>
       <span class="th-cpair"><span class="lbl">Show</span>
         <select data-library-watch-filter aria-label="Show" onchange="LIB_FILTER=this.value;${m.reload}">
           ${libOpt("all","Everything",LIB_FILTER)}${libOpt("unwatched","Unwatched",LIB_FILTER)}${libOpt("inprogress","In progress",LIB_FILTER)}${libOpt("watched","Watched",LIB_FILTER)}</select></span>
-      <span class="th-cpair"><span class="lbl">Per page</span>
-        <select aria-label="Per page" onchange="setPerPage(this.value);libGoPage(0)">
-          ${LIB_SIZES.map(n=>libOpt(String(n),String(n),String(LIB_PER))).join("")}${libOpt("all","All",String(LIB_PER))}</select></span>
+      ${libraryPageSize()}
       <span class="muted" id="libcount"></span></div>`;
   return `${head}${bar}<div class="th-grid"><div id="libbody"><div class="empty">Loading…</div></div></div>`
     +`<div id="libpager"></div><div id="librail"></div>`;

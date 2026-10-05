@@ -32,6 +32,8 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.scale
 import androidx.compose.ui.focus.FocusRequester
@@ -87,6 +89,7 @@ fun PosterCard(
     modifier: Modifier = Modifier,
     width: Dp = 128.dp,
     resolutionPlacement: PosterResolutionPlacement = PosterResolutionPlacement.ArtworkOverlay,
+    landscape: Boolean = false,
     onClick: () -> Unit,
 ) {
     var focused by remember { mutableStateOf(false) }
@@ -111,7 +114,7 @@ fun PosterCard(
             Modifier
                 .fillMaxWidth()
                 .testTag("poster-artwork")
-                .aspectRatio(2f / 3f)
+                .aspectRatio(if (landscape) 16f / 9f else 2f / 3f)
                 .clip(MaterialTheme.shapes.medium)
                 .background(SurfaceHi)
                 .then(
@@ -122,7 +125,7 @@ fun PosterCard(
                     },
                 )
         ) {
-            NetworkImage(imageUrl(item.poster), Modifier.fillMaxSize())
+            NetworkImage(imageUrl(if (landscape) item.backdrop ?: item.poster else item.poster), Modifier.fillMaxSize())
             if (resolutionPlacement == PosterResolutionPlacement.ArtworkOverlay) item.resolution?.let { height ->
                 Text(
                     resolutionLabel(height),
@@ -171,7 +174,7 @@ fun PosterCard(
         )
         Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
             Text(
-                subtitleFor(item),
+                if (landscape) homeMediaMetadata(item) else subtitleFor(item),
                 style = MaterialTheme.typography.labelMedium,
                 color = Muted,
                 maxLines = 1,
@@ -197,6 +200,7 @@ fun MediaRow(
     posterWidth: Dp = 128.dp,
     resolutionPlacement: PosterResolutionPlacement = PosterResolutionPlacement.ArtworkOverlay,
     onViewAll: (() -> Unit)? = null,
+    landscape: Boolean = false,
     rowFocusRequester: FocusRequester? = null,
     previousRowFocusRequester: FocusRequester? = null,
     nextRowFocusRequester: FocusRequester? = null,
@@ -216,6 +220,7 @@ fun MediaRow(
                     color = Accent,
                     style = MaterialTheme.typography.labelLarge,
                     modifier = Modifier
+                        .semantics { contentDescription = "View all $title" }
                         .focusRequester(viewAllFocusRequester)
                         .focusProperties {
                             if (previousRowFocusRequester != null) up = previousRowFocusRequester
@@ -271,6 +276,7 @@ fun MediaRow(
                     modifier = cardFocusOrder,
                     width = posterWidth,
                     resolutionPlacement = resolutionPlacement,
+                    landscape = landscape,
                 ) { onOpen(item) }
             }
         }
@@ -332,6 +338,11 @@ fun LoadingBox(modifier: Modifier = Modifier) {
         CircularProgressIndicator(color = Accent)
     }
 }
+
+internal fun homeMediaMetadata(item: Item): String = listOfNotNull(
+    item.recorded_at?.take(10),
+    item.runtime_ms?.takeIf { it > 0 }?.let { "${maxOf(1, it / 60_000)} min" },
+).joinToString(" · ").ifEmpty { subtitleFor(item) }
 
 private fun subtitleFor(item: Item): String = when {
     (item.isBook || item.isAudiobook) && !item.author.isNullOrBlank() -> item.author

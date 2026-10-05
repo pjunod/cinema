@@ -12,6 +12,9 @@ final class LibraryGridCoordinator: ObservableObject {
 
     @Published private(set) var items: [Item] = []
     @Published private(set) var visibleItems: [Item] = []
+    @Published private(set) var groups: [LibraryGroup] = []
+    private var rowsEnabled = false
+    private var preservingRowsDuringRefresh = false
     @Published private(set) var loading = true
     @Published private(set) var error: String?
     @Published private(set) var loadedCount = 0
@@ -87,21 +90,37 @@ final class LibraryGridCoordinator: ObservableObject {
     private func filterNow() {
         filterGeneration += 1
         let generation = filterGeneration
+        for task in filterTasks.values { task.cancel() }
         let snapshot = items
         let selected = filter
         let text = query
         let worker = worker
+        let selectedSort = sort
+        let groupRows = rowsEnabled
         filterTasks[generation] = Task { [weak self] in
             let result = await worker(snapshot, selected, text)
             guard let self else { return }
-            self.filterTasks[generation] = nil
-            if generation == self.filterGeneration, !Task.isCancelled { self.visibleItems = result }
+            defer { self.filterTasks[generation] = nil }
+            guard generation == self.filterGeneration, !Task.isCancelled else { return }
+            let grouping = Task.detached(priority: .userInitiated) {
+                groupRows ? LibraryGroups.make(result, sort: selectedSort) : []
+            }
+            let grouped = await withTaskCancellationHandler {
+                await grouping.value
+            } onCancel: {
+                grouping.cancel()
+            }
+            if generation == self.filterGeneration, !Task.isCancelled {
+                self.visibleItems = result
+                self.groups = grouped
+            }
         }
     }
 
     func stop() {
         driveTask?.cancel()
         fetchTask?.cancel()
+        fetchTask = nil
         pageGeneration += 1
         queryGeneration += 1
         filterGeneration += 1
@@ -110,10 +129,21 @@ final class LibraryGridCoordinator: ObservableObject {
         filterTasks.removeAll()
     }
 
+    func presentationChanged(rows: Bool) {
+        rowsEnabled = rows
+        filterNow()
+        runDrive()
+    }
+
+    func retry() async {
+        error = nil
+        await fetchUntil(rowsEnabled || filter != .all || !query.isEmpty ? Int.max : items.count + 40)
+    }
+
     @MainActor
     private func runDrive() {
         driveTask?.cancel()
-        guard filter != .all || !query.isEmpty else {
+        guard rowsEnabled || filter != .all || !query.isEmpty else {
             // A cleared filter no longer needs a full catalogue walk. Keep
             // the initial viewport target; scrolling can request more later.
             requestedThrough = min(requestedThrough, 40)
@@ -124,14 +154,14 @@ final class LibraryGridCoordinator: ObservableObject {
 
     @MainActor
     func fetchUntil(_ through: Int) async {
-        guard let current = pager, !current.complete, current.decided.count < through else { return }
+        guard !complete, let current = pager, !current.complete, current.decided.count < through else { return }
         let generation = pageGeneration
         requestedThrough = max(requestedThrough, through)
         // Every caller waits on the same worker. A search arriving during the
         // initial 40 rows raises its target to the end of the catalogue.
         // Cancelling a superseded view task does not cancel that worker.
         while generation == pageGeneration && !Task.isCancelled {
-            guard let current = pager, !current.complete,
+            guard !complete, let current = pager, !current.complete,
                   current.decided.count < through, error == nil else { return }
             if fetchTask == nil {
                 fetchTask = Task { await fetchPages(generation: generation) }
@@ -144,8 +174,10 @@ final class LibraryGridCoordinator: ObservableObject {
     private func fetchPages(generation: Int) async {
         guard var current = pager else { return }
         defer {
-            if generation == pageGeneration { requestedThrough = 0 }
-            fetchTask = nil
+            if generation == pageGeneration {
+                requestedThrough = 0
+                fetchTask = nil
+            }
         }
         do {
             while current.decided.count < requestedThrough && !current.complete &&
@@ -176,25 +208,37 @@ final class LibraryGridCoordinator: ObservableObject {
                     return
                 }
                 pager = current
-                items = current.decided
-                filterNow()
+                if !preservingRowsDuringRefresh || current.complete {
+                    items = current.decided
+                    filterNow()
+                }
                 loadedCount = current.loadedCount
                 total = current.total
                 complete = current.complete
             }
         } catch {
             guard generation == pageGeneration, !Task.isCancelled else { return }
-            self.error = AppModel.homeErrorMessage(for: error, hasCachedContent: !items.isEmpty)
+            // A partial catalog is not a successful cached Home refresh.
+            // Suppressing this error makes fetchUntil immediately retry forever.
+            self.error = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
         }
     }
 
     func load(libraryIds: [Int], sort: LibrarySort) async {
         driveTask?.cancel()
         fetchTask?.cancel()
+        fetchTask = nil
         pageGeneration += 1
         requestedThrough = 0
         loading = true
         error = nil
+        complete = false
+        preservingRowsDuringRefresh = rowsEnabled && !items.isEmpty && self.sort == sort
+        if self.sort != sort {
+            items = []; visibleItems = []; groups = []
+            loadedCount = 0; total = 0
+            filterGeneration += 1
+        }
         self.sort = sort
         pager = LibraryMerge(libraryIds: libraryIds, sort: sort)
         // A refresh preserves the prior content until the new first page lands.
@@ -202,6 +246,6 @@ final class LibraryGridCoordinator: ObservableObject {
         await fetchUntil(40)
         guard generation == pageGeneration, !Task.isCancelled else { return }
         loading = false
-        if filter != .all || !query.isEmpty { runDrive() }
+        if rowsEnabled || filter != .all || !query.isEmpty { runDrive() }
     }
 }
