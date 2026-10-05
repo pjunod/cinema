@@ -3515,3 +3515,13 @@ source = "clients/apple/Sources/SharedPlaybackControl.swift"
 source_anchor = "response.acceptedSequence == request.sequence"
 test = "clients/apple/Tests/SharedPlaybackControlTests.swift"
 test_anchor = "testAnswersBindOnlyToTheSentSequenceOnBsTuple"
+
+[[fixes]]
+# One row per fix commit: the suffix bound and the 2^53 duration bound both land
+# in 20a1d58c0, and the same fixture suite reads both rows.
+id = "sharing.android-shared-file-suffix-index-bound"
+commits = ["20a1d58c0"]
+source = "clients/android/app/src/main/java/tv/plurx/app/data/PlaybackFileContext.kt"
+source_anchor = "if (reference != null) require(sharedFileSuffix(resource))"
+test = "clients/android/app/src/test/java/tv/plurx/app/data/SharedProtocolCasesTest.kt"
+test_anchor = "sharedFileSuffixesFollowTheClosedSharedGrammar"
