@@ -504,9 +504,11 @@
   //     letters, digits, `.` and `-` — or a bracketed IPv6 literal — with an
   //     optional port of one to five digits no greater than 65535. So no user
   //     info, no empty host, nothing a parser could read two ways.
-  // The accepted string is returned exactly as given, so all three clients
-  // fetch byte-identical addresses; one that still fails to load leaves the
-  // callsign. tests/playback/live-tv-guide-cases.json `station_logo` pins it.
+  // The accepted string is returned with its scheme spelled `https://` and
+  // otherwise exactly as given — not every image loader matches an
+  // upper-case scheme — so all three clients fetch byte-identical addresses;
+  // one that still fails to load leaves the callsign.
+  // tests/playback/live-tv-guide-cases.json `station_logo` pins it.
   const STATION_LOGO_MAX = 512;
   const STATION_LOGO_AUTHORITY = /^(?:[A-Za-z0-9.-]+|\[[0-9A-Fa-f:.]+\])(?::([0-9]{1,5}))?$/;
   function stationLogoUrl(guide, channelId) {
@@ -522,7 +524,7 @@
     const authority = STATION_LOGO_AUTHORITY.exec(cut === -1 ? rest : rest.slice(0, cut));
     if (!authority) return null;
     if (authority[1] !== undefined && Number(authority[1]) > 65535) return null;
-    return value;
+    return "https://" + rest;
   }
 
   // (guide, channel id, now) → { now, next, progress }.

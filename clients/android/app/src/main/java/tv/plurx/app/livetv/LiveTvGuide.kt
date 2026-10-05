@@ -201,7 +201,9 @@ object LiveTvGuideReducer {
      * guide's own HDHomeRun artwork is the only source. The rule is textual on
      * purpose: this is a third-party address inside a client that holds a
      * bearer token, and "whatever `java.net.URI` tolerates" is not the set the
-     * other two clients accept. The accepted string is returned verbatim.
+     * other two clients accept. The accepted string is returned with its
+     * scheme spelled `https://` and otherwise verbatim — Coil's fetcher
+     * matches the scheme case-sensitively.
      */
     fun stationLogoUrl(guide: LiveTvGuide?, channelId: String): String? {
         val value = channel(guide, channelId)?.image_url ?: return null
@@ -214,7 +216,7 @@ object LiveTvGuideReducer {
             ?: return null
         val port = authority.groupValues[1]
         if (port.isNotEmpty() && port.toInt() > 65535) return null
-        return value
+        return "https://$rest"
     }
 
     /**

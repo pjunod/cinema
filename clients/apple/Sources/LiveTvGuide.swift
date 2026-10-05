@@ -457,7 +457,8 @@ enum LiveTvGuideReducer {
     /// textual on purpose — this is a third-party address inside a client that
     /// holds a bearer token, and "whatever Foundation's parser tolerates" is
     /// not the same set on two OS versions, let alone on three clients. The
-    /// accepted string is returned verbatim.
+    /// accepted string is returned with its scheme spelled `https://` and
+    /// otherwise verbatim.
     static let stationLogoMaxLength = 512
 
     static func stationLogoURL(_ guide: LiveTvGuide?, channelId: String) -> String? {
@@ -472,7 +473,8 @@ enum LiveTvGuideReducer {
         let rest = bytes[8...]
         let end = rest.firstIndex { $0 == UInt8(ascii: "/") || $0 == UInt8(ascii: "?") || $0 == UInt8(ascii: "#") }
             ?? rest.endIndex
-        return stationLogoAuthorityIsValid(Array(rest[rest.startIndex..<end])) ? value : nil
+        guard stationLogoAuthorityIsValid(Array(rest[rest.startIndex..<end])) else { return nil }
+        return "https://" + String(decoding: rest, as: UTF8.self)
     }
 
     /// `host[:port]`: letters, digits, `.` and `-`, or a bracketed IPv6
