@@ -527,6 +527,10 @@ mod rate_control;
 pub use rate_control::*;
 // split: end rate-control
 
+/// A cheap, synchronous count of live deliveries held by a registry outside
+/// [`TranscodeManager`]. See [`TranscodeManager::live_delivery_sessions`].
+pub(crate) type DeliveryCensus = Box<dyn Fn() -> usize + Send + Sync>;
+
 pub struct TranscodeManager {
     store: Arc<dyn Store>,
     work_dir: PathBuf,
@@ -671,6 +675,12 @@ pub struct TranscodeManager {
     /// authority; every production insert/removal publishes its resulting
     /// length while holding that map's lock.
     active_session_count: Arc<AtomicUsize>,
+    /// Live deliveries this manager does not own a registry for — progressive
+    /// `/stream.mp4` remuxes, direct plays and Live TV sessions — counted by
+    /// the registries that do own them (see
+    /// [`TranscodeManager::register_delivery_census`]). Unset (a manager
+    /// built outside `AppState`) counts nothing.
+    delivery_census: std::sync::OnceLock<DeliveryCensus>,
     /// Process-local, closed-cardinality inventory of the encoder contract
     /// selected by successful session starts. These counters deliberately
     /// live beside the boot-probed caps: `/metrics` can compare what this

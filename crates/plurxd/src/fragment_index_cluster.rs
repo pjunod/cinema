@@ -630,18 +630,41 @@ pub(crate) async fn attest_source(
     memo: Option<&FragmentIndexSourceObservation>,
     progress: &(dyn Fn(u64) + Sync),
 ) -> Result<AttestedSource, String> {
-    attest_source_mode(node_id, file, memo, progress, false).await
+    attest_source_mode(
+        node_id,
+        file,
+        memo,
+        progress,
+        false,
+        AttestationIo::default(),
+    )
+    .await
 }
 
 /// Copy proofs may cross nodes only after every byte is attested. Keep this
 /// regime separate from subtitle/sample observations and their memo keys.
+/// Production reads go through [`attest_copy_source_with`], which carries the
+/// durable checkpoints (and, on the request path, the cap).
+#[cfg(test)]
 pub(crate) async fn attest_copy_source(
     node_id: &str,
     file: &MediaFile,
     memo: Option<&FragmentIndexSourceObservation>,
     progress: &(dyn Fn(u64) + Sync),
 ) -> Result<AttestedSource, String> {
-    attest_source_mode(node_id, file, memo, progress, is_hevc(file)).await
+    attest_copy_source_with(node_id, file, memo, progress, AttestationIo::default()).await
+}
+
+/// [`attest_copy_source`] with durable checkpoints and, on the request path,
+/// the byte-rate cap. See [`AttestationIo`].
+pub(crate) async fn attest_copy_source_with(
+    node_id: &str,
+    file: &MediaFile,
+    memo: Option<&FragmentIndexSourceObservation>,
+    progress: &(dyn Fn(u64) + Sync),
+    io: AttestationIo<'_>,
+) -> Result<AttestedSource, String> {
+    attest_source_mode(node_id, file, memo, progress, is_hevc(file), io).await
 }
 
 fn is_hevc(file: &MediaFile) -> bool {
@@ -672,6 +695,153 @@ pub(crate) fn copy_attestation_read_bytes(file: &MediaFile) -> u64 {
     }
 }
 
+/// A SHA-256 whose state can be written down and picked up again.
+///
+/// `sha2 0.10`'s `Sha256` keeps its chaining value, partial block and byte
+/// count private and has no export, so a whole-file digest could only ever be
+/// resumed inside the process that started it. This is the same function
+/// built on the crate's own compression primitive (`compress256`, behind its
+/// `compress` feature), with the three pieces of state in the open. The
+/// partial block is the part that matters: the domain token and size prefix
+/// in front of the file's bytes mean a 64 MiB checkpoint is never on a block
+/// boundary.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct ResumableSha256 {
+    state: [u32; 8],
+    block: [u8; 64],
+    /// Bytes fed so far; the last `length % 64` of them wait in `block`.
+    length: u64,
+}
+
+/// FIPS 180-4 §5.3.3.
+const SHA256_INITIAL_STATE: [u32; 8] = [
+    0x6a09_e667,
+    0xbb67_ae85,
+    0x3c6e_f372,
+    0xa54f_f53a,
+    0x510e_527f,
+    0x9b05_688c,
+    0x1f83_d9ab,
+    0x5be0_cd19,
+];
+/// Serialized layout: format byte, eight big-endian state words, the
+/// big-endian byte count, then the `length % 64` buffered bytes.
+const RESUMABLE_SHA256_FORMAT: u8 = 1;
+const RESUMABLE_SHA256_FIXED_BYTES: usize = 1 + 32 + 8;
+
+type Sha256Block = sha2::digest::generic_array::GenericArray<u8, sha2::digest::consts::U64>;
+
+impl Default for ResumableSha256 {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl ResumableSha256 {
+    pub(crate) fn new() -> Self {
+        Self {
+            state: SHA256_INITIAL_STATE,
+            block: [0; 64],
+            length: 0,
+        }
+    }
+
+    pub(crate) fn update(&mut self, mut data: &[u8]) {
+        let buffered = (self.length % 64) as usize;
+        self.length = self.length.wrapping_add(data.len() as u64);
+        if buffered > 0 {
+            let take = (64 - buffered).min(data.len());
+            self.block[buffered..buffered + take].copy_from_slice(&data[..take]);
+            data = &data[take..];
+            if buffered + take < 64 {
+                return;
+            }
+            sha2::compress256(&mut self.state, &[*Sha256Block::from_slice(&self.block)]);
+        }
+        let whole = data.len() / 64 * 64;
+        let (blocks, rest) = data.split_at(whole);
+        // `compress256` takes a slice of blocks; batching amortises its CPU
+        // feature dispatch across 4 KiB rather than paying it per block.
+        let mut batch = [Sha256Block::default(); 64];
+        for chunk in blocks.chunks(64 * 64) {
+            let count = chunk.len() / 64;
+            for (slot, block) in batch.iter_mut().zip(chunk.chunks_exact(64)) {
+                slot.copy_from_slice(block);
+            }
+            sha2::compress256(&mut self.state, &batch[..count]);
+        }
+        self.block[..rest.len()].copy_from_slice(rest);
+    }
+
+    pub(crate) fn finalize(self) -> [u8; 32] {
+        let buffered = (self.length % 64) as usize;
+        let mut tail = [0_u8; 128];
+        tail[..buffered].copy_from_slice(&self.block[..buffered]);
+        tail[buffered] = 0x80;
+        let blocks = if buffered < 56 { 1 } else { 2 };
+        tail[blocks * 64 - 8..blocks * 64]
+            .copy_from_slice(&self.length.wrapping_mul(8).to_be_bytes());
+        let mut state = self.state;
+        for block in tail[..blocks * 64].chunks_exact(64) {
+            sha2::compress256(&mut state, &[*Sha256Block::from_slice(block)]);
+        }
+        let mut out = [0_u8; 32];
+        for (bytes, word) in out.chunks_exact_mut(4).zip(state) {
+            bytes.copy_from_slice(&word.to_be_bytes());
+        }
+        out
+    }
+
+    /// Bytes fed so far.
+    pub(crate) fn len(&self) -> u64 {
+        self.length
+    }
+
+    pub(crate) fn to_bytes(&self) -> Vec<u8> {
+        let buffered = (self.length % 64) as usize;
+        let mut out = Vec::with_capacity(RESUMABLE_SHA256_FIXED_BYTES + buffered);
+        out.push(RESUMABLE_SHA256_FORMAT);
+        for word in self.state {
+            out.extend_from_slice(&word.to_be_bytes());
+        }
+        out.extend_from_slice(&self.length.to_be_bytes());
+        out.extend_from_slice(&self.block[..buffered]);
+        out
+    }
+
+    /// The inverse of [`Self::to_bytes`]; `None` for anything it did not
+    /// write, including a buffered tail of the wrong length.
+    pub(crate) fn from_bytes(bytes: &[u8]) -> Option<Self> {
+        let (&format, rest) = bytes.split_first()?;
+        if format != RESUMABLE_SHA256_FORMAT || rest.len() < 40 {
+            return None;
+        }
+        let mut state = [0_u32; 8];
+        for (word, raw) in state.iter_mut().zip(rest[..32].chunks_exact(4)) {
+            *word = u32::from_be_bytes(raw.try_into().ok()?);
+        }
+        let length = u64::from_be_bytes(rest[32..40].try_into().ok()?);
+        let tail = &rest[40..];
+        if tail.len() != (length % 64) as usize {
+            return None;
+        }
+        let mut block = [0_u8; 64];
+        block[..tail.len()].copy_from_slice(tail);
+        Some(Self {
+            state,
+            block,
+            length,
+        })
+    }
+}
+
+/// The domain token and size prefix every whole-file HEVC digest starts with.
+const FULL_DIGEST_DOMAIN: &[u8] = b"plurx/source-attestation/hevc-full-v1\0";
+
+fn full_digest_prefix_len() -> u64 {
+    FULL_DIGEST_DOMAIN.len() as u64 + 8
+}
+
 /// The object a whole-file digest is being computed for. A checkpoint is
 /// only ever resumed by an attempt whose freshly observed key is identical.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -689,7 +859,7 @@ struct FullDigestKey {
 struct FullDigestCheckpoint {
     key: FullDigestKey,
     offset: u64,
-    digest: Sha256,
+    digest: ResumableSha256,
 }
 
 /// Progress of whole-file digests whose attempts were preempted.
@@ -714,7 +884,13 @@ struct FullDigestCheckpoint {
 /// may preempt it before it is recorded, or the claim may be lost. The retry
 /// then reruns both identity checks and skips the read. Once the result is
 /// recorded, the source memo serves later attempts and the entry ages out of
-/// the bound. The table lives in memory, so a restarted daemon starts over.
+/// the bound.
+///
+/// This table is the fast path. Each checkpoint is also written to the
+/// node-local store ([`AttestationIo::checkpoints`]), so a restarted daemon —
+/// which starts with this table empty — resumes from the stored row instead
+/// of byte 0. With a byte-rate cap a whole-file read beside playback takes
+/// tens of minutes, and this fleet restarts several times a day.
 #[derive(Default)]
 struct FullDigestCheckpoints {
     entries: Vec<FullDigestCheckpoint>,
@@ -774,13 +950,213 @@ fn full_digest_checkpoints() -> std::sync::MutexGuard<'static, FullDigestCheckpo
         .unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
+/// How often a paced read asks whether the node is still serving anything.
+pub(crate) const PACE_EVALUATE_BYTES: u64 = 4 * 1024 * 1024;
+
+/// Whether this node is serving anything right now — the pacer's trigger.
+pub(crate) trait AttestationLoad: Send + Sync {
+    fn serving(&self) -> futures_util::future::BoxFuture<'_, bool>;
+}
+
+/// A byte-rate cap on one whole-file source read, engaged while the node is
+/// serving anything (QSF Part D, ruling R7).
+///
+/// The trigger is evaluated every [`PACE_EVALUATE_BYTES`]; while it holds,
+/// each read waits for its turn so reads start at least `len / rate` apart.
+/// Over any window of `W` seconds the read therefore stays within
+/// `rate × W` plus one chunk, and it returns to full speed at the first
+/// evaluation after the last delivery ends. There is no starvation test:
+/// `readrate` is zero for unpaced and cached sessions and `recent_speed` is
+/// `None` after every respawn, so "is the producer starved" cannot be
+/// answered — "is anything playing" can.
+pub(crate) struct AttestationPacer<'a> {
+    load: &'a dyn AttestationLoad,
+    bytes_per_sec: u64,
+    file_id: i64,
+    state: std::sync::Mutex<PacerState>,
+    capped: std::sync::atomic::AtomicBool,
+    capped_seen: std::sync::atomic::AtomicBool,
+}
+
+#[derive(Default)]
+struct PacerState {
+    next_evaluation: Option<u64>,
+    next_free: Option<tokio::time::Instant>,
+}
+
+impl<'a> AttestationPacer<'a> {
+    pub(crate) fn new(load: &'a dyn AttestationLoad, bytes_per_sec: u64, file_id: i64) -> Self {
+        Self {
+            load,
+            bytes_per_sec: bytes_per_sec.max(1),
+            file_id,
+            state: std::sync::Mutex::new(PacerState::default()),
+            capped: std::sync::atomic::AtomicBool::new(false),
+            capped_seen: std::sync::atomic::AtomicBool::new(false),
+        }
+    }
+
+    /// Whether the cap is holding the read right now.
+    pub(crate) fn capped(&self) -> bool {
+        self.capped.load(std::sync::atomic::Ordering::Acquire)
+    }
+
+    /// Whether the cap held the read at any point. A deadline reached by a
+    /// read the cap slowed is not evidence against the source.
+    pub(crate) fn was_capped(&self) -> bool {
+        self.capped_seen.load(std::sync::atomic::Ordering::Acquire)
+    }
+
+    fn lock(&self) -> std::sync::MutexGuard<'_, PacerState> {
+        self.state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    /// Wait until `len` bytes starting at `offset` may be read.
+    async fn admit(&self, offset: u64, len: usize) {
+        let evaluate = self.lock().next_evaluation.is_none_or(|at| offset >= at);
+        if evaluate {
+            let serving = self.load.serving().await;
+            let was = self
+                .capped
+                .swap(serving, std::sync::atomic::Ordering::AcqRel);
+            if serving {
+                self.capped_seen
+                    .store(true, std::sync::atomic::Ordering::Release);
+            }
+            if serving != was {
+                if serving {
+                    tracing::info!(
+                        file_id = self.file_id,
+                        offset,
+                        bytes_per_sec = self.bytes_per_sec,
+                        "attestation read cap on: this node is serving playback"
+                    );
+                } else {
+                    tracing::info!(
+                        file_id = self.file_id,
+                        offset,
+                        "attestation read cap off: nothing is playing from this node"
+                    );
+                }
+            }
+            let mut state = self.lock();
+            state.next_evaluation = Some(offset.saturating_add(PACE_EVALUATE_BYTES));
+            if !serving {
+                state.next_free = None;
+            }
+        }
+        if !self.capped() {
+            return;
+        }
+        let start = {
+            let mut state = self.lock();
+            let now = tokio::time::Instant::now();
+            let start = state.next_free.map_or(now, |free| free.max(now));
+            state.next_free =
+                Some(start + Duration::from_secs_f64(len as f64 / self.bytes_per_sec as f64));
+            start
+        };
+        tokio::time::sleep_until(start).await;
+    }
+}
+
+/// What a whole-file attestation may use beyond the file itself.
+#[derive(Clone, Copy, Default)]
+pub(crate) struct AttestationIo<'a> {
+    /// Node-local durable checkpoints. Both the request and the job path pass
+    /// one, so either resumes after a restart; `None` keeps the in-memory
+    /// table only.
+    pub(crate) checkpoints: Option<&'a dyn Store>,
+    /// The byte-rate cap. The request path only: the job path has no viewer
+    /// waiting on it, so it stops for playback instead of slowing down.
+    pub(crate) pacer: Option<&'a AttestationPacer<'a>>,
+}
+
+/// The stored checkpoint for this key, if one survives and decodes into a
+/// state that covers exactly the prefix plus `read_offset` bytes.
+async fn durable_checkpoint(
+    io: AttestationIo<'_>,
+    key: &FullDigestKey,
+) -> Option<FullDigestCheckpoint> {
+    let store = io.checkpoints?;
+    let size = i64::try_from(key.size).ok()?;
+    let row = match store
+        .attestation_checkpoint(&key.node_id, key.file_id, &key.object_version, size)
+        .await
+    {
+        Ok(row) => row?,
+        Err(error) => {
+            tracing::warn!(file_id = key.file_id, %error, "reading a stored attestation checkpoint");
+            return None;
+        }
+    };
+    let offset = u64::try_from(row.read_offset).ok()?;
+    match ResumableSha256::from_bytes(&row.hasher_state) {
+        Some(digest)
+            if offset <= key.size
+                && digest.len() == full_digest_prefix_len().saturating_add(offset) =>
+        {
+            Some(FullDigestCheckpoint {
+                key: key.clone(),
+                offset,
+                digest,
+            })
+        }
+        _ => {
+            tracing::warn!(
+                file_id = key.file_id,
+                "discarding a stored attestation checkpoint that does not decode"
+            );
+            let _ = store
+                .forget_attestation_checkpoint(&key.node_id, key.file_id)
+                .await;
+            None
+        }
+    }
+}
+
+async fn save_durable_checkpoint(io: AttestationIo<'_>, checkpoint: &FullDigestCheckpoint) {
+    let Some(store) = io.checkpoints else {
+        return;
+    };
+    let (Ok(source_size), Ok(read_offset)) = (
+        i64::try_from(checkpoint.key.size),
+        i64::try_from(checkpoint.offset),
+    ) else {
+        return;
+    };
+    // Best effort: the in-memory table still holds this progress, and the
+    // next checkpoint writes again.
+    if let Err(error) = store
+        .put_attestation_checkpoint(&plurx_core::store::AttestationCheckpoint {
+            node_id: checkpoint.key.node_id.clone(),
+            file_id: checkpoint.key.file_id,
+            object_version: checkpoint.key.object_version.clone(),
+            source_size,
+            read_offset,
+            hasher_state: checkpoint.digest.to_bytes(),
+            saved_at_ms: unix_ms(),
+        })
+        .await
+    {
+        tracing::warn!(file_id = checkpoint.key.file_id, %error, "saving an attestation checkpoint");
+    }
+}
+
 async fn full_source_digest(
     source: &mut tokio::fs::File,
     key: &FullDigestKey,
     progress: &(dyn Fn(u64) + Sync),
+    io: AttestationIo<'_>,
 ) -> Result<String, String> {
     let size = key.size;
-    let resume = full_digest_checkpoints().load(key);
+    let in_memory = full_digest_checkpoints().load(key);
+    let (resume, durable) = match in_memory {
+        Some(checkpoint) => (Some(checkpoint), false),
+        None => (durable_checkpoint(io, key).await, true),
+    };
     let (mut digest, mut offset) = match resume {
         Some(checkpoint) => {
             source
@@ -791,25 +1167,35 @@ async fn full_source_digest(
                 file_id = key.file_id,
                 offset = checkpoint.offset,
                 size,
+                durable,
                 "resuming a preempted whole-file source attestation"
             );
             progress(checkpoint.offset);
             (checkpoint.digest, checkpoint.offset)
         }
         None => {
-            let mut digest = Sha256::new();
-            digest.update(b"plurx/source-attestation/hevc-full-v1\0");
-            digest.update(size.to_be_bytes());
+            let mut digest = ResumableSha256::new();
+            digest.update(FULL_DIGEST_DOMAIN);
+            digest.update(&size.to_be_bytes());
             (digest, 0)
         }
     };
     let mut buffer = vec![0; HASH_CHUNK];
     let mut next_checkpoint = offset.saturating_add(FULL_DIGEST_CHECKPOINT_BYTES);
+    let mut mark = (tokio::time::Instant::now(), offset);
     while offset < size {
         let want = (size - offset).min(HASH_CHUNK as u64) as usize;
+        if let Some(pacer) = io.pacer {
+            pacer.admit(offset, want).await;
+        }
         let read = match source.read(&mut buffer[..want]).await {
             Ok(0) => {
                 full_digest_checkpoints().clear(key);
+                if let Some(store) = io.checkpoints {
+                    let _ = store
+                        .forget_attestation_checkpoint(&key.node_id, key.file_id)
+                        .await;
+                }
                 return Err("source ended before full attestation".into());
             }
             Ok(read) => read,
@@ -822,12 +1208,41 @@ async fn full_source_digest(
         offset += read as u64;
         progress(offset);
         if offset >= next_checkpoint || offset == size {
-            full_digest_checkpoints().save(FullDigestCheckpoint {
+            let checkpoint = FullDigestCheckpoint {
                 key: key.clone(),
                 offset,
                 digest: digest.clone(),
-            });
+            };
+            full_digest_checkpoints().save(checkpoint.clone());
+            save_durable_checkpoint(io, &checkpoint).await;
             next_checkpoint = offset.saturating_add(FULL_DIGEST_CHECKPOINT_BYTES);
+            // The measured rate since the last checkpoint. Without it nothing
+            // in the log can show whether the cap ran or what it held to.
+            let now = tokio::time::Instant::now();
+            let elapsed = now.saturating_duration_since(mark.0).as_secs_f64();
+            let read_bytes_per_sec = if elapsed > 0.0 {
+                ((offset - mark.1) as f64 / elapsed) as u64
+            } else {
+                0
+            };
+            mark = (now, offset);
+            match io.pacer {
+                Some(pacer) => tracing::info!(
+                    file_id = key.file_id,
+                    offset,
+                    size,
+                    read_bytes_per_sec,
+                    capped = pacer.capped(),
+                    "attestation checkpoint"
+                ),
+                None => tracing::debug!(
+                    file_id = key.file_id,
+                    offset,
+                    size,
+                    read_bytes_per_sec,
+                    "attestation checkpoint"
+                ),
+            }
         }
     }
     Ok(hex::encode(digest.finalize()))
@@ -839,6 +1254,7 @@ async fn attest_source_mode(
     memo: Option<&FragmentIndexSourceObservation>,
     progress: &(dyn Fn(u64) + Sync),
     full: bool,
+    io: AttestationIo<'_>,
 ) -> Result<AttestedSource, String> {
     #[cfg(unix)]
     let mut source = tokio::fs::File::open(&file.path)
@@ -891,7 +1307,7 @@ async fn attest_source_mode(
                 object_version: version.clone(),
                 size: before.len(),
             };
-            full_source_digest(&mut source, &key, progress).await?
+            full_source_digest(&mut source, &key, progress, io).await?
         } else {
             sampled_source_digest(&mut source, before.len(), &file.path, progress).await?
         };
@@ -1263,6 +1679,49 @@ pub(crate) fn unix_ms() -> i64 {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|duration| duration.as_millis().min(i64::MAX as u128) as i64)
         .unwrap_or(0)
+}
+
+/// An HEVC catalogue row for a real file, as the scanner would record it,
+/// for tests in this crate that exercise the whole-file regime.
+#[cfg(test)]
+pub(crate) fn hevc_test_file(id: i64, path: PathBuf) -> MediaFile {
+    let metadata = std::fs::metadata(&path).expect("HEVC test file metadata");
+    let mtime = metadata
+        .modified()
+        .ok()
+        .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|duration| duration.as_secs().min(i64::MAX as u64) as i64)
+        .unwrap_or(0);
+    MediaFile {
+        downloaded_subtitles: Vec::new(),
+        id,
+        item_id: 7,
+        path,
+        size: metadata.len() as i64,
+        mtime,
+        duration_ms: Some(1_000),
+        container: Some("mkv".to_owned()),
+        video_codec: Some("hevc".to_owned()),
+        video_codec_tag: None,
+        field_order: None,
+        video_profile: Some("Main 10".to_owned()),
+        width: Some(3840),
+        height: Some(2160),
+        bit_depth: Some(10),
+        hdr: None,
+        hdr_format: None,
+        max_cll: None,
+        max_fall: None,
+        mastering_max_luminance: None,
+        luminance_source: None,
+        dolby_vision: plurx_core::domain::DolbyVisionFacts::default(),
+        bitrate: None,
+        audio_streams: vec![],
+        subtitle_streams: vec![],
+        scanned_at: 1,
+        audio_offset_ms: 0,
+        probed: true,
+    }
 }
 
 #[cfg(test)]
@@ -2016,7 +2475,7 @@ mod tests {
         let checkpoint = |key: FullDigestKey, offset: u64| FullDigestCheckpoint {
             key,
             offset,
-            digest: Sha256::new(),
+            digest: ResumableSha256::new(),
         };
         let mut table = FullDigestCheckpoints::default();
         table.save(checkpoint(key(1, "v1"), 10));
@@ -2049,5 +2508,220 @@ mod tests {
             table.load(&key(1, "v2")).is_none(),
             "the oldest entry is the one evicted"
         );
+    }
+
+    // ---- resumable SHA-256, pacing and durable checkpoints (QSF Part D) ----
+
+    /// xorshift64*, so the splits are random but every run sees the same.
+    fn next(state: &mut u64) -> u64 {
+        *state ^= *state >> 12;
+        *state ^= *state << 25;
+        *state ^= *state >> 27;
+        state.wrapping_mul(0x2545_f491_4f6c_dd1d)
+    }
+
+    /// D-M2 step 0: for random splits, including every awkward boundary
+    /// around a block and lengths that are never block-aligned, a state
+    /// written down with `to_bytes` and picked up with `from_bytes` at every
+    /// split finalizes to exactly `Sha256::digest` of the whole input.
+    #[test]
+    fn a_resumed_sha256_equals_the_library_digest_for_random_splits() {
+        let mut seed = 0x9e37_79b9_7f4a_7c15_u64;
+        let lengths = [
+            0_usize, 1, 3, 55, 56, 57, 63, 64, 65, 119, 120, 127, 128, 129, 1_000, 4_095, 4_097,
+            70_001, 262_147,
+        ];
+        for length in lengths {
+            let input = filler(length);
+            let expected: [u8; 32] = Sha256::digest(&input).into();
+            for _ in 0..24 {
+                let mut cuts = (0..(next(&mut seed) % 6))
+                    .map(|_| (next(&mut seed) as usize) % (length + 1))
+                    .collect::<Vec<_>>();
+                cuts.push(length);
+                cuts.sort_unstable();
+                let mut hasher = ResumableSha256::new();
+                let mut at = 0;
+                for cut in cuts {
+                    hasher.update(&input[at..cut]);
+                    at = cut;
+                    let bytes = hasher.to_bytes();
+                    hasher =
+                        ResumableSha256::from_bytes(&bytes).expect("a written state reads back");
+                    assert_eq!(hasher.len(), at as u64);
+                }
+                assert_eq!(hasher.finalize(), expected, "length {length}");
+            }
+        }
+        // The domain prefix every whole-file digest starts with is not
+        // block-aligned, which is why the partial block has to persist.
+        assert_ne!(full_digest_prefix_len() % 64, 0);
+        assert!(ResumableSha256::from_bytes(&[]).is_none());
+        assert!(
+            ResumableSha256::from_bytes(&[2; 41]).is_none(),
+            "unknown format"
+        );
+        let mut short = ResumableSha256::new();
+        short.update(b"abc");
+        let mut bytes = short.to_bytes();
+        bytes.pop();
+        assert!(
+            ResumableSha256::from_bytes(&bytes).is_none(),
+            "a buffered tail shorter than the byte count says is refused"
+        );
+    }
+
+    struct FlagLoad(std::sync::atomic::AtomicBool);
+
+    impl AttestationLoad for FlagLoad {
+        fn serving(&self) -> futures_util::future::BoxFuture<'_, bool> {
+            let serving = self.0.load(std::sync::atomic::Ordering::Acquire);
+            Box::pin(async move { serving })
+        }
+    }
+
+    /// D-M1: while the node is serving, a capped read never exceeds the
+    /// configured rate over any 5 s window; at the first evaluation after the
+    /// last delivery ends it returns to full speed.
+    #[tokio::test(start_paused = true)]
+    async fn a_capped_read_holds_its_rate_and_returns_to_full_speed() {
+        let dir = tempfile::tempdir().expect("pacing fixture");
+        let path = dir.path().join("paced.bin");
+        let size = 6 * FULL_DIGEST_CHECKPOINT_BYTES as usize + 1_234;
+        tokio::fs::write(&path, filler(size))
+            .await
+            .expect("pacing fixture");
+        let file = hevc_test_file(4_101, path);
+        let rate = 1024 * 1024_u64;
+        let release_at = 4 * PACE_EVALUATE_BYTES;
+        let load = FlagLoad(std::sync::atomic::AtomicBool::new(true));
+        let pacer = AttestationPacer::new(&load, rate, file.id);
+        let samples = std::sync::Mutex::new(Vec::new());
+        let started = tokio::time::Instant::now();
+        let attested = attest_copy_source_with(
+            "pacing-node",
+            &file,
+            None,
+            &|bytes| {
+                samples
+                    .lock()
+                    .expect("samples")
+                    .push((tokio::time::Instant::now(), bytes));
+                if bytes >= release_at {
+                    // The last delivery ends.
+                    load.0.store(false, std::sync::atomic::Ordering::Release);
+                }
+            },
+            AttestationIo {
+                checkpoints: None,
+                pacer: Some(&pacer),
+            },
+        )
+        .await
+        .expect("paced attestation");
+        let samples = samples.into_inner().expect("samples");
+        assert!(pacer.was_capped());
+        assert!(!pacer.capped(), "the cap is off once nothing plays");
+
+        // Every read issued while a delivery was live: up to and including
+        // the one that ended where the last delivery ended.
+        let capped = samples
+            .iter()
+            .position(|(_, bytes)| *bytes >= release_at)
+            .expect("release sample")
+            + 1;
+        let window = Duration::from_secs(5);
+        let allowance = rate * 5 + 2 * HASH_CHUNK as u64;
+        for (index, (at, bytes)) in samples[..capped].iter().enumerate() {
+            for (later_at, later_bytes) in &samples[index..capped] {
+                if later_at.saturating_duration_since(*at) <= window {
+                    assert!(
+                        later_bytes - bytes <= allowance,
+                        "{} bytes in {:?} exceeds the cap",
+                        later_bytes - bytes,
+                        later_at.saturating_duration_since(*at)
+                    );
+                }
+            }
+        }
+        let released = samples
+            .iter()
+            .find(|(_, bytes)| *bytes >= release_at)
+            .expect("release sample")
+            .0;
+        assert!(
+            released.saturating_duration_since(started)
+                >= Duration::from_secs_f64((release_at - HASH_CHUNK as u64) as f64 / rate as f64),
+            "the capped stretch ran at the cap"
+        );
+        assert_eq!(
+            samples.last().expect("final sample").0,
+            released,
+            "after the last delivery ends the rest of the file reads at full speed"
+        );
+        assert_eq!(attested.observation.source_sha256.len(), 64);
+    }
+
+    /// D-M2: a restart empties the in-memory table; the next attempt resumes
+    /// from the node-local stored row, and the digest is the one an
+    /// uninterrupted read produces.
+    #[tokio::test]
+    async fn a_restarted_attestation_resumes_from_the_stored_checkpoint() {
+        let dir = tempfile::tempdir().expect("durable fixture");
+        let path = dir.path().join("durable.bin");
+        let size = 6 * FULL_DIGEST_CHECKPOINT_BYTES as usize + 4_321;
+        tokio::fs::write(&path, filler(size))
+            .await
+            .expect("durable fixture");
+        let file = hevc_test_file(4_102, path);
+        let store = plurx_core::store::SqliteStore::open_in_memory().expect("store");
+        let io = AttestationIo {
+            checkpoints: Some(&store as &dyn Store),
+            pacer: None,
+        };
+        let node = "durable-node";
+        let past = 2 * FULL_DIGEST_CHECKPOINT_BYTES + HASH_CHUNK as u64;
+        let stop = tokio::sync::Notify::new();
+        let report = |bytes: u64| {
+            if bytes >= past {
+                stop.notify_one();
+            }
+        };
+        tokio::select! {
+            biased;
+            () = stop.notified() => {}
+            result = attest_copy_source_with(node, &file, None, &report, io) => panic!(
+                "the attempt was meant to be preempted: {:?}",
+                result.map(|attested| attested.observation.source_sha256)
+            ),
+        }
+        let key = full_key(node, &file);
+        assert!(full_digest_checkpoints().load(&key).is_some());
+        // The daemon restarts: nothing in memory survives.
+        full_digest_checkpoints().clear(&key);
+        assert!(full_digest_checkpoints().load(&key).is_none());
+
+        let first = std::sync::Mutex::new(None);
+        let resumed = attest_copy_source_with(
+            node,
+            &file,
+            None,
+            &|bytes| {
+                first.lock().expect("first").get_or_insert(bytes);
+            },
+            io,
+        )
+        .await
+        .expect("resumed attestation");
+        let resumed_from = first
+            .into_inner()
+            .expect("first")
+            .expect("a progress report");
+        assert!(
+            resumed_from >= 2 * FULL_DIGEST_CHECKPOINT_BYTES && resumed_from < size as u64,
+            "the restarted attempt resumes at the stored checkpoint, not byte 0: {resumed_from}"
+        );
+        let (_, reference) = first_progress_and_digest("durable-reference-node", &file).await;
+        assert_eq!(resumed.observation.source_sha256, reference);
     }
 }

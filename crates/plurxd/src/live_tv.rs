@@ -5167,6 +5167,16 @@ impl LiveTvManager {
         }
     }
 
+    /// How many Live TV sessions this node holds, as a count rather than the
+    /// activity rows [`Self::activities`] builds.
+    pub(crate) fn session_count(&self) -> usize {
+        self.registry
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .sessions
+            .len()
+    }
+
     pub(crate) fn activities(&self) -> Vec<LiveTvActivity> {
         let now = tokio::time::Instant::now();
         let instant = unix_seconds();

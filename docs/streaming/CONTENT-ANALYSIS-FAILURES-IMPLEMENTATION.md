@@ -257,6 +257,22 @@ substring matching must not turn an unknown error into an endless retry.
 Retain `attempt_limit` when the configured charged-attempt ceiling is reached,
 but retain the underlying failure in diagnostics and attempt history.
 
+The `attempt_limit` row itself is never reopened, and its deterministic
+generation still blocks every ordinary re-enqueue of that identity. What
+reopens the work is a **successor** (ruling R8, 2026-10-04): a playback whose
+enqueue finds the request at `attempt_limit` inserts one new request for the
+same identity tuple (file, size, mtime, component, pipeline, video identity,
+target node) with fresh attempts, the exhausted row's own priority class and
+trigger, never forced and never boosted
+(`enqueue_playback_analysis_successor`, both backends), and joins the viewer
+to the successor's id so it may run on a busy node. At most one such
+successor is created per identity in 24 hours — derived from the successors'
+`created_at_ms`, with no new column — and none while another request for the
+identity is active or ready. Discovery, which has no viewer, never creates
+one. The operator route (`POST /api/v1/analysis/reopen`) is unchanged: its
+successor is forced and boosted. The cost of the rule is at most five more
+failed attempts a day on a title that truly cannot be indexed.
+
 One shared pure policy produces `retryable`, next-attempt time and terminal
 reason for both local and cluster workers. Update browse summaries and every
 `is_due`/retryability consumer; a new code must not become retryable merely

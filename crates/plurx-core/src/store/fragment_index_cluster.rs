@@ -12,6 +12,74 @@ use crate::error::StoreError;
 use crate::fmp4::{CutClass, PromotionInputs};
 use crate::segplan::{FragmentIndex, IndexRow, SourceIdentity, SEGPLAN_VERSION};
 
+/// R8's successor insert, shared by both backends (the replicated twin
+/// rewrites `?N` to `$N`). `?1` successor id (also its generation), `?2` now,
+/// `?3` the exhausted request, `?4` the active-queue cap, `?5` the window.
+///
+/// A "later" row is any other request for the exhausted row's identity
+/// tuple. One that is still working or already ready means nothing needs
+/// re-requesting; one created since the exhausted row inside the window is
+/// the at-most-one-a-day bound, derived from `created_at_ms` with no new
+/// column. The successor copies the exhausted row's own priority class and
+/// trigger and is never forced, so it gets no operator boost.
+pub(crate) const PLAYBACK_SUCCESSOR_INSERT: &str = "INSERT INTO analysis_requests
+    (request_id, file_id, source_size, source_mtime, component,
+     pipeline_version, video_identity, requested_generation,
+     expected_predecessor_generation, priority, trigger,
+     force_rebuild, target_node_id, state, owner_node_id, fence,
+     lease_expires_ms, attempts, not_before_ms, result_cache_key,
+     last_error_code, cancel_requested, created_at_ms, updated_at_ms)
+ SELECT ?1, original.file_id, original.source_size, original.source_mtime,
+        original.component, original.pipeline_version, original.video_identity, ?1,
+        original.expected_predecessor_generation, original.priority, original.trigger,
+        0, original.target_node_id, 'queued', NULL, 0, NULL, 0, ?2,
+        NULL, NULL, 0, ?2, ?2
+   FROM analysis_requests original
+  WHERE original.request_id = ?3
+    AND original.component = 'fragment_index' AND original.state = 'failed'
+    AND original.last_error_code = 'attempt_limit' AND original.force_rebuild = 0
+    AND EXISTS (SELECT 1 FROM files
+          WHERE id = original.file_id AND size = original.source_size
+            AND mtime = original.source_mtime)
+    AND (SELECT COUNT(*) FROM analysis_requests
+          WHERE state IN ('queued', 'running', 'submitted')) < ?4
+    AND NOT EXISTS (SELECT 1 FROM analysis_requests later
+          WHERE later.file_id = original.file_id
+            AND later.source_size = original.source_size
+            AND later.source_mtime = original.source_mtime
+            AND later.component = original.component
+            AND later.pipeline_version = original.pipeline_version
+            AND later.video_identity = original.video_identity
+            AND later.target_node_id = original.target_node_id
+            AND later.request_id <> original.request_id
+            AND (later.state IN ('queued', 'running', 'submitted', 'ready')
+              OR (later.created_at_ms >= original.created_at_ms
+                AND later.created_at_ms > ?2 - ?5)))
+ ON CONFLICT DO NOTHING";
+
+/// The request that stands for an exhausted row's identity after R8: an
+/// active one first, then a ready one, then the newest successor. `?1` is the
+/// exhausted request, which must still be an `attempt_limit` fragment row.
+pub(crate) const PLAYBACK_SUCCESSOR_STANDING: &str = "FROM analysis_requests later
+  WHERE EXISTS (SELECT 1 FROM analysis_requests original
+          WHERE original.request_id = ?1
+            AND original.component = 'fragment_index' AND original.state = 'failed'
+            AND original.last_error_code = 'attempt_limit' AND original.force_rebuild = 0
+            AND later.file_id = original.file_id
+            AND later.source_size = original.source_size
+            AND later.source_mtime = original.source_mtime
+            AND later.component = original.component
+            AND later.pipeline_version = original.pipeline_version
+            AND later.video_identity = original.video_identity
+            AND later.target_node_id = original.target_node_id
+            AND later.request_id <> original.request_id
+            AND (later.state IN ('queued', 'running', 'submitted', 'ready')
+              OR later.created_at_ms >= original.created_at_ms))
+  ORDER BY CASE WHEN later.state IN ('queued', 'running', 'submitted') THEN 0
+                WHEN later.state = 'ready' THEN 1 ELSE 2 END,
+           later.created_at_ms DESC, later.request_id DESC
+  LIMIT 1";
+
 pub(crate) fn analysis_live_viewer_clause(now: &str) -> String {
     format!(
         "(analysis_requests.component = 'fragment_index' AND EXISTS (
@@ -952,6 +1020,14 @@ pub const DEFAULT_ANALYSIS_BACKOFF_BASE_SECS: i64 = 5;
 pub const MAX_ANALYSIS_BACKOFF_BASE_SECS: i64 = 300;
 pub const DEFAULT_ANALYSIS_BACKOFF_MAX_SECS: i64 = 300;
 pub const MAX_ANALYSIS_BACKOFF_MAX_SECS: i64 = 3_600;
+/// Ruling R7: about a quarter of a spinning disk's sequential rate, while a
+/// 2× read-rate producer on a 100 Mb/s remux needs about 25 MB/s.
+pub const DEFAULT_ANALYSIS_ATTEST_BUSY_BYTES_PER_SEC: i64 = 32 * 1024 * 1024;
+pub const MIN_ANALYSIS_ATTEST_BUSY_BYTES_PER_SEC: i64 = 1024 * 1024;
+pub const MAX_ANALYSIS_ATTEST_BUSY_BYTES_PER_SEC: i64 = 4 * 1024 * 1024 * 1024;
+/// Ruling R8: a playback creates at most one successor for an
+/// `attempt_limit` request per identity in this window.
+pub const PLAYBACK_ANALYSIS_SUCCESSOR_WINDOW_MS: i64 = 24 * 60 * 60 * 1_000;
 /// Forward subtitle materialization span. Kept with the other bounded server
 /// settings so every consumer resolves the same default and clamp.
 pub const DEFAULT_SUBTITLE_WINDOW_SECS: i64 = 200;
@@ -975,6 +1051,16 @@ fn bounded_analysis_seconds(value: Option<&str>, default: i64, min: i64, max: i6
         .and_then(|value| value.trim().parse::<i64>().ok())
         .unwrap_or(default)
         .clamp(min, max)
+}
+
+/// The attestation byte-rate cap (R7), clamped like every analysis tunable.
+pub fn bounded_analysis_attest_busy_bytes_per_sec(value: Option<&str>) -> i64 {
+    bounded_analysis_seconds(
+        value,
+        DEFAULT_ANALYSIS_ATTEST_BUSY_BYTES_PER_SEC,
+        MIN_ANALYSIS_ATTEST_BUSY_BYTES_PER_SEC,
+        MAX_ANALYSIS_ATTEST_BUSY_BYTES_PER_SEC,
+    )
 }
 
 pub fn bounded_analysis_lease_secs(value: Option<&str>) -> i64 {
@@ -2053,6 +2139,46 @@ pub trait ClusterFragmentIndexStore: Send + Sync + 'static {
         &self,
         request_id: &str,
         requested_generation: &str,
+        now_ms: i64,
+    ) -> Result<Option<AnalysisRequest>, StoreError>;
+
+    /// Read-only: whether a queued request other than `except_request_id`,
+    /// which this node could claim now, has a live playback viewer waiting.
+    ///
+    /// The question a long capped source read asks before it gives the
+    /// node's single analysis reader back. The claim mutation is not
+    /// something to call as a question — it sweeps leases, settles rows and
+    /// fences a winner — so this is its candidate predicate alone, with the
+    /// live-viewer clause and no write. The source-capacity clause is left
+    /// out on purpose: the asking read holds one of those reservations
+    /// itself and would release it by yielding.
+    async fn analysis_viewer_request_waiting(
+        &self,
+        node_id: &str,
+        except_request_id: &str,
+        pipeline_version: Option<&str>,
+        now_ms: i64,
+    ) -> Result<bool, StoreError>;
+
+    /// Ruling R8: a playback found this request at `attempt_limit`.
+    ///
+    /// Inserts one ordinary successor — `successor_request_id` as both id and
+    /// generation, the exhausted row's priority class and trigger, never
+    /// forced and never boosted, zero attempts — unless another request for
+    /// the same identity tuple (file, size, mtime, component, pipeline,
+    /// video identity, target) is active or ready, or was created in the last
+    /// [`PLAYBACK_ANALYSIS_SUCCESSOR_WINDOW_MS`]. The exhausted row and its
+    /// attempt history are not touched.
+    ///
+    /// Returns the request that now stands for this identity — the new
+    /// successor, or the existing later one — so the caller joins its viewer
+    /// to that id. `None` when `exhausted` is not an `attempt_limit` fragment
+    /// request, the source changed, or the active queue is full and no
+    /// successor exists.
+    async fn enqueue_playback_analysis_successor(
+        &self,
+        exhausted_request_id: &str,
+        successor_request_id: &str,
         now_ms: i64,
     ) -> Result<Option<AnalysisRequest>, StoreError>;
 

@@ -1288,6 +1288,10 @@ pub(crate) const MIGRATIONS: &[&str] = &[
     // v103: parent-fenced continuous media facts and dependency reservations
     // (drafted as v93, then v99).
     super::quality_ledger::SCHEMA,
+    // v104: durable whole-file attestation checkpoints, node-local beside
+    // `fragment_indexes` (QSF Part D, D-M2). The replicated voter carries the
+    // same table in its telemetry sidecar (v13 there).
+    crate::store::fragindex::ATTESTATION_CHECKPOINTS_SCHEMA,
 ];
 
 /// Highest SQLite schema version this binary can read and migrate.
@@ -3269,9 +3273,10 @@ mod tests {
         // v98–v101 add Jellyfin compatibility: permanent wire identities,
         // compatibility-only logins, bounded negotiations with exact native
         // references, and manual-edit watch revisions; v102 adds quality
-        // cancellation and v103 continuous dependencies.
+        // cancellation and v103 continuous dependencies; v104 adds node-local
+        // whole-file attestation checkpoints.
         assert_eq!(
-            version, 103,
+            version, 104,
             "a new migration must be a deliberate bump, not a surprise — \
              the list is append-only and every entry is one somebody shipped"
         );

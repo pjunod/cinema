@@ -87,7 +87,7 @@ CREATE INDEX network_priors_by_updated
     ON network_priors(updated_at_ms, user_id, client_class);";
 
 #[cfg(any(test, feature = "hiqlite-store"))]
-const SIDECAR_SCHEMA_VERSION: i64 = 12;
+const SIDECAR_SCHEMA_VERSION: i64 = 13;
 pub(crate) const NETWORK_PRIOR_LINK_COLUMNS: &str = "
 ALTER TABLE network_priors ADD COLUMN link_worst_rung_height INTEGER;
 ALTER TABLE network_priors ADD COLUMN link_starved_at_ms INTEGER;";
@@ -618,6 +618,14 @@ impl NodeLocalTelemetry {
                 migration.push('\n');
             }
             migration.push_str(crate::store::candidate_link::SCHEMA);
+            // v13: durable whole-file attestation checkpoints (QSF Part D),
+            // node-local beside `fragment_indexes` exactly as on SQLite.
+            // Guarded on the table, like v8, so a sidecar created in this
+            // same batch and an upgraded one reach one shape.
+            if !table_exists(&conn, "attestation_checkpoints")? {
+                migration.push_str(crate::store::fragindex::ATTESTATION_CHECKPOINTS_SCHEMA);
+                migration.push('\n');
+            }
             migration.push_str(&format!(
                 "PRAGMA user_version = {SIDECAR_SCHEMA_VERSION};\nCOMMIT;"
             ));
@@ -746,6 +754,7 @@ impl NodeLocalTelemetry {
             // it.
             conn.execute("DELETE FROM rendition_plans", [])?;
             conn.execute("DELETE FROM fragment_index_outcomes", [])?;
+            conn.execute("DELETE FROM attestation_checkpoints", [])?;
             Ok(())
         })
         .await
@@ -784,6 +793,46 @@ impl NodeLocalTelemetry {
     ) -> Result<crate::store::FragmentIndexValidationBackfill, StoreError> {
         self.with_conn(move |conn| crate::store::fragindex::validate_page(conn, limit))
             .await
+    }
+
+    pub(crate) async fn attestation_checkpoint(
+        &self,
+        node_id: String,
+        file_id: i64,
+        object_version: String,
+        source_size: i64,
+    ) -> Result<Option<crate::store::AttestationCheckpoint>, StoreError> {
+        self.with_conn(move |conn| {
+            crate::store::fragindex::attestation_checkpoint(
+                conn,
+                &node_id,
+                file_id,
+                &object_version,
+                source_size,
+            )
+        })
+        .await
+    }
+
+    pub(crate) async fn put_attestation_checkpoint(
+        &self,
+        checkpoint: crate::store::AttestationCheckpoint,
+    ) -> Result<(), StoreError> {
+        self.with_conn(move |conn| {
+            crate::store::fragindex::put_attestation_checkpoint(conn, &checkpoint)
+        })
+        .await
+    }
+
+    pub(crate) async fn forget_attestation_checkpoint(
+        &self,
+        node_id: String,
+        file_id: i64,
+    ) -> Result<(), StoreError> {
+        self.with_conn(move |conn| {
+            crate::store::fragindex::forget_attestation_checkpoint(conn, &node_id, file_id)
+        })
+        .await
     }
 
     pub(crate) async fn vod_row_file_ids(&self, limit: i64) -> Result<Vec<i64>, StoreError> {
@@ -1685,7 +1734,7 @@ mod tests {
         // `SIDECAR_SCHEMA_VERSION`, so an assertion built from the same
         // constant can never fail on a bump. Update it by hand, deliberately,
         // exactly as the single-node backend's `assert_eq!(version, 37)` is.
-        assert!(error.to_string().contains("only knows v12"), "{error}");
+        assert!(error.to_string().contains("only knows v13"), "{error}");
     }
 
     #[tokio::test]

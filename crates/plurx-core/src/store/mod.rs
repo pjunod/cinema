@@ -990,7 +990,8 @@ pub use self::hiqlite::{
 #[cfg(feature = "hiqlite-store")]
 pub use self::hiqlite_import::{SqliteImportReport, SqliteImportTableDigest};
 pub use fragment_index_cluster::{
-    analysis_backoff_ms, bounded_analysis_backoff_base_secs, bounded_analysis_backoff_max_secs,
+    analysis_backoff_ms, bounded_analysis_attest_busy_bytes_per_sec,
+    bounded_analysis_backoff_base_secs, bounded_analysis_backoff_max_secs,
     bounded_analysis_lease_secs, bounded_analysis_max_attempts, bounded_subtitle_window_seconds,
     cluster_fragment_index_blob_sha256, cluster_fragment_index_generation_key,
     cluster_fragment_index_key, cluster_fragment_index_pipeline_digest,
@@ -1003,12 +1004,15 @@ pub use fragment_index_cluster::{
     NewClusterFragmentIndexJob, SubtitleBackfillCandidate, SubtitleBackfillDiagnostics,
     SubtitleSourcePublication, SubtitleSourceStamp, CONTENT_ANALYSIS_REPAIR_HEADROOM,
     CONTENT_ANALYSIS_REPAIR_MAX_CANDIDATES, CONTENT_ANALYSIS_REPAIR_REVISION,
-    DEFAULT_ANALYSIS_BACKOFF_BASE_SECS, DEFAULT_ANALYSIS_BACKOFF_MAX_SECS,
-    DEFAULT_ANALYSIS_LEASE_SECS, DEFAULT_ANALYSIS_MAX_ATTEMPTS, DEFAULT_SUBTITLE_WINDOW_SECS,
-    FRAGMENT_PRUNE_CANDIDATES, FRAGMENT_PRUNE_TERMINAL_JOBS, MAX_ACTIVE_ANALYSIS_REQUESTS,
+    DEFAULT_ANALYSIS_ATTEST_BUSY_BYTES_PER_SEC, DEFAULT_ANALYSIS_BACKOFF_BASE_SECS,
+    DEFAULT_ANALYSIS_BACKOFF_MAX_SECS, DEFAULT_ANALYSIS_LEASE_SECS, DEFAULT_ANALYSIS_MAX_ATTEMPTS,
+    DEFAULT_SUBTITLE_WINDOW_SECS, FRAGMENT_PRUNE_CANDIDATES, FRAGMENT_PRUNE_TERMINAL_JOBS,
+    MAX_ACTIVE_ANALYSIS_REQUESTS, MAX_ANALYSIS_ATTEST_BUSY_BYTES_PER_SEC,
     MAX_ANALYSIS_BACKOFF_BASE_SECS, MAX_ANALYSIS_BACKOFF_MAX_SECS, MAX_ANALYSIS_LEASE_SECS,
     MAX_ANALYSIS_MAX_ATTEMPTS, MAX_CLUSTER_FRAGMENT_INDEX_BLOB_BYTES, MAX_SUBTITLE_WINDOW_SECS,
-    MIN_SUBTITLE_WINDOW_SECS, SUBTITLE_SOURCE_REPAIR_LIMIT, SUBTITLE_SOURCE_REPAIR_WINDOW_MS,
+    MIN_ANALYSIS_ATTEST_BUSY_BYTES_PER_SEC, MIN_SUBTITLE_WINDOW_SECS,
+    PLAYBACK_ANALYSIS_SUCCESSOR_WINDOW_MS, SUBTITLE_SOURCE_REPAIR_LIMIT,
+    SUBTITLE_SOURCE_REPAIR_WINDOW_MS,
 };
 pub use publication::{PublicationFence, PublicationStore};
 pub use sqlite::{prometheus_sqlite_health, SqliteStore, SQLITE_SCHEMA_VERSION};
@@ -2002,6 +2006,10 @@ pub mod keys {
     pub const ANALYSIS_LEASE_SECS: &str = "analysis.lease_secs";
     pub const ANALYSIS_BACKOFF_BASE_SECS: &str = "analysis.backoff_base_secs";
     pub const ANALYSIS_BACKOFF_MAX_SECS: &str = "analysis.backoff_max_secs";
+    /// Byte rate a playback request's source attestation is held to while
+    /// this node is serving anything (ruling R7). Absent means 32 MiB/s. A
+    /// tunable read at the start of each read; it gates nothing.
+    pub const ANALYSIS_ATTEST_BUSY_BYTES_PER_SEC: &str = "analysis.attest_busy_bytes_per_sec";
     /// Forward subtitle materialization span. The settings API constrains this
     /// to 30–900 seconds and absent means the 200-second default.
     pub const SUBTITLE_WINDOW_SECS: &str = "playback.subtitle_window_secs";
@@ -5392,6 +5400,33 @@ pub struct FragmentIndexStatus {
     pub outcome: Option<crate::segplan::FragmentIndexOutcome>,
 }
 
+/// How far one node's whole-file source attestation had read, durably.
+///
+/// Node-local for [`FragmentIndexStore`]'s reason: the state is a hash of one
+/// machine's read of one machine's copy of a file, under that machine's
+/// `object_version` (device, inode, size, mtime and ctime). It is resumed only
+/// by an attempt whose own freshly observed `object_version` and size equal
+/// the ones stored here; any other row for the same node and file is
+/// discarded on load. `hasher_state` is the caller's serialized SHA-256 state
+/// (chaining value, partial block and byte count) — opaque to the store.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AttestationCheckpoint {
+    pub node_id: String,
+    pub file_id: i64,
+    pub object_version: String,
+    pub source_size: i64,
+    /// Source bytes already folded into `hasher_state`.
+    pub read_offset: i64,
+    pub hasher_state: Vec<u8>,
+    pub saved_at_ms: i64,
+}
+
+/// At most this many attestation checkpoints are kept per node. Only a
+/// handful of sources are ever part-way through a whole-file read on one
+/// node; the bound stops a library whose files keep changing under their
+/// attempts from growing the table without limit.
+pub const ATTESTATION_CHECKPOINT_LIMIT: i64 = 16;
+
 /// Test-only decoder counter scoped to one owned file-backed database.
 /// Its strong handle controls the registration lifetime; parallel tests on
 /// other databases cannot affect its positive/negative control.
@@ -5505,6 +5540,33 @@ pub trait FragmentIndexStore: Send + Sync + 'static {
 
     /// Which of `file_ids` still exist in the replicated `files` table.
     async fn surviving_file_ids(&self, file_ids: &[i64]) -> Result<Vec<i64>, StoreError>;
+
+    /// The durable whole-file attestation checkpoint for exactly this
+    /// object, if one survives. A row for the same node and file under a
+    /// different `object_version` or size can never be resumed and is
+    /// discarded by this call.
+    async fn attestation_checkpoint(
+        &self,
+        node_id: &str,
+        file_id: i64,
+        object_version: &str,
+        source_size: i64,
+    ) -> Result<Option<AttestationCheckpoint>, StoreError>;
+
+    /// Keep the furthest checkpoint for one node and file, replacing any row
+    /// for an older identity, and bound the table to
+    /// [`ATTESTATION_CHECKPOINT_LIMIT`] rows (oldest saved first out).
+    async fn put_attestation_checkpoint(
+        &self,
+        checkpoint: &AttestationCheckpoint,
+    ) -> Result<(), StoreError>;
+
+    /// Drop the checkpoint for one node and file.
+    async fn forget_attestation_checkpoint(
+        &self,
+        node_id: &str,
+        file_id: i64,
+    ) -> Result<(), StoreError>;
 }
 
 /// Node-local rendition plans.

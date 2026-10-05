@@ -2795,6 +2795,92 @@ impl ClusterFragmentIndexStore for HiqliteAuthStore {
         self.analysis_request(requested_generation).await
     }
 
+    async fn analysis_viewer_request_waiting(
+        &self,
+        node_id: &str,
+        except_request_id: &str,
+        pipeline_version: Option<&str>,
+        now_ms: i64,
+    ) -> Result<bool, StoreError> {
+        if node_id.is_empty() || node_id.len() > 128 || pipeline_version.is_some_and(str::is_empty)
+        {
+            return Err(StoreError::Task("invalid analysis peek".to_owned()));
+        }
+        let max_attempts = configured_max_attempts(self).await?;
+        let viewer = super::fragment_index_cluster::analysis_live_viewer_clause("$4");
+        // A local read, deliberately: this is a hint a capped read asks every
+        // thirty seconds. Replica lag can only delay a yield by one tick or
+        // cause one uncharged yield; neither is worth a quorum round trip.
+        Ok(self
+            .client()
+            .query_map::<SchemaCountRow, _>(
+                format!(
+                    "SELECT EXISTS (SELECT 1 FROM analysis_requests
+                      WHERE target_node_id = $1 AND request_id <> $2
+                        AND component = 'fragment_index' AND attempts < $3
+                        AND state = 'queued' AND not_before_ms <= $4
+                        AND ($5 IS NULL OR pipeline_version = $5)
+                        AND {viewer}) AS count"
+                ),
+                params!(
+                    node_id,
+                    except_request_id,
+                    max_attempts,
+                    now_ms,
+                    pipeline_version
+                ),
+            )
+            .await?
+            .into_iter()
+            .next()
+            .is_some_and(|row| row.0 != 0))
+    }
+
+    async fn enqueue_playback_analysis_successor(
+        &self,
+        exhausted_request_id: &str,
+        successor_request_id: &str,
+        now_ms: i64,
+    ) -> Result<Option<AnalysisRequest>, StoreError> {
+        if successor_request_id.is_empty()
+            || successor_request_id.len() > 64
+            || successor_request_id == exhausted_request_id
+        {
+            return Err(StoreError::Task(
+                "invalid playback analysis successor".to_owned(),
+            ));
+        }
+        self.client()
+            .txn(vec![(
+                super::fragment_index_cluster::PLAYBACK_SUCCESSOR_INSERT.replace('?', "$"),
+                params!(
+                    successor_request_id,
+                    now_ms,
+                    exhausted_request_id,
+                    MAX_ANALYSIS_REQUESTS,
+                    super::PLAYBACK_ANALYSIS_SUCCESSOR_WINDOW_MS
+                ),
+            )])
+            .await?
+            .into_iter()
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(database_error)?;
+        Ok(self
+            .client()
+            // authority: the caller joins its viewer to the id this returns, so it must see the successor the write above just committed.
+            .query_consistent_map::<RequestRow, _>(
+                format!(
+                    "SELECT {REQUEST_COLS} {}",
+                    super::fragment_index_cluster::PLAYBACK_SUCCESSOR_STANDING.replace('?', "$")
+                ),
+                params!(exhausted_request_id),
+            )
+            .await?
+            .into_iter()
+            .next()
+            .map(|row| row.0))
+    }
+
     async fn preview_analysis_index_repairs(
         &self,
         after: Option<&str>,

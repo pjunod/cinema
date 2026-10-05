@@ -1173,6 +1173,26 @@ impl AppState {
             live_tv_scratch,
             runtime_cache.join("live-tv"),
         );
+        let streams = crate::progressive::Streams::new();
+        let direct_plays = crate::delivery::DirectPlays::new();
+        // The deliveries the transcode manager has no registry for, counted
+        // where they live. Weak, because Live TV already holds the manager.
+        transcode.register_delivery_census({
+            let streams = Arc::downgrade(&streams);
+            let direct_plays = Arc::downgrade(&direct_plays);
+            let live_tv = Arc::downgrade(&live_tv);
+            Box::new(move || {
+                streams
+                    .upgrade()
+                    .map_or(0, |streams| streams.active_count())
+                    + direct_plays
+                        .upgrade()
+                        .map_or(0, |direct_plays| direct_plays.live_count())
+                    + live_tv
+                        .upgrade()
+                        .map_or(0, |live_tv| live_tv.session_count())
+            })
+        });
         AppState {
             store,
             link_receipts: Default::default(),
@@ -1223,8 +1243,8 @@ impl AppState {
             detail_availability: crate::availability::AvailabilityCache::new(),
             starts: Arc::new(crate::playstart::StartNotifier::new()),
             start_attempts: Arc::new(crate::playstart::StartAttempts::new()),
-            streams: crate::progressive::Streams::new(),
-            direct_plays: crate::delivery::DirectPlays::new(),
+            streams,
+            direct_plays,
             watch_ledger: Arc::new(crate::telemetry::WatchLedger::default()),
             store_metrics: StoreMetricsCache::default(),
             shutdown: tokio_util::sync::CancellationToken::new(),
@@ -2322,6 +2342,24 @@ enum AnalysisResolutionError {
     Terminal(&'static str),
 }
 
+/// How long a capped source read must have held this node's single analysis
+/// reader before it may give way, uncharged, to another viewer request. An
+/// uncharged yield requeues after the ordinary short backoff, so without a
+/// minimum hold two capped requests would swap every few seconds.
+const ANALYSIS_CAPPED_MIN_HOLD: Duration = Duration::from_secs(5 * 60);
+/// How often a capped read asks the read-only "is another viewer request
+/// waiting for this node" peek, once it may yield.
+const ANALYSIS_VIEWER_PEEK_EVERY: Duration = Duration::from_secs(30);
+
+/// The attestation pacer's trigger: this node serving anything.
+struct ServingLoad<'a>(&'a TranscodeManager);
+
+impl crate::fragment_index_cluster::AttestationLoad for ServingLoad<'_> {
+    fn serving(&self) -> futures_util::future::BoxFuture<'_, bool> {
+        Box::pin(self.0.serving_anything())
+    }
+}
+
 /// Remember contention throughout a source read, even if playback ends before
 /// its deadline. A busy-viewer timeout must not exhaust the durable retry budget.
 #[derive(Default)]
@@ -2893,7 +2931,42 @@ pub(crate) async fn enqueue_copy_preparation_for_object_with_viewer(
             created_at_ms: now,
         })
         .await?;
-    if let Some(viewer) = viewer.filter(|viewer| viewer.user_id > 0) {
+    let viewer = viewer.filter(|viewer| viewer.user_id > 0);
+    // Ruling R8: the deterministic generation of a request that spent its
+    // charged attempts blocks every later enqueue for good, so a playback
+    // asks for one ordinary successor (at most one a day per identity) and
+    // the viewer joins that instead. Without it a title stays on the slower
+    // rolling path until an operator notices. Discovery, with no viewer,
+    // never does this.
+    let request = if viewer.is_some()
+        && request.state == "failed"
+        && request.last_error_code == "attempt_limit"
+        && !request.force_rebuild
+    {
+        match store
+            .enqueue_playback_analysis_successor(
+                &request.request_id,
+                &uuid::Uuid::new_v4().to_string(),
+                clock_ms(),
+            )
+            .await?
+        {
+            Some(successor) => {
+                tracing::info!(
+                    file_id = file.id,
+                    exhausted = %request.request_id,
+                    successor = %successor.request_id,
+                    state = %successor.state,
+                    "playback stands an analysis successor in for an attempt_limit request"
+                );
+                successor
+            }
+            None => request,
+        }
+    } else {
+        request
+    };
+    if let Some(viewer) = viewer {
         store
             .join_analysis_viewer(plurx_core::store::AnalysisViewerInterest {
                 analysis_request_id: request.request_id.clone(),
@@ -9121,35 +9194,18 @@ impl JobManager {
                 0,
             );
         };
-        let attestation_budget = AnalysisAttestationBudget::default();
-        attestation_budget.observe_busy(!transcode.pretranscode_worker_idle());
-        let attested = tokio::select! {
-            result = crate::fragment_index_cluster::attest_copy_source(
+        let attested = self
+            .attest_for_analysis_request(
+                transcode,
+                request,
                 node_id,
                 &file,
                 memo.as_ref(),
                 &report_progress,
-            ) => {
-                result.map_err(|_| AnalysisResolutionError::Retry {
-                    code: "source_attestation_failed",
-                    charge_attempt: true,
-                })?
-            }
-            () = self.wait_for_cluster_fragment_index_stop(transcode, Some(request), lost, &attestation_budget) => {
-                if lost.is_cancelled() {
-                    return Err(AnalysisResolutionError::ClaimLost);
-                }
-                return Err(AnalysisResolutionError::Retry {
-                    code: "foreground_preempted",
-                    charge_attempt: false,
-                });
-            }
-            () = wait_analysis_deadline(attest_timeout) => {
-                // Playback contention must not turn a formerly deferred request
-                // into terminal attempt_limit. Idle-only reads retain the cap.
-                return Err(attestation_budget.deadline_failure(!transcode.pretranscode_worker_idle()));
-            }
-        };
+                lost,
+                attest_timeout,
+            )
+            .await?;
         if lost.is_cancelled() {
             return Err(AnalysisResolutionError::ClaimLost);
         }
@@ -9396,6 +9452,147 @@ impl JobManager {
             .is_some_and(|state| state.has_live_viewer)
     }
 
+    /// Hash the source a playback analysis request names, beside whatever
+    /// this node is serving.
+    ///
+    /// The read is capped at `analysis.attest_busy_bytes_per_sec` (R7) while
+    /// the node is serving anything — busy by the admission counters, *or*
+    /// delivering to any viewer at all, since a rolling copy, a progressive
+    /// remux, a direct play, a VOD copy and a Live TV copy all hold no slot
+    /// (see [`TranscodeManager::serving_anything`]). The cap only slows the
+    /// read; `pretranscode_worker_idle` still alone decides whether the read
+    /// may continue at all and whether a timeout is charged — extended here by
+    /// one latch: a timeout reached by a read the cap slowed is uncharged,
+    /// which is what covers a copy-only node, where the admission counters
+    /// read idle throughout.
+    ///
+    /// Analysis requests resolve one at a time per node, so a capped read of
+    /// a large remux would hold every other viewer's request behind it for
+    /// tens of minutes. Once a capped read has held the reader for
+    /// [`ANALYSIS_CAPPED_MIN_HOLD`], it asks every
+    /// [`ANALYSIS_VIEWER_PEEK_EVERY`] whether another viewer request is
+    /// waiting, and if so gives the reader back uncharged; its checkpoints let
+    /// the next attempt resume. The minimum hold is what stops two capped
+    /// requests swapping every few seconds, each swap a fresh claim and
+    /// attempt row. The lease heartbeat runs beside all of this unchanged.
+    #[allow(clippy::too_many_arguments)]
+    async fn attest_for_analysis_request(
+        &self,
+        transcode: &TranscodeManager,
+        request: &AnalysisRequest,
+        node_id: &str,
+        file: &MediaFile,
+        memo: Option<&plurx_core::store::FragmentIndexSourceObservation>,
+        report_progress: &(dyn Fn(u64) + Sync),
+        lost: &CancellationToken,
+        attest_timeout: Duration,
+    ) -> Result<crate::fragment_index_cluster::AttestedSource, AnalysisResolutionError> {
+        // A tunable read once, at the start of the read. It gates nothing.
+        let bytes_per_sec = plurx_core::store::bounded_analysis_attest_busy_bytes_per_sec(
+            self.store
+                .get_setting(keys::ANALYSIS_ATTEST_BUSY_BYTES_PER_SEC)
+                .await
+                .ok()
+                .flatten()
+                .as_deref(),
+        );
+        let load = ServingLoad(transcode);
+        let pacer = crate::fragment_index_cluster::AttestationPacer::new(
+            &load,
+            u64::try_from(bytes_per_sec).unwrap_or(1),
+            file.id,
+        );
+        let io = crate::fragment_index_cluster::AttestationIo {
+            checkpoints: Some(self.store.as_ref()),
+            pacer: Some(&pacer),
+        };
+        let attestation_budget = AnalysisAttestationBudget::default();
+        attestation_budget.observe_busy(!transcode.pretranscode_worker_idle());
+        let started = tokio::time::Instant::now();
+        let attested = tokio::select! {
+            result = crate::fragment_index_cluster::attest_copy_source_with(
+                node_id,
+                file,
+                memo,
+                report_progress,
+                io,
+            ) => {
+                result.map_err(|_| AnalysisResolutionError::Retry {
+                    code: "source_attestation_failed",
+                    charge_attempt: true,
+                })?
+            }
+            () = self.wait_for_cluster_fragment_index_stop(transcode, Some(request), lost, &attestation_budget) => {
+                if lost.is_cancelled() {
+                    return Err(AnalysisResolutionError::ClaimLost);
+                }
+                return Err(AnalysisResolutionError::Retry {
+                    code: "foreground_preempted",
+                    charge_attempt: false,
+                });
+            }
+            () = self.wait_for_waiting_viewer_request(&pacer, request, node_id, started) => {
+                tracing::info!(
+                    request_id = %request.request_id,
+                    file_id = file.id,
+                    held_secs = started.elapsed().as_secs(),
+                    "a capped source attestation yields to a waiting viewer request"
+                );
+                // The viewer-demand code the queue already counts; the line
+                // above says which demand it was.
+                return Err(AnalysisResolutionError::Retry {
+                    code: "foreground_preempted",
+                    charge_attempt: false,
+                });
+            }
+            () = wait_analysis_deadline(attest_timeout) => {
+                // Playback contention must not turn a formerly deferred request
+                // into terminal attempt_limit. Idle-only reads retain the cap.
+                attestation_budget.observe_busy(pacer.was_capped());
+                return Err(attestation_budget.deadline_failure(!transcode.pretranscode_worker_idle()));
+            }
+        };
+        Ok(attested)
+    }
+
+    /// Resolve once a capped read has held the node's analysis reader for
+    /// [`ANALYSIS_CAPPED_MIN_HOLD`] and the read-only peek finds another
+    /// viewer request this node could claim. Asked on a timer, not per
+    /// checkpoint: at the cap a checkpoint passes every two seconds.
+    async fn wait_for_waiting_viewer_request(
+        &self,
+        pacer: &crate::fragment_index_cluster::AttestationPacer<'_>,
+        request: &AnalysisRequest,
+        node_id: &str,
+        started: tokio::time::Instant,
+    ) {
+        let mut ticks = tokio::time::interval_at(
+            started + ANALYSIS_VIEWER_PEEK_EVERY,
+            ANALYSIS_VIEWER_PEEK_EVERY,
+        );
+        ticks.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        loop {
+            ticks.tick().await;
+            if !pacer.capped() || started.elapsed() < ANALYSIS_CAPPED_MIN_HOLD {
+                continue;
+            }
+            match self
+                .store
+                .analysis_viewer_request_waiting(
+                    node_id,
+                    &request.request_id,
+                    Some(&request.pipeline_version),
+                    clock_ms(),
+                )
+                .await
+            {
+                Ok(true) => return,
+                Ok(false) => {}
+                Err(error) => tracing::debug!(%error, "asking whether a viewer request waits"),
+            }
+        }
+    }
+
     async fn wait_for_cluster_fragment_index_stop(
         &self,
         transcode: &TranscodeManager,
@@ -9431,6 +9628,36 @@ impl JobManager {
         loop {
             if lost.is_cancelled()
                 || !transcode.fragment_worker_idle(admission)
+                || !self.cluster_fragment_index_enabled().await
+            {
+                return;
+            }
+            tokio::select! {
+                () = lost.cancelled() => return,
+                () = tokio::time::sleep(Duration::from_millis(500)) => {}
+            }
+        }
+    }
+
+    /// [`Self::wait_for_fragment_worker_stop`] for the job path's source
+    /// read, plus the one thing the admission counters cannot see: a live
+    /// delivery that holds no slot. A rolling copy (or a progressive remux,
+    /// direct play, VOD copy or Live TV copy) leaves `fragment_worker_idle`
+    /// true, so before this a job kept hashing the same disk at full speed
+    /// beside a remux. The read issues no new source read later than one
+    /// 500 ms poll plus the read in flight after the first delivery goes
+    /// live; the job then yields as it does for an encode and resumes from
+    /// its checkpoint.
+    async fn wait_for_fragment_attestation_stop(
+        &self,
+        transcode: &TranscodeManager,
+        admission: &crate::transcode::FragmentAdmission,
+        lost: &tokio_util::sync::CancellationToken,
+    ) {
+        loop {
+            if lost.is_cancelled()
+                || !transcode.fragment_worker_idle(admission)
+                || transcode.live_delivery_sessions().await > 0
                 || !self.cluster_fragment_index_enabled().await
             {
                 return;
@@ -9563,6 +9790,43 @@ impl JobManager {
                 "recording a typed cluster fragment-index outcome locally"
             );
         }
+    }
+
+    /// The fragment-index job's source read. Not paced: the job path has no
+    /// viewer waiting on it, so it stops for playback instead (see
+    /// [`Self::wait_for_fragment_attestation_stop`]) and keeps its charged
+    /// timeout, the only bound on a targeted job against a dead mount.
+    /// `None` means the read stopped for this node's own work or viewers.
+    #[allow(clippy::too_many_arguments)]
+    async fn attest_fragment_job_source(
+        &self,
+        transcode: &TranscodeManager,
+        admission: &crate::transcode::FragmentAdmission,
+        lost: &CancellationToken,
+        node_id: &str,
+        file: &MediaFile,
+        memo: Option<&plurx_core::store::FragmentIndexSourceObservation>,
+        report_progress: &(dyn Fn(u64) + Sync),
+        attest_timeout: Duration,
+    ) -> Option<Result<crate::fragment_index_cluster::AttestedSource, AttestationFailure>> {
+        let io = crate::fragment_index_cluster::AttestationIo {
+            checkpoints: Some(self.store.as_ref()),
+            pacer: None,
+        };
+        let attestation = tokio::select! {
+            result = crate::fragment_index_cluster::attest_copy_source_with(
+                node_id,
+                file,
+                memo,
+                report_progress,
+                io,
+            ) => Some(result.map_err(AttestationFailure::Refused)),
+            () = self.wait_for_fragment_attestation_stop(transcode, admission, lost) => None,
+            () = tokio::time::sleep(attest_timeout) => {
+                Some(Err(AttestationFailure::TimedOut))
+            }
+        };
+        attestation
     }
 
     async fn run_cluster_fragment_index_job(
@@ -9795,21 +10059,18 @@ impl JobManager {
                 0,
             );
         };
-        let attestation = tokio::select! {
-            result = crate::fragment_index_cluster::attest_copy_source(
+        let attestation = self
+            .attest_fragment_job_source(
+                transcode.as_ref(),
+                admission,
+                &lost,
                 &node_id,
                 &file,
                 memo.as_ref(),
                 &report_progress,
-            ) => Some(result.map_err(AttestationFailure::Refused)),
-            () = self.wait_for_fragment_worker_stop(
-                transcode.as_ref(), admission,
-                &lost,
-            ) => None,
-            () = tokio::time::sleep(ATTEST_TIMEOUT) => {
-                Some(Err(AttestationFailure::TimedOut))
-            }
-        };
+                ATTEST_TIMEOUT,
+            )
+            .await;
         let Some(attestation) = attestation else {
             let now = clock_ms();
             self.yield_fragment_index_job(
@@ -9824,10 +10085,13 @@ impl JobManager {
         let attested = match attestation {
             Ok(attested) if attested.observation.source_sha256 == job.source_sha256 => attested,
             outcome => {
-                // A ten-minute read of a 64 MiB sample is a mount that stopped
-                // answering; a digest that does not match is the source
-                // changing. The queue shows this code, so it has to be the
-                // right one.
+                // A ten-minute timeout is a mount that stopped answering —
+                // for a sampled source that is 64 MiB unread, and for an HEVC
+                // copy proof (a whole-file read at the job's full, unpaced
+                // speed) a read that made too little progress to finish; the
+                // next attempt resumes from its checkpoint either way. A
+                // digest that does not match is the source changing. The
+                // queue shows this code, so it has to be the right one.
                 let code = attestation_failure_code(&outcome);
                 let timed_out = matches!(outcome, Err(AttestationFailure::TimedOut));
                 if let Err(AttestationFailure::Refused(reason)) = &outcome {
@@ -16635,5 +16899,494 @@ mod tests {
             .is_empty());
         assert_eq!(show_hits.load(Ordering::SeqCst), 0);
         assert_eq!(season_hits.load(Ordering::SeqCst), 1);
+    }
+}
+
+/// QSF Part D (D-M1, D-M3): attestation beside playback.
+#[cfg(test)]
+mod attestation_pacing_tests {
+    use super::*;
+    use plurx_core::domain::{ItemKind, NewItem, NewLibrary, ProbeResult};
+    use plurx_core::store::SqliteStore;
+    use plurx_core::transcode::Pipeline;
+
+    fn transcode_manager(store: Arc<dyn Store>, dir: &Path) -> Arc<TranscodeManager> {
+        Arc::new(TranscodeManager::new(
+            store,
+            dir.join("work"),
+            EncoderCaps::default(),
+            Pipeline::Cpu,
+        ))
+    }
+
+    /// A catalogue row for a real HEVC file on disk, so the whole-file
+    /// regime and the store's source checks both see the same object.
+    async fn catalogued_hevc(store: &dyn Store, path: &Path, title: &str) -> MediaFile {
+        let library = store
+            .create_library(&NewLibrary {
+                name: format!("{title} library"),
+                kind: LibraryKind::Movies,
+                paths: Vec::new(),
+                anime: false,
+            })
+            .await
+            .expect("library");
+        let item = store
+            .insert_item(&NewItem {
+                library_id: library.id,
+                kind: ItemKind::Movie,
+                parent_id: None,
+                title: title.to_owned(),
+                year: None,
+                season_number: None,
+                episode_number: None,
+            })
+            .await
+            .expect("item");
+        let shape = crate::fragment_index_cluster::hevc_test_file(0, path.to_owned());
+        let id = store
+            .upsert_file(
+                item,
+                path.to_str().expect("utf-8 path"),
+                shape.size,
+                shape.mtime,
+                &ProbeResult {
+                    video_codec: Some("hevc".to_owned()),
+                    ..Default::default()
+                },
+            )
+            .await
+            .expect("file");
+        crate::fragment_index_cluster::hevc_test_file(id, path.to_owned())
+    }
+
+    fn analysis_request(file: &MediaFile, request_id: &str, node: &str) -> NewAnalysisRequest {
+        NewAnalysisRequest {
+            request_id: request_id.to_owned(),
+            file_id: file.id,
+            source_size: file.size,
+            source_mtime: file.mtime,
+            component: "fragment_index".to_owned(),
+            pipeline_version: "e".repeat(64),
+            video_identity: String::new(),
+            requested_generation: format!("pacing-{request_id}"),
+            priority: "normal".to_owned(),
+            trigger: "background".to_owned(),
+            force_rebuild: false,
+            target_node_id: node.to_owned(),
+            not_before_ms: 1,
+            created_at_ms: 1,
+        }
+    }
+
+    /// D-M1's trigger table: idle with nothing playing is off; one rolling
+    /// copy and nothing else is on — although the admission counters read
+    /// idle, which is the incident — and an encode holding a slot is on.
+    /// Deliveries other registries own count through the census.
+    #[tokio::test]
+    async fn the_cap_trigger_sees_every_live_delivery() {
+        let store: Arc<dyn Store> = Arc::new(SqliteStore::open_in_memory().expect("store"));
+        let dir = crate::test_tempdir().expect("transcode dir");
+        let transcode = transcode_manager(store, dir.path());
+        assert!(transcode.pretranscode_worker_idle());
+        assert_eq!(transcode.live_delivery_sessions().await, 0);
+        assert!(
+            !transcode.serving_anything().await,
+            "idle, no sessions: off"
+        );
+
+        transcode
+            .install_rolling_copy_test_session("copy", dir.path().join("copy"))
+            .await;
+        assert!(
+            transcode.pretranscode_worker_idle(),
+            "a rolling copy holds no admission slot"
+        );
+        assert_eq!(transcode.live_delivery_sessions().await, 1);
+        assert!(transcode.serving_anything().await, "one rolling copy: on");
+        transcode.remove_rolling_test_session("copy").await;
+        assert!(!transcode.serving_anything().await);
+
+        transcode
+            .install_rolling_encode_test_session("encode", dir.path().join("encode"))
+            .await;
+        assert!(!transcode.pretranscode_worker_idle());
+        assert!(
+            transcode.serving_anything().await,
+            "an encode holding a slot: on"
+        );
+        transcode.remove_rolling_test_session("encode").await;
+        assert!(!transcode.serving_anything().await);
+
+        let others = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        transcode.register_delivery_census({
+            let others = Arc::clone(&others);
+            Box::new(move || others.load(Ordering::Relaxed))
+        });
+        assert!(!transcode.serving_anything().await);
+        others.store(1, Ordering::Relaxed);
+        assert!(
+            transcode.serving_anything().await,
+            "a progressive remux, direct play or Live TV session: on"
+        );
+    }
+
+    /// D-M1, job path: hashing starts on an idle node; a rolling copy then
+    /// starts. No source read may be issued more than one second later. A
+    /// job path that still stops only on admission state keeps hashing at
+    /// full speed beside the remux and fails this.
+    #[tokio::test]
+    async fn a_job_attestation_stops_within_a_second_of_a_rolling_copy_starting() {
+        let store: Arc<dyn Store> = Arc::new(SqliteStore::open_in_memory().expect("store"));
+        store
+            .put_setting(keys::VOD_INDEX_CLUSTER_CACHE, "1")
+            .await
+            .expect("shared indexing on");
+        let dir = crate::test_tempdir().expect("fixture dir");
+        let path = dir.path().join("job-source.mkv");
+        // Sparse: eight gigabytes of zeros read from the page cache, far
+        // more than an unchanged job path could finish in the window.
+        std::fs::File::create(&path)
+            .and_then(|file| file.set_len(8 * 1024 * 1024 * 1024))
+            .expect("sparse source");
+        let file = catalogued_hevc(store.as_ref(), &path, "Job source").await;
+        let transcode = transcode_manager(Arc::clone(&store), dir.path());
+        let admission = transcode.admit_fragment().await.expect("idle node admits");
+        let jobs = Arc::new(JobManager::new(Arc::clone(&store), dir.path().join("art")));
+        let lost = CancellationToken::new();
+        let reads = std::sync::Mutex::new(Vec::<(std::time::Instant, u64)>::new());
+        let report = |bytes: u64| {
+            reads
+                .lock()
+                .expect("reads")
+                .push((std::time::Instant::now(), bytes));
+        };
+        let attestation = jobs.attest_fragment_job_source(
+            &transcode,
+            &admission,
+            &lost,
+            "job-node",
+            &file,
+            None,
+            &report,
+            Duration::from_secs(600),
+        );
+        tokio::pin!(attestation);
+        let started_playback = async {
+            loop {
+                if reads
+                    .lock()
+                    .expect("reads")
+                    .last()
+                    .is_some_and(|(_, bytes)| *bytes >= 64 * 1024 * 1024)
+                {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+            transcode
+                .install_rolling_copy_test_session("remux", dir.path().join("remux"))
+                .await;
+            std::time::Instant::now()
+        };
+        let (outcome, copy_started) = tokio::select! {
+            outcome = &mut attestation => panic!(
+                "hashing finished before playback started: {:?}",
+                outcome.map(|result| result.is_ok())
+            ),
+            copy_started = started_playback => {
+                let outcome = tokio::time::timeout(Duration::from_secs(120), &mut attestation)
+                    .await
+                    .expect("the job read ends");
+                (outcome, copy_started)
+            }
+        };
+        assert!(
+            outcome.is_none(),
+            "the job yields for the remux instead of hashing to the end"
+        );
+        let last_read = reads.lock().expect("reads").last().expect("a read").0;
+        assert!(
+            last_read <= copy_started + Duration::from_secs(1),
+            "a source read was issued {:?} after the copy started",
+            last_read.saturating_duration_since(copy_started)
+        );
+    }
+
+    /// D-M1, request path: a read the cap slowed on a copy-only node — where
+    /// the admission counters read idle throughout — times out uncharged.
+    /// The same deadline on an idle node is still charged.
+    #[tokio::test(start_paused = true)]
+    async fn a_capped_request_timeout_on_a_copy_only_node_is_uncharged() {
+        let store: Arc<dyn Store> = Arc::new(SqliteStore::open_in_memory().expect("store"));
+        store
+            .put_setting(keys::VOD_INDEX_CLUSTER_CACHE, "1")
+            .await
+            .expect("shared indexing on");
+        store
+            .put_setting(keys::ANALYSIS_ATTEST_BUSY_BYTES_PER_SEC, "1048576")
+            .await
+            .expect("slow cap");
+        let dir = crate::test_tempdir().expect("fixture dir");
+        let path = dir.path().join("request-source.mkv");
+        std::fs::File::create(&path)
+            .and_then(|file| file.set_len(64 * 1024 * 1024))
+            .expect("sparse source");
+        let file = catalogued_hevc(store.as_ref(), &path, "Request source").await;
+        let request = store
+            .enqueue_analysis_request(&analysis_request(&file, "timeout-request", "request-node"))
+            .await
+            .expect("request");
+        let transcode = transcode_manager(Arc::clone(&store), dir.path());
+        transcode
+            .install_rolling_copy_test_session("remux", dir.path().join("remux"))
+            .await;
+        assert!(transcode.pretranscode_worker_idle());
+        let jobs = Arc::new(JobManager::new(Arc::clone(&store), dir.path().join("art")));
+        let lost = CancellationToken::new();
+        let outcome = jobs
+            .attest_for_analysis_request(
+                &transcode,
+                &request,
+                "request-node",
+                &file,
+                None,
+                &|_| {},
+                &lost,
+                Duration::from_secs(10),
+            )
+            .await;
+        assert_eq!(
+            outcome.err(),
+            Some(AnalysisResolutionError::Retry {
+                code: "source_attestation_timeout",
+                charge_attempt: false,
+            }),
+            "a capped read's timeout is uncharged on a copy-only node"
+        );
+
+        // What the latch alone would have said: the copy-only node reads idle
+        // to the admission counters for the whole read, so the old
+        // idle-predicate latch charges this timeout.
+        assert_eq!(
+            AnalysisAttestationBudget::default()
+                .deadline_failure(!transcode.pretranscode_worker_idle()),
+            AnalysisResolutionError::Retry {
+                code: "source_attestation_timeout",
+                charge_attempt: true,
+            }
+        );
+    }
+
+    /// D-M1, the timed yield: a capped read does not give the reader up
+    /// before five minutes even though a viewer request waits from the
+    /// start; after five minutes it yields uncharged, and the next attempt
+    /// resumes from its checkpoint.
+    #[tokio::test(start_paused = true)]
+    async fn a_capped_read_yields_to_a_waiting_viewer_only_after_five_minutes() {
+        let store: Arc<dyn Store> = Arc::new(SqliteStore::open_in_memory().expect("store"));
+        store
+            .put_setting(keys::VOD_INDEX_CLUSTER_CACHE, "1")
+            .await
+            .expect("shared indexing on");
+        store
+            .put_setting(keys::ANALYSIS_ATTEST_BUSY_BYTES_PER_SEC, "1048576")
+            .await
+            .expect("slow cap");
+        let dir = crate::test_tempdir().expect("fixture dir");
+        let reading_path = dir.path().join("reading.mkv");
+        std::fs::File::create(&reading_path)
+            .and_then(|file| file.set_len(400 * 1024 * 1024))
+            .expect("sparse source");
+        let waiting_path = dir.path().join("waiting.mkv");
+        std::fs::write(&waiting_path, b"waiting").expect("waiting source");
+        let reading = catalogued_hevc(store.as_ref(), &reading_path, "Reading").await;
+        let waiting = catalogued_hevc(store.as_ref(), &waiting_path, "Waiting").await;
+        let node = "yield-node";
+        let request = store
+            .enqueue_analysis_request(&analysis_request(&reading, "yield-reading", node))
+            .await
+            .expect("reading request");
+        let other = store
+            .enqueue_analysis_request(&analysis_request(&waiting, "yield-waiting", node))
+            .await
+            .expect("waiting request");
+        let user = store
+            .create_user("yield-viewer", "hash", false)
+            .await
+            .expect("viewer");
+        assert!(store
+            .join_analysis_viewer(plurx_core::store::AnalysisViewerInterest {
+                analysis_request_id: other.request_id.clone(),
+                requested_generation: other.requested_generation.clone(),
+                pipeline_version: other.pipeline_version.clone(),
+                video_identity: other.video_identity.clone(),
+                target_node_id: other.target_node_id.clone(),
+                user_id: user.id,
+                playback_id: "yield-playback".to_owned(),
+                now_ms: clock_ms(),
+            })
+            .await
+            .expect("join waiting viewer"));
+        assert!(store
+            .analysis_viewer_request_waiting(node, &request.request_id, None, clock_ms())
+            .await
+            .expect("peek"));
+
+        let transcode = transcode_manager(Arc::clone(&store), dir.path());
+        transcode
+            .install_rolling_copy_test_session("remux", dir.path().join("remux"))
+            .await;
+        let jobs = Arc::new(JobManager::new(Arc::clone(&store), dir.path().join("art")));
+        let lost = CancellationToken::new();
+        let read = std::sync::atomic::AtomicU64::new(0);
+        let started = tokio::time::Instant::now();
+        let outcome = jobs
+            .attest_for_analysis_request(
+                &transcode,
+                &request,
+                node,
+                &reading,
+                None,
+                &|bytes| read.store(bytes, Ordering::Relaxed),
+                &lost,
+                Duration::from_secs(3_600),
+            )
+            .await;
+        let held = started.elapsed();
+        assert_eq!(
+            outcome.err(),
+            Some(AnalysisResolutionError::Retry {
+                code: "foreground_preempted",
+                charge_attempt: false,
+            }),
+            "the capped read gives the reader back, uncharged"
+        );
+        assert!(
+            held >= ANALYSIS_CAPPED_MIN_HOLD,
+            "it held the reader for {held:?}, less than the minimum hold"
+        );
+        assert!(
+            held < ANALYSIS_CAPPED_MIN_HOLD + 2 * ANALYSIS_VIEWER_PEEK_EVERY,
+            "it yields at the first peek after the hold: {held:?}"
+        );
+        let read_before_yield = read.load(Ordering::Relaxed);
+        assert!(
+            read_before_yield < reading.size as u64,
+            "the read had not finished"
+        );
+
+        transcode.remove_rolling_test_session("remux").await;
+        let first = std::sync::Mutex::new(None);
+        let resumed = jobs
+            .attest_for_analysis_request(
+                &transcode,
+                &request,
+                node,
+                &reading,
+                None,
+                &|bytes| {
+                    first.lock().expect("first").get_or_insert(bytes);
+                },
+                &lost,
+                Duration::from_secs(3_600),
+            )
+            .await;
+        assert!(resumed.is_ok(), "the next attempt completes");
+        let resumed_from = first.into_inner().expect("first").expect("a report");
+        assert!(
+            resumed_from > 0 && resumed_from <= read_before_yield,
+            "the next attempt resumes from its checkpoint, not byte 0: {resumed_from}"
+        );
+    }
+
+    /// D-M3 (R8) through the playback enqueue: a title whose request reached
+    /// `attempt_limit` gets one ordinary successor with the viewer joined to
+    /// it; a second playback inside a day reuses it; discovery creates none.
+    #[tokio::test]
+    async fn a_playback_of_an_attempt_limit_title_joins_one_successor() {
+        use plurx_core::transcode::CopyVideoOptions;
+
+        let store: Arc<dyn Store> = Arc::new(SqliteStore::open_in_memory().expect("store"));
+        let dir = crate::test_tempdir().expect("fixture dir");
+        let path = dir.path().join("exhausted.mkv");
+        std::fs::write(&path, b"exhausted source").expect("source");
+        let file = catalogued_hevc(store.as_ref(), &path, "Exhausted").await;
+        let video = CopyVideoOptions::new(false, false);
+        let original = enqueue_copy_preparation(store.as_ref(), "r8-node", &file, video)
+            .await
+            .expect("enqueue");
+        let mut now = clock_ms();
+        for _ in 0..5 {
+            let claimed = store
+                .claim_analysis_request("r8-node", now, now + 100)
+                .await
+                .expect("claim")
+                .expect("claimable");
+            assert!(store
+                .retry_analysis_request(&claimed, "source_attestation_failed", now, now + 1, true)
+                .await
+                .expect("charged retry"));
+            now += 101;
+        }
+        assert!(store
+            .claim_analysis_request("r8-node", now, now + 100)
+            .await
+            .expect("settle")
+            .is_none());
+        let discovery = enqueue_copy_preparation(store.as_ref(), "r8-node", &file, video)
+            .await
+            .expect("discovery");
+        assert_eq!(discovery.request_id, original.request_id);
+        assert_eq!(discovery.last_error_code, "attempt_limit");
+
+        let user = store
+            .create_user("r8-viewer", "hash", false)
+            .await
+            .expect("viewer");
+        let viewer = PlaybackViewerDemand {
+            user_id: user.id,
+            playback_id: "r8-playback".into(),
+        };
+        let successor = enqueue_copy_preparation_for_object_with_viewer(
+            store.as_ref(),
+            "r8-node",
+            &file,
+            video,
+            None,
+            Some(&viewer),
+        )
+        .await
+        .expect("playback enqueue");
+        assert_ne!(successor.request_id, original.request_id);
+        assert_eq!(successor.state, "queued");
+        assert_eq!(successor.attempts, 0);
+        assert!(!successor.force_rebuild);
+        assert!(store
+            .analysis_preparation_observation(&successor.request_id, clock_ms())
+            .await
+            .expect("observe")
+            .is_some_and(|observation| observation.has_live_viewer));
+        let again = enqueue_copy_preparation_for_object_with_viewer(
+            store.as_ref(),
+            "r8-node",
+            &file,
+            video,
+            None,
+            Some(&viewer),
+        )
+        .await
+        .expect("second playback");
+        assert_eq!(
+            again.request_id, successor.request_id,
+            "one successor a day"
+        );
+        let failed = store
+            .analysis_request(&original.request_id)
+            .await
+            .expect("read")
+            .expect("kept");
+        assert_eq!(failed.state, "failed");
+        assert_eq!(failed.last_error_code, "attempt_limit");
     }
 }

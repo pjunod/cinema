@@ -304,6 +304,19 @@ impl DirectPlays {
         }
     }
 
+    /// How many direct plays are live right now, without sweeping or
+    /// allocating. The read [`Self::list`] does owns cleanup; this is the
+    /// cheap count the attestation pacer asks several times a second.
+    pub(crate) fn live_count(&self) -> usize {
+        let now = Instant::now();
+        let Ok(live) = self.live.lock() else {
+            return 0;
+        };
+        live.values()
+            .filter(|entry| is_live(now.saturating_duration_since(entry.last_seen), IDLE_TIMEOUT))
+            .count()
+    }
+
     /// Everything still live, newest first, pruning what is not as it goes.
     ///
     /// The read *is* the sweep. A background reaper would be a second clock to

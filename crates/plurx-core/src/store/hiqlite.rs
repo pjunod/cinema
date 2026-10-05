@@ -4755,6 +4755,43 @@ impl crate::store::FragmentIndexStore for HiqliteAuthStore {
         self.telemetry.vod_row_file_ids(limit).await
     }
 
+    async fn attestation_checkpoint(
+        &self,
+        node_id: &str,
+        file_id: i64,
+        object_version: &str,
+        source_size: i64,
+    ) -> Result<Option<crate::store::AttestationCheckpoint>, StoreError> {
+        // Node-local: a hash state over this voter's own read of its own copy.
+        self.telemetry
+            .attestation_checkpoint(
+                node_id.to_owned(),
+                file_id,
+                object_version.to_owned(),
+                source_size,
+            )
+            .await
+    }
+
+    async fn put_attestation_checkpoint(
+        &self,
+        checkpoint: &crate::store::AttestationCheckpoint,
+    ) -> Result<(), StoreError> {
+        self.telemetry
+            .put_attestation_checkpoint(checkpoint.clone())
+            .await
+    }
+
+    async fn forget_attestation_checkpoint(
+        &self,
+        node_id: &str,
+        file_id: i64,
+    ) -> Result<(), StoreError> {
+        self.telemetry
+            .forget_attestation_checkpoint(node_id.to_owned(), file_id)
+            .await
+    }
+
     async fn surviving_file_ids(&self, file_ids: &[i64]) -> Result<Vec<i64>, StoreError> {
         // The replicated side. Every node agrees on this answer, which is why
         // the sweep converges rather than each node guessing -- and why a node

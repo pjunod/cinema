@@ -230,9 +230,9 @@ fn sqlite_cases(root: &Path) {
                 conn.query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0))
                     .expect("canonical marker"),
                 // The bridge stamps the canonical end (v97); the ordinary
-                // Jellyfin (v98-v101) and continuous-quality (v102-v103)
-                // steps then reach v103.
-                103
+                // Jellyfin (v98-v101), continuous-quality (v102-v103) and
+                // attestation-checkpoint (v104) steps then reach v104.
+                104
             );
             assert_eq!(
                 conn.query_row(PAYLOAD, [], |row| row.get::<_, String>(0))

@@ -24,6 +24,7 @@ use crate::store::{
 };
 
 const MAX_ERROR_CODE_BYTES: usize = 64;
+
 use super::super::MAX_ACTIVE_ANALYSIS_REQUESTS as MAX_ANALYSIS_REQUESTS;
 const MAX_LIST_ROWS: i64 = 500;
 const MAX_ATTEMPT_HISTORY_PER_REQUEST: i64 = 64;
@@ -1533,6 +1534,89 @@ impl ClusterFragmentIndexStore for SqliteStore {
                 .optional()?;
             transaction.commit()?;
             Ok(request)
+        })
+        .await
+    }
+
+    async fn analysis_viewer_request_waiting(
+        &self,
+        node_id: &str,
+        except_request_id: &str,
+        pipeline_version: Option<&str>,
+        now_ms: i64,
+    ) -> Result<bool, StoreError> {
+        if node_id.is_empty() || node_id.len() > 128 || pipeline_version.is_some_and(str::is_empty)
+        {
+            return Err(StoreError::Task("invalid analysis peek".to_owned()));
+        }
+        let node_id = node_id.to_owned();
+        let except_request_id = except_request_id.to_owned();
+        let pipeline_version = pipeline_version.map(str::to_owned);
+        self.with_read(move |conn| {
+            let max_attempts = configured_max_attempts(conn)?;
+            let viewer = super::super::fragment_index_cluster::analysis_live_viewer_clause("?4");
+            Ok(conn.query_row(
+                &format!(
+                    "SELECT EXISTS (SELECT 1 FROM analysis_requests
+                      WHERE target_node_id = ?1 AND request_id <> ?2
+                        AND component = 'fragment_index' AND attempts < ?3
+                        AND state = 'queued' AND not_before_ms <= ?4
+                        AND (?5 IS NULL OR pipeline_version = ?5)
+                        AND {viewer})"
+                ),
+                params![
+                    node_id,
+                    except_request_id,
+                    max_attempts,
+                    now_ms,
+                    pipeline_version
+                ],
+                |row| row.get::<_, bool>(0),
+            )?)
+        })
+        .await
+    }
+
+    async fn enqueue_playback_analysis_successor(
+        &self,
+        exhausted_request_id: &str,
+        successor_request_id: &str,
+        now_ms: i64,
+    ) -> Result<Option<AnalysisRequest>, StoreError> {
+        if successor_request_id.is_empty()
+            || successor_request_id.len() > 64
+            || successor_request_id == exhausted_request_id
+        {
+            return Err(StoreError::Task(
+                "invalid playback analysis successor".to_owned(),
+            ));
+        }
+        let exhausted_request_id = exhausted_request_id.to_owned();
+        let successor_request_id = successor_request_id.to_owned();
+        self.with_conn(move |conn| {
+            let transaction = conn.unchecked_transaction()?;
+            transaction.execute(
+                super::super::fragment_index_cluster::PLAYBACK_SUCCESSOR_INSERT,
+                params![
+                    successor_request_id,
+                    now_ms,
+                    exhausted_request_id,
+                    MAX_ANALYSIS_REQUESTS,
+                    crate::store::PLAYBACK_ANALYSIS_SUCCESSOR_WINDOW_MS,
+                ],
+            )?;
+            let standing = transaction
+                .query_row(
+                    &format!(
+                        "SELECT {REQUEST_COLS} {}",
+                        super::super::fragment_index_cluster::PLAYBACK_SUCCESSOR_STANDING
+                    ),
+                    params![exhausted_request_id],
+                    request_from_row,
+                )
+                .optional()?;
+            transaction.commit()?;
+            Ok(standing)
         })
         .await
     }

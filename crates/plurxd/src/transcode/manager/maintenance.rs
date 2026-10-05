@@ -424,6 +424,50 @@ impl TranscodeManager {
             .await;
     }
 
+    /// Register a rolling session that holds no admission slot, exactly as
+    /// `start.rs` builds a copy session, for tests outside this module.
+    #[cfg(test)]
+    pub(crate) async fn install_rolling_copy_test_session(
+        &self,
+        session_id: &str,
+        dir: std::path::PathBuf,
+    ) {
+        let mut session = crate::transcode::test_support::test_session(dir);
+        session.method = crate::delivery::Method::HlsCopy;
+        let mut sessions = self.sessions.lock().await;
+        sessions.insert(session_id.to_owned(), Arc::new(session));
+        self.active_session_count
+            .store(sessions.len(), std::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// Register a rolling transcode that holds a live hardware slot.
+    #[cfg(test)]
+    pub(crate) async fn install_rolling_encode_test_session(
+        &self,
+        session_id: &str,
+        dir: std::path::PathBuf,
+    ) {
+        let session = crate::transcode::test_support::test_session(dir);
+        *session.hw_slot.lock().expect("hw slot mutex") = Some(
+            self.admissions
+                .try_acquire(1, crate::admission::Priority::Live)
+                .expect("test hardware slot"),
+        );
+        let mut sessions = self.sessions.lock().await;
+        sessions.insert(session_id.to_owned(), Arc::new(session));
+        self.active_session_count
+            .store(sessions.len(), std::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// Remove a session installed by one of the helpers above.
+    #[cfg(test)]
+    pub(crate) async fn remove_rolling_test_session(&self, session_id: &str) {
+        let mut sessions = self.sessions.lock().await;
+        sessions.remove(session_id);
+        self.active_session_count
+            .store(sessions.len(), std::sync::atomic::Ordering::Relaxed);
+    }
+
     #[cfg(test)]
     pub(crate) async fn vod_last_touch_for_test(&self, session_id: &str) -> Option<Instant> {
         self.vod.last_touch_for_test(session_id).await

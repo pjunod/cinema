@@ -44,7 +44,7 @@ const CONSISTENT_READ_SITES: &[(&str, usize)] = &[
     ("hiqlite_durable.rs", 29),
     ("hiqlite_dv_conversion.rs", 13),
     ("hiqlite_dvr.rs", 19),
-    ("hiqlite_fragment_index_cluster.rs", 32),
+    ("hiqlite_fragment_index_cluster.rs", 33),
     ("hiqlite_import.rs", 3),
     ("hiqlite_jellyfin_catalog.rs", 3),
     ("hiqlite_jellyfin_identity.rs", 3),

@@ -70,7 +70,10 @@ mdns-sd = { workspace = true }
 uuid = { workspace = true }
 reqwest = { workspace = true }
 qrcode = { workspace = true }
-sha2 = { workspace = true }
+# `compress` exposes `compress256`, the one primitive a resumable SHA-256
+# needs: whole-file source attestation persists its hash state at each
+# checkpoint so a restarted daemon resumes rather than rereads (QSF D-M2).
+sha2 = { workspace = true, features = ["compress"] }
 hex = { workspace = true }
 flate2 = { workspace = true }
 crc32fast = { workspace = true }

@@ -942,6 +942,131 @@ pub(crate) fn holds_for_source(
     )?)
 }
 
+/// Durable whole-file attestation checkpoints (QSF Part D, D-M2).
+///
+/// Node-local beside `fragment_indexes`, in both migration lists: SQLite's
+/// own and the replicated voter's telemetry sidecar. A checkpoint is a hash
+/// state over one machine's read of its own copy of a file; replicating it
+/// would let one node resume another node's bytes.
+pub(crate) const ATTESTATION_CHECKPOINTS_SCHEMA: &str = "
+CREATE TABLE IF NOT EXISTS attestation_checkpoints (
+    node_id          TEXT NOT NULL,
+    file_id          INTEGER NOT NULL,
+    object_version   TEXT NOT NULL,
+    source_size      INTEGER NOT NULL CHECK (source_size >= 0),
+    read_offset      INTEGER NOT NULL CHECK (read_offset >= 0 AND read_offset <= source_size),
+    hasher_state     BLOB NOT NULL,
+    saved_at_ms      INTEGER NOT NULL,
+    PRIMARY KEY (node_id, file_id)
+) STRICT;";
+
+/// See [`crate::store::FragmentIndexStore::attestation_checkpoint`].
+pub(crate) fn attestation_checkpoint(
+    conn: &Connection,
+    node_id: &str,
+    file_id: i64,
+    object_version: &str,
+    source_size: i64,
+) -> Result<Option<crate::store::AttestationCheckpoint>, StoreError> {
+    // A row for this node and file under any other identity can never be
+    // resumed: the bytes it covered are not the bytes on disk now.
+    conn.execute(
+        "DELETE FROM attestation_checkpoints
+          WHERE node_id = ?1 AND file_id = ?2
+            AND (object_version <> ?3 OR source_size <> ?4)",
+        params![node_id, file_id, object_version, source_size],
+    )?;
+    Ok(conn
+        .query_row(
+            "SELECT node_id, file_id, object_version, source_size, read_offset,
+                    hasher_state, saved_at_ms
+               FROM attestation_checkpoints
+              WHERE node_id = ?1 AND file_id = ?2 AND object_version = ?3
+                AND source_size = ?4",
+            params![node_id, file_id, object_version, source_size],
+            |row| {
+                Ok(crate::store::AttestationCheckpoint {
+                    node_id: row.get(0)?,
+                    file_id: row.get(1)?,
+                    object_version: row.get(2)?,
+                    source_size: row.get(3)?,
+                    read_offset: row.get(4)?,
+                    hasher_state: row.get(5)?,
+                    saved_at_ms: row.get(6)?,
+                })
+            },
+        )
+        .optional()?)
+}
+
+/// See [`crate::store::FragmentIndexStore::put_attestation_checkpoint`].
+pub(crate) fn put_attestation_checkpoint(
+    conn: &Connection,
+    checkpoint: &crate::store::AttestationCheckpoint,
+) -> Result<(), StoreError> {
+    if checkpoint.node_id.len() > 128
+        || checkpoint.object_version.is_empty()
+        || checkpoint.object_version.len() > 256
+        || checkpoint.source_size < 0
+        || !(0..=checkpoint.source_size).contains(&checkpoint.read_offset)
+        || checkpoint.hasher_state.is_empty()
+        || checkpoint.hasher_state.len() > 1_024
+    {
+        return Err(StoreError::Task(
+            "invalid attestation checkpoint".to_owned(),
+        ));
+    }
+    let transaction = conn.unchecked_transaction()?;
+    // Two attempts at one identity each hold a valid state; the one that has
+    // read further wins. A different identity replaces the row outright.
+    transaction.execute(
+        "INSERT INTO attestation_checkpoints
+            (node_id, file_id, object_version, source_size, read_offset,
+             hasher_state, saved_at_ms)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+         ON CONFLICT (node_id, file_id) DO UPDATE SET
+             object_version = excluded.object_version,
+             source_size = excluded.source_size,
+             read_offset = excluded.read_offset,
+             hasher_state = excluded.hasher_state,
+             saved_at_ms = excluded.saved_at_ms
+          WHERE attestation_checkpoints.object_version <> excluded.object_version
+             OR attestation_checkpoints.source_size <> excluded.source_size
+             OR attestation_checkpoints.read_offset < excluded.read_offset",
+        params![
+            checkpoint.node_id,
+            checkpoint.file_id,
+            checkpoint.object_version,
+            checkpoint.source_size,
+            checkpoint.read_offset,
+            checkpoint.hasher_state,
+            checkpoint.saved_at_ms,
+        ],
+    )?;
+    transaction.execute(
+        "DELETE FROM attestation_checkpoints
+          WHERE (node_id, file_id) NOT IN (
+            SELECT node_id, file_id FROM attestation_checkpoints
+             ORDER BY saved_at_ms DESC, node_id, file_id LIMIT ?1)",
+        params![crate::store::ATTESTATION_CHECKPOINT_LIMIT],
+    )?;
+    transaction.commit()?;
+    Ok(())
+}
+
+/// See [`crate::store::FragmentIndexStore::forget_attestation_checkpoint`].
+pub(crate) fn forget_attestation_checkpoint(
+    conn: &Connection,
+    node_id: &str,
+    file_id: i64,
+) -> Result<(), StoreError> {
+    conn.execute(
+        "DELETE FROM attestation_checkpoints WHERE node_id = ?1 AND file_id = ?2",
+        params![node_id, file_id],
+    )?;
+    Ok(())
+}
+
 pub(crate) fn forget(conn: &Connection, file_id: i64) -> Result<bool, StoreError> {
     let affected = conn.execute(
         "DELETE FROM fragment_indexes WHERE file_id = ?1",
@@ -1639,6 +1764,92 @@ mod tests {
         assert!(
             unpack(&conn(), &[0u8; ROW_BYTES]).is_err(),
             "cut class 0 is not a class"
+        );
+    }
+
+    fn checkpoint(
+        file_id: i64,
+        version: &str,
+        offset: i64,
+        saved_at_ms: i64,
+    ) -> crate::store::AttestationCheckpoint {
+        crate::store::AttestationCheckpoint {
+            node_id: "checkpoint-node".to_owned(),
+            file_id,
+            object_version: version.to_owned(),
+            source_size: 1_000,
+            read_offset: offset,
+            hasher_state: vec![1, 2, 3],
+            saved_at_ms,
+        }
+    }
+
+    /// D-M2: the durable checkpoint keeps the furthest state for one
+    /// identity, discards a row whose identity moved, and never holds more
+    /// than the bound.
+    #[test]
+    fn attestation_checkpoints_keep_the_furthest_state_and_are_bounded() {
+        let conn = Connection::open_in_memory().expect("checkpoint database");
+        conn.execute_batch(ATTESTATION_CHECKPOINTS_SCHEMA)
+            .expect("checkpoint schema");
+        put_attestation_checkpoint(&conn, &checkpoint(1, "v1", 100, 1)).expect("first");
+        put_attestation_checkpoint(&conn, &checkpoint(1, "v1", 50, 2)).expect("slower");
+        assert_eq!(
+            attestation_checkpoint(&conn, "checkpoint-node", 1, "v1", 1_000)
+                .expect("load")
+                .map(|row| row.read_offset),
+            Some(100),
+            "a slower concurrent attempt does not undo the faster one's progress"
+        );
+        assert!(
+            attestation_checkpoint(&conn, "checkpoint-node", 1, "v1", 999)
+                .expect("load changed size")
+                .is_none(),
+            "a changed size is never resumed"
+        );
+        assert!(
+            attestation_checkpoint(&conn, "checkpoint-node", 1, "v1", 1_000)
+                .expect("reload")
+                .is_none(),
+            "and the stale row is discarded, not merely skipped"
+        );
+        put_attestation_checkpoint(&conn, &checkpoint(1, "v1", 100, 3)).expect("again");
+        assert!(
+            attestation_checkpoint(&conn, "checkpoint-node", 1, "v2", 1_000)
+                .expect("load changed version")
+                .is_none()
+        );
+        assert!(
+            attestation_checkpoint(&conn, "checkpoint-node", 1, "v1", 1_000)
+                .expect("reload v1")
+                .is_none()
+        );
+
+        for file_id in 1..=(crate::store::ATTESTATION_CHECKPOINT_LIMIT + 4) {
+            put_attestation_checkpoint(&conn, &checkpoint(file_id, "v1", 10, 100 + file_id))
+                .expect("fill");
+        }
+        let rows: i64 = conn
+            .query_row("SELECT COUNT(*) FROM attestation_checkpoints", [], |row| {
+                row.get(0)
+            })
+            .expect("count");
+        assert_eq!(rows, crate::store::ATTESTATION_CHECKPOINT_LIMIT);
+        assert!(
+            attestation_checkpoint(&conn, "checkpoint-node", 1, "v1", 1_000)
+                .expect("oldest")
+                .is_none(),
+            "the oldest saved row is the one evicted"
+        );
+        forget_attestation_checkpoint(&conn, "checkpoint-node", 20).expect("forget");
+        assert!(
+            attestation_checkpoint(&conn, "checkpoint-node", 20, "v1", 1_000)
+                .expect("forgotten")
+                .is_none()
+        );
+        assert!(
+            put_attestation_checkpoint(&conn, &checkpoint(2, "v1", 1_001, 1)).is_err(),
+            "an offset past the source size is refused"
         );
     }
 }

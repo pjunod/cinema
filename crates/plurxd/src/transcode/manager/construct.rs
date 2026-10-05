@@ -98,6 +98,7 @@ impl TranscodeManager {
             serving_ready: AtomicBool::new(true),
             serving_loss_generation: AtomicU64::new(0),
             active_session_count: Arc::new(AtomicUsize::new(0)),
+            delivery_census: std::sync::OnceLock::new(),
             codec_qualification: Arc::new(CodecQualificationMetrics::default()),
             requests: std::sync::Mutex::new(HashMap::new()),
             producer: ProducerTuning::default(),
@@ -1091,6 +1092,50 @@ impl TranscodeManager {
         } else {
             None
         }
+    }
+
+    /// Hand the manager the count of live deliveries other registries own.
+    ///
+    /// Rolling HLS and VOD sessions live in this manager. Progressive
+    /// `/stream.mp4` remuxes (`progressive::Streams`), direct plays
+    /// (`delivery::DirectPlays`) and Live TV (`LiveTvManager`) each keep their
+    /// own registry with the lock discipline their lifetime needs, so they are
+    /// counted where they live rather than copied in. Set once by `AppState`;
+    /// a second registration is ignored.
+    pub(crate) fn register_delivery_census(&self, census: DeliveryCensus) {
+        let _ = self.delivery_census.set(census);
+    }
+
+    /// Every delivery this node is serving right now, of every kind: rolling
+    /// HLS (copy and transcode), VOD, progressive remux, direct play and Live
+    /// TV.
+    ///
+    /// The admission counters cannot answer this. A rolling copy holds no
+    /// slot (`start.rs` builds it with `hw_slot: None` and no software
+    /// permits), and neither does a progressive remux, a direct play, a VOD
+    /// copy or a Live TV copy/audio conversion — so a node delivering only
+    /// those reads as idle to [`Self::pretranscode_worker_idle`]. Every one of
+    /// them is reading its source or receiving its tuner over this node's disk
+    /// and link while it plays.
+    ///
+    /// In-memory and cheap: one atomic for rolling sessions, one short map
+    /// lock for VOD, and the registered census for the rest. Never
+    /// [`Self::list_deliveries`], which enriches every session with telemetry.
+    pub(crate) async fn live_delivery_sessions(&self) -> usize {
+        let rolling = self
+            .active_session_count
+            .load(std::sync::atomic::Ordering::Relaxed);
+        let vod = self.vod.active_sessions().await;
+        let other = self.delivery_census.get().map_or(0, |census| census());
+        rolling.saturating_add(vod).saturating_add(other)
+    }
+
+    /// Whether this node is serving anything, by the code's own definition of
+    /// busy *or* by a live delivery that holds no admission slot. The trigger
+    /// for pacing (request path) and stopping (job path) a source
+    /// attestation; it decides nothing else.
+    pub(crate) async fn serving_anything(&self) -> bool {
+        !self.pretranscode_worker_idle() || self.live_delivery_sessions().await > 0
     }
 
     pub fn pretranscode_worker_idle(&self) -> bool {

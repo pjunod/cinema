@@ -131,6 +131,50 @@ impl FragmentIndexStore for SqliteStore {
             .await
     }
 
+    async fn attestation_checkpoint(
+        &self,
+        node_id: &str,
+        file_id: i64,
+        object_version: &str,
+        source_size: i64,
+    ) -> Result<Option<crate::store::AttestationCheckpoint>, StoreError> {
+        let node_id = node_id.to_owned();
+        let object_version = object_version.to_owned();
+        self.with_conn(move |conn| {
+            crate::store::fragindex::attestation_checkpoint(
+                conn,
+                &node_id,
+                file_id,
+                &object_version,
+                source_size,
+            )
+        })
+        .await
+    }
+
+    async fn put_attestation_checkpoint(
+        &self,
+        checkpoint: &crate::store::AttestationCheckpoint,
+    ) -> Result<(), StoreError> {
+        let checkpoint = checkpoint.clone();
+        self.with_conn(move |conn| {
+            crate::store::fragindex::put_attestation_checkpoint(conn, &checkpoint)
+        })
+        .await
+    }
+
+    async fn forget_attestation_checkpoint(
+        &self,
+        node_id: &str,
+        file_id: i64,
+    ) -> Result<(), StoreError> {
+        let node_id = node_id.to_owned();
+        self.with_conn(move |conn| {
+            crate::store::fragindex::forget_attestation_checkpoint(conn, &node_id, file_id)
+        })
+        .await
+    }
+
     async fn surviving_file_ids(&self, file_ids: &[i64]) -> Result<Vec<i64>, StoreError> {
         let wanted = file_ids.to_vec();
         self.with_read(move |conn| {

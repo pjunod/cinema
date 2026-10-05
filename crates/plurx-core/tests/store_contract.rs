@@ -90,7 +90,7 @@ use plurx_core::segplan::{
 use plurx_core::store::{
     analysis_backoff_ms, cluster_fragment_index_generation_key, cluster_fragment_index_key,
     requeue_cluster_fragment_index_after_no_holder, AnalysisHistoryCursor, AnalysisHistoryFilter,
-    AnalysisHistoryQuery, ArtworkRepairFence, ClusterFragmentIndexArtifact,
+    AnalysisHistoryQuery, ArtworkRepairFence, AttestationCheckpoint, ClusterFragmentIndexArtifact,
     ClusterFragmentIndexJob, ClusterFragmentIndexLocation, ClusterFragmentIndexStore,
     DvConversionMode, DvConversionState, DvRecoveryGuardState, FileGrantStore,
     IdentityRepairOutcome, LibraryStore, MediaStore, NewAnalysisRequest,
@@ -680,6 +680,12 @@ const FRAGMENT_INDEX_METHODS: &[&str] = &[
     // source means the pass that keeps PGS tracks ran here. Node-local and
     // read-only.
     "holds_fragment_index_for_source",
+    // QSF Part D's durable whole-file attestation checkpoints: node-local
+    // like the index (a hash state over one machine's read of its own copy),
+    // covered by `attestation_checkpoints_resume_only_their_own_identity`.
+    "attestation_checkpoint",
+    "put_attestation_checkpoint",
+    "forget_attestation_checkpoint",
 ];
 const RENDITION_PLAN_METHODS: &[&str] = &[
     "put_rendition_plan",
@@ -16705,6 +16711,7 @@ fn populated_v14_import_fixture(data_dir: &std::path::Path) -> PathBuf {
              ALTER TABLE media_playback_pointers DROP COLUMN desired_revision;
              DROP TABLE IF EXISTS media_playback_desired;
              DROP TABLE fragment_index_outcomes;
+             DROP TABLE IF EXISTS attestation_checkpoints;
              DROP TABLE dv_recovery_guards;
              DROP TABLE dv_conversions;
              -- v38's Dolby Vision columns. A fixture that stamps user_version
@@ -18700,7 +18707,10 @@ fn contract_inventory_matches_every_store_method() {
     // +9 -> 475: continuous quality's ledger, reservation, family-binding and
     // cancellation-receipt methods on `MediaSessionStore`, listed in
     // `MEDIA_SESSION_METHODS` with the scenarios that cover them.
-    assert_eq!(declared.len(), 475, "review the Store method count");
+    // +3 -> 478: QSF Part D's node-local attestation checkpoints on
+    // `FragmentIndexStore`, listed in `FRAGMENT_INDEX_METHODS`. No new trait
+    // or supertrait of `Store`.
+    assert_eq!(declared.len(), 478, "review the Store method count");
     assert_eq!(
         covered, declared,
         "the declared async method name inventory changed"
@@ -23804,6 +23814,323 @@ async fn requeue_through_the_no_holder_arm_preserves_exhausted_lease_terminality
             metrics.analysis.lifecycle_counts[analysis_lifecycle_slot("failure", "attempt_limit")],
             1,
             "backend {backend}"
+        );
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn attestation_checkpoints_resume_only_their_own_identity() {
+    for_each_backend(|store, backend| async move {
+        let checkpoint = AttestationCheckpoint {
+            node_id: "checkpoint-node".to_owned(),
+            file_id: 41,
+            object_version: "hevc-full-v1:s1:1:2:1000:3:4:5:6".to_owned(),
+            source_size: 1_000,
+            read_offset: 512,
+            hasher_state: vec![7; 41],
+            saved_at_ms: 10,
+        };
+        store
+            .put_attestation_checkpoint(&checkpoint)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: save checkpoint: {error}"));
+        assert_eq!(
+            store
+                .attestation_checkpoint("checkpoint-node", 41, &checkpoint.object_version, 1_000)
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: load checkpoint: {error}")),
+            Some(checkpoint.clone()),
+            "{backend}: the exact identity resumes"
+        );
+        assert!(
+            store
+                .attestation_checkpoint("checkpoint-node", 41, &checkpoint.object_version, 999)
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: load resized: {error}"))
+                .is_none(),
+            "{backend}: a changed size discards the row"
+        );
+        assert!(
+            store
+                .attestation_checkpoint("checkpoint-node", 41, &checkpoint.object_version, 1_000)
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: reload: {error}"))
+                .is_none(),
+            "{backend}: the discarded row is gone"
+        );
+        store
+            .put_attestation_checkpoint(&checkpoint)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: save again: {error}"));
+        store
+            .forget_attestation_checkpoint("checkpoint-node", 41)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: forget: {error}"));
+        assert!(store
+            .attestation_checkpoint("checkpoint-node", 41, &checkpoint.object_version, 1_000)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: after forget: {error}"))
+            .is_none());
+    })
+    .await;
+}
+
+/// Exhaust one fragment request through five charged claims, the way the
+/// worker does, starting at `now`. Returns the time after the last lease.
+async fn exhaust_analysis_request(
+    store: &Arc<dyn Store>,
+    backend: &str,
+    node: &str,
+    mut now: i64,
+) -> i64 {
+    for attempt in 1..=5_i64 {
+        let claimed = store
+            .claim_analysis_request(node, now, now + 100)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: claim: {error}"))
+            .unwrap_or_else(|| panic!("{backend}: claim attempt {attempt}"));
+        assert!(store
+            .retry_analysis_request(&claimed, "source_attestation_failed", now, now + 1, true)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: charged retry: {error}")));
+        now += 101;
+    }
+    assert!(store
+        .claim_analysis_request(node, now, now + 100)
+        .await
+        .unwrap_or_else(|error| panic!("{backend}: settle attempt limit: {error}"))
+        .is_none());
+    now
+}
+
+/// D-M3 (ruling R8): a playback of a title whose request reached
+/// `attempt_limit` creates one ordinary successor and joins the viewer to
+/// it; a second playback inside 24 hours creates none; the failed row and
+/// its history are untouched.
+#[tokio::test]
+async fn playback_of_an_attempt_limit_title_creates_one_ordinary_successor_a_day() {
+    for_each_backend(|store, backend| async move {
+        let (user_id, file_id) = seed_file(&store, "r8-successor").await;
+        let request = |request_id: &str, now: i64| NewAnalysisRequest {
+            request_id: request_id.to_owned(),
+            file_id,
+            source_size: 10_000,
+            source_mtime: 1,
+            component: "fragment_index".to_owned(),
+            pipeline_version: "c".repeat(64),
+            video_identity: "identity-r8".to_owned(),
+            requested_generation: "deterministic-r8".to_owned(),
+            priority: "normal".to_owned(),
+            trigger: "background".to_owned(),
+            force_rebuild: false,
+            target_node_id: "r8-node".to_owned(),
+            not_before_ms: now,
+            created_at_ms: now,
+        };
+        let original = store
+            .enqueue_analysis_request(&request("r8-original", 10))
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: enqueue: {error}"));
+        let now = exhaust_analysis_request(&store, backend, "r8-node", 10).await;
+        let failed = store
+            .enqueue_analysis_request(&request("r8-replay", now))
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: replay enqueue: {error}"));
+        assert_eq!(failed.request_id, original.request_id, "{backend}");
+        assert_eq!(failed.state, "failed", "{backend}");
+        assert_eq!(failed.last_error_code, "attempt_limit", "{backend}");
+        let history = store
+            .analysis_attempts(&failed.request_id, 100)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: history: {error}"));
+
+        let successor = store
+            .enqueue_playback_analysis_successor(&failed.request_id, "r8-successor-1", now + 1)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: successor: {error}"))
+            .unwrap_or_else(|| panic!("{backend}: a successor is created"));
+        assert_eq!(successor.request_id, "r8-successor-1", "{backend}");
+        assert_eq!(successor.state, "queued", "{backend}");
+        assert_eq!(successor.attempts, 0, "{backend}: fresh attempts");
+        assert!(!successor.force_rebuild, "{backend}: never forced");
+        assert_eq!(successor.priority, "normal", "{backend}: never boosted");
+        assert_eq!(successor.trigger, failed.trigger, "{backend}");
+        assert_eq!(successor.video_identity, failed.video_identity, "{backend}");
+        assert_eq!(successor.target_node_id, failed.target_node_id, "{backend}");
+        let viewer = AnalysisViewerInterest {
+            analysis_request_id: successor.request_id.clone(),
+            requested_generation: successor.requested_generation.clone(),
+            pipeline_version: successor.pipeline_version.clone(),
+            video_identity: successor.video_identity.clone(),
+            target_node_id: successor.target_node_id.clone(),
+            user_id,
+            playback_id: "r8-playback".to_owned(),
+            now_ms: now + 1,
+        };
+        assert!(
+            store
+                .join_analysis_viewer(viewer)
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: join successor: {error}")),
+            "{backend}: the viewer joins the successor's id"
+        );
+        assert!(
+            store
+                .analysis_preparation_observation(&successor.request_id, now + 2)
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: observe: {error}"))
+                .is_some_and(|observation| observation.has_live_viewer),
+            "{backend}: the successor has a live viewer and may run on a busy node"
+        );
+
+        let again = store
+            .enqueue_playback_analysis_successor(&failed.request_id, "r8-successor-2", now + 3)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: second playback: {error}"))
+            .unwrap_or_else(|| panic!("{backend}: the standing successor is returned"));
+        assert_eq!(
+            again.request_id, "r8-successor-1",
+            "{backend}: no second successor"
+        );
+        assert!(store
+            .analysis_request("r8-successor-2")
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: read refused id: {error}"))
+            .is_none());
+
+        // The successor fails too; inside the day nothing new is made, and
+        // the standing (failed) successor is what the caller is told.
+        let later = exhaust_analysis_request(&store, backend, "r8-node", now + 4).await;
+        let inside = store
+            .enqueue_playback_analysis_successor(&failed.request_id, "r8-successor-3", later)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: inside the day: {error}"))
+            .unwrap_or_else(|| panic!("{backend}: the failed successor stands"));
+        assert_eq!(inside.request_id, "r8-successor-1", "{backend}");
+        assert_eq!(inside.state, "failed", "{backend}");
+        let day = plurx_core::store::PLAYBACK_ANALYSIS_SUCCESSOR_WINDOW_MS;
+        let next = store
+            .enqueue_playback_analysis_successor(
+                &failed.request_id,
+                "r8-successor-4",
+                now + 1 + day + 1,
+            )
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: next day: {error}"))
+            .unwrap_or_else(|| panic!("{backend}: a new day allows one more"));
+        assert_eq!(next.request_id, "r8-successor-4", "{backend}");
+        assert_eq!(next.state, "queued", "{backend}");
+
+        let untouched = store
+            .analysis_request(&failed.request_id)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: reread failed: {error}"))
+            .unwrap_or_else(|| panic!("{backend}: failed row retained"));
+        assert_eq!(untouched, failed, "{backend}: the failed row is untouched");
+        assert_eq!(
+            store
+                .analysis_attempts(&failed.request_id, 100)
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: history again: {error}")),
+            history,
+            "{backend}: and so is its attempt history"
+        );
+        // Only an attempt_limit fragment row is eligible.
+        assert!(store
+            .enqueue_playback_analysis_successor("r8-successor-4", "r8-successor-5", now + day + 10)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: queued is not exhausted: {error}"))
+            .is_none());
+    })
+    .await;
+}
+
+/// D-M1's read-only peek: a queued request with a live viewer on this node
+/// is visible, the asking request never sees itself, and asking claims and
+/// changes nothing.
+#[tokio::test]
+async fn analysis_viewer_request_waiting_peeks_without_claiming() {
+    for_each_backend(|store, backend| async move {
+        let (user_id, file_id) = seed_file(&store, "peek-viewer").await;
+        let (_, other_file_id) = seed_file(&store, "peek-other").await;
+        let request = |request_id: &str, file_id: i64| NewAnalysisRequest {
+            request_id: request_id.to_owned(),
+            file_id,
+            source_size: 10_000,
+            source_mtime: 1,
+            component: "fragment_index".to_owned(),
+            pipeline_version: "d".repeat(64),
+            video_identity: String::new(),
+            requested_generation: format!("peek-{request_id}"),
+            priority: "normal".to_owned(),
+            trigger: "background".to_owned(),
+            force_rebuild: false,
+            target_node_id: "peek-node".to_owned(),
+            not_before_ms: 10,
+            created_at_ms: 10,
+        };
+        let reading = store
+            .enqueue_analysis_request(&request("peek-reading", file_id))
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: enqueue reading: {error}"));
+        let waiting = store
+            .enqueue_analysis_request(&request("peek-waiting", other_file_id))
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: enqueue waiting: {error}"));
+        let pipeline = "d".repeat(64);
+        let peek = |except: &'static str, now: i64| {
+            let store = Arc::clone(&store);
+            let pipeline = pipeline.clone();
+            async move {
+                store
+                    .analysis_viewer_request_waiting("peek-node", except, Some(&pipeline), now)
+                    .await
+                    .unwrap_or_else(|error| panic!("peek: {error}"))
+            }
+        };
+        assert!(
+            !peek("peek-reading", 11).await,
+            "{backend}: no viewer, nothing waits"
+        );
+        assert!(store
+            .join_analysis_viewer(AnalysisViewerInterest {
+                analysis_request_id: waiting.request_id.clone(),
+                requested_generation: waiting.requested_generation.clone(),
+                pipeline_version: waiting.pipeline_version.clone(),
+                video_identity: waiting.video_identity.clone(),
+                target_node_id: waiting.target_node_id.clone(),
+                user_id,
+                playback_id: "peek-playback".to_owned(),
+                now_ms: 12,
+            })
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: join: {error}")));
+        let before = store
+            .analysis_request(&waiting.request_id)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: read: {error}"))
+            .unwrap_or_else(|| panic!("{backend}: waiting row"));
+        assert!(
+            peek("peek-reading", 13).await,
+            "{backend}: a viewer request waits"
+        );
+        assert!(!peek("peek-waiting", 13).await, "{backend}: never itself");
+        assert!(
+            !store
+                .analysis_viewer_request_waiting("another-node", &reading.request_id, None, 13)
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: other node: {error}")),
+            "{backend}: only work this node could claim"
+        );
+        assert_eq!(
+            store
+                .analysis_request(&waiting.request_id)
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: reread: {error}"))
+                .unwrap_or_else(|| panic!("{backend}: waiting row kept")),
+            before,
+            "{backend}: asking claims nothing"
         );
     })
     .await;

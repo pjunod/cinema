@@ -1386,6 +1386,7 @@ mod tests {
                  DROP INDEX IF EXISTS analysis_requests_terminal_identity;
                  DROP TABLE dv_recovery_guards;
                  DROP TABLE IF EXISTS fragment_index_outcomes;
+                 DROP TABLE IF EXISTS attestation_checkpoints;
                  ALTER TABLE dv_conversions DROP COLUMN recovery_guard_id;
                  ALTER TABLE cluster_fragment_index_jobs DROP COLUMN attempt_errors;
                  ALTER TABLE cluster_fragment_index_jobs DROP COLUMN index_diagnostic_json;
@@ -1493,7 +1494,7 @@ mod tests {
     #[test]
     fn the_downgrade_fixture_undoes_every_migration_after_the_guard() {
         const GUARD_SCHEMA_VERSION: i64 = 44;
-        const DROPPED_BY_THE_FIXTURE: [&str; 59] = [
+        const DROPPED_BY_THE_FIXTURE: [&str; 60] = [
             "fragment_index_outcomes",
             "attempt_errors",
             "video_identity",
@@ -1604,6 +1605,9 @@ mod tests {
             // tables (their indexes go with them) before replay.
             "CREATE TABLE IF NOT EXISTS quality_cancellation_receipts",
             "CREATE TABLE IF NOT EXISTS continuous_quality_ledgers",
+            // v104: node-local attestation checkpoints. Both fixtures drop
+            // the table before replay.
+            "CREATE TABLE IF NOT EXISTS attestation_checkpoints",
         ];
 
         assert!(
