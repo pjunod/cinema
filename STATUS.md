@@ -21,6 +21,27 @@ retryable 503. Sustained losses end the work within one grace, as before.
 RCA: `docs/streaming/BAD-BOYS-APPLE-TV-INTERRUPTIONS-RCA.md` finding 6.
 Still owed: the GPT leader-restart check under live progressive, rolling and
 Live TV playback, before and after deploy.
+
+## Jellyfin facade: both pinned clients can now finish a play (J5)
+
+**Branch `claude/jellyfin-facade-gaps`, one draft PR to `main`.** The
+2026-10-04 merge review listed six facade gaps; re-checking them against the
+J0 traces and the upstream sources found that neither Infuse nor Jellyfin for
+Android TV could finish a play on the facade: Infuse's direct request names no
+play and its HLS entry lower-cases query keys, Android TV's media requests
+carry only the URL's `ApiKey`, every returned URL doubled `/jellyfin`, and the
+five-segment subtitle route both request was missing. Fixed on the existing
+seams: Jellyfin's subtitle routes and cue window, per-stream `DeliveryMethod`
+and `DeliveryUrl` from each client's subtitle profile, base-relative URLs with
+the compatibility login as `ApiKey`, the newest-direct-play resolution for
+Infuse (a new Store read on both backends), the nine missing contract routes,
+one switch read per request, and `plurx_jellyfin_requests_total`. The leader
+restart gap was a misreading: `/jellyfin` is fenced like native media and an
+HLS play keeps #798's grace; a regression now proves it. Detail:
+[JELLYFIN-COMPATIBILITY-STATUS.md](docs/clients/JELLYFIN-COMPATIBILITY-STATUS.md) §13.
+Open: the physical check on both clients (a GPT prompt), and the `ApiKey`
+decision for Paul to look over.
+
 ## Apple TV: new HEVC WEB-DLs refused with 503 — ffmpeg 8 repeats the sample description
 
 **Branch `fix/ffmpeg8-repeated-hevc-descriptions`.** Paul reported
@@ -273,52 +294,6 @@ acceptance extended with a thirty-track menu, the Diagnostics readout and a
 scrolled-under-the-header check; passes on fine and coarse pointers.
 Native clients untouched.
 
-## Live TV: direct play first, 5.1 stays 5.1
-
-**Branch `fix/live-tv-direct-play`, draft pull request; not merged, nothing
-deployed.** Paul's three reports of 2026-09-24 — Live TV "transcodes no matter
-what", audio is "unnecessarily downmixed to stereo", and every channel shows
-the same aspect ratio — worked against the real lineup on the FLEX 4K
-(59 ATSC 1.0 MPEG-2/AC-3 channels, 10 ATSC 3.0 HEVC/AC-4 channels).
-Record: [docs/streaming/LIVE-TV-DIRECT-PLAY-AND-SURROUND.md](docs/streaming/LIVE-TV-DIRECT-PLAY-AND-SURROUND.md).
-
-- **Transcoding:** every client sent `interlaced: false` and no client claimed
-  `mpeg2video`, so all 59 ATSC 1.0 channels were encoded on every client. Android
-  TV now claims its hardware MPEG-2 decoder and interlaced input (television UI
-  mode only), so ATSC 1.0 is copied there; Apple and the web cannot decode MPEG-2
-  in HLS and keep the encode — the one necessary case. On ATSC 3.0 the picture
-  was already copied; the audio was converted from the fragile AC-4 track even
-  though 157.x carries an **AC-3 5.1 simulcast in the same programme**. The
-  owner now probes every audio stream and selects the track the player can copy
-  (`LiveDeliveryPlan.audio_track`), and the AC-3-in-fMP4 rule switches the
-  container to MPEG-TS when the player claims that pair instead of converting.
-- **Stereo:** all three clients claimed `aac: max_channels 2`, and an AC-4 track
-  whose layout the probe had not seen was folded to stereo before a frame
-  existed. The AAC claim is now the sink's real channel count (floored 2, capped
-  5.1) on Apple, Android and the web, and the encode negotiates its layout with
-  `aformat=channel_layouts=` under that ceiling — `-ac` is gone from live
-  commands, so stereo stays stereo, 7.1.4 folds to 5.1, unknown is decided by
-  the first frame.
-- **Aspect ratio: not reproduced on the server.** Real 6.2 captures (704×480,
-  SAR 40:33, 480i) through the exact QSV, VAAPI and x264 producer chains on nynuc
-  all publish SAR 40:33 / DAR 16:9. `scripts/live-tv-hardware` now records the
-  segment's SAR/DAR. Open until the client showing it is named.
-
-**Deployment finding (same day):** the layout list led with `5.1(side)`, which
-the AAC encoder signals as ADTS configuration 0 plus a PCE; browsers read that
-as an audio track with no channels and never start, so Safari and Chrome sat
-black on 157.1. Fixed: the list is `5.1|stereo|mono`, the harness asserts a
-positive header channel count and gains `--surround`.
-
-Verified: focused Rust tests (53) + clippy `-D warnings` + fmt on nuc3;
-`make apple-test` on mba (1330 cases); Android unit tests in the pinned image
-(745); `tests/web/live-tv.test.js`. Hardware, this branch's `plurxd` against
-the real tuner from nuc3: 6.2 encodes to `704×480 SAR 40:33 DAR 16:9`;
-157.1 with a copy envelope comes back **copy/copy** — HEVC + the AC-3 5.1
-simulcast in MPEG-TS, no decoder running. One adversarial review pass, eight
-findings folded (Android now reads the HDMI sink's PCM channel count, described
-tracks never win, `und` is no language, the track is mapped by PID).
-
 ## P-03: the regression ledger stops growing, and releases get a weekly cadence
 
 **Merged by #489 (`995b60f3e`); phase B switched on 2026-09-25 by branch
@@ -336,11 +311,12 @@ folder's `STATUS-HISTORY.md`. The execution log in the plan is the record.
 
 ## Older efforts — where each one now lives
 
-Sections older than those above moved verbatim on 2026-09-24, 2026-09-25, 2026-09-26, 2026-09-27 and 2026-09-28
+Sections older than those above moved verbatim on 2026-09-24, 2026-09-25, 2026-09-26, 2026-09-27, 2026-09-28 and 2026-10-05
 into the status history of their subject folder. One row per section, newest first.
 
 | First recorded | Effort | Now in |
 |---|---|---|
+| 2026-09-24 | Live TV: direct play first, 5.1 stays 5.1 | [docs/streaming/STATUS-HISTORY.md](docs/streaming/STATUS-HISTORY.md) |
 | 2026-09-22 | PGS subtitles stopped blocking the start path | [docs/clients/STATUS-HISTORY.md](docs/clients/STATUS-HISTORY.md) |
 | 2026-09-22 | The full Rust suite and the release build are clean again | [docs/ci/STATUS-HISTORY.md](docs/ci/STATUS-HISTORY.md) |
 | 2026-09-22 | Resume stopped working on every client — reproduced, half fixed | [docs/streaming/STATUS-HISTORY.md](docs/streaming/STATUS-HISTORY.md) |

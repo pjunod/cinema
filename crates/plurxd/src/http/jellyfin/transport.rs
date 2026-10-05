@@ -271,10 +271,21 @@ async fn serve(
         } else {
             input
         };
-        let rewritten = rewrite_manifest(input, &manifest_resource, &session, &base, inline)
-            .map_err(|_| {
-                ApiError::ServiceUnavailable("native manifest representation unsupported".into())
-            })?;
+        let credential = client
+            .url_credential
+            .as_deref()
+            .map(|token| format!("ApiKey={token}"));
+        let rewritten = rewrite_manifest(
+            input,
+            &manifest_resource,
+            &session,
+            &base,
+            credential.as_deref(),
+            inline,
+        )
+        .map_err(|_| {
+            ApiError::ServiceUnavailable("native manifest representation unsupported".into())
+        })?;
         let response = Response::builder()
             .status(StatusCode::OK)
             .header(header::CONTENT_TYPE, "application/vnd.apple.mpegurl")
