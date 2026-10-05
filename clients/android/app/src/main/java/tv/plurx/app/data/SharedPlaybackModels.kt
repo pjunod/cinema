@@ -135,6 +135,37 @@ internal class SharedStart private constructor(val response: HlsStart, val wire:
             wire.strictString("session_id"); wire.strictString("playlist_url")
             return SharedStart(Json { ignoreUnknownKeys = true }.decodeFromJsonElement(wire), wire)
         }
+
+        /**
+         * The successor B offered in a `prepare` on [predecessor]'s channel,
+         * bound like a Start. The offer names only B's own identities: the
+         * successor B session, its playlist under `/api/v1/hls/{successor}/`,
+         * and its control bootstrap (generation = the successor's B
+         * incarnation). Nothing else of the predecessor is inherited except the
+         * file context and the film duration; [request] is the ask the
+         * successor was created for, as this client would have started it.
+         */
+        fun successor(action: JsonObject, predecessor: SharedStartedPlayback, request: CreateSessionReq): SharedStartedPlayback {
+            require(action.toString().toByteArray().size <= 16_384)
+            require(action.strictString("type") == "prepare")
+            val session = action.strictString("session_id")
+            val previous = requireNotNull(predecessor.start.response.control)
+            require(V4.matches(session) && session != predecessor.sessionId)
+            val control = Json { ignoreUnknownKeys = false }.decodeFromJsonElement(tv.plurx.app.player.ControlBootstrap.serializer(), action.getValue("control"))
+            require(V4.matches(control.generation) && control.generation != previous.generation)
+            require(control.nextExchangeMs == 5_000L && control.leaseTimeoutMs == 300_000L)
+            val origin = action.getValue("media_origin_ms").jsonPrimitive.let { require(!it.isString); requireNotNull(it.longOrNull) }
+            require(origin in 0..9_007_199_254_740_991L)
+            val height = action["effective_selection"]?.jsonObject?.get("height")?.jsonPrimitive?.intOrNull?.takeIf { it > 0 }
+            val response = predecessor.start.response.copy(
+                session_id = session, playlist_url = action.strictString("playlist_url"), control = control,
+                media_origin_ms = origin, height = height ?: predecessor.start.response.height,
+            )
+            val bound = predecessor.context.withSession(session)
+            val start = SharedStart(response, action).validated(bound)
+            return SharedStartedPlayback(start, bound, request)
+        }
+        private val V4 = Regex("[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}")
     }
 }
 
@@ -147,7 +178,7 @@ internal class SharedStartedPlayback(val start: SharedStart, override val contex
 internal fun SharedStart.bindInitial(context: PlaybackFileContext, request: CreateSessionReq): SharedStartedPlayback {
     require(context.reference != null && context.sessionId == null)
     require(response.vod == true && response.start_seconds.isFinite() && response.start_seconds >= 0 && response.start_seconds <= 9_007_199_254_740.0)
-    require(response.duration_ms?.let { it >= 0 } != false)
+    require(response.duration_ms?.let { it in 0..9_007_199_254_740_991L } != false)
     val control = requireNotNull(response.control)
     require(Regex("[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}").matches(control.generation))
     require(control.nextExchangeMs == 5_000L && control.leaseTimeoutMs == 300_000L)
@@ -380,6 +411,7 @@ internal class SharedPlaybackStatus private constructor(val sessionId: String, v
         val optionalWords = setOf("tone_map_peak_source", "producer_hold", "producer_decision", "control_demand", "render_state")
         /** `status_token` in sharing_playback_client.rs. */
         private val token = Regex("[A-Za-z0-9_.-]{1,32}")
+        fun isToken(text: String): Boolean = token.matches(text)
         fun decode(bytes: ByteArray, playback: SharedStartedPlayback): SharedPlaybackStatus {
             require(bytes.size <= 65_536)
             val outer = Json.parseToJsonElement(bytes.decodeToString()).jsonObject

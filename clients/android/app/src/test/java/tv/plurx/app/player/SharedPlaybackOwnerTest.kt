@@ -21,6 +21,14 @@ class SharedPlaybackOwnerTest {
         override fun setPlaying(playing: Boolean) { log += "playing $playing"; active = playing }
         override fun snapshot() = SharedRendererSnapshot(position, position + 4_000, 90_000, active, RenderState.RENDERING)
         override fun release() { log += "release" }
+        // These owners never declare a Shared successor, so nothing primes one.
+        override fun prepareSuccessor(url: String, positionMs: Long, textEnabled: Boolean) = error("no successor without the declaration")
+        override fun successorSnapshot(): SharedSuccessorSnapshot? = null
+        override fun parkSuccessor(positionMs: Long) = error("no successor")
+        override fun switchToSuccessor() = error("no successor")
+        override fun restorePredecessor() = error("no successor")
+        override fun releasePredecessor() = error("no successor")
+        override fun releaseSuccessor() = error("no successor")
     }
 
     @Test fun seekPauseAndPlayReachTheRendererOnlyAfterBAccepts(): Unit = runBlocking {

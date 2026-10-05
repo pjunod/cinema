@@ -1352,18 +1352,18 @@ layer; "B-only" means no client parses that wire.
 
 | Fixture group | Rows | Rust | Web | Swift | Kotlin |
 |---|---|---|---|---|---|
-| `cases` Source IDs | 12 | yes, core `sharing_shared_protocol_fixture_validates_exact_wire_ids` | yes, `playbackFileDecimal` | yes, `SharedProtocolFixtureTests` | open |
-| `status_tokens` × `shared_status.word_fields` | 12 × 9 | yes, `sharing_protocol_fixture_status_grammar` | yes, `sharedPlaybackStatusMetrics` | yes | open |
-| `shared_status` accepted + mutations | 1 + 17 (b 10, client 13) | decode and b rows: yes. B's emitted envelope: **open** (built inline in `receiver_status`) | yes | yes (client 13) | open |
-| `control_refusals.source` | 14 (7 valid) | validity and Source minting: yes, `sharing_protocol_fixture_source_control_refusals`. B's mapped answer (`b`): **open** (`refusal_response`) | client outcome (`client`): yes | client outcome: yes | open |
-| `control_refusals.b_precheck` | 4 | **open** (inline in `receiver_control`) | client outcome: yes | client outcome: yes | open |
-| `control_preparation` (`none`) | 3 | **open** (`rebind_to_receiver`) | yes, `settlePreparedOfferWaiter` | yes (`SharedControlStep`, `PreparedOfferWait`) | open |
-| `hls_start` public + mutations | 1 + 17 (b 15, client 16) | yes, `sharing_protocol_fixture_hls_start_projection` | yes, `sharedPlaybackStartContext` | yes (client 16; fixed `unsafe-duration`) | open |
-| `direct` MIME set, public + mutations | 13; 1 + 16 (b 9, client 13) | yes, `sharing_protocol_fixture_direct_start` | yes, `sharedPlaybackDirectStartContext` | yes (client 13) | open |
-| `direct_session_query` | 11 | yes, `sharing_protocol_fixture_direct_session_query` | yes | yes | open |
-| `file_suffixes` (route class `b`) | 25 | yes, core `sharing_protocol_fixture_file_suffixes` | yes, `playbackFileUrl` | yes (5 rows fixed) | open, fails 5 rows |
+| `cases` Source IDs | 12 | yes, core `sharing_shared_protocol_fixture_validates_exact_wire_ids` | yes, `playbackFileDecimal` | yes, `SharedProtocolFixtureTests` | yes, `SharedProtocolCasesTest` (`canonicalId`) |
+| `status_tokens` × `shared_status.word_fields` | 12 × 9 | yes, `sharing_protocol_fixture_status_grammar` | yes, `sharedPlaybackStatusMetrics` | yes | yes, `SharedPlaybackStatus.isToken` and `decode` |
+| `shared_status` accepted + mutations | 1 + 17 (b 10, client 13) | decode and b rows: yes. B's emitted envelope: **open** (built inline in `receiver_status`) | yes | yes (client 13) | yes, `SharedPlaybackStatus.decode` |
+| `control_refusals.source` | 14 (7 valid) | validity and Source minting: yes, `sharing_protocol_fixture_source_control_refusals`. B's mapped answer (`b`): **open** (`refusal_response`) | client outcome (`client`): yes | client outcome: yes | client outcome: yes, `SharedControlChannel` |
+| `control_refusals.b_precheck` | 4 | **open** (inline in `receiver_control`) | client outcome: yes | client outcome: yes | client outcome: yes, `SharedControlChannel` |
+| `control_preparation` (`none`) | 3 | **open** (`rebind_to_receiver`) | yes, `settlePreparedOfferWaiter` | yes (`SharedControlStep`, `PreparedOfferWait`) | yes, `PreparedOfferWait` with the Shared rule |
+| `hls_start` public + mutations | 1 + 17 (b 15, client 16) | yes, `sharing_protocol_fixture_hls_start_projection` | yes, `sharedPlaybackStartContext` | yes (client 16; fixed `unsafe-duration`) | yes, `SharedStart.bindInitial` |
+| `direct` MIME set, public + mutations | 13; 1 + 16 (b 9, client 13) | yes, `sharing_protocol_fixture_direct_start` | yes, `sharedPlaybackDirectStartContext` | yes (client 13) | yes, `SharedStartedDirect.decode` |
+| `direct_session_query` | 11 | yes, `sharing_protocol_fixture_direct_session_query` | yes | yes | yes |
+| `file_suffixes` (route class `b`) | 25 | yes, core `sharing_protocol_fixture_file_suffixes` | yes, `playbackFileUrl` | yes (5 rows fixed) | yes, `PlaybackFileContext.path` (fixed 2026-10-04) |
 | `asset_session_query` | 14 | yes, `sharing_protocol_fixture_asset_session_query` | B-only parser; web composes the bound query (next row) | B-only | B-only |
-| `presession_assets` | 4 | yes, same test | yes, `playbackFileUrl` bound and unbound | yes, bound and unbound | open |
+| `presession_assets` | 4 | yes, same test | yes, `playbackFileUrl` bound and unbound | yes, bound and unbound | yes, `PlaybackFileContext.path` |
 | `resource_unsupported` (typed 422) | 1 | yes, `sharing_protocol_fixture_resource_unsupported` | B-only | B-only | B-only |
 | `playback_ids` (per-session) | 1 | yes, `sharing_protocol_fixture_per_session_playback_ids` | B-only (B to Source) | B-only | B-only |
 | `receiver_recovery` | 1 + 4 rendered | yes, `sharing_protocol_fixture_receiver_recovery_status` | yes, `sharingRecoveryHTML` | B-only (web node card) | B-only |
@@ -1384,12 +1384,14 @@ functions, then drive `refusal_response`, the precheck and
 `control_preparation`. Those functions are already covered by hard-coded tests
 there; the gap is only that the fixture does not drive them.
 
-No Swift or Kotlin test reads the fixture yet. `subs/[0-9]{1,6}` and
-`chapters/[0-9]{1,6}/thumb` in `PlaybackFileContext.swift` and
-`PlaybackFileContext.kt` accept `subs/4096`, `subs/4096.vtt`,
-`subs/4096/overlay.json`, `chapters/4096/thumb` and `subs/01`, which the
-Shared grammar refuses, so those five `file_suffixes` rows fail there until
-the Shared context bounds canonical indexes at 0..4095. The web status binding
+No Swift test reads the fixture yet. `subs/[0-9]{1,6}` and
+`chapters/[0-9]{1,6}/thumb` in `PlaybackFileContext.swift` accept
+`subs/4096`, `subs/4096.vtt`, `subs/4096/overlay.json`,
+`chapters/4096/thumb` and `subs/01`, which the Shared grammar refuses, so
+those five `file_suffixes` rows fail there until the Shared context bounds
+canonical indexes at 0..4095. Kotlin had the same hole; it was fixed and the
+Kotlin column filled on 2026-10-04 (see "Android Shared prepared successor,
+catalogue actions and fixture parity"). The web status binding
 is looser than Swift's: it does not check the exact outer key set,
 `incarnation_id` or `control_epoch`, so the fixture has no rows for those
 yet.
@@ -6068,3 +6070,92 @@ offer the next time it exchanges, but nothing exchanges while the viewer is
 idle).
 
 Regression-Test: clients/apple/Tests/SharedPreparedHandoffTests.swift::testCommittedSuccessorBecomesThePlayersSessionAskAndProgress
+
+### Android Shared prepared successor, catalogue actions and fixture parity (2026-10-04)
+
+The Android client now covers the client work the P1/P2 and S4 audit sections
+above leave owed, and reads the protocol fixture. Local paths, the numeric
+Local guards and the original-account checks are unchanged; `versionCode` is
+not bumped.
+
+**Prepared successor (A).** When Settings → Developer leaves prepared
+replacement on (the same switch Local uses, default on), the Shared channel
+declares `prepare_replacement` and `shared_prepare_replacement`, plus
+`dual_player_preparation` in its sequence-1 capabilities. Off, it declares no
+actions and keeps the P0 reopen. `SharedPlaybackOwner` drives the handoff
+with the Local M6 pieces rather than new ones: `PreparedOfferWait` (with
+`noneOnTheAskDeclines`, because B decides on the exchange that carries the
+ask), `PreparedReplacementLedger` for the acknowledgement grammar, and
+`RendezvousHold` for the meeting point. Every exchange on the predecessor
+while the handoff lives carries the new ask, since an exchange carrying the
+old one tells B the viewer left it. `staging` and absence keep waiting (12 s
+bound); `none` reopens at once. On `offered`, `SharedStart.successor` binds
+the `prepare` like a Start: only B's successor session, its
+`/api/v1/hls/{successor}/…` playlist and its control bootstrap (v4
+generation, 5 s cadence, VOD lease) are accepted. The renderer primes a
+second ExoPlayer (`buildSuccessorPlayer`, muted, no surface, parked). Then:
+
+- `metadata_ready` once it is playable, then a park at the rendezvous;
+- `buffer_ready` once the park has landed with runway through it;
+- the switch at the rendezvous: the successor takes the surface, volume and
+  transport intent, and the predecessor is retained;
+- `committed`, echoing the offer's `media_origin_ms`, once the successor
+  renders a real frame (5 s bound).
+
+Every acknowledgement rides the predecessor's channel. A commit with no
+answer is asked again byte for byte under its own sequence
+(`SharedControlChannel.replayLast`), so B replays its answer or settles once.
+After an accepted commit, control (a new channel from sequence 1, same
+`client_instance_id`), status and Shared progress move to the successor's B
+session. The predecessor is not DELETEd, because B retires it. A withdrawn
+successor (`none` after the offer), a readiness or rendezvous failure, or an
+offer the client cannot bind is acknowledged `failed`. A frameless switch is
+`failed` after the predecessor is put back. A refused commit puts the
+predecessor back. Each of these takes the P0 reopen exactly once, with the
+decision already asked for the successor. A seek while unswitched
+acknowledges `aborted` and reopens at the target with the new selection. A
+commit whose outcome stays unknown reopens and ends the successor too. The
+view releases a pipeline it has moved off from its own update, and `stop`
+releases whatever is left. There is no timer for either.
+
+**Manual watched (B).** Shared movie and episode details show Mark watched /
+Mark unwatched, which posts `{watched}` to
+`POST /api/v1/shared/imports/{import}/items/{item}/watched` (§5.3). The answer
+must be `updated: 1` with the asked state.
+
+**Next episode (C).** `SharedLibraryClient.nextEpisode` follows Source order
+through B's viewer routes only: the next episode of the season, else the
+first episode of the next season. Every child page is validated against the
+import's library, and the cursor walk is bounded and refuses a repeated
+cursor. When a Shared episode ends and autoplay next is on, the details screen
+starts the next one with `prepareNextSharedEpisode`. That is a fresh detail
+read, context, decision and playback id under the current login, never an
+inherited context.
+
+**Fixture (D).** `tests/sharing` is a JVM test resource directory, and
+`SharedProtocolCasesTest` reads every Kotlin column group of the parity
+matrix above through the shipped decoders. It exposed two real bugs, now
+fixed: the Shared file-suffix grammar accepted indexes above 4095 and leading
+zeros (`PlaybackFileContext.sharedFileSuffix`), and a Shared Start accepted a
+duration above 2^53-1 ms.
+
+Evidence on nuc3 (pinned `plurx-android-build` image):
+
+- New suites: `SharedProtocolCasesTest` (8), `SharedCatalogueActionsTest` (3)
+  and `SharedPreparedHandoffTest` (5). The handoff suite covers a commit
+  whose answer is lost and replayed with identical bytes, the move of control
+  and progress, `none` on the ask, a withdrawn successor, a refused commit,
+  and a seek while staging. Each mutation of the two grammar fixes fails its
+  fixture row.
+- Full `testDebugUnitTest`: 885 tests, 0 failures, 0 skipped. `lintDebug`: no
+  errors.
+- Python fences pass: player builder, credential exposure, playback surface,
+  player input, control wire, caps wire, test markers, contracts. So do
+  `scripts/playback-surface-fence`, `scripts/player-input-fence` and
+  `make validation-lint`.
+
+Not qualified here: any physical device against a real pinned Source/B pair.
+That includes a real two-pipeline prime and switch on a phone and on a
+television (where Local M5.5 measured dual prime failing), first-frame proof
+on the surface, the next episode on a real series, and the watched control
+against a real B.

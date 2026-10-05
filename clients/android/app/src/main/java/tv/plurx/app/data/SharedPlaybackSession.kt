@@ -4,7 +4,9 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.serialization.json.*
+import tv.plurx.app.player.ActionAcknowledgement
 import tv.plurx.app.player.CodecPolicy
+import tv.plurx.app.player.ControlAction
 import tv.plurx.app.player.ControlResponse
 import tv.plurx.app.player.DynamicCapabilities
 import tv.plurx.app.player.DynamicRangePolicy
@@ -135,13 +137,26 @@ internal fun sharedPlaybackPlan(
     return SharedPlaybackPlan(subject, decision, result.caps, body)
 }
 
-/** Shared capabilities for sequence 1: SDR only and never a prepared successor (B offers none). */
-internal fun sharedControlCapabilities(caps: DeviceCaps): DynamicCapabilities = DynamicCapabilities(
+/**
+ * The name a client declares beside `prepare_replacement` to be offered a
+ * Shared successor. The Local promise alone is not enough: B answers a client
+ * that has not also declared this one `none`, because such a client would keep
+ * beating Shared progress on the session it left.
+ */
+internal const val SHARED_PREPARE_REPLACEMENT_ACTION = "shared_prepare_replacement"
+
+/** The actions a Shared channel declares: both names, or none at all (P0 reopen). */
+internal fun sharedSupportedActions(prepared: Boolean): List<String> =
+    if (prepared) listOf(PlaybackControl.PREPARE_REPLACEMENT_ACTION, SHARED_PREPARE_REPLACEMENT_ACTION) else emptyList()
+
+/** Shared capabilities for sequence 1: SDR only; dual-player preparation only
+ * when this player will prime a Shared successor B offers. */
+internal fun sharedControlCapabilities(caps: DeviceCaps, dualPlayer: Boolean = false): DynamicCapabilities = DynamicCapabilities(
     platform = "android", maxHeight = PlaybackControl.MAX_HEIGHT,
     codecs = caps.video.mapNotNull {
         when (it.codec.lowercase()) { "h264" -> CodecPolicy.H264; "hevc" -> CodecPolicy.HEVC; "av1" -> CodecPolicy.AV1; else -> null }
     }.distinct().ifEmpty { listOf(CodecPolicy.H264) },
-    dynamicRanges = listOf(DynamicRangePolicy.SDR), dualPlayerPreparation = false,
+    dynamicRanges = listOf(DynamicRangePolicy.SDR), dualPlayerPreparation = dualPlayer,
 )
 
 /** What the renderer is doing when an exchange is built. */
@@ -151,8 +166,15 @@ internal data class SharedControlState(
 )
 
 internal sealed interface SharedControlOutcome {
-    /** B accepted this exact sequence under the B tuple. */
-    data class Accepted(val preparation: String?) : SharedControlOutcome
+    /**
+     * B accepted this exact sequence under the B tuple. [action] is a
+     * validated `prepare` naming B's successor (only to a channel that
+     * declared both names), with its exact wire in [actionWire]; otherwise null.
+     */
+    data class Accepted(
+        val preparation: String?, val sequence: Long = 0,
+        val action: ControlAction? = null, val actionWire: JsonObject? = null,
+    ) : SharedControlOutcome
     /** A definitive refusal; the renderer stays where it is. */
     data class Refused(val status: Int, val code: String?) : SharedControlOutcome
     /** 410: B retired the session; only a fresh Start can continue. */
@@ -165,26 +187,32 @@ internal sealed interface SharedControlOutcome {
  * Current-rendition control for one started Shared HLS session. The B tuple is
  * the Start's (generation = B incarnation, control_epoch = B epoch), one
  * exchange is in flight at a time, sequences are ordered and never reused, and
- * an uncertain or deferred exchange is resent byte for byte. The client
- * declares no actions, so B may answer only `none`; the caller applies a
- * renderer change only after [SharedControlOutcome.Accepted].
+ * an uncertain or deferred exchange is resent byte for byte. Unless [prepared],
+ * the client declares no actions and B may answer only `none`. A prepared
+ * channel declares both successor names and may be offered a `prepare`, and
+ * its acknowledgements ride on this, the predecessor's, channel. The caller
+ * applies a renderer change only after [SharedControlOutcome.Accepted].
  */
 internal class SharedControlChannel(
     private val client: SharedDecisionClient, val playback: SharedStartedPlayback,
     private val clientInstanceId: String, private val capabilities: DynamicCapabilities,
+    private val prepared: Boolean = false,
 ) {
     private val mutex = Mutex()
     private val bootstrap = requireNotNull(playback.start.response.control)
     var sequence = 0L; private set
+    /** The last request sent, kept so an uncertain answer can be asked again exactly. */
+    private var last: String? = null
     init {
         require(PlaybackControl.isUuid(clientInstanceId) && capabilities.isValid)
         require(bootstrap.url == "/api/v1/hls/${playback.sessionId}/control")
+        require(capabilities.dualPlayerPreparation == prepared)
     }
     private fun clamp(value: Long): Long {
         val duration = playback.start.response.duration_ms
         return value.coerceIn(0, if (duration != null && duration in 0..PlaybackControl.MAX_MEDIA_MILLIS) duration else PlaybackControl.MAX_MEDIA_MILLIS)
     }
-    fun body(sequence: Long, state: SharedControlState, selection: JsonObject): String {
+    fun body(sequence: Long, state: SharedControlState, selection: JsonObject, acknowledgement: ActionAcknowledgement? = null): String {
         val seeking = state.renderState == RenderState.SEEKING
         require(seeking == (state.seekTargetMs != null))
         val position = clamp(state.positionMs)
@@ -199,15 +227,28 @@ internal class SharedControlChannel(
             state.seekTargetMs?.let { put("seek_target_ms", clamp(it)) }
             put("selection", selection)
             if (sequence == 1L) put("capabilities", Net.json.encodeToJsonElement(DynamicCapabilities.serializer(), capabilities))
-            put("supported_actions", JsonArray(emptyList()))
+            acknowledgement?.let {
+                require(prepared && it.isValid)
+                put("acknowledgement", Net.json.encodeToJsonElement(ActionAcknowledgement.serializer(), it))
+            }
+            put("supported_actions", JsonArray(sharedSupportedActions(prepared).map(::JsonPrimitive)))
         }.toString()
     }
-    suspend fun exchange(state: SharedControlState, selection: JsonObject): SharedControlOutcome = mutex.withLock {
+    suspend fun exchange(state: SharedControlState, selection: JsonObject, acknowledgement: ActionAcknowledgement? = null): SharedControlOutcome = mutex.withLock {
         require(sequence < MAX_SAFE)
         val sent = sequence + 1
-        val text = body(sent, state, selection)
+        val text = body(sent, state, selection, acknowledgement)
         require(text.toByteArray().size <= 65_536)
-        sequence = sent
+        sequence = sent; last = text
+        send(text, sent)
+    }
+    /**
+     * Ask the last exchange again, byte for byte, under its own sequence. An
+     * acknowledgement whose answer was lost is settled this way: B replays the
+     * exact answer it gave, or settles now, and never twice.
+     */
+    suspend fun replayLast(): SharedControlOutcome = mutex.withLock { send(requireNotNull(last), sequence) }
+    private suspend fun send(text: String, sent: Long): SharedControlOutcome {
         var uncertain = 0; var deferred = 0
         while (true) {
             val reply = try { client.control(playback, text) } catch (error: IOException) {
@@ -228,15 +269,17 @@ internal class SharedControlChannel(
                 else -> return SharedControlOutcome.Unavailable(reply.status, code)
             }
         }
-        @Suppress("UNREACHABLE_CODE") error("unreachable")
     }
     private fun accepted(text: String, sent: Long): SharedControlOutcome {
         val response = runCatching { Net.json.decodeFromString(ControlResponse.serializer(), text) }.getOrNull()
             ?: return SharedControlOutcome.Refused(200, "protocol")
+        val offer = prepared && response.action.type == PlaybackControl.PREPARE_ACTION_TYPE && response.action.preparedPayloadIsValid
         if (response.protocol != PlaybackControl.PROTOCOL || response.generation != bootstrap.generation ||
-            response.controlEpoch != bootstrap.controlEpoch || response.acceptedSequence != sent || response.action.type != "none") {
+            response.controlEpoch != bootstrap.controlEpoch || response.acceptedSequence != sent || (response.action.type != "none" && !offer)) {
             return SharedControlOutcome.Refused(200, "protocol")
         }
-        return SharedControlOutcome.Accepted(response.delivery?.preparation)
+        if (!offer) return SharedControlOutcome.Accepted(response.delivery?.preparation, sent)
+        val wire = Json.parseToJsonElement(text).jsonObject.getValue("action").jsonObject
+        return SharedControlOutcome.Accepted(response.delivery?.preparation, sent, response.action, wire)
     }
 }

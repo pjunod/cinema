@@ -890,10 +890,15 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
         return null
     }
 
-    internal suspend fun prepareSharedPlayback(reference: SharedPlaybackReference, fileId: String): SharedPlaybackPlan {
+    /** A Shared Start from fresh B details. A null [fileId] takes the first
+     * launchable file of those details (the next episode); either way the
+     * context, decision and playback id are new, never inherited. */
+    internal suspend fun prepareSharedPlayback(reference: SharedPlaybackReference, fileId: String?): SharedPlaybackPlan {
         val catalogue = SharedLibraryClient.create()
         val detail = catalogue.detail(reference); catalogue.requireCurrent()
-        require(detail.delivery_status == "available" && detail.files.any { it.file_id == fileId && it.file_base != null }) { "Playback is unavailable for this Shared title." }
+        val chosen = fileId ?: detail.files.firstOrNull { it.file_base != null }?.file_id
+        require(detail.delivery_status == "available" && chosen != null && detail.files.any { it.file_id == chosen && it.file_base != null }) { "Playback is unavailable for this Shared title." }
+        val fileId: String = chosen
         val context = PlaybackFileContext.authenticatedDetail(reference, fileId)
         require(context.lifecycleGeneration == detail.lifecycle_generation)
         val selection = tv.plurx.app.data.SharedSelection(_preferences.value.playbackQuality)
@@ -904,6 +909,17 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
         // as it is; Copy or encoded HLS otherwise.
         return tv.plurx.app.data.sharedPlaybackPlan(subject, result, selection, java.util.UUID.randomUUID().toString(),
             java.util.UUID.randomUUID().toString(), allowDirect = true)
+    }
+
+    /**
+     * Shared next episode: Source order resolved through B's viewer routes, then
+     * a fresh authorized Start of it. Null when the series has no next episode.
+     */
+    internal suspend fun prepareNextSharedEpisode(current: SharedPlaybackReference): Pair<SharedPlaybackReference, SharedPlaybackPlan>? {
+        val catalogue = SharedLibraryClient.create()
+        val next = catalogue.nextEpisode(current) ?: return null
+        catalogue.requireCurrent()
+        return next to prepareSharedPlayback(next, null)
     }
 
     suspend fun createHlsSession(fileId: Long, body: CreateSessionReq, fileContext: PlaybackFileContext = PlaybackFileContext.local(fileId)): HlsStart {
