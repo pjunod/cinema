@@ -6,7 +6,10 @@ import okhttp3.OkHttpClient
 import okhttp3.ResponseBody.Companion.toResponseBody
 import org.junit.Assert.*
 import org.junit.Test
+import tv.plurx.app.player.ControlAction
+import tv.plurx.app.player.ControlAnswer
 import tv.plurx.app.player.PlaybackDemand
+import tv.plurx.app.player.PreparedOfferWait
 import tv.plurx.app.player.RenderState
 
 /**
@@ -178,6 +181,16 @@ class SharedProtocolCasesTest {
                 assertEquals(row.string("id"), 1, sent.toSet().size)
                 assertTrue(row.string("id"), outcome is SharedControlOutcome.Accepted)
             } else assertTrue(row.string("id"), outcome is SharedControlOutcome.Refused || outcome is SharedControlOutcome.Ended)
+        }
+    }
+
+    @Test fun preparationAnswersNoneDeclinesAtOnceAbsenceStaysArmed() {
+        for (row in fixture.getValue("control_preparation").jsonArray.map { it.jsonObject }) {
+            val preparation = row["b"]?.takeUnless { it is JsonNull }?.jsonPrimitive?.content
+            val wait = PreparedOfferWait(tappedAtMs = 0, floorSequence = 1, noneOnTheAskDeclines = true)
+            val step = wait.observe(ControlAnswer(1, ControlAction(type = "none"), preparation), nowMs = 0)
+            val outcome = if (step is PreparedOfferWait.Step.Reopen) "declined" else "armed"
+            assertEquals(row.string("id"), row.string("client"), outcome)
         }
     }
 }

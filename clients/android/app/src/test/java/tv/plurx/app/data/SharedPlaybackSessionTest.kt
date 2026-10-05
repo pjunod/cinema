@@ -45,7 +45,7 @@ class SharedPlaybackSessionTest {
         val playback = client.start(plan.subject.context, plan.request)
         val channel = SharedControlChannel(client, playback, instance, sharedControlCapabilities(plan.caps))
         val state = SharedControlState(PlaybackDemand.ACTIVE, 40_000, 45_000, RenderState.RENDERING)
-        assertEquals(SharedControlOutcome.Accepted("none"), channel.exchange(state, plan.frozenControlSelection()))
+        assertEquals(SharedControlOutcome.Accepted("none", 1), channel.exchange(state, plan.frozenControlSelection()))
         val first = f.body("control ${f.session(1)}")
         assertEquals(f.generation(1), first.getValue("generation").jsonPrimitive.content)
         assertEquals(1L, first.getValue("control_epoch").jsonPrimitive.long)

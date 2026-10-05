@@ -3111,7 +3111,14 @@ internal fun PlayerScreen(vm: AppViewModel, plan: tv.plurx.app.data.SharedPlayba
     DisposableEffect(controller) { onDispose { controller.close() } }
     Column(Modifier.fillMaxSize()) {
         Text(plan.subject.title, style = MaterialTheme.typography.headlineSmall)
-        AndroidView(factory = { androidx.media3.ui.PlayerView(it).apply { useController = false; player = controller.player } }, modifier = Modifier.weight(1f).fillMaxWidth())
+        // A prepared handoff moves the surface to the successor (and a rollback
+        // back); the view releases the pipeline it left once it no longer
+        // points at it.
+        val surface by controller.surfacePlayer.collectAsStateWithLifecycle()
+        val retired by controller.retired.collectAsStateWithLifecycle()
+        AndroidView(factory = { androidx.media3.ui.PlayerView(it).apply { useController = false; player = surface } },
+            update = { view -> if (view.player !== surface) view.player = surface; if (retired != null) controller.collectRetired(view.player) },
+            modifier = Modifier.weight(1f).fillMaxWidth())
         if (starting) Text("Starting Shared playback")
         statusSummary?.let { Text(it, style = MaterialTheme.typography.bodySmall) }
         failure?.let { Text(it) }
