@@ -48,10 +48,11 @@ pub use dolby::{
     StrictDolbyImplementation, StrictDolbyPolicy,
 };
 pub use encoder::{
-    benchmark_encoder, detect_encoders, detect_video_decoders, validate_quality_rate_control,
-    validate_quality_rate_control_yielding, CompletedReconstructedOutputContract,
-    EffectiveRateControl, Encoder, EncoderCaps, OutputCodecContract, OutputGrade,
-    QualityRateControlValidation, QualityRc, RateMode, VideoCodec,
+    benchmark_encoder, detect_encoders, detect_video_decoders, vaapi_device,
+    validate_quality_rate_control, validate_quality_rate_control_yielding,
+    CompletedReconstructedOutputContract, EffectiveRateControl, Encoder, EncoderCaps,
+    OutputCodecContract, OutputGrade, QualityRateControlValidation, QualityRc, RateMode,
+    VideoCodec,
 };
 pub use macos::{
     MacosProcessingAvailability, MacosProcessingContext, MacosProcessingGraph,

@@ -161,6 +161,12 @@ impl TranscodeManager {
         (self.admissions.in_use(), self.max_hw_sessions().await)
     }
 
+    /// The node's admission state, for background work outside the manager
+    /// that must take and yield the same slots (the tone-map census).
+    pub(crate) fn admissions(&self) -> crate::admission::Admissions {
+        self.admissions.clone()
+    }
+
     /// How many hardware transcodes this node will run at once.
     pub async fn max_hw_sessions(&self) -> usize {
         // A configured zero means "no hardware transcoding", which is a

@@ -1286,6 +1286,13 @@ impl TranscodeManager {
         self.pretranscode_worker_idle() && self.background_heavy.available_permits() > 0
     }
 
+    /// The node's one heavy-background gate, for background work outside the
+    /// manager that must not run beside a pretranscode, a fragment index or
+    /// the transcoder benchmark (the operator-run tone-map census).
+    pub(crate) fn background_heavy_gate(&self) -> Arc<tokio::sync::Semaphore> {
+        Arc::clone(&self.background_heavy)
+    }
+
     pub(crate) fn background_worker_in_use(&self) -> bool {
         self.background_heavy.available_permits() == 0
     }

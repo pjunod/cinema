@@ -2911,7 +2911,15 @@ pattern = "(?:[A-Za-z_]\\w*::)+spawn(?:_blocking|_local|_for_test)?\\s*\\("
 # server shutdown token. Neither owns a producer or process.
 # Merge with main 1d3765776: the effort +2 and main #844 +1 add together.
 # Merge with main 05bf60381: the effort's reviewed sites and main #983 add together.
-expected_occurrences = 937
+# +4 with the tone-map census (C-M0, pipeprobe/census.rs): one
+# production `tokio::spawn` in `http/system.rs::start_tone_map_census`, the
+# admin-started census task. It owns no producer and no session: it holds one
+# background admission permit, runs every ffmpeg through pipeprobe's existing
+# Spawn seam (job-owned, kill-on-drop), polls `background_must_yield` and the
+# stop token, and drops its permit and child before it returns. Three are
+# test-only: the census driven on a test task in the queued, stop and yield
+# regressions, each joined before the test ends.
+expected_occurrences = 941
 # Batch001 source union: +1 main #859 namespace cancellation fixture; its
 # probe task is cancelled and awaited before checking reaped source ownership.
 # +1 #861 optimization owner: bounded at 600s, preempted by playback, publishes
@@ -4449,7 +4457,14 @@ pattern = "(?:[A-Za-z_]\\w*::)+(?:sleep|sleep_until|interval|interval_at|timeout
 # decides producer recovery.
 # Merge with main 1d3765776: the effort +2 and main #844 +2 add together.
 # Merge with main 05bf60381: the effort's reviewed sites and main #983 add together.
-expected_occurrences = 1693
+# +8 with the tone-map census (C-M0, pipeprobe/census.rs). Two
+# production: the queued census's `tokio::time::sleep(POLL)` between
+# admission retries, and `guarded`'s `tokio::time::interval(POLL)` that polls
+# `background_must_yield` while a census child runs. Both are local to the
+# census task, end with it, and own no producer. Six are test-only: the
+# `settle` and two child-started waits' `sleep`, the queued test's
+# `sleep(POLL * 3)`, and two `timeout`s bounding the stop and yield tests.
+expected_occurrences = 1701
 # Batch001 source union: +5 main #859 namespace fixture bounds (one pipe-reap
 # timeout, descendant-start timeout/sleep, cancellation join and cleanup-gate
 # timeout); all observe exact child/source cleanup, never authorize production.
@@ -4876,6 +4891,10 @@ pattern = "(?:[A-Za-z_]\\w*::)*Command::new\\s*\\("
 # ChildWork::background: bounded time and output, cancelled with the probe,
 # reaped before the result is used. No rolling producer is started.
 # Merge with main 05bf60381: the effort's reviewed sites and main #983 add together.
+# +0 with the tone-map census (C-M0, pipeprobe/census.rs): every ffmpeg it
+# starts (signal encode, graph runs, stills) goes through pipeprobe's existing
+# `Spawn::command` constructor and its two `output_job_owned` calls, under its
+# own Activity purpose ("tone-map census"). No new constructor or launcher.
 expected_occurrences = 259
 # Promotion union: final count is measured after architectural conflict resolution.
 
@@ -5489,6 +5508,9 @@ pattern = "\\.(?:spawn|output|status)\\s*\\("
 # Startup pending fallback: +3 false positives. The pending-socket regression
 # reads `response.status()` on three in-process `oneshot` responses; the
 # fallback itself launches nothing.
+# +0 with the tone-map census: it reuses pipeprobe's two awaited
+# `output_job_owned` launches; cancelling a step drops that future, which
+# kills the kill-on-drop, job-owned child.
 expected_occurrences = 748
 
 [[module_structures]]

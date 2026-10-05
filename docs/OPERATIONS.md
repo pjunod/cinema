@@ -5963,6 +5963,19 @@ the tone-map filter alone or a promise that another GPU's result will match.
 A candidate must produce valid BT.709 output, pass the picture comparison,
 and exceed the reference throughput by 20%.
 
+**The tone-map census.** The boot gate proves a graph runs and lands on
+BT.709; it does not say whether its picture differs from the CPU chain. The
+**Run census** button on the same row (Settings → System → HDR tone-map)
+measures that for every graph the node's encoder pairs with, on authored PQ
+signals at 1000 and 4000 nits, and keeps per-graph block distances and a
+still of each ([TONE-MAP-CENSUS.md](streaming/TONE-MAP-CENSUS.md)). It uses
+the GPU, so it runs only when asked, waits behind and yields to any viewer
+(the row then says "yielded to playback"), and has a Stop. Admin routes:
+`GET`/`POST /api/v1/system/tone-map/census`,
+`POST /api/v1/system/tone-map/census/stop`,
+`GET /api/v1/system/tone-map/census/stills/{name}`. It changes no selection
+and no filter string.
+
 With a VA-API encoder the probe tries `tonemap_vaapi`, then
 `libplacebo_vaapi` (VA-API decode → Vulkan tone-map → VA-API encode with
 hardware frame mapping), then the existing `libplacebo` path with CPU frame

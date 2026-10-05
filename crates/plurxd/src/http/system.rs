@@ -433,7 +433,11 @@ pub async fn system_info(
                 overridden,
             }
         },
-        info: (*state.system).clone(),
+        info: {
+            let mut info = (*state.system).clone();
+            info.tone_map.census = Some(tone_map_census_view(&state).await);
+            info
+        },
     }))
 }
 
@@ -591,6 +595,133 @@ pub async fn remeasure_storage(
     let sustained = q.sustained.unwrap_or(0.0).clamp(0.0, SUSTAINED_MAX_SECS);
     probe_storage(state.clone(), sustained).await;
     Ok(Json(state.storage.read().await.clone()))
+}
+
+/// The encoder the tone-map census pairs graphs with: the one production
+/// sessions use, without a store read. On "auto" that is the transcoder
+/// optimiser's fastest family (the manager's encoder override), which is also
+/// what the boot probe paired its graphs with; resolving the bare preference
+/// against the capabilities would pick a different family on a node with
+/// more than one.
+fn tone_map_census_encoder(state: &AppState) -> plurx_core::transcode::Encoder {
+    state
+        .transcode
+        .encoder_for_preference(&state.system.hwaccel_pref)
+}
+
+/// The key this node's census result is stored under now.
+fn tone_map_census_key(state: &AppState) -> crate::pipeprobe::CensusKey {
+    crate::pipeprobe::CensusKey::for_node(
+        state.system.ffmpeg_version.as_deref().unwrap_or("unknown"),
+        tone_map_census_encoder(state),
+    )
+}
+
+/// Where census results live: node-local, under the data directory, because
+/// they describe this machine's GPU and ffmpeg and nothing else.
+fn tone_map_census_root(state: &AppState) -> std::path::PathBuf {
+    std::path::Path::new(&state.system.data_dir).join("tone-map-census")
+}
+
+async fn tone_map_census_view(state: &AppState) -> crate::pipeprobe::CensusView {
+    let mut view = state
+        .tone_map_census
+        .view(&tone_map_census_root(state), tone_map_census_key(state))
+        .await;
+    view.node_id = state.node_id.clone();
+    view
+}
+
+/// GET /api/v1/system/tone-map/census (admin) — the census's live status and
+/// this node's stored result. The same object `GET /api/v1/system` carries as
+/// `tone_map.census`; its own route so the System row can poll a run without
+/// re-reading every other diagnostic.
+pub async fn tone_map_census(
+    _admin: AdminUser,
+    State(state): State<AppState>,
+) -> Json<crate::pipeprobe::CensusView> {
+    Json(tone_map_census_view(&state).await)
+}
+
+/// POST /api/v1/system/tone-map/census (admin) — queue a census run. Returns
+/// 202 at once; the run waits for a background hardware permit, yields to any
+/// viewer, and reports on the GET. 409 while one is already queued or running.
+pub async fn start_tone_map_census(
+    _admin: AdminUser,
+    State(state): State<AppState>,
+) -> Result<(StatusCode, Json<crate::pipeprobe::CensusView>), ApiError> {
+    let Some((generation, stop)) = state.tone_map_census.begin() else {
+        return Err(ApiError::Conflict(
+            "a tone-map census is already queued or running on this node".to_owned(),
+        ));
+    };
+    let encoder = tone_map_census_encoder(&state);
+    let slot = crate::pipeprobe::AdmissionSlot {
+        admissions: state.transcode.admissions(),
+        heavy: state.transcode.background_heavy_gate(),
+        hardware_max: state.transcode.max_hw_sessions().await,
+        software_budget: state.transcode.software_budget().await,
+        hardware: encoder != plurx_core::transcode::Encoder::Software,
+    };
+    let plan = crate::pipeprobe::CensusPlan {
+        encoder,
+        selected: state.system.tone_map.selected(),
+        key: tone_map_census_key(&state),
+        root: tone_map_census_root(&state),
+    };
+    let census = Arc::clone(&state.tone_map_census);
+    let runtime_cache = state.runtime_cache_dir.clone();
+    tracing::info!(
+        encoder = encoder.family_name(),
+        "tone-map census requested by an administrator"
+    );
+    tokio::spawn(async move {
+        crate::pipeprobe::run_census(&census, generation, stop, slot, &runtime_cache, plan).await;
+    });
+    Ok((
+        StatusCode::ACCEPTED,
+        Json(tone_map_census_view(&state).await),
+    ))
+}
+
+/// POST /api/v1/system/tone-map/census/stop (admin) — stop a queued or
+/// running census. Its child is killed and its permit released; the status
+/// moves to `stopped` once that has happened.
+pub async fn stop_tone_map_census(
+    _admin: AdminUser,
+    State(state): State<AppState>,
+) -> Json<crate::pipeprobe::CensusView> {
+    state.tone_map_census.stop();
+    Json(tone_map_census_view(&state).await)
+}
+
+/// GET /api/v1/system/tone-map/census/stills/{name} (admin) — one saved still
+/// of the stored result. Only a name the current result lists is served.
+pub async fn tone_map_census_still(
+    _admin: AdminUser,
+    State(state): State<AppState>,
+    axum::extract::Path(name): axum::extract::Path<String>,
+) -> Result<axum::response::Response, ApiError> {
+    let path = state
+        .tone_map_census
+        .still_path(
+            &tone_map_census_root(&state),
+            tone_map_census_key(&state),
+            &name,
+        )
+        .await
+        .ok_or(ApiError::NotFound("no such census still"))?;
+    let bytes = tokio::fs::read(&path)
+        .await
+        .map_err(|_| ApiError::NotFound("no such census still"))?;
+    Ok((
+        [
+            (axum::http::header::CONTENT_TYPE, "image/png"),
+            (axum::http::header::CACHE_CONTROL, "private, no-store"),
+        ],
+        bytes,
+    )
+        .into_response())
 }
 
 /// POST /api/v1/system/search-index/rebuild (admin) — recreate the derived

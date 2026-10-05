@@ -99,7 +99,98 @@ function toneMapHtml(tm){
   const details=rows
     ? `<details class="muted" style="margin-top:4px;font-size:12px"><summary style="cursor:pointer">Probe details</summary><div style="margin-top:6px;overflow-wrap:anywhere">${rows}</div></details>`
     : "";
-  return `${head}${note}${details}`;
+  return `${head}${note}${details}${tm.census?censusMount(tm.census):""}`;
+}
+function censusMount(census){
+  return census?`<div id="tone-map-census" style="margin-top:8px">${toneMapCensusHtml(census)}</div>`:"";
+}
+// The tone-map census (docs/streaming/TONE-MAP-CENSUS.md): every GPU graph
+// this node could pair with its encoder, measured against the CPU chain on
+// authored PQ signals, with a still of each. GPU work on a production node, so
+// it runs only from this button, waits behind and yields to any viewer, says
+// which graph it is on, and has a Stop.
+//
+// Distances are 8-bit levels of 16x9 block means, Y/U/V, and they are
+// distance from the CPU chain — a baseline, not a reference picture.
+function toneMapCensusHtml(c){
+  const active=c.state==="queued"||c.state==="running";
+  const ago=c.since?fmtAgo(Math.floor(c.since/1000)):"";
+  const words={
+    idle:`<span class="muted">Not run on this node.</span>`,
+    queued:`Queued <span class="muted">— ${esc(c.step||"waiting for a free hardware slot")}</span>`,
+    running:`Running <span class="muted">— ${esc(c.step||"")}</span>`,
+    finished:`Finished <span class="muted">${esc(ago)}</span>`,
+    yielded:`<span style="color:var(--warn,#fbbf24)">Yielded to playback</span> <span class="muted">${esc(ago)} — run it again when the node is idle</span>`,
+    stopped:`Stopped <span class="muted">${esc(ago)}</span>`,
+    failed:`<span style="color:var(--bad)">Failed</span> <span class="muted">— ${esc(c.reason||"")}</span>`,
+  };
+  const control=active
+    ? `<button class="ghost sm" onclick="stopToneMapCensus(this)">Stop</button>`
+    : `<button class="ghost sm" onclick="startToneMapCensus(this)">Run census</button>`;
+  const head=`<div class="row" style="gap:10px;align-items:center"><span>Census: ${words[c.state]||esc(c.state)}</span>${control}</div>`;
+  const hint=`<div class="muted" style="font-size:12px">Uses the GPU for a minute or two. Waits for and gives way to any viewer.</div>`;
+  return head+hint+(c.result?toneMapCensusResultHtml(c.result):"");
+}
+function toneMapCensusResultHtml(r){
+  const lv=n=>n==null?"—":Number(n).toFixed(1);
+  const trio=a=>a?a.map(lv).join(" / "):"—";
+  const still=name=>name?`<button class="ghost sm" onclick="showCensusStill(this,${esc(JSON.stringify(name))})">still</button>`:"";
+  const rows=[];
+  (r.baseline||[]).forEach(b=>rows.push(`<tr><td>CPU chain <span class="muted">(baseline)</span></td><td>${esc(b.signal)}</td><td>noise ${lv(b.noise_floor)}</td><td></td><td>${lv(b.brightest_block_luma)}</td><td>${still(b.still)}</td></tr>`));
+  (r.candidates||[]).forEach(c=>(c.signals||[]).forEach(s=>rows.push(`<tr><td>${esc(c.label)}${c.selected?` <span class="muted">(selected)</span>`:""}</td><td>${esc(s.signal)}</td>${
+    s.distance
+      ? `<td>${trio(s.distance.max)}</td><td>${trio(s.distance.p95)}</td><td>${lv(s.brightest_block_luma)}</td><td>${still(s.still)}</td>`
+      : `<td colspan="4" class="muted" style="overflow-wrap:anywhere">${s.started?"ran, not measurable":"did not start"}: ${esc(s.reason||"")}</td>`
+  }</tr>`)));
+  const floor=r.noise_floor_zero?"The CPU chain reproduced itself exactly (noise floor 0).":"The CPU chain differed from itself between runs; read distances against its noise figure.";
+  return `<details class="muted" style="margin-top:4px;font-size:12px"><summary style="cursor:pointer">Census results <span class="muted">(${esc(r.key&&r.key.encoder_family||"")} · ${esc(r.key&&r.key.gpu_device||"")})</span></summary>
+    <div style="margin-top:6px;overflow-x:auto"><table><thead><tr><th>Graph</th><th>Signal</th><th>Max Δ Y/U/V</th><th>p95 Δ Y/U/V</th><th>Brightest Y</th><th></th></tr></thead><tbody>${rows.join("")}</tbody></table>
+    <div>${floor} Distances are from the CPU chain in 8-bit levels of 16×9 block means.</div><div id="tone-map-census-still"></div></div></details>`;
+}
+async function startToneMapCensus(btn){
+  btn.disabled=true;
+  try{ paintToneMapCensus(await api("/system/tone-map/census",{method:"POST"})); }
+  catch(e){ toast(e.message); btn.disabled=false; }
+}
+async function stopToneMapCensus(btn){
+  btn.disabled=true;
+  try{ paintToneMapCensus(await api("/system/tone-map/census/stop",{method:"POST"})); }
+  catch(e){ toast(e.message); btn.disabled=false; }
+}
+// The row describes the node Settings loaded. A poll or a Stop that a
+// balanced ingress answered from another node is not this node's census.
+function censusFromThisNode(census){
+  const sys=SETTINGS_DATA&&SETTINGS_DATA.sys;
+  return !!(census&&sys&&(!census.node_id||census.node_id===sys.node_id));
+}
+function paintToneMapCensus(census){
+  if(!censusFromThisNode(census)){
+    const mount=document.getElementById("tone-map-census");
+    if(mount&&!mount.querySelector(".census-elsewhere")) mount.insertAdjacentHTML("beforeend",`<div class="muted census-elsewhere" style="font-size:12px">Another node answered; reload Settings to see this node's census.</div>`);
+    return;
+  }
+  if(SETTINGS_DATA&&SETTINGS_DATA.sys&&SETTINGS_DATA.sys.tone_map) SETTINGS_DATA.sys.tone_map.census=census;
+  const mount=document.getElementById("tone-map-census");
+  if(mount) mount.innerHTML=toneMapCensusHtml(census);
+}
+function toneMapCensusActive(){
+  const c=SETTINGS_DATA&&SETTINGS_DATA.sys&&SETTINGS_DATA.sys.tone_map&&SETTINGS_DATA.sys.tone_map.census;
+  return !!c&&(c.state==="queued"||c.state==="running");
+}
+// A still is an authenticated route, so it is fetched with the session's
+// credential and shown from a blob rather than linked.
+async function showCensusStill(btn,name){
+  const mount=document.getElementById("tone-map-census-still");
+  if(!mount) return;
+  try{
+    const res=await api(`/system/tone-map/census/stills/${encodeURIComponent(name)}`,{raw:true});
+    if(!res.ok) throw new Error(`still unavailable (${res.status})`);
+    const url=URL.createObjectURL(await res.blob());
+    // One still is shown at a time; release the one it replaces.
+    if(mount.dataset.stillUrl) URL.revokeObjectURL(mount.dataset.stillUrl);
+    mount.dataset.stillUrl=url;
+    mount.innerHTML=`<div style="margin-top:6px">${esc(name)}</div><img alt="${esc(name)}" style="max-width:100%;margin-top:4px" src="${url}">`;
+  }catch(e){ toast(e.message); }
 }
 // What each library's storage reads at, in the unit the rest of the page uses
 // for bitrates — so "this mount does 240 Mb/s" and "this file is 69 Mb/s" can
