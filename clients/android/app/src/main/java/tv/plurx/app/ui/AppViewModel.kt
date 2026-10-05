@@ -508,6 +508,8 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
 
     fun setAppearance(appearance: Appearance) = updatePreferences { copy(appearance = appearance) }
 
+    fun setLibraryPresentation(value: tv.plurx.app.data.LibraryPresentation) = updatePreferences { copy(libraryPresentation = value) }
+
     fun setPosterSize(size: PosterSize) = updatePreferences { copy(posterSize = size) }
 
     fun setHomeGrouping(grouping: HomeGrouping) = updatePreferences { copy(homeGrouping = grouping) }
