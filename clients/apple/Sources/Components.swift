@@ -863,6 +863,8 @@ func cardShelfMetadata(_ item: Item) -> String {
     if let author = item.author, !author.isEmpty,
        item.isBook || item.isAudiobook {
         parts.append(author)
+    } else if (item.kind == "video" || item.kind == "photo"), let recorded = item.recordedAt {
+        parts.append(shortDate(recorded))
     } else if let season = item.seasonNumber, let episode = item.episodeNumber {
         parts.append("S\(season) E\(episode)")
     } else if let year = item.year {

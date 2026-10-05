@@ -148,7 +148,7 @@ had to be edited.
 | 16 | [`pages/home.js`](../../crates/plurxd/src/web/pages/home.js) | `buildHomeSections` and `viewHome` — the page-model seam. | 5027–5134 |
 | 17 | [`layouts/renderers.js`](../../crates/plurxd/src/web/layouts/renderers.js) | `classicChrome`, the layout resolution helpers, and the classic renderers. | 5135–5372 (less 5140–5147) |
 | 18 | [`layouts/header.js`](../../crates/plurxd/src/web/layouts/header.js) | The page header: back control and breadcrumb trail. | 5373–5392 |
-| 19 | [`layouts/library-grids.js`](../../crates/plurxd/src/web/layouts/library-grids.js) | `classicLibraryShell`, `classicLibraryItems`, `classicLibraryCount` — the one incremental route. | 5393–5657 |
+| 19 | [`layouts/library-grids.js`](../../crates/plurxd/src/web/layouts/library-grids.js) | `libraryView`, grouped Rows/Grid browsing, and the classic library regions — the incremental route. | 5393–5657 |
 | 20 | [`detail/helpers.js`](../../crates/plurxd/src/web/detail/helpers.js) | Detail-screen helpers, and the four inlined Material icon paths. | 5658–5697 |
 | 21 | [`detail/dynamic-range.js`](../../crates/plurxd/src/web/detail/dynamic-range.js) | Source vs delivered vs rendered HDR/DV, and the badges that say which. | 5698–5859 |
 | 22 | [`detail/track-facts.js`](../../crates/plurxd/src/web/detail/track-facts.js) | Shared track facts and the read-only media-preparation panel. | 5860–6005 |

@@ -3353,7 +3353,7 @@ id = "android.library-local-loader-production-bridge"
 commits = []
 supplements = "android.library-filter-and-focus-wiring"
 source = "clients/android/app/src/main/java/tv/plurx/app/ui/LibraryScreen.kt"
-source_anchor = "pager.setWatchFilter(filter)"
+source_anchor = "pager.setDriveToCompletion(rows || filter != WatchFilter.Everything || query.isNotBlank())"
 test = "tests/operations/test_android_library_paging_wiring.py"
 test_anchor = "test_view_model_route_uses_the_same_grid_and_watch_filter_policy"
 
@@ -4104,3 +4104,50 @@ source = "crates/plurxd/src/web/player/stall-diagnosis.js"
 source_anchor = "if(family!=null&&continuousFamilyPeak(p,p.qualityCandidateId)!=null) return own&&link>=family*1.8;"
 test = "tests/playback/current-main-effort-quality.test.js"
 test_anchor = "continuous family upgrades use the enforced family budget and the family's own objects"
+
+[[fixes]]
+# iOS does not promise an `.ended` for every `.began`. A hold raised on
+# `.began` that only `.ended` could clear stayed up for an hour over a picture
+# the viewer had resumed (iPad Pro, 2026-10-04), with the stall monitor off.
+# The viewer's press, and film actually playing, now end it, and a `.began`
+# while the viewer has already paused holds nothing.
+id = "apple.system-hold-ends-without-ended"
+commits = ["969aba483299e9293ec3ffc5fc9bc40b2ef0da67"]
+source = "clients/apple/Sources/PlayerController.swift"
+source_anchor = "if systemPaused, viewerOrigin { endSystemHoldForViewer(play: requested) }"
+test = "clients/apple/Tests/AppleClientTests.swift"
+test_anchor = "func testViewerPlayEndsASystemHoldThatIOSNeverEnded()"
+
+
+[[fixes]]
+id = "apple.native-library-group-membership"
+commits = ["b0b499bab73ee903f1759caa6a45b1861f45d975"]
+source = "clients/apple/Sources/LibraryGroups.swift"
+source_anchor = "static func make(_ items: [Item], sort: LibrarySort"
+test = "clients/apple/Tests/LibraryGroupsTests.swift"
+test_anchor = "func testTitleRowsUseServerKeysAndKeepEveryItemInPagerOrder()"
+
+[[fixes]]
+id = "android.native-library-group-membership"
+commits = []
+supplements = "apple.native-library-group-membership"
+source = "clients/android/app/src/main/java/tv/plurx/app/ui/LibraryGroups.kt"
+source_anchor = "internal fun libraryGroups(items: List<Item>, sort: String"
+test = "clients/android/app/src/test/java/tv/plurx/app/ui/LibraryGroupsTest.kt"
+test_anchor = "fun titleRowsUseServerKeysAndKeepEveryItemInPagerOrder()"
+
+[[fixes]]
+id = "apple.native-library-refresh-retains-rows"
+commits = ["a7dbd3542a3e8786ac3802b9ad933312f916cf55"]
+source = "clients/apple/Sources/LibraryGridCoordinator.swift"
+source_anchor = "if !preservingRowsDuringRefresh || current.complete {"
+test = "clients/apple/Tests/LibraryGridCoordinatorTests.swift"
+test_anchor = "func testReturningRefreshesWatchStateWithoutDroppingLateRows()"
+
+[[fixes]]
+id = "android.native-library-group-action-identity"
+commits = ["a21a9791cdea390148bb1a0c90ae17835ead8a80"]
+source = "clients/android/app/src/main/java/tv/plurx/app/ui/components/Common.kt"
+source_anchor = '.semantics { contentDescription = "View all $title" }'
+test = "clients/android/app/src/androidTest/java/tv/plurx/app/ui/LibraryRowsNavigationTest.kt"
+test_anchor = 'compose.onNodeWithContentDescription("View all Z · 21").performClick()'
