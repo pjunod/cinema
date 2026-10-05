@@ -1,5 +1,8 @@
 # Browse native libraries in grouped horizontal rows
 
+**Status:** built — merged in [PR #823](http://192.168.4.7:3000/noirr/plurx/pulls/823);
+physical-device deployment is not claimed.
+
 Build: 209
 Issue: #821
 
