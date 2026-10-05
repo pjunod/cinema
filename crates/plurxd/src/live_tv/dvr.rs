@@ -1336,7 +1336,7 @@ impl LiveTvManager {
             .filter(|transport| {
                 !transport.is_closing()
                     && transport.source_known()
-                    && self.serving.is_current(transport.owner_serving_generation)
+                    && self.serving.running(transport.owner_serving_generation)
                     && (!transport.live_viewers().is_empty() || !transport.live_sinks().is_empty())
                     && transport.viewer_seats() < MAX_CONSUMERS_PER_TRANSPORT
             })
@@ -1419,7 +1419,7 @@ impl LiveTvManager {
         let now = std::time::Instant::now();
         let mut observations = Vec::new();
         for transport in transports {
-            if !self.serving.is_current(transport.owner_serving_generation) {
+            if !self.serving.running(transport.owner_serving_generation) {
                 continue;
             }
             let sinks = transport
@@ -2487,7 +2487,7 @@ impl LiveTvManager {
                     Some(transport)
                         if !transport.is_closing()
                             && transport.same_tuner(&device_id, address)
-                            && transport.owner_serving_generation == serving_generation
+                            && self.serving.running(transport.owner_serving_generation)
                             && schedule::may_share_transport(
                                 transport.open_until(),
                                 row.capture_start,
@@ -3310,10 +3310,10 @@ fn store_error(error: plurx_core::error::StoreError) -> LiveTvError {
 async fn run_transport(
     client: reqwest::Client,
     manager: std::sync::Weak<LiveTvManager>,
-    serving: crate::serving_fence::ServingAuthority,
+    serving: super::LiveTvAuthority,
     transport: Arc<DvrTransport>,
 ) -> Result<(), LiveTvError> {
-    if !serving.is_current(transport.owner_serving_generation) {
+    if !serving.serving(transport.owner_serving_generation) {
         return Err(LiveTvError::OwnerUnavailable(
             crate::serving_fence::SERVING_FENCED_MESSAGE.into(),
         ));
@@ -3429,7 +3429,7 @@ async fn reprobe_outcome(
 /// whose bounded queue is full is evicted; nothing else is (plan §3.2).
 async fn pump_tuner_fanout(
     input: LiveTunerInput,
-    serving: crate::serving_fence::ServingAuthority,
+    serving: super::LiveTvAuthority,
     transport: Arc<DvrTransport>,
     prober: Option<Arc<super::SystemInfo>>,
 ) -> Result<(), LiveTvError> {
@@ -3487,12 +3487,14 @@ async fn pump_tuner_fanout(
                 (bytes, false)
             }
         };
-        // Checked per chunk, exactly as a session's fence is. A node that
-        // has lost serving authority must stop writing within one read
-        // timeout: the replacement owner is about to open its own attempt,
-        // and two processes writing one recording is the corruption the
-        // attempt files exist to make impossible.
-        if !serving.is_current(transport.owner_serving_generation) {
+        // Checked per chunk, exactly as a session's fence is. A node whose
+        // loss of serving authority outlasts the session grace must stop
+        // writing within one read timeout. Writing on through a loss inside
+        // the grace is safe: a replacement owner can claim this capture only
+        // after this owner's 30 s ledger lease has lapsed, and at least
+        // twenty seconds of it remain when the grace runs out, so two
+        // processes never write one recording.
+        if !serving.running(transport.owner_serving_generation) {
             for sink in transport.live_sinks() {
                 transport
                     .metrics
@@ -4622,7 +4624,7 @@ mod tests {
             .expect("slow writer")
             .queued_bytes
             .clone();
-        let serving = crate::serving_fence::ServingAuthority::always_ready();
+        let serving = super::super::LiveTvAuthority::always_ready();
         let transport = test_transport(
             vec![Arc::clone(&fast), Arc::clone(&slow)],
             delivered,
@@ -4691,7 +4693,7 @@ mod tests {
             Arc::clone(&delivered),
             Arc::clone(&metrics),
         );
-        let serving = crate::serving_fence::ServingAuthority::always_ready();
+        let serving = super::super::LiveTvAuthority::always_ready();
         let transport = test_transport(
             vec![Arc::clone(&sink)],
             delivered,
@@ -4783,7 +4785,7 @@ mod tests {
             Arc::clone(&delivered),
             Arc::clone(&metrics),
         );
-        let serving = crate::serving_fence::ServingAuthority::always_ready();
+        let serving = super::super::LiveTvAuthority::always_ready();
         let transport = test_transport(
             vec![Arc::clone(&failing), Arc::clone(&sibling)],
             delivered,
@@ -4863,7 +4865,7 @@ mod tests {
             Arc::clone(&delivered),
             metrics,
         );
-        let serving = crate::serving_fence::ServingAuthority::always_ready();
+        let serving = super::super::LiveTvAuthority::always_ready();
         let transport = test_transport(
             vec![Arc::clone(&left), Arc::clone(&right)],
             delivered,
@@ -4933,7 +4935,7 @@ mod tests {
             channel_id,
             device_id: "fixture-device",
             address: std::net::Ipv4Addr::new(10, 42, 1, 20),
-            serving_generation: 0,
+            running_floor: 0,
         }
     }
 
@@ -5077,8 +5079,10 @@ mod tests {
         other_address.address = std::net::Ipv4Addr::new(10, 42, 1, 21);
         let mut other_device = seat_for("7.1");
         other_device.device_id = "another-device";
+        // A transport whose loss of serving authority outlasted the grace
+        // (its generation is below the running floor) is never joined.
         let mut other_authority = seat_for("7.1");
-        other_authority.serving_generation = 1;
+        other_authority.running_floor = 1;
         for seat in [other_address, other_device, other_authority] {
             assert!(
                 matches!(
@@ -5101,7 +5105,7 @@ mod tests {
     #[tokio::test]
     async fn a_stalled_viewer_is_evicted_and_its_sibling_continues() {
         let metrics = Arc::new(LiveTvMetrics::default());
-        let serving = crate::serving_fence::ServingAuthority::always_ready();
+        let serving = super::super::LiveTvAuthority::always_ready();
         let transport = test_transport_with(
             Vec::new(),
             serving.admit().expect("serving generation"),
@@ -5173,7 +5177,7 @@ mod tests {
     async fn the_last_detach_closes_the_transport_and_releases_the_tuner() {
         let root = tempfile::tempdir().expect("root");
         let manager = transport_test_manager(root.path());
-        let serving = crate::serving_fence::ServingAuthority::always_ready();
+        let serving = super::super::LiveTvAuthority::always_ready();
         let transport = test_transport_with(
             Vec::new(),
             serving.admit().expect("serving generation"),
@@ -5226,7 +5230,7 @@ mod tests {
     #[tokio::test]
     async fn a_recording_keeps_the_transport_open_past_the_last_viewer() {
         let metrics = Arc::new(LiveTvMetrics::default());
-        let serving = crate::serving_fence::ServingAuthority::always_ready();
+        let serving = super::super::LiveTvAuthority::always_ready();
         let writer = MemoryWriter::default();
         let written = Arc::clone(&writer.bytes);
         let sink = test_sink(
@@ -5273,7 +5277,7 @@ mod tests {
     async fn closing_a_shared_transport_ends_every_viewer_and_joins_its_reader() {
         let root = tempfile::tempdir().expect("root");
         let manager = transport_test_manager(root.path());
-        let serving = crate::serving_fence::ServingAuthority::always_ready();
+        let serving = super::super::LiveTvAuthority::always_ready();
         let transport = DvrTransport::new(TransportInit {
             channel: test_channel(),
             generation: 3,
@@ -5547,7 +5551,7 @@ mod tests {
         let root = tempfile::tempdir().expect("root");
         let manager = transport_test_manager(root.path());
         let metrics = Arc::new(LiveTvMetrics::default());
-        let serving = crate::serving_fence::ServingAuthority::always_ready();
+        let serving = super::super::LiveTvAuthority::always_ready();
         let scratch = root.path().join("transport");
         std::fs::create_dir_all(&scratch).expect("transport scratch");
         let transport = DvrTransport::new(TransportInit {
@@ -5670,7 +5674,7 @@ mod tests {
         // its FFmpeg read. A reading opener takes the prefix and the live
         // bytes behind it, and a viewer that stops reading is still evicted.
         let metrics = Arc::new(LiveTvMetrics::default());
-        let serving = crate::serving_fence::ServingAuthority::always_ready();
+        let serving = super::super::LiveTvAuthority::always_ready();
         let transport = test_transport_with(
             Vec::new(),
             serving.admit().expect("serving generation"),
@@ -5768,6 +5772,66 @@ mod tests {
         );
     }
 
+    /// A leader restart costs the owner its serving authority for a second
+    /// or two. Inside the session grace the transport keeps feeding every
+    /// recording: a replacement owner cannot claim the capture while this
+    /// owner's ledger lease is valid, so stopping would only cut a hole.
+    #[tokio::test]
+    async fn a_transport_keeps_writing_through_a_loss_inside_the_grace() {
+        use plurx_core::cluster::migration::status::ReplicationMonitor;
+
+        let metrics = Arc::new(LiveTvMetrics::default());
+        let delivered = Arc::new(AtomicU64::new(0));
+        let left_writer = MemoryWriter::default();
+        let left_bytes = Arc::clone(&left_writer.bytes);
+        let right_writer = MemoryWriter::default();
+        let right_bytes = Arc::clone(&right_writer.bytes);
+        let left = test_sink(
+            "graced-left",
+            Box::new(left_writer),
+            Arc::clone(&delivered),
+            Arc::clone(&metrics),
+        );
+        let right = test_sink(
+            "graced-right",
+            Box::new(right_writer),
+            Arc::clone(&delivered),
+            metrics,
+        );
+        let fence =
+            crate::serving_fence::ServingFence::new(ReplicationMonitor::sqlite().metrics_handle());
+        let serving = super::super::LiveTvAuthority::new(fence.authority());
+        let generation = serving.admit().expect("serving generation");
+        let transport = test_transport(
+            vec![Arc::clone(&left), Arc::clone(&right)],
+            delivered,
+            generation,
+        );
+        // Lost, and the grace is not spent: the floor stays where it was.
+        fence.validation_set_ready(false).await;
+        let chunks = vec![
+            bytes::Bytes::from_static(b"kept-a"),
+            bytes::Bytes::from_static(b"kept-b"),
+        ];
+        let expected = chunks.concat();
+        let result = pump_tuner_fanout(
+            tuner_input(chunks, Arc::new(std::sync::Mutex::new(Vec::new()))),
+            serving,
+            transport,
+            None,
+        )
+        .await;
+        assert!(
+            matches!(result, Err(LiveTvError::StreamFailed(_))),
+            "the pump runs to the end of its input, not to a fence: {result:?}"
+        );
+        assert!(!left.cancel.is_cancelled(), "no recording is cancelled");
+        assert_eq!(settle_sink(&left).await, SinkStopResult::Settled);
+        assert_eq!(settle_sink(&right).await, SinkStopResult::Settled);
+        assert_eq!(*left_bytes.lock().expect("left bytes"), expected);
+        assert_eq!(*right_bytes.lock().expect("right bytes"), expected);
+    }
+
     #[tokio::test]
     async fn a_fenced_transport_cancels_every_sink_before_exiting() {
         use plurx_core::cluster::migration::status::ReplicationMonitor;
@@ -5792,7 +5856,7 @@ mod tests {
         );
         let fence =
             crate::serving_fence::ServingFence::new(ReplicationMonitor::sqlite().metrics_handle());
-        let serving = fence.authority();
+        let serving = super::super::LiveTvAuthority::new(fence.authority());
         let generation = serving.admit().expect("serving generation");
         let transport = test_transport(
             vec![Arc::clone(&left), Arc::clone(&right)],
@@ -5800,6 +5864,9 @@ mod tests {
             generation,
         );
         fence.validation_set_ready(false).await;
+        // The loss outlasted the session grace: the authority's loop raises
+        // the running floor past this transport's generation.
+        assert!(serving.end_running_before(fence.authority().state().loss_generation));
 
         let result = pump_tuner_fanout(
             tuner_input(

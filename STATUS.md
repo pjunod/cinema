@@ -27,6 +27,24 @@ addressed (scheme respelled for Coil, Android failure backoff, Apple lock
 kept off suspension points, grid headers keep their width without artwork,
 wiring pinned by source tests). Not yet on hardware.
 
+## A leader restart no longer ends progressive or Live TV playback
+
+**[PR #807](http://192.168.4.7:3000/noirr/plurx/pulls/807), branch `fix/progressive-fence-grace`; not deployed.**
+Paul's standing rule is that a quorum leader restart must not interrupt
+playback. #798 gave the rolling registry a 5 s serving-fence grace; two more
+owners of running playback still treated any fence generation bump as final,
+even after authority came back. The progressive `stream.mp4` remux owner
+killed ffmpeg and ended the response, with no respawn, on every node. On the
+Live TV owner, the session observer, tuner fan-out, lease loop and request
+fence ended every session, shared transport and recording, and requests
+during the blip answered 410. Both now use #798's policy, moved beside the
+fence as `serving_fence::SessionGrace`. Brief losses keep the work, and
+nothing is published while authority is lost. Live TV requests answer a
+retryable 503. Sustained losses end the work within one grace, as before.
+RCA: `docs/streaming/BAD-BOYS-APPLE-TV-INTERRUPTIONS-RCA.md` finding 6.
+Still owed: the GPT leader-restart check under live progressive, rolling and
+Live TV playback, before and after deploy.
+
 ## 2026-10-04: the architecture effort is on `main`; the close-out is a draft PR
 
 **All four nodes were deployed to `b5e39b8bb` on 2026-10-04; later `main`
