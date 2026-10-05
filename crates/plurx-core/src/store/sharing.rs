@@ -8,6 +8,73 @@ use async_trait::async_trait;
 use serde::de::DeserializeOwned;
 use uuid::Uuid;
 
+/// Wall-clock milliseconds that every sharing freshness bound is measured on.
+///
+/// Authorities, owner stamps and renewals are accepted only within seconds of
+/// this clock, so it is the one place that reads it. Under `cfg(test)` a
+/// fixture may install [`LogicalClock`] on its thread instead: a scenario that
+/// holds one authority across dozens of guarded writes then proves the guards,
+/// not how quickly a loaded runner schedules it.
+pub(crate) fn wall_clock_ms() -> Result<i64, StoreError> {
+    #[cfg(test)]
+    if let Some(now) = LogicalClock::tick() {
+        return Ok(now);
+    }
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()
+        .and_then(|duration| i64::try_from(duration.as_millis()).ok())
+        .filter(|value| *value > 0)
+        .ok_or_else(invalid)
+}
+
+#[cfg(test)]
+thread_local! {
+    static LOGICAL_NOW: std::cell::Cell<Option<i64>> = const { std::cell::Cell::new(None) };
+}
+
+/// A deterministic stand-in for [`wall_clock_ms`] on the installing thread.
+///
+/// It starts at the real time and advances exactly one millisecond per read,
+/// so stamps stay strictly ordered (a renewal is still later than the write it
+/// renews) while elapsed time is a property of the scenario, never of runner
+/// load. Freshness refusals are still proven by stamps the test ages itself.
+/// Reads happen in async code on the test thread (current-thread runtime);
+/// nothing reads it from a blocking-pool closure. Dropping it restores the
+/// system clock.
+#[cfg(test)]
+pub(crate) struct LogicalClock(std::marker::PhantomData<*const ()>);
+
+#[cfg(test)]
+impl LogicalClock {
+    pub(crate) fn install() -> Self {
+        let start = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("real start time")
+            .as_millis();
+        LOGICAL_NOW.with(|now| {
+            assert!(now.get().is_none(), "one logical clock per test thread");
+            now.set(Some(i64::try_from(start).expect("millisecond start")));
+        });
+        Self(std::marker::PhantomData)
+    }
+
+    fn tick() -> Option<i64> {
+        LOGICAL_NOW.with(|now| {
+            let current = now.get()?;
+            now.set(Some(current + 1));
+            Some(current)
+        })
+    }
+}
+
+#[cfg(test)]
+impl Drop for LogicalClock {
+    fn drop(&mut self) {
+        LOGICAL_NOW.with(|now| now.set(None));
+    }
+}
+
 pub const SCHEMA: &str = include_str!("sharing_schema.sql");
 #[derive(Clone)]
 pub(crate) enum Value {

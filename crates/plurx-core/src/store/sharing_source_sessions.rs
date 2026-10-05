@@ -15,7 +15,6 @@ use crate::{
 use async_trait::async_trait;
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
-use std::time::{SystemTime, UNIX_EPOCH};
 use uuid::Uuid;
 
 pub const CANDIDATE_SCHEMA: &str = include_str!("sharing_source_session_bindings_schema.sql");
@@ -47,12 +46,7 @@ fn source_owner_removal_key(members: &SourceAdmissionMembers, node: &str) -> Str
 }
 
 fn now_ms() -> Result<i64, StoreError> {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .ok()
-        .and_then(|duration| i64::try_from(duration.as_millis()).ok())
-        .filter(|value| *value > 0)
-        .ok_or_else(invalid)
+    super::sharing::wall_clock_ms()
 }
 
 fn quote(value: &str) -> String {

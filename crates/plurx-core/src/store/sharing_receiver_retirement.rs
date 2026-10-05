@@ -14,7 +14,6 @@ use crate::{
 };
 use async_trait::async_trait;
 use sha2::{Digest, Sha256};
-use std::time::{SystemTime, UNIX_EPOCH};
 #[async_trait]
 pub trait SharingReceiverRetirementStore: Send + Sync {
     /// Cleanup-only exact claim with no created route/resources. Caller retains
@@ -119,12 +118,7 @@ impl<T: Backend> SharingReceiverRetirementStore for T {
                 Err(e) => Err(e),
             };
         }
-        let now = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .ok()
-            .and_then(|d| i64::try_from(d.as_millis()).ok())
-            .filter(|n| *n > 0)
-            .ok_or_else(invalid)?;
+        let now = super::sharing::wall_clock_ms()?;
         let update = "UPDATE media_session_requests SET state='failed',claim_expires_at_ms=$2,updated_at_ms=$2 WHERE incarnation_id=json_extract($1,'$.incarnation') AND user_id=json_extract($1,'$.user') AND request_id=json_extract($1,'$.request') AND state='starting'";
         let written = format!("{after} AND EXISTS(SELECT 1 FROM media_session_requests r WHERE {identity} AND r.updated_at_ms=$2 AND r.claim_expires_at_ms=$2)");
         let statements = vec![
@@ -238,11 +232,7 @@ impl<T: Backend> SharingReceiverRetirementStore for T {
         digest.update(b"plurx.receiver.retirement-context.v1\0");
         digest.update(context_identity.as_bytes());
         let receipt=serde_json::json!({"kind":"receiver_retirement_v1","context":format!("{:x}",digest.finalize()),"confirmation":w.confirmation_id(),"disposition":disposition,"reason":reason}).to_string();
-        let now = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .ok()
-            .and_then(|d| i64::try_from(d.as_millis()).ok())
-            .ok_or_else(invalid)?;
+        let now = super::sharing::wall_clock_ms()?;
         let vals = vec![
             Value::Text(context),
             Value::Text(receipt),
@@ -439,10 +429,7 @@ pub(crate) async fn metadata_retirement_matrix<T: Backend + super::MediaSessionS
         .await
         .expect("successor authority")
         .expect("current original login");
-    let actual = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .expect("clock")
-        .as_millis() as i64;
+    let actual = crate::store::sharing::wall_clock_ms().expect("clock");
     let next = crate::domain::MediaSessionActivation {
         incarnation_id: next_intent.recipe.source_request_id.to_string(),
         session_id: uuid::Uuid::new_v4().to_string(),
@@ -537,10 +524,7 @@ pub(crate) async fn metadata_retirement_matrix<T: Backend + super::MediaSessionS
             ])
             .await
             .expect("logout/import revocation and displaced old pointer");
-        let actual = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .expect("clock")
-            .as_millis() as i64;
+        let actual = crate::store::sharing::wall_clock_ms().expect("clock");
         let ack = crate::domain::MediaSessionTerminalAck {
             incarnation_id: inc.to_string(),
             session_id: witness.attachment.owner.session_id.to_string(),
@@ -754,6 +738,7 @@ mod pending_request_tests {
     }
     #[tokio::test]
     async fn sharing_receiver_pending_retirement_requires_exact_claim_and_absent_resources() {
+        let _clock = crate::store::sharing::LogicalClock::install();
         let dir = tempfile::tempdir().expect("pool");
         for rebuilt in [false, true] {
             for pooled in [false, true] {
@@ -828,10 +813,7 @@ mod pending_request_tests {
                     store.sharing_txn(vec![("INSERT INTO sharing_viewers VALUES($1,$2)".into(),vec![user.id.into(),Uuid::new_v4().into()]),("INSERT INTO sharing_imports(id,source_server_id,catalogue_epoch,source_name,claim_id,remote_grant_id,credential_envelope,endpoints_json,assignment_generation,lifecycle_generation,endpoint_generation,state,created_at_ms,updated_at_ms) VALUES($1,$2,$3,'Source',$4,$5,'unopened metadata fixture','[]',1,1,1,'active',1,1)".into(),vec![w.intent.scope.import_id.into(),w.intent.scope.source_server_id.into(),w.intent.scope.catalogue_epoch.into(),w.intent.scope.claim_id.into(),w.intent.scope.remote_grant_id.into()]),("INSERT INTO sharing_assignments VALUES($1,'0',$2,1)".into(),vec![w.intent.scope.import_id.into(),user.id.into()])]).await.expect("actual B import/assignment metadata before revocation");
                     let principal = PlaybackPrincipal::LocalUser { user_id: user.id };
                     let inc = w.intent.recipe.source_request_id.to_string();
-                    let now = SystemTime::now()
-                        .duration_since(UNIX_EPOCH)
-                        .expect("clock")
-                        .as_millis() as i64;
+                    let now = crate::store::sharing::wall_clock_ms().expect("clock");
                     assert!(matches!(
                         store
                             .claim_media_session_request(
