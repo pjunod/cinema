@@ -3704,3 +3704,11 @@ source = "crates/plurxd/src/web/player/transport.js"
 source_anchor = "async function resumeQualityBoundary(p){"
 test = "tests/playback/web-media-recovery.test.js"
 test_anchor = "Play after a long pause never seeks when Auto keeps the route"
+
+[[fixes]]
+id = "android.seek-during-a-prepared-switch-is-held-not-dropped"
+commits = ["8ed4a3b821ccff4d2e2c515d18124b2348d6c8f6"]
+source = "clients/android/app/src/main/java/tv/plurx/app/player/Controller.kt"
+source_anchor = "internal class SeekDeferredBehindSwitch {"
+test = "clients/android/app/src/test/java/tv/plurx/app/player/PlaybackControlReporterTest.kt"
+test_anchor = "@Test fun seekDeferredBehindASwitchRunsExactlyOnceAndOnlyWhileCurrent()"
