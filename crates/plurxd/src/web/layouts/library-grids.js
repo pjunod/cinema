@@ -40,11 +40,17 @@ function setLibraryPresentation(value){
   if(LIB_VIEW)LIB_VIEW.draw(LIB_VIEW.done);
 }
 function libraryShowGroup(key){
+  const previous=LIB_GROUP;
   LIB_GROUP=key;LIB_PAGE_AT=0;
   if(LIB_VIEW)LIB_VIEW.draw(LIB_VIEW.done);
+  if(!key&&document.getElementById(`library-row-${previous}`)){libraryJump(previous);return;}
   const target=libraryElement(document,key?"#library-group-back":"#library-group-index button");
-  if(target)target.focus({preventScroll:true});
+  if(target){
+    window.scrollTo({top:window.scrollY+target.getBoundingClientRect().top-Math.max(0,stickyFloor())-12,behavior:libraryScrollBehavior()});
+    target.focus({preventScroll:true});
+  }
 }
+
 /** @returns {HTMLElement|null} */
 function libraryElement(root,selector){return root.querySelector(selector);}
 function libraryTitleKey(it){return it.sort_title??sortKey(it.title);}
@@ -216,9 +222,24 @@ function libraryPaintControls(groups,rows,done){
   const per=libraryElement(document,".library-page-size");if(per)per.hidden=rows;
   const nav=document.getElementById("library-group-index");if(!nav)return;
   nav.hidden=!rows;
-  const markup=rows?groups.map(g=>`<button class="ghost sm" data-jump="${g.key}" onclick="libraryJump('${g.key}')">${esc(g.label)}</button>`).join(""):"";
-  // Preserve keyboard focus in the index when only counts change.
-  if(nav.dataset.keys!==markup){nav.innerHTML=markup;nav.dataset.keys=markup;}
+  const focused=document.activeElement,scroll=nav.scrollLeft;
+  const buttons=new Map(Array.from(nav.children).map(b=>[b.getAttribute("data-jump"),b]));
+  let before=nav.firstElementChild;
+  for(const group of rows?groups:[]){
+    let button=buttons.get(group.key);
+    if(!button){
+      button=document.createElement("button");button.className="ghost sm";
+      button.setAttribute("data-jump",group.key);
+      button.setAttribute("onclick",`libraryJump('${group.key}')`);
+      button.textContent=group.label;
+    }
+    if(button!==before)nav.insertBefore(button,before);
+    before=button.nextElementSibling;
+    buttons.delete(group.key);
+  }
+  for(const button of buttons.values())button.remove();
+  if(focused instanceof HTMLElement&&nav.contains(focused)&&document.activeElement!==focused)focused.focus({preventScroll:true});
+  nav.scrollLeft=scroll;
   nav.setAttribute("aria-label",done?"Jump to group":"Jump to loaded group; more groups may appear");
   const detail=document.getElementById("library-group-detail");
   if(detail){

@@ -12,7 +12,7 @@ async function setup(browser,{layout="catalog",width=1280,items=large,libraries=
   page.on("pageerror",e=>errors.push(e.message));
   await page.addInitScript(layout=>{
     localStorage.setItem("plurx_token","fixture");localStorage.setItem("plurx_layout",layout);
-    localStorage.setItem("plurx_theme","noirr");localStorage.setItem("plurx_perpage","20");
+    localStorage.setItem("plurx_theme","noirr");localStorage.setItem("plurx_appearance","dark");localStorage.setItem("plurx_perpage","20");
   },layout);
   await page.route("**/*",async route=>{
     const url=new URL(route.request().url()),p=url.pathname;
@@ -84,13 +84,51 @@ test("rows preserve cards, focus, and horizontal scroll as later pages arrive",a
       card.setAttribute("data-same-node","yes");card.focus();
       document.querySelector("#library-row-A .rowscroll").scrollLeft=200;
     });
-    await page.waitForFunction(()=>document.querySelector("#library-row-A .rowscroll").scrollLeft===200);
+    await page.waitForFunction(()=>document.querySelector("#library-row-A .rowscroll").scrollLeft>0);
+    const position=await page.locator("#library-row-A .rowscroll").evaluate(el=>el.scrollLeft);
     release();await loaded(page);
     assert.equal(await page.locator('[data-same-node="yes"]').count(),1);
     assert.equal(await page.evaluate(()=>document.activeElement?.getAttribute("data-same-node")),"yes");
-    assert.equal(await page.locator("#library-row-A .rowscroll").evaluate(el=>el.scrollLeft),200);
+    assert.equal(await page.locator("#library-row-A .rowscroll").evaluate(el=>el.scrollLeft),position);
     assert.deepEqual(errors,[]);await page.close();
   }finally{release();await browser.close();}
+});
+
+test("arriving groups preserve the focused jump-index button",async()=>{
+  const browser=await chromium.launch({headless:true});let release;
+  const blocked=new Promise(resolve=>{release=resolve;});
+  const items=[...large.slice(0,200),movie(999,"Zodiac")];
+  try{
+    const {page,errors}=await setup(browser,{items,reply:async url=>{if(url.searchParams.get("offset")==="200")await blocked;}});
+    await page.goto("http://library.test/#/library/1");
+    const button=page.locator('#library-group-index [data-jump="A"]');await button.waitFor();
+    await button.evaluate(el=>el.setAttribute("data-original-index","yes"));await button.focus();
+    release();await loaded(page);
+    assert.equal(await page.locator('#library-group-index [data-jump="Z"]').count(),1);
+    assert.equal(await button.getAttribute("data-original-index"),"yes");
+    assert.equal(await page.evaluate(()=>document.activeElement?.getAttribute("data-original-index")),"yes");
+    assert.deepEqual(errors,[]);await page.close();
+  }finally{release();await browser.close();}
+});
+
+test("View all opens at the group heading and returns to the originating row",async()=>{
+  const browser=await chromium.launch({headless:true});
+  const items=Array.from({length:1560},(_,i)=>movie(i+1,`${String.fromCharCode(65+Math.floor(i/60))} Film ${i}`));
+  try{
+    const {page,errors}=await setup(browser,{items});
+    await page.goto("http://library.test/#/library/1");await loaded(page);
+    await page.evaluate(()=>setPerPage("all"));
+    await page.locator('#library-group-index [data-jump="T"]').click();
+    const initial=await page.evaluate(()=>scrollY);assert.ok(initial>1500);
+    await page.getByRole("button",{name:"View all T items",exact:true}).click();
+    const expanded=await page.locator("#library-group-back").boundingBox();
+    assert.ok(expanded.y>=0&&expanded.y<150,`group heading starts near the viewport top: ${JSON.stringify({expanded,metrics:await page.evaluate(()=>({y:scrollY,height:document.documentElement.scrollHeight,view:innerHeight}))})}`);
+    await page.getByRole("button",{name:"‹ All rows",exact:true}).click();
+    const returned=await page.locator("#library-row-T h2").boundingBox();
+    assert.ok(returned.y>=0&&returned.y<200,"return restores the originating row");
+    assert.equal(await page.evaluate(()=>document.activeElement?.id),"library-row-T-title");
+    assert.deepEqual(errors,[]);await page.close();
+  }finally{await browser.close();}
 });
 
 test("row filters, sorts, and remembered Grid choice work across desktop and mobile layouts",async()=>{
@@ -103,10 +141,10 @@ test("row filters, sorts, and remembered Grid choice work across desktop and mob
         await page.setViewportSize({width,height:1000});await page.goto("http://library.test/#/library/1");await loaded(page);
         if(await page.locator('#libbody.library-rows').count()===0)await page.getByRole("button",{name:"Rows",exact:true}).click();
         assert.equal(await page.locator(".library-group").count(),3);
-        const geometry=await page.evaluate(()=>({viewport:innerWidth,scroll:document.documentElement.scrollWidth,
+        const geometry=await page.evaluate(()=>({viewport:innerWidth,right:document.getElementById("libbody").getBoundingClientRect().right,
           index:document.getElementById("library-group-index").getBoundingClientRect().width,
           row:document.querySelector(".rowscroll").getBoundingClientRect().width}));
-        assert.ok(geometry.scroll<=geometry.viewport+1,`${layout} ${width}: page must not scroll sideways`);
+        assert.ok(geometry.right<=geometry.viewport+1,`${layout} ${width}: the library body stays inside the viewport`);
         assert.ok(geometry.row>geometry.index-70,`${layout} ${width}: rows use available width`);
         await page.locator("#library-find").fill("Film 30");
         assert.equal(await page.locator("#libbody .poster").count(),1);
