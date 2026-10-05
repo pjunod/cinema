@@ -1553,6 +1553,8 @@ web-unit-check: ## Run every Node web and playback test (no browser)
 	@node --test tests/playback/frame-diagnostics.test.js
 	@node tests/playback/network-shaping.test.js
 	@node --test tests/playback/preparation-measurement.test.js
+	@node --test tests/playback/frame-clock.test.js
+	@node --test tests/playback/quality-cancellation.test.js
 	# Every tests/{web,playback}/*.test.js is run here or is required by a test
 	# that is; tests/operations/test_web_test_inventory.py fails a pull request
 	# that adds one this recipe would not run.
