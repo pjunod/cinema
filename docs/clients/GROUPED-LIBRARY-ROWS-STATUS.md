@@ -110,3 +110,13 @@ was request changes for three P2 findings:
 | A new group replaced every jump-index button and lost focus. | Index buttons reconcile by group identity, preserving focus and scroll. | Delayed page with a focused index button. |
 
 No second review is requested. Validation follows these corrections.
+
+## Candidate handoff — 2026-10-05
+
+Review corrections and focused passing evidence are committed in `b45b81409`.
+The PR is ready for merge validation; `main` remained at `bf0bb6acf` through
+this local acceptance pass. Forgejo's API title change cleared draft status
+without emitting a ready-for-review run, so this documentation update supplies
+the normal ready-PR synchronization event. It changes no tested source.
+The [PR check list](http://192.168.4.7:3000/noirr/plurx/pulls/821) is the
+source of truth for the resulting candidate's gate and landing status.
