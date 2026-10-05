@@ -465,6 +465,77 @@ fn refusal_response(refusal: &SharedControlRefusal, tuple: &ReceiverTuple) -> Re
     )
 }
 
+/// A control exchange B answers itself, before any Source exchange is owned
+/// or sent.
+#[derive(Debug, PartialEq, Eq)]
+struct PrecheckRefusal {
+    status: StatusCode,
+    code: &'static str,
+    message: &'static str,
+    invalid_field: Option<&'static str>,
+}
+
+impl PrecheckRefusal {
+    fn response(&self, tuple: &ReceiverTuple) -> Response {
+        control_error(
+            self.status,
+            self.code,
+            self.message,
+            Some(tuple.incarnation.to_string()),
+            Some(tuple.owner_epoch),
+            None,
+            self.invalid_field,
+        )
+    }
+}
+
+/// What B refuses on its own tuple: a body outside the bounded v1 contract, a
+/// foreign generation or owner epoch, or an acknowledgement `plan` cannot
+/// settle against B's own successor slot (an action this slot never offered,
+/// or one past its deadline). `Ok` carries the acknowledgement's plan, if the
+/// exchange has one.
+fn receiver_control_precheck(
+    request: &ControlRequestV1,
+    tuple: &ReceiverTuple,
+    plan: impl FnOnce(&ControlRequestV1) -> Result<AckPlan, ()>,
+) -> Result<Option<AckPlan>, PrecheckRefusal> {
+    // The largest target-duration clamp: B refuses only what the Source
+    // would certainly refuse, and the Source re-validates exactly.
+    if let Err(field) = request.validate(tuple.duration_ms, 30_000) {
+        return Err(PrecheckRefusal {
+            status: StatusCode::BAD_REQUEST,
+            code: "invalid_control",
+            message: "a control field is outside the bounded v1 contract",
+            invalid_field: Some(field),
+        });
+    }
+    if request.generation != tuple.incarnation.to_string() {
+        return Err(PrecheckRefusal {
+            status: StatusCode::CONFLICT,
+            code: "stale_control",
+            message: "the control generation is no longer current",
+            invalid_field: None,
+        });
+    }
+    if request.control_epoch != tuple.owner_epoch {
+        return Err(PrecheckRefusal {
+            status: StatusCode::CONFLICT,
+            code: "owner_changed",
+            message: "the media session owner epoch changed",
+            invalid_field: None,
+        });
+    }
+    if request.acknowledgement.is_none() {
+        return Ok(None);
+    }
+    plan(request).map(Some).map_err(|()| PrecheckRefusal {
+        status: StatusCode::CONFLICT,
+        code: "stale_control",
+        message: "the acknowledgement names no current prepared successor",
+        invalid_field: None,
+    })
+}
+
 fn unavailable_without_tuple() -> Response {
     control_error(
         StatusCode::TOO_EARLY,
@@ -485,6 +556,29 @@ fn with_writer(response: Response, guard: Arc<dyn Send + Sync>) -> Response {
         frame
     });
     Response::from_parts(parts, axum::body::Body::from_stream(stream))
+}
+
+/// B's Shared status envelope: the agreed grammar, bound to B's own tuple and
+/// the complete shared file reference, around the Source's relayed metrics.
+/// Nothing else is named; no Source identity crosses back to the client.
+fn shared_status_body(
+    recipe: &plurx_core::sharing_receiver_sessions::RemoteSourceRecipe,
+    tuple: &ReceiverTuple,
+    status: &SharedVodStatus,
+) -> serde_json::Value {
+    serde_json::json!({
+        "subject": "shared",
+        "reference": {
+            "item": recipe.reference,
+            "file_id": recipe.file_id,
+            "revision": recipe.file_revision,
+            "lifecycle_generation": recipe.lifecycle_generation,
+        },
+        "session_id": tuple.session,
+        "incarnation_id": tuple.incarnation,
+        "control_epoch": tuple.owner_epoch,
+        "status": status,
+    })
 }
 
 /// `GET /api/v1/hls/{B}/status` for a shared session: the agreed Shared
@@ -510,20 +604,7 @@ pub(super) async fn receiver_status(
                 && current.owner_epoch == tuple.owner_epoch => {}
         _ => return StatusCode::SERVICE_UNAVAILABLE.into_response(),
     }
-    let recipe = &actor.0.intent.recipe;
-    let body = serde_json::json!({
-        "subject": "shared",
-        "reference": {
-            "item": recipe.reference,
-            "file_id": recipe.file_id,
-            "revision": recipe.file_revision,
-            "lifecycle_generation": recipe.lifecycle_generation,
-        },
-        "session_id": tuple.session,
-        "incarnation_id": tuple.incarnation,
-        "control_epoch": tuple.owner_epoch,
-        "status": status,
-    });
+    let body = shared_status_body(&actor.0.intent.recipe, &tuple, &status);
     let guard = match actor.retain_accepted_connection(state, connection) {
         Ok(guard) => guard,
         Err(_) => return StatusCode::SERVICE_UNAVAILABLE.into_response(),
@@ -554,61 +635,13 @@ pub(super) async fn receiver_control(
     };
     let generation = Some(tuple.incarnation.to_string());
     let epoch = Some(tuple.owner_epoch);
-    // The largest target-duration clamp: B refuses only what the Source
-    // would certainly refuse, and the Source re-validates exactly.
-    if let Err(field) = request.validate(tuple.duration_ms, 30_000) {
-        return control_error(
-            StatusCode::BAD_REQUEST,
-            "invalid_control",
-            "a control field is outside the bounded v1 contract",
-            generation,
-            epoch,
-            None,
-            Some(field),
-        );
-    }
-    if request.generation != tuple.incarnation.to_string() {
-        return control_error(
-            StatusCode::CONFLICT,
-            "stale_control",
-            "the control generation is no longer current",
-            generation,
-            epoch,
-            None,
-            None,
-        );
-    }
-    if request.control_epoch != tuple.owner_epoch {
-        return control_error(
-            StatusCode::CONFLICT,
-            "owner_changed",
-            "the media session owner epoch changed",
-            generation,
-            epoch,
-            None,
-            None,
-        );
-    }
-    // An acknowledgement settles B's own successor slot. One naming an action
-    // this slot never offered, or arriving past its deadline, is refused
-    // before any Source exchange is owned or sent.
-    let plan = if request.acknowledgement.is_some() {
-        match actor.plan_acknowledgement(&state, &request, clock_ms()) {
-            Ok(plan) => Some(plan),
-            Err(()) => {
-                return control_error(
-                    StatusCode::CONFLICT,
-                    "stale_control",
-                    "the acknowledgement names no current prepared successor",
-                    generation,
-                    epoch,
-                    None,
-                    None,
-                )
-            }
-        }
-    } else {
-        None
+    // An acknowledgement settles B's own successor slot, decided before any
+    // Source exchange is owned or sent.
+    let plan = match receiver_control_precheck(&request, &tuple, |request| {
+        actor.plan_acknowledgement(&state, request, clock_ms())
+    }) {
+        Ok(plan) => plan,
+        Err(refused) => return refused.response(&tuple),
     };
     if request.demand == crate::playback_control::PlaybackDemand::End {
         // A terminal exchange ends B's own session through the one retirement
@@ -1017,6 +1050,173 @@ mod tests {
                 &tuple,
             );
             assert_eq!(response.status(), status, "{code:?}");
+        }
+    }
+
+    // ---- the cross-platform protocol fixture (tests/sharing/protocol-cases.json)
+
+    fn fixture_uuid(value: &serde_json::Value) -> Uuid {
+        Uuid::parse_str(value.as_str().expect("fixture UUID")).expect("fixture UUID")
+    }
+
+    /// B's tuple as the fixture names it: the receiver session of the HLS
+    /// Start, which the accepted status envelope is bound to.
+    fn fixture_tuple(fixture: &serde_json::Value) -> ReceiverTuple {
+        let receiver = &fixture["hls_start"]["receiver"];
+        let envelope = &fixture["shared_status"]["accepted"];
+        assert_eq!(receiver["session_id"], envelope["session_id"]);
+        assert_eq!(receiver["incarnation_id"], envelope["incarnation_id"]);
+        assert_eq!(receiver["control_epoch"], envelope["control_epoch"]);
+        ReceiverTuple {
+            session: fixture_uuid(&receiver["session_id"]),
+            incarnation: fixture_uuid(&receiver["incarnation_id"]),
+            owner_node_id: "receiver-node".to_owned(),
+            owner_epoch: receiver["control_epoch"].as_u64().expect("fixture epoch"),
+            duration_ms: fixture["hls_start"]["public"]["duration_ms"].as_i64(),
+        }
+    }
+
+    /// The HTTP answer as the fixture's `b` column spells it.
+    async fn fixture_answer(response: Response, tuple: &ReceiverTuple) -> serde_json::Value {
+        // Parts, not `Response::status()`: the ownership inventory counts
+        // `.status(` calls as process-capable launches.
+        let (parts, body) = response.into_parts();
+        let bytes = axum::body::to_bytes(body, 64 * 1024)
+            .await
+            .expect("bounded control error");
+        let body: serde_json::Value = serde_json::from_slice(&bytes).expect("control error JSON");
+        assert_eq!(
+            body["generation"],
+            tuple.incarnation.to_string(),
+            "B's own identity"
+        );
+        assert_eq!(body["control_epoch"], tuple.owner_epoch);
+        let mut answer = serde_json::json!({
+            "status": parts.status.as_u16(),
+            "code": body["code"],
+            "retry_after_ms": body.get("retry_after_ms").cloned().unwrap_or_default(),
+        });
+        if let Some(field) = body.get("invalid_field") {
+            answer["invalid_field"] = field.clone();
+        }
+        answer
+    }
+
+    #[test]
+    fn sharing_protocol_fixture_receiver_status_envelope() {
+        use crate::sharing_protocol_fixture::fixture;
+        use plurx_core::{
+            sharing::SourceId,
+            sharing_catalogue_details::FileRevision,
+            sharing_receiver_sessions::{ReceiverProducerKind, RemoteSourceRecipe},
+        };
+        let fixture = fixture();
+        let context = &fixture["context"];
+        let envelope = &fixture["shared_status"]["accepted"];
+        let text = |value: &serde_json::Value| value.as_str().expect("fixture text").to_owned();
+        let recipe = RemoteSourceRecipe {
+            kind: ReceiverProducerKind::RemoteSource,
+            version: 1,
+            reference: serde_json::from_value(context["reference"].clone())
+                .expect("fixture reference"),
+            lifecycle_generation: context["lifecycle_generation"]
+                .as_i64()
+                .expect("fixture lifecycle"),
+            file_id: SourceId::parse(&text(&context["file_id"])).expect("fixture file"),
+            file_revision: FileRevision::parse(&text(&context["revision"]))
+                .expect("fixture revision"),
+            source_request_id: Uuid::new_v4(),
+            parent_login_hash: "a".repeat(64),
+            request_json: "{}".to_owned(),
+        };
+        let status: SharedVodStatus =
+            serde_json::from_value(envelope["status"].clone()).expect("fixture status");
+        let tuple = fixture_tuple(&fixture);
+        // Exactly the accepted envelope every client parses: the same six
+        // top-level keys, B's own session, incarnation and epoch, and the
+        // complete file reference. A client-layer mutation is something B
+        // never emits.
+        assert_eq!(shared_status_body(&recipe, &tuple, &status), *envelope);
+    }
+
+    #[tokio::test]
+    async fn sharing_protocol_fixture_receiver_refusals() {
+        use crate::sharing_protocol_fixture::{fixture, rows};
+        let fixture = fixture();
+        let tuple = fixture_tuple(&fixture);
+        let mut mapped = 0;
+        for row in rows(&fixture["control_refusals"]["source"], "Source refusal") {
+            let Ok(refusal) = serde_json::from_value::<SharedControlRefusal>(row["source"].clone())
+            else {
+                assert_eq!(row["valid"], false, "{}", row["id"]);
+                continue;
+            };
+            if !refusal.is_valid() {
+                assert_eq!(row["valid"], false, "{}", row["id"]);
+                continue;
+            }
+            let answer = fixture_answer(refusal_response(&refusal, &tuple), &tuple).await;
+            assert_eq!(answer, row["b"], "{}", row["id"]);
+            mapped += 1;
+        }
+        assert_eq!(mapped, 7, "every valid Source refusal has a B answer");
+    }
+
+    #[tokio::test]
+    async fn sharing_protocol_fixture_receiver_control_precheck() {
+        use crate::sharing_protocol_fixture::{fixture, rows};
+        let fixture = fixture();
+        let tuple = fixture_tuple(&fixture);
+        // A published session with no staged successor: an acknowledgement
+        // has nothing of B's to settle.
+        let registry = ReceiverStartRegistry::default();
+        let state = Arc::new(crate::http::source_actor_test_state());
+        let actor = ReceiverStartActor(super::super::tests::registered(
+            &registry, "fixture", "player", 1,
+        ));
+        let base = serde_json::to_value(request(&tuple)).expect("request JSON");
+        let mut refused = 0;
+        for row in rows(&fixture["control_refusals"]["b_precheck"], "B precheck") {
+            let mut value = base.clone();
+            for (field, patch) in row["request_patch"].as_object().expect("request patch") {
+                value[field] = patch.clone();
+            }
+            let patched: ControlRequestV1 =
+                serde_json::from_value(value).expect("fixture control request");
+            let outcome = receiver_control_precheck(&patched, &tuple, |request| {
+                actor.plan_acknowledgement(&state, request, clock_ms())
+            });
+            match outcome {
+                Ok(plan) => {
+                    assert!(row["b"].is_null(), "{} is refused at B", row["id"]);
+                    assert!(plan.is_none(), "{}", row["id"]);
+                }
+                Err(refusal) => {
+                    let answer = fixture_answer(refusal.response(&tuple), &tuple).await;
+                    assert_eq!(answer, row["b"], "{}", row["id"]);
+                    refused += 1;
+                }
+            }
+        }
+        assert_eq!(refused, 3, "B answers these before any Source exchange");
+    }
+
+    #[test]
+    fn sharing_protocol_fixture_receiver_preparation_rebind() {
+        use crate::sharing_protocol_fixture::{fixture, rows};
+        let fixture = fixture();
+        let tuple = fixture_tuple(&fixture);
+        let original = request(&tuple);
+        for row in rows(&fixture["control_preparation"], "preparation") {
+            let mut source = accepted(&original, 11);
+            source.delivery.preparation = row["source"].as_str().map(str::to_owned);
+            let rebound = rebind_to_receiver(source, &tuple, &original).expect("rebound");
+            assert_eq!(
+                rebound.delivery.preparation.as_deref(),
+                row["b"].as_str(),
+                "{}",
+                row["id"]
+            );
         }
     }
 }

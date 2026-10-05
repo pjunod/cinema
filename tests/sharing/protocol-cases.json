@@ -79,7 +79,7 @@
     "b_precheck": [
       {"id":"foreign-generation","request_patch":{"generation":"20000000-0000-4000-8000-000000000004"},"b":{"status":409,"code":"stale_control","retry_after_ms":null},"client":"stop"},
       {"id":"foreign-owner-epoch","request_patch":{"control_epoch":99},"b":{"status":409,"code":"owner_changed","retry_after_ms":null},"client":"stop"},
-      {"id":"acknowledgement-without-successor","request_patch":{"acknowledgement":{"action_id":"a0a0a0a0-a0a0-40a0-80a0-a0a0a0a0a0a0","state":"metadata_ready","buffered_through_ms":null,"committed_media_origin_ms":null,"first_frame_unix_ms":null}},"b":{"status":422,"code":"shared_control_unsupported","retry_after_ms":null,"invalid_field":"acknowledgement"},"client":"stop"},
+      {"id":"acknowledgement-without-successor","request_patch":{"acknowledgement":{"action_id":"a0a0a0a0-a0a0-40a0-80a0-a0a0a0a0a0a0","state":"metadata_ready","buffered_through_ms":null,"committed_media_origin_ms":null,"first_frame_unix_ms":null}},"b":{"status":409,"code":"stale_control","retry_after_ms":null},"client":"stop"},
       {"id":"current-request","request_patch":{},"b":null,"client":null}
     ]
   },
