@@ -258,11 +258,11 @@ be dismissed because they are absent from this initial list.
 | Television | `GET /Shows/{seriesId}/Seasons`, `/Shows/{seriesId}/Episodes`, `/Shows/NextUp` | Show/season linkage and next episode semantics |
 | Search | Item search parameters; `/Search/Hints` if observed | Same supported catalog for authenticated users, deterministic limits |
 | Artwork | `GET /Items/{itemId}/Images/{type}` and indexed form if observed | Primary/backdrop mapping, cache tags, bounds and §5.1 image policy; trace token presence |
-| Capabilities | `POST /Sessions/Capabilities`, `/Sessions/Capabilities/Full` if observed | Retain this login/device's claims; do not advertise remote control |
+| Capabilities | `POST /Sessions/Capabilities`, `/Sessions/Capabilities/Full` if observed | Validate and accept; do not advertise remote control. *Amended 2026-10-04:* not stored, because nothing in Plurx reads a capability report |
 | Negotiation | `GET`/`POST /Items/{itemId}/PlaybackInfo` | Media sources, streams, allowed delivery and one play identity; no encoder allocation for browsing |
 | Direct media | `GET`/`HEAD /Videos/{itemId}/stream` and extension variants used by targets | Source mapping, existing Range semantics and cancellation; validators are separate work |
 | HLS entry | `/Videos/{itemId}/master.m3u8` or exact returned URL | Lazy, idempotent activation followed by existing HLS delivery |
-| Subtitle resources | `/Videos/{itemId}/{mediaSourceId}/Subtitles/{index}/Stream.{format}` or exact returned URL | Supported format, selected source/stream and correct media timeline |
+| Subtitle resources | `/Videos/{itemId}/{mediaSourceId}/Subtitles/{index}/{startTicks}/Stream.{format}` (what `DeliveryUrl` names and both targets request) and the four-segment form | Supported format, selected source/stream and correct media timeline; Jellyfin's start/end cue window |
 | Playback events | `POST /Sessions/Playing`, `/Sessions/Playing/Progress`, `/Sessions/Playing/Stopped`; `/Sessions/Playing/Ping` if observed | Identity-bound start/progress/stop; a ping is not render evidence |
 | Transcode stop | `DELETE /Videos/ActiveEncodings` if observed | Only this authenticated device/play's encoding; never a global kill |
 | Watched state | `POST`/`DELETE /UserPlayedItems/{itemId}`, legacy `/Users/{userId}/PlayedItems/{itemId}` | Existing watched/unwatched and tree semantics |
@@ -734,7 +734,11 @@ Associate events with the strongest identity the actual client sends. Require
 play/source/device matches where present. When a client omits `PlaySessionId`,
 resolve only an unambiguous authenticated active binding; do not guess across
 multiple plays. J0 must demonstrate whether either target requires this
-fallback and record what ordering cannot be guaranteed.
+fallback and record what ordering cannot be guaranteed. *Resolved 2026-10-04:*
+Infuse's direct request omits it (J0 trace), so it resolves the same login's
+newest pending or active direct negotiation of exactly that source, which is
+the play its events then name. It never crosses a login, device, client
+family, item or source.
 
 Use server-owned attempt/terminal fences for operations the server can order.
 A late stop for a retired play cannot kill its successor. A terminal binding

@@ -28,6 +28,22 @@ bump may break compatibility and a **patch** bump never does.
 
 ### Fixed
 
+- **Jellyfin clients get subtitles and can play.** Re-checking the `/jellyfin`
+  facade against the J0 traces found that neither pinned client could finish
+  a play: Infuse's own PlaybackInfo was refused (it names
+  `DirectPlayProtocols`), and its direct and HLS requests were refused (it
+  sends no `PlaySessionId` on direct play and lower-cases query names), Jellyfin for
+  Android TV's HLS and subtitle requests carried no credential the facade
+  accepted, every returned media URL doubled the `/jellyfin` base, and the
+  subtitle route both clients request did not exist. Subtitles now follow each
+  client's subtitle profile the way Jellyfin decides them (embedded in the
+  file, or a VTT/SRT sidecar), returned URLs are base-relative and carry the
+  compatibility login as `ApiKey` like Jellyfin's, and the missing contract
+  routes answer (`System/Info`, `Users/Public`, session capabilities, `Ping`,
+  `ActiveEncodings`, search hints, the newer played-items route, and an honest
+  download refusal). `plurx_jellyfin_requests_total{route,outcome}` names any
+  route a client asks for that the facade does not have. The switch stays in
+  Developer until the physical client check passes.
 - **A day of settled background work no longer stops every new job for a
   week.** The durable queue keeps finished jobs for seven days as receipts,
   and its 10,000-row bound counted them. On 2026-09-28 an embedding backfill

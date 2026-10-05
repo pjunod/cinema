@@ -4804,7 +4804,8 @@ pattern = "\\.(?:spawn|output|status)\\s*\\("
 # HTTP status codes on in-process oneshot responses; nothing is launched.
 # +1: `state.membership.status()` in the Developer readiness read is a
 # membership observation the `.status(` shape matches, not a process launch.
-expected_occurrences = 518
+# +6: integrated Jellyfin admission, catalog and refusal response reads.
+expected_occurrences = 524
 
 [[module_structures]]
 id = "process-command-ufcs-launch"

@@ -55,6 +55,9 @@ class KnownRedContractTest(unittest.TestCase):
         # needs the pinned model files its ignore reason names.
         # K-08 M5 adds embed_thread_scaling, the inference thread-count
         # measurement behind EMBED_THREADS, which needs the same model files.
+        # #811 adds three ffmpeg 8 fixture checks of the repeated-HEVC
+        # description collapse (generations, output, copy pipe), each needing
+        # the captured ffmpeg 8 media its ignore reason names.
         # S11's operator-only capture is not a known-red product regression.
         # It requires an owned manifest, real browser and an explicit ignored
         # invocation; its module is feature/Unix-gated, absent in default lists.
@@ -86,8 +89,9 @@ class KnownRedContractTest(unittest.TestCase):
         admitted_identities = {capture_identity, public_wire_identity}
         # Main's native FFmpeg/libvmaf qualification remains independently
         # admitted; keep it in addition to effort's two acquisition identities.
-        # #811 added three opt-in captures of real ffmpeg 8 output
-        # (`captured_ffmpeg8_*`), each ignored until its capture path is set.
+        # #811 adds three operator-run ffmpeg 8 fixture checks (captured
+        # generations, a captured output and a captured copy pipe), each
+        # needing the capture its ignore reason names: 21 -> 24.
         self.assertEqual(len(tuple(item for item in ignored if item.identity not in admitted_identities)), 24)
         validate_listed_tests(public_wires, (public_wire.cargo_name,))
         with self.assertRaisesRegex(KnownRedError, "absent"):

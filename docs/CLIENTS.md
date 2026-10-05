@@ -254,10 +254,10 @@ The founding assumption "point Infuse at plurx" turned out to be **false** — v
 |---|---|---|---|
 | **1 — direct connect (v1 target)** | Composite for Kodi (best reference client), PlexKodiConnect, python-plexapi tools, Home Assistant | PMS HTTP API subset + GDM discovery + token or LAN-whitelist auth | Committed — REQ-PLEX-1 |
 | **2 — plex.tv-dependent** | Infuse, VidHub, Symfonium, official Plex apps | Emulating plex.tv itself (PIN link flow, `/api/v2/resources`) **plus DNS redirection of plex.tv on the client's network** | **Deferred.** Fragile (Plex controls both ends and ships breaking auth changes), adversarial posture, and Plex's 2025–26 remote-streaming enforcement makes their client behavior a moving target |
-| **3 — Jellyfin-compat (idea only)** | Streamyfin, Findroid, Infuse-via-Jellyfin, the whole Jellyfin client ecosystem | A Jellyfin-compatible façade instead of/alongside the Plex one — notably, **Infuse *does* support direct manual connections for Jellyfin servers** | Unscoped; recorded because it may be the cheapest legitimate route to Infuse ever working with plurx |
+| **3 — Jellyfin-compat (built, off by default)** | Infuse 8.5.6 and Jellyfin for Android TV 0.19.10 (the two pinned clients); other Jellyfin clients untested | A Jellyfin-compatible façade at `/jellyfin` alongside the Plex one — **Infuse supports direct manual connections for Jellyfin servers** | On `main` behind Settings → Developer → *Allow Jellyfin clients*. Sign-in, movie/TV browsing, direct play, native VOD over HLS, sidecar subtitles and watch state. Physical qualification on both clients is still open. Contract and evidence: [JELLYFIN-COMPATIBILITY-BUILD.md](clients/JELLYFIN-COMPATIBILITY-BUILD.md), [status](clients/JELLYFIN-COMPATIBILITY-STATUS.md) |
 | Dead | MrMC | — | Project abandoned |
 
-Tier 1 is honest old-Plex compatibility on day one: a Kodi box or the `plexapi` ecosystem sees plurx as a Plex server on the LAN with zero cloud anywhere. The Tier 3 observation is worth a future spike precisely because it turns "emulate a hostile cloud" into "implement a documented open API."
+Tier 1 is honest old-Plex compatibility on day one: a Kodi box or the `plexapi` ecosystem sees plurx as a Plex server on the LAN with zero cloud anywhere. Tier 3 turned "emulate a hostile cloud" into "implement a documented open API", and is now built for two named clients; connect with `http://<voter>:32400/jellyfin` (see [OPERATIONS.md](OPERATIONS.md#jellyfin-client-compatibility)).
 
 ## 4. Living-room coverage timeline
 
