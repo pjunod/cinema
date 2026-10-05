@@ -137,23 +137,21 @@ impl TranscodeManager {
     /// acknowledge the actual shape. Retain the old shared-setting guarantee
     /// for durable takeover recipes rather than claiming this binary's local
     /// behavior for an older worker. Local rolling serving never reads it.
+    ///
+    /// The two switches are read in one statement: the `||` they replace read
+    /// the second only when the first was off, which is the common case, so
+    /// one read is never more than it cost and usually one fewer.
     pub(crate) async fn cluster_playlist_is_typeless(&self) -> bool {
-        self.bool_setting(keys::HLS_TYPELESS_SLIDING).await
-            || self
-                .bool_setting(keys::CLUSTER_SESSION_TAKEOVER_ENABLED)
-                .await
-    }
-
-    /// A feature switch stored in the ordinary settings table. Only the
-    /// literal value `1` enables an experiment; absent, malformed, and every
-    /// other value stay on the established path.
-    async fn bool_setting(&self, key: &str) -> bool {
-        self.store
-            .get_setting(key)
+        let settings = self
+            .store
+            .get_settings(&[
+                keys::HLS_TYPELESS_SLIDING,
+                keys::CLUSTER_SESSION_TAKEOVER_ENABLED,
+            ])
             .await
-            .ok()
-            .flatten()
-            .is_some_and(|value| value.trim() == "1")
+            .unwrap_or_default();
+        let on = |key: &str| settings.get(key).is_some_and(|value| value.trim() == "1");
+        on(keys::HLS_TYPELESS_SLIDING) || on(keys::CLUSTER_SESSION_TAKEOVER_ENABLED)
     }
 
     /// Hardware slots in use, and the cap. The pair is the diagnostic: "2"

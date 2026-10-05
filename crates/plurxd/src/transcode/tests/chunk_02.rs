@@ -2883,3 +2883,44 @@ quality_catalog: None,
         assert_eq!(status.producer_exit_code, None);
         assert_eq!(status.producer_state, "waiting");
     }
+
+    /// Reduction 4 of the startup and tone-map handoff reads the
+    /// typeless/takeover pair in one statement. The pair must keep the rule
+    /// the two separate reads had: either switch set to the literal 1.
+    #[tokio::test]
+    async fn batched_settings_reads_keep_each_value_rule() {
+        use plurx_core::store::{keys, SqliteStore};
+        let store: Arc<dyn Store> = Arc::new(SqliteStore::open_in_memory().expect("store"));
+        let base = crate::test_tempdir().expect("manager dir");
+        let manager = TranscodeManager::new(
+            Arc::clone(&store),
+            base.path().join("manager"),
+            EncoderCaps::default(),
+            Pipeline::Cpu,
+        );
+        assert!(
+            !manager.cluster_playlist_is_typeless().await,
+            "both switches unset"
+        );
+        for (typeless, takeover, expected) in [
+            ("1", "0", true),
+            ("0", "1", true),
+            (" 1 ", "0", true),
+            ("0", "0", false),
+            ("true", "yes", false),
+        ] {
+            store
+                .put_setting(keys::HLS_TYPELESS_SLIDING, typeless)
+                .await
+                .expect("typeless");
+            store
+                .put_setting(keys::CLUSTER_SESSION_TAKEOVER_ENABLED, takeover)
+                .await
+                .expect("takeover");
+            assert_eq!(
+                manager.cluster_playlist_is_typeless().await,
+                expected,
+                "typeless={typeless:?} takeover={takeover:?}"
+            );
+        }
+    }
