@@ -1,2 +1,0 @@
-web-types: installing typescript 6.0.3 (npm ci --prefix tools/web-types)
-web-types: OK, unchanged — 517 diagnostics in 83 keys match tests/web/tsc-baseline.tsv (5.0s)

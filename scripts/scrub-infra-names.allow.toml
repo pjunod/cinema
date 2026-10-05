@@ -22,9 +22,8 @@ path = "README.md"
 rules = ["retired-name"]
 reason = "the trademark reservation names the retired mark on purpose"
 
-# Content-addressed or digest-pinned evidence: rewriting the bytes breaks a
-# sha256 that another file records (and, for the first two, that a test
-# verifies).
+# Digest-pinned evidence: rewriting the bytes breaks a sha256 that another
+# file records.
 
 [[allow]]
 path = "docs/streaming/DISPLAY-AWARE-AUTO-QUALITY-OPUS-REVIEW.txt"
@@ -81,14 +80,6 @@ reason = "sha256 recorded in batch-qualification.json"
 [[allow]]
 path = "docs/evidence/video-quality-2026-10-03/scorer/qualification.json"
 reason = "sha256 recorded in batch-qualification.json"
-
-[[allow]]
-path = "docs/evidence/video-quality-2026-10-03/operations-41505.log"
-reason = "sha256 recorded in continuation-receipt.json"
-
-[[allow]]
-path = "docs/evidence/video-quality-2026-10-03/web-41504.log"
-reason = "sha256 recorded in continuation-receipt.json"
 
 # Installed verbatim on the two Apple runner Macs by deploy/apple-runner/install.
 # Rewriting them would install a probe that cannot reach the primary. They stay
