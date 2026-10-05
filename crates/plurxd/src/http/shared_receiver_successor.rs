@@ -54,8 +54,14 @@ pub(super) struct PreparedRole {
 /// Directed-change bookkeeping on the session the client is watching.
 #[derive(Default)]
 pub(super) struct HandoffState {
-    /// The ask this session was started for or last staged. The first
-    /// accepted exchange records it and dispatches nothing.
+    /// The ask this session itself delivers: recorded by its first accepted
+    /// exchange (Local's rule), or the ask a successor was staged for. An ask
+    /// equal to it never stages anything, so a client that cancels a change
+    /// and returns to it is never offered its own rendition again.
+    own_digest: Option<String>,
+    /// The ask last dispatched, so a refused or failed one is dispatched only
+    /// once. Cleared when its successor is withdrawn because the client left
+    /// it or aborted it, so a renewed ask stages again.
     dispatched_digest: Option<String>,
     /// The latest `dual_player_preparation` the client declared.
     dual_player: bool,
@@ -428,7 +434,7 @@ impl ReceiverStartRegistry {
                 committed: false,
             });
             // Its own first exchange is not a change from what it was staged for.
-            owned.handoff.dispatched_digest = Some(digest.to_owned());
+            owned.handoff.own_digest = Some(digest.to_owned());
         }
         Ok((entry, wrapper))
     }
@@ -500,14 +506,16 @@ impl ReceiverStartActor {
                 };
                 if let Some(successor) = withdrawn.as_ref() {
                     handoff.withdrawing = Some(Arc::clone(successor));
+                    handoff.dispatched_digest = None;
                 }
-                let stage = match handoff.dispatched_digest.as_deref() {
+                let stage = match handoff.own_digest.as_deref() {
                     None => {
-                        handoff.dispatched_digest = Some(digest.clone());
+                        handoff.own_digest = Some(digest.clone());
                         None
                     }
-                    Some(dispatched)
-                        if dispatched != digest
+                    Some(own)
+                        if own != digest
+                            && handoff.dispatched_digest.as_deref() != Some(digest.as_str())
                             && handoff.slot.is_none()
                             && handoff.withdrawing.is_none()
                             && handoff.dual_player
@@ -752,6 +760,7 @@ impl ReceiverStartActor {
                 if owned.handoff.slot.as_ref().is_some_and(|slot| {
                     !slot.committed && slot.action_id.as_deref() == Some(action_id)
                 }) {
+                    owned.handoff.dispatched_digest = None;
                     owned.handoff.take_uncommitted()
                 } else {
                     None

@@ -899,3 +899,61 @@ async fn sharing_receiver_commit_answer_writer_is_released_before_the_predecesso
     assert!(!superseding(&successor));
     assert!(retired_within(&actor, Duration::from_secs(5)).await);
 }
+
+#[tokio::test]
+async fn sharing_receiver_cancelled_change_never_restages_the_sessions_own_ask() {
+    let registry = ReceiverStartRegistry::default();
+    let state = Arc::new(crate::http::source_actor_test_state());
+    let predecessor = registered(&registry, "predecessor", "player", 1);
+    publish_hls(&predecessor);
+    let actor = ReceiverStartActor(predecessor.clone());
+    let at = |sequence, ask: ClientSelection| request(&generation(&predecessor), sequence, ask);
+    assert_eq!(actor.observe_ask(&state, &at(1, selection()), true), None);
+    let changed = manual(480).desired().digest();
+    assert_eq!(
+        actor.observe_ask(&state, &at(2, manual(480)), true),
+        Some(changed.clone())
+    );
+    let deadline = clock_ms() + SUCCESSOR_DEADLINE_MS;
+    let successor = successor_of(&registry, &predecessor, &manual(480), deadline);
+    assert!(actor.install_successor(
+        &ReceiverStartActor(successor.clone()),
+        changed.clone(),
+        deadline
+    ));
+    // Cancelled: the client's ask returns to what this session delivers. The
+    // staged successor is withdrawn, and nothing is staged for the session's
+    // own rendition, before or after the withdrawn one has retired.
+    assert_eq!(actor.observe_ask(&state, &at(3, selection()), true), None);
+    assert!(superseding(&successor));
+    assert!(retired_within(&ReceiverStartActor(successor), Duration::from_secs(5)).await);
+    for sequence in 4..7 {
+        assert_eq!(
+            actor.observe_ask(&state, &at(sequence, selection()), true),
+            None,
+            "never a successor for the session's own ask"
+        );
+    }
+    // A renewed change stages again.
+    assert_eq!(
+        actor.observe_ask(&state, &at(7, manual(480)), true),
+        Some(changed.clone())
+    );
+    // The same after an aborted offer.
+    let registry = ReceiverStartRegistry::default();
+    let (predecessor, successor, _, action_id) = offered_pair(&registry);
+    let actor = ReceiverStartActor(predecessor.clone());
+    let at = |sequence, ask: ClientSelection| request(&generation(&predecessor), sequence, ask);
+    // The session delivers the created ask; its offered successor carries 480.
+    predecessor.state.lock().expect("owner").handoff.own_digest =
+        Some(selection().desired().digest());
+    assert!(actor.abort_successor(&state, &action_id));
+    assert!(retired_within(&ReceiverStartActor(successor), Duration::from_secs(5)).await);
+    for sequence in 1..4 {
+        assert_eq!(
+            actor.observe_ask(&state, &at(sequence, selection()), true),
+            None,
+            "an aborted change never restages the session's own ask"
+        );
+    }
+}
