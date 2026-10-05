@@ -257,7 +257,8 @@ test("Shared initial route is direct only for an actual direct decision, else se
 });
 test("shared status metrics are read only from the bound Shared grammar",()=>{
   const h=harness(),id="55555555-5555-4555-8555-555555555555";
-  const started=h.withPlaybackFileSession(h.sharedPlaybackFileContextFromDetail(reference,detail()),id);
+  const started=h.withPlaybackFileSession(h.sharedPlaybackFileContextFromDetail(reference,detail()),id,
+    {generation:"66666666-6666-4666-8666-666666666666",control_epoch:1});
   const status={target_height:720,http_wait_count:2,active_encode_milli_realtime:1500};
   const reply={subject:"shared",reference:{item:{...reference},file_id:"7",revision:"a".repeat(64),lifecycle_generation:1},
     session_id:id,incarnation_id:"66666666-6666-4666-8666-666666666666",control_epoch:1,status};
@@ -269,8 +270,14 @@ test("shared status metrics are read only from the bound Shared grammar",()=>{
     {...reply,reference:{...reply.reference,revision:"b".repeat(64)}},
     {...reply,reference:{...reply.reference,item:{...reference,item_id:"10"}}},
     {...reply,status:null},
+    {...reply,incarnation_id:"88888888-8888-4888-8888-888888888888"},
+    {...reply,control_epoch:2},
+    {...reply,local_session_id:"1"},
+    (({incarnation_id,...rest})=>rest)(reply),
     status,
   ]) assert.equal(h.sharedPlaybackStatusMetrics(started,wrong),null);
+  // A started session with no control tuple (direct play) has no status sample.
+  assert.equal(h.sharedPlaybackStatusMetrics(h.withPlaybackFileSession(h.sharedPlaybackFileContextFromDetail(reference,detail()),id),reply),null);
   assert.equal(h.sharedPlaybackStatusMetrics(h.sharedPlaybackFileContextFromDetail(reference,detail()),reply),null);
   assert.equal(h.sharedPlaybackStatusMetrics(h.localPlaybackFileContext(7),reply),null);
 });

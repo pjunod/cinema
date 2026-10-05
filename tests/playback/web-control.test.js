@@ -2138,6 +2138,26 @@ async function main() {
     "the serialized request carries the declared vocabulary verbatim",
   );
   declaring.stop();
+  // A Shared reporter also names B's successor transaction, and only a Shared
+  // one: B stages a successor for a client that names both.
+  let sharedDeclared = null;
+  const sharedDeclaring = new control.Reporter({
+    bootstrap: bootstrap(),
+    clientInstanceId: "66666666-6666-4666-8666-666666666666",
+    capture: () => captureSnapshot(snapshot()),
+    sharedSuccessor: true,
+    send: async (_url, request) => { sharedDeclared = request.supported_actions; return response(request); },
+  }).start();
+  await flush();
+  assert.deepEqual(
+    JSON.parse(JSON.stringify({ supported_actions: sharedDeclared })).supported_actions,
+    ["hold", "retry_resource", "terminal", "prepare_replacement", "shared_prepare_replacement"],
+    "a Shared reporter declares the Local promise and B's successor beside it",
+  );
+  sharedDeclaring.stop();
+  assert.match(shippedSource("startPlaybackControl"),
+    /const shared=!!\(p\.fileContext&&p\.fileContext\.source_ref&&p\.fileContext\.source_ref\.kind!=="local"\);[\s\S]*sharedSuccessor:shared/,
+    "the page's reporter declares it exactly for a Shared session");
 
   // ---- the prepared replacement action ------------------------------------
   //
@@ -3993,7 +4013,7 @@ async function main() {
       "TOKEN", "setTimeout", "clearTimeout", "setInterval", "clearInterval",
       "notifyPlaybackControl", "clientLog", "nativeHls", "wirePlayerMedia",
       "armHitchDetector", "setupAirplay", "playbackProgressTick", "probeDecode",
-      "handleEnded", "renderPlayerInfo", "pbTick", "pbSyncPlayIcon",
+      "handleEnded", "renderPlayerInfo", "pbTick", "pbSyncPlayIcon", "SHARED_DECISION",
       [
         "let PLAYER=null; let quality='auto';",
         "function playbackContext(){return {};}",
@@ -4036,6 +4056,7 @@ async function main() {
         shippedSource("preparedState"),
         shippedSource("preparedSettlementDone"), shippedSource("markPreparedSettlement"),
         shippedSource("handlePreparedReplacementAction"),
+        shippedSource("preparedSharedSuccessor"),
         shippedSource("beginPreparedReplacement"), shippedSource("preparedSelectionText"),
         shippedSource("preparedHlsAttach"), shippedSource("preparedNativeAttach"),
         shippedSource("resumePreparedIncumbentLoad"),
@@ -4159,6 +4180,7 @@ async function main() {
       async () => { adopted.push(["ended"]); },
       () => adopted.push(["render"]),
       () => {}, () => {},
+      options.sharedDecision || null,
     );
     const current = () => {
       const player = api.current();
@@ -5564,6 +5586,77 @@ async function main() {
     assert.equal(h.plays[0].meta.fileContext, fileContext,
       "the reopen starts from the bound Shared context and its accepted login");
     assert.equal(p.directedChange.outcome, "declined");
+  }
+  {
+    // A Shared session's offer is B's own successor (P1/P2). It binds through
+    // the Shared Start grammar from the predecessor's bound context before a
+    // second pipeline is primed, every acknowledgement rides the
+    // predecessor's channel, and only B's acceptance of the commit moves the
+    // player's Shared context to it. Nothing releases the predecessor here
+    // (this harness has no `releaseSession`): B supersedes it.
+    const successorContext = Object.freeze({ session_id: PREPARE_SESSION, source_ref: { kind: "shared" } });
+    const bound = [];
+    const h = preparedHarness({ sharedDecision: {
+      successor(context, action) { bound.push([context, action.session_id]); return successorContext; } } });
+    const fileContext = Object.freeze({ session_id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+      source_ref: { kind: "shared" } });
+    const p = directedPlayer(h, { offset: 0, fileId: "9007199254740993", fileContext, meta: { fileContext } });
+    offerReporter(h);
+    const pending = h.menu("480");
+    await flush();
+    const control = { protocol: "plurx-playback-control-v1", url: `/api/v1/hls/${PREPARE_SESSION}/control`,
+      generation: "55555555-5555-4555-8555-555555555555", control_epoch: 1,
+      next_exchange_ms: 5000, lease_timeout_ms: 300000 };
+    h.exchange(offerRequest(6), offerResponse({ action: prepareAction({ control }) }));
+    fireOfferConfirm(h);
+    await outcomeOf(pending);
+    assert.deepEqual(bound, [[fileContext, PREPARE_SESSION]],
+      "the offer binds once, from the predecessor's bound Shared context");
+    assert.equal(h.instances.length, 1, "a bound offer is primed like any preparation");
+    h.instances[0].events.manifest();
+    h.spare.ranges = [[0, 30]];
+    h.instances[0].events.append();
+    h.provePrepared();
+    assert.equal(p.sessionId, PREPARE_SESSION, "the successor took the picture");
+    assert.equal(p.fileContext, fileContext, "an unaccepted commit moves no Shared context");
+    const committed = h.pending("active");
+    assert.equal(committed.state, "committed");
+    assert.equal(committed.committed_media_origin_ms, 0, "the offer's origin, echoed");
+    h.settle({ acknowledgement: committed });
+    assert.equal(p.fileContext, successorContext,
+      "B accepted the commit: progress and status now name the successor");
+    assert.equal(p.meta.fileContext, successorContext, "and a later reopen starts from it");
+    assert.equal(p.directedChange.outcome, "committed");
+    assert.equal(h.plays.length, 0, "a committed handoff reopens nothing");
+  }
+  {
+    // A Shared offer that does not bind (B's grammar refused it) is settled
+    // `failed` on the predecessor's channel, which withdraws it at B, nothing
+    // is primed, and the change takes its one P0 reopen from the bound context.
+    const h = preparedHarness({ sharedDecision: {
+      successor() { throw new TypeError("Invalid playback file context"); } } });
+    const fileContext = Object.freeze({ session_id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+      source_ref: { kind: "shared" } });
+    const p = directedPlayer(h, { offset: 0, fileId: "9007199254740993", fileContext, meta: { fileContext } });
+    offerReporter(h);
+    h.live.currentTime = 40;
+    const pending = h.menu("480");
+    await flush();
+    h.exchange(offerRequest(6), offerResponse({ action: prepareAction() }));
+    assert.equal(h.instances.length, 0, "nothing is primed for an offer that does not bind");
+    assert.equal(p.prepared, null);
+    assert.equal(latest(h).action_id, PREPARE_ACTION_ID);
+    assert.equal(latest(h).state, "failed");
+    assert.equal(h.plays.length, 1, "the change takes its one P0 reopen");
+    assert.equal(h.plays[0].position, 40_000);
+    assert.equal(h.plays[0].meta.fileContext, fileContext);
+    // The reopen publishes its destination, which retires the offer waiter.
+    await outcomeOf(pending);
+    assert.equal(h.plays.length, 1, "and only one");
+    assert.equal(p.directedChange.outcome, "failed", "the settled outcome is kept");
+    // A replay of the refused offer is recognised, never bound again.
+    assert.equal(h.handle(prepareAction()), null);
+    assert.equal(h.instances.length, 0);
   }
   {
     // Menu → the bound → one reopen.

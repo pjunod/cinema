@@ -73,6 +73,16 @@ const SHARED_DECISION=(()=>{
     if(c.watch.pending&&c.watch.pending.session_id!==bound.session_id)c.watch.pending=null;
     Object.defineProperty(response,"_sharedContext",{value:bound,enumerable:false});return response;
   }
+  // B's prepared successor of a started HLS session, offered on the
+  // predecessor's control channel, binds under the accepted login before
+  // anything is primed. It keeps the same accepted record, so once the client
+  // commits to it the ordered watch state carries on and a later reopen starts
+  // from it like any bound context. Nothing is sent: B started it.
+  function successor(context,action){
+    const c=accepted.get(context),base=bases.get(context);
+    if(!c||!base||!authorized(c))fail();
+    const bound=sharedPlaybackSuccessorContext(base,context,action);accepted.set(bound,c);bases.set(bound,base);return bound;
+  }
   async function resync(context,c,state){
     const fresh=await read(`/api/v1/shared/imports/${context.source_ref.import_id}/items/${context.source_ref.item_id}`,c,null,null,"session");
     if(fresh.item?.source!=="shared"||JSON.stringify(sharedCatalogueReference(fresh.item.reference))!==JSON.stringify(context.source_ref)||sharingInteger(fresh.lifecycle_generation)!==context.lifecycle_generation)fail();
@@ -86,6 +96,10 @@ const SHARED_DECISION=(()=>{
     state.busy=true;
     try{
       if(state.resync){await resync(context,c,state);return false;}
+      // A retained beat belongs to the session it named. One for a session
+      // the player has left (a committed handoff, a reopen) is never resent
+      // under another; the next beat names the current session.
+      if(state.pending&&state.pending.session_id!==context.session_id)state.pending=null;
       if(!state.pending){if(state.sequence>=Number.MAX_SAFE_INTEGER)fail();state.pending=Object.freeze({session_id:context.session_id,sequence:++state.sequence,position_ms,duration_ms,watched});}
       // An uncertain send retries exactly; a later beat never renumbers the
       // retained payload or overwrites newer Source/item history after409.
@@ -128,6 +142,6 @@ const SHARED_DECISION=(()=>{
     if((bound?accepted.get(context):contexts.get(context))!==c||!valid())fail();const result=validate(raw,base);
     Object.defineProperty(result,"_capsSnapshot",{value:snapshot,enumerable:false});return result;
   }
-  return Object.freeze({details,decision,start,progress,retire});
+  return Object.freeze({details,decision,start,successor,progress,retire});
 })();
 function sharedDecisionRetire(){SHARED_DECISION.retire();}

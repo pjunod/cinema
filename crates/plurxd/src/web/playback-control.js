@@ -49,6 +49,15 @@
   const SUPPORTED_ACTIONS = Object.freeze([
     "hold", "retry_resource", "terminal", PREPARE_REPLACEMENT_ACTION,
   ]);
+  // A Shared session's successor is B's own: an ordinary second B session,
+  // offered with B's playlist and control bootstrap, whose commit moves this
+  // client's Shared context (progress, status, control) to it. B stages one
+  // only for a client that names this beside `prepare_replacement`, because a
+  // client that understands the Local promise alone would keep beating
+  // progress on the session it left. Declared only on a Shared reporter.
+  const SHARED_PREPARE_REPLACEMENT_ACTION = "shared_prepare_replacement";
+  const SHARED_SUPPORTED_ACTIONS = Object.freeze(
+    SUPPORTED_ACTIONS.concat([SHARED_PREPARE_REPLACEMENT_ACTION]));
 
   function defaultNow() {
     if (typeof performance === "object" && typeof performance.now === "function") {
@@ -207,7 +216,7 @@
     return Object.keys(observation).length ? observation : null;
   }
 
-  function makeRequest(bootstrap, clientInstanceId, sequence, snapshot) {
+  function makeRequest(bootstrap, clientInstanceId, sequence, snapshot, actions) {
     if (!validSnapshot(snapshot)) throw new TypeError("invalid playback-control snapshot");
     const request = Object.assign({}, snapshot, {
       protocol: PROTOCOL,
@@ -215,7 +224,7 @@
       control_epoch: bootstrap.control_epoch,
       client_instance_id: clientInstanceId,
       sequence,
-      supported_actions: SUPPORTED_ACTIONS.slice(),
+      supported_actions: (actions || SUPPORTED_ACTIONS).slice(),
     });
     return request;
   }
@@ -291,6 +300,10 @@
       }
       this.bootstrap = Object.assign({}, value.bootstrap);
       this.clientInstanceId = value.clientInstanceId;
+      // Fixed for the reporter's life: one reporter speaks for one session,
+      // and a Shared session is Shared on every exchange.
+      this.supportedActions = value.sharedSuccessor === true
+        ? SHARED_SUPPORTED_ACTIONS : SUPPORTED_ACTIONS;
       this.capture = value.capture;
       this.send = value.send;
       // Wrapped, not assigned. `setTimeout` and `clearTimeout` are
@@ -385,7 +398,8 @@
           return;
         }
         this.sequence = sequence;
-        request = makeRequest(this.bootstrap, this.clientInstanceId, sequence, snapshot);
+        request = makeRequest(this.bootstrap, this.clientInstanceId, sequence, snapshot,
+          this.supportedActions);
         const capabilityKey = JSON.stringify(snapshot.capabilities);
         if (sequence !== 1 && capabilityKey === this.acceptedCapabilitiesKey) {
           delete request.capabilities;
@@ -757,7 +771,7 @@
   }
 
   return Object.freeze({ PROTOCOL, PREPARE_REPLACEMENT_ACTION, PREPARE_ACTION_TAG,
-    SUPPORTED_ACTIONS, Reporter, capture, sameIntent, validBootstrap, validResponse,
+    SUPPORTED_ACTIONS, SHARED_PREPARE_REPLACEMENT_ACTION, SHARED_SUPPORTED_ACTIONS, Reporter, capture, sameIntent, validBootstrap, validResponse,
     validPreparation, validAcknowledgement, preparedPlaylistUrl,
     PREPARED_SWITCH_WINDOW_MS, PREPARED_SWITCH_SEAM_WINDOW_MS,
     PREPARED_SWITCH_SILENCE_GAP_MS, PREPARED_SWITCH_SILENCE_FLOOR,
