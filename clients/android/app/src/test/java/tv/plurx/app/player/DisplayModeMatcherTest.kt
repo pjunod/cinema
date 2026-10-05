@@ -1,5 +1,6 @@
 package tv.plurx.app.player
 
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -16,5 +17,18 @@ class DisplayModeMatcherTest {
         assertTrue(detail.startsWith("outcome=late result=matched "))
         assertTrue("source_fps=23.976" in detail)
         assertTrue("wait_ms=41" in detail)
+    }
+
+    @Test fun timedOutWaitWithdrawsTheRequestOnlyWhileItStillOwnsTheWindow() {
+        assertTrue(
+            "a timeout under the current owner must clear preferredDisplayModeId",
+            clearsDisplayModeRequestAfterWait(matched = false, stillOwner = true),
+        )
+        assertFalse(
+            "a new owner may have set its own request",
+            clearsDisplayModeRequestAfterWait(matched = false, stillOwner = false),
+        )
+        assertFalse(clearsDisplayModeRequestAfterWait(matched = true, stillOwner = true))
+        assertFalse(clearsDisplayModeRequestAfterWait(matched = true, stillOwner = false))
     }
 }

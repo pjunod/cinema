@@ -37,6 +37,19 @@ internal fun logDisplayModeResult(result: DisplayModeMatchResult) {
     Log.i("PlurxTelemetry", "playback_display_mode ${result.detail()}")
 }
 
+/**
+ * Whether a finished wait must withdraw the window's `preferredDisplayModeId`.
+ *
+ * A wait that timed out while this owner is still current withdraws it: the
+ * request would otherwise stay set, playback starts at the current mode, and
+ * if the display completes the switch later the HDMI resync lands seconds into
+ * playback (ANDROID-DISPLAY-MODE-AND-BUFFER-BUDGET §5.6). A wait whose owner
+ * changed leaves it alone, because the new owner may already have set its own
+ * request. A matched wait keeps the mode it asked for.
+ */
+internal fun clearsDisplayModeRequestAfterWait(matched: Boolean, stillOwner: Boolean): Boolean =
+    !matched && stillOwner
+
 /** Owns one activity window's exact display-mode request and bounded wait. */
 internal class DisplayModeMatcher(private val activity: Activity) {
     private var generation = 0L
@@ -94,7 +107,13 @@ internal class DisplayModeMatcher(private val activity: Activity) {
                 }
             }
         } == true
-        if (owner != generation) {
+        val stillOwner = owner == generation
+        if (clearsDisplayModeRequestAfterWait(matched, stillOwner)) {
+            val attributes = activity.window.attributes
+            attributes.preferredDisplayModeId = 0
+            activity.window.attributes = attributes
+        }
+        if (!stillOwner) {
             return DisplayModeMatchResult(
                 "unsupported",
                 sourceFps,
