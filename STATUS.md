@@ -4,6 +4,32 @@
 commit as the work it describes; a stale entry here is a bug. Newest effort
 first.
 
+## Quality and streaming follow-ups — attestation, replica reads, audio, QSV, Auto
+
+**Branch `claude/quality-streaming-followups`, one batched PR to `main`; merge
+waits for Astra to clear rev 4 of the handoff.** Executes
+`quality-and-streaming-followups-build-handoff-2026-10-04` (project doc).
+Part D: source attestation is capped at `analysis.attest_busy_bytes_per_sec`
+(32 MiB/s) on the request path whenever the node serves anything — including
+rolling copies, progressive remuxes, direct plays, VOD and Live TV, none of
+which hold an admission slot and so read as idle before — and the job path
+stops while any delivery is live; a capped read yields to a waiting viewer
+request only after five minutes; whole-file checkpoints are a resumable
+SHA-256 persisted in the node-local sidecar, so a restart resumes instead of
+re-reading; a playback of an `attempt_limit` title starts one ordinary
+successor a day (ruling R8, taken in Paul's absence). Part E: Apple (build
+209) and Android (versionCode 146) echo `x-plurx-commit-index` on API calls
+only; the fleet readout is still owed. Part F: continuous shared audio now
+folds through the measured Lo/Ro matrix and limiter (domain v2, objects
+re-made), and the 7.1 → 5.1 fold was measured clipping (+4.51 dBFS) so every
+non-stereo fold now ends in the limiter. Part G: the calibration screen runs
+from production argv with a forced-IDR control; on lab4 no QSV candidate
+clears the §3.3 bar (look-ahead segfaults), so bitrate stays. Part H: the
+Developer card's native-controller row is corrected, and Android continuous
+enrollment no longer needs the display-aware switch (R5). Not done: R4
+pricing (waits on shaped-link numbers), Part I TLS (R1: not now), and the
+device evidence (GPT prompts in the project status doc).
+
 ## Apple TV: new HEVC WEB-DLs refused with 503 — ffmpeg 8 repeats the sample description
 
 **Branch `fix/ffmpeg8-repeated-hevc-descriptions`.** Paul reported
