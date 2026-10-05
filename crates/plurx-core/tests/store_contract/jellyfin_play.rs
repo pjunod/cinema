@@ -221,6 +221,89 @@ async fn jellyfin_scoped_link_grant_resolves_only_its_exact_play_and_observes_st
     .await;
 }
 #[tokio::test]
+async fn jellyfin_current_direct_play_is_the_newest_live_link_of_this_login_and_source_only() {
+    for_each_backend(|store, backend| async move {
+        let first = fixture(&store).await;
+        let none = store
+            .jellyfin_current_direct_play(&first.scope, &first.item_wire_id, &first.file_wire_id)
+            .await
+            .expect("empty read");
+        assert!(none.is_none(), "{backend}");
+        let mut older = first.clone();
+        store
+            .create_file_grant(link_grant(&older, "current-older", older.file_id))
+            .await
+            .expect("older grant");
+        older.media_grant_id = Some("current-older".into());
+        assert!(store
+            .create_jellyfin_play(older.clone())
+            .await
+            .expect("older"));
+        // An HLS ask (no link grant) is never a direct play.
+        let mut hls = first.clone();
+        hls.play_id = uuid::Uuid::new_v4().simple().to_string();
+        assert!(store
+            .create_jellyfin_play(hls.clone())
+            .await
+            .expect("hls ask"));
+        let mut newer = first.clone();
+        newer.play_id = uuid::Uuid::new_v4().simple().to_string();
+        store
+            .create_file_grant(link_grant(&newer, "current-newer", newer.file_id))
+            .await
+            .expect("newer grant");
+        newer.media_grant_id = Some("current-newer".into());
+        assert!(store
+            .create_jellyfin_play(newer.clone())
+            .await
+            .expect("newer"));
+        let current = |scope: Scope| {
+            let store = Arc::clone(&store);
+            let (item, file) = (first.item_wire_id.clone(), first.file_wire_id.clone());
+            async move {
+                store
+                    .jellyfin_current_direct_play(&scope, &item, &file)
+                    .await
+                    .expect("read")
+                    .map(|play| play.negotiation.play_id)
+            }
+        };
+        assert_eq!(
+            current(first.scope.clone()).await.as_deref(),
+            Some(newer.play_id.as_str()),
+            "{backend}: the newest negotiation is the one the client's events name"
+        );
+        // Another device of the same user sees none of this login's plays.
+        let mut other_device = first.scope.clone();
+        other_device.device_digest = digest("another-device");
+        assert_eq!(current(other_device).await, None, "{backend}");
+        let mut other_login = first.scope.clone();
+        other_login.token_digest = digest("another-login");
+        assert_eq!(current(other_login).await, None, "{backend}");
+        // Another source of the same item resolves nothing.
+        assert!(store
+            .jellyfin_current_direct_play(&first.scope, &first.item_wire_id, &first.item_wire_id)
+            .await
+            .expect("other source")
+            .is_none());
+        // A stopped play is not current; the older live one is.
+        assert!(store
+            .end_jellyfin_play(&newer.play_id, &newer.scope, 3_000)
+            .await
+            .expect("stop newer"));
+        assert_eq!(
+            current(first.scope.clone()).await.as_deref(),
+            Some(older.play_id.as_str()),
+            "{backend}"
+        );
+        assert!(store
+            .jellyfin_current_direct_play(&first.scope, "not-a-wire-id", &first.file_wire_id)
+            .await
+            .is_err());
+    })
+    .await;
+}
+#[tokio::test]
 async fn jellyfin_play_transitions_commit_only_under_their_switch_generation() {
     for_each_backend(|store, backend| async move {
         let play = fixture(&store).await;

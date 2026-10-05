@@ -881,6 +881,17 @@ browse and play directly against plurx — validated end-to-end with
 `python-plexapi`. plex.tv is never contacted. Detail: [CLIENTS.md](CLIENTS.md),
 [ARCHITECTURE.md](ARCHITECTURE.md) §5.
 
+**Jellyfin-compat (experimental, off by default):** a `/jellyfin` façade so
+Infuse 8.5.6 and Jellyfin for Android TV 0.19.10 connect to plurx as if it
+were Jellyfin Server 10.11.11: sign-in, movie/TV browsing and search, artwork,
+direct play, native VOD over HLS, audio choice, embedded or sidecar subtitles
+(VTT/SRT) chosen from each client's subtitle profile, skip markers, watch
+progress and watched marks. Every play runs on the native media owners. The
+switch is Settings → Developer → *Allow Jellyfin clients*; physical client
+qualification is still open. Detail: [OPERATIONS.md](OPERATIONS.md#jellyfin-client-compatibility),
+[PLAYBACK.md](PLAYBACK.md#jellyfin-clients--the-same-media-owners-another-protocol),
+[JELLYFIN-COMPATIBILITY-STATUS.md](clients/JELLYFIN-COMPATIBILITY-STATUS.md).
+
 **Web settings:** Live TV owns tuner enablement, owner recovery, guide
 configuration, recording, library-channel playback and subject matching.
 Playback owns player defaults, chapter thumbnails, and advanced server

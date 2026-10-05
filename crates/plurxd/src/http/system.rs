@@ -5909,7 +5909,7 @@ pub(crate) async fn metrics(
          # HELP plurx_transcode_sessions_active Live transcode sessions.\n\
          # TYPE plurx_transcode_sessions_active gauge\n\
          plurx_transcode_sessions_active {sessions}\n\
-        {scans}{store_metrics}{analysis_runtime_metrics}{membership_metrics}{raft_metrics}{process_metrics}{codec_qualification_metrics}{decode_fact_metrics}{auth_revocation_metrics}{login_metrics}{live_tv_metrics}{backup_metrics}{library_channel_metrics}{takeover_metrics}{control_metrics}{playback_metrics}{availability_metrics}{blocked_get_metrics}{live_recovery_metrics}{probe_reporter_metrics}{interlace_metrics}{artwork_metrics}",
+        {scans}{store_metrics}{analysis_runtime_metrics}{membership_metrics}{raft_metrics}{process_metrics}{codec_qualification_metrics}{decode_fact_metrics}{auth_revocation_metrics}{login_metrics}{live_tv_metrics}{backup_metrics}{library_channel_metrics}{jellyfin_metrics}{takeover_metrics}{control_metrics}{playback_metrics}{availability_metrics}{blocked_get_metrics}{live_recovery_metrics}{probe_reporter_metrics}{interlace_metrics}{artwork_metrics}",
         version = crate::version::SEMVER,
         build = crate::version::BUILD,
         // The takeover statics, then this node's route-cache instrumentation
@@ -5935,6 +5935,7 @@ pub(crate) async fn metrics(
         codec_qualification_metrics = codec_qualification_metrics,
         live_tv_metrics = live_tv_metrics,
         library_channel_metrics = crate::http::library_channels::prometheus(),
+        jellyfin_metrics = crate::http::jellyfin::prometheus(),
         artwork_metrics = crate::http::images::prometheus(),
     );
     (

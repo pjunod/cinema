@@ -5000,6 +5000,80 @@ finite-HLS control traffic for liveness and Activity; clients must not send
 item-progress calls to keep it visible. **Watch from start** is ordinary VOD
 and therefore resumes ordinary progress and notification behavior.
 
+## Jellyfin client compatibility
+
+A `/jellyfin` facade lets two named Jellyfin clients use Plurx: **Infuse 8.5.6**
+(tvOS) and **Jellyfin for Android TV 0.19.10**, measured against Jellyfin
+Server 10.11.11. Other Jellyfin clients are untested. The facade is off by
+default; the switch is **Settings → Developer → Allow Jellyfin clients**, and
+its readiness checks are advice only. Contract and evidence:
+[JELLYFIN-COMPATIBILITY-BUILD.md](clients/JELLYFIN-COMPATIBILITY-BUILD.md) and
+[JELLYFIN-COMPATIBILITY-STATUS.md](clients/JELLYFIN-COMPATIBILITY-STATUS.md).
+
+### Connecting a client
+
+Add a Jellyfin server with the address `http://<voter>:32400/jellyfin` and sign
+in with a Plurx user's name and password. Use a voter: a learner answers 503
+on `/jellyfin`. The bare root (`http://<voter>:32400`) answers the web app, so
+a client pointed there fails without a useful error. The server reports
+itself as Jellyfin Server 10.11.11 (the tested protocol baseline) under the
+Plurx server name; `GET /jellyfin/System/Info` with a login also names the
+Plurx build in `PackageName`.
+
+What works: sign-in and sign-out, movie and TV browsing, search, artwork,
+direct play with Range, native VOD over HLS (copy or encoded, no rolling
+fallback), audio selection, subtitles (embedded where the client reads them
+from the file, otherwise a VTT or SRT sidecar), skip markers, watch progress
+and watched marks. Downloads are refused (`403 download_not_offered`); there
+is no remote control, no Live TV and no music through the facade.
+
+### Watching it
+
+`plurx_jellyfin_requests_total{route,outcome}` counts every facade request by
+its route template. `route="unmatched"` is a path the facade does not
+implement: when a client fails, that line names the missing route. Outcomes:
+
+| Outcome | Meaning |
+|---|---|
+| `ok` | Answered |
+| `not_supported` | PlaybackInfo found no delivery for the client's profile (`ErrorCode: NotSupported`) |
+| `unauthorized`, `forbidden` | Login missing, expired or revoked; or another user's ID |
+| `not_found` | Unknown route, unmapped item or source, unsupported subtitle format |
+| `conflict`, `gone` | The play ended, was replaced, or was negotiated before the switch was last saved; a link expired |
+| `refused` | A malformed or unsupported request (400, 422) |
+| `throttled` | The artwork miss budget for that address |
+| `unavailable` | Capacity, or serving authority lost (a leader restart) |
+| `error` | A server failure; look in the log |
+
+Successful requests are not logged. Failures log the route without its query,
+so no `ApiKey` reaches the log.
+
+### Leader restarts
+
+While a node has lost serving authority, `/jellyfin` answers 503 with
+`Retry-After` exactly as native media does, before any store read. A play's HLS
+media is a native session, so it survives an authority loss that recovers
+within the native session grace (5 s); a direct play is plain Range reads and
+resumes when authority returns. Clients retry 503.
+
+### Turning it off
+
+Saving the switch off answers JSON 404 for every new facade request and ends
+every play negotiated under the old setting, even if it is turned back on
+before the client returns. Logins and wire IDs survive, so re-enabling keeps
+client libraries and watch state. Turning it off is also the rollback: nothing
+else needs to be undone.
+
+### Security notes
+
+Mapped posters and backdrops answer without a login while the switch is on,
+and a direct-play link (the source `ETag`) works without a login header for up
+to 24 hours or until Stop or sign-out (both approved for client parity; see
+[SECURITY.md](SECURITY.md)). Media, HLS and subtitle URLs the facade returns
+carry the compatibility login as `ApiKey`, as Jellyfin's do, because Jellyfin
+for Android TV sends no header on those requests. That login authenticates
+only `/jellyfin`; a native, Plex or admin credential is refused there.
+
 ## Live TV (HDHomeRun) — the runbook
 
 Live TV plays over-the-air channels and can record unprotected channels to a

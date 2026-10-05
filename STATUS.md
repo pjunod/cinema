@@ -45,6 +45,26 @@ web; Apple waits on a device check). D6: the Fit Auto card names its
 network-priors prerequisite and priors get a switch (behaviour unchanged). D7
 and gates G1, G3–G6, G8 fixed; G2 (the UI golden) is regenerated separately.
 
+## Jellyfin facade: both pinned clients can now finish a play (J5)
+
+**Branch `claude/jellyfin-facade-gaps`, one draft PR to `main`.** The
+2026-10-04 merge review listed six facade gaps; re-checking them against the
+J0 traces and the upstream sources found that neither Infuse nor Jellyfin for
+Android TV could finish a play on the facade: Infuse's direct request names no
+play and its HLS entry lower-cases query keys, Android TV's media requests
+carry only the URL's `ApiKey`, every returned URL doubled `/jellyfin`, and the
+five-segment subtitle route both request was missing. Fixed on the existing
+seams: Jellyfin's subtitle routes and cue window, per-stream `DeliveryMethod`
+and `DeliveryUrl` from each client's subtitle profile, base-relative URLs with
+the compatibility login as `ApiKey`, the newest-direct-play resolution for
+Infuse (a new Store read on both backends), the nine missing contract routes,
+one switch read per request, and `plurx_jellyfin_requests_total`. The leader
+restart gap was a misreading: `/jellyfin` is fenced like native media and an
+HLS play keeps #798's grace; a regression now proves it. Detail:
+[JELLYFIN-COMPATIBILITY-STATUS.md](docs/clients/JELLYFIN-COMPATIBILITY-STATUS.md) §13.
+Open: the physical check on both clients (a GPT prompt), and the `ApiKey`
+decision for Paul to look over.
+
 ## Apple TV: new HEVC WEB-DLs refused with 503 — ffmpeg 8 repeats the sample description
 
 **Branch `fix/ffmpeg8-repeated-hevc-descriptions`.** Paul reported

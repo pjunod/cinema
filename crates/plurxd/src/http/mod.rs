@@ -246,6 +246,10 @@ fn http_route_group(path: &str) -> usize {
         "/jellyfin"
         | "/jellyfin/"
         | "/jellyfin/System/Info/Public"
+        | "/jellyfin/System/Info"
+        | "/jellyfin/Users/Public"
+        | "/jellyfin/Sessions/Capabilities"
+        | "/jellyfin/Sessions/Capabilities/Full"
         | "/jellyfin/Users/AuthenticateByName"
         | "/jellyfin/Users/{user_id}"
         | "/jellyfin/Users/Me"
@@ -362,11 +366,12 @@ fn http_route_group(path: &str) -> usize {
         | "/api/v1/files/{id}/chapters/{index}/thumb" => 3,
 
         // Search only; maintenance of the search index is a settings action.
-        "/api/v1/search" | "/api/v1/search/related" | "/api/v1/search/settings" | "/search" => 4,
+        "/jellyfin/Search/Hints" | "/api/v1/search" | "/api/v1/search/related" | "/api/v1/search/settings" | "/search" => 4,
 
         // Playback decisions, control, media bodies and watch state.
         "/jellyfin/Items/{item_id}/PlaybackInfo"
         | "/jellyfin/Videos/{item_id}/{source_id}/Subtitles/{index}/{filename}"
+        | "/jellyfin/Videos/{item_id}/{source_id}/Subtitles/{index}/{start_ticks}/{filename}"
         | "/jellyfin/Videos/{item_id}/stream"
         | "/jellyfin/Videos/{item_id}/{play_id}/hls/{*resource}"
         | "/jellyfin/Videos/{item_id}/{filename}"
@@ -374,6 +379,10 @@ fn http_route_group(path: &str) -> usize {
         | "/jellyfin/Sessions/Playing"
         | "/jellyfin/Sessions/Playing/Progress"
         | "/jellyfin/Sessions/Playing/Stopped"
+        | "/jellyfin/Sessions/Playing/Ping"
+        | "/jellyfin/Videos/ActiveEncodings"
+        | "/jellyfin/UserPlayedItems/{item_id}"
+        | "/jellyfin/Items/{item_id}/Download"
         | "/jellyfin/Users/{user_id}/PlayedItems/{item_id}"
         | "/api/v1/items/{id}/progress"
         | "/api/v1/items/{id}/scrobble"

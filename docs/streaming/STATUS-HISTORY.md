@@ -19,7 +19,7 @@ deployed.** Paul's three reports of 2026-09-24 — Live TV "transcodes no matter
 what", audio is "unnecessarily downmixed to stereo", and every channel shows
 the same aspect ratio — worked against the real lineup on the FLEX 4K
 (59 ATSC 1.0 MPEG-2/AC-3 channels, 10 ATSC 3.0 HEVC/AC-4 channels).
-Record: [docs/streaming/LIVE-TV-DIRECT-PLAY-AND-SURROUND.md](../streaming/LIVE-TV-DIRECT-PLAY-AND-SURROUND.md).
+Record: [docs/streaming/LIVE-TV-DIRECT-PLAY-AND-SURROUND.md](LIVE-TV-DIRECT-PLAY-AND-SURROUND.md).
 
 - **Transcoding:** every client sent `interlaced: false` and no client claimed
   `mpeg2video`, so all 59 ATSC 1.0 channels were encoded on every client. Android
