@@ -3319,8 +3319,10 @@ mod tests {
         for h2 in [false, true] {
             let source = body_fixture().await;
             let tls_dir = tempfile::tempdir().expect("Source TLS fixture");
-            let tls =
-                Arc::new(LiveNodeTls::open(tls_dir.path(), clock_ms() / 1000).expect("Source TLS"));
+            let tls = Arc::new(
+                LiveNodeTls::open(&tls_dir.path().join("tls"), clock_ms() / 1000)
+                    .expect("Source TLS"),
+            );
             let (pin, _) = tls.status().expect("Source SPKI");
             let listener = tokio::net::TcpListener::bind((address, 0))
                 .await
@@ -3749,7 +3751,8 @@ mod tests {
                 }
                 let tls_dir = tempfile::tempdir().expect("Source TLS fixture");
                 let tls = Arc::new(
-                    LiveNodeTls::open(tls_dir.path(), clock_ms() / 1000).expect("Source TLS"),
+                    LiveNodeTls::open(&tls_dir.path().join("tls"), clock_ms() / 1000)
+                        .expect("Source TLS"),
                 );
                 let (pin, _) = tls.status().expect("Source SPKI");
                 let listener = tokio::net::TcpListener::bind((address, 0))
@@ -4387,7 +4390,8 @@ mod tests {
                 let source = body_fixture().await;
                 let tls_dir = tempfile::tempdir().expect("Source TLS fixture");
                 let tls = Arc::new(
-                    LiveNodeTls::open(tls_dir.path(), clock_ms() / 1000).expect("Source TLS"),
+                    LiveNodeTls::open(&tls_dir.path().join("tls"), clock_ms() / 1000)
+                        .expect("Source TLS"),
                 );
                 let (pin, _) = tls.status().expect("Source SPKI");
                 let listener = tokio::net::TcpListener::bind((address, 0))

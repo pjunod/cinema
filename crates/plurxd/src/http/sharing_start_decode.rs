@@ -473,7 +473,7 @@ mod tests {
             let source_dir = tempfile::tempdir().expect("TLS directory");
             let tls = Arc::new(
                 LiveNodeTls::open(
-                    source_dir.path(),
+                    &source_dir.path().join("tls"),
                     i64::try_from(
                         std::time::SystemTime::now()
                             .duration_since(std::time::UNIX_EPOCH)

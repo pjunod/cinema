@@ -12051,8 +12051,11 @@ mod tests {
         assert!(plurx_core::sharing::is_tailnet_address(address));
         let temporary = tempfile::tempdir().expect("fixture TLS directory");
         let tls = Arc::new(
-            LiveNodeTls::open(temporary.path(), crate::state::clock_ms() / 1000)
-                .expect("generated source TLS"),
+            LiveNodeTls::open(
+                &temporary.path().join("tls"),
+                crate::state::clock_ms() / 1000,
+            )
+            .expect("generated source TLS"),
         );
         let (pin, _) = tls.status().expect("public source pin");
         let socket = tokio::net::TcpListener::bind((address, 0))
