@@ -1354,10 +1354,10 @@ layer; "B-only" means no client parses that wire.
 |---|---|---|---|---|---|
 | `cases` Source IDs | 12 | yes, core `sharing_shared_protocol_fixture_validates_exact_wire_ids` | yes, `playbackFileDecimal` | yes, `SharedProtocolFixtureTests` | yes, `SharedProtocolCasesTest` (`canonicalId`) |
 | `status_tokens` × `shared_status.word_fields` | 12 × 9 | yes, `sharing_protocol_fixture_status_grammar` | yes, `sharedPlaybackStatusMetrics` | yes | yes, `SharedPlaybackStatus.isToken` and `decode` |
-| `shared_status` accepted + mutations | 1 + 17 (b 10, client 13) | decode and b rows: yes. B's emitted envelope: **open** (built inline in `receiver_status`) | yes | yes (client 13) | yes, `SharedPlaybackStatus.decode` |
-| `control_refusals.source` | 14 (7 valid) | validity and Source minting: yes, `sharing_protocol_fixture_source_control_refusals`. B's mapped answer (`b`): **open** (`refusal_response`) | client outcome (`client`): yes | client outcome: yes | client outcome: yes, `SharedControlChannel` |
-| `control_refusals.b_precheck` | 4 | **open** (inline in `receiver_control`) | client outcome: yes | client outcome: yes | client outcome: yes, `SharedControlChannel` |
-| `control_preparation` (`none`) | 3 | **open** (`rebind_to_receiver`) | yes, `settlePreparedOfferWaiter` | yes (`SharedControlStep`, `PreparedOfferWait`) | yes, `PreparedOfferWait` with the Shared rule |
+| `shared_status` accepted + mutations | 1 + 21 (b 10, client 17) | decode and b rows: yes. B's emitted envelope: yes, `sharing_protocol_fixture_receiver_status_envelope` (`shared_status_body`) | yes, including the exact key set, `incarnation_id` and `control_epoch` | yes (client 17) | yes, `SharedPlaybackStatus.decode` |
+| `control_refusals.source` | 14 (7 valid) | validity and Source minting: yes, `sharing_protocol_fixture_source_control_refusals`. B's mapped answer (`b`): yes, `sharing_protocol_fixture_receiver_refusals` (`refusal_response`) | client outcome (`client`): yes | client outcome: yes | client outcome: yes, `SharedControlChannel` |
+| `control_refusals.b_precheck` | 4 | yes, `sharing_protocol_fixture_receiver_control_precheck` (`receiver_control_precheck`) | client outcome: yes | client outcome: yes | client outcome: yes, `SharedControlChannel` |
+| `control_preparation` (`none`) | 3 | yes, `sharing_protocol_fixture_receiver_preparation_rebind` (`rebind_to_receiver`) | yes, `settlePreparedOfferWaiter` | yes (`SharedControlStep`, `PreparedOfferWait`) | yes, `PreparedOfferWait` with the Shared rule |
 | `hls_start` public + mutations | 1 + 17 (b 15, client 16) | yes, `sharing_protocol_fixture_hls_start_projection` | yes, `sharedPlaybackStartContext` | yes (client 16; fixed `unsafe-duration`) | yes, `SharedStart.bindInitial` |
 | `direct` MIME set, public + mutations | 13; 1 + 16 (b 9, client 13) | yes, `sharing_protocol_fixture_direct_start` | yes, `sharedPlaybackDirectStartContext` | yes (client 13) | yes, `SharedStartedDirect.decode` |
 | `direct_session_query` | 11 | yes, `sharing_protocol_fixture_direct_session_query` | yes | yes | yes |
@@ -1375,14 +1375,11 @@ sharing_wire_ids` 4 passed; plurxd `--bin plurxd -- sharing_protocol_fixture`
 tests/web/sharing-protocol-cases.test.js` 9 passed; clippy `-D warnings`
 clean.
 
-The three Rust **open** cells need a test inside
-`http/shared_receiver_control.rs`, which is outside this audit's edit set:
-extract `shared_status_body(recipe, tuple, status)` and
-`receiver_control_precheck(request, tuple) -> Option<Response>` as pure
-functions, then drive `refusal_response`, the precheck and
-`rebind_to_receiver` from `control_refusals.source[].b`, `b_precheck` and
-`control_preparation`. Those functions are already covered by hard-coded tests
-there; the gap is only that the fixture does not drive them.
+The three Rust cells this audit left **open** are closed (2026-10-04, see
+"Web Shared prepared successor and fixture-driven B wire" below):
+`shared_status_body` and `receiver_control_precheck` are pure functions in
+`http/shared_receiver_control.rs`, and the fixture drives them,
+`refusal_response` and `rebind_to_receiver`.
 
 No Swift test reads the fixture yet. `subs/[0-9]{1,6}` and
 `chapters/[0-9]{1,6}/thumb` in `PlaybackFileContext.swift` accept
@@ -1392,9 +1389,8 @@ those five `file_suffixes` rows fail there until the Shared context bounds
 canonical indexes at 0..4095. Kotlin had the same hole; it was fixed and the
 Kotlin column filled on 2026-10-04 (see "Android Shared prepared successor,
 catalogue actions and fixture parity"). The web status binding
-is looser than Swift's: it does not check the exact outer key set,
-`incarnation_id` or `control_epoch`, so the fixture has no rows for those
-yet.
+was looser than Swift's (no exact outer key set, `incarnation_id` or
+`control_epoch`); it now matches, with four client rows for it.
 
 Fixes this audit made: `project_shared_start` accepted a rolling-lease Start
 that every client refuses, so a Source answering `vod: true` with a 60 s lease
@@ -5880,8 +5876,9 @@ It shares its pair setup with the P0 reopen fixture, which now declares only
 Client work still owed before a client may declare
 `shared_prepare_replacement`:
 
-- **Web.** On commit, rebind `t.fileContext` to a bound context for the
-  successor B session (`SHARED_DECISION` `bases`/`accepted` keyed by it), so
+- **Web.** Done; see "Web Shared prepared successor and fixture-driven B
+  wire" below. The owed work was: on commit, rebind `t.fileContext` to a
+  bound context for the successor B session (`SHARED_DECISION` `bases`/`accepted` keyed by it), so
   progress beats and any later reopen name the successor. Then send the next
   beat with the next sequence, and drop the P0 predecessor DELETE for a
   committed handoff, since B supersedes it. Then add
@@ -6159,3 +6156,88 @@ That includes a real two-pipeline prime and switch on a phone and on a
 television (where Local M5.5 measured dual prime failing), first-frame proof
 on the surface, the next episode on a real series, and the watched control
 against a real B.
+
+### Web Shared prepared successor and fixture-driven B wire (2026-10-04)
+
+The web client now consumes the B prepared successor, and the B wire the
+parity matrix listed as open is driven from the fixture in Rust.
+
+**Negotiation.** A Shared reporter (`startPlaybackControl` on a Shared file
+context) declares `shared_prepare_replacement` beside `prepare_replacement`
+(`PlurxPlaybackControl.Reporter` option `sharedSuccessor`; Local reporters are
+unchanged). `dual_player_preparation` stays the Settings → Developer "Allow a
+second player" switch every session honours, so B stages nothing with it off
+and the change keeps the P0 reopen. There is no new gate.
+
+**Offer.** A `prepare` on a Shared session binds whole before a second
+pipeline is primed: `SHARED_DECISION.successor` binds it under the accepted
+login through `sharedPlaybackSuccessorContext`, which requires another B
+session than the predecessor's, its own `/api/v1/hls/{successor}/index.m3u8`
+or `master.m3u8` (the Shared playlist query grammar), and its own control
+bootstrap through the ordinary Shared Start grammar
+(`/api/v1/hls/{successor}/control`, a new v4 incarnation, 5 s cadence, 300 s
+lease) on the same file. An offer that does not bind is acknowledged `failed`
+on the predecessor's channel (B withdraws it), nothing is primed, and the
+change takes its one P0 reopen. `none` still reopens at once, as in P0.
+
+**Switch and commit.** The existing web prepared-replacement player
+(`player/prepared-replacement.js`, `player/directed-change.js`) primes,
+aligns, proves the frame and switches, exactly as for Local. Every
+acknowledgement rides the predecessor's reporter. Only B's acceptance of the
+`committed` exchange moves the player's Shared context: `p.fileContext` and
+`p.meta.fileContext` become the successor's bound context (same accepted
+record, so the ordered watch sequence carries on and a later reopen starts
+from it), and the successor's reporter starts on its own bootstrap. Status
+then reads the successor's session and incarnation. The predecessor is never
+DELETEd after a committed handoff; B supersedes it. A Shared beat retained for
+one session is never resent under another
+(`SHARED_DECISION.progress`), so a lost predecessor beat cannot wedge the
+successor's progress. A change that settled before its offer waiter confirmed
+keeps its settled outcome (`requestQualityChange`).
+
+**Status reader.** `sharedPlaybackStatusMetrics` refuses an envelope whose
+top-level keys are not exactly B's six, or whose `incarnation_id` and
+`control_epoch` are not the started session's control tuple
+(`withPlaybackFileSession` now carries it for HLS sessions; a direct session
+has none and gets no sample). Fixture rows `envelope-foreign-incarnation`,
+`envelope-foreign-control-epoch`, `envelope-missing-incarnation` and
+`envelope-unknown-key` (client layer) cover it; Swift and Kotlin already
+refuse all four, and the Swift exact row count moved from 13 to 17.
+
+**B wire extraction (no behaviour change).** `shared_status_body` (the
+envelope `receiver_status` emits) and `receiver_control_precheck` (the bounded
+v1 check, generation, owner epoch and acknowledgement plan, returning a typed
+`PrecheckRefusal`) are pure functions; `receiver_control` calls them. The
+fixture now drives the envelope, `refusal_response`, the precheck (against a
+real registered actor with no staged successor) and `rebind_to_receiver`.
+That exposed one stale fixture row: since P1/P2 an acknowledgement with no
+staged successor is `409 stale_control`, not `422 shared_control_unsupported`
+(P0's answer). The row now says so; every client's outcome for it is still
+`stop`.
+
+Evidence on nuc4 (rustc 1.97.1, node 22.22.1):
+
+- New Rust tests, all passing: `sharing_protocol_fixture_receiver_status_envelope`,
+  `sharing_protocol_fixture_receiver_refusals`,
+  `sharing_protocol_fixture_receiver_control_precheck`,
+  `sharing_protocol_fixture_receiver_preparation_rebind`.
+- Affected daemon filters (`sharing`, `source_`, `direct_range`, `receiver_`):
+  353 passed, 10 ignored (the opt-in CGNAT fixtures), 1 failed:
+  `sharing_artwork_blocked_http1_http2_bytes_own_their_lease_without_a_monitor`
+  (503 for 429 under load, as before), which passed on an exact rerun.
+- Clippy with denied warnings on plurxd and plurx-core, all targets.
+- Web: `tests/web/shared-decision.test.js` 18/18 (new: the successor binds
+  whole, the next beat names it), `tests/web/file-context.test.js` 18/18,
+  `tests/web/sharing-protocol-cases.test.js` 9/9,
+  `tests/playback/web-control.test.js` 23/23 (new: a bound Shared offer
+  commits and moves the context only on B's acceptance; an unbindable offer
+  is acknowledged `failed` and reopens once; a Shared reporter declares
+  `shared_prepare_replacement`), `tests/playback/seek-control.test.js` 24/24.
+  `scripts/web-types` unchanged at 518.
+- `tests/validation` (253), `make validation-lint` and
+  `tests.operations.test_docs_index` pass. `make history-check` cannot read
+  history in this partial clone (a promisor blob of an earlier commit).
+
+Not qualified here: a real browser handoff against a pinned Source/B pair
+(two pipelines, frame proof, commit, status and progress moving to the
+successor), and the Apple and Android fixture suites with the four new rows.
