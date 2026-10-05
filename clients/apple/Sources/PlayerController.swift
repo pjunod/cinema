@@ -10937,6 +10937,27 @@ final class SharedPlayerController: ObservableObject {
     /// beat and B release are done. The view decides whether a next Shared
     /// episode follows; this controller never starts another title itself.
     var onNaturalEnd: (() -> Void)?
+    /// A prepared change is waiting for B's offer or priming B's successor
+    /// beside the incumbent. A viewer action may still take the player back
+    /// (the preparation settles `aborted`); never during the switch itself or
+    /// its settlement.
+    @Published private(set) var preparing = false
+    private var preemptRequested = false
+    private var preempting = false
+    /// The Local M6 coordinator for the one live preparation.
+    private var preparation: PreparedReplacementCoordinator?
+    private var preparedPlayer: AVPlayer?
+    private var preparedItem: AVPlayerItem?
+    private var preparedOutput: AVPlayerItemVideoOutput?
+    private var preparedFilmPositionMs = 0
+    private var preparedSeekPending = false
+    /// B's staged successor, bound to this player before it is primed. Until
+    /// adopted it is not this player's session; `stop()` still ends it.
+    private var preparedAdoption: (plan: SharedPlaybackPlan, playback: SharedStartedPlayback)?
+    private var preparedFallbackOwed = false
+    private var preparedSwapped = false
+    private var preparedAlignment: (generation: Int, landed: Bool?) = (0, nil)
+    private var lastExchangeMs = 0
 
     var isDirect: Bool { playback?.isDirect == true }
 
@@ -10961,14 +10982,25 @@ final class SharedPlayerController: ObservableObject {
     func currentPositionMs() -> Int { positionMs().map { Int($0) } ?? lastPositionMs }
 
     private func run(_ op: Operation) async {
-        guard operation == nil, !closing else { return }
+        guard !closing else { return }
+        if let current = operation {
+            // Only a preparation that has not reached its switch yields, and
+            // only to one waiting action: it settles `aborted` and returns.
+            guard preparing, !preempting else { return }
+            preempting = true; preemptRequested = true
+            await current.value
+            preempting = false
+            guard operation == nil, !closing else { return }
+        }
         operationSerial += 1
         let serial = operationSerial
-        busy = true
-        let task = Task { await self.perform(op) }
+        busy = true; preemptRequested = false
+        let task = Task {
+            await self.perform(op)
+            if self.operationSerial == serial, !self.closing { self.operation = nil; self.busy = false }
+        }
         operation = task
         await task.value
-        if operationSerial == serial, !closing { operation = nil; busy = false }
     }
 
     private func perform(_ op: Operation) async {
@@ -11006,7 +11038,10 @@ final class SharedPlayerController: ObservableObject {
             case .hls(let started):
                 url = try client.playlistURL(playback: started)
                 var capabilities = Caps.controlCapabilities()
-                capabilities.dualPlayerPreparation = false
+                // The same Developer switch Local reads. A source without video
+                // has no frame to prove a switch with, so it keeps the reopen.
+                capabilities.dualPlayerPreparation = capabilities.dualPlayerPreparation
+                    && plan.decision.presentation.source?.videoCodec != nil
                 nextChannel = try SharedControlChannel(playback: started, clientInstanceId: clientInstanceId,
                                                        capabilities: capabilities)
             case .direct(let direct):
@@ -11072,7 +11107,9 @@ final class SharedPlayerController: ObservableObject {
                 self.channel = channel
                 let outcome = try await exchange(request, playback: started, channel: channel, client: client)
                 switch SharedControlStep.after(intent, outcome: outcome, playing: playing, restartAllowed: restartAllowance) {
-                case .apply: await applyRenderer(intent)
+                case .apply:
+                    await applyRenderer(intent)
+                    if case .offered(let offer, _) = outcome { await abortUnwanted(offer, playback: started, client: client) }
                 case .pauseEnded: player.pause(); playing = false; sessionEnded = true
                 case .reopen(let play):
                     restartAllowance = false
@@ -11103,7 +11140,12 @@ final class SharedPlayerController: ObservableObject {
             guard var channel else { return }
             do {
                 let selection = try plan.directedSelection(change)
-                guard selection != (try plan.frozenControlSelection()) else { return }
+                let frozen = try plan.frozenControlSelection()
+                guard selection != frozen else { return }
+                if channel.prepares {
+                    try await prepareChange(change, selection: selection, frozen: frozen, playback: started, client: client)
+                    return
+                }
                 let request = try channel.request(nil, sample: sample(), selection: selection)
                 self.channel = channel
                 let outcome = try await exchange(request, playback: started, channel: channel, client: client)
@@ -11127,8 +11169,10 @@ final class SharedPlayerController: ObservableObject {
     private func exchange(_ request: SharedControlRequest, playback: SharedStartedPlayback,
                           channel: SharedControlChannel, client: SharedDecisionClient) async throws -> SharedControlOutcome {
         let first = try await client.control(playback: playback, channel: channel, request: request)
+        lastExchangeMs = PlaybackControlSession.monotonicMs()
         guard case .retry(let delay) = first else { return first }
         try await Task.sleep(nanoseconds: UInt64(delay) * 1_000_000)
+        defer { lastExchangeMs = PlaybackControlSession.monotonicMs() }
         return try await client.control(playback: playback, channel: channel, request: request)
     }
 
@@ -11286,7 +11330,8 @@ final class SharedPlayerController: ObservableObject {
         itemObservers = []; statusObservation = nil
         if let authorizationObserver { Session.shared.removeAuthorizationObserver(authorizationObserver); self.authorizationObserver = nil }
         if let operation { operation.cancel(); await operation.value }
-        operation = nil; busy = false
+        operation = nil; busy = false; preparing = false
+        discardPreparedSuccessor(); preparation = nil
         await progressTask?.value
         if let client, let media = playback, let plan {
             if let position = positionMs() {
@@ -11301,7 +11346,322 @@ final class SharedPlayerController: ObservableObject {
             player.replaceCurrentItem(with: nil)
             unreleased.append(media)
         }
+        // A staged successor this player never adopted is ended too: after a
+        // commit whose answer was lost, it may be the session B now serves.
+        if let staged = preparedAdoption?.playback { unreleased.append(.hls(staged)); preparedAdoption = nil }
         if let client { await releaseUnreleased(client) }
         player.replaceCurrentItem(with: nil); playback = nil; channel = nil; statusSummary = nil
     }
+}
+
+// MARK: - Shared prepared successor
+
+/// The Shared half of a prepared quality handoff, on the Local M6 machinery:
+/// `PreparedOfferWait` decides when an offer, a decline or the bound has
+/// arrived; `PreparedReplacementCoordinator` owns the ledger (build once,
+/// abandon exactly once, commit only after a frame, always settle); the commit
+/// uses the same rendezvous, alignment bound and first-frame rule as Local.
+/// What is Shared: the offer names only B's successor session and control
+/// bootstrap, every acknowledgement rides the predecessor's B channel, and a
+/// committed successor becomes this player's session (control, status and
+/// shared progress) without a DELETE of the predecessor, which B retires.
+/// `none`, the wait's bound, and a failed or refused successor take the P0
+/// reopen.
+extension SharedPlayerController {
+    func prepareChange(_ change: SharedDirectedChange, selection: SharedPlaybackJSON, frozen: SharedPlaybackJSON,
+                       playback started: SharedStartedPlayback, client: SharedDecisionClient) async throws {
+        preparing = true
+        defer { preparing = false; preparedFallbackOwed = false; preparedSwapped = false }
+        // B records a session's first exchange as the ask it was started for
+        // and stages only a different one, so a silent session states its own
+        // ask before the change.
+        if channel?.sequence == 0 {
+            let (_, first) = try await send(selection: frozen, playback: started, client: client)
+            if case .ended = first { await reopen(at: currentPositionMs(), change: change, play: playing); return }
+        }
+        var (sequence, outcome) = try await send(selection: selection, playback: started, client: client)
+        var wait = PreparedOfferWait(tappedAtMs: PlaybackControlSession.monotonicMs(), floorSequence: sequence)
+        while true {
+            // A newer viewer action carries the frozen ask, which withdraws
+            // anything B staged for this one.
+            if preemptRequested { return }
+            if case .ended = outcome { await reopen(at: currentPositionMs(), change: change, play: playing); return }
+            let answer = SharedPreparedHandoff.answer(outcome, sequence: sequence)
+            switch wait.observe(answer: answer, nowMs: PlaybackControlSession.monotonicMs()) {
+            case .reopen:
+                await reopen(at: currentPositionMs(), change: change, play: playing)
+                return
+            case .keepWaiting(let delay):
+                try await Task.sleep(nanoseconds: UInt64(max(1, delay)) * 1_000_000)
+                if preemptRequested { continue }
+                (sequence, outcome) = try await send(selection: selection, playback: started, client: client)
+            case .offered:
+                guard case .offered(let offer, _) = outcome else { return }
+                do { try await prime(offer, change: change, selection: selection, playback: started, client: client) }
+                catch is CancellationError { throw CancellationError() }
+                catch {
+                    // The viewer may already be on the successor's item while
+                    // B never took the commit: a fresh Start puts them back on
+                    // a session B serves.
+                    if preparedSwapped { await reopen(at: currentPositionMs(), change: change, play: playing) }
+                    throw error
+                }
+                return
+            }
+        }
+    }
+
+    /// One ordinary exchange on the current channel with no viewer intent.
+    private func send(selection: SharedPlaybackJSON, playback: SharedStartedPlayback,
+                      client: SharedDecisionClient) async throws -> (Int, SharedControlOutcome) {
+        guard var channel else { throw APIError.badURL }
+        await paceExchange()
+        let request = try channel.request(nil, sample: sample(), selection: selection)
+        self.channel = channel
+        return (request.sequence, try await exchange(request, playback: playback, channel: channel, client: client))
+    }
+
+    /// B refuses exchanges closer than 250 ms; a preparation's own sequence of
+    /// exchanges keeps clear of that rather than earning a 429.
+    private func paceExchange() async {
+        let wait = lastExchangeMs + 300 - PlaybackControlSession.monotonicMs()
+        if wait > 0 { try? await Task.sleep(nanoseconds: UInt64(wait) * 1_000_000) }
+    }
+
+    /// One acknowledgement on the predecessor's channel, on its own ordered
+    /// sequence. B answers an acknowledgement exchange byte-identically on a
+    /// replay, so a lost or deferred answer resends the same bytes, at most
+    /// three sends in all.
+    private func acknowledge(_ acknowledgement: ActionAcknowledgement, selection: SharedPlaybackJSON,
+                             playback: SharedStartedPlayback, client: SharedDecisionClient) async throws -> SharedControlOutcome {
+        guard var channel else { return .refused }
+        await paceExchange()
+        let request = try channel.request(nil, sample: sample(), selection: selection, acknowledgement: acknowledgement)
+        self.channel = channel
+        var outcome = SharedControlOutcome.refused
+        for attempt in 0..<3 {
+            if attempt > 0, case .retry(let delay) = outcome { try await Task.sleep(nanoseconds: UInt64(delay) * 1_000_000) }
+            outcome = try await client.control(playback: playback, channel: channel, request: request)
+            lastExchangeMs = PlaybackControlSession.monotonicMs()
+            guard case .retry = outcome else { break }
+        }
+        return outcome
+    }
+
+    /// B offered a successor this player did not ask for. It is settled
+    /// `aborted` at once so B frees its slots instead of holding them to the
+    /// deadline.
+    func abortUnwanted(_ offer: SharedPreparedOffer, playback: SharedStartedPlayback, client: SharedDecisionClient) async {
+        guard let plan, let selection = try? plan.frozenControlSelection() else { return }
+        _ = try? await acknowledge(ActionAcknowledgement(actionId: offer.action.actionId, state: .aborted),
+                                   selection: selection, playback: playback, client: client)
+    }
+
+    private func prime(_ offer: SharedPreparedOffer, change: SharedDirectedChange, selection: SharedPlaybackJSON,
+                       playback started: SharedStartedPlayback, client: SharedDecisionClient) async throws {
+        guard let plan else { return }
+        let position = currentPositionMs()
+        // Bound to this player before anything is primed: an offer that does
+        // not bind to this context is a failed preparation, never a played one.
+        let adoption: (plan: SharedPlaybackPlan, playback: SharedStartedPlayback)
+        do { adoption = try plan.adopting(offer, change: change, predecessor: started, positionMs: position) }
+        catch {
+            _ = try await acknowledge(ActionAcknowledgement(actionId: offer.action.actionId, state: .failed),
+                                      selection: selection, playback: started, client: client)
+            await reopen(at: currentPositionMs(), change: change, play: playing)
+            return
+        }
+        preparedAdoption = adoption
+        let coordinator = PreparedReplacementCoordinator(host: self)
+        preparation = coordinator
+        defer { preparation = nil; discardPreparedSuccessor() }
+        coordinator.offer(offer.action, filmPositionMs: position)
+        var lastProgressMs = PlaybackControlSession.monotonicMs()
+        while coordinator.hasActivePreparation, !coordinator.ledger.isSwitching {
+            if preemptRequested { coordinator.abandonWithoutFallback(.aborted); break }
+            guard let item = preparedItem else { coordinator.abandon(.failed); break }
+            if item.status == .failed || coordinator.readinessBoundElapsed() { coordinator.abandon(.failed); break }
+            if item.status == .readyToPlay {
+                coordinator.successorIsMetadataReady()
+                if preparedSeekPending {
+                    // Issued once, and only once the item can honour it.
+                    preparedSeekPending = false
+                    _ = await item.seek(to: CMTime(value: CMTimeValue(preparedFilmPositionMs), timescale: 1_000),
+                                        toleranceBefore: .zero, toleranceAfter: .zero)
+                    continue
+                }
+                if let through = preparedBufferedThroughMs(item),
+                   through >= preparedFilmPositionMs + PreparedReplacementBounds.switchRunwayMs {
+                    coordinator.successorIsBuffered(throughMs: through)
+                    preparing = false
+                    await coordinator.commit()
+                    break
+                }
+            }
+            // Progress states are optional and each costs an exchange: at most
+            // one a second, and a lost one is not resent.
+            if let ack = coordinator.pendingAcknowledgement, !ack.state.isTerminal,
+               PlaybackControlSession.monotonicMs() - lastProgressMs >= 1_000 {
+                _ = try await acknowledge(ack, selection: selection, playback: started, client: client)
+                coordinator.acknowledgementDelivered(ack)
+                lastProgressMs = PlaybackControlSession.monotonicMs()
+            }
+            try await Task.sleep(nanoseconds: UInt64(PreparedReplacementBounds.pollMs) * 1_000_000)
+        }
+        preparing = false
+        // Everything still owed goes out in order; only a commit's answer
+        // decides what this player plays next.
+        var committed = false
+        while let ack = coordinator.pendingAcknowledgement {
+            let outcome = try await acknowledge(ack, selection: selection, playback: started, client: client)
+            coordinator.acknowledgementDelivered(ack)
+            if ack.state == .committed { committed = SharedPreparedHandoff.settled(outcome) }
+        }
+        if committed {
+            adopt(adoption)
+            return
+        }
+        if preparedSwapped && !preparedFallbackOwed {
+            // The viewer is on the successor's item but B did not accept the
+            // commit: end it with the predecessor once a fresh Start attaches.
+            unreleased.append(.hls(adoption.playback))
+            preparedFallbackOwed = true
+        }
+        preparedAdoption = nil
+        if preparedFallbackOwed { await reopen(at: currentPositionMs(), change: change, play: playing) }
+    }
+
+    /// The committed successor becomes this player's session: its own B tuple
+    /// on a fresh ordered channel, its status, and the shared progress beat
+    /// (which names it from the next beat on, continuing the item's order).
+    private func adopt(_ adoption: (plan: SharedPlaybackPlan, playback: SharedStartedPlayback)) {
+        preparedAdoption = nil
+        guard let capabilities = channel?.capabilities,
+              let next = try? SharedControlChannel(playback: adoption.playback, clientInstanceId: clientInstanceId,
+                                                   capabilities: capabilities)
+        else { failure = "This Shared change could not continue."; return }
+        plan = adoption.plan; playback = .hls(adoption.playback); channel = next
+        statusSummary = nil; sessionEnded = false; restartAllowance = true
+    }
+
+    private func preparedBufferedThroughMs(_ item: AVPlayerItem) -> Int? {
+        let playhead = item.currentTime().seconds
+        guard playhead.isFinite else { return nil }
+        for value in item.loadedTimeRanges {
+            let range = value.timeRangeValue
+            let start = range.start.seconds, end = CMTimeRangeGetEnd(range).seconds
+            guard start.isFinite, end.isFinite, start <= playhead + 0.5, end > playhead else { continue }
+            return Int((end * 1_000).rounded(.down))
+        }
+        return nil
+    }
+
+    /// Local's alignment: the seek runs in its own task so giving up on it at
+    /// `alignmentMs` is possible at all (`AVPlayerItem.seek` ignores
+    /// cancellation); the generation stops a late landing reporting in.
+    private func alignPrepared(_ item: AVPlayerItem, to itemMs: Int) async -> Bool {
+        preparedAlignment = (preparedAlignment.generation &+ 1, nil)
+        let generation = preparedAlignment.generation
+        let seek = Task { @MainActor [weak self] in
+            let landed = await item.seek(to: CMTime(value: CMTimeValue(max(0, itemMs)), timescale: 1_000),
+                                         toleranceBefore: .zero, toleranceAfter: .zero)
+            guard let self, self.preparedAlignment.generation == generation else { return }
+            self.preparedAlignment.landed = landed
+        }
+        let landed = await awaitBoundedValue(
+            boundMs: PreparedReplacementBounds.alignmentMs, pollMs: PreparedReplacementBounds.pollMs,
+            now: { Int(ProcessInfo.processInfo.systemUptime * 1_000) },
+            sleep: { try? await Task.sleep(nanoseconds: UInt64($0) * 1_000_000) },
+            read: { [weak self] in self?.preparedAlignment.landed })
+        seek.cancel()
+        return landed ?? false
+    }
+
+    /// Wall clock at the successor's own first frame at or past the switch.
+    private func awaitPreparedFirstFrame(_ output: AVPlayerItemVideoOutput, boundaryMs: Int) async -> Int? {
+        let deadline = ProcessInfo.processInfo.systemUptime + Double(PreparedReplacementBounds.firstFrameMs) / 1_000
+        while ProcessInfo.processInfo.systemUptime < deadline {
+            if Task.isCancelled || closing { return nil }
+            let itemTime = output.itemTime(forHostTime: ProcessInfo.processInfo.systemUptime)
+            var displayTime = CMTime.invalid
+            if itemTime.isValid, itemTime.seconds.isFinite, output.hasNewPixelBuffer(forItemTime: itemTime),
+               output.copyPixelBuffer(forItemTime: itemTime, itemTimeForDisplay: &displayTime) != nil,
+               displayTime.isValid, displayTime.seconds.isFinite,
+               max(0, Int(displayTime.seconds * 1_000)) + PlayerController.preparedFirstFrameToleranceMs >= boundaryMs {
+                return Int(Date().timeIntervalSince1970 * 1_000)
+            }
+            try? await Task.sleep(nanoseconds: UInt64(PreparedReplacementBounds.pollMs) * 1_000_000)
+        }
+        return nil
+    }
+}
+
+extension SharedPlayerController: PreparedSuccessorHost {
+    /// The muted, layer-less second pipeline on B's successor playlist. A
+    /// shared session is VOD, so its timeline zero is the film's (Local's
+    /// `sessionMediaOriginMs`) and the successor is primed at the film
+    /// position itself, once its item can honour a seek.
+    func startPreparedSuccessor(_ action: PreparedReplacementAction, filmPositionMs: Int) -> Bool {
+        discardPreparedSuccessor()
+        guard !closing, player.currentItem != nil, let client, let adoption = preparedAdoption,
+              adoption.playback.start.response.sessionId == action.sessionId,
+              let url = try? client.playlistURL(playback: adoption.playback) else { return false }
+        let item = AVPlayerItem(url: url)
+        let output = AVPlayerItemVideoOutput(pixelBufferAttributes: nil)
+        item.add(output)
+        let successor = AVPlayer(playerItem: item)
+        successor.isMuted = true; successor.volume = 0
+        successor.appliesMediaSelectionCriteriaAutomatically = false
+        preparedPlayer = successor; preparedItem = item; preparedOutput = output
+        let origin = PlayerController.sessionMediaOriginMs(vod: true, mediaOriginMs: action.mediaOriginMs,
+                                                           startSeconds: nil, requestedStartMs: filmPositionMs)
+        preparedFilmPositionMs = max(0, filmPositionMs - origin)
+        preparedSeekPending = preparedFilmPositionMs > 0
+        return true
+    }
+
+    func discardPreparedSuccessor() {
+        preparedPlayer?.replaceCurrentItem(with: nil)
+        preparedPlayer = nil; preparedItem = nil; preparedOutput = nil
+        preparedFilmPositionMs = 0; preparedSeekPending = false
+    }
+
+    /// Local's commit, for one AVPlayer the view owns: align the successor to
+    /// where the incumbent is, move its item onto the viewer's player, and
+    /// report its own first qualifying frame. The predecessor is not DELETEd;
+    /// the committed exchange is what retires it on B.
+    func commitPreparedSuccessor(_ action: PreparedReplacementAction) async -> PreparedCommitOutcome {
+        // A paused viewer renders no new frame, so a paused switch could only
+        // time out: it takes the reopen instead, as Local does.
+        guard !closing, playing, let successor = preparedPlayer, let item = preparedItem, let output = preparedOutput,
+              player.currentItem != nil, let adoption = preparedAdoption,
+              adoption.playback.start.response.sessionId == action.sessionId
+        else { return .refused }
+        let rendezvous = PreparedCommitRendezvous.plan(stagedFilmPositionMs: preparedFilmPositionMs,
+                                                       incumbentFilmPositionMs: currentPositionMs(), mediaOriginMs: 0)
+        guard await alignPrepared(item, to: rendezvous.itemPositionMs), !closing,
+              preparedItem === item, preparedPlayer === successor else {
+            discardPreparedSuccessor()
+            return PreparedCommitRendezvous.outcomeWhenAlignmentCannotLand
+        }
+        successor.replaceCurrentItem(with: nil)
+        guard successor.currentItem == nil else { discardPreparedSuccessor(); return .refused }
+        preparedPlayer = nil; preparedItem = nil; preparedOutput = nil
+        observe(item)
+        player.replaceCurrentItem(with: item)
+        preparedSwapped = true
+        await applySubtitle(adoption.plan, item: item)
+        player.play()
+        guard let frame = await awaitPreparedFirstFrame(output, boundaryMs: rendezvous.filmPositionMs) else {
+            return .switchedWithoutAFrame
+        }
+        return .committed(firstFrameUnixMs: frame)
+    }
+
+    /// The P0 reopen, run by the preparation once its settlement is sent.
+    func fallBackToInPlaceReplacement(_ action: PreparedReplacementAction) { preparedFallbackOwed = true }
+    /// The preparation loop delivers whatever the ledger owes, in order.
+    func preparedSuccessorOwesAnExchange() {}
+    func notePreparedSuccessorAbandoned(_ reason: PreparedReplacementAbandonment) {}
+    func recordPreparedFallbackInterruption(ms: Int) {}
 }

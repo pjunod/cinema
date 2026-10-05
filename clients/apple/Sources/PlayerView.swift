@@ -3624,7 +3624,9 @@ struct SharedPlayerControls: View {
                 }.accessibilityIdentifier("shared-subtitles")
             }
         }
-        .disabled(controller.busy)
+        // A preparation waiting for B or priming its successor yields to a
+        // viewer action; the switch itself and its settlement do not.
+        .disabled(controller.busy && !controller.preparing)
     }
     private func seek(by deltaMs: Int) {
         let target = max(0, controller.currentPositionMs() + deltaMs)

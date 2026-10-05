@@ -34,13 +34,16 @@ struct SharedControlRequest: Encodable, Equatable {
     let seekTargetMs: Int?
     let selection: SharedPlaybackJSON
     let capabilities: DynamicCapabilities?
+    /// The settlement owed a prepared successor, on the predecessor's own
+    /// channel. Omitted when nil.
+    let acknowledgement: ActionAcknowledgement?
     let supportedActions: [String]
 
     enum CodingKeys: String, CodingKey {
         case proto = "protocol"
         case generation, controlEpoch, clientInstanceId, sequence, demand, positionMs
         case bufferedFromMs, bufferedThroughMs, playbackRate, renderState, seekTargetMs
-        case selection, capabilities, supportedActions
+        case selection, capabilities, acknowledgement, supportedActions
     }
 
     /// Sorted keys keep a replay of the same sequence byte-identical.
@@ -59,6 +62,9 @@ enum SharedControlOutcome: Equatable {
     /// B accepted exactly this sequence. `preparation` is relayed verbatim;
     /// only a directed change reads it, and absence is never a decline.
     case accepted(preparation: String?)
+    /// B accepted exactly this sequence and offers its prepared successor.
+    /// Only a channel that declared `shared_prepare_replacement` gets one.
+    case offered(SharedPreparedOffer, preparation: String?)
     /// The B session is gone (410, or a terminal answer).
     case ended
     /// A transition or rate refusal the server asked to be retried.
@@ -70,8 +76,15 @@ enum SharedControlOutcome: Equatable {
 /// One started shared HLS playback's control lane: B's exact tuple, one stable
 /// client identity and one strictly ordered sequence. B's tuple never moves
 /// for a shared session, so a refusal naming another owner is not adopted.
+///
+/// A channel whose capabilities declare dual-player preparation also
+/// declares `prepare_replacement` and `shared_prepare_replacement`: it will
+/// prime B's successor, settle it on this channel and move its control,
+/// status and progress to the successor's B session at commit.
 struct SharedControlChannel {
     static let supportedActions = ["terminal"]
+    static let sharedPrepareReplacementAction = "shared_prepare_replacement"
+    static let preparedActions = ["terminal", PlaybackControl.prepareReplacementAction, sharedPrepareReplacementAction]
     let sessionId: String
     let path: String
     let generation: String
@@ -88,7 +101,7 @@ struct SharedControlChannel {
               control.url == "/api/v1/hls/\(start.sessionId)/control",
               playback.context.sessionId == start.sessionId,
               PlaybackFileContext.canonicalV4(clientInstanceId),
-              capabilities.isValid, !capabilities.dualPlayerPreparation
+              capabilities.isValid
         else { throw APIError.badURL }
         sessionId = start.sessionId; path = control.url
         generation = control.generation; controlEpoch = control.controlEpoch
@@ -96,11 +109,16 @@ struct SharedControlChannel {
         durationMs = start.durationMs
     }
 
+    /// Whether this channel takes B's prepared successor.
+    var prepares: Bool { capabilities.dualPlayerPreparation }
+
     /// The next ordered request. `intent` nil is a directed change that keeps
     /// the current demand. Capabilities ride the first sequence only.
     mutating func request(_ intent: SharedControlIntent?, sample: SharedRendererSample,
-                          selection: SharedPlaybackJSON) throws -> SharedControlRequest {
+                          selection: SharedPlaybackJSON,
+                          acknowledgement: ActionAcknowledgement? = nil) throws -> SharedControlRequest {
         try SharedPlaybackPlan.validateControlSelection(selection)
+        if let acknowledgement { guard prepares, acknowledgement.isValid else { throw APIError.badURL } }
         guard sequence < 9_007_199_254_740_991 else { throw APIError.badURL }
         let ceiling = durationMs.map { max(0, min($0, PlaybackControl.maximumMediaMs)) } ?? PlaybackControl.maximumMediaMs
         let position = max(0, min(sample.positionMs, ceiling))
@@ -122,11 +140,15 @@ struct SharedControlChannel {
             positionMs: position, bufferedFromMs: from, bufferedThroughMs: through,
             playbackRate: demand == .active ? 1 : 0, renderState: render, seekTargetMs: target,
             selection: selection, capabilities: sequence == 1 ? capabilities : nil,
-            supportedActions: Self.supportedActions)
+            acknowledgement: acknowledgement,
+            supportedActions: prepares ? Self.preparedActions : Self.supportedActions)
     }
 
-    /// An answer binds only to the request that was sent on this tuple.
-    func accept(_ response: ControlResponse, for request: SharedControlRequest) throws -> SharedControlOutcome {
+    /// An answer binds only to the request that was sent on this tuple. A
+    /// `prepare` binds only on a channel that declared it, and only as the
+    /// whole offer decoded from the same answer.
+    func accept(_ response: ControlResponse, offer: SharedPreparedOffer? = nil,
+                for request: SharedControlRequest) throws -> SharedControlOutcome {
         guard request.generation == generation, request.controlEpoch == controlEpoch,
               response.proto == PlaybackControl.protocolName,
               response.generation == generation,
@@ -136,6 +158,11 @@ struct SharedControlChannel {
         switch response.action.type {
         case "none", "hold", "retry_resource": return .accepted(preparation: response.delivery?.preparation)
         case "terminal": return .ended
+        case PlaybackControl.prepareActionType:
+            guard prepares, request.supportedActions == Self.preparedActions, let offer,
+                  PreparedReplacementAction(response.action) == offer.action
+            else { throw ControlProtocolError(reason: "action") }
+            return .offered(offer, preparation: response.delivery?.preparation)
         default: throw ControlProtocolError(reason: "action")
         }
     }
@@ -323,7 +350,7 @@ enum SharedControlStep: Equatable {
     static func after(_ intent: SharedControlIntent, outcome: SharedControlOutcome,
                       playing: Bool, restartAllowed: Bool) -> Self {
         switch outcome {
-        case .accepted: return .apply
+        case .accepted, .offered: return .apply
         case .ended:
             if intent == .pause { return .pauseEnded }
             return restartAllowed ? .reopen(play: intent == .play || playing) : .ended
@@ -336,8 +363,136 @@ enum SharedControlStep: Equatable {
     static func afterChange(_ outcome: SharedControlOutcome, playing: Bool) -> Self {
         switch outcome {
         case .accepted(let preparation): return preparation == "none" ? .reopen(play: playing) : .refused
+        case .offered: return .refused
         case .ended: return .reopen(play: playing)
         case .retry, .refused: return .refused
         }
+    }
+}
+
+// MARK: - Prepared successor (B P1/P2)
+
+/// B's prepared successor for a directed change on a shared HLS session: a
+/// `prepare` naming only B's successor session, its `/api/v1/hls/{B}/…`
+/// playlist and its control bootstrap. Offered only to a channel that declared
+/// `shared_prepare_replacement` with dual-player preparation.
+struct SharedPreparedOffer: Equatable {
+    let action: PreparedReplacementAction
+    let control: ControlBootstrap
+
+    /// The same `prepare` in the Local vocabulary, for the reused offer wait.
+    var controlAction: ControlAction {
+        ControlAction(type: PlaybackControl.prepareActionType, actionId: action.actionId, sessionId: action.sessionId,
+                      playlistUrl: action.playlistUrl, mediaOriginMs: action.mediaOriginMs,
+                      effectiveSelection: action.effectiveSelection)
+    }
+
+    /// The whole offer, or a protocol error. The successor must be another
+    /// canonical B session whose control route is its own, with the shared
+    /// VOD cadence and lease every B Start carries.
+    static func decode(_ action: ControlAction, raw: Data, predecessor: String) throws -> Self {
+        struct Wire: Decodable { struct Action: Decodable { let control: ControlBootstrap? }; let action: Action }
+        guard let prepared = PreparedReplacementAction(action),
+              PlaybackFileContext.canonicalV4(prepared.sessionId), prepared.sessionId != predecessor,
+              PlaybackFileContext.canonicalV4(prepared.actionId),
+              let control = (try? PlaybackControl.decoder.decode(Wire.self, from: raw))?.action.control,
+              control.isValid, control.url == "/api/v1/hls/\(prepared.sessionId)/control",
+              PlaybackFileContext.canonicalV4(control.generation),
+              control.nextExchangeMs == 5_000, control.leaseTimeoutMs == 300_000
+        else { throw ControlProtocolError(reason: "prepare") }
+        return Self(action: prepared, control: control)
+    }
+}
+
+/// The pure half of the Shared prepared handoff.
+enum SharedPreparedHandoff {
+    /// What the reused Local offer wait reads off one shared exchange. `nil`
+    /// is "nothing yet": a refusal or a retry is not evidence about the change
+    /// in either direction, and the wait's own bound handles it.
+    static func answer(_ outcome: SharedControlOutcome, sequence: Int) -> PlaybackControlAnswer? {
+        switch outcome {
+        case .accepted(let preparation):
+            return PlaybackControlAnswer(requestSequence: sequence, action: nil, preparation: preparation)
+        case .offered(let offer, let preparation):
+            return PlaybackControlAnswer(requestSequence: sequence, action: offer.controlAction, preparation: preparation)
+        case .ended, .retry, .refused:
+            return nil
+        }
+    }
+
+    /// Whether an acknowledgement exchange's answer settled it: B accepted
+    /// that exact sequence (a replay of an answered sequence is byte-identical).
+    static func settled(_ outcome: SharedControlOutcome) -> Bool {
+        switch outcome {
+        case .accepted, .offered: return true
+        case .ended, .retry, .refused: return false
+        }
+    }
+
+    /// The create request B built the successor from, mirrored client side:
+    /// the predecessor's request with the new selection, a fresh request id,
+    /// the sampled position and no lineage fields.
+    static func successorRequest(_ base: CreateSessionRequest, selection: SharedPlaybackJSON, positionMs: Int) throws -> CreateSessionRequest {
+        try SharedPlaybackPlan.validateControlSelection(selection)
+        guard let object = selection.object, let quality = object["quality"]?.object, let mode = quality["mode"]?.string,
+              let subtitle = object["subtitle"]?.object else { throw APIError.badURL }
+        var request = base
+        request.requestId = UUID().uuidString.lowercased()
+        request.start = Double(max(0, positionMs)) / 1000
+        request.previousSessionId = nil; request.controlSequence = nil; request.reopenReason = nil
+        request.intent = nil; request.subtitleBurn = nil
+        func integer(_ value: SharedPlaybackJSON?) -> Int? { if case .integer(let n)? = value { return Int(n) }; return nil }
+        switch mode {
+        case "auto": request.qualityAuto = true; request.copy = nil; request.height = integer(quality["height"])
+        case "original": request.qualityAuto = false; request.copy = true; request.height = nil
+        default: request.qualityAuto = false; request.copy = false; request.height = integer(quality["height"])
+        }
+        request.audio = integer(object["audio_track"])
+        if subtitle["mode"]?.string == "native" { request.nativeSubtitles = true; request.subtitle = integer(subtitle["track"]) }
+        else { request.nativeSubtitles = nil; request.subtitle = nil }
+        return request
+    }
+}
+
+extension SharedPlaybackPlan {
+    /// The plan and started playback a committed prepared successor becomes.
+    /// Its ask is the directed selection, so the next exchange on the
+    /// successor carries exactly the ask B staged it for. Built only from the
+    /// offer's own B identities and this player's bound context.
+    func adopting(_ offer: SharedPreparedOffer, change: SharedDirectedChange, predecessor: SharedStartedPlayback,
+                  positionMs: Int) throws -> (plan: SharedPlaybackPlan, playback: SharedStartedPlayback) {
+        let selection = try directedSelection(change)
+        let request = try SharedPreparedHandoff.successorRequest(self.request, selection: selection, positionMs: positionMs)
+        let session = offer.action.sessionId
+        var wire: [String: Any] = [
+            "session_id": session, "playlist_url": offer.action.playlistUrl, "vod": true,
+            "start_seconds": request.start ?? 0, "media_origin_ms": offer.action.mediaOriginMs,
+            "control": ["protocol": offer.control.proto, "url": offer.control.url, "generation": offer.control.generation,
+                        "control_epoch": offer.control.controlEpoch, "next_exchange_ms": offer.control.nextExchangeMs,
+                        "lease_timeout_ms": offer.control.leaseTimeoutMs],
+        ]
+        if let duration = predecessor.start.response.durationMs { wire["duration_ms"] = duration }
+        if offer.action.effectiveSelection.height > 0 { wire["height"] = offer.action.effectiveSelection.height }
+        let start = try SharedStart.decode(JSONSerialization.data(withJSONObject: wire))
+        let context = try predecessor.context.withSession(session)
+        _ = try start.validated(context)
+        let playback = SharedStartedPlayback(start: start, context: context, request: request)
+        let subject = SharedPlaybackSubject(context: self.subject.context, title: self.subject.title,
+                                            resumeMs: Int64(max(0, positionMs)), watchSequence: self.subject.watchSequence)
+        return (try SharedPlaybackPlan(adopting: self, subject: subject, request: request), playback)
+    }
+
+    /// A successor B already planned: the decision and caps stay the
+    /// predecessor's (the same file and device), the request is the one B
+    /// started. The Start guards still hold: VOD, no lineage, no burn, the
+    /// same caps, context and player playback id.
+    init(adopting predecessor: SharedPlaybackPlan, subject: SharedPlaybackSubject, request: CreateSessionRequest) throws {
+        try subject.validate()
+        guard request.presentation == "vod", request.intent == nil, request.previousSessionId == nil,
+              request.controlSequence == nil, request.reopenReason == nil, request.subtitleBurn == nil,
+              request.preserveDolbyVision != true, request.hdr10 != true, request.caps == predecessor.caps,
+              request.playbackId == predecessor.request.playbackId, subject.context == predecessor.subject.context
+        else { throw APIError.transport("This Shared successor does not match its player.") }
+        self.subject = subject; decision = predecessor.decision; caps = predecessor.caps; self.request = request
     }
 }
