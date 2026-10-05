@@ -1,0 +1,76 @@
+{
+  "scope": "offline_encoder_screen_non_acceptance",
+  "decision": "retain bitrate; no candidate clears ENCODER-RATE-CONTROL-DEFAULTS.md section 3.3; no production settings or defaults changed",
+  "host": "lab4",
+  "date": "2026-10-05",
+  "source_revision": "70b72f3bebfc92d44f1d32c28df668abdb592b9c with the G-M1 harness changes (uncommitted at run time; executed script bytes below equal the committed ones)",
+  "executed_sha256": {
+    "scripts/encoder-calibration-screen": "132f39304e96827e25ed9c3c316f7840534a958ae8b37176a027d5eeb3374510",
+    "scripts/encoder-calibration-candidates.json": "ad99bc0c1d5e1328654f4f9f9360a2927db02e0eabe77e257d1f16601ea40a58",
+    "scripts/bench": "93759c6377a27df7bc70f78d843a3884ef23b38a9fa2d1438df80a057f66e32d",
+    "scripts/perf2-rate-control-n2-corpus.json": "fdddc70db9cd7e678f212e00c9ce11713b49f0308f4c51c63abdfb6c1824cd0c"
+  },
+  "export": "cargo build -p plurx-core --example encoder-calibration-args (Rust 1.97.1, lab3); --family qsv --bitrate-kbps 8000|4000 --threads 2, --quality 22 with --extra for vbr-base candidates, --candidate-base qvbr --quality 18|26",
+  "capture": "one isolated encode at a time in a container of the running production image (network none, all capabilities dropped, no-new-privileges, 2 CPUs, 2 GiB, render-group device), production ffmpeg/ffprobe via docker exec wrappers; reference fixtures from the host ffmpeg as in the 2026-10-02 screen",
+  "scoring": "libvmaf vmaf_v0.6.1 with the controller FFmpeg 9.0.1 on maca (same scorer build as the 2026-10-02 screen)",
+  "viewer_checks": "34 checks, one before every fixture capture, all idle: plurx_transcode_sessions_active 0, live TV active 0, no ffmpeg in the daemon container, plurx_delivered_bytes_total unchanged over 10 s",
+  "provenance_notes": [
+    "The first viewer check's ffmpeg-process term read 0 because `docker top` without a pid column errors; it was fixed after three preset-slower fixtures, and those three were recaptured under the fixed check before scoring. The other three terms were idle throughout.",
+    "Load: lab4 also ran a CPU-heavy test process during the run, so encode-speed ratios are single-run and noisy; each ratio compares back-to-back captures of the same fixture."
+  ],
+  "results": {
+    "preset-slower": {
+      "benefit_passed": false,
+      "bytes_reduction_percent": -0.007416,
+      "quality_regressions": [
+        "easy-1080p-h264"
+      ],
+      "forced_idr_column_valid": true,
+      "forced_idr_kept": true,
+      "candidate_warrants_further_qualification": false
+    },
+    "qvbr-18": {
+      "benefit_passed": false,
+      "bytes_reduction_percent": 0.573922,
+      "quality_regressions": [
+        "easy-1080p-animation",
+        "easy-1080p-h264",
+        "easy-720p-web",
+        "hard-1080p-dark-gradient",
+        "hard-1080p-grain",
+        "hard-1080p-sport"
+      ],
+      "forced_idr_column_valid": true,
+      "forced_idr_kept": true,
+      "candidate_warrants_further_qualification": false
+    },
+    "qvbr-26": {
+      "benefit_passed": false,
+      "bytes_reduction_percent": 5.032124,
+      "quality_regressions": [
+        "easy-1080p-animation",
+        "easy-1080p-h264",
+        "easy-720p-web",
+        "hard-1080p-dark-gradient",
+        "hard-1080p-grain",
+        "hard-1080p-sport"
+      ],
+      "forced_idr_column_valid": true,
+      "forced_idr_kept": true,
+      "candidate_warrants_further_qualification": false
+    }
+  },
+  "look_ahead": "look-ahead-20 and look-ahead-40: encoder segfault on every fixture; see qsv-look-ahead-failures.json",
+  "best_pair": "not run: the only measurable candidate that did not lose VMAF (preset-slower) has no partner that improves anything \u2014 both look-ahead depths crash and both QVBR values lose VMAF on every fixture by more than preset-slower gains on any.",
+  "remote_scratch_removed": true,
+  "remote_container_removed": true,
+  "sha256": {
+    "qsv-preset-slower-summary.json": "591f4a4b6bc14700fcd5753eade439f688f76559658bf30bd034a6033f25ea2f",
+    "qsv-qvbr-18-summary.json": "0d1f6ba1072dc31c7708e2b7080f70d958a66b9c36e4d104365677ca895539a0",
+    "qsv-qvbr-26-summary.json": "fdc92541a981484ce97810222d035d077eb66807f08d62f85f93000ed35ab86d",
+    "qsv-look-ahead-failures.json": "f184096834903210e0dbc9659f20f9eb2765f0c90d3ac4caf0dea3010dfd6b25"
+  },
+  "validation": [
+    "python3 -m unittest tests.operations.test_encoder_calibration_screen (23 tests, including four real libx264 segmenter runs)"
+  ]
+}

@@ -325,6 +325,58 @@ test_encoder_calibration_screen.py` for the 13 focused regressions. The
 libvmaf in its image. The exporter calls the production Rust implementation;
 it is not an independently maintained copy of encoding constants.
 
+### QSV tuning pre-screen G-M1 — screen, not acceptance
+
+The 2026-10-05 pre-screen measured the committed
+[candidate list](../../scripts/encoder-calibration-candidates.json) against
+production VBR on the same six n2 fixtures, on idle lab4, with #766's method
+(one isolated encode at a time in a container of the running production image,
+the shipped Jellyfin FFmpeg 8.1.3, scored with `vmaf_v0.6.1` on the same
+controller scorer). Every candidate is production argv plus appended options
+(the exporter refuses anything else), keyframes come from the rolling
+producer's own arguments (no `-g`), and no candidate carries B-frames.
+Summaries and the [receipt](../evidence/video-quality-2026-10-05/encoder/receipt.json)
+are under `docs/evidence/video-quality-2026-10-05/encoder/`.
+
+Each row is marked against
+[ENCODER-RATE-CONTROL-DEFAULTS.md](../streaming/ENCODER-RATE-CONTROL-DEFAULTS.md)
+§3.3: bytes −10 % with VMAF not lower on any fixture, or VMAF +1.0 on every
+hard fixture with bytes not higher on any easy one. That bar is worded for the
+full `vbr,qvbr` run; applying it to the preset and look-ahead candidates is an
+extension of it, not its stated scope. Forced IDR is measured on the
+production segmenter's output: a keyframe within one frame of every 2 s
+boundary, every segment starting on an IDR that decodes on its own, and a
+control with `-force_key_frames` removed that must fail (it failed on all 18
+fixture runs, so the column is valid). Speed is VBR encode time over candidate
+encode time on the same fixture (single runs; lab4 carried an unrelated CPU
+load), and first segment is wall time to the first complete 2 s segment.
+
+| Candidate | Bytes vs VBR | VMAF vs VBR, per fixture | §3.3 bar | Forced IDR | Speed vs VBR | First segment VBR → candidate | Result |
+|---|---:|---|---|---|---|---|---|
+| [`-preset slower`](../evidence/video-quality-2026-10-05/encoder/qsv-preset-slower-summary.json) | +0.007 % | −0.005 … +0.190; lower on one easy fixture | not met (no byte path; hard gains ≤ 0.19) | kept | 0.76–1.16× | 0.32–0.85 s → 0.31–0.84 s | no benefit |
+| `-look_ahead 1 -look_ahead_depth 20` | — | — | not measurable | — | — | — | [encoder segfaults](../evidence/video-quality-2026-10-05/encoder/qsv-look-ahead-failures.json) (exit 139) on every fixture |
+| `-look_ahead 1 -look_ahead_depth 40` | — | — | not measurable | — | — | — | encoder segfaults on every fixture |
+| [QVBR 18](../evidence/video-quality-2026-10-05/encoder/qsv-qvbr-18-summary.json) | −0.574 % | −0.17 … −3.02; lower on every fixture | not met | kept | 0.94–1.63× | 0.34–1.49 s → 0.24–0.92 s | quality loss |
+| [QVBR 26](../evidence/video-quality-2026-10-05/encoder/qsv-qvbr-26-summary.json) | −5.032 % | −0.09 … −3.02; lower on every fixture | not met | kept | 0.87–1.17× | 0.26–0.99 s → 0.25–0.95 s | quality loss |
+
+Look-ahead is not available on this encoder at all: with production argv the
+encoder initialises "VBR with lookahead (LA)" and then segfaults before the
+first packet, and so does every variant tried in isolation (depth 10/20, low
+power on and off, `-extbrc 1` with a look-ahead depth, no forced keyframes,
+1 s inputs, a fresh unrestricted container). QVBR 18 and 26 bracket the
+failed 22 and lose VMAF on every fixture, like 22 did, so the constant-quality
+question is closed for `h264_qsv` on this corpus. The best-pair run was not
+made: the only candidate that did not lose quality (`-preset slower`) has no
+partner that improves anything. **Decision: retain bitrate.** The three daemon
+comparisons `ENCODER-RATE-CONTROL-DEFAULTS.md` lists as owed stay owed; this
+screen does not replace them.
+
+Run `python3 -m unittest tests.operations.test_encoder_calibration_screen`
+for the screen's 23 focused tests; four of them run real libx264 encodes
+through the production segmenter to prove the forced-IDR check passes with
+production forcing and fails without it, with a short fixed GOP shown to hide
+the difference, and with an I-frame that is not an IDR.
+
 ## Selective fast-lane continuation
 
 The initial preflight found stale ownership/source-count assertions. The owner
